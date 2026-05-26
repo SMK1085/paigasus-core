@@ -7,4 +7,5 @@ workspace with three crate groups:
 - `crates/bindings/` — FFI wrappers (PyO3, napi-rs, wasm-bindgen)
 - `crates/services/` — service binaries
 
-**Status:** scaffolded in SMA-357. Empty until the Cargo workspace lands.
+**Status:** Cargo workspace landed in SMA-357. The three crates are empty placeholders
+until their behavior lands in later issues.
