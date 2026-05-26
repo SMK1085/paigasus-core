@@ -43,14 +43,14 @@ behavior yet — this is scaffolding the later Rust issues build on.
   maturin tasks). Until then the inherited `.moon/tasks/rust.yml` covers everything.
 - Slimming the `.moon/templates/rust/` generator (defer standard tasks to `rust.yml`) AND
   resolving the service archetype's `--release` build vs `rust.yml`'s debug `build` profile
-  split → **tracked follow-up issue** (to open), not just "future cleanup". Review S8 showed
-  this is a latent mixed-profile bug (a generated service `moon.yml` would build release
-  while sibling crates build debug under one `moon ci :build`), not cosmetic. Not touched
-  here to keep SMA-356's deliverable stable.
+  split → **SMA-374**, not just "future cleanup". Review S8 showed this is a latent
+  mixed-profile bug (a generated service `moon.yml` would build release while sibling crates
+  build debug under one `moon ci :build`), not cosmetic. Not touched here to keep SMA-356's
+  deliverable stable.
 - `cargo-deny` (license allowlist + advisories) and `cargo-machete` (unused-dep detection)
-  → **follow-up issue** (review N4); high signal for the open-core posture.
+  → **SMA-375** (review N4); high signal for the open-core posture.
 - Flipping `paigasus-kernel` to `publish = true` + a real `0.x` version when it gains
-  release-worthy logic → **follow-up issue** (review S9); a `TODO(<issue>)` comment marks it
+  release-worthy logic → **SMA-376** (review S9); a `TODO(SMA-376)` comment marks it
   in `paigasus-kernel/Cargo.toml` so the stub state is not silently permanent.
 - Workspace `[profile.release]` (lto/codegen-units/strip) and a `[workspace.metadata]`
   reservation → deferred to the first service / the ADR-0010 release-tooling work
@@ -244,8 +244,8 @@ crate-type = ["cdylib"]
 Service (`paigasus-gateway`) uses the same `[package]`/`[lints]` form as the library (no
 `[lib]` section); its `src/main.rs` is `fn main() {}`. `version = "0.0.0"` +
 `publish = false` mark all three as not-yet-real placeholders. `paigasus-kernel` carries a
-`# TODO(<follow-up issue>): flip publish = true + choose a real 0.x version once the kernel
-has release-worthy logic` comment so the unpublishable stub state isn't silently permanent
+`# TODO(SMA-376): flip publish = true + choose a real 0.x version once the kernel has
+release-worthy logic` comment so the unpublishable stub state isn't silently permanent
 (review S9; kernel is crates.io-bound per ADR-0005).
 
 ### `.moon/tasks/rust.yml`
