@@ -27,3 +27,13 @@ markers = [
   "integration: integration tests that may hit real infrastructure",
   "slow: tests that take more than 1s",
 ]
+
+# Bounded constraints so a lock regen can't silently bump rule behavior (basedpyright/ruff).
+# uv.lock pins the exact resolved versions; these specifiers cap the upgrade window.
+[dependency-groups]
+dev = [
+    "anyio[trio]>=4.13.0,<5",
+    "basedpyright>=1.39.6,<2",
+    "pytest>=9.0.3,<10",
+    "ruff>=0.15.14,<0.16",
+]
