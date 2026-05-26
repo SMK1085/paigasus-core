@@ -203,14 +203,16 @@ rust:
   bins:
     - 'cargo-nextest'
 
-# Python is a first-class Moon 2.x toolchain (top-level 'python'); the older
-# 'unstable_python' key is silently ignored by Moon 2.2.5. Fallback if it
-# misbehaves: drop this block and run uv via plain 'command' tasks per project.
-python:
+# Python/uv are Moon 2.2.5 built-in toolchains keyed 'unstable_python' and the
+# separate 'unstable_uv' (verified via 'moon toolchain info'; unprefixed
+# 'python'/'uv' are NOT built-in in 2.2.5). uv version pins under 'unstable_uv',
+# not nested in 'unstable_python'. Fallback: drop these blocks and run uv via
+# plain 'command' tasks per project.
+unstable_python:
   version: '${PY}'
   packageManager: 'uv'
-  uv:
-    version: '${UV}'
+unstable_uv:
+  version: '${UV}'
 EOF
 cat .moon/toolchain.yml
 ```
@@ -219,7 +221,7 @@ cat .moon/toolchain.yml
 
 Inspect the printed `.moon/toolchain.yml`. Confirm:
 - `node.version` starts with `22.` (AC: Node 22.x LTS).
-- `python.version` starts with `3.12.` (AC: Python 3.12.x).
+- `unstable_python.version` starts with `3.12.` (AC: Python 3.12.x).
 - `rust.version` is a `1.x.y` stable (AC: Rust latest stable).
 - `pnpm` is `10.x`, `uv` is `0.11.x` (current majors).
 
@@ -240,8 +242,8 @@ git add .moon/toolchain.yml
 git commit -m "$(cat <<'EOF'
 chore(repo): pin Rust/Node+pnpm/Python+uv in Moon toolchain.yml
 
-Current-stable versions resolved at build time. Python uses Moon 2.x's
-first-class python toolchain with a documented command-task fallback.
+Current-stable versions resolved at build time. Python/uv use Moon 2.2.5's
+unstable_python + unstable_uv built-in toolchains with a command-task fallback.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -652,7 +654,7 @@ Run:
 ```bash
 moon ci :build
 ```
-Expected: completes with no project errors and no tasks run (zero affected targets). (Moon 2.x: `moon ci` takes explicit `[TARGETS]`; bare `moon ci` errors `app::tty::required_id` in non-TTY.) If Moon attempts to provision the `python` toolchain and fails despite there being no tasks, apply the spec's fallback (drop the `python` block from `.moon/toolchain.yml` and run uv via command tasks) and record it — but the expected result is a clean no-op.
+Expected: completes with no project errors and no tasks run (zero affected targets). (Moon 2.x: `moon ci` takes explicit `[TARGETS]`; bare `moon ci` errors `app::tty::required_id` in non-TTY.) If Moon attempts to provision the `unstable_python`/`unstable_uv` toolchains and fails despite there being no tasks, apply the spec's fallback (drop those blocks from `.moon/toolchain.yml` and run uv via command tasks) and record it — but the expected result is a clean no-op.
 
 - [ ] **Step 2: `moon ci :test` succeeds as a no-op (AC gate 2)**
 
@@ -700,7 +702,7 @@ today, so `moon ci :build` is a clean no-op.
 ## Acceptance criteria
 
 - [x] `.moon/workspace.yml` with the seven project globs
-- [x] `.moon/toolchain.yml` pinning Rust (+rustfmt/clippy/cargo-nextest), Node 22.x LTS (+pnpm), Python 3.12.x (+uv, via the `python` toolchain)
+- [x] `.moon/toolchain.yml` pinning Rust (+rustfmt/clippy/cargo-nextest), Node 22.x LTS (+pnpm), Python 3.12.x (+uv, via `unstable_python`/`unstable_uv`)
 - [x] `.moon/tasks.yml` with global defaults + `sources`/`tests` file groups
 - [x] Per-project `moon.yml` templates (library/service/app) as `moon generate` scaffolds
 - [x] `codeowners.sync: true` (corrected from the AC's invalid `syncOnRun`)
@@ -742,9 +744,10 @@ Expected: `gh` prints the new PR URL.
 Executed in PR #2. Deltas from this plan's 1.x-era assumptions (full detail in the
 spec's "Post-implementation outcomes (Moon 2.2.5)"):
 
-- Moon pinned to **2.2.5**; `vcs.manager` → `vcs.client`; Python uses the first-class
-  `python` toolchain (not `unstable_python`, which 2.2.5 silently ignores); sync
-  subcommand is `moon sync code-owners`.
+- Moon pinned to **2.2.5**; `vcs.manager` → `vcs.client`; Python/uv use the
+  `unstable_python` + `unstable_uv` built-in toolchains (verified via
+  `moon toolchain info`; unprefixed `python`/`uv` are not built-in in 2.2.5, and uv
+  version pins under `unstable_uv`); sync subcommand is `moon sync code-owners`.
 - Moon resolves **one task-less project** (`contracts`), not zero; the language
   globs match nothing yet.
 - Verified gate is **`moon ci :build`** (exit 0) — bare `moon ci` needs explicit

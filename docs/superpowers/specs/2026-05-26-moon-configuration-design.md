@@ -80,18 +80,21 @@ version — reproducibility is a stated goal, see decision 4):
 - **Rust** — latest stable (≈ 1.94.x), components `rustfmt` + `clippy`, bin `cargo-nextest`.
 - **Node** — latest 22.x LTS patch, package manager `pnpm` (current 10.x).
 - **Python** — latest 3.12.x patch, package manager `uv` (current 0.11.x), under the
-  first-class `python` toolchain key (Moon 2.x; not `unstable_python` — see decision 2).
+  `unstable_python` toolchain plus a separate `unstable_uv` block (Moon 2.2.5
+  built-ins — see decision 2).
 
-### 2. Python toolchain — first-class `python` key (Moon 2.x), with a documented fallback
+### 2. Python/uv toolchains — `unstable_python` + `unstable_uv` (Moon 2.2.5 built-ins), with a documented fallback
 
-The AC and scoping doc assumed Moon's Python toolchain was on the `unstable_python`
-tier. As of the pinned Moon 2.2.5 it is the first-class top-level `python` key
-(verified against the toolchain JSON schema); `unstable_python` is silently ignored
-by 2.2.5 and would leave Python/uv unpinned, so we use `python`. We document the
-fallback explicitly: **if the `python` toolchain proves unreliable, drop the block
-and run `uv` via plain `command` tasks in each Python project.** That loses
-toolchain-layer version pinning for Python but gains stability — a config-time
-switch, not a structural change.
+Verified against the pinned Moon 2.2.5 binary (`moon toolchain info`): the built-in
+toolchains are `unstable_python` and a **separate** `unstable_uv` — the unprefixed
+`python`/`uv` keys are *not* built-in in 2.2.5 (the hosted JSON schema, which shows
+`python`, is ahead of the 2.2.5 binary; the binary is authoritative). The Python
+version pins under `unstable_python.version` (with `packageManager: 'uv'`); the
+**uv** version pins under `unstable_uv.version` — it is *not* a nested field of
+`unstable_python`. We document the fallback explicitly: **if these toolchains prove
+unreliable, drop the blocks and run `uv` via plain `command` tasks in each Python
+project.** That loses toolchain-layer version pinning for Python but gains
+stability — a config-time switch, not a structural change.
 
 ### 3. `moon.yml` templates — Moon's generator system, one per language, archetype-parameterized
 
@@ -218,14 +221,16 @@ rust:
   bins:
     - 'cargo-nextest'
 
-# Python is a first-class Moon 2.x toolchain (top-level `python`); the older
-# `unstable_python` key is silently ignored by 2.2.5. Fallback if it misbehaves:
-# drop this block and run uv via plain `command` tasks per project.
-python:
+# Python/uv are Moon 2.2.5 built-in toolchains keyed `unstable_python` and the
+# separate `unstable_uv` (verified via `moon toolchain info`; unprefixed
+# `python`/`uv` are NOT built-in in 2.2.5). uv's version pins under `unstable_uv`,
+# not nested in `unstable_python`. Fallback: drop these blocks and run uv via
+# plain `command` tasks per project.
+unstable_python:
   version: '3.12.<latest-patch>'
   packageManager: 'uv'
-  uv:
-    version: '0.11.<latest>'
+unstable_uv:
+  version: '0.11.<latest>'
 ```
 
 ### `.moon/tasks.yml`
@@ -356,8 +361,8 @@ Maps to the issue's acceptance criteria.
 - `.moon/workspace.yml` exists with all seven project globs, `vcs` config, and
   `codeowners` config.
 - `.moon/toolchain.yml` pins Rust (+rustfmt/clippy/cargo-nextest), Node 22.x LTS
-  (+pnpm), and Python 3.12.x (+uv) under the `python` toolchain, all at concrete
-  committed versions.
+  (+pnpm), and Python 3.12.x (+uv) under `unstable_python` + `unstable_uv`, all at
+  concrete committed versions.
 - `.moon/tasks.yml` defines `sources` and `tests` file groups and global task
   defaults.
 - The three generator templates exist and `moon generate` lists/recognizes them;
@@ -435,9 +440,10 @@ assumed:
 
 - **Moon version:** pinned to **2.2.5** in `.prototools` (latest stable at build time).
 - **Resolved toolchain pins:** Rust 1.95.0, Node 22.22.3, pnpm 11.3.0, Python
-  3.12.13, uv 0.11.16 — under the first-class `python` toolchain key (Moon 2.x).
-  Note: `unstable_python` is silently *ignored* by 2.2.5 (it would leave Python/uv
-  unpinned), so the config uses `python` with uv nested under `python.uv`.
+  3.12.13, uv 0.11.16 — Python under `unstable_python`, uv under the **separate**
+  `unstable_uv` block (Moon 2.2.5 built-ins, verified via `moon toolchain info`;
+  the unprefixed `python`/`uv` keys are not built-in in 2.2.5, and uv is not a
+  nested field of `unstable_python`).
 - **Moon 1.x → 2.x renames applied:** `vcs.manager` → `vcs.client`; the codeowners
   field is `sync` (not `syncOnRun`); the sync subcommand is `moon sync code-owners`.
 - **Open item #1 (CODEOWNERS on empty workspace) — RESOLVED:** `globalPaths` alone
