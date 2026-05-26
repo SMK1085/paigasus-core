@@ -4,10 +4,9 @@
 
 ## Acceptance criteria
 
-<!-- Copy the issue's acceptance criteria and check them off as you satisfy them. -->
+<!-- Copy the issue's acceptance criteria below and check them off as you satisfy them. -->
 
-- [ ]
-- [ ]
+- [ ] _Paste each acceptance criterion from the Linear issue here_
 
 ## Checklist
 
