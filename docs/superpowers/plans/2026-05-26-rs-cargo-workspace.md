@@ -270,9 +270,18 @@ git commit -m "feat(rs): add paigasus-gateway binary stub (SMA-357)"
 
 ## Task 4: Moon wiring (nextest pin + inherited Rust tasks)
 
+> **As-built correction (see spec "Post-implementation outcomes"):** Moon 2.2.5 does not
+> scope task files by filename, so `rust.yml` needs an `inheritedBy: languages: ['rust']`
+> block; it must re-declare `fileGroups` (scoped files replace, not merge, the global ones);
+> each crate needs a one-line `moon.yml` with `language: 'rust'` (auto-detection returned
+> `unknown`); and `/.moon/tasks/rust.yml` was added to `implicitInputs`. With scoping in
+> place, `contracts` needs no opt-out. The steps below predate these findings.
+
 **Files:**
 - Modify: `.moon/toolchain.yml` (the `rust.bins` list)
-- Create: `.moon/tasks/rust.yml`
+- Create: `.moon/tasks/rust.yml` (with `inheritedBy` scoping + `fileGroups`)
+- Create: `rs/crates/{libs/paigasus-kernel,bindings/paigasus-py-bindings,services/paigasus-gateway}/moon.yml` (`language: 'rust'`)
+- Modify: `.moon/tasks.yml` (`implicitInputs` += `/.moon/tasks/rust.yml`)
 
 - [ ] **Step 1: Resolve the latest stable `cargo-nextest` version**
 

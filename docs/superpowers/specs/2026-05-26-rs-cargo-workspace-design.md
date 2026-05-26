@@ -250,11 +250,26 @@ release-worthy logic` comment so the unpublishable stub state isn't silently per
 
 ### `.moon/tasks/rust.yml`
 
-Inherited by every project Moon detects as Rust (presence of `Cargo.toml`), so no
-per-crate `moon.yml` is required:
+Scoped to Rust projects via an `inheritedBy` condition (see Post-implementation outcomes
+— Moon does **not** scope task files by filename, and each crate needs a one-line
+`moon.yml` declaring `language: 'rust'`):
 
 ```yaml
 $schema: 'https://moonrepo.dev/schemas/tasks.json'
+
+# Moon does NOT scope task files by filename — scope explicitly so these Rust commands
+# attach only to Rust projects (not contracts, and not the future py/ts workspaces).
+inheritedBy:
+  languages: ['rust']
+
+# A scoped task file REPLACES (not merges) the global fileGroups for matched projects,
+# so re-declare what the Rust tasks reference; `tests` uses Rust conventions.
+fileGroups:
+  sources:
+    - 'src/**/*'
+  tests:
+    - 'tests/**/*'
+    - '**/*_test.rs'
 
 tasks:
   build:
@@ -270,6 +285,9 @@ tasks:
     command: 'cargo fmt -p $project --check'
     inputs: ['@group(sources)']
 ```
+
+Each Rust crate carries a one-line `moon.yml` (`language: 'rust'`); `.moon/tasks.yml`'s
+`implicitInputs` gains `/.moon/tasks/rust.yml` so editing the task file busts Rust caches.
 
 `$project` resolves to the Moon project id = crate dir name = Cargo package name, so
 `-p $project` selects the right package. Cargo discovers the workspace root by walking up
@@ -328,11 +346,12 @@ Maps to the AC, plus Moon gates proving the Option-B wiring.
    `BinEntry` schema accepts `bin@version`, installed through `cargo binstall`) so the flag's
    availability is locked, not left to whatever `binstall` resolves. Confirm the exact flag
    spelling against the pinned version at implementation.
-2. **`$project` token + Rust language auto-detection** in the pinned Moon 2.2.5 — confirm
-   `$project` interpolates in `command`, and that Moon applies `.moon/tasks/rust.yml` to
-   the crates via `Cargo.toml`-based language detection (no explicit `language: rust`
-   needed). Fallback if detection misbehaves: add a one-line `moon.yml` (`language: rust`)
-   per crate, or tag-scope the task file.
+2. **`$project` token + Rust task scoping — RESOLVED** (see Post-implementation outcomes).
+   `$project` interpolates correctly. Moon 2.2.5 does **not** scope task files by filename
+   and does **not** auto-detect the crate language from `Cargo.toml` here, so the design's
+   "no per-crate `moon.yml`" assumption was wrong: `rust.yml` needs an `inheritedBy:
+   languages: ['rust']` block, and each crate needs a one-line `language: 'rust'` `moon.yml`
+   (the anticipated fallback). With scoping in place, `contracts` needs no opt-out.
 3. **Resolved dependency versions.** Confirm the latest compatible minor for each
    `[workspace.dependencies]` entry at implementation (esp. axum 0.8.x, reqwest 0.12.x,
    thiserror 2.x) and freeze in `Cargo.lock`.
@@ -370,6 +389,34 @@ item was evaluated against the codebase and the prior brainstorm decisions befor
 | **N6** cargo-direct needs provisioned toolchain | **Adopted (note)** in verification — feeds SMA-363. |
 | **N7** Notion scoping-doc drift | **Adopted as external action** (needs sign-off; not a repo edit). |
 | **N8** tokio `macros` in libs | **Adopted** — minimal baseline + comment (see S3). |
+
+## Post-implementation outcomes (Moon 2.2.5)
+
+Recorded after implementing SMA-357. The Cargo workspace landed exactly as designed; the
+Moon wiring (Option B) needed three corrections to the design's assumptions, all about how
+Moon 2.2.5 scopes inherited tasks:
+
+- **Task files are not scoped by filename.** A file named `.moon/tasks/rust.yml` does **not**
+  auto-apply to Rust projects — by default Moon inherits a task file into *every* project.
+  Scoping is declarative via an `inheritedBy` block. The working form in 2.2.5 is the flat
+  list `inheritedBy:\n  languages: ['rust']` — the nested `languages: { or: [...] }` form is
+  a schema error, and `toolchains: { or: ['rust'] }` silently matched nothing here.
+- **Language is not auto-detected from `Cargo.toml`** in this setup: without help, the crates
+  resolved as `language: unknown` and inherited no tasks. So each crate carries a one-line
+  `moon.yml` (`language: 'rust'`) — the fallback open item #2 anticipated. This refines the
+  design's "no per-crate `moon.yml` required" claim: three trivial language-marker files are
+  required; no per-crate *task* config is.
+- **Scoped task files replace, not merge, `fileGroups`.** Because `rust.yml` defines
+  `fileGroups`, the matched projects use *only* that file's groups, so `sources` must be
+  re-declared there (dropping it broke `@group(sources)`). `tests` uses Rust globs
+  (`tests/**/*`, `**/*_test.rs`).
+- **`contracts` needs no opt-out.** Once `rust.yml` is scoped to `languages: ['rust']`,
+  `contracts` (language `unknown`) inherits nothing — and the future `py/`/`ts/` projects
+  won't either. This is the property that makes the wiring scale to the polyglot repo.
+- **Resolved pins:** `cargo-nextest@0.9.136` in `.moon/toolchain.yml`; `/.moon/tasks/rust.yml`
+  added to `implicitInputs`. Verified: `moon run :build :test :lint :fmt` runs all four tasks
+  across the three crates (test = no-tests, exit 0) and skips `contracts`; the four raw
+  `cargo` gates pass.
 
 ## References
 
