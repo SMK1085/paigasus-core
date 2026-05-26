@@ -155,7 +155,7 @@ A comprehensive, template-derived `.gitignore` (Rust + Node + Python + Moon + ma
 # ─── Secrets / environment ───────────────────────────────────────────────
 .env
 .env.*
-!.env.example
+!.env*.example
 *.pem
 *.key
 *.p12
@@ -225,15 +225,16 @@ Expected: `git check-ignore` prints `.env` and `.env.local` (exit 0); the `grep`
 Run:
 ```bash
 printf 'SECRET=\n' > .env.example
-git check-ignore .env.example; echo "exit=$?"
+printf 'SECRET=\n' > .env.development.example
+git check-ignore .env.example .env.development.example; echo "exit=$?"
 ```
-Expected: no path printed and `exit=1` (the `!.env.example` negation un-ignores it).
+Expected: no path printed and `exit=1` (the `!.env*.example` negation un-ignores both the exact `.env.example` and per-environment variants like `.env.development.example`).
 
 - [ ] **Step 4: Clean up the temp files**
 
 Run:
 ```bash
-rm -f .env .env.local .env.example
+rm -f .env .env.local .env.example .env.development.example
 ```
 
 - [ ] **Step 5: Commit**
@@ -503,10 +504,11 @@ Expected: six `OK: ... tracked` lines.
 
 Run:
 ```bash
-git log --oneline -- LICENSE | tail -1   # should still be the initial commit
-git diff bc9a98f -- LICENSE              # should produce no output
+# Dynamically find the commit that added LICENSE (no hardcoded SHA — works on forks too)
+INITIAL_COMMIT=$(git log --oneline --diff-filter=A -- LICENSE | tail -1 | cut -d' ' -f1)
+git diff "$INITIAL_COMMIT" -- LICENSE   # should produce no output
 ```
-Expected: the `git diff` produces no output (LICENSE untouched since the initial commit).
+Expected: the `git diff` produces no output (LICENSE untouched since the commit that added it).
 
 - [ ] **Step 4: Confirm the full deliverable set is present**
 
