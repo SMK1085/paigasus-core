@@ -1,0 +1,29 @@
+[tool.uv.workspace]
+members = ["packages/*"]
+
+# Python version lives in THREE places that must move together on a floor bump:
+# requires-python (per package), tool.basedpyright.pythonVersion, tool.ruff.target-version.
+[tool.basedpyright]
+typeCheckingMode = "all"
+pythonVersion = "3.12"
+include = ["packages/*/src", "packages/*/tests"]
+exclude = ["**/__pycache__", "**/node_modules", "**/.venv", "**/dist", "**/build"]
+reportMissingTypeStubs = "warning"
+reportUnnecessaryTypeIgnoreComment = "error"
+reportImplicitOverride = "error"
+reportImportCycles = "error"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TCH", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["packages/*/tests"]
+markers = [
+  "integration: integration tests that may hit real infrastructure",
+  "slow: tests that take more than 1s",
+]
