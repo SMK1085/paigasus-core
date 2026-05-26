@@ -60,9 +60,16 @@ project that runs the workspace-wide quality gates. No real package logic — bo
   - Each task sets explicit `inputs` (relevant file group + `pyproject.toml` + `uv.lock`) so the
     parent project's tasks don't default to the greedy `**/*` (the documented root-project caveat).
   - No `build` task (the root is a virtual uv workspace; `uv build` there is awkward).
-- `py/packages/<name>/moon.yml` — minimal per-package projects: `language: 'python'`, no tasks yet.
-  They exist for identity/CODEOWNERS/affected-graph; a `build` task is added per package when one
-  needs to produce an artifact.
+- `py/packages/<name>/moon.yml` — minimal per-package projects: an explicit `id: 'paigasus-<name>-py'`
+  plus `language: 'python'`, no tasks yet. They exist for identity/CODEOWNERS/affected-graph; a
+  `build` task is added per package when one needs to produce an artifact.
+- **Moon project-ID convention (`-py` suffix).** Moon derives a project's ID from its directory leaf,
+  so `py/packages/paigasus-kernel` collides with the Rust crate `rs/crates/libs/paigasus-kernel`
+  (both → `paigasus-kernel`), and `paigasus-proto` would collide once a Rust proto crate lands. All
+  four Python package projects therefore carry an explicit `-py`-suffixed id (`paigasus-proto-py`,
+  `paigasus-kernel-py`, `paigasus-ml-py`, `paigasus-workflows-py`). The `py` parent project keeps the
+  derived id `py` (so the gates stay `moon run py:<task>`). The Rust crates get the mirror `-rs`
+  suffix in a follow-up (SMA-380); `rs/` is not touched here.
 - **No `.moon/tasks/python.yml` yet.** A language-scoped inherited task file would attach the same
   tasks to *both* the `py` parent and every package (the gates belong only on `py`; `build` only on
   packages), so inheritance doesn't separate them cleanly. When packages start needing `build`,
@@ -123,13 +130,20 @@ markers = [
 The `dev` group installs by default on `uv sync`, including in a virtual workspace root. Direct deps
 pinned (per the guidelines); `uv.lock` pins transitive.
 
+`py/.python-version` pins `3.12.13` (matching `.moon/toolchain.yml`). Without it, raw `uv` selects the
+newest interpreter satisfying `requires-python >=3.12` (e.g. 3.14 on the dev machine), and Moon's
+`uv run` reuses whatever `py/.venv` already exists — so nothing actually runs on the pinned 3.12.
+The `.python-version` file makes both raw uv and Moon build the venv on 3.12.13, which is the point of
+pinning. (This supersedes the original reliance on "run via Moon" for version parity, which did not
+hold in practice.)
+
 ## C. The four stub packages
 
 `paigasus-proto`, `paigasus-kernel`, `paigasus-ml`, `paigasus-workflows`. Each:
 
 ```
 py/packages/<name>/
-├── moon.yml                 # language: python (identity; no tasks yet)
+├── moon.yml                 # id 'paigasus-<name>-py', language python (identity; no tasks yet)
 ├── pyproject.toml
 └── src/<module>/            # module = name with - → _, e.g. paigasus_proto
     ├── __init__.py          # SPDX header only
@@ -239,6 +253,9 @@ hooks (SMA-371).
 - **First package with tests (SMA-379):** remove the conftest exit-5 shim (§D).
 - **First real `.pyi` stubs:** consider per-package `reportMissingTypeStubs = "error"` for
   `paigasus-kernel`/`paigasus-proto`. (N2.)
+- **SMA-380 (rust `-rs` ids):** mirror this issue's `-py` Moon-id convention on the Rust crates
+  (`paigasus-kernel-rs`, …) for cross-stack consistency. Touches landed SMA-357 crates and the
+  `cargo -p $project` task wiring, so tracked separately.
 
 ## H. Review disposition
 

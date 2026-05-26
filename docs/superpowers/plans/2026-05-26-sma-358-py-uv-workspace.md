@@ -560,4 +560,28 @@ git push -u origin feature/sma-358-bootstrap-py-uv-workspace-with-basedpyright-r
 - **Do not** add a `build` task to `py/moon.yml` (virtual root) or create `.moon/tasks/python.yml`
   (would attach gate tasks to every package too). Both are deliberately deferred — see spec §A, §G.
 - **Do not** hand-edit `.github/CODEOWNERS`; it is Moon-generated.
+
+---
+
+## Execution amendments (post-review decisions)
+
+Two things surfaced during Task 5 that the as-written tasks above did not anticipate; the executed
+result reflects these decisions:
+
+1. **Moon project-ID `-py` suffix.** Moon derives project IDs from the directory leaf, so the Python
+   `paigasus-kernel` package collided with the Rust `paigasus-kernel` crate. Each Python *package*
+   `moon.yml` therefore carries an explicit `id: 'paigasus-<name>-py'` (`paigasus-proto-py`,
+   `paigasus-kernel-py`, `paigasus-ml-py`, `paigasus-workflows-py`). The `py` parent project keeps id
+   `py` (gates remain `moon run py:<task>`). Rust crates get the mirror `-rs` suffix in a follow-up
+   (**SMA-380**) — not touched here. So Task 1's package `moon.yml` and Task 5's `py/packages/*`
+   wiring include that `id` line.
+
+2. **`py/.python-version` pins `3.12.13`.** Raw `uv` was selecting Python 3.14 (newest satisfying
+   `requires-python >=3.12`), and Moon's `uv run` reused that venv — nothing ran on the pinned 3.12.
+   Adding `py/.python-version` (`3.12.13`, matching `.moon/toolchain.yml`) makes both raw uv and Moon
+   build/run the venv on 3.12.13. Added during Task 5; `uv.lock` was unaffected (deps resolve for
+   `>=3.12`).
+
+Follow-up issues filed from this work: **SMA-378** (PyPI publish metadata for proto/kernel),
+**SMA-379** (remove the pytest exit-5 shim once tests exist), **SMA-380** (suffix Rust Moon ids `-rs`).
 ```
