@@ -1,0 +1,16 @@
+[package]
+name = "paigasus-py-bindings"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+# Only cdylib: Python loads this artifact; no other Rust crate consumes it. Add "rlib"
+# only if a test or debug tool later needs to import it.
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true

@@ -5,3 +5,7 @@ version = 4
 [[package]]
 name = "paigasus-kernel"
 version = "0.0.0"
+
+[[package]]
+name = "paigasus-py-bindings"
+version = "0.0.0"
