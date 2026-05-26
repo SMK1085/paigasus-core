@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Wire Moon as the polyglot task orchestrator for `paigasus-core` — workspace project graph, pinned toolchains, global task defaults, per-language generator templates, Moon-owned CODEOWNERS — such that `moon ci` and `moon check :build` run clean on the (still empty) workspace.
+**Goal:** Wire Moon as the polyglot task orchestrator for `paigasus-core` — workspace project graph, pinned toolchains, global task defaults, per-language generator templates, Moon-owned CODEOWNERS — such that `moon ci :build` runs clean on the (still empty) workspace.
 
 **Architecture:** Pure configuration. The project globs match zero directories today (workspace dirs hold only READMEs), so Moon resolves **zero projects** and the verification gates are trivially satisfiable. Moon itself is installed and version-pinned via `proto`/`.prototools`; language toolchains are *declared* in `.moon/toolchain.yml` but not provisioned (no tasks to run). Generator templates are real `moon generate` scaffolds, one per language, parameterized by an `archetype` enum.
 
@@ -203,10 +203,10 @@ rust:
   bins:
     - 'cargo-nextest'
 
-# Moon's Python toolchain is still on the 'unstable' tier as of mid-2026.
-# Pin uv explicitly; if this tier proves unreliable, remove this block and run
-# uv via plain 'command' tasks per project (loses pinning, gains stability).
-unstable_python:
+# Python is a first-class Moon 2.x toolchain (top-level 'python'); the older
+# 'unstable_python' key is silently ignored by Moon 2.2.5. Fallback if it
+# misbehaves: drop this block and run uv via plain 'command' tasks per project.
+python:
   version: '${PY}'
   packageManager: 'uv'
   uv:
@@ -219,7 +219,7 @@ cat .moon/toolchain.yml
 
 Inspect the printed `.moon/toolchain.yml`. Confirm:
 - `node.version` starts with `22.` (AC: Node 22.x LTS).
-- `unstable_python.version` starts with `3.12.` (AC: Python 3.12.x).
+- `python.version` starts with `3.12.` (AC: Python 3.12.x).
 - `rust.version` is a `1.x.y` stable (AC: Rust latest stable).
 - `pnpm` is `10.x`, `uv` is `0.11.x` (current majors).
 
@@ -240,8 +240,8 @@ git add .moon/toolchain.yml
 git commit -m "$(cat <<'EOF'
 chore(repo): pin Rust/Node+pnpm/Python+uv in Moon toolchain.yml
 
-Current-stable versions resolved at build time. Python stays on Moon's
-unstable_python tier with a documented command-task fallback.
+Current-stable versions resolved at build time. Python uses Moon 2.x's
+first-class python toolchain with a documented command-task fallback.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -528,7 +528,7 @@ The static root `CODEOWNERS` (`* @SMK1085`) from SMA-355 must be replaced by Moo
 
 Run:
 ```bash
-moon sync codeowners
+moon sync code-owners
 echo "--- .github/CODEOWNERS ---"; cat .github/CODEOWNERS 2>/dev/null || echo "(none at .github/)"
 echo "--- root CODEOWNERS ---";   cat CODEOWNERS 2>/dev/null || echo "(none at root)"
 ```
@@ -646,21 +646,21 @@ EOF
 
 **Files:** none created — verification and PR only.
 
-- [ ] **Step 1: `moon ci` runs clean on the empty workspace (AC gate 1)**
+- [ ] **Step 1: `moon ci :build` runs clean on the empty workspace (AC gate 1)**
 
 Run:
 ```bash
-moon ci
+moon ci :build
 ```
-Expected: completes with no project errors and no tasks run (zero affected projects). If Moon attempts to provision the `unstable_python` toolchain and fails here despite there being no tasks, apply the spec's fallback (remove the `unstable_python` block from `.moon/toolchain.yml`, re-commit Task 3) and record it — but the expected result is a clean no-op.
+Expected: completes with no project errors and no tasks run (zero affected targets). (Moon 2.x: `moon ci` takes explicit `[TARGETS]`; bare `moon ci` errors `app::tty::required_id` in non-TTY.) If Moon attempts to provision the `python` toolchain and fails despite there being no tasks, apply the spec's fallback (drop the `python` block from `.moon/toolchain.yml` and run uv via command tasks) and record it — but the expected result is a clean no-op.
 
-- [ ] **Step 2: `moon check :build` succeeds as a no-op (AC gate 2)**
+- [ ] **Step 2: `moon ci :test` succeeds as a no-op (AC gate 2)**
 
 Run:
 ```bash
-moon check :build
+moon ci :test
 ```
-Expected: succeeds with nothing to run (no `build` tasks exist because no projects exist). This is the exact form SMA-363 uses.
+Expected: succeeds with nothing to run (no `test` tasks exist because no real projects exist). (Moon 2.x: `moon check` takes project IDs, not task targets, so `moon check :build` is invalid — use explicit `moon ci <target>`. SMA-363's AC was updated to this `moon ci :build`/`:test` form.)
 
 - [ ] **Step 3: Confirm zero projects and a clean tree**
 
@@ -695,17 +695,17 @@ generator registration), `.moon/toolchain.yml` (current-stable Rust / Node+pnpm 
 Python+uv pins), `.moon/tasks.yml` (file groups + global defaults), per-language
 `moon generate` templates (rust/python/typescript, archetype-parameterized), and
 `.prototools` pinning the Moon binary. The project globs match zero directories
-today, so `moon ci` and `moon check :build` are clean no-ops.
+today, so `moon ci :build` is a clean no-op.
 
 ## Acceptance criteria
 
 - [x] `.moon/workspace.yml` with the seven project globs
-- [x] `.moon/toolchain.yml` pinning Rust (+rustfmt/clippy/cargo-nextest), Node 22.x LTS (+pnpm), Python 3.12.x (+uv, unstable_python)
+- [x] `.moon/toolchain.yml` pinning Rust (+rustfmt/clippy/cargo-nextest), Node 22.x LTS (+pnpm), Python 3.12.x (+uv, via the `python` toolchain)
 - [x] `.moon/tasks.yml` with global defaults + `sources`/`tests` file groups
 - [x] Per-project `moon.yml` templates (library/service/app) as `moon generate` scaffolds
 - [x] `codeowners.sync: true` (corrected from the AC's invalid `syncOnRun`)
-- [x] `moon ci` runs cleanly on the empty workspace
-- [x] `moon check :build` succeeds across all language workspaces (no-op on empty)
+- [x] `moon ci :build` runs cleanly on the empty workspace
+- [x] `moon ci :test` succeeds across all language workspaces (no-op on empty)
 
 Design: docs/superpowers/specs/2026-05-26-moon-configuration-design.md
 Plan: docs/superpowers/plans/2026-05-26-moon-configuration.md
@@ -742,8 +742,9 @@ Expected: `gh` prints the new PR URL.
 Executed in PR #2. Deltas from this plan's 1.x-era assumptions (full detail in the
 spec's "Post-implementation outcomes (Moon 2.2.5)"):
 
-- Moon pinned to **2.2.5**; `vcs.manager` → `vcs.client`; sync subcommand is
-  `moon sync code-owners`.
+- Moon pinned to **2.2.5**; `vcs.manager` → `vcs.client`; Python uses the first-class
+  `python` toolchain (not `unstable_python`, which 2.2.5 silently ignores); sync
+  subcommand is `moon sync code-owners`.
 - Moon resolves **one task-less project** (`contracts`), not zero; the language
   globs match nothing yet.
 - Verified gate is **`moon ci :build`** (exit 0) — bare `moon ci` needs explicit

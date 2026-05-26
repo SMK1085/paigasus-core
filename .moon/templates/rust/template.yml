@@ -1,6 +1,6 @@
 title: 'Rust crate'
 description: |
-  Scaffolds a moon.yml for a Rust crate in paigasus-core. Choose `library` for
+  Scaffolds a moon.yml for a Rust crate under rs/crates. Choose `library` for
   crates under rs/crates/libs (and bindings), or `service` for binaries under
   rs/crates/services.
 

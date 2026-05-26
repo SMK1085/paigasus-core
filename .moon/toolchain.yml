@@ -14,10 +14,12 @@ rust:
   bins:
     - 'cargo-nextest'
 
-# Moon's Python toolchain is still on the 'unstable' tier as of mid-2026.
-# Pin uv explicitly; if this tier proves unreliable, remove this block and run
-# uv via plain 'command' tasks per project (loses pinning, gains stability).
-unstable_python:
+# Python is a first-class Moon toolchain in 2.x — the top-level `python` key.
+# (The older `unstable_python` name is silently ignored by Moon 2.2.5, which
+# would leave Python and uv unpinned.) uv is pinned under `python.uv`. Fallback
+# if it misbehaves: drop this block and run uv via plain 'command' tasks per
+# project (loses pinning, gains stability).
+python:
   version: '3.12.13'
   packageManager: 'uv'
   uv:
