@@ -178,12 +178,12 @@ re-export wrapper over the PyO3 binding post-MVP), `paigasus-ml` (ML lifecycle),
   # TODO(SMA-379): remove this shim once at least one package has tests; until then it keeps the
   # empty workspace green. The on-disk guard means it does NOT mask a "discovery broke" regression
   # in a package that previously had tests.
-  from pathlib import Path
   import pytest
+
 
   def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
       if exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED and not any(
-          Path(session.config.rootdir).glob("packages/*/tests")
+          session.config.rootpath.glob("packages/*/tests")
       ):
           session.exitstatus = 0
   ```
