@@ -1,0 +1,24 @@
+$schema: 'https://moonrepo.dev/schemas/toolchain.json'
+
+node:
+  version: '22.22.3'
+  packageManager: 'pnpm'
+  pnpm:
+    version: '11.3.0'
+
+rust:
+  version: '1.95.0'
+  components:
+    - 'rustfmt'
+    - 'clippy'
+  bins:
+    - 'cargo-nextest'
+
+# Moon's Python toolchain is still on the 'unstable' tier as of mid-2026.
+# Pin uv explicitly; if this tier proves unreliable, remove this block and run
+# uv via plain 'command' tasks per project (loses pinning, gains stability).
+unstable_python:
+  version: '3.12.13'
+  packageManager: 'uv'
+  uv:
+    version: '0.11.16'
