@@ -115,7 +115,7 @@ projects:
   - 'ts/apps/*'
 
 vcs:
-  manager: 'git'
+  client: 'git'       # Moon 2.x renamed `manager` → `client`.
   defaultBranch: 'main'
   provider: 'github'
   # `hooks` intentionally left unset — lefthook owns .git/hooks (SMA-371).
@@ -736,3 +736,21 @@ Expected: `gh` prints the new PR URL.
 - **`repo` project + `vcs.hooks`** are deliberately absent — SMA-371 adds them.
 - If `moon generate`'s non-interactive flags differ in the pinned Moon version,
   the fix is the *invocation* in Task 5 Step 7, never the template files.
+
+## Post-implementation reconciliation (Moon 2.2.5)
+
+Executed in PR #2. Deltas from this plan's 1.x-era assumptions (full detail in the
+spec's "Post-implementation outcomes (Moon 2.2.5)"):
+
+- Moon pinned to **2.2.5**; `vcs.manager` → `vcs.client`; sync subcommand is
+  `moon sync code-owners`.
+- Moon resolves **one task-less project** (`contracts`), not zero; the language
+  globs match nothing yet.
+- Verified gate is **`moon ci :build`** (exit 0) — bare `moon ci` needs explicit
+  targets and `moon check :build` is invalid in Moon 2.x. CODEOWNERS generated at
+  `.github/CODEOWNERS` from `globalPaths` alone (Case A); static root file removed.
+- Resolved pins: Rust 1.95.0 / Node 22.22.3 / pnpm 11.3.0 / Python 3.12.13 /
+  uv 0.11.16.
+- `moon generate` non-interactive form: `moon generate <tmpl> --to <dir> --defaults
+  --force -- --name <name> --archetype <a>` (a destination INSIDE the workspace;
+  an absolute out-of-tree `--to` is treated as workspace-relative).

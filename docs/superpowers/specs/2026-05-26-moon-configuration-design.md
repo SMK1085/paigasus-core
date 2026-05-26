@@ -176,7 +176,7 @@ projects:
   - 'ts/apps/*'
 
 vcs:
-  manager: 'git'
+  client: 'git'       # Moon 2.x renamed `manager` → `client`.
   defaultBranch: 'main'
   provider: 'github'
   # `hooks` intentionally left unset — lefthook owns .git/hooks (per SMA-371).
@@ -424,6 +424,34 @@ before acting:
 **New finding the review missed:** the AC's and scoping doc's `codeowners.syncOnRun`
 is not a valid current Moon field — the field is **`codeowners.sync`**. Corrected
 throughout; flagged for an AC fix in Linear (decision §5).
+
+## Post-implementation outcomes (Moon 2.2.5)
+
+Recorded after implementing SMA-356 (PR #2). The build matched this design; a few
+values and command/field names resolved differently than the 1.x-era scoping doc
+assumed:
+
+- **Moon version:** pinned to **2.2.5** in `.prototools` (latest stable at build time).
+- **Resolved toolchain pins:** Rust 1.95.0, Node 22.22.3, pnpm 11.3.0, Python
+  3.12.13, uv 0.11.16. `unstable_python` is still accepted by Moon 2.2.5.
+- **Moon 1.x → 2.x renames applied:** `vcs.manager` → `vcs.client`; the codeowners
+  field is `sync` (not `syncOnRun`); the sync subcommand is `moon sync code-owners`.
+- **Open item #1 (CODEOWNERS on empty workspace) — RESOLVED:** `globalPaths` alone
+  *does* generate a file even with no per-project owners. Moon wrote
+  `.github/CODEOWNERS` (`* @SMK1085`); the static root `CODEOWNERS` was removed.
+  Exactly one authoritative CODEOWNERS results.
+- **Project graph:** Moon resolves **one task-less project** (`contracts`, a dir with
+  only a README), not zero — the `rs`/`py`/`ts` globs still match nothing. The gates
+  pass because a task-less project has nothing to run. (This refines the "zero
+  projects" framing used above.)
+- **Open item #2 (toolchain download on empty) + AC gate commands — RESOLVED:** in
+  Moon 2.x `moon ci` requires explicit `[TARGETS]` and `moon check` takes project IDs,
+  so the AC's literal `moon ci` / `moon check :build` do not run as written
+  (bare `moon ci` errors `app::tty::required_id` in non-TTY). Verified gate:
+  **`moon ci :build` → exit 0** (no affected tasks; no toolchain download on the empty
+  workspace). `moon check :build` is invalid 2.x syntax. SMA-363's AC was updated to
+  `moon ci :build`/`:test` and SMA-361 was flagged to use explicit targets +
+  `codeowners.sync`.
 
 ## References
 
