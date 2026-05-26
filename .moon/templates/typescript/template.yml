@@ -1,0 +1,17 @@
+title: 'TypeScript project'
+description: |
+  Scaffolds a moon.yml for a TypeScript project. `library` for a publishable
+  package under ts/packages, `app` for a deployable under ts/apps (e.g. Next.js).
+  Lint/format use ESLint + Prettier per ADR-0009; the test runner is a scaffold
+  default (vitest) — finalize in SMA-359.
+variables:
+  name:
+    type: 'string'
+    default: ''
+    required: true
+    prompt: 'Project name (e.g. sdk)?'
+  archetype:
+    type: 'enum'
+    values: ['library', 'app']
+    default: 'library'
+    prompt: 'Archetype?'

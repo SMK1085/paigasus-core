@@ -1,0 +1,27 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+type: '{% if archetype == "service" %}application{% else %}library{% endif %}'
+language: 'python'
+tasks:
+  build:
+    command: 'uv build'
+    inputs: ['@group(sources)', 'pyproject.toml']
+    outputs: ['dist']
+  lint:
+    command: 'ruff check .'
+    inputs: ['@group(sources)', '@group(tests)']
+  format:
+    command: 'ruff format --check .'
+    inputs: ['@group(sources)', '@group(tests)']
+  typecheck:
+    command: 'basedpyright'
+    inputs: ['@group(sources)', '@group(tests)']
+  test:
+    command: 'pytest'
+    inputs: ['@group(sources)', '@group(tests)']
+{% if archetype == "service" %}
+  start:
+    command: 'python -m {{ name | replace(from="-", to="_") }}'
+    options:
+      cache: false
+      persistent: true
+{% endif %}

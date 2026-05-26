@@ -1,0 +1,20 @@
+title: 'Python package'
+description: |
+  Scaffolds a moon.yml for a Python package under py/packages. `library` for an
+  importable package, `service` for a runnable service.
+
+  CAVEAT: a package that builds native code via maturin must add
+  `dependsOn: ['<rust-binding-crate>']` by hand so Moon provisions BOTH the
+  Python and Rust toolchains in the task context (not exercised yet; first
+  surfaces in the kernel-bindings work).
+variables:
+  name:
+    type: 'string'
+    default: ''
+    required: true
+    prompt: 'Package name (e.g. paigasus-ml)?'
+  archetype:
+    type: 'enum'
+    values: ['library', 'service']
+    default: 'library'
+    prompt: 'Archetype?'
