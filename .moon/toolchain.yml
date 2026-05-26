@@ -12,7 +12,7 @@ rust:
     - 'rustfmt'
     - 'clippy'
   bins:
-    - 'cargo-nextest'
+    - 'cargo-nextest@0.9.136'
 
 # Python and uv are Moon 2.2.5 built-in toolchains, keyed `unstable_python` and
 # the separate `unstable_uv` (verified via `moon toolchain info`; the unprefixed

@@ -1,0 +1,27 @@
+$schema: 'https://moonrepo.dev/schemas/tasks.json'
+
+# Moon does NOT scope task files by filename — scope explicitly so these Rust commands
+# only attach to Rust projects (not contracts, and not the future py/ts workspaces).
+inheritedBy:
+  languages: ['rust']
+
+fileGroups:
+  sources:
+    - 'src/**/*'
+  tests:
+    - 'tests/**/*'
+    - '**/*_test.rs'
+
+tasks:
+  build:
+    command: 'cargo build -p $project'
+    inputs: ['@group(sources)', 'Cargo.toml']
+  test:
+    command: 'cargo nextest run -p $project --no-tests=pass'
+    inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml']
+  lint:
+    command: 'cargo clippy -p $project --all-targets -- -D warnings'
+    inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml']
+  fmt:
+    command: 'cargo fmt -p $project --check'
+    inputs: ['@group(sources)']

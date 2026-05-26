@@ -16,6 +16,7 @@ fileGroups:
 implicitInputs:
   - '/.moon/toolchain.yml'
   - '/.moon/tasks.yml'
+  - '/.moon/tasks/rust.yml'
 
 taskOptions:
   outputStyle: 'buffer-only-failure'
