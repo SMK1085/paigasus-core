@@ -399,16 +399,16 @@ tasks:
     outputs: ['dist']
   lint:
     command: 'uv run ruff check .'
-    inputs: ['@group(sources)', '@group(tests)']
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
   format:
     command: 'uv run ruff format --check .'
-    inputs: ['@group(sources)', '@group(tests)']
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
   typecheck:
     command: 'uv run basedpyright'
-    inputs: ['@group(sources)', '@group(tests)']
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
   test:
     command: 'uv run pytest'
-    inputs: ['@group(sources)', '@group(tests)']
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
 {%- if archetype == "service" %}
   start:
     command: 'uv run python -m {{ name | replace(from="-", to="_") }}'
