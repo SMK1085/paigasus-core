@@ -1,0 +1,27 @@
+$schema: 'https://moonrepo.dev/schemas/workspace.json'
+
+projects:
+  - 'contracts'
+  - 'rs/crates/libs/*'
+  - 'rs/crates/bindings/*'
+  - 'rs/crates/services/*'
+  - 'py/packages/*'
+  - 'ts/packages/*'
+  - 'ts/apps/*'
+
+vcs:
+  client: 'git'
+  defaultBranch: 'main'
+  provider: 'github'
+  # `hooks` intentionally left unset — lefthook owns .git/hooks (SMA-371).
+
+codeowners:
+  # Field is `sync`, NOT `syncOnRun` (the AC's original wording was invalid for
+  # current Moon — verified against moonrepo.dev config/workspace docs).
+  sync: true
+  globalPaths:
+    '*': ['@SMK1085']
+
+generator:
+  templates:
+    - './.moon/templates'

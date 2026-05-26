@@ -1,0 +1,26 @@
+$schema: 'https://moonrepo.dev/schemas/toolchain.json'
+
+node:
+  version: '22.22.3'
+  packageManager: 'pnpm'
+  pnpm:
+    version: '11.3.0'
+
+rust:
+  version: '1.95.0'
+  components:
+    - 'rustfmt'
+    - 'clippy'
+  bins:
+    - 'cargo-nextest'
+
+# Python and uv are Moon 2.2.5 built-in toolchains, keyed `unstable_python` and
+# the separate `unstable_uv` (verified via `moon toolchain info`; the unprefixed
+# `python` / `uv` keys are NOT built-in in 2.2.5). The uv VERSION pins under
+# `unstable_uv` — `unstable_python` has no nested `uv` field. Fallback if this
+# misbehaves: drop these blocks and run uv via plain 'command' tasks per project.
+unstable_python:
+  version: '3.12.13'
+  packageManager: 'uv'
+unstable_uv:
+  version: '0.11.16'

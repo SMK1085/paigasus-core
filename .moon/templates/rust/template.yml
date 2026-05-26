@@ -1,0 +1,24 @@
+title: 'Rust crate'
+description: |
+  Scaffolds a moon.yml for a Rust crate under rs/crates. Choose `library` for
+  crates under rs/crates/libs (and bindings), or `service` for binaries under
+  rs/crates/services.
+
+  CAVEATS:
+  - The `service` archetype emits dependsOn paigasus-proto/paigasus-kernel and a
+    `contracts:generate` dep, which only resolve after SMA-357/360. Generate into
+    a workspace where those projects exist, or hand-edit the references.
+  - The `library` archetype emits NO dependsOn on purpose: most libs depend on
+    paigasus-kernel, but paigasus-kernel and paigasus-proto must NOT (self/cycle).
+    Add `dependsOn: ['paigasus-kernel']` by hand where appropriate.
+variables:
+  name:
+    type: 'string'
+    default: ''
+    required: true
+    prompt: 'Crate name (e.g. paigasus-kernel)?'
+  archetype:
+    type: 'enum'
+    values: ['library', 'service']
+    default: 'library'
+    prompt: 'Archetype?'

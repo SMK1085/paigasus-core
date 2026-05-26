@@ -1,0 +1,17 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+type: '{% if archetype == "app" %}application{% else %}library{% endif %}'
+language: 'typescript'
+tasks:
+  build:
+    command: '{% if archetype == "app" %}next build{% else %}tsc --build{% endif %}'
+    inputs: ['@group(sources)', 'tsconfig.json', 'package.json']
+    outputs: ['{% if archetype == "app" %}.next{% else %}dist{% endif %}']
+  lint:
+    command: 'eslint .'
+    inputs: ['@group(sources)']
+  format:
+    command: 'prettier --check .'
+    inputs: ['@group(sources)', '@group(tests)']
+  test:
+    command: 'vitest run'
+    inputs: ['@group(sources)', '@group(tests)']

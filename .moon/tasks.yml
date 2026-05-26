@@ -1,0 +1,21 @@
+$schema: 'https://moonrepo.dev/schemas/tasks.json'
+
+fileGroups:
+  sources:
+    - 'src/**/*'
+  tests:
+    - 'tests/**/*'
+    - '**/*.test.*'
+    - '**/*.spec.*'
+    - '**/*_test.*'
+
+# Inserted into every inherited task's inputs so a workspace-level toolchain or
+# global-task change busts caches. (Caching is on by default, and an undeclared
+# task `inputs` already defaults to all project files '**/*', so per-project
+# edits invalidate correctly without further config.)
+implicitInputs:
+  - '/.moon/toolchain.yml'
+  - '/.moon/tasks.yml'
+
+taskOptions:
+  outputStyle: 'buffer-only-failure'
