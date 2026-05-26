@@ -1,4 +1,0 @@
-# Default owner for everything in the repo.
-# Moon will later manage this file via codeowners.syncOnRun (SMA-356);
-# this static entry is the interim default.
-* @SMK1085
