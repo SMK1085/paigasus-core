@@ -31,6 +31,31 @@ and entry points are summarized in the root [README](./README.md#quickstart).
 The unified `moon ci` flow becomes available once the workspace-setup issues
 land.
 
+## Local development setup
+
+Tooling is orchestrated by [Moon](https://moonrepo.dev), and Moon itself is
+version-pinned via [proto](https://moonrepo.dev/proto) in `.prototools`. One-time
+setup:
+
+```bash
+# 1. Install proto (toolchain manager)
+bash <(curl -fsSL https://moonrepo.dev/install/proto.sh) --yes
+#    add proto to your shell PATH if the installer didn't (see its output)
+
+# 2. Install the pinned Moon binary from .prototools
+proto install
+
+# 3. Verify
+moon --version
+```
+
+Moon downloads and pins the per-language toolchains (Rust, Node + pnpm, Python +
+uv) from `.moon/toolchain.yml` on first use — no manual language installs needed.
+
+> Output is buffered for passing tasks (`buffer-only-failure`). To watch a long
+> task stream locally, append `--output-style stream`, e.g.
+> `moon run <project>:test --output-style stream`.
+
 ## Commit messages
 
 We follow [Conventional Commits](https://www.conventionalcommits.org). Use a
