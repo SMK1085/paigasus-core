@@ -49,7 +49,7 @@ this consistent — changelog automation depends on it.
 
 - Every source file starts with an SPDX license header, using the language's
   comment syntax:
-  - Rust / TypeScript: `// SPDX-License-Identifier: Apache-2.0`
+  - Rust / TypeScript / Protobuf: `// SPDX-License-Identifier: Apache-2.0`
   - Python: `# SPDX-License-Identifier: Apache-2.0`
 - Per-language formatting and linting are enforced by each workspace's Moon
   tasks; run the workspace's `lint`/`fmt` tasks before pushing once it's set up.
