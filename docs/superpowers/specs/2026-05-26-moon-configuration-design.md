@@ -400,8 +400,9 @@ Maps to the issue's acceptance criteria.
 
 ## Review incorporation
 
-Staff-eng review (`docs/superpowers/reviews/2026-05-26-moon-configuration-design-review.md`),
-each item verified against Moon docs / the real sibling issues before acting:
+Staff-eng review pass (review doc removed after incorporation, per repo
+convention); each item verified against Moon docs / the real sibling issues
+before acting:
 
 | Item | Disposition |
 |------|-------------|
