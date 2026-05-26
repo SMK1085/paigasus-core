@@ -52,11 +52,11 @@ project that runs the workspace-wide quality gates. No real package logic — bo
   - `language: 'python'`, no `type`.
   - Explicit `fileGroups` (the global groups in `.moon/tasks.yml` assume `src/` at the project root):
     `sources: ['packages/*/src/**/*']`, `tests: ['packages/*/tests/**/*']`.
-  - Tasks (commands **bare** — see §D on the venv-on-PATH assumption):
-    - `lint`: `ruff check .`
-    - `format`: `ruff format --check .`
-    - `typecheck`: `basedpyright`
-    - `test`: `pytest`
+  - Tasks (all via `uv run` so they resolve from `py/.venv` regardless of Moon venv activation):
+    - `lint`: `uv run ruff check .`
+    - `format`: `uv run ruff format --check .`
+    - `typecheck`: `uv run basedpyright`
+    - `test`: `uv run pytest`
   - Each task sets explicit `inputs` (relevant file group + `pyproject.toml` + `uv.lock`) so the
     parent project's tasks don't default to the greedy `**/*` (the documented root-project caveat).
   - No `build` task (the root is a virtual uv workspace; `uv build` there is awkward).
@@ -67,7 +67,9 @@ project that runs the workspace-wide quality gates. No real package logic — bo
   tasks to *both* the `py` parent and every package (the gates belong only on `py`; `build` only on
   packages), so inheritance doesn't separate them cleanly. When packages start needing `build`,
   either add a per-package `build` task or introduce a carefully-scoped `python.yml` then.
-- `.moon/templates/python` stays in place, dormant, for scaffolding future package `moon.yml`s.
+- `.moon/templates/python` stays in place for scaffolding future package `moon.yml`s; its task
+  commands are updated to the `uv run <tool>` form too (and `uv run python -m <pkg>` for `start`), so
+  generated projects stay consistent with the `py` parent project (resolves review S5).
 
 ## B. Workspace root — `py/pyproject.toml` (virtual root)
 
@@ -142,7 +144,7 @@ name = "paigasus-proto"
 version = "0.0.0"
 requires-python = ">=3.12"
 dependencies = []
-# TODO(SMA-NNN): before first PyPI publish, paigasus-proto & paigasus-kernel need
+# TODO(SMA-378): before first PyPI publish, paigasus-proto & paigasus-kernel need
 # description/readme/license = "Apache-2.0"/authors/classifiers (ADR-0006). (PyPI-bound only.)
 
 [build-system]
@@ -162,11 +164,10 @@ re-export wrapper over the PyO3 binding post-MVP), `paigasus-ml` (ML lifecycle),
 
 ## D. Conventions, the "0 tests" shim, and the venv assumption
 
-- **Bare task commands + venv-on-PATH assumption.** Gate tasks invoke `ruff`/`basedpyright`/`pytest`
-  bare (matching `.moon/templates/python`), relying on Moon's uv toolchain putting `py/.venv` on
-  PATH for the `py` project (cwd = `py/`). **Implementation step 1 verifies this empirically.** If
-  Moon does not activate the venv, fall back to `uv run <tool>` for every gate task **and** update
-  `.moon/templates/python` to match (keep the two consistent).
+- **Gate commands run via `uv run`.** Every gate task invokes `uv run <tool>` (`uv run ruff`,
+  `uv run basedpyright`, `uv run pytest`), which resolves the tool from `py/.venv` deterministically
+  regardless of whether Moon's toolchain puts the venv on PATH. `.moon/templates/python` is updated
+  to the same `uv run` form so scaffolded projects stay consistent (resolves review S5).
 - **pytest exits 5 on "no tests collected"**, which Moon treats as failure — same shape as the
   `cargo nextest --no-tests=pass` gotcha in CLAUDE.md. A dependency-free root `py/conftest.py` maps
   it to success, but **selectively** (per review S4) to avoid masking a real test-discovery
@@ -174,7 +175,7 @@ re-export wrapper over the PyO3 binding post-MVP), `paigasus-ml` (ML lifecycle),
 
   ```python
   # SPDX-License-Identifier: Apache-2.0
-  # TODO(SMA-NNN): remove this shim once at least one package has tests; until then it keeps the
+  # TODO(SMA-379): remove this shim once at least one package has tests; until then it keeps the
   # empty workspace green. The on-disk guard means it does NOT mask a "discovery broke" regression
   # in a package that previously had tests.
   from pathlib import Path
@@ -233,8 +234,9 @@ hooks (SMA-371).
   `mypy-protobuf`). Other stubs stay dependency-free until their roles land. (Review S7.)
 - **First package `build`:** when a package must produce an artifact, add a per-package `build` task
   or a scoped `.moon/tasks/python.yml`; do not duplicate task definitions across packages. (N6.)
-- **First PyPI publish:** add `description`/`readme`/`license`/`classifiers` to the PyPI-bound
-  packages (the TODO in §C). (N4.)
+- **First PyPI publish (SMA-378):** add `description`/`readme`/`license`/`classifiers` to the
+  PyPI-bound packages (the TODO in §C). (N4.)
+- **First package with tests (SMA-379):** remove the conftest exit-5 shim (§D).
 - **First real `.pyi` stubs:** consider per-package `reportMissingTypeStubs = "error"` for
   `paigasus-kernel`/`paigasus-proto`. (N2.)
 
@@ -244,9 +246,9 @@ Disposition of the staff-eng design review (since removed; this section preserve
 
 - **Applied:** B1 (chose nested topology — corrects the review's `runFromWorkspaceRoot` premise:
   that flag is the repo root, not `py/`), S1 (anyio; AC corrected), S2 (typecheck tests), S3 (pin
-  dev tools), S4 (selective conftest shim + TODO), S5 (bare commands, consistent, with impl-step-1
-  verification), S6 (version-of-truth comment), S7 (proto-deps note), N8 (exclude `dist`/`build`),
-  N1/N2/N3 (README notes), N4/N6 (TODOs + future-delta notes).
+  dev tools), S4 (selective conftest shim + TODO → SMA-379), S5 (standardized on `uv run`; template
+  updated to match), S6 (version-of-truth comment), S7 (proto-deps note), N8 (exclude
+  `dist`/`build`), N1/N2/N3 (README notes), N4 (TODO → SMA-378), N6 (future-delta note).
 - **Noted, no config change:** N5 (no `fix`/`format-fix` tasks — matches `rs/`; revisit as a
   polyglot-wide convention), N7 (`reportAny` already on under `typeCheckingMode = "all"`).
 - **Withdrawn by reviewer:** B2 (`paigasus-kernel` is a pure re-export wrapper; `uv_build` correct).
