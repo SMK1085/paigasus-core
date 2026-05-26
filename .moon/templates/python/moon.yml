@@ -18,10 +18,10 @@ tasks:
   test:
     command: 'pytest'
     inputs: ['@group(sources)', '@group(tests)']
-{% if archetype == "service" %}
+{%- if archetype == "service" %}
   start:
     command: 'python -m {{ name | replace(from="-", to="_") }}'
     options:
       cache: false
       persistent: true
-{% endif %}
+{%- endif %}

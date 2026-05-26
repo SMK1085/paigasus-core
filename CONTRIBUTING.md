@@ -26,13 +26,6 @@ can, include reproduction steps and name the affected workspace (`contracts`,
 
 ## Local development
 
-Per-workspace setup lives in each workspace's `README.md`; the overall toolchain
-and entry points are summarized in the root [README](./README.md#quickstart).
-The unified `moon ci` flow becomes available once the workspace-setup issues
-land.
-
-## Local development setup
-
 Tooling is orchestrated by [Moon](https://moonrepo.dev), and Moon itself is
 version-pinned via [proto](https://moonrepo.dev/proto) in `.prototools`. One-time
 setup:
@@ -51,6 +44,8 @@ moon --version
 
 Moon downloads and pins the per-language toolchains (Rust, Node + pnpm, Python +
 uv) from `.moon/toolchain.yml` on first use — no manual language installs needed.
+Per-workspace specifics live in each workspace's `README.md`; the root
+[README](./README.md#quickstart) summarizes the overall layout.
 
 > Output is buffered for passing tasks (`buffer-only-failure`). To watch a long
 > task stream locally, append `--output-style stream`, e.g.
