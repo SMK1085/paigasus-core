@@ -1,0 +1,11 @@
+[project]
+name = "paigasus-proto"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = []
+# TODO(SMA-378): before first PyPI publish, paigasus-proto & paigasus-kernel need
+# description/readme/license = "Apache-2.0"/authors/classifiers (ADR-0006). (PyPI-bound only.)
+
+[build-system]
+requires = ["uv_build>=0.11.16,<0.12"]
+build-backend = "uv_build"
