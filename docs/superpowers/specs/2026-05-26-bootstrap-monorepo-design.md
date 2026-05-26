@@ -3,7 +3,7 @@
 **Date:** 2026-05-26
 **Linear:** [SMA-355](https://linear.app/smaschek/issue/SMA-355/bootstrap-polyglot-monorepo-structure)
 **Status:** Design approved, review feedback incorporated, pending implementation
-**Review:** [`2026-05-26-bootstrap-monorepo-design-review.md`](./2026-05-26-bootstrap-monorepo-design-review.md) — R1–R4 + S1–S4 addressed (R4's issue-filing item resolved in favor of GitHub→Linear; see §"Content intent")
+**Review:** R1–R4 + S1–S4 from design review addressed (R4's issue-filing item resolved in favor of GitHub→Linear; see §"Content intent"). Review doc removed after incorporation.
 
 ## Goal
 
