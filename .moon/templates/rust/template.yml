@@ -5,12 +5,12 @@ description: |
   rs/crates/services.
 
   CAVEATS:
-  - The `service` archetype emits dependsOn paigasus-proto/paigasus-kernel and a
+  - The `service` archetype emits dependsOn paigasus-proto-rs/paigasus-kernel-rs and a
     `contracts:generate` dep, which only resolve after SMA-357/360. Generate into
     a workspace where those projects exist, or hand-edit the references.
   - The `library` archetype emits NO dependsOn on purpose: most libs depend on
-    paigasus-kernel, but paigasus-kernel and paigasus-proto must NOT (self/cycle).
-    Add `dependsOn: ['paigasus-kernel']` by hand where appropriate.
+    paigasus-kernel-rs, but paigasus-kernel-rs and paigasus-proto-rs must NOT (self/cycle).
+    Add `dependsOn: ['paigasus-kernel-rs']` by hand where appropriate.
 variables:
   name:
     type: 'string'
