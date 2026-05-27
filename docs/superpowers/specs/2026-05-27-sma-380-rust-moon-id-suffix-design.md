@@ -1,6 +1,6 @@
 # SMA-380 — Suffix Rust Moon project ids with `-rs` for cross-stack consistency
 
-**Status:** Designed (brainstorming complete)
+**Status:** Designed (brainstorming complete; staff-eng review incorporated)
 **Date:** 2026-05-27
 **Linear:** [SMA-380](https://linear.app/smaschek/issue/SMA-380/suffix-rust-moon-project-ids-with-rs-for-cross-stack-consistency)
 **Branch:** `feature/sma-380-suffix-rust-moon-project-ids-with-rs-for-cross-stack`
@@ -19,6 +19,14 @@ Only **Moon project ids** change. Cargo crate names, the `rs/` Cargo workspace, 
 layout are untouched — `cargo build --workspace`, `clippy`, `fmt`, `nextest` all behave exactly as
 before.
 
+**What is being mirrored is the naming convention, not the topology.** After this PR both stacks
+are *named* consistently (`-py` / `-rs` on every leaf), but they remain structurally asymmetric by
+design: the py side has a task-bearing parent project (`py`) with alias-only leaves, whereas the rs
+side has task-bearing leaves and no parent — Rust's language-inherited `.moon/tasks/rust.yml` is the
+equivalent of py's parent project, just expressed through a different Moon primitive. Concretely,
+`moon run py:lint` works but there is no `rs:lint`; `moon ci :lint` works for both. Do not read
+"mirror the `-py` work" as "the two sides will look identical."
+
 ## Context discovered during brainstorming
 
 - **No parent `rs` Moon project exists.** The only Rust-side Moon projects are the three leaf crates
@@ -34,10 +42,9 @@ before.
   `moon project` reports `Toolchain: system` for the crates — Moon runs the cargo commands as plain
   `bash -c "cargo …"` and does **not** parse `Cargo.toml`. Therefore the `$projectAlias` token would
   resolve to nothing; the issue's `$projectAlias` suggestion is not viable without enabling deeper
-  Rust-toolchain-plugin integration (`addMsrvConstraint`, `syncToolchainConfig`, Cargo.toml-derived
-  aliases). That is a much larger, separate initiative and is explicitly **out of scope**; getting
-  the alias would also re-create `paigasus-kernel` as a live Moon target, partially undoing the
-  disambiguation this issue exists to create.
+  Rust-toolchain-plugin integration (a separate initiative — see Out of scope). Getting the alias
+  would also re-create `paigasus-kernel` as a live Moon target, partially undoing the disambiguation
+  this issue exists to create.
 
 ## Key decisions
 
@@ -46,11 +53,23 @@ before.
    Cargo rejects (`-p` expects the crate name). Rather than reintroduce the crate name via an alias
    or hardcode it per crate, drop `-p` and rely on the verified per-crate cwd. The shared task file
    becomes independent of project ids, so no future id change can break it again.
-2. **Leaf crates only; `contracts` stays bare.** `contracts` is its own stack with no cross-stack
-   name clash; it gets no suffix (revisit separately if a Rust/Py `contracts` project ever lands).
+2. **Leaf crates only; `contracts` stays bare as a documented carve-out.** SMA-358 suffixed *all*
+   py packages uniformly (including non-clashing ones like `paigasus-ml-py`), so the convention is
+   "every language-stack leaf carries its stack suffix" — `-rs` / `-py` / `-ts`. `contracts` is the
+   one leaf that is *not* a language stack: it is the language-neutral protobuf/buf IDL source. It is
+   therefore intentionally unsuffixed — a principled carve-out (a different category, not different
+   treatment of the same category), not an oversight. This is the single documented exception and it
+   matches the issue's own "likely leave bare" lean. Note there is no actual collision risk even
+   after SMA-360, because the proto *binding* packages it adds are named `paigasus-proto-{rs,py,ts}`
+   — a different name from `contracts`.
 3. **Update the scaffold template so generated crates are consistent.** Beyond the three existing
    crates, the `.moon/templates/rust/` scaffold must emit `-rs` ids and `-rs` `dependsOn`, and adopt
    the no-`-p` convention — otherwise `moon generate` would keep producing inconsistent/broken ids.
+4. **No manual `alias:` either — one canonical name.** Moon supports a one-line `alias:` per
+   `moon.yml` that would make `moon run paigasus-kernel:build` *also* resolve. We deliberately do not
+   add one: the `-rs` suffix is the single canonical Moon id, and having the bare `paigasus-kernel`
+   work as an alias would re-create the asymmetric, ambiguous naming this issue exists to remove.
+   (This is separate from the `$projectAlias` / toolchain-plugin path, also rejected — see Context.)
 
 ## A. Crate `moon.yml` — explicit ids
 
@@ -61,6 +80,13 @@ Add one line to each crate's `moon.yml` (no SPDX header — these config files c
 | `rs/crates/libs/paigasus-kernel/moon.yml` | `id: 'paigasus-kernel-rs'` |
 | `rs/crates/bindings/paigasus-py-bindings/moon.yml` | `id: 'paigasus-py-bindings-rs'` |
 | `rs/crates/services/paigasus-gateway/moon.yml` | `id: 'paigasus-gateway-rs'` |
+
+`paigasus-py-bindings-rs` doubles the language hint by design: the crate is a Rust artifact (`-rs`)
+that *produces* Python bindings (`py-bindings`). The two hints describe different things (the `-rs`
+is the stack the crate lives in; `py-bindings` is what it emits), so this is consistent with the
+convention. Renaming the underlying Cargo crate to remove the doubled hint is intentionally out of
+scope (churn for a cosmetic gain). The same will apply to future `paigasus-node-bindings-rs` /
+`paigasus-wasm-rs`.
 
 ## B. `.moon/tasks/rust.yml` — drop `-p $project`
 
@@ -114,9 +140,18 @@ tasks:
 
 Result: **libraries inherit all four tasks** from `.moon/tasks/rust.yml` (matching the hand-written
 crates — no redundant block); **services override only `build`/`test`** for their `--release` +
-`contracts:generate` deltas and inherit `lint`/`fmt`. `template.yml`'s prose caveats and the
-`dependsOn` hand-edit note update their `paigasus-kernel` / `paigasus-proto` references to the
-`-rs` forms.
+`contracts:generate` deltas and inherit `lint`/`fmt`.
+
+`template.yml`'s description prose updates too (both must land — easy to miss): the `service`
+caveat paragraph (`paigasus-proto` / `paigasus-kernel` → `paigasus-proto-rs` / `paigasus-kernel-rs`)
+**and** the `library` caveat's hand-edit note (`Add dependsOn: ['paigasus-kernel']` →
+`['paigasus-kernel-rs']`).
+
+**Cargo vs. Moon dependency names are independent layers.** The template's `dependsOn` uses Moon
+*project ids* (now `-rs`), but any consuming crate's Cargo `[dependencies]` / `[workspace.dependencies]`
+table continues to use the bare crate name (`paigasus-kernel`). Moon's `dependsOn` drives the
+affected-graph; Cargo's `[dependencies]` drives compilation — the rename touches only the former.
+(No inter-crate Cargo deps exist among the three stubs today, so this is forward-looking guidance.)
 
 ## D. Docs
 
@@ -137,6 +172,12 @@ nothing references a bare Moon target.
 - Rendering the template (`moon generate`) for a `library` and a `service` produces correct `-rs`
   ids and `-rs` `dependsOn`; the service emits `build`/`test` overrides and inherits `lint`/`fmt`.
 - `cargo build --workspace` (run directly in `rs/`) is unaffected — crate names did not change.
+- Confirm empirically that bare `cargo fmt --check` (no `-p`, no `--all`) run from a crate dir
+  targets **only that crate's** package, not the whole workspace — the pinned `rust 1.95.0` should
+  make this stable, but verify rather than assume.
+- Expect a **single cold-cache `moon ci` run** the first time after merge: renaming three project
+  ids changes the workspace-graph hash, invalidating `.moon/cache/states/workspaceGraph.json` (and
+  any CI layer keyed on the Moon graph hash) once before steady-state caching resumes. Not a failure.
 
 ## Out of scope
 
@@ -144,5 +185,8 @@ nothing references a bare Moon target.
   `addMsrvConstraint`, `syncToolchainConfig`, `$projectAlias`). Tracked conceptually as a possible
   future initiative, not here.
 - Adding a parent `rs` Moon project for structural symmetry with `py`.
+- Harmonizing the rs/py *topologies* (rs has task-bearing leaves; py has a task-bearing parent +
+  alias-only leaves). The asymmetry is functional today; revisit when ts lands (SMA-359) and/or when
+  py packages get promoted to per-package task-bearing projects.
 - Any change to Cargo crate names, the Cargo workspace, or directory layout.
-- A `contracts` suffix.
+- A `contracts` suffix (see Key decision §2 — intentional carve-out).
