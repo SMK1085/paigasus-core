@@ -1,3 +1,4 @@
 $schema: 'https://moonrepo.dev/schemas/project.json'
 
+id: 'paigasus-gateway-rs'
 language: 'rust'
