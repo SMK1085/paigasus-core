@@ -14,14 +14,14 @@ fileGroups:
 
 tasks:
   build:
-    command: 'cargo build -p $project'
+    command: 'cargo build'
     inputs: ['@group(sources)', 'Cargo.toml']
   test:
-    command: 'cargo nextest run -p $project --no-tests=pass'
+    command: 'cargo nextest run --no-tests=pass'
     inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml']
   lint:
-    command: 'cargo clippy -p $project --all-targets -- -D warnings'
+    command: 'cargo clippy --all-targets -- -D warnings'
     inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml']
   fmt:
-    command: 'cargo fmt -p $project --check'
+    command: 'cargo fmt --check'
     inputs: ['@group(sources)']
