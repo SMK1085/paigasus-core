@@ -5,6 +5,7 @@ projects:
   - 'rs/crates/libs/*'
   - 'rs/crates/bindings/*'
   - 'rs/crates/services/*'
+  - 'py'
   - 'py/packages/*'
   - 'ts/packages/*'
   - 'ts/apps/*'

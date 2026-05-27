@@ -1,0 +1,25 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+language: 'python'
+
+# The global fileGroups in .moon/tasks.yml assume src/ at the project root; the py workspace
+# keeps sources under packages/*/src, so redefine them here.
+fileGroups:
+  sources:
+    - 'packages/*/src/**/*'
+  tests:
+    - 'packages/*/tests/**/*'
+
+tasks:
+  lint:
+    command: 'uv run ruff check .'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', 'uv.lock']
+  format:
+    command: 'uv run ruff format --check .'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', 'uv.lock']
+  typecheck:
+    command: 'uv run basedpyright'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', 'uv.lock']
+  test:
+    command: 'uv run pytest'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', 'uv.lock', 'conftest.py']

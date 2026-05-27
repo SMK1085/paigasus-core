@@ -7,20 +7,20 @@ tasks:
     inputs: ['@group(sources)', 'pyproject.toml']
     outputs: ['dist']
   lint:
-    command: 'ruff check .'
-    inputs: ['@group(sources)', '@group(tests)']
+    command: 'uv run ruff check .'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
   format:
-    command: 'ruff format --check .'
-    inputs: ['@group(sources)', '@group(tests)']
+    command: 'uv run ruff format --check .'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
   typecheck:
-    command: 'basedpyright'
-    inputs: ['@group(sources)', '@group(tests)']
+    command: 'uv run basedpyright'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
   test:
-    command: 'pytest'
-    inputs: ['@group(sources)', '@group(tests)']
+    command: 'uv run pytest'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
 {%- if archetype == "service" %}
   start:
-    command: 'python -m {{ name | replace(from="-", to="_") }}'
+    command: 'uv run python -m {{ name | replace(from="-", to="_") }}'
     options:
       cache: false
       persistent: true
