@@ -43,7 +43,7 @@ scaffold/hand-written alignment requires the templates to use `layer:` too.
 
 ## Why this is otherwise cosmetic today
 
-Moon's `layer` can carry behavior via `constraints.enforceProjectTypeRelationships` (e.g. a `library`
+Moon's `layer` can carry behavior via `constraints.enforceLayerRelationships` (e.g. a `library`
 may not depend on an `application`). Verified this does **not** bite here:
 
 - `.moon/workspace.yml` has **no `constraints` block** (setting sits at its default).
@@ -142,7 +142,7 @@ After this, generated projects parse, and they match the hand-written `layer:` s
    rendered `moon.yml` contains `layer:` (not `type:`) and that `moon project` loads it without a
    parse error; then discard the throwaway. Also assert no `moon.yml` (including the three templates)
    still contains a `type:` line.
-3. `moon ci :build :test` stays green; no `enforceProjectTypeRelationships` violations (no edges).
+3. `moon ci :build :test` stays green; no `enforceLayerRelationships` violations (no edges).
 
 ## Acceptance criteria
 

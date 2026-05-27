@@ -324,7 +324,7 @@ Expected: no matches (grep exit 1). Only `layer:` should appear.
 ```bash
 moon ci :build :test --output-style stream
 ```
-Expected: completes green; no `enforceProjectTypeRelationships` errors (no `dependsOn` edges exist).
+Expected: completes green; no `enforceLayerRelationships` errors (no `dependsOn` edges exist).
 
 > If `moon ci :build :test` reports "no affected targets" in a non-TTY shell, that is acceptable for a
 > config-only change. The authoritative checks are the per-task `moon project … | grep Layer`
