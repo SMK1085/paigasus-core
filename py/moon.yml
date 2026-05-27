@@ -1,5 +1,6 @@
 $schema: 'https://moonrepo.dev/schemas/project.json'
 
+layer: 'configuration'
 language: 'python'
 
 # The global fileGroups in .moon/tasks.yml assume src/ at the project root; the py workspace
