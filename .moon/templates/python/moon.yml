@@ -1,5 +1,5 @@
 $schema: 'https://moonrepo.dev/schemas/project.json'
-type: '{% if archetype == "service" %}application{% else %}library{% endif %}'
+layer: '{% if archetype == "service" %}application{% else %}library{% endif %}'
 language: 'python'
 tasks:
   build:
