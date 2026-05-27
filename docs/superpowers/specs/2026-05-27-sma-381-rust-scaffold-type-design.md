@@ -1,6 +1,6 @@
-# SMA-381 — Align Moon project `type:` across rust + py with explicit layers
+# SMA-381 — Align Moon project `layer:` across rust + py (and fix the scaffold templates)
 
-**Status:** Designed (brainstorming complete; scope covers rust + py)
+**Status:** Designed (brainstorming complete; corrected during implementation — field is `layer:`, not `type:`; templates brought into scope)
 **Date:** 2026-05-27
 **Linear:** [SMA-381](https://linear.app/smaschek/issue/SMA-381/align-rust-scaffold-type-with-hand-written-crates-omit-for-library)
 **Branch:** `feature/sma-381-align-rust-scaffold-type-with-hand-written-crates-omit-for`
@@ -8,146 +8,144 @@
 
 ## Goal
 
-Give every hand-written Moon project an **explicit `type:`** (Moon 2.x: the *layer*), matching the
-style the rust **and** python scaffold templates already emit. Today the hand-written projects
-declare only `id` + `language` (leaves) or `language` + tasks (the py parent) and rely on Moon's
-implicit default.
-
-This is a **cosmetic / consistency** change — no behavior changes (see "Why this is cosmetic
-today"). It closes the gap between scaffolded and hand-written projects, in both stacks, so the
-convention "every project declares its layer explicitly" holds uniformly.
+Give every hand-written Moon project an **explicit `layer:`**, and fix both scaffold templates to
+emit a valid `layer:` (they currently emit an invalid `type:` field). After this, scaffolded and
+hand-written projects share one explicit, *parseable* style across both the rust and python stacks.
 
 ## Corrected premise (verified against Moon 2.2.5)
 
-The originating Linear issue and the first draft of this spec both claimed *"Moon defaults an absent
-`type` to `library`, so there is no functional bug."* **The default is wrong.** Verified empirically
-with `moon project <id>` on this repo:
+The originating Linear issue, and the first draft of this spec, were written around a `type:` field
+and the claim that *"Moon defaults an absent `type` to `library`."* **Both are wrong for Moon 2.2.5**,
+verified empirically on this repo:
 
-- Every type-less project reports **`Layer: unknown`** (and `Stack: unknown`) — **not** `library`.
-- Moon's `type:` accepts **seven** values (`LayerType`), not two:
-  `application, automation, configuration, library, scaffolding, tool, unknown`. Default: `unknown`.
-- Moon 2.x displays the field as **"Layer"**; `type:` in `moon.yml` is the legacy alias for the
-  modern `layer:` key (both deserialize to `LayerType`). We keep `type:` to match the existing files
-  and both templates; switching the key name to `layer:` is out of scope.
+- **The field is `layer:`, not `type:`.** Moon 2.2.5's project parser hard-errors on `type:`
+  (`unknown field 'type'`). The accepted fields are `$schema, dependsOn, deps, docker, env,
+  fileGroups, id, language, layer, owners, project, stack, tags, tasks, toolchains, workspace`.
+  `type` was renamed to `layer` in Moon 2.x; the published JSON schema still lists `type` as an
+  alias, but the 2.2.5 binary rejects it.
+- **The default is `unknown`, not `library`.** A project with no `layer:` reports `Layer: unknown`
+  (and `Stack: unknown`) under `moon project <id>`.
+- **`layer:` accepts seven values** (`LayerType`): `application, automation, configuration, library,
+  scaffolding, tool, unknown`.
 
-So the real before/after is `unknown → {library | application | configuration}`, not
-`library → …`. The "no functional bug" conclusion still holds (layer is categorization metadata),
-but the characterization is now accurate.
+So the real before/after is `unknown → {library | application | configuration}`.
 
-## Why this is cosmetic today
+### This makes the scaffold templates a real bug, not a cosmetic mismatch
 
-Moon's `type`/layer can carry behavior via `constraints.enforceProjectTypeRelationships` (e.g. a
-`library` may not depend on an `application`). Verified that this does **not** bite here:
+Both `.moon/templates/rust/moon.yml` and `.moon/templates/python/moon.yml` emit
+`type: '{% if archetype == "service" %}application{% else %}library{% endif %}'`. Because `type:` is
+rejected, **any crate or package generated from these templates produces a `moon.yml` that fails to
+parse.** It hasn't bitten anyone only because no `moon generate` has run since the field rename.
+Fixing the templates (`type:` → `layer:`) is therefore part of this issue — both to remove the bug
+and because true scaffold/hand-written alignment requires the templates to use `layer:` too.
+
+## Why this is otherwise cosmetic today
+
+Moon's `layer` can carry behavior via `constraints.enforceProjectTypeRelationships` (e.g. a `library`
+may not depend on an `application`). Verified this does **not** bite here:
 
 - `.moon/workspace.yml` has **no `constraints` block** (setting sits at its default).
 - **Every project has zero `dependsOn` edges** (`moon project <id>` → `Depends on: —` for all 8).
   With no edges, the relationship rules never fire.
 
-So the layer choice is pure categorization right now. It begins to matter only once dependency edges
-exist (SMA-357/360 wiring) — which is exactly why getting the layers right now is worthwhile.
+So the layer values are pure categorization right now; they begin to matter once dependency edges
+exist (SMA-357/360 wiring) — which is why setting them correctly now is worthwhile.
 
 ## Decision
 
-Chosen direction: **option (b)** from the issue — add an explicit `type:` to each hand-written
-project (rather than option (a), stripping `type:` from the template's library archetype). We then
-**expand the scope to the python stack too**, because it has the identical gap and the spec's
-principle ("explicit over implicit defaults") applies uniformly.
+Add an explicit `layer:` to each hand-written project (option (b) from the issue — explicitness over
+stripping the field), expanded to **both stacks** and to **both templates**:
 
-### Why explicitness (option b), strengthened
-
-- **Forward compatibility.** `unknown` is the current default, not a guarantee. Explicit declarations
-  are unaffected if a future Moon changes the default or the layer set.
-- **Query / CI ergonomics.** `moon query projects --type=library` is only meaningful if every project
-  declares its layer; implicit `unknown` hides projects from (and pollutes) such filters.
-- **Self-documenting.** A `moon.yml` that omits `type:` forces the reader to know Moon's defaults;
-  explicit is self-describing.
-- **Trivial cost.** A handful of one-line additions vs. one modified template line — rounding error,
-  and it keeps scaffolded and hand-written projects consistent (the templates already declare `type:`).
-
-### Correction to the issue's framing
-
-The issue's option (b) literally says "add `type: 'library'` to the three hand-written crates." That
-conflates them: `paigasus-gateway` is under `rs/crates/services/` and is a service binary, so its
-correct layer is `application`, **not** `library`. Choosing option (b) is what surfaces and corrects
-that crate's silent `unknown` layer.
+- **Explicitness rationale:** forward-compatibility (don't rely on the `unknown` default), query/CI
+  ergonomics (`moon query` layer filters only work if every project declares a layer), and
+  self-documenting config. Cost is a handful of one-line edits.
+- **Issue framing correction:** the issue's option (b) said "add `type: 'library'` to the three
+  hand-written crates," but `paigasus-gateway` (under `rs/crates/services/`) is a service binary, so
+  its correct layer is `application`. Choosing option (b) is what surfaces and corrects that crate's
+  silent `unknown` layer.
 
 ## Changes
 
-Field order follows the templates: `id` → `type` → `language`. The added line goes between `id` and
-`language` (for the py parent, which has no `id`, `type:` goes immediately before `language:`).
+Field order follows the templates: `id` → `layer` → `language`. The added line goes between `id` and
+`language` (the py parent has no `id`, so `layer:` goes immediately before `language:`).
 
 ### Rust (`rs/crates/*/moon.yml`)
 
-| File | `type:` | Rationale |
-|------|---------|-----------|
+| File | `layer:` | Rationale |
+|------|----------|-----------|
 | `rs/crates/libs/paigasus-kernel/moon.yml` | `library` | pure library crate |
-| `rs/crates/bindings/paigasus-py-bindings/moon.yml` | `library` | FFI/cdylib — see caveat below |
+| `rs/crates/bindings/paigasus-py-bindings/moon.yml` | `library` (+ FFI caveat comment) | FFI/cdylib — see below |
 | `rs/crates/services/paigasus-gateway/moon.yml` | `application` | service binary |
 
 `paigasus-py-bindings` is `crate-type = ["cdylib"]` (FFI artifact loaded by Python; not an rlib, not
-a runnable app). Moon has no FFI-specific layer among its seven, so `library` is the least-wrong fit
-(it builds like a library; nothing runs it). To keep this from misleading `--type=library` filters
-later, add a comment next to its `type:` line:
+a runnable app). Moon has no FFI-specific layer among its seven, so `library` is the least-wrong fit.
+A comment next to its `layer:` line records this so it isn't mistaken for a publishable rlib:
 
 ```yaml
 # Moon-side layer label for this FFI crate (no native `binding` layer exists).
 # Built like a library but NOT published as an rlib — ships as a Python wheel
-# via maturin. Exclude from regular `--type=library` publish matrices.
-type: 'library'
+# via maturin. Exclude from any layer=library publish matrix.
+layer: 'library'
 ```
 
 ### Python (`py/**/moon.yml`)
 
-| File | `type:` | Rationale |
-|------|---------|-----------|
-| `py/moon.yml` (parent) | `configuration` | builds nothing — workspace task/config aggregate; stays out of `--type=library` |
+| File | `layer:` | Rationale |
+|------|----------|-----------|
+| `py/moon.yml` (parent) | `configuration` | builds nothing — workspace task/config aggregate; stays out of layer=library filters |
 | `py/packages/paigasus-kernel/moon.yml` | `library` | uv-built package |
 | `py/packages/paigasus-ml/moon.yml` | `library` | uv-built package |
 | `py/packages/paigasus-proto/moon.yml` | `library` | generated-proto package |
 | `py/packages/paigasus-workflows/moon.yml` | `library` | uv-built package |
 
-The py **parent** has no `id`, no sources, and no buildable artifact — it exists to host the
-workspace-wide uv tasks (`lint`/`format`/`typecheck`/`test`) and `fileGroups`. `configuration` is the
-honest layer for it and keeps it out of library-publish filters. The four leaves are ordinary
-publishable packages → `library`.
+The py **parent** has no `id`, no sources, and no buildable artifact — it hosts the workspace-wide uv
+tasks and `fileGroups`. `configuration` is the honest layer and keeps it out of library-publish
+filters. The four leaves are ordinary packages → `library`.
 
-### No template changes
+### Templates (`.moon/templates/*/moon.yml`)
 
-Both `.moon/templates/rust/moon.yml` and `.moon/templates/python/moon.yml` already emit `type:`
-explicitly for the `library`/`service` archetypes. That explicit style **is** what we are aligning
-the hand-written projects to, so both templates are left untouched. (Neither template has a
-`configuration`/parent archetype; the py parent is a hand-written one-off — not in scope to add one.)
+Change the emitted field from the invalid `type:` to `layer:` in **both** templates; the archetype
+conditional (`application` for `service`, else `library`) is unchanged:
+
+| File | Change |
+|------|--------|
+| `.moon/templates/rust/moon.yml` | `type:` → `layer:` (line emitting the archetype conditional) |
+| `.moon/templates/python/moon.yml` | `type:` → `layer:` (same) |
+
+After this, generated projects parse, and they match the hand-written `layer:` style.
+
+## Commit grouping
+
+- `chore(rs)` — the three rust crate files.
+- `chore(py)` — the py parent + four leaf files.
+- `fix(repo)` — both scaffold templates (a genuine bug fix: generate currently yields unparseable output).
 
 ## Out of scope / follow-up
 
-- **`moon.yml` field-order convention in CONTRIBUTING.** This spec sets `id` → `type` →
-  `language`; that convention should be documented in CONTRIBUTING.md so it carries to `contracts/`
-  (SMA-360) and `ts/` (SMA-359). Cross-cutting; file separately.
-- **SPDX carve-out for config files in CONTRIBUTING.** `moon.yml` is config, not source, and
-  carries no SPDX header (the existing files don't, and we don't add one). The CONTRIBUTING SPDX rule
-  should explicitly exempt config files (yaml/toml). Cross-cutting; file separately.
-- Switching the `moon.yml` key from the legacy `type:` to the modern `layer:` — separate cleanup.
+- **`moon.yml` field-order convention in CONTRIBUTING** (`$schema` → `id` → `layer` → `language`), so
+  it carries to `contracts/` (SMA-360) and `ts/` (SMA-359). Cross-cutting; file separately.
+- **SPDX carve-out for config files in CONTRIBUTING.** `moon.yml` is config, not source, and carries
+  no SPDX header. The CONTRIBUTING SPDX rule should exempt config files (yaml/toml). File separately.
 - Adding a `configuration`/parent archetype to the python template — YAGNI; the parent is a one-off.
-- Any `dependsOn`/tasks changes on the gateway crate — setting `type:` is metadata only.
+- Any `dependsOn`/tasks changes on the gateway crate — setting `layer:` is metadata only.
 
-## Verification (no behavior change expected)
+## Verification
 
-1. **Before/after layer assertion (the strongest finding).** Before this PR,
-   `moon project paigasus-gateway-rs` reports `Layer: unknown`; after, `Layer: application`. Confirm
-   the same `unknown → typed` transition empirically for each touched project:
-   `paigasus-kernel-rs`/`-py-bindings-rs` → `library`, `paigasus-gateway-rs` → `application`, the four
-   `*-py` leaves → `library`, and `py` → `configuration`.
-2. `moon generate rust … --archetype=library`/`--archetype=service` and the python equivalents still
-   render correctly (templates unchanged; sanity check that the scaffold stays the reference).
-3. `moon ci :build :test` stays green; no `enforceProjectTypeRelationships` constraint violations
-   (expected, since there are no `dependsOn` edges).
+1. **Before/after layer assertion.** Before: `moon project <id>` reports `Layer: unknown` for all
+   eight hand-written projects. After: `paigasus-kernel-rs`/`-py-bindings-rs` → `library`,
+   `paigasus-gateway-rs` → `application`, the four `*-py` leaves → `library`, `py` → `configuration`.
+   Confirm empirically.
+2. **Templates parse and emit `layer:`.** Generate a throwaway crate and package from each template,
+   confirm the rendered `moon.yml` contains `layer:` (not `type:`) and that `moon project` loads the
+   generated project without a parse error; then discard the throwaway.
+3. `moon ci :build :test` stays green; no `enforceProjectTypeRelationships` violations (no edges).
 
 ## Acceptance criteria
 
-- All eight hand-written `moon.yml` files declare an explicit `type:` with the layers in the tables
-  above (`id` → `type` → `language` ordering; parent has `type:` before `language:`).
+- All eight hand-written `moon.yml` files declare an explicit `layer:` with the values above
+  (`id` → `layer` → `language` ordering; parent has `layer:` before `language:`).
 - `paigasus-gateway-rs` resolves as `Layer: application`; `py` resolves as `Layer: configuration`.
 - `paigasus-py-bindings/moon.yml` carries the FFI caveat comment.
-- Both scaffold templates are unchanged.
+- Both scaffold templates emit `layer:` (not `type:`), and a project generated from each parses.
 - `moon ci :build :test` is green; `moon project <id>` resolves for all eight projects with the
   expected layer.
