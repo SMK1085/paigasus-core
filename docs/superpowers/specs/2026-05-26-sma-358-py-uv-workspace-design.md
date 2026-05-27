@@ -141,7 +141,7 @@ hold in practice.)
 
 `paigasus-proto`, `paigasus-kernel`, `paigasus-ml`, `paigasus-workflows`. Each:
 
-```
+```text
 py/packages/<name>/
 ├── moon.yml                 # id 'paigasus-<name>-py', language python (identity; no tasks yet)
 ├── pyproject.toml

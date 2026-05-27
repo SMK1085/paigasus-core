@@ -121,7 +121,7 @@ done
 
 Run: `find py/packages -type f | sort`
 Expected (16 files):
-```
+```text
 py/packages/paigasus-kernel/moon.yml
 py/packages/paigasus-kernel/pyproject.toml
 py/packages/paigasus-kernel/src/paigasus_kernel/__init__.py
@@ -144,7 +144,7 @@ py/packages/paigasus-workflows/src/paigasus_workflows/py.typed
 
 Run: `grep -L 'TODO(SMA-378)' py/packages/*/pyproject.toml`
 Expected (only the two non-PyPI packages):
-```
+```text
 py/packages/paigasus-ml/pyproject.toml
 py/packages/paigasus-workflows/pyproject.toml
 ```
@@ -584,4 +584,3 @@ result reflects these decisions:
 
 Follow-up issues filed from this work: **SMA-378** (PyPI publish metadata for proto/kernel),
 **SMA-379** (remove the pytest exit-5 shim once tests exist), **SMA-380** (suffix Rust Moon ids `-rs`).
-```
