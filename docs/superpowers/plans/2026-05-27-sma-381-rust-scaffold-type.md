@@ -44,6 +44,7 @@ templates have their emitted field corrected from `type:` to `layer:`.
 | `py/packages/paigasus-workflows/moon.yml` | `library` | `unknown` → `library` |
 | `.moon/templates/rust/moon.yml` | emit `layer:` not `type:` | (latent generate bug) |
 | `.moon/templates/python/moon.yml` | emit `layer:` not `type:` | (latent generate bug) |
+| `.moon/templates/typescript/moon.yml` | emit `layer:` not `type:` | (latent generate bug; ahead of SMA-359) |
 
 ---
 
@@ -226,9 +227,11 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 **Files:**
 - Modify: `.moon/templates/rust/moon.yml`
 - Modify: `.moon/templates/python/moon.yml`
+- Modify: `.moon/templates/typescript/moon.yml`
 
-Both templates currently emit an invalid `type:` field; any project generated from them fails to
-parse. Rename the emitted field to `layer:`. The archetype conditional is unchanged.
+All three templates currently emit an invalid `type:` field; any project generated from them fails
+to parse. Rename the emitted field to `layer:`. The archetype conditional is unchanged. (The
+typescript template exists ahead of the `ts/` workspace, SMA-359, but carries the same bug.)
 
 - [ ] **Step 1: rust template — change the emitted field**
 
@@ -252,31 +255,46 @@ to:
 layer: '{% if archetype == "service" %}application{% else %}library{% endif %}'
 ```
 
-- [ ] **Step 3: Verify a generated project parses (the "test passes")**
+- [ ] **Step 3: typescript template — change the emitted field**
 
-Generate a throwaway crate from the rust template, confirm it emits `layer:` and loads without a
-parse error, then discard it:
+In `.moon/templates/typescript/moon.yml`, change the line:
+```yaml
+type: '{% if archetype == "app" %}application{% else %}library{% endif %}'
+```
+to:
+```yaml
+layer: '{% if archetype == "app" %}application{% else %}library{% endif %}'
+```
+
+- [ ] **Step 4: Verify a generated project parses (the "test passes")**
+
+Generate a throwaway crate from the rust template (variables passed after `--`), confirm it emits
+`layer:` and loads without a parse error, then discard it:
 ```bash
-moon generate rust ./rs/crates/libs/tmp-layer-check --defaults --template-vars 'name=tmp-layer-check'
-grep -n 'layer:' rs/crates/libs/tmp-layer-check/moon.yml   # expect: layer: 'library'
-moon sync projects >/dev/null 2>&1; moon project tmp-layer-check-rs | grep -i Layer  # expect: Layer: library
+moon generate rust --to rs/crates/libs/tmp-layer-check --defaults --force -- --name tmp-layer-check
+grep -n 'layer:' rs/crates/libs/tmp-layer-check/moon.yml      # expect: layer: 'library'
+moon project tmp-layer-check-rs | grep -iE 'Layer|Error'       # expect: Layer: library (no error)
 rm -rf rs/crates/libs/tmp-layer-check
 ```
 Expected: the `grep` shows `layer: 'library'`; `moon project` reports `Layer: library` with **no**
-`config::parse::failed` error. (If `moon generate` flag names differ in your Moon build, generate
-interactively instead; the assertion is that the rendered file contains `layer:` and parses.)
+`config::parse::failed` error. (One generated project exercises the shared field rename; the python
+and typescript templates carry the identical one-line change.)
 
-- [ ] **Step 4: Confirm the throwaway is gone**
+- [ ] **Step 5: Confirm the throwaway is gone**
 
 ```bash
-git status --short   # expect only the two template files modified; no tmp-layer-check/ left behind
+git status --short   # expect only the three template files modified; no tmp-layer-check/ left behind
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add .moon/templates/rust/moon.yml .moon/templates/python/moon.yml
+git add .moon/templates/rust/moon.yml .moon/templates/python/moon.yml .moon/templates/typescript/moon.yml
 git commit -m "fix(repo): emit layer: not invalid type: in Moon scaffold templates (SMA-381)
+
+The rust, python, and typescript scaffold templates all emitted a 'type:'
+field that Moon 2.2.5 rejects ('unknown field type'), so any generated
+project failed to parse. Rename the emitted field to 'layer:'.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```

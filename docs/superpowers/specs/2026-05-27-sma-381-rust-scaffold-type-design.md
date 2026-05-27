@@ -8,9 +8,10 @@
 
 ## Goal
 
-Give every hand-written Moon project an **explicit `layer:`**, and fix both scaffold templates to
-emit a valid `layer:` (they currently emit an invalid `type:` field). After this, scaffolded and
-hand-written projects share one explicit, *parseable* style across both the rust and python stacks.
+Give every hand-written Moon project an **explicit `layer:`**, and fix all three scaffold templates
+(rust, python, typescript) to emit a valid `layer:` (they currently emit an invalid `type:` field).
+After this, scaffolded and hand-written projects share one explicit, *parseable* style across the
+rust, python, and typescript stacks.
 
 ## Corrected premise (verified against Moon 2.2.5)
 
@@ -32,12 +33,13 @@ So the real before/after is `unknown → {library | application | configuration}
 
 ### This makes the scaffold templates a real bug, not a cosmetic mismatch
 
-Both `.moon/templates/rust/moon.yml` and `.moon/templates/python/moon.yml` emit
-`type: '{% if archetype == "service" %}application{% else %}library{% endif %}'`. Because `type:` is
-rejected, **any crate or package generated from these templates produces a `moon.yml` that fails to
-parse.** It hasn't bitten anyone only because no `moon generate` has run since the field rename.
-Fixing the templates (`type:` → `layer:`) is therefore part of this issue — both to remove the bug
-and because true scaffold/hand-written alignment requires the templates to use `layer:` too.
+All three scaffold templates (`.moon/templates/{rust,python,typescript}/moon.yml`) emit a
+`type: '…'` archetype conditional. Because `type:` is rejected, **any project generated from these
+templates produces a `moon.yml` that fails to parse.** It hasn't bitten anyone only because no
+`moon generate` has run since the field rename. (The typescript template exists ahead of the `ts/`
+workspace setup in SMA-359, but carries the same bug, so it's fixed here too.) Fixing the templates
+(`type:` → `layer:`) is therefore part of this issue — both to remove the bug and because true
+scaffold/hand-written alignment requires the templates to use `layer:` too.
 
 ## Why this is otherwise cosmetic today
 
@@ -104,13 +106,14 @@ filters. The four leaves are ordinary packages → `library`.
 
 ### Templates (`.moon/templates/*/moon.yml`)
 
-Change the emitted field from the invalid `type:` to `layer:` in **both** templates; the archetype
-conditional (`application` for `service`, else `library`) is unchanged:
+Change the emitted field from the invalid `type:` to `layer:` in **all three** templates; the
+archetype conditional (`application` for the app/service archetype, else `library`) is unchanged:
 
 | File | Change |
 |------|--------|
 | `.moon/templates/rust/moon.yml` | `type:` → `layer:` (line emitting the archetype conditional) |
 | `.moon/templates/python/moon.yml` | `type:` → `layer:` (same) |
+| `.moon/templates/typescript/moon.yml` | `type:` → `layer:` (same; archetype values `app`/else) |
 
 After this, generated projects parse, and they match the hand-written `layer:` style.
 
@@ -118,7 +121,7 @@ After this, generated projects parse, and they match the hand-written `layer:` s
 
 - `chore(rs)` — the three rust crate files.
 - `chore(py)` — the py parent + four leaf files.
-- `fix(repo)` — both scaffold templates (a genuine bug fix: generate currently yields unparseable output).
+- `fix(repo)` — all three scaffold templates (a genuine bug fix: generate currently yields unparseable output).
 
 ## Out of scope / follow-up
 
@@ -135,9 +138,10 @@ After this, generated projects parse, and they match the hand-written `layer:` s
    eight hand-written projects. After: `paigasus-kernel-rs`/`-py-bindings-rs` → `library`,
    `paigasus-gateway-rs` → `application`, the four `*-py` leaves → `library`, `py` → `configuration`.
    Confirm empirically.
-2. **Templates parse and emit `layer:`.** Generate a throwaway crate and package from each template,
-   confirm the rendered `moon.yml` contains `layer:` (not `type:`) and that `moon project` loads the
-   generated project without a parse error; then discard the throwaway.
+2. **Templates parse and emit `layer:`.** Generate a throwaway project from a template, confirm the
+   rendered `moon.yml` contains `layer:` (not `type:`) and that `moon project` loads it without a
+   parse error; then discard the throwaway. Also assert no `moon.yml` (including the three templates)
+   still contains a `type:` line.
 3. `moon ci :build :test` stays green; no `enforceProjectTypeRelationships` violations (no edges).
 
 ## Acceptance criteria
@@ -146,6 +150,6 @@ After this, generated projects parse, and they match the hand-written `layer:` s
   (`id` → `layer` → `language` ordering; parent has `layer:` before `language:`).
 - `paigasus-gateway-rs` resolves as `Layer: application`; `py` resolves as `Layer: configuration`.
 - `paigasus-py-bindings/moon.yml` carries the FFI caveat comment.
-- Both scaffold templates emit `layer:` (not `type:`), and a project generated from each parses.
+- All three scaffold templates emit `layer:` (not `type:`), and a generated project parses.
 - `moon ci :build :test` is green; `moon project <id>` resolves for all eight projects with the
   expected layer.
