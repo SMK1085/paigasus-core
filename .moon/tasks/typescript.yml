@@ -1,0 +1,65 @@
+$schema: 'https://moonrepo.dev/schemas/tasks.json'
+
+# Moon does NOT scope task files by filename — scope explicitly so these TypeScript
+# commands only attach to typescript projects (not rust, python, or contracts).
+inheritedBy:
+  languages: ['typescript']
+
+fileGroups:
+  sources:
+    - 'src/**/*'
+  tests:
+    - 'tests/**/*'
+    - '**/*.test.ts'
+    - '**/*.test.tsx'
+    - '**/*.spec.ts'
+    - '**/*.spec.tsx'
+
+tasks:
+  build:
+    # No `outputs:` — tsc --noEmit produces no files; Moon's per-project output check
+    # would fail (same shape as SMA-384 Correction 1 for `uv build`). Cache invalidation
+    # runs off `inputs:`. Apps that produce artifacts (Next.js) override this task.
+    command: 'pnpm exec tsc -p tsconfig.json --noEmit'
+    inputs:
+      - '@group(sources)'
+      - 'tsconfig.json'
+      - 'package.json'
+      - '/ts/tsconfig.base.json'
+      - '/ts/pnpm-lock.yaml'
+  lint:
+    command: 'pnpm exec eslint .'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'eslint.config.js'
+      - 'package.json'
+      - '/ts/eslint.config.js'
+      - '/ts/pnpm-lock.yaml'
+  fmt:
+    command: 'pnpm exec prettier --check .'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - '.prettierrc.js'
+      - '.prettierignore'
+      - 'package.json'
+      - '/ts/.prettierrc.js'
+      - '/ts/.prettierignore'
+      - '/ts/pnpm-lock.yaml'
+  typecheck:
+    command: 'pnpm exec tsc -p tsconfig.json --noEmit'
+    inputs:
+      - '@group(sources)'
+      - 'tsconfig.json'
+      - 'package.json'
+      - '/ts/tsconfig.base.json'
+      - '/ts/pnpm-lock.yaml'
+  test:
+    command: 'pnpm exec vitest run --passWithNoTests'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'package.json'
+      - 'vitest.config.ts'
+      - '/ts/pnpm-lock.yaml'
