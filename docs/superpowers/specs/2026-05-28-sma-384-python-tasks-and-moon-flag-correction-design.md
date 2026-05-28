@@ -1,7 +1,6 @@
 # SMA-384 — Wire `.moon/tasks/python.yml`, slim the python scaffold template, clean up `py/moon.yml`, and correct the bogus `--output-style stream` claim
 
-**Status:** Designed (brainstorming complete; review pass applied 2026-05-28 — see
-[review doc](../reviews/2026-05-28-sma-384-python-tasks-and-moon-flag-correction-design-review.md))
+**Status:** Designed (brainstorming complete; staff-eng review pass applied 2026-05-28)
 **Date:** 2026-05-28
 **Linear:** [SMA-384](https://linear.app/smaschek/issue/SMA-384/wire-python-language-tasks-moontaskspythonyml-correct-moon-output)
 **Branch:** `feature/sma-384-wire-python-language-tasks-moontaskspythonyml-correct-moon`
@@ -163,8 +162,8 @@ tasks:
 
 Notes:
 
-- **Task name `fmt`, not `format`** — harmonizes with rust.yml so `moon ci :fmt` covers both stacks
-  (review S2). The command stays `uv run ruff format --check .` — only the Moon task name changes.
+- **Task name `fmt`, not `format`** — harmonizes with rust.yml so `moon ci :fmt` covers both stacks.
+  The command stays `uv run ruff format --check .` — only the Moon task name changes.
   ruff itself is still called via its `format` subcommand; this is purely Moon-side naming.
 - **`/py/uv.lock`** uses Moon's workspace-anchor syntax — every python package shares the single
   `py/uv.lock` lockfile (uv workspace), not per-package locks. Same input shape as the current
