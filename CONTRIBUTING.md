@@ -71,8 +71,46 @@ this consistent — changelog automation depends on it.
   comment syntax:
   - Rust / TypeScript / Protobuf: `// SPDX-License-Identifier: Apache-2.0`
   - Python: `# SPDX-License-Identifier: Apache-2.0`
+- Hand-written config carries no SPDX header. Examples in this repo:
+  `moon.yml`, `*.toml`, `*.yaml` / `*.yml`, `*.json`, and dotfiles like
+  `.gitignore` / `.editorconfig`. If you're unsure for a new file type, ask in
+  the PR — it's almost always config.
+- Generated files (lockfiles such as `Cargo.lock` / `uv.lock` /
+  `pnpm-lock.yaml`, plus codegen output) carry whatever header the generator
+  emits. Don't hand-edit a generated file's header.
+- Markdown docs (`README.md`, `CONTRIBUTING.md`, ADRs, design specs) and the
+  `LICENSE` file itself carry no SPDX header.
 - Per-language formatting and linting are enforced by each workspace's Moon
   tasks; run the workspace's `lint`/`fmt` tasks before pushing once it's set up.
+
+### Moon project files
+
+Hand-written `moon.yml` files use a fixed top-level field order so diffs
+across workspaces stay readable and so generated/scaffolded files line up
+with hand-written ones:
+
+1. `$schema`
+2. `id` (when present)
+3. `layer`
+4. `language`
+5. `dependsOn`
+6. `fileGroups`
+7. `tasks`
+8. `options`
+9. Any remaining fields (alphabetical)
+
+Use `layer:`, not the pre-2.x `type:` — Moon 2.2.5's parser rejects `type:`.
+The values in active use are `library` (importable code, e.g. the rust
+crates in `rs/crates/libs/` and the py packages in `py/packages/`),
+`application` (runnable binary, e.g. `paigasus-gateway-rs`), and
+`configuration` (workspace-root project that aggregates child projects,
+e.g. `py/moon.yml`). Moon's full set of seven values is documented in its
+[project config docs](https://moonrepo.dev/docs/config/project) — pick
+`library` if unsure.
+
+The three scaffold templates under `.moon/templates/{rust,python,typescript}/`
+emit this same order, so `moon generate` output is consistent with
+hand-written projects (SMA-381).
 
 ## Contributor License Agreement
 
