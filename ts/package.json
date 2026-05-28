@@ -21,6 +21,7 @@
     "eslint-plugin-jsx-a11y": "catalog:",
     "typescript-eslint": "catalog:",
     "prettier": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "@next/eslint-plugin-next": "catalog:"
   }
 }

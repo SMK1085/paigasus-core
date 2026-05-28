@@ -4,6 +4,7 @@ import tseslint from 'typescript-eslint';
 import reactPlugin from '@eslint-react/eslint-plugin';
 import reactHooks from 'eslint-plugin-react-hooks';
 import jsxA11y from 'eslint-plugin-jsx-a11y';
+import nextPlugin from '@next/eslint-plugin-next';
 
 export default tseslint.config(
   { ignores: ['**/dist/**', '**/.next/**', '**/node_modules/**', '**/*.d.ts'] },
@@ -33,5 +34,13 @@ export default tseslint.config(
       ...reactHooks.configs.recommended.rules,
       ...jsxA11y.configs.recommended.rules,
     },
+  },
+  // Next.js rules — scoped to the console app only. Lifted from a per-project
+  // eslint.config.js so the workspace-level `moon run ts:lint` task enforces
+  // Next.js rules too (the per-project task alone wasn't a complete CI gate).
+  {
+    files: ['apps/paigasus-console/**/*.{ts,tsx}'],
+    plugins: { '@next/next': nextPlugin },
+    rules: { ...nextPlugin.configs.recommended.rules },
   },
 );

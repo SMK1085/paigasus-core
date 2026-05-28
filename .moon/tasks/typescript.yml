@@ -61,5 +61,4 @@ tasks:
       - '@group(sources)'
       - '@group(tests)'
       - 'package.json'
-      - 'vitest.config.ts'
       - '/ts/pnpm-lock.yaml'

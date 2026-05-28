@@ -30,6 +30,8 @@ tasks:
       - '@group(sources)'
       - '@group(tests)'
       - 'tsconfig.base.json'
+      - 'packages/*/tsconfig.json'
+      - 'apps/*/tsconfig.json'
       - 'package.json'
       - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
@@ -40,6 +42,8 @@ tasks:
     inputs:
       - '@group(sources)'
       - 'tsconfig.base.json'
+      - 'packages/*/tsconfig.json'
+      - 'apps/*/tsconfig.json'
       - 'package.json'
       - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
