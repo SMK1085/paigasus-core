@@ -465,8 +465,10 @@ verification commands assume `moon` on `PATH` per that setup.
       resolution shows the inherited tasks with no `unknown_file_group` error.
 - [ ] `moon generate python --archetype service` produces a project with a `tasks:` block
       containing only the `start` task.
-- [ ] `moon project py` resolves with the five inherited tasks, with their `inputs` referencing
-      the project-local `fileGroups` (`packages/*/src/**/*`, `packages/*/tests/**/*`).
+- [ ] `moon project py` resolves with the five inherited tasks; their resolved `inputs` include
+      the project-local `fileGroups` patterns (`packages/*/src/**/*`, `packages/*/tests/**/*`).
+      Moon merges (not overrides) fileGroups across layers, so python.yml's inherited defaults
+      (`src/**/*`, `tests/**/*`) may also appear in the resolved set — that's expected.
 - [ ] Notion "Polyglot Monorepo Scoping" § 1 is a one-line redirect to CONTRIBUTING.md (no
       moon.yml examples remain).
 - [ ] Three commits on the feature branch, scoped `docs(repo)` / `feat(py)` / `chore(py)`,

@@ -173,7 +173,6 @@ tasks:
   build:
     command: 'uv build'
     inputs: ['@group(sources)', 'pyproject.toml']
-    outputs: ['dist']
   lint:
     command: 'uv run ruff check .'
     inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
@@ -364,13 +363,13 @@ moon project py 2>&1 | grep -iE '^Layer|^Tasks|^Inheritance|sources|tests' | hea
 Expected:
 - `Layer: configuration`.
 - Tasks section lists the five inherited tasks (`build`, `lint`, `fmt`, `typecheck`, `test`).
-- The resolved `inputs` for each task reference `packages/*/src/**/*` and `packages/*/tests/**/*` (py-workspace's fileGroups override), not the python.yml defaults (`src/**/*`, `tests/**/*`).
+- The resolved `inputs` for each task **include** `packages/*/src/**/*` and `packages/*/tests/**/*` (py-workspace's fileGroups override). Moon merges (not overrides) fileGroups across the inherited and project-local layers, so the python.yml defaults (`src/**/*`, `tests/**/*`) may also appear in the resolved set — that's expected and harmless because `py/src/` and `py/tests/` don't exist in the workspace.
 
 If `moon project py` doesn't print resolved inputs verbosely, fall back to:
 ```bash
 moon project py --json 2>&1 | jq '.tasks[] | {target, inputs}' | head -40
 ```
-and confirm each task's `inputs` includes the `packages/*/` patterns.
+and confirm each task's `inputs` includes the `packages/*/` patterns (inherited defaults may also appear).
 
 - [ ] **Step 8: Confirm no throwaway artifacts remain**
 
