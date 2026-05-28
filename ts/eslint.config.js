@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import path from 'node:path';
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import reactPlugin from '@eslint-react/eslint-plugin';
@@ -38,8 +39,16 @@ export default tseslint.config(
   // Next.js rules — scoped to the console app only. Lifted from a per-project
   // eslint.config.js so the workspace-level `moon run ts:lint` task enforces
   // Next.js rules too (the per-project task alone wasn't a complete CI gate).
+  // `settings.next.rootDir` is required so `no-html-link-for-pages` resolves
+  // the App Router at apps/paigasus-console/app/ rather than searching
+  // the cwd (ts/ or ts/apps/paigasus-console/ depending on invocation).
+  // Using an absolute path anchored to import.meta.dirname makes it
+  // cwd-independent.
   {
     files: ['apps/paigasus-console/**/*.{ts,tsx}'],
+    settings: {
+      next: { rootDir: path.join(import.meta.dirname, 'apps/paigasus-console') },
+    },
     plugins: { '@next/next': nextPlugin },
     rules: { ...nextPlugin.configs.recommended.rules },
   },

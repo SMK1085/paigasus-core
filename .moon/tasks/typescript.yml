@@ -32,7 +32,6 @@ tasks:
     inputs:
       - '@group(sources)'
       - '@group(tests)'
-      - 'eslint.config.js'
       - 'package.json'
       - '/ts/eslint.config.js'
       - '/ts/pnpm-lock.yaml'
