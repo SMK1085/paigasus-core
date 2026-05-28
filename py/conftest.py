@@ -6,7 +6,5 @@ import pytest
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    if exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED and not any(
-        p.is_dir() for p in session.config.rootpath.glob("packages/*/tests")
-    ):
+    if exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED and not any(p.is_dir() for p in session.config.rootpath.glob("packages/*/tests")):
         session.exitstatus = 0

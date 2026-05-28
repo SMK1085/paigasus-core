@@ -1,0 +1,4 @@
+# rustfmt configuration for the rs/ workspace. Default max_width is 100;
+# bumped to 200 in SMA-359 for cross-stack consistency with py (ruff
+# line-length = 200) and ts (prettier printWidth: 200).
+max_width = 200
