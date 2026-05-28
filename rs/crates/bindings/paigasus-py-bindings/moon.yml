@@ -1,4 +1,8 @@
 $schema: 'https://moonrepo.dev/schemas/project.json'
 
 id: 'paigasus-py-bindings-rs'
+# Moon-side layer label for this FFI crate (no native `binding` layer exists).
+# Built like a library but NOT published as an rlib — ships as a Python wheel
+# via maturin. Exclude from any layer=library publish matrix.
+layer: 'library'
 language: 'rust'

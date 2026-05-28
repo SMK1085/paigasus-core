@@ -1,6 +1,6 @@
 $schema: 'https://moonrepo.dev/schemas/project.json'
 id: '{{ name }}-rs'
-type: '{% if archetype == "service" %}application{% else %}library{% endif %}'
+layer: '{% if archetype == "service" %}application{% else %}library{% endif %}'
 language: 'rust'
 {%- if archetype == "service" %}
 dependsOn:
