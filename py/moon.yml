@@ -3,24 +3,14 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 layer: 'configuration'
 language: 'python'
 
-# The global fileGroups in .moon/tasks.yml assume src/ at the project root; the py workspace
-# keeps sources under packages/*/src, so redefine them here.
+# The inherited fileGroups from .moon/tasks/python.yml assume src/ at the project root.
+# The py workspace keeps sources under packages/*/src, so extend the inherited groups
+# here. Moon merges (not overrides) fileGroups across the layers, so the resolved
+# @group(sources) and @group(tests) contain both python.yml's defaults and these
+# additions — fine in practice because py/src/ and py/tests/ don't exist; only
+# packages/*/src/** and packages/*/tests/** actually match.
 fileGroups:
   sources:
     - 'packages/*/src/**/*'
   tests:
     - 'packages/*/tests/**/*'
-
-tasks:
-  lint:
-    command: 'uv run ruff check .'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', 'uv.lock']
-  format:
-    command: 'uv run ruff format --check .'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', 'uv.lock']
-  typecheck:
-    command: 'uv run basedpyright'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', 'uv.lock']
-  test:
-    command: 'uv run pytest'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', 'uv.lock', 'conftest.py']
