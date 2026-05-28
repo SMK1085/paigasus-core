@@ -1,8 +1,9 @@
 $schema: 'https://moonrepo.dev/schemas/project.json'
-id: '{{ name }}-ts'
-layer: '{% if archetype == "app" %}application{% else %}library{% endif %}'
+
+id: 'paigasus-console-ts'
+layer: 'application'
 language: 'typescript'
-{%- if archetype == "app" %}
+
 tasks:
   build:
     command: 'pnpm exec next build'
@@ -10,4 +11,3 @@ tasks:
     outputs: ['.next']
     options:
       merge: replace
-{%- endif %}

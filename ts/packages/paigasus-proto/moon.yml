@@ -1,0 +1,5 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-proto-ts'
+layer: 'library'
+language: 'typescript'

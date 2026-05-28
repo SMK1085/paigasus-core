@@ -1,0 +1,47 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+layer: 'configuration'
+language: 'typescript'
+
+# The inherited fileGroups from .moon/tasks/typescript.yml assume src/ at the project root.
+# The ts workspace keeps sources under packages/*/src and apps/*/{src,app}, so extend the
+# inherited groups here. Moon merges (not overrides) fileGroups across the layers, so the
+# resolved @group(sources) and @group(tests) contain both typescript.yml's defaults and these
+# additions — fine in practice because ts/src/ and ts/tests/ don't exist; only the package/app
+# subdirs actually match. (Same merge semantics confirmed for py in SMA-384 Correction 2.)
+fileGroups:
+  sources:
+    - 'packages/*/src/**/*'
+    - 'apps/*/src/**/*'
+    - 'apps/*/app/**/*'
+  tests:
+    - 'packages/*/tests/**/*'
+    - 'apps/*/tests/**/*'
+
+# Override the inherited per-project commands for the two tasks that need a workspace-wide
+# entry point. typecheck fans out via pnpm recursion (each package owns a `typecheck` script).
+# build fans out the same way; packages without a `build` script no-op cleanly. The inherited
+# lint/fmt/test commands work from `ts/` cwd unchanged — they walk from cwd to find their
+# config and pick up the whole tree.
+tasks:
+  typecheck:
+    command: 'pnpm -r --if-present run typecheck'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'tsconfig.base.json'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+    options:
+      merge: replace
+  build:
+    command: 'pnpm -r --if-present run build'
+    inputs:
+      - '@group(sources)'
+      - 'tsconfig.base.json'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+    options:
+      merge: replace
