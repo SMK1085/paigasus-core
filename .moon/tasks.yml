@@ -17,6 +17,7 @@ implicitInputs:
   - '/.moon/toolchain.yml'
   - '/.moon/tasks.yml'
   - '/.moon/tasks/rust.yml'
+  - '/.moon/tasks/python.yml'
 
 taskOptions:
   outputStyle: 'buffer-only-failure'

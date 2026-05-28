@@ -1,0 +1,37 @@
+$schema: 'https://moonrepo.dev/schemas/tasks.json'
+
+# Moon does NOT scope task files by filename — scope explicitly so these python
+# commands only attach to python projects (not rust, and not contracts/ts).
+#
+# `start` is intentionally absent from this file; service-archetype projects
+# get it from the python scaffold template, which needs per-project Tera
+# variables (the module path) that Moon's task-file syntax can't reach. A
+# hand-written python service (none today) would need to add `start` to its
+# own moon.yml.
+inheritedBy:
+  languages: ['python']
+
+fileGroups:
+  sources:
+    - 'src/**/*'
+  tests:
+    - 'tests/**/*'
+    - '**/*_test.py'
+    - '**/test_*.py'
+
+tasks:
+  build:
+    command: 'uv build'
+    inputs: ['@group(sources)', 'pyproject.toml']
+  lint:
+    command: 'uv run ruff check .'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
+  fmt:
+    command: 'uv run ruff format --check .'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
+  typecheck:
+    command: 'uv run basedpyright'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
+  test:
+    command: 'uv run pytest'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'conftest.py']
