@@ -2,17 +2,14 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 id: '{{ name }}-ts'
 layer: '{% if archetype == "app" %}application{% else %}library{% endif %}'
 language: 'typescript'
+{%- if archetype == "app" %}
 tasks:
   build:
-    command: '{% if archetype == "app" %}next build{% else %}tsc --build{% endif %}'
-    inputs: ['@group(sources)', 'tsconfig.json', 'package.json']
-    outputs: ['{% if archetype == "app" %}.next{% else %}dist{% endif %}']
-  lint:
-    command: 'eslint .'
-    inputs: ['@group(sources)']
-  format:
-    command: 'prettier --check .'
-    inputs: ['@group(sources)', '@group(tests)']
-  test:
-    command: 'vitest run'
-    inputs: ['@group(sources)', '@group(tests)']
+    command: 'pnpm exec next build'
+    # next.config.{ts,js,mjs} are all supported by Next; list each so the config
+    # file edits invalidate cache regardless of which extension a future project uses.
+    inputs: ['@group(sources)', 'tsconfig.json', 'package.json', 'next.config.ts', 'next.config.js', 'next.config.mjs']
+    outputs: ['.next']
+    options:
+      merge: replace
+{%- endif %}

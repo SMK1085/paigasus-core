@@ -1,0 +1,13 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-console-ts'
+layer: 'application'
+language: 'typescript'
+
+tasks:
+  build:
+    command: 'pnpm exec next build'
+    inputs: ['@group(sources)', 'tsconfig.json', 'package.json', 'next.config.ts']
+    outputs: ['.next']
+    options:
+      merge: replace

@@ -1,0 +1,27 @@
+{
+  "name": "@paigasus/workspace",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "format": "prettier --check .",
+    "format:write": "prettier --write .",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "eslint": "catalog:",
+    "@eslint/js": "catalog:",
+    "@eslint-react/eslint-plugin": "catalog:",
+    "eslint-plugin-react-hooks": "catalog:",
+    "eslint-plugin-jsx-a11y": "catalog:",
+    "typescript-eslint": "catalog:",
+    "prettier": "catalog:",
+    "vitest": "catalog:",
+    "@next/eslint-plugin-next": "catalog:"
+  }
+}
