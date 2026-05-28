@@ -1,4 +1,10 @@
 {
+  // TODO(framework-choice): noEmit: true is intentional while paigasus-docs is a
+  // framework-TBD placeholder (spec §D.2 / §H docs app framework choice). When a
+  // framework is selected (Next.js/Vite/Astro/etc.) this tsconfig will need to:
+  //   - flip noEmit: false (or rely on the framework's build),
+  //   - add framework-specific lib/jsx/plugins,
+  //   - the parent moon.yml will gain a `build` task override.
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",

@@ -47,6 +47,10 @@ tasks:
       - '/ts/.prettierignore'
       - '/ts/pnpm-lock.yaml'
   typecheck:
+    # Identical command to `build` above. By convention `typecheck` is the canonical
+    # type-checking task that never gets overridden, while `build` IS the override surface:
+    # library projects inherit this no-op `tsc --noEmit` form; app projects (Next.js)
+    # override `build` with `next build` while keeping `typecheck` for pure type-only checks.
     command: 'pnpm exec tsc -p tsconfig.json --noEmit'
     inputs:
       - '@group(sources)'

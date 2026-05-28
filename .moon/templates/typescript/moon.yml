@@ -6,7 +6,9 @@ language: 'typescript'
 tasks:
   build:
     command: 'pnpm exec next build'
-    inputs: ['@group(sources)', 'tsconfig.json', 'package.json', 'next.config.ts']
+    # next.config.{ts,js,mjs} are all supported by Next; list each so the config
+    # file edits invalidate cache regardless of which extension a future project uses.
+    inputs: ['@group(sources)', 'tsconfig.json', 'package.json', 'next.config.ts', 'next.config.js', 'next.config.mjs']
     outputs: ['.next']
     options:
       merge: replace

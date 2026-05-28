@@ -535,6 +535,13 @@ in place. `noEmit: true` since the bootstrap doesn't produce JS output — the p
 script (declared in §C.1's `package.json`) runs this tsconfig with `--noEmit` redundantly to be
 explicit. No `composite: true` — we dropped the solution-file pattern (§B.4).
 
+**React-library exception: `paigasus-ui`** carries an extra `"jsx": "react-jsx"` entry in its
+`compilerOptions` (on top of the template above) so the first `.tsx` component added doesn't fail
+typecheck with `TS17004: Cannot use JSX unless the '--jsx' flag is provided`. `"react-jsx"` (not
+`"preserve"`) is correct for a library — emits the React 17+ automatic transform inline; the
+console app uses `"preserve"` because Next.js handles the JSX transform itself. The base
+`tsconfig.base.json` deliberately leaves `jsx` unset because not every package is a JSX consumer.
+
 ### C.3 `src/index.ts` for every stub
 
 ```ts
