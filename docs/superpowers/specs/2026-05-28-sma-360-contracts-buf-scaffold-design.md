@@ -37,11 +37,11 @@ since landed. The following decisions reconcile them:
    extended to include `tool` in the same PR (see §4) — a deliberate convention
    extension, not silent drift.
 
-### Reconciliation with the design review (2026-05-28)
+### Reconciliation with the staff-engineer design review (2026-05-28)
 
-This spec incorporates the staff-engineer review in
-[`2026-05-28-sma-360-contracts-buf-scaffold-design-review.md`](./2026-05-28-sma-360-contracts-buf-scaffold-design-review.md).
-Disposition:
+This spec incorporates a staff-engineer review of the original draft. The
+findings (referenced below by their `H#`/`M#`/`L#` labels) and their
+disposition:
 
 - **H1** (dropped plugin opts) — accepted; full opt set restored in §3.
 - **H2** (`clean: true`) — accepted; deferred with an explicit policy in §3.
