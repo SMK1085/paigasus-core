@@ -2,24 +2,8 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 id: '{{ name }}-py'
 layer: '{% if archetype == "service" %}application{% else %}library{% endif %}'
 language: 'python'
-tasks:
-  build:
-    command: 'uv build'
-    inputs: ['@group(sources)', 'pyproject.toml']
-    outputs: ['dist']
-  lint:
-    command: 'uv run ruff check .'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
-  format:
-    command: 'uv run ruff format --check .'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
-  typecheck:
-    command: 'uv run basedpyright'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
-  test:
-    command: 'uv run pytest'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
 {%- if archetype == "service" %}
+tasks:
   start:
     command: 'uv run python -m {{ name | replace(from="-", to="_") }}'
     options:
