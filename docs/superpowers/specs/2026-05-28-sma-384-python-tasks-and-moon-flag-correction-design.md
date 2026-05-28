@@ -355,6 +355,64 @@ tasks) in its own commit, separate from the template + py-root-tasks-block chang
 both of which only affect resolution/scaffolding, not what the commands do). The `docs(repo)`
 commit is pure prose.
 
+## Post-implementation corrections
+
+Two prescriptive details in this spec turned out to be wrong when the change actually ran against
+Moon 2.2.5 + the uv workspace. The implementation deviated from the spec text; both deviations are
+empirically justified. Recorded here so the spec doesn't trap future readers (e.g. SMA-359 mirroring
+this pattern for `typescript.yml`).
+
+### Correction 1 — Change B's `build` task: drop `outputs: ['dist']`
+
+The spec prescribed `outputs: ['dist']` on the `build` task in `.moon/tasks/python.yml`. Verified
+during Task 2 implementation that this triggers `task_runner::missing_outputs` for every py-package
+build: `uv build` in a uv workspace emits the artifact to the workspace-root `py/dist/`, not to the
+per-package `py/packages/<pkg>/dist/`. So Moon's per-project output check fails even though the
+build itself succeeded.
+
+**Final shape (what's actually in `.moon/tasks/python.yml`):**
+
+```yaml
+  build:
+    command: 'uv build'
+    inputs: ['@group(sources)', 'pyproject.toml']
+```
+
+(No `outputs:` declaration.) The task still works; cache invalidation runs off `inputs:`; downstream
+tasks (none today depend on `build`) just don't get a specific output artifact. The original spec
+text was lifted from the pre-existing python scaffold template, which had the same latent bug — it
+never triggered because no py package had a `build` task until python.yml landed.
+
+### Correction 2 — Change D2's `py/moon.yml` comment: "override" → "merge"
+
+The spec prescribed a comment that described Moon's fileGroups inheritance as "override" semantics.
+Verified via `moon project py --json` during Task 3 implementation that Moon actually **merges**
+fileGroups across the inherited layer (`.moon/tasks/python.yml`'s `src/**/*` / `tests/**/*`) and the
+project-local layer (`py/moon.yml`'s `packages/*/src/**/*` / `packages/*/tests/**/*`). The resolved
+`@group(sources)` for `py` contains both `["py/src/**/*", "py/packages/*/src/**/*"]`.
+
+In practice this is harmless (`py/src/` and `py/tests/` don't exist), but a future maintainer adding
+`py/src/foo.py` and seeing it picked up by `moon run py:lint` would be confused by an "override"
+comment.
+
+**Final shape (what's actually in `py/moon.yml`):**
+
+```yaml
+# The inherited fileGroups from .moon/tasks/python.yml assume src/ at the project root.
+# The py workspace keeps sources under packages/*/src, so extend the inherited groups
+# here. Moon merges (not overrides) fileGroups across the layers, so the resolved
+# @group(sources) and @group(tests) contain both python.yml's defaults and these
+# additions — fine in practice because py/src/ and py/tests/ don't exist; only
+# packages/*/src/** and packages/*/tests/** actually match.
+fileGroups:
+  sources:
+    - 'packages/*/src/**/*'
+  tests:
+    - 'packages/*/tests/**/*'
+```
+
+The fileGroups patterns themselves are unchanged; only the comment was corrected.
+
 ## Out of scope / follow-up
 
 - **`.moon/tasks/typescript.yml`** — symmetrically missing for ts; defer to SMA-359 (ts bootstrap),
