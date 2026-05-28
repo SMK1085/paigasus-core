@@ -47,9 +47,10 @@ uv) from `.moon/toolchain.yml` on first use — no manual language installs need
 Per-workspace specifics live in each workspace's `README.md`; the root
 [README](./README.md#quickstart) summarizes the overall layout.
 
-> Output is buffered for passing tasks (`buffer-only-failure`). To watch a long
-> task stream locally, append `--output-style stream`, e.g.
-> `moon run <project>:test --output-style stream`.
+> Output is buffered for passing tasks (`buffer-only-failure`, set as
+> `taskOptions.outputStyle` in `.moon/tasks.yml`). Moon 2.2.5 has no CLI flag
+> to override this per invocation; to stream a specific task locally, set
+> `options.outputStyle: 'stream'` on the task definition.
 
 ## Commit messages
 

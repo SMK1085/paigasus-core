@@ -12,7 +12,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 
 - `moon ci :build` / `moon ci :test` — affected build/test graph. **Moon 2.x needs explicit
   targets**; bare `moon ci` errors in non-TTY.
-- Append `--output-style stream` to watch a long task (default is `buffer-only-failure`).
+- Task output style is set in `.moon/tasks.yml` (`taskOptions.outputStyle`,
+  currently `buffer-only-failure`). Moon 2.2.5 has no per-invocation CLI flag
+  for it; to stream a specific task locally, set `options.outputStyle: 'stream'`
+  on the task definition.
 - Rust (in `rs/`): `cargo build --workspace`, `cargo fmt --check`,
   `cargo clippy --workspace -- -D warnings`, `cargo nextest run --workspace`.
 
