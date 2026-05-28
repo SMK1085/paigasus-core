@@ -21,7 +21,7 @@ or prefix your shell once with:
 export PATH="$HOME/.proto/bin:$HOME/.proto/shims:$PATH"
 ```
 
-Run every command from the repo root: `/Users/smaschek/dev/paigasus/paigasus-core`.
+Run every command from the repository root (use `git rev-parse --show-toplevel` to locate it if needed).
 
 Work happens on the branch already created during brainstorming:
 `feature/sma-383-document-moonyml-field-order-config-file-spdx-carve-out-in`. The spec doc and
