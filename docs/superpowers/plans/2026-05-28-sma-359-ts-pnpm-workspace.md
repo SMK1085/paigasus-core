@@ -1012,7 +1012,11 @@ tasks:
     command: 'next build'
     inputs: ['@group(sources)', 'tsconfig.json', 'package.json', 'next.config.ts']
     outputs: ['.next']
+    options:
+      merge: replace
 ```
+
+`options: merge: replace` is **required**. Without it Moon 2.2.5 concatenates the local `next build` command with the inherited `pnpm exec tsc -p tsconfig.json --noEmit`, producing a corrupted invocation. This was discovered during Phase 3 smoke-testing and applied to the scaffold template; the hand-written `paigasus-console/moon.yml` needs the same option for the same reason.
 
 - [ ] **Step 7.10: Verify the trim landed cleanly**
 

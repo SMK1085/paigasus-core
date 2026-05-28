@@ -243,12 +243,22 @@ tasks:
     command: 'next build'
     inputs: ['@group(sources)', 'tsconfig.json', 'package.json', 'next.config.ts']
     outputs: ['.next']
+    options:
+      merge: replace
 {%- endif %}
 ```
 
 After this, library-archetype renders produce a 4-line `moon.yml` (header only); app archetype adds
 the `tasks:` block with the `build` override. No `test`/`lint`/`fmt`/`typecheck` definitions remain
 in the template — they all come from the inherited `.moon/tasks/typescript.yml`.
+
+**`options: merge: replace` is required**, not optional. Moon 2.2.5's default task-merge semantics
+combine a local `command:` with the inherited task's `command:`, which for the inherited
+`pnpm exec tsc -p tsconfig.json --noEmit` + the local `next build` produces a corrupted
+`next exec tsc -p tsconfig.json --noEmit build` invocation. `merge: replace` forces Moon to
+fully replace the inherited task definition with the local one. Discovered during Phase 3
+smoke-testing and applied uniformly to every per-project app-archetype `build` override (template
++ hand-written `paigasus-console/moon.yml`).
 
 ### A.6 Per-package and per-app `moon.yml`
 
@@ -657,7 +667,8 @@ export default [
 ];
 ```
 
-**`moon.yml`** (overrides the inherited `build`):
+**`moon.yml`** (overrides the inherited `build`; `options: merge: replace` is required — see §A.5
+for the rationale):
 
 ```yaml
 $schema: 'https://moonrepo.dev/schemas/project.json'
@@ -671,6 +682,8 @@ tasks:
     command: 'next build'
     inputs: ['@group(sources)', 'tsconfig.json', 'package.json', 'next.config.ts']
     outputs: ['.next']
+    options:
+      merge: replace
 ```
 
 **`app/layout.tsx`** — minimal HTML shell:
