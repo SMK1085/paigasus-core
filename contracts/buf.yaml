@@ -1,0 +1,17 @@
+version: v2
+modules:
+  - path: proto
+# googleapis is declared so the lockfile + lint posture are ready before the
+# first proto imports google.protobuf.* / google.api.* — nothing imports it yet.
+deps:
+  - buf.build/googleapis/googleapis
+lint:
+  use:
+    - STANDARD
+  except:
+    # The directory already encodes the version, so don't also require the
+    # package path to match the directory.
+    - PACKAGE_DIRECTORY_MATCH
+breaking:
+  use:
+    - FILE
