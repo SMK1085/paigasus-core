@@ -214,8 +214,9 @@ truth, and CONTRIBUTING mirrors the type + scope lists (maintenance rule below).
 - **Bot guard:** each command begins with an inline check — if
   `git config user.email` matches `*[bot]@*`, exit 0. Portable regardless of
   lefthook's skip-condition surface.
-- **Replay safety:** global `skip: [merge, rebase]` so interactive rebases do not
-  re-validate replayed commits.
+- **Replay safety:** per-hook `skip: [merge, rebase]` (nested under each hook) so
+  interactive rebases do not re-validate replayed commits. lefthook 2.x silently
+  drops a top-level `skip` — see Implementation notes (as-built).
 
 ## Error handling
 

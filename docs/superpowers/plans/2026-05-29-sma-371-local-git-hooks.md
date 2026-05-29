@@ -369,6 +369,15 @@ git commit -m "feat(repo): add lefthook.yml (commit-msg + pre-push hooks)"
 
 **Files:**
 - Modify: `.prototools`
+- Create: `.proto/plugins/lefthook.toml`
+
+> **As-built (see the spec's "Implementation notes"):** proto's npm backend requires
+> proto-managed Node, but this repo uses nvm — so lefthook was pinned via a
+> **vendored proto TOML plugin** (`.proto/plugins/lefthook.toml`, mirroring
+> `buf.toml`) plus `lefthook = "2.1.8"` in `.prototools`, not the `"npm:lefthook"`
+> pin the steps below describe. The steps' goal (lefthook on `$PATH` after
+> `proto install`) is unchanged; the commit landed as
+> `build(repo): pin lefthook via proto TOML plugin (SMA-371)`.
 
 - [ ] **Step 1: Find the latest lefthook version**
 
@@ -437,6 +446,11 @@ tasks:
 > step) errors on `toolchain`, change it to `toolchains: ['system']`. If it errors
 > on `language: 'bash'`, change it to `language: 'unknown'` (the task's `system`
 > toolchain is what actually selects the executor; `language` is metadata).
+>
+> **As-built:** Moon 2.2.5 rejected `options.local: true` (shipped as
+> `options.runInCI: false`) and rejects shell operators in `command:` — so the task
+> shipped as `script: 'lefthook validate && lefthook install'`, where the prepended
+> `lefthook validate` guards against invalid hook config.
 
 - [ ] **Step 2: Register the project in the workspace**
 
