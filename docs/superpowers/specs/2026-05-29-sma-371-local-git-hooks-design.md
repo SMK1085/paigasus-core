@@ -298,6 +298,27 @@ stdin/delete/tag/multi-ref cases from scope.)
   The package's `package.json` carries a `TODO(SMA-390)` next to `private: true`,
   mirroring the kernel pattern.
 
+## Implementation notes (as-built)
+
+Deviations discovered during implementation (the design intent held; these are
+mechanism corrections):
+
+- **lefthook pinned via a vendored proto TOML plugin** (`.proto/plugins/lefthook.toml`,
+  mirroring `buf.toml`), not proto's npm backend — the npm backend requires
+  proto-managed Node, but this repo manages Node via nvm. Version pinned: **2.1.8**.
+- **`options.runInCI: false`** on the `install-hooks` task — Moon 2.2.5 rejects the
+  `local: true` shorthand. Same effect (never runs in CI).
+- **`install-hooks` uses `script:`, not `command:`** — Moon 2.2.5 rejects shell
+  operators (`&&`) in `command`. The task is `script: 'lefthook validate && lefthook
+  install'`; the prepended `lefthook validate` is a guard against invalid hook config.
+- **lefthook 2.x requires `skip` per-hook, not top-level** — a top-level
+  `skip: [merge, rebase]` is silently dropped (the plan was drafted against lefthook
+  1.x). `skip: [merge, rebase]` is nested under both `commit-msg` and `pre-push`; the
+  `lefthook validate` gate above catches this class of error.
+- **commitlint pinned `^21.0.1`** (`@commitlint/cli` + `@commitlint/config-conventional`).
+- Root `repo` project (`source: '.'`) registered with no Moon overlap warning
+  (open item #2 resolved favorably).
+
 ## Out of scope
 
 - The GitHub server-side branch-name ruleset (separate concern; mirrors this rule
