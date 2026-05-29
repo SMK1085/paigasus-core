@@ -1,5 +1,10 @@
 $schema: 'https://moonrepo.dev/schemas/project.json'
 
 id: 'paigasus-docs-ts'
-layer: 'library'
+layer: 'application'
 language: 'typescript'
+
+# No `build` task yet: this app currently only type-checks (it inherits the no-op
+# `tsc --noEmit`). When it grows a real docs build it MUST add its own `build` task
+# with `outputs:` (see paigasus-console and the app-build invariant in CONTRIBUTING) —
+# otherwise it would silently emit nothing.

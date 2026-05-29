@@ -153,6 +153,16 @@ The three scaffold templates under `.moon/templates/{rust,python,typescript}/`
 emit this same order, so `moon generate` output is consistent with
 hand-written projects (SMA-381).
 
+**App build artifacts (TypeScript):** every `ts/apps/*` that produces a build
+artifact MUST define its own Moon `build` task with `outputs:` — as
+`paigasus-console` does (`next build` → `outputs: ['.next']`). The `ts` root
+excludes the inherited `build`/`typecheck` (SMA-394), so Moon's per-project
+tasks own the build graph; a project that only inherits the default `build`
+runs `tsc -p tsconfig.json --noEmit`, which type-checks but **emits nothing**.
+An app without its own `build` task therefore passes a green build while
+producing no artifact. The TypeScript app scaffold
+(`.moon/templates/typescript/`, archetype `app`) emits this task for you.
+
 ## Contributor License Agreement
 
 Before your first contribution can be merged you'll be asked to sign a CLA
