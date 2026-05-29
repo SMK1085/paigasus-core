@@ -44,6 +44,8 @@ moon --version
 
 Moon downloads and pins the per-language toolchains (Rust, Node + pnpm, Python +
 uv) from `.moon/toolchain.yml` on first use — no manual language installs needed.
+`proto install` also provides the `buf` CLI, pinned in `.prototools` via a
+vendored plugin at `.proto/plugins/buf.toml`.
 Per-workspace specifics live in each workspace's `README.md`; the root
 [README](./README.md#quickstart) summarizes the overall layout.
 
@@ -105,7 +107,8 @@ The values in active use are `library` (importable code, e.g. the rust
 crates in `rs/crates/libs/` and the py packages in `py/packages/`),
 `application` (runnable binary, e.g. `paigasus-gateway-rs`), and
 `configuration` (workspace-root project that aggregates child projects,
-e.g. `py/moon.yml`). Moon's full set of seven values is documented in its
+e.g. `py/moon.yml`), and `tool` (non-language codegen/utility project,
+e.g. `contracts`). Moon's full set of seven values is documented in its
 [project config docs](https://moonrepo.dev/docs/config/project) — pick
 `library` if unsure.
 

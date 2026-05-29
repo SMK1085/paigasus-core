@@ -1,0 +1,32 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'contracts'
+layer: 'tool'
+
+tasks:
+  generate:
+    command: 'buf generate'
+    toolchain: 'system'
+    inputs:
+      - 'proto/**/*'
+      - 'buf.yaml'
+      - 'buf.gen.yaml'
+      - 'buf.lock'
+  lint:
+    command: 'buf lint'
+    toolchain: 'system'
+    inputs:
+      - 'proto/**/*'
+      - 'buf.yaml'
+  format:
+    command: 'buf format --exit-code'
+    toolchain: 'system'
+    inputs:
+      - 'proto/**/*'
+      - 'buf.yaml'
+  breaking:
+    command: "buf breaking --against '../.git#branch=main,subdir=contracts'"
+    toolchain: 'system'
+    inputs:
+      - 'proto/**/*'
+      - 'buf.yaml'

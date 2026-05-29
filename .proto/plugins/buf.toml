@@ -1,0 +1,35 @@
+# Vendored proto TOML plugin for the buf CLI.
+#
+# Source: https://github.com/stk0vrfl0w/proto-toml-plugins (plugins/buf.toml, MIT).
+# Vendored in SMA-360 rather than referenced by URL: the upstream repo is
+# effectively unmaintained, and this schema only resolves official, checksummed
+# `bufbuild/buf` GitHub release binaries — nothing to maintain, so we own it.
+#
+# TODO(SMA-387): the `aarch64 = "arm64"` remap below is correct for macOS-arm64
+# and Linux-x86_64 but resolves Linux-aarch64 to a non-existent asset
+# (buf-Linux-arm64 vs. real buf-Linux-aarch64). Fix before adding Linux-arm CI.
+
+name = "buf"
+type = "cli"
+
+[platform.linux]
+download-file = "buf-Linux-{arch}"
+checksum-file = "sha256.txt"
+
+[platform.macos]
+download-file = "buf-Darwin-{arch}"
+checksum-file = "sha256.txt"
+
+[platform.windows]
+download-file = "buf-Windows-{arch}.exe"
+checksum-file = "sha256.txt"
+
+[install]
+checksum-url = "https://github.com/bufbuild/buf/releases/download/v{version}/{checksum_file}"
+download-url = "https://github.com/bufbuild/buf/releases/download/v{version}/{download_file}"
+
+[install.arch]
+aarch64 = "arm64"
+
+[resolve]
+git-url = "https://github.com/bufbuild/buf"

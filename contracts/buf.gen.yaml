@@ -1,0 +1,34 @@
+version: v2
+# NOTE: `clean: true` (from the canonical config) is intentionally OMITTED while
+# the workspace is empty — it would delete the generated/ dirs and their .gitkeep
+# stubs on every run. Add `clean: true` in the same PR that lands the first protos
+# and removes the stubs (tracked with SMA-389 / the codegen-drift work).
+
+plugins:
+  # ─── Rust: prost (messages) + tonic (gRPC stubs) ──────────────────────────
+  - remote: buf.build/community/neoeinstein-prost
+    out: ../rs/crates/libs/paigasus-proto/src/generated
+    opt:
+      - bytes=.
+      - file_descriptor_set
+  - remote: buf.build/community/neoeinstein-tonic
+    out: ../rs/crates/libs/paigasus-proto/src/generated
+    opt:
+      # prost + tonic write to the SAME dir; without no_include, tonic's own
+      # include scaffolding collides with prost's modules.
+      - no_include
+      - compile_well_known_types
+
+  # ─── Python: betterproto2 (pre-stable 0.x per ADR-0004; fallback is ─────────
+  #     grpcio-tools + mypy-protobuf if it stalls) ──────────────────────────────
+  - remote: buf.build/community/danielgtaylor-betterproto
+    out: ../py/packages/paigasus-proto/src/paigasus_proto/generated
+
+  # ─── TypeScript: protobuf-es v2 ───────────────────────────────────────────
+  - remote: buf.build/bufbuild/es
+    out: ../ts/packages/paigasus-proto/src/generated
+    opt:
+      - target=ts
+      # required for runtime-correct ESM specifiers once @paigasus/proto emits
+      # real dist under NodeNext resolution.
+      - import_extension=.js
