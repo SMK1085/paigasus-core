@@ -6,7 +6,7 @@ language: 'bash'
 
 tasks:
   install-hooks:
-    command: 'lefthook install'
+    script: 'lefthook validate && lefthook install'
     toolchain: 'system'
     inputs:
       - 'lefthook.yml'

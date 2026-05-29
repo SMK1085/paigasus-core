@@ -2,12 +2,11 @@
 # (ADR-0010); Moon vcs.hooks is intentionally empty. Install via:
 #   moon run repo:install-hooks   (or automatically on `pnpm install` in ts/)
 
-# Don't re-validate replayed commits during interactive rebases / merges.
-skip:
-  - merge
-  - rebase
-
 commit-msg:
+  # Don't re-validate replayed commits during interactive rebases / merges.
+  skip:
+    - merge
+    - rebase
   commands:
     commitlint:
       run: |
@@ -22,6 +21,9 @@ commit-msg:
         ts/node_modules/.bin/commitlint --edit {1} --config ts/commitlint.config.cjs
 
 pre-push:
+  skip:
+    - merge
+    - rebase
   commands:
     branch-name:
       run: |
