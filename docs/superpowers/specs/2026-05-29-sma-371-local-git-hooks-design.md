@@ -1,10 +1,9 @@
 # SMA-371 — Local git hooks: commit-msg (Conventional Commits) + branch-name validation
 
-**Status:** Approved (design); revised post-review 2026-05-29
+**Status:** Approved (design)
 **Date:** 2026-05-29
 **Linear:** [SMA-371](https://linear.app/smaschek/issue/SMA-371/local-git-hooks-commit-msg-conventional-commits-branch-name-validation)
 **ADR:** [ADR-0010 — lefthook + commitlint over convco](https://www.notion.so/36c830e8fbaa8110bbaee37475ad57c8)
-**Review:** [`2026-05-29-sma-371-local-git-hooks-design-review.md`](./2026-05-29-sma-371-local-git-hooks-design-review.md) (findings H1–H2, M1–M5, L1–L3 all addressed below)
 
 ## Goal
 
@@ -12,12 +11,12 @@ Make Conventional Commits and branch naming a **hard local requirement** — fas
 feedback at `git commit` and `git push` time, not first discovered at CI. This is
 the developer-machine layer; SMA-361 is the server-side counterpart.
 
-> **Residual coverage gap (review M5).** "Hard local requirement" holds only for
-> contributors who run `pnpm install` (auto-install via `prepare`) or who run the
-> documented `moon run repo:install-hooks`. Pure-Rust / pure-Python contributors
-> who do neither still hit violations first at CI. This is an accepted consequence
-> of the Moon-sync correction (decision #1) — not a bug, but a known hole. ADR-0010
-> and AC item A are being amended to stop claiming sync-time auto-install.
+> **Residual coverage gap.** "Hard local requirement" holds only for contributors
+> who run `pnpm install` (auto-install via `prepare`) or who run the documented
+> `moon run repo:install-hooks`. Pure-Rust / pure-Python contributors who do
+> neither still hit violations first at CI. This is an accepted consequence of the
+> Moon-sync correction (decision #1) — not a bug, but a known hole. ADR-0010 and AC
+> item A have been amended to stop claiming sync-time auto-install.
 
 The toolchain is settled by ADR-0010: **lefthook** (hook manager) + **commitlint**
 (commit-msg validator) with a shared `@paigasus/commitlint-config` package, a
@@ -36,10 +35,9 @@ both pinned via `pnpm-lock.yaml`) is documented here but enforced by SMA-361.
 
 ## Key decisions
 
-Implementation decisions the ADR/AC did not fully pin down, plus the corrections
-that came out of review.
+Implementation decisions the ADR/AC did not fully pin down.
 
-### 1. Install trigger (with a resilient `prepare` — review H2)
+### 1. Install trigger (with a resilient `prepare`)
 
 Moon cannot auto-run a project task during `moon sync` — its only native "act on
 sync" path for hooks is `vcs.hooks`, which we deliberately disable. Install is
@@ -62,14 +60,14 @@ lefthook isn't on `$PATH` yet (e.g. `pnpm install` run before `proto install`):
 
 CONTRIBUTING documents the required order: **`proto install` → workspace installs**.
 
-> **Correction to the AC (review M5).** The AC says install is "triggered
-> automatically by Moon `sync`". With `vcs.hooks` empty (which the same AC
-> mandates), that is not achievable — `moon sync` runs `SyncWorkspace` (codeowners,
-> VCS hooks), not project tasks. Re-enabling `vcs.hooks` as the installer was
-> considered and rejected: it makes Moon **and** lefthook both write
-> `.git/hooks/*`, last-writer-wins — the exact failure mode ADR-0010 guards against.
+> **Correction to the AC.** The AC says install is "triggered automatically by Moon
+> `sync`". With `vcs.hooks` empty (which the same AC mandates), that is not
+> achievable — `moon sync` runs `SyncWorkspace` (codeowners, VCS hooks), not project
+> tasks. Re-enabling `vcs.hooks` as the installer was considered and rejected: it
+> makes Moon **and** lefthook both write `.git/hooks/*`, last-writer-wins — the exact
+> failure mode ADR-0010 guards against.
 
-### 2. `repo` Moon project home (+ `local` task — review M2)
+### 2. `repo` Moon project home (+ `local` task)
 
 A root-level `repo` project registered via Moon's combined `projects` form
 (`globs: [...]` + `sources: { repo: '.' }`) with a root `moon.yml` (`id: repo`,
@@ -77,12 +75,12 @@ A root-level `repo` project registered via Moon's combined `projects` form
 its `inputs` scoped to `lefthook.yml` + `.lefthook/**`) so a future `moon ci` run
 never executes `lefthook install` into a CI checkout's `.git/hooks`.
 
-A `repo/` subdirectory project was the alternative; the reviewer mildly prefers it
-to avoid root-overlap warnings. We keep the root-level project (puts the task where
-`lefthook.yml` lives, matches the AC's `repo:` naming) — the `local: true` guard
-resolves the concrete CI concern; the overlap is a watch-item (open item below).
+A `repo/` subdirectory project was the alternative (avoids any root-overlap
+warnings). We keep the root-level project — it puts the task where `lefthook.yml`
+lives and matches the AC's `repo:` naming; the `local: true` guard resolves the
+concrete CI concern, and the overlap is a watch-item (open item below).
 
-### 3. Tool resolution + the corrected commitlint invocation (review H1)
+### 3. Tool resolution + the corrected commitlint invocation
 
 - **lefthook** is pinned in `.prototools` (proto), on `$PATH` after `proto install`
   — like `moon` / `buf`. This sidesteps lefthook's monorepo failure mode: its npm
@@ -90,16 +88,16 @@ resolves the concrete CI concern; the overlap is a watch-item (open item below).
   exist here (node_modules is in `ts/`)
   ([lefthook#510](https://github.com/evilmartians/lefthook/issues/510),
   [#443](https://github.com/evilmartians/lefthook/issues/443)).
-- **commitlint** is a pnpm dependency inside `ts/`. The **corrected** invocation
-  runs from the git-root cwd (lefthook's default) using an explicit binary + config
-  path — **not** `pnpm -C ts exec`:
+- **commitlint** is a pnpm dependency inside `ts/`. The invocation runs from the
+  git-root cwd (lefthook's default) using an explicit binary + config path —
+  **not** `pnpm -C ts exec`:
 
   ```yaml
   # lefthook.yml (commit-msg)
   run: ts/node_modules/.bin/commitlint --edit {1} --config ts/commitlint.config.cjs
   ```
 
-  **Why this and not `pnpm -C ts exec` (review H1):** lefthook's `{1}` expands to
+  **Why this and not `pnpm -C ts exec`:** lefthook's `{1}` expands to
   `.git/COMMIT_EDITMSG` **relative to the repo root**, and `pnpm -C ts exec` changes
   the child cwd to `ts/` ([pnpm#5068](https://github.com/pnpm/pnpm/issues/5068)) —
   so `--edit {1}` would resolve against `ts/.git/COMMIT_EDITMSG` and fail on a path
@@ -109,10 +107,10 @@ resolves the concrete CI concern; the overlap is a watch-item (open item below).
   (`ts/`), so module resolution still finds `ts/node_modules`
   ([commitlint shareable-config](https://commitlint.js.org/concepts/shareable-config.html)).
 
-  > **Must be executed before merge** (review's top recommendation): a real
-  > `git commit` with a good and a bad message, from a terminal *and* a GUI client.
+  > **Must be executed before merge:** a real `git commit` with a good and a bad
+  > message, from a terminal *and* a GUI client.
 
-### 4. Branch-name validation: current branch, not stdin (review M4)
+### 4. Branch-name validation: current branch, not stdin
 
 `pre-push` validates the **current checked-out branch** via
 `git symbolic-ref --short HEAD`, not the pushed refs from stdin.
@@ -164,7 +162,7 @@ git event ──> .git/hooks/{commit-msg,pre-push}   (shims written by `lefthook
 | `lefthook.yml` (repo root) | `commit-msg` (commitlint, explicit bin path) + `pre-push` (branch-name); global `skip: [merge, rebase]`; bot-email guard per command. |
 | `.lefthook/pre-push/check-branch.sh` | Branch-name validator (current branch via `git symbolic-ref`). Carries SPDX header (hand-written script). |
 | `ts/commitlint.config.cjs` | `module.exports = { extends: ['@paigasus/commitlint-config'] }` — no per-repo overrides (ADR-0010). |
-| `ts/packages/commitlint-config/package.json` | `@paigasus/commitlint-config`; `private: true` (see L3 follow-up); `main: index.cjs`; deps `@commitlint/config-conventional`. |
+| `ts/packages/commitlint-config/package.json` | `@paigasus/commitlint-config`; `private: true` (see follow-up below); `main: index.cjs`; deps `@commitlint/config-conventional`. |
 | `ts/packages/commitlint-config/index.cjs` | The canonical ruleset (types, scopes, lengths, scope-empty). |
 | `ts/packages/commitlint-config/moon.yml` | `id: commitlint-config-ts`, `layer: library`, `language: typescript` (`-ts` suffix, SMA-380). |
 
@@ -176,7 +174,7 @@ git event ──> .git/hooks/{commit-msg,pre-push}   (shims written by `lefthook
 | `.moon/workspace.yml` | Convert `projects` list → `{ globs: [...existing...], sources: { repo: '.' } }`. `vcs.hooks` stays unset. |
 | `ts/package.json` | Add resilient `prepare` (above); devDep `@commitlint/cli` (catalog); `@paigasus/commitlint-config: "workspace:*"`. |
 | `ts/pnpm-workspace.yaml` | Catalog entries: `@commitlint/cli`, `@commitlint/config-conventional`. |
-| `CONTRIBUTING.md` | New "Local development setup" subsection (install order, GUI-PATH note, `--no-verify`); **full type + scope allowlists** (review M3); `.cjs`/`.js` config added to the no-SPDX list (review L2); maintenance rule covering **both** lists. |
+| `CONTRIBUTING.md` | New "Local development setup" subsection (install order, GUI-PATH note, `--no-verify`); **full type + scope allowlists**; `.cjs`/`.js` config added to the no-SPDX list; maintenance rule covering **both** lists. |
 | `pnpm-lock.yaml` | Regenerated. |
 
 ## Commit-msg rule set (`@paigasus/commitlint-config`)
@@ -187,8 +185,8 @@ git event ──> .git/hooks/{commit-msg,pre-push}   (shims written by `lefthook
   `build`, `perf`, `style`, `revert`
 - `scope-enum` (error): `rs`, `py`, `ts`, `contracts`, `ci`, `docs`, `deps`,
   `release`, `repo`, `claude`, `workspace`
-- `scope-empty: [2, 'never']` — **scope is mandatory** (review L1); repo-wide
-  changes use the `repo` / `workspace` scopes
+- `scope-empty: [2, 'never']` — **scope is mandatory**; repo-wide changes use the
+  `repo` / `workspace` scopes
 - `subject-empty: [2, 'never']`
 - `header-max-length: 100`
 - `body-max-line-length: 100`
@@ -219,7 +217,7 @@ truth, and CONTRIBUTING mirrors the type + scope lists (maintenance rule below).
 - **Replay safety:** global `skip: [merge, rebase]` so interactive rebases do not
   re-validate replayed commits.
 
-## Error handling (review M1)
+## Error handling
 
 - `commitlint` / `pnpm` / `node` missing on `$PATH` → print an install hint, exit
   non-zero. **Never silently pass** (AC item B). Warn-and-pass was rejected: it
@@ -260,14 +258,14 @@ truth, and CONTRIBUTING mirrors the type + scope lists (maintenance rule below).
 | push from `feature/sma-371-local-git-hooks` | passes |
 | `git commit --no-verify` | bypasses all hooks (documented) |
 | commit as `dependabot[bot]@users.noreply.github.com` | not validated locally |
-| `git commit` from a GUI client (terminal + GUI) | succeeds with toolchain on PATH (review H1/M1) |
+| `git commit` from a GUI client (terminal + GUI) | succeeds with toolchain on PATH |
 
 **Unit test:** a `bats`/sh test for `check-branch.sh` covering: conforming
 `feature/...`, non-conforming `sven/...`, `main` allow-list, `dependabot/...`
 allow-list, detached HEAD (allow). (The current-branch design removes the
-stdin/delete/tag/multi-ref cases from scope — review M4.)
+stdin/delete/tag/multi-ref cases from scope.)
 
-## SPDX headers (review L2 — decided, not punted)
+## SPDX headers (decided)
 
 - `lefthook.yml`, `moon.yml`, `.prototools`, `package.json`, `pnpm-workspace.yaml`
   → config, **no** SPDX header.
@@ -290,14 +288,15 @@ stdin/delete/tag/multi-ref cases from scope — review M4.)
 
 ## Follow-ups / amendments
 
-- **Amend ADR-0010 + AC item A (review M5):** drop the "wired into Moon `sync`"
-  language; state the `prepare` + documented-task reality and the non-ts
-  auto-install gap. Done as part of this work (user-approved).
-- **Publish-tracking for `@paigasus/commitlint-config` (review L3):** ADR-0010's
-  headline rationale is cross-repo reuse of a *published* config. It ships `private`
-  for now; **SMA-390** tracks flipping `private: false` when the repo's publish
-  story lands. The package's `package.json` carries a `TODO(SMA-390)` next to
-  `private: true`, mirroring the kernel pattern.
+- **ADR-0010 + AC item A amended:** dropped the "wired into Moon `sync`" language;
+  state the `prepare` + documented-task reality and the non-ts auto-install gap.
+  Done as part of this work (user-approved); AC amendment also recorded as a comment
+  on SMA-371.
+- **Publish-tracking for `@paigasus/commitlint-config`:** ADR-0010's headline
+  rationale is cross-repo reuse of a *published* config. It ships `private` for now;
+  **SMA-390** tracks flipping `private: false` when the repo's publish story lands.
+  The package's `package.json` carries a `TODO(SMA-390)` next to `private: true`,
+  mirroring the kernel pattern.
 
 ## Out of scope
 
