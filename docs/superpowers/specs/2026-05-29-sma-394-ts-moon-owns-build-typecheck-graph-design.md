@@ -55,11 +55,23 @@ inherited build/typecheck at the root, not merely omit the overrides.
 
 ## Decision
 
-Make the `ts` root a pure aggregator that owns no build/typecheck of its own — mirroring
-`py/moon.yml` (a `layer: configuration` project that defines only `fileGroups`). Remove the
-`tasks:` block entirely and exclude the two inherited tasks that have no valid target at the
-root, using the same `workspace.inheritedTasks.exclude` field `commitlint-config` already uses
-(whose comment forward-references this issue).
+Remove the `tasks:` block entirely and **exclude** the two inherited tasks that have no valid
+target at the root, using the same `workspace.inheritedTasks.exclude` field `commitlint-config`
+already uses (whose comment forward-references this issue). The root keeps `language:
+typescript` and its inherited whole-tree `lint`/`fmt`/`test`; Moon's per-project fan-out owns
+the entire `:build`/`:typecheck` graph.
+
+> **Not a "mirror py."** An earlier draft justified this as mirroring `py/moon.yml`. That framing
+> was wrong and is removed. `py/moon.yml` is `layer: configuration`, `language: python`, and
+> defines only `fileGroups` — but it does **not** exclude anything; it *inherits* `build:
+> uv build` and `typecheck: uv run basedpyright` from `.moon/tasks/python.yml`. `py:build` even
+> succeeds today (verified: exit 0, ~940ms) but builds a meaningless `unknown-0.0.0` wheel,
+> because `py/pyproject.toml` has `[tool.uv.workspace]` and **no `[project]` table**. So `py` is
+> in the *same pre-fix shape* this issue removes from `ts`; after this change the two roots
+> **diverge** on exactly the field being added. `py` is a follow-up twin (see Out of scope), not
+> the model. The justification for the `ts` exclude stands on its own: without it the root falls
+> back to the inherited `tsc -p tsconfig.json --noEmit`, which fails `TS5058` (no root
+> `tsconfig.json`).
 
 ### `ts/moon.yml` end state
 
@@ -83,13 +95,12 @@ fileGroups:
     - 'packages/*/tests/**/*'
     - 'apps/*/tests/**/*'
 
-# The ts root is a pure aggregator (layer: configuration), like py/moon.yml — it owns no
-# build/typecheck of its own. Moon's per-project fan-out owns the whole :build / :typecheck
-# graph: each package/app inherits `tsc -p tsconfig.json --noEmit`, and apps override `build`
-# with their own `outputs:` (see paigasus-console). We must EXCLUDE (not merely omit) the
-# inherited build/typecheck here, because ts/ has only tsconfig.base.json — no tsconfig.json —
-# so the inherited `tsc -p tsconfig.json --noEmit` would fail TS5058 at the root cwd.
-# lint/fmt/test stay inherited and run whole-tree from ts/. Same field/idiom as
+# The ts root owns no build/typecheck of its own: Moon's per-project fan-out owns the whole
+# :build / :typecheck graph — each package/app inherits `tsc -p tsconfig.json --noEmit`, and
+# apps override `build` with their own `outputs:` (see paigasus-console). We must EXCLUDE (not
+# merely omit) the inherited build/typecheck here, because ts/ has only tsconfig.base.json —
+# no tsconfig.json — so the inherited `tsc -p tsconfig.json --noEmit` would fail TS5058 at the
+# root cwd. lint/fmt/test stay inherited and run whole-tree from ts/. Same field/idiom as
 # commitlint-config (SMA-395), which forward-referenced this change.
 workspace:
   inheritedTasks:
@@ -122,6 +133,12 @@ produces no build artifact yet (it has only a `typecheck` script and inherits th
 `tsc --noEmit` build), so reclassifying does **not** trip the app-build invariant documented
 below; it will need its own `build` + `outputs:` task only once it grows a real docs build.
 
+Nothing in the repo depends on `paigasus-docs` (grep-confirmed), so Moon's
+`constraints.enforceProjectTypeRelationships` — on by default; under it an `application` may not
+be *depended upon* by another project — stays satisfied by the flip. A future `apps/*`
+reclassification should re-check dependents, since that constraint, not task inheritance, is the
+one dimension `layer` actually affects.
+
 ## Documentation — the app-build invariant
 
 Every `apps/*` that produces a build artifact MUST define its own Moon `build` task with
@@ -142,12 +159,15 @@ artifact. Document this in two places:
 `ts/README.md` currently instructs `moon run ts:typecheck` and `moon run ts:build` — both
 targets disappear when the root overrides are removed. Update:
 
-- The command table: `moon run ts:typecheck` → `moon run :typecheck`, `moon run ts:build` →
-  `moon run :build` (the repo's full-graph idiom, per SMA-395). Keep the per-app
-  `moon run paigasus-console-ts:build` example.
-- The `moon.yml` description line (line 12): the root no longer "owns workspace-wide
-  typecheck/build"; reword to say it excludes build/typecheck and Moon's per-project tasks own
-  them, while it still owns whole-tree lint/fmt/test.
+- The command table: `moon run ts:typecheck` → `moon run :typecheck`, and `moon run ts:build`
+  → `moon run :build` (the repo's full-graph idiom, per SMA-395). **Relabel the "Build (libs)"
+  row** — `:build` runs every project's build (libs' no-op `tsc --noEmit` *and* apps' real
+  builds), so the "(libs)" qualifier becomes wrong; use "Build (all)". Keep the per-app
+  `moon run paigasus-console-ts:build` row.
+- The Layout-section `moon.yml` bullet (the one reading *"Owns workspace-wide `typecheck` and
+  `build` (recursive `pnpm -r ...`)"*): reword so it no longer states the removed behavior —
+  the root excludes build/typecheck (Moon's per-project tasks own them) while it still owns
+  whole-tree lint/fmt/test.
 
 The general guidance line ("invoke pnpm via `moon run ts:<task>`") stays valid for the tasks
 that remain on the root (`ts:lint`, `ts:fmt`, `ts:test`).
@@ -173,13 +193,22 @@ that remain on the root (`ts:lint`, `ts:fmt`, `ts:test`).
   **SMA-361** and noted there, not built here.
 - **Promoting `inheritedTasks.exclude` to a documented config-only-package convention.** That is
   SMA-396's recurring-shape problem; not subsumed here.
+- **`py/moon.yml` is the same pre-fix shape (py twin).** The py configuration root inherits
+  `build`/`typecheck` without excluding them, and `py:build` runs `uv build` at a
+  `[project]`-less workspace root → a meaningless `unknown-0.0.0` wheel. It *succeeds* (exit 0),
+  so it does **not** block this issue's AC — but it is the py-side twin of exactly this cleanup.
+  File a follow-up to apply `inheritedTasks.exclude: ['build', 'typecheck']` to `py/moon.yml`;
+  deliberately **not** folded into this TS issue (same scope discipline that spun the config-only
+  convention out to SMA-396, and that kept SMA-391 narrow).
 
 ## Acceptance criteria
 
 - [ ] No recursive `pnpm -r` / `pnpm --filter` build or typecheck aggregator remains in
       `ts/moon.yml`; Moon's per-project tasks own the full `:build` and `:typecheck` graphs.
-- [ ] Cold `moon run :build` and `moon run :typecheck` (and `moon ci :build` / `:typecheck`)
-      succeed; `paigasus-console` builds exactly once.
+- [ ] `moon ci :build` and `moon ci :typecheck` (the affected-graph form PR CI runs) succeed,
+      and `paigasus-console` builds exactly once. Whole-graph `moon run :build` /
+      `moon run :typecheck` are also green today (`py:build` verified passing), though their
+      greenness spans the whole repo, not just this change.
 - [ ] The `ts` root project no longer fails on an inherited `tsc --noEmit` (inheritance
       excluded — `moon project ts` shows no `build`/`typecheck`).
 - [ ] App-build invariant documented in CONTRIBUTING + the TS app scaffold template.
