@@ -1,5 +1,7 @@
 buf = "1.70.0"
+lefthook = "2.1.8"
 moon = "2.2.5"
 
 [plugins]
 buf = "file://./.proto/plugins/buf.toml"
+lefthook = "file://./.proto/plugins/lefthook.toml"

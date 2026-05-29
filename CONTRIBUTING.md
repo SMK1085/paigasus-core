@@ -49,6 +49,32 @@ vendored plugin at `.proto/plugins/buf.toml`.
 Per-workspace specifics live in each workspace's `README.md`; the root
 [README](./README.md#quickstart) summarizes the overall layout.
 
+### Local development setup (git hooks)
+
+Local git hooks enforce the commit-message and branch-name conventions before
+CI sees them. They're managed by [lefthook](https://lefthook.dev) (pinned in
+`.prototools`) and run [commitlint](https://commitlint.js.org) from `ts/`.
+
+**Order matters:** run `proto install` *before* installing workspace
+dependencies, so the lefthook binary is on `$PATH`:
+
+```bash
+proto install                 # installs moon, buf, lefthook
+moon run repo:install-hooks   # one-time: writes .git/hooks/{commit-msg,pre-push}
+```
+
+`pnpm install` (in `ts/`) also installs the hooks via a `prepare` script, so
+contributors who touch `ts/` get them automatically. Pure-Rust / pure-Python
+contributors should run the `moon run repo:install-hooks` step above.
+
+- **commit-msg** rejects non-Conventional-Commit messages.
+- **pre-push** rejects branches not matching `^feature/[a-z0-9._-]+$`
+  (`main` and `dependabot/*` are exempt).
+- **Emergency bypass:** `git commit --no-verify` (CI still enforces the rule).
+- **GUI git clients** (VS Code, IntelliJ, etc.) often launch with a stripped
+  `$PATH`; if commits fail there with "command not found", add your proto shim
+  directory (`~/.proto/shims`) to the client's environment.
+
 > Output is buffered for passing tasks (`buffer-only-failure`, set as
 > `taskOptions.outputStyle` in `.moon/tasks.yml`). Moon 2.2.5 has no CLI flag
 > to override this per invocation; to stream a specific task locally, set
@@ -65,8 +91,18 @@ fix(contracts): correct pagination field number in common/v1
 docs(py): document uv workspace setup
 ```
 
-Common types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`. Keep
-this consistent — changelog automation depends on it.
+**Allowed types:** `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`,
+`build`, `perf`, `style`, `revert`.
+
+**Allowed scopes:** `rs`, `py`, `ts`, `contracts`, `ci`, `docs`, `deps`,
+`release`, `repo`, `claude`, `workspace`. A scope is **required** (use `repo`
+or `workspace` for repo-wide changes). Note: a blank line is required before
+any commit footer (e.g. `Closes #12`).
+
+> **Maintenance rule (SMA-371):** these type and scope lists are enforced by
+> `@paigasus/commitlint-config` (in `ts/packages/commitlint-config/index.cjs`),
+> which is the source of truth. When you change either list, update the config
+> package **and** this section in the same PR.
 
 ## Code conventions
 
@@ -75,7 +111,8 @@ this consistent — changelog automation depends on it.
   - Rust / TypeScript / Protobuf: `// SPDX-License-Identifier: Apache-2.0`
   - Python: `# SPDX-License-Identifier: Apache-2.0`
 - Hand-written config carries no SPDX header. Examples in this repo:
-  `moon.yml`, `*.toml`, `*.yaml` / `*.yml`, `*.json`, and dotfiles like
+  `moon.yml`, `*.toml`, `*.yaml` / `*.yml`, `*.json`, `*.cjs` / `*.js` config
+  (e.g. `commitlint.config.cjs`, ESLint/Prettier config), and dotfiles like
   `.gitignore` / `.editorconfig`. If you're unsure for a new file type, ask in
   the PR — it's almost always config.
 - Generated files (lockfiles such as `Cargo.lock` / `uv.lock` /

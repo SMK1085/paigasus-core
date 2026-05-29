@@ -10,9 +10,12 @@
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "typecheck": "pnpm -r --if-present run typecheck",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "prepare": "command -v lefthook >/dev/null 2>&1 && lefthook install || echo \"[hooks] run 'proto install' then 'moon run repo:install-hooks' to enable git hooks\""
   },
   "devDependencies": {
+    "@commitlint/cli": "catalog:",
+    "@paigasus/commitlint-config": "workspace:*",
     "typescript": "catalog:",
     "eslint": "catalog:",
     "@eslint/js": "catalog:",
