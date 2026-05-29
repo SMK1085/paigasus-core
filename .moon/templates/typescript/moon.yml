@@ -3,6 +3,9 @@ id: '{{ name }}-ts'
 layer: '{% if archetype == "app" %}application{% else %}library{% endif %}'
 language: 'typescript'
 {%- if archetype == "app" %}
+# App-build invariant (SMA-394): an app that emits a build artifact MUST define its own
+# `build` task with `outputs:`. The ts root excludes the inherited build/typecheck, so an
+# app that only inherited the default would run `tsc --noEmit` and silently emit nothing.
 tasks:
   build:
     command: 'pnpm exec next build'
