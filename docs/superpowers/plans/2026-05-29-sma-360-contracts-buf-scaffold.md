@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stand up the `contracts/` buf workspace and the Rust `paigasus-proto` crate so future proto work has a place to land — no `.proto` schemas yet.
+**Goal:** Stand up the `contracts/` buf workspace and the Rust `paigasus-proto` crate so future proto work has a place to land — no real schemas yet (a package-only placeholder proto is included so buf 1.70 accepts the module).
 
 **Architecture:** buf config (`buf.yaml` + `buf.gen.yaml` + `buf.lock`) lives at `contracts/` root; sources go under `contracts/proto/`. `buf` is pinned via a **vendored** proto TOML plugin. Four codegen plugins target committed `generated/` dirs in the rs/py/ts workspaces (empty `.gitkeep` stubs for now). A new `paigasus-proto` Rust crate mirrors `paigasus-kernel`. Moon drives `lint`/`format`/`breaking`/`generate` as system-toolchain shell tasks.
 
@@ -118,16 +118,28 @@ git commit -m "build(contracts): vendor buf proto plugin and pin buf 1.70.0 (SMA
 ## Task 2: Scaffold `contracts/buf.yaml`, proto dirs, and the dep lock
 
 **Files:**
-- Create: `contracts/proto/paigasus/common/v1/.gitkeep`
+- Create: `contracts/proto/paigasus/common/v1/reserved.proto` (package-only placeholder)
 - Create: `contracts/proto/paigasus/gateway/v1/.gitkeep`
 - Create: `contracts/buf.yaml`
 - Create: `contracts/buf.lock` (generated)
 
-- [ ] **Step 1: Create the empty proto package dirs**
+- [ ] **Step 1: Create the proto package dirs + a placeholder proto**
+
+buf 1.70 errors on a module with zero `.proto` files, so `common/v1/` gets a
+package-only placeholder (real schemas replace it later); `gateway/v1/` stays
+empty via `.gitkeep`.
 
 ```bash
 mkdir -p contracts/proto/paigasus/common/v1 contracts/proto/paigasus/gateway/v1
-touch contracts/proto/paigasus/common/v1/.gitkeep contracts/proto/paigasus/gateway/v1/.gitkeep
+touch contracts/proto/paigasus/gateway/v1/.gitkeep
+cat > contracts/proto/paigasus/common/v1/reserved.proto <<'EOF'
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+// Placeholder so the buf module is non-empty: buf 1.70 errors on a module with
+// zero .proto files. Real schemas replace this when contracts work begins (SMA-360).
+package paigasus.common.v1;
+EOF
 ```
 
 - [ ] **Step 2: Create `contracts/buf.yaml`**
@@ -157,10 +169,10 @@ breaking:
 Run: `cd contracts && buf dep update && cd ..`
 Expected: creates `contracts/buf.lock` pinning a `buf.build/googleapis/googleapis` commit. No error.
 
-- [ ] **Step 4: Verify `buf lint` passes on the empty workspace (this is the test)**
+- [ ] **Step 4: Verify `buf lint` passes (this is the test)**
 
 Run: `cd contracts && buf lint && cd ..`
-Expected: exits 0, no output (no protos to lint).
+Expected: exits 0 — the package-only `reserved.proto` passes STANDARD cleanly.
 
 - [ ] **Step 5: Commit**
 
@@ -205,7 +217,7 @@ git commit -m "feat(contracts): add committed generated/ stub dirs for rs/py/ts 
 
 ---
 
-## Task 4: Add `contracts/buf.gen.yaml` and verify generate is a clean no-op
+## Task 4: Add `contracts/buf.gen.yaml` and verify generate runs (output discarded)
 
 **Files:**
 - Create: `contracts/buf.gen.yaml`
@@ -252,18 +264,24 @@ plugins:
       - import_extension=.js
 ```
 
-- [ ] **Step 2: Verify generate is a no-op that preserves the stubs (this is the test)**
+- [ ] **Step 2: Verify generate runs, then discard its output (this is the test)**
 
 Run: `cd contracts && buf generate && cd ..`
-Expected: exits 0, writes nothing (no protos).
+Expected: exits 0. The placeholder `reserved.proto` yields trivial output in
+rs/py/ts — that's expected; this scaffold PR commits NO generated code, so discard it:
 
-Then confirm the stubs survived (proves `clean` is correctly omitted):
-Run: `ls rs/crates/libs/paigasus-proto/src/generated/.gitkeep py/packages/paigasus-proto/src/paigasus_proto/generated/.gitkeep ts/packages/paigasus-proto/src/generated/.gitkeep`
-Expected: all three still present.
+```bash
+for d in rs/crates/libs/paigasus-proto/src/generated \
+         py/packages/paigasus-proto/src/paigasus_proto/generated \
+         ts/packages/paigasus-proto/src/generated; do
+  find "$d" -type f ! -name '.gitkeep' -delete
+  find "$d" -mindepth 1 -type d -empty -delete
+done
+```
 
-Then confirm git sees no new generated files:
+Then confirm only the stubs remain and nothing generated was left behind:
 Run: `git status --porcelain rs py ts`
-Expected: no output (nothing changed).
+Expected: no output (the three 0-byte `.gitkeep` stubs are the only files under the `generated/` dirs).
 
 - [ ] **Step 3: Commit**
 
