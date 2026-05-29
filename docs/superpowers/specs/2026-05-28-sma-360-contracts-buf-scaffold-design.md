@@ -290,3 +290,31 @@ to land with the first real protos.
 - **SMA-388** — flip `paigasus-proto` `publish=false` once codegen lands (L2).
 - **SMA-389** — wire `contracts:generate` build-graph edges with first protos (H3).
 - Notion §2 (Polyglot Monorepo Scoping) updated to the as-built config (M1).
+
+## Implementation notes (discovered during execution, 2026-05-29)
+
+Three deviations from this spec surfaced while implementing and were resolved:
+
+1. **buf 1.70 rejects an empty module.** `buf lint`/`build`/`dep update`/`generate`
+   all error with `Module "path: proto" had no .proto files`, so the workspace
+   cannot be literally empty (contradicting the "no proto schemas yet" AC). A single
+   package-only placeholder, `contracts/proto/paigasus/common/v1/reserved.proto`
+   (SPDX header + `syntax`/`package` only, no messages), makes `buf lint` pass
+   STANDARD cleanly. It carries a comment explaining why and is deleted when real
+   schemas land. `gateway/v1/` keeps its `.gitkeep` (the module is non-empty via
+   `common/v1`).
+2. **`generate` is no longer a no-op.** With the placeholder present, `buf generate`
+   emits trivial output in all three languages. Per the chosen approach
+   (placeholder proto, *no committed codegen* this issue), generated output is NOT
+   committed — the `generated/` dirs stay `.gitkeep`-only and the generate task's
+   output is discarded during verification. The full canonical opt set is retained
+   (dropping `file_descriptor_set` does not stop output and would reintroduce the
+   H1 defect). Verification item 5 ("generate produces no output") is superseded by
+   this; running `moon run contracts:generate` locally produces uncommitted files
+   until committed codegen begins (with the first real protos + `clean: true`).
+3. **`breaking` git path.** Moon runs tasks with CWD = the project dir, so the
+   `--against` ref must be `../.git#branch=main,subdir=contracts` (repo-root `.git`),
+   not `.git#...` (which resolves to the non-existent `contracts/.git`).
+
+All eight plan tasks completed; `moon ci :lint --base main` runs six affected lint
+tasks green; the working tree is clean with no committed generated code.
