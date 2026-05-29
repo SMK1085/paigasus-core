@@ -1,0 +1,31 @@
+# Local git hooks for paigasus-core. lefthook is the sole owner of .git/hooks
+# (ADR-0010); Moon vcs.hooks is intentionally empty. Install via:
+#   moon run repo:install-hooks   (or automatically on `pnpm install` in ts/)
+
+# Don't re-validate replayed commits during interactive rebases / merges.
+skip:
+  - merge
+  - rebase
+
+commit-msg:
+  commands:
+    commitlint:
+      run: |
+        # Bots commit/push directly; CI is their authoritative gate.
+        case "$(git config user.email)" in
+          *\[bot\]@*) exit 0 ;;
+        esac
+        if [ ! -x ts/node_modules/.bin/commitlint ]; then
+          echo "✖ commitlint not found. Run 'proto install' then 'pnpm install' in ts/." >&2
+          exit 1
+        fi
+        ts/node_modules/.bin/commitlint --edit {1} --config ts/commitlint.config.cjs
+
+pre-push:
+  commands:
+    branch-name:
+      run: |
+        case "$(git config user.email)" in
+          *\[bot\]@*) exit 0 ;;
+        esac
+        .lefthook/pre-push/check-branch.sh
