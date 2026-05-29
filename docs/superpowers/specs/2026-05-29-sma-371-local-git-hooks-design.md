@@ -158,8 +158,9 @@ git event ──> .git/hooks/{commit-msg,pre-push}   (shims written by `lefthook
 
 | File | Purpose |
 |---|---|
-| `moon.yml` (repo root) | `id: repo`, `layer: configuration`; task `install-hooks` → `lefthook install`, `options.local: true`, `inputs: [lefthook.yml, .lefthook/**]`. System command (no language toolchain). |
-| `lefthook.yml` (repo root) | `commit-msg` (commitlint, explicit bin path) + `pre-push` (branch-name); global `skip: [merge, rebase]`; bot-email guard per command. |
+| `moon.yml` (repo root) | `id: repo`, `layer: configuration`; task `install-hooks` → `script: 'lefthook validate && lefthook install'`, `toolchain: system`, `options.runInCI: false`, `inputs: [lefthook.yml, .lefthook/**]` (as-built; see notes). |
+| `lefthook.yml` (repo root) | `commit-msg` (commitlint, explicit bin path) + `pre-push` (branch-name); per-hook `skip: [merge, rebase]`; bot-email guard per command. |
+| `.proto/plugins/lefthook.toml` | Vendored proto plugin resolving checksummed `evilmartians/lefthook` release binaries (mirrors `buf.toml`). |
 | `.lefthook/pre-push/check-branch.sh` | Branch-name validator (current branch via `git symbolic-ref`). Carries SPDX header (hand-written script). |
 | `ts/commitlint.config.cjs` | `module.exports = { extends: ['@paigasus/commitlint-config'] }` — no per-repo overrides (ADR-0010). |
 | `ts/packages/commitlint-config/package.json` | `@paigasus/commitlint-config`; `private: true` (see follow-up below); `main: index.cjs`; deps `@commitlint/config-conventional`. |
@@ -170,7 +171,7 @@ git event ──> .git/hooks/{commit-msg,pre-push}   (shims written by `lefthook
 
 | File | Change |
 |---|---|
-| `.prototools` | Add the lefthook pin (proto npm backend preferred — see open items). |
+| `.prototools` | Pin lefthook (`lefthook = "2.1.8"`) and reference the vendored plugin (`lefthook = "file://./.proto/plugins/lefthook.toml"`). |
 | `.moon/workspace.yml` | Convert `projects` list → `{ globs: [...existing...], sources: { repo: '.' } }`. `vcs.hooks` stays unset. |
 | `ts/package.json` | Add resilient `prepare` (above); devDep `@commitlint/cli` (catalog); `@paigasus/commitlint-config: "workspace:*"`. |
 | `ts/pnpm-workspace.yaml` | Catalog entries: `@commitlint/cli`, `@commitlint/config-conventional`. |
