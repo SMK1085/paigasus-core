@@ -141,7 +141,7 @@ below), and ideally asserted by SMA-361 CI (each app emits its expected output).
   never collides — only minor wasted work. Not this issue's concern; folded into the follow-up
   below, do not change here.
 
-## Follow-up (structural fix — new issue, decided not to do here)
+## Follow-up (structural fix — tracked as SMA-394, decided not to do here)
 
 This one-liner fully resolves the flaky-CI bug and is safe to ship, but it is a **fence around the
 cause, not its removal**. The recursive `ts:build` survives as a "forward-looking
