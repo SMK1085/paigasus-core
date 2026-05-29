@@ -25,7 +25,7 @@ tasks:
       - 'proto/**/*'
       - 'buf.yaml'
   breaking:
-    command: "buf breaking --against '.git#branch=main,subdir=contracts'"
+    command: "buf breaking --against '../.git#branch=main,subdir=contracts'"
     toolchain: 'system'
     inputs:
       - 'proto/**/*'
