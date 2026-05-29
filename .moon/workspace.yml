@@ -1,15 +1,18 @@
 $schema: 'https://moonrepo.dev/schemas/workspace.json'
 
 projects:
-  - 'contracts'
-  - 'rs/crates/libs/*'
-  - 'rs/crates/bindings/*'
-  - 'rs/crates/services/*'
-  - 'py'
-  - 'py/packages/*'
-  - 'ts'
-  - 'ts/packages/*'
-  - 'ts/apps/*'
+  globs:
+    - 'contracts'
+    - 'rs/crates/libs/*'
+    - 'rs/crates/bindings/*'
+    - 'rs/crates/services/*'
+    - 'py'
+    - 'py/packages/*'
+    - 'ts'
+    - 'ts/packages/*'
+    - 'ts/apps/*'
+  sources:
+    repo: '.'
 
 vcs:
   client: 'git'
