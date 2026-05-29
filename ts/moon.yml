@@ -6,9 +6,8 @@ language: 'typescript'
 # The inherited fileGroups from .moon/tasks/typescript.yml assume src/ at the project root.
 # The ts workspace keeps sources under packages/*/src and apps/*/{src,app}, so extend the
 # inherited groups here. Moon merges (not overrides) fileGroups across the layers, so the
-# resolved @group(sources) and @group(tests) contain both typescript.yml's defaults and these
-# additions — fine in practice because ts/src/ and ts/tests/ don't exist; only the package/app
-# subdirs actually match. (Same merge semantics confirmed for py in SMA-384 Correction 2.)
+# resolved @group(sources)/@group(tests) feed the inputs of the inherited whole-tree
+# lint/fmt/test that still run from ts/. (Same merge semantics confirmed for py in SMA-384.)
 fileGroups:
   sources:
     - 'packages/*/src/**/*'
@@ -18,40 +17,13 @@ fileGroups:
     - 'packages/*/tests/**/*'
     - 'apps/*/tests/**/*'
 
-# Override the inherited per-project commands for the two tasks that need a workspace-wide
-# entry point. typecheck fans out via pnpm recursion (each package owns a `typecheck` script).
-# build fans out the same way; packages without a `build` script no-op cleanly. The inherited
-# lint/fmt/test commands work from `ts/` cwd unchanged — they walk from cwd to find their
-# config and pick up the whole tree.
-tasks:
-  typecheck:
-    command: 'pnpm -r --if-present run typecheck'
-    inputs:
-      - '@group(sources)'
-      - '@group(tests)'
-      - 'tsconfig.base.json'
-      - 'packages/**/tsconfig.json'
-      - 'apps/**/tsconfig.json'
-      - 'package.json'
-      - 'pnpm-workspace.yaml'
-      - 'pnpm-lock.yaml'
-    options:
-      merge: replace
-  build:
-    # Library packages only — apps own their build via per-app Moon tasks (see paigasus-console).
-    # `typecheck` above intentionally still uses `pnpm -r` over the whole tree: its `tsc --noEmit`
-    # writes nothing and holds no lock, so the double-run is harmless. The asymmetry is deliberate;
-    # both converge in the structural follow-up (SMA-394). See SMA-391 design doc.
-    command: 'pnpm --filter "./packages/**" --if-present run build'
-    inputs:
-      # @group(sources) still includes apps/*/src and apps/*/app (see fileGroups above), so an
-      # app-source edit invalidates this task's cache and triggers a clean no-op re-run — benign
-      # (never a wrong build). Left intentionally broad; tightening waits on SMA-394.
-      - '@group(sources)'
-      - 'tsconfig.base.json'
-      - 'packages/**/tsconfig.json'
-      - 'package.json'
-      - 'pnpm-workspace.yaml'
-      - 'pnpm-lock.yaml'
-    options:
-      merge: replace
+# The ts root owns no build/typecheck of its own: Moon's per-project fan-out owns the whole
+# :build / :typecheck graph — each package/app inherits `tsc -p tsconfig.json --noEmit`, and
+# apps override `build` with their own `outputs:` (see paigasus-console). We must EXCLUDE (not
+# merely omit) the inherited build/typecheck here, because ts/ has only tsconfig.base.json —
+# no tsconfig.json — so the inherited `tsc -p tsconfig.json --noEmit` would fail TS5058 at the
+# root cwd. lint/fmt/test stay inherited and run whole-tree from ts/. Same field/idiom as
+# commitlint-config (SMA-395), which forward-referenced this change.
+workspace:
+  inheritedTasks:
+    exclude: ['build', 'typecheck']
