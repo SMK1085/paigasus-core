@@ -68,7 +68,8 @@ language: 'typescript'
 # compile or type-check. It stays `language: typescript` only so lint/fmt/test
 # still attach. Opt out of the inherited per-project `build`/`typecheck` tasks
 # (.moon/tasks/typescript.yml runs `tsc -p tsconfig.json --noEmit`, which fails
-# TS5058 with no tsconfig.json). Same mechanism SMA-394 applies to the `ts` root.
+# TS5058 with no tsconfig.json). This is the repo's first use of this field;
+# SMA-394 will later apply the same field to the `ts` root.
 workspace:
   inheritedTasks:
     exclude: ['build', 'typecheck']
@@ -78,8 +79,12 @@ workspace:
 
 `workspace.inheritedTasks.exclude` is a valid **project-level** field in Moon (confirmed against
 moonrepo.dev project-config docs): it lives under a top-level `workspace:` key, accepts a list of
-task names, and removes those inherited tasks from the project. This is the same mechanism
-SMA-394 will apply to the `ts` root — so the fix pre-sets that pattern rather than inventing one.
+task names, and removes those inherited tasks from the project. This is the **first** use of
+`inheritedTasks.exclude` in the repo (grep-confirmed: none exists today); SMA-394 will later
+apply the same field to the `ts` root. So SMA-395 establishes the pattern rather than following
+one — which makes verification step 1 below (`moon project commitlint-config-ts` shows the two
+tasks gone) the proof that the field resolves correctly in this repo's Moon 2.2.5, given Moon
+2.x's history of field renames here (`vcs.client`, `codeowners.sync`).
 
 ### What deliberately stays
 
@@ -88,6 +93,11 @@ SMA-394 will apply to the `ts` root — so the fix pre-sets that pattern rather 
 failure, so we exclude **only** the two broken tasks rather than dropping the whole TS toolchain
 (which is why `language: typescript` is kept rather than flipped to `javascript`).
 
+Forward caveat (not this issue's job): this package is slated to be published (SMA-390). If the
+shared ESLint config later enables type-aware rules (typescript-eslint project service), `eslint .`
+can choke on a `.cjs` that belongs to no `tsconfig`. Watch for it when the lint config tightens or
+the package goes public.
+
 ## Why this stays isolated
 
 The exclusion lives on `commitlint-config-ts` only and touches no other project. The root
@@ -95,6 +105,17 @@ The exclusion lives on `commitlint-config-ts` only and touches no other project.
 `build`/`typecheck` *script*, so `pnpm -r --if-present` / `--filter` pass over it). SMA-394's
 separate structural cleanup of those aggregators stays separate (decided in brainstorm: keep
 SMA-395 narrow).
+
+### This is a recurring class, and SMA-394 does not subsume it
+
+The exclusion fixes the one config-only package that exists today, but the underlying assumption —
+*every `language: typescript` project is a `tsc` unit with a `tsconfig.json`* — is violated by
+config-only packages as a shape (a future `@paigasus/eslint-config`, `prettier-config`, or shared
+`tsconfig` package would each be CJS/JSON-only and hit the identical `TS5058`). SMA-394 will **not**
+catch them: it drops the *root* aggregators and excludes tasks on the `ts` root project, leaving the
+*per-project* inherited `tsc -p tsconfig.json` task — the actual failure here — unchanged. So the
+exclude block recurs per package until it's promoted to a convention. Out of scope for this narrow
+fix; captured as the follow-up below.
 
 ## Alternatives considered
 
@@ -113,6 +134,15 @@ SMA-395 narrow).
 - SMA-394's removal of the recursive `ts:build` / `ts:typecheck` aggregators and the `ts`-root
   `inheritedTasks.exclude`. Separate, lower-priority issue; do not change `ts/moon.yml` here.
 - `lint` / `fmt` behavior on `index.cjs` — currently passes; not part of this failure.
+
+### Follow-up (not done here)
+
+Config-only TS packages are a recurring shape (see above), so the `inheritedTasks.exclude` block
+should become a documented convention rather than per-package rediscovery. Two options for a
+future issue: (a) document the "config-only TS package" pattern in the TS package scaffold/template
+so the Nth such package ships the exclude block by default; or (b) harden the inherited
+`build`/`typecheck` task definition to no-op gracefully when no `tsconfig.json` is present (one fix
+for all). Worth filing separately; deliberately not expanding SMA-395.
 
 ## Acceptance criteria
 
