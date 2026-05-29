@@ -159,11 +159,15 @@ artifact. Document this in two places:
 `ts/README.md` currently instructs `moon run ts:typecheck` and `moon run ts:build` — both
 targets disappear when the root overrides are removed. Update:
 
-- The command table: `moon run ts:typecheck` → `moon run :typecheck`, and `moon run ts:build`
-  → `moon run :build` (the repo's full-graph idiom, per SMA-395). **Relabel the "Build (libs)"
-  row** — `:build` runs every project's build (libs' no-op `tsc --noEmit` *and* apps' real
-  builds), so the "(libs)" qualifier becomes wrong; use "Build (all)". Keep the per-app
-  `moon run paigasus-console-ts:build` row.
+- The command table: `moon run ts:typecheck` → `moon run :typecheck --query "language=typescript"`,
+  and `moon run ts:build` → `moon run :build --query "language=typescript"`. **The query is
+  required** — a *bare* `moon run :build`/`:typecheck` runs the task in every project across all
+  languages (rust + py both define `build`), so in a TS-workspace README it must be scoped to
+  `language=typescript` to preserve the old `ts:build` intent. (`--query` is a real `moon run`
+  flag; the query was verified to resolve only the TS projects.) **Relabel the "Build (libs)"
+  row** to "Build (all TS)" — `:build` runs every TS project's build (libs' no-op `tsc --noEmit`
+  *and* apps' real builds). Keep the per-app `moon run paigasus-console-ts:build` row, and leave
+  `lint`/`fmt`/`test` on `moon run ts:<task>` (those tasks still live on the root).
 - The Layout-section `moon.yml` bullet (the one reading *"Owns workspace-wide `typecheck` and
   `build` (recursive `pnpm -r ...`)"*): reword so it no longer states the removed behavior —
   the root excludes build/typecheck (Moon's per-project tasks own them) while it still owns
@@ -249,5 +253,6 @@ that remain on the root (`ts:lint`, `ts:fmt`, `ts:test`).
 - `.moon/templates/typescript/moon.yml` — comment the `app` branch's `build`+`outputs:` task
   with the invariant rationale.
 - `.moon/templates/typescript/template.yml` — strengthen the `description` to state the invariant.
-- `ts/README.md` — update the command table (`ts:build`/`ts:typecheck` → `:build`/`:typecheck`)
-  and the `moon.yml` description line.
+- `ts/README.md` — update the command table (`ts:build`/`ts:typecheck` →
+  `moon run :build --query "language=typescript"` / `:typecheck --query ...`), the "gates"
+  sentence, the Notes section, and the `moon.yml` Layout bullet.

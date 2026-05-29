@@ -305,12 +305,14 @@ The workspace-wide gates live on the `ts` Moon project and run once over the who
 with:
 
 ```markdown
-`lint`/`fmt`/`test` run once over the whole workspace from the `ts` Moon project; `typecheck` and `build` fan out per project (Moon owns the `:typecheck`/`:build` graph), so they are addressed with the all-projects target form:
+`lint`/`fmt`/`test` run once over the whole workspace from the `ts` Moon project; `typecheck` and `build` fan out per project (Moon owns the `:typecheck`/`:build` graph), so they are addressed with a TypeScript-scoped query — a bare `moon run :build` would also build the `rust`/`py` workspaces:
 ```
+
+> **Why the `--query`:** a bare `moon run :build` / `:typecheck` runs that task in EVERY project across ALL languages (`rust.yml` and `python.yml` both define `build`), not just the TS workspace. The old `ts:build` was TS-scoped, so the README must scope with `--query "language=typescript"` to preserve that. `--query` is a real `moon run` flag and `language=typescript` resolves to exactly the TS projects (verified).
 
 - [ ] **Step 3: Update the command table (lines 30, 32, 33)**
 
-Replace the table body so the `Type check` and `Build` rows use the all-projects form (leave `lint`/`fmt`/`test` on `ts:` — those tasks still live on the root). Exact replacement for the three changed rows:
+Replace the table body so the `Type check` and `Build` rows use the TypeScript-scoped query form (leave `lint`/`fmt`/`test` on `ts:` — those tasks still live on the root). Exact replacement for the three changed rows:
 
 Change line 30 from:
 ```markdown
@@ -318,7 +320,7 @@ Change line 30 from:
 ```
 to:
 ```markdown
-| Type check       | `moon run :typecheck`                |
+| Type check      | `moon run :typecheck --query "language=typescript"` |
 ```
 
 Change lines 32–33 from:
@@ -328,8 +330,8 @@ Change lines 32–33 from:
 ```
 to:
 ```markdown
-| Build (all)      | `moon run :build`                    |
-| Build (one app)  | `moon run paigasus-console-ts:build` |
+| Build (all TS)  | `moon run :build --query "language=typescript"`     |
+| Build (one app) | `moon run paigasus-console-ts:build`                |
 ```
 
 (Exact padding does not matter — Step 5 runs `prettier --write` to re-align the table.)
@@ -339,7 +341,7 @@ to:
 After the first Notes bullet (the one starting "For env parity, invoke pnpm via `moon run ts:<task>`…"), add:
 
 ```markdown
-- `Type check` and `Build` use the all-projects target form (`moon run :typecheck` / `moon run :build`): the `ts` root no longer defines those tasks — Moon's per-project tasks own them (SMA-394) — whereas `lint`/`fmt`/`test` still run once from the `ts` project.
+- `Type check` and `Build` use a TypeScript-scoped query (`moon run :typecheck --query "language=typescript"` / `moon run :build --query "language=typescript"`): the `ts` root no longer defines those tasks — Moon's per-project tasks own them (SMA-394) — and a bare `moon run :build` would also build the `rust`/`py` workspaces, so the query scopes it to TS. `lint`/`fmt`/`test` still run once from the `ts` project.
 ```
 
 - [ ] **Step 5: Normalize formatting and verify it is prettier-clean**
@@ -351,12 +353,12 @@ moon run ts:fmt 2>&1 | tail -5
 ```
 Expected: `prettier --write` reports `README.md` (re-aligned table); `moon run ts:fmt` passes (no formatting violations across the ts tree).
 
-- [ ] **Step 6: Confirm no stale `ts:build`/`ts:typecheck` references remain**
+- [ ] **Step 6: Confirm no stale standalone `ts:build`/`ts:typecheck` references remain**
 
 ```bash
-grep -nE 'ts:build|ts:typecheck' ts/README.md || echo "clean"
+grep -nE 'moon run ts:(build|typecheck)' ts/README.md || echo "clean"
 ```
-Expected: `clean`.
+Expected: `clean`. (Match the full `moon run ts:build` form, NOT a bare `ts:build` — the latter is a benign substring of the legitimate `paigasus-console-ts:build` per-app target, which must stay.)
 
 - [ ] **Step 7: Commit**
 
@@ -364,9 +366,10 @@ Expected: `clean`.
 git add ts/README.md
 git commit -m "docs(ts): update ts README for Moon-owned build/typecheck graph (SMA-394)
 
-ts:build / ts:typecheck no longer exist; document the all-projects form
-(moon run :build / :typecheck), reword the moon.yml layout bullet and the
-gates sentence, and relabel the build rows (:build covers libs and apps).
+ts:build / ts:typecheck no longer exist; document the TypeScript-scoped
+query form (moon run :build --query \"language=typescript\"), reword the
+moon.yml layout bullet and the gates sentence, and relabel the build rows
+(a bare :build would also build the rust/py workspaces).
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -439,6 +442,6 @@ Confirm each spec AC is green:
 
 ## Self-Review (performed against the spec)
 
-- **Spec coverage:** all five files in the spec's "Files touched" map to Tasks 1–4; all five ACs map to Task 5 Step 6. The two F1/F2/F3 review corrections are reflected (README "Build (all)" relabel, application-constraint check in Task 2 Step 2, no "mirror py" claim, py twin called out as out-of-scope).
+- **Spec coverage:** all five files in the spec's "Files touched" map to Tasks 1–4; all five ACs map to Task 5 Step 6. The F1/F2/F3 review corrections are reflected (README build/typecheck commands TS-scoped via `--query "language=typescript"` and the "Build (all TS)" relabel, application-constraint check in Task 2 Step 2, no "mirror py" claim, py twin called out as out-of-scope).
 - **Placeholder scan:** no TBD/TODO/"handle errors"; every edit shows exact before/after content and exact commands with expected output.
 - **Consistency:** the `workspace.inheritedTasks.exclude: ['build', 'typecheck']` syntax matches `commitlint-config/moon.yml` (proven prettier-clean and resolvable in Moon 2.2.5 per SMA-395); commit subjects are commitlint-compliant (lowercase lead, no em-dash, ≤100 chars).
