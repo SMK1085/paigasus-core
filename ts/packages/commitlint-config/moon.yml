@@ -3,3 +3,13 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 id: 'commitlint-config-ts'
 layer: 'library'
 language: 'typescript'
+
+# Pure CommonJS config package (index.cjs): no tsconfig.json and nothing to
+# compile or type-check. It stays `language: typescript` only so lint/fmt/test
+# still attach. Opt out of the inherited per-project `build`/`typecheck` tasks
+# (.moon/tasks/typescript.yml runs `tsc -p tsconfig.json --noEmit`, which fails
+# TS5058 with no tsconfig.json). First use of this field in the repo; SMA-394
+# will later apply the same field to the `ts` root.
+workspace:
+  inheritedTasks:
+    exclude: ['build', 'typecheck']
