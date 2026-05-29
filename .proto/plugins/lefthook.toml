@@ -1,0 +1,33 @@
+# Vendored proto TOML plugin for the lefthook CLI.
+#
+# Source: adapted from https://github.com/ageha734/proto-plugins (lefthook.toml).
+# Vendored so we own the binary resolution; resolves official, checksummed
+# evilmartians/lefthook GitHub release binaries.
+#
+# Release assets ship as plain executables (no archive): lefthook_{ver}_{OS}_{arch}
+# That binary IS the shim target; proto renames it to "lefthook" in ~/.proto/bin/.
+
+name = "lefthook"
+type = "cli"
+
+[platform.linux]
+download-file = "lefthook_{version}_Linux_{arch}"
+checksum-file = "lefthook_checksums.txt"
+
+[platform.macos]
+download-file = "lefthook_{version}_MacOS_{arch}"
+checksum-file = "lefthook_checksums.txt"
+
+[platform.windows]
+download-file = "lefthook_{version}_Windows_{arch}.exe"
+checksum-file = "lefthook_checksums.txt"
+
+[install.arch]
+aarch64 = "arm64"
+
+[install]
+download-url = "https://github.com/evilmartians/lefthook/releases/download/v{version}/{download_file}"
+checksum-url = "https://github.com/evilmartians/lefthook/releases/download/v{version}/{checksum_file}"
+
+[resolve]
+git-url = "https://github.com/evilmartians/lefthook"
