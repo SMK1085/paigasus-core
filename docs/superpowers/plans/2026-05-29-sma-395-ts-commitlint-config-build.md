@@ -104,7 +104,9 @@ Run:
 ```bash
 moon run commitlint-config-ts:lint commitlint-config-ts:fmt commitlint-config-ts:test
 ```
-Expected: all three **succeed** (exit 0). `test` passes via `vitest run --passWithNoTests`; `lint`/`fmt` operate on `index.cjs`.
+Expected: `lint` and `test` **succeed** (exit 0; `test` via `vitest run --passWithNoTests`). The point is that these tasks still **attach and run** (not excluded).
+
+> **Found during execution:** `fmt` **fails** — but on a *pre-existing* Prettier violation in `index.cjs` (hand-wrapped arrays Prettier wants collapsed; introduced in SMA-371, `aca3a78`), not anything this fix changed. The `fmt` task itself runs correctly. This is out of scope for SMA-395 (it's not the `TS5058` build/typecheck failure) and is flagged for a separate follow-up issue. Do not fix `index.cjs` here.
 
 - [ ] **Step 6: Cold full build graph — no `TS5058`**
 

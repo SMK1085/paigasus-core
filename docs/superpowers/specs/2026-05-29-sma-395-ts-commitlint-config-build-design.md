@@ -88,10 +88,14 @@ tasks gone) the proof that the field resolves correctly in this repo's Moon 2.2.
 
 ### What deliberately stays
 
-`lint`, `fmt`, `test` remain inherited and run fine on a lone `.cjs`
-(`eslint .`, `prettier --check .`, `vitest run --passWithNoTests`). They are not part of the
-failure, so we exclude **only** the two broken tasks rather than dropping the whole TS toolchain
-(which is why `language: typescript` is kept rather than flipped to `javascript`).
+`lint`, `fmt`, `test` remain inherited (`eslint .`, `prettier --check .`,
+`vitest run --passWithNoTests`). They are not part of the `TS5058` failure, so we exclude **only**
+the two broken tasks rather than dropping the whole TS toolchain (which is why `language:
+typescript` is kept rather than flipped to `javascript`). `lint` and `test` pass on the lone
+`.cjs`. **`fmt` currently fails** — but on a *pre-existing* Prettier violation in `index.cjs`
+(hand-wrapped `type-enum`/`scope-enum` arrays that Prettier wants collapsed), introduced in
+SMA-371 and unrelated to this fix; the `fmt` task itself attaches and runs correctly. That
+failure is out of scope here (see "Out of scope" / "Follow-up").
 
 Forward caveat (not this issue's job): this package is slated to be published (SMA-390). If the
 shared ESLint config later enables type-aware rules (typescript-eslint project service), `eslint .`
@@ -133,7 +137,11 @@ fix; captured as the follow-up below.
 
 - SMA-394's removal of the recursive `ts:build` / `ts:typecheck` aggregators and the `ts`-root
   `inheritedTasks.exclude`. Separate, lower-priority issue; do not change `ts/moon.yml` here.
-- `lint` / `fmt` behavior on `index.cjs` — currently passes; not part of this failure.
+- The **pre-existing `commitlint-config-ts:fmt` failure**: `index.cjs` is not Prettier-clean
+  (predates this branch — last touched in SMA-371's `aca3a78`). It is unrelated to the `TS5058`
+  build/typecheck failure this issue fixes, and surfaces only because the fix correctly keeps
+  `fmt` attached. Fix is trivial (`prettier --write index.cjs`) but belongs in its own issue, not
+  SMA-395. It will break a full `moon ci :fmt` until then.
 
 ### Follow-up (not done here)
 
