@@ -38,12 +38,18 @@ tasks:
     options:
       merge: replace
   build:
-    command: 'pnpm -r --if-present run build'
+    # Library packages only — apps own their build via per-app Moon tasks (see paigasus-console).
+    # `typecheck` above intentionally still uses `pnpm -r` over the whole tree: its `tsc --noEmit`
+    # writes nothing and holds no lock, so the double-run is harmless. The asymmetry is deliberate;
+    # both converge in the structural follow-up (SMA-394). See SMA-391 design doc.
+    command: 'pnpm --filter "./packages/**" --if-present run build'
     inputs:
+      # @group(sources) still includes apps/*/src and apps/*/app (see fileGroups above), so an
+      # app-source edit invalidates this task's cache and triggers a clean no-op re-run — benign
+      # (never a wrong build). Left intentionally broad; tightening waits on SMA-394.
       - '@group(sources)'
       - 'tsconfig.base.json'
       - 'packages/**/tsconfig.json'
-      - 'apps/**/tsconfig.json'
       - 'package.json'
       - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
