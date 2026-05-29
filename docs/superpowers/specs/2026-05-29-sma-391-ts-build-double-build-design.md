@@ -68,12 +68,12 @@ build:
   # Library packages only — apps own their build via per-app Moon tasks (see paigasus-console).
   # `typecheck` below intentionally still uses `pnpm -r` (whole tree): tsc --noEmit writes nothing
   # and holds no lock, so its double-run is harmless. The asymmetry is deliberate, not an oversight;
-  # both are slated to converge in the F1 follow-up (see "Follow-up").
+  # both are slated to converge in the structural follow-up (see "Follow-up").
   command: 'pnpm --filter "./packages/**" --if-present run build'   # was: pnpm -r --if-present run build
   inputs:
     - '@group(sources)'
     - 'tsconfig.base.json'
-    - 'packages/**/tsconfig.json'   # `apps/**/tsconfig.json` dropped — the task no longer touches apps (F5)
+    - 'packages/**/tsconfig.json'   # `apps/**/tsconfig.json` dropped — the task no longer touches apps
     - 'package.json'
     - 'pnpm-workspace.yaml'
     - 'pnpm-lock.yaml'
@@ -104,10 +104,10 @@ step (e.g. `tsup`/bundling beyond plain `tsc --noEmit`) gets picked up automatic
 `build` script to its `package.json`. Apps (`paigasus-console`, future `paigasus-docs`) build via
 their own `<app>-ts:build` Moon tasks, which Moon already orders and caches independently.
 
-The task `command` changes and the now-irrelevant `apps/**/tsconfig.json` input is dropped (F5).
+The task `command` changes and the now-irrelevant `apps/**/tsconfig.json` input is dropped.
 `options.merge: replace` and the rest of `ts/moon.yml` are otherwise untouched.
 
-## Invariant this fix establishes (F2)
+## Invariant this fix establishes
 
 Excluding `apps/**` from the recursive build converts the old failure mode ("apps double-built,
 loud and intermittent") into a new one ("an app with no Moon `build` override is **silently never
@@ -144,7 +144,7 @@ below), and ideally asserted by SMA-361 CI (each app emits its expected output).
 ## Follow-up (structural fix — new issue, decided not to do here)
 
 This one-liner fully resolves the flaky-CI bug and is safe to ship, but it is a **fence around the
-cause, not its removal** (review F1/F4). The recursive `ts:build` survives as a "forward-looking
+cause, not its removal**. The recursive `ts:build` survives as a "forward-looking
 hook," and that hook is precisely the mechanism that recreates the bug: a future `packages/*` that
 gains a real artifact build (e.g. `"build": "tsup"`) will, following the console's own pattern,
 override its per-project Moon `build` (with `outputs:`) **and** still be picked up by `ts:build`'s
@@ -157,8 +157,8 @@ The structural fix (deferred by decision, no `packages/*` triggers it today):
 - Drop the recursive `ts:build` aggregator; let `moon ci :build`'s per-project fan-out own the
   whole graph. Use `workspace.inheritedTasks.exclude: ['build']` on the `ts` root project so it
   doesn't fall back to the inherited `tsc --noEmit` (which fails — no root `tsconfig.json`).
-- Apply the same treatment to `ts:typecheck` so the two sibling aggregators stay parallel (F4).
-- Record the F2 app-build invariant in CONTRIBUTING + the TS app scaffold template.
+- Apply the same treatment to `ts:typecheck` so the two sibling aggregators stay parallel.
+- Record the app-build invariant (above) in CONTRIBUTING + the TS app scaffold template.
 
 This touches the workspace-aggregator pattern introduced in SMA-359, so it gets its own issue.
 
@@ -195,5 +195,5 @@ This touches the workspace-aggregator pattern introduced in SMA-359, so it gets 
 ## Files touched
 
 - `ts/moon.yml` — `build` task only: change `command` to the packages-scoped + `--if-present`
-  form, drop the now-irrelevant `apps/**/tsconfig.json` input (F5), and add the comment explaining
-  the deliberate `build`/`typecheck` asymmetry (F4). No other task or file changes.
+  form, drop the now-irrelevant `apps/**/tsconfig.json` input, and add the comment explaining
+  the deliberate `build`/`typecheck` asymmetry. No other task or file changes.
