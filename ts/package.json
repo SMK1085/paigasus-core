@@ -13,6 +13,8 @@
     "test": "vitest run --passWithNoTests"
   },
   "devDependencies": {
+    "@commitlint/cli": "catalog:",
+    "@paigasus/commitlint-config": "workspace:*",
     "typescript": "catalog:",
     "eslint": "catalog:",
     "@eslint/js": "catalog:",

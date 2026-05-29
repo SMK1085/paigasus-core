@@ -28,3 +28,6 @@ catalog:
   # Per-package add-ons (catalog-listed so they bump centrally even when used in only one app)
   '@next/eslint-plugin-next': ^16.2.6
   '@tanstack/eslint-plugin-query': ^5.100.14
+  # Commit tooling (SMA-371)
+  '@commitlint/cli': ^21.0.1
+  '@commitlint/config-conventional': ^21.0.1
