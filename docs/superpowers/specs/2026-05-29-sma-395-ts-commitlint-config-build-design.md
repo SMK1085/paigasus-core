@@ -92,10 +92,9 @@ tasks gone) the proof that the field resolves correctly in this repo's Moon 2.2.
 `vitest run --passWithNoTests`). They are not part of the `TS5058` failure, so we exclude **only**
 the two broken tasks rather than dropping the whole TS toolchain (which is why `language:
 typescript` is kept rather than flipped to `javascript`). `lint` and `test` pass on the lone
-`.cjs`. **`fmt` currently fails** — but on a *pre-existing* Prettier violation in `index.cjs`
-(hand-wrapped `type-enum`/`scope-enum` arrays that Prettier wants collapsed), introduced in
-SMA-371 and unrelated to this fix; the `fmt` task itself attaches and runs correctly. That
-failure is out of scope here (see "Out of scope" / "Follow-up").
+`.cjs`. Keeping `fmt` attached surfaced a *pre-existing* Prettier violation in `index.cjs`
+(hand-wrapped `type-enum`/`scope-enum` arrays Prettier wants collapsed, introduced in SMA-371 and
+unrelated to the `TS5058` fix) — fixed in this PR as a bundled cleanup (see "Bundled cleanup").
 
 Forward caveat (not this issue's job): this package is slated to be published (SMA-390). If the
 shared ESLint config later enables type-aware rules (typescript-eslint project service), `eslint .`
@@ -133,15 +132,20 @@ fix; captured as the follow-up below.
   `inheritedBy.languages: ['typescript']`, so this drops *all* inherited tasks including the
   wanted lint/fmt/test, and changes the project's language semantics for affected-graph detection.
 
+## Bundled cleanup (`index.cjs` Prettier fix)
+
+Keeping the inherited `fmt` task attached surfaced a pre-existing failure: `index.cjs` was not
+Prettier-clean (its `type-enum`/`scope-enum` arrays were hand-wrapped; introduced in SMA-371's
+`aca3a78`, predating this branch). It is unrelated to the `TS5058` build/typecheck failure SMA-395
+fixes, but it would break a full `moon ci :fmt`. By maintainer decision it is folded into this PR
+rather than tracked as a separate issue — a trivial, formatting-only `prettier --write index.cjs`
+(collapses the two arrays onto single lines; no semantic change). After it, `commitlint-config-ts:fmt`
+passes.
+
 ## Out of scope
 
 - SMA-394's removal of the recursive `ts:build` / `ts:typecheck` aggregators and the `ts`-root
   `inheritedTasks.exclude`. Separate, lower-priority issue; do not change `ts/moon.yml` here.
-- The **pre-existing `commitlint-config-ts:fmt` failure**: `index.cjs` is not Prettier-clean
-  (predates this branch — last touched in SMA-371's `aca3a78`). It is unrelated to the `TS5058`
-  build/typecheck failure this issue fixes, and surfaces only because the fix correctly keeps
-  `fmt` attached. Fix is trivial (`prettier --write index.cjs`) but belongs in its own issue, not
-  SMA-395. It will break a full `moon ci :fmt` until then.
 
 ### Follow-up (not done here)
 

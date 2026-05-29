@@ -106,7 +106,7 @@ moon run commitlint-config-ts:lint commitlint-config-ts:fmt commitlint-config-ts
 ```
 Expected: `lint` and `test` **succeed** (exit 0; `test` via `vitest run --passWithNoTests`). The point is that these tasks still **attach and run** (not excluded).
 
-> **Found during execution:** `fmt` **fails** — but on a *pre-existing* Prettier violation in `index.cjs` (hand-wrapped arrays Prettier wants collapsed; introduced in SMA-371, `aca3a78`), not anything this fix changed. The `fmt` task itself runs correctly. This is out of scope for SMA-395 (it's not the `TS5058` build/typecheck failure) and is flagged for a separate follow-up issue. Do not fix `index.cjs` here.
+> **Found during execution:** `fmt` **fails** — but on a *pre-existing* Prettier violation in `index.cjs` (hand-wrapped arrays Prettier wants collapsed; introduced in SMA-371, `aca3a78`), not anything this fix changed. The `fmt` task itself runs correctly. It's not the `TS5058` build/typecheck failure SMA-395 targets, but by maintainer decision it's bundled into this PR rather than tracked separately (see Step 9).
 
 - [ ] **Step 6: Cold full build graph — no `TS5058`**
 
@@ -131,6 +131,17 @@ git add ts/packages/commitlint-config/moon.yml
 git commit -m "fix(ts): exclude commitlint-config from inherited tsc build/typecheck (SMA-395)"
 ```
 (The repo's lefthook `commit-msg` hook runs commitlint; the Conventional-Commit message above passes it.)
+
+- [ ] **Step 9: Bundled cleanup — fix the pre-existing `index.cjs` Prettier violation** (added during execution per maintainer decision)
+
+This is *not* part of SMA-395's `TS5058` fix; it's the pre-existing `fmt` failure surfaced in Step 5, folded into this PR so a full `moon ci :fmt` isn't left broken. Formatting only — no semantic change.
+
+```bash
+( cd ts/packages/commitlint-config && pnpm exec prettier --write index.cjs )
+moon run commitlint-config-ts:fmt --force   # expect: "All matched files use Prettier code style!"
+git add ts/packages/commitlint-config/index.cjs
+git commit -m "style(ts): format commitlint-config index.cjs to satisfy prettier (SMA-395)"
+```
 
 ---
 
