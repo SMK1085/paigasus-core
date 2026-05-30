@@ -61,9 +61,9 @@ jobs:
 ```
 
 - **PR trigger** is the AC requirement; **push-to-`main`** warms the shared cache and gives `main` a status.
-- **`permissions: contents: read`** — `paigasus-core` is a public repo; declare least privilege explicitly (the CODEOWNERS gate only does `git diff`, no writes). [F3]
-- **`cancel-in-progress` is scoped to PRs** so a rapid second push to `main` doesn't cancel the run that's warming the cache / setting `main`'s status. [F4]
-- **`timeout-minutes`** caps runaway jobs (GitHub's default is 6h). [F5]
+- **`permissions: contents: read`** — `paigasus-core` is a public repo; declare least privilege explicitly (the CODEOWNERS gate only does `git diff`, no writes).
+- **`cancel-in-progress` is scoped to PRs** so a rapid second push to `main` doesn't cancel the run that's warming the cache / setting `main`'s status.
+- **`timeout-minutes`** caps runaway jobs (GitHub's default is 6h).
 
 ### 2. Job steps
 
@@ -77,7 +77,7 @@ jobs:
 | 6 | `moon ci :build :test :lint :fmt :typecheck :breaking --base origin/main` | The graph gate. |
 | 7 | CODEOWNERS drift gate (see §7) | Fail if generated CODEOWNERS is stale. |
 
-**Action pinning [F3]:** on a public repo, pin third-party actions to a commit SHA (with a version comment). This applies to `actions/checkout`, `actions/cache`, and `moonrepo/setup-toolchain` — the last is a floating `v0` (pre-1.0, mutable) and is the subject of risk #2 (it could install a newer Moon than the pinned 2.2.5).
+**Action pinning:** on a public repo, pin third-party actions to a commit SHA (with a version comment). This applies to `actions/checkout`, `actions/cache`, and `moonrepo/setup-toolchain` — the last is a floating `v0` (pre-1.0, mutable) and is the subject of risk #2 (it could install a newer Moon than the pinned 2.2.5).
 
 `moon ci` **auto-installs the language toolchains** (Rust 1.95, Node 22 + pnpm 11, Python 3.12 + uv) from `.moon/toolchain.yml` — no `setup-rust`/`setup-node`/`setup-python` steps. Moon also runs affected tasks across its own thread pool, so one job parallelizes internally.
 
@@ -147,7 +147,7 @@ Notes:
 - The AC's `~/.moon/cache` path is a Moon 1.x assumption; 2.2.5 keeps the workspace task cache **repo-local at `.moon/cache`** (gitignored). Cache that path.
 - Resolve pnpm/uv cache directories at runtime (`pnpm store path`, `uv cache dir`) rather than hard-coding, to stay correct across runner image changes.
 - All keys carry `restore-keys` prefixes for partial-hit warm starts.
-- **Fork-PR note [F5]:** the branch-name policy invites external fork PRs. Fork PRs run with a read-only token and **cannot write `actions/cache`** — CI still works (the §5 `git fetch origin …main` resolves since `main` lives in the base repo) but fork PRs won't warm caches and run slower. Expected, not a misconfiguration.
+- **Fork-PR note:** the branch-name policy invites external fork PRs. Fork PRs run with a read-only token and **cannot write `actions/cache`** — CI still works (the §5 `git fetch origin …main` resolves since `main` lives in the base repo) but fork PRs won't warm caches and run slower. Expected, not a misconfiguration.
 
 ### 7. CODEOWNERS drift gate
 
@@ -186,7 +186,7 @@ Mirrors SMA-384 (py `format` → `fmt`). Scope check: the only **live** referenc
 1. **Commit-lint gate:** confirm the commitlint step passes on this branch's (conventional) commits; sanity-check that a deliberately bad message would fail it.
 2. **No-op pass:** open the PR; confirm the `ci` job runs green.
 3. **Affected-graph end-to-end:** push a commit touching a single file in one workspace (e.g. `rs/crates/libs/paigasus-kernel/src/lib.rs`) and confirm the Moon run summary shows **only that workspace's** tasks executing, not the universe. Capture the output for the close-out comment.
-4. **Whole-graph green [F2]:** before declaring CI green / configuring branch protection, run the **entire** graph once (not just affected subsets) to flush any latent per-project failure: `moon run :build :typecheck :lint :fmt :test` across all projects. *Already exercised during design on `25bc0b7`: 78 tasks completed, exit 0, zero failures — the graph is currently green (`py:build` included; it passes, see SMA-399 for its junk-artifact quality issue).* Re-confirm on the PR head before keying branch protection on it.
+4. **Whole-graph green:** before declaring CI green / configuring branch protection, run the **entire** graph once (not just affected subsets) to flush any latent per-project failure: `moon run :build :typecheck :lint :fmt :test` across all projects. *Already exercised during design on `25bc0b7`: 78 tasks completed, exit 0, zero failures — the graph is currently green (`py:build` included; it passes, see SMA-399 for its junk-artifact quality issue).* Re-confirm on the PR head before keying branch protection on it.
 
 ## Acceptance-criteria mapping
 
