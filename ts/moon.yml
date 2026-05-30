@@ -27,3 +27,17 @@ fileGroups:
 workspace:
   inheritedTasks:
     exclude: ['build', 'typecheck']
+
+# Commit-message validation for CI (SMA-371 AC-E parity gate). Lives here because the
+# pinned commitlint binary + @paigasus/commitlint-config are installed under ts/. NOT part
+# of the affected gate — invoked explicitly: `moon run ts:commitlint -- --from <a> --to <b>`.
+# cache:false because the result depends on git history, not file inputs.
+tasks:
+  commitlint:
+    # `--config` path is relative to the ts/ task cwd (the local lefthook hook uses the
+    # repo-rooted `ts/commitlint.config.cjs` instead — same file, different cwd; don't "fix").
+    command: 'pnpm exec commitlint --config commitlint.config.cjs'
+    inputs: []
+    options:
+      cache: false
+      runInCI: false
