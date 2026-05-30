@@ -79,6 +79,7 @@ jobs:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
+          set -euo pipefail
           if printf '%s' "$BASE" | grep -qE '^0+$'; then
             echo "Initial push (no base commit); skipping commit-range lint."
             exit 0
