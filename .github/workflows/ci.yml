@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Least privilege on a public repo: the job only reads and runs checks.
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel superseded PR runs; let push-to-main runs finish (they warm caches + carry status).
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    name: moon ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (full history for Moon's affected-graph)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Materialize main ref (for --base origin/main and buf breaking)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main \
+            +refs/heads/main:refs/heads/main
+
+      - name: Set up proto + Moon (pinned via .prototools)
+        uses: moonrepo/setup-toolchain@v0
+
+      - name: Install pinned CLIs from .prototools (buf, lefthook)
+        run: proto install
+
+      - name: Cache Rust (cargo + target)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rs/target
+          key: rust-${{ runner.os }}-${{ hashFiles('rs/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('ts/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('py/uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Cache Moon task cache
+        uses: actions/cache@v4
+        with:
+          path: .moon/cache
+          key: moon-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            moon-${{ runner.os }}-
+
+      - name: Validate commit messages (commitlint parity gate)
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if printf '%s' "$BASE" | grep -qE '^0+$'; then
+            echo "Initial push (no base commit); skipping commit-range lint."
+            exit 0
+          fi
+          moon run ts:commitlint -- --from "$BASE" --to "$HEAD"
+
+      - name: moon ci (affected graph)
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          T=(:build :test :lint :fmt :typecheck :breaking)
+          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]}" --base origin/main
+          elif [ -n "${BEFORE:-}" ] && ! printf '%s' "$BEFORE" | grep -qE '^0+$'; then
+            moon ci "${T[@]}" --base "$BEFORE"
+          else
+            # Initial push with no usable base — run the whole graph to warm caches.
+            moon run "${T[@]}"
+          fi
+
+      - name: CODEOWNERS up-to-date (drift gate)
+        run: |
+          moon sync code-owners
+          git diff --exit-code .github/CODEOWNERS
