@@ -308,7 +308,8 @@ Expected: `YAML OK`
 
 ```bash
 git add .github/workflows/ci.yml
-git commit -m "ci: pin workflow actions to commit SHAs (SMA-361)"
+# NB: commitlint requires a non-empty scope (scope-empty: never), so `ci:` alone is rejected.
+git commit -m "ci(ci): pin workflow actions to commit SHAs (SMA-361)"
 ```
 
 ---
