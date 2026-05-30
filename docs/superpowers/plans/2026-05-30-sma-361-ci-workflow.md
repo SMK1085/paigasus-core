@@ -83,21 +83,27 @@ Add this `tasks:` block to the end of `ts/moon.yml` (the file currently ends wit
 
 ```yaml
 # Commit-message validation for CI (SMA-371 AC-E parity gate). Lives here because the
-# pinned commitlint binary + @paigasus/commitlint-config are installed under ts/. NOT part
-# of the affected gate — invoked explicitly: `moon run ts:commitlint -- --from <a> --to <b>`.
-# cache:false because the result depends on git history, not file inputs.
+# pinned commitlint binary + @paigasus/commitlint-config are installed under ts/. Invoked
+# explicitly — `moon run ts:commitlint -- --from <a> --to <b>` — never via `moon ci`; it
+# stays out of the gate because the workflow's `moon ci` target list never includes it.
+# Do NOT set `runInCI: false`: Moon also excludes such tasks from `moon run` whenever CI=true,
+# which would make the CI gate resolve zero tasks and exit 1.
 tasks:
   commitlint:
+    # `--config` path is relative to the ts/ task cwd (the local lefthook hook uses the
+    # repo-rooted `ts/commitlint.config.cjs` instead — same file, different cwd; don't "fix").
     command: 'pnpm exec commitlint --config commitlint.config.cjs'
+    inputs: []
     options:
       cache: false
-      runInCI: false
 ```
 
-- [ ] **Step 2: Verify it accepts a conforming commit range**
+> **Correction (applied during execution):** an earlier draft set `runInCI: false` on this task. That is wrong — Moon excludes `runInCI: false` tasks from `moon run` too whenever `CI=true`, so the CI commitlint step would resolve zero tasks and exit 1 on every run. It was dropped; isolation from the gate comes from the explicit `moon ci` target list, which never includes `:commitlint`. **Verify with `CI` set**, not just locally.
 
-Run: `moon run ts:commitlint -- --from HEAD~1 --to HEAD`
-Expected: PASS — the previous commit (`refactor(contracts): …`) conforms, exit 0. (First run also installs ts deps via Moon; that's expected.)
+- [ ] **Step 2: Verify it accepts a conforming commit range (with CI set)**
+
+Run: `CI=true moon run ts:commitlint -- --from HEAD~1 --to HEAD`
+Expected: PASS — the previous commit (`refactor(contracts): …`) conforms, exit 0. (First run also installs ts deps via Moon; that's expected.) Running with `CI=true` is essential — without it, a `runInCI:false` regression would pass here and only fail in real CI.
 
 - [ ] **Step 3: Verify it rejects a non-conforming message**
 
@@ -206,6 +212,7 @@ jobs:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
+          set -euo pipefail
           if printf '%s' "$BASE" | grep -qE '^0+$'; then
             echo "Initial push (no base commit); skipping commit-range lint."
             exit 0
