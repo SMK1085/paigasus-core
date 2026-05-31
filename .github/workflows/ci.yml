@@ -31,10 +31,15 @@ jobs:
 
       - name: Materialize main ref (for --base origin/main and buf breaking)
         if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git fetch --no-tags origin \
-            +refs/heads/main:refs/remotes/origin/main \
-            +refs/heads/main:refs/heads/main
+          # persist-credentials:false strips the checkout token, but this private repo needs
+          # auth to fetch main. Provide the read-scoped token for this one fetch only, without
+          # writing it back into .git/config (keeps the artipacked hardening intact).
+          git fetch --no-tags "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/heads/main:refs/heads/main"
 
       - name: Set up proto + Moon (pinned via .prototools)
         uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
