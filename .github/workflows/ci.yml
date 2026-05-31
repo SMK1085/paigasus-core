@@ -35,6 +35,11 @@ jobs:
 
       - name: Set up proto + Moon (pinned via .prototools)
         uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          # Don't cache the proto/Moon toolchain dir: a restored ~/.proto carries stale
+          # setup-state that makes `moon setup` skip installing node/pnpm (their shims
+          # then don't exist → "pnpm: command not found"). Reinstall fresh each run.
+          cache: false
 
       - name: Install pinned CLIs from .prototools (buf, lefthook)
         run: proto install
@@ -45,7 +50,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.rustup
             rs/target
           key: rust-${{ runner.os }}-${{ hashFiles('rs/Cargo.lock') }}
           restore-keys: |
@@ -82,7 +86,9 @@ jobs:
         # Moon manages the toolchain *binaries* (node/pnpm) but not node_modules — the
         # `javascript` toolchain that would auto-install them conflicts with the repo's
         # project layers, so install deps explicitly with Moon's pinned pnpm.
-        run: pnpm --dir ts install --frozen-lockfile
+        run: |
+          command -v pnpm >/dev/null || { echo "::error::pnpm not on PATH after 'moon setup'"; ls -la ~/.proto/shims || true; exit 1; }
+          pnpm --dir ts install --frozen-lockfile
 
       - name: Validate commit messages (commitlint parity gate)
         env:
