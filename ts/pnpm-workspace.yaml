@@ -2,11 +2,13 @@ packages:
   - 'packages/*'
   - 'apps/*'
 
-# pnpm 10+ blocks dependency build (postinstall) scripts by default and errors in
-# CI (ERR_PNPM_IGNORED_BUILDS) until they're explicitly approved. `sharp` (Next.js
-# image optimization) ships prebuilt binaries, so allow its install script.
-onlyBuiltDependencies:
-  - sharp
+# pnpm 11 blocks dependency build (postinstall) scripts by default and errors in CI
+# (ERR_PNPM_IGNORED_BUILDS) until they're explicitly approved. `sharp` (Next.js image
+# optimization) ships prebuilt binaries, so allow its install script. NOTE: pnpm 11 uses
+# the `allowBuilds` map; the older `onlyBuiltDependencies` list is ignored (verified
+# against pnpm 11.3.0 — onlyBuiltDependencies still errored, allowBuilds builds it).
+allowBuilds:
+  sharp: true
 
 # Catalog — single bump-point for shared dep versions across the workspace.
 # Per-package package.json references these as "<dep>": "catalog:".
