@@ -4,7 +4,8 @@
 **Date:** 2026-05-31
 **Linear:** SMA-399
 **Branch:** `feature/sma-399-py-py-root-build-emits-junk-unknown-wheel-exclude-inherited`
-**Related:** SMA-394 (the TS analog), SMA-361 (CI review that surfaced this)
+**Related:** SMA-394 (the TS analog), SMA-361 (CI review that surfaced this), SMA-401 (the N+1
+whole-tree redundancy spun out of this spec's review)
 
 ## Problem
 
@@ -114,7 +115,7 @@ workspace:
 Field order follows the CONTRIBUTING rule (`$schema`, `layer`, `language`, `fileGroups`, …,
 `workspace` trailing) — identical placement to `ts/moon.yml`.
 
-### Cross-file legibility (F4): make the ts/py divergence deliberate-on-its-face
+### Cross-file legibility: make the ts/py divergence deliberate-on-its-face
 
 After this lands, the two `layer: configuration` roots intentionally differ — `ts/moon.yml`
 excludes `['build', 'typecheck']`, `py/moon.yml` excludes `['build']`. To stop a future
@@ -144,7 +145,7 @@ files instead of one. It is the only reason this is not a strictly single-file c
 the repo by SMA-395 (`commitlint-config-ts`) and SMA-394 (`ts/moon.yml`). This is the third use
 of the same field/idiom.
 
-### Resilience, not just cleanup (F2)
+### Resilience, not just cleanup
 
 `py:build` is green today only because this uv version treats *"workspace root with no
 `[project]` table"* as a **warning plus a legacy setuptools fallback**, not an error — so the
@@ -180,7 +181,7 @@ actual `fmt` task name, orthogonal to this issue and left untouched.)
 
 ## Out of scope / non-goals
 
-- **N+1 whole-tree redundancy (F1).** Every `py/packages/*` project also inherits
+- **N+1 whole-tree redundancy.** Every `py/packages/*` project also inherits
   `typecheck`/`lint`/`fmt`/`test`, and the central basedpyright/ruff/pytest config is keyed off
   `packages/*` (e.g. `testpaths = ["packages/*/tests"]`, basedpyright `include = ["packages/*/src",
   …]`). So each per-package run is configured against the *whole* `packages/*` tree, not just its
@@ -190,8 +191,8 @@ actual `fmt` task name, orthogonal to this issue and left untouched.)
   failures). It is masked today only because the packages are empty (basedpyright analyzes 0
   files, pytest collects 0 tests). This is pre-existing, repo-wide (the TS twin's spec flags the
   same lint/fmt/test redundancy and defers it), and orthogonal to the build junk — so it is right
-  to leave it out of *this* change, but it should be filed as its own follow-up issue rather than
-  tracked conditionally, since it scales super-linearly. (It also means keeping the root
+  to leave it out of *this* change. Tracked as its own follow-up in **SMA-401**. (It also means
+  keeping the root
   `typecheck` adds no unique coverage — see the corrected rationale above; the reasons to keep it
   are non-breakage and consistency with `lint`/`fmt`/`test`, not uniqueness.)
 - **Existing local junk artifacts.** `py/dist/unknown-*.whl`, `py/dist/packages-0.0.0.tar.gz`,
@@ -245,4 +246,4 @@ actual `fmt` task name, orthogonal to this issue and left untouched.)
   `test`. This is the only functional change.
 - `ts/moon.yml` — comment-only: add a one-line back-reference in the existing exclude comment
   noting that `py/` deliberately excludes only `['build']` (the divergence is intentional, not
-  drift). No task-graph change (F4).
+  drift). No task-graph change.
