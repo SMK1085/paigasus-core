@@ -45,6 +45,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.rustup
             rs/target
           key: rust-${{ runner.os }}-${{ hashFiles('rs/Cargo.lock') }}
           restore-keys: |
@@ -73,6 +74,15 @@ jobs:
           key: moon-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
             moon-${{ runner.os }}-
+
+      - name: Install Moon-managed toolchains (node, pnpm, rust, python, uv)
+        run: moon setup
+
+      - name: Install JS workspace dependencies
+        # Moon manages the toolchain *binaries* (node/pnpm) but not node_modules — the
+        # `javascript` toolchain that would auto-install them conflicts with the repo's
+        # project layers, so install deps explicitly with Moon's pinned pnpm.
+        run: pnpm --dir ts install --frozen-lockfile
 
       - name: Validate commit messages (commitlint parity gate)
         env:
