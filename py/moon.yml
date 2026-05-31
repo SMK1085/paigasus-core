@@ -14,3 +14,17 @@ fileGroups:
     - 'packages/*/src/**/*'
   tests:
     - 'packages/*/tests/**/*'
+
+# The py root owns no build of its own: Moon's per-project fan-out owns the whole :build
+# graph — each py/packages/* inherits `uv build` and emits a real wheel via the uv_build
+# backend. We EXCLUDE (not merely omit) the inherited build here, because py/pyproject.toml
+# is a virtual uv workspace root ([tool.uv.workspace], NO [project] table); `uv build` there
+# falls back to legacy setuptools and emits a junk UNKNOWN-0.0.0 wheel + packages.egg-info/.
+# Unlike ts/ (SMA-394, which excludes typecheck too), typecheck is KEPT here: `uv run
+# basedpyright` from py/ runs clean (it reads the central [tool.basedpyright] config), so it has
+# none of the root problem `build` has. It stays inherited alongside the whole-tree lint/fmt/test
+# for consistency — not as a uniquely necessary pass (per-package typecheck already covers the
+# same configured tree; the N+1 whole-tree redundancy is tracked in SMA-401).
+workspace:
+  inheritedTasks:
+    exclude: ['build']
