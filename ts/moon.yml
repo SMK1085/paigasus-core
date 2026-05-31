@@ -45,3 +45,13 @@ tasks:
     inputs: []
     options:
       cache: false
+  check-config-only:
+    # Enforces the config-only TS shape (SMA-396): a language:typescript project with no
+    # tsconfig.json MUST exclude the inherited build/typecheck. Run-once guard, invoked
+    # explicitly in CI (never via `moon ci`); turns a cryptic TS5058 into an actionable error.
+    # Do NOT set runInCI: false (Moon would then drop it under CI=true → explicit `moon run`
+    # resolves zero tasks and exits 1, same as the commitlint task).
+    command: 'node scripts/check-config-only.mjs'
+    inputs: []
+    options:
+      cache: false

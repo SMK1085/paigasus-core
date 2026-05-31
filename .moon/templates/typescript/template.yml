@@ -1,12 +1,16 @@
 title: 'TypeScript project'
 description: |
   Scaffolds a moon.yml for a TypeScript project. `library` for a publishable
-  package under ts/packages, `app` for a deployable under ts/apps (e.g. Next.js).
-  Library archetype renders a header-only moon.yml; app archetype adds a `build`
-  task with `outputs:` overriding the inherited `tsc --noEmit` with `next build`.
-  That `build`+`outputs:` task is REQUIRED for any app that emits an artifact: the
-  ts root excludes the inherited build/typecheck (SMA-394), so an app that only
-  inherited the default would run `tsc --noEmit` and silently emit nothing.
+  package under ts/packages, `app` for a deployable under ts/apps (e.g. Next.js),
+  `config` for a config-only package that is not a tsc compilation unit (no .ts
+  sources — e.g. a shared eslint/prettier/commitlint config).
+  Library renders a header-only moon.yml; app adds a `build` task with `outputs:`
+  overriding the inherited `tsc --noEmit` with `next build`; config adds
+  `inheritedTasks.exclude: ['build','typecheck']` (those inherited tasks run
+  `tsc -p tsconfig.json --noEmit`, which fails TS5058 with no tsconfig.json).
+  The app `build`+`outputs:` task is REQUIRED for any app that emits an artifact:
+  the ts root excludes the inherited build/typecheck (SMA-394), so an app that
+  only inherited the default would run `tsc --noEmit` and silently emit nothing.
   Lint/format/test/typecheck come from .moon/tasks/typescript.yml (ESLint +
   Prettier per ADR-0009; Vitest).
 variables:
@@ -17,6 +21,6 @@ variables:
     prompt: 'Project name (e.g. sdk)?'
   archetype:
     type: 'enum'
-    values: ['library', 'app']
+    values: ['library', 'app', 'config']
     default: 'library'
     prompt: 'Archetype?'

@@ -124,6 +124,11 @@ jobs:
           set -euo pipefail
           moon run ts:commitlint -- --from "$BASE" --to "$HEAD"
 
+      - name: Config-only TS guard (no tsconfig.json ⇒ must exclude build/typecheck)
+        run: |
+          set -euo pipefail
+          moon run ts:check-config-only
+
       - name: moon ci (affected graph)
         env:
           EVENT: ${{ github.event_name }}
