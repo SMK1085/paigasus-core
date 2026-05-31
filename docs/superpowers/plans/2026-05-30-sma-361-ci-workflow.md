@@ -183,10 +183,15 @@ jobs:
           restore-keys: |
             rust-${{ runner.os }}-
 
+      # NOTE: this embedded snippet is the initial plan and is superseded by the live
+      # `.github/workflows/ci.yml`, which (per the design spec) resolves the pnpm/uv store
+      # paths at runtime after `moon setup` — `path: ${{ steps.cache-paths.outputs.pnpm-store }}`
+      # / `uv-cache` from `pnpm store path` / `uv cache dir` — rather than hard-coding Linux
+      # defaults. The reworked workflow also adds `moon setup` + an explicit `pnpm install`.
       - name: Cache pnpm store
         uses: actions/cache@v4
         with:
-          path: ~/.local/share/pnpm/store
+          path: ${{ steps.cache-paths.outputs.pnpm-store }}  # pnpm store path (runtime)
           key: pnpm-${{ runner.os }}-${{ hashFiles('ts/pnpm-lock.yaml') }}
           restore-keys: |
             pnpm-${{ runner.os }}-
@@ -194,7 +199,7 @@ jobs:
       - name: Cache uv
         uses: actions/cache@v4
         with:
-          path: ~/.cache/uv
+          path: ${{ steps.cache-paths.outputs.uv-cache }}  # uv cache dir (runtime)
           key: uv-${{ runner.os }}-${{ hashFiles('py/uv.lock') }}
           restore-keys: |
             uv-${{ runner.os }}-
