@@ -43,7 +43,7 @@ moon --version
 ```
 
 Moon downloads and pins the per-language toolchains (Rust, Node + pnpm, Python +
-uv) from `.moon/toolchain.yml` on first use — no manual language installs needed.
+uv) from `.moon/toolchains.yml` on first use — no manual language installs needed.
 `proto install` also provides the `buf` CLI, pinned in `.prototools` via a
 vendored plugin at `.proto/plugins/buf.toml`.
 Per-workspace specifics live in each workspace's `README.md`; the root

@@ -14,7 +14,7 @@ fileGroups:
 # task `inputs` already defaults to all project files '**/*', so per-project
 # edits invalidate correctly without further config.)
 implicitInputs:
-  - '/.moon/toolchain.yml'
+  - '/.moon/toolchains.yml'
   - '/.moon/tasks.yml'
   - '/.moon/tasks/rust.yml'
   - '/.moon/tasks/python.yml'
