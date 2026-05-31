@@ -24,6 +24,9 @@ fileGroups:
 # no tsconfig.json — so the inherited `tsc -p tsconfig.json --noEmit` would fail TS5058 at the
 # root cwd. lint/fmt/test stay inherited and run whole-tree from ts/. Same field/idiom as
 # commitlint-config (SMA-395), which forward-referenced this change.
+#
+# (SMA-399: py/moon.yml deliberately excludes only ['build'] — basedpyright reads a central
+#  config and runs fine at the py root, whereas tsc needs a root tsconfig.json this dir lacks.)
 workspace:
   inheritedTasks:
     exclude: ['build', 'typecheck']
