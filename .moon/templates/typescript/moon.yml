@@ -15,4 +15,13 @@ tasks:
     outputs: ['.next']
     options:
       merge: replace
+{%- elif archetype == "config" %}
+# Config-only TS package: not a tsc compilation unit (no .ts sources to type-check — e.g. an
+# eslint/prettier/commitlint config). Stays language: typescript so lint/fmt/test still attach;
+# excludes the inherited per-project build/typecheck, which run `tsc -p tsconfig.json --noEmit`
+# and fail TS5058 with no tsconfig.json. The config-only CI guard (ts:check-config-only) enforces
+# this exclude repo-wide. See CONTRIBUTING "Moon project files". (SMA-396)
+workspace:
+  inheritedTasks:
+    exclude: ['build', 'typecheck']
 {%- endif %}
