@@ -8,7 +8,7 @@ orchestrated by [Moon](https://moonrepo.dev).
 - `pyproject.toml` — virtual uv workspace root. Declares the workspace members, the shared dev
   toolchain (basedpyright, ruff, pytest, anyio), and all tool config. No `[project]` table — the
   root is not itself a package.
-- `.python-version` — pins CPython `3.12.13` (matching `.moon/toolchain.yml`) so uv builds the
+- `.python-version` — pins CPython `3.12.13` (matching `.moon/toolchains.yml`) so uv builds the
   workspace venv on the project's Python, whether invoked directly or via Moon.
 - `packages/*` — one package per bounded context; each is a uv workspace member and a Moon project
   (id `paigasus-<name>-py`, suffixed to avoid colliding with the same-named Rust crates):

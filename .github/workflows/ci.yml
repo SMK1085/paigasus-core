@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Least privilege on a public repo: the job only reads and runs checks.
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel superseded PR runs; let push-to-main runs finish (they warm caches + carry status).
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    name: moon ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (full history for Moon's affected-graph)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+          # Don't persist GITHUB_TOKEN in .git/config (artipacked hardening). CI only reads +
+          # runs checks, and the main-ref fetch below is anonymous on this public repo.
+          persist-credentials: false
+
+      - name: Materialize main ref (for --base origin/main and buf breaking)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # persist-credentials:false strips the checkout token, but this private repo needs
+          # auth to fetch main. Provide the read-scoped token for this one fetch only, without
+          # writing it back into .git/config (keeps the artipacked hardening intact).
+          git fetch --no-tags "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/heads/main:refs/heads/main"
+
+      - name: Set up proto + Moon (pinned via .prototools)
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          # Don't cache the proto/Moon toolchain dir: a restored ~/.proto carries stale
+          # setup-state that makes `moon setup` skip installing node/pnpm (their shims
+          # then don't exist → "pnpm: command not found"). Reinstall fresh each run.
+          cache: false
+
+      - name: Install pinned CLIs from .prototools (buf, lefthook)
+        run: proto install
+
+      # Caches that don't need a resolved tool path go before `moon setup` (which is
+      # uncached and so doesn't benefit from them anyway, but restoring them here keeps
+      # them available for the build below).
+      - name: Cache Rust (cargo + target)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rs/target
+          key: rust-${{ runner.os }}-${{ hashFiles('rs/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
+      - name: Cache Moon task cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: .moon/cache
+          key: moon-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            moon-${{ runner.os }}-
+
+      - name: Install Moon-managed toolchains (node, pnpm, rust, python, uv)
+        run: moon setup
+
+      # pnpm/uv stores live wherever each tool decides; resolve them at runtime (now that
+      # moon setup has installed pnpm + uv) instead of hard-coding Linux defaults that may
+      # not match Moon's managed install. The pnpm-store cache restores before `pnpm install`
+      # and the uv cache before `moon ci` runs the Python tasks.
+      - name: Resolve pnpm/uv cache paths
+        id: cache-paths
+        run: |
+          echo "pnpm-store=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+          echo "uv-cache=$(uv cache dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: ${{ steps.cache-paths.outputs.pnpm-store }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('ts/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: Cache uv
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: ${{ steps.cache-paths.outputs.uv-cache }}
+          key: uv-${{ runner.os }}-${{ hashFiles('py/uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Install JS workspace dependencies
+        # Moon manages the toolchain *binaries* (node/pnpm) but not node_modules — the
+        # `javascript` toolchain that would auto-install them conflicts with the repo's
+        # project layers, so install deps explicitly with Moon's pinned pnpm.
+        run: |
+          command -v pnpm >/dev/null || { echo "::error::pnpm not on PATH after 'moon setup'"; ls -la ~/.proto/shims || true; exit 1; }
+          pnpm --dir ts install --frozen-lockfile
+
+      - name: Validate commit messages (commitlint parity gate)
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if printf '%s' "$BASE" | grep -qE '^0+$'; then
+            echo "Initial push (no base commit); skipping commit-range lint."
+            exit 0
+          fi
+          moon run ts:commitlint -- --from "$BASE" --to "$HEAD"
+
+      - name: moon ci (affected graph)
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          T=(:build :test :lint :fmt :typecheck :breaking)
+          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]}" --base origin/main
+          elif [ -n "${BEFORE:-}" ] && ! printf '%s' "$BEFORE" | grep -qE '^0+$'; then
+            moon ci "${T[@]}" --base "$BEFORE"
+          else
+            # Initial push with no usable base — run the whole graph to warm caches.
+            moon run "${T[@]}"
+          fi
+
+      - name: CODEOWNERS up-to-date (drift gate)
+        run: |
+          moon sync code-owners
+          git diff --exit-code .github/CODEOWNERS

@@ -34,7 +34,7 @@ TypeScript workspace for paigasus-core, managed with [pnpm](https://pnpm.io/) an
 
 Notes:
 
-- For env parity, invoke pnpm via `moon run ts:<task>` so Moon's pinned Node (`.moon/toolchain.yml`) is used, not whatever's on PATH.
+- For env parity, invoke pnpm via `moon run ts:<task>` so Moon's pinned Node (`.moon/toolchains.yml`) is used, not whatever's on PATH.
 - `Type check` and `Build` use a TypeScript-scoped query (`moon run :typecheck --query "language=typescript"` / `moon run :build --query "language=typescript"`): the `ts` root no longer defines those tasks — Moon's per-project tasks own them (SMA-394) — and a bare `moon run :build` would also build the `rust`/`py` workspaces, so the query scopes it to TS. `lint`/`fmt`/`test` still run once from the `ts` project.
 - Per-package install: `pnpm --filter @paigasus/<name> add <dep>`. For dev deps: `pnpm --filter @paigasus/<name> add -D <dep>`.
 - The `catalog:` block in `pnpm-workspace.yaml` is the single bump-point for shared versions. To bump a tool, edit the catalog entry — every package picks up the new version on the next `pnpm install`.
