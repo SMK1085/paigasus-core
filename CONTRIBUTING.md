@@ -163,6 +163,18 @@ An app without its own `build` task therefore passes a green build while
 producing no artifact. The TypeScript app scaffold
 (`.moon/templates/typescript/`, archetype `app`) emits this task for you.
 
+**Config-only TS packages:** a TypeScript _package_ that is not a `tsc`
+compilation unit (no `.ts` sources — a CommonJS/JSON config such as a shared
+`eslint`/`prettier`/`commitlint` config; `commitlint-config` is the one today)
+MUST exclude the inherited per-project `build`/`typecheck`:
+`workspace.inheritedTasks.exclude: ['build', 'typecheck']`. Those tasks run
+`tsc -p tsconfig.json --noEmit`, which fails `TS5058` with no `tsconfig.json`.
+It stays `language: typescript` (so `lint`/`fmt`/`test` still attach) and
+`layer: library` (importable/published code). The TypeScript scaffold
+(`.moon/templates/typescript/`, archetype `config`) emits this block for you,
+and the `ts:check-config-only` CI guard fails the build with an actionable
+message if a config-only package is added without it.
+
 ## Contributor License Agreement
 
 Before your first contribution can be merged you'll be asked to sign a CLA
