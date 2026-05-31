@@ -2,6 +2,12 @@ packages:
   - 'packages/*'
   - 'apps/*'
 
+# pnpm 10+ blocks dependency build (postinstall) scripts by default and errors in
+# CI (ERR_PNPM_IGNORED_BUILDS) until they're explicitly approved. `sharp` (Next.js
+# image optimization) ships prebuilt binaries, so allow its install script.
+onlyBuiltDependencies:
+  - sharp
+
 # Catalog — single bump-point for shared dep versions across the workspace.
 # Per-package package.json references these as "<dep>": "catalog:".
 # pnpm-lock.yaml pins exact resolved versions; the carets here cap the upgrade window.
