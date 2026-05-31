@@ -4,10 +4,16 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import process from 'node:process';
 
-// Enumerate Moon's resolved project graph (moon query projects prints JSON; the --json
-// flag is rejected). Each entry has top-level id/source/root/language/tasks, and tasks
-// already reflects workspace.inheritedTasks.exclude.
-const { projects } = JSON.parse(execFileSync('moon', ['query', 'projects'], { encoding: 'utf8' }));
+// Enumerate Moon's resolved project graph. `moon query projects` outputs JSON by default
+// (it has no --json flag — passing one errors). Each entry has top-level id/source/root/
+// language/tasks, and tasks already reflects workspace.inheritedTasks.exclude.
+let projects;
+try {
+  ({ projects } = JSON.parse(execFileSync('moon', ['query', 'projects'], { encoding: 'utf8' })));
+} catch (err) {
+  process.stderr.write(`config-only guard: failed to run \`moon query projects\`: ${err.message}\n`);
+  process.exit(1);
+}
 const tsProjects = projects.filter((p) => p.language === 'typescript');
 
 // A config-only package is not a tsc compilation unit (no tsconfig.json), so the inherited
