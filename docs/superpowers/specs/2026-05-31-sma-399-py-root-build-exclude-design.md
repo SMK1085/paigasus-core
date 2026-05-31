@@ -40,10 +40,10 @@ test:      uv run pytest
 
 Of these, **only `build` is per-distribution.** `lint`/`fmt`/`typecheck`/`test` are all
 config-driven whole-tree tasks that run correctly from the `py/` root cwd (ruff/basedpyright/
-pytest read the central config in `py/pyproject.toml`). The py root inherits and runs them as
-the canonical whole-workspace passes — the same role `ts/`'s comment ascribes to its inherited
-`lint`/`fmt`/`test`. `uv build` is the odd one out: it expects a `[project]` table, which the
-virtual workspace root deliberately lacks.
+pytest read the central config in `py/pyproject.toml`). The py root inherits and runs them
+whole-tree — the same role `ts/`'s comment ascribes to its inherited `lint`/`fmt`/`test`.
+`uv build` is the odd one out: it expects a `[project]` table, which the virtual workspace root
+deliberately lacks.
 
 ### Why this is the py-twin of SMA-394 — and where it diverges
 
@@ -56,10 +56,12 @@ They **diverge on `typecheck`**, and that divergence is the one real design deci
 
 - **TS** excluded `typecheck` because it genuinely *broke* at the root — `tsc -p tsconfig.json
   --noEmit` fails `TS5058` since `ts/` has only `tsconfig.base.json`, no root `tsconfig.json`.
-- **PY** root `typecheck` does **not** break. `uv run basedpyright` from `py/` uses the central
-  `[tool.basedpyright]` config (`include = ["packages/*/src", "packages/*/tests"]`) and is the
-  canonical whole-workspace check — verified: **0 errors, 0 warnings, 0 notes** over all four
-  packages.
+- **PY** root `typecheck` does **not** break. `uv run basedpyright` from `py/` reads the central
+  `[tool.basedpyright]` config (`include = ["packages/*/src", "packages/*/tests"]`) and runs
+  clean — verified: **0 errors, 0 warnings, 0 notes** (it currently analyzes 0 files; the four
+  packages are still empty scaffolds with a one-line `__init__.py` each). It is *not* a uniquely
+  necessary pass — per-package `typecheck` covers the same configured tree (see Out of scope) —
+  but it runs correctly, which `build` does not.
 
 So the AC's conditional — *"(and `typecheck` if it has the same root problem)"* — resolves to
 **false** for `typecheck`. Mirroring TS's exclude *list* verbatim would cargo-cult the symptom
@@ -99,9 +101,11 @@ fileGroups:
 # backend. We EXCLUDE (not merely omit) the inherited build here, because py/pyproject.toml
 # is a virtual uv workspace root ([tool.uv.workspace], NO [project] table); `uv build` there
 # falls back to legacy setuptools and emits a junk UNKNOWN-0.0.0 wheel + packages.egg-info/.
-# Unlike ts/ (SMA-394), typecheck is KEPT: `uv run basedpyright` from py/ is the canonical
-# whole-workspace check (central [tool.basedpyright] config), in the same root-owned whole-tree
-# family as the inherited lint/fmt/test — none of which have the root problem `build` does.
+# Unlike ts/ (SMA-394, which excludes typecheck too), typecheck is KEPT here: `uv run
+# basedpyright` from py/ runs clean (it reads the central [tool.basedpyright] config), so it has
+# none of the root problem `build` has. It stays inherited alongside the whole-tree lint/fmt/test
+# for consistency — not as a uniquely necessary pass (per-package typecheck already covers the
+# same configured tree; see the redundancy note deferred to a follow-up issue).
 workspace:
   inheritedTasks:
     exclude: ['build']
@@ -109,6 +113,21 @@ workspace:
 
 Field order follows the CONTRIBUTING rule (`$schema`, `layer`, `language`, `fileGroups`, …,
 `workspace` trailing) — identical placement to `ts/moon.yml`.
+
+### Cross-file legibility (F4): make the ts/py divergence deliberate-on-its-face
+
+After this lands, the two `layer: configuration` roots intentionally differ — `ts/moon.yml`
+excludes `['build', 'typecheck']`, `py/moon.yml` excludes `['build']`. To stop a future
+maintainer diffing the two roots from reading that as drift and "fixing" it, add a one-line
+back-reference in `ts/moon.yml`'s exclude comment pointing the other way:
+
+```yaml
+# (SMA-399: py/moon.yml deliberately excludes only ['build'] — basedpyright reads a central
+#  config and runs fine at the py root, whereas tsc needs a root tsconfig.json this dir lacks.)
+```
+
+This is a comment-only edit to `ts/moon.yml` (no task-graph change), making the change span two
+files instead of one. It is the only reason this is not a strictly single-file change.
 
 ### What deliberately stays
 
@@ -125,6 +144,17 @@ Field order follows the CONTRIBUTING rule (`$schema`, `layer`, `language`, `file
 the repo by SMA-395 (`commitlint-config-ts`) and SMA-394 (`ts/moon.yml`). This is the third use
 of the same field/idiom.
 
+### Resilience, not just cleanup (F2)
+
+`py:build` is green today only because this uv version treats *"workspace root with no
+`[project]` table"* as a **warning plus a legacy setuptools fallback**, not an error — so the
+root build's greenness is contingent on uv tolerating a malformed build target. Excluding the
+task removes that dependency: we stop asking uv to build something that isn't a distribution,
+rather than relying on it to keep accepting the attempt. This makes no claim about uv's roadmap;
+the point is only that not depending on the lenient fallback is strictly safer than depending on
+it. It reframes the change from "stop emitting junk" (cosmetic) to "stop depending on uv
+tolerating a malformed build target" (resilience).
+
 ## No README fallout
 
 Unlike the TS twin, no docs change is needed:
@@ -139,9 +169,9 @@ actual `fmt` task name, orthogonal to this issue and left untouched.)
 ## Alternatives considered
 
 - **Exclude both `build` and `typecheck` (mirror `ts/moon.yml` verbatim).** Rejected: py's root
-  `typecheck` is not broken (proven: 0 errors over the whole workspace) and belongs to the
-  root-owned whole-tree family with `lint`/`fmt`/`test`. Mirroring the exclude *list* copies TS's
-  symptom, not its cause.
+  `typecheck` is not broken (proven: runs clean, 0 errors) and belongs to the root-owned
+  whole-tree family with `lint`/`fmt`/`test`. Mirroring the exclude *list* copies TS's symptom,
+  not its cause.
 - **Redefine root `build` as a no-op task.** Rejected: Moon has no clean builtin no-op, `true` is
   platform-fragile, and it adds task noise. `inheritedTasks.exclude` is the established repo idiom.
 - **Add a `[project]` table to `py/pyproject.toml` so `uv build` produces something real.**
@@ -150,13 +180,20 @@ actual `fmt` task name, orthogonal to this issue and left untouched.)
 
 ## Out of scope / non-goals
 
-- **N+1 whole-tree redundancy.** Every `py/packages/*` project also inherits
-  `typecheck`/`lint`/`fmt`/`test`, and — because the central basedpyright/ruff/pytest config keys
-  off `packages/*` — each per-package run re-checks the *entire* workspace. So `moon ci :typecheck`
-  runs basedpyright once at the root plus once per package, all over the same files. This is
-  pre-existing, repo-wide (the TS twin's spec flags the same lint/fmt/test redundancy and defers
-  it), and orthogonal to the build junk. Left untouched; file a separate issue if we want each
-  whole-tree task to run exactly once.
+- **N+1 whole-tree redundancy (F1).** Every `py/packages/*` project also inherits
+  `typecheck`/`lint`/`fmt`/`test`, and the central basedpyright/ruff/pytest config is keyed off
+  `packages/*` (e.g. `testpaths = ["packages/*/tests"]`, basedpyright `include = ["packages/*/src",
+  …]`). So each per-package run is configured against the *whole* `packages/*` tree, not just its
+  own dir — per-package runs overlap rather than partition — and the root runs each once more on
+  top. `moon ci :test` therefore trends toward *(N+1)×* the full suite as packages and tests grow
+  (for `pytest`, that also means the same tests counted/reported multiple times, which muddies
+  failures). It is masked today only because the packages are empty (basedpyright analyzes 0
+  files, pytest collects 0 tests). This is pre-existing, repo-wide (the TS twin's spec flags the
+  same lint/fmt/test redundancy and defers it), and orthogonal to the build junk — so it is right
+  to leave it out of *this* change, but it should be filed as its own follow-up issue rather than
+  tracked conditionally, since it scales super-linearly. (It also means keeping the root
+  `typecheck` adds no unique coverage — see the corrected rationale above; the reasons to keep it
+  are non-breakage and consistency with `lint`/`fmt`/`test`, not uniqueness.)
 - **Existing local junk artifacts.** `py/dist/unknown-*.whl`, `py/dist/packages-0.0.0.tar.gz`,
   and `py/packages.egg-info/` are already gitignored (confirmed via `git check-ignore`) — not in
   the repo. After this change they simply stop being regenerated. Removing the stale local copies
@@ -195,9 +232,17 @@ actual `fmt` task name, orthogonal to this issue and left untouched.)
    moon ci :build --base origin/main
    ```
    Expect: every `py/packages/*` build present, root `py:build` absent.
+5. **The kept `typecheck` still passes** — asserts the load-bearing half of the keep-`typecheck`
+   decision, not just the removal of `build`:
+   ```bash
+   moon run py:typecheck   # expect: 0 errors, 0 warnings (whole-tree basedpyright still runs at py/)
+   ```
 
 ## Files touched
 
 - `py/moon.yml` — add `workspace.inheritedTasks.exclude: ['build']` with the explanatory comment;
   keep `fileGroups`, `language: python`, and the inherited whole-tree `lint`/`fmt`/`typecheck`/
-  `test`. Single-file change.
+  `test`. This is the only functional change.
+- `ts/moon.yml` — comment-only: add a one-line back-reference in the existing exclude comment
+  noting that `py/` deliberately excludes only `['build']` (the divergence is intentional, not
+  drift). No task-graph change (F4).
