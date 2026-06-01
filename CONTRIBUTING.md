@@ -123,6 +123,32 @@ any commit footer (e.g. `Closes #12`).
 - Per-language formatting and linting are enforced by each workspace's Moon
   tasks; run the workspace's `lint`/`fmt` tasks before pushing once it's set up.
 
+### Task routing by layer (SMA-401)
+
+Per-language task files in `.moon/tasks/` route tasks by **project layer** (`inheritedBy.layers`,
+combined with `languages`), so each task attaches only where it belongs:
+
+- **Whole-tree checks** run **once** at the `configuration`-layer workspace roots
+  (`py/moon.yml`, `ts/moon.yml`) — their tools read a central config, so one invocation covers
+  the whole tree (including root-level files). These are py `lint`/`fmt`/`typecheck`/`test` and
+  ts `lint`/`fmt`, defined in `.moon/tasks/python.yml` / `.moon/tasks/typescript.yml`.
+- **Per-project tasks** attach to `library`/`application` projects only — they bind to each
+  project's own config (`tsconfig.json`, `[project]`) or have no central config. These are py
+  `build` and ts `build`/`typecheck`/`test`, defined in `.moon/tasks/python-project.yml` /
+  `.moon/tasks/typescript-project.yml`.
+
+The discriminator is *"does a central, cwd-independent config make one whole-tree run correct and
+complete?"* — yes for the checks above (py reads `py/pyproject.toml`; ts `lint`/`fmt` read
+`ts/eslint.config.js` / `.prettierrc.js`), no for ts `typecheck` (per-`tsconfig.json`) and ts
+`test` (no central vitest config; per-package environments). So the workspace roots define no
+`build`/`typecheck` (and the ts root no `test`), and those tasks fan out per project — Moon owns
+each fan-out graph. A new `library`/`application` project is correct automatically; no per-project
+opt-out is needed.
+
+`fileGroups` live in each scoped task file next to the tasks that use them (Moon 2.2.5 does not
+propagate global `.moon/tasks.yml` fileGroups to a project that inherits a task from a scoped
+file), mirroring `.moon/tasks/rust.yml`.
+
 ### Moon project files
 
 Hand-written `moon.yml` files use a fixed top-level field order so diffs
@@ -169,8 +195,8 @@ compilation unit (no `.ts` sources — a CommonJS/JSON config such as a shared
 MUST exclude the inherited per-project `build`/`typecheck`:
 `workspace.inheritedTasks.exclude: ['build', 'typecheck']`. Those tasks run
 `tsc -p tsconfig.json --noEmit`, which fails `TS5058` with no `tsconfig.json`.
-It stays `language: typescript` (so `lint`/`fmt`/`test` still attach) and
-`layer: library` (importable/published code). The TypeScript scaffold
+It stays `language: typescript` (so the workspace `lint`/`fmt` at the `ts` root cover its files
+and the per-project `test` still attaches) and `layer: library` (importable/published code). The TypeScript scaffold
 (`.moon/templates/typescript/`, archetype `config`) emits this block for you,
 and the `ts:check-config-only` CI guard fails the build with an actionable
 message if a config-only package is added without it.
