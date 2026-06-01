@@ -4,7 +4,8 @@ $schema: 'https://moonrepo.dev/schemas/tasks.json'
 # (ts/moon.yml) ONLY: eslint/prettier read the central ts/eslint.config.js & .prettierrc.js,
 # so one run from ts/ covers the whole tree (including root-level files like ts/scripts/) —
 # running them per-package would re-lint the same files (SMA-401). Per-project
-# build/typecheck/test live in typescript-project.yml.
+# build/typecheck/test live in typescript-project.yml (tsc binds per-tsconfig; vitest has no
+# central config — both run per-package).
 #
 # fileGroups stay in this file (Moon 2.2.5 does not propagate global .moon/tasks.yml fileGroups
 # to projects inheriting a scoped task); ts/moon.yml extends them with packages/*/… and apps/*/…

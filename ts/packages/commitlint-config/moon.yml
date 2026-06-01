@@ -6,10 +6,12 @@ language: 'typescript'
 
 # Reference instance of the config-only TS package shape (SMA-396): a pure CommonJS config
 # package (index.cjs) that is not a tsc compilation unit — no tsconfig.json, nothing to compile
-# or type-check. Stays `language: typescript` so lint/fmt/test still attach; excludes the
-# inherited per-project build/typecheck (.moon/tasks/typescript.yml runs `tsc -p tsconfig.json
-# --noEmit`, which fails TS5058 with no tsconfig.json). See CONTRIBUTING "Moon project files";
-# the ts:check-config-only CI guard enforces this exclude.
+# or type-check. Excludes the inherited per-project build/typecheck (.moon/tasks/typescript-
+# project.yml runs `tsc -p tsconfig.json --noEmit`, which fails TS5058 with no tsconfig.json).
+# Stays `language: typescript` so it's covered by the workspace lint/fmt that run at the ts root,
+# and so the inherited per-project `test` (vitest --passWithNoTests) still attaches harmlessly.
+# See CONTRIBUTING "Moon project files"; the ts:check-config-only guard enforces this exclude.
+# (SMA-401: build/typecheck/test route per-project by layer; lint/fmt run at the root.)
 workspace:
   inheritedTasks:
     exclude: ['build', 'typecheck']
