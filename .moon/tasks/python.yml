@@ -1,15 +1,17 @@
 $schema: 'https://moonrepo.dev/schemas/tasks.json'
 
-# Moon does NOT scope task files by filename — scope explicitly so these python
-# commands only attach to python projects (not rust, and not contracts/ts).
+# Whole-tree quality checks for the py workspace. Scoped to the configuration-layer root
+# (py/moon.yml) ONLY: ruff/basedpyright/pytest all read the central config in py/pyproject.toml,
+# so one run from py/ covers (and de-duplicates) the whole packages/* tree — running them
+# per-package would re-do the same whole-tree work N times (SMA-401). Per-distribution `build`
+# lives in python-project.yml.
 #
-# `start` is intentionally absent from this file; service-archetype projects
-# get it from the python scaffold template, which needs per-project Tera
-# variables (the module path) that Moon's task-file syntax can't reach. A
-# hand-written python service (none today) would need to add `start` to its
-# own moon.yml.
+# fileGroups live in each scoped task file (next to the tasks that use them), NOT in the global
+# .moon/tasks.yml: Moon 2.2.5 does not propagate global-file fileGroups to projects that inherit
+# a task from a scoped file. py/moon.yml extends these with packages/*/src for the root checks.
 inheritedBy:
   languages: ['python']
+  layers: ['configuration']
 
 fileGroups:
   sources:
@@ -20,9 +22,6 @@ fileGroups:
     - '**/test_*.py'
 
 tasks:
-  build:
-    command: 'uv build'
-    inputs: ['@group(sources)', 'pyproject.toml']
   lint:
     command: 'uv run ruff check .'
     inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
