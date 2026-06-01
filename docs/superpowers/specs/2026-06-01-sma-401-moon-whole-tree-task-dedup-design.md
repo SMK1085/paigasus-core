@@ -1,7 +1,6 @@
 # SMA-401 — Route tasks by project layer so whole-tree checks run once, not (N+1)×
 
-**Status:** Design approved; staff-engineer review incorporated (2026-06-01, see
-[review](./2026-06-01-sma-401-moon-whole-tree-task-dedup-design-review.md))
+**Status:** Design approved (staff-engineer review pass incorporated 2026-06-01)
 **Date:** 2026-06-01
 **Linear:** SMA-401
 **Branch:** `feature/sma-401-moon-root-per-package-whole-tree-tasks-lintfmttypechecktest`
@@ -82,8 +81,8 @@ eliminates the `(N+1)×` class with **zero per-package/template boilerplate** �
 The per-language asymmetry (`typecheck` **and** `test` at the py root but per-package on ts) is not
 drift — it falls directly out of the discriminator: py has central config for both; ts has neither
 (tsc is per-`tsconfig`, vitest has no central config). Routing by layer expresses this without
-special cases. *(This corrects the prior draft, which routed ts `test` to the root alongside
-lint/fmt — review finding F1.)*
+special cases. *(This corrects an earlier draft that routed ts `test` to the root alongside
+lint/fmt.)*
 
 ## Mechanism — split each language's task file by scope
 
@@ -135,7 +134,7 @@ tasks:
 (The `commitlint` / `check-config-only` tasks defined in `ts/moon.yml` are unrelated and stay
 there.) Add both new files to `.moon/tasks.yml` `implicitInputs` so edits bust caches.
 
-## fileGroups — global-only as the primary design (review finding F3)
+## fileGroups — global-only as the primary design
 
 `@group(sources)`/`@group(tests)` are consumed by the task `inputs` on both sides of the split.
 Rather than re-declare fileGroups in each scoped file (which raises the "fileGroups in a scoped
@@ -158,7 +157,7 @@ Net resolution: a package `build`'s `@group(sources)` → its own `src/**/*` (gl
 checks' groups → global `src/**/*` (empty at root) **+** `py|ts/moon.yml`'s `packages/*/…`. Still
 **prototype-verified first** via `moon project` before the rest of the change (Open items #1).
 
-## Root-exclude cleanup (gated — review finding F4)
+## Root-exclude cleanup (gated)
 
 Central routing makes the SMA-394/399 root excludes dead config (build/`typecheck` are no longer
 routed to `configuration` at all). Remove them for a single source of truth — **but only after**
@@ -175,7 +174,7 @@ confirming the routing is in force, in the same change:
 Removing them before confirming routing would re-expose exactly the bugs SMA-394/399 fixed (py junk
 `UNKNOWN` wheel, ts root `TS5058`) if a `layers`-key mismatch silently no-ops the routing.
 
-## Trade-off accepted (review finding F2)
+## Trade-off accepted
 
 Routing the whole-tree checks to the root means **any** `packages/*` edit marks the root check
 affected and re-runs it over the whole tree — no per-package check caching for lint/fmt (both
@@ -209,7 +208,7 @@ the repo grows large enough that whole-tree-on-every-change checks dominate CI t
   root configs) — a coverage gap. (The granularity trade is captured above instead.)
 - **Per-package partitioning configs** (scoped per-package basedpyright/pytest). Rejected: fights
   the deliberate central-config decision and invites drift.
-- **F1 sub-alternative — root-only ts `test` + a vitest projects/workspace config** as a companion
+- **ts `test` sub-alternative — root-only + a vitest projects/workspace config** as a companion
   deliverable (so one root run serves heterogeneous per-package environments). Rejected in favor of
   per-package ts `test`: no new config, matches the discriminator, and preserves per-package
   environments/caching naturally. (If a workspace-wide vitest config is ever wanted, it's a
@@ -240,7 +239,7 @@ the repo grows large enough that whole-tree-on-every-change checks dominate CI t
 
 ## Verification plan
 
-1. **Resolved task lists** (core assertion — and the F4 gate; run *before* removing excludes):
+1. **Resolved task lists** (core assertion — and the exclude-removal gate; run *before* removing excludes):
    ```bash
    moon project py    # lint, fmt, typecheck, test; NO build
    moon project ts    # lint, fmt; NO build/typecheck/test
