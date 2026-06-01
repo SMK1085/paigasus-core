@@ -5,9 +5,8 @@ language: 'typescript'
 
 # The inherited fileGroups from .moon/tasks/typescript.yml assume src/ at the project root.
 # The ts workspace keeps sources under packages/*/src and apps/*/{src,app}, so extend the
-# inherited groups here. Moon merges (not overrides) fileGroups across the layers, so the
-# resolved @group(sources)/@group(tests) feed the inputs of the inherited whole-tree
-# lint/fmt/test that still run from ts/. (Same merge semantics confirmed for py in SMA-384.)
+# inherited groups here. Moon merges (not overrides) fileGroups across layers, so the resolved
+# @group(sources)/@group(tests) used by the root's whole-tree lint/fmt cover the whole tree.
 fileGroups:
   sources:
     - 'packages/*/src/**/*'
@@ -17,19 +16,12 @@ fileGroups:
     - 'packages/*/tests/**/*'
     - 'apps/*/tests/**/*'
 
-# The ts root owns no build/typecheck of its own: Moon's per-project fan-out owns the whole
-# :build / :typecheck graph — each package/app inherits `tsc -p tsconfig.json --noEmit`, and
-# apps override `build` with their own `outputs:` (see paigasus-console). We must EXCLUDE (not
-# merely omit) the inherited build/typecheck here, because ts/ has only tsconfig.base.json —
-# no tsconfig.json — so the inherited `tsc -p tsconfig.json --noEmit` would fail TS5058 at the
-# root cwd. lint/fmt/test stay inherited and run whole-tree from ts/. Same field/idiom as
-# commitlint-config (SMA-395), which forward-referenced this change.
-#
-# (SMA-399: py/moon.yml deliberately excludes only ['build'] — basedpyright reads a central
-#  config and runs fine at the py root, whereas tsc needs a root tsconfig.json this dir lacks.)
-workspace:
-  inheritedTasks:
-    exclude: ['build', 'typecheck']
+# No build/typecheck/test here: they are routed to the library/application layers in
+# .moon/tasks/typescript-project.yml, so they never attach to this configuration root. This
+# replaces the SMA-394 `workspace.inheritedTasks.exclude: ['build', 'typecheck']`, now redundant
+# under layer routing (the root has no tsconfig.json, so a root tsc would fail TS5058; routing
+# simply never gives it the task). ts `test` also routes per-project (no central vitest config).
+# The root owns only the whole-tree lint/fmt. (SMA-401)
 
 # Commit-message validation for CI (SMA-371 AC-E parity gate). Lives here because the
 # pinned commitlint binary + @paigasus/commitlint-config are installed under ts/. Invoked

@@ -1,0 +1,27 @@
+$schema: 'https://moonrepo.dev/schemas/tasks.json'
+
+# Per-distribution tasks for the py workspace. Scoped to library/application layers ONLY:
+# each py/packages/* builds its own wheel via the uv_build backend. NOT routed to the
+# configuration root — py/pyproject.toml is a virtual workspace root with no [project] table,
+# so a root `uv build` emits a junk UNKNOWN wheel (the bug SMA-399 excluded; now simply not
+# routed here). (SMA-401)
+#
+# fileGroups are repeated here (not centralized in .moon/tasks.yml) because Moon 2.2.5 does not
+# propagate global-file fileGroups to projects inheriting a task from a scoped file; build's
+# @group(sources) resolves against the `sources` group below.
+#
+# `start` is intentionally absent: service-archetype projects get it from the python scaffold
+# template, which needs per-project Tera variables (the module path) Moon's task-file syntax
+# can't reach. A hand-written python service (none today) adds `start` to its own moon.yml.
+inheritedBy:
+  languages: ['python']
+  layers: ['library', 'application']
+
+fileGroups:
+  sources:
+    - 'src/**/*'
+
+tasks:
+  build:
+    command: 'uv build'
+    inputs: ['@group(sources)', 'pyproject.toml']

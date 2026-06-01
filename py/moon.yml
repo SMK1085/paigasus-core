@@ -4,27 +4,18 @@ layer: 'configuration'
 language: 'python'
 
 # The inherited fileGroups from .moon/tasks/python.yml assume src/ at the project root.
-# The py workspace keeps sources under packages/*/src, so extend the inherited groups
-# here. Moon merges (not overrides) fileGroups across the layers, so the resolved
-# @group(sources) and @group(tests) contain both python.yml's defaults and these
-# additions — fine in practice because py/src/ and py/tests/ don't exist; only
-# packages/*/src/** and packages/*/tests/** actually match.
+# The py workspace keeps sources under packages/*/src, so extend the inherited groups here.
+# Moon merges (not overrides) fileGroups across the layers, so the resolved @group(sources)/
+# @group(tests) used by the root's whole-tree checks (lint/fmt/typecheck/test) cover
+# packages/*/src/** and packages/*/tests/**.
 fileGroups:
   sources:
     - 'packages/*/src/**/*'
   tests:
     - 'packages/*/tests/**/*'
 
-# The py root owns no build of its own: Moon's per-project fan-out owns the whole :build
-# graph — each py/packages/* inherits `uv build` and emits a real wheel via the uv_build
-# backend. We EXCLUDE (not merely omit) the inherited build here, because py/pyproject.toml
-# is a virtual uv workspace root ([tool.uv.workspace], NO [project] table); `uv build` there
-# falls back to legacy setuptools and emits a junk UNKNOWN-0.0.0 wheel + packages.egg-info/.
-# Unlike ts/ (SMA-394, which excludes typecheck too), typecheck is KEPT here: `uv run
-# basedpyright` from py/ runs clean (it reads the central [tool.basedpyright] config), so it has
-# none of the root problem `build` has. It stays inherited alongside the whole-tree lint/fmt/test
-# for consistency — not as a uniquely necessary pass (per-package typecheck already covers the
-# same configured tree; the N+1 whole-tree redundancy is tracked in SMA-401).
-workspace:
-  inheritedTasks:
-    exclude: ['build']
+# No `build` here: it is routed to the library/application layers in
+# .moon/tasks/python-project.yml, so it never attaches to this configuration root. This replaces
+# the SMA-399 `workspace.inheritedTasks.exclude: ['build']`, now redundant under layer routing
+# (SMA-401) — py/pyproject.toml is a virtual workspace root with no [project] table, so a root
+# `uv build` would emit a junk UNKNOWN wheel; routing simply never gives it the task.
