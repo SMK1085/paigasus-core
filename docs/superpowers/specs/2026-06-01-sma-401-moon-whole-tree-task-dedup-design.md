@@ -1,6 +1,7 @@
-# SMA-401 — Route whole-tree checks by project layer so `lint`/`fmt`/`typecheck`/`test` run once, not (N+1)×
+# SMA-401 — Route tasks by project layer so whole-tree checks run once, not (N+1)×
 
-**Status:** Design approved
+**Status:** Design approved; staff-engineer review incorporated (2026-06-01, see
+[review](./2026-06-01-sma-401-moon-whole-tree-task-dedup-design-review.md))
 **Date:** 2026-06-01
 **Linear:** SMA-401
 **Branch:** `feature/sma-401-moon-root-per-package-whole-tree-tasks-lintfmttypechecktest`
@@ -14,270 +15,282 @@
 `.moon/tasks/python.yml` and `.moon/tasks/typescript.yml` attach `lint`/`fmt`/`typecheck`/`test`
 (+ `build`) to **every** project of that language via `inheritedBy.languages`. So both the
 **configuration root** (`py/moon.yml`, `ts/moon.yml`, `layer: configuration`) **and each package**
-under `packages/*` / `apps/*` inherit and run the same whole-tree tasks. The root then runs each
-once more on top of the per-package fan-out.
+under `packages/*` / `apps/*` inherit and run the same tasks. The root then runs each once more on
+top of the per-package fan-out.
 
 The redundancy is real but **not uniform** — its severity depends on how each tool resolves the
-file set it operates on. This nuance drives the design, so it is worth stating precisely:
+file set it operates on. This nuance drives the design:
 
-| Task | Tool behavior | Per-package run covers | Total cost |
+| Task | Tool behavior | Per-package run covers | Today's cost |
 | --- | --- | --- | --- |
-| **py `typecheck`** (`uv run basedpyright`) | reads `[tool.basedpyright] include = ["packages/*/src", "packages/*/tests"]`, resolved relative to `py/pyproject.toml` — **cwd-independent** | the **entire** `packages/*` tree | **(N+1)×** |
-| **py `test`** (`uv run pytest`) | walks up to the config → `rootdir = py/` → `[tool.pytest.ini_options] testpaths = ["packages/*/tests"]` — **cwd-independent** | the **entire** suite (and **re-counts/re-reports** it) | **(N+1)×** |
-| **py `lint`/`fmt`** (`ruff check .` / `ruff format --check .`) | the `.` arg scopes to the task cwd | only its **own** dir (per-package runs *partition*) | ~**2×** (partitioned packages + one full root pass) |
-| **ts `lint`/`fmt`/`test`** (`eslint .` / `prettier --check .` / `vitest run`) | cwd-scoped | only its **own** dir (partition) | ~**2×** |
-| **ts `typecheck`/`build`**, **py `build`** | bound to each project's own `tsconfig.json` / `[project]` | its own project | **already correct** — root-excluded (SMA-394/399), per-project, no overlap |
+| **py `typecheck`** (`basedpyright`) | reads central `[tool.basedpyright] include = ["packages/*/src", …]`, resolved relative to `py/pyproject.toml` — **cwd-independent** | the **entire** `packages/*` tree | **(N+1)×** |
+| **py `test`** (`pytest`) | central `[tool.pytest] testpaths = ["packages/*/tests"]`, `rootdir = py/` — **cwd-independent** | the **entire** suite (and **re-counts** it) | **(N+1)×** |
+| **py `lint`/`fmt`** (`ruff … .`) | central `[tool.ruff]` config; the `.` arg scopes the file set to the cwd | only its **own** dir (per-package runs *partition*) | ~**2×** |
+| **ts `lint`/`fmt`** (`eslint .` / `prettier --check .`) | central `eslint.config.js` / `.prettierrc.js`; `.` scopes to cwd | only its **own** dir (partition) | ~**2×** |
+| **ts `test`** (`vitest run`) | **no central config exists** (no `vitest.config.*`/`vitest.workspace.*` in `ts/`); per-package cwd/env | only its **own** package | ~**2×** |
+| **ts `typecheck`/`build`**, **py `build`** | bound to each project's own `tsconfig.json` / `[project]` | its own project | already correct (root-excluded SMA-394/399; per-project; no overlap) |
 
-So the true `(N+1)×` offenders are **py `typecheck` and py `test`** (config is whole-tree and
-cwd-independent — each per-package run re-does the *entire* tree, and `pytest` double-counts).
-`lint`/`fmt` (both langs) and ts `test` are a milder ~2× (per-package partitions, root adds one
-full pass). ts `typecheck`/`build` and py `build` are already clean from SMA-394/399.
+The true `(N+1)×` offenders are **py `typecheck` and py `test`** (central, cwd-independent config —
+each per-package run re-does the *entire* tree, and `pytest` double-counts). `lint`/`fmt` (both
+langs) and ts `test` are a milder ~2× (per-package partitions, root adds one full pass). ts
+`typecheck`/`build` and py `build` are already clean from SMA-394/399.
 
-This is **masked today** only because the packages are empty bootstrap scaffolds — basedpyright
-analyzes 0 files, pytest collects 0 tests (SMA-379 shim). The cost scales the moment real
-source/tests land. Rust differs (cargo tasks are workspace-aware via `--workspace`/clippy); the
-adjacent Rust *template* dedup is SMA-374. This is a structural/perf cleanup, not a correctness
-bug — everything is green today, just redundant.
+**Masked today** only because the packages are empty scaffolds — basedpyright analyzes 0 files,
+pytest collects 0 tests (SMA-379 shim). The cost scales the moment real source/tests land. Rust
+differs (workspace-aware via `--workspace`/clippy); its template dedup is SMA-374. This is a
+structural/perf cleanup, not a correctness bug — everything is green today, just redundant.
 
 ## Root cause
 
 Inheritance is scoped by **language only** (`inheritedBy.languages`), so a task that conceptually
-belongs to *one* level (the whole-tree checks belong to the config root; `build` belongs to each
-distribution) is attached to *all* projects of that language regardless of level. SMA-394 and
-SMA-399 each patched one symptom of this at the root with `workspace.inheritedTasks.exclude`
-(ts excluded `build`/`typecheck`; py excluded `build`). Those are per-project opt-outs of a
-mis-scoped global; they treat the symptom, not the cause, and must be repeated on every future
-project (the same forget-the-exclude failure mode that already required the `ts:check-config-only`
-CI guard).
+belongs to *one* level is attached to *all* projects of that language. SMA-394 and SMA-399 each
+patched one symptom at the root with `workspace.inheritedTasks.exclude`; those are per-project
+opt-outs of a mis-scoped global — they treat the symptom, not the cause, and must be repeated on
+every future project (the same forget-the-exclude failure mode that already required the
+`ts:check-config-only` CI guard).
 
 ## Decision
 
 Scope task inheritance by **project layer** as well as language, so each task attaches only at the
-level it belongs to. Moon 2.x supports `inheritedBy.layers` combined (AND) with `languages` (and
-`or`/`not` operators); this is the precise mechanism for "this task belongs to the config root,
-that one to each distribution."
+level it belongs to. Moon 2.x supports `inheritedBy.layers` combined (AND) with `languages`.
 
-- **Whole-tree checks** → `inheritedBy.layers: ['configuration']` → attach **only** to the
-  `py`/`ts` roots (which already run them green today).
-- **Per-distribution tasks** (py `build`; ts `build` + `typecheck`) →
-  `inheritedBy.layers: ['library', 'application']` → attach **only** to `packages/*` / `apps/*`.
+**The discriminator** (this is the whole thesis): a task is routed to the **`configuration` root**
+iff its tool reads a **central, cwd-independent config** that makes a *single whole-tree invocation
+both correct and complete*. Otherwise it is routed **per-project** (`library`/`application`).
 
-This is the symmetric inverse of the `build` decision (build = per-distribution only; checks =
-config-root only), achieved centrally. It produces the **same end-state task graph** that
-per-package `inheritedTasks.exclude` (the rejected Alternative A) would — packages simply stop
-inheriting the checks — but with **zero per-package boilerplate**, **no template changes**, and the
-`(N+1)×` class **structurally eliminated**: a `library`/`application` project can never again
-inherit a whole-tree check.
+- **Configuration root** — py `lint`/`fmt`/`typecheck`/`test` (all read `py/pyproject.toml`), and
+  ts `lint`/`fmt` (read `ts/eslint.config.js` / `.prettierrc.js`). One whole-tree run is correct,
+  complete (it also covers root-level files like `ts/scripts/`), and authoritative.
+- **Per-project** — ts `typecheck` (bound to each `tsconfig.json`; no root `tsconfig`), ts `test`
+  (**no central vitest config**; per-package cwd + environments — e.g. jsdom for `paigasus-ui`,
+  node for pure libs), py `build` and ts `build` (per-distribution). There is no root-level unit
+  for any of these (no root tsconfig, no root tests, no root distribution), so per-project is
+  complete.
+
+This is the symmetric generalization of the SMA-394/399 `build` decision, achieved centrally. It
+eliminates the `(N+1)×` class with **zero per-package/template boilerplate** — a `library`/
+`application` project can never again inherit a whole-tree check.
 
 ### Target task graph
 
 | Project (layer) | Inherited py tasks | Inherited ts tasks |
 | --- | --- | --- |
-| `py/`, `ts/` root (`configuration`) | `lint`, `fmt`, `typecheck`, `test` | `lint`, `fmt`, `test` |
-| `packages/*` (`library`) | `build` | `build`, `typecheck` |
-| `apps/*` (`application`) | — *(none in py today)* | `build`, `typecheck` |
+| `py/`, `ts/` root (`configuration`) | `lint`, `fmt`, `typecheck`, `test` | `lint`, `fmt` |
+| `packages/*` (`library`) | `build` | `build`, `typecheck`, `test` |
+| `apps/*` (`application`) | — *(none in py today)* | `build`, `typecheck`, `test` |
 
-**The one deliberate asymmetry:** ts `typecheck` lives **per-package**, not at the root — it is
-bound to each project's own `tsconfig.json`, and the ts root has none (would fail `TS5058`; this is
-exactly why SMA-394 excluded it). py `typecheck` lives **at the root** because `basedpyright` reads
-the central `[tool.basedpyright]` config and runs clean whole-tree (proven in SMA-399). This
-language asymmetry is correct, not drift — and the layer-routing expresses it cleanly (ts
-`typecheck` is in the `library`/`application`-scoped file; py `typecheck` is in the
-`configuration`-scoped file).
+The per-language asymmetry (`typecheck` **and** `test` at the py root but per-package on ts) is not
+drift — it falls directly out of the discriminator: py has central config for both; ts has neither
+(tsc is per-`tsconfig`, vitest has no central config). Routing by layer expresses this without
+special cases. *(This corrects the prior draft, which routed ts `test` to the root alongside
+lint/fmt — review finding F1.)*
 
 ## Mechanism — split each language's task file by scope
 
 `inheritedBy` is **per-file**, so routing different tasks to different layers requires splitting
-each language's single task file into a *checks* file (configuration-scoped) and a *dist* file
-(library/application-scoped). Rust's file is untouched.
-
-### Python
+each language's single task file into a *checks* file (`configuration`) and a *project* file
+(`library`/`application`). Rust's file is untouched. Naming: keep `python.yml`/`typescript.yml`
+(they hold the whole-tree checks) and add `python-project.yml`/`typescript-project.yml` for the
+per-project tasks; each gets a header comment stating its scope. *(Role-explicit alternative
+`*-root.yml`/`*-project.yml` was considered; flag in review if preferred.)*
 
 ```yaml
-# .moon/tasks/python.yml  — KEEP this name; it now holds the whole-tree checks (root-only).
+# .moon/tasks/python.yml — whole-tree checks, configuration-root only
 inheritedBy:
   languages: ['python']
   layers: ['configuration']
-fileGroups:            # unchanged; merge with py/moon.yml's packages/*/src extension at the root
-  sources: ['src/**/*']
-  tests: ['tests/**/*', '**/*_test.py', '**/test_*.py']
-tasks:                 # the four task bodies (command + inputs) move verbatim from today's python.yml
+tasks:                 # task bodies (command + inputs) move verbatim from today's python.yml
   lint:      # uv run ruff check .
   fmt:       # uv run ruff format --check .
   typecheck: # uv run basedpyright
   test:      # uv run pytest
-```
 
-```yaml
-# .moon/tasks/python-dist.yml  — NEW; per-distribution build.
+# .moon/tasks/python-project.yml — per-distribution, library/application only
 inheritedBy:
   languages: ['python']
   layers: ['library', 'application']
-fileGroups:
-  sources: ['src/**/*']     # restated explicitly so build's @group(sources) resolves per-package
 tasks:
-  build: { command: 'uv build', inputs: ['@group(sources)', 'pyproject.toml'] }
+  build:     # uv build
 ```
 
-### TypeScript
+```yaml
+# .moon/tasks/typescript.yml — whole-tree checks, configuration-root only
+inheritedBy:
+  languages: ['typescript']
+  layers: ['configuration']
+tasks:
+  lint:      # pnpm exec eslint .
+  fmt:       # pnpm exec prettier --check .
 
-Same split: `typescript.yml` keeps `lint`/`fmt`/`test` (commands unchanged) scoped to
-`layers: ['configuration']`; new `typescript-dist.yml` holds `build` + `typecheck` scoped to
-`layers: ['library', 'application']`. The `commitlint` and `check-config-only` tasks defined in
-`ts/moon.yml` are unrelated and stay there.
+# .moon/tasks/typescript-project.yml — per-project, library/application only
+inheritedBy:
+  languages: ['typescript']
+  layers: ['library', 'application']
+tasks:
+  build:     # pnpm exec tsc -p tsconfig.json --noEmit (apps override with next build + outputs:)
+  typecheck: # pnpm exec tsc -p tsconfig.json --noEmit
+  test:      # pnpm exec vitest run --passWithNoTests
+```
 
-### Cache wiring
+(The `commitlint` / `check-config-only` tasks defined in `ts/moon.yml` are unrelated and stay
+there.) Add both new files to `.moon/tasks.yml` `implicitInputs` so edits bust caches.
 
-Add the two new files to `.moon/tasks.yml` `implicitInputs` (alongside the existing
-`python.yml`/`typescript.yml`/`rust.yml`) so edits to them bust caches.
+## fileGroups — global-only as the primary design (review finding F3)
 
-> **Naming:** keeping `python.yml`/`typescript.yml` as the *checks* files (they hold the majority
-> of tasks) minimizes the diff. The role-explicit alternative (`*-root.yml` + `*-package.yml`) was
-> considered; `*-dist.yml` for the new file reads clearly against the kept name. Each file gets a
-> header comment stating its scope and why the split exists.
+`@group(sources)`/`@group(tests)` are consumed by the task `inputs` on both sides of the split.
+Rather than re-declare fileGroups in each scoped file (which raises the "fileGroups in a scoped
+file are themselves scoped" subtlety), make the **unscoped global `.moon/tasks.yml` the single
+home**:
 
-## fileGroups handling (the one technical risk)
+- Keep global `sources: ['src/**/*']`.
+- **Augment** global `tests` with `'**/test_*.*'` — today it has `tests/**/*`, `**/*.test.*`,
+  `**/*.spec.*`, `**/*_test.*`, but **not** the pytest `test_*.py` *prefix* form currently carried
+  by `python.yml`. Adding it makes the global group a superset of both languages' current groups,
+  so dropping the per-language fileGroups loses no cache-invalidation coverage.
+- **Remove** the `fileGroups` blocks from `python.yml`/`typescript.yml` (and don't add any to the
+  `-project.yml` files).
+- **Keep** the `packages/*/src`, `packages/*/tests` extensions in `py/moon.yml`/`ts/moon.yml`
+  (project-scoped) — these are what make the root checks' `@group(sources)`/`@group(tests)` cover
+  the whole `packages/*` tree. (Moon merges, not overrides, fileGroups across layers — confirmed
+  for this repo in SMA-384.)
 
-`@group(sources)`/`@group(tests)` must resolve correctly on both sides of the split:
+Net resolution: a package `build`'s `@group(sources)` → its own `src/**/*` (global); the root
+checks' groups → global `src/**/*` (empty at root) **+** `py|ts/moon.yml`'s `packages/*/…`. Still
+**prototype-verified first** via `moon project` before the rest of the change (Open items #1).
 
-- **Root checks** need `packages/*/src/**/*` etc. — supplied by the `fileGroups` extension already
-  in `py/moon.yml`/`ts/moon.yml` (**kept as-is**), merged with the checks file's groups. (Moon
-  merges, not overrides, fileGroups across inheritance layers — confirmed for this repo in SMA-384.)
-- **Package `build`** needs the package's own `src/**/*` — supplied by the global `fileGroups` in
-  `.moon/tasks.yml` (which apply to all projects) and restated in the dist file to be explicit.
-
-The subtlety: fileGroups declared in a scoped task file are themselves scoped by that file's
-`inheritedBy`. The design is sound (the global `.moon/tasks.yml` groups provide `sources`/`tests`
-everywhere as a floor), **but this is the first thing implementation will prototype-verify** — see
-Open items. Fallback if resolution misbehaves: keep `sources`/`tests` only in the unscoped global
-`.moon/tasks.yml` and drop them from the per-language files.
-
-## Root-exclude cleanup
+## Root-exclude cleanup (gated — review finding F4)
 
 Central routing makes the SMA-394/399 root excludes dead config (build/`typecheck` are no longer
-routed to the `configuration` layer at all). Remove them so there is a single source of truth:
+routed to `configuration` at all). Remove them for a single source of truth — **but only after**
+confirming the routing is in force, in the same change:
 
-- `py/moon.yml`: drop `workspace.inheritedTasks.exclude: ['build']`. Keep `layer`/`language`/
-  `fileGroups`. Replace the exclude comment with a one-liner: *build is routed to the
-  library/application layers in `python-dist.yml`; it is not attached to this configuration root.*
-- `ts/moon.yml`: drop `workspace.inheritedTasks.exclude: ['build', 'typecheck']`. **Keep** its
-  `tasks:` block (`commitlint`, `check-config-only`) and `fileGroups`/`layer`/`language`. Same
-  pointer comment.
+1. Land the routing; run `moon project py` / `moon project ts` and confirm they resolve with **no**
+   `build`/`typecheck`.
+2. *Then* remove the excludes:
+   - `py/moon.yml`: drop `inheritedTasks.exclude: ['build']`; keep `layer`/`language`; replace the
+     comment with a pointer to `python-project.yml`.
+   - `ts/moon.yml`: drop `inheritedTasks.exclude: ['build', 'typecheck']`; **keep** its `tasks:`
+     block (`commitlint`, `check-config-only`); same pointer comment.
 
-End behavior is identical (build/typecheck still never run at the roots); only the reason changes
-from "excluded here" to "not routed here."
+Removing them before confirming routing would re-expose exactly the bugs SMA-394/399 fixed (py junk
+`UNKNOWN` wheel, ts root `TS5058`) if a `layers`-key mismatch silently no-ops the routing.
+
+## Trade-off accepted (review finding F2)
+
+Routing the whole-tree checks to the root means **any** `packages/*` edit marks the root check
+affected and re-runs it over the whole tree — no per-package check caching for lint/fmt (both
+langs) and py typecheck/test. For py typecheck/test this loses nothing (those per-package runs were
+already whole-tree). ts `typecheck`/`test`/`build` keep per-package caching (they stay per-project).
+For a small monorepo this is the consciously-accepted inverse of the cost being fixed; **revisit if
+the repo grows large enough that whole-tree-on-every-change checks dominate CI time.**
 
 ## What deliberately does not change
 
 - **Scaffold templates** (`.moon/templates/{python,typescript}/`): untouched. A generated
-  `library`/`application` project is automatically correct by layer — it inherits `build`
-  (+ ts `typecheck`) and **not** the whole-tree checks, with no per-project config. This is the
-  central payoff over Alternative A.
-- **`commitlint-config-ts` + the `config` template archetype**: keep
-  `exclude: ['build', 'typecheck']`. It is a `library`-layer package, so `build`/`typecheck` *are*
-  routed to it, and it still cannot run `tsc` (no `tsconfig.json` → `TS5058`). The
-  `ts:check-config-only` CI guard stays valid and necessary. Its `lint`/`fmt`/`test` coverage is
-  preserved — the root `eslint .`/`prettier --check .` already walk `packages/commitlint-config/`.
-- **End-user commands** (`py:lint`, `ts:test`, the `--query`-scoped build/typecheck commands):
-  unchanged. Both READMEs already describe "checks run once at the root."
+  `library`/`application` project is automatically correct by layer — the central payoff over the
+  rejected per-package-exclude approach.
+- **`commitlint-config-ts` + the `config` template archetype**: keep `exclude: ['build',
+  'typecheck']`. Still `library` → still gets `build`/`typecheck`/`test` routed to it. It keeps
+  excluding build/typecheck (can't run `tsc` → `TS5058`); the inherited `test` runs
+  `vitest run --passWithNoTests` (0 tests → green, harmless — not worth widening the guard). The
+  `ts:check-config-only` guard stays valid. Its lint/fmt coverage comes from the root pass.
+- **Commands:** `py:lint`/`py:fmt`/`py:typecheck`/`py:test` all stay on the py root. ts `lint`/`fmt`
+  stay as `ts:lint`/`ts:fmt`; ts `test` joins `typecheck`/`build` on the `--query`-scoped form
+  (see Docs).
 
 ## Alternatives considered
 
-- **A. Per-package `inheritedTasks.exclude` (the established repo idiom; SMA-394/5/6/9).** Add an
-  exclude block to every `packages/*`/`apps/*` and to both scaffold templates so the checks run
-  once at the root. Produces the identical task graph, lowest behavioral risk (the root already
-  runs the checks green). **Rejected** because it pushes boilerplate onto every current *and future*
-  package + both templates, and re-creates the forget-the-exclude failure mode the
-  `check-config-only` guard exists to catch. Layer-routing fixes the cause centrally instead of the
-  symptom per project.
-- **C. Partition-aware hybrid.** Keep partitionable tools (`lint`/`fmt`, ts `test`) per-package for
-  incremental caching and move only the true whole-tree offenders (py `typecheck`/`test`) to
-  root-only. **Rejected:** mixed mental model, and per-package-only for the partitionable tools
-  risks missing files that live *outside* any package (e.g. `ts/scripts/`, root config files) — a
-  coverage gap the AC forbids. The marginal caching win does not justify it for a small monorepo
-  with whole-tree central config.
-- **Per-package partitioning configs** (give each package its own scoped basedpyright/pytest
-  config so per-package runs partition). **Rejected:** directly fights the deliberate central-config
-  decision (one `[tool.*]` block in `py/pyproject.toml`) and invites drift.
+- **A. Per-package `inheritedTasks.exclude` (the established idiom; SMA-394/5/6/9).** Same task
+  graph, lowest behavioral risk, but pushes boilerplate onto every current *and future* package +
+  both templates and re-creates the forget-the-exclude failure mode. Rejected — layer-routing fixes
+  the cause centrally.
+- **C. Partition-aware hybrid** (keep partitionable tools per-package for caching). Rejected: mixed
+  model, and per-package-only for lint/fmt risks missing files outside any package (`ts/scripts/`,
+  root configs) — a coverage gap. (The granularity trade is captured above instead.)
+- **Per-package partitioning configs** (scoped per-package basedpyright/pytest). Rejected: fights
+  the deliberate central-config decision and invites drift.
+- **F1 sub-alternative — root-only ts `test` + a vitest projects/workspace config** as a companion
+  deliverable (so one root run serves heterogeneous per-package environments). Rejected in favor of
+  per-package ts `test`: no new config, matches the discriminator, and preserves per-package
+  environments/caching naturally. (If a workspace-wide vitest config is ever wanted, it's a
+  separate issue.)
 
 ## Out of scope / non-goals
 
-- **Rust template task-definition dedup** — SMA-374. Rust tasks are workspace-aware
-  (`--workspace`/clippy) and not affected by this layer split.
-- **Per-package partitioned checks for caching granularity.** We eliminate N+1 by *single-run*, not
-  by partitioning; root-only runs also cover root-level files. (See Alternative C.)
-- **`contracts` (`layer: tool`).** Unaffected — the `languages` filter (`python`/`typescript`)
-  already excludes it; no `tool`-layer routing is added.
+- Rust template task-definition dedup — SMA-374 (Rust is workspace-aware; unaffected).
+- The root `ts/package.json` `"test"` npm script — orthogonal to Moon task routing; left as-is.
+- `contracts` (`layer: tool`) and the `repo` root (`language: bash`) — both excluded by the
+  `languages` filter; no `tool`/`bash` routing added.
 
 ## Acceptance criteria
 
-- [ ] `moon ci :typecheck` / `:lint` / `:fmt` / `:test` each execute the whole-tree work **once**
-      (at the `configuration` root), not once-per-package-plus-root, for both `py/` and `ts/`.
+- [ ] `moon ci :typecheck` / `:lint` / `:fmt` / `:test` each execute their whole-tree work **once**,
+      not once-per-package-plus-root: py `lint`/`fmt`/`typecheck`/`test` and ts `lint`/`fmt` run
+      once at the root; ts `typecheck`/`test` run per-project with **no** root duplicate.
 - [ ] No double-counted pytest collection/reporting (only the root `py:test` collects).
-- [ ] `moon project paigasus-kernel-py` shows **only** `build` (no `lint`/`fmt`/`typecheck`/`test`);
-      `moon project paigasus-kernel-ts` shows **only** `build` + `typecheck`.
+- [ ] `moon project paigasus-kernel-py` shows **only** `build`; `moon project paigasus-kernel-ts`
+      shows **only** `build`/`typecheck`/`test`.
 - [ ] `moon project py` shows `lint`/`fmt`/`typecheck`/`test` and **no** `build`; `moon project ts`
-      shows `lint`/`fmt`/`test` and **no** `build`/`typecheck`.
+      shows **only** `lint`/`fmt` (no `build`/`typecheck`/`test`).
 - [ ] `moon ci :build` still covers every `packages/*` (+ ts `apps/*`); no coverage lost — every
-      `packages/*` source/test dir is still checked (by the root whole-tree run).
-- [ ] The SMA-394/399 root excludes are removed; `commitlint-config-ts` keeps its exclude and
-      `ts:check-config-only` still passes.
+      source/test dir is still checked (py via the root run; ts per-project + the root lint/fmt).
+- [ ] SMA-394/399 root excludes removed **only after** the resolved-task-list check passes;
+      `commitlint-config-ts` keeps its exclude; `ts:check-config-only` still passes.
 - [ ] Whole-graph `moon run :build|:typecheck|:lint|:fmt|:test` stays green.
 
 ## Verification plan
 
-1. **Resolved task lists** (the core assertion):
+1. **Resolved task lists** (core assertion — and the F4 gate; run *before* removing excludes):
    ```bash
-   moon project py    # expect: lint, fmt, typecheck, test; NO build
-   moon project ts    # expect: lint, fmt, test; NO build, NO typecheck
-   moon project paigasus-kernel-py   # expect: build only
-   moon project paigasus-kernel-ts   # expect: build, typecheck only
-   moon project commitlint-config-ts # expect: nothing attached (build/typecheck excluded; checks routed away)
+   moon project py    # lint, fmt, typecheck, test; NO build
+   moon project ts    # lint, fmt; NO build/typecheck/test
+   moon project paigasus-kernel-py    # build only
+   moon project paigasus-kernel-ts    # build, typecheck, test only
+   moon project paigasus-console-ts   # build (next), typecheck, test
+   moon project commitlint-config-ts  # test only (build/typecheck excluded)
    ```
-2. **fileGroups resolve** (the risk): inspect resolved inputs for a package `build` and the root
-   checks (`moon project …` / task introspection) — confirm `@group(sources)` expands to the
-   package's own `src/**/*` for `build`, and to `packages/*/src/**/*` for the root checks.
+2. **fileGroups resolve** (Open item #1): inspect resolved `inputs` for a package `build`
+   (`@group(sources)` → own `src/**/*`) and the root checks (→ `packages/*/src` + `…/tests`).
 3. **Single-run, no duplication:**
    ```bash
-   moon ci :test       # expect: one py:test + one ts:test, no per-package test tasks
-   moon ci :typecheck  # py:typecheck once at root; ts typecheck per-package (bound to tsconfig)
-   moon ci :lint
-   moon ci :fmt
-   moon ci :build      # every packages/* + ts apps/* build present
+   moon ci :test       # one py:test (root) + per-package ts test; no per-package py test, no root ts test
+   moon ci :typecheck  # py:typecheck once at root; ts typecheck per-package
+   moon ci :lint ; moon ci :fmt ; moon ci :build
    ```
-4. **Affected-graph:** edit one file under one `packages/*/src` → the `configuration` root's check
-   task is marked affected (runs once whole-tree); confirm **no** per-package check task fires.
-5. **Whole-graph green + guard:** `moon run :build|:typecheck|:lint|:fmt|:test`; `moon run
-   ts:check-config-only`.
+4. **Affected-graph:** edit one file under one `packages/*/src` → the root check task is affected
+   (runs once whole-tree); confirm no per-package py check fires.
+5. **Whole-graph green + guard:** `moon run :build|:typecheck|:lint|:fmt|:test`;
+   `moon run ts:check-config-only`.
 
 ## Open items to confirm during implementation (prototype-first)
 
-1. **fileGroup resolution across the split** (highest risk) — verify before writing the rest; apply
-   the global-only fallback if needed.
-2. **Exact Moon 2.2.5 `inheritedBy` keys/semantics.** The repo currently uses `inheritedBy.languages`
-   successfully; the v2 docs show `layers` (plural list) combined with `languages`/`toolchains` as
-   **AND**, plus `or`/`not`. Confirm the `languages` + `layers` AND-combination on the pinned 2.2.5
-   (and that the key is `layers`, plural — the project field is `layer:`, singular). If 2.2.5 names
-   it differently, adjust; the routing intent is unchanged.
-3. **Affected-graph marks the configuration root** when a `packages/*` file changes (so the root
-   check runs) — relied on by AC "no coverage lost"; verify in step 4 above.
+1. **fileGroup resolution under global-only** (highest risk) — verify step 2 before the rest.
+2. **Exact Moon 2.2.5 `inheritedBy` keys.** Review confirmed v2 supports `languages` + `layers`
+   (AND) with `layers` a plural list; confirm on the pinned 2.2.5 (project field is `layer:`,
+   singular). If named differently, adjust — intent unchanged.
+3. **Affected-graph marks the `configuration` root** when a `packages/*` file changes (AC "no
+   coverage lost") — verify in step 4.
 
 ## Files touched
 
-- `.moon/tasks/python.yml` — add `layers: ['configuration']`; remove the `build` task (moves to
-  `python-dist.yml`); keep checks + fileGroups; header comment.
-- `.moon/tasks/python-dist.yml` — **new**; library/application-scoped `build` + `sources` fileGroup.
-- `.moon/tasks/typescript.yml` — add `layers: ['configuration']`; remove `build` + `typecheck`
-  (move to dist); keep `lint`/`fmt`/`test` + fileGroups; header comment.
-- `.moon/tasks/typescript-dist.yml` — **new**; library/application-scoped `build` + `typecheck`
-  + `sources` fileGroup.
-- `.moon/tasks.yml` — add the two new files to `implicitInputs`.
-- `py/moon.yml` — remove `inheritedTasks.exclude: ['build']`; pointer comment.
+- `.moon/tasks/python.yml` — add `layers: ['configuration']`; remove `build` (→ `python-project.yml`)
+  and the `fileGroups` block; keep checks; header comment.
+- `.moon/tasks/python-project.yml` — **new**; library/application-scoped `build`.
+- `.moon/tasks/typescript.yml` — add `layers: ['configuration']`; remove `build`/`typecheck`/`test`
+  (→ `typescript-project.yml`) and `fileGroups`; keep `lint`/`fmt`; header comment.
+- `.moon/tasks/typescript-project.yml` — **new**; library/application-scoped `build`/`typecheck`/`test`.
+- `.moon/tasks.yml` — add `'**/test_*.*'` to the global `tests` fileGroup; add the two new files to
+  `implicitInputs`.
+- `py/moon.yml` — remove `inheritedTasks.exclude: ['build']`; pointer comment (gated on step 1).
 - `ts/moon.yml` — remove `inheritedTasks.exclude: ['build', 'typecheck']`; keep `tasks:` block;
-  pointer comment.
-- `CONTRIBUTING.md` — "Moon project files": document the layer-routing model (checks → config root;
-  build/typecheck → library/application via `inheritedBy.layers`) and that config-only packages
-  still need their exclude.
-- `ts/README.md` — reword the one `moon.yml` bullet that says the root "excludes build/typecheck"
-  → "build/typecheck are routed per-project by layer, not attached to the root."
-- `py/README.md` — review; likely no change (it does not describe the build exclusion).
+  pointer comment (gated on step 1).
+- `CONTRIBUTING.md` — "Moon project files": document the layer-routing model (whole-tree checks →
+  configuration root; per-project tasks → library/application via `inheritedBy.layers`) and the
+  central-config discriminator; note config-only packages still need their exclude.
+- `ts/README.md` — Commands: `Test` moves from `moon run ts:test` to `moon run :test --query
+  "language=typescript"` (now per-project, like `typecheck`/`build`); reword the "lint/fmt/test run
+  once at the root" prose to "lint/fmt run once at the root; typecheck, test, and build fan out per
+  project," and the `moon.yml` bullet (no longer "excludes build/typecheck" — "not routed to the
+  root by layer").
+- `py/README.md` — review; expected no change (py `lint`/`fmt`/`typecheck`/`test` all stay on the
+  root as documented).
