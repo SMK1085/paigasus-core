@@ -134,28 +134,29 @@ tasks:
 (The `commitlint` / `check-config-only` tasks defined in `ts/moon.yml` are unrelated and stay
 there.) Add both new files to `.moon/tasks.yml` `implicitInputs` so edits bust caches.
 
-## fileGroups — global-only as the primary design
+## fileGroups — kept in each scoped task file
 
 `@group(sources)`/`@group(tests)` are consumed by the task `inputs` on both sides of the split.
-Rather than re-declare fileGroups in each scoped file (which raises the "fileGroups in a scoped
-file are themselves scoped" subtlety), make the **unscoped global `.moon/tasks.yml` the single
-home**:
 
-- Keep global `sources: ['src/**/*']`.
-- **Augment** global `tests` with `'**/test_*.*'` — today it has `tests/**/*`, `**/*.test.*`,
-  `**/*.spec.*`, `**/*_test.*`, but **not** the pytest `test_*.py` *prefix* form currently carried
-  by `python.yml`. Adding it makes the global group a superset of both languages' current groups,
-  so dropping the per-language fileGroups loses no cache-invalidation coverage.
-- **Remove** the `fileGroups` blocks from `python.yml`/`typescript.yml` (and don't add any to the
-  `-project.yml` files).
-- **Keep** the `packages/*/src`, `packages/*/tests` extensions in `py/moon.yml`/`ts/moon.yml`
-  (project-scoped) — these are what make the root checks' `@group(sources)`/`@group(tests)` cover
-  the whole `packages/*` tree. (Moon merges, not overrides, fileGroups across layers — confirmed
-  for this repo in SMA-384.)
+**Implementation finding (prototype, Open item #1 — resolved).** An earlier draft of this spec
+proposed centralizing fileGroups in the unscoped global `.moon/tasks.yml`. The Task 1 prototype
+disproved it: **Moon 2.2.5 does not propagate global-file fileGroups to a project that inherits a
+task from a *scoped* task file** — `moon project paigasus-kernel-py` errored
+`project::unknown_file_group sources`. So fileGroups must live **in each scoped task file**, next to
+the tasks that reference them — the pattern `.moon/tasks/rust.yml` already uses. Concretely:
 
-Net resolution: a package `build`'s `@group(sources)` → its own `src/**/*` (global); the root
-checks' groups → global `src/**/*` (empty at root) **+** `py|ts/moon.yml`'s `packages/*/…`. Still
-**prototype-verified first** via `moon project` before the rest of the change (Open items #1).
+- `python.yml` / `typescript.yml` (checks) **keep** their `sources`/`tests` fileGroups (consumed by
+  the root checks; merged with the `py|ts/moon.yml` `packages/*` extensions, which are also kept).
+- `python-project.yml` / `typescript-project.yml` (per-project) **carry** the `fileGroups` their
+  tasks need: `sources` for py `build` and ts `build`/`typecheck`; `sources` + `tests` for ts
+  `test`.
+- The global `.moon/tasks.yml` fileGroups are **left as-is** (pre-existing; not load-bearing for the
+  split). The only change to `.moon/tasks.yml` is adding the two new task files to `implicitInputs`.
+
+Net resolution (verified): a package `build`'s `@group(sources)` → its own `src/**/*` (from the
+`-project.yml` group); the root checks' groups → `src/**/*` (empty at root) **+** `py|ts/moon.yml`'s
+`packages/*/…` extension. (Moon merges, not overrides, fileGroups across layers — confirmed for this
+repo in SMA-384.)
 
 ## Root-exclude cleanup (gated)
 
@@ -263,7 +264,9 @@ the repo grows large enough that whole-tree-on-every-change checks dominate CI t
 
 ## Open items to confirm during implementation (prototype-first)
 
-1. **fileGroup resolution under global-only** (highest risk) — verify step 2 before the rest.
+1. **fileGroup resolution** (highest risk) — **resolved by the Task 1 prototype:** global-only is
+   unsupported on Moon 2.2.5; fileGroups now live in each scoped task file (see the fileGroups
+   section). Verify step 2 still passes for ts in Task 2.
 2. **Exact Moon 2.2.5 `inheritedBy` keys.** Review confirmed v2 supports `languages` + `layers`
    (AND) with `layers` a plural list; confirm on the pinned 2.2.5 (project field is `layer:`,
    singular). If named differently, adjust — intent unchanged.
@@ -272,14 +275,16 @@ the repo grows large enough that whole-tree-on-every-change checks dominate CI t
 
 ## Files touched
 
-- `.moon/tasks/python.yml` — add `layers: ['configuration']`; remove `build` (→ `python-project.yml`)
-  and the `fileGroups` block; keep checks; header comment.
-- `.moon/tasks/python-project.yml` — **new**; library/application-scoped `build`.
+- `.moon/tasks/python.yml` — add `layers: ['configuration']`; remove `build` (→ `python-project.yml`);
+  keep checks **and `fileGroups`**; header comment.
+- `.moon/tasks/python-project.yml` — **new**; library/application-scoped `build` + its `sources`
+  fileGroup.
 - `.moon/tasks/typescript.yml` — add `layers: ['configuration']`; remove `build`/`typecheck`/`test`
-  (→ `typescript-project.yml`) and `fileGroups`; keep `lint`/`fmt`; header comment.
-- `.moon/tasks/typescript-project.yml` — **new**; library/application-scoped `build`/`typecheck`/`test`.
-- `.moon/tasks.yml` — add `'**/test_*.*'` to the global `tests` fileGroup; add the two new files to
-  `implicitInputs`.
+  (→ `typescript-project.yml`); keep `lint`/`fmt` **and `fileGroups`**; header comment.
+- `.moon/tasks/typescript-project.yml` — **new**; library/application-scoped `build`/`typecheck`/`test`
+  + `sources`/`tests` fileGroups.
+- `.moon/tasks.yml` — add the two new task files to `implicitInputs` (global fileGroups left as-is;
+  not load-bearing for the split — see the fileGroups section).
 - `py/moon.yml` — remove `inheritedTasks.exclude: ['build']`; pointer comment (gated on step 1).
 - `ts/moon.yml` — remove `inheritedTasks.exclude: ['build', 'typecheck']`; keep `tasks:` block;
   pointer comment (gated on step 1).

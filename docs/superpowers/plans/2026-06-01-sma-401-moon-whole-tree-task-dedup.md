@@ -4,7 +4,7 @@
 
 **Goal:** Make Moon's `lint`/`fmt`/`typecheck`/`test` run exactly once instead of (N+1)× by routing task inheritance with `inheritedBy.layers` — whole-tree checks attach to the `configuration` roots, per-project tasks to `library`/`application` projects.
 
-**Architecture:** Split each language's single `.moon/tasks/<lang>.yml` into a *checks* file (`configuration`-scoped) and a *project* file (`library`/`application`-scoped). Move `fileGroups` to the unscoped global `.moon/tasks.yml`. Then remove the now-redundant SMA-394/399 root excludes (gated on the routing being in force), and fix the comments/docs that the new model makes stale.
+**Architecture:** Split each language's single `.moon/tasks/<lang>.yml` into a *checks* file (`configuration`-scoped) and a *project* file (`library`/`application`-scoped). Keep `fileGroups` in each scoped task file (Moon 2.2.5 does not propagate global `.moon/tasks.yml` fileGroups to projects that inherit a task from a scoped file — confirmed by the Task 1 prototype). Then remove the now-redundant SMA-394/399 root excludes (gated on the routing being in force), and fix the comments/docs that the new model makes stale.
 
 **Tech Stack:** Moon 2.2.5 (`inheritedBy.languages` + `inheritedBy.layers`, AND-combined), YAML task config. No application code.
 
@@ -36,7 +36,15 @@
 **Files:**
 - Modify: `.moon/tasks/python.yml` (becomes the configuration-scoped checks file)
 - Create: `.moon/tasks/python-project.yml` (library/application-scoped `build`)
-- Modify: `.moon/tasks.yml` (central `tests` fileGroup + `implicitInputs`)
+- Modify: `.moon/tasks.yml` (`implicitInputs` only)
+
+> **Implemented note (correction).** The Task 1 prototype showed Moon 2.2.5 does **not** propagate
+> global `.moon/tasks.yml` fileGroups to a project that inherits a task from a scoped file, so
+> fileGroups stay **in each scoped task file**: `python.yml` keeps its `sources`/`tests`;
+> `python-project.yml` carries a `sources` group; `.moon/tasks.yml` keeps its original fileGroups
+> and only gains the two `implicitInputs` (no `**/test_*.*` addition). The Step 1–3 snippets below
+> are **superseded** by the as-committed files (`4fc8e27`) and the spec's "fileGroups — kept in each
+> scoped task file" section. Step 4–6 verification stands.
 
 - [ ] **Step 1: Move `fileGroups` to the global file and register the new task file**
 
@@ -190,11 +198,22 @@ $schema: 'https://moonrepo.dev/schemas/tasks.json'
 # (ts/moon.yml) ONLY: eslint/prettier read the central ts/eslint.config.js & .prettierrc.js,
 # so one run from ts/ covers the whole tree (including root-level files like ts/scripts/) —
 # running them per-package would re-lint the same files (SMA-401). Per-project
-# build/typecheck/test live in typescript-project.yml; fileGroups live centrally in
-# .moon/tasks.yml.
+# build/typecheck/test live in typescript-project.yml. fileGroups stay in this file (Moon 2.2.5
+# does not propagate global .moon/tasks.yml fileGroups to scoped-task inheritors — see the spec);
+# ts/moon.yml extends them with packages/*/… and apps/*/… for the root checks.
 inheritedBy:
   languages: ['typescript']
   layers: ['configuration']
+
+fileGroups:
+  sources:
+    - 'src/**/*'
+  tests:
+    - 'tests/**/*'
+    - '**/*.test.ts'
+    - '**/*.test.tsx'
+    - '**/*.spec.ts'
+    - '**/*.spec.tsx'
 
 tasks:
   lint:
@@ -228,10 +247,22 @@ $schema: 'https://moonrepo.dev/schemas/tasks.json'
 # the bug SMA-394 excluded; now simply not routed here), and vitest has NO central config so
 # tests run per-package in each package's own cwd/environment. Apps override `build` with their
 # own outputs: (see paigasus-console). `typecheck` is the canonical type-check task that never
-# gets overridden; `build` is the override surface. (SMA-401)
+# gets overridden; `build` is the override surface. fileGroups stay in this file (Moon 2.2.5 does
+# not propagate global fileGroups to scoped-task inheritors); build/typecheck use @group(sources),
+# test uses @group(sources)+@group(tests). (SMA-401)
 inheritedBy:
   languages: ['typescript']
   layers: ['library', 'application']
+
+fileGroups:
+  sources:
+    - 'src/**/*'
+  tests:
+    - 'tests/**/*'
+    - '**/*.test.ts'
+    - '**/*.test.tsx'
+    - '**/*.spec.ts'
+    - '**/*.spec.tsx'
 
 tasks:
   build:
