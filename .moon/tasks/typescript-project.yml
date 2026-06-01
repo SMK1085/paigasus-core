@@ -1,0 +1,52 @@
+$schema: 'https://moonrepo.dev/schemas/tasks.json'
+
+# Per-project tasks for the ts workspace. Scoped to library/application layers ONLY:
+# `tsc -p tsconfig.json` binds to each project's own tsconfig (the ts root has none → TS5058,
+# the bug SMA-394 excluded; now simply not routed here), and vitest has NO central config so
+# tests run per-package in each package's own cwd/environment. Apps override `build` with their
+# own outputs: (see paigasus-console). `typecheck` is the canonical type-check task that never
+# gets overridden; `build` is the override surface.
+#
+# fileGroups stay in this file (Moon 2.2.5 does not propagate global fileGroups to scoped-task
+# inheritors); build/typecheck use @group(sources), test uses @group(sources)+@group(tests).
+# (SMA-401)
+inheritedBy:
+  languages: ['typescript']
+  layers: ['library', 'application']
+
+fileGroups:
+  sources:
+    - 'src/**/*'
+  tests:
+    - 'tests/**/*'
+    - '**/*.test.ts'
+    - '**/*.test.tsx'
+    - '**/*.spec.ts'
+    - '**/*.spec.tsx'
+
+tasks:
+  build:
+    # No outputs — tsc --noEmit produces no files; cache invalidation runs off inputs.
+    # Apps that produce artifacts (Next.js) override this task with outputs:.
+    command: 'pnpm exec tsc -p tsconfig.json --noEmit'
+    inputs:
+      - '@group(sources)'
+      - 'tsconfig.json'
+      - 'package.json'
+      - '/ts/tsconfig.base.json'
+      - '/ts/pnpm-lock.yaml'
+  typecheck:
+    command: 'pnpm exec tsc -p tsconfig.json --noEmit'
+    inputs:
+      - '@group(sources)'
+      - 'tsconfig.json'
+      - 'package.json'
+      - '/ts/tsconfig.base.json'
+      - '/ts/pnpm-lock.yaml'
+  test:
+    command: 'pnpm exec vitest run --passWithNoTests'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'package.json'
+      - '/ts/pnpm-lock.yaml'

@@ -1,9 +1,17 @@
 $schema: 'https://moonrepo.dev/schemas/tasks.json'
 
-# Moon does NOT scope task files by filename — scope explicitly so these TypeScript
-# commands only attach to typescript projects (not rust, python, or contracts).
+# Whole-tree lint/format for the ts workspace. Scoped to the configuration-layer root
+# (ts/moon.yml) ONLY: eslint/prettier read the central ts/eslint.config.js & .prettierrc.js,
+# so one run from ts/ covers the whole tree (including root-level files like ts/scripts/) —
+# running them per-package would re-lint the same files (SMA-401). Per-project
+# build/typecheck/test live in typescript-project.yml.
+#
+# fileGroups stay in this file (Moon 2.2.5 does not propagate global .moon/tasks.yml fileGroups
+# to projects inheriting a scoped task); ts/moon.yml extends them with packages/*/… and apps/*/…
+# for the root checks.
 inheritedBy:
   languages: ['typescript']
+  layers: ['configuration']
 
 fileGroups:
   sources:
@@ -16,17 +24,6 @@ fileGroups:
     - '**/*.spec.tsx'
 
 tasks:
-  build:
-    # No `outputs:` — tsc --noEmit produces no files; Moon's per-project output check
-    # would fail (same shape as SMA-384 Correction 1 for `uv build`). Cache invalidation
-    # runs off `inputs:`. Apps that produce artifacts (Next.js) override this task.
-    command: 'pnpm exec tsc -p tsconfig.json --noEmit'
-    inputs:
-      - '@group(sources)'
-      - 'tsconfig.json'
-      - 'package.json'
-      - '/ts/tsconfig.base.json'
-      - '/ts/pnpm-lock.yaml'
   lint:
     command: 'pnpm exec eslint .'
     inputs:
@@ -45,23 +42,4 @@ tasks:
       - 'package.json'
       - '/ts/.prettierrc.js'
       - '/ts/.prettierignore'
-      - '/ts/pnpm-lock.yaml'
-  typecheck:
-    # Identical command to `build` above. By convention `typecheck` is the canonical
-    # type-checking task that never gets overridden, while `build` IS the override surface:
-    # library projects inherit this no-op `tsc --noEmit` form; app projects (Next.js)
-    # override `build` with `next build` while keeping `typecheck` for pure type-only checks.
-    command: 'pnpm exec tsc -p tsconfig.json --noEmit'
-    inputs:
-      - '@group(sources)'
-      - 'tsconfig.json'
-      - 'package.json'
-      - '/ts/tsconfig.base.json'
-      - '/ts/pnpm-lock.yaml'
-  test:
-    command: 'pnpm exec vitest run --passWithNoTests'
-    inputs:
-      - '@group(sources)'
-      - '@group(tests)'
-      - 'package.json'
       - '/ts/pnpm-lock.yaml'
