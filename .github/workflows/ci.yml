@@ -135,7 +135,7 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          T=(:build :test :lint :fmt :typecheck :breaking)
+          T=(:build :test :lint :fmt :typecheck :breaking :release-parity)
           if [ "$EVENT" = "pull_request" ]; then
             moon ci "${T[@]}" --base origin/main
           elif [ -n "${BEFORE:-}" ] && ! printf '%s' "$BEFORE" | grep -qE '^0+$'; then
