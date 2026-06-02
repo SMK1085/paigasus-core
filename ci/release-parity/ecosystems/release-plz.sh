@@ -7,6 +7,18 @@ set -euo pipefail
 A_CRATE="paigasus-release-parity-a"
 B_CRATE="paigasus-release-parity-b"
 
+# release-plz and the `cargo metadata` it spawns run inside a temp fixture OUTSIDE
+# this repo. The proto `release-plz` shim resolves its version by walking up from
+# CWD to find .prototools — from /tmp that fails (CI: proto::tool::unknown_id). So
+# resolve the absolute tool binaries once, from the repo, and invoke those directly.
+_RP_SELF="${BASH_SOURCE[0]:-$0}"
+_RP_REPO_ROOT="$(cd "$(dirname "$_RP_SELF")/../../.." && pwd)"
+RELEASE_PLZ_BIN="$( (cd "$_RP_REPO_ROOT" && proto bin release-plz) 2>/dev/null || command -v release-plz || echo release-plz )"
+# release-plz shells out to `cargo metadata`; pass an explicit, CWD-independent
+# cargo (rustup proxy / real binary, not a CWD-sensitive shim).
+CARGO_BIN="$( command -v cargo 2>/dev/null || true )"
+[ -n "$CARGO_BIN" ] || CARGO_BIN="$HOME/.cargo/bin/cargo"
+
 ecosystem::_crate_dir() { # dir slot(a|b) -> path
   case "$2" in
     a) printf '%s/crates/%s' "$1" "$A_CRATE" ;;
@@ -88,7 +100,7 @@ ecosystem::run_update() { # dir
   # crates.io index isn't consulted for the (nonexistent) fixture crate names.
   # Capture output and replay it on failure so CI failures are diagnosable.
   local out
-  if ! out="$(cd "$1" && CARGO_NET_OFFLINE=true release-plz update 2>&1 >/dev/null)"; then
+  if ! out="$(cd "$1" && CARGO="$CARGO_BIN" CARGO_NET_OFFLINE=true "$RELEASE_PLZ_BIN" update 2>&1 >/dev/null)"; then
     printf '%s\n' "$out" >&2
     return 1
   fi
