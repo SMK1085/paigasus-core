@@ -57,7 +57,9 @@ if [ "$NEGATIVE" = 1 ]; then
 fi
 
 rc=0
-while IFS=$'\t' read -r id subject footer expected_0x _expected_1x _discr || [ -n "$id" ]; do
+# Read cases on FD 3, not stdin: a loop-body subprocess (release-plz, git) that
+# reads stdin must not be able to swallow case rows (silent skips = false green).
+while IFS=$'\t' read -r -u 3 id subject footer expected_0x _expected_1x _discr || [ -n "$id" ]; do
   case "$id" in ''|'#'*) continue ;; esac
   ec=0; check_case "$id" "$subject" "$footer" "$expected_0x" || ec=$?
   case "$ec" in
@@ -65,7 +67,7 @@ while IFS=$'\t' read -r id subject footer expected_0x _expected_1x _discr || [ -
     1) rc=1 ;;
     *) echo "== parity ABORTED: infrastructure error on case $id ==" >&2; exit 2 ;;
   esac
-done <"$CASES"
+done 3<"$CASES"
 
 if [ "$rc" = 0 ]; then echo "== all parity cases passed =="; else echo "== parity FAILURES (see above) ==" >&2; fi
 exit "$rc"
