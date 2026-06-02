@@ -13,7 +13,7 @@
 A staff-eng review raised five findings; all five were verified and incorporated:
 
 - **F1 (High):** the original S1 ("independent per-package versioning") *reversed* the scoping doc's lockstep mandate. Resolved → **hybrid**: lockstep within the kernel/proto families, independent across unrelated packages (S1 below). The ADR **refines** the scoping doc rather than silently diverging.
-- **F2 (Med):** in 0.x with `always_bump_minor_for_0 = true`, `feat!:` and `feat:`+footer are *degenerate* (both = `feat:` = `0.2.0`). The discriminating cases now use a **patch-base** (`fix!:`, `fix:`+footer); 1.x columns staged but unasserted (S6, §6).
+- **F2 (Med):** in 0.x with `features_always_increment_minor = true`, `feat!:` and `feat:`+footer are *degenerate* (both = `feat:` = `0.2.0`). The discriminating cases now use a **patch-base** (`fix!:`, `fix:`+footer); 1.x columns staged but unasserted (S6, §6).
 - **F3 (Med):** the fixture `release-plz.toml` is now **derived from the real `rs/release-plz.toml`**, not hand-mirrored (§7).
 - **F4 (Med):** the original single-crate fixture couldn't test the path→package **attribution** that was SMA-385's actual bug; the fixture is now **multi-crate** with an attribution case (§5, §7).
 - **F5 (Low):** the `0.0.0 → 0.1.0` first-activation step is named as the riskiest activation moment and routed to **E-activate** (§11).
@@ -43,7 +43,7 @@ The decisions below are the substance of **ADR-00XX "Polyglot versioning & relea
 | **S3** | **`0.1.0` floor; the tool owns *every* tag.** No package starts at `0.0.0`; first release is `0.1.0`; thereafter the release tool creates **all** tags. Never hand-place a release tag. | Encodes the Helikon lessons: the `0.0.0` trap (SMA-347/372/382) and SMA-385's finding that **manually-created tags lack the metadata release-plz uses to track "what's been released,"** silently stopping future bumps. |
 | **S4** | **Dormant until real.** Config + workflows land but release-PR opening / tag-cutting stays gated off until a package has a real public API; registry publish is *additionally* gated on SMA-378 metadata. Near-term, the only thing that runs is the dry-run parity test. | Nothing is releasable yet; an active pipeline would cut meaningless stub releases and re-expose the very traps S3 guards. The parity test needs only *config + a baseline + git history* — not publishing — so its value lands now. |
 | **S5** | **Commit *scope* ≠ release unit; file *path* is.** The ADR states explicitly that release tools map commits to packages by **changed file path**; commitlint's workspace scopes (`rs`/`py`/`ts`/`contracts`) do **not** drive per-package bumps. | SMA-385's root cause. Recording it stops contributors (and fixtures) from assuming a `feat(...)` *scope* bumps a specific package. **Tested**, not just documented — see the attribution case (§7, F4). |
-| **S6** | **Canonical commit→semver contract, pinned to the 0.x regime** (table below), with `always_bump_minor_for_0 = true`. The breaking-vs-non-breaking distinction is exercised with a **patch-base** (`fix`), because on a `feat` base it is degenerate in 0.x. | The contract the harness asserts. See the S6 detail for why the patch-base matters. |
+| **S6** | **Canonical commit→semver contract, pinned to the 0.x regime** (table below), with `features_always_increment_minor = true`. The breaking-vs-non-breaking distinction is exercised with a **patch-base** (`fix`), because on a `feat` base it is degenerate in 0.x. | The contract the harness asserts. See the S6 detail for why the patch-base matters. |
 
 ### S1 mechanism (deferred to E-activate)
 
@@ -51,11 +51,11 @@ How the lockstep number propagates — the maturin/napi version source, and whet
 
 ### S6 detail — the canonical expectation table
 
-release-plz follows **Cargo's SemVer rules** in `0.x`: a breaking change bumps the **minor** field (`0.1.0 → 0.2.0`); compatible changes bump **patch**. By **default** `feat:` bumps only patch in `0.x` (feat and fix collapse); `always_bump_minor_for_0 = true` restores the feat/fix distinction. We set it **`true`**.
+release-plz follows **Cargo's SemVer rules** in `0.x`: a breaking change bumps the **minor** field (`0.1.0 → 0.2.0`); compatible changes bump **patch**. By **default** `feat:` bumps only patch in `0.x` (feat and fix collapse); `features_always_increment_minor = true` restores the feat/fix distinction. We set it **`true`**.
 
 **The 0.x degeneracy (F2).** With the knob on, `feat:` → minor, so adding a breaking marker to a `feat` (`feat!:`, or `feat:`+`BREAKING CHANGE:` footer) **changes nothing** — all three land on `0.2.0`. Asserting those rows tests nothing. The breaking marker only changes the bump on a **patch-base** type (`fix`), where the non-breaking form is patch and the breaking form is minor. So the *discriminating* cases use a `fix` base:
 
-| Case | Commit | 0.x bump (`always_bump_minor_for_0=true`) | From `0.1.0` | Role |
+| Case | Commit | 0.x bump (`features_always_increment_minor=true`) | From `0.1.0` | Role |
 |------|--------|-------------------------------------------|--------------|------|
 | `fix` | `fix: …` | patch | `0.1.1` | non-breaking patch baseline |
 | `feat` | `feat: …` | minor | `0.2.0` | proves feat ≠ fix (knob active) |
@@ -123,7 +123,7 @@ Lives as **data** (`ci/release-parity/cases.toml`), each row `{ id, commits: [..
 - **release-plz adapter:** run release-plz's version-update against the **disposable fixture** and read the resulting version from the crate manifest. Because the fixture is throwaway, letting `release-plz update` write into it and reading the bumped `version` is equivalent to a dry-run against the real repo — and **avoids fragile log/JSON parsing** of `--dry-run` output (resolves the original Risk #1). semver-check is **off** in the fixture, so the calculation is purely Conventional-Commit-driven and needs no crates.io network.
 - Future adapters (E3/E4): `python-semantic-release version --print`, `semantic-release --dry-run`.
 
-**Fixture config derived from the real config (F3).** The fixture's `release-plz.toml` is **not** a hand-maintained mirror. The harness reads `rs/release-plz.toml`, copies the **classification-relevant `[workspace]` keys** (notably `always_bump_minor_for_0`), forces the semver-check **off**, and **omits the per-package `[[package]]` overrides** (they reference real crates and don't affect classification). This guarantees the harness exercises **production classification settings**; a change to those settings in `rs/release-plz.toml` flows into the fixture automatically (and re-runs the check via §9 inputs).
+**Fixture config derived from the real config (F3).** The fixture's `release-plz.toml` is **not** a hand-maintained mirror. The harness reads `rs/release-plz.toml`, copies the **classification-relevant `[workspace]` keys** (notably `features_always_increment_minor`), forces the semver-check **off**, and **omits the per-package `[[package]]` overrides** (they reference real crates and don't affect classification). This guarantees the harness exercises **production classification settings**; a change to those settings in `rs/release-plz.toml` flows into the fixture automatically (and re-runs the check via §9 inputs).
 
 **Mechanism (Approach A — ephemeral multi-crate fixture):**
 1. Temp dir; `git init`; write a minimal Cargo workspace with **two independent crates** (`fixture_a`, `fixture_b`, no dep edge) + the derived `release-plz.toml`.
@@ -140,7 +140,7 @@ Lives as **data** (`ci/release-parity/cases.toml`), each row `{ id, commits: [..
 ### 8. The Rust slice (release-plz dormant config + adapter)
 
 - `.prototools`: pin `release-plz` (exact version at implementation — latest stable).
-- `rs/release-plz.toml`: `dependencies_update = true`, `sort_commits = "newest"`, `always_bump_minor_for_0 = true`, semver-check posture set, per-crate overrides as needed. Mirrors SMA-307 conventions **minus the active workflow**.
+- `rs/release-plz.toml`: `dependencies_update = true`, `sort_commits = "newest"`, `features_always_increment_minor = true`, semver-check posture set, per-crate overrides as needed. Mirrors SMA-307 conventions **minus the active workflow**.
 - `ci/release-parity/adapters/release-plz.sh`: the adapter (§7).
 - `ci/release-parity/cases.toml`: the S6 table.
 
@@ -174,9 +174,9 @@ The parity check runs **per-PR on the affected graph only — no nightly** (cade
 1. **Harness green on the canonical table:** `moon run <proj>:release-parity` builds the multi-crate fixture, runs release-plz over all S6 rows, asserts every `resulting == expected_0x`. Exit 0.
 2. **Negative control fails red:** flip one expected value (or `--negative-control`); confirm non-zero exit with `expected X, got Y`. Proves no false-green.
 3. **Discriminating breaking cases (the AC target, 0.x):** confirm `fix-bang` → `0.2.0` and `fix-footer` → `0.2.0` (equal), each ≠ plain `fix` → `0.1.1`. Confirm a fixture variant that *drops* the `!`/footer yields `0.1.1` (the caught under-classification).
-4. **Knob active:** confirm `feat` → `0.2.0` (proves `always_bump_minor_for_0 = true`).
+4. **Knob active:** confirm `feat` → `0.2.0` (proves `features_always_increment_minor = true`).
 5. **Attribution (F4):** confirm a commit touching `fixture_a` bumps `fixture_a` and leaves `fixture_b` at `0.1.0`.
-6. **Derived config (F3):** confirm the fixture `release-plz.toml` is generated from `rs/release-plz.toml` (e.g. flipping `always_bump_minor_for_0` in the real file changes the `feat` row's result), not from a hardcoded copy.
+6. **Derived config (F3):** confirm the fixture `release-plz.toml` is generated from `rs/release-plz.toml` (e.g. flipping `features_always_increment_minor` in the real file changes the `feat` row's result), not from a hardcoded copy.
 7. **Dormancy:** confirm the slice produces **no** tag/PR/changelog on `main` — grep the workflow set for any push-triggered release-plz invocation (none), and confirm `publish = false` intact.
 8. **Affected wiring:** a PR touching only an unrelated file does **not** run `release-parity`; a PR touching `rs/release-plz.toml`, `ci/release-parity/**`, or `.prototools` **does**.
 
@@ -191,7 +191,7 @@ The parity check runs **per-PR on the affected graph only — no nightly** (cade
 ## Risks / to-verify during implementation
 
 1. **release-plz version-update mechanics (§7).** Confirm `release-plz update` writing into the disposable fixture yields a readable bumped `version` in the crate manifest (preferred over `--dry-run` log parsing). If `update` refuses without a remote/registry, fall back to `release-plz update --dry-run` + parse.
-2. **`always_bump_minor_for_0` semantics (§6).** Verify empirically that the pinned release-plz yields `feat:` → `0.2.0`, `fix:` → `0.1.1`, `fix!:`/`fix:`+footer → `0.2.0` from a `0.1.0` baseline.
+2. **`features_always_increment_minor` semantics (§6).** Verify empirically that the pinned release-plz yields `feat:` → `0.2.0`, `fix:` → `0.1.1`, `fix!:`/`fix:`+footer → `0.2.0` from a `0.1.0` baseline.
 3. **Offline (§7).** Confirm semver-check-off update needs **no** crates.io network in the fixture; if it still resolves the index, set a registry override / vendor in the fixture.
 4. **`dependencies_update` isolation (§7).** Confirm two independent (no-dep-edge) fixture crates prevent any cross-crate cascade so the attribution assertion holds; if not, give each case its own fixture dir.
 5. **Derived-config extraction (§7, F3).** Confirm copying only `[workspace]` classification keys (and forcing semver-check off, dropping `[[package]]`) produces a valid fixture config that still reflects production classification.

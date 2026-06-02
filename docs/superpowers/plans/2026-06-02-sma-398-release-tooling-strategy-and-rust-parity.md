@@ -12,6 +12,19 @@
 
 ---
 
+## Post-execution note (as-built deltas)
+
+Executed via subagent-driven development; several details were corrected against the live release-plz `0.3.158` binary and live in the committed code (the task text below is the original plan):
+
+- **Field name:** the 0.x knob is `features_always_increment_minor = true`, **not** `always_bump_minor_for_0` (release-plz 0.3.158 rejects the latter as unknown). `rs/release-plz.toml` and `_derive_config` both use the correct name; the derive greps it **directly, no field-name mapping** (preserving the F3 invariant).
+- **Fixture mechanics:** `_derive_config` also writes `git_only = true` + `git_tag_name = "{{ package }}-v{{ version }}"` (read baselines from per-crate tags, offline); `build_fixture` sets `commit.gpgsign false` + `tag.gpgsign false` on the fixture repo.
+- **Orchestrator hardening:** `run.sh` distinguishes infrastructure errors (exit 2) from assertion failures (exit 1) so `--negative-control` can't false-positive on a crash, and tolerates a final `cases.tsv` line without a trailing newline.
+- **proto plugin:** `.proto/plugins/release-plz.toml` needed a `git-tag-pattern` in `[resolve]` (release-plz tags are prefixed `release-plz-v`).
+
+The full table passes against release-plz 0.3.158: `fix→0.1.1`, `feat→0.2.0`, `fix!:`/`fix:`+footer→`0.2.0`, `feat!:`→`0.2.0`, attribution holds.
+
+---
+
 ## File Structure
 
 | File | Create/Modify | Responsibility |
