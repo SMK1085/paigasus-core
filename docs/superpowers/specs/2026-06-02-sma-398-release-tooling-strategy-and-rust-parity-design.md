@@ -10,7 +10,7 @@
 
 ## Review changes (2026-06-02)
 
-A staff-eng review ([`…-design-review.md`](./2026-06-02-sma-398-release-tooling-strategy-and-rust-parity-design-review.md)) raised five findings; all five were verified and incorporated:
+A staff-eng review raised five findings; all five were verified and incorporated:
 
 - **F1 (High):** the original S1 ("independent per-package versioning") *reversed* the scoping doc's lockstep mandate. Resolved → **hybrid**: lockstep within the kernel/proto families, independent across unrelated packages (S1 below). The ADR **refines** the scoping doc rather than silently diverging.
 - **F2 (Med):** in 0.x with `always_bump_minor_for_0 = true`, `feat!:` and `feat:`+footer are *degenerate* (both = `feat:` = `0.2.0`). The discriminating cases now use a **patch-base** (`fix!:`, `fix:`+footer); 1.x columns staged but unasserted (S6, §6).
