@@ -57,7 +57,7 @@ Use the Notion MCP: fetch the "Architecture Decision Records" index page (`36883
 
 Create a child page under the ADR index titled `ADR-0011: Polyglot versioning & release strategy`, with sections:
 - **Context:** every paigasus-core artifact is a `0.0.0` stub; the Scoping doc §3 #4 / §4 mandate lockstep for the kernel/proto artifacts; SMA-371 AC-E needs a commit→semver parity gate.
-- **Decision:** the S1–S6 table verbatim from the spec (hybrid versioning; per-language tools with kernel/proto as Rust byproducts; `0.1.0` floor + tool-owned tags; dormant-until-real; scope≠file-path; the 0.x contract with `always_bump_minor_for_0 = true`).
+- **Decision:** the S1–S6 table verbatim from the spec (hybrid versioning; per-language tools with kernel/proto as Rust byproducts; `0.1.0` floor + tool-owned tags; dormant-until-real; scope≠file-path; the 0.x contract with `features_always_increment_minor = true`).
 - **Relationship to existing docs:** this ADR **refines** Scoping §3 #4 / §4 — it scopes their lockstep mandate explicitly to the kernel/proto families and records per-package independence for unrelated packages. (Do **not** mark them superseded.)
 - **Consequences:** lockstep propagation mechanism (maturin/napi) deferred to E-activate; parity gate (SMA-398) is the enforcement.
 
@@ -156,7 +156,7 @@ git commit -m "build(release): vendor release-plz proto plugin pinned at 0.3.158
 
 - [ ] **Step 1: Write the dormant config**
 
-The harness greps `always_bump_minor_for_0` from this file (Task 5), so it MUST be present and literal.
+The harness greps `features_always_increment_minor` from this file (Task 5), so it MUST be present and literal.
 
 ```toml
 # Dormant release-plz configuration (SMA-398).
@@ -170,8 +170,8 @@ The harness greps `always_bump_minor_for_0` from this file (Task 5), so it MUST 
 [workspace]
 # Conventional-Commit -> semver classification (the contract SMA-398 asserts).
 # In 0.x: fix -> patch, feat -> minor, breaking (! or BREAKING CHANGE) -> minor.
-# always_bump_minor_for_0 keeps feat distinguishable from fix in 0.x.
-always_bump_minor_for_0 = true
+# features_always_increment_minor keeps feat distinguishable from fix in 0.x.
+features_always_increment_minor = true
 dependencies_update = true
 
 [workspace.changelog]
@@ -233,7 +233,7 @@ The fixture `release-plz.toml` is generated from the real `rs/release-plz.toml`
 config would drift and validate the wrong settings.
 
 ## 0.x degeneracy (F2)
-With `always_bump_minor_for_0 = true`, `feat:` already bumps minor, so `feat!:`
+With `features_always_increment_minor = true`, `feat:` already bumps minor, so `feat!:`
 and `feat:`+footer are NON-discriminating in 0.x (all = 0.2.0). The breaking
 marker is only testable on a **patch-base** (`fix!:`, `fix:`+footer): a tool that
 drops the marker yields 0.1.1, which the harness catches. Breaking-vs-feature by
@@ -278,9 +278,9 @@ ecosystem::_crate_dir() { # dir slot(a|b) -> path
 
 ecosystem::_derive_config() { # real_toml out_toml   (F3)
   local real="$1" out="$2" bump
-  bump="$(grep -E '^[[:space:]]*always_bump_minor_for_0[[:space:]]*=' "$real" || true)"
+  bump="$(grep -E '^[[:space:]]*features_always_increment_minor[[:space:]]*=' "$real" || true)"
   if [ -z "$bump" ]; then
-    echo "FATAL: rs/release-plz.toml lacks always_bump_minor_for_0 — parity would test stale settings" >&2
+    echo "FATAL: rs/release-plz.toml lacks features_always_increment_minor — parity would test stale settings" >&2
     return 1
   fi
   {
@@ -587,7 +587,7 @@ Verify each new issue shows `relatedTo SMA-398` and `blockedBy ADR-0011` (or a n
 | ADR-0011 (S1–S6), refines Scoping doc | Task 1 |
 | Pin release-plz / `.prototools` (§8) | Task 2 |
 | Dormant `rs/release-plz.toml` (S4/§3/§4) | Task 3 |
-| `always_bump_minor_for_0 = true` (S6) | Task 3 |
+| `features_always_increment_minor = true` (S6) | Task 3 |
 | Expectation table as data, patch-base discriminating cases (S6/F2) | Task 4 (`cases.tsv`) |
 | 1.x columns staged unasserted (F2) | Task 4 (`expected_1x`), Task 6 (reads `expected_0x` only) |
 | scope≠path, *tested* via attribution (S5/F4) | Task 5 (two-crate fixture) + Task 6 (`b` baseline assert) |

@@ -13,5 +13,5 @@
 features_always_increment_minor = true
 dependencies_update = true
 
-[workspace.changelog]
+[changelog]
 sort_commits = "newest"

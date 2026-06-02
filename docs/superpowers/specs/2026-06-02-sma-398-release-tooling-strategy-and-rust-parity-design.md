@@ -63,7 +63,7 @@ release-plz follows **Cargo's SemVer rules** in `0.x`: a breaking change bumps t
 | `fix-footer` | `fix: …` + `BREAKING CHANGE:` footer | minor | `0.2.0` | **breaking footer on patch-base → caught; ≡ `fix-bang`** |
 | `feat-bang` *(staged, asserted)* | `feat!: …` | minor | `0.2.0` | degenerate in 0.x (= `feat`); asserted only to lock the current number, flagged as non-discriminating |
 
-What the job actually verifies **in 0.x**: **under-classification** — a tool that drops the `!` or ignores the `BREAKING CHANGE:` footer yields `0.1.1` (patch) where the table expects `0.2.0` (minor) → red. The AC's named equivalence ("`feat!:` vs `BREAKING CHANGE:` footer must classify the same") is exercised as `fix-bang ≡ fix-footer` (both `0.2.0`, both ≠ plain `fix`). The genuine *breaking-vs-feature magnitude* separation (breaking → **major**) only becomes testable at **1.0** — so `cases.toml` carries a **1.x expectation column, documented but unasserted**, ready for the table regeneration the 1.0 transition forces:
+What the job actually verifies **in 0.x**: **under-classification** — a tool that drops the `!` or ignores the `BREAKING CHANGE:` footer yields `0.1.1` (patch) where the table expects `0.2.0` (minor) → red. The AC's named equivalence ("`feat!:` vs `BREAKING CHANGE:` footer must classify the same") is exercised as `fix-bang ≡ fix-footer` (both `0.2.0`, both ≠ plain `fix`). The genuine *breaking-vs-feature magnitude* separation (breaking → **major**) only becomes testable at **1.0** — so `cases.tsv` carries a **1.x expectation column, documented but unasserted**, ready for the table regeneration the 1.0 transition forces:
 
 | Case | 1.x bump | 1.x version (from `1.0.0`) |
 |------|----------|----------------------------|
@@ -113,7 +113,7 @@ The original spec claimed the harness "guards SMA-385"; that was overstated for 
 
 ### 6. The expectation table (S6, F2)
 
-Lives as **data** (`ci/release-parity/cases.toml`), each row `{ id, commits: [...], touches: [crate], expected_0x, expected_1x (unasserted), discriminating: bool }`, baseline `0.1.0`. The asserted rows are `fix`, `feat`, `fix-bang`, `fix-footer`, `feat-bang` (per S6 detail) plus the `attribution` case (§5). The 1.x column is carried but not asserted until the 1.0 transition.
+Lives as **data** (`ci/release-parity/cases.tsv`), each row `{ id, commits: [...], touches: [crate], expected_0x, expected_1x (unasserted), discriminating: bool }`, baseline `0.1.0`. The asserted rows are `fix`, `feat`, `fix-bang`, `fix-footer`, `feat-bang` (per S6 detail) plus the `attribution` case (§5). The 1.x column is carried but not asserted until the 1.0 transition.
 
 ### 7. The dry-run parity harness (tool-agnostic, multi-crate, reusable)
 
@@ -135,14 +135,14 @@ Lives as **data** (`ci/release-parity/cases.toml`), each row `{ id, commits: [..
 
 **Self-check (anti-false-green):** a guard run with a deliberately wrong expected value (a `--negative-control` mode) proves the harness reports **red** on mismatch — guarding against an adapter that silently returns "no bump."
 
-**Home:** `ci/release-parity/` — `run.sh` (or a small script), `cases.toml`, `adapters/release-plz.sh`, `README.md` (records the SMA-385 rationale + the derived-config invariant). Driven by a Moon task.
+**Home:** `ci/release-parity/` — `run.sh` (or a small script), `cases.tsv`, `adapters/release-plz.sh`, `README.md` (records the SMA-385 rationale + the derived-config invariant). Driven by a Moon task.
 
 ### 8. The Rust slice (release-plz dormant config + adapter)
 
 - `.prototools`: pin `release-plz` (exact version at implementation — latest stable).
 - `rs/release-plz.toml`: `dependencies_update = true`, `sort_commits = "newest"`, `features_always_increment_minor = true`, semver-check posture set, per-crate overrides as needed. Mirrors SMA-307 conventions **minus the active workflow**.
 - `ci/release-parity/adapters/release-plz.sh`: the adapter (§7).
-- `ci/release-parity/cases.toml`: the S6 table.
+- `ci/release-parity/cases.tsv`: the S6 table.
 
 ### 9. CI wiring (per-PR affected only)
 
