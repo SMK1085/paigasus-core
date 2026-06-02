@@ -9,8 +9,8 @@
 [workspace]
 # Conventional-Commit -> semver classification (the contract SMA-398 asserts).
 # In 0.x: fix -> patch, feat -> minor, breaking (! or BREAKING CHANGE) -> minor.
-# always_bump_minor_for_0 keeps feat distinguishable from fix in 0.x.
-always_bump_minor_for_0 = true
+# features_always_increment_minor keeps feat distinguishable from fix in 0.x.
+features_always_increment_minor = true
 dependencies_update = true
 
 [workspace.changelog]

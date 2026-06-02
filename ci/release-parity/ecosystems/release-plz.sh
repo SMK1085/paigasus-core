@@ -16,23 +16,19 @@ ecosystem::_crate_dir() { # dir slot(a|b) -> path
 }
 
 ecosystem::_derive_config() { # real_toml out_toml   (F3)
-  local real="$1" out="$2" bump
-  bump="$(grep -E '^[[:space:]]*always_bump_minor_for_0[[:space:]]*=' "$real" || true)"
-  if [ -z "$bump" ]; then
-    echo "FATAL: rs/release-plz.toml lacks always_bump_minor_for_0 — parity would test stale settings" >&2
+  local real="$1" out="$2" key
+  # F3: copy the classification knob from the REAL config verbatim; fail loudly
+  # if it's gone, so the harness can't silently test stale settings.
+  key="$(grep -E '^[[:space:]]*features_always_increment_minor[[:space:]]*=' "$real" || true)"
+  if [ -z "$key" ]; then
+    echo "FATAL: rs/release-plz.toml lacks features_always_increment_minor — parity would test stale settings" >&2
     return 1
   fi
-  # always_bump_minor_for_0 was the intended field name when rs/release-plz.toml was written,
-  # but release-plz 0.3.158 schema uses features_always_increment_minor for the same semantics
-  # (feat always bumps minor even in 0.x). Map the field name here so the fixture config is
-  # valid while still derived from the real config's intent.
-  local val
-  val="$(printf '%s' "${bump#"${bump%%[![:space:]]*}"}" | sed -E 's/always_bump_minor_for_0/features_always_increment_minor/')"
   {
     echo "[workspace]"
-    printf '%s\n' "$val"
-    echo "semver_check = false"                          # orthogonal to classification
-    echo "git_only = true"                               # avoids crates.io registry lookup for nonexistent fixture crates
+    printf '%s\n' "${key#"${key%%[![:space:]]*}"}"        # left-trimmed, verbatim
+    echo "semver_check = false"                            # orthogonal to classification
+    echo "git_only = true"                                 # avoids crates.io registry lookup for nonexistent fixture crates
     # Tera template so release-plz looks for tags like paigasus-release-parity-a-v0.1.0,
     # matching what build_fixture creates. Without this, git_only defaults to ^v(\d+\.\d+\.\d+)$.
     echo 'git_tag_name = "{{ package }}-v{{ version }}"'
