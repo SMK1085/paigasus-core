@@ -1,0 +1,33 @@
+# Vendored proto TOML plugin for the release-plz CLI (SMA-398).
+#
+# Resolves official release-plz GitHub release binaries (cargo-dist tarballs).
+# Used only by the ci/release-parity harness, not general dev/CI tooling.
+#
+# NOTE: release-plz publishes no per-asset checksum file (unlike buf/lefthook),
+# so resolution is HTTPS-from-GitHub only. The exact version is pinned in
+# .prototools, so the resolved asset is deterministic.
+# NOTE: cargo-dist uses Rust target arches (x86_64/aarch64) = proto's default
+# {arch} tokens, so no [install.arch] remap is needed.
+# cargo-dist publishes macOS-aarch64 only (no x86_64-apple-darwin asset).
+
+name = "release-plz"
+type = "cli"
+
+[platform.linux]
+download-file = "release-plz-{arch}-unknown-linux-gnu.tar.gz"
+
+[platform.macos]
+download-file = "release-plz-{arch}-apple-darwin.tar.gz"
+
+[platform.windows]
+# .zip preferred over the co-shipped .tar.gz (Windows-native tooling handles zip).
+download-file = "release-plz-{arch}-pc-windows-msvc.zip"
+
+[install]
+download-url = "https://github.com/release-plz/release-plz/releases/download/release-plz-v{version}/{download_file}"
+
+[resolve]
+git-url = "https://github.com/release-plz/release-plz"
+# Tags are prefixed "release-plz-v" (e.g. release-plz-v0.3.158); the default
+# v? pattern matches nothing. This captures the semver portion directly.
+git-tag-pattern = "^release-plz-v(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)$"
