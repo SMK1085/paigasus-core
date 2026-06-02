@@ -38,12 +38,12 @@ The full table passes against release-plz 0.3.158: `fix→0.1.1`, `feat→0.2.0`
 | `ci/release-parity/README.md` | Create | Records the SMA-385 (scope≠path) rationale, the derived-config invariant, and the 0.x degeneracy. |
 | `moon.yml` (root, `repo` project) | Modify | Add the `release-parity` task with explicit inputs. |
 | `.github/workflows/ci.yml` | Modify | Add `:release-parity` to the `moon ci` target array. |
-| Notion ADR-00XX | Create | Strategy of record (S1–S6). |
+| Notion ADR-0011 | Create | Strategy of record (S1–S6). |
 | Linear E3/E4/E-activate | Create | Decomposition follow-ups. |
 
 ---
 
-## Task 1: Author ADR-00XX (strategy of record, before code)
+## Task 1: Author ADR-0011 (strategy of record, before code)
 
 CLAUDE.md requires a Notion ADR for significant choices before code. This records S1–S6 and **refines** (does not silently reverse) the Polyglot Monorepo Scoping doc.
 
@@ -51,11 +51,11 @@ CLAUDE.md requires a Notion ADR for significant choices before code. This record
 
 - [ ] **Step 1: Find the next ADR number**
 
-Use the Notion MCP: fetch the "Architecture Decision Records" index page (`368830e8fbaa816cb411c7ee1682c175`) and read the highest existing `ADR-00NN`. The new one is the next integer (the spec calls it ADR-00XX as a placeholder).
+Use the Notion MCP: fetch the "Architecture Decision Records" index page (`368830e8fbaa816cb411c7ee1682c175`) and read the highest existing `ADR-0011`. The new one is the next integer (the spec calls it ADR-0011 as a placeholder).
 
 - [ ] **Step 2: Create the ADR page**
 
-Create a child page under the ADR index titled `ADR-00NN: Polyglot versioning & release strategy`, with sections:
+Create a child page under the ADR index titled `ADR-0011: Polyglot versioning & release strategy`, with sections:
 - **Context:** every paigasus-core artifact is a `0.0.0` stub; the Scoping doc §3 #4 / §4 mandate lockstep for the kernel/proto artifacts; SMA-371 AC-E needs a commit→semver parity gate.
 - **Decision:** the S1–S6 table verbatim from the spec (hybrid versioning; per-language tools with kernel/proto as Rust byproducts; `0.1.0` floor + tool-owned tags; dormant-until-real; scope≠file-path; the 0.x contract with `always_bump_minor_for_0 = true`).
 - **Relationship to existing docs:** this ADR **refines** Scoping §3 #4 / §4 — it scopes their lockstep mandate explicitly to the kernel/proto families and records per-package independence for unrelated packages. (Do **not** mark them superseded.)
@@ -63,15 +63,15 @@ Create a child page under the ADR index titled `ADR-00NN: Polyglot versioning & 
 
 - [ ] **Step 3: Back-reference from the Scoping doc**
 
-Add a one-line callout near Scoping §4 pointing to the new ADR ("Versioning strategy refined in ADR-00NN").
+Add a one-line callout near Scoping §4 pointing to the new ADR ("Versioning strategy refined in ADR-0011").
 
 - [ ] **Step 4: Record the number in the spec**
 
-Replace `ADR-00XX` with the allocated `ADR-00NN` in the spec file, then commit:
+Replace `ADR-0011` with the allocated `ADR-0011` in the spec file, then commit:
 
 ```bash
 git add docs/superpowers/specs/2026-06-02-sma-398-release-tooling-strategy-and-rust-parity-design.md
-git commit -m "docs(release): record ADR-00NN number in SMA-398 spec"
+git commit -m "docs(release): record ADR-0011 number in SMA-398 spec"
 ```
 
 ---
@@ -559,22 +559,22 @@ git commit -m "feat(ci): run release-parity in the moon ci affected graph (SMA-3
 - [ ] **Step 1: Create E3 (Python)**
 
 Title: `CI: python-semantic-release dormant config + Py semver-parity adapter`.
-Body: dormant python-semantic-release config for `paigasus-ml` + `paigasus-workflows` (the language-native Py packages only — kernel/proto wrappers are maturin byproducts, out of scope); add `ci/release-parity/ecosystems/python-semantic-release.sh` implementing the same `ecosystem::*` interface; reuse `cases.tsv`. `relatedTo` SMA-398; `blockedBy` ADR-00NN.
+Body: dormant python-semantic-release config for `paigasus-ml` + `paigasus-workflows` (the language-native Py packages only — kernel/proto wrappers are maturin byproducts, out of scope); add `ci/release-parity/ecosystems/python-semantic-release.sh` implementing the same `ecosystem::*` interface; reuse `cases.tsv`. `relatedTo` SMA-398; `blockedBy` ADR-0011.
 Team: `Sven Maschek`. Project: `Paigasus Polyglot`. Labels: `area:ci`.
 
 - [ ] **Step 2: Create E4 (TypeScript)**
 
 Title: `CI: semantic-release dormant config + TS semver-parity adapter`.
-Body: dormant semantic-release (+ monorepo path-filtering) config for `@paigasus/sdk` + `@paigasus/ui` only; add `ci/release-parity/ecosystems/semantic-release.sh` against the same interface. `relatedTo` SMA-398; `blockedBy` ADR-00NN.
+Body: dormant semantic-release (+ monorepo path-filtering) config for `@paigasus/sdk` + `@paigasus/ui` only; add `ci/release-parity/ecosystems/semantic-release.sh` against the same interface. `relatedTo` SMA-398; `blockedBy` ADR-0011.
 
 - [ ] **Step 3: Create E-activate**
 
 Title: `Release activation: 0.0.0 -> 0.1.0 floor + kernel/proto lockstep wiring + live workflows`.
-Body: the riskiest activation step (F5). Move each package off `0.0.0` to the `0.1.0` floor and let release-plz cut the FIRST tag without a hand-placed tag (the SMA-385 metadata-loss trap); wire maturin/napi so kernel/proto Py/TS artifacts derive the Rust crate version (S1 lockstep); enable the live release workflows. `relatedTo` SMA-398; `blockedBy` ADR-00NN.
+Body: the riskiest activation step (F5). Move each package off `0.0.0` to the `0.1.0` floor and let release-plz cut the FIRST tag without a hand-placed tag (the SMA-385 metadata-loss trap); wire maturin/napi so kernel/proto Py/TS artifacts derive the Rust crate version (S1 lockstep); enable the live release workflows. `relatedTo` SMA-398; `blockedBy` ADR-0011.
 
 - [ ] **Step 4: Confirm links**
 
-Verify each new issue shows `relatedTo SMA-398` and `blockedBy ADR-00NN` (or a note if ADRs aren't tracked as issues).
+Verify each new issue shows `relatedTo SMA-398` and `blockedBy ADR-0011` (or a note if ADRs aren't tracked as issues).
 
 ---
 
@@ -584,7 +584,7 @@ Verify each new issue shows `relatedTo SMA-398` and `blockedBy ADR-00NN` (or a n
 
 | Spec item | Task |
 |-----------|------|
-| ADR-00XX (S1–S6), refines Scoping doc | Task 1 |
+| ADR-0011 (S1–S6), refines Scoping doc | Task 1 |
 | Pin release-plz / `.prototools` (§8) | Task 2 |
 | Dormant `rs/release-plz.toml` (S4/§3/§4) | Task 3 |
 | `always_bump_minor_for_0 = true` (S6) | Task 3 |
@@ -605,7 +605,7 @@ No spec item is unmapped.
 
 **2. Placeholder scan**
 
-`ADR-00XX` → `ADR-00NN` is resolved by Task 1 (allocate the real number) and propagated. The three verify-and-adjust points (proto tarball bin-path in Task 2; offline/tag-pattern in Task 5) are tool-vendoring gates with the exact debug command given, not hand-waved core logic. No `TBD`/"handle edge cases"/"similar to" placeholders.
+`ADR-0011` → `ADR-0011` is resolved by Task 1 (allocate the real number) and propagated. The three verify-and-adjust points (proto tarball bin-path in Task 2; offline/tag-pattern in Task 5) are tool-vendoring gates with the exact debug command given, not hand-waved core logic. No `TBD`/"handle edge cases"/"similar to" placeholders.
 
 **3. Type/interface consistency**
 

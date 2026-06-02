@@ -28,13 +28,13 @@ The release-plz work in SMA-307/347/372/382/385 lives in the **older, Rust-only 
 
 ## Goal
 
-1. Settle a **polyglot versioning & release strategy** (→ ADR-00XX) that honors the scoping doc's lockstep mandate for the kernel/proto artifacts while staying tool-native, and avoids re-importing Helikon's traps.
+1. Settle a **polyglot versioning & release strategy** (→ ADR-0011) that honors the scoping doc's lockstep mandate for the kernel/proto artifacts while staying tool-native, and avoids re-importing Helikon's traps.
 2. Land the **first vertical slice** for Rust: a *dormant* `release-plz` configuration plus a **dry-run semver-parity smoke test** that satisfies SMA-398's AC for the Rust ecosystem.
 3. Build that parity test as a **tool-agnostic, multi-crate harness** so the Python/TS adapters (E3/E4) drop into the same expectation-table machinery.
 
 ## Strategy decisions (the ADR core)
 
-The decisions below are the substance of **ADR-00XX "Polyglot versioning & release strategy."**
+The decisions below are the substance of **ADR-0011 "Polyglot versioning & release strategy."**
 
 | # | Decision | Rationale |
 |---|----------|-----------|
@@ -76,11 +76,11 @@ The contract is **intent**; each tool's adapter is configured to honor it. When 
 
 ## Decision (what this branch delivers)
 
-A **dormant** Rust release configuration and a **tool-agnostic, multi-crate dry-run parity harness** with a release-plz adapter, wired into CI as a per-PR affected check. No active release workflow cuts tags or opens PRs. The strategy is captured in ADR-00XX (Notion); child issues E3/E4/E-activate are created.
+A **dormant** Rust release configuration and a **tool-agnostic, multi-crate dry-run parity harness** with a release-plz adapter, wired into CI as a per-PR affected check. No active release workflow cuts tags or opens PRs. The strategy is captured in ADR-0011 (Notion); child issues E3/E4/E-activate are created.
 
 Deliverables on this branch:
 
-- `docs:` — ADR-00XX draft/link, this spec.
+- `docs:` — ADR-0011 draft/link, this spec.
 - `build:` — pin `release-plz` in `.prototools`.
 - `feat(release):` — dormant `rs/release-plz.toml` (S3/S4/S6 settings).
 - `feat(ci):` — the parity harness under `ci/release-parity/` (multi-crate fixture-builder + expectation-table data + release-plz adapter) and its Moon task.
@@ -152,12 +152,12 @@ The parity check runs **per-PR on the affected graph only — no nightly** (cade
 
 ### 10. Decomposition — ADR + Linear
 
-- **ADR-00XX "Polyglot versioning & release strategy"** (Notion) — the S1–S6 table; written before/with the config code. **Refines** the scoping doc §3 #4 / §4 (scopes the lockstep mandate to the kernel/proto families); the Notion scoping doc gets a back-reference note.
+- **ADR-0011 "Polyglot versioning & release strategy"** (Notion) — the S1–S6 table; written before/with the config code. **Refines** the scoping doc §3 #4 / §4 (scopes the lockstep mandate to the kernel/proto families); the Notion scoping doc gets a back-reference note.
 - **SMA-398** (this issue) — re-scoped to *parity harness + release-plz adapter (Rust) + dormant Rust config*. Its AC's "once release tooling exists" precondition is met **for Rust** by the dormant `release-plz.toml`. Stays In Progress.
 - **E3** — python-semantic-release dormant config + Py parity adapter (`paigasus-ml`, `paigasus-workflows`).
 - **E4** — semantic-release dormant config + TS parity adapter (`@paigasus/sdk`, `@paigasus/ui`).
 - **E-activate** — first activation: `0.0.0 → 0.1.0`, kernel/proto lockstep wiring, live workflows (see §11/F5).
-- Relations: E3/E4/E-activate `relatedTo` SMA-398, `blockedBy` ADR-00XX.
+- Relations: E3/E4/E-activate `relatedTo` SMA-398, `blockedBy` ADR-0011.
 
 ### 11. Out of scope
 
@@ -196,4 +196,4 @@ The parity check runs **per-PR on the affected graph only — no nightly** (cade
 4. **`dependencies_update` isolation (§7).** Confirm two independent (no-dep-edge) fixture crates prevent any cross-crate cascade so the attribution assertion holds; if not, give each case its own fixture dir.
 5. **Derived-config extraction (§7, F3).** Confirm copying only `[workspace]` classification keys (and forcing semver-check off, dropping `[[package]]`) produces a valid fixture config that still reflects production classification.
 6. **Moon task tool availability (§9).** Confirm `release-parity` sees proto-pinned `release-plz` on `PATH` after `moon setup`.
-7. **ADR number.** Allocate the next free ADR number in the Notion ADR index before writing ADR-00XX.
+7. **ADR number.** Allocate the next free ADR number in the Notion ADR index before writing ADR-0011.
