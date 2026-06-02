@@ -59,12 +59,12 @@ EOF
     git init -q
     git config user.email "parity@example.com"
     git config user.name "parity"
+    git config commit.gpgsign false   # fixture repo: never sign (CI/dev have no key)
+    git config tag.gpgsign false
     git add -A
     git commit -qm "chore: seed fixture"
-    # -c tag.gpgSign=false: the fixture repo is throwaway; global tag.gpgSign=true
-    # would otherwise require a message and a signing key that CI doesn't have.
-    git -c tag.gpgSign=false tag "$A_CRATE-v0.1.0"   # release-plz default workspace tag pattern
-    git -c tag.gpgSign=false tag "$B_CRATE-v0.1.0"
+    git tag "$A_CRATE-v0.1.0"   # release-plz default workspace tag pattern
+    git tag "$B_CRATE-v0.1.0"
   )
 }
 
@@ -86,7 +86,12 @@ ecosystem::apply_commit() { # dir slot subject footer
 ecosystem::run_update() { # dir
   # Disposable fixture: let `update` write, then read the result. Offline so the
   # crates.io index isn't consulted for the (nonexistent) fixture crate names.
-  ( cd "$1" && CARGO_NET_OFFLINE=true release-plz update >/dev/null 2>&1 )
+  # Capture output and replay it on failure so CI failures are diagnosable.
+  local out
+  if ! out="$(cd "$1" && CARGO_NET_OFFLINE=true release-plz update 2>&1 >/dev/null)"; then
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
 }
 
 ecosystem::version() { # dir slot -> version string
