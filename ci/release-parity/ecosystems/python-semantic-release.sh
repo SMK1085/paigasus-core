@@ -29,7 +29,7 @@ PSR_BIN="$( (cd "$_PSR_REPO_ROOT/py" && uv run --frozen python -c 'import shutil
 [ -n "$PSR_BIN" ] || PSR_BIN="$( command -v semantic-release 2>/dev/null || echo semantic-release )"
 
 # Real configs the fixture derives its classification settings from (F3). Both
-# packages must agree (review F1).
+# packages must agree (both must honor the canonical contract).
 _PSR_ML_TOML="$_PSR_REPO_ROOT/py/packages/paigasus-ml/pyproject.toml"
 _PSR_WF_TOML="$_PSR_REPO_ROOT/py/packages/paigasus-workflows/pyproject.toml"
 
@@ -58,7 +58,7 @@ ecosystem::_psr_key() { # toml key -> value
     | sed -E "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//" || true
 }
 
-# Derive + validate classification from the REAL configs (F3 + review F1/F2).
+# Derive + validate classification from the REAL configs (F3).
 # Echoes "major_on_zero allow_zero_version"; fails loudly on a missing key, a
 # non-true allow_zero_version, or an ml/workflows disagreement.
 ecosystem::_derive_classification() {

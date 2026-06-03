@@ -222,7 +222,7 @@ PSR_BIN="$( (cd "$_PSR_REPO_ROOT/py" && uv run --frozen python -c 'import shutil
 [ -n "$PSR_BIN" ] || PSR_BIN="$( command -v semantic-release 2>/dev/null || echo semantic-release )"
 
 # Real configs the fixture derives its classification settings from (F3). Both
-# packages must agree (review F1).
+# packages must agree (both must honor the canonical contract).
 _PSR_ML_TOML="$_PSR_REPO_ROOT/py/packages/paigasus-ml/pyproject.toml"
 _PSR_WF_TOML="$_PSR_REPO_ROOT/py/packages/paigasus-workflows/pyproject.toml"
 
@@ -251,7 +251,7 @@ ecosystem::_psr_key() { # toml key -> value
     | sed -E "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//" || true
 }
 
-# Derive + validate classification from the REAL configs (F3 + review F1/F2).
+# Derive + validate classification from the REAL configs (F3).
 # Echoes "major_on_zero allow_zero_version"; fails loudly on a missing key, a
 # non-true allow_zero_version, or an ml/workflows disagreement.
 ecosystem::_derive_classification() {
@@ -415,11 +415,11 @@ git commit -m "feat(ci): python-semantic-release parity adapter (SMA-405)"
 
 ---
 
-## Task 5: Verify the derivation + equality guards (review F1/F2) fail loudly
+## Task 5: Verify the derivation + equality guards fail loudly
 
 These are negative tests for the guards. Each step makes a temporary edit, asserts the harness aborts loudly (exit 2), then reverts. **No commit** — the repo must be left clean.
 
-- [ ] **Step 1: Cross-package disagreement → loud abort (F1)**
+- [ ] **Step 1: Cross-package disagreement → loud abort**
 
 Temporarily flip `major_on_zero` to `true` in `paigasus-workflows` only:
 
@@ -436,7 +436,7 @@ Expected: a `FATAL: paigasus-ml and paigasus-workflows PSR classification keys d
 Run: `git diff --exit-code py/packages/paigasus-workflows/pyproject.toml`
 Expected: exit 0, no diff. (If a `.bak` remains, `rm py/packages/paigasus-workflows/pyproject.toml.bak`.)
 
-- [ ] **Step 3: Missing `allow_zero_version` → loud abort (F2)**
+- [ ] **Step 3: Missing `allow_zero_version` → loud abort**
 
 Temporarily delete the `allow_zero_version` line from `paigasus-ml`:
 
@@ -483,7 +483,7 @@ assertion, not a hardcoded constant). Do NOT "simplify" this into a single share
 repo: PSR would then bump `b` from `a`'s commit and the attribution-equivalent
 check would silently break.
 
-### Why the fixture config is derived from BOTH real configs (F1/F2/F3)
+### Why the fixture config is derived from BOTH real configs
 `build_fixture` greps the classification keys (`major_on_zero`,
 `allow_zero_version`) from the real `paigasus-ml` **and** `paigasus-workflows`
 `pyproject.toml`, and fails loudly if either is missing, if `allow_zero_version`
