@@ -35,5 +35,6 @@ dev = [
     "anyio[trio]>=4.13.0,<5",
     "basedpyright>=1.39.6,<2",
     "pytest>=9.0.3,<10",
+    "python-semantic-release>=10,<11",
     "ruff>=0.15.14,<0.16",
 ]

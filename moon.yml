@@ -23,3 +23,14 @@ tasks:
       - 'rs/release-plz.toml'
       - '.prototools'
       - '.proto/plugins/release-plz.toml'
+
+  release-parity-py:
+    description: 'Dry-run python-semantic-release over synthetic commits; assert commit->semver parity (SMA-405).'
+    script: 'ci/release-parity/run.sh --ecosystem python-semantic-release'
+    toolchain: 'system'
+    inputs:
+      - 'ci/release-parity/**/*'
+      - 'py/packages/paigasus-ml/pyproject.toml'
+      - 'py/packages/paigasus-workflows/pyproject.toml'
+      - 'py/uv.lock'
+      - '.prototools'
