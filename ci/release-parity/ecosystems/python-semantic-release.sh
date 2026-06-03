@@ -52,10 +52,20 @@ ecosystem::_slot_baseline_tag() { # slot -> baseline tag
   esac
 }
 
-# Extract a flat `key = value` from a [tool.semantic_release] block; empty if absent.
-ecosystem::_psr_key() { # toml key -> value
-  grep -E "^[[:space:]]*$2[[:space:]]*=" "$1" 2>/dev/null | head -n1 \
-    | sed -E "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//" || true
+# Extract a scalar `key = value` from the [tool.semantic_release] table; empty if
+# absent. Table-scoped (not a whole-file grep) so a same-named key under another
+# table can't feed a stale value into the fixture — in keeping with this harness's
+# "never silently test stale settings" invariant. Only safe for unquoted scalar
+# values (the booleans used here); a `#` inside a quoted value would be treated as
+# a comment.
+ecosystem::_psr_key() { # toml key -> value (within [tool.semantic_release])
+  awk -v k="$2" '
+    /^\[tool\.semantic_release\]/ { f = 1; next }
+    /^\[/ { f = 0 }
+    f && $0 ~ "^[[:space:]]*" k "[[:space:]]*=" {
+      sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]*(#.*)?$/, ""); print; exit
+    }
+  ' "$1"
 }
 
 # Derive + validate classification from the REAL configs (F3).
@@ -133,7 +143,7 @@ ecosystem::build_fixture() { # dir real_release_plz_toml(ignored)
       git tag "$tag"
       # PSR always calls `git remote get-url origin`; add a placeholder so it
       # doesn't error out. The remote URL is never actually contacted.
-      git remote add origin "file:///dev/null/parity-fixture-$(basename "$d")"
+      git remote add origin "file:///dev/null/parity-fixture-$d"
     )
   done
 }
@@ -185,6 +195,6 @@ ecosystem::run_update() { # dir
 ecosystem::version() { # dir slot -> version string
   local d v
   d="$(ecosystem::_slot_dir "$1" "$2")"
-  IFS= read -r v <"$d/.parity-next-version" || true
+  IFS= read -r v <"$d/.parity-next-version" 2>/dev/null || true
   printf '%s' "$v"
 }
