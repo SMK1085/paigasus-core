@@ -13,3 +13,13 @@ tasks:
       - '.lefthook/**/*'
     options:
       runInCI: false
+
+  release-parity:
+    description: 'Dry-run release-plz over synthetic commits; assert commit->semver parity (SMA-398).'
+    script: 'ci/release-parity/run.sh'
+    toolchain: 'system'
+    inputs:
+      - 'ci/release-parity/**/*'
+      - 'rs/release-plz.toml'
+      - '.prototools'
+      - '.proto/plugins/release-plz.toml'

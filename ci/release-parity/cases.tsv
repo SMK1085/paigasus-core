@@ -1,0 +1,6 @@
+# id	subject	footer	expected_0x	expected_1x	discriminating
+fix	fix: tweak crate a	-	0.1.1	1.0.1	no
+feat	feat: add to crate a	-	0.2.0	1.1.0	no
+fix-bang	fix!: change crate a	-	0.2.0	2.0.0	yes
+fix-footer	fix: change crate a	BREAKING CHANGE: drop old behavior	0.2.0	2.0.0	yes
+feat-bang	feat!: change crate a	-	0.2.0	2.0.0	no

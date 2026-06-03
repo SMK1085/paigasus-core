@@ -41,6 +41,10 @@ build/
 .moon/cache/
 .moon/docker/
 
+# ─── release-plz ─────────────────────────────────────────────────────────
+# `release-plz generate-schema` output; nothing in-repo consumes it.
+.schema/
+
 # ─── Editors / IDE ───────────────────────────────────────────────────────
 .idea/
 .vscode/*

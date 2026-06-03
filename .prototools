@@ -1,7 +1,9 @@
 buf = "1.70.0"
 lefthook = "2.1.8"
 moon = "2.2.5"
+release-plz = "0.3.158"
 
 [plugins]
 buf = "file://./.proto/plugins/buf.toml"
 lefthook = "file://./.proto/plugins/lefthook.toml"
+release-plz = "file://./.proto/plugins/release-plz.toml"

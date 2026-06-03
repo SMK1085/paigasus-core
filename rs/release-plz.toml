@@ -1,0 +1,17 @@
+# Dormant release-plz configuration (SMA-398).
+#
+# Present so the SMA-398 parity harness derives its fixture config from the REAL
+# classification settings (ci/release-parity). NO release-plz workflow is wired
+# yet: activation (0.0.0 -> 0.1.0, live release PRs/tags) is deferred to
+# E-activate. Real crates stay `publish = false`; this file changes no publish
+# state and cuts no tags.
+
+[workspace]
+# Conventional-Commit -> semver classification (the contract SMA-398 asserts).
+# In 0.x: fix -> patch, feat -> minor, breaking (! or BREAKING CHANGE) -> minor.
+# features_always_increment_minor keeps feat distinguishable from fix in 0.x.
+features_always_increment_minor = true
+dependencies_update = true
+
+[changelog]
+sort_commits = "newest"
