@@ -7,3 +7,14 @@ dependencies = []
 [build-system]
 requires = ["uv_build>=0.11.16,<0.12"]
 build-backend = "uv_build"
+
+# Dormant python-semantic-release config (SMA-405 / ADR-0011 S4).
+# No release workflow is wired (dormant); this also serves as the canonical
+# classification source the ci/release-parity Py adapter derives its fixture
+# from (F3). major_on_zero=false + allow_zero_version=true align PSR's 0.x
+# classification to release-plz's: breaking-in-0.x -> minor (0.1.0 -> 0.2.0).
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+tag_format = "paigasus-ml-v{version}"
+major_on_zero = false
+allow_zero_version = true
