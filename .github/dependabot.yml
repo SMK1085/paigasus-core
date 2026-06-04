@@ -29,6 +29,12 @@ updates:
       day: monday
       time: "06:00"
       timezone: Etc/UTC
+    # Hold a bump for 3 days before proposing it: pnpm 11's built-in 24h
+    # minimumReleaseAge supply-chain policy rejects too-fresh packages in CI
+    # (ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION), so a same-day npm release fails
+    # `pnpm install --frozen-lockfile`. 3 days clears the 24h gate with margin.
+    cooldown:
+      default-days: 3
     commit-message:
       prefix: "build(deps)"
       prefix-development: "build(deps)"
