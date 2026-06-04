@@ -1,0 +1,75 @@
+# Dependabot version updates. Each ecosystem gets ONE grouped PR per week covering
+# minor+patch bumps; major bumps intentionally arrive as separate individual PRs so a
+# breaking change is reviewed on its own (not hidden in a green group).
+version: 2
+updates:
+  # ---- Rust: Cargo workspace at rs/ ----
+  - package-ecosystem: cargo
+    directory: /rs
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps)"
+    groups:
+      cargo-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  # ---- JS/TS: pnpm workspace + catalog at ts/ ----
+  - package-ecosystem: npm
+    directory: /ts
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps)"
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  # ---- Python: uv workspace at py/ ----
+  - package-ecosystem: uv
+    directory: /py
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps)"
+    groups:
+      uv-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  # ---- GitHub Actions: workflows at repo root ----
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
