@@ -4,6 +4,7 @@
 **Date:** 2026-06-04
 **Linear:** SMA-362
 **Branch:** `feature/sma-362-dependabot-cla-bot-setup`
+**Review:** [`2026-06-04-sma-362-dependabot-design-review.md`](./2026-06-04-sma-362-dependabot-design-review.md) — F1–F4 incorporated (2026-06-04)
 
 ## Problem
 
@@ -146,43 +147,59 @@ correct here and explicit values would be noise.
 
 ### 2. commitlint exemption for Dependabot bodies
 
-Add an `ignores` predicate to the shared config so machine-generated Dependabot commits skip
-the rules (the subject is already kept Conventional by the `dependabot.yml` prefix; the body
-is what would otherwise fail `body-max-line-length`). Humans are unaffected — the predicate
-only matches Dependabot's `Signed-off-by` trailer.
+Add an `ignores` predicate to the **repo's consumer config** `ts/commitlint.config.cjs` — the
+one both CI's `ts:commitlint` (`pnpm exec commitlint --config commitlint.config.cjs`) and
+local lefthook (`--config ts/commitlint.config.cjs`) resolve — **not** the published
+`@paigasus/commitlint-config` package. A bot exemption is a repo-operational concern, not part
+of the canonical commit grammar other repos inherit (ADR-0010), so the shared package stays a
+clean rules-only ruleset and the exemption lives next to the repo that needs it (F2).
 
 ```js
-// ts/packages/commitlint-config/index.cjs
+// ts/commitlint.config.cjs
 module.exports = {
-  extends: ['@commitlint/config-conventional'],
-  // Dependabot commits are machine-generated; their bodies carry long markdown/URL lines
-  // that legitimately exceed body-max-line-length. dependabot.yml keeps the *subject*
+  extends: ['@paigasus/commitlint-config'],
+  // Dependabot commits are machine-generated; their grouped bodies carry long markdown/URL
+  // lines that legitimately exceed body-max-line-length. dependabot.yml keeps the *subject*
   // Conventional (build(deps)/ci(deps)); skip the whole commit by its sign-off trailer.
   ignores: [(message) => /^Signed-off-by: dependabot\[bot\]/m.test(message)],
-  rules: {
-    /* …unchanged: type-enum, scope-enum, scope-empty, subject-empty,
-       header-max-length, body-max-line-length, footer-leading-blank… */
-  },
 };
 ```
 
-**Fallback if the trailer is absent.** If the first real Dependabot PR turns out not to
-carry `Signed-off-by: dependabot[bot]`, fall back to an actor guard in `ci.yml` on the
-commitlint step (`&& github.actor != 'dependabot[bot]'`). Decided in brainstorm to prefer
-the config-level predicate (centralized, works for CI and local lefthook); the CI guard is
-the documented fallback, not both.
+This covers the only path that actually lints bot commits: **CI** (`moon run ts:commitlint
+--from --to` over the PR range, `ci.yml`). Local lefthook already exits 0 for any `*[bot]@*`
+commit author, so Dependabot never reaches the local hook — CI is its authoritative gate. The
+subject stays Conventional via the `dependabot.yml` prefix; only the over-long body is
+exempted, and human commits on the same PR branch are still linted **per-commit**.
+
+**Fallback if the trailer is absent.** If the first real Dependabot PR turns out not to carry
+`Signed-off-by: dependabot[bot]`, fall back to an actor guard in `ci.yml` on the commitlint
+step (`&& github.actor != 'dependabot[bot]'`). Note this is **coarser, not equivalent** (F3):
+it skips the whole step for the run and keys on `github.actor` (the last triggering user), so
+a human fixup commit pushed to a Dependabot PR would escape linting — which the per-commit
+predicate avoids. Prefer the predicate; the guard is a documented last resort, not both.
 
 ## Ecosystem coverage notes (verify on first run)
 
-- **uv** — `package-ecosystem: uv` is natively supported, but has known sync rough edges:
-  it won't bump a dependency in `uv.lock` if `pyproject.toml` carries no version constraint
-  for it, and there are case-sensitivity bugs between `pyproject.toml` and `uv.lock`. The
-  first uv PR landing cleanly is a real verification step, not a formality.
-- **pnpm catalogs** — GA in Dependabot since 2025-02; it reads `catalog:` entries in
-  `ts/pnpm-workspace.yaml`. It classifies all catalog deps as `production` (can't infer
-  dev/prod) — harmless here since both prefixes are `build(deps)`.
-- **github-actions** — handles SHA-pinned `uses:` plus the `# v4` version comment (current
-  pins: `actions/checkout`, `actions/cache`, `moonrepo/setup-toolchain`).
+Ranked by likelihood of breaking *in this repo* (F1 re-ranked catalogs to the top):
+
+- **pnpm catalogs (`npm` / `/ts`) — highest risk.** Every TS `package.json` references
+  `"<dep>": "catalog:"`; the real version pins live in `ts/pnpm-workspace.yaml`'s `catalog:`
+  block, so the catalog is the **only** thing this entry can usefully bump. Dependabot's
+  catalog support is GA (2025-02) but carries open defects — reported to stop updating
+  `pnpm-workspace.yaml`'s catalog (dependabot-core #11953) and to emit a broken
+  `pnpm-lock.yaml` for pnpm+catalog (#14339). If catalog support is regressed when this lands,
+  the `/ts` entry silently bumps nothing (or ships an unresolvable lockfile). Separately it
+  classifies all catalog deps as `production` (can't infer dev/prod) — *that* part is harmless
+  to us since both prefixes are `build(deps)`. **Prove this ecosystem out first.**
+- **uv (`/py`) — medium risk.** `package-ecosystem: uv` is natively supported but has sync
+  rough edges: it won't bump a dependency in `uv.lock` if `pyproject.toml` carries no version
+  constraint for it, and there are case-sensitivity bugs between `pyproject.toml` and
+  `uv.lock`. Smaller blast radius than catalogs (a handful of dev-group tools), but the first
+  uv PR landing cleanly is a real check, not a formality.
+- **github-actions (`/`) — low risk.** Handles SHA-pinned `uses:` plus the `# v4`/`# v0`
+  version comment (current pins: `actions/checkout`, `actions/cache`,
+  `moonrepo/setup-toolchain`).
+- **cargo (`/rs`) — low risk.** Standard Cargo workspace; no special caveats.
 
 ## Alternatives considered
 
@@ -194,7 +211,7 @@ the documented fallback, not both.
 - **Group majors too (`update-types: [major, minor, patch]`).** Rejected: hides breaking
   changes inside a grouped PR that may pass CI.
 - **Relax `body-max-line-length` globally / CI-only actor skip.** Rejected in favor of the
-  config-level `ignores` predicate (keeps the human gate intact; single source of truth).
+  consumer-config `ignores` predicate (keeps the human gate intact, per-commit; single home).
 
 ## Out of scope
 
@@ -213,10 +230,14 @@ the documented fallback, not both.
       `npm` (`/ts`), `uv` (`/py`), and `github-actions` (`/`), each minor+patch grouped.
 - [ ] Subjects are Conventional-Commit valid: `build(deps): …` for cargo/npm/uv,
       `ci(deps): …` for github-actions (verified against commitlint).
-- [ ] commitlint exempts Dependabot commits (the `ignores` predicate) so
+- [ ] commitlint exempts Dependabot commits via the `ignores` predicate in
+      `ts/commitlint.config.cjs` (the consumer config, **not** the published package) so
       `body-max-line-length` doesn't fail bot PRs; human commits unaffected.
-- [ ] Minor+patch updates produce **at most one PR per ecosystem per week** (majors may
-      arrive as separate individual PRs, by design).
+- [ ] Minor+patch updates produce **at most one PR per ecosystem per week**. This is a
+      deliberate reading of the AC: majors are intentionally left **un-grouped** (separate
+      individual PRs) so a breaking bump isn't hidden in a green group — a documented
+      deviation from a strictly-literal "one PR per ecosystem," flagged in case the wording
+      matters for the SMA-363 foundation gate this issue blocks.
 - [ ] First Dependabot PR runs cleanly through CI (`moon ci` + commitlint green).
 
 ## Verification plan
@@ -231,8 +252,13 @@ the documented fallback, not both.
    - commitlint step passes (the bot PR is skipped by the `ignores` predicate); confirm a
      **human** commit on the same branch still gets linted.
    - `moon ci` passes.
-4. **Watch the caveats** — confirm the **uv** PR actually updates `uv.lock` (constraint/case
-   issues), and that the **github-actions** PR bumps both the SHA and the `# v4` comment.
+4. **Watch the caveats, catalogs first** — confirm the **npm** PR actually bumps a `catalog:`
+   entry in `ts/pnpm-workspace.yaml` *and* produces a resolvable `pnpm-lock.yaml` (the
+   highest-risk path, F1); confirm the **uv** PR actually updates `uv.lock` (constraint/case
+   issues); confirm the **github-actions** PR bumps both the SHA and the `# v4` comment.
+   **Catalog fallback:** if Dependabot's catalog support is still regressed when this lands,
+   accept manual catalog bumps for now (or lift a few hot deps out of the catalog), note it on
+   the PR, and don't block the other three ecosystems on the one shaky path.
 5. **commitlint locally** — `echo "build(deps): bump serde from 1 to 2" | pnpm --dir ts exec
    commitlint` passes; a body line >100 chars *without* the dependabot trailer still fails
    (proves the exemption is scoped to the bot).
@@ -240,8 +266,9 @@ the documented fallback, not both.
 ## Files touched
 
 - `.github/dependabot.yml` — **new.** The four-ecosystem config above.
-- `ts/packages/commitlint-config/index.cjs` — add the `ignores` predicate (one line + a
-  comment); rules unchanged.
+- `ts/commitlint.config.cjs` — add the Dependabot `ignores` predicate (one line + comment) to
+  the repo's consumer config. The published `@paigasus/commitlint-config` package is left
+  rules-only (F2).
 
 ## Pending Linear edits (implementation phase, needs go-ahead)
 
