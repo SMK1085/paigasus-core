@@ -36,9 +36,12 @@ cleanly through CI" is not automatic:
 
 The commitlint config already permits a `deps` scope and `build`/`ci`/`chore` types
 (`ts/packages/commitlint-config/index.cjs`), so a correctly-prefixed Dependabot **subject**
-passes. The risk is the **body**: Dependabot's auto-generated commit bodies (especially
-grouped ones, with markdown links / long URLs) routinely exceed 100 chars/line and would
-trip `body-max-line-length`.
+passes. The **body** is fine too: although Dependabot bodies have long lines, commitlint's
+`body-max-line-length` has a **built-in carve-out for lines containing a URL**, and real
+Dependabot bodies are dominated by URL lines (`Bumps [x](url)…`, `- [Release notes](url)`,
+`- [Commits](url)`). Verified empirically — a realistic grouped Dependabot body passes
+`body-max-line-length` with no special handling (see §2). So neither gate needs a
+Dependabot-specific exemption; the only real work is getting the **subject** prefix right.
 
 ## Decision
 
@@ -139,38 +142,28 @@ bumps inside a green-looking group.
 (default `main`), and `versioning-strategy` (default `auto`) are not set — the defaults are
 correct here and explicit values would be noise.
 
-### 2. commitlint exemption for Dependabot bodies
+### 2. No commitlint change needed (URL carve-out)
 
-Add an `ignores` predicate to the **repo's consumer config** `ts/commitlint.config.cjs` — the
-one both CI's `ts:commitlint` (`pnpm exec commitlint --config commitlint.config.cjs`) and
-local lefthook (`--config ts/commitlint.config.cjs`) resolve — **not** the published
-`@paigasus/commitlint-config` package. A bot exemption is a repo-operational concern, not part
-of the canonical commit grammar other repos inherit (ADR-0010), so the shared package stays a
-clean rules-only ruleset and the exemption lives next to the repo that needs it.
+An earlier draft added an `ignores` predicate to exempt Dependabot's long bodies. **Dropped as
+YAGNI** after verifying it isn't needed: commitlint's `body-max-line-length` already ignores
+any line **containing a URL**, and Dependabot body lines are URL-laden. Empirical check against
+the live `ts/commitlint.config.cjs` (commitlint 21.0.1, `--edit <file>`):
 
-```js
-// ts/commitlint.config.cjs
-module.exports = {
-  extends: ['@paigasus/commitlint-config'],
-  // Dependabot commits are machine-generated; their grouped bodies carry long markdown/URL
-  // lines that legitimately exceed body-max-line-length. dependabot.yml keeps the *subject*
-  // Conventional (build(deps)/ci(deps)); skip the whole commit by its sign-off trailer.
-  ignores: [(message) => /^Signed-off-by: dependabot\[bot\]/m.test(message)],
-};
-```
+| Commit body | `body-max-line-length` |
+| --- | --- |
+| Realistic grouped Dependabot body (`Bumps [x](url)…`, `- [Commits](url)`) | **passes** |
+| Long line **with** a URL | **passes** (carve-out) |
+| Long line **without** a URL | fails |
 
-This covers the only path that actually lints bot commits: **CI** (`moon run ts:commitlint
---from --to` over the PR range, `ci.yml`). Local lefthook already exits 0 for any `*[bot]@*`
-commit author, so Dependabot never reaches the local hook — CI is its authoritative gate. The
-subject stays Conventional via the `dependabot.yml` prefix; only the over-long body is
-exempted, and human commits on the same PR branch are still linted **per-commit**.
+So **`ts/commitlint.config.cjs` and the published `@paigasus/commitlint-config` are left
+untouched**. The subject is kept Conventional purely by the `dependabot.yml` prefix.
 
-**Fallback if the trailer is absent.** If the first real Dependabot PR turns out not to carry
-`Signed-off-by: dependabot[bot]`, fall back to an actor guard in `ci.yml` on the commitlint
-step (`&& github.actor != 'dependabot[bot]'`). Note this is **coarser, not equivalent**:
-it skips the whole step for the run and keys on `github.actor` (the last triggering user), so
-a human fixup commit pushed to a Dependabot PR would escape linting — which the per-commit
-predicate avoids. Prefer the predicate; the guard is a documented last resort, not both.
+**Reactive fallback (only if it ever fires).** The single residual risk is a Dependabot line
+that exceeds 100 chars *without* a URL (e.g. a very long group name). If a real Dependabot PR
+ever fails CI on `body-max-line-length`, add an `ignores` predicate to the **consumer** config
+`ts/commitlint.config.cjs` (not the published package), keyed on Dependabot's sign-off trailer:
+`ignores: [(m) => /^Signed-off-by: dependabot\[bot\]/m.test(m)]`. Local lefthook already exits
+0 for `*[bot]@*` authors, so CI is the only path that would ever need it. Not added now.
 
 ## Ecosystem coverage notes (verify on first run)
 
@@ -204,8 +197,10 @@ Ranked by likelihood of breaking *in this repo*:
   deps, which is not in `scope-enum` → commitlint failure.
 - **Group majors too (`update-types: [major, minor, patch]`).** Rejected: hides breaking
   changes inside a grouped PR that may pass CI.
-- **Relax `body-max-line-length` globally / CI-only actor skip.** Rejected in favor of the
-  consumer-config `ignores` predicate (keeps the human gate intact, per-commit; single home).
+- **Add an `ignores` predicate / actor skip / relax `body-max-line-length`.** Rejected as
+  YAGNI: commitlint's built-in URL carve-out already lets real Dependabot bodies pass
+  (verified, §2). A trailer-keyed predicate is the documented reactive fallback if a non-URL
+  long line ever trips the rule — not added pre-emptively.
 
 ## Out of scope
 
@@ -224,9 +219,10 @@ Ranked by likelihood of breaking *in this repo*:
       `npm` (`/ts`), `uv` (`/py`), and `github-actions` (`/`), each minor+patch grouped.
 - [ ] Subjects are Conventional-Commit valid: `build(deps): …` for cargo/npm/uv,
       `ci(deps): …` for github-actions (verified against commitlint).
-- [ ] commitlint exempts Dependabot commits via the `ignores` predicate in
-      `ts/commitlint.config.cjs` (the consumer config, **not** the published package) so
-      `body-max-line-length` doesn't fail bot PRs; human commits unaffected.
+- [ ] No commitlint change is needed: real Dependabot bodies pass `body-max-line-length` via
+      commitlint's built-in URL carve-out (verified). A trailer-keyed `ignores` predicate in
+      `ts/commitlint.config.cjs` is the documented reactive fallback if a non-URL long line
+      ever trips it — not added now.
 - [ ] Minor+patch updates produce **at most one PR per ecosystem per week**. This is a
       deliberate reading of the AC: majors are intentionally left **un-grouped** (separate
       individual PRs) so a breaking bump isn't hidden in a green group — a documented
@@ -243,8 +239,7 @@ Ranked by likelihood of breaking *in this repo*:
 3. **Inspect the first PRs**:
    - One grouped PR per ecosystem (minor+patch).
    - Subject is `build(deps): …` / `ci(deps): …`.
-   - commitlint step passes (the bot PR is skipped by the `ignores` predicate); confirm a
-     **human** commit on the same branch still gets linted.
+   - commitlint step passes (the body's URL lines are exempt via the built-in carve-out).
    - `moon ci` passes.
 4. **Watch the caveats, catalogs first** — confirm the **npm** PR actually bumps a `catalog:`
    entry in `ts/pnpm-workspace.yaml` *and* produces a resolvable `pnpm-lock.yaml` (the
@@ -253,16 +248,17 @@ Ranked by likelihood of breaking *in this repo*:
    **Catalog fallback:** if Dependabot's catalog support is still regressed when this lands,
    accept manual catalog bumps for now (or lift a few hot deps out of the catalog), note it on
    the PR, and don't block the other three ecosystems on the one shaky path.
-5. **commitlint locally** — `echo "build(deps): bump serde from 1 to 2" | pnpm --dir ts exec
-   commitlint` passes; a body line >100 chars *without* the dependabot trailer still fails
-   (proves the exemption is scoped to the bot).
+5. **commitlint locally (sanity)** — from `ts/`, `pnpm --dir ts exec commitlint --config
+   commitlint.config.cjs --edit <file>`: a `build(deps): …` subject passes; a realistic grouped
+   Dependabot body (URL lines) passes `body-max-line-length`, while a long body line *without*
+   a URL fails — confirming the URL carve-out is what carries Dependabot bodies.
 
 ## Files touched
 
-- `.github/dependabot.yml` — **new.** The four-ecosystem config above.
-- `ts/commitlint.config.cjs` — add the Dependabot `ignores` predicate (one line + comment) to
-  the repo's consumer config. The published `@paigasus/commitlint-config` package is left
-  rules-only.
+- `.github/dependabot.yml` — **new, and the only file changed.** The four-ecosystem config
+  above.
+- _(No commitlint change — `ts/commitlint.config.cjs` and `@paigasus/commitlint-config` are
+  left untouched; see §2.)_
 
 ## Linear split (done)
 
