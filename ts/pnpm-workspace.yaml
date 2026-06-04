@@ -39,3 +39,6 @@ catalog:
   # Commit tooling (SMA-371)
   '@commitlint/cli': ^21.0.1
   '@commitlint/config-conventional': ^21.0.1
+  # Release tooling (SMA-406 — dormant semantic-release + parity adapter)
+  semantic-release: ^25.0.0
+  '@semantic-release/commit-analyzer': ^13.0.0
