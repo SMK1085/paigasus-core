@@ -10,6 +10,13 @@ import nextPlugin from '@next/eslint-plugin-next';
 export default tseslint.config(
   { ignores: ['**/dist/**', '**/.next/**', '**/node_modules/**', '**/*.d.ts'] },
   js.configs.recommended,
+  // Node CLI tooling scripts (e.g. the SMA-406 semantic-release parity helpers under
+  // tooling/): plain Node ESM, outside the typed app/library graph. Provide Node globals
+  // so `no-undef` doesn't flag `process` etc.
+  {
+    files: ['tooling/**/*.{js,mjs,cjs}'],
+    languageOptions: { globals: { process: 'readonly', console: 'readonly' } },
+  },
   // Type-checked rules only on TS files. JS config files (eslint.config.js itself,
   // .prettierrc.js, next.config.ts) without a tsconfig entry would otherwise fail
   // projectService resolution.

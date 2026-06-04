@@ -34,3 +34,16 @@ tasks:
       - 'py/packages/paigasus-workflows/pyproject.toml'
       - 'py/uv.lock'
       - '.prototools'
+
+  release-parity-ts:
+    description: 'Dry-run semantic-release over synthetic commits; assert commit->semver parity + documented 0.x divergence (SMA-406).'
+    script: 'ci/release-parity/run.sh --ecosystem semantic-release'
+    toolchain: 'system'
+    inputs:
+      - 'ci/release-parity/**/*'
+      - 'ts/packages/paigasus-sdk/.releaserc.json'
+      - 'ts/packages/paigasus-ui/.releaserc.json'
+      - 'ts/tooling/semantic-release-path-filter.mjs'
+      - 'ts/tooling/semantic-release-next-version.mjs'
+      - 'ts/pnpm-lock.yaml'
+      - '.prototools'

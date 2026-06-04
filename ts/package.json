@@ -16,6 +16,7 @@
   "devDependencies": {
     "@commitlint/cli": "catalog:",
     "@paigasus/commitlint-config": "workspace:*",
+    "@semantic-release/commit-analyzer": "catalog:",
     "typescript": "catalog:",
     "eslint": "catalog:",
     "@eslint/js": "catalog:",
@@ -24,6 +25,7 @@
     "eslint-plugin-jsx-a11y": "catalog:",
     "typescript-eslint": "catalog:",
     "prettier": "catalog:",
+    "semantic-release": "catalog:",
     "vitest": "catalog:",
     "@next/eslint-plugin-next": "catalog:"
   }
