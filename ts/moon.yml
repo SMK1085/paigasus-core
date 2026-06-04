@@ -12,6 +12,7 @@ fileGroups:
     - 'packages/*/src/**/*'
     - 'apps/*/src/**/*'
     - 'apps/*/app/**/*'
+    - 'tooling/**/*' # SMA-406 parity helpers; lint/fmt lint the whole tree, so the cache must track these too
   tests:
     - 'packages/*/tests/**/*'
     - 'apps/*/tests/**/*'
