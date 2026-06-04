@@ -114,11 +114,16 @@ EOF
   done
 
   # Seed commit + baseline tags, then a real LOCAL BARE origin (semantic-release runs
-  # `git ls-remote --heads origin`; a placeholder URL fails). Fully offline.
+  # `git ls-remote --heads origin` and a no-refspec `git fetch --tags origin`, which
+  # resolves the remote HEAD; a placeholder URL fails). Pin the bare repo's default
+  # branch to main so its HEAD matches the pushed branch — otherwise on a host whose
+  # init.defaultBranch is `master` (e.g. CI runners) the remote HEAD points at a branch
+  # that was never pushed and `git fetch` dies with "couldn't find remote ref HEAD".
+  # Fully offline.
   ( cd "$dir" \
     && git add -A && git commit -qm "chore: seed fixture" \
     && git tag "a-v$BASELINE" && git tag "b-v$BASELINE" \
-    && git init --bare "$dir/origin.git" -q \
+    && git -c init.defaultBranch=main init --bare "$dir/origin.git" -q \
     && git remote add origin "$dir/origin.git" \
     && git push -q origin main --tags )
 }
