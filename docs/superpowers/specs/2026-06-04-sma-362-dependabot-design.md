@@ -4,7 +4,6 @@
 **Date:** 2026-06-04
 **Linear:** SMA-362
 **Branch:** `feature/sma-362-dependabot-cla-bot-setup`
-**Review:** [`2026-06-04-sma-362-dependabot-design-review.md`](./2026-06-04-sma-362-dependabot-design-review.md) — F1–F4 incorporated (2026-06-04)
 
 ## Problem
 
@@ -18,15 +17,10 @@ one; the CLA "can wait until just before the first external PR is expected" (pri
 
 ## Scope decision
 
-**This issue delivers Dependabot only.** The CLA acceptance criteria are split into a
-**new follow-up Linear issue** ("CLA bot setup (cla-assistant)", Low, `area:deps`,
-do-before-first-external-PR), and SMA-362's description is trimmed to the Dependabot ACs.
-
-> **Pending action (not yet done):** creating the follow-up CLA issue and trimming SMA-362
-> were blocked by the permission classifier during brainstorm (a plain "go ahead" wasn't
-> read as authorizing a new-ticket write). These Linear edits are an implementation-phase
-> task and need an explicit go-ahead (or the maintainer doing them). Until then, the CLA
-> ACs remain on SMA-362 and the references below to the follow-up issue are forward-looking.
+**This issue delivers Dependabot only.** The CLA acceptance criteria were split into a
+follow-up Linear issue — **SMA-408** ("CLA bot setup (cla-assistant)", Low, `area:deps`, MVP
+milestone, related to SMA-362, do-before-first-external-PR). SMA-362 was retitled "Dependabot
+setup" and its description trimmed to the Dependabot ACs (CLA portion → SMA-408).
 
 ## The CI gates a Dependabot PR must pass
 
@@ -152,7 +146,7 @@ one both CI's `ts:commitlint` (`pnpm exec commitlint --config commitlint.config.
 local lefthook (`--config ts/commitlint.config.cjs`) resolve — **not** the published
 `@paigasus/commitlint-config` package. A bot exemption is a repo-operational concern, not part
 of the canonical commit grammar other repos inherit (ADR-0010), so the shared package stays a
-clean rules-only ruleset and the exemption lives next to the repo that needs it (F2).
+clean rules-only ruleset and the exemption lives next to the repo that needs it.
 
 ```js
 // ts/commitlint.config.cjs
@@ -173,14 +167,14 @@ exempted, and human commits on the same PR branch are still linted **per-commit*
 
 **Fallback if the trailer is absent.** If the first real Dependabot PR turns out not to carry
 `Signed-off-by: dependabot[bot]`, fall back to an actor guard in `ci.yml` on the commitlint
-step (`&& github.actor != 'dependabot[bot]'`). Note this is **coarser, not equivalent** (F3):
+step (`&& github.actor != 'dependabot[bot]'`). Note this is **coarser, not equivalent**:
 it skips the whole step for the run and keys on `github.actor` (the last triggering user), so
 a human fixup commit pushed to a Dependabot PR would escape linting — which the per-commit
 predicate avoids. Prefer the predicate; the guard is a documented last resort, not both.
 
 ## Ecosystem coverage notes (verify on first run)
 
-Ranked by likelihood of breaking *in this repo* (F1 re-ranked catalogs to the top):
+Ranked by likelihood of breaking *in this repo*:
 
 - **pnpm catalogs (`npm` / `/ts`) — highest risk.** Every TS `package.json` references
   `"<dep>": "catalog:"`; the real version pins live in `ts/pnpm-workspace.yaml`'s `catalog:`
@@ -254,7 +248,7 @@ Ranked by likelihood of breaking *in this repo* (F1 re-ranked catalogs to the to
    - `moon ci` passes.
 4. **Watch the caveats, catalogs first** — confirm the **npm** PR actually bumps a `catalog:`
    entry in `ts/pnpm-workspace.yaml` *and* produces a resolvable `pnpm-lock.yaml` (the
-   highest-risk path, F1); confirm the **uv** PR actually updates `uv.lock` (constraint/case
+   highest-risk path); confirm the **uv** PR actually updates `uv.lock` (constraint/case
    issues); confirm the **github-actions** PR bumps both the SHA and the `# v4` comment.
    **Catalog fallback:** if Dependabot's catalog support is still regressed when this lands,
    accept manual catalog bumps for now (or lift a few hot deps out of the catalog), note it on
@@ -268,10 +262,12 @@ Ranked by likelihood of breaking *in this repo* (F1 re-ranked catalogs to the to
 - `.github/dependabot.yml` — **new.** The four-ecosystem config above.
 - `ts/commitlint.config.cjs` — add the Dependabot `ignores` predicate (one line + comment) to
   the repo's consumer config. The published `@paigasus/commitlint-config` package is left
-  rules-only (F2).
+  rules-only.
 
-## Pending Linear edits (implementation phase, needs go-ahead)
+## Linear split (done)
 
-- Create follow-up issue "CLA bot setup (cla-assistant)" (Low, `area:deps`, MVP milestone,
+- Created **SMA-408** "CLA bot setup (cla-assistant)" (Low, `area:deps`, MVP milestone,
   related to SMA-362) carrying the four CLA ACs + ADR-0007 ref.
-- Trim SMA-362's description to the Dependabot ACs, pointing at the follow-up.
+- Retitled SMA-362 → "Dependabot setup" and trimmed its description to the Dependabot ACs,
+  pointing at SMA-408. The `sma-362` key remains in the branch name, so PR auto-linking is
+  unaffected.
