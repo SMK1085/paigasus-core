@@ -50,3 +50,58 @@ loudly if either is missing, if `allow_zero_version` isn't `true`, or if the two
 packages disagree. Both packages' configs are task inputs, so editing
 `-workflows` re-runs this check — the equality guard stops that edit from passing
 green against `-ml`-only settings.
+
+## semantic-release adapter (SMA-406)
+Run with `run.sh --ecosystem semantic-release`. It reuses this same `cases.tsv`.
+
+Unlike release-plz and PSR — both aligned to the canonical 0.x contract —
+semantic-release has **no version-aware 0.x clamp**, so it cannot be cleanly
+aligned (its only lever, commit-analyzer `releaseRules`, is version-blind and
+would mis-clamp post-1.0). Per the canonical contract from a `0.1.0` baseline:
+
+| commit | canonical | semantic-release |
+|--------|-----------|------------------|
+| `fix:`  | 0.1.1 | 0.1.1 ✓ |
+| `feat:` | 0.2.0 | 0.2.0 ✓ |
+| `fix!:` / `feat!:` / `fix:`+`BREAKING CHANGE:` | 0.2.0 | **1.0.0** (documented divergence) |
+
+So this adapter **documents** the divergence rather than aligning (ADR-0011 S6,
+amended 2026-06-04). The harness asserts it via run.sh's generic
+`ecosystem::expected` hook (breaking→`1.0.0`); the gate goes **red** if a
+semantic-release upgrade changes the classification. The sub-1.0 lifecycle
+consequence (TS-native packages leave 0.x on their first breaking change) is
+routed to SMA-407.
+
+### Why an in-repo path-filter (not a monorepo plugin)
+The canonical `semantic-release-monorepo` (pmowrer) is abandoned + ESM-broken.
+Per-package isolation is instead a small in-repo plugin
+(`ts/tooling/semantic-release-path-filter.mjs`) that restricts `analyzeCommits`
+to commits touching the package dir (via `git log -- .`), then delegates to
+`@semantic-release/commit-analyzer`. It is the **only** `analyzeCommits` provider
+in the `plugins` array — listing commit-analyzer separately would analyze the
+unfiltered set and take the max, defeating the filter.
+
+The configs select the **`conventionalcommits` preset**, NOT commit-analyzer's
+`angular` default: the angular preset silently ignores the Conventional Commits
+`!` breaking marker, so `fix!:`/`feat!:` would classify as non-breaking. The
+`conventionalcommits` preset honors `!` (and the `BREAKING CHANGE:` footer),
+matching the canonical contract's commit grammar. It loads with no extra
+dependency (commit-analyzer provides it, pinned transitively in `ts/pnpm-lock.yaml`).
+
+### One repo, two package dirs; versions via the JS API
+The fixture is a single git repo with two package dirs through that same
+path-filter, so slot `b` staying at baseline tests **path→package attribution**
+(the mechanism the real `sdk`/`ui` config ships) — paralleling release-plz's
+cargo attribution. Next versions are computed via the semantic-release **JS API**
+(`ts/tooling/semantic-release-next-version.mjs`, `dryRun`), which returns the
+structured next release (or `false`), so the adapter never scrapes the CLI log.
+The fixture pushes to a **local bare `origin.git`** (git-ignored in the fixture):
+semantic-release runs `git ls-remote --heads origin`, so a placeholder remote
+won't do.
+
+### Fixture config derived from BOTH real configs (F3)
+`build_fixture` reads the classification (the `preset`; absence of `releaseRules`)
+from the real `paigasus-sdk` **and** `paigasus-ui` `.releaserc.json`, and fails
+loudly if either adds a `releaseRules` clamp (the documented divergence would no
+longer hold) or if the two disagree. Both configs are task inputs, so editing
+either re-runs this check.
