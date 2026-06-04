@@ -20,6 +20,18 @@ done
 # shellcheck source=ci/release-parity/ecosystems/release-plz.sh
 source "$HERE/ecosystems/$ECOSYSTEM.sh"
 
+# Default: the canonical 0.x expectation (expected_0x). An ecosystem MAY define
+# `ecosystem::expected` to assert a documented, intentional divergence (e.g.
+# semantic-release's strict-semver breaking->major). release-plz / PSR do NOT
+# define it, so their behavior is byte-for-byte unchanged.
+resolve_expected() { # id subject footer expected_0x expected_1x discr -> expected
+  if declare -F ecosystem::expected >/dev/null; then
+    ecosystem::expected "$@"
+  else
+    printf '%s' "$4"
+  fi
+}
+
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 REAL_TOML="$REPO_ROOT/rs/release-plz.toml"   # release-plz-specific; other ecosystems may ignore
 BASELINE="0.1.0"
@@ -61,7 +73,8 @@ rc=0
 # reads stdin must not be able to swallow case rows (silent skips = false green).
 while IFS=$'\t' read -r -u 3 id subject footer expected_0x _expected_1x _discr || [ -n "$id" ]; do
   case "$id" in ''|'#'*) continue ;; esac
-  ec=0; check_case "$id" "$subject" "$footer" "$expected_0x" || ec=$?
+  expected="$(resolve_expected "$id" "$subject" "$footer" "$expected_0x" "$_expected_1x" "$_discr")"
+  ec=0; check_case "$id" "$subject" "$footer" "$expected" || ec=$?
   case "$ec" in
     0) ;;
     1) rc=1 ;;
