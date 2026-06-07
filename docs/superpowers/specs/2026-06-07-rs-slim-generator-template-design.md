@@ -5,8 +5,6 @@
 - **Date:** 2026-06-07
 - **Status:** Design approved (revised post-review); ready for implementation plan
 - **Follow-up from:** SMA-357 (review S8), generator template from SMA-356
-- **Review:** [`2026-06-07-rs-slim-generator-template-design-review.md`](./2026-06-07-rs-slim-generator-template-design-review.md)
-  (findings F1–F4 incorporated — see "Review incorporated" below)
 
 ## Problem
 
@@ -118,21 +116,21 @@ dependsOn:
 - `paigasus-py-bindings` dependency wiring (separate concern).
 - `clean: true` in `buf.gen.yaml` (tracked under SMA-389 / codegen-drift).
 
-## Review incorporated
+## Design decisions
 
-- **F1 (Medium):** the earlier "Model B" (wiring `contracts:generate` onto
-  `paigasus-proto-rs:build` here) reversed ADR-0004's no-prebuild property, made affected
-  builds network-dependent, and validated regenerated rather than committed code — and it
-  duplicated SMA-389, which deliberately defers that wiring. **Resolved by deferring all
-  codegen edges to SMA-389; `proto-rs` is untouched.**
-- **F2 (Low):** the `mergeDeps: append` concern is now moot — no `deps:`-only partial
-  overrides remain in this change.
-- **F3 (Low):** `build-release` is intentionally **not** added to CI's `T` array, so the
-  release profile won't compile in CI until activation. Flagged for **SMA-407** so the
-  first real release build isn't the first time the release profile compiles in CI.
-- **F4 (Nit):** the template smoke test leaves Moon cache residue
-  (`.moon/cache/states/<name>/`, gitignored) — run `moon clean` afterward and do not treat
-  a clean `git status` as proof of discard.
+- **No codegen edges here (deferred to SMA-389).** An earlier draft wired
+  `contracts:generate` onto `paigasus-proto-rs:build`, but that reverses ADR-0004's
+  no-prebuild property, makes affected builds network-dependent, and validates
+  regenerated rather than committed code. SMA-389 already owns that wiring and
+  deliberately defers it until the first protos land, so `proto-rs` is left untouched.
+- **No partial task overrides.** Nothing overrides `deps:` on an inherited task, so Moon's
+  `mergeDeps` strategy is irrelevant to this change.
+- **`build-release` stays out of CI.** It is intentionally absent from CI's `T=(…)` array,
+  so the release profile won't compile in CI until activation (tracked by **SMA-407**) —
+  flagged so the first real release build isn't the first CI release compile.
+- **Smoke-test hygiene.** Generating a throwaway crate can leave Moon cache residue
+  (`.moon/cache/states/<name>/`, gitignored); run `moon clean` afterward and don't treat a
+  clean `git status` as proof of discard.
 
 ## Verification
 

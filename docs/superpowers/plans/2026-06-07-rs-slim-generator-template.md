@@ -327,7 +327,7 @@ Expected: empty (all three edits committed, no stray smoke/temp files).
 - [ ] `rs/crates/services/paigasus-gateway/moon.yml` declares `dependsOn: [paigasus-proto-rs, paigasus-kernel-rs]` with no task overrides. *(Spec §Changes 3)*
 - [ ] `rs/crates/libs/paigasus-proto/moon.yml` is untouched. *(Spec §Not changed)*
 - [ ] `moon run :build` across the Rust crates yields a uniform debug profile (`rs/target/release` absent). *(Spec §Verification)*
-- [ ] `build-release` is **not** added to CI's `T=(…)` array (release profile activation tracked by SMA-407). *(Spec §F3)*
+- [ ] `build-release` is **not** added to CI's `T=(…)` array (release profile activation tracked by SMA-407). *(Spec §Design decisions)*
 - [ ] No `contracts:generate` / `^:build` edges introduced (deferred to SMA-389). *(Spec §Out of scope)*
 - [ ] Three commits, working tree clean.
 ```
