@@ -6,13 +6,4 @@ language: 'rust'
 dependsOn:
   - 'paigasus-proto-rs'
   - 'paigasus-kernel-rs'
-tasks:
-  build:
-    command: 'cargo build --release'
-    inputs: ['@group(sources)', 'Cargo.toml']
-    deps: ['contracts:generate', '^:build']
-  test:
-    command: 'cargo nextest run --no-tests=pass'
-    inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml']
-    deps: ['contracts:generate']
 {%- endif %}
