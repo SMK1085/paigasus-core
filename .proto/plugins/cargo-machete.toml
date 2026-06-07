@@ -1,0 +1,45 @@
+# Vendored proto TOML plugin for cargo-machete (SMA-375).
+#
+# Resolves official, checksummed bnjbvr/cargo-machete GitHub release tarballs (cargo-dist).
+# Same vendoring rationale as buf/release-plz: a static schema over official release
+# assets — nothing upstream to maintain.
+#
+# exe-path is required on every platform: proto auto-locates a binary only when it
+# sits at the archive ROOT, but cargo-machete's cargo-dist tarballs nest the binary one
+# directory deep (cargo-machete-v{version}-{target}/cargo-machete). release-plz places
+# its binary at the archive root, so it needs no exe-path — this is the key difference.
+# Tag convention: "v"-PREFIXED (e.g. v0.9.2); asset filenames also embed "v{version}".
+# Linux assets are libc-ASYMMETRIC: x86_64 = musl, aarch64 = gnu. This plugin targets
+# the x86_64-musl asset (CI runners + local macOS). Linux-aarch64 is deferred — it would
+# need the -unknown-linux-gnu target dir (parallels the buf.toml Linux-arm TODO).
+# Arches are Rust triples (x86_64/aarch64) = proto's default {arch} tokens, so no
+# [install.arch] remap is needed.
+
+name = "cargo-machete"
+type = "cli"
+
+[platform.linux]
+download-file = "cargo-machete-v{version}-{arch}-unknown-linux-musl.tar.gz"
+checksum-file = "cargo-machete-v{version}-{arch}-unknown-linux-musl.tar.gz.sha256"
+exe-path = "cargo-machete-v{version}-{arch}-unknown-linux-musl/cargo-machete"
+
+[platform.macos]
+download-file = "cargo-machete-v{version}-{arch}-apple-darwin.tar.gz"
+checksum-file = "cargo-machete-v{version}-{arch}-apple-darwin.tar.gz.sha256"
+exe-path = "cargo-machete-v{version}-{arch}-apple-darwin/cargo-machete"
+
+[platform.windows]
+# Only x86_64 is published for Windows; there is no aarch64-pc-windows-msvc asset.
+download-file = "cargo-machete-v{version}-{arch}-pc-windows-msvc.tar.gz"
+checksum-file = "cargo-machete-v{version}-{arch}-pc-windows-msvc.tar.gz.sha256"
+exe-path = "cargo-machete-v{version}-{arch}-pc-windows-msvc/cargo-machete.exe"
+
+[install]
+download-url = "https://github.com/bnjbvr/cargo-machete/releases/download/v{version}/{download_file}"
+checksum-url = "https://github.com/bnjbvr/cargo-machete/releases/download/v{version}/{checksum_file}"
+
+[resolve]
+# Tags are "v"-prefixed (e.g. v0.9.2). The exact version is pinned in .prototools,
+# so installation is deterministic and does not exercise git-tag resolution —
+# hence no git-tag-pattern override is needed here.
+git-url = "https://github.com/bnjbvr/cargo-machete"

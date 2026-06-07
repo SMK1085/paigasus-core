@@ -14,6 +14,23 @@ tasks:
     options:
       runInCI: false
 
+  deny:
+    description: 'cargo-deny supply-chain/license/advisory gate over the rs/ workspace (SMA-375).'
+    command: 'cargo deny --manifest-path rs/Cargo.toml check'
+    toolchain: 'system'
+    inputs:
+      - 'rs/**/Cargo.toml'
+      - 'rs/Cargo.lock'
+      - 'rs/deny.toml'
+
+  machete:
+    description: 'cargo-machete unused-dependency check over the rs/ workspace (SMA-375).'
+    command: 'cargo machete rs'
+    toolchain: 'system'
+    inputs:
+      - 'rs/**/Cargo.toml'
+      - 'rs/**/*.rs'
+
   release-parity:
     description: 'Dry-run release-plz over synthetic commits; assert commit->semver parity (SMA-398).'
     script: 'ci/release-parity/run.sh'

@@ -1,0 +1,42 @@
+# Vendored proto TOML plugin for cargo-deny (SMA-375).
+#
+# Resolves official, checksummed EmbarkStudios/cargo-deny GitHub release tarballs.
+# Same vendoring rationale as buf/release-plz: a static schema over official release
+# assets — nothing upstream to maintain.
+#
+# exe-path is required on every platform: proto auto-locates a binary only when it
+# sits at the archive ROOT, but cargo-deny's cargo-dist tarballs nest the binary one
+# directory deep (cargo-deny-{version}-{target}/cargo-deny). release-plz places its
+# binary at the archive root, so it needs no exe-path — this is the key difference.
+# Linux assets are musl for BOTH arches (symmetric).
+# Arches are Rust triples (x86_64/aarch64) = proto's default {arch} tokens, so no
+# [install.arch] remap.
+
+name = "cargo-deny"
+type = "cli"
+
+[platform.linux]
+download-file = "cargo-deny-{version}-{arch}-unknown-linux-musl.tar.gz"
+checksum-file = "cargo-deny-{version}-{arch}-unknown-linux-musl.tar.gz.sha256"
+exe-path = "cargo-deny-{version}-{arch}-unknown-linux-musl/cargo-deny"
+
+[platform.macos]
+download-file = "cargo-deny-{version}-{arch}-apple-darwin.tar.gz"
+checksum-file = "cargo-deny-{version}-{arch}-apple-darwin.tar.gz.sha256"
+exe-path = "cargo-deny-{version}-{arch}-apple-darwin/cargo-deny"
+
+[platform.windows]
+# Only x86_64 is published for Windows; there is no aarch64-pc-windows-msvc asset.
+download-file = "cargo-deny-{version}-{arch}-pc-windows-msvc.tar.gz"
+checksum-file = "cargo-deny-{version}-{arch}-pc-windows-msvc.tar.gz.sha256"
+exe-path = "cargo-deny-{version}-{arch}-pc-windows-msvc/cargo-deny.exe"
+
+[install]
+download-url = "https://github.com/EmbarkStudios/cargo-deny/releases/download/{version}/{download_file}"
+checksum-url = "https://github.com/EmbarkStudios/cargo-deny/releases/download/{version}/{checksum_file}"
+
+[resolve]
+# Tags are plain semver with no "v" prefix (e.g. 0.19.8). The exact version is
+# pinned in .prototools, so installation is deterministic and does not exercise
+# git-tag resolution — hence no git-tag-pattern override is needed here.
+git-url = "https://github.com/EmbarkStudios/cargo-deny"
