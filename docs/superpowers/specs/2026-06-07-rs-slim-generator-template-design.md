@@ -3,8 +3,10 @@
 - **Linear:** SMA-374
 - **Branch:** `feature/sma-374-slim-rust-generator-template-and-unify-build-profile-with`
 - **Date:** 2026-06-07
-- **Status:** Design approved; ready for implementation plan
+- **Status:** Design approved (revised post-review); ready for implementation plan
 - **Follow-up from:** SMA-357 (review S8), generator template from SMA-356
+- **Review:** [`2026-06-07-rs-slim-generator-template-design-review.md`](./2026-06-07-rs-slim-generator-template-design-review.md)
+  (findings F1–F4 incorporated — see "Review incorporated" below)
 
 ## Problem
 
@@ -23,40 +25,39 @@ Two problems follow:
 
 The four checked-in crate `moon.yml` files are already slim (`id`/`layer`/`language`
 only), so the bug is **latent in the template, not live** in the repo today. Separately,
-the checked-in `paigasus-gateway` service lacks the proto/kernel dependency wiring a
-service should carry.
-
-`buf generate` (`contracts:generate`) writes the prost/tonic Rust output **into the
-`paigasus-proto` crate** (`src/generated/`), so proto-rs — not each service — is the real
-consumer of generation.
+the checked-in `paigasus-gateway` service lacks the proto/kernel `dependsOn` a service
+should carry per the template's intent.
 
 ## Approach
 
-Make `rust.yml` the single source of build tasks; the template and special crates
-override **only what differs**. Wire generation with **Model B**: the crate that consumes
-generated code (`paigasus-proto-rs`) owns the `contracts:generate` dependency, and
-services pull it transitively through build ordering rather than declaring it themselves.
+Make `rust.yml` the single source of build tasks; the template and crates override **only
+what differs**. Keep the change **purely mechanical** — template slimming, profile
+unification, and a static `dependsOn` reconciliation.
 
-Moon's default `mergeDeps` strategy is `append`, so a task override that specifies only
-`deps:` merges onto the inherited `command`/`inputs` from `rust.yml` — no need to restate
-the command.
+**Codegen and affected-graph edges are explicitly out of scope** and deferred to
+**SMA-389**. `contracts:generate` (buf) writes the prost/tonic output into
+`paigasus-proto`'s `src/generated/`, which is **committed** (ADR-0004) so that builds
+compile the committed source offline — no prebuild. SMA-360 deliberately left the
+`contracts:generate` build edges un-wired (no protos to order yet, and depending on a
+no-op `generate` would force `buf` onto PATH for every proto build). SMA-389 owns wiring
+`paigasus-proto-rs:build`/`:test` → `contracts:generate` (plus py/ts) and lands with the
+first real `.proto` definitions. SMA-374 therefore adds **no** `contracts:generate` edge,
+**no** `^:build` ordering, and **does not touch `paigasus-proto`**.
 
 ## Changes
 
 ### 1. `.moon/tasks/rust.yml`
 
-Add a dedicated release task and dependency-build ordering. `build` keeps debug.
+Add a dedicated release task. `build` stays debug; `test`/`lint`/`fmt` unchanged.
 
 ```yaml
 tasks:
   build:
     command: 'cargo build'
     inputs: ['@group(sources)', 'Cargo.toml']
-    deps: ['^:build']            # build project-deps first (no-op for dep-less libs)
   build-release:
     command: 'cargo build --release'
     inputs: ['@group(sources)', 'Cargo.toml']
-    deps: ['^:build-release']
   test:    # unchanged
     command: 'cargo nextest run --no-tests=pass'
     inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml']
@@ -68,14 +69,10 @@ tasks:
     inputs: ['@group(sources)']
 ```
 
-`^:build` generalizes the ordering the old template expressed per-service. It is a no-op
-for `paigasus-kernel-rs` / `paigasus-proto-rs` (no project-level `dependsOn`), so it
-introduces no cycles.
-
 ### 2. `.moon/templates/rust/moon.yml`
 
-The `service` archetype drops **all** task overrides; it only needs project deps. The
-`library` archetype is unchanged (still emits no `dependsOn` on purpose — see template
+The `service` archetype drops **all** task overrides; it only emits project `dependsOn`.
+The `library` archetype is unchanged (still emits no `dependsOn` on purpose — see template
 caveats).
 
 ```yaml
@@ -91,25 +88,14 @@ dependsOn:
 ```
 
 `build`/`build-release`/`test`/`lint`/`fmt` all inherit from `rust.yml`. The `--release`
-bug and the redundant `test` redefinition are gone.
+bug, the redundant `test` redefinition, and the premature `contracts:generate`/`^:build`
+edges are all gone (the codegen edge returns via SMA-389 on `paigasus-proto-rs`, not here).
 
-### 3. `rs/crates/libs/paigasus-proto/moon.yml`
+### 3. `rs/crates/services/paigasus-gateway/moon.yml`
 
-The consumer of generated code owns the `contracts:generate` dependency. These deps merge
-onto the inherited commands via Moon's default `append` mergeDeps.
-
-```yaml
-tasks:
-  build:         { deps: ['contracts:generate'] }
-  build-release: { deps: ['contracts:generate'] }
-  test:          { deps: ['contracts:generate'] }
-```
-
-### 4. `rs/crates/services/paigasus-gateway/moon.yml`
-
-Reconcile the live service to match the slimmed template (adopt Model B): add project deps,
-no task overrides. It inherits `build` (with `^:build` → builds `paigasus-proto-rs` →
-runs `contracts:generate`).
+Reconcile the live service to match the slimmed template: add the static project deps, no
+task overrides. This is a benign project-graph edge — no `buf`-on-PATH, no network, no
+task-ordering change.
 
 ```yaml
 dependsOn:
@@ -117,34 +103,47 @@ dependsOn:
   - 'paigasus-kernel-rs'
 ```
 
+### Not changed
+
+- `rs/crates/libs/paigasus-proto/moon.yml` — untouched. Its `contracts:generate` edge is
+  SMA-389's, landing with the first protos.
+
 ## Out of scope
 
+- **`contracts:generate` build edges and `^:build` affected-graph ordering** — owned by
+  SMA-389 (lands with first protos). `contracts:generate` stays orphan in CI until then,
+  which is the deliberate post-SMA-360 state.
+- **Adding `:build-release` to CI's `T=(…)` array** — release artifacts are dormant per
+  ADR-0011; activation is SMA-407 (see F3 note below).
 - `paigasus-py-bindings` dependency wiring (separate concern).
-- `lint`/`fmt` gaining the `contracts:generate` dep — generated code is committed
-  (ADR-0004), so clippy reads it as-is; ordering only matters for the `:build`/`:test`
-  graph addressed here. Deeper affected-rebuild granularity is SMA-401 / SMA-389 territory.
 - `clean: true` in `buf.gen.yaml` (tracked under SMA-389 / codegen-drift).
 
-## Assumptions & risks
+## Review incorporated
 
-- **Moon `mergeDeps` defaults to `append`** so partial `deps:`-only overrides keep the
-  inherited command. Confirm during implementation (`moon project paigasus-proto-rs`
-  should show the merged command + appended dep). If a project somewhere sets
-  `mergeDeps: replace`, the proto overrides would need the full command restated.
-- **`buf generate` must be runnable wherever `paigasus-proto-rs:build` runs when
-  affected** (it uses remote buf plugins → network). Because generated code is committed,
-  builds that don't touch protos won't trigger generation, so the common path is
-  unaffected.
+- **F1 (Medium):** the earlier "Model B" (wiring `contracts:generate` onto
+  `paigasus-proto-rs:build` here) reversed ADR-0004's no-prebuild property, made affected
+  builds network-dependent, and validated regenerated rather than committed code — and it
+  duplicated SMA-389, which deliberately defers that wiring. **Resolved by deferring all
+  codegen edges to SMA-389; `proto-rs` is untouched.**
+- **F2 (Low):** the `mergeDeps: append` concern is now moot — no `deps:`-only partial
+  overrides remain in this change.
+- **F3 (Low):** `build-release` is intentionally **not** added to CI's `T` array, so the
+  release profile won't compile in CI until activation. Flagged for **SMA-407** so the
+  first real release build isn't the first time the release profile compiles in CI.
+- **F4 (Nit):** the template smoke test leaves Moon cache residue
+  (`.moon/cache/states/<name>/`, gitignored) — run `moon clean` afterward and do not treat
+  a clean `git status` as proof of discard.
 
 ## Verification
 
 - `moon ci :build` → inspect `rs/target/`: only `debug/`, **no** `release/`
   (uniform debug profile across all crates).
-- `moon run :build-release` → `rs/target/release/` appears.
-- `moon project paigasus-proto-rs` (or the task graph) shows `build` depends on
-  `contracts:generate`; `paigasus-gateway-rs` `build` depends on `^:build`.
+- `moon run :build-release` → `rs/target/release/` appears (run on demand; not in CI).
+- `moon project paigasus-gateway-rs` shows `dependsOn` proto/kernel and inherited tasks
+  with no per-crate overrides.
 - Template smoke test: generate a throwaway service, confirm its `moon.yml` carries
-  `dependsOn` only and **no** per-crate tasks; discard.
+  `dependsOn` only and **no** per-crate tasks; then `moon clean` and remove the generated
+  crate (don't rely on `git status` alone — Moon cache residue is gitignored).
 
 Implementation note: moon/buf are proto-managed and off the Bash tool PATH — export
 `~/.proto/bin:~/.proto/shims`. No macOS `timeout` available.
