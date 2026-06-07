@@ -17,6 +17,7 @@ allow = [                   # v2: anything NOT listed is denied
   "BSD-3-Clause",
   "ISC",
   "Unicode-3.0",
+  "Unicode-DFS-2016",        # older Unicode data-files license (pre-3.0 unicode-* crates)
   "Zlib",
   "MPL-2.0",                # Apache-compatible weak file-level copyleft (review F4)
 ]
