@@ -1,0 +1,34 @@
+[graph]
+all-features = true   # see the full dep surface (service tokio/reqwest features, etc.)
+
+[advisories]
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "deny"             # reject crates yanked from crates.io
+# vulnerability advisories are deny-by-default in v2 — no separate key needed
+unmaintained = "workspace"  # police crates we pull in, not every deep transitive (noise control)
+ignore = []                 # waive specific RUSTSEC-IDs here, each with a `reason`
+
+[licenses]
+allow = [                   # v2: anything NOT listed is denied
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "MPL-2.0",                # Apache-compatible weak file-level copyleft (review F4)
+]
+confidence-threshold = 0.8
+unused-allowed-license = "allow"   # don't warn on allowlist entries no crate matches yet (near-empty lock)
+exceptions = []             # per-crate carve-outs (e.g. ring's OpenSSL bit) land here as deps arrive
+
+[bans]
+multiple-versions = "warn"  # duplicates common early-stage — surface, don't block
+wildcards = "deny"          # "*" version reqs are a hygiene smell; the catalog uses none
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
