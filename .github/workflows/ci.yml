@@ -49,7 +49,7 @@ jobs:
           # then don't exist → "pnpm: command not found"). Reinstall fresh each run.
           cache: false
 
-      - name: Install pinned CLIs from .prototools (buf, lefthook, cargo-deny, cargo-machete)
+      - name: Install pinned CLIs from .prototools (buf, lefthook, cargo-deny, cargo-machete, cargo-nextest)
         run: proto install
 
       # Caches that don't need a resolved tool path go before `moon setup` (which is

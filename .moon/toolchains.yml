@@ -13,8 +13,11 @@ rust:
   components:
     - 'rustfmt'
     - 'clippy'
-  bins:
-    - 'cargo-nextest@0.9.136'
+  # cargo-nextest is provisioned via a vendored proto plugin pinned in .prototools
+  # (installed by `proto install`), NOT via `rust.bins` here: `moon setup` provisions the
+  # toolchain + components but NOT bins, so a `rust.bins` nextest was never installed in CI
+  # and every `:test` task failed with "no such command: nextest". Same reliability reason
+  # cargo-deny/machete use proto plugins (SMA-375).
 
 # Python and uv are Moon 2.2.5 built-in toolchains, keyed `unstable_python` and
 # the separate `unstable_uv` (the unprefixed `python` / `uv` keys are NOT built-in

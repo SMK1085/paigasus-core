@@ -1,0 +1,48 @@
+# Vendored proto TOML plugin for cargo-nextest (SMA-374).
+#
+# Resolves official, checksummed nextest-rs/nextest GitHub release tarballs. Same
+# vendoring rationale as buf/release-plz/cargo-deny/cargo-machete: a static schema over
+# official release assets — nothing upstream to maintain.
+#
+# WHY proto and not Moon's `rust.bins`: `moon setup` provisions the Rust toolchain +
+# components but NOT `rust.bins`, so `cargo-nextest` was never installed in CI and every
+# `:test` task failed with "no such command: nextest". This is the same reliability gap
+# that moved cargo-deny/machete to proto plugins (SMA-375). `proto install` now provisions
+# nextest onto PATH so `cargo nextest` resolves it.
+#
+# Differences from the cargo-deny/machete plugins (don't copy blindly):
+#   - NO exe-path: the nextest tarball places `cargo-nextest` at the archive ROOT (matching
+#     its official `tar zxf - -C ~/.cargo/bin` install), so proto auto-locates the binary.
+#   - Tag is "cargo-nextest-"-PREFIXED (e.g. cargo-nextest-0.9.136); asset filenames embed
+#     the bare {version}.
+#   - Checksum filename REPLACES `.tar.gz` with `.sha256` (it is NOT `<tarball>.sha256`).
+#   - macOS ships a single UNIVERSAL2 binary (universal-apple-darwin), so {arch} is NOT
+#     used on macOS — it is hardcoded to `universal`.
+#   - Linux assets are musl for BOTH arches (symmetric); {arch} = Rust triple = proto default.
+
+name = "cargo-nextest"
+type = "cli"
+
+[platform.linux]
+download-file = "cargo-nextest-{version}-{arch}-unknown-linux-musl.tar.gz"
+checksum-file = "cargo-nextest-{version}-{arch}-unknown-linux-musl.sha256"
+
+[platform.macos]
+# Single universal2 asset covers x86_64 + aarch64; {arch} intentionally not used.
+download-file = "cargo-nextest-{version}-universal-apple-darwin.tar.gz"
+checksum-file = "cargo-nextest-{version}-universal-apple-darwin.sha256"
+
+[platform.windows]
+download-file = "cargo-nextest-{version}-{arch}-pc-windows-msvc.tar.gz"
+checksum-file = "cargo-nextest-{version}-{arch}-pc-windows-msvc.sha256"
+
+[install]
+download-url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-{version}/{download_file}"
+checksum-url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-{version}/{checksum_file}"
+
+[resolve]
+git-url = "https://github.com/nextest-rs/nextest"
+# Tags are prefixed "cargo-nextest-" with NO "v" (e.g. cargo-nextest-0.9.136); proto's
+# default v? pattern matches nothing, so resolving even the exact pinned version fails
+# without this. Captures the semver portion directly (mirrors the release-plz plugin).
+git-tag-pattern = "^cargo-nextest-(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)$"

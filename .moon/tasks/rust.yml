@@ -16,6 +16,9 @@ tasks:
   build:
     command: 'cargo build'
     inputs: ['@group(sources)', 'Cargo.toml']
+  build-release:
+    command: 'cargo build --release'
+    inputs: ['@group(sources)', 'Cargo.toml']
   test:
     command: 'cargo nextest run --no-tests=pass'
     inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml']

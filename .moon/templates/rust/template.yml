@@ -5,9 +5,11 @@ description: |
   rs/crates/services.
 
   CAVEATS:
-  - The `service` archetype emits dependsOn paigasus-proto-rs/paigasus-kernel-rs and a
-    `contracts:generate` dep, which only resolve after SMA-357/360. Generate into
-    a workspace where those projects exist, or hand-edit the references.
+  - The `service` archetype emits dependsOn paigasus-proto-rs/paigasus-kernel-rs, which
+    only resolve in a workspace where those projects exist (SMA-357/360) — generate there
+    or hand-edit the references. Build/test/lint/fmt are inherited from
+    .moon/tasks/rust.yml (no per-crate overrides); the contracts:generate build edge is
+    added on paigasus-proto by SMA-389.
   - The `library` archetype emits NO dependsOn on purpose: most libs depend on
     paigasus-kernel-rs, but paigasus-kernel-rs and paigasus-proto-rs must NOT (self/cycle).
     Add `dependsOn: ['paigasus-kernel-rs']` by hand where appropriate.
