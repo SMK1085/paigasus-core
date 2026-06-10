@@ -1,7 +1,8 @@
 # SMA-387: Fix Linux-aarch64 buf asset resolution — Design
 
 **Issue:** [SMA-387](https://linear.app/smaschek/issue/SMA-387/fix-linux-aarch64-buf-asset-resolution-in-vendored-buftoml-proto)
-**Date:** 2026-06-10
+**Date:** 2026-06-10 (revised same day after design review, see
+[design review](./2026-06-10-sma-387-buf-linux-aarch64-design-review.md))
 **Status:** Approved
 
 ## Problem
@@ -40,9 +41,12 @@ Linux-arm64 gets a broken download with no hint why.
   schema engine cannot be pointed at a fork through configuration. The only
   fork route is building and hosting a standalone WASM plugin (forked
   `schema_tool` with the buf schema embedded) — the previously rejected
-  vendor-a-WASM option with extra steps, for a platform with zero current
-  users. Rejected; revisit only if ARM Linux CI becomes real before the
-  upstream fix ships.
+  vendor-a-WASM option with extra steps. Rejected, with a concrete revisit
+  trigger: **if arm64 release CI lands before the upstream fix reaches a proto
+  release, vendor the standalone WASM after all.** "Zero current users" has a
+  shelf life — the planned release matrix ships napi/maturin Linux-arm64
+  artifacts, GitHub's arm64 runners are free for public repos, and Docker on
+  Apple Silicon is a Linux-aarch64 proto client today.
 
 ## Decision
 
@@ -59,6 +63,11 @@ Linux-arm64 errors clearly instead of silently downloading a wrong asset.
   `install.*` map → raw Rust value. `interpolate_tokens` gains the current
   `PlatformMapper` as a parameter (callers already hold it via `get_platform`).
 - Enables: `[platform.macos.arch] aarch64 = "arm64"`.
+- **Identity overrides must work and carry an explicit test**: a platform map
+  entry equal to the raw value (e.g. `[platform.linux.arch] aarch64 = "aarch64"`)
+  must shadow the global map, not be skipped as a no-op. The flip-over plan
+  below depends on exactly this semantic; the test protects it from being
+  "simplified" away in review.
 - Includes tests in the existing schema-plugin test style and a docs update
   for the non-WASM plugin page.
 - No new upstream issue; the PR references and closes proto#896.
@@ -69,18 +78,53 @@ Linux-arm64 errors clearly instead of silently downloading a wrong asset.
   The schema plugin checks this list before downloading, so Linux-arm64 fails
   with a clear unsupported-arch error.
 - Replace the `TODO(SMA-387)` comment with the real constraint (global-only
-  remap), a link to the upstream PR, and the flip-over plan.
+  remap), a link to the upstream PR, and the **compatible** flip-over plan
+  (§3) — the comment is what the eventual flip-over executor will follow
+  verbatim, so it must describe the stale-client-safe shape, not the naive
+  remap move.
+- `lefthook.toml`: one-line comment noting its `aarch64 = "arm64"` remap is
+  safe only because lefthook publishes `Linux_aarch64` **and** `Linux_arm64`
+  as duplicate assets (verified: identical sha256); if upstream drops the
+  alias, this same bug reappears there. Apply the platform-scoped pattern to
+  lefthook in the same pass as the buf flip-over.
 - AC #2 (all four platforms resolve to existing assets) is verified
   empirically against the v1.70.0 release asset list; the PR description
   records the asset names. No verification script — not worth it for a file
-  that effectively never changes.
+  that effectively never changes. Residual risk accepted explicitly: buf pin
+  bumps are manual (no Dependabot ecosystem for proto), so a future asset
+  rename is detected at next install on the affected platform, not by CI.
 
 ### 3. Flip-over (after upstream ships)
 
 The fix reaches contributors only after: PR merge → `schema_tool` release →
-proto release bumping the pinned version → contributors updating proto. When
-that lands: move the remap to `[platform.macos.arch]` / `[platform.windows.arch]`,
-drop the global `[install.arch]`, drop the `archs` restriction.
+proto release bumping the pinned version → contributors updating proto.
+
+**The flip-over must stay correct on stale proto clients.** The schema engine
+ships inside proto releases, and `PlatformMapper` ignores unknown fields
+(serde default, no `deny_unknown_fields`) — so an older engine parses the
+flipped TOML cleanly and silently drops any `[platform.*.arch]` table. Moving
+the remap to macOS/Windows and dropping the global `[install.arch]` would
+therefore break buf for **every macOS/Windows-arm64 contributor on a stale
+proto** (raw `aarch64` → nonexistent `buf-Darwin-aarch64`) — trading a bug on
+a near-zero-population platform for one on the primary dev platform. Instead:
+
+```toml
+[install.arch]
+aarch64 = "arm64"        # keep: old engines still resolve macOS/Windows correctly
+
+[platform.linux.arch]
+aarch64 = "aarch64"      # new engines: identity override beats the global remap
+```
+
+Outcome: new proto — all four platforms correct; stale proto — macOS/Windows
+unchanged, Linux-aarch64 reverts to today's behavior only while stale. The
+`archs = ["x86_64"]` restriction is dropped at flip-over (it would otherwise
+block Linux-arm64 on new engines too).
+
+In the same PR: **pin proto itself in `.prototools`** (`proto = ">=x.y.z"`,
+the release carrying the new schema engine). Without a floor, "contributors
+updating proto" is a hope, not a step; with it, CI (`moonrepo/setup-toolchain`
+installs from `.prototools`) and proto's own pin check enforce the floor.
 
 ### 4. Issue bookkeeping
 
@@ -92,12 +136,21 @@ drop the global `[install.arch]`, drop the `archs` restriction.
 
 ## Testing
 
-Interim change is declarative TOML: `proto install buf` must still work on
-macOS-arm64 locally, and CI (Linux-x86_64) exercises it on the PR. The
-upstream change carries its own Rust tests.
+- Happy paths: `proto install buf` still works on macOS-arm64 locally; CI
+  (Linux-x86_64) exercises it on the PR.
+- **The loud-fail itself** (the interim's only new behavior):
+  `docker run --platform linux/arm64` on the Apple Silicon Mac (arm64 runs
+  natively), install proto, `proto install buf`, and confirm the
+  unsupported-arch error fires and is actually legible. The observed error
+  text goes in the PR description as AC evidence.
+- The upstream change carries its own Rust tests, including the identity-
+  override case (§1).
 
 ## Out of scope
 
-- `lefthook.toml` and cargo-* plugins (unaffected, see findings).
+- cargo-* plugins (no `{arch}` remaps).
+- `lefthook.toml` behavior changes (comment-only inoculation, see §2; the
+  platform-scoped rewrite happens with the buf flip-over).
 - Windows support beyond keeping the existing section correct.
-- Any fork/self-hosted WASM interim (see findings).
+- Any fork/self-hosted WASM interim (see findings; concrete revisit trigger
+  recorded there).
