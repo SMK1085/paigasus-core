@@ -1,8 +1,7 @@
 # SMA-387: Fix Linux-aarch64 buf asset resolution — Design
 
 **Issue:** [SMA-387](https://linear.app/smaschek/issue/SMA-387/fix-linux-aarch64-buf-asset-resolution-in-vendored-buftoml-proto)
-**Date:** 2026-06-10 (revised same day after design review, see
-[design review](./2026-06-10-sma-387-buf-linux-aarch64-design-review.md))
+**Date:** 2026-06-10 (revised same day after design review)
 **Status:** Approved
 
 ## Problem
