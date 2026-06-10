@@ -129,10 +129,13 @@ installs from `.prototools`) and proto's own pin check enforce the floor.
 ### 4. Issue bookkeeping
 
 - Comment on SMA-387 with the research findings and amend the AC: Linux-aarch64
-  "resolves correctly" splits into interim loud-fail (now) and correct
-  resolution (at flip-over).
-- SMA-387 stays In Progress until the flip-over; the interim PR does not
-  close it.
+  "resolves correctly" splits into interim loud-fail (SMA-387) and correct
+  resolution (successor issue, at flip-over).
+- SMA-387 closes when the interim lands and the upstream PR is submitted. The
+  flip-over (§3, including the proto floor and the lefthook rewrite) moves to
+  a successor issue ("flip buf.toml to platform-scoped arch remap"), marked
+  blocked-external with the upstream PR linked — holding one issue In Progress
+  against a four-link external chain would rot on the board.
 
 ## Testing
 
