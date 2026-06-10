@@ -5,14 +5,20 @@
 # effectively unmaintained, and this schema only resolves official, checksummed
 # `bufbuild/buf` GitHub release binaries — nothing to maintain, so we own it.
 #
-# TODO(SMA-387): the `aarch64 = "arm64"` remap below is correct for macOS-arm64
-# and Linux-x86_64 but resolves Linux-aarch64 to a non-existent asset
-# (buf-Linux-arm64 vs. real buf-Linux-aarch64). Fix before adding Linux-arm CI.
+# Linux is restricted to x86_64 (SMA-387): buf's Linux-arm64 asset is named
+# `buf-Linux-aarch64`, but proto's TOML schema supports only the global
+# [install.arch] remap, which must stay "arm64" for macOS/Windows. The archs
+# restriction makes Linux-arm64 fail loudly instead of silently downloading a
+# nonexistent asset. Flip-over is SMA-411, once moonrepo/plugins#151 ships in a
+# proto release: keep [install.arch], add `[platform.linux.arch] aarch64 =
+# "aarch64"` (identity override — safe on stale schema engines, which ignore
+# unknown platform tables), drop the archs line, and pin proto in .prototools.
 
 name = "buf"
 type = "cli"
 
 [platform.linux]
+archs = ["x86_64"]
 download-file = "buf-Linux-{arch}"
 checksum-file = "sha256.txt"
 
