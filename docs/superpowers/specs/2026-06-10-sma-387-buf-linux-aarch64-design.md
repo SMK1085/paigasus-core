@@ -55,9 +55,13 @@ Linux-arm64 errors clearly instead of silently downloading a wrong asset.
 ### 1. Upstream PR to `moonrepo/plugins` (closes proto#896)
 
 - Add `arch: HashMap<HostArch, String>` **and** `libc: HashMap<HostLibc, String>`
-  to `PlatformMapper` (serde-defaulted → backwards compatible). The libc map is
-  ~5 extra lines on the identical code path and covers proto#896's second
-  example, making "closes #896" honest rather than partial.
+  to `PlatformMapper` (serde-defaulted → backwards compatible). The arch map
+  alone covers **both** proto#896 examples — buf directly, and ripgrep because
+  the remapped value can embed a full target triple per arch (e.g.
+  `[platform.linux.arch] x86_64 = "x86_64-unknown-linux-musl"`). The libc map
+  cannot express ripgrep's per-arch libc variance (it's keyed by detected host
+  libc, not arch) and is included only as cheap symmetry with the existing
+  global `install.arch`/`install.libc` pair.
 - Resolution order for `{arch}`/`{libc}` tokens: platform-scoped map → global
   `install.*` map → raw Rust value. `interpolate_tokens` gains the current
   `PlatformMapper` as a parameter (callers already hold it via `get_platform`).
