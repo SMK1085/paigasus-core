@@ -5,7 +5,6 @@
 **Date:** 2026-06-13
 **ADR:** ADR-0004 (Protobuf + buf as the single source of truth for wire contracts), ADR-0005 (kernel-once)
 **Follows:** SMA-360 (§8 / finding H3 deferred this wiring to "land with the first real protos"); SMA-374 (slimmed the rust template, explicitly deferred the codegen edges to here, and removed an earlier `proto-rs:build → contracts:generate` draft — **this issue supersedes that deferred wiring**)
-**Review:** [`…-design-review.md`](./2026-06-13-sma-389-proto-build-graph-wiring-design-review.md) — findings F1–F4 resolved below
 
 ## Goal
 
@@ -50,7 +49,7 @@ lint/format gates.
    prettyplease output is not byte-identical to rustfmt, so `cargo fmt --check`
    would otherwise fail on generated code.
 6. **The Python whole-tree `typecheck`/`test` do *not* get the edge** (reverses an
-   earlier draft; resolves review F3). They live on the `py` root (SMA-401
+   earlier draft). They live on the `py` root (SMA-401
    whole-tree dedup) and run on *any* py change. Decisions #8 (pinned plugins) +
    #9 (PR drift gate) make committed generated code byte-identical to regenerated
    code, so the whole-tree py checks read the committed code safely and need no
@@ -62,12 +61,12 @@ lint/format gates.
    to be replaced once contracts work begins; `health.proto` keeps the buf module
    non-empty.
 8. **Pin all four remote codegen plugins** in `buf.gen.yaml` and pin the
-   prost/tonic crates to match (resolves review F1). Untagged plugins resolve
-   *latest* at generate time; with committed codegen + `clean: true` +
+   prost/tonic crates to match. Untagged plugins resolve *latest* at generate
+   time; with committed codegen + `clean: true` +
    build→generate that floats the output, makes the crate↔plugin pin meaningless,
    and would false-positive any drift check on every upstream plugin release.
-9. **Land a PR-level codegen drift gate now**, not a deferred nightly (resolves
-   review F2). `clean: true` + build→generate means CI compiles *regenerated*
+9. **Land a PR-level codegen drift gate now**, not a deferred nightly. `clean:
+   true` + build→generate means CI compiles *regenerated*
    output, so stale committed codegen could merge uncaught. The build graph
    already regenerates, so a `git diff --exit-code` on the generated dirs is
    nearly free. Sound only because of #8 (deterministic regeneration).
