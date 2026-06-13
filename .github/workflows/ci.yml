@@ -145,6 +145,17 @@ jobs:
             moon run "${T[@]}"
           fi
 
+      - name: Codegen drift gate (committed generated code matches protos)
+        run: |
+          moon run contracts:generate
+          if ! git diff --exit-code -- \
+              rs/crates/libs/paigasus-proto/src/generated \
+              py/packages/paigasus-proto/src/paigasus_proto/generated \
+              ts/packages/paigasus-proto/src/generated; then
+            echo "::error::Generated code is stale. Run 'moon run contracts:generate' and commit the result."
+            exit 1
+          fi
+
       - name: CODEOWNERS up-to-date (drift gate)
         run: |
           moon sync code-owners
