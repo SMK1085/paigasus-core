@@ -62,9 +62,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             rs/target
-          key: rust-${{ runner.os }}-${{ hashFiles('rs/Cargo.lock') }}
+          # Toolchain hash in the key + restore-key prefix so a rustc bump (rs/rust-toolchain.toml)
+          # can't restore stale cross-version target artifacts (E0514 on prost/tonic rmeta, SMA-389).
+          key: rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-${{ hashFiles('rs/Cargo.lock') }}
           restore-keys: |
-            rust-${{ runner.os }}-
+            rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-
 
       - name: Cache Moon task cache
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
@@ -137,12 +139,27 @@ jobs:
           set -euo pipefail
           T=(:build :test :lint :fmt :deny :machete :typecheck :breaking :release-parity :release-parity-py :release-parity-ts)
           if [ "$EVENT" = "pull_request" ]; then
-            moon ci "${T[@]}" --base origin/main
+            moon ci "${T[@]}" --base origin/main --include-relations
           elif [ -n "${BEFORE:-}" ] && ! printf '%s' "$BEFORE" | grep -qE '^0+$'; then
-            moon ci "${T[@]}" --base "$BEFORE"
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
           else
             # Initial push with no usable base — run the whole graph to warm caches.
             moon run "${T[@]}"
+          fi
+
+      - name: Codegen drift gate (committed generated code matches protos)
+        run: |
+          moon run contracts:generate
+          git add --intent-to-add -- \
+              rs/crates/libs/paigasus-proto/src/generated \
+              py/packages/paigasus-proto/src/paigasus_proto/generated \
+              ts/packages/paigasus-proto/src/generated
+          if ! git diff --exit-code -- \
+              rs/crates/libs/paigasus-proto/src/generated \
+              py/packages/paigasus-proto/src/paigasus_proto/generated \
+              ts/packages/paigasus-proto/src/generated; then
+            echo "::error::Generated code is stale. Run 'moon run contracts:generate' and commit the result."
+            exit 1
           fi
 
       - name: CODEOWNERS up-to-date (drift gate)

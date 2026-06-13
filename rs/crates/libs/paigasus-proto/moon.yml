@@ -3,3 +3,9 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 id: 'paigasus-proto-rs'
 layer: 'library'
 language: 'rust'
+
+tasks:
+  build:
+    deps: ['contracts:generate']
+  test:
+    deps: ['contracts:generate']

@@ -7,3 +7,9 @@ language: 'rust'
 dependsOn:
   - 'paigasus-proto-rs'
   - 'paigasus-kernel-rs'
+
+tasks:
+  build:
+    deps: ['^:build']
+  test:
+    deps: ['^:build']

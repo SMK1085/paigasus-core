@@ -2,7 +2,12 @@
 name = "paigasus-proto"
 version = "0.0.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  # Runtime for generated betterproto2 code. The [grpclib] extra is required
+  # because the generated HealthService stub imports grpclib at module level.
+  # Minor must match betterproto2-compiler (compiler enforces ~=0.10.0).
+  "betterproto2[grpclib]>=0.10,<0.11",
+]
 # TODO(SMA-378): before first PyPI publish, paigasus-proto & paigasus-kernel need
 # description/readme/license = "Apache-2.0"/authors/classifiers (ADR-0006). (PyPI-bound only.)
 

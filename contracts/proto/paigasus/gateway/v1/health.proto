@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package paigasus.gateway.v1;
+
+// Minimal liveness probe — the first real contract. Exercises the full
+// prost + tonic / betterproto2 / protobuf-es codegen path end-to-end.
+service HealthService {
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+message CheckRequest {}
+
+message CheckResponse {
+  string status = 1;
+}

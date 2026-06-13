@@ -1,0 +1,11 @@
+# Pin the Rust toolchain so cargo/rustc/clippy/rustfmt all resolve the SAME rustc on
+# every host. GitHub runners ship a newer default rustup toolchain; without this pin
+# `cargo build` used Moon's managed 1.95.0 while `cargo clippy` picked up the runner's
+# 1.96.0 clippy-driver, tripping `E0514` ("crate `tonic` compiled by an incompatible
+# version of rustc") on the prost/tonic generated code (SMA-389). rustup reads this file
+# for every cargo invocation, so build and lint stay consistent.
+#
+# Keep `channel` in lockstep with `.moon/toolchains.yml` `rust.version`.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

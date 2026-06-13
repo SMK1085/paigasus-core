@@ -7,7 +7,7 @@ members = ["packages/*"]
 typeCheckingMode = "all"
 pythonVersion = "3.12"
 include = ["packages/*/src", "packages/*/tests"]
-exclude = ["**/__pycache__", "**/node_modules", "**/.venv", "**/dist", "**/build"]
+exclude = ["**/__pycache__", "**/node_modules", "**/.venv", "**/dist", "**/build", "**/generated/**"]
 reportMissingTypeStubs = "warning"
 reportUnnecessaryTypeIgnoreComment = "error"
 reportImplicitOverride = "error"
@@ -16,6 +16,7 @@ reportImportCycles = "error"
 [tool.ruff]
 line-length = 200
 target-version = "py312"
+extend-exclude = ["**/generated/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TCH", "RUF"]
@@ -34,6 +35,7 @@ markers = [
 dev = [
     "anyio[trio]>=4.13.0,<5",
     "basedpyright>=1.39.6,<2",
+    "betterproto2-compiler>=0.10,<0.11",
     "pytest>=9.0.3,<10",
     "python-semantic-release>=10,<11",
     "ruff>=0.15.16,<0.16",

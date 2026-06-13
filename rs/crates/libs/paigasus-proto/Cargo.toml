@@ -9,5 +9,10 @@ authors.workspace = true
 # code lands (paigasus-proto is crates.io-bound per the open-core release strategy).
 publish = false
 
+[dependencies]
+prost.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+
 [lints]
 workspace = true
