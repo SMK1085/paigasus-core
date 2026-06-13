@@ -137,9 +137,9 @@ jobs:
           set -euo pipefail
           T=(:build :test :lint :fmt :deny :machete :typecheck :breaking :release-parity :release-parity-py :release-parity-ts)
           if [ "$EVENT" = "pull_request" ]; then
-            moon ci "${T[@]}" --base origin/main
+            moon ci "${T[@]}" --base origin/main --include-relations
           elif [ -n "${BEFORE:-}" ] && ! printf '%s' "$BEFORE" | grep -qE '^0+$'; then
-            moon ci "${T[@]}" --base "$BEFORE"
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
           else
             # Initial push with no usable base — run the whole graph to warm caches.
             moon run "${T[@]}"
