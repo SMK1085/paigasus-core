@@ -267,3 +267,42 @@ a cheap PR gate; a nightly re-affirmation can still follow (see Follow-ups).
   lands (this issue unblocks it).
 - Nightly codegen-drift re-affirmation (the PR-level gate lands here; a nightly
   adds defense-in-depth against plugin-registry changes outside a PR).
+- **Remove the temporary `buf.yaml` breaking `ignore`** for
+  `proto/paigasus/common/v1/reserved.proto` once `main` no longer carries the
+  file (see delta D5).
+
+## As-built deltas (implementation)
+
+Discoveries during implementation that diverge from the design above. Recorded so
+the design record stays honest:
+
+- **D1 — Python codegen is betterproto2 via a *local* plugin, generating an
+  *async (grpclib)* client.** There is no BSR remote plugin for betterproto2
+  (the `danielgtaylor-betterproto` remote is betterproto v1). `buf.gen.yaml` runs
+  `local: ['uv','run','--project','../py','protoc-gen-python_betterproto2']`
+  (compiler `betterproto2-compiler`, runtime `betterproto2[grpclib]`). The default
+  `client_generation=sync` emits `import grpc` (grpcio); we set
+  `client_generation=async` so the stub uses the already-vendored `grpclib` and no
+  grpcio dep is needed (decision #2 refined).
+- **D2 — Rust generated layout is two nested files**, not one flat file:
+  `src/generated/paigasus/gateway/v1/{paigasus.gateway.v1.rs, …tonic.rs}`. `lib.rs`
+  mirrors the proto package (`pub mod paigasus::gateway::v1`) and `include!`s both;
+  the public path is `paigasus_proto::paigasus::gateway::v1::CheckResponse`. tonic
+  0.14 also required the new `tonic-prost` crate.
+- **D3 — §8 was wrong about Moon's affected semantics.** Project-level `dependsOn`
+  does **not** propagate task-affected in `moon ci`; only a task-level edge does,
+  and `moon ci` defaults to *changed-files-only*. To realise "touch proto →
+  gateway rebuilds" we added `^:build` to `paigasus-gateway-rs` build/test **and**
+  `--include-relations` to the ci.yml `moon ci` invocations. The corrected chain:
+  `contracts:generate → paigasus-proto-{rs,py,ts}:build → paigasus-gateway-rs:build`,
+  active in CI via `--include-relations`. (The proto packages themselves rebuild on
+  a real proto-edit PR regardless, since their committed generated files change.)
+- **D4 — rustfmt.toml dropped (decision #5 reversed).** `cargo fmt` does not follow
+  `include!`, so generated code is never visited by rustfmt; the `ignore` directive
+  was nightly-only (no-op + warning on stable) and was in fact *suppressing* the fmt
+  gate. Removed it; the gate now genuinely runs (clippy `#![allow]` still handles
+  the generated code that clippy *does* compile).
+- **D5 — temporary buf breaking `ignore`.** Deleting `reserved.proto` (decision #7)
+  trips buf `FILE_NO_DELETE` against `main`; `contracts:breaking` runs in CI. Added
+  a scoped, commented `breaking.ignore` for that path — remove once `main` drops the
+  file (see Follow-ups).
