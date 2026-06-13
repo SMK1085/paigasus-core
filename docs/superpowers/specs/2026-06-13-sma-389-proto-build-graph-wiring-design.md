@@ -1,10 +1,11 @@
 # SMA-389 — Wire `paigasus-proto` build → `contracts:generate` edges with the first real proto
 
-**Status:** approved design
+**Status:** approved design (revised post staff-engineer review)
 **Linear:** [SMA-389](https://linear.app/smaschek/issue/SMA-389/wire-paigasus-proto-build-contractsgenerate-dependency-edges-when)
 **Date:** 2026-06-13
 **ADR:** ADR-0004 (Protobuf + buf as the single source of truth for wire contracts), ADR-0005 (kernel-once)
-**Follows:** SMA-360 (§8 / finding H3 deferred this wiring to "land with the first real protos")
+**Follows:** SMA-360 (§8 / finding H3 deferred this wiring to "land with the first real protos"); SMA-374 (slimmed the rust template, explicitly deferred the codegen edges to here, and removed an earlier `proto-rs:build → contracts:generate` draft — **this issue supersedes that deferred wiring**)
+**Review:** [`…-design-review.md`](./2026-06-13-sma-389-proto-build-graph-wiring-design-review.md) — findings F1–F4 resolved below
 
 ## Goal
 
@@ -17,8 +18,9 @@ headline monorepo behavior works end-to-end:
 SMA-360 deliberately deferred these edges: with zero protos, `contracts:generate`
 is a no-op and wiring it would force `buf` onto PATH for every proto build for no
 benefit. This issue resolves that deferral by landing a real schema *together
-with* the edges, committing the generated code (ADR-0004), and keeping generated
-code out of the strict lint/format gates.
+with* the edges, committing the generated code (ADR-0004), pinning the codegen
+toolchain for determinism, and keeping generated code out of the strict
+lint/format gates.
 
 ## Decisions resolved during brainstorming
 
@@ -41,20 +43,34 @@ code out of the strict lint/format gates.
    Moon treat `contracts` as a project-dependency of each proto package, so
    affected-detection propagates (`contracts → proto-rs → gateway`). Rejected:
    adding global `^:build` to the language `build` tasks (broader DAG change,
-   out of scope) and project-level `dependsOn: contracts` (contracts exposes no
-   `build` task for `^:build` to bind to).
+   out of scope, and correctly *not* landed by SMA-374) and project-level
+   `dependsOn: contracts` (contracts exposes no `build` task for `^:build` to
+   bind to).
 5. **rustfmt ignores the generated dir** (`ignore = ["src/generated"]`): prost's
    prettyplease output is not byte-identical to rustfmt, so `cargo fmt --check`
    would otherwise fail on generated code.
-6. **The Python whole-tree `typecheck`/`test` also get the edge.** Those tasks
-   live on the `py` root project (SMA-401 whole-tree dedup) yet genuinely consume
-   generated code, so the rigorous ordering edge belongs there too — accepting
-   that this forces `buf` onto PATH for every py-root check. `ruff`/`prettier`
-   and the ts/rust whole-tree lints do **not** get the edge because generated
-   code is lint-excluded (below), so they consume nothing.
+6. **The Python whole-tree `typecheck`/`test` do *not* get the edge** (reverses an
+   earlier draft; resolves review F3). They live on the `py` root (SMA-401
+   whole-tree dedup) and run on *any* py change. Decisions #8 (pinned plugins) +
+   #9 (PR drift gate) make committed generated code byte-identical to regenerated
+   code, so the whole-tree py checks read the committed code safely and need no
+   pre-generate ordering — the drift gate is the backstop. This keeps codegen off
+   the hot path of proto-unrelated py work. (`ruff`/`prettier` and the ts/rust
+   whole-tree lints likewise get no edge: generated code is lint-excluded, so they
+   consume nothing.)
 7. **Remove `common/v1/reserved.proto`.** Its own comment marks it a placeholder
    to be replaced once contracts work begins; `health.proto` keeps the buf module
    non-empty.
+8. **Pin all four remote codegen plugins** in `buf.gen.yaml` and pin the
+   prost/tonic crates to match (resolves review F1). Untagged plugins resolve
+   *latest* at generate time; with committed codegen + `clean: true` +
+   build→generate that floats the output, makes the crate↔plugin pin meaningless,
+   and would false-positive any drift check on every upstream plugin release.
+9. **Land a PR-level codegen drift gate now**, not a deferred nightly (resolves
+   review F2). `clean: true` + build→generate means CI compiles *regenerated*
+   output, so stale committed codegen could merge uncaught. The build graph
+   already regenerates, so a `git diff --exit-code` on the generated dirs is
+   nearly free. Sound only because of #8 (deterministic regeneration).
 
 ## 1. Proto source
 
@@ -90,6 +106,10 @@ Delete `contracts/proto/paigasus/common/v1/reserved.proto`.
 - `contracts/buf.gen.yaml`: add **`clean: true`** (SMA-360 §3 deferred this to the
   PR that lands the first protos). With committed codegen, `clean` wipes each
   `out:` dir before regeneration so stale files can't linger.
+- **Pin every remote plugin to an explicit version** (decision #8):
+  `remote: buf.build/community/neoeinstein-prost:vX.Y.Z` (and `…-tonic`,
+  `…danielgtaylor-betterproto`, `bufbuild/es`). Exact versions chosen at
+  implementation time; they fix the prost/tonic crate pins in §4.
 - Delete the four `generated/.gitkeep` stubs (`clean` would remove them anyway;
   real generated files now occupy those dirs).
 
@@ -108,8 +128,8 @@ All generated files are committed.
 ## 4. Rust crate (`paigasus-proto`)
 
 - Add `prost` and `tonic` to `[workspace.dependencies]` and consume them in the
-  proto crate. **Versions must match the neoeinstein-prost/tonic remote-plugin
-  output** — plugin↔crate version skew is the classic prost/tonic footgun;
+  proto crate. **Versions must match the *pinned* plugin versions** (§2 /
+  decision #8) — plugin↔crate version skew is the classic prost/tonic footgun;
   verify a clean `cargo build`. (`bytes` is already a workspace dep, satisfying
   the prost `bytes=.` opt.)
 - `src/lib.rs`: declare a `gateway::v1` module that `include!`s the generated
@@ -127,11 +147,12 @@ Add task-level `deps` (Moon merges these onto the inherited tasks):
 | `paigasus-proto-rs:build`, `:test` | `contracts:generate` | AC #1; both compile generated code |
 | `paigasus-proto-py:build` | `contracts:generate` | AC #2; `uv build` packages generated code |
 | `paigasus-proto-ts:build`, `:typecheck`, `:test` | `contracts:generate` | AC #2; tsc/vitest compile `src/generated` |
-| `py:typecheck`, `py:test` | `contracts:generate` | decision #6; whole-tree basedpyright/pytest consume generated code |
 
 The rs/ts proto packages own their per-package build/typecheck/test (library
 layer), so the edge sits on the package. Python's whole-tree typecheck/test live
-on the `py` root, hence the extra two rows.
+on the `py` root and deliberately carry **no** edge (decision #6): committed code
+is authoritative (decisions #8/#9), so they read it directly without forcing
+codegen onto every py change.
 
 ## 6. Lint / format integration (keep generated code out of the gates)
 
@@ -173,24 +194,42 @@ Within a `moon ci :build` / `:test` run, the ordering edge forces
 `contracts:generate` to run first (regenerating committed code); the proto
 packages then build/test against fresh code, and affected consumers re-run.
 `contracts:generate` runs **once** per invocation regardless of how many
-dependents reference it (Moon dedups).
+dependents reference it (Moon dedups), and is cache-skipped entirely when the
+proto inputs are unchanged.
 
-## 9. Risks & caveats
+## 9. Codegen determinism & PR drift gate
 
-- **buf-on-PATH in CI (SMA-360 caveat M3, now due).** The edge forces `buf` onto
-  PATH for every affected proto build *and* every py-root check. `ci.yml`
-  (landed since SMA-360, SMA-361/363) must activate proto's shims **before**
-  `moon ci`. Verification includes a clean, rc-free shell check (CI proxy).
-- **prost/tonic plugin↔crate version skew.** Pin crate versions to the remote
-  plugin output; verify clean `cargo build` + smoke test.
+Committed codegen + `clean: true` + build→generate only behaves if regeneration
+is **deterministic** and **verified**:
+
+- **Determinism (decision #8).** All four remote plugins are version-pinned in
+  `buf.gen.yaml`, and the prost/tonic crates are pinned to match. Without this,
+  `buf generate` floats to latest: CI compiles a moving target, the crate pin
+  desyncs on the next upstream plugin release (with no `.proto` change), and any
+  drift check false-positives on plugin churn.
+- **Drift gate (decision #9).** A PR-level CI step regenerates and runs
+  `git diff --exit-code` over the three generated dirs. Because `moon ci`'s build
+  graph already runs `contracts:generate`, the marginal cost is one `git diff`.
+  - *Pass* → committed code matches the protos, and (given pinning) the bytes CI
+    builds equal the bytes a reviewer approved.
+  - *Fail* → a PR edited a `.proto` without regenerating-and-committing; caught at
+    PR time instead of silently merging (CI never commits its own regeneration).
+
+This pulls the SMA-360 "codegen-drift" guard forward from a deferred nightly into
+a cheap PR gate; a nightly re-affirmation can still follow (see Follow-ups).
+
+## 10. Risks & caveats
+
+- **buf-on-PATH in CI — already mitigated (was SMA-360 caveat M3).** `ci.yml` runs
+  `proto install` → `moon setup` before `moon ci :lint :breaking …`, and both
+  `contracts:lint` and `contracts:breaking` are buf commands — so buf-on-PATH is
+  proven in CI today. The new edges add more buf calls on an already-working PATH.
+  Verification keeps a clean, rc-free shell check as a guard, but the risk is low.
 - **`contracts:generate` declares no `outputs`.** Its outputs land in sibling
   projects (`../rs`, `../py`, `../ts`) — outside the contracts project root, which
   Moon cannot list as task outputs. The mechanism is therefore the ordering edge
   plus the committed generated code (an input of each consumer), not output
   caching/hydration of `generate`. Accepted.
-- **Broader py blast radius (decision #6).** Every `py:test`/`py:typecheck` now
-  depends on `contracts:generate`; acceptable given buf is on PATH in CI and
-  after `proto install` locally.
 
 ## Verification (maps to acceptance criteria)
 
@@ -208,12 +247,17 @@ dependents reference it (Moon dedups).
    confirm `contracts` → `paigasus-proto-{rs,py,ts}` → `paigasus-gateway-rs` all
    re-run in the affected set, in that order.
 5. Clean, shell-rc-free shell resolves `buf` (CI proxy) before `moon ci`.
+6. **Determinism & drift (decisions #8/#9)** — `buf.gen.yaml` plugins are
+   version-pinned and the prost/tonic crate versions match; the PR drift gate
+   (regenerate + `git diff --exit-code`) passes on a clean tree and **fails** on a
+   deliberately-stale generated file.
 
 ## Out of scope
 
 - Real `paigasus-gateway` *implementation* / consumption of `HealthService` → its
   own issue.
-- `codegen-drift.yml` nightly CI (committed-codegen drift guard) → follow-up.
+- A *nightly* `codegen-drift.yml` re-affirmation → follow-up. (The PR-level drift
+  gate itself is **in scope** — §9 / decision #9.)
 - Flipping `paigasus-proto` `publish=false` / ts `private` → **SMA-388** (which
   this unblocks).
 - Any further domain schemas beyond the single `HealthService`.
@@ -222,4 +266,5 @@ dependents reference it (Moon dedups).
 
 - **SMA-388** — flip `paigasus-proto` `publish`/`private` once generated code
   lands (this issue unblocks it).
-- Nightly codegen-drift CI (re-affirm committed generated code matches protos).
+- Nightly codegen-drift re-affirmation (the PR-level gate lands here; a nightly
+  adds defense-in-depth against plugin-registry changes outside a PR).
