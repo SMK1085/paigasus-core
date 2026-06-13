@@ -4,7 +4,10 @@ $schema: 'https://moonrepo.dev/schemas/toolchains.json'
 # version-pinned toolchains. The Moon 1.x form (`node.packageManager` + nested
 # `node.pnpm.version`) is silently ignored by 2.2.5, so pnpm never installs.
 node:
-  version: '22.22.3'
+  # Node 24 ("Krypton") is the Active LTS; 22 ("Jod") moved to Maintenance LTS.
+  # Keep @types/node (ts catalog) on the matching major; bump both together at the
+  # next LTS line.
+  version: '24.16.0'
 pnpm:
   version: '11.3.0'
 

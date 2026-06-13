@@ -44,6 +44,13 @@ updates:
         update-types:
           - minor
           - patch
+    # @types/node tracks the Node runtime major (Active LTS 24, .moon/toolchains.yml).
+    # Ignore its major bumps so the type defs can't drift ahead of the runtime — bump
+    # both deliberately at the next LTS line.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types:
+          - "version-update:semver-major"
 
   # ---- Python: uv workspace at py/ ----
   - package-ecosystem: uv
