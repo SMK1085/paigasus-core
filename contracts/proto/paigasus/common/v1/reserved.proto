@@ -1,6 +1,0 @@
-// SPDX-License-Identifier: Apache-2.0
-syntax = "proto3";
-
-// Placeholder so the buf module is non-empty: buf 1.70 errors on a module with
-// zero .proto files. Real schemas replace this when contracts work begins (SMA-360).
-package paigasus.common.v1;
