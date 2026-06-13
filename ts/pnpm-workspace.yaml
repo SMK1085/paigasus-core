@@ -32,7 +32,9 @@ catalog:
   # Type declarations
   '@types/react': ^19.2.16
   '@types/react-dom': ^19.0.0
-  '@types/node': ^22.0.0
+  # Track the Node runtime major (Active LTS 24); Dependabot ignores major bumps so
+  # the types can't drift ahead of the runtime (see .github/dependabot.yml).
+  '@types/node': ^24.0.0
   # Per-package add-ons (catalog-listed so they bump centrally even when used in only one app)
   '@next/eslint-plugin-next': ^16.2.7
   '@tanstack/eslint-plugin-query': ^5.100.14
