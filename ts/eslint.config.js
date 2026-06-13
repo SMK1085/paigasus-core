@@ -8,7 +8,7 @@ import jsxA11y from 'eslint-plugin-jsx-a11y';
 import nextPlugin from '@next/eslint-plugin-next';
 
 export default tseslint.config(
-  { ignores: ['**/dist/**', '**/.next/**', '**/node_modules/**', '**/*.d.ts'] },
+  { ignores: ['**/dist/**', '**/.next/**', '**/node_modules/**', '**/*.d.ts', '**/generated/**'] },
   js.configs.recommended,
   // Node CLI tooling scripts (e.g. the SMA-406 semantic-release parity helpers under
   // tooling/): plain Node ESM, outside the typed app/library graph. Provide Node globals

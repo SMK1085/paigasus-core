@@ -42,3 +42,5 @@ catalog:
   # Release tooling (SMA-406 — dormant semantic-release + parity adapter)
   semantic-release: ^25.0.0
   '@semantic-release/commit-analyzer': ^13.0.0
+  # Protobuf-ES v2 runtime (SMA-389)
+  '@bufbuild/protobuf': ^2.12.0
