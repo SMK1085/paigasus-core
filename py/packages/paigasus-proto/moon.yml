@@ -3,3 +3,7 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 id: 'paigasus-proto-py'
 layer: 'library'
 language: 'python'
+
+tasks:
+  build:
+    deps: ['contracts:generate']
