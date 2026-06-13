@@ -10,11 +10,16 @@ __all__ = (
 )
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import betterproto2
-import grpc
+from betterproto2 import grpclib as betterproto2_grpclib
 
 from ....message_pool import default_message_pool
+
+if TYPE_CHECKING:
+    from betterproto2.grpclib.grpclib_client import MetadataLike
+    from grpclib.metadata import Deadline
 
 _COMPILER_VERSION = "0.10.1"
 betterproto2.check_compiler_version(_COMPILER_VERSION)
@@ -40,22 +45,29 @@ default_message_pool.register_message(
 )
 
 
-class HealthServiceStub:
+class HealthServiceStub(betterproto2_grpclib.ServiceStub):
     """
     Minimal liveness probe — the first real contract. Exercises the full
     prost + tonic / betterproto2 / protobuf-es codegen path end-to-end.
     """
 
-    def __init__(self, channel: grpc.Channel):
-        self._channel = channel
-
-    def check(self, message: "CheckRequest | None" = None) -> "CheckResponse":
+    async def check(
+        self,
+        message: "CheckRequest | None" = None,
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "CheckResponse":
 
         if message is None:
             message = CheckRequest()
 
-        return self._channel.unary_unary(
+        return await self._unary_unary(
             "/paigasus.gateway.v1.HealthService/Check",
-            CheckRequest.SerializeToString,
-            CheckResponse.FromString,
-        )(message)
+            message,
+            CheckResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )

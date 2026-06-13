@@ -21,6 +21,8 @@ plugins:
   #     the compiler shells out to). betterproto2-compiler is a py dev dep. ────
   - local: ['uv', 'run', '--project', '../py', 'protoc-gen-python_betterproto2']
     out: ../py/packages/paigasus-proto/src/paigasus_proto/generated
+    opt:
+      - client_generation=async
 
   # ─── TypeScript: protobuf-es v2, pinned ───────────────────────────────────
   - remote: buf.build/bufbuild/es:v2.12.0
