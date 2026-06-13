@@ -6,6 +6,11 @@
 #
 # Release assets ship as plain executables (no archive): lefthook_{ver}_{OS}_{arch}
 # That binary IS the shim target; proto renames it to "lefthook" in ~/.proto/bin/.
+#
+# The global aarch64→arm64 remap is safe for Linux only because lefthook
+# publishes duplicate Linux_aarch64 and Linux_arm64 assets (identical sha256).
+# If upstream drops that alias, apply the platform-scoped pattern from
+# .proto/plugins/buf.toml (SMA-387).
 
 name = "lefthook"
 type = "cli"
