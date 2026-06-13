@@ -17,32 +17,32 @@ catalog:
   # Runtime (React + Next)
   react: ^19.2.7
   react-dom: ^19.2.7
-  next: ^16.2.7
+  next: ^16.2.9
   # TypeScript + ESLint + Prettier
   typescript: ^6.0.3
   eslint: ^10.4.1
   '@eslint/js': ^10.0.1
-  '@eslint-react/eslint-plugin': ^5.8.9
+  '@eslint-react/eslint-plugin': ^5.8.17
   'eslint-plugin-react-hooks': ^7.1.0
   'eslint-plugin-jsx-a11y': ^6.10.2
-  'typescript-eslint': ^8.60.0
-  prettier: ^3.8.3
+  'typescript-eslint': ^8.61.0
+  prettier: ^3.8.4
   # Test runner
   vitest: ^4.1.8
   # Type declarations
-  '@types/react': ^19.2.16
+  '@types/react': ^19.2.17
   '@types/react-dom': ^19.0.0
   # Track the Node runtime major (Active LTS 24); Dependabot ignores major bumps so
   # the types can't drift ahead of the runtime (see .github/dependabot.yml).
   '@types/node': ^24.0.0
   # Per-package add-ons (catalog-listed so they bump centrally even when used in only one app)
-  '@next/eslint-plugin-next': ^16.2.7
+  '@next/eslint-plugin-next': ^16.2.9
   '@tanstack/eslint-plugin-query': ^5.100.14
   # Commit tooling (SMA-371)
   '@commitlint/cli': ^21.0.2
   '@commitlint/config-conventional': ^21.0.2
   # Release tooling (SMA-406 — dormant semantic-release + parity adapter)
-  semantic-release: ^25.0.0
+  semantic-release: ^25.0.5
   '@semantic-release/commit-analyzer': ^13.0.0
   # Protobuf-ES v2 runtime (SMA-389)
   '@bufbuild/protobuf': ^2.12.0
