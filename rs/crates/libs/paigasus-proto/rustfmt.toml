@@ -1,3 +1,0 @@
-# prost output (prettyplease) is not byte-identical to rustfmt; keep generated
-# code out of the `cargo fmt --check` gate.
-ignore = ["src/generated"]
