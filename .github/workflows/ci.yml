@@ -148,6 +148,10 @@ jobs:
       - name: Codegen drift gate (committed generated code matches protos)
         run: |
           moon run contracts:generate
+          git add --intent-to-add -- \
+              rs/crates/libs/paigasus-proto/src/generated \
+              py/packages/paigasus-proto/src/paigasus_proto/generated \
+              ts/packages/paigasus-proto/src/generated
           if ! git diff --exit-code -- \
               rs/crates/libs/paigasus-proto/src/generated \
               py/packages/paigasus-proto/src/paigasus_proto/generated \
