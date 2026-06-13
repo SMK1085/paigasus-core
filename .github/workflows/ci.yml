@@ -62,9 +62,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             rs/target
-          key: rust-${{ runner.os }}-${{ hashFiles('rs/Cargo.lock') }}
+          # Toolchain hash in the key + restore-key prefix so a rustc bump (rs/rust-toolchain.toml)
+          # can't restore stale cross-version target artifacts (E0514 on prost/tonic rmeta, SMA-389).
+          key: rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-${{ hashFiles('rs/Cargo.lock') }}
           restore-keys: |
-            rust-${{ runner.os }}-
+            rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-
 
       - name: Cache Moon task cache
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
