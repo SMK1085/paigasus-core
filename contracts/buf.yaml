@@ -15,8 +15,3 @@ lint:
 breaking:
   use:
     - FILE
-  # TEMP (SMA-389): allow the one-time deletion of the reserved.proto placeholder.
-  # buf FILE_NO_DELETE flags it vs main; remove this ignore in a follow-up once
-  # main no longer carries reserved.proto.
-  ignore:
-    - proto/paigasus/common/v1/reserved.proto
