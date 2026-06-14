@@ -663,3 +663,37 @@ The PR auto-links to SMA-409 by branch name (do not attach the Linear link manua
 **Placeholder scan:** none — every step has concrete code/commands/expected output.
 
 **Type/name consistency:** `paigasus_kernel::sum` defined in Task 1, called in Task 3; project id `paigasus-py-bindings-rs`, task `repo:affected-smoke`, and the `moon query projects --affected --downstream deep` invocation are identical across Tasks 4–7 and the script.
+
+---
+
+## As-built deltas (implementation)
+
+Discoveries during execution that diverged from the task text above. Recorded so the plan
+stays honest; the committed code is the source of truth.
+
+- **D1 — Task 3 also touched `rs/Cargo.lock` and `rs/Cargo.toml`.** Building the binding
+  pulls PyO3 into `rs/Cargo.lock`, so that lockfile is part of the commit (the original
+  `git add` list omitted it). Separately, `cargo-deny`'s `wildcards = "deny"` rejects a
+  *path-only* workspace dep once it is actually consumed, so the `paigasus-kernel` workspace
+  entry gained `version = "0.0.0"` (matching the crate's own version) — fixing the root cause
+  rather than weakening `deny.toml`.
+- **D2 — Task 5 guard `--include-relations` matcher tightened, + infra-error distinction.**
+  The first-draft `grep -E '\bmoon ci\b'` false-matched the workflow's job name
+  (`name: moon ci`), step name, and comments — and an attempt to work around it by *renaming*
+  the job would have broken the `CI / moon ci` required status check. The committed matcher is
+  `grep -E 'moon ci +"'` (only real `moon ci "${T[@]}"` shell invocations) plus a
+  "no invocation found → FAIL" fail-safe. Also added a `run_case` helper so an infrastructure
+  error (e.g. `moon query` dying) aborts with exit 2, distinct from an assertion failure
+  (exit 1) — mirroring `ci/release-parity/run.sh`. All three exit codes were verified.
+- **D3 — Task 6 commit body uses `AC4`, not `AC #4`.** commitlint's conventional parser reads
+  `... #4)` as a footer token and trips `footer-leading-blank`; `AC4` preserves the meaning.
+- **D4 — guard `inputs` deliberately exclude lock/workspace-root files (review decision).** A
+  Task 6 quality review suggested adding `rs/Cargo.lock`, `ts/pnpm-workspace.yaml`,
+  `py/pyproject.toml`, etc. Declined: Moon discovers projects from `.moon/workspace.yml`
+  `projects.globs` (covered by `.moon/**/*`) and the cascade topology from `moon.yml`
+  `dependsOn` edges (covered by the `moon.yml` globs) — lock files and pnpm/uv workspace-root
+  files do **not** change what `moon query projects --affected` returns (verified: a
+  `rs/Cargo.lock` touch resolves to just `repo`). Adding them would re-run the guard on every
+  Dependabot bump for zero added protection. The current inputs already cover every real
+  regression vector (a removed `dependsOn`, a changed project glob, a dropped
+  `--include-relations`).
