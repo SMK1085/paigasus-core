@@ -6,3 +6,15 @@ id: 'paigasus-py-bindings-rs'
 # via maturin. Exclude from any layer=library publish matrix.
 layer: 'library'
 language: 'rust'
+
+# The kernel→binding edge (ADR-0005): a kernel change must rebuild this crate. The
+# task-level `^:build` is what propagates `affected` in `moon ci --include-relations`
+# — a project-level `dependsOn` alone does NOT (SMA-389 D3). Mirrors paigasus-gateway-rs.
+dependsOn:
+  - 'paigasus-kernel-rs'
+
+tasks:
+  build:
+    deps: ['^:build']
+  test:
+    deps: ['^:build']
