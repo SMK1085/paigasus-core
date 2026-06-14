@@ -49,7 +49,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 pyo3 = { version = "0.29", features = ["abi3-py312", "extension-module"] }
 # In-tree path dep: the bindings (and future consumers) build against the live kernel, so a
 # kernel edit rebuilds them. This is also the cargo-side half of the affected-graph edge.
-paigasus-kernel = { path = "crates/libs/paigasus-kernel" }
+paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.0.0" }
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
 # via the Moon `lint` task's `-D warnings`.

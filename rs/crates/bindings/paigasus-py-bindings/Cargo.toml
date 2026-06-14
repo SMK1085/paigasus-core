@@ -8,9 +8,24 @@ authors.workspace = true
 publish = false
 
 [lib]
-# Only cdylib: Python loads this artifact; no other Rust crate consumes it. Add "rlib"
-# only if a test or debug tool later needs to import it.
+# Only cdylib: Python loads this artifact; no other Rust crate consumes it.
 crate-type = ["cdylib"]
+# A PyO3 `extension-module` cdylib leaves libpython symbols undefined, so a Rust test
+# harness for this target can't link. Kernel logic is unit-tested in `paigasus-kernel`; the
+# FFI boundary is proven by compilation. Disable the (un-linkable, empty) test/doctest
+# targets so `cargo nextest --no-tests=pass` stays green (SMA-409).
+test = false
+doctest = false
+
+[dependencies]
+pyo3.workspace = true
+paigasus-kernel.workspace = true
+
+[package.metadata.cargo-machete]
+# pyo3 is consumed only through attribute macros (#[pyfunction]/#[pymodule]) — the canonical
+# cargo-machete false-positive, and :machete is a blocking gate (SMA-375). paigasus-kernel is
+# called directly and needs no ignore.
+ignored = ["pyo3"]
 
 [lints]
 workspace = true
