@@ -64,3 +64,22 @@ tasks:
       - 'ts/tooling/semantic-release-next-version.mjs'
       - 'ts/pnpm-lock.yaml'
       - '.prototools'
+
+  affected-smoke:
+    description: 'Assert the cross-language affected graph still cascades; fail red on a deleted edge or a dropped --include-relations (SMA-409).'
+    script: 'ci/affected-graph/run.sh'
+    toolchain: 'system'
+    inputs:
+      - 'ci/affected-graph/**/*'
+      - '.github/workflows/ci.yml'
+      - '.moon/**/*'
+      - 'moon.yml'
+      - '*/moon.yml'
+      - 'rs/crates/*/*/moon.yml'
+      - 'py/packages/*/moon.yml'
+      - 'ts/packages/*/moon.yml'
+      - 'ts/apps/*/moon.yml'
+      - 'rs/**/Cargo.toml'
+      - 'py/packages/*/pyproject.toml'
+      - 'ts/packages/*/package.json'
+      - 'ts/apps/*/package.json'

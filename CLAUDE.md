@@ -13,7 +13,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - `moon ci :build` / `moon ci :test` — affected build/test graph. **Moon 2.x needs explicit
   targets**; bare `moon ci` errors in non-TTY.
 - Task output style is set in `.moon/tasks.yml` (`taskOptions.outputStyle`,
-  currently `buffer-only-failure`). Moon 2.2.5 has no per-invocation CLI flag
+  currently `buffer-only-failure`). Moon 2.3.2 has no per-invocation CLI flag
   for it; to stream a specific task locally, set `options.outputStyle: 'stream'`
   on the task definition.
 - Rust (in `rs/`): `cargo build --workspace`, `cargo fmt --check`,
@@ -40,7 +40,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 
 ## Gotchas
 
-- Moon is 2.2.5: `vcs.client` (not `manager`), `codeowners.sync` (not `syncOnRun`),
+- Moon is 2.3.2: `vcs.client` (not `manager`), `codeowners.sync` (not `syncOnRun`),
   Python/uv toolchains keyed `unstable_python` + a separate `unstable_uv`.
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
 - `.github/CODEOWNERS` is Moon-generated — don't hand-edit.

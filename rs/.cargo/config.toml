@@ -1,0 +1,16 @@
+# SMA-409: paigasus-py-bindings is a PyO3 `extension-module` cdylib — at link time its
+# libpython symbols are intentionally undefined (CPython resolves them when it loads the
+# module). Linux/ELF permits undefined symbols in shared objects by default; the macOS
+# linker rejects them unless told to defer resolution. These flags let `cargo build` link
+# the extension on macOS WITHOUT maturin. Scoped to apple-darwin so every other target keeps
+# strict link-time symbol checking; CI (Linux) is unaffected.
+#
+# NOTE: cargo finds this file by walking up from the working directory, so run cargo from
+# inside `rs/` (as CONTRIBUTING/CLAUDE.md document, and as `moon` always does). A workspace
+# build launched from the repo ROOT won't pick up these flags and fails to link the cdylib
+# on macOS with undefined `_Py*` symbols.
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
