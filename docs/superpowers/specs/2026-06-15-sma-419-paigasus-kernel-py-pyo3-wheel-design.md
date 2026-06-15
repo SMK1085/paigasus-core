@@ -1,11 +1,13 @@
 # SMA-419 — Wire `paigasus-kernel-py` to the PyO3 wheel (uv↔maturin) + runtime smoke test
 
-**Status:** approved design (brainstorm complete, ready for plan)
+**Status:** approved design (brainstorm + staff review incorporated, ready for plan)
 **Linear:** [SMA-419](https://linear.app/smaschek/issue/SMA-419/wire-paigasus-kernel-py-to-the-pyo3-wheel-uvmaturin-runtime-smoke-test)
 **Date:** 2026-06-15
-**ADR:** ADR-0005 (kernel-once — pure Rust kernel bound to Py/Node/WASM), ADR-0006 (Python packaging)
+**ADR:** ADR-0005 (kernel-once — pure Rust kernel bound to Py/Node/WASM)
+**Layout authority:** Notion *Polyglot Monorepo Scoping* §1 (Directory layout) + §3 (Shared Rust core + FFI) — the maturin cross-directory caveat and its co-located fallback.
 **Follow-up of:** [SMA-409](https://linear.app/smaschek/issue/SMA-409/wire-cross-language-affected-graph-cascade-re-verify-at-phase-2-entry) — landed the `paigasus-kernel-rs → paigasus-py-bindings-rs` edge at **compile level only**; deferred the runtime/wheel chain and the Python-visible binding here (review findings F4 + F5).
 **Design context:** `docs/superpowers/specs/2026-06-14-sma-409-affected-graph-cascade-guard-design.md` (Out of scope + Follow-ups).
+**Reviewed by:** staff-engineer design review (`2026-06-15-…-review.md`); dispositions in the final section.
 
 ## Goal
 
@@ -16,49 +18,58 @@ SMA-409 AC #1** ("kernel wrappers in py").
 
 SMA-409 already shipped the Rust half: `paigasus-py-bindings` (a `cdylib` with
 `pyo3 0.29` + `abi3-py312` + `extension-module`) exposes `sum_as_string(a, b) -> String`
-via a provisional `#[pymodule] paigasus_py_bindings`, genuinely calling
-`paigasus_kernel::sum`. The `paigasus-kernel-rs → paigasus-py-bindings-rs` Moon edge with
-`^:build` is wired and guarded. **This issue does not re-touch the Rust crate's logic** — it
-builds the Python consumption chain on top and extends the existing guard.
+via a `#[pymodule] paigasus_py_bindings`, genuinely calling `paigasus_kernel::sum`. The
+`paigasus-kernel-rs → paigasus-py-bindings-rs` Moon edge with `^:build` is wired and guarded,
+and `rs/.cargo/config.toml` carries the macOS link flags that let `cargo build` the
+`extension-module` cdylib without maturin. **This issue does not re-touch the Rust crate's
+logic** — it builds the Python consumption chain on top and extends the existing guard.
 
 ## Decisions resolved during brainstorming
 
-1. **Two Python packages, not one.** A new maturin-built wheel package
-   (`py/packages/paigasus-py-bindings`) compiles the existing Rust crate and exposes the
-   native module; the existing `paigasus-kernel` uv package stays pure (`uv_build`),
-   depends on the wheel package, and re-exports a clean public surface. This keeps the
-   *compiled FFI artifact* cleanly separate from the *public Python API*. Rejected
-   alternative: making `paigasus-kernel` itself maturin-built (mixed Rust/Python layout) —
-   fewer moving parts, but couples the public package to the compiler toolchain and the
-   out-of-tree manifest.
+1. **Co-located maturin wheel + pure-Python wrapper (the *Polyglot Monorepo Scoping*
+   fallback layout).** The maturin `pyproject.toml` lives **inside the binding crate**
+   (`rs/crates/bindings/paigasus-py-bindings/`, next to its `Cargo.toml` — no `manifest-path`),
+   and the pure-`uv_build` `paigasus-kernel` package depends on the built wheel via a uv
+   **path source**, re-exporting its public surface. This keeps the compiled FFI artifact
+   distinct from the public API while avoiding a cross-directory `manifest-path`. *(Revised
+   after staff review — see decision-revision note below and disposition F1.)*
 2. **maturin is uv-native + pinned in `[build-system].requires`, not `.prototools`.**
-   maturin is a PEP 517 build backend, so its correct home is the wheel package's
+   maturin is a PEP 517 build backend, so its home is the wheel package's
    `[build-system] requires = ["maturin>=1.7,<2"]`, locked via `uv.lock`. uv drives the
    build in isolation (`uv sync`); no standalone maturin CLI and **no new proto plugin**.
-   This reverses the issue text's *speculation* that maturin would land in `.prototools` —
-   that would only be warranted if we invoked `maturin develop` outside uv's resolver,
-   adding a second pinning system. Single source of truth (uv.lock) wins.
-3. **No Rust pymodule rename.** Under the two-package split the provisional native name
-   `paigasus_py_bindings` becomes *deliberate* — owned by the wheel package via
-   `[tool.maturin] module-name` — and `paigasus_kernel` re-exports from it. "Reconcile the
-   provisional name" (issue scope) is satisfied by ownership + re-export, not a rename.
+   This reverses the issue text's *speculation* that maturin would land in `.prototools`.
+3. **No Rust pymodule rename.** The native name `paigasus_py_bindings` stays — it is now
+   *deliberately owned* by the co-located wheel package, and `paigasus_kernel` re-exports
+   from it. "Reconcile the provisional name" (issue scope) is satisfied by ownership +
+   re-export, not a rename.
 4. **Keep the placeholder `sum_as_string` as the public surface.** The kernel fn is itself
-   a deliberate placeholder (SMA-409 decision #3); inventing a "cleaner" API now would be
-   premature. The smoke test asserts the FFI round-trip, not a domain contract.
-5. **The guard's binding-rs touch case grows too, not just the kernel-edit case.** The
-   issue names only the kernel-edit case, but for a coherent guard a `paigasus-py-bindings`
-   Rust edit must also be shown to cascade to the two new py projects (they depend on it),
-   while still asserting the one-way property that it does **not** drag in
-   `paigasus-kernel-rs`.
+   a deliberate placeholder (SMA-409 decision #3); the smoke test asserts the FFI round-trip,
+   not a domain contract.
+5. **The guard's binding-rs touch case grows too, not just the kernel-edit case.** For a
+   coherent guard a `paigasus-py-bindings` Rust edit must also be shown to cascade to
+   `paigasus-kernel-py` (which now depends on it), while still asserting it does **not** drag
+   in `paigasus-kernel-rs`.
 
-## 1. Package layout (two packages)
+**Decision-revision note (decision #1).** Brainstorming first chose a *new*
+`py/packages/paigasus-py-bindings/` maturin package with a cross-directory `manifest-path`.
+Staff review (F1) showed that is a third path the canonical doc doesn't describe — it takes
+on the documented cross-directory sharp edge *and* adds a package the doc doesn't call for.
+The decisive factor (F3): Cargo discovers `.cargo/config.toml` from the **working
+directory's** ancestors. A cross-directory `manifest-path` makes maturin run cargo from a cwd
+**outside `rs/`**, so `rs/.cargo/config.toml`'s macOS link flags are missed and the wheel
+fails to link on macOS with undefined `_Py*` symbols. The co-located fallback keeps cargo
+running **inside `rs/`**, so the flags resolve. The canonical *primary* layout (a single
+maturin `paigasus-kernel`) shares the same cross-directory hazard, so we take the documented
+fallback instead.
 
-### New: `py/packages/paigasus-py-bindings/` — the compiled wheel
+## 1. Package layout (co-located fallback)
 
-maturin-built, **no Python source of its own** (pure compiled extension):
+### `rs/crates/bindings/paigasus-py-bindings/` — gains a co-located maturin `pyproject.toml`
+
+Sits beside the existing `Cargo.toml`; no `manifest-path` (maturin finds the crate in-place):
 
 ```toml
-# pyproject.toml
+# pyproject.toml  (SPDX per CONTRIBUTING config-file exemption)
 [project]
 name = "paigasus-py-bindings"
 version = "0.0.0"
@@ -69,16 +80,24 @@ requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 [tool.maturin]
-manifest-path = "../../../rs/crates/bindings/paigasus-py-bindings/Cargo.toml"
-module-name   = "paigasus_py_bindings"
+module-name = "paigasus_py_bindings"   # matches the existing #[pymodule]; no rename
 ```
 
-Produces a single `abi3` wheel (from the crate's existing `abi3-py312` feature) exposing
-the native module `paigasus_py_bindings` with `sum_as_string`. No Rust change required.
+Produces a single `abi3` wheel (from the crate's `abi3-py312` feature) exposing the native
+module `paigasus_py_bindings` with `sum_as_string`. The crate's `moon.yml`
+(`paigasus-py-bindings-rs`, `language: rust`) is unchanged — it keeps its `cargo` `build`/`test`
+tasks. The added `pyproject.toml` is **not** a uv workspace member (it's outside `py/`); it is
+reached only via the path source below.
 
-### Existing: `py/packages/paigasus-kernel/` — the public wrapper
+### `py/packages/paigasus-kernel/` — the public wrapper (stays `uv_build`)
 
-Stays `uv_build`; gains the dependency and re-exports:
+```toml
+# pyproject.toml additions
+dependencies = ["paigasus-py-bindings"]
+
+[tool.uv.sources]
+paigasus-py-bindings = { path = "../../../rs/crates/bindings/paigasus-py-bindings" }
+```
 
 ```python
 # src/paigasus_kernel/__init__.py  (keeps its SPDX header)
@@ -87,20 +106,15 @@ from paigasus_py_bindings import sum_as_string
 __all__ = ["sum_as_string"]
 ```
 
+(`editable = true` on the path source is an optional dev-ergonomics choice; the compiled
+extension still won't auto-recompile on a Rust edit either way — see §6. Default to the
+non-editable path source, which is what CI needs.)
+
 ## 2. uv workspace wiring
 
-`paigasus-kernel`'s `pyproject.toml` adds the workspace dependency:
-
-```toml
-dependencies = ["paigasus-py-bindings"]
-
-[tool.uv.sources]
-paigasus-py-bindings = { workspace = true }
-```
-
-The new package is auto-discovered by the existing `members = ["packages/*"]` glob in
-`py/pyproject.toml`. `uv.lock` regenerates and records the `maturin` build pin. `uv sync`
-builds the wheel in isolation (PEP 660 editable); CI runs `uv sync` then `pytest`.
+`uv sync` resolves the path source and builds the co-located wheel in isolation (maturin from
+`[build-system].requires`, shelling out to cargo). `uv.lock` regenerates and records the
+maturin pin. The new `pyproject.toml` is not added to `members = ["packages/*"]`.
 
 ## 3. Public surface & runtime smoke test
 
@@ -122,64 +136,103 @@ moot for this package (and stays harmless).
 
 ## 4. Build-graph edges (Moon)
 
-Extend the cascade `kernel-rs → py-bindings-rs → py-bindings-py → kernel-py`. Per the
-`moon-ci-affected-model` rule, project `dependsOn` alone does **not** propagate
-task-affectedness — the task-level `^:build` deps (plus `--include-relations`, already
-asserted by the guard) are what carry affectedness across the language boundary.
+Extend the existing cascade `kernel-rs → py-bindings-rs` with a single new cross-language edge
+to the wrapper. Per the `moon-ci-affected-model` rule, the task-level `^:build` deps (plus
+`--include-relations`, already asserted by the guard) are what carry affectedness — a
+project-level `dependsOn` alone does not.
 
-- **New** `py/packages/paigasus-py-bindings/moon.yml`: id `paigasus-py-bindings-py`,
-  `layer: library`, `language: python`, `dependsOn: ['paigasus-py-bindings-rs']`,
-  `build`/`test` tasks with `deps: ['^:build']`.
-- **Edit** `py/packages/paigasus-kernel/moon.yml`: `dependsOn: ['paigasus-py-bindings-py']`,
-  `build`/`test` with `deps: ['^:build']`.
-
-Note: the moon id `paigasus-py-bindings-py` and the Rust crate's `paigasus-py-bindings-rs`
-share the leaf dir name across stacks; the `-py`/`-rs` suffix convention disambiguates them
-(`moon-project-id-stack-suffix`). The wheel package's build compiles the Rust crate itself
-(via maturin→cargo), so the `dependsOn` edge to `paigasus-py-bindings-rs` is primarily for
-the affected-graph cascade rather than strict build ordering.
+- **Edit** `py/packages/paigasus-kernel/moon.yml`: `dependsOn: ['paigasus-py-bindings-rs']`,
+  `build`/`test` tasks with `deps: ['^:build']`. The `dependsOn` to a **Rust** project is also
+  what makes Moon provision **both** the Python and Rust toolchains in this task's context —
+  exactly the case the `.moon/templates/python/template.yml` caveat anticipated ("first
+  surfaces in the kernel-bindings work"), since `uv sync` here invokes maturin → cargo.
+- **No new `paigasus-py-bindings-py` project** — the wheel is built as part of
+  `paigasus-kernel-py:build` (via `uv sync`), so the graph stays
+  `kernel-rs → py-bindings-rs → kernel-py`.
 
 ## 5. Affected-graph regression guard (`ci/affected-graph/run.sh` + README)
 
-- **kernel-edit touch** (`rs/crates/libs/paigasus-kernel/src/lib.rs`): move
-  `paigasus-kernel-py` and `paigasus-py-bindings-py` from the forbid side to **must-include**.
-  Narrow the forbid-regex so it no longer blanket-forbids `-py$`, but **still asserts the
-  negatives that are now meaningful**: `-ts$`/`^contracts$`/`^ts$` plus the unrelated py
-  packages (`paigasus-proto-py`, `paigasus-workflows-py`, `paigasus-ml-py`) must remain
-  unaffected by a kernel edit. (This is exactly the must-exclude revision SMA-409 F5
-  anticipated — the expected next edge, not a regression.)
+- **kernel-edit touch** (`rs/crates/libs/paigasus-kernel/src/lib.rs`): add `paigasus-kernel-py`
+  to **must-include** (`paigasus-py-bindings-rs` is already there). Narrow the forbid-regex so
+  it no longer blanket-forbids `-py$`, but **still asserts the negatives that remain true**:
+  `-ts$`/`^contracts$`/`^ts$` plus the unrelated py packages (`paigasus-proto-py`,
+  `paigasus-workflows-py`, `paigasus-ml-py`) must stay unaffected by a kernel edit. (This is
+  the must-exclude revision SMA-409 F5 anticipated — the expected next edge, not a regression.)
 - **binding-rs touch** (`rs/crates/bindings/paigasus-py-bindings/src/lib.rs`): must-include
-  grows to also include `paigasus-py-bindings-py` + `paigasus-kernel-py`, while keeping the
-  one-way assertion that it does **not** drag in `paigasus-kernel-rs`.
-- The `--negative-control` path must still fail red (harness can still detect a broken edge).
+  grows to also include `paigasus-kernel-py`, while keeping the one-way assertion that it does
+  **not** drag in `paigasus-kernel-rs`.
+- `ci/affected-graph/run.sh --negative-control` must still fail red.
 - Update `ci/affected-graph/README.md`'s maintenance note to reflect the new topology.
+
+## 6. Build mechanics & the double-compile (review F2)
+
+In a full `moon ci :build`, the binding crate compiles **twice**: `paigasus-py-bindings-rs:build`
+runs `cargo build` (for the crate's own `fmt`/`clippy`/`nextest` gates), and
+`paigasus-kernel-py:build` runs `uv sync → maturin → cargo` (for the wheel). Both invoke cargo
+against `rs/target/`. This is named deliberately, not free:
+
+- **Decision:** accept the double-compile as the cost of keeping a uniform `:build` gate and an
+  independently buildable Rust crate. The cargo `build` on `paigasus-py-bindings-rs` is what the
+  `clippy`/`nextest`/`fmt` gates compile against; the maturin build produces the shippable wheel.
+- **Target-dir contention:** if Moon schedules the two cargo invocations concurrently against a
+  shared `rs/target/`, cargo serializes on its target-dir lock (safe; the second waits). The
+  spike confirms whether maturin shares `rs/target/` or uses its own, and we choose the shared
+  dir intentionally (cache reuse over double disk). This is the same two-builders-into-one-area
+  class as the SMA-391 `.next`-lock collision, in cargo form — hence calling it out.
+
+## Primary risk — de-risk first (spike before anything else)
+
+The first implementation step is a throwaway spike proving the uv↔maturin chain end-to-end on
+the user's macOS host, checking **all** of:
+
+1. **`.cargo/config.toml` discovery (macOS link).** Confirm that when `uv sync` builds the
+   co-located path source, maturin runs cargo with a cwd **inside `rs/`** so the
+   `apple-darwin` link flags resolve and the `abi3` wheel links (no undefined `_Py*` symbols).
+2. **cargo reachable from inside uv's build isolation (F3).** uv's isolated PEP 517 env
+   provides maturin but **not** cargo/the Rust toolchain — confirm cargo is on the system PATH
+   when `uv sync` triggers the maturin build (CI: Moon installs the Rust toolchain via the
+   `dependsOn` provisioning; locally: after `proto install`).
+3. **Path source resolves + imports.** `uv sync` builds the out-of-`py/` path source and
+   `from paigasus_kernel import sum_as_string` succeeds.
+4. **Cache-bust on a Rust edit (F4).** Since SMA-361's CI caches the uv cache, confirm a
+   kernel/binding **Rust-source** change actually re-runs the maturin **compile** (the affected
+   cascade busts the build), so the smoke test isn't asserting against a stale wheel — not
+   merely a uv re-resolution.
+
+Known non-blocking caveat: an editable install will **not** auto-recompile on a Rust edit — a
+re-`uv sync` is required (acceptable for dev iteration, irrelevant to CI's clean build).
 
 ## Verification (maps to acceptance criteria)
 
 1. **AC #1** — `uv sync` builds the wheel; `python -c "from paigasus_kernel import sum_as_string"`
    succeeds; `maturin` pinned in `[build-system].requires` and present in `uv.lock`.
-2. **AC #2** — `uv run pytest` (the round-trip test) passes, asserting a value crosses the
-   FFI boundary at runtime.
+2. **AC #2** — `uv run pytest` (the round-trip test) passes at runtime.
 3. **AC #3** — `moon run repo:affected-smoke` passes with the updated must-include +
    narrowed forbid-regex; `ci/affected-graph/run.sh --negative-control` still fails red.
 4. **AC #4** — full `moon ci :build`/`:test`/`:deny`/`:machete`/`:affected-smoke` green; the
    `cargo` gates (`fmt`/`clippy`/`nextest`) are untouched.
 
-## Primary risk — de-risk first
-
-**uv↔maturin build isolation with an out-of-tree `manifest-path`.** The first
-implementation step is a throwaway spike: confirm `uv sync` resolves the relative
-`../../../rs/...` manifest from inside its isolated build env and produces an importable
-`abi3` wheel. Everything else builds on this. Known non-blocking caveat: an editable install
-will **not** auto-recompile on a Rust source edit — a re-`uv sync` is required (acceptable for
-dev iteration and irrelevant to CI's clean build).
-
 ## Out of scope (deferred, with follow-ups)
 
 - **TS/napi/wasm kernel binding** — no binding crate exists yet (SMA-409 deferral, ts side).
-- **Flipping `publish`/version off `0.0.0`** for `paigasus-kernel` / `paigasus-py-bindings`
-  (SMA-376, SMA-407).
-- **sdist-correct packaging** — the out-of-tree `manifest-path` will not resolve from a
-  published sdist; this is fine while publish is deferred. A note will be left in the wheel
-  package's `pyproject.toml` so the constraint is discoverable when publishing is activated.
+- **Publishing** — flipping `publish`/version off `0.0.0` for `paigasus-kernel` /
+  `paigasus-py-bindings`, and the PyPI metadata + release-artifact discipline (ADR-0006,
+  ADR-0011, SMA-376/407). Note: a published **sdist** of the wheel package would need its own
+  packaging treatment; while publish is deferred this is irrelevant, but a discoverable note
+  goes in the wheel package's `pyproject.toml`.
 - **Real kernel domain logic** — `sum` remains a deliberate placeholder.
+
+## Review dispositions (staff review, 2026-06-15)
+
+- **F1 (Medium — layout) — accepted, layout changed.** Switched from the invented
+  `py/packages/paigasus-py-bindings/` cross-dir `manifest-path` to the documented co-located
+  fallback (§1). ADR-0006 was mis-cited as the layout authority — it governs the
+  publish/open-core-boundary discipline (per the ADR-0003/0005 cross-refs); the layout
+  authority is *Polyglot Monorepo Scoping* §1/§3. Decisive tie-breaker: the macOS
+  `.cargo/config.toml` cwd-discovery hazard (see decision-revision note + spike check #1).
+- **F2 (Medium — double-compile / target lock) — accepted.** Named explicitly in §6 with a
+  deliberate decision and a spike check on target-dir sharing/contention.
+- **F3 (Low — cargo on PATH in uv isolation) — accepted, and elevated.** It is the concrete
+  mechanism behind F1's macOS failure; folded into spike checks #1 and #2.
+- **F4 (Low — stale wheel in cached CI) — accepted.** Spike check #4 verifies a Rust edit
+  busts the maturin build, not just the uv resolution.
