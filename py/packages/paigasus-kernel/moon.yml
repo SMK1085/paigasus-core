@@ -3,3 +3,28 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 id: 'paigasus-kernel-py'
 layer: 'library'
 language: 'python'
+
+# Cross-language edge to the PyO3 wheel crate (ADR-0005). dependsOn here buys two things:
+# build ordering (paigasus-py-bindings-rs:build runs first) and affected-graph propagation
+# under `moon ci --include-relations` — the task-level `^:build` is what carries the cascade;
+# a project dependsOn alone does not (SMA-389 D3). It does NOT provision the Rust toolchain
+# for this project (verified: these tasks resolve to python/uv toolchains only); cargo must be
+# on PATH (CI proto shims / dev shell) when `uv sync --reinstall-package` triggers maturin (S6).
+dependsOn:
+  - 'paigasus-py-bindings-rs'
+
+tasks:
+  build:
+    deps: ['^:build']
+  # Dedicated runtime FFI smoke test. It lives here (not only in the whole-tree py:test) so the
+  # kernel→bindings→py cascade actually re-runs it on a Rust edit (review F4). uv serves a CACHED
+  # maturin wheel and ignores Rust source changes (spike S4), so we MUST force a rebuild with
+  # --reinstall-package before pytest — otherwise this would assert against a stale wheel.
+  test:
+    script: 'uv sync --reinstall-package paigasus-py-bindings && uv run pytest tests'
+    deps: ['^:build']
+    inputs:
+      - 'tests/**/*'
+      - 'src/**/*'
+      - 'pyproject.toml'
+      - '/py/uv.lock'
