@@ -591,6 +591,12 @@ wheels = [
 name = "paigasus-kernel"
 version = "0.0.0"
 source = { editable = "packages/paigasus-kernel" }
+dependencies = [
+    { name = "paigasus-py-bindings" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "paigasus-py-bindings", directory = "../rs/crates/bindings/paigasus-py-bindings" }]
 
 [[package]]
 name = "paigasus-ml"
@@ -607,6 +613,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "betterproto2", extras = ["grpclib"], specifier = ">=0.10,<0.11" }]
+
+[[package]]
+name = "paigasus-py-bindings"
+version = "0.0.0"
+source = { directory = "../rs/crates/bindings/paigasus-py-bindings" }
 
 [[package]]
 name = "paigasus-workflows"
