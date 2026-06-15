@@ -81,5 +81,6 @@ tasks:
       - 'ts/apps/*/moon.yml'
       - 'rs/**/Cargo.toml'
       - 'py/packages/*/pyproject.toml'
+      - 'rs/crates/*/*/pyproject.toml'
       - 'ts/packages/*/package.json'
       - 'ts/apps/*/package.json'

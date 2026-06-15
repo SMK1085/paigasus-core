@@ -9,9 +9,11 @@ deep` and asserts the affected project set per known case (`repo`, which owns th
 tree as its source, is filtered out):
 
 - **contracts edit** → `contracts` + `paigasus-proto-{rs,py,ts}` + `paigasus-gateway-rs`.
-- **kernel edit** → `paigasus-kernel-rs` + `paigasus-py-bindings-rs` + `paigasus-gateway-rs`,
-  and **nothing cross-stack** (no `*-py` / `*-ts` / `contracts`).
-- **binding edit** → only `paigasus-py-bindings-rs` (the edge is one-directional).
+- **kernel edit** → `paigasus-kernel-rs` + `paigasus-py-bindings-rs` + `paigasus-gateway-rs`
+  + `paigasus-kernel-py` (the py wrapper now wraps the wheel, SMA-419); still **no `*-ts` /
+  `contracts` / unrelated `*-py`** (`paigasus-proto/workflows/ml-py`).
+- **binding edit** → `paigasus-py-bindings-rs` + `paigasus-kernel-py`; still one-directional
+  w.r.t. the kernel (never drags in `paigasus-kernel-rs`).
 
 It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
 `--include-relations` (the edges are inert without it).
@@ -22,8 +24,8 @@ Prove it can fail: `ci/affected-graph/run.sh --negative-control`.
 ## Maintenance — the must-exclude assertions are topology-coupled (SMA-409 F5)
 
 The **must-include** sets are durable. The **must-exclude** (cross-stack-isolation)
-assertions hold only because the py/ts kernel wrappers are deferred. When the deferred
-uv↔maturin integration lands and `paigasus-kernel-py` genuinely wraps the wheel, a kernel
-edit *should* affect the py wrapper — and the `kernel->bindings` forbid-regex here will
-correctly need loosening. A failure there is the expected next edge, not a regression;
-update this guard alongside each deferred binding.
+assertions track current topology. The **py** wrapper edge landed in SMA-419
+(`paigasus-kernel-py` moved from forbid → must-include). The remaining deferred edge is the
+**ts** kernel wrapper: when it lands, a kernel edit *should* affect it, and the
+`kernel->bindings` forbid-regex here will correctly need its `-ts$` term loosened. A failure
+there is the expected next edge, not a regression; update this guard alongside that work.
