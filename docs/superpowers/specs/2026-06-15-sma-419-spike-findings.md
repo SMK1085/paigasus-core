@@ -35,7 +35,7 @@ holds on this host.
 
 ### Check 2 — cargo reachable inside uv's isolated build env: PASS
 The build did NOT fail with "cargo: command not found". maturin found cargo
-(`/Users/smaschek/.cargo/bin/cargo`, the standard cargo home — NOT a proto shim) on PATH.
+(via `~/.cargo/bin/cargo`, the standard rustup-managed cargo home — NOT a proto shim) on PATH.
 Caveat for CI / S6: this only matters on a COLD build (see S6).
 
 ### Check 3 — path source resolves + FFI import round-trips: PASS (with a Task-2 caveat)
