@@ -35,9 +35,14 @@ logic** — it builds the Python consumption chain on top and extends the existi
    after staff review — see decision-revision note below and disposition F1.)*
 2. **maturin is uv-native + pinned in `[build-system].requires`, not `.prototools`.**
    maturin is a PEP 517 build backend, so its home is the wheel package's
-   `[build-system] requires = ["maturin>=1.7,<2"]`, locked via `uv.lock`. uv drives the
+   `[build-system] requires = ["maturin>=1.7,<2"]` — **range-pinned** (major capped). uv drives the
    build in isolation (`uv sync`); no standalone maturin CLI and **no new proto plugin**.
    This reverses the issue text's *speculation* that maturin would land in `.prototools`.
+   Note: maturin is the build backend of a **path-source** package, so it is resolved fresh in
+   uv's build-isolation env and is **not** exact-locked in `uv.lock` (verified — `uv.lock` records
+   the path source, not the backend version). Exact-pinning the backend (e.g. via
+   `[tool.uv] constraint-dependencies`) is a deferred follow-up tied to the publish work
+   (ADR-0006 / SMA-376/407), where reproducible builds actually matter.
 3. **No Rust pymodule rename.** The native name `paigasus_py_bindings` stays — it is now
    *deliberately owned* by the co-located wheel package, and `paigasus_kernel` re-exports
    from it. "Reconcile the provisional name" (issue scope) is satisfied by ownership +
@@ -114,7 +119,9 @@ non-editable path source, which is what CI needs.)
 
 `uv sync` resolves the path source and builds the co-located wheel in isolation (maturin from
 `[build-system].requires`, shelling out to cargo). `uv.lock` regenerates and records the
-maturin pin. The new `pyproject.toml` is not added to `members = ["packages/*"]`.
+**path source** entry for `paigasus-py-bindings` (the maturin backend itself is resolved in
+build isolation, not locked here — see decision #2). The new `pyproject.toml` is not added to
+`members = ["packages/*"]`.
 
 ## 3. Public surface & runtime smoke test
 
@@ -205,7 +212,8 @@ re-`uv sync` is required (acceptable for dev iteration, irrelevant to CI's clean
 ## Verification (maps to acceptance criteria)
 
 1. **AC #1** — `uv sync` builds the wheel; `python -c "from paigasus_kernel import sum_as_string"`
-   succeeds; `maturin` pinned in `[build-system].requires` and present in `uv.lock`.
+   succeeds; `maturin` range-pinned in `[build-system].requires` (resolved in build isolation,
+   not exact-locked in `uv.lock`).
 2. **AC #2** — `uv run pytest` (the round-trip test) passes at runtime.
 3. **AC #3** — `moon run repo:affected-smoke` passes with the updated must-include +
    narrowed forbid-regex; `ci/affected-graph/run.sh --negative-control` still fails red.
