@@ -1,0 +1,16 @@
+[project]
+name = "paigasus-py-bindings"
+version = "0.0.0"
+requires-python = ">=3.12"
+
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+# Cargo.toml is co-located (same dir) → no manifest-path. Keeping this pyproject INSIDE
+# rs/ means maturin runs cargo from within rs/, so rs/.cargo/config.toml's apple-darwin
+# link flags resolve and the extension-module cdylib links on macOS (SMA-419; Polyglot
+# Monorepo Scoping §1/§3 co-located fallback). NOTE (publish deferred): a published sdist
+# won't carry rs/.cargo/config.toml — revisit packaging when flipping publish off 0.0.0.
+module-name = "paigasus_py_bindings"

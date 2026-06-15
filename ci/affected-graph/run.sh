@@ -37,7 +37,9 @@ assert_case() {
     grep -qx "$p" <<<"$got" || { echo "FAIL  [$label] missing expected project: $p" >&2; rc=1; }
   done
   if [ -n "$forbid" ]; then
-    leaked="$(grep -E "$forbid" <<<"$got" || true)"
+    # `--` is required: a forbid-regex can start with `-` (e.g. the kernel->bindings case's
+    # `-ts$|...`), which grep would otherwise parse as option flags and abort (exit 2). Keep it.
+    leaked="$(grep -E -- "$forbid" <<<"$got" || true)"
     [ -z "$leaked" ] || { echo "FAIL  [$label] cross-stack leak: $(tr '\n' ' ' <<<"$leaked")" >&2; rc=1; }
   fi
   [ "$rc" = 0 ] && printf 'PASS  %-18s -> %s\n' "$label" "$(tr '\n' ' ' <<<"$got")"
@@ -85,13 +87,15 @@ run_suite() {
   # contracts proto edit -> proto packages in all three languages + the gateway rebuild.
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
     "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs" ""
-  # kernel edit -> kernel + binding + gateway; nothing cross-stack (no *-py / *-ts / contracts).
+  # kernel edit -> kernel + binding + gateway + the py wrapper (SMA-419). Still nothing else
+  # cross-stack: no *-ts / contracts / py root, and no UNRELATED py packages (proto/workflows/ml).
   run_case "kernel->bindings" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
-    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs" \
-    '(-py|-ts)$|^contracts$|^py$|^ts$'
-  # binding edit -> only the binding; the edge is one-directional (must not drag in the kernel).
+    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py" \
+    '-ts$|^contracts$|^py$|^ts$|^paigasus-(proto|workflows|ml)-py$'
+  # binding edit -> the binding + the py wrapper that depends on it (SMA-419); still
+  # one-directional w.r.t. the kernel (must not drag in paigasus-kernel-rs).
   run_case "binding-oneway"   "rs/crates/bindings/paigasus-py-bindings/src/lib.rs" \
-    "paigasus-py-bindings-rs" '^paigasus-kernel-rs$'
+    "paigasus-py-bindings-rs,paigasus-kernel-py" '^paigasus-kernel-rs$'
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
   assert_include_relations || SUITE_RC=1
   return "$SUITE_RC"
@@ -99,9 +103,11 @@ run_suite() {
 
 if [ "$NEGATIVE" = 1 ]; then
   echo "== negative control: assert a deliberately-wrong expectation reports red =="
-  # paigasus-kernel-py is NOT a dependent of the kernel crate, so requiring it MUST fail.
+  # paigasus-proto-py is NOT a dependent of the kernel crate, so requiring it MUST fail.
+  # (paigasus-kernel-py IS a dependent now (SMA-419), so it can no longer serve as the wrong
+  # expectation.)
   rc=0
-  assert_case "neg-wrong-expect" "rs/crates/libs/paigasus-kernel/src/lib.rs" "paigasus-kernel-py" "" || rc=$?
+  assert_case "neg-wrong-expect" "rs/crates/libs/paigasus-kernel/src/lib.rs" "paigasus-proto-py" "" || rc=$?
   case "$rc" in
     1) echo "negative-control OK: harness reported red as expected"; exit 0 ;;
     0) echo "negative-control FAILED: harness accepted a wrong expectation" >&2; exit 1 ;;
