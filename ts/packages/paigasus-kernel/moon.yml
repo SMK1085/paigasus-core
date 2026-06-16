@@ -41,11 +41,15 @@ tasks:
       - '/ts/pnpm-lock.yaml'
       # Both Rust sources: napi build recompiles the binding AND the kernel it calls (spike S5),
       # so a kernel-source edit must bust this task's cache too (review F4) — Moon hashes only
-      # listed inputs, and an upstream `^:build` recompile alone does not re-key this task. The
-      # binding's generated glue (index.js / index.d.ts) freshness rides on these Rust src inputs:
-      # any surface change is a Rust source change, so the glue is not listed separately.
+      # listed inputs, and an upstream `^:build` recompile alone does not re-key this task.
       - '/rs/crates/libs/paigasus-kernel/src/**/*'
       - '/rs/crates/bindings/paigasus-node-bindings/src/**/*'
+      # ...and the binding's manifests, so a napi-config (package.json) or dependency (Cargo.toml)
+      # change re-keys the build even without a Rust src diff (cache-input completeness, CodeRabbit).
+      # The generated glue (index.js / index.d.ts) is this task's OUTPUT, not an input — its content
+      # is fully determined by the Rust src + napi version (pnpm-lock.yaml), both already listed.
+      - '/rs/crates/bindings/paigasus-node-bindings/Cargo.toml'
+      - '/rs/crates/bindings/paigasus-node-bindings/package.json'
     outputs:
       # Glob the platform-suffixed .node (darwin-arm64 on dev, linux-x64-gnu on CI, …) so the
       # declared output exists on EVERY host — a hardcoded triple fails Moon's output check on Linux.
@@ -75,7 +79,9 @@ tasks:
       - 'package.json'
       - '/ts/pnpm-lock.yaml'
       # Both Rust sources, so a kernel-source edit re-runs vitest against a freshly built .node
-      # rather than caching a stale green (review F4) — see the build task's note. (The binding's
-      # generated glue freshness rides on these Rust src inputs; it is not listed separately.)
+      # rather than caching a stale green (review F4) — see the build task's note. The binding's
+      # manifests are listed too so a napi-config/dep change re-keys this task (CodeRabbit).
       - '/rs/crates/libs/paigasus-kernel/src/**/*'
       - '/rs/crates/bindings/paigasus-node-bindings/src/**/*'
+      - '/rs/crates/bindings/paigasus-node-bindings/Cargo.toml'
+      - '/rs/crates/bindings/paigasus-node-bindings/package.json'

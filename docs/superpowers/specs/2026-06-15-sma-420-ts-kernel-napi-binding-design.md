@@ -126,7 +126,9 @@ throw new Error(
 
 - The `file:` specifier is the pnpm analog of SMA-419's uv path source
   (`{ path = "../../../rs/crates/bindings/paigasus-py-bindings" }`) — a cross-`ts/` link, **not** an
-  extension of the pnpm workspace globs. pnpm links it and installs its devDeps (`@napi-rs/cli`).
+  extension of the pnpm workspace globs. pnpm links it but does **not** install a `file:` dep's
+  devDeps, so `@napi-rs/cli` is declared as a devDep of `@paigasus/kernel` (the consumer), not
+  inherited from the linked crate (SMA-420 spike S2).
 - **Conditional `exports` set up now (review F2).** Scoping §3's canonical `@paigasus/kernel` uses a
   `node`/`browser`/`workerd`/`default` `exports` map (→ napi / wasm). We adopt that **structure** now,
   with a `node` condition + a `default` stub that throws — so the Node-only intermediate state is a
