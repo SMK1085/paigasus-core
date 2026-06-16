@@ -26,24 +26,37 @@ affected_ids() { # file
     | python3 -c 'import sys,json; print("\n".join(sorted(p["id"] for p in json.load(sys.stdin)["projects"] if p["id"] != "repo")))'
 }
 
-# assert_case LABEL FILE MUST_INCLUDE_CSV FORBID_REGEX
-#   MUST_INCLUDE_CSV : comma-separated project ids that MUST be present (positive superset)
-#   FORBID_REGEX     : extended regex; any matching id present = cross-stack leak (empty = skip)
+# assert_case LABEL FILE EXPECTED_CSV
+#   EXPECTED_CSV : comma-separated project ids. The affected set (minus `repo`) must EQUAL this
+#                  set exactly — default-deny: any project present that is not listed fails the
+#                  case (no separate forbid list; cross-stack isolation is implicit).
 # returns 0 pass / 1 assertion fail / 2 infrastructure error
 assert_case() {
-  local label="$1" file="$2" inc="$3" forbid="$4" got rc=0 p leaked
+  local label="$1" file="$2" expected_csv="$3" got want missing unexpected
+  [ -n "$expected_csv" ] || { echo "FATAL [$label]: EXPECTED_CSV is empty (harness bug)" >&2; return 2; }
   got="$(affected_ids "$file")" || { echo "FATAL [$label]: moon query failed" >&2; return 2; }
-  for p in ${inc//,/ }; do
-    grep -qx "$p" <<<"$got" || { echo "FAIL  [$label] missing expected project: $p" >&2; rc=1; }
-  done
-  if [ -n "$forbid" ]; then
-    # `--` is required: a forbid-regex can start with `-`, which grep would otherwise parse as
-    # option flags and abort (exit 2). Keep it even though the current regexes are `^`-anchored.
-    leaked="$(grep -E -- "$forbid" <<<"$got" || true)"
-    [ -z "$leaked" ] || { echo "FAIL  [$label] cross-stack leak: $(tr '\n' ' ' <<<"$leaked")" >&2; rc=1; }
+  # Split the CSV on commas into lines and sort, to match affected_ids' sorted output. Use `tr`,
+  # NOT an unquoted `${expected_csv//,/ }` word-split: the latter depends on IFS word-splitting
+  # (absent in zsh) and is exposed to globbing — fragile. The expected CSV is hand-written in
+  # arbitrary order, so the sort makes the comparison order-insensitive.
+  want="$(tr ',' '\n' <<<"$expected_csv" | sort)"
+  if [ "$got" = "$want" ]; then
+    printf 'PASS  %-18s -> %s\n' "$label" "$(tr '\n' ' ' <<<"$got")"
+    return 0
   fi
-  [ "$rc" = 0 ] && printf 'PASS  %-18s -> %s\n' "$label" "$(tr '\n' ' ' <<<"$got")"
-  return "$rc"
+  missing="$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))"
+  unexpected="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))"
+  echo "FAIL  [$label] affected set != expected set" >&2
+  if [ -n "$missing" ]; then
+    echo "  missing  (expected but absent — likely a dropped dependsOn edge or a lost --include-relations):" >&2
+    sed 's/^/    /' <<<"$missing" >&2
+  fi
+  if [ -n "$unexpected" ]; then
+    echo "  unexpected (present but not expected — a cross-stack leak/regression, OR a legitimate new" >&2
+    echo "  dependent: if the new edge is intended, add it to this case's expected set):" >&2
+    sed 's/^/    /' <<<"$unexpected" >&2
+  fi
+  return 1
 }
 
 # Every real `moon ci` shell invocation in ci.yml must carry --include-relations: it is the
@@ -86,38 +99,51 @@ run_suite() {
   SUITE_RC=0
   # contracts proto edit -> proto packages in all three languages + the gateway rebuild.
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
-    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs" ""
-  # kernel edit -> kernel + both bindings + gateway + both language wrappers (SMA-419/420). Still
-  # nothing else cross-stack: no contracts / py root, no UNRELATED py packages (proto/workflows/ml),
-  # and no UNRELATED ts packages (proto/sdk/ui/console/docs/commitlint-config).
+    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs"
+  # kernel edit -> kernel + both bindings + gateway + both language wrappers (SMA-419/420).
+  # Strict equality (default-deny): any OTHER project appearing (an unrelated *-py/*-ts package, a
+  # contracts/py/ts root) fails the case automatically — no forbid enumeration needed.
   run_case "kernel->bindings" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
-    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts" \
-    '^(commitlint-config|paigasus-console|paigasus-docs|paigasus-proto|paigasus-sdk|paigasus-ui)-ts$|^contracts$|^py$|^ts$|^paigasus-(proto|workflows|ml)-py$'
-  # binding edit -> the binding + the py wrapper that depends on it (SMA-419); still
-  # one-directional w.r.t. the kernel (must not drag in paigasus-kernel-rs).
+    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts"
+  # py binding edit -> the binding + the py wrapper that depends on it (SMA-419). One-directional
+  # w.r.t. the kernel: paigasus-kernel-rs is deliberately ABSENT (a binding edit must not rebuild
+  # the kernel), now enforced implicitly by strict equality rather than a forbid-regex.
   run_case "binding-oneway"   "rs/crates/bindings/paigasus-py-bindings/src/lib.rs" \
-    "paigasus-py-bindings-rs,paigasus-kernel-py" '^paigasus-kernel-rs$'
-  # node binding edit -> the node binding + the ts wrapper that depends on it (SMA-420); still
-  # one-directional w.r.t. the kernel (must not drag in paigasus-kernel-rs).
+    "paigasus-py-bindings-rs,paigasus-kernel-py"
+  # node binding edit -> the node binding + the ts wrapper that depends on it (SMA-420). Likewise
+  # one-directional: paigasus-kernel-rs deliberately absent.
   run_case "binding-oneway-node" "rs/crates/bindings/paigasus-node-bindings/src/lib.rs" \
-    "paigasus-node-bindings-rs,paigasus-kernel-ts" '^paigasus-kernel-rs$'
+    "paigasus-node-bindings-rs,paigasus-kernel-ts"
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
   assert_include_relations || SUITE_RC=1
   return "$SUITE_RC"
 }
 
 if [ "$NEGATIVE" = 1 ]; then
-  echo "== negative control: assert a deliberately-wrong expectation reports red =="
-  # paigasus-proto-py is NOT a dependent of the kernel crate, so requiring it MUST fail.
-  # (paigasus-kernel-py IS a dependent now (SMA-419), so it can no longer serve as the wrong
-  # expectation.)
-  rc=0
-  assert_case "neg-wrong-expect" "rs/crates/libs/paigasus-kernel/src/lib.rs" "paigasus-proto-py" "" || rc=$?
-  case "$rc" in
-    1) echo "negative-control OK: harness reported red as expected"; exit 0 ;;
-    0) echo "negative-control FAILED: harness accepted a wrong expectation" >&2; exit 1 ;;
-    *) echo "negative-control INCONCLUSIVE: infrastructure error (rc=$rc)" >&2; exit 2 ;;
-  esac
+  echo "== negative control: assert deliberately-wrong expectations report red =="
+  NEG_RC=0
+  # expect_red LABEL FILE EXPECTED_CSV — assert the harness reports a red (rc=1) for a wrong
+  # expectation; record a failed control if it green-lights one; abort on infra error (rc=2).
+  expect_red() {
+    local rc=0
+    assert_case "$1" "$2" "$3" || rc=$?
+    case "$rc" in
+      1) echo "  OK   [$1] harness reported red as expected" ;;
+      0) echo "  FAIL [$1] harness accepted a wrong expectation" >&2; NEG_RC=1 ;;
+      *) echo "  INCONCLUSIVE [$1] infrastructure error (rc=$rc)" >&2; exit 2 ;;
+    esac
+  }
+  # 1) wrong project: a kernel edit does NOT affect paigasus-proto-py, so requiring it must fail.
+  expect_red "neg-wrong-expect"     "rs/crates/libs/paigasus-kernel/src/lib.rs" "paigasus-proto-py"
+  # 2) default-deny direction (NEW in SMA-429): an INCOMPLETE expected set must fail on the extras.
+  #    Under the old positive-superset model this PASSED (a subset satisfied the must-include check),
+  #    silently unasserting every project left out — the exact gap strict equality closes.
+  expect_red "neg-incomplete-expect" "rs/crates/libs/paigasus-kernel/src/lib.rs" "paigasus-kernel-rs"
+  if [ "$NEG_RC" = 0 ]; then
+    echo "negative-control OK: harness reported red on all wrong expectations"; exit 0
+  else
+    echo "negative-control FAILED: harness green-lit a wrong expectation" >&2; exit 1
+  fi
 fi
 
 if run_suite; then
