@@ -7,7 +7,7 @@
 **Layout authority:** Notion *Polyglot Monorepo Scoping* §1 (Directory layout) + §3 (Shared Rust core + FFI) — the same co-located-artifact fallback SMA-419 used for the Python wheel.
 **Follow-up of:** [SMA-409](https://linear.app/smaschek/issue/SMA-409/wire-cross-language-affected-graph-cascade-re-verify-at-phase-2-entry) — completes the deferred **ts side of AC #1** ("kernel wrappers in ts"). SMA-409 could not mirror the kernel→bindings cascade on the TS side because no TS binding crate existed.
 **Mirrors:** [SMA-419](https://linear.app/smaschek/issue/SMA-419/wire-paigasus-kernel-py-to-the-pyo3-wheel-uvmaturin-runtime-smoke-test) — the Python runtime round-trip (uv↔maturin). This is the structurally-symmetric Node (napi-rs) version; design context `docs/superpowers/specs/2026-06-15-sma-419-paigasus-kernel-py-pyo3-wheel-design.md`.
-**Reviewed by:** staff-engineer design review (`2026-06-15-sma-420-ts-kernel-napi-binding-design-review.md`); dispositions in the final section.
+**Reviewed by:** staff-engineer design review (incorporated; dispositions in the final section).
 
 ## Goal
 
