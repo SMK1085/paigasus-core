@@ -1,6 +1,7 @@
-# SMA-409: paigasus-py-bindings is a PyO3 `extension-module` cdylib — at link time its
-# libpython symbols are intentionally undefined (CPython resolves them when it loads the
-# module). Linux/ELF permits undefined symbols in shared objects by default; the macOS
+# SMA-409/420: the FFI binding cdylibs (paigasus-py-bindings = PyO3 extension-module;
+# paigasus-node-bindings = napi-rs) leave their host-runtime symbols intentionally undefined at
+# link time — CPython resolves _Py* and Node resolves napi_* when they load the module.
+# Linux/ELF permits undefined symbols in shared objects by default; the macOS
 # linker rejects them unless told to defer resolution. These flags let `cargo build` link
 # the extension on macOS WITHOUT maturin. Scoped to apple-darwin so every other target keeps
 # strict link-time symbol checking; CI (Linux) is unaffected.

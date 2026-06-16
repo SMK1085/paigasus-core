@@ -1,0 +1,19 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-node-bindings-rs'
+# Moon-side layer label for this FFI crate (no native `binding` layer exists). Built like a
+# library but NOT published as an rlib — ships as a Node .node addon via @napi-rs/cli.
+layer: 'library'
+language: 'rust'
+
+# The kernel→binding edge (ADR-0005): a kernel change must rebuild this crate. The task-level
+# `^:build` is what propagates `affected` in `moon ci --include-relations` — a project-level
+# `dependsOn` alone does NOT (SMA-389 D3). Mirrors paigasus-py-bindings-rs.
+dependsOn:
+  - 'paigasus-kernel-rs'
+
+tasks:
+  build:
+    deps: ['^:build']
+  test:
+    deps: ['^:build']
