@@ -26,10 +26,11 @@ paigasus-kernel.workspace = true
 napi-build.workspace = true
 
 [package.metadata.cargo-machete]
-# napi + napi-derive are consumed only through attribute macros (#[napi]) — the canonical
-# cargo-machete false-positive (like pyo3 on the py crate); :machete is a blocking gate (SMA-375).
-# napi-build is used in build.rs and paigasus-kernel is called directly — neither needs an ignore.
-ignored = ["napi", "napi-derive"]
+# napi is consumed only through attribute macros (#[napi]) — the canonical cargo-machete
+# false-positive (like pyo3 on the py crate); :machete is a blocking gate (SMA-375). napi-derive
+# (explicit `use napi_derive::napi`), napi-build (build.rs), and paigasus-kernel (direct call) are
+# all visibly used, so only napi needs the ignore.
+ignored = ["napi"]
 
 [lints]
 workspace = true
