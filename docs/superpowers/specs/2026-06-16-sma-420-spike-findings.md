@@ -90,10 +90,11 @@ for self-consistency.
 - The `napi build` shares `rs/target/` with cargo (the same target dir moon uses) — see S5; cache
   reuse confirmed. The double-compile (spec §5) holds: `napi build` recompiles only changed crates.
 
-`napi-derive` DID need a cargo-machete ignore entry (it is a separate proc-macro crate consumed via
-`#[napi]`); the crate's `[package.metadata.cargo-machete] ignored = ["napi", "napi-derive"]` covers
-both. `napi-build` (build.rs) and `paigasus-kernel` (direct call) need no ignore — confirmed by the
-crate compiling and `paigasus_kernel::sum` being a real call.
+Only `napi` needs a cargo-machete ignore (consumed purely via attribute macros). `napi-derive` is
+visibly used (`use napi_derive::napi`), and `napi-build` (build.rs) + `paigasus-kernel` (direct call)
+are real uses — so `[package.metadata.cargo-machete] ignored = ["napi"]` is the minimal correct set
+(matching the py crate's single-entry `ignored = ["pyo3"]`). Verified: `cargo machete` passes with
+only `napi` ignored; a `napi-derive` entry is redundant. (Corrected after the Task 1 quality review.)
 
 ## S3 — import + call — PASS
 
