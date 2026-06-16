@@ -47,6 +47,15 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # `extension-module` feature omits the libpython link so plain `cargo build` works without
 # an embedded interpreter. macOS needs the link flags in rs/.cargo/config.toml.
 pyo3 = { version = "0.29", features = ["abi3-py312", "extension-module"] }
+# napi-rs — Rust↔Node FFI for the node binding crate (ADR-0005). napi/napi-derive are the
+# runtime + proc-macro (consumed via #[napi] macros); napi-build runs in build.rs to set up the
+# cdylib link. Node resolves N-API symbols at load (like CPython resolves PyO3's), so plain
+# `cargo build` links the cdylib without an embedded Node; macOS needs the rs/.cargo/config.toml
+# `-undefined dynamic_lookup` flags (shared with PyO3). Versions track the @napi-rs/cli 3 line
+# (Polyglot Monorepo Scoping §3); spike confirms the napi-build pairing.
+napi = { version = "3", default-features = false, features = ["napi8"] }
+napi-derive = "3"
+napi-build = "2"
 # In-tree path dep: the bindings (and future consumers) build against the live kernel, so a
 # kernel edit rebuilds them. This is also the cargo-side half of the affected-graph edge.
 paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.0.0" }

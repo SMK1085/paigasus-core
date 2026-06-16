@@ -37,8 +37,8 @@ assert_case() {
     grep -qx "$p" <<<"$got" || { echo "FAIL  [$label] missing expected project: $p" >&2; rc=1; }
   done
   if [ -n "$forbid" ]; then
-    # `--` is required: a forbid-regex can start with `-` (e.g. the kernel->bindings case's
-    # `-ts$|...`), which grep would otherwise parse as option flags and abort (exit 2). Keep it.
+    # `--` is required: a forbid-regex can start with `-`, which grep would otherwise parse as
+    # option flags and abort (exit 2). Keep it even though the current regexes are `^`-anchored.
     leaked="$(grep -E -- "$forbid" <<<"$got" || true)"
     [ -z "$leaked" ] || { echo "FAIL  [$label] cross-stack leak: $(tr '\n' ' ' <<<"$leaked")" >&2; rc=1; }
   fi
@@ -87,15 +87,20 @@ run_suite() {
   # contracts proto edit -> proto packages in all three languages + the gateway rebuild.
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
     "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs" ""
-  # kernel edit -> kernel + binding + gateway + the py wrapper (SMA-419). Still nothing else
-  # cross-stack: no *-ts / contracts / py root, and no UNRELATED py packages (proto/workflows/ml).
+  # kernel edit -> kernel + both bindings + gateway + both language wrappers (SMA-419/420). Still
+  # nothing else cross-stack: no contracts / py root, no UNRELATED py packages (proto/workflows/ml),
+  # and no UNRELATED ts packages (proto/sdk/ui/console/docs/commitlint-config).
   run_case "kernel->bindings" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
-    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py" \
-    '-ts$|^contracts$|^py$|^ts$|^paigasus-(proto|workflows|ml)-py$'
+    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts" \
+    '^(commitlint-config|paigasus-console|paigasus-docs|paigasus-proto|paigasus-sdk|paigasus-ui)-ts$|^contracts$|^py$|^ts$|^paigasus-(proto|workflows|ml)-py$'
   # binding edit -> the binding + the py wrapper that depends on it (SMA-419); still
   # one-directional w.r.t. the kernel (must not drag in paigasus-kernel-rs).
   run_case "binding-oneway"   "rs/crates/bindings/paigasus-py-bindings/src/lib.rs" \
     "paigasus-py-bindings-rs,paigasus-kernel-py" '^paigasus-kernel-rs$'
+  # node binding edit -> the node binding + the ts wrapper that depends on it (SMA-420); still
+  # one-directional w.r.t. the kernel (must not drag in paigasus-kernel-rs).
+  run_case "binding-oneway-node" "rs/crates/bindings/paigasus-node-bindings/src/lib.rs" \
+    "paigasus-node-bindings-rs,paigasus-kernel-ts" '^paigasus-kernel-rs$'
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
   assert_include_relations || SUITE_RC=1
   return "$SUITE_RC"

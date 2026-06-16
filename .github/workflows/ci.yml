@@ -79,6 +79,17 @@ jobs:
       - name: Install Moon-managed toolchains (node, pnpm, rust, python, uv)
         run: moon setup
 
+      # rs/rust-toolchain.toml declares `components = ["rustfmt", "clippy"]`, which rustup
+      # auto-installs on the FIRST cargo invocation in rs/. Under `moon ci` several rust tasks
+      # (paigasus-node-bindings-rs:lint + the kernel-ts napi builds, SMA-420) start concurrently and
+      # their first cargo calls race to download the same components into ~/.rustup/downloads/,
+      # failing with "could not rename 'downloaded' ... (os error 2)". ~/.rustup is not cached, so it
+      # recurs every run. Materialize the components ONCE, serially, so the parallel graph finds them
+      # already present.
+      - name: Pre-install Rust components (serial — avoid rustup concurrent-download races)
+        working-directory: rs
+        run: rustup component add rustfmt clippy
+
       # pnpm/uv stores live wherever each tool decides; resolve them at runtime (now that
       # moon setup has installed pnpm + uv) instead of hard-coding Linux defaults that may
       # not match Moon's managed install. The pnpm-store cache restores before `pnpm install`

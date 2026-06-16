@@ -1,0 +1,2 @@
+# Platform-specific napi addon — rebuilt by `napi build` per host/CI; never committed.
+*.node

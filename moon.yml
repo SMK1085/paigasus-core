@@ -82,5 +82,6 @@ tasks:
       - 'rs/**/Cargo.toml'
       - 'py/packages/*/pyproject.toml'
       - 'rs/crates/*/*/pyproject.toml'
+      - 'rs/crates/*/*/package.json'
       - 'ts/packages/*/package.json'
       - 'ts/apps/*/package.json'
