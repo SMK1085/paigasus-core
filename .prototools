@@ -3,7 +3,7 @@ cargo-deny = "0.19.8"
 cargo-machete = "0.9.2"
 cargo-nextest = "0.9.136"
 lefthook = "2.1.8"
-moon = "2.2.5"
+moon = "2.3.2"
 release-plz = "0.3.158"
 
 [plugins]
