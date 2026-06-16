@@ -22,17 +22,15 @@ tasks:
   # inside `rs/` so it picks up the apple-darwin `-undefined dynamic_lookup` link flags from
   # rs/.cargo/config.toml (spike S1); the .node + glue land in the crate dir, not here.
   #
-  # `cargo clean -p` first: cargo/`napi build` incrementality is mtime-based, so after a git op
-  # that leaves a Rust source OLDER than an existing rs/target/ artifact (warm cache + checkout/
-  # rebase/stash → mtime inversion), cargo reports "up to date" and napi re-links a STALE .node
-  # against the wrong source. Cleaning just these two (tiny) crates forces a content-correct
-  # recompile from current source (cached deps like napi stay) — the napi analog of the py wheel's
-  # `uv sync --reinstall-package`. The .node napi links is built for the host target TRIPLE, so the
-  # clean MUST name `--target aarch64-apple-darwin` (single-host; bare `cargo clean -p` cleans only
-  # the host dir, not the per-triple subdir napi --platform uses — cross-platform matrix is deferred,
-  # ADR-0006 / SMA-376/407).
+  # `touch` the kernel + binding sources first: cargo/`napi build` incrementality is mtime-based, so
+  # after a git op that leaves a Rust source OLDER than an existing rs/target/ artifact (warm cache +
+  # checkout/rebase/stash → mtime inversion), cargo reports "up to date" and napi re-links a STALE
+  # .node against the wrong source. Bumping the two (tiny) crates' source mtime forces a
+  # content-correct recompile from current source — the napi analog of the py wheel's
+  # `uv sync --reinstall-package`. `touch` is host-agnostic (CI is Linux, dev is macOS); a per-triple
+  # `cargo clean --target <triple>` would have to know the host triple, so we avoid it.
   build:
-    script: 'cargo clean -p paigasus-kernel -p paigasus-node-bindings --target aarch64-apple-darwin --manifest-path ../../../rs/Cargo.toml && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec tsc -p tsconfig.json --noEmit'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec tsc -p tsconfig.json --noEmit'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
@@ -49,7 +47,10 @@ tasks:
       - '/rs/crates/libs/paigasus-kernel/src/**/*'
       - '/rs/crates/bindings/paigasus-node-bindings/src/**/*'
     outputs:
-      - '/rs/crates/bindings/paigasus-node-bindings/paigasus-node-bindings.darwin-arm64.node' # single-host; cross-platform .node matrix is deferred (ADR-0006 / SMA-376/407)
+      # Glob the platform-suffixed .node (darwin-arm64 on dev, linux-x64-gnu on CI, …) so the
+      # declared output exists on EVERY host — a hardcoded triple fails Moon's output check on Linux.
+      # Cross-platform prebuild matrix + publish still deferred (ADR-0006 / SMA-376/407).
+      - '/rs/crates/bindings/paigasus-node-bindings/paigasus-node-bindings.*.node'
   # Rebuild the .node fresh (cache-bust on a Rust edit, review F4), THEN run vitest. The py
   # analog (`uv sync --reinstall-package … && pytest`) refreshes the INSTALLED artifact; here the
   # freshness fix is split: `napi build` rewrites the crate-dir .node, and vitest.config.ts aliases
@@ -57,17 +58,15 @@ tasks:
   # install time and never re-copies a rebuilt binary, so loading via the package name would import
   # a STALE store .node (verified: a kernel edit otherwise passes against the old value).
   #
-  # `cargo clean -p` first (highest priority — this is the assertion): cargo/`napi build`
-  # incrementality is mtime-based, so a warm rs/target/ + a git op that leaves a Rust source OLDER
-  # than its artifact (mtime inversion) makes cargo skip the recompile and napi re-link a STALE
-  # .node — the review reproduced sum(2,3)→6 against `a + b` source (silent false red/green, which
-  # defeats the guard's whole purpose). Cleaning just these two crates forces a content-correct
-  # recompile from current source before the assertion (napi analog of py's
-  # `uv sync --reinstall-package`). `--target aarch64-apple-darwin` is required: napi --platform
-  # builds into the per-triple subdir, which bare `cargo clean -p` does NOT touch (single-host;
-  # cross-platform matrix deferred, ADR-0006 / SMA-376/407).
+  # `touch` first (highest priority — this is the assertion): cargo/`napi build` incrementality is
+  # mtime-based, so a warm rs/target/ + a git op that leaves a Rust source OLDER than its artifact
+  # (mtime inversion) makes cargo skip the recompile and napi re-link a STALE .node — the review
+  # reproduced sum(2,3)→6 against `a + b` source (silent false red/green, which defeats the guard's
+  # whole purpose). Bumping the two crates' source mtime forces a content-correct recompile from
+  # current source before the assertion (napi analog of py's `uv sync --reinstall-package`); it is
+  # host-agnostic, unlike a per-triple `cargo clean --target`.
   test:
-    script: 'cargo clean -p paigasus-kernel -p paigasus-node-bindings --target aarch64-apple-darwin --manifest-path ../../../rs/Cargo.toml && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec vitest run'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec vitest run'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
