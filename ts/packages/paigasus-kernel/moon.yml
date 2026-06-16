@@ -21,8 +21,18 @@ tasks:
   # `file:`-linked dep's devDeps — SMA-420 spike S2). `--cwd ../../../rs/...` keeps cargo's cwd
   # inside `rs/` so it picks up the apple-darwin `-undefined dynamic_lookup` link flags from
   # rs/.cargo/config.toml (spike S1); the .node + glue land in the crate dir, not here.
+  #
+  # `cargo clean -p` first: cargo/`napi build` incrementality is mtime-based, so after a git op
+  # that leaves a Rust source OLDER than an existing rs/target/ artifact (warm cache + checkout/
+  # rebase/stash → mtime inversion), cargo reports "up to date" and napi re-links a STALE .node
+  # against the wrong source. Cleaning just these two (tiny) crates forces a content-correct
+  # recompile from current source (cached deps like napi stay) — the napi analog of the py wheel's
+  # `uv sync --reinstall-package`. The .node napi links is built for the host target TRIPLE, so the
+  # clean MUST name `--target aarch64-apple-darwin` (single-host; bare `cargo clean -p` cleans only
+  # the host dir, not the per-triple subdir napi --platform uses — cross-platform matrix is deferred,
+  # ADR-0006 / SMA-376/407).
   build:
-    script: 'pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec tsc -p tsconfig.json --noEmit'
+    script: 'cargo clean -p paigasus-kernel -p paigasus-node-bindings --target aarch64-apple-darwin --manifest-path ../../../rs/Cargo.toml && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec tsc -p tsconfig.json --noEmit'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
@@ -33,19 +43,31 @@ tasks:
       - '/ts/pnpm-lock.yaml'
       # Both Rust sources: napi build recompiles the binding AND the kernel it calls (spike S5),
       # so a kernel-source edit must bust this task's cache too (review F4) — Moon hashes only
-      # listed inputs, and an upstream `^:build` recompile alone does not re-key this task.
+      # listed inputs, and an upstream `^:build` recompile alone does not re-key this task. The
+      # binding's generated glue (index.js / index.d.ts) freshness rides on these Rust src inputs:
+      # any surface change is a Rust source change, so the glue is not listed separately.
       - '/rs/crates/libs/paigasus-kernel/src/**/*'
       - '/rs/crates/bindings/paigasus-node-bindings/src/**/*'
     outputs:
-      - '/rs/crates/bindings/paigasus-node-bindings/paigasus-node-bindings.darwin-arm64.node'
+      - '/rs/crates/bindings/paigasus-node-bindings/paigasus-node-bindings.darwin-arm64.node' # single-host; cross-platform .node matrix is deferred (ADR-0006 / SMA-376/407)
   # Rebuild the .node fresh (cache-bust on a Rust edit, review F4), THEN run vitest. The py
   # analog (`uv sync --reinstall-package … && pytest`) refreshes the INSTALLED artifact; here the
   # freshness fix is split: `napi build` rewrites the crate-dir .node, and vitest.config.ts aliases
   # @paigasus/node-bindings to that crate dir — because pnpm COPIES a `file:` dep into its store at
   # install time and never re-copies a rebuilt binary, so loading via the package name would import
   # a STALE store .node (verified: a kernel edit otherwise passes against the old value).
+  #
+  # `cargo clean -p` first (highest priority — this is the assertion): cargo/`napi build`
+  # incrementality is mtime-based, so a warm rs/target/ + a git op that leaves a Rust source OLDER
+  # than its artifact (mtime inversion) makes cargo skip the recompile and napi re-link a STALE
+  # .node — the review reproduced sum(2,3)→6 against `a + b` source (silent false red/green, which
+  # defeats the guard's whole purpose). Cleaning just these two crates forces a content-correct
+  # recompile from current source before the assertion (napi analog of py's
+  # `uv sync --reinstall-package`). `--target aarch64-apple-darwin` is required: napi --platform
+  # builds into the per-triple subdir, which bare `cargo clean -p` does NOT touch (single-host;
+  # cross-platform matrix deferred, ADR-0006 / SMA-376/407).
   test:
-    script: 'pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec vitest run'
+    script: 'cargo clean -p paigasus-kernel -p paigasus-node-bindings --target aarch64-apple-darwin --manifest-path ../../../rs/Cargo.toml && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec vitest run'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
@@ -54,6 +76,7 @@ tasks:
       - 'package.json'
       - '/ts/pnpm-lock.yaml'
       # Both Rust sources, so a kernel-source edit re-runs vitest against a freshly built .node
-      # rather than caching a stale green (review F4) — see the build task's note.
+      # rather than caching a stale green (review F4) — see the build task's note. (The binding's
+      # generated glue freshness rides on these Rust src inputs; it is not listed separately.)
       - '/rs/crates/libs/paigasus-kernel/src/**/*'
       - '/rs/crates/bindings/paigasus-node-bindings/src/**/*'

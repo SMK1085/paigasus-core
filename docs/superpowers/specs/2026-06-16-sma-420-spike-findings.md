@@ -159,6 +159,29 @@ mirroring the py `test`'s `uv sync --reinstall-package … && pytest`.
   point at source re-exporting `@paigasus/node-bindings` (whose `main: "index.js"` resolves the CJS
   loader). Watch ESM/CJS interop in the wrapper if it ships as pure ESM.
 
+## Freshness — cargo mtime caveat (affects BOTH FFI guards)
+
+The freshness guard relies on `napi build` / maturin recompiling the changed Rust crate before the
+assertion. But cargo's incrementality is **mtime-based**: after a warm `rs/target/` plus a git op
+that leaves a source file's mtime OLDER than its existing artifact (checkout / rebase / stash →
+mtime inversion), cargo reports "up to date" and does NOT recompile, so the FFI artifact is re-linked
+STALE. The review reproduced `sum(2,3) → 6` against a kernel whose source is `a + b` — a silent
+false red/green that defeats the guard's entire purpose.
+
+- **ts (napi) — FIXED here:** `paigasus-kernel-ts`'s `build`/`test` tasks now prepend
+  `cargo clean -p paigasus-kernel -p paigasus-node-bindings --target aarch64-apple-darwin
+  --manifest-path ../../../rs/Cargo.toml` before `napi build`, forcing a content-correct recompile
+  of just those two crates (cached deps untouched; a few seconds). `--target aarch64-apple-darwin`
+  is required because `napi --platform` builds into the per-triple subdir, which a bare
+  `cargo clean -p` (host dir only) does not touch — single-host, cross-platform matrix deferred
+  (ADR-0006 / SMA-376/407). Verified: with the trap (target built from `a+b+1`, source reverted to
+  `a+b` with a 2000-01-01 mtime), the unfixed task asserts a stale 6 (false red) while the fixed
+  task recompiles and passes; a real `a+b → a+b+1` edit still fails correctly.
+- **py (maturin) — LATENT, NOT fixed here:** `uv sync --reinstall-package paigasus-py-bindings`
+  forces a *wheel* rebuild, but maturin's underlying cargo is still mtime-incremental, so the same
+  inversion could re-link a stale wheel. A symmetric forced-rebuild for the py side **plus** a CI
+  `rs/target` cache-invalidation policy is a tracked FOLLOW-UP, not SMA-420.
+
 ## Task 2 resolutions (recorded after implementing the wrapper + smoke test)
 
 All open items above resolved as follows (host: macOS arm64, same toolchain):
