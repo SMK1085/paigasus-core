@@ -3,3 +3,57 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 id: 'paigasus-kernel-ts'
 layer: 'library'
 language: 'typescript'
+
+# Cross-language edge to the napi binding crate (ADR-0005). dependsOn buys build ordering +
+# affected-graph propagation under `moon ci --include-relations` (task-level `^:build` carries the
+# cascade; a project dependsOn alone does not — SMA-389 D3), and provisions the Rust toolchain in
+# this project's task context so `napi build` can shell out to cargo.
+dependsOn:
+  - 'paigasus-node-bindings-rs'
+
+tasks:
+  # Produce the .node + regenerate the committed glue, THEN typecheck. Overrides the inherited
+  # `tsc --noEmit` build (which would not produce the addon). `^:build` only builds the upstream
+  # cargo gate, not this artifact (review F1).
+  #
+  # `napi build` is the @paigasus/node-bindings devDep `@napi-rs/cli`, hoisted into the ts
+  # workspace via @paigasus/kernel's own `@napi-rs/cli` devDep (pnpm does NOT install a
+  # `file:`-linked dep's devDeps — SMA-420 spike S2). `--cwd ../../../rs/...` keeps cargo's cwd
+  # inside `rs/` so it picks up the apple-darwin `-undefined dynamic_lookup` link flags from
+  # rs/.cargo/config.toml (spike S1); the .node + glue land in the crate dir, not here.
+  build:
+    script: 'pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec tsc -p tsconfig.json --noEmit'
+    deps: ['^:build']
+    inputs:
+      - 'src/**/*'
+      - 'tsconfig.json'
+      - 'vitest.config.ts'
+      - 'package.json'
+      - '/ts/tsconfig.base.json'
+      - '/ts/pnpm-lock.yaml'
+      # Both Rust sources: napi build recompiles the binding AND the kernel it calls (spike S5),
+      # so a kernel-source edit must bust this task's cache too (review F4) — Moon hashes only
+      # listed inputs, and an upstream `^:build` recompile alone does not re-key this task.
+      - '/rs/crates/libs/paigasus-kernel/src/**/*'
+      - '/rs/crates/bindings/paigasus-node-bindings/src/**/*'
+    outputs:
+      - '/rs/crates/bindings/paigasus-node-bindings/paigasus-node-bindings.darwin-arm64.node'
+  # Rebuild the .node fresh (cache-bust on a Rust edit, review F4), THEN run vitest. The py
+  # analog (`uv sync --reinstall-package … && pytest`) refreshes the INSTALLED artifact; here the
+  # freshness fix is split: `napi build` rewrites the crate-dir .node, and vitest.config.ts aliases
+  # @paigasus/node-bindings to that crate dir — because pnpm COPIES a `file:` dep into its store at
+  # install time and never re-copies a rebuilt binary, so loading via the package name would import
+  # a STALE store .node (verified: a kernel edit otherwise passes against the old value).
+  test:
+    script: 'pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec vitest run'
+    deps: ['^:build']
+    inputs:
+      - 'src/**/*'
+      - 'tests/**/*'
+      - 'vitest.config.ts'
+      - 'package.json'
+      - '/ts/pnpm-lock.yaml'
+      # Both Rust sources, so a kernel-source edit re-runs vitest against a freshly built .node
+      # rather than caching a stale green (review F4) — see the build task's note.
+      - '/rs/crates/libs/paigasus-kernel/src/**/*'
+      - '/rs/crates/bindings/paigasus-node-bindings/src/**/*'

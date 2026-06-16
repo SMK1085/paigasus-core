@@ -159,6 +159,47 @@ mirroring the py `test`'s `uv sync --reinstall-package … && pytest`.
   point at source re-exporting `@paigasus/node-bindings` (whose `main: "index.js"` resolves the CJS
   loader). Watch ESM/CJS interop in the wrapper if it ships as pure ESM.
 
+## Task 2 resolutions (recorded after implementing the wrapper + smoke test)
+
+All open items above resolved as follows (host: macOS arm64, same toolchain):
+
+- **`@napi-rs/cli` wiring (the devDep gotcha):** added `'@napi-rs/cli': ^3` to the `ts/`
+  catalog and `"@napi-rs/cli": "catalog:"` as a devDep of `@paigasus/kernel`. pnpm does NOT
+  install a `file:` dep's devDeps, so the CLI must be a devDep of the *consumer*. After
+  `pnpm install` under `ts/`, `pnpm exec napi --version` → `3.7.2` from the kernel package.
+- **napi build invocation (exact):**
+  `pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings`,
+  run from the `paigasus-kernel-ts` task cwd (`ts/packages/paigasus-kernel`). The `--cwd` flag
+  makes the CLI resolve from the ts workspace while cargo runs inside `rs/` (picks up the
+  apple-darwin link flags, S1). The literal plan command `pnpm --filter @paigasus/node-bindings
+  build` does NOT work (a `file:` package is not a workspace member; `--filter` can't target it).
+  Moon's `command:` rejects `&&`, so both `build` and `test` use `script:` (mirrors the py task).
+- **Generated-glue churn:** `napi build --platform` regenerates `index.js`/`index.d.ts`
+  byte-identically (the surface is unchanged) — `git status` on the crate dir is clean, no
+  spurious diff committed. The `.node` stays gitignored.
+- **`vitest.config.ts`: YES, needed — but for a DIFFERENT reason than predicted.** The plain
+  inherited `vitest run` *passed* on first run. The real problem only surfaces on a Rust edit:
+  **pnpm COPIES a `file:` dep into its store at install time and never re-copies a rebuilt
+  binary.** So `napi build` rewrites the crate-dir `.node`, but importing via the package name
+  loads a **STALE store `.node`** — a kernel edit (`a+b` → `a+b+1`) still passed against the old
+  value (silent false-green). Fix: `vitest.config.ts` aliases `@paigasus/node-bindings` to the
+  **crate-dir** `index.js` (absolute, via `fileURLToPath(new URL(...))`), so vitest loads the
+  fresh `.node` that `napi build` rewrites. With the alias, the broken-kernel test correctly
+  FAILS (`Expected 5, Received 6`) and the real kernel passes. (`test.server.deps.external:
+  [/\.node$/]` is also set to keep the addon out of vitest's transform; `deps` lives under
+  `test`, not top-level `server`, in vitest 4 — top-level fails typecheck.) This pnpm
+  store-copy gotcha is the TS analog of SMA-419's `uv sync --reinstall-package` wheel-freshness
+  fix; **Task 3's affected-graph guard / any future CI must NOT assume importing by package name
+  sees a rebuilt `.node`.**
+- **tsconfig change (not in the literal file list, but required for the gates):** the kernel
+  `tsconfig.json` gained `customConditions: ["node"]` (so tsc/eslint walk `src/index.ts`, not the
+  `default` `unsupported.ts`) and `include: ["src/**/*", "tests/**/*", "vitest.config.ts"]` (so
+  eslint's typed projectService covers the test + config; `rootDir` dropped — it rejects files
+  outside `src/`, inert under `noEmit`). Without this, `ts:lint` errors (`projectService` parse
+  error on the test file + `no-unsafe-call` on `sum`) and `tsc` resolves the wrong export branch.
+- **prettier:** the repo config is `singleQuote: true, printWidth: 200`; the new `.ts` files use
+  single quotes (the spec's double-quote literals were reformatted to satisfy `ts:fmt`).
+
 ## Files created / modified by this spike
 
 - `rs/Cargo.toml` — added `napi`/`napi-derive`/`napi-build` to `[workspace.dependencies]`.

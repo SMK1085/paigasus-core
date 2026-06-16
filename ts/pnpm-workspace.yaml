@@ -46,3 +46,9 @@ catalog:
   '@semantic-release/commit-analyzer': ^13.0.0
   # Protobuf-ES v2 runtime (SMA-389)
   '@bufbuild/protobuf': ^2.12.0
+  # napi-rs CLI — drives `napi build --platform` for the Node FFI binding (SMA-420).
+  # It is a devDependency of @paigasus/node-bindings, but that crate is reached via a `file:`
+  # specifier (not a workspace member), and pnpm does NOT install a dependency's devDeps — so
+  # the CLI must be a devDep of @paigasus/kernel (the consumer) to be runnable from the ts
+  # workspace. Catalog-listed so it bumps centrally; matches the crate's `^3` devDep range.
+  '@napi-rs/cli': ^3

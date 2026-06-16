@@ -1,17 +1,25 @@
 {
   "name": "@paigasus/kernel",
-  "_comment_exports": "Source-only exports. Bundler-aware consumers only (Next/Vitest/tsc walk through TS via moduleResolution: bundler). Switch to ./dist/index.js when tsup wiring lands — must happen IN LOCKSTEP with flipping `private: false` for publishable packages.",
+  "_comment_exports": "node → the napi binding (loads a compiled .node); default (browser/Edge/workerd) → a stub that throws until paigasus-wasm lands (SMA-420). Conditions point at SOURCE (bundler-aware consumers walk TS); switch to ./dist/* when tsup wiring lands, IN LOCKSTEP with flipping `private: false`.",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "node": "./src/index.ts",
+      "default": "./src/unsupported.ts"
+    }
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+  "dependencies": {
+    "@paigasus/node-bindings": "file:../../../rs/crates/bindings/paigasus-node-bindings"
+  },
   "devDependencies": {
-    "typescript": "catalog:"
+    "@napi-rs/cli": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   }
 }
