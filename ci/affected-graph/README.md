@@ -9,11 +9,15 @@ deep` and asserts the affected project set per known case (`repo`, which owns th
 tree as its source, is filtered out):
 
 - **contracts edit** → `contracts` + `paigasus-proto-{rs,py,ts}` + `paigasus-gateway-rs`.
-- **kernel edit** → `paigasus-kernel-rs` + `paigasus-py-bindings-rs` + `paigasus-gateway-rs`
-  + `paigasus-kernel-py` (the py wrapper now wraps the wheel, SMA-419); still **no `*-ts` /
-  `contracts` / unrelated `*-py`** (`paigasus-proto/workflows/ml-py`).
-- **binding edit** → `paigasus-py-bindings-rs` + `paigasus-kernel-py`; still one-directional
-  w.r.t. the kernel (never drags in `paigasus-kernel-rs`).
+- **kernel edit** → `paigasus-kernel-rs` + `paigasus-py-bindings-rs` + `paigasus-node-bindings-rs`
+  + `paigasus-gateway-rs` + `paigasus-kernel-py` + `paigasus-kernel-ts` (both language wrappers now
+  wrap their bindings, SMA-419/420); still **no `contracts` / unrelated `*-py`
+  (`paigasus-proto/workflows/ml-py`) / unrelated `*-ts`** (`paigasus-proto/sdk/ui/console/docs-ts`,
+  `commitlint-config-ts`).
+- **py binding edit** → `paigasus-py-bindings-rs` + `paigasus-kernel-py`; one-directional w.r.t.
+  the kernel.
+- **node binding edit** → `paigasus-node-bindings-rs` + `paigasus-kernel-ts`; one-directional
+  w.r.t. the kernel.
 
 It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
 `--include-relations` (the edges are inert without it).
@@ -23,9 +27,10 @@ Prove it can fail: `ci/affected-graph/run.sh --negative-control`.
 
 ## Maintenance — the must-exclude assertions are topology-coupled (SMA-409 F5)
 
-The **must-include** sets are durable. The **must-exclude** (cross-stack-isolation)
-assertions track current topology. The **py** wrapper edge landed in SMA-419
-(`paigasus-kernel-py` moved from forbid → must-include). The remaining deferred edge is the
-**ts** kernel wrapper: when it lands, a kernel edit *should* affect it, and the
-`kernel->bindings` forbid-regex here will correctly need its `-ts$` term loosened. A failure
-there is the expected next edge, not a regression; update this guard alongside that work.
+The **must-include** sets are durable. The **must-exclude** (cross-stack-isolation) assertions
+track current topology. Both the **py** and **ts** kernel-wrapper edges have now landed
+(SMA-419/420). The `kernel->bindings` forbid-regex enumerates the *unrelated* ts/py packages a
+kernel edit must not reach; each newly-added ts/py package must be hand-added to that enumeration
+or it is silently unasserted. Consolidating this into a completeness/default-deny meta-check is a
+tracked follow-up (SMA-420 review F4) — it would reverse the deliberate "positive-superset, not
+strict equality" choice (SMA-409), so it gets its own decision.
