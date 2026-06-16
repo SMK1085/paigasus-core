@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# SMA-409 — affected-graph regression guard.
+# SMA-409 / SMA-429 — affected-graph regression guard (strict-equality, default-deny).
 #
 # `moon ci` USES the affected graph but never ASSERTS it is correct, so a deleted
 # dependsOn edge (or a dropped `moon ci --include-relations`) silently under-builds and
 # stays green. This guard feeds a synthetic touched-file to `moon query projects
-# --affected --downstream deep` and asserts the resulting project set per known case, so
+# --affected --downstream deep` and asserts the resulting project set EQUALS a known
+# expected set per case (default-deny — any unlisted project present fails the case), so
 # such a regression fails red. See
-# docs/superpowers/specs/2026-06-14-sma-409-affected-graph-cascade-guard-design.md.
+# docs/superpowers/specs/2026-06-14-sma-409-affected-graph-cascade-guard-design.md (guard
+# architecture) and
+# docs/superpowers/specs/2026-06-16-sma-429-affected-graph-completeness-guard-design.md
+# (strict-equality model).
 #
 # usage: run.sh [--negative-control]
 set -euo pipefail
