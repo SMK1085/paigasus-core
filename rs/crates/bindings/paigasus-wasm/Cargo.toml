@@ -1,0 +1,37 @@
+[package]
+name = "paigasus-wasm"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+# Only cdylib: the browser/Edge runtime loads the .wasm; no other Rust crate consumes it. A
+# wasm-bindgen cdylib leaves __wbindgen_* imports unresolved until instantiation, so a host test
+# harness can't meaningfully link/run — disable the test/doctest targets so `cargo nextest
+# --no-tests=pass` stays green (mirrors paigasus-node-bindings / paigasus-py-bindings). Kernel logic
+# is unit-tested in paigasus-kernel; the FFI boundary is proven by the wasm round-trip vitest.
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+wasm-bindgen.workspace = true
+paigasus-kernel.workspace = true
+
+[package.metadata.cargo-machete]
+# wasm-bindgen is consumed only through the #[wasm_bindgen] attribute macro — the canonical
+# cargo-machete false-positive (like pyo3 on the py crate / napi on the node crate); :machete is a
+# blocking gate (SMA-375). Unlike napi-rs, wasm-bindgen ships macro + runtime in one crate, so a
+# single ignore suffices. paigasus-kernel is called directly and needs no ignore.
+ignored = ["wasm-bindgen"]
+
+[package.metadata.wasm-pack.profile.release]
+# Placeholder kernel — skip wasm-opt so no unpinned binaryen is downloaded at build (SMA-427 L3).
+# Re-enabling optimization later must pin binaryen via a proto plugin (tracked follow-up).
+wasm-opt = false
+
+[lints]
+workspace = true

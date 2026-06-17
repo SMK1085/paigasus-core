@@ -1,0 +1,18 @@
+{
+  "name": "@paigasus/wasm",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "paigasus_wasm.js",
+  "module": "paigasus_wasm.js",
+  "types": "paigasus_wasm.d.ts",
+  "sideEffects": ["./paigasus_wasm.js", "./snippets/*"],
+  "files": [
+    "paigasus_wasm.js",
+    "paigasus_wasm_bg.js",
+    "paigasus_wasm_bg.wasm",
+    "paigasus_wasm.d.ts",
+    "paigasus_wasm_bg.wasm.d.ts"
+  ]
+}
