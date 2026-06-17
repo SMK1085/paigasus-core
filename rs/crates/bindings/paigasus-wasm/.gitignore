@@ -1,9 +1,10 @@
 # wasm-pack emits the binary here; commit the JS + .d.ts glue, ignore the built .wasm (mirrors the
 # napi crate's `*.node` ignore — SMA-427).
 #
-# NOTE: `wasm-pack build --out-dir .` CLEANS this dir each run — it overwrites this file with a bare
-# `*` and DELETES the hand-written package.json (even with --no-pack). We intend the opposite: commit
-# the glue + package.json, ignore only the binary. Phase 2's moon build/test reruns wasm-pack, so it
-# MUST re-assert this file and package.json afterward (the committed glue + package.json are what the
-# `@paigasus/wasm` file: link resolves). Re-check both after any rebuild.
+# NOTE: `wasm-pack build` CLEANS its --out-dir each run (overwrites .gitignore with a bare `*`,
+# DELETES package.json, even with --no-pack). The kernel-ts build/test tasks therefore build into a
+# gitignored scratch dir (.wasmpack-out) and copy only the paigasus_wasm* glue back here, so the
+# committed package.json/.gitignore/glue (what the `@paigasus/wasm` file: link resolves) are never
+# clobbered. See ts/packages/paigasus-kernel/moon.yml.
 *.wasm
+.wasmpack-out/
