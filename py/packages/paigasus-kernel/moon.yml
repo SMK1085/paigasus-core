@@ -20,11 +20,32 @@ tasks:
   # kernel→bindings→py cascade actually re-runs it on a Rust edit (review F4). uv serves a CACHED
   # maturin wheel and ignores Rust source changes (spike S4), so we MUST force a rebuild with
   # --reinstall-package before pytest — otherwise this would assert against a stale wheel.
+  #
+  # `touch` the kernel + binding sources first: maturin's underlying cargo is mtime-incremental, so
+  # after a git op that leaves a Rust source OLDER than an existing rs/target/ artifact (warm cache +
+  # checkout/rebase/stash → mtime inversion), cargo reports "up to date" and maturin re-links a STALE
+  # .so into the freshly reinstalled wheel — the runtime guard then asserts against the wrong kernel
+  # (SMA-420's review reproduced sum(2,3)→6 against an `a + b` kernel). Bumping the two (tiny) crates'
+  # source mtime forces a content-correct recompile from current source — the py analog of the ts
+  # `touch` (SMA-430). `touch` is host-agnostic (CI is Linux, dev is macOS); a per-triple
+  # `cargo clean --target <triple>` would have to know the host triple (maturin builds into the
+  # per-triple subdir), so we avoid it. Only `test` carries the touch — the `build` task above
+  # neither materializes nor asserts the wheel, so it cannot serve a stale artifact (intentional
+  # asymmetry with the ts side, whose `build` produces the .node).
   test:
-    script: 'uv sync --reinstall-package paigasus-py-bindings && uv run pytest tests'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-py-bindings/src/lib.rs && uv sync --reinstall-package paigasus-py-bindings && uv run pytest tests'
     deps: ['^:build']
     inputs:
       - 'tests/**/*'
       - 'src/**/*'
       - 'pyproject.toml'
       - '/py/uv.lock'
+      # Both Rust sources: maturin recompiles the binding AND the kernel it calls, so a kernel-source
+      # edit must bust this task's Moon cache too (review F4) — Moon hashes only listed inputs, and an
+      # upstream `^:build` recompile alone does not re-key this task.
+      - '/rs/crates/libs/paigasus-kernel/src/**/*'
+      - '/rs/crates/bindings/paigasus-py-bindings/src/**/*'
+      # ...and the binding's manifests, so a maturin-config (pyproject.toml) or dependency
+      # (Cargo.toml) change re-keys the guard even without a Rust src diff (cache-input completeness).
+      - '/rs/crates/bindings/paigasus-py-bindings/Cargo.toml'
+      - '/rs/crates/bindings/paigasus-py-bindings/pyproject.toml'
