@@ -6,6 +6,9 @@
 # for every cargo invocation, so build and lint stay consistent.
 #
 # Keep `channel` in lockstep with `.moon/toolchains.yml` `rust.version`.
+#
+# NOTE: the wasm32-unknown-unknown target is provisioned via .moon/toolchains.yml `rust.targets`
+# (moon's setup path), NOT from a `targets` key here — moon reads only `channel` from this file.
 [toolchain]
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]

@@ -5,6 +5,7 @@ cargo-nextest = "0.9.136"
 lefthook = "2.1.8"
 moon = "2.3.2"
 release-plz = "0.3.158"
+wasm-pack = "0.15.0"
 
 # Moon-managed runtime toolchains, also pinned here so the proto SHIMS resolve a version in a
 # fresh CI env (cache:false → clean ~/.proto). Under moon 2.3.2 a bare `pnpm`/`uv`/`node` call in
@@ -23,3 +24,4 @@ cargo-machete = "file://./.proto/plugins/cargo-machete.toml"
 cargo-nextest = "file://./.proto/plugins/cargo-nextest.toml"
 lefthook = "file://./.proto/plugins/lefthook.toml"
 release-plz = "file://./.proto/plugins/release-plz.toml"
+wasm-pack = "file://./.proto/plugins/wasm-pack.toml"

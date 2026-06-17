@@ -16,6 +16,11 @@ rust:
   components:
     - 'rustfmt'
     - 'clippy'
+  # wasm32 target for the paigasus-wasm binding (SMA-427). Provisioned HERE (the path moon's
+  # `moon setup` actually uses), NOT via rust-toolchain.toml `targets` — moon reads only the
+  # channel from that file (syncToolchainConfig), so a clean CI runner would never install it.
+  targets:
+    - 'wasm32-unknown-unknown'
   # cargo-nextest is provisioned via a vendored proto plugin pinned in .prototools
   # (installed by `proto install`), NOT via `rust.bins` here: `moon setup` provisions the
   # toolchain + components but NOT bins, so a `rust.bins` nextest was never installed in CI
