@@ -98,8 +98,12 @@ maturin-version axis *is* covered (maturin resolves via `/py/uv.lock`, a listed 
 bindings `pyproject.toml` is listed too) — only the underlying FFI-crate-version axis is not.
 Risk is low (a patch bump rarely changes integer marshalling) and the obvious fix (add
 `rs/Cargo.lock` as an input) is noisy: it would re-key the guard on *any* workspace-dep change.
-Deliberately not addressed here, to preserve an exact mirror of the ts template; **if ever
-tightened, do it on both guards** to keep the symmetry that is the whole point of this issue.
+The same gap applies to the kernel/binding crates' own `Cargo.toml` `[dependencies]` sections,
+which are likewise absent from both guards' inputs (a dependency edit that changed kernel
+behaviour would not re-key) — equally low-risk, since those manifests are mostly
+workspace-inheriting and stable. Deliberately not addressed here, to preserve an exact mirror of
+the ts template; **if ever tightened, do it on both guards** to keep the symmetry that is the
+whole point of this issue.
 
 ## Verification (the trap test, mirroring ts)
 
