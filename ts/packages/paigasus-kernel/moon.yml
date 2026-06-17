@@ -30,8 +30,17 @@ tasks:
   # content-correct recompile from current source — the napi analog of the py wheel's
   # `uv sync --reinstall-package`. `touch` is host-agnostic (CI is Linux, dev is macOS); a per-triple
   # `cargo clean --target <triple>` would have to know the host triple, so we avoid it.
+  #
+  # wasm-pack runs from INSIDE the crate dir (`cd ... && wasm-pack build .`), NOT via a path arg from
+  # here: rs/rust-toolchain.toml's `1.95.0` override only applies under rs/, so running wasm-pack from
+  # this ts cwd would resolve rustup's DEFAULT toolchain (on CI, the runner's stable — which lacks the
+  # wasm32 target and is off our pinned toolchain). cwd inside the crate pins wasm-pack's rustup/cargo
+  # to 1.95.0, where CI pre-installs the wasm32 target serially (.github/workflows/ci.yml) — so its
+  # "Checking for the Wasm target" finds it present and the parallel build+test wasm-pack invocations
+  # don't race two concurrent `rustup target add` (SMA-427 CI fix). `--out-dir` stays relative to the
+  # crate, so the glue still lands in the crate dir; the subshell reverts cwd for the copy-back.
   build:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && wasm-pack build ../../../rs/crates/bindings/paigasus-wasm --target bundler --release --no-pack --out-dir .wasmpack-out --out-name paigasus_wasm && cp ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out/paigasus_wasm* ../../../rs/crates/bindings/paigasus-wasm/ && rm -rf ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out && pnpm exec tsc -p tsconfig.json --noEmit'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-out --out-name paigasus_wasm ) && cp ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out/paigasus_wasm* ../../../rs/crates/bindings/paigasus-wasm/ && rm -rf ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out && pnpm exec tsc -p tsconfig.json --noEmit'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
@@ -80,7 +89,7 @@ tasks:
   # current source before the assertion (napi analog of py's `uv sync --reinstall-package`); it is
   # host-agnostic, unlike a per-triple `cargo clean --target`.
   test:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && wasm-pack build ../../../rs/crates/bindings/paigasus-wasm --target bundler --release --no-pack --out-dir .wasmpack-out --out-name paigasus_wasm && cp ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out/paigasus_wasm* ../../../rs/crates/bindings/paigasus-wasm/ && rm -rf ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out && pnpm exec vitest run'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-out --out-name paigasus_wasm ) && cp ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out/paigasus_wasm* ../../../rs/crates/bindings/paigasus-wasm/ && rm -rf ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out && pnpm exec vitest run'
     deps: ['^:build']
     inputs:
       - 'src/**/*'

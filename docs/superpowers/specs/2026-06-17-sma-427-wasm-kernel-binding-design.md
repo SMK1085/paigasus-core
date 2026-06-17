@@ -503,9 +503,18 @@ auto-fetched the matching CLI — the §1 invariant held).
   2/2, both the napi `node` and wasm `browser` vitest projects); `repo:affected-smoke` PASS (incl. the new
   `binding-oneway-wasm` case and `paigasus-wasm-rs` in `kernel->bindings`); `repo:machete`/`repo:deny`/
   `cargo fmt`/`clippy`/`nextest` green.
-- **CI fix (H1, follow-on):** the first Linux CI run (PR #50) surfaced the predicted gap — `.moon/toolchains.yml`
-  `rust.targets` did **not** make the wasm32 target present for wasm-pack, which runs `rustup target add
-  wasm32-unknown-unknown` itself; kernel-ts's parallel `build`+`test` both invoked wasm-pack, racing two
-  `rustup target add` on `~/.rustup/downloads/` → one died with `could not rename 'downloaded' … (os error 2)`.
-  Fix: pre-install the wasm32 target **serially** in `.github/workflows/ci.yml` before the parallel graph
-  (extending the existing rustfmt/clippy component pre-install that guards the identical napi-era race).
+- **CI fix (H1, follow-on — two parts).** The first Linux CI run (PR #50) surfaced the predicted gap, and a
+  **toolchain mismatch** made the obvious fix insufficient (took a second CI round to pin down):
+  - *Symptom:* `wasm-pack build` runs `rustup target add wasm32-unknown-unknown` itself ("Checking for the
+    Wasm target…"); kernel-ts's parallel `build`+`test` both invoke wasm-pack → two concurrent `rustup target
+    add` race `~/.rustup/downloads/` → one dies with `could not rename 'downloaded' … (os error 2)`.
+  - *Root cause:* `rs/rust-toolchain.toml`'s `1.95.0` override only applies under `rs/`. wasm-pack was invoked
+    from the `ts` task cwd, so its rustup/cargo resolved the runner's **default** toolchain (CI's stable, which
+    lacks wasm32 and is off-pin). `.moon/toolchains.yml` `rust.targets` and a `rustup target add` run from
+    `rs/` both installed wasm32 on **1.95.0** — the wrong toolchain for wasm-pack's context. (Latent locally:
+    the dev host's rustup *default* is 1.95.0, so there's no mismatch there.)
+  - *Fix (both needed):* (1) pre-install wasm32 **serially** on 1.95.0 in `.github/workflows/ci.yml` before the
+    parallel graph (extending the existing rustfmt/clippy pre-install that guards the identical napi-era race);
+    and (2) run wasm-pack **from inside the crate dir** (`cd …/paigasus-wasm && wasm-pack build .`) in the
+    kernel-ts `build`/`test` tasks, so `rust-toolchain.toml` pins its rustup/cargo to 1.95.0 — matching where
+    the target is pre-installed (no download, no race) and building the wasm artifact on the pinned toolchain.
