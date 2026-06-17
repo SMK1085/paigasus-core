@@ -1,11 +1,12 @@
 # SMA-428 — napi-rs cross-platform `.node` prebuild matrix (infra-only, publish deferred)
 
-**Status:** approved design (brainstorm complete, ready for plan)
+**Status:** approved design (brainstorm + staff review incorporated, ready for plan)
 **Linear:** [SMA-428](https://linear.app/smaschek/issue/SMA-428/napi-rs-cross-platform-node-prebuild-matrix-npm-publish-for)
 **Date:** 2026-06-17
 **ADR:** ADR-0005 (kernel-once — pure Rust kernel bound to Py/Node/WASM), ADR-0006 (open-core boundary / publish discipline), ADR-0010/0011 (release tooling + strategy)
 **Follow-up of:** [SMA-420](https://linear.app/smaschek/issue/SMA-420/stand-up-a-ts-kernel-binding-wasmnapi-wire-the-cascade-to-paigasus) — stood up the napi binding for a **single host** (macOS arm64) only; deferred the cross-platform prebuild matrix + npm publish here.
 **Related:** SMA-407 (release activation — owns the actual publish), SMA-419 (the py-wheel sibling deferral), SMA-376 (kernel publish), SMA-434 (CI drift check for committed FFI glue).
+**Reviewed by:** staff-engineer design review (`2026-06-17-sma-428-napi-prebuild-matrix-design-review.md`); dispositions in the final section.
 
 ## Goal
 
@@ -20,7 +21,7 @@ and prove the machinery while it's dormant, so activation is a clean flip.
 The single-host build that drives local `moon` build/test (SMA-420) is **untouched**; the matrix
 is a separate, CI-only concern.
 
-## Decisions resolved during brainstorming
+## Decisions resolved during brainstorming (+ staff review)
 
 1. **Infra only; publish deferred (scope boundary vs SMA-407).** SMA-428 builds + verifies the
    prebuild/packaging pipeline but does **not** publish. Both packages stay `private: true` /
@@ -34,28 +35,39 @@ is a separate, CI-only concern.
    `ubuntu-latest` `moon ci` job. It runs on manual dispatch (verify) and on push-to-main (catch
    breakage before activation), **not** on every PR — keeps PR CI fast on a placeholder kernel.
    The workflow is decoupled from `moon ci` and the affected-graph model (which is single-host).
-3. **Verify = build matrix + dry-run assembly.** All 7 targets build and upload their `.node`; a
-   final job runs `napi prepublish --dry-run` + `npm pack --dry-run` to assert the exact publish
-   artifact shape (os/cpu/libc fields, `main` paths, `optionalDependencies` resolution) **without
-   pushing to npm**. SMA-407 inherits a verified pipeline.
-4. **`@paigasus/node-bindings`-focused; `@paigasus/kernel` gets metadata only.** The matrix /
-   packaging / dry-run work is entirely a `@paigasus/node-bindings` concern (it is the
-   host-coupled native package). `@paigasus/kernel` is pure TS glue whose `exports` point at
-   **source** (`./src/*.ts`) with no `dist` build (tsup deferred by SMA-420) and `file:` deps on
-   `@paigasus/node-bindings` + `@paigasus/wasm` — so it is **double-blocked** from real packaging
-   (needs tsup/dist **and** version activation). SMA-428 only adds the static npm metadata it can
-   have now, plus a breadcrumb comment. No tsup/dist work here.
-5. **Native runners per target + official napi-rs Alpine Docker images for musl.** Each target
+3. **Verify = build matrix + dry-run assembly + a single-host real install-resolution check.**
+   All 7 targets build and upload their `.node`; an `assemble` job generates the per-platform
+   packages and runs `napi prepublish --dry-run --no-gh-release` + `npm pack --dry-run` to assert
+   the publish artifact *structure* (os/cpu/libc, `main` paths, `optionalDependencies`), **and**
+   does one *real* install on the CI host (`linux-x64-gnu`) to prove install-time platform
+   resolution actually works for one target — not just by inspection (review H2). SMA-407 inherits
+   a pipeline verified **up to, but not including, its riskiest links**: `npm publish`, and
+   `napi prepublish` *without* `--dry-run` (the gh-release / tagging path — see §6).
+4. **Generate `npm/<platform>/` in CI; commit nothing (review M1).** Per the napi v3 workflow,
+   `napi create-npm-dirs` runs in CI; the per-platform `package.json`s and the main package's
+   `optionalDependencies` are materialized ephemerally for the dry-run/assembly, **not** committed.
+   This avoids committing generated artifacts whose only drift guard (SMA-434) is deferred, and
+   dissolves the would-be 15-string `0.0.0` version lockstep — only the main `package.json`'s own
+   `version: 0.0.0` stays committed. (Reverses the brainstorm's first instinct to commit
+   reviewable scaffolds; the unguarded-generated-code smell decided it.)
+5. **`@paigasus/node-bindings`-focused; `@paigasus/kernel` gets metadata only.** The matrix /
+   packaging work is entirely a `@paigasus/node-bindings` concern (the host-coupled native
+   package). `@paigasus/kernel` is pure TS glue whose `exports` point at **source** (`./src/*.ts`)
+   with no `dist` build (tsup deferred by SMA-420) and `file:` deps on `@paigasus/node-bindings` +
+   `@paigasus/wasm` — so it is **double-blocked** from real packaging (needs tsup/dist **and**
+   version activation). SMA-428 only adds the static npm metadata it can have now, plus a
+   breadcrumb comment. No tsup/dist work here.
+6. **Native runners per target + official napi-rs Alpine Docker images for musl.** Each target
    builds on its matching native-arch GitHub runner (GitHub's free `ubuntu-24.04-arm` removes the
    need to cross-compile arm64); only the two musl targets swap in the official `napi-rs` Alpine
-   container. This is the canonical `@napi-rs/cli` scaffold shape — battle-tested and
-   copy-adaptable — and avoids zig cross-compilation's sharp edges (Windows-MSVC, macOS SDK).
+   container. Canonical `@napi-rs/cli` scaffold shape — battle-tested, copy-adaptable — and avoids
+   zig cross-compilation's sharp edges (Windows-MSVC, macOS SDK).
 
 ## 1. Target matrix (7)
 
 | napi platform     | Rust triple                  | Runner / method                                   |
 | ----------------- | ---------------------------- | ------------------------------------------------- |
-| `darwin-x64`      | `x86_64-apple-darwin`        | `macos-13` (Intel)                                |
+| `darwin-x64`      | `x86_64-apple-darwin`        | `macos-15-intel` (last native Intel; EOL Fall 2027) |
 | `darwin-arm64`    | `aarch64-apple-darwin`       | `macos-latest`                                    |
 | `win32-x64-msvc`  | `x86_64-pc-windows-msvc`     | `windows-latest`                                  |
 | `linux-x64-gnu`   | `x86_64-unknown-linux-gnu`   | `ubuntu-latest`                                   |
@@ -63,117 +75,196 @@ is a separate, CI-only concern.
 | `linux-x64-musl`  | `x86_64-unknown-linux-musl`  | `ubuntu-latest` + napi-rs Alpine image            |
 | `linux-arm64-musl`| `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` + napi-rs Alpine image         |
 
-Every leg builds on its **native arch** (no cross-compiling for glibc/musl arm); musl just runs
-the build inside the official Alpine container. `macos-13` is the Intel fallback path if a leg
-cannot run on a native Intel runner — see §6 risk on macos-13 retirement.
+Every leg builds on its **native arch**; musl runs the build inside the official Alpine container.
+
+**`macos-13` is retired** (GitHub brownout began Sept 2025, fully unsupported by 8 Dec 2025), so
+`darwin-x64` uses **`macos-15-intel`** — GitHub's dedicated last-Intel image. Known clock:
+**GitHub drops x86_64 macOS hosted runners entirely in Fall 2027** when the macOS-15 image
+retires. So `darwin-x64` is a **time-boxed, sunset** matrix row, not a permanent one — and it is
+**build-verified only** (the single-host install check in §2 runs on `linux-x64-gnu`; the Intel
+addon is never *run* in CI; review L1). Revisit before real domain logic ships on Intel; the
+fallback if `macos-15-intel` is constrained is to cross-build `x86_64-apple-darwin` on
+`macos-latest` (Rust + Apple SDK cross-compile x86_64↔arm64 natively — **no zig**, so it does not
+trip decision #6's zig concern), at the cost of the same never-run-on-Intel caveat.
 
 ## 2. New workflow — `.github/workflows/prebuild.yml`
 
-Decoupled from `moon ci` (single-host, affected-graph-bound). Tooling is still pinned via
+Decoupled from `moon ci` (single-host, affected-graph-bound). Host tooling is pinned via
 `moonrepo/setup-toolchain` + `proto install` so node/pnpm/rust match `.prototools` /
-`rs/rust-toolchain.toml`; napi is then invoked directly (not through Moon).
+`rs/rust-toolchain.toml`; napi is invoked directly (not through Moon).
 
 - **Triggers:** `workflow_dispatch` and `push: branches: [main]`.
-- **Permissions:** `contents: read` only — no publish creds. SMA-407 adds registry auth /
-  `id-token` when it turns publish on.
+- **Permissions:** `contents: read` only — no publish creds, and `--no-gh-release` (§ below) means
+  no `contents: write` is needed. SMA-407 adds registry auth / `id-token` / release perms when it
+  turns publish on.
 - **`build` job** — `strategy.matrix` over the 7 targets `{ platform, target, runner, useContainer }`:
   1. checkout
-  2. `moonrepo/setup-toolchain` + `proto install` (pinned node/pnpm)
+  2. `moonrepo/setup-toolchain` + `proto install` (pinned node/pnpm) — *host* legs only
   3. `rustup target add <triple>` against the pinned **1.95.0** toolchain (run from `rs/` so the
-     `rust-toolchain.toml` override applies — see §6 toolchain-pin risk)
+     `rust-toolchain.toml` override applies — verified pattern, mirrors `ci.yml`'s serial
+     pre-install)
   4. `pnpm --dir ts install --frozen-lockfile`
   5. `pnpm exec napi build --platform --release --target <triple>` in
      `rs/crates/bindings/paigasus-node-bindings` (`--platform` emits the platform-suffixed
      `paigasus-node-bindings.<platform>.node` filename)
   6. upload `paigasus-node-bindings.<platform>.node` as a CI artifact
-  - musl legs run steps 3–5 inside the official napi-rs Alpine container.
+  - **musl legs** run steps 3–5 **inside** the official napi-rs Alpine container, which ships its
+    **own** Rust/Node — the host's `setup-toolchain`/`proto install` (step 2) do **not** reach into
+    the container's filesystem/PATH. **Decision (review M2):** accept the **image's** toolchain for
+    the two musl legs (the canonical napi-rs template does the same), rather than re-installing
+    proto inside. Rationale: the `.node` is a **leaf** artifact — nothing links its rmeta across
+    the npm boundary — so a musl leg built with the image's rustc carries none of the SMA-389
+    cross-version `E0514` hazard. This is a *written, conscious* choice, not an accident of step
+    ordering. (Confirm in the spike that the image's Rust is ≥ the kernel's MSRV.)
+  - **Caching (review L2):** mirror `ci.yml`'s Rust cache (`~/.cargo` + `rs/target`) keyed on
+    `runner.os` + **triple** + `rust-toolchain.toml` hash + `Cargo.lock` (cross-target artifacts
+    differ by triple, so the triple must be in the key). Container-leg caching is best-effort
+    (paths differ inside Alpine); accept colder musl builds if needed.
 - **`assemble` job** (`needs: build`):
   1. download all build artifacts
-  2. `napi artifacts` — sort each downloaded `.node` into its **committed** `npm/<platform>/` dir
-     (the dirs themselves are committed scaffolds, §4 — `create-npm-dirs` is the authoring-time
-     step that produced them, not a CI step; re-generating them in CI is SMA-434's drift concern,
-     not this job's)
-  3. `napi prepublish --dry-run` + `npm pack --dry-run` on the main + per-platform packages —
-     assert os/cpu/libc, `main` paths, and `optionalDependencies` all resolve
+  2. `napi create-npm-dirs` — generate the seven `npm/<platform>/` package dirs in CI (not
+     committed; decision #4), then `napi artifacts` to sort each downloaded `.node` into its dir
+  3. `napi prepublish --dry-run --no-gh-release` + `npm pack --dry-run` on the main + per-platform
+     packages — assert os/cpu/libc, `main` paths, and `optionalDependencies` all resolve, and that
+     the **main tarball ships loader-only** (no `.node`; this is the `files` fix in §3). `--dry-run`
+     keeps it filesystem-/registry-inert; `--no-gh-release` neutralizes the `ghRelease: true`
+     default now so the dry-run reflects the intended config (see §6).
+  4. **Single-host install-resolution check (review H2).** On this `ubuntu-latest` host
+     (= `linux-x64-gnu`, one of the seven targets): `npm pack` the main package + the
+     `@paigasus/node-bindings-linux-x64-gnu` per-platform package, install them into a scratch
+     project so the optional dep resolves *through the package path* (not the loader's local-`.node`
+     fallback, which the §3 `files` fix removes from the main tarball), and assert
+     `require('@paigasus/node-bindings').sum(2, 3) === 5`. Proves install-time platform resolution
+     end-to-end for one real target at near-zero cost. (The exact local-resolution incantation —
+     install both tarballs into the scratch project vs a throwaway local registry — is a spike
+     check, §6.)
   - **No `npm publish` anywhere.** Both packages stay `private: true` / `0.0.0`.
 
 ## 3. `rs/crates/bindings/paigasus-node-bindings/package.json`
 
-- Extend the `napi` block with `targets` = the 7 triples (so `create-npm-dirs` / `prepublish`
-  know the full set).
-- Add `optionalDependencies`: the 7 `@paigasus/node-bindings-<platform>` entries pinned to
-  `0.0.0` — committed explicitly so the structure is reviewable + drift-checkable (SMA-434),
-  rather than materialized only at publish time.
+- Extend the `napi` block with `targets` = the 7 triples (the correct v3 schema key — v2's
+  `napi.triples` was renamed) so `create-npm-dirs` / `prepublish` know the full set.
 - Add npm metadata: `repository`, `homepage`, `keywords`, `description`, `engines.node`,
   `publishConfig.access: public`. Keep `private: true` / `version: 0.0.0`.
-- **Fix `files`:** drop `*.node` from `files` (currently `["index.js", "index.d.ts", "*.node"]`).
-  In the optionalDependencies model the main package ships **only** the loader glue; the `.node`
-  binaries ship in the per-platform packages. Leaving `*.node` in would wrongly bundle a
-  locally-built host `.node` into the main tarball — the `npm pack --dry-run` in §2 surfaces this.
+- **Fix `files`:** drop `*.node` from `files` (currently `["index.js", "index.d.ts", "*.node"]` →
+  `["index.js", "index.d.ts"]`). In the optionalDependencies model the main package ships **only**
+  the loader glue; the `.node` binaries ship in the per-platform packages. Leaving `*.node` in
+  would wrongly bundle a locally-built host `.node` into the main tarball — the `npm pack --dry-run`
+  (§2.3) asserts loader-only, and the §2.4 install check would otherwise load via the bundled
+  fallback instead of exercising real resolution.
+- **No committed `optionalDependencies`** and **no committed `npm/<platform>/` scaffolds**
+  (decision #4) — both are generated in CI. At SMA-407, `napi version` / `napi prepublish` **owns**
+  the version derivation + the `optionalDependencies` rewrite (not hand edits); SMA-428 commits
+  only the single `version: 0.0.0` here.
 
-## 4. Per-platform package scaffolds — `rs/crates/bindings/paigasus-node-bindings/npm/<platform>/package.json` (new ×7)
-
-Committed as `napi create-npm-dirs` emits them:
-
-- name `@paigasus/node-bindings-<platform>`, `version: 0.0.0`, `license: Apache-2.0`
-- `os` / `cpu` (and `libc` for musl) constraints so npm resolves the right prebuild on install
-- `main` → `paigasus-node-bindings.<platform>.node`, `files: ["*.node"]`
-
-The built `.node` lands in these dirs at CI time via `napi artifacts` and is **gitignored** (the
-existing `.gitignore` already ignores `*.node`). Only the `package.json` scaffolds are committed.
-
-## 5. `ts/packages/paigasus-kernel/package.json` (metadata only)
+## 4. `ts/packages/paigasus-kernel/package.json` (metadata only)
 
 - Add static npm metadata: `repository`, `keywords`, `description`, `publishConfig`. Keep
   `private: true` / `version: 0.0.0`; **no** `exports` change, **no** tsup/dist.
-- Extend the existing `_comment_exports` breadcrumb (or add a sibling `_comment`) noting that
-  publish is double-blocked: (a) `exports` point at source — needs tsup/dist (SMA-420 deferral),
-  and (b) version activation lives in SMA-407.
+- Extend the existing `_comment_exports` breadcrumb (or add a sibling `_comment`) noting publish is
+  double-blocked: (a) `exports` point at source — needs tsup/dist (SMA-420 deferral), and
+  (b) version activation lives in SMA-407.
 
-## 6. `moon.yml` — unchanged
+## 5. `moon.yml` — unchanged
 
-`rs/crates/bindings/paigasus-node-bindings/moon.yml` and
-`ts/packages/paigasus-kernel/moon.yml` are **not** touched. The local single-host build/test
-chain (`paigasus-kernel-ts:build`/`:test` running `napi build --platform` for the dev host) is
-unchanged, so local dev and the existing `moon ci` are unaffected. The matrix is a separate
-CI-only workflow.
+`rs/crates/bindings/paigasus-node-bindings/moon.yml` and `ts/packages/paigasus-kernel/moon.yml`
+are **not** touched. The local single-host build/test chain (`paigasus-kernel-ts:build`/`:test`
+running `napi build --platform` for the dev host) is unchanged, so local dev and the existing
+`moon ci` are unaffected. The matrix is a separate CI-only workflow.
+
+## 6. Release-tool boundary (`napi prepublish` vs release-plz) — SMA-407 hand-off (review M3)
+
+`napi prepublish` defaults to **`ghRelease: true`** and **`tagStyle: lerna`** (verified against the
+napi v3 docs). Under `--dry-run` (this issue) both are inert, but **SMA-407 activates by removing
+`--dry-run`** — at which point `prepublish` would try to **create a GitHub release** (needing
+`contents: write` + a token this workflow deliberately withholds) and **tag in lerna style**, while
+this repo's release machinery is **release-plz** (its vendored proto plugin tags `release-plz-v*` /
+per-crate patterns, SMA-398). Two release tools with two tagging schemes against one repo is a
+duplicate-tag / double-publish incident waiting for activation day.
+
+- **This issue:** pin **`--no-gh-release`** on the dry-run now, so the verified config carries no
+  gh-release surprise into SMA-407, and the workflow needs no write permission.
+- **Deliberately deferred to SMA-407 (not guessed here):** the `--tag-style` value and the
+  division of labor between `napi prepublish` and release-plz (who derives the version, who tags,
+  who publishes to npm). `--tag-style` is inert under dry-run and its correct value depends on the
+  release-plz integration SMA-407 designs, so hard-pinning a possibly-wrong style now would be
+  premature. Recorded as an explicit SMA-407 input, not a silent default.
 
 ## Primary risks → de-risk first (spike before the workflow)
 
-1. **Toolchain pin on cross legs.** `rs/rust-toolchain.toml` pins **1.95.0**; each matrix leg must
-   `rustup target add <triple>` against *that* toolchain (run from `rs/`), and the musl Alpine
-   image must use the pin — or we accept the image's default Rust with a written rationale. This
-   is the napi analog of the SMA-427 wasm-pack toolchain trap (wasm-pack resolved the wrong
-   rustup toolchain when invoked from the wrong cwd).
-2. **`@napi-rs/cli` v3 command + schema surface.** Confirm the exact v3 subcommands
-   (`create-npm-dirs`, `artifacts`, `prepublish --dry-run`) and the `napi.targets` package.json
-   schema against the pinned `^3` — v3 renamed some v2 commands.
-3. **`macos-13` Intel runner availability.** If retired, build `darwin-x64` via
-   `--target x86_64-apple-darwin` on `macos-latest` instead of a native Intel runner.
+1. **`@napi-rs/cli` v3 command + schema surface.** Confirm the exact v3 subcommands
+   (`create-npm-dirs`, `artifacts`, `prepublish --dry-run --no-gh-release`) and the `napi.targets`
+   package.json schema against the pinned `^3` — v3 renamed some v2 commands.
+2. **Single-host install-resolution mechanism (§2.4).** Confirm the exact way to make the
+   `@paigasus/node-bindings-linux-x64-gnu` optional dep resolvable locally (install both tarballs
+   into the scratch project vs a throwaway local registry) so the assertion loads via the **package
+   path**, not the loader's local-`.node` fallback. Watch napi's `NAPI_RS_ENFORCE_VERSION_CHECK`
+   (off by default) given the `0.0.0` placeholder version.
+3. **musl image toolchain (§2 / M2).** Confirm the napi-rs Alpine image's bundled Rust is ≥ the
+   kernel MSRV (1.95.0) so the accepted-image-toolchain decision is sound.
+4. **`macos-15-intel` availability + cross-build fallback (§1 / H1, L1).** Confirm `macos-15-intel`
+   runs the build; verify the `--target x86_64-apple-darwin` on `macos-latest` fallback compiles if
+   needed.
 
 ## Verification (maps to acceptance criteria)
 
 1. **Matrix build** — `prebuild.yml` dispatched: all 7 build legs green, each uploads its
    `paigasus-node-bindings.<platform>.node` artifact.
-2. **Dry-run assembly** — the `assemble` job's `napi prepublish --dry-run` + `npm pack --dry-run`
-   succeed and show: a loader-only main package (no `.node`), exactly one `.node` per platform
-   package, correct `os`/`cpu`/`libc`, and 7 `optionalDependencies`.
-3. **No publish / no state change** — no `npm publish` runs; both packages remain
-   `private: true` / `0.0.0`.
-4. **No regression** — existing `moon ci` stays green and unchanged; local
+2. **Dry-run assembly** — the `assemble` job's `napi prepublish --dry-run --no-gh-release` +
+   `npm pack --dry-run` succeed and show: a loader-only main package (no `.node`), exactly one
+   `.node` per platform package, correct `os`/`cpu`/`libc`, and 7 `optionalDependencies`.
+3. **Single-host install resolution** — the `linux-x64-gnu` install check resolves exactly the
+   `linux-x64-gnu` optional dep and `require('@paigasus/node-bindings').sum(2, 3) === 5`.
+4. **No publish / no state change** — no `npm publish` runs; no GitHub release is created; both
+   packages remain `private: true` / `0.0.0`; nothing under `npm/` is committed.
+5. **No regression** — existing `moon ci` stays green and unchanged; local
    `moon run paigasus-kernel-ts:build`/`:test` still work.
 
 ## Out of scope (deferred, with owners)
 
 - **Actual publish** — `private: false`, version off `0.0.0`, kernel/proto lockstep versioning,
-  and the live release-plz workflow → **SMA-407** (ADR-0011).
+  the live release-plz workflow, and the `napi prepublish` ↔ release-plz boundary (§6: tag-style,
+  who tags/publishes) → **SMA-407** (ADR-0011).
 - **tsup/dist for `@paigasus/kernel`** — which also unblocks `@paigasus/kernel` + `@paigasus/wasm`
   publish → SMA-420 deferral / its own issue.
 - **maturin py-wheel matrix** (manylinux/musllinux/macos/windows) — the py sibling of this work →
   SMA-419 / SMA-407.
-- **CI drift check for committed FFI glue** (`index.js` + the new `npm/<platform>/` scaffolds) →
-  **SMA-434**.
-- **Per-OS real install/import smoke** (pack tarballs, install into a scratch project on each OS,
-  `import { sum }`) — considered and declined for a placeholder kernel; dry-run assembly is the
-  chosen fidelity level.
+- **CI drift check for committed FFI glue** (`index.js`) → **SMA-434**. (Note: decision #4 means
+  SMA-428 commits **no** `npm/` artifacts, so the only committed generated glue remains `index.js`
+  / `index.d.ts`; SMA-434's surface is unchanged by this issue.)
+- **Full per-OS install/import smoke** (install + run on all 7 OSes) — considered and declined; the
+  single-host check (§2.4) is the chosen fidelity level. `darwin-x64` in particular is
+  build-verified only (review L1).
 - **Real kernel domain logic** — `sum` remains a deliberate placeholder.
+
+## Review dispositions (staff review, 2026-06-17)
+
+- **H1 (High — `macos-13` retired, leg dead on arrival) — accepted, verified, design changed.**
+  Confirmed via the GitHub changelog + `actions/runner-images#13046`: macos-13 brownout Sept 2025,
+  fully unsupported 8 Dec 2025. §1 now uses **`macos-15-intel`** (not as a "fallback" but as the
+  primary), records the **Fall-2027 x86_64-macOS EOL** as a known sunset, and notes the
+  no-zig cross-build fallback. `darwin-x64` flagged build-verified-only.
+- **H2 (High — dry-run never tests install resolution) — accepted, design changed.** Added the
+  single-host (`linux-x64-gnu`) real install-resolution check (§2.4, AC #3) and softened the
+  "verified pipeline" claim (decision #3) to name the links SMA-407 still must prove (publish,
+  prepublish-without-dry-run / gh-release / tagging).
+- **M1 (Medium — committing `npm/` runs against v3 guidance + unguarded until SMA-434) — accepted,
+  design changed.** Switched to **generate `npm/` in CI, commit nothing** (decision #4, §2.2, §3).
+  Removes the unguarded-generated-artifact smell and dissolves the version lockstep (M4).
+- **M2 (Medium — musl legs use the image toolchain, not the proto pin) — accepted, made explicit.**
+  §2 now states a deliberate decision to accept the Alpine image's Rust for the musl legs
+  (leaf-artifact rationale), with a spike check that the image's Rust ≥ MSRV (§6 spike #3).
+- **M3 (Medium — `prepublish` gh-release/lerna-tag defaults masked by `--dry-run`) — accepted,
+  verified, partially actioned.** Confirmed defaults `ghRelease:true` / `tagStyle:lerna` against
+  the napi v3 docs. Pinned **`--no-gh-release`** now (§2.3, §6); **deviation from the reviewer's
+  "pin `--tag-style` too":** left tag-style + the napi/release-plz division as an explicit SMA-407
+  decision (inert under dry-run; correct value depends on SMA-407's release-plz integration).
+- **M4 (Medium — 15 lockstep `0.0.0` strings) — accepted, dissolved by M1.** Generate-in-CI means
+  only the main `package.json` `version` is committed; `napi version`/`prepublish` owns the bump at
+  SMA-407 (§3).
+- **L1 (Low — `darwin-x64` build-verified only) — accepted, noted** in §1 + Out of scope.
+- **L2 (Low — caching unspecified) — accepted.** §2 adds the `ci.yml` Rust-cache pattern with the
+  triple in the key.
+- **L3 (Process — spec narrows the Linear ticket) — accepted.** SMA-428's Linear description
+  updated to mark publish + install-resolution-publish as handed to SMA-407 so the ticket isn't
+  closed with literal scope bullets unmet.
