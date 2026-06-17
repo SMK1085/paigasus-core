@@ -6,6 +6,16 @@ lefthook = "2.1.8"
 moon = "2.3.2"
 release-plz = "0.3.158"
 
+# Moon-managed runtime toolchains, also pinned here so the proto SHIMS resolve a version in a
+# fresh CI env (cache:false → clean ~/.proto). Under moon 2.3.2 a bare `pnpm`/`uv`/`node` call in
+# a CI `run:` step (e.g. `pnpm store path`, `uv cache dir`, `pnpm --dir ts install`) reads the
+# version from .prototools, NOT from .moon/toolchains.yml — without these it fails with
+# `proto::detect::failed`. moon keeps in sync via versionFromPrototools (default true); values
+# mirror .moon/toolchains.yml.
+node = "24.16.0"
+pnpm = "11.3.0"
+uv = "0.11.16"
+
 [plugins]
 buf = "file://./.proto/plugins/buf.toml"
 cargo-deny = "file://./.proto/plugins/cargo-deny.toml"
