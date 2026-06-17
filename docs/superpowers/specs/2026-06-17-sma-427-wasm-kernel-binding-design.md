@@ -437,8 +437,7 @@ Notion, where the ADRs live.
 
 ## Review dispositions (staff review, 2026-06-17)
 
-Review: `docs/superpowers/specs/2026-06-17-sma-427-wasm-kernel-binding-design-review.md`. Findings
-verified against the live repo before disposition.
+Findings from a staff-engineering design review, verified against the live repo before disposition.
 
 - **H1 (High — `rust-toolchain.toml` `targets` ignored by Moon → no `wasm32` in CI) — accepted, verified,
   design changed.** Confirmed via `moon toolchain info rust`: Moon's Rust toolchain has a first-class
