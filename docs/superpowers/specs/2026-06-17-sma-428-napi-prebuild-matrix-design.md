@@ -94,9 +94,10 @@ Decoupled from `moon ci` (single-host, affected-graph-bound). Host tooling is pi
 `rs/rust-toolchain.toml`; napi is invoked directly (not through Moon).
 
 - **Triggers:** `workflow_dispatch` and `push: branches: [main]`.
-- **Permissions:** `contents: read` only — no publish creds, and `--no-gh-release` (§ below) means
-  no `contents: write` is needed. SMA-407 adds registry auth / `id-token` / release perms when it
-  turns publish on.
+- **Permissions:** `contents: read` only — no publish creds. The dry-run **omits `--gh-release`**
+  (an opt-in presence flag — there is **no** `--no-gh-release` on `@napi-rs/cli` 3.7.2,
+  spike-confirmed), so no GitHub release is created and no `contents: write` is needed. SMA-407 adds
+  registry auth / `id-token` / release perms when it turns publish on.
 - **`build` job** — `strategy.matrix` over the 7 targets `{ platform, target, runner, useContainer }`:
   1. checkout
   2. `moonrepo/setup-toolchain` + `proto install` (pinned node/pnpm) — *host* legs only
@@ -123,12 +124,13 @@ Decoupled from `moon ci` (single-host, affected-graph-bound). Host tooling is pi
 - **`assemble` job** (`needs: build`):
   1. download all build artifacts
   2. `napi create-npm-dirs` — generate the seven `npm/<platform>/` package dirs in CI (not
-     committed; decision #4), then `napi artifacts` to sort each downloaded `.node` into its dir
-  3. `napi prepublish --dry-run --no-gh-release` + `npm pack --dry-run` on the main + per-platform
+     committed; decision #4), then `napi artifacts --npm-dir npm` to sort each downloaded `.node`
+     (from the `actions/download-artifact` default `./artifacts` dir) into its platform dir
+  3. `napi prepublish --dry-run --npm-dir npm` + `npm pack --dry-run` on the main + per-platform
      packages — assert os/cpu/libc, `main` paths, and `optionalDependencies` all resolve, and that
      the **main tarball ships loader-only** (no `.node`; this is the `files` fix in §3). `--dry-run`
-     keeps it filesystem-/registry-inert; `--no-gh-release` neutralizes the `ghRelease: true`
-     default now so the dry-run reflects the intended config (see §6).
+     keeps it filesystem-/registry-inert; **`--gh-release` is omitted** (opt-in presence flag — no
+     `--no-gh-release` exists on 3.7.2, spike-confirmed), so no GitHub release is created (see §6).
   4. **Single-host install-resolution check (review H2).** On this `ubuntu-latest` host
      (= `linux-x64-gnu`, one of the seven targets): `npm pack` the main package + the
      `@paigasus/node-bindings-linux-x64-gnu` per-platform package, install them into a scratch
@@ -174,27 +176,29 @@ running `napi build --platform` for the dev host) is unchanged, so local dev and
 
 ## 6. Release-tool boundary (`napi prepublish` vs release-plz) — SMA-407 hand-off (review M3)
 
-`napi prepublish` defaults to **`ghRelease: true`** and **`tagStyle: lerna`** (verified against the
-napi v3 docs). Under `--dry-run` (this issue) both are inert, but **SMA-407 activates by removing
-`--dry-run`** — at which point `prepublish` would try to **create a GitHub release** (needing
-`contents: write` + a token this workflow deliberately withholds) and **tag in lerna style**, while
-this repo's release machinery is **release-plz** (its vendored proto plugin tags `release-plz-v*` /
-per-crate patterns, SMA-398). Two release tools with two tagging schemes against one repo is a
-duplicate-tag / double-publish incident waiting for activation day.
+On `@napi-rs/cli` 3.7.2 (Task-1 spike-confirmed), `napi prepublish`'s **`--gh-release` is an opt-in
+presence flag** (there is **no** `--no-gh-release`), and `--tag-style` defaults to **`lerna`**. So
+the dry-run here simply **omits `--gh-release`** → no GitHub release, no `contents: write` needed.
+But **SMA-407 activates by removing `--dry-run`** and will need `--gh-release` / a real publish path
+— at which point napi's **lerna-style tagging** (`@paigasus/node-bindings@vX.Y.Z`) must be
+reconciled with this repo's **release-plz** machinery (its vendored proto plugin tags
+`release-plz-v*` / per-crate patterns, SMA-398). Two release tools with two tagging schemes against
+one repo is a duplicate-tag / double-publish incident waiting for activation day.
 
-- **This issue:** pin **`--no-gh-release`** on the dry-run now, so the verified config carries no
-  gh-release surprise into SMA-407, and the workflow needs no write permission.
-- **Deliberately deferred to SMA-407 (not guessed here):** the `--tag-style` value and the
-  division of labor between `napi prepublish` and release-plz (who derives the version, who tags,
-  who publishes to npm). `--tag-style` is inert under dry-run and its correct value depends on the
-  release-plz integration SMA-407 designs, so hard-pinning a possibly-wrong style now would be
-  premature. Recorded as an explicit SMA-407 input, not a silent default.
+- **This issue:** **omit `--gh-release`** on the dry-run (the safe default — nothing to neutralize),
+  so the workflow needs no write permission and creates no release.
+- **Deliberately deferred to SMA-407 (not guessed here):** whether/how to use `--gh-release`, the
+  `--tag-style` value, and the division of labor between `napi prepublish` and release-plz (who
+  derives the version, who tags, who publishes to npm). These depend on the release-plz integration
+  SMA-407 designs. Recorded as an explicit SMA-407 input, not a silent default.
 
 ## Primary risks → de-risk first (spike before the workflow)
 
 1. **`@napi-rs/cli` v3 command + schema surface.** Confirm the exact v3 subcommands
-   (`create-npm-dirs`, `artifacts`, `prepublish --dry-run --no-gh-release`) and the `napi.targets`
-   package.json schema against the pinned `^3` — v3 renamed some v2 commands.
+   (`create-npm-dirs`, `artifacts --npm-dir npm`, `prepublish --dry-run`) and the `napi.targets`
+   package.json schema against the pinned `^3`. **(Done — Task-1 spike: confirmed 3.7.2; no
+   `--no-gh-release` — `--gh-release` is opt-in; `artifacts` default input dir is `./artifacts`;
+   `NAPI_RS_ENFORCE_VERSION_CHECK` must stay unset. See `2026-06-17-sma-428-spike-findings.md`.)**
 2. **Single-host install-resolution mechanism (§2.4).** Confirm the exact way to make the
    `@paigasus/node-bindings-linux-x64-gnu` optional dep resolvable locally (install both tarballs
    into the scratch project vs a throwaway local registry) so the assertion loads via the **package
@@ -210,7 +214,7 @@ duplicate-tag / double-publish incident waiting for activation day.
 
 1. **Matrix build** — `prebuild.yml` dispatched: all 7 build legs green, each uploads its
    `paigasus-node-bindings.<platform>.node` artifact.
-2. **Dry-run assembly** — the `assemble` job's `napi prepublish --dry-run --no-gh-release` +
+2. **Dry-run assembly** — the `assemble` job's `napi prepublish --dry-run` (no `--gh-release`) +
    `npm pack --dry-run` succeed and show: a loader-only main package (no `.node`), exactly one
    `.node` per platform package, correct `os`/`cpu`/`libc`, and 7 `optionalDependencies`.
 3. **Single-host install resolution** — the `linux-x64-gnu` install check resolves exactly the
@@ -254,11 +258,13 @@ duplicate-tag / double-publish incident waiting for activation day.
 - **M2 (Medium — musl legs use the image toolchain, not the proto pin) — accepted, made explicit.**
   §2 now states a deliberate decision to accept the Alpine image's Rust for the musl legs
   (leaf-artifact rationale), with a spike check that the image's Rust ≥ MSRV (§6 spike #3).
-- **M3 (Medium — `prepublish` gh-release/lerna-tag defaults masked by `--dry-run`) — accepted,
-  verified, partially actioned.** Confirmed defaults `ghRelease:true` / `tagStyle:lerna` against
-  the napi v3 docs. Pinned **`--no-gh-release`** now (§2.3, §6); **deviation from the reviewer's
-  "pin `--tag-style` too":** left tag-style + the napi/release-plz division as an explicit SMA-407
-  decision (inert under dry-run; correct value depends on SMA-407's release-plz integration).
+- **M3 (Medium — `prepublish` gh-release/lerna-tag defaults) — accepted, verified, corrected by the
+  spike.** The reviewer (and the napi *docs*) cited a `ghRelease:true` default + a `--no-gh-release`
+  flag; the Task-1 spike against the **pinned `@napi-rs/cli` 3.7.2** found **`--gh-release` is an
+  opt-in presence flag with no `--no-gh-release`**, and `--tag-style` defaults to `lerna`. So the
+  dry-run **omits `--gh-release`** (§2.3, §6) — even safer than pinning a negation. **Deviation from
+  the reviewer's "pin `--tag-style` too":** left tag-style + the napi/release-plz division as an
+  explicit SMA-407 decision (inert under dry-run).
 - **M4 (Medium — 15 lockstep `0.0.0` strings) — accepted, dissolved by M1.** Generate-in-CI means
   only the main `package.json` `version` is committed; `napi version`/`prepublish` owns the bump at
   SMA-407 (§3).

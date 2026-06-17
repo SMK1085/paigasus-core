@@ -401,14 +401,18 @@ Add to `.github/workflows/prebuild.yml` after the `build` job (use Task 1's conf
         run: |
           CRATE=../../../rs/crates/bindings/paigasus-node-bindings
           pnpm exec napi create-npm-dirs --cwd "$CRATE"
-          pnpm exec napi artifacts --cwd "$CRATE"   # input dir: $CRATE/artifacts (confirm flag in Task 1)
+          # `napi artifacts` default input dir is ./artifacts (spike Task 1) — the download-artifact
+          # step above writes the .node files into $CRATE/artifacts, so do NOT pass --output-dir.
+          pnpm exec napi artifacts --cwd "$CRATE" --npm-dir npm
 
       # Dry-run prepublish: assert os/cpu/libc + main paths + optionalDependencies resolve, touching
-      # nothing. --no-gh-release neutralizes the ghRelease:true default (spec §6 / M3); --dry-run keeps
-      # it registry-inert. tag-style left at the default deliberately (inert under dry-run; SMA-407 owns it).
+      # nothing. `--gh-release` is OMITTED — it is an opt-in presence flag; there is NO --no-gh-release
+      # on @napi-rs/cli 3.7.2 (spike Task 1), so omitting it creates no GitHub release and needs no
+      # contents:write. --tag-style left at the default `lerna` (inert under dry-run; SMA-407 owns the
+      # napi/release-plz tagging boundary). Do NOT set NAPI_RS_ENFORCE_VERSION_CHECK (spike Task 1).
       - name: Verify packaging (prepublish dry-run)
         working-directory: ts/packages/paigasus-kernel
-        run: pnpm exec napi prepublish --dry-run --no-gh-release --cwd ../../../rs/crates/bindings/paigasus-node-bindings
+        run: pnpm exec napi prepublish --dry-run --npm-dir npm --cwd ../../../rs/crates/bindings/paigasus-node-bindings
 
       # Assert the MAIN package tarball is loader-only (the §3 files fix) + each per-platform tarball
       # carries exactly one .node.
@@ -441,7 +445,7 @@ Add to `.github/workflows/prebuild.yml` after the `build` job (use Task 1's conf
           test -d node_modules/@paigasus/node-bindings-linux-x64-gnu || { echo "FAIL: linux-x64-gnu optional dep not installed"; exit 1; }
           node -e 'const b=require("@paigasus/node-bindings"); if(b.sum(2,3)!==5){console.error("FAIL sum=",b.sum(2,3));process.exit(1);} console.log("install-resolution + FFI load OK");'
 ```
-Notes: pin the `download-artifact` SHA to the current v4 release. If Task 1 found `artifacts` needs an explicit input-dir flag (e.g. `-d artifacts` or `--build-output-dir`), apply it. If `prepublish` requires `artifacts` to have populated `npm/` first (it does in v3), the step order above is correct.
+Notes: pin the `download-artifact` SHA to the current v4 release. Spike Task 1 confirmed the exact flags (see `docs/superpowers/specs/2026-06-17-sma-428-spike-findings.md`): `napi artifacts` default input dir is `./artifacts` (matches the download path → no `--output-dir`); `--npm-dir npm` is the correct flag (not `--dist`); there is **no** `--no-gh-release` (omit `--gh-release`); `prepublish` needs `artifacts` to have populated `npm/` first, so the step order above is correct. **Task 6 watch item:** confirm `napi artifacts`'s default `./artifacts` resolves relative to `--cwd "$CRATE"` (i.e. `$CRATE/artifacts`, where the download lands); if the CI run shows it reading the wrong dir, pass an explicit `--output-dir "$CRATE/artifacts"`.
 
 - [ ] **Step 2: Validate YAML syntax**
 
