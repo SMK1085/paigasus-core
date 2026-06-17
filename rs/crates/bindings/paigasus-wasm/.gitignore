@@ -2,9 +2,12 @@
 # napi crate's `*.node` ignore — SMA-427).
 #
 # NOTE: `wasm-pack build` CLEANS its --out-dir each run (overwrites .gitignore with a bare `*`,
-# DELETES package.json, even with --no-pack). The kernel-ts build/test tasks therefore build into a
-# gitignored scratch dir (.wasmpack-out) and copy only the paigasus_wasm* glue back here, so the
-# committed package.json/.gitignore/glue (what the `@paigasus/wasm` file: link resolves) are never
-# clobbered. See ts/packages/paigasus-kernel/moon.yml.
+# DELETES package.json, even with --no-pack). The kernel-ts tasks therefore build into gitignored
+# scratch dirs, never into the crate root directly: the `build` task uses `.wasmpack-out` and copies
+# only the paigasus_wasm* glue back here (sole crate-dir writer); the `test` task uses its OWN
+# `.wasmpack-test-out` and vitest aliases straight at it (no copy), so the two concurrent `moon ci`
+# tasks don't race the crate-dir copy. The committed package.json/.gitignore/glue (what the
+# `@paigasus/wasm` file: link resolves) are never clobbered. See ts/packages/paigasus-kernel/moon.yml.
 *.wasm
 .wasmpack-out/
+.wasmpack-test-out/
