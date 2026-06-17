@@ -1,6 +1,6 @@
 {
   "name": "@paigasus/kernel",
-  "_comment_exports": "node → the napi binding (loads a compiled .node); default (browser/Edge/workerd) → a stub that throws until paigasus-wasm lands (SMA-420). Conditions point at SOURCE (bundler-aware consumers walk TS); switch to ./dist/* when tsup wiring lands, IN LOCKSTEP with flipping `private: false`.",
+  "_comment_exports": "node → the napi binding (compiled .node); browser/default → the wasm binding (paigasus-wasm, .wasm + glue). Conditions point at SOURCE (bundler-aware consumers walk TS); switch to ./dist/* when tsup wiring lands, IN LOCKSTEP with flipping `private: false`. workerd intentionally omitted (no verified workerd path yet — SMA-427 H3); it falls through to `default`.",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -8,18 +8,21 @@
   "exports": {
     ".": {
       "node": "./src/index.ts",
-      "default": "./src/unsupported.ts"
+      "browser": "./src/wasm.ts",
+      "default": "./src/wasm.ts"
     }
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@paigasus/node-bindings": "file:../../../rs/crates/bindings/paigasus-node-bindings"
+    "@paigasus/node-bindings": "file:../../../rs/crates/bindings/paigasus-node-bindings",
+    "@paigasus/wasm": "file:../../../rs/crates/bindings/paigasus-wasm"
   },
   "devDependencies": {
     "@napi-rs/cli": "catalog:",
     "typescript": "catalog:",
+    "vite-plugin-wasm": "catalog:",
     "vitest": "catalog:"
   }
 }

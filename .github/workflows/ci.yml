@@ -86,9 +86,18 @@ jobs:
       # failing with "could not rename 'downloaded' ... (os error 2)". ~/.rustup is not cached, so it
       # recurs every run. Materialize the components ONCE, serially, so the parallel graph finds them
       # already present.
-      - name: Pre-install Rust components (serial — avoid rustup concurrent-download races)
+      #
+      # Same race for the wasm32 target (SMA-427): `wasm-pack build` runs `rustup target add
+      # wasm32-unknown-unknown` itself ("Checking for the Wasm target…"), and kernel-ts's `build` and
+      # `test` tasks both invoke wasm-pack concurrently → two `rustup target add` race the same
+      # ~/.rustup/downloads/ and one dies with the same rename error. `.moon/toolchains.yml`
+      # `rust.targets` does NOT prevent this (wasm-pack re-checks/installs into the rust-toolchain.toml
+      # toolchain regardless), so materialize the target here too, serially, before the parallel graph.
+      - name: Pre-install Rust components + wasm32 target (serial — avoid rustup concurrent-download races)
         working-directory: rs
-        run: rustup component add rustfmt clippy
+        run: |
+          rustup component add rustfmt clippy
+          rustup target add wasm32-unknown-unknown
 
       # pnpm/uv stores live wherever each tool decides; resolve them at runtime (now that
       # moon setup has installed pnpm + uv) instead of hard-coding Linux defaults that may

@@ -10,6 +10,7 @@ language: 'typescript'
 # this project's task context so `napi build` can shell out to cargo.
 dependsOn:
   - 'paigasus-node-bindings-rs'
+  - 'paigasus-wasm-rs'
 
 tasks:
   # Produce the .node + regenerate the committed glue, THEN typecheck. Overrides the inherited
@@ -29,8 +30,17 @@ tasks:
   # content-correct recompile from current source — the napi analog of the py wheel's
   # `uv sync --reinstall-package`. `touch` is host-agnostic (CI is Linux, dev is macOS); a per-triple
   # `cargo clean --target <triple>` would have to know the host triple, so we avoid it.
+  #
+  # wasm-pack runs from INSIDE the crate dir (`cd ... && wasm-pack build .`), NOT via a path arg from
+  # here: rs/rust-toolchain.toml's `1.95.0` override only applies under rs/, so running wasm-pack from
+  # this ts cwd would resolve rustup's DEFAULT toolchain (on CI, the runner's stable — which lacks the
+  # wasm32 target and is off our pinned toolchain). cwd inside the crate pins wasm-pack's rustup/cargo
+  # to 1.95.0, where CI pre-installs the wasm32 target serially (.github/workflows/ci.yml) — so its
+  # "Checking for the Wasm target" finds it present and the parallel build+test wasm-pack invocations
+  # don't race two concurrent `rustup target add` (SMA-427 CI fix). `--out-dir` stays relative to the
+  # crate, so the glue still lands in the crate dir; the subshell reverts cwd for the copy-back.
   build:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec tsc -p tsconfig.json --noEmit'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-out --out-name paigasus_wasm ) && cp ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out/paigasus_wasm* ../../../rs/crates/bindings/paigasus-wasm/ && rm -rf ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out && pnpm exec tsc -p tsconfig.json --noEmit'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
@@ -50,17 +60,34 @@ tasks:
       # is fully determined by the Rust src + napi version (pnpm-lock.yaml), both already listed.
       - '/rs/crates/bindings/paigasus-node-bindings/Cargo.toml'
       - '/rs/crates/bindings/paigasus-node-bindings/package.json'
+      # wasm binding: same cache-input completeness as the napi crate — a kernel or wasm-binding src
+      # edit (the wasm-pack build also recompiles the kernel) or a manifest change must re-key this
+      # task. The generated paigasus_wasm* glue is this task's OUTPUT, not an input.
+      - '/rs/crates/bindings/paigasus-wasm/src/**/*'
+      - '/rs/crates/bindings/paigasus-wasm/Cargo.toml'
+      - '/rs/crates/bindings/paigasus-wasm/package.json'
     outputs:
       # Glob the platform-suffixed .node (darwin-arm64 on dev, linux-x64-gnu on CI, …) so the
       # declared output exists on EVERY host — a hardcoded triple fails Moon's output check on Linux.
       # Cross-platform prebuild matrix + publish still deferred (ADR-0006 / SMA-376/407).
       - '/rs/crates/bindings/paigasus-node-bindings/paigasus-node-bindings.*.node'
+      # The wasm binary is gitignored (the JS/.d.ts glue is committed) — declare only it as an
+      # output (mirror napi; M3); the glue files are tracked and not Moon-managed artifacts.
+      - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm'
   # Rebuild the .node fresh (cache-bust on a Rust edit, review F4), THEN run vitest. The py
   # analog (`uv sync --reinstall-package … && pytest`) refreshes the INSTALLED artifact; here the
   # freshness fix is split: `napi build` rewrites the crate-dir .node, and vitest.config.ts aliases
   # @paigasus/node-bindings to that crate dir — because pnpm COPIES a `file:` dep into its store at
   # install time and never re-copies a rebuilt binary, so loading via the package name would import
   # a STALE store .node (verified: a kernel edit otherwise passes against the old value).
+  #
+  # wasm: this task builds into its OWN scratch out-dir `.wasmpack-test-out` (distinct from the build
+  # task's `.wasmpack-out`) and vitest.config.ts aliases @paigasus/wasm straight at THAT scratch glue —
+  # it does NOT copy into the crate dir. build and test run concurrently under `moon ci`, so if both
+  # copied the freshly-built glue into the shared crate dir they'd race (`cp: … File exists` on the
+  # gitignored .wasm — SMA-427 CI). build is the sole crate-dir writer (for the committed glue); test
+  # reads its own fresh scratch. The two wasm-pack cargo builds still share rs/target and serialize on
+  # cargo's target-dir lock (safe).
   #
   # `touch` first (highest priority — this is the assertion): cargo/`napi build` incrementality is
   # mtime-based, so a warm rs/target/ + a git op that leaves a Rust source OLDER than its artifact
@@ -70,7 +97,7 @@ tasks:
   # current source before the assertion (napi analog of py's `uv sync --reinstall-package`); it is
   # host-agnostic, unlike a per-triple `cargo clean --target`.
   test:
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && pnpm exec vitest run'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && ( cd ../../../rs/crates/bindings/paigasus-wasm && wasm-pack build . --target bundler --release --no-pack --out-dir .wasmpack-test-out --out-name paigasus_wasm ) && pnpm exec vitest run'
     deps: ['^:build']
     inputs:
       - 'src/**/*'
@@ -85,3 +112,8 @@ tasks:
       - '/rs/crates/bindings/paigasus-node-bindings/src/**/*'
       - '/rs/crates/bindings/paigasus-node-bindings/Cargo.toml'
       - '/rs/crates/bindings/paigasus-node-bindings/package.json'
+      # wasm binding sources + manifests, so a kernel or wasm-binding edit re-runs the browser vitest
+      # project against freshly built glue rather than a stale green (mirrors the napi inputs above).
+      - '/rs/crates/bindings/paigasus-wasm/src/**/*'
+      - '/rs/crates/bindings/paigasus-wasm/Cargo.toml'
+      - '/rs/crates/bindings/paigasus-wasm/package.json'

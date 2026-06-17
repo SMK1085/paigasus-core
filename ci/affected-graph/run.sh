@@ -104,11 +104,11 @@ run_suite() {
   # contracts proto edit -> proto packages in all three languages + the gateway rebuild.
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
     "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs"
-  # kernel edit -> kernel + both bindings + gateway + both language wrappers (SMA-419/420).
+  # kernel edit -> kernel + all three bindings (py/node/wasm) + gateway + both language wrappers (SMA-419/420/427).
   # Strict equality (default-deny): any OTHER project appearing (an unrelated *-py/*-ts package, a
   # contracts/py/ts root) fails the case automatically — no forbid enumeration needed.
   run_case "kernel->bindings" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
-    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts"
+    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts,paigasus-wasm-rs"
   # py binding edit -> the binding + the py wrapper that depends on it (SMA-419). One-directional
   # w.r.t. the kernel: paigasus-kernel-rs is deliberately ABSENT (a binding edit must not rebuild
   # the kernel), now enforced implicitly by strict equality rather than a forbid-regex.
@@ -118,6 +118,10 @@ run_suite() {
   # one-directional: paigasus-kernel-rs deliberately absent.
   run_case "binding-oneway-node" "rs/crates/bindings/paigasus-node-bindings/src/lib.rs" \
     "paigasus-node-bindings-rs,paigasus-kernel-ts"
+  # wasm binding edit -> the wasm binding + the ts wrapper that depends on it (SMA-427). Likewise
+  # one-directional: paigasus-kernel-rs deliberately absent (a binding edit must not rebuild the kernel).
+  run_case "binding-oneway-wasm" "rs/crates/bindings/paigasus-wasm/src/lib.rs" \
+    "paigasus-wasm-rs,paigasus-kernel-ts"
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
   assert_include_relations || SUITE_RC=1
   return "$SUITE_RC"

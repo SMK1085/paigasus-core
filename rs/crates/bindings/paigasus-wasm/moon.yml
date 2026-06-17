@@ -1,0 +1,19 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-wasm-rs'
+# Moon-side layer label for this FFI crate (no native `binding` layer). Built like a library but NOT
+# published as an rlib — ships as a .wasm + JS glue via wasm-pack (driven from paigasus-kernel-ts).
+layer: 'library'
+language: 'rust'
+
+# The kernel→binding edge (ADR-0005): a kernel change must rebuild this crate. Task-level `^:build`
+# propagates `affected` under `moon ci --include-relations` (a project dependsOn alone does NOT —
+# SMA-389 D3). Mirrors paigasus-node-bindings-rs.
+dependsOn:
+  - 'paigasus-kernel-rs'
+
+tasks:
+  build:
+    deps: ['^:build']
+  test:
+    deps: ['^:build']

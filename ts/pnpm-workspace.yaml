@@ -65,3 +65,9 @@ catalog:
   # the CLI must be a devDep of @paigasus/kernel (the consumer) to be runnable from the ts
   # workspace. Catalog-listed so it bumps centrally; matches the crate's `^3` devDep range.
   '@napi-rs/cli': ^3.7.2
+  # Vite wasm handling for the browser-condition kernel round-trip test (SMA-427). The bundler-target
+  # wasm-pack glue does a bundler-style `import * as wasm from './…_bg.wasm'`; vitest (Vite) needs
+  # this plugin to instantiate it. Browser vitest project only. (vite-plugin-top-level-await was
+  # dropped: the sync bundler glue needs no TLA, and v1.6.0 hard-requires classic `rollup`, absent
+  # under vitest 4's Vite 8 / rolldown stack — see vitest.config.ts.)
+  vite-plugin-wasm: ^3.6.0

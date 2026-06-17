@@ -1,0 +1,35 @@
+# Vendored proto TOML plugin for wasm-pack (SMA-427).
+#
+# Resolves official rustwasm/wasm-pack GitHub release tarballs. Same vendoring rationale as
+# buf/cargo-machete: a static schema over official release assets. wasm-pack drives the wasm-bindgen
+# build for paigasus-wasm; it auto-fetches the wasm-bindgen-cli matching the crate's wasm-bindgen
+# version (see the rs/Cargo.toml invariant comment).
+#
+# Binary nests one directory deep (wasm-pack-v{version}-{target}/wasm-pack), so exe-path is required
+# on every platform (like cargo-machete; unlike release-plz whose binary is at the archive root).
+# NOTE: wasm-pack publishes NO per-asset .sha256, so — unlike cargo-machete — there is no
+# checksum-file/checksum-url. Tags are "v"-prefixed (v0.15.0); asset filenames embed "v{version}".
+# Linux is symmetric musl (both x86_64 and aarch64 musl assets exist), so {arch} works as-is.
+# Windows ships x86_64 only.
+
+name = "wasm-pack"
+type = "cli"
+
+[platform.linux]
+download-file = "wasm-pack-v{version}-{arch}-unknown-linux-musl.tar.gz"
+exe-path = "wasm-pack-v{version}-{arch}-unknown-linux-musl/wasm-pack"
+
+[platform.macos]
+download-file = "wasm-pack-v{version}-{arch}-apple-darwin.tar.gz"
+exe-path = "wasm-pack-v{version}-{arch}-apple-darwin/wasm-pack"
+
+[platform.windows]
+# Only x86_64 is published for Windows; there is no aarch64-pc-windows-msvc asset.
+download-file = "wasm-pack-v{version}-x86_64-pc-windows-msvc.tar.gz"
+exe-path = "wasm-pack-v{version}-x86_64-pc-windows-msvc/wasm-pack.exe"
+
+[install]
+download-url = "https://github.com/rustwasm/wasm-pack/releases/download/v{version}/{download_file}"
+
+[resolve]
+git-url = "https://github.com/rustwasm/wasm-pack"

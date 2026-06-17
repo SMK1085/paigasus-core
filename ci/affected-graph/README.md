@@ -10,12 +10,17 @@ deep` and asserts the affected project set **equals** an exact expected set per 
 
 - **contracts edit** → `contracts` + `paigasus-proto-{rs,py,ts}` + `paigasus-gateway-rs`.
 - **kernel edit** → `paigasus-kernel-rs` + `paigasus-py-bindings-rs` + `paigasus-node-bindings-rs`
-  + `paigasus-gateway-rs` + `paigasus-kernel-py` + `paigasus-kernel-ts` (both language wrappers
-  wrap their bindings, SMA-419/420). Strict equality rejects any other project implicitly.
+  + `paigasus-wasm-rs` + `paigasus-gateway-rs` + `paigasus-kernel-py` + `paigasus-kernel-ts` (both
+  language wrappers wrap their bindings, SMA-419/420/427). Strict equality rejects any other project
+  implicitly.
 - **py binding edit** → `paigasus-py-bindings-rs` + `paigasus-kernel-py`; one-directional w.r.t.
   the kernel.
 - **node binding edit** → `paigasus-node-bindings-rs` + `paigasus-kernel-ts`; one-directional
   w.r.t. the kernel.
+- **wasm binding edit** → `paigasus-wasm-rs` + `paigasus-kernel-ts`; one-directional w.r.t. the
+  kernel. `paigasus-kernel-ts` now has two upstream binding edges — `paigasus-kernel-rs →
+  paigasus-node-bindings-rs → paigasus-kernel-ts` (napi) and `paigasus-kernel-rs →
+  paigasus-wasm-rs → paigasus-kernel-ts` (wasm, SMA-427) — so a kernel edit reaches it via both.
 
 It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
 `--include-relations` (the edges are inert without it).
