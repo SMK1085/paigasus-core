@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { fileURLToPath } from 'node:url';
-import { defineConfig } from 'vitest/config';
+import { defineConfig, type Plugin } from 'vitest/config';
 import wasm from 'vite-plugin-wasm';
 
 // Resolve each binding to its crate dir (where the build rewrites the artifact) instead of pnpm's
@@ -44,7 +44,10 @@ export default defineConfig({
         // (`Cannot find module 'rollup'`). vite-plugin-wasm alone instantiates the glue and both
         // round-trip tests pass. If a future kernel fn forces async wasm init, revisit with a
         // rolldown-compatible TLA shim (SMA-427).
-        plugins: [wasm()],
+        // vite-plugin-wasm's factory is typed `() => any`; cast to vite's `Plugin` (re-exported by
+        // vitest/config — `vite` itself isn't a direct dep here) so the typed-ESLint
+        // no-unsafe-assignment rule passes without a disable.
+        plugins: [wasm() as Plugin],
         test: {
           name: 'browser',
           environment: 'node',
