@@ -499,7 +499,13 @@ auto-fetched the matching CLI — the §1 invariant held).
   disproof. The `await init()` fallback remains documented and open for the workerd/consumer follow-up.
 - **§7.1 host build/lint: PASS** (macOS) — `cargo build`/`clippy --all-targets -D warnings`/`machete` all
   green against the wasm cdylib on the host; no host-gate exclusion needed.
-- **Final verification:** `moon ci :build`/`:test --include-relations` green (`paigasus-kernel-ts:test` =
+- **Final verification (local):** `moon ci :build`/`:test --include-relations` green (`paigasus-kernel-ts:test` =
   2/2, both the napi `node` and wasm `browser` vitest projects); `repo:affected-smoke` PASS (incl. the new
   `binding-oneway-wasm` case and `paigasus-wasm-rs` in `kernel->bindings`); `repo:machete`/`repo:deny`/
   `cargo fmt`/`clippy`/`nextest` green.
+- **CI fix (H1, follow-on):** the first Linux CI run (PR #50) surfaced the predicted gap — `.moon/toolchains.yml`
+  `rust.targets` did **not** make the wasm32 target present for wasm-pack, which runs `rustup target add
+  wasm32-unknown-unknown` itself; kernel-ts's parallel `build`+`test` both invoked wasm-pack, racing two
+  `rustup target add` on `~/.rustup/downloads/` → one died with `could not rename 'downloaded' … (os error 2)`.
+  Fix: pre-install the wasm32 target **serially** in `.github/workflows/ci.yml` before the parallel graph
+  (extending the existing rustfmt/clippy component pre-install that guards the identical napi-era race).
