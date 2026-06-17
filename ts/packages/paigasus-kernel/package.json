@@ -1,10 +1,22 @@
 {
   "name": "@paigasus/kernel",
   "_comment_exports": "node → the napi binding (compiled .node); browser/default → the wasm binding (paigasus-wasm, .wasm + glue). Conditions point at SOURCE (bundler-aware consumers walk TS); switch to ./dist/* when tsup wiring lands, IN LOCKSTEP with flipping `private: false`. workerd intentionally omitted (no verified workerd path yet — SMA-427 H3); it falls through to `default`.",
+  "_comment_publish": "Publish is DOUBLE-BLOCKED, deferred beyond SMA-428 (which only adds static metadata): (1) exports point at source — needs the tsup/dist build (SMA-420 deferral) before a pack ships JS instead of raw .ts, and the `file:` deps must become real npm packages; (2) the version flip off 0.0.0 + private:false belong to release activation (SMA-407).",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
+  "description": "Cross-language Paigasus kernel for Node and the browser (napi + wasm bindings).",
+  "keywords": ["paigasus", "kernel", "napi", "wasm", "ffi"],
+  "homepage": "https://github.com/SMK1085/paigasus-core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SMK1085/paigasus-core.git",
+    "directory": "ts/packages/paigasus-kernel"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "node": "./src/index.ts",
