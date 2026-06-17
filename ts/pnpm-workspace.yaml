@@ -7,13 +7,7 @@ packages:
 # optimization) ships prebuilt binaries, so allow its install script. NOTE: pnpm 11 uses
 # the `allowBuilds` map; the older `onlyBuiltDependencies` list is ignored (verified
 # against pnpm 11.3.0 — onlyBuiltDependencies still errored, allowBuilds builds it).
-#
-# `@swc/core` arrives transitively via vite-plugin-top-level-await (SMA-427 browser vitest).
-# It loads its prebuilt platform binary (@swc/core-<platform>, an optional dep) — verified that
-# `require('@swc/core')` succeeds with the postinstall NOT run — so we deny its build script
-# (false) rather than run an unpinned native build in CI.
 allowBuilds:
-  '@swc/core': false
   sharp: true
 
 # Security overrides for transitive deps that parents pin to vulnerable versions
