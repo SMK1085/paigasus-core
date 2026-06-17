@@ -1,0 +1,85 @@
+name: prebuild
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+# Build-only verification: read the repo, build addons, run dry-run packaging. No publish, and no
+# GitHub release is created (the assemble job omits napi's opt-in --gh-release flag), so no
+# contents:write is needed. SMA-407 adds publish creds at activation.
+permissions:
+  contents: read
+
+concurrency:
+  group: prebuild-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin-x64,       target: x86_64-apple-darwin,        runner: macos-15-intel,    container: '' }
+          - { platform: darwin-arm64,     target: aarch64-apple-darwin,       runner: macos-latest,      container: '' }
+          - { platform: win32-x64-msvc,   target: x86_64-pc-windows-msvc,     runner: windows-latest,    container: '' }
+          - { platform: linux-x64-gnu,    target: x86_64-unknown-linux-gnu,   runner: ubuntu-latest,     container: '' }
+          - { platform: linux-arm64-gnu,  target: aarch64-unknown-linux-gnu,  runner: ubuntu-24.04-arm,  container: '' }
+          - { platform: linux-x64-musl,   target: x86_64-unknown-linux-musl,  runner: ubuntu-latest,     container: 'ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine' }
+          - { platform: linux-arm64-musl, target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm,  container: 'ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine' }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+
+      # Host legs: pin node/pnpm/rust via proto (matches .prototools / rust-toolchain.toml).
+      # musl container legs SKIP this and use the image's bundled Rust/Node by design (spec §2 / M2:
+      # the .node is a leaf artifact, so the image toolchain carries no cross-version rmeta hazard).
+      - name: Set up proto + Moon (host legs)
+        if: ${{ matrix.container == '' }}
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install Moon-managed toolchains (host legs)
+        if: ${{ matrix.container == '' }}
+        run: moon setup
+
+      # Cross-target artifacts differ by triple → triple in the cache key (spec §2 / L2).
+      - name: Cache Rust (cargo + target)
+        if: ${{ matrix.container == '' }}
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rs/target
+          key: prebuild-rust-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('rs/rust-toolchain.toml') }}-${{ hashFiles('rs/Cargo.lock') }}
+          restore-keys: |
+            prebuild-rust-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('rs/rust-toolchain.toml') }}-
+
+      # Attach the cross target to the pinned 1.95.0 toolchain — run from rs/ so rust-toolchain.toml's
+      # override selects 1.95.0, not the runner default (mirrors ci.yml's serial pre-install; spec §2).
+      - name: Add Rust target (pinned toolchain)
+        working-directory: rs
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install JS workspace deps
+        run: pnpm --dir ts install --frozen-lockfile
+
+      - name: Build the addon
+        working-directory: ts/packages/paigasus-kernel
+        run: pnpm exec napi build --platform --release --target ${{ matrix.target }} --cwd ../../../rs/crates/bindings/paigasus-node-bindings
+
+      - name: Upload prebuild artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: prebuild-${{ matrix.platform }}
+          path: rs/crates/bindings/paigasus-node-bindings/paigasus-node-bindings.${{ matrix.platform }}.node
+          if-no-files-found: error
