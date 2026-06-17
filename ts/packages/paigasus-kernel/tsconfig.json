@@ -4,9 +4,10 @@
     "noEmit": true,
     // Resolve the `node` export condition so tsc/eslint's typed projectService walk
     // src/index.ts (the napi binding, typed via @paigasus/node-bindings' index.d.ts) — NOT the
-    // `default` branch (src/unsupported.ts, no `sum`). The runtime (vitest in Node) picks `node`
-    // anyway; this keeps the type view in lockstep. Drop in lockstep if the wasm/default branch
-    // ever needs to be the type-checked surface (SMA-420 follow-up).
+    // `browser`/`default` branch (src/wasm.ts → @paigasus/wasm). Both surfaces expose the same
+    // `sum`, so the type view stays single and consistent; the wasm surface is kept in lockstep
+    // not by type-checking it here but by the src/binding-parity.types.ts guard, which fails the
+    // build if the wasm and napi `sum` signatures ever diverge (SMA-427).
     "customConditions": ["node"]
   },
   // tests/ holds the runtime FFI smoke test; vitest.config.ts wires the binding alias. Both must
