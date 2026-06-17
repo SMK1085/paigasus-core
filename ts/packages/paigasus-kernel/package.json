@@ -22,7 +22,6 @@
   "devDependencies": {
     "@napi-rs/cli": "catalog:",
     "typescript": "catalog:",
-    "vite-plugin-top-level-await": "catalog:",
     "vite-plugin-wasm": "catalog:",
     "vitest": "catalog:"
   }
