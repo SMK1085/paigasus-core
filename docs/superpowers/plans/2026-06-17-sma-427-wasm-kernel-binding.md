@@ -16,7 +16,7 @@
 
 - **PATH:** proto-managed tools (`moon`, `wasm-pack`, `cargo`, `pnpm`) are off the default Bash PATH. Prefix shell steps with:
   `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` (shims FIRST = repo-pinned versions). Run `moon`/`cargo` from inside `rs/` per CLAUDE.md/`rs/.cargo/config.toml`.
-- **Commits:** Conventional Commits with a scope from the allowlist (`rs`, `ts`, `ci`, `repo`, `docs`, …) — commitlint enforces a non-empty scope. End every commit message body with a blank line then:
+- **Commits:** Conventional Commits with a scope from the allowlist (`rs`, `ts`, `ci`, `repo`, `docs`, …) — commitlint enforces a non-empty scope. **The subject must NOT start with an uppercase token** (commitlint `subject-case` rejects leading `SMA-427`): lead with a lowercase verb, e.g. `feat(rs): add paigasus-wasm …`, never `feat(rs): SMA-427 …`. Body lines ≤100 chars. End every commit message body with a blank line then:
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
   Commits are SSH-signed via 1Password; if a commit fails with "failed to fill whole buffer", 1Password is locked — ask the user to unlock, then retry.
 - **Branch:** already on `feature/sma-427-stand-up-the-wasm-kernel-binding-paigasus-wasm-for`.
@@ -315,11 +315,20 @@ Expected `git status` after add: `rs/Cargo.toml`, `rs/Cargo.lock`, the four crat
 
 - [ ] **Step 1: Write** `docs/superpowers/specs/2026-06-17-sma-427-spike-findings.md` recording, for each of §7.1–§7.8: the command run, the observed result, and the go/no-go decision. Explicitly state: (a) host build/lint PASS or FALLBACK-exclude; (b) exact glue filenames; (c) wasm-pack `--out-dir` form that worked; (d) the working vite-plugin-wasm config; (e) Next.js outcome (sync confirmed / risk + `init()` fallback open); (f) whether the machete ignore is actually needed.
 
-- [ ] **Step 2: Commit** `docs(repo): SMA-427 spike findings + go/no-go`.
+- [ ] **Step 2: Commit** `docs(repo): record SMA-427 wasm spike findings + go/no-go` (lead with a lowercase verb — see Conventions).
 
 - [ ] **Step 3: STOP for orchestrator review.** If §7.1 forced the host-gate exclusion or §7.6 forced `init()`, the orchestrator amends Phases 1–3 before continuing.
 
 ---
+
+## Phase 0 gate outcomes (resolved by orchestrator)
+
+Recorded from `docs/superpowers/specs/2026-06-17-sma-427-spike-findings.md`:
+- **§7.1 host build/lint/machete: PASS** (macOS) → no host-gate exclusion (Task 2.1 uses plain `deps`).
+- **Glue filenames + `--out-dir` + vitest config: confirmed** as written. wasm-bindgen 0.2.125 + matching CLI auto-fetched.
+- **wasm-pack destructively cleans `--out-dir`** → Task 2.2 uses the scratch-dir + copy-back approach.
+- **§7.6 Next.js (H2): keep the synchronous surface (decision #1).** No live consumer; turbopack compiled/prerendered fine; the `await init()` fallback stays documented and open for the future workerd/consumer follow-up. **No `init()` change in Phase 1.**
+- **§7.8 machete ignore:** not strictly required but kept (defense-in-depth, mirrors pyo3).
 
 ## Phase 1 — Dual-export `@paigasus/kernel` (node → napi, browser/default → wasm)
 
@@ -485,7 +494,7 @@ tasks:
   test:
     deps: ['^:build']
 ```
-> **If the spike (Task 0.2 Step 5) forced the host-gate exclusion:** add the inherited-task override here to skip/replace the host `build`/`lint` for this crate per the spike's recorded approach, instead of the bare `deps` above.
+> **Resolved at the Phase 0 gate:** §7.1 host build + `clippy --all-targets -D warnings` + machete all PASSED on macOS — **no host-gate exclusion needed**. Use the plain `deps: ['^:build']` form above. (Linux host gate is verified by CI on the PR, Phase 4.)
 
 - [ ] **Step 2: Verify the project + edge register**
 
@@ -499,7 +508,15 @@ Expected: includes `paigasus-wasm-rs` (alongside the existing kernel/py/node/gat
 
 ### Task 2.2: Drive wasm-pack from `paigasus-kernel-ts` build/test
 
-**Files:** Modify `ts/packages/paigasus-kernel/moon.yml`.
+**Files:** Modify `ts/packages/paigasus-kernel/moon.yml`; Modify `rs/crates/bindings/paigasus-wasm/.gitignore` (add the scratch dir).
+
+> **Phase 0 finding — wasm-pack destructively cleans its `--out-dir`.** `wasm-pack build … --out-dir .`
+> DELETES the hand-written `package.json` and overwrites `.gitignore` (a bare `*`) on every run, even
+> with `--no-pack`. Because these build/test scripts rerun wasm-pack, they must NOT point `--out-dir` at
+> the crate root. Fix: build into a **gitignored scratch dir** (`.wasmpack-out`) and copy only the
+> `paigasus_wasm*` glue back into the crate root — wasm-pack's clean only ever touches the scratch dir,
+> leaving the committed `package.json`/`.gitignore`/glue untouched. The crate-root `.gitignore` already
+> ignores `*.wasm` (so the copied binary stays ignored); add `.wasmpack-out/` to it too.
 
 - [ ] **Step 1: Add `paigasus-wasm-rs` to `dependsOn`:**
 
@@ -509,11 +526,14 @@ dependsOn:
   - 'paigasus-wasm-rs'
 ```
 
-- [ ] **Step 2: Update the `build` task** — `touch` all three sources, run napi build, then wasm-pack build, then typecheck. Replace the existing `build.script` with:
+- [ ] **Step 2: Add `.wasmpack-out/` to** `rs/crates/bindings/paigasus-wasm/.gitignore` (the scratch out-dir the build/test tasks use; keep the existing `*.wasm` line). Replace the existing "NOTE: …" paragraph with a short note pointing at the scratch-copy approach below.
+
+- [ ] **Step 3: Update the `build` task** — `touch` all three sources, run napi build, then wasm-pack build into the scratch dir + copy the glue back, then typecheck. Replace the existing `build.script` with:
 
 ```yaml
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && wasm-pack build ../../../rs/crates/bindings/paigasus-wasm --target bundler --release --no-pack --out-dir . --out-name paigasus_wasm && pnpm exec tsc -p tsconfig.json --noEmit'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && wasm-pack build ../../../rs/crates/bindings/paigasus-wasm --target bundler --release --no-pack --out-dir .wasmpack-out --out-name paigasus_wasm && cp ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out/paigasus_wasm* ../../../rs/crates/bindings/paigasus-wasm/ && rm -rf ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out && pnpm exec tsc -p tsconfig.json --noEmit'
 ```
+> `--out-dir .wasmpack-out` is relative to the crate dir (the positional path) — confirmed in the spike — so the scratch dir is `…/paigasus-wasm/.wasmpack-out`. The `cp …/paigasus_wasm*` glob copies all five emitted files (the 4 glue files + `paigasus_wasm_bg.wasm`) into the crate root; `.wasm` stays gitignored there.
 Add to the `build.inputs` (after the node-bindings entries):
 ```yaml
       - '/rs/crates/bindings/paigasus-wasm/src/**/*'
@@ -525,15 +545,14 @@ Add to the `build.outputs` (gitignored binary ONLY — mirror napi; M3):
       - '/rs/crates/bindings/paigasus-wasm/paigasus_wasm_bg.wasm'
 ```
 
-- [ ] **Step 3: Update the `test` task** identically — add the wasm sources to `touch`, add `wasm-pack build …` before `pnpm exec vitest run`, and add the same three wasm inputs. Replace `test.script` with:
+- [ ] **Step 4: Update the `test` task** identically — same `touch` + napi build + wasm-pack-into-scratch + copy-back, then `pnpm exec vitest run`, and add the same three wasm inputs. Replace `test.script` with:
 
 ```yaml
-    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && wasm-pack build ../../../rs/crates/bindings/paigasus-wasm --target bundler --release --no-pack --out-dir . --out-name paigasus_wasm && pnpm exec vitest run'
+    script: 'touch ../../../rs/crates/libs/paigasus-kernel/src/lib.rs ../../../rs/crates/bindings/paigasus-node-bindings/src/lib.rs ../../../rs/crates/bindings/paigasus-wasm/src/lib.rs && pnpm exec napi build --platform --cwd ../../../rs/crates/bindings/paigasus-node-bindings && wasm-pack build ../../../rs/crates/bindings/paigasus-wasm --target bundler --release --no-pack --out-dir .wasmpack-out --out-name paigasus_wasm && cp ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out/paigasus_wasm* ../../../rs/crates/bindings/paigasus-wasm/ && rm -rf ../../../rs/crates/bindings/paigasus-wasm/.wasmpack-out && pnpm exec vitest run'
 ```
-Add the three wasm inputs to `test.inputs` as well.
-> Adjust the `wasm-pack build` invocation to whatever form the spike (Task 0.2 Step 6) recorded as working for `--out-dir`.
+Add the same three wasm `inputs` to `test.inputs` as well.
 
-- [ ] **Step 4: Commit** `feat(ts): build paigasus-wasm in the kernel-ts build/test cascade (SMA-427)`.
+- [ ] **Step 5: Commit** `feat(ts): build paigasus-wasm in the kernel-ts build/test cascade (SMA-427)`.
 
 ### Task 2.3: Two vitest projects + the wasm round-trip test (AC #1 proof)
 
