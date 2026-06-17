@@ -88,6 +88,19 @@ Update the existing `test`-task comment to record the freshness mechanism (mirro
 moon.yml comments): why the `touch` is needed, why it's host-agnostic (vs a per-triple
 `cargo clean`), and why only `test` (not `build`) carries it.
 
+## Known limitation (not addressed; shared with the ts template)
+
+Neither FFI guard re-keys when the **FFI crate itself** bumps version (review F1). `pyo3` is
+declared in `rs/Cargo.toml` `[workspace.dependencies]` (the binding's `Cargo.toml` only says
+`pyo3.workspace = true`) and the resolved version lives in `rs/Cargo.lock` — none of which are
+task inputs. So a `pyo3` bump that altered FFI value-mapping would not re-run the guard. The
+maturin-version axis *is* covered (maturin resolves via `/py/uv.lock`, a listed input; the
+bindings `pyproject.toml` is listed too) — only the underlying FFI-crate-version axis is not.
+Risk is low (a patch bump rarely changes integer marshalling) and the obvious fix (add
+`rs/Cargo.lock` as an input) is noisy: it would re-key the guard on *any* workspace-dep change.
+Deliberately not addressed here, to preserve an exact mirror of the ts template; **if ever
+tightened, do it on both guards** to keep the symmetry that is the whole point of this issue.
+
 ## Verification (the trap test, mirroring ts)
 
 1. **Trap (false-green proof):** build a warm `rs/target` from a tampered kernel (`a + b + 1`),
@@ -107,6 +120,20 @@ ordering (sources written at "now"; `actions/cache`/tar preserves the older rest
 mtimes) means the inversion is a local-demonstrated risk, not a natural CI one. Protecting the
 *non-FFI* Rust tasks (cargo build / nextest / clippy) from inversion would be a separate, broader
 follow-up — not required to close the FFI-guard gap this issue is about.
+
+**This deferral's CI-safety is contingent on the cache action's mtime behavior** (review F3):
+the "no inversion on CI" argument holds only because `actions/cache` (tar) preserves
+restored-artifact mtimes and `actions/checkout` writes sources at "now." If the `rs/target`
+restore strategy ever changes to re-time files to "now," the CI inversion reappears and the
+`touch` becomes load-bearing on CI too — not just locally.
+
+**The per-guard `touch` is also why this broader policy is the eventual consolidation**
+(review F2): the py guard (this) and the ts guard both `touch` the *same*
+`rs/crates/libs/paigasus-kernel/src/lib.rs`, and the deferred wasm guard will make three. Each
+touch bumps the shared kernel mtime, which can trigger redundant kernel/binding recompiles in
+sibling cargo tasks — serialized safely by cargo's target-dir lock (correctness-preserving), but
+churn that compounds as guards multiply. A single `rs/target` freshness policy would consolidate
+N per-guard touches into one — a cleaner long-term shape than one touch per guard.
 
 ## Files touched
 
