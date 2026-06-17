@@ -471,3 +471,35 @@ Findings from a staff-engineering design review, verified against the live repo 
   conscious change (L4) flagged in §2; `i32` truncation debt (L5) in §8.
 - **P1 (Process — spike as blocker gate) — accepted.** §7 reframed as a gate sequenced *before* the
   crate/tooling/guard/ADR wiring; this is carried into the implementation plan ordering.
+
+## Implementation notes (as-built, 2026-06-17)
+
+Deviations discovered during implementation (plan:
+`docs/superpowers/plans/2026-06-17-sma-427-wasm-kernel-binding.md`; spike findings:
+`2026-06-17-sma-427-spike-findings.md`). Pins: **wasm-pack 0.15.0**, **wasm-bindgen 0.2.125** (wasm-pack
+auto-fetched the matching CLI — the §1 invariant held).
+
+- **`vite-plugin-top-level-await` was NOT used (supersedes §3/§5/§7.4's "+ top-level-await").** Two
+  reasons: (a) the `--target bundler` glue instantiates **synchronously** (`import * as wasm` + a sync
+  `__wbindgen_start()`), so no top-level await is needed for this surface; (b) `vite-plugin-top-level-await@1.6.0`
+  hard-`require("rollup")`s at load, but vitest 4.1.9 pulls **Vite 8 (rolldown, no classic `rollup`)**, so
+  importing it crashes config load. **`vite-plugin-wasm` alone** instantiates the glue and both round-trip
+  tests pass. A future async-`init()` surface (the H2 fallback) would need a rolldown-compatible TLA shim.
+- **The browser vitest project aliases `@paigasus/kernel` → `src/wasm.ts`** (not only `@paigasus/wasm`).
+  vitest forces `node` into `resolve.conditions` for an `environment: 'node'` run, and the kernel's
+  `node`-first exports map would self-resolve to `src/index.ts` (napi) — a silent false green. The alias
+  forces the real browser-export entry. Round-trip fidelity was proven by a **wasm-shim-specific
+  perturbation** (a `+100` in `paigasus-wasm/src/lib.rs` moved only the browser test, not the node test).
+- **wasm-pack destructively cleans its `--out-dir`** (deletes `package.json`, overwrites `.gitignore`).
+  The `paigasus-kernel-ts` build/test tasks therefore build into a gitignored `.wasmpack-out` scratch dir
+  and copy the `paigasus_wasm*` glue back into the crate root, leaving the committed
+  `package.json`/`.gitignore`/glue intact.
+- **§7.6 (H2): the synchronous surface was kept.** No live consumer exists; a throwaway Next.js check had
+  turbopack compiling/prerendering fine but webpack failing at static prerender — neither a hydration
+  disproof. The `await init()` fallback remains documented and open for the workerd/consumer follow-up.
+- **§7.1 host build/lint: PASS** (macOS) — `cargo build`/`clippy --all-targets -D warnings`/`machete` all
+  green against the wasm cdylib on the host; no host-gate exclusion needed.
+- **Final verification:** `moon ci :build`/`:test --include-relations` green (`paigasus-kernel-ts:test` =
+  2/2, both the napi `node` and wasm `browser` vitest projects); `repo:affected-smoke` PASS (incl. the new
+  `binding-oneway-wasm` case and `paigasus-wasm-rs` in `kernel->bindings`); `repo:machete`/`repo:deny`/
+  `cargo fmt`/`clippy`/`nextest` green.
