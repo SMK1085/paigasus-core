@@ -1,0 +1,19 @@
+{
+  "name": "@paigasus/node-bindings",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "binaryName": "paigasus-node-bindings"
+  },
+  "files": ["index.js", "index.d.ts", "*.node"],
+  "scripts": {
+    "build": "napi build --platform",
+    "build:release": "napi build --platform --release"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3"
+  }
+}

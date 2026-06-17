@@ -1,19 +1,21 @@
-# affected-graph regression guard (SMA-409)
+# affected-graph regression guard (SMA-409 / SMA-429)
 
 `moon ci` *uses* the affected graph but never *asserts* it is correct: a deleted
 `dependsOn` edge — or a dropped `moon ci --include-relations` — makes the affected set
 silently shrink, so CI under-builds and stays **green**. This guard closes that gap.
 
 `run.sh` feeds a synthetic touched-file to `moon query projects --affected --downstream
-deep` and asserts the affected project set per known case (`repo`, which owns the whole
-tree as its source, is filtered out):
+deep` and asserts the affected project set **equals** an exact expected set per known case
+(default-deny; `repo`, which owns the whole tree as its source, is filtered out):
 
 - **contracts edit** → `contracts` + `paigasus-proto-{rs,py,ts}` + `paigasus-gateway-rs`.
-- **kernel edit** → `paigasus-kernel-rs` + `paigasus-py-bindings-rs` + `paigasus-gateway-rs`
-  + `paigasus-kernel-py` (the py wrapper now wraps the wheel, SMA-419); still **no `*-ts` /
-  `contracts` / unrelated `*-py`** (`paigasus-proto/workflows/ml-py`).
-- **binding edit** → `paigasus-py-bindings-rs` + `paigasus-kernel-py`; still one-directional
-  w.r.t. the kernel (never drags in `paigasus-kernel-rs`).
+- **kernel edit** → `paigasus-kernel-rs` + `paigasus-py-bindings-rs` + `paigasus-node-bindings-rs`
+  + `paigasus-gateway-rs` + `paigasus-kernel-py` + `paigasus-kernel-ts` (both language wrappers
+  wrap their bindings, SMA-419/420). Strict equality rejects any other project implicitly.
+- **py binding edit** → `paigasus-py-bindings-rs` + `paigasus-kernel-py`; one-directional w.r.t.
+  the kernel.
+- **node binding edit** → `paigasus-node-bindings-rs` + `paigasus-kernel-ts`; one-directional
+  w.r.t. the kernel.
 
 It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
 `--include-relations` (the edges are inert without it).
@@ -21,11 +23,19 @@ It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
 Run locally: `moon run repo:affected-smoke` (or `ci/affected-graph/run.sh`).
 Prove it can fail: `ci/affected-graph/run.sh --negative-control`.
 
-## Maintenance — the must-exclude assertions are topology-coupled (SMA-409 F5)
+## Maintenance — expected sets are exact (default-deny, SMA-429)
 
-The **must-include** sets are durable. The **must-exclude** (cross-stack-isolation)
-assertions track current topology. The **py** wrapper edge landed in SMA-419
-(`paigasus-kernel-py` moved from forbid → must-include). The remaining deferred edge is the
-**ts** kernel wrapper: when it lands, a kernel edit *should* affect it, and the
-`kernel->bindings` forbid-regex here will correctly need its `-ts$` term loosened. A failure
-there is the expected next edge, not a regression; update this guard alongside that work.
+Each case asserts the affected set (minus `repo`) **equals** its expected set exactly — there is
+no separate must-exclude list and no forbid enumeration. Cross-stack isolation is enforced
+implicitly: any project that appears but isn't in the expected set fails the case.
+
+- A project **unrelated** to a case never enters its downstream set, so it never appears → no
+  maintenance (this is what the old hand-maintained forbid-regex existed to track).
+- A project that **legitimately** becomes a new dependent (e.g. a future wasm kernel binding)
+  makes the case fail with an `unexpected` entry → confirm the new edge is intended, then add the
+  one project to that case's expected set.
+
+The expected sets are a snapshot of `moon query --affected --downstream deep` output at the
+**pinned moon version** (currently 2.3.2). A moon upgrade that changes the affected-set output —
+even benignly — will fail the guard, so re-grounding the expected sets is a known step of any
+moon bump.

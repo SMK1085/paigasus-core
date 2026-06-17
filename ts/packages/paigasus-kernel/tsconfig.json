@@ -1,9 +1,16 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "./dist",
-    "rootDir": "./src",
-    "noEmit": true
+    "noEmit": true,
+    // Resolve the `node` export condition so tsc/eslint's typed projectService walk
+    // src/index.ts (the napi binding, typed via @paigasus/node-bindings' index.d.ts) — NOT the
+    // `default` branch (src/unsupported.ts, no `sum`). The runtime (vitest in Node) picks `node`
+    // anyway; this keeps the type view in lockstep. Drop in lockstep if the wasm/default branch
+    // ever needs to be the type-checked surface (SMA-420 follow-up).
+    "customConditions": ["node"]
   },
-  "include": ["src/**/*"]
+  // tests/ holds the runtime FFI smoke test; vitest.config.ts wires the binding alias. Both must
+  // be in the program so the typed eslint projectService covers them (no rootDir — it would reject
+  // files outside src/; inert under noEmit).
+  "include": ["src/**/*", "tests/**/*", "vitest.config.ts"]
 }
