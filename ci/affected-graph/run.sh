@@ -104,7 +104,7 @@ run_suite() {
   # contracts proto edit -> proto packages in all three languages + the gateway rebuild.
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
     "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs"
-  # kernel edit -> kernel + both bindings + gateway + both language wrappers (SMA-419/420).
+  # kernel edit -> kernel + all three bindings (py/node/wasm) + gateway + both language wrappers (SMA-419/420/427).
   # Strict equality (default-deny): any OTHER project appearing (an unrelated *-py/*-ts package, a
   # contracts/py/ts root) fails the case automatically — no forbid enumeration needed.
   run_case "kernel->bindings" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
