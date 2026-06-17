@@ -10,6 +10,18 @@ packages:
 allowBuilds:
   sharp: true
 
+# Security overrides for transitive deps that parents pin to vulnerable versions
+# (Dependabot can't auto-PR these — they're not in any manifest). Selectors only
+# touch the vulnerable range, so a patched parent later resolves normally.
+overrides:
+  # GHSA-h67p-54hq-rp68 — js-yaml quadratic-complexity DoS in merge-key handling.
+  # Pulled in via cosmiconfig@9.0.1 (@commitlint/cli); 4.2.0 already resolves elsewhere.
+  'js-yaml@<4.2.0': '>=4.2.0'
+  # GHSA-qx2v-qp2m-jg93 — postcss XSS via unescaped </style> in stringify output.
+  # next@16.2.9 (latest stable) hard-pins postcss@8.4.31; the fix only ships in Next
+  # 16.3 (preview/canary already pin 8.5.10). Interim — drop once Next 16.3 is stable.
+  'postcss@<8.5.10': '>=8.5.10'
+
 # Catalog — single bump-point for shared dep versions across the workspace.
 # Per-package package.json references these as "<dep>": "catalog:".
 # pnpm-lock.yaml pins exact resolved versions; the carets here cap the upgrade window.
@@ -20,21 +32,21 @@ catalog:
   next: ^16.2.9
   # TypeScript + ESLint + Prettier
   typescript: ^6.0.3
-  eslint: ^10.4.1
+  eslint: ^10.5.0
   '@eslint/js': ^10.0.1
-  '@eslint-react/eslint-plugin': ^5.8.17
-  'eslint-plugin-react-hooks': ^7.1.0
+  '@eslint-react/eslint-plugin': ^5.9.0
+  'eslint-plugin-react-hooks': ^7.1.1
   'eslint-plugin-jsx-a11y': ^6.10.2
-  'typescript-eslint': ^8.61.0
+  'typescript-eslint': ^8.61.1
   prettier: ^3.8.4
   # Test runner
-  vitest: ^4.1.8
+  vitest: ^4.1.9
   # Type declarations
   '@types/react': ^19.2.17
-  '@types/react-dom': ^19.0.0
+  '@types/react-dom': ^19.2.3
   # Track the Node runtime major (Active LTS 24); Dependabot ignores major bumps so
   # the types can't drift ahead of the runtime (see .github/dependabot.yml).
-  '@types/node': ^24.0.0
+  '@types/node': ^24.13.2
   # Per-package add-ons (catalog-listed so they bump centrally even when used in only one app)
   '@next/eslint-plugin-next': ^16.2.9
   '@tanstack/eslint-plugin-query': ^5.100.14
@@ -43,7 +55,7 @@ catalog:
   '@commitlint/config-conventional': ^21.0.2
   # Release tooling (SMA-406 — dormant semantic-release + parity adapter)
   semantic-release: ^25.0.5
-  '@semantic-release/commit-analyzer': ^13.0.0
+  '@semantic-release/commit-analyzer': ^13.0.1
   # Protobuf-ES v2 runtime (SMA-389)
   '@bufbuild/protobuf': ^2.12.0
   # napi-rs CLI — drives `napi build --platform` for the Node FFI binding (SMA-420).
@@ -51,4 +63,4 @@ catalog:
   # specifier (not a workspace member), and pnpm does NOT install a dependency's devDeps — so
   # the CLI must be a devDep of @paigasus/kernel (the consumer) to be runnable from the ts
   # workspace. Catalog-listed so it bumps centrally; matches the crate's `^3` devDep range.
-  '@napi-rs/cli': ^3
+  '@napi-rs/cli': ^3.7.2
