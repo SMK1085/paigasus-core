@@ -20,7 +20,7 @@
   ```
   (shims FIRST = repo-pinned versions). Verify: `moon --version` → `2.3.2`, `uv --version` and `cargo --version` resolve.
 - **Host:** dev host is macOS arm64. The trap commands use `perl -i` (portable) and `touch -t` (BSD/GNU compatible for the `[[CC]YY]MMDDhhmm` form used here).
-- **Working dir:** all paths are relative to the repo root `/Users/smaschek/dev/paigasus/paigasus-core` unless a step says otherwise.
+- **Working dir:** all paths are relative to the repository root (your local `paigasus-core` checkout) unless a step says otherwise.
 - **Branch:** already on `feature/sma-430-ffi-freshness-fix-the-cargo-mtime-stale-artifact-caveat`.
 - **State note:** the trap mutates `rs/target/` (gitignored) and back-dates a source file's mtime. Every task that sets a trap also restores git-clean state. Confirm `git status` is clean before starting.
 
