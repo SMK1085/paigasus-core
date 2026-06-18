@@ -247,6 +247,16 @@ git commit -m "chore(ts): add npm metadata + publish-blocked breadcrumb to @paig
 
 ## Task 4: `.github/workflows/prebuild.yml` — cross-platform `build` matrix job
 
+> ⚠️ **SUPERSEDED — do NOT implement the YAML in this task as-is.** The matrix + steps below are the
+> *original* design using a job-level napi-rs **Alpine container** for the two musl legs. CI proved
+> that unworkable (GitHub bans JS actions in Alpine containers on **arm64** runners; the image ships
+> **pnpm 9** vs the repo's **pnpm-11** lockfile). The committed **`.github/workflows/prebuild.yml`** is
+> the authoritative source: every leg runs on a glibc/macOS/Windows host with **no `container:` key**,
+> and the two **musl** targets cross-compile via `cargo-zigbuild` (`napi build -x`, zig via
+> `pip install ziglang`). See the **Post-implementation amendments** note near the top of this plan and
+> the design spec (`…-sma-428-napi-prebuild-matrix-design.md`, §1/§6 + *CI verification findings*). The
+> block below is retained for historical context only.
+
 **Files:**
 - Create: `.github/workflows/prebuild.yml`
 
