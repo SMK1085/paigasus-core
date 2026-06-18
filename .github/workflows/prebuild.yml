@@ -1,0 +1,175 @@
+name: prebuild
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+# Build-only verification: read the repo, build addons, run dry-run packaging. No publish, and no
+# GitHub release is created (the assemble job omits napi's opt-in --gh-release flag), so no
+# contents:write is needed. SMA-407 adds publish creds at activation.
+permissions:
+  contents: read
+
+concurrency:
+  group: prebuild-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin-x64,       target: x86_64-apple-darwin,        runner: macos-15-intel,   zig: false }
+          - { platform: darwin-arm64,     target: aarch64-apple-darwin,       runner: macos-latest,     zig: false }
+          - { platform: win32-x64-msvc,   target: x86_64-pc-windows-msvc,     runner: windows-latest,   zig: false }
+          - { platform: linux-x64-gnu,    target: x86_64-unknown-linux-gnu,   runner: ubuntu-latest,    zig: false }
+          - { platform: linux-arm64-gnu,  target: aarch64-unknown-linux-gnu,  runner: ubuntu-24.04-arm, zig: false }
+          - { platform: linux-x64-musl,   target: x86_64-unknown-linux-musl,  runner: ubuntu-latest,    zig: true }
+          - { platform: linux-arm64-musl, target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, zig: true }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+
+      # Pin node/pnpm/rust via proto (matches .prototools / rust-toolchain.toml). Every leg runs on a
+      # real glibc/macOS/Windows host (no job-level container), so GitHub JS actions work everywhere —
+      # incl. the musl legs, which cross-compile via zig instead of an Alpine container (that container
+      # can't run JS actions on arm64 and ships pnpm 9 vs the repo's pnpm 11 lockfile — SMA-428 CI,
+      # decision #6 revised).
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install Moon-managed toolchains
+        run: moon setup
+
+      # Cross-target artifacts differ by triple → triple in the cache key (spec §2 / L2).
+      - name: Cache Rust (cargo + target)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rs/target
+          key: prebuild-rust-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('rs/rust-toolchain.toml') }}-${{ hashFiles('rs/Cargo.lock') }}
+          restore-keys: |
+            prebuild-rust-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('rs/rust-toolchain.toml') }}-
+
+      # Attach the cross target to the pinned 1.95.0 toolchain — run from rs/ so rust-toolchain.toml's
+      # override selects 1.95.0, not the runner default (mirrors ci.yml's serial pre-install; spec §2).
+      - name: Add Rust target (pinned toolchain)
+        working-directory: rs
+        run: rustup target add ${{ matrix.target }}
+
+      # musl targets cross-compile with cargo-zigbuild (zig supplies the musl libc) on a glibc host,
+      # instead of a job-level Alpine container (decision #6 revised — SMA-428 CI). ziglang via pip is
+      # the zig that cargo-zigbuild discovers (`python3 -m ziglang`); cargo-zigbuild provides the
+      # `cargo zigbuild` subcommand that napi's `-x` flag invokes. Built with the pinned toolchain.
+      - name: Set up zig + cargo-zigbuild (musl cross-compile)
+        if: ${{ matrix.zig }}
+        working-directory: rs
+        run: |
+          pip3 install --break-system-packages ziglang
+          cargo install --locked cargo-zigbuild
+
+      - name: Install JS workspace deps
+        run: pnpm --dir ts install --frozen-lockfile
+
+      - name: Build the addon
+        working-directory: ts/packages/paigasus-kernel
+        run: pnpm exec napi build --platform --release --target ${{ matrix.target }} ${{ matrix.zig && '-x' || '' }} --cwd ../../../rs/crates/bindings/paigasus-node-bindings
+
+      - name: Upload prebuild artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: prebuild-${{ matrix.platform }}
+          path: rs/crates/bindings/paigasus-node-bindings/paigasus-node-bindings.${{ matrix.platform }}.node
+          if-no-files-found: error
+
+  assemble:
+    name: assemble + verify (dry-run, no publish)
+    runs-on: ubuntu-latest   # ubuntu-latest == linux-x64-gnu, one of the 7 targets (spec §2.4)
+    needs: build
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install Moon-managed toolchains
+        run: moon setup
+
+      - name: Install JS workspace deps
+        run: pnpm --dir ts install --frozen-lockfile
+
+      - name: Download all prebuilt addons
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          path: rs/crates/bindings/paigasus-node-bindings/artifacts
+          pattern: prebuild-*
+          merge-multiple: true
+
+      # Generate the per-platform npm/<platform>/ dirs IN CI (decision #4 — nothing committed),
+      # then sort the downloaded .node files into them. `napi artifacts` default input dir is
+      # ./artifacts (spike Task 1) — the download step wrote them to $CRATE/artifacts, so do NOT
+      # pass --output-dir. --npm-dir is the correct flag (not --dist).
+      - name: Generate npm dirs + distribute artifacts
+        working-directory: ts/packages/paigasus-kernel
+        run: |
+          CRATE=../../../rs/crates/bindings/paigasus-node-bindings
+          pnpm exec napi create-npm-dirs --cwd "$CRATE"
+          pnpm exec napi artifacts --cwd "$CRATE" --npm-dir npm
+
+      # Dry-run prepublish: assert os/cpu/libc + main paths + optionalDependencies resolve, touching
+      # nothing. `--no-gh-release` IS REQUIRED — ghRelease defaults ON, so without it prepublish enters
+      # createGhRelease→getRepoInfo and fails on the shallow CI checkout ("No release commit found")
+      # even under --dry-run. The flag IS accepted (clipanion auto-negates booleans) though it's absent
+      # from --help — the Task-1 spike misread this; CI confirmed. --tag-style left at default `lerna`
+      # (inert under dry-run; SMA-407 owns the napi/release-plz tagging boundary + the real --gh-release
+      # path). Do NOT set NAPI_RS_ENFORCE_VERSION_CHECK.
+      - name: Verify packaging (prepublish dry-run)
+        working-directory: ts/packages/paigasus-kernel
+        run: pnpm exec napi prepublish --dry-run --no-gh-release --npm-dir npm --cwd ../../../rs/crates/bindings/paigasus-node-bindings
+
+      # Assert the MAIN package tarball is loader-only (the files fix from Task 2) + has the glue.
+      - name: Verify tarball contents (pack dry-run)
+        working-directory: rs/crates/bindings/paigasus-node-bindings
+        run: |
+          set -euo pipefail
+          echo "== main package ==" ; npm pack --dry-run
+          npm pack --dry-run --json | node -e '
+            const pkgs = JSON.parse(require("fs").readFileSync(0));
+            const files = pkgs[0].files.map(f => f.path);
+            if (files.some(f => f.endsWith(".node"))) { console.error("FAIL: main package ships a .node", files); process.exit(1); }
+            if (!files.includes("index.js") || !files.includes("index.d.ts")) { console.error("FAIL: missing loader glue", files); process.exit(1); }
+            console.log("main package is loader-only OK");
+          '
+
+      # Single-host REAL install-resolution check on linux-x64-gnu (spec §2.4 / review H2): pack the
+      # main + linux-x64-gnu per-platform packages, install both into a scratch project so the
+      # optional dep resolves via the PACKAGE PATH, and load sum across the FFI boundary.
+      - name: Verify install-time platform resolution (linux-x64-gnu)
+        working-directory: rs/crates/bindings/paigasus-node-bindings
+        run: |
+          set -euo pipefail
+          CRATE_ABS="$(pwd)"
+          MAIN_TGZ="$CRATE_ABS/$(npm pack | tail -1)"
+          PLAT_TGZ="$CRATE_ABS/npm/linux-x64-gnu/$(cd npm/linux-x64-gnu && npm pack | tail -1)"
+          SMOKE="$(mktemp -d)"
+          cd "$SMOKE" && npm init -y >/dev/null
+          npm install "$MAIN_TGZ" "$PLAT_TGZ"
+          test -d node_modules/@paigasus/node-bindings-linux-x64-gnu || { echo "FAIL: linux-x64-gnu optional dep not installed"; exit 1; }
+          node -e 'const b=require("@paigasus/node-bindings"); if(b.sum(2,3)!==5){console.error("FAIL sum=",b.sum(2,3));process.exit(1);} console.log("install-resolution + FFI load OK");'

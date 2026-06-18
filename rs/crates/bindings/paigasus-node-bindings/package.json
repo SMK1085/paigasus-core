@@ -3,12 +3,35 @@
   "version": "0.0.0",
   "private": true,
   "license": "Apache-2.0",
+  "description": "Node-API (napi-rs) binding for the Paigasus Rust kernel.",
+  "keywords": ["paigasus", "napi", "napi-rs", "node-api", "ffi", "rust"],
+  "homepage": "https://github.com/SMK1085/paigasus-core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SMK1085/paigasus-core.git",
+    "directory": "rs/crates/bindings/paigasus-node-bindings"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {
-    "binaryName": "paigasus-node-bindings"
+    "binaryName": "paigasus-node-bindings",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl"
+    ]
   },
-  "files": ["index.js", "index.d.ts", "*.node"],
+  "files": ["index.js", "index.d.ts"],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "napi build --platform",
     "build:release": "napi build --platform --release"
