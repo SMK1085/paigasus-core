@@ -19,41 +19,39 @@ jobs:
   build:
     name: build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
-    container: ${{ matrix.container }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { platform: darwin-x64,       target: x86_64-apple-darwin,        runner: macos-15-intel,    container: '' }
-          - { platform: darwin-arm64,     target: aarch64-apple-darwin,       runner: macos-latest,      container: '' }
-          - { platform: win32-x64-msvc,   target: x86_64-pc-windows-msvc,     runner: windows-latest,    container: '' }
-          - { platform: linux-x64-gnu,    target: x86_64-unknown-linux-gnu,   runner: ubuntu-latest,     container: '' }
-          - { platform: linux-arm64-gnu,  target: aarch64-unknown-linux-gnu,  runner: ubuntu-24.04-arm,  container: '' }
-          - { platform: linux-x64-musl,   target: x86_64-unknown-linux-musl,  runner: ubuntu-latest,     container: 'ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine' }
-          - { platform: linux-arm64-musl, target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm,  container: 'ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine' }
+          - { platform: darwin-x64,       target: x86_64-apple-darwin,        runner: macos-15-intel,   zig: false }
+          - { platform: darwin-arm64,     target: aarch64-apple-darwin,       runner: macos-latest,     zig: false }
+          - { platform: win32-x64-msvc,   target: x86_64-pc-windows-msvc,     runner: windows-latest,   zig: false }
+          - { platform: linux-x64-gnu,    target: x86_64-unknown-linux-gnu,   runner: ubuntu-latest,    zig: false }
+          - { platform: linux-arm64-gnu,  target: aarch64-unknown-linux-gnu,  runner: ubuntu-24.04-arm, zig: false }
+          - { platform: linux-x64-musl,   target: x86_64-unknown-linux-musl,  runner: ubuntu-latest,    zig: true }
+          - { platform: linux-arm64-musl, target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, zig: true }
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 
-      # Host legs: pin node/pnpm/rust via proto (matches .prototools / rust-toolchain.toml).
-      # musl container legs SKIP this and use the image's bundled Rust/Node by design (spec §2 / M2:
-      # the .node is a leaf artifact, so the image toolchain carries no cross-version rmeta hazard).
-      - name: Set up proto + Moon (host legs)
-        if: ${{ matrix.container == '' }}
+      # Pin node/pnpm/rust via proto (matches .prototools / rust-toolchain.toml). Every leg runs on a
+      # real glibc/macOS/Windows host (no job-level container), so GitHub JS actions work everywhere —
+      # incl. the musl legs, which cross-compile via zig instead of an Alpine container (that container
+      # can't run JS actions on arm64 and ships pnpm 9 vs the repo's pnpm 11 lockfile — SMA-428 CI,
+      # decision #6 revised).
+      - name: Set up proto + Moon
         uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
         with:
           cache: false
 
-      - name: Install Moon-managed toolchains (host legs)
-        if: ${{ matrix.container == '' }}
+      - name: Install Moon-managed toolchains
         run: moon setup
 
       # Cross-target artifacts differ by triple → triple in the cache key (spec §2 / L2).
       - name: Cache Rust (cargo + target)
-        if: ${{ matrix.container == '' }}
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
@@ -70,12 +68,23 @@ jobs:
         working-directory: rs
         run: rustup target add ${{ matrix.target }}
 
+      # musl targets cross-compile with cargo-zigbuild (zig supplies the musl libc) on a glibc host,
+      # instead of a job-level Alpine container (decision #6 revised — SMA-428 CI). ziglang via pip is
+      # the zig that cargo-zigbuild discovers (`python3 -m ziglang`); cargo-zigbuild provides the
+      # `cargo zigbuild` subcommand that napi's `-x` flag invokes. Built with the pinned toolchain.
+      - name: Set up zig + cargo-zigbuild (musl cross-compile)
+        if: ${{ matrix.zig }}
+        working-directory: rs
+        run: |
+          pip3 install --break-system-packages ziglang
+          cargo install --locked cargo-zigbuild
+
       - name: Install JS workspace deps
         run: pnpm --dir ts install --frozen-lockfile
 
       - name: Build the addon
         working-directory: ts/packages/paigasus-kernel
-        run: pnpm exec napi build --platform --release --target ${{ matrix.target }} --cwd ../../../rs/crates/bindings/paigasus-node-bindings
+        run: pnpm exec napi build --platform --release --target ${{ matrix.target }} ${{ matrix.zig && '-x' || '' }} --cwd ../../../rs/crates/bindings/paigasus-node-bindings
 
       - name: Upload prebuild artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
