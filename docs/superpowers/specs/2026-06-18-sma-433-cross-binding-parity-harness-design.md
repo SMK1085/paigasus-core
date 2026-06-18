@@ -1,6 +1,6 @@
 # SMA-433 — Stand up the cross-binding behavioral parity test harness (ADR-0005)
 
-**Status:** approved design (brainstorm + staff review incorporated; ready for plan)
+**Status:** approved design (brainstorm complete; ready for plan)
 **Linear:** [SMA-433](https://linear.app/smaschek/issue/SMA-433/stand-up-the-cross-binding-behavioral-parity-test-harness-adr-0005)
 **Branch:** `feature/sma-433-stand-up-the-cross-binding-behavioral-parity-test-harness`
 **Date:** 2026-06-18
@@ -28,7 +28,8 @@ for py, a number for node/wasm). Unifying the surfaces (retiring `sum_as_string`
 return) is real, load-bearing work, tracked under L5 (§ Out of scope), arguably a harder prerequisite for
 real domain logic than this harness. And this harness proves binding↔kernel **fidelity**, never kernel
 **correctness** — for `sum`, `a + b` is a complete independent oracle (the proptest), but for real logic
-the proptest *properties* become the only correctness check (M3 below).
+the proptest *properties* become the only correctness check (see *What parity does and does not prove*,
+below).
 
 **This issue does not touch kernel logic** — `paigasus_kernel::sum(a: i64, b: i64) -> i64` stays the
 deliberate placeholder from SMA-409. It is harness-only. The recommendation (issue + SMA-427 §8) is to
@@ -44,7 +45,7 @@ reimplementing the kernel — the exact thing ADR-0005 forbids), so the only cor
 itself. A harness that treats the kernel as the single oracle is therefore the design that survives the
 jump to real logic — and it must already be in place when that jump happens.
 
-## What parity does and does not prove (review M3)
+## What parity does and does not prove
 
 This harness proves **binding↔kernel fidelity**: every binding reproduces what the kernel computes. It
 does **not** prove the kernel is **correct** — by construction the corpus bakes in whatever the kernel
@@ -82,7 +83,7 @@ properties is per-function work due when each real function lands.
    task-output plumbing, nondeterministic failures, unreviewable in PRs) and *committed-only, no proptest*
    (drops the "against the Rust impl" half).
 
-   **The committed corpus uses a deterministic *enumerated* sample — no PRNG (review H2).** The drift
+   **The committed corpus uses a deterministic *enumerated* sample — no PRNG.** The drift
    guard regenerates and `git diff --exit-code`s the corpus, so generation must be byte-stable across
    toolchain and dependency bumps. `rand`'s `StdRng` is explicitly documented as **not** reproducible
    across `rand` releases (its backing algorithm has already changed once), so a routine `cargo update`
@@ -118,7 +119,7 @@ properties is per-function work due when each real function lands.
    committed corpus inside `cargo nextest` (it overlaps the drift guard slightly, but is ~10 lines and
    makes the corpus a true four-runtime vector).
 
-7. **Every language replay carries a corpus-integrity guard (review H1).** A replay that merely
+7. **Every language replay carries a corpus-integrity guard.** A replay that merely
    iterates-and-asserts goes **green** if the corpus fails to load or comes back empty — and a
    cross-workspace relative-path load is the most likely failure. So *each* of the four replays
    (rust/py/node/wasm), not just Rust, independently asserts the corpus loaded and contains the committed
@@ -139,7 +140,7 @@ properties is per-function work due when each real function lands.
   `dependsOn: [paigasus-kernel-rs]`, `build`/`test` with `deps: ['^:build']` (mirrors the binding crates,
   so a kernel edit cascades — SMA-389 D3).
 - `Cargo.toml`: depends on `paigasus-kernel`; `serde`/`serde_json` for the corpus. **No `rand`** — the
-  sample is deterministically enumerated (decision #2, review H2). `publish = false`.
+  sample is deterministically enumerated (decision #2). `publish = false`.
 - A `gen-parity-vectors` **bin** that:
   - assembles **curated edge cases** (`0`, `±1`, `i32::MAX`, `i32::MIN`, and pairs whose sum approaches
     but stays within the i32 boundary) **+ a deterministic enumerated sample** (a fixed lattice of
@@ -150,7 +151,7 @@ properties is per-function work due when each real function lands.
     trailing newline) so regeneration is reproducible and `git diff` is meaningful.
 - A **replay test** deserializing `vectors/sum.json` and asserting
   `paigasus_kernel::sum(a, b) == expected` for every case, plus the shared **corpus-integrity invariant**
-  (review H1): the corpus loaded, is non-empty, matches the committed case count, and every case lies
+ : the corpus loaded, is non-empty, matches the committed case count, and every case lies
   inside the parity domain.
 
 ### The committed corpus (`rs/crates/libs/paigasus-kernel-parity/vectors/sum.json`)
@@ -159,8 +160,8 @@ properties is per-function work due when each real function lands.
 ### Python replay (`py/packages/paigasus-kernel/tests/`)
 - Replace `test_ffi_roundtrip.py` with a corpus-driven test: load `sum.json` via a **single resolved
   path constant** (one helper that resolves the corpus from `__file__`, not an ad-hoc relative path per
-  call — review L1), `pytest.mark.parametrize` over the cases, assert `sum_as_string(a, b) == str(expected)`.
-- **Corpus-integrity guard (review H1):** a *separate, non-parametrized* test asserts the corpus loaded,
+  call), `pytest.mark.parametrize` over the cases, assert `sum_as_string(a, b) == str(expected)`.
+- **Corpus-integrity guard:** a *separate, non-parametrized* test asserts the corpus loaded,
   is non-empty, and contains the committed case count. Without it, a bad path → an empty parametrize set,
   which pytest reports as **skipped** (`got empty parameter set`), i.e. a green run that compared nothing —
   the worst failure mode for a safety net. The integrity test fails red on a zero/short load.
@@ -169,10 +170,10 @@ properties is per-function work due when each real function lands.
 
 ### TypeScript replay (`ts/packages/paigasus-kernel/tests/`)
 - Both existing vitest projects (`node` + `browser`/wasm) replay the corpus instead of hardcoded values:
-  load `sum.json` via a **single resolved path constant** (review L1), iterate, assert
+  load `sum.json` via a **single resolved path constant**, iterate, assert
   `sum(a, b) === expected`. (`sum.test.ts` → node/napi, `sum.wasm.test.ts` → browser/wasm; the existing
   project/alias wiring in `vitest.config.ts` is unchanged.)
-- **Corpus-integrity guard (review H1):** an `expect(cases.length).toBe(<committed count>)` (or `>0`)
+- **Corpus-integrity guard:** an `expect(cases.length).toBe(<committed count>)` (or `>0`)
   assertion that runs regardless of the per-case loop — a zero-length load (a wrong cwd/relative path)
   otherwise registers **no `it()`s** and the file passes green having compared nothing.
 - Add the corpus to the `paigasus-kernel-ts:build`/`:test` task `inputs`.
@@ -181,7 +182,7 @@ properties is per-function work due when each real function lands.
 - A `repo:parity-corpus-drift` task (`toolchain: system`, like `affected-smoke`/`release-parity`): runs
   the generator **crate-scoped** (`cargo run -p paigasus-kernel-parity --bin gen-parity-vectors`, from
   `rs/` so `rs/.cargo/config.toml` is in scope) then `git diff --exit-code` over `vectors/sum.json`. A
-  kernel change without a corpus regen → **red**. Keep it `-p`-scoped, never `--workspace` (review L2):
+  kernel change without a corpus regen → **red**. Keep it `-p`-scoped, never `--workspace`:
   the parity crate is a plain lib+bin with no cdylib, so it needs none of the apple-darwin
   `-undefined dynamic_lookup` link flags — broadening to `--workspace` would pull in the FFI cdylibs and
   hit the macOS link trap `rs/.cargo/config.toml` exists to avoid.
@@ -217,13 +218,13 @@ re-runs all three binding tests on a kernel edit. This issue adds:
 default-deny means an unlisted-but-present project fails the case:
 - `kernel->bindings` expected set **gains** `paigasus-kernel-parity-rs` (else "unexpected" → red). The
   live baseline already lists `paigasus-wasm-rs` (SMA-427 landed — verified), so this adds exactly one
-  entry (review L3); no rebase needed on a branch cut from current `main`.
+  entry; no rebase needed on a branch cut from current `main`.
 - A new **`parity-oneway`** case: editing `rs/crates/libs/paigasus-kernel-parity/src|vectors` affects
   **only** `paigasus-kernel-parity-rs` — `paigasus-kernel-rs` is deliberately absent (a parity edit must
   not rebuild the kernel), one-directional w.r.t. the kernel like the binding-oneway cases.
 - `ci/affected-graph/README.md` updated to match both.
 
-**Moon affected-semantics to verify at implementation time (review M2).** `moon query projects
+**Moon affected-semantics to verify at implementation time.** `moon query projects
 --affected` tracks a project's `source` dir + `dependsOn` relations; a cross-project task `inputs` glob
 (py/ts listing the corpus under `rs/`) drives task *hashing/caching*, **not** project-affected status. So
 the expectation above — a corpus edit affects only `paigasus-kernel-parity-rs`, py/ts do not appear — is
@@ -255,14 +256,14 @@ read). If that gap ever proves to matter, revisit with a real edge.
 5. **Existing gates green.** `cargo deny` / `cargo machete` stay green over `rs/` with the new crate +
    deps (`serde`/`serde_json`, `proptest` as a kernel dev-dep — mainstream, Apache/MIT-compatible, all
    actually used; **no `rand`**, per H2).
-6. **Corpus-integrity guard bites (review H1).** Pointing a replay at a nonexistent corpus path fails the
+6. **Corpus-integrity guard bites.** Pointing a replay at a nonexistent corpus path fails the
    py/ts/rust integrity assertion **red** (not a skipped/zero-`it()` green) — i.e. the net cannot pass
    while comparing zero cases.
 
 ## Out of scope (deferred, with follow-ups)
 
 - **L5 — surface unification (`i32`/`i64` + string vs number).** The parity domain is the i32-safe
-  intersection, and parity is *decoded-value* equality, not *surface* identity (see Goal, review M1): the
+  intersection, and parity is *decoded-value* equality, not *surface* identity (see Goal): the
   py binding returns a stringified i64 (`sum_as_string`), napi/wasm return a `number` narrowed to i32.
   Retiring `sum_as_string` for a numeric/typed return and widening the i32 boundary (explicit
   `BigInt`/checked conversion) happens across **all** bindings at once when a kernel fn needs the range —
@@ -279,32 +280,3 @@ read). If that gap ever proves to matter, revisit with a real edge.
   net for it.
 - **Per-binding fuzz/property generation in the binding's own language.** Out of scope by decision #1
   (the corpus is the shared vehicle; languages replay, they do not re-randomize).
-
-## Review dispositions (staff review, 2026-06-18)
-
-Findings from a staff-engineering design review (`…-design-review.md`), verified against the live repo.
-
-- **H1 (replays can pass comparing nothing) — accepted, design changed.** A corpus-integrity guard
-  (loaded + non-empty + committed case count) is now required in **every** language replay, not just
-  Rust (decision #7; py/ts components; Verification #6). Closes the empty-parametrize-skips /
-  zero-`it()`-passes soft-green.
-- **H2 (`StdRng` not version-stable → drift-guard false reds) — accepted, design changed.** The committed
-  corpus drops the PRNG entirely for a **deterministic enumerated sample** (decision #2, decision #5,
-  generator component). `rand` is removed from the parity crate; `ChaCha*Rng` is noted as the only
-  acceptable PRNG if randomness is ever reintroduced.
-- **M1 (value-parity vs surface-parity) — accepted, design changed.** The Goal now states parity is
-  *decoded-value* equality, not *surface* identity; the L5 note is expanded to make surface unification
-  (retiring `sum_as_string`, folding Python into the `binding-parity.types.ts` discipline) an explicit
-  prerequisite for real logic.
-- **M2 (corpus-only affected gap + unverified Moon semantics) — accepted, documented.** The `parity-oneway`
-  expectation is marked to-verify (the strict-equality guard self-verifies it); the corpus-only coverage
-  gap is accepted explicitly (covered by the kernel cascade + drift guard + push-to-main), without adding
-  an artificial py/ts→parity dependency edge.
-- **M3 (net only as strong as proptest properties) — accepted, design changed.** New "What parity does
-  and does not prove" section + the per-function "ship properties that pin behavior" convention.
-- **L1 (cross-workspace path coupling) — accepted.** Each language replay resolves the corpus via a single
-  path constant, paired with the H1 integrity assertion so a bad path fails loud.
-- **L2 (drift-guard cargo invocation) — accepted.** Kept crate-scoped (`-p`, run from `rs/`); never
-  `--workspace` (macOS cdylib link trap).
-- **L3 (guard baseline) — confirmed.** The live `kernel->bindings` set already lists `paigasus-wasm-rs`;
-  SMA-433 adds exactly one entry and needs no rebase from current `main`.
