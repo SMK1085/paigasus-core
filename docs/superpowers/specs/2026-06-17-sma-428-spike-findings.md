@@ -4,6 +4,12 @@
 **Host:** darwin-arm64 (macOS 25.5.0, Node 24.16.0, pnpm 11.3.0)
 **@napi-rs/cli version confirmed:** 3.7.2
 
+> **Correction (2026-06-18, after CI):** Finding #1 below — that `--no-gh-release` does not exist — is
+> **WRONG**. `ghRelease` defaults **on**, and `--no-gh-release` **is** accepted (clipanion auto-negates
+> booleans) even though it's absent from `--help`. Omitting it makes `prepublish` fail in CI's shallow
+> checkout (`createGhRelease`→`getRepoInfo`, "No release commit found"). The workflow + spec use
+> `napi prepublish --dry-run --no-gh-release`. See the spec's *CI verification findings*.
+
 ---
 
 ## Step 1 — Confirmed CLI flag surface

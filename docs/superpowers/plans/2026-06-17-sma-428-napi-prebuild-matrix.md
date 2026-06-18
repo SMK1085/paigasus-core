@@ -4,9 +4,11 @@
 
 **Goal:** Build and verify a cross-platform `.node` prebuild + packaging pipeline for `@paigasus/node-bindings` up to (but not including) `npm publish`, leaving both packages `private:true` / `0.0.0`.
 
-**Architecture:** A dedicated, `moon`-decoupled GitHub Actions workflow (`.github/workflows/prebuild.yml`) builds the 7 platform `.node` addons on native-arch runners (musl via the official napi-rs Alpine container), then an `assemble` job generates the per-platform npm packages **in CI** (nothing committed), asserts the publish-artifact shape with `napi prepublish --dry-run --no-gh-release` + `npm pack --dry-run`, and proves install-time platform resolution with one real install on the `linux-x64-gnu` host. Package metadata is added to both `@paigasus/node-bindings` and `@paigasus/kernel`; the single-host local `moon` build is untouched.
+**Architecture:** A dedicated, `moon`-decoupled GitHub Actions workflow (`.github/workflows/prebuild.yml`) builds the 7 platform `.node` addons on native-arch runners (musl cross-compiled via `cargo-zigbuild` — see amendment below), then an `assemble` job generates the per-platform npm packages **in CI** (nothing committed), asserts the publish-artifact shape with `napi prepublish --dry-run --no-gh-release` + `npm pack --dry-run`, and proves install-time platform resolution with one real install on the `linux-x64-gnu` host. Package metadata is added to both `@paigasus/node-bindings` and `@paigasus/kernel`; the single-host local `moon` build is untouched.
 
-**Tech Stack:** `@napi-rs/cli` v3 (`^3.7.2`), GitHub Actions (native runners + `ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine`), proto/Moon toolchain pins (node 24.16.0, pnpm 11.3.0, Rust 1.95.0), pnpm.
+**Tech Stack:** `@napi-rs/cli` v3 (`^3.7.2`), GitHub Actions (native runners + `cargo-zigbuild` for musl), proto/Moon toolchain pins (node 24.16.0, pnpm 11.3.0, Rust 1.95.0), pnpm.
+
+> **Post-implementation amendments (2026-06-18, after CI verification — see the spec's "CI verification findings").** Two design points changed under real CI: **(1) musl** — the originally-planned job-level napi-rs Alpine container (Task 4 below) was dropped (GitHub bans JS actions in Alpine containers on arm64 runners; the image's pnpm 9 can't read the pnpm-11 lockfile). Both musl targets now cross-compile via `cargo-zigbuild` on the glibc `ubuntu` runners (`napi build -x`, zig via `pip install ziglang`), with **no** `container:` key and **no** `matrix.container == ''` gating — every leg runs the toolchain steps. **(2) `--no-gh-release` IS required** on `napi prepublish` (re-added — the Task-1 spike wrongly removed it; `ghRelease` defaults on and the flag is accepted despite being absent from `--help`). The Task 4/Task 5 code blocks below predate these fixes; the committed `prebuild.yml` is authoritative.
 
 **Spec:** `docs/superpowers/specs/2026-06-17-sma-428-napi-prebuild-matrix-design.md` (+ `-review.md`).
 
@@ -406,13 +408,14 @@ Add to `.github/workflows/prebuild.yml` after the `build` job (use Task 1's conf
           pnpm exec napi artifacts --cwd "$CRATE" --npm-dir npm
 
       # Dry-run prepublish: assert os/cpu/libc + main paths + optionalDependencies resolve, touching
-      # nothing. `--gh-release` is OMITTED — it is an opt-in presence flag; there is NO --no-gh-release
-      # on @napi-rs/cli 3.7.2 (spike Task 1), so omitting it creates no GitHub release and needs no
-      # contents:write. --tag-style left at the default `lerna` (inert under dry-run; SMA-407 owns the
-      # napi/release-plz tagging boundary). Do NOT set NAPI_RS_ENFORCE_VERSION_CHECK (spike Task 1).
+      # nothing. `--no-gh-release` IS REQUIRED — ghRelease defaults ON, so without it prepublish enters
+      # createGhRelease→getRepoInfo and fails on the shallow CI checkout ("No release commit found")
+      # even under --dry-run. The flag IS accepted (clipanion auto-negates booleans) though absent from
+      # --help (the Task-1 spike misread this; CI confirmed). --tag-style left at the default `lerna`
+      # (inert under dry-run; SMA-407 owns the boundary). Do NOT set NAPI_RS_ENFORCE_VERSION_CHECK.
       - name: Verify packaging (prepublish dry-run)
         working-directory: ts/packages/paigasus-kernel
-        run: pnpm exec napi prepublish --dry-run --npm-dir npm --cwd ../../../rs/crates/bindings/paigasus-node-bindings
+        run: pnpm exec napi prepublish --dry-run --no-gh-release --npm-dir npm --cwd ../../../rs/crates/bindings/paigasus-node-bindings
 
       # Assert the MAIN package tarball is loader-only (the §3 files fix) + each per-platform tarball
       # carries exactly one .node.

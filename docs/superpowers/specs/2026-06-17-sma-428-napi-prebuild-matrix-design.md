@@ -57,11 +57,14 @@ is a separate, CI-only concern.
    `@paigasus/wasm` — so it is **double-blocked** from real packaging (needs tsup/dist **and**
    version activation). SMA-428 only adds the static npm metadata it can have now, plus a
    breadcrumb comment. No tsup/dist work here.
-6. **Native runners per target + official napi-rs Alpine Docker images for musl.** Each target
-   builds on its matching native-arch GitHub runner (GitHub's free `ubuntu-24.04-arm` removes the
-   need to cross-compile arm64); only the two musl targets swap in the official `napi-rs` Alpine
-   container. Canonical `@napi-rs/cli` scaffold shape — battle-tested, copy-adaptable — and avoids
-   zig cross-compilation's sharp edges (Windows-MSVC, macOS SDK).
+6. **Native runners per target; musl cross-compiled via `cargo-zigbuild` (no container).** The five
+   glibc/macOS/Windows targets build natively on their matching runners. The two musl targets were
+   *first designed* to use the official napi-rs Alpine container, but CI proved that unworkable —
+   GitHub forbids JS actions (checkout/cache/upload) in Alpine containers on **arm64** runners, and
+   the image ships **pnpm 9** which can't read the repo's **pnpm-11** lockfile (see *CI verification
+   findings* near the end). So musl builds on the glibc `ubuntu` runners via `napi build -x`
+   (`cargo-zigbuild`; zig supplies the musl libc). zig is used **only** for Linux musl, never for
+   Windows-MSVC or macOS, so its sharp edges don't apply.
 
 ## 1. Target matrix (7)
 
@@ -72,10 +75,12 @@ is a separate, CI-only concern.
 | `win32-x64-msvc`  | `x86_64-pc-windows-msvc`     | `windows-latest`                                  |
 | `linux-x64-gnu`   | `x86_64-unknown-linux-gnu`   | `ubuntu-latest`                                   |
 | `linux-arm64-gnu` | `aarch64-unknown-linux-gnu`  | `ubuntu-24.04-arm`                                |
-| `linux-x64-musl`  | `x86_64-unknown-linux-musl`  | `ubuntu-latest` + napi-rs Alpine image            |
-| `linux-arm64-musl`| `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` + napi-rs Alpine image         |
+| `linux-x64-musl`  | `x86_64-unknown-linux-musl`  | `ubuntu-latest` + `cargo-zigbuild` (`napi build -x`)    |
+| `linux-arm64-musl`| `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` + `cargo-zigbuild` (`napi build -x`) |
 
-Every leg builds on its **native arch**; musl runs the build inside the official Alpine container.
+Every glibc/macOS/Windows leg builds natively on its arch; the two musl legs cross-compile via
+`cargo-zigbuild` on the glibc `ubuntu` runners (no container — decision #6 + *CI verification
+findings*).
 
 **`macos-13` is retired** (GitHub brownout began Sept 2025, fully unsupported by 8 Dec 2025), so
 `darwin-x64` uses **`macos-15-intel`** — GitHub's dedicated last-Intel image. Known clock:
@@ -89,48 +94,45 @@ trip decision #6's zig concern), at the cost of the same never-run-on-Intel cave
 
 ## 2. New workflow — `.github/workflows/prebuild.yml`
 
-Decoupled from `moon ci` (single-host, affected-graph-bound). Host tooling is pinned via
-`moonrepo/setup-toolchain` + `proto install` so node/pnpm/rust match `.prototools` /
+Decoupled from `moon ci` (single-host, affected-graph-bound). Tooling is pinned via
+`moonrepo/setup-toolchain` + `moon setup` so node/pnpm/rust match `.prototools` /
 `rs/rust-toolchain.toml`; napi is invoked directly (not through Moon).
 
 - **Triggers:** `workflow_dispatch` and `push: branches: [main]`.
-- **Permissions:** `contents: read` only — no publish creds. The dry-run **omits `--gh-release`**
-  (an opt-in presence flag — there is **no** `--no-gh-release` on `@napi-rs/cli` 3.7.2,
-  spike-confirmed), so no GitHub release is created and no `contents: write` is needed. SMA-407 adds
-  registry auth / `id-token` / release perms when it turns publish on.
-- **`build` job** — `strategy.matrix` over the 7 targets `{ platform, target, runner, useContainer }`:
+- **Permissions:** `contents: read` only — no publish creds. The dry-run passes **`--no-gh-release`**
+  (required: `ghRelease` defaults **on**, so without it `prepublish` enters `createGhRelease` and
+  fails on the shallow CI checkout — see *CI verification findings*), so no GitHub release is created
+  and no `contents: write` is needed. SMA-407 adds registry auth / `id-token` / release perms when it
+  turns publish on.
+- **`build` job** — `strategy.matrix` over the 7 targets `{ platform, target, runner, zig }`:
   1. checkout
-  2. `moonrepo/setup-toolchain` + `proto install` (pinned node/pnpm) — *host* legs only
+  2. `moonrepo/setup-toolchain` + `moon setup` (pinned node/pnpm/rust) — every leg
   3. `rustup target add <triple>` against the pinned **1.95.0** toolchain (run from `rs/` so the
      `rust-toolchain.toml` override applies — verified pattern, mirrors `ci.yml`'s serial
      pre-install)
-  4. `pnpm --dir ts install --frozen-lockfile`
-  5. `pnpm exec napi build --platform --release --target <triple>` in
-     `rs/crates/bindings/paigasus-node-bindings` (`--platform` emits the platform-suffixed
-     `paigasus-node-bindings.<platform>.node` filename)
-  6. upload `paigasus-node-bindings.<platform>.node` as a CI artifact
-  - **musl legs** run steps 3–5 **inside** the official napi-rs Alpine container, which ships its
-    **own** Rust/Node — the host's `setup-toolchain`/`proto install` (step 2) do **not** reach into
-    the container's filesystem/PATH. **Decision (review M2):** accept the **image's** toolchain for
-    the two musl legs (the canonical napi-rs template does the same), rather than re-installing
-    proto inside. Rationale: the `.node` is a **leaf** artifact — nothing links its rmeta across
-    the npm boundary — so a musl leg built with the image's rustc carries none of the SMA-389
-    cross-version `E0514` hazard. This is a *written, conscious* choice, not an accident of step
-    ordering. (Confirm in the spike that the image's Rust is ≥ the kernel's MSRV.)
+  4. musl legs only: set up zig + cargo-zigbuild (`pip install ziglang` + `cargo install cargo-zigbuild`)
+  5. `pnpm --dir ts install --frozen-lockfile`
+  6. `pnpm exec napi build --platform --release --target <triple>` (musl legs add `-x` for
+     `cargo-zigbuild`) in `rs/crates/bindings/paigasus-node-bindings` (`--platform` emits the
+     platform-suffixed `paigasus-node-bindings.<platform>.node` filename)
+  7. upload `paigasus-node-bindings.<platform>.node` as a CI artifact
+  - **All legs run on real glibc/macOS/Windows runners (no job-level container)**, so the GitHub JS
+    actions and the pinned pnpm-11 work uniformly. The two **musl** legs cross-compile with
+    `cargo-zigbuild` (step 4 + `-x`); this replaced the originally-designed Alpine container (review
+    M2), which CI proved unworkable — see *CI verification findings*.
   - **Caching (review L2):** mirror `ci.yml`'s Rust cache (`~/.cargo` + `rs/target`) keyed on
     `runner.os` + **triple** + `rust-toolchain.toml` hash + `Cargo.lock` (cross-target artifacts
-    differ by triple, so the triple must be in the key). Container-leg caching is best-effort
-    (paths differ inside Alpine); accept colder musl builds if needed.
+    differ by triple, so the triple must be in the key).
 - **`assemble` job** (`needs: build`):
   1. download all build artifacts
   2. `napi create-npm-dirs` — generate the seven `npm/<platform>/` package dirs in CI (not
      committed; decision #4), then `napi artifacts --npm-dir npm` to sort each downloaded `.node`
      (from the `actions/download-artifact` default `./artifacts` dir) into its platform dir
-  3. `napi prepublish --dry-run --npm-dir npm` + `npm pack --dry-run` on the main + per-platform
-     packages — assert os/cpu/libc, `main` paths, and `optionalDependencies` all resolve, and that
-     the **main tarball ships loader-only** (no `.node`; this is the `files` fix in §3). `--dry-run`
-     keeps it filesystem-/registry-inert; **`--gh-release` is omitted** (opt-in presence flag — no
-     `--no-gh-release` exists on 3.7.2, spike-confirmed), so no GitHub release is created (see §6).
+  3. `napi prepublish --dry-run --no-gh-release --npm-dir npm` + `npm pack --dry-run` on the main +
+     per-platform packages — assert os/cpu/libc, `main` paths, and `optionalDependencies` all
+     resolve, and that the **main tarball ships loader-only** (no `.node`; this is the `files` fix in
+     §3). `--dry-run` keeps it filesystem-/registry-inert; **`--no-gh-release` is required** (see §6 +
+     *CI verification findings*), so no GitHub release is created.
   4. **Single-host install-resolution check (review H2).** On this `ubuntu-latest` host
      (= `linux-x64-gnu`, one of the seven targets): `npm pack` the main package + the
      `@paigasus/node-bindings-linux-x64-gnu` per-platform package, install them into a scratch
@@ -176,17 +178,20 @@ running `napi build --platform` for the dev host) is unchanged, so local dev and
 
 ## 6. Release-tool boundary (`napi prepublish` vs release-plz) — SMA-407 hand-off (review M3)
 
-On `@napi-rs/cli` 3.7.2 (Task-1 spike-confirmed), `napi prepublish`'s **`--gh-release` is an opt-in
-presence flag** (there is **no** `--no-gh-release`), and `--tag-style` defaults to **`lerna`**. So
-the dry-run here simply **omits `--gh-release`** → no GitHub release, no `contents: write` needed.
-But **SMA-407 activates by removing `--dry-run`** and will need `--gh-release` / a real publish path
-— at which point napi's **lerna-style tagging** (`@paigasus/node-bindings@vX.Y.Z`) must be
-reconciled with this repo's **release-plz** machinery (its vendored proto plugin tags
-`release-plz-v*` / per-crate patterns, SMA-398). Two release tools with two tagging schemes against
-one repo is a duplicate-tag / double-publish incident waiting for activation day.
+On `@napi-rs/cli` 3.7.2, `napi prepublish`'s **`ghRelease` defaults ON** and `--tag-style` defaults
+to **`lerna`**. `--no-gh-release` **does** turn it off (clipanion auto-negates booleans) even though
+it isn't listed in `--help` — the Task-1 spike misread this; CI confirmed it (see *CI verification
+findings*). Without `--no-gh-release`, `prepublish` enters `createGhRelease`→`getRepoInfo` and
+**fails on the shallow CI checkout** ("No release commit found") even under `--dry-run`. So the
+dry-run **passes `--no-gh-release`** → no GitHub release, no `contents: write` needed. When
+**SMA-407 removes `--dry-run`** and opts into `--gh-release` / a real publish, napi's
+**lerna-style tagging** (`@paigasus/node-bindings@vX.Y.Z`) must be reconciled with this repo's
+**release-plz** machinery (its vendored proto plugin tags `release-plz-v*` / per-crate patterns,
+SMA-398). Two release tools with two tagging schemes against one repo is a duplicate-tag /
+double-publish incident waiting for activation day.
 
-- **This issue:** **omit `--gh-release`** on the dry-run (the safe default — nothing to neutralize),
-  so the workflow needs no write permission and creates no release.
+- **This issue:** pass **`--no-gh-release`** on the dry-run, so the workflow needs no write
+  permission and creates no release.
 - **Deliberately deferred to SMA-407 (not guessed here):** whether/how to use `--gh-release`, the
   `--tag-style` value, and the division of labor between `napi prepublish` and release-plz (who
   derives the version, who tags, who publishes to npm). These depend on the release-plz integration
@@ -195,17 +200,19 @@ one repo is a duplicate-tag / double-publish incident waiting for activation day
 ## Primary risks → de-risk first (spike before the workflow)
 
 1. **`@napi-rs/cli` v3 command + schema surface.** Confirm the exact v3 subcommands
-   (`create-npm-dirs`, `artifacts --npm-dir npm`, `prepublish --dry-run`) and the `napi.targets`
-   package.json schema against the pinned `^3`. **(Done — Task-1 spike: confirmed 3.7.2; no
-   `--no-gh-release` — `--gh-release` is opt-in; `artifacts` default input dir is `./artifacts`;
-   `NAPI_RS_ENFORCE_VERSION_CHECK` must stay unset. See `2026-06-17-sma-428-spike-findings.md`.)**
+   (`create-npm-dirs`, `artifacts --npm-dir npm`, `prepublish --dry-run --no-gh-release`) and the
+   `napi.targets` package.json schema against the pinned `^3`. **(Done — Task-1 spike + CI: confirmed
+   3.7.2; `artifacts` default input dir is `./artifacts`; `NAPI_RS_ENFORCE_VERSION_CHECK` must stay
+   unset; `--no-gh-release` IS required and IS accepted despite being absent from `--help` — see *CI
+   verification findings* + `2026-06-17-sma-428-spike-findings.md`.)**
 2. **Single-host install-resolution mechanism (§2.4).** Confirm the exact way to make the
    `@paigasus/node-bindings-linux-x64-gnu` optional dep resolvable locally (install both tarballs
    into the scratch project vs a throwaway local registry) so the assertion loads via the **package
    path**, not the loader's local-`.node` fallback. Watch napi's `NAPI_RS_ENFORCE_VERSION_CHECK`
    (off by default) given the `0.0.0` placeholder version.
-3. **musl image toolchain (§2 / M2).** Confirm the napi-rs Alpine image's bundled Rust is ≥ the
-   kernel MSRV (1.95.0) so the accepted-image-toolchain decision is sound.
+3. **musl cross-compile (§2 / decision #6).** *Obsolete:* the Alpine container was dropped after CI
+   failures; musl now cross-compiles via `cargo-zigbuild` on the glibc runners with the pinned
+   1.95.0 toolchain (see *CI verification findings*).
 4. **`macos-15-intel` availability + cross-build fallback (§1 / H1, L1).** Confirm `macos-15-intel`
    runs the build; verify the `--target x86_64-apple-darwin` on `macos-latest` fallback compiles if
    needed.
@@ -214,7 +221,7 @@ one repo is a duplicate-tag / double-publish incident waiting for activation day
 
 1. **Matrix build** — `prebuild.yml` dispatched: all 7 build legs green, each uploads its
    `paigasus-node-bindings.<platform>.node` artifact.
-2. **Dry-run assembly** — the `assemble` job's `napi prepublish --dry-run` (no `--gh-release`) +
+2. **Dry-run assembly** — the `assemble` job's `napi prepublish --dry-run --no-gh-release` +
    `npm pack --dry-run` succeed and show: a loader-only main package (no `.node`), exactly one
    `.node` per platform package, correct `os`/`cpu`/`libc`, and 7 `optionalDependencies`.
 3. **Single-host install resolution** — the `linux-x64-gnu` install check resolves exactly the
@@ -255,15 +262,18 @@ one repo is a duplicate-tag / double-publish incident waiting for activation day
 - **M1 (Medium — committing `npm/` runs against v3 guidance + unguarded until SMA-434) — accepted,
   design changed.** Switched to **generate `npm/` in CI, commit nothing** (decision #4, §2.2, §3).
   Removes the unguarded-generated-artifact smell and dissolves the version lockstep (M4).
-- **M2 (Medium — musl legs use the image toolchain, not the proto pin) — accepted, made explicit.**
-  §2 now states a deliberate decision to accept the Alpine image's Rust for the musl legs
-  (leaf-artifact rationale), with a spike check that the image's Rust ≥ MSRV (§6 spike #3).
-- **M3 (Medium — `prepublish` gh-release/lerna-tag defaults) — accepted, verified, corrected by the
-  spike.** The reviewer (and the napi *docs*) cited a `ghRelease:true` default + a `--no-gh-release`
-  flag; the Task-1 spike against the **pinned `@napi-rs/cli` 3.7.2** found **`--gh-release` is an
-  opt-in presence flag with no `--no-gh-release`**, and `--tag-style` defaults to `lerna`. So the
-  dry-run **omits `--gh-release`** (§2.3, §6) — even safer than pinning a negation. **Deviation from
-  the reviewer's "pin `--tag-style` too":** left tag-style + the napi/release-plz division as an
+- **M2 (Medium — musl legs use the image toolchain, not the proto pin) — accepted, then superseded
+  by CI.** Originally resolved by accepting the Alpine image's Rust (leaf-artifact rationale). CI then
+  proved the whole job-level Alpine container unworkable (arm64 JS-actions ban + pnpm-9 image), so the
+  container was dropped entirely — musl now cross-compiles via `cargo-zigbuild` on the glibc runners
+  with the **pinned** 1.95.0 toolchain, removing the M2 concern rather than mitigating it (see *CI
+  verification findings*).
+- **M3 (Medium — `prepublish` gh-release/lerna-tag defaults) — accepted; the reviewer + docs were
+  right, CI confirmed.** `ghRelease` defaults ON and `--no-gh-release` turns it off (clipanion
+  auto-negation, absent from `--help`). The Task-1 spike wrongly concluded `--no-gh-release` didn't
+  exist; the first `assemble` run then failed (`createGhRelease`→`getRepoInfo`, "No release commit
+  found" on the shallow checkout), and re-adding `--no-gh-release` fixed it (§2.3, §6). **Deviation
+  from the reviewer's "pin `--tag-style` too":** left tag-style + the napi/release-plz division as an
   explicit SMA-407 decision (inert under dry-run).
 - **M4 (Medium — 15 lockstep `0.0.0` strings) — accepted, dissolved by M1.** Generate-in-CI means
   only the main `package.json` `version` is committed; `napi version`/`prepublish` owns the bump at
@@ -274,3 +284,27 @@ one repo is a duplicate-tag / double-publish incident waiting for activation day
 - **L3 (Process — spec narrows the Linear ticket) — accepted.** SMA-428's Linear description
   updated to mark publish + install-resolution-publish as handed to SMA-407 so the ticket isn't
   closed with literal scope bullets unmet.
+
+## CI verification findings (2026-06-18)
+
+`prebuild.yml` was verified on real CI via a temporary branch trigger (reverted after green). Two
+design points changed under contact; both are folded into the sections above:
+
+1. **musl: Alpine container → `cargo-zigbuild` (decision #6 + M2).** The first run failed both musl
+   legs. `linux-arm64-musl`: GitHub forbids JS actions (`actions/checkout`) in Alpine containers on
+   arm64 runners ("JavaScript Actions in Alpine containers are only supported on x64 Linux runners").
+   `linux-x64-musl`: the `nodejs-rust:lts-alpine` image ships Node 18 / **pnpm 9**, which can't read
+   the repo's **pnpm-11** lockfile (`ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`). Fix (user-approved): drop
+   the job-level container; build both musl targets on the glibc `ubuntu` runners via `napi build -x`
+   (`cargo-zigbuild`, zig via `pip install ziglang`). Both musl legs then passed.
+2. **`prepublish` needs `--no-gh-release` (M3).** Omitting it, `prepublish` entered
+   `createGhRelease`→`getRepoInfo` and failed on the shallow CI checkout ("No release commit found")
+   even under `--dry-run` — `ghRelease` defaults **on**. `--no-gh-release` IS accepted (clipanion
+   auto-negation) despite not appearing in `--help`; re-adding it fixed the `assemble` job.
+
+**Final result (run on commit `976de97`):** all **7 build legs green** (darwin-x64 on `macos-15-intel`
+— H1 validated; darwin-arm64; win32-x64-msvc; linux x64/arm64 gnu; linux x64/arm64 musl via zig)
+**and** the `assemble` job green — `prepublish --dry-run --no-gh-release` clean, `npm pack` main package
+loader-only (`main package is loader-only OK`), and the single-host `linux-x64-gnu` install-resolution
+check loaded `sum(2,3)===5` (`install-resolution + FFI load OK`). No `npm publish`, no GitHub release
+created, both packages still `private:true` / `0.0.0`.
