@@ -3,7 +3,7 @@ name: prebuild
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, feature/sma-428-napi-rs-cross-platform-node-prebuild-matrix-npm-publish-for]
 
 # Build-only verification: read the repo, build addons, run dry-run packaging. No publish, and no
 # GitHub release is created (the assemble job omits napi's opt-in --gh-release flag), so no
