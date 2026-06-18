@@ -66,6 +66,9 @@ tasks:
       - '/rs/crates/bindings/paigasus-wasm/src/**/*'
       - '/rs/crates/bindings/paigasus-wasm/Cargo.toml'
       - '/rs/crates/bindings/paigasus-wasm/package.json'
+      # Parity corpus (SMA-433): a corpus change must re-key the ts replay. Task-hash input only —
+      # it does not make this project affected by a corpus-only edit (see affected-smoke parity-oneway).
+      - '/rs/crates/libs/paigasus-kernel-parity/vectors/sum.json'
     outputs:
       # Glob the platform-suffixed .node (darwin-arm64 on dev, linux-x64-gnu on CI, …) so the
       # declared output exists on EVERY host — a hardcoded triple fails Moon's output check on Linux.
@@ -117,3 +120,6 @@ tasks:
       - '/rs/crates/bindings/paigasus-wasm/src/**/*'
       - '/rs/crates/bindings/paigasus-wasm/Cargo.toml'
       - '/rs/crates/bindings/paigasus-wasm/package.json'
+      # Parity corpus (SMA-433): a corpus change must re-key the ts replay. Task-hash input only —
+      # it does not make this project affected by a corpus-only edit (see affected-smoke parity-oneway).
+      - '/rs/crates/libs/paigasus-kernel-parity/vectors/sum.json'
