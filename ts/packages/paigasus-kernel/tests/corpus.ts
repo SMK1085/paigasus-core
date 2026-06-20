@@ -10,8 +10,6 @@ export interface ParityCase {
 
 // Single resolved path constant: the committed corpus lives in the Rust parity crate. From this
 // file: tests -> paigasus-kernel -> packages -> ts -> repo root == four `../`.
-const corpusPath = fileURLToPath(
-  new URL('../../../../rs/crates/libs/paigasus-kernel-parity/vectors/sum.json', import.meta.url),
-);
+const corpusPath = fileURLToPath(new URL('../../../../rs/crates/libs/paigasus-kernel-parity/vectors/sum.json', import.meta.url));
 
 export const cases: ParityCase[] = JSON.parse(readFileSync(corpusPath, 'utf8')) as ParityCase[];
