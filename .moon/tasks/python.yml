@@ -29,8 +29,14 @@ tasks:
     command: 'uv run ruff format --check .'
     inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
   typecheck:
-    command: 'uv run basedpyright'
-    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock']
+    # `script` (not `command`) because we chain two steps. First run: basedpyright's native
+    # output, which fails on real type errors. Second run: --outputjson piped to the coverage
+    # guard, which fails if basedpyright analyzed fewer files than the source tree contains --
+    # so an include/layout regression can't silently re-darken the gate, totally or partially
+    # (SMA-436). If the first run fails, the && short-circuits before the guard runs; otherwise the
+    # guard is the last command in the pipe, so its exit status is the pipeline's.
+    script: 'uv run basedpyright && uv run basedpyright --outputjson | uv run python scripts/assert_typecheck_coverage.py'
+    inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'scripts/**']
   test:
     command: 'uv run pytest'
     inputs: ['@group(sources)', '@group(tests)', 'pyproject.toml', '/py/uv.lock', 'conftest.py']

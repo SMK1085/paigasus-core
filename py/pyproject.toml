@@ -6,7 +6,10 @@ members = ["packages/*"]
 [tool.basedpyright]
 typeCheckingMode = "all"
 pythonVersion = "3.12"
-include = ["packages/*/src", "packages/*/tests"]
+# Each glob needs a recursive /** suffix: a single-* pattern terminating at a directory
+# (packages/*/src) matches the dir but collects NONE of its .py files, so basedpyright runs on
+# zero files and the gate passes vacuously (SMA-436). Do not drop the /**.
+include = ["packages/*/src/**", "packages/*/tests/**"]
 exclude = ["**/__pycache__", "**/node_modules", "**/.venv", "**/dist", "**/build", "**/generated/**"]
 reportMissingTypeStubs = "warning"
 reportUnnecessaryTypeIgnoreComment = "error"
