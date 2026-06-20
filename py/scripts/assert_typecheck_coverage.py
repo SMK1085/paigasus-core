@@ -25,6 +25,7 @@ EXCLUDE_PARTS = frozenset({"generated", "__pycache__", "node_modules", ".venv", 
 EXIT_OK = 0
 EXIT_UNDER_FLOOR = 1
 EXIT_UNREADABLE = 2
+EXIT_NO_PACKAGES = 3
 
 
 def expected_count(py_root: Path) -> int:
@@ -53,6 +54,13 @@ def main() -> int:
 
     # scripts/ lives directly under py/, so the parent of this file's dir is the py root.
     expected = expected_count(Path(__file__).resolve().parents[1])
+    if expected == 0:
+        print(
+            "py:typecheck coverage guard: computed an expected source-file count of 0 -- the py/packages/* layout may have moved or the guard's root is wrong. Refusing to pass vacuously (SMA-436).",
+            file=sys.stderr,
+        )
+        return EXIT_NO_PACKAGES
+
     if analyzed < expected:
         print(
             f"py:typecheck coverage guard: basedpyright analyzed {analyzed} file(s) but the "
