@@ -109,6 +109,19 @@ rather than an opaque traceback indistinguishable from the vacuous-gate signal. 
 red; the operator can tell them apart. The guard is the last command in the pipe, so its exit status
 propagates without `pipefail`.
 
+The guard's complete exit-code contract:
+
+| code | condition | meaning |
+| --- | --- | --- |
+| `0` | `filesAnalyzed >= expected` | gate saw the full source tree (pass) |
+| `1` | `filesAnalyzed < expected` | total or partial coverage darkening — vacuous gate |
+| `2` | empty stdin / non-JSON / missing key | unreadable `--outputjson` (fail-closed) |
+| `3` | `expected == 0` | source tree appears empty (`packages/*` layout moved) — the guard refuses to pass vacuously on its own broken view |
+
+(Exit `3`, `EXIT_NO_PACKAGES`, was added during the code-review loop as a further fail-closed
+hardening: a guard whose job is to detect "zero files analyzed" must not itself pass when its own
+glob finds nothing.)
+
 **Why double-run over the alternatives:** keeps basedpyright's native (grouped, colored) output
 verbatim and keeps the guard single-purpose. A separate `typecheck-coverage` Moon task was rejected
 (extra CI-graph node, decoupled from the gate it protects). Note the double-run *also* parses
