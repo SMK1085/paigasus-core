@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 
 # Mirrors tool.basedpyright.include (src + tests per package) and the exclude basenames.
+# No /** suffix here (unlike the pyproject include): expected_count() rglobs each matched dir
+# itself, so these intentionally terminate at the directory. Don't "align" them by adding /**.
 INCLUDE_GLOBS = ("packages/*/src", "packages/*/tests")
 EXCLUDE_PARTS = frozenset({"generated", "__pycache__", "node_modules", ".venv", "dist", "build"})
 
