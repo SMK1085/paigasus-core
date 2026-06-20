@@ -90,7 +90,7 @@ The guard is a committed, ruff-linted helper `py/scripts/assert_typecheck_covera
 3. Fail (exit 1) if `filesAnalyzed < expected`, with a message naming both counts and pointing at
    `tool.basedpyright.include`.
 
-**Why a floor, not `== 0` (M1):** `== 0` only catches *total* darkness. The likelier future
+**Why a floor, not `== 0`:** `== 0` only catches *total* darkness. The likelier future
 recurrence is *partial* darkness — a new package whose layout doesn't fit `packages/*/src/**`, or an
 over-narrow edit — which leaves `filesAnalyzed > 0` and would pass a non-zero check. A package-count
 floor (`>= number of packages`) doesn't fix it either: a broken new package still leaves the count
@@ -102,7 +102,7 @@ entire mechanism. `--outputjson` exposes only the *count*, not the analyzed-file
 floor is the practical durable ceiling; the floor's patterns/excludes mirror
 `tool.basedpyright.{include,exclude}` and must move with them (a deliberate two-place coupling).
 
-**Fail-closed, legibly (L1):** on empty stdin, non-JSON, or a missing key (basedpyright crash or a
+**Fail-closed, legibly:** on empty stdin, non-JSON, or a missing key (basedpyright crash or a
 future `--outputjson` schema change under the `basedpyright<2` pin), the guard exits with a
 *distinct* code and message (e.g. *"couldn't read basedpyright coverage JSON — schema changed?"*)
 rather than an opaque traceback indistinguishable from the vacuous-gate signal. Both directions are
@@ -113,9 +113,9 @@ propagates without `pipefail`.
 verbatim and keeps the guard single-purpose. A separate `typecheck-coverage` Moon task was rejected
 (extra CI-graph node, decoupled from the gate it protects). Note the double-run *also* parses
 `--outputjson` for the guard, so it carries the same JSON dependency a single-run design would — the
-honest reason to prefer it is native output on the error path, not schema-coupling avoidance (L2).
+honest reason to prefer it is native output on the error path, not schema-coupling avoidance.
 
-**Cost (L3):** the gate runs two full `typeCheckingMode = "all"` passes; the guard's expected-count
+**Cost:** the gate runs two full `typeCheckingMode = "all"` passes; the guard's expected-count
 step is a filesystem glob (no third analysis). Sub-second today, Moon-cached and affected-gated, but
 it scales ~linearly with the py tree. If it ever bites, the single-run-parse-both shape reclaims the
 2× at the cost of re-rendering diagnostics.
@@ -136,7 +136,7 @@ Two proofs, each injected then removed:
 
 This discharges the issue's "prove the gate's effectiveness rather than assume it" requirement.
 
-### Residual risk: potency is not durably guarded (M2)
+### Residual risk: potency is not durably guarded
 
 A type gate can go vacuous two ways: it analyzes too few files (closed by the coverage floor above),
 or it analyzes the right files under a *toothless ruleset* — a future downgrade of `typeCheckingMode`,
