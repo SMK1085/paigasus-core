@@ -9,7 +9,7 @@ replay it and must reproduce `expected` — the kernel is the single oracle.
 - **Regenerate:** `cargo run -p paigasus-kernel-parity --bin gen-parity-vectors` (run from `rs/`).
   The sample is a deterministic enumeration (no PRNG), so output is byte-stable.
 - **Drift guard:** the `repo:parity-corpus-drift` Moon task regenerates the corpus and
-  `git diff --exit-code`s it, so a kernel edit landed without regenerating fails CI red. The
+  runs `git diff --exit-code`, so a kernel edit landed without regenerating fails CI red. The
   in-crate `tests/replay.rs` asserts the same thing in `cargo nextest`.
 
 Scope note: parity here is *decoded-value* equality on the i32-safe domain, not *surface*
