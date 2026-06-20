@@ -1,0 +1,18 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-kernel-parity-rs'
+layer: 'library'
+language: 'rust'
+
+# Cross-language edge to the kernel (ADR-0005): a kernel change must rebuild this crate so its
+# replay/drift tests re-run against the new kernel. The task-level `^:build` is what propagates
+# `affected` under `moon ci --include-relations` — a project dependsOn alone does not (SMA-389 D3).
+# Mirrors the binding crates.
+dependsOn:
+  - 'paigasus-kernel-rs'
+
+tasks:
+  build:
+    deps: ['^:build']
+  test:
+    deps: ['^:build']

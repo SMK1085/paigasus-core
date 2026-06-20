@@ -108,7 +108,7 @@ run_suite() {
   # Strict equality (default-deny): any OTHER project appearing (an unrelated *-py/*-ts package, a
   # contracts/py/ts root) fails the case automatically — no forbid enumeration needed.
   run_case "kernel->bindings" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
-    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts,paigasus-wasm-rs"
+    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts,paigasus-wasm-rs,paigasus-kernel-parity-rs"
   # py binding edit -> the binding + the py wrapper that depends on it (SMA-419). One-directional
   # w.r.t. the kernel: paigasus-kernel-rs is deliberately ABSENT (a binding edit must not rebuild
   # the kernel), now enforced implicitly by strict equality rather than a forbid-regex.
@@ -122,6 +122,12 @@ run_suite() {
   # one-directional: paigasus-kernel-rs deliberately absent (a binding edit must not rebuild the kernel).
   run_case "binding-oneway-wasm" "rs/crates/bindings/paigasus-wasm/src/lib.rs" \
     "paigasus-wasm-rs,paigasus-kernel-ts"
+  # parity crate edit -> only the parity crate. One-directional w.r.t. the kernel: a parity edit
+  # must NOT rebuild the kernel (paigasus-kernel-rs deliberately absent), now enforced implicitly by
+  # strict equality. Confirms Moon treats the cross-project corpus `inputs` of the py/ts test tasks
+  # as task-hash keys, NOT as project-affected edges (so py/ts do not appear here) — SMA-433.
+  run_case "parity-oneway" "rs/crates/libs/paigasus-kernel-parity/src/lib.rs" \
+    "paigasus-kernel-parity-rs"
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
   assert_include_relations || SUITE_RC=1
   return "$SUITE_RC"

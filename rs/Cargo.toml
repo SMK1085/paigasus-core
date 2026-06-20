@@ -64,6 +64,10 @@ napi-build = "2"
 # per 0.2.z) — bump the two together (dependency-bump runbook), or this re-introduces the schema
 # mismatch the proto pin was meant to avoid.
 wasm-bindgen = "0.2"
+# proptest — property-based coverage of the kernel's behavioral properties (the "against the
+# Rust impl" half of the ADR-0005 parity harness, SMA-433). Dev-dependency only — never enters a
+# published artifact.
+proptest = "1"
 # In-tree path dep: the bindings (and future consumers) build against the live kernel, so a
 # kernel edit rebuilds them. This is also the cargo-side half of the affected-graph edge.
 paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.0.0" }

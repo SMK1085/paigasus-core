@@ -85,3 +85,21 @@ tasks:
       - 'rs/crates/*/*/package.json'
       - 'ts/packages/*/package.json'
       - 'ts/apps/*/package.json'
+
+  parity-corpus-drift:
+    description: 'Regenerate the parity corpus from the kernel; assert it matches the committed vectors (SMA-433).'
+    # Run the generator crate-scoped from rs/ so rs/.cargo/config.toml is in scope, then assert the
+    # committed corpus is unchanged. NEVER broaden to --workspace: the parity crate is a plain
+    # lib+bin (no cdylib), so it needs none of the apple-darwin link flags the FFI cdylibs do.
+    script: '( cd rs && cargo run -p paigasus-kernel-parity --bin gen-parity-vectors ) && git diff --exit-code rs/crates/libs/paigasus-kernel-parity/vectors/sum.json'
+    toolchain: 'system'
+    # Narrow inputs — `repo` owns the whole tree, so without these the guard would run on every change.
+    inputs:
+      - 'rs/crates/libs/paigasus-kernel/src/**/*'
+      # The kernel manifest too: the generator compiles `paigasus-kernel`, so a kernel Cargo.toml
+      # change (a future `[features]` toggle altering `sum`) must re-key the gate (cache-input
+      # completeness — the on-disk complement to the in-crate replay test).
+      - 'rs/crates/libs/paigasus-kernel/Cargo.toml'
+      - 'rs/crates/libs/paigasus-kernel-parity/src/**/*'
+      - 'rs/crates/libs/paigasus-kernel-parity/Cargo.toml'
+      - 'rs/crates/libs/paigasus-kernel-parity/vectors/sum.json'

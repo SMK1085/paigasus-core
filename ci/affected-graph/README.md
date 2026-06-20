@@ -10,9 +10,9 @@ deep` and asserts the affected project set **equals** an exact expected set per 
 
 - **contracts edit** → `contracts` + `paigasus-proto-{rs,py,ts}` + `paigasus-gateway-rs`.
 - **kernel edit** → `paigasus-kernel-rs` + `paigasus-py-bindings-rs` + `paigasus-node-bindings-rs`
-  + `paigasus-wasm-rs` + `paigasus-gateway-rs` + `paigasus-kernel-py` + `paigasus-kernel-ts` (both
-  language wrappers wrap their bindings, SMA-419/420/427). Strict equality rejects any other project
-  implicitly.
+  + `paigasus-wasm-rs` + `paigasus-gateway-rs` + `paigasus-kernel-py` + `paigasus-kernel-ts`
+  + `paigasus-kernel-parity-rs` (both language wrappers wrap their bindings, SMA-419/420/427).
+  Strict equality rejects any other project implicitly.
 - **py binding edit** → `paigasus-py-bindings-rs` + `paigasus-kernel-py`; one-directional w.r.t.
   the kernel.
 - **node binding edit** → `paigasus-node-bindings-rs` + `paigasus-kernel-ts`; one-directional
@@ -21,6 +21,9 @@ deep` and asserts the affected project set **equals** an exact expected set per 
   kernel. `paigasus-kernel-ts` now has two upstream binding edges — `paigasus-kernel-rs →
   paigasus-node-bindings-rs → paigasus-kernel-ts` (napi) and `paigasus-kernel-rs →
   paigasus-wasm-rs → paigasus-kernel-ts` (wasm, SMA-427) — so a kernel edit reaches it via both.
+- **parity-crate edit** → `paigasus-kernel-parity-rs`; one-directional w.r.t. the kernel (a parity
+  edit must not rebuild the kernel). The py/ts parity tests list the corpus as a task `input`
+  (cache-keying), which does not make them project-affected by a corpus-only edit.
 
 It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
 `--include-relations` (the edges are inert without it).
