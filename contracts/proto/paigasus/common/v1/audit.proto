@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package paigasus.common.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Shared audit metadata for auditable entities and DTOs across all Paigasus
+// services and languages. Carried by *embedding* this message as a field
+// (`AuditMetadata audit = N;`) rather than repeating the four fields per
+// message — the shape is defined once here. The per-language `Auditable`
+// trait / interface / Protocol is layered on top of the generated type.
+message AuditMetadata {
+  // When the entity was first created (UTC).
+  google.protobuf.Timestamp created_at = 1;
+
+  // When the entity was last modified (UTC). Equals created_at on first write.
+  google.protobuf.Timestamp modified_at = 2;
+
+  // Opaque identifier of the actor that created the entity (user id / subject
+  // claim / service name). Empty = unknown/system, pending a structured Actor.
+  string created_by = 3;
+
+  // Opaque identifier of the actor that last modified the entity.
+  string modified_by = 4;
+}
