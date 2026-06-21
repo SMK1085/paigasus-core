@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package paigasus.common.v1;
+
+import "paigasus/common/v1/audit.proto";
+
+// Conformance/codegen fixture: the canonical example of *embedding* AuditMetadata
+// in a message (`AuditMetadata audit = N;`). It exists to prove the cross-language
+// embedding path generates correctly and to back the per-language Auditable
+// conformance tests against a *generated* type. Not a domain type — real auditable
+// aggregates embed AuditMetadata exactly this way.
+message AuditableExample {
+  string id = 1;
+
+  // Embedded shared audit metadata. Generated as Option<AuditMetadata> (Rust) /
+  // AuditMetadata | None (Python) / optional AuditMetadata (TS).
+  AuditMetadata audit = 2;
+}
