@@ -36,7 +36,7 @@ markers = [
 # uv.lock pins the exact resolved versions; these specifiers cap the upgrade window.
 [dependency-groups]
 dev = [
-    "anyio[trio]>=4.13.0,<5",
+    "anyio[trio]>=4.14.0,<5",
     "basedpyright>=1.39.8,<2",
     "betterproto2-compiler>=0.10,<0.11",
     "pytest>=9.1.1,<10",
