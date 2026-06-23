@@ -116,11 +116,16 @@ a wheel with `License-Expression: Apache-2.0` but **no license text** —
 only `LICENSE` lives at the repo root, outside each package. A permissive-licensed
 artifact published to PyPI should carry its license text. Fix: place a real copy
 of the root `LICENSE` in each package directory (`py/packages/paigasus-proto/LICENSE`
-and `py/packages/paigasus-kernel/LICENSE`). `uv_build` then embeds it as
-`License-File: LICENSE`. A real copy (not a symlink) is used — symlinks interact
-badly with sdist tarballs and cross-platform file collection. The text is the
-standard Apache-2.0 license and effectively never changes, so the duplication
-carries no meaningful sync burden.
+and `py/packages/paigasus-kernel/LICENSE`) **and declare it explicitly** with a
+PEP 639 `license-files = ["LICENSE"]` key in `[project]`. Verified during
+implementation: with uv_build 0.11.16, placing the file alone is **not** enough —
+`uv_build` does not auto-glob license files, so without the `license-files` key
+the wheel carries `License-Expression: Apache-2.0` but no `License-File:` entry
+and no embedded text. With the key, `uv_build` emits `License-File: LICENSE` and
+ships the text at `*.dist-info/licenses/LICENSE` in both wheel and sdist. A real
+copy (not a symlink) is used — symlinks interact badly with sdist tarballs and
+cross-platform file collection. The text is the standard Apache-2.0 license and
+effectively never changes, so the duplication carries no meaningful sync burden.
 
 ### README content (per package)
 
