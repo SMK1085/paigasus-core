@@ -24,4 +24,4 @@ fileGroups:
 tasks:
   build:
     command: 'uv build'
-    inputs: ['@group(sources)', 'pyproject.toml']
+    inputs: ['@group(sources)', 'pyproject.toml', 'README.md', 'LICENSE']
