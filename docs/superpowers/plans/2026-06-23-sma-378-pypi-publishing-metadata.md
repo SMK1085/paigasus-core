@@ -57,6 +57,7 @@ version = "0.0.0"
 description = "Generated protobuf message types and gRPC stubs for Paigasus."
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Paigasus contributors" }]
 requires-python = ">=3.12"
 classifiers = [
@@ -188,6 +189,7 @@ version = "0.0.0"
 description = "Python bindings for the Paigasus behavioral kernel."
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Paigasus contributors" }]
 requires-python = ">=3.12"
 classifiers = [
