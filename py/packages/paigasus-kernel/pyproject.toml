@@ -1,10 +1,21 @@
 [project]
 name = "paigasus-kernel"
 version = "0.0.0"
+description = "Python bindings for the Paigasus behavioral kernel."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Paigasus contributors" }]
 requires-python = ">=3.12"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
 dependencies = ["paigasus-py-bindings"]
-# TODO(SMA-378): before first PyPI publish, paigasus-proto & paigasus-kernel need
-# description/readme/license = "Apache-2.0"/authors/classifiers (ADR-0006). (PyPI-bound only.)
 
 [build-system]
 requires = ["uv_build>=0.11.16,<0.12"]

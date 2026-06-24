@@ -1,15 +1,26 @@
 [project]
 name = "paigasus-proto"
 version = "0.0.0"
+description = "Generated protobuf message types and gRPC stubs for Paigasus."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Paigasus contributors" }]
 requires-python = ">=3.12"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
 dependencies = [
   # Runtime for generated betterproto2 code. The [grpclib] extra is required
   # because the generated HealthService stub imports grpclib at module level.
   # Minor must match betterproto2-compiler (compiler enforces ~=0.10.0).
   "betterproto2[grpclib]>=0.10,<0.11",
 ]
-# TODO(SMA-378): before first PyPI publish, paigasus-proto & paigasus-kernel need
-# description/readme/license = "Apache-2.0"/authors/classifiers (ADR-0006). (PyPI-bound only.)
 
 [build-system]
 requires = ["uv_build>=0.11.16,<0.12"]
