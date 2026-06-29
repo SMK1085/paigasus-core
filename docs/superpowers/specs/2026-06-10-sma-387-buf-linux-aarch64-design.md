@@ -2,7 +2,9 @@
 
 **Issue:** [SMA-387](https://linear.app/smaschek/issue/SMA-387/fix-linux-aarch64-buf-asset-resolution-in-vendored-buftoml-proto)
 **Date:** 2026-06-10 (revised same day after design review)
-**Status:** Approved
+**Status:** Approved — interim shipped. **Flip-over (§3) executed in SMA-411**
+(2026-06-29, unblocked by proto 0.58.1 / schema_tool 0.18.0); see
+[2026-06-29-sma-411-buf-platform-scoped-arch-flip.md](./2026-06-29-sma-411-buf-platform-scoped-arch-flip.md).
 
 ## Problem
 
