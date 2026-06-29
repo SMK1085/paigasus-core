@@ -7,10 +7,12 @@
 # Release assets ship as plain executables (no archive): lefthook_{ver}_{OS}_{arch}
 # That binary IS the shim target; proto renames it to "lefthook" in ~/.proto/bin/.
 #
-# The global aarch64→arm64 remap is safe for Linux only because lefthook
-# publishes duplicate Linux_aarch64 and Linux_arm64 assets (identical sha256).
-# If upstream drops that alias, apply the platform-scoped pattern from
-# .proto/plugins/buf.toml (SMA-387).
+# Arch naming mirrors buf: macOS/Windows arm64 assets are *_arm64, but Linux ships
+# lefthook_{ver}_Linux_aarch64. The global aarch64 -> arm64 remap covers
+# macOS/Windows; the Linux-only [platform.linux.arch] identity override pins the
+# Linux name explicitly (proto >= 0.58.1, schema_tool 0.18.0), so resolution no
+# longer relies on lefthook also publishing a duplicate Linux_arm64 alias. Do NOT
+# add macos/windows arch tables — those assets need the kept global remap. (SMA-411)
 
 name = "lefthook"
 type = "cli"
@@ -27,8 +29,14 @@ checksum-file = "lefthook_checksums.txt"
 download-file = "lefthook_{version}_Windows_{arch}.exe"
 checksum-file = "lefthook_checksums.txt"
 
+# macOS/Windows arm64 assets are *_arm64; kept global for older schema engines.
 [install.arch]
 aarch64 = "arm64"
+
+# Linux arm64 asset is lefthook_{version}_Linux_aarch64; identity override beats
+# the global remap on proto >= 0.58.1.
+[platform.linux.arch]
+aarch64 = "aarch64"
 
 [install]
 download-url = "https://github.com/evilmartians/lefthook/releases/download/v{version}/{download_file}"
