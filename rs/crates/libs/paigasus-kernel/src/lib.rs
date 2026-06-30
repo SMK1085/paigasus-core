@@ -5,6 +5,10 @@
 //! Bound to Python / Node / WASM via the crates under `rs/crates/bindings/`. No FFI or
 //! adapter dependencies live here (ADR-0005). Empty until real logic lands.
 
+pub mod uuid7;
+
+pub use uuid7::mint_uuid7;
+
 /// Sum two integers — the kernel's first real, pure primitive. Deliberately minimal
 /// (placeholder for real domain logic); its purpose is to give the PyO3 binding a genuine
 /// kernel call to consume so the `paigasus-kernel-rs → paigasus-py-bindings-rs` edge is real
