@@ -5,5 +5,5 @@ import { __wbg_set_wasm } from "./paigasus_wasm_bg.js";
 __wbg_set_wasm(wasm);
 wasm.__wbindgen_start();
 export {
-    sum
+    mintUuid7, prnBuild, prnCanonicalize, prnCedarEntityId, prnCedarEntityType, prnErrorKind, prnOrg, prnRegion, prnResourceId, prnResourceType, prnService, sum
 } from "./paigasus_wasm_bg.js";
