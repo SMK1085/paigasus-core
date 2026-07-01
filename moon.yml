@@ -103,3 +103,17 @@ tasks:
       - 'rs/crates/libs/paigasus-kernel-parity/src/**/*'
       - 'rs/crates/libs/paigasus-kernel-parity/Cargo.toml'
       - 'rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
+
+  wasm-getrandom-free:
+    description: 'Assert the wasm binding pulls no `getrandom` — the kernel mints UUIDv7 from injected bytes, so wasm32-unknown-unknown stays buildable (SMA-448).'
+    # `cargo tree -i getrandom` exits 0 (prints the tree) if getrandom is a dep, non-zero if absent.
+    # We WANT it absent: fail the task only when the tree command succeeds.
+    script: 'cd rs && if cargo tree -p paigasus-wasm --target wasm32-unknown-unknown -e no-dev -i getrandom >/dev/null 2>&1; then echo "getrandom is in the paigasus-wasm dependency graph — a uuid rng feature leaked" >&2; exit 1; fi'
+    toolchain: 'system'
+    inputs:
+      - 'rs/Cargo.toml'
+      - 'rs/Cargo.lock'
+      - 'rs/crates/libs/paigasus-kernel/Cargo.toml'
+      - 'rs/crates/libs/paigasus-kernel/src/**/*'
+      - 'rs/crates/bindings/paigasus-wasm/Cargo.toml'
+      - 'rs/crates/bindings/paigasus-wasm/src/**/*'
