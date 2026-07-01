@@ -5,8 +5,10 @@
 //! Bound to Python / Node / WASM via the crates under `rs/crates/bindings/`. No FFI or
 //! adapter dependencies live here (ADR-0005). Empty until real logic lands.
 
+pub mod prn;
 pub mod uuid7;
 
+pub use prn::{Prn, PrnError};
 pub use uuid7::mint_uuid7;
 
 /// Sum two integers — the kernel's first real, pure primitive. Deliberately minimal
