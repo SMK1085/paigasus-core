@@ -174,15 +174,15 @@ Each shim exposes plain functions; **no `Prn` or struct object crosses the FFI b
 | `prn_error_kind(s: String) -> String` | `""` if valid, else the stable §7 token (the value the parity corpus compares) |
 | `prn_build(service, region, org, resource_type, resource_id) -> String` | canonical string; raises/throws on invalid |
 | `prn_service` / `prn_region` / `prn_org` / `prn_resource_type` / `prn_resource_id` `(s) -> String` | accessor strings; `org`/`region` map `None`/empty → `""` |
-| `mint_uuid7(unix_ms: f64, rand_hex: String) -> String` | minted UUID string; **fallible** — raises/throws `bad-rand-hex` if `rand_hex` is not exactly 20 lowercase hex chars, or `bad-unix-ms` if `unix_ms` is not finite/non-negative/integral |
+| `mint_uuid7(unix_ms: f64, rand_hex: String) -> String` | minted UUID string; **fallible** — raises/throws `bad-rand-hex` if `rand_hex` is not exactly 20 lowercase hex chars, or `bad-unix-ms` if `unix_ms` is not finite/non-negative/integral/`< u64::MAX` |
 | `prn_cedar_entity_type(s) -> String` | `"Pgs::Iam::Project"`-style namespace+type |
 | `prn_cedar_entity_id(s) -> String` | the resource-id UUID |
 
 **Marshalling rules** (stated so all three shims agree):
 - `unix_ms`: FFI `f64`, cast `f64 → u64` in the shim (48-bit ms is exact in `f64`). The shim
-  validates `unix_ms` is finite, non-negative, and integral **before** the cast, else raises/
-  throws `bad-unix-ms` (a bare `as u64` would silently coerce NaN→0, +Inf→`u64::MAX`,
-  negative→0, fractional→truncated).
+  validates `unix_ms` is finite, non-negative, integral, and `< u64::MAX as f64` **before** the
+  cast, else raises/throws `bad-unix-ms` (a bare `as u64` would silently coerce NaN→0,
+  +Inf→`u64::MAX`, negative→0, fractional→truncated, and any finite value ≥ `u64::MAX` saturated).
 - `rand_hex`: exactly 20 lowercase hex chars → `[u8;10]`; else the shim raises/throws
   `bad-rand-hex` (a mint-only token, distinct from `PrnError`).
 - `org`/`region`: `"" ⇔ None`/empty in **both** directions (`prn_build` maps `""` org → `None`,

@@ -83,9 +83,10 @@ pub fn prn_resource_id(s: String) -> Result<String, JsError> {
 }
 
 /// Validate a millisecond timestamp before the `as u64` cast, or return `JsError("bad-unix-ms")`
-/// (a bare cast would silently coerce NaN→0, +Inf→`u64::MAX`, negative→0, fractional→truncated).
+/// (a bare cast would silently coerce NaN→0, +Inf→`u64::MAX`, negative→0, fractional→truncated, and
+/// any finite value ≥ `u64::MAX` saturated to `u64::MAX`).
 fn checked_unix_ms(unix_ms: f64) -> Result<u64, JsError> {
-    if !unix_ms.is_finite() || unix_ms < 0.0 || unix_ms.fract() != 0.0 {
+    if !unix_ms.is_finite() || unix_ms < 0.0 || unix_ms.fract() != 0.0 || unix_ms >= u64::MAX as f64 {
         return Err(JsError::new("bad-unix-ms"));
     }
     Ok(unix_ms as u64)
