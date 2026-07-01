@@ -1,0 +1,22 @@
+[
+  {"unix_ms":0,"rand_hex":"00000000000000000000","expected_uuid":"00000000-0000-7000-8000-000000000000"},
+  {"unix_ms":0,"rand_hex":"ffffffffffffffffffff","expected_uuid":"00000000-0000-7fff-bfff-ffffffffffff"},
+  {"unix_ms":0,"rand_hex":"aa55aa55aa55aa55aa55","expected_uuid":"00000000-0000-7a55-aa55-aa55aa55aa55"},
+  {"unix_ms":0,"rand_hex":"0123456789abcdef1032","expected_uuid":"00000000-0000-7123-8567-89abcdef1032"},
+  {"unix_ms":1,"rand_hex":"00000000000000000000","expected_uuid":"00000000-0001-7000-8000-000000000000"},
+  {"unix_ms":1,"rand_hex":"ffffffffffffffffffff","expected_uuid":"00000000-0001-7fff-bfff-ffffffffffff"},
+  {"unix_ms":1,"rand_hex":"aa55aa55aa55aa55aa55","expected_uuid":"00000000-0001-7a55-aa55-aa55aa55aa55"},
+  {"unix_ms":1,"rand_hex":"0123456789abcdef1032","expected_uuid":"00000000-0001-7123-8567-89abcdef1032"},
+  {"unix_ms":1000,"rand_hex":"00000000000000000000","expected_uuid":"00000000-03e8-7000-8000-000000000000"},
+  {"unix_ms":1000,"rand_hex":"ffffffffffffffffffff","expected_uuid":"00000000-03e8-7fff-bfff-ffffffffffff"},
+  {"unix_ms":1000,"rand_hex":"aa55aa55aa55aa55aa55","expected_uuid":"00000000-03e8-7a55-aa55-aa55aa55aa55"},
+  {"unix_ms":1000,"rand_hex":"0123456789abcdef1032","expected_uuid":"00000000-03e8-7123-8567-89abcdef1032"},
+  {"unix_ms":1700000000000,"rand_hex":"00000000000000000000","expected_uuid":"018bcfe5-6800-7000-8000-000000000000"},
+  {"unix_ms":1700000000000,"rand_hex":"ffffffffffffffffffff","expected_uuid":"018bcfe5-6800-7fff-bfff-ffffffffffff"},
+  {"unix_ms":1700000000000,"rand_hex":"aa55aa55aa55aa55aa55","expected_uuid":"018bcfe5-6800-7a55-aa55-aa55aa55aa55"},
+  {"unix_ms":1700000000000,"rand_hex":"0123456789abcdef1032","expected_uuid":"018bcfe5-6800-7123-8567-89abcdef1032"},
+  {"unix_ms":281474976710655,"rand_hex":"00000000000000000000","expected_uuid":"ffffffff-ffff-7000-8000-000000000000"},
+  {"unix_ms":281474976710655,"rand_hex":"ffffffffffffffffffff","expected_uuid":"ffffffff-ffff-7fff-bfff-ffffffffffff"},
+  {"unix_ms":281474976710655,"rand_hex":"aa55aa55aa55aa55aa55","expected_uuid":"ffffffff-ffff-7a55-aa55-aa55aa55aa55"},
+  {"unix_ms":281474976710655,"rand_hex":"0123456789abcdef1032","expected_uuid":"ffffffff-ffff-7123-8567-89abcdef1032"}
+]
