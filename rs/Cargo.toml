@@ -25,7 +25,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+# uuid: NO rng feature. v4/v7/rng transitively pull `getrandom`, which does not build on
+# wasm32-unknown-unknown without a JS cfg — and the kernel (uuid's first consumer) is bound to
+# wasm. The kernel mints UUIDv7 from injected bytes via `Uuid::from_bytes` (no feature needed);
+# parse/Display/as_hyphenated are in default features. Add features per-consumer if ever needed
+# (SMA-448).
+uuid = { version = "1" }
 bytes = "1"
 # Proto codegen runtimes — versions track the pinned neoeinstein-prost/tonic
 # v0.5.0 plugins (prost 0.14 / tonic 0.14). tonic 0.14 split the prost codec into

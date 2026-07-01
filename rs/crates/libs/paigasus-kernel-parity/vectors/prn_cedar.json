@@ -1,0 +1,9 @@
+[
+  {"prn":"prn:pgs:iam:::organization/0190a1e5-0000-7000-8000-000000000000","entity_type":"Pgs::Iam::Organization","entity_id":"0190a1e5-0000-7000-8000-000000000000"},
+  {"prn":"prn:pgs:iam::0190a100-0000-7000-8000-0000000000aa:team/0190a1b2-0000-7000-8000-000000000001","entity_type":"Pgs::Iam::Team","entity_id":"0190a1b2-0000-7000-8000-000000000001"},
+  {"prn":"prn:pgs:iam::0190a100-0000-7000-8000-0000000000aa:project/0190a1c3-0000-7000-8000-000000000002","entity_type":"Pgs::Iam::Project","entity_id":"0190a1c3-0000-7000-8000-000000000002"},
+  {"prn":"prn:pgs:iam::0190a100-0000-7000-8000-0000000000aa:service-account/0190a1d4-0000-7000-8000-000000000003","entity_type":"Pgs::Iam::ServiceAccount","entity_id":"0190a1d4-0000-7000-8000-000000000003"},
+  {"prn":"prn:pgs:iam:::user/0190a1e5-0000-7000-8000-000000000004","entity_type":"Pgs::Iam::User","entity_id":"0190a1e5-0000-7000-8000-000000000004"},
+  {"prn":"prn:pgs:gateway::0190a100-0000-7000-8000-0000000000aa:api-key/0190a1f6-0000-7000-8000-000000000005","entity_type":"Pgs::Gateway::ApiKey","entity_id":"0190a1f6-0000-7000-8000-000000000005"},
+  {"prn":"prn:pgs:gateway::0190a100-0000-7000-8000-0000000000aa:oauth2-client/0190a1f7-0000-7000-8000-000000000006","entity_type":"Pgs::Gateway::Oauth2Client","entity_id":"0190a1f7-0000-7000-8000-000000000006"}
+]

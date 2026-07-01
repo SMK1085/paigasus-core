@@ -587,4 +587,15 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.mintUuid7 = nativeBinding.mintUuid7
+module.exports.prnBuild = nativeBinding.prnBuild
+module.exports.prnCanonicalize = nativeBinding.prnCanonicalize
+module.exports.prnCedarEntityId = nativeBinding.prnCedarEntityId
+module.exports.prnCedarEntityType = nativeBinding.prnCedarEntityType
+module.exports.prnErrorKind = nativeBinding.prnErrorKind
+module.exports.prnOrg = nativeBinding.prnOrg
+module.exports.prnRegion = nativeBinding.prnRegion
+module.exports.prnResourceId = nativeBinding.prnResourceId
+module.exports.prnResourceType = nativeBinding.prnResourceType
+module.exports.prnService = nativeBinding.prnService
 module.exports.sum = nativeBinding.sum

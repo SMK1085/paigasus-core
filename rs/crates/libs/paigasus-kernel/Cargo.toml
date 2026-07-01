@@ -9,6 +9,10 @@ authors.workspace = true
 # release-worthy logic (kernel is crates.io-bound per ADR-0005).
 publish = false
 
+[dependencies]
+uuid = { workspace = true }
+thiserror = { workspace = true }
+
 [dev-dependencies]
 proptest.workspace = true
 
