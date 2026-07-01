@@ -52,4 +52,4 @@ tasks:
       # Parity corpus (SMA-433): a corpus change must re-run the py replay. This is a task-hash
       # input only — it does NOT make this project affected by a corpus-only edit (see affected-smoke
       # parity-oneway).
-      - '/rs/crates/libs/paigasus-kernel-parity/vectors/sum.json'
+      - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
