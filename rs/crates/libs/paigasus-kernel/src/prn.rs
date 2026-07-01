@@ -68,8 +68,9 @@ impl PrnError {
     }
 }
 
-/// `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` — lowercase; no leading/trailing/double hyphen (keeps the Cedar
-/// PascalCase mapping injective).
+/// `^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$` — lowercase; every `-`-separated segment starts with a
+/// letter, so there is no leading/trailing/double hyphen AND no digit-only post-hyphen segment
+/// (which would collide under the Cedar PascalCase mapping — e.g. `a1` and `a-1` both map to `A1`).
 fn is_valid_label(s: &str) -> bool {
     let mut segments = s.split('-');
     match segments.next() {
@@ -85,7 +86,10 @@ fn is_valid_label(s: &str) -> bool {
         }
         None => return false,
     }
-    segments.all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+    segments.all(|seg| {
+        let mut chars = seg.chars();
+        matches!(chars.next(), Some(c) if c.is_ascii_lowercase()) && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    })
 }
 
 /// `^[a-z0-9]+(-[a-z0-9]+)*$` — like a label but a leading digit is allowed (forward-compat region

@@ -53,8 +53,10 @@ From the brainstorm (B) and the adversarial challenge (C):
    is exact. The **kernel** signature stays `u64`; each shim casts `f64 → u64`.
 8. **(C-MAJOR) Cedar is exposed as two string accessors**, not an object — see §5.
 9. **(C-MAJOR) `service` and `resource-type` use a hyphen-strict regex**
-   `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` (no leading/trailing/double hyphen) so the PascalCase
-   Cedar mapping is injective (`api--key` and `api-key` must not collide).
+   `^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$` (no leading/trailing/double hyphen, AND every
+   post-hyphen segment starts with a letter — else `a1`/`a-1` collide under the Cedar
+   PascalCase mapping) so the PascalCase Cedar mapping is injective (`api--key` and
+   `api-key` must not collide, nor must `a1` and `a-1`).
 10. **(C-MAJOR) Case handling is split:** scheme/partition/service/region/resource-type are
     matched **case-sensitively (lowercase only)** — uppercase is rejected, not normalized.
     Only UUID fields (org, resource-id) are case-normalized (accepted mixed-case, emitted
@@ -78,10 +80,10 @@ for a well-formed PRN.
 |---|---|
 | `prn` | literal lowercase `prn` |
 | `pgs` | literal lowercase `pgs` |
-| `service` | `^[a-z][a-z0-9]*(-[a-z0-9]+)*$`; non-empty |
+| `service` | `^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$`; non-empty; every post-hyphen segment starts with a letter — else `a1`/`a-1` collide under the Cedar PascalCase mapping |
 | `region` | **empty in v1** (what minting emits), OR forward-compat `^[a-z0-9]+(-[a-z0-9]+)*$` (accepted on parse, never minted in v1) |
 | `org` | **empty**, OR a syntactically valid UUID (case-normalized to lowercase). Empty for `organization`/`user` |
-| `resource-type` | `^[a-z][a-z0-9]*(-[a-z0-9]+)*$`; non-empty; open set |
+| `resource-type` | `^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$`; non-empty; open set; every post-hyphen segment starts with a letter — else `a1`/`a-1` collide under the Cedar PascalCase mapping |
 | `resource-id` | a syntactically valid UUID (case-normalized); **always present**; minted ids are UUIDv7 |
 
 **Max length:** `parse` rejects inputs longer than **512 bytes** (`TooLong`) before any other
@@ -172,12 +174,15 @@ Each shim exposes plain functions; **no `Prn` or struct object crosses the FFI b
 | `prn_error_kind(s: String) -> String` | `""` if valid, else the stable §7 token (the value the parity corpus compares) |
 | `prn_build(service, region, org, resource_type, resource_id) -> String` | canonical string; raises/throws on invalid |
 | `prn_service` / `prn_region` / `prn_org` / `prn_resource_type` / `prn_resource_id` `(s) -> String` | accessor strings; `org`/`region` map `None`/empty → `""` |
-| `mint_uuid7(unix_ms: f64, rand_hex: String) -> String` | minted UUID string; **fallible** — raises/throws `bad-rand-hex` if `rand_hex` is not exactly 20 lowercase hex chars |
+| `mint_uuid7(unix_ms: f64, rand_hex: String) -> String` | minted UUID string; **fallible** — raises/throws `bad-rand-hex` if `rand_hex` is not exactly 20 lowercase hex chars, or `bad-unix-ms` if `unix_ms` is not finite/non-negative/integral |
 | `prn_cedar_entity_type(s) -> String` | `"Pgs::Iam::Project"`-style namespace+type |
 | `prn_cedar_entity_id(s) -> String` | the resource-id UUID |
 
 **Marshalling rules** (stated so all three shims agree):
-- `unix_ms`: FFI `f64`, cast `f64 → u64` in the shim (48-bit ms is exact in `f64`).
+- `unix_ms`: FFI `f64`, cast `f64 → u64` in the shim (48-bit ms is exact in `f64`). The shim
+  validates `unix_ms` is finite, non-negative, and integral **before** the cast, else raises/
+  throws `bad-unix-ms` (a bare `as u64` would silently coerce NaN→0, +Inf→`u64::MAX`,
+  negative→0, fractional→truncated).
 - `rand_hex`: exactly 20 lowercase hex chars → `[u8;10]`; else the shim raises/throws
   `bad-rand-hex` (a mint-only token, distinct from `PrnError`).
 - `org`/`region`: `"" ⇔ None`/empty in **both** directions (`prn_build` maps `""` org → `None`,
@@ -253,7 +258,8 @@ the `prn_error_kind` FFI fn and the `prn_canonical.json` corpus compare across l
 | `BadResourceType` | `bad-resource-type` |
 | `BadResourceId` | `bad-resource-id` |
 
-Mint-only (not a `PrnError`; raised by the FFI shim, not the kernel): **`bad-rand-hex`**.
+Mint-only (not a `PrnError`; raised by the FFI shim, not the kernel): **`bad-rand-hex`**,
+**`bad-unix-ms`**.
 
 Idiomatic wrappers raise/throw with the token in the message: PyO3 → `ValueError`; napi/wasm →
 `Error`. The token vocabulary is the cross-language contract; adding a variant means adding a
@@ -295,17 +301,16 @@ token here + a corpus case.
 | Cross-binding parity vectors | §6 |
 | Bind via PyO3/napi/wasm; smoke each; clean Py/TS surface | §5 + §8 |
 
-## 10. ADR-0014 amendment (required)
+## 10. ADR-0014 amendment (applied)
 
-ADR-0014 is *Proposed*. Two corrections, applied in place (pre-acceptance fix of a Proposed
-ADR; the "supersede, don't edit" rule governs revisits of *decided* ADRs):
+ADR-0014 was *Proposed*. Two corrections were applied in place in the Notion ADR on
+2026-06-30 (pre-acceptance fix of a Proposed ADR; the "supersede, don't edit" rule governs
+revisits of *decided* ADRs):
 
 1. **Org-self PRN form** → `prn:pgs:iam:::organization/<org>` (empty tenant slot, org UUID as
    resource-id). Supersedes `prn:pgs:iam::org_…:organization` and the `org_…` examples.
 2. **No `org_` prefix in the canonical org slot** — the tenant slot is the raw UUID; any type
    prefix is display-only.
-
-Action: amend the Notion ADR (offered at GATE 1).
 
 ## 11. Out of scope (explicit)
 

@@ -17,6 +17,7 @@
   {"input":"prn:pgs:iam:::userwithoutslash","error_kind":"bad-resource-path","canonical":null},
   {"input":"prn:pgs:iam:::user/a/b","error_kind":"bad-resource-path","canonical":null},
   {"input":"prn:pgs:iam:::/0190a1e5-0000-7000-8000-000000000004","error_kind":"bad-resource-type","canonical":null},
+  {"input":"prn:pgs:iam::0190a100-0000-7000-8000-0000000000aa:team-1/0190a1b2-0000-7000-8000-000000000001","error_kind":"bad-resource-type","canonical":null},
   {"input":"prn:pgs:iam:::UPPER/0190a1e5-0000-7000-8000-000000000004","error_kind":"bad-resource-type","canonical":null},
   {"input":"prn:pgs:iam:::user/not-a-uuid","error_kind":"bad-resource-id","canonical":null},
   {"input":"prn:pgs:iam:::user/","error_kind":"bad-resource-id","canonical":null},

@@ -48,6 +48,7 @@ fn rejects_with_expected_kind() {
         ("prn:pgs:iam:::user", "bad-resource-path"),
         ("prn:pgs:iam:::user/a/b", "bad-resource-path"),
         ("prn:pgs:iam:::/0190a1e5-0000-7000-8000-000000000004", "bad-resource-type"),
+        ("prn:pgs:iam:::team-1/0190a1e5-0000-7000-8000-000000000004", "bad-resource-type"),
         ("prn:pgs:iam:::user/not-a-uuid", "bad-resource-id"),
     ];
     for (input, kind) in cases {

@@ -85,12 +85,22 @@ pub fn prn_resource_id(s: String) -> napi::Result<String> {
     Prn::parse(&s).map(|p| p.resource_id().as_hyphenated().to_string()).map_err(to_napi)
 }
 
+/// Validate a millisecond timestamp before the `as u64` cast, or return `napi::Error("bad-unix-ms")`
+/// (a bare cast would silently coerce NaN→0, +Inf→`u64::MAX`, negative→0, fractional→truncated).
+fn checked_unix_ms(unix_ms: f64) -> napi::Result<u64> {
+    if !unix_ms.is_finite() || unix_ms < 0.0 || unix_ms.fract() != 0.0 {
+        return Err(napi::Error::from_reason("bad-unix-ms"));
+    }
+    Ok(unix_ms as u64)
+}
+
 /// Mint a UUIDv7 from an injected millisecond timestamp and a 20-char lowercase hex string of
 /// entropy (throws `"bad-rand-hex"` if `rand_hex` is malformed).
 #[napi(js_name = "mintUuid7")]
 pub fn mint_uuid7(unix_ms: f64, rand_hex: String) -> napi::Result<String> {
     let rand = parse_rand_hex(&rand_hex)?;
-    Ok(paigasus_kernel::mint_uuid7(unix_ms as u64, rand).as_hyphenated().to_string())
+    let ms = checked_unix_ms(unix_ms)?;
+    Ok(paigasus_kernel::mint_uuid7(ms, rand).as_hyphenated().to_string())
 }
 
 /// Parse `s` and return its Cedar entity type (e.g. `Pgs::Iam::Project`), or throw `kind()`.

@@ -153,6 +153,7 @@ pub fn build_prn_canonical_corpus() -> Vec<PrnCanonicalCase> {
         "prn:pgs:iam:::userwithoutslash",
         "prn:pgs:iam:::user/a/b",
         "prn:pgs:iam:::/0190a1e5-0000-7000-8000-000000000004",
+        "prn:pgs:iam::0190a100-0000-7000-8000-0000000000aa:team-1/0190a1b2-0000-7000-8000-000000000001",
         "prn:pgs:iam:::UPPER/0190a1e5-0000-7000-8000-000000000004",
         "prn:pgs:iam:::user/not-a-uuid",
         "prn:pgs:iam:::user/",
