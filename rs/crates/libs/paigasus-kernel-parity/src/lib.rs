@@ -178,6 +178,45 @@ pub fn build_prn_canonical_corpus() -> Vec<PrnCanonicalCase> {
         .collect()
 }
 
+/// One PRN field-accessor + build round-trip case: the canonical PRN and each accessor's expected
+/// output (`org` is `""` when the tenant slot is empty). Covers the FFI accessors AND `prn_build`,
+/// which must reproduce `prn` from the fields — mapping `""` org → None (spec §5 marshalling).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrnFieldsCase {
+    pub prn: String,
+    pub service: String,
+    pub region: String,
+    pub org: String,
+    pub resource_type: String,
+    pub resource_id: String,
+}
+
+/// Deterministic PRN field/build corpus: org-scoped and empty-tenant-slot (organization/user) PRNs.
+#[must_use]
+pub fn build_prn_fields_corpus() -> Vec<PrnFieldsCase> {
+    const PRNS: [&str; 6] = [
+        "prn:pgs:iam:::organization/0190a1e5-0000-7000-8000-000000000000",
+        "prn:pgs:iam::0190a100-0000-7000-8000-0000000000aa:team/0190a1b2-0000-7000-8000-000000000001",
+        "prn:pgs:iam::0190a100-0000-7000-8000-0000000000aa:project/0190a1c3-0000-7000-8000-000000000002",
+        "prn:pgs:iam::0190a100-0000-7000-8000-0000000000aa:service-account/0190a1d4-0000-7000-8000-000000000003",
+        "prn:pgs:iam:::user/0190a1e5-0000-7000-8000-000000000004",
+        "prn:pgs:gateway::0190a100-0000-7000-8000-0000000000aa:api-key/0190a1f6-0000-7000-8000-000000000005",
+    ];
+    PRNS.iter()
+        .map(|s| {
+            let p = paigasus_kernel::Prn::parse(s).expect("prn_fields corpus PRN parses");
+            PrnFieldsCase {
+                prn: (*s).to_string(),
+                service: p.service().to_string(),
+                region: p.region().to_string(),
+                org: p.org().map(|u| u.as_hyphenated().to_string()).unwrap_or_default(),
+                resource_type: p.resource_type().to_string(),
+                resource_id: p.resource_id().as_hyphenated().to_string(),
+            }
+        })
+        .collect()
+}
+
 /// Deterministic PRN → Cedar corpus across services, types, and multi-dash types.
 #[must_use]
 pub fn build_prn_cedar_corpus() -> Vec<PrnCedarCase> {

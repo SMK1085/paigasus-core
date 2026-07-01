@@ -4,7 +4,9 @@
 //! corpus must fail RED, not pass having compared nothing) and a committed==fresh-generation guard
 //! (a kernel edit landed without regenerating fails here) (SMA-433, SMA-448).
 
-use paigasus_kernel_parity::{Case, PrnCanonicalCase, PrnCedarCase, Uuid7Case, build_corpus, build_prn_canonical_corpus, build_prn_cedar_corpus, build_uuid7_corpus, load_corpus};
+use paigasus_kernel_parity::{
+    Case, PrnCanonicalCase, PrnCedarCase, PrnFieldsCase, Uuid7Case, build_corpus, build_prn_canonical_corpus, build_prn_cedar_corpus, build_prn_fields_corpus, build_uuid7_corpus, load_corpus,
+};
 
 #[test]
 fn sum_corpus_present_and_fresh() {
@@ -32,4 +34,11 @@ fn prn_cedar_corpus_present_and_fresh() {
     let committed = load_corpus::<PrnCedarCase>("prn_cedar");
     assert!(!committed.is_empty(), "prn_cedar corpus is empty");
     assert_eq!(committed, build_prn_cedar_corpus());
+}
+
+#[test]
+fn prn_fields_corpus_present_and_fresh() {
+    let committed = load_corpus::<PrnFieldsCase>("prn_fields");
+    assert!(!committed.is_empty(), "prn_fields corpus is empty");
+    assert_eq!(committed, build_prn_fields_corpus());
 }

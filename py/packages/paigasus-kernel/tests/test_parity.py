@@ -12,10 +12,16 @@ from typing import TypedDict, cast
 import pytest
 from paigasus_kernel import (
     mint_uuid7,
+    prn_build,
     prn_canonicalize,
     prn_cedar_entity_id,
     prn_cedar_entity_type,
     prn_error_kind,
+    prn_org,
+    prn_region,
+    prn_resource_id,
+    prn_resource_type,
+    prn_service,
     sum_as_string,
 )
 
@@ -47,6 +53,15 @@ class PrnCedarCase(TypedDict):
     entity_id: str
 
 
+class PrnFieldsCase(TypedDict):
+    prn: str
+    service: str
+    region: str
+    org: str
+    resource_type: str
+    resource_id: str
+
+
 def _read(name: str) -> object:
     return cast("object", json.loads((VECTORS / f"{name}.json").read_text()))
 
@@ -55,6 +70,7 @@ SUM_CASES = cast("list[SumCase]", _read("sum"))
 UUID7_CASES = cast("list[Uuid7Case]", _read("uuid7"))
 PRN_CANONICAL_CASES = cast("list[PrnCanonicalCase]", _read("prn_canonical"))
 PRN_CEDAR_CASES = cast("list[PrnCedarCase]", _read("prn_cedar"))
+PRN_FIELDS_CASES = cast("list[PrnFieldsCase]", _read("prn_fields"))
 
 
 def test_corpora_present_and_non_empty() -> None:
@@ -65,6 +81,7 @@ def test_corpora_present_and_non_empty() -> None:
         ("uuid7", len(UUID7_CASES)),
         ("prn_canonical", len(PRN_CANONICAL_CASES)),
         ("prn_cedar", len(PRN_CEDAR_CASES)),
+        ("prn_fields", len(PRN_FIELDS_CASES)),
     ]
     for name, count in corpora:
         assert count > 0, f"{name} corpus is empty"
@@ -91,3 +108,22 @@ def test_prn_canonical_matches_corpus(case: PrnCanonicalCase) -> None:
 def test_prn_cedar_matches_corpus(case: PrnCedarCase) -> None:
     assert prn_cedar_entity_type(case["prn"]) == case["entity_type"]
     assert prn_cedar_entity_id(case["prn"]) == case["entity_id"]
+
+
+@pytest.mark.parametrize("case", PRN_FIELDS_CASES, ids=[c["prn"] for c in PRN_FIELDS_CASES])
+def test_prn_fields_matches_corpus(case: PrnFieldsCase) -> None:
+    assert prn_service(case["prn"]) == case["service"]
+    assert prn_region(case["prn"]) == case["region"]
+    assert prn_org(case["prn"]) == case["org"]
+    assert prn_resource_type(case["prn"]) == case["resource_type"]
+    assert prn_resource_id(case["prn"]) == case["resource_id"]
+    assert (
+        prn_build(
+            case["service"],
+            case["region"],
+            case["org"],
+            case["resource_type"],
+            case["resource_id"],
+        )
+        == case["prn"]
+    )

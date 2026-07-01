@@ -5,7 +5,7 @@
 
 use std::fs;
 
-use paigasus_kernel_parity::{build_corpus, build_prn_canonical_corpus, build_prn_cedar_corpus, build_uuid7_corpus, corpus_path, serialize};
+use paigasus_kernel_parity::{build_corpus, build_prn_canonical_corpus, build_prn_cedar_corpus, build_prn_fields_corpus, build_uuid7_corpus, corpus_path, serialize};
 
 fn write(name: &str, body: &str) -> std::io::Result<()> {
     let path = corpus_path(name);
@@ -22,5 +22,6 @@ fn main() -> std::io::Result<()> {
     write("uuid7", &serialize(&build_uuid7_corpus()))?;
     write("prn_canonical", &serialize(&build_prn_canonical_corpus()))?;
     write("prn_cedar", &serialize(&build_prn_cedar_corpus()))?;
+    write("prn_fields", &serialize(&build_prn_fields_corpus()))?;
     Ok(())
 }

@@ -28,11 +28,20 @@ export interface PrnCedarCase {
   entity_type: string;
   entity_id: string;
 }
+export interface PrnFieldsCase {
+  prn: string;
+  service: string;
+  region: string;
+  org: string;
+  resource_type: string;
+  resource_id: string;
+}
 
 export const sumCases = load<SumCase>('sum');
 export const uuid7Cases = load<Uuid7Case>('uuid7');
 export const prnCanonicalCases = load<PrnCanonicalCase>('prn_canonical');
 export const prnCedarCases = load<PrnCedarCase>('prn_cedar');
+export const prnFieldsCases = load<PrnFieldsCase>('prn_fields');
 
 // Back-compat for the existing sum replays.
 export type ParityCase = SumCase;

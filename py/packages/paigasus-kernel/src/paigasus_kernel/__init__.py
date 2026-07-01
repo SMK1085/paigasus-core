@@ -20,7 +20,7 @@ from paigasus_py_bindings import (
 
 def mint() -> str:
     """Mint a UUIDv7 from the ambient clock + CSPRNG (the injected FFI mint is pure)."""
-    return mint_uuid7(time.time_ns() / 1_000_000, os.urandom(10).hex())
+    return mint_uuid7(time.time_ns() // 1_000_000, os.urandom(10).hex())
 
 
 __all__ = [
