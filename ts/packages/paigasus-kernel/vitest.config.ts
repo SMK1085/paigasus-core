@@ -28,7 +28,7 @@ export default defineConfig({
         test: {
           name: 'node',
           environment: 'node',
-          include: ['tests/sum.test.ts', 'tests/uuid7.test.ts', 'tests/prn.test.ts', 'tests/prn-fields.test.ts', 'tests/cedar.test.ts'],
+          include: ['tests/sum.test.ts', 'tests/uuid7.test.ts', 'tests/prn-canonical.test.ts', 'tests/prn-fields.test.ts', 'tests/cedar.test.ts'],
           server: { deps: { external: [/\.node$/] } },
         },
         resolve: { alias: { '@paigasus/node-bindings': nodeBindingDir } },
@@ -55,7 +55,7 @@ export default defineConfig({
         test: {
           name: 'browser',
           environment: 'node',
-          include: ['tests/sum.wasm.test.ts', 'tests/uuid7.wasm.test.ts', 'tests/prn.wasm.test.ts', 'tests/prn-fields.wasm.test.ts', 'tests/cedar.wasm.test.ts'],
+          include: ['tests/sum.wasm.test.ts', 'tests/uuid7.wasm.test.ts', 'tests/prn-canonical.wasm.test.ts', 'tests/prn-fields.wasm.test.ts', 'tests/cedar.wasm.test.ts'],
         },
         resolve: {
           conditions: ['browser', 'module', 'import', 'default'],

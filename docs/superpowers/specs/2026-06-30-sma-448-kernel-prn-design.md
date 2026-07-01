@@ -126,8 +126,10 @@ prn:pgs:gateway::0190a100-…:api-key/0190a1f6-…                       # anoth
 
 ## 4. Module layout (`rs/crates/libs/paigasus-kernel/src/`)
 
-- **`prn.rs`** — `pub struct Prn { service: String, region: String, org: Option<Uuid>,
-  resource_type: String, resource_id: Uuid }`; `pub enum PrnError` (derive
+- **`resource_name.rs`** (module `resource_name`, NOT `prn` — `prn`/`PRN` is a Windows reserved
+  device name, so a `prn.rs` file cannot be checked out on Windows) — `pub struct Prn { service:
+  String, region: String, org: Option<Uuid>, resource_type: String, resource_id: Uuid }`; `pub enum
+  PrnError` (derive
   `thiserror::Error`, plus `kind(&self) -> &'static str` returning the stable token from §7);
   `Prn::parse`, `Prn::canonical`, `Prn::build`, accessors (`service`, `region`, `org`,
   `resource_type`, `resource_id`); `PartialEq`/`Eq`/`Hash` over the canonical tuple. No serde
@@ -141,7 +143,7 @@ prn:pgs:gateway::0190a100-…:api-key/0190a1f6-…                       # anoth
   first char of each `-`-segment and concatenates (the §2.9 regex guarantees no empty
   segment, so the mapping is injective); `entity_id = resource_id` (lowercase hyphenated).
   `Pgs` is the partition (`pgs`) PascalCased — constant for v1.
-- **`lib.rs`** — re-exports `prn`, `uuid7`, `cedar`; **keeps `sum`**.
+- **`lib.rs`** — re-exports `resource_name`, `uuid7`, `cedar`; **keeps `sum`**.
 
 ### UUIDv7 byte layout (RFC 9562) — exact, deterministic
 
