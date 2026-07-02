@@ -45,6 +45,11 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
 - `.github/CODEOWNERS` is Moon-generated — don't hand-edit.
 - `vcs.hooks` is intentionally empty; lefthook will own `.git/hooks` (SMA-371).
+- Never name a source file with a base name that is a **Windows reserved device name**
+  (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`) — `PRN.<ext>` etc. are reserved
+  too, so git can't check the file out on Windows (`error: invalid path …`). The Linux-only
+  `CI` gate passes; only the Windows `prebuild` matrix job catches it (SMA-448: `prn.rs` →
+  `resource_name.rs`). An underscore/hyphen suffix (`prn_canonical`, `prn-fields`) is fine.
 
 ## Workflow
 
