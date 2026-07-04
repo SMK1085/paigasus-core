@@ -16,12 +16,18 @@ figment = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+thiserror = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as
-# a dev-dependency — it's unified into test builds only, never the shipped binary.
+# a dev-dependency — it's unified into test builds only, never the shipped binary. Same
+# reasoning for chrono/uuid/async-trait: `create_user`'s in-memory test fakes use them
+# directly, but production code only reaches them through `paigasus-iam-core`.
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
 
 [package.metadata.cargo-machete]
 # `:machete` is a blocking CI gate (SMA-375). These deps are declared now but

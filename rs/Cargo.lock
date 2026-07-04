@@ -738,13 +738,17 @@ name = "paigasus-iam"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "chrono",
  "figment",
  "paigasus-iam-core",
  "paigasus-kernel",
  "paigasus-logging",
  "serde",
+ "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

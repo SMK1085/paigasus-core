@@ -2,6 +2,7 @@
 
 //! paigasus-iam service entrypoint. Full composition root lands in SMA-441 Task 11.
 
+mod application;
 mod config;
 
 fn main() {
