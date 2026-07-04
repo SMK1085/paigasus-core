@@ -44,6 +44,7 @@ tonic       = "0.14"
 tonic-prost = "0.14"
 thiserror = "2"
 anyhow = "1"
+figment = { version = "0.10", features = ["toml", "env"] }
 # Prefer native `async fn` in traits (stable since 1.75); use async-trait only when
 # `dyn Trait` is required (per the Notion Rust guidelines).
 async-trait = "0.1"
