@@ -21,7 +21,7 @@ tower-http = "0.6"
 # libraries take a strict subset (avoid `macros`, which pulls in #[tokio::main]/tokio::test).
 tokio = { version = "1" }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
