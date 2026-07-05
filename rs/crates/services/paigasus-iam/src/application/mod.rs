@@ -8,3 +8,5 @@ pub mod error;
 pub mod fakes;
 pub mod organizations;
 pub mod pagination;
+pub mod projects;
+pub mod teams;
