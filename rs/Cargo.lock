@@ -744,6 +744,7 @@ dependencies = [
  "paigasus-iam-core",
  "paigasus-kernel",
  "paigasus-logging",
+ "rand",
  "serde",
  "thiserror",
  "tokio",
