@@ -47,16 +47,16 @@ sea-orm-migration = { workspace = true }
 # (`PrincipalRepository`, `MigrationTrait`) — production code, so this moved out of
 # dev-dependencies (Task 6 had it dev-only for the in-memory test fakes).
 async-trait = { workspace = true }
+# `adapters::id::KernelIdGenerator` names `Uuid` directly in the tenancy `IdGenerator`
+# methods' signatures (`new_team_id(&self, org: Uuid)`, `new_membership_id() -> Uuid`) —
+# production code, not just test fakes, since Task 4 (SMA-442).
+uuid = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as
-# a dev-dependency — it's unified into test builds only, never the shipped binary. Same
-# reasoning for uuid: `create_user`'s in-memory test fakes use it directly, but production
-# code only reaches `Uuid` through `paigasus-iam-core`/`paigasus-kernel` without naming the
-# `uuid` crate itself.
+# a dev-dependency — it's unified into test builds only, never the shipped binary.
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
-uuid = { workspace = true }
 # `tests/health.rs` drives the health router via `ServiceExt::oneshot` (no real listener).
 tower = { workspace = true }
 # `tests/grpc_health.rs` wraps an ephemeral `TcpListener` into a `Stream` for

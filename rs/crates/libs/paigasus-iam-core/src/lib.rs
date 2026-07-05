@@ -10,7 +10,10 @@ pub mod tenancy;
 pub mod user;
 pub mod value;
 
-pub use ports::{Clock, IdGenerator, PrincipalRepository, RepositoryError};
+pub use ports::{
+    Clock, ConflictKind, IdGenerator, MembershipRecord, MembershipRepository, NodeView, OrganizationRepository, PreconditionKind, PrincipalRepository, ProjectRepository, RepositoryError,
+    TeamRepository,
+};
 pub use principal::{Principal, PrincipalKind, PrincipalStatus};
 pub use tenancy::{Membership, NAME_MAX_CHARS, NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId, TenancyNodeRef, validate_name};
 pub use user::User;

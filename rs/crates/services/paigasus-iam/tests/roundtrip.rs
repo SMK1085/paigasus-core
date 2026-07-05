@@ -8,7 +8,7 @@
 use chrono::{SubsecRound, Utc};
 use paigasus_iam::adapters::persistence::entities::principal;
 use paigasus_iam::adapters::persistence::{Migrator, PgPrincipalRepository};
-use paigasus_iam_core::{Email, Principal, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, RepositoryError, User};
+use paigasus_iam_core::{ConflictKind, Email, Principal, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, RepositoryError, User};
 use paigasus_kernel::{Prn, mint_uuid7};
 use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use sea_orm_migration::MigratorTrait;
@@ -90,7 +90,10 @@ async fn create_user_rolls_back_principal_on_duplicate_email() {
     let second_user = User::new(second_id.clone(), Email::parse("dupe@example.com").unwrap(), "Second User".into(), None, None, now, now);
 
     let result = repo.create_user(&second_principal, &second_user).await;
-    assert!(matches!(result, Err(RepositoryError::Conflict(_))), "expected Conflict, got {result:?}");
+    assert!(
+        matches!(result, Err(RepositoryError::Conflict(ConflictKind::EmailTaken))),
+        "expected Conflict(EmailTaken), got {result:?}"
+    );
 
     // The second principal must NOT be orphaned: the transaction rolled back its insert.
     // `find_user` alone is a weak check (it returns `None` if EITHER row is missing), so also
