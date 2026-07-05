@@ -1,0 +1,16 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-iam-rs'
+layer: 'application'
+language: 'rust'
+
+dependsOn:
+  - 'paigasus-iam-core-rs'
+  - 'paigasus-logging-rs'
+  - 'paigasus-kernel-rs'
+
+tasks:
+  build:
+    deps: ['^:build']
+  test:
+    deps: ['^:build']

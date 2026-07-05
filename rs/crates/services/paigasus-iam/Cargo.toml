@@ -1,0 +1,71 @@
+[package]
+name = "paigasus-iam"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+name = "paigasus_iam"
+path = "src/lib.rs"
+
+[[bin]]
+name = "paigasus-iam"
+path = "src/main.rs"
+
+[dependencies]
+paigasus-iam-core = { path = "../../libs/paigasus-iam-core", version = "0.0.0" }
+paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0" }
+paigasus-kernel = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+figment = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+# `adapters::clock::SystemClock` names `chrono::{DateTime, SubsecRound, Utc}` directly.
+chrono = { workspace = true }
+# `adapters::id::KernelIdGenerator` draws the kernel's required entropy via `rand::random`.
+rand = { workspace = true }
+# `adapters::http` — axum liveness/readiness routes; serde_json builds the JSON bodies.
+axum = { workspace = true }
+serde_json = { workspace = true }
+# `adapters::http::serve_http` — TraceLayer + TimeoutLayer wrapping the axum router.
+tower-http = { workspace = true }
+# `adapters::http::AppState.db` + the `/readyz` ping.
+sea-orm = { workspace = true }
+# `adapters::grpc` — tonic Server hosting the well-known `grpc.health.v1.Health` service.
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+# `adapters::persistence::migration` — sea-orm-migration's `SchemaManager`/`MigrationTrait`
+# build the m0001 DDL (production code, not test-only: `PgPrincipalRepository` + the
+# migrator are wired at boot, not just under `#[cfg(test)]`).
+sea-orm-migration = { workspace = true }
+# `adapters::persistence::pg_repository` + `migration` implement `#[async_trait]` traits
+# (`PrincipalRepository`, `MigrationTrait`) — production code, so this moved out of
+# dev-dependencies (Task 6 had it dev-only for the in-memory test fakes).
+async-trait = { workspace = true }
+
+# figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
+# the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as
+# a dev-dependency — it's unified into test builds only, never the shipped binary. Same
+# reasoning for uuid: `create_user`'s in-memory test fakes use it directly, but production
+# code only reaches `Uuid` through `paigasus-iam-core`/`paigasus-kernel` without naming the
+# `uuid` crate itself.
+[dev-dependencies]
+figment = { workspace = true, features = ["test"] }
+uuid = { workspace = true }
+# `tests/health.rs` drives the health router via `ServiceExt::oneshot` (no real listener).
+tower = { workspace = true }
+# `tests/grpc_health.rs` wraps an ephemeral `TcpListener` into a `Stream` for
+# `Server::serve_with_incoming`.
+tokio-stream = { workspace = true, features = ["net"] }
+# `tests/roundtrip.rs` — AC #2: a real Postgres round-trip via an ephemeral Docker
+# container. Dev-only: never enters the published/shipped binary.
+testcontainers = "0.24"
+testcontainers-modules = { version = "0.12", features = ["postgres"] }
+
+[lints]
+workspace = true

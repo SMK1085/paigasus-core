@@ -91,7 +91,7 @@ tasks:
     # Run the generator crate-scoped from rs/ so rs/.cargo/config.toml is in scope, then assert the
     # committed corpus is unchanged. NEVER broaden to --workspace: the parity crate is a plain
     # lib+bin (no cdylib), so it needs none of the apple-darwin link flags the FFI cdylibs do.
-    script: '( cd rs && cargo run -p paigasus-kernel-parity --bin gen-parity-vectors ) && git diff --exit-code rs/crates/libs/paigasus-kernel-parity/vectors/sum.json'
+    script: '( cd rs && cargo run -p paigasus-kernel-parity --bin gen-parity-vectors ) && git diff --exit-code rs/crates/libs/paigasus-kernel-parity/vectors/'
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard would run on every change.
     inputs:
@@ -102,4 +102,28 @@ tasks:
       - 'rs/crates/libs/paigasus-kernel/Cargo.toml'
       - 'rs/crates/libs/paigasus-kernel-parity/src/**/*'
       - 'rs/crates/libs/paigasus-kernel-parity/Cargo.toml'
-      - 'rs/crates/libs/paigasus-kernel-parity/vectors/sum.json'
+      - 'rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
+
+  wasm-getrandom-free:
+    description: 'Assert the wasm binding pulls no `getrandom` — the kernel mints UUIDv7 from injected bytes, so wasm32-unknown-unknown stays buildable (SMA-448).'
+    # Resolve the FULL dependency tree first (fail LOUD if `cargo tree` itself errors — a broken
+    # invocation must not silently read as "getrandom absent"), then grep it for getrandom. We WANT
+    # it absent: fail the task only when the (successfully resolved) tree contains it.
+    script: |
+      cd rs
+      if ! out="$(cargo tree -p paigasus-wasm --target wasm32-unknown-unknown -e no-dev)"; then
+        echo "cargo tree failed for paigasus-wasm (wasm32) — cannot verify getrandom absence" >&2
+        exit 2
+      fi
+      if printf '%s\n' "$out" | grep -qw getrandom; then
+        echo "getrandom is in the paigasus-wasm dependency graph — a uuid rng feature leaked" >&2
+        exit 1
+      fi
+    toolchain: 'system'
+    inputs:
+      - 'rs/Cargo.toml'
+      - 'rs/Cargo.lock'
+      - 'rs/crates/libs/paigasus-kernel/Cargo.toml'
+      - 'rs/crates/libs/paigasus-kernel/src/**/*'
+      - 'rs/crates/bindings/paigasus-wasm/Cargo.toml'
+      - 'rs/crates/bindings/paigasus-wasm/src/**/*'

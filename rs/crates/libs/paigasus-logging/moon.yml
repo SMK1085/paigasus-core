@@ -1,0 +1,5 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-logging-rs'
+layer: 'library'
+language: 'rust'

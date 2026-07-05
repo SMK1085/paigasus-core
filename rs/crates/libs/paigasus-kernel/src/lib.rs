@@ -5,6 +5,17 @@
 //! Bound to Python / Node / WASM via the crates under `rs/crates/bindings/`. No FFI or
 //! adapter dependencies live here (ADR-0005). Empty until real logic lands.
 
+pub mod cedar;
+// The PRN value type lives in `resource_name`, NOT `prn`: `prn` (PRN) is a Windows reserved device
+// name, so a `prn.rs` file cannot be checked out on Windows (git fails with "invalid path"). Do not
+// rename this back to `prn`. The public type is still `Prn` (re-exported below).
+pub mod resource_name;
+pub mod uuid7;
+
+pub use cedar::{CedarUid, to_cedar_uid};
+pub use resource_name::{Prn, PrnError};
+pub use uuid7::mint_uuid7;
+
 /// Sum two integers — the kernel's first real, pure primitive. Deliberately minimal
 /// (placeholder for real domain logic); its purpose is to give the PyO3 binding a genuine
 /// kernel call to consume so the `paigasus-kernel-rs → paigasus-py-bindings-rs` edge is real

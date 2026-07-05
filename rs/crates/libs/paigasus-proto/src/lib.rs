@@ -24,6 +24,15 @@ pub mod paigasus {
             include!("generated/paigasus/common/v1/paigasus.common.v1.rs");
         }
     }
+    pub mod iam {
+        pub mod v1 {
+            // Generated code is excluded from the strict lint gate.
+            #![allow(clippy::all, warnings)]
+            // Only the prost file: iam.proto (M0) declares no service, so
+            // neoeinstein-tonic emits no `.tonic.rs` for this package.
+            include!("generated/paigasus/iam/v1/paigasus.iam.v1.rs");
+        }
+    }
 }
 
 /// Thin `Auditable` contract layered on the generated `common::v1::AuditMetadata`.

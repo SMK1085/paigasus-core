@@ -5,20 +5,20 @@
 # effectively unmaintained, and this schema only resolves official, checksummed
 # `bufbuild/buf` GitHub release binaries — nothing to maintain, so we own it.
 #
-# Linux is restricted to x86_64 (SMA-387): buf's Linux-arm64 asset is named
-# `buf-Linux-aarch64`, but proto's TOML schema supports only the global
-# [install.arch] remap, which must stay "arm64" for macOS/Windows. The archs
-# restriction makes Linux-arm64 fail loudly instead of silently downloading a
-# nonexistent asset. Flip-over is SMA-411, once moonrepo/plugins#151 ships in a
-# proto release: keep [install.arch], add `[platform.linux.arch] aarch64 =
-# "aarch64"` (identity override — safe on stale schema engines, which ignore
-# unknown platform tables), drop the archs line, and pin proto in .prototools.
+# buf names its arm64 assets differently per OS: `buf-Darwin-arm64` and
+# `buf-Windows-arm64.exe`, but `buf-Linux-aarch64`. The global [install.arch]
+# remap (aarch64 -> arm64) is correct for macOS/Windows; the Linux-only
+# [platform.linux.arch] identity override (aarch64 -> aarch64) shadows it so the
+# Linux asset resolves too. Needs proto >= 0.58.1 (bundles schema_tool 0.18.0,
+# moonrepo/plugins#151), pinned in .prototools. On an older schema engine the
+# unknown [platform.linux.arch] table is ignored: macOS/Windows stay correct via
+# the kept global remap, and only Linux-arm64 would regress to the wrong name —
+# which the proto floor prevents. (SMA-360, SMA-387, SMA-411)
 
 name = "buf"
 type = "cli"
 
 [platform.linux]
-archs = ["x86_64"]
 download-file = "buf-Linux-{arch}"
 checksum-file = "sha256.txt"
 
@@ -34,8 +34,15 @@ checksum-file = "sha256.txt"
 checksum-url = "https://github.com/bufbuild/buf/releases/download/v{version}/{checksum_file}"
 download-url = "https://github.com/bufbuild/buf/releases/download/v{version}/{download_file}"
 
+# macOS/Windows arm64 assets are *-arm64; kept global so older schema engines
+# still resolve them correctly.
 [install.arch]
 aarch64 = "arm64"
+
+# Linux arm64 asset is buf-Linux-aarch64; this identity override beats the global
+# remap above on proto >= 0.58.1 (schema_tool 0.18.0).
+[platform.linux.arch]
+aarch64 = "aarch64"
 
 [resolve]
 git-url = "https://github.com/bufbuild/buf"

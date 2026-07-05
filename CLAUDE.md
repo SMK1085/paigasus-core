@@ -45,6 +45,26 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
 - `.github/CODEOWNERS` is Moon-generated — don't hand-edit.
 - `vcs.hooks` is intentionally empty; lefthook will own `.git/hooks` (SMA-371).
+- Never name a source file with a base name that is a **Windows reserved device name**
+  (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`) — `PRN.<ext>` etc. are reserved
+  too, so git can't check the file out on Windows (`error: invalid path …`). The Linux-only
+  `CI` gate passes; only the Windows `prebuild` matrix job catches it — and `prebuild` runs
+  ONLY on push-to-`main` / `workflow_dispatch`, NOT on PRs, so the bad path is green on the PR
+  and reds `main` after merge (SMA-448: `prn.rs` → `resource_name.rs`). An underscore/hyphen
+  suffix (`prn_canonical`, `prn-fields`) is fine.
+- Per-project Moon tasks (`<proj>:build/test/lint/fmt`) do NOT run the repo-level gates
+  (`:deny`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing new
+  crates/deps/proto, run the full graph like CI does: `moon ci :build :test :lint :fmt :deny
+  :machete :typecheck :breaking :affected-smoke :parity-corpus-drift :wasm-getrandom-free
+  --base origin/main --include-relations`.
+- A new crate that `dependsOn` `paigasus-kernel-rs` reds `:affected-smoke` until it's added to
+  the `kernel->bindings` expected set in `ci/affected-graph/run.sh` (strict-equality guard,
+  SMA-409). New workspace deps may need `rs/deny.toml` `[licenses] exceptions` or a dev-only
+  `[advisories] ignore`; a dep consumed only by a later commit needs a temporary
+  `[package.metadata.cargo-machete] ignored` allowlist (prune once consumed).
+- Bash tool PATH lacks the proto-managed CLIs; prefix commands with
+  `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so moon/uv/buf/nextest resolve to
+  the repo-pinned versions (shims first).
 
 ## Workflow
 

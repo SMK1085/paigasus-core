@@ -16,16 +16,28 @@ authors      = ["Paigasus contributors"]
 [workspace.dependencies]
 axum = "0.8"
 tower = "0.5"
-tower-http = "0.6"
+# tower-http: TraceLayer (request/response spans) + TimeoutLayer for `paigasus-iam`'s
+# `serve_http` helper (SMA-441 Task 11 — the first consumer).
+tower-http = { version = "0.6", features = ["trace", "timeout"] }
 # tokio: no feature baseline — services add rt-multi-thread/macros/time/sync/signal;
 # libraries take a strict subset (avoid `macros`, which pulls in #[tokio::main]/tokio::test).
 tokio = { version = "1" }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+# uuid: NO rng feature. v4/v7/rng transitively pull `getrandom`, which does not build on
+# wasm32-unknown-unknown without a JS cfg — and the kernel (uuid's first consumer) is bound to
+# wasm. The kernel mints UUIDv7 from injected bytes via `Uuid::from_bytes` (no feature needed);
+# parse/Display/as_hyphenated are in default features. Add features per-consumer if ever needed
+# (SMA-448).
+uuid = { version = "1" }
+# rand: host entropy source for service adapters (e.g. paigasus-iam's `KernelIdGenerator`
+# feeds random bytes into the kernel's pure `mint_uuid7`). Native-only consumer — must not
+# leak into the wasm-bindgen crate's dependency tree (same getrandom/wasm concern as uuid
+# above); `moon run repo:wasm-getrandom-free` guards this.
+rand = "0.9"
 bytes = "1"
 # Proto codegen runtimes — versions track the pinned neoeinstein-prost/tonic
 # v0.5.0 plugins (prost 0.14 / tonic 0.14). tonic 0.14 split the prost codec into
@@ -37,8 +49,16 @@ prost       = "0.14"
 prost-types = "0.14"
 tonic       = "0.14"
 tonic-prost = "0.14"
+# tonic-health — the well-known `grpc.health.v1.Health` service (M0 walking skeleton,
+# SMA-441 Task 9). Tracks the pinned tonic 0.14 line.
+tonic-health = "0.14"
+# tokio-stream — wraps a `TcpListener` into the `Stream` tonic's `serve_with_incoming`
+# expects. Consumers add the features they need (e.g. the iam service's gRPC boot test
+# needs `net` for `TcpListenerStream`); no default features at the workspace baseline.
+tokio-stream = { version = "0.1", default-features = false }
 thiserror = "2"
 anyhow = "1"
+figment = { version = "0.10", features = ["toml", "env"] }
 # Prefer native `async fn` in traits (stable since 1.75); use async-trait only when
 # `dyn Trait` is required (per the Notion Rust guidelines).
 async-trait = "0.1"
@@ -75,6 +95,17 @@ proptest = "1"
 # In-tree path dep: the bindings (and future consumers) build against the live kernel, so a
 # kernel edit rebuilds them. This is also the cargo-side half of the affected-graph edge.
 paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.0.0" }
+# sea-orm — async ORM for service persistence adapters (paigasus-iam's AppState/readyz ping,
+# later the Postgres repository). `runtime-tokio-rustls` keeps the TLS posture on rustls/ring
+# (see reqwest above) instead of native-tls/openssl; `sqlx-postgres` is the only backend we run.
+sea-orm = { version = "1", default-features = false, features = [
+  "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono",
+] }
+# sea-orm-migration — the migration runner (`MigratorTrait`/`SchemaManager`) for the m0001
+# DDL. Same backend posture as `sea-orm` above (sqlx-postgres + rustls).
+sea-orm-migration = { version = "1", default-features = false, features = [
+  "sqlx-postgres", "runtime-tokio-rustls",
+] }
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
 # via the Moon `lint` task's `-D warnings`.
