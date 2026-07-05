@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package paigasus.iam.v1;
+
+// IAM v1 wire model — SCAFFOLD ONLY (SMA-441, M0 walking skeleton).
+//
+// M0 defines no RPCs: the service's health surface is the well-known
+// grpc.health.v1.Health (served via tonic-health), not an IAM RPC. This file
+// exists to establish the paigasus.iam.v1 package and exercise the buf codegen
+// path end-to-end (prost / betterproto2 / protobuf-es).
+//
+// Reserved for later milestones (do not repurpose without an ADR):
+//   service AuthorizationService { rpc IsAuthorized(...); rpc Introspect(...); }  // M4/M5
+//   messages: Principal, User, Organization, Team, Project, ApiKey, Policy, ...   // M1+
+
+// Placeholder so the package generates a concrete type in all three languages.
+// Replaced by real messages in M1; carries a service PRN string for now.
+message ServiceInfo {
+  string prn = 1;
+}

@@ -1,0 +1,10 @@
+# paigasus-iam config. Copy to iam.toml or supply via IAM_* env vars.
+# Precedence: built-in defaults < iam.toml < IAM_* environment.
+
+# http_addr = "0.0.0.0:8080"     # axum HTTP (health) — default shown
+# grpc_addr = "0.0.0.0:9090"     # tonic gRPC (grpc.health.v1) — default shown
+# log_level = "info"             # RUST_LOG-style filter — default shown
+
+# REQUIRED — no default. Example:
+# database_url = "postgres://postgres:postgres@127.0.0.1:5432/paigasus_iam"
+#   or:  IAM_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/paigasus_iam
