@@ -16,7 +16,9 @@ authors      = ["Paigasus contributors"]
 [workspace.dependencies]
 axum = "0.8"
 tower = "0.5"
-tower-http = "0.6"
+# tower-http: TraceLayer (request/response spans) + TimeoutLayer for `paigasus-iam`'s
+# `serve_http` helper (SMA-441 Task 11 — the first consumer).
+tower-http = { version = "0.6", features = ["trace", "timeout"] }
 # tokio: no feature baseline — services add rt-multi-thread/macros/time/sync/signal;
 # libraries take a strict subset (avoid `macros`, which pulls in #[tokio::main]/tokio::test).
 tokio = { version = "1" }

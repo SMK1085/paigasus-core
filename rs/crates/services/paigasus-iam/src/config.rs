@@ -40,11 +40,9 @@ impl IamConfig {
         Figment::from(Serialized::defaults(Defaults::default())).merge(Toml::file("iam.toml")).merge(Env::prefixed("IAM_"))
     }
 
-    // `load` isn't called yet — the temporary `main.rs` stub only builds the `Figment`
-    // (Task 11 wires the composition root through `load`), so it's dead code in this
-    // binary today. `figment::Error` is also a large enum (~208B); allow both narrowly
-    // rather than reshape the public signature the brief specifies.
-    #[allow(dead_code, clippy::result_large_err)]
+    // `figment::Error` is a large enum (~208B); allow the size lint narrowly rather than
+    // reshape the public signature the brief specifies (`main` calls this directly).
+    #[allow(clippy::result_large_err)]
     pub fn load() -> Result<Self, FigmentError> {
         Self::figment().extract()
     }

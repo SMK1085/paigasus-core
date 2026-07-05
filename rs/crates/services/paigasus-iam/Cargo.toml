@@ -32,6 +32,8 @@ rand = { workspace = true }
 # `adapters::http` — axum liveness/readiness routes; serde_json builds the JSON bodies.
 axum = { workspace = true }
 serde_json = { workspace = true }
+# `adapters::http::serve_http` — TraceLayer + TimeoutLayer wrapping the axum router.
+tower-http = { workspace = true }
 # `adapters::http::AppState.db` + the `/readyz` ping.
 sea-orm = { workspace = true }
 # `adapters::grpc` — tonic Server hosting the well-known `grpc.health.v1.Health` service.
