@@ -23,7 +23,13 @@ allow = [                   # v2: anything NOT listed is denied
 ]
 confidence-threshold = 0.8
 unused-allowed-license = "allow"   # don't warn on allowlist entries no crate matches yet (near-empty lock)
-exceptions = []             # per-crate carve-outs (e.g. ring's OpenSSL bit) land here as deps arrive
+exceptions = [
+  # sea-orm's runtime-tokio-rustls -> sqlx-core pulls webpki-roots (the embedded Mozilla
+  # root-CA bundle) for TLS cert validation. Its data license is CDLA-Permissive-2.0 —
+  # a permissive (non-copyleft) data license, not code-copyleft — which predates this repo's
+  # allow-list. Covers both the legacy 0.26.x series and the 1.x it now re-exports from.
+  { name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
 
 [bans]
 multiple-versions = "warn"  # duplicates common early-stage — surface, don't block

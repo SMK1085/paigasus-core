@@ -86,6 +86,12 @@ proptest = "1"
 # In-tree path dep: the bindings (and future consumers) build against the live kernel, so a
 # kernel edit rebuilds them. This is also the cargo-side half of the affected-graph edge.
 paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.0.0" }
+# sea-orm — async ORM for service persistence adapters (paigasus-iam's AppState/readyz ping,
+# later the Postgres repository). `runtime-tokio-rustls` keeps the TLS posture on rustls/ring
+# (see reqwest above) instead of native-tls/openssl; `sqlx-postgres` is the only backend we run.
+sea-orm = { version = "1", default-features = false, features = [
+  "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono",
+] }
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
 # via the Moon `lint` task's `-D warnings`.

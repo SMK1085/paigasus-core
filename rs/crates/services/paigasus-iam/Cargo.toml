@@ -7,6 +7,14 @@ rust-version.workspace = true
 authors.workspace = true
 publish = false
 
+[lib]
+name = "paigasus_iam"
+path = "src/lib.rs"
+
+[[bin]]
+name = "paigasus-iam"
+path = "src/main.rs"
+
 [dependencies]
 paigasus-iam-core = { path = "../../libs/paigasus-iam-core", version = "0.0.0" }
 paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0" }
@@ -21,6 +29,11 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 # `adapters::id::KernelIdGenerator` draws the kernel's required entropy via `rand::random`.
 rand = { workspace = true }
+# `adapters::http` — axum liveness/readiness routes; serde_json builds the JSON bodies.
+axum = { workspace = true }
+serde_json = { workspace = true }
+# `adapters::http::AppState.db` + the `/readyz` ping.
+sea-orm = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as
@@ -32,6 +45,8 @@ rand = { workspace = true }
 figment = { workspace = true, features = ["test"] }
 uuid = { workspace = true }
 async-trait = { workspace = true }
+# `tests/health.rs` drives the health router via `ServiceExt::oneshot` (no real listener).
+tower = { workspace = true }
 
 [package.metadata.cargo-machete]
 # `:machete` is a blocking CI gate (SMA-375). These deps are declared now but

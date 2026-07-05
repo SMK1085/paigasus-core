@@ -2,9 +2,7 @@
 
 //! paigasus-iam service entrypoint. Full composition root lands in SMA-441 Task 11.
 
-mod adapters;
-mod application;
-mod config;
+use paigasus_iam::config;
 
 fn main() {
     // Placeholder: real wiring (logging, DB, servers, shutdown) added in Task 11.
