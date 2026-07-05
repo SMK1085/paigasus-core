@@ -2,11 +2,13 @@
 
 //! Tenancy value objects and entities (SMA-442, ADR-0014).
 
-use crate::value::DomainError;
+use crate::value::{DomainError, PrincipalId};
+use chrono::{DateTime, Utc};
 use paigasus_kernel::Prn;
 use uuid::Uuid;
 
 pub const SLUG_MAX_LEN: usize = 64;
+pub const NAME_MAX_CHARS: usize = 256;
 
 /// URL-safe mutable display token, unique within parent scope (spec D2).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -173,6 +175,99 @@ impl TenancyNodeRef {
     }
 }
 
+pub fn validate_name(input: &str) -> Result<String, DomainError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > NAME_MAX_CHARS {
+        return Err(DomainError::InvalidName(input.to_owned()));
+    }
+    Ok(trimmed.to_owned())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Organization {
+    pub id: OrganizationId,
+    pub slug: Slug,
+    pub name: String,
+    pub status: NodeStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+impl Organization {
+    pub fn new(id: OrganizationId, slug: Slug, name: &str, now: DateTime<Utc>) -> Result<Self, DomainError> {
+        Ok(Self {
+            id,
+            slug,
+            name: validate_name(name)?,
+            status: NodeStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Team {
+    pub id: TeamId,
+    pub slug: Slug,
+    pub name: String,
+    pub status: NodeStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+impl Team {
+    pub fn new(id: TeamId, slug: Slug, name: &str, now: DateTime<Utc>) -> Result<Self, DomainError> {
+        Ok(Self {
+            id,
+            slug,
+            name: validate_name(name)?,
+            status: NodeStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Project {
+    pub id: ProjectId,
+    pub team_id: TeamId,
+    pub slug: Slug,
+    pub name: String,
+    pub status: NodeStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+impl Project {
+    pub fn new(id: ProjectId, team_id: TeamId, slug: Slug, name: &str, now: DateTime<Utc>) -> Result<Self, DomainError> {
+        if id.org_uuid() != team_id.org_uuid() {
+            return Err(DomainError::InvalidNodePrn(id.canonical()));
+        }
+        Ok(Self {
+            id,
+            team_id,
+            slug,
+            name: validate_name(name)?,
+            status: NodeStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+}
+
+/// Pure belongs-to relationship (roles arrive in M3). Plain UUIDv7 id, no PRN (D5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Membership {
+    pub id: Uuid,
+    pub principal_id: PrincipalId,
+    pub node: TenancyNodeRef,
+    pub created_at: DateTime<Utc>,
+}
+impl Membership {
+    pub fn new(id: Uuid, principal_id: PrincipalId, node: TenancyNodeRef, created_at: DateTime<Utc>) -> Self {
+        Self { id, principal_id, node, created_at }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +330,27 @@ mod tests {
         assert_eq!(r.resource_uuid(), u(2));
         assert_eq!(r.kind(), "team");
         assert!(TenancyNodeRef::from_prn(Prn::build("iam", "", None, "user", u(1)).unwrap()).is_err());
+    }
+    #[test]
+    fn name_validation() {
+        assert_eq!(validate_name("  Acme Corp.  ").unwrap(), "Acme Corp.");
+        assert!(validate_name("   ").is_err());
+        assert!(validate_name(&"x".repeat(257)).is_err());
+        assert!(validate_name(&"ü".repeat(256)).is_ok()); // scalar values, not bytes
+    }
+    #[test]
+    fn project_rejects_cross_org_team() {
+        let now = Utc::now();
+        let team = TeamId::from_parts(u(7), u(2));
+        assert!(Project::new(ProjectId::from_parts(u(8), u(3)), team.clone(), Slug::parse("p").unwrap(), "P", now).is_err());
+        assert!(Project::new(ProjectId::from_parts(u(7), u(3)), team, Slug::parse("p").unwrap(), "P", now).is_ok());
+    }
+    #[test]
+    fn new_nodes_start_active() {
+        let now = Utc::now();
+        let org = Organization::new(OrganizationId::from_uuid(u(1)), Slug::parse("acme").unwrap(), "Acme", now).unwrap();
+        assert_eq!(org.status, NodeStatus::Active);
+        assert_eq!(org.created_at, now);
+        assert_eq!(org.updated_at, now);
     }
 }
