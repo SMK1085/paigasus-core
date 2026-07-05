@@ -67,12 +67,5 @@ tokio-stream = { workspace = true, features = ["net"] }
 testcontainers = "0.24"
 testcontainers-modules = { version = "0.12", features = ["postgres"] }
 
-[package.metadata.cargo-machete]
-# `:machete` is a blocking CI gate (SMA-375). These deps are declared now but
-# first consumed by later M0 tasks (SMA-441): paigasus-iam-core + tokio (Task 6),
-# paigasus-kernel (Task 7), paigasus-logging + tracing + anyhow (Task 11). This
-# allowlist is pruned in Task 12 once every dep has a real consumer.
-ignored = ["anyhow", "paigasus-iam-core", "paigasus-kernel", "paigasus-logging", "tokio", "tracing"]
-
 [lints]
 workspace = true
