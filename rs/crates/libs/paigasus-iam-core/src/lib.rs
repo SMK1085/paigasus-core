@@ -12,6 +12,6 @@ pub mod value;
 
 pub use ports::{Clock, IdGenerator, PrincipalRepository, RepositoryError};
 pub use principal::{Principal, PrincipalKind, PrincipalStatus};
-pub use tenancy::{NodeStatus, Slug};
+pub use tenancy::{NodeStatus, OrganizationId, ProjectId, Slug, TeamId, TenancyNodeRef};
 pub use user::User;
 pub use value::{DomainError, Email, PrincipalId};
