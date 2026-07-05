@@ -22,7 +22,9 @@ impl PgPrincipalRepository {
 
 fn map_err(e: DbErr) -> RepositoryError {
     match e.sql_err() {
-        Some(SqlErr::UniqueConstraintViolation(msg)) => RepositoryError::Conflict(msg),
+        // The raw Postgres message embeds `DETAIL: Key (email)=(...)` — PII. Return a
+        // generic message so callers/logs never surface the offending value.
+        Some(SqlErr::UniqueConstraintViolation(_)) => RepositoryError::Conflict("unique constraint violated".to_string()),
         _ => RepositoryError::Backend(Box::new(e)),
     }
 }

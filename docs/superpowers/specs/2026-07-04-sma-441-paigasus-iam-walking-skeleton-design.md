@@ -41,7 +41,8 @@ in §3) are folded in for exactly this reason: a wrong pattern here propagates.
 5. axum HTTP (`/healthz`, `/readyz`) + tonic gRPC (`grpc.health.v1`) on **two ports**, each
    with its protocol-correct middleware built from **one shared middleware *config*** (§6).
 6. SeaORM + Postgres wiring: migration `m0001` + entities for `principal` + `user`
-   (1:1, shared PK); `PgPrincipalRepository` adapter; a real create→read round-trip.
+   (1:1, shared PK); `PgPrincipalRepository` adapter; `create_user` writes both rows in one
+   transaction; a real create→read round-trip.
 7. figment config (defaults ← optional TOML ← `IAM_` env), `database_url` required; plus a
    committed `iam.toml.example` documenting every key so a dev can run `main` locally.
 8. Moon projects (`-rs` suffix) with correct `dependsOn`/`^:build` wiring; CI green across

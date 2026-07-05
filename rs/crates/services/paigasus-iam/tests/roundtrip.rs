@@ -6,13 +6,15 @@
 //! daemon is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note.
 
 use chrono::{SubsecRound, Utc};
+use paigasus_iam::adapters::persistence::entities::principal;
 use paigasus_iam::adapters::persistence::{Migrator, PgPrincipalRepository};
 use paigasus_iam_core::{Email, Principal, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, RepositoryError, User};
 use paigasus_kernel::{Prn, mint_uuid7};
-use sea_orm::{Database, DatabaseConnection};
+use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use sea_orm_migration::MigratorTrait;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ContainerAsync;
+use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 /// Starts an ephemeral Postgres container, connects, and runs migrations.
@@ -20,7 +22,7 @@ use testcontainers_modules::testcontainers::runners::AsyncRunner;
 /// Returns `None` when Docker is unavailable and `CI` is unset (local skip path). Panics
 /// when `CI` is set and Docker is unreachable — Docker must be present in CI.
 async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseConnection)> {
-    let node = match Postgres::default().start().await {
+    let node = match Postgres::default().with_tag("16-alpine").start().await {
         Ok(n) => n,
         Err(e) => {
             if std::env::var_os("CI").is_some() {
@@ -68,6 +70,9 @@ async fn create_user_rolls_back_principal_on_duplicate_email() {
         return;
     };
 
+    // Kept alongside `repo` so the test can query the `principal` entity directly, bypassing
+    // `find_user`'s weaker "either row missing" semantics.
+    let db_for_direct_query = db.clone();
     let repo = PgPrincipalRepository::new(db);
     let now = Utc::now().trunc_subsecs(6);
 
@@ -88,6 +93,11 @@ async fn create_user_rolls_back_principal_on_duplicate_email() {
     assert!(matches!(result, Err(RepositoryError::Conflict(_))), "expected Conflict, got {result:?}");
 
     // The second principal must NOT be orphaned: the transaction rolled back its insert.
+    // `find_user` alone is a weak check (it returns `None` if EITHER row is missing), so also
+    // query the `principal` entity directly to prove the row itself is absent.
     let found = repo.find_user(&second_id).await.unwrap();
     assert!(found.is_none(), "second principal was orphaned despite the failed transaction");
+
+    let orphan = principal::Entity::find_by_id(second_id.uuid()).one(&db_for_direct_query).await.unwrap();
+    assert!(orphan.is_none(), "principal insert must have rolled back — no orphan row");
 }

@@ -31,8 +31,14 @@ pub fn init(service: &str, default_level: &str) {
 mod tests {
     use super::env_filter;
 
+    // `RUST_LOG` is a process-global; these tests mutate it, so serialize access to avoid a
+    // race under `cargo test` (thread-parallel). `cargo nextest` process-isolates each test and
+    // doesn't need this, but the lock is harmless there too.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn env_filter_defaults_to_info_without_rust_log() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // SAFETY: single-threaded test; we remove RUST_LOG so the default branch runs.
         unsafe { std::env::remove_var("RUST_LOG") };
         assert_eq!(env_filter("info").to_string(), "info");
@@ -40,6 +46,7 @@ mod tests {
 
     #[test]
     fn env_filter_defaults_to_given_level_without_rust_log() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // SAFETY: single-threaded test; we remove RUST_LOG so the default branch runs.
         unsafe { std::env::remove_var("RUST_LOG") };
         assert_eq!(env_filter("debug").to_string(), "debug");
@@ -47,6 +54,7 @@ mod tests {
 
     #[test]
     fn env_filter_rust_log_overrides_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // SAFETY: single-threaded test; we set then remove RUST_LOG to stay hermetic.
         unsafe { std::env::set_var("RUST_LOG", "warn") };
         assert_eq!(env_filter("info").to_string(), "warn");
