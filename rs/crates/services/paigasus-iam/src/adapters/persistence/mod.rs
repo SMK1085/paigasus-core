@@ -5,11 +5,15 @@
 pub mod entities;
 pub mod migration;
 pub mod pg_organizations;
+pub mod pg_projects;
 pub mod pg_repository;
+pub mod pg_teams;
 
 pub use migration::Migrator;
 pub use pg_organizations::PgOrganizationRepository;
+pub use pg_projects::PgProjectRepository;
 pub use pg_repository::PgPrincipalRepository;
+pub use pg_teams::PgTeamRepository;
 
 use paigasus_iam_core::{ConflictKind, RepositoryError};
 use sea_orm::{DbErr, SqlErr};
