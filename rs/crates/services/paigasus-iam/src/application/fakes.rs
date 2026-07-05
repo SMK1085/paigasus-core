@@ -2,17 +2,16 @@
 
 //! Shared in-memory fakes for application-service tests (`#[cfg(test)]`-only, never
 //! shipped). `TenancyStore` holds the tenancy state behind `Arc<Mutex<HashMap>>`s so the
-//! per-port fakes — `InMemoryOrgs`, `InMemoryTeams`, `InMemoryProjects` here, plus
-//! `InMemoryMemberships` added in a later task — can each clone a handle onto the *same*
-//! backing data: a team fake needs to see an org archived via the org fake to compute
-//! effective status (D10), and `InMemoryOrgs::create` populates the shared team map with
-//! the auto-provisioned default team (ADR-0014).
+//! per-port fakes — `InMemoryOrgs`, `InMemoryTeams`, `InMemoryProjects`, `InMemoryMemberships`
+//! — can each clone a handle onto the *same* backing data: a team fake needs to see an org
+//! archived via the org fake to compute effective status (D10), and `InMemoryOrgs::create`
+//! populates the shared team map with the auto-provisioned default team (ADR-0014).
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
-    Clock, ConflictKind, IdGenerator, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, PreconditionKind, PrincipalId, Project, ProjectId, ProjectRepository,
-    RepositoryError, Slug, Team, TeamId, TeamRepository,
+    Clock, ConflictKind, IdGenerator, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, PreconditionKind, PrincipalId,
+    Project, ProjectId, ProjectRepository, RepositoryError, Slug, Team, TeamId, TeamRepository, TenancyNodeRef,
 };
 use paigasus_kernel::Prn;
 use std::collections::HashMap;
@@ -22,12 +21,16 @@ use uuid::Uuid;
 
 /// Shared backing store for all tenancy in-memory fakes. Cloning is cheap (shares the
 /// `Arc` innards), so e.g. an `InMemoryTeams` fake sees the same org rows an
-/// `InMemoryOrgs` fake mutates.
+/// `InMemoryOrgs` fake mutates. `principals` is a minimal stand-in for the principal
+/// repository (Task 6's own fake lives in `create_user.rs`, unrelated store): just the
+/// uuid -> canonical-prn record `InMemoryMemberships` checks caller prns against.
 #[derive(Clone, Default)]
 pub struct TenancyStore {
     pub orgs: Arc<Mutex<HashMap<Uuid, Organization>>>,
     pub teams: Arc<Mutex<HashMap<Uuid, Team>>>,
     pub projects: Arc<Mutex<HashMap<Uuid, Project>>>,
+    pub memberships: Arc<Mutex<HashMap<Uuid, Membership>>>,
+    pub principals: Arc<Mutex<HashMap<Uuid, String>>>,
 }
 
 /// In-memory `OrganizationRepository` fake, faithful to the port's doc contracts:
@@ -278,6 +281,151 @@ impl ProjectRepository for InMemoryProjects {
             project.updated_at = now;
         }
         Ok(project_view(&self.0, project))
+    }
+}
+
+/// Builds a `MembershipRecord` from a stored `Membership`. Safe to read canonicals
+/// straight off the entity: by the time a row is in the store, `InMemoryMemberships::attach`
+/// has already checked them against the store's stated-canonical prns.
+fn to_record(m: &Membership) -> MembershipRecord {
+    MembershipRecord {
+        id: m.id,
+        principal_prn: m.principal_id.canonical(),
+        node_prn: m.node.canonical(),
+        created_at: m.created_at,
+    }
+}
+
+/// For team/project nodes, the org uuid that must already have a membership row before a
+/// team/project attach is allowed (D8's org-membership invariant). Organization nodes have
+/// no such parent scope, hence `None`.
+fn parent_org_uuid(node: &TenancyNodeRef) -> Option<Uuid> {
+    match node {
+        TenancyNodeRef::Organization(_) => None,
+        TenancyNodeRef::Team(id) => Some(id.org_uuid()),
+        TenancyNodeRef::Project(id) => Some(id.org_uuid()),
+    }
+}
+
+/// Resolves a node ref against the store: `None` if the node doesn't exist, else its
+/// stored canonical prn (to detect a forged/stale caller prn), own status, and ancestor
+/// statuses (D10's `NodeStatus::effective`).
+fn node_lookup(store: &TenancyStore, node: &TenancyNodeRef) -> Option<(String, NodeStatus, Vec<NodeStatus>)> {
+    match node {
+        TenancyNodeRef::Organization(id) => {
+            let org = store.orgs.lock().unwrap().get(&id.uuid())?.clone();
+            Some((org.id.canonical(), org.status, Vec::new()))
+        }
+        TenancyNodeRef::Team(id) => {
+            let team = store.teams.lock().unwrap().get(&id.uuid())?.clone();
+            let ancestors = org_status(store, team.id.org_uuid()).into_iter().collect();
+            Some((team.id.canonical(), team.status, ancestors))
+        }
+        TenancyNodeRef::Project(id) => {
+            let project = store.projects.lock().unwrap().get(&id.uuid())?.clone();
+            Some((project.id.canonical(), project.status, project_ancestors(store, &project)))
+        }
+    }
+}
+
+/// In-memory `MembershipRepository` fake, faithful to the port's doc contract (exact guard
+/// order): principal exists in the store's `principals` map + stored-canonical compare ->
+/// `NotFound`/`PrnMismatch`; node exists + stored-canonical compare -> `NotFound`/
+/// `PrnMismatch`; node effectively active (D1/D10) -> `Precondition(NodeArchived)`;
+/// team/project targets require an existing org membership -> `Precondition
+/// (MissingOrgMembership)`; duplicate (same principal + same node) ->
+/// `Conflict(DuplicateMembership)`. `detach` cascades: removing an org membership also
+/// removes that principal's team/project memberships scoped to that org (rule 5).
+#[derive(Clone, Default)]
+pub struct InMemoryMemberships(pub TenancyStore);
+
+#[async_trait]
+impl MembershipRepository for InMemoryMemberships {
+    async fn attach(&self, membership: &Membership) -> Result<MembershipRecord, RepositoryError> {
+        let store = &self.0;
+        let principal_uuid = membership.principal_id.uuid();
+
+        // 1. Principal must exist, and the caller's prn must byte-match the stored one.
+        let stored_principal_prn = { store.principals.lock().unwrap().get(&principal_uuid).cloned() }.ok_or(RepositoryError::NotFound)?;
+        if stored_principal_prn != membership.principal_id.canonical() {
+            return Err(RepositoryError::PrnMismatch);
+        }
+
+        // 2. Node must exist, and the caller's prn must byte-match the stored one.
+        let (node_canonical, own_status, ancestors) = node_lookup(store, &membership.node).ok_or(RepositoryError::NotFound)?;
+        if node_canonical != membership.node.canonical() {
+            return Err(RepositoryError::PrnMismatch);
+        }
+
+        // 3. The node must be effectively active.
+        if NodeStatus::effective(own_status, &ancestors) == NodeStatus::Archived {
+            return Err(RepositoryError::Precondition(PreconditionKind::NodeArchived));
+        }
+
+        // 4. Team/project targets require an existing org membership.
+        if let Some(org_uuid) = parent_org_uuid(&membership.node) {
+            let expected_org_node = TenancyNodeRef::Organization(OrganizationId::from_uuid(org_uuid));
+            let has_org_membership = store
+                .memberships
+                .lock()
+                .unwrap()
+                .values()
+                .any(|m| m.principal_id.uuid() == principal_uuid && m.node == expected_org_node);
+            if !has_org_membership {
+                return Err(RepositoryError::Precondition(PreconditionKind::MissingOrgMembership));
+            }
+        }
+
+        // 5. No duplicate (same principal, same node).
+        let mut memberships = store.memberships.lock().unwrap();
+        let duplicate = memberships.values().any(|m| m.principal_id.uuid() == principal_uuid && m.node == membership.node);
+        if duplicate {
+            return Err(RepositoryError::Conflict(ConflictKind::DuplicateMembership));
+        }
+
+        memberships.insert(membership.id, membership.clone());
+        Ok(MembershipRecord {
+            id: membership.id,
+            principal_prn: stored_principal_prn,
+            node_prn: node_canonical,
+            created_at: membership.created_at,
+        })
+    }
+
+    async fn find(&self, id: Uuid) -> Result<Option<MembershipRecord>, RepositoryError> {
+        Ok(self.0.memberships.lock().unwrap().get(&id).map(to_record))
+    }
+
+    async fn detach(&self, id: Uuid) -> Result<(), RepositoryError> {
+        let mut memberships = self.0.memberships.lock().unwrap();
+        let membership = memberships.get(&id).cloned().ok_or(RepositoryError::NotFound)?;
+        memberships.remove(&id);
+
+        if let TenancyNodeRef::Organization(org_id) = &membership.node {
+            let org_uuid = org_id.uuid();
+            let principal_uuid = membership.principal_id.uuid();
+            memberships.retain(|_, m| !(m.principal_id.uuid() == principal_uuid && parent_org_uuid(&m.node) == Some(org_uuid)));
+        }
+        Ok(())
+    }
+
+    async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
+        let memberships = self.0.memberships.lock().unwrap();
+        let mut items: Vec<&Membership> = memberships.values().filter(|m| m.principal_id.uuid() == principal).collect();
+        items.sort_by_key(|m| (m.created_at, m.id));
+        Ok(items.into_iter().skip(offset as usize).take(limit as usize).map(to_record).collect())
+    }
+
+    async fn list_by_node(&self, node: &TenancyNodeRef, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError> {
+        let (node_canonical, _own_status, _ancestors) = node_lookup(&self.0, node).ok_or(RepositoryError::NotFound)?;
+        if node_canonical != node.canonical() {
+            return Err(RepositoryError::PrnMismatch);
+        }
+
+        let memberships = self.0.memberships.lock().unwrap();
+        let mut items: Vec<&Membership> = memberships.values().filter(|m| m.node == *node).collect();
+        items.sort_by_key(|m| (m.created_at, m.id));
+        Ok(items.into_iter().skip(offset as usize).take(limit as usize).map(to_record).collect())
     }
 }
 

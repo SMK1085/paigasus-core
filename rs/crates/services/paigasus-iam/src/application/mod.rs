@@ -6,6 +6,7 @@ pub mod create_user;
 pub mod error;
 #[cfg(test)]
 pub mod fakes;
+pub mod memberships;
 pub mod organizations;
 pub mod pagination;
 pub mod projects;
