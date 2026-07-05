@@ -99,6 +99,11 @@ paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.0.0" }
 sea-orm = { version = "1", default-features = false, features = [
   "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono",
 ] }
+# sea-orm-migration — the migration runner (`MigratorTrait`/`SchemaManager`) for the m0001
+# DDL. Same backend posture as `sea-orm` above (sqlx-postgres + rustls).
+sea-orm-migration = { version = "1", default-features = false, features = [
+  "sqlx-postgres", "runtime-tokio-rustls",
+] }
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
 # via the Moon `lint` task's `-D warnings`.

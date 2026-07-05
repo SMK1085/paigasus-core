@@ -6,7 +6,16 @@ db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "deny"             # reject crates yanked from crates.io
 # vulnerability advisories are deny-by-default in v2 — no separate key needed
 unmaintained = "workspace"  # police crates we pull in, not every deep transitive (noise control)
-ignore = []                 # waive specific RUSTSEC-IDs here, each with a `reason`
+ignore = [
+  # RUSTSEC-2025-0111 ("Tarmageddon"): tokio-tar mis-parses PAX headers with a
+  # zero-size ustar header, letting a tar file smuggle content past `tokio_tar::Archive`.
+  # Reached only via testcontainers-modules (SMA-441 Task 10's Postgres round-trip test) —
+  # a dev-dependency, never in the shipped binary. testcontainers itself only calls the
+  # *writer* side (`tokio_tar::Builder`/`Header`, for `copy_to_container`); our test never
+  # calls that API either, so the affected reader (`Archive::new`/`ArchiveBuilder::new`) is
+  # unreached. No patched tokio-tar exists upstream (crate is archived/unmaintained).
+  "RUSTSEC-2025-0111",
+]
 
 [licenses]
 allow = [                   # v2: anything NOT listed is denied

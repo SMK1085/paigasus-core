@@ -6,3 +6,4 @@ pub mod clock;
 pub mod grpc;
 pub mod http;
 pub mod id;
+pub mod persistence;
