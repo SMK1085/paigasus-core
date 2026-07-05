@@ -1,0 +1,161 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Postgres-backed `OrganizationRepository` (SeaORM). Maps domain <-> entity models and
+//! backend errors into the core's `RepositoryError`.
+
+use super::entities::{organization, team};
+use super::map_err;
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use paigasus_iam_core::{NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, PreconditionKind, RepositoryError, Slug, Team};
+use paigasus_kernel::Prn;
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryOrder, QuerySelect, Set, TransactionTrait};
+use uuid::Uuid;
+
+pub struct PgOrganizationRepository {
+    db: DatabaseConnection,
+}
+
+impl PgOrganizationRepository {
+    #[must_use]
+    pub fn new(db: DatabaseConnection) -> Self {
+        PgOrganizationRepository { db }
+    }
+}
+
+/// Builds the insertable `organization` row from a domain `Organization`.
+fn org_to_model(org: &Organization) -> organization::ActiveModel {
+    organization::ActiveModel {
+        id: Set(org.id.uuid()),
+        prn: Set(org.id.canonical()),
+        slug: Set(org.slug.as_str().to_string()),
+        name: Set(org.name.clone()),
+        status: Set(org.status.as_str().to_string()),
+        created_at: Set(org.created_at),
+        updated_at: Set(org.updated_at),
+    }
+}
+
+/// Builds the insertable `team` row for the org's auto-provisioned default team (ADR-0014).
+fn team_to_model(team: &Team) -> team::ActiveModel {
+    team::ActiveModel {
+        id: Set(team.id.uuid()),
+        org_id: Set(team.id.org_uuid()),
+        prn: Set(team.id.canonical()),
+        slug: Set(team.slug.as_str().to_string()),
+        name: Set(team.name.clone()),
+        status: Set(team.status.as_str().to_string()),
+        created_at: Set(team.created_at),
+        updated_at: Set(team.updated_at),
+    }
+}
+
+/// Re-parses a stored `organization` row back into the pure-core `Organization`, mirroring
+/// M0's `find_user`: a parse failure on stored data becomes a `Backend` error (never a
+/// silent default) — the row was written by this same adapter, so a failure here means the
+/// data is corrupt or the domain's parsing rules changed underneath it.
+fn model_to_org(model: organization::Model) -> Result<Organization, RepositoryError> {
+    let backend = |msg: String| RepositoryError::Backend(Box::new(std::io::Error::other(msg)));
+
+    let prn = Prn::parse(&model.prn).map_err(|e| backend(e.to_string()))?;
+    let id = OrganizationId::from_prn(prn).map_err(|e| backend(e.to_string()))?;
+    let slug = Slug::parse(&model.slug).map_err(|e| backend(e.to_string()))?;
+    let status = NodeStatus::parse(&model.status).ok_or_else(|| backend(format!("bad node status: {}", model.status)))?;
+
+    Ok(Organization {
+        id,
+        slug,
+        name: model.name,
+        status,
+        created_at: model.created_at,
+        updated_at: model.updated_at,
+    })
+}
+
+/// Orgs have no ancestors: effective status is own status alone (D1/D10), but still routed
+/// through the shared `NodeStatus::effective` rule rather than hand-rolled.
+fn org_view(org: Organization) -> NodeView<Organization> {
+    let effective_status = NodeStatus::effective(org.status, &[]);
+    NodeView { node: org, effective_status }
+}
+
+#[async_trait]
+impl OrganizationRepository for PgOrganizationRepository {
+    async fn create(&self, org: &Organization, default_team: &Team) -> Result<(), RepositoryError> {
+        // Org + its auto-provisioned default team must commit-or-rollback together
+        // (ADR-0014): a lone org row without its default team would violate the tenancy
+        // invariant that every org has at least one team.
+        let txn = self.db.begin().await.map_err(map_err)?;
+
+        org_to_model(org).insert(&txn).await.map_err(map_err)?;
+        team_to_model(default_team).insert(&txn).await.map_err(map_err)?;
+
+        txn.commit().await.map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn find(&self, id: Uuid) -> Result<Option<NodeView<Organization>>, RepositoryError> {
+        let Some(model) = organization::Entity::find_by_id(id).one(&self.db).await.map_err(map_err)? else {
+            return Ok(None);
+        };
+        Ok(Some(org_view(model_to_org(model)?)))
+    }
+
+    async fn list(&self, limit: u64, offset: u64) -> Result<Vec<NodeView<Organization>>, RepositoryError> {
+        let models = organization::Entity::find()
+            .order_by_asc(organization::Column::CreatedAt)
+            .order_by_asc(organization::Column::Id)
+            .limit(limit)
+            .offset(offset)
+            .all(&self.db)
+            .await
+            .map_err(map_err)?;
+
+        models.into_iter().map(|m| model_to_org(m).map(org_view)).collect()
+    }
+
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Organization>, RepositoryError> {
+        let txn = self.db.begin().await.map_err(map_err)?;
+
+        let Some(model) = organization::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
+            return Err(RepositoryError::NotFound);
+        };
+        if model.status == NodeStatus::Archived.as_str() {
+            return Err(RepositoryError::Precondition(PreconditionKind::NodeArchived));
+        }
+
+        let mut active = model.into_active_model();
+        if let Some(slug) = new_slug {
+            active.slug = Set(slug.as_str().to_string());
+        }
+        if let Some(name) = new_name {
+            active.name = Set(name.to_owned());
+        }
+        active.updated_at = Set(now);
+        let updated = active.update(&txn).await.map_err(map_err)?;
+
+        txn.commit().await.map_err(map_err)?;
+        Ok(org_view(model_to_org(updated)?))
+    }
+
+    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Organization>, RepositoryError> {
+        let txn = self.db.begin().await.map_err(map_err)?;
+
+        let Some(model) = organization::Entity::find_by_id(id).lock_exclusive().one(&txn).await.map_err(map_err)? else {
+            return Err(RepositoryError::NotFound);
+        };
+
+        let final_model = if model.status == status.as_str() {
+            // Idempotent: already at the target status — no-op, `updated_at` untouched.
+            model
+        } else {
+            let mut active = model.into_active_model();
+            active.status = Set(status.as_str().to_owned());
+            active.updated_at = Set(now);
+            active.update(&txn).await.map_err(map_err)?
+        };
+
+        txn.commit().await.map_err(map_err)?;
+        Ok(org_view(model_to_org(final_model)?))
+    }
+}
