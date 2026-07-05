@@ -21,6 +21,11 @@ async fn tenancy_schema_has_named_constraints_and_indexes() {
         "uq_project_prn",
         "uq_project_team_slug",
         "fk_project_team",
+        "fk_team_org",
+        "fk_membership_principal",
+        "fk_membership_org",
+        "fk_membership_team",
+        "fk_membership_project",
         "ck_membership_one_target",
     ];
     for n in constraint_names {
@@ -31,7 +36,18 @@ async fn tenancy_schema_has_named_constraints_and_indexes() {
         assert!(row.is_some(), "missing constraint {n}");
     }
 
-    for n in ["uq_membership_principal_org", "uq_membership_principal_team", "uq_membership_principal_project"] {
+    for n in [
+        "uq_membership_principal_org",
+        "uq_membership_principal_team",
+        "uq_membership_principal_project",
+        "ix_team_org",
+        "ix_project_team",
+        "ix_project_org",
+        "ix_membership_principal",
+        "ix_membership_org",
+        "ix_membership_team",
+        "ix_membership_project",
+    ] {
         let row = db
             .query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT 1 AS one FROM pg_indexes WHERE indexname = $1", [n.into()]))
             .await
