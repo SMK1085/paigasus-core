@@ -34,6 +34,9 @@ axum = { workspace = true }
 serde_json = { workspace = true }
 # `adapters::http::AppState.db` + the `/readyz` ping.
 sea-orm = { workspace = true }
+# `adapters::grpc` — tonic Server hosting the well-known `grpc.health.v1.Health` service.
+tonic = { workspace = true }
+tonic-health = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as
@@ -47,6 +50,9 @@ uuid = { workspace = true }
 async-trait = { workspace = true }
 # `tests/health.rs` drives the health router via `ServiceExt::oneshot` (no real listener).
 tower = { workspace = true }
+# `tests/grpc_health.rs` wraps an ephemeral `TcpListener` into a `Stream` for
+# `Server::serve_with_incoming`.
+tokio-stream = { workspace = true, features = ["net"] }
 
 [package.metadata.cargo-machete]
 # `:machete` is a blocking CI gate (SMA-375). These deps are declared now but
