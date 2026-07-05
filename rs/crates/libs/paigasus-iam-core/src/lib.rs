@@ -6,10 +6,12 @@
 
 pub mod ports;
 pub mod principal;
+pub mod tenancy;
 pub mod user;
 pub mod value;
 
 pub use ports::{Clock, IdGenerator, PrincipalRepository, RepositoryError};
 pub use principal::{Principal, PrincipalKind, PrincipalStatus};
+pub use tenancy::{NodeStatus, Slug};
 pub use user::User;
 pub use value::{DomainError, Email, PrincipalId};
