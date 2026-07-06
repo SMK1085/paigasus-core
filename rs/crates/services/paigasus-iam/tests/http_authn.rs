@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::application::authenticate_token::Provisioning;
 use serde_json::json;
-use support::{send, send_raw, start_mock_idp, test_config, test_config_with};
+use support::{send, send_raw, send_raw_parts, start_mock_idp, test_config, test_config_with};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -118,6 +118,57 @@ async fn introspect_oversized_token_is_401_invalid_token() {
     assert_eq!(body["error"]["code"], "invalid_token");
 }
 
+#[tokio::test]
+async fn introspect_oversized_body_is_413_request_too_large() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, _idp) = support::app(db).await;
+
+    // Past max_token_bytes (16384) + the 1024-byte envelope headroom: rejected by the
+    // route-level body limit BEFORE JSON parsing, in the standard envelope (H1). The
+    // 401 band just above max_token_bytes stays covered by
+    // introspect_oversized_token_is_401_invalid_token — the two-tier behavior is by design.
+    let huge = format!(r#"{{"token":"{}"}}"#, "a".repeat(20_000));
+    let response = send_raw_parts(&app, "POST", "/v1/authn/introspect", None, Some("application/json"), Some(huge.into_bytes())).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "request_too_large");
+    assert_eq!(body["error"]["message"], "request body too large");
+}
+
+#[tokio::test]
+async fn introspect_malformed_json_is_enveloped() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, _idp) = support::app(db).await;
+
+    // Broken JSON must render the same {"error":{code,message}} envelope as every other
+    // authn error — not axum's default plain-text rejection (H1).
+    let response = send_raw_parts(&app, "POST", "/v1/authn/introspect", None, Some("application/json"), Some(b"{not json".to_vec())).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(body["error"]["message"], "invalid request body");
+}
+
+#[tokio::test]
+async fn introspect_wrong_content_type_is_enveloped() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, _idp) = support::app(db).await;
+
+    let response = send_raw_parts(&app, "POST", "/v1/authn/introspect", None, Some("text/plain"), Some(br#"{"token":"x"}"#.to_vec())).await;
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
 // --- Task 11: bearer enforcement on the protected `/v1` surface (D14, spec §7.4) ---
 
 #[tokio::test]
@@ -127,16 +178,33 @@ async fn protected_route_without_token_is_401() {
     };
     let (app, _idp) = support::app(db).await;
 
-    // No `Authorization` header on a protected tenancy route: the middleware short-circuits
-    // with 401 `invalid_token` + the RFC 6750 `WWW-Authenticate` challenge, before any
-    // handler runs (a missing header is treated exactly like a rejected token, D12).
+    // No `Authorization` header at all on a protected tenancy route: 401 with the same
+    // `invalid_token` body as any rejected credential, but a BARE `Bearer` challenge —
+    // RFC 6750 §3.1 says a request with no authentication information gets a challenge
+    // without an error attribute (H3). Only the header distinguishes the cases.
     let response = send_raw(&app, "POST", "/v1/organizations", Some(json!({ "slug": "acme", "name": "Acme" })), None).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let challenge = response.headers().get("www-authenticate").expect("WWW-Authenticate header").to_str().unwrap();
-    assert_eq!(challenge, "Bearer error=\"invalid_token\"");
+    assert_eq!(challenge, "Bearer");
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["error"]["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn present_but_malformed_authorization_keeps_error_challenge() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, _idp) = support::app(db).await;
+
+    // A PRESENT-but-unusable header (foreign scheme) is NOT "missing credentials": the
+    // client did attempt authentication, so the challenge keeps the error attribute
+    // (H3 differentiates only the fully-absent case).
+    let response = send_raw_parts(&app, "GET", "/v1/organizations", Some("Basic dXNlcjpwdw=="), None, None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let challenge = response.headers().get("www-authenticate").expect("WWW-Authenticate header").to_str().unwrap();
+    assert_eq!(challenge, "Bearer error=\"invalid_token\"");
 }
 
 #[tokio::test]
@@ -155,6 +223,38 @@ async fn protected_route_with_invalid_token_is_401_with_www_authenticate() {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["error"]["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn fused_bearer_scheme_is_401() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, idp) = support::app(db).await;
+
+    // A perfectly VALID token, but the scheme is fused with the credential ("Bearer<jwt>",
+    // no space): header parsing requires `<scheme> <credential>`, so this must 401 without
+    // the token ever reaching the validator.
+    let token = idp.bearer("fused-scheme", Some("fused@example.com"), "paigasus", 3600);
+    let response = send_raw_parts(&app, "GET", "/v1/organizations", Some(&format!("Bearer{token}")), None, None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn lowercase_bearer_scheme_is_accepted() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, idp) = support::app(db).await;
+
+    // RFC 7235 §2.1: the auth-scheme is case-insensitive, so `bearer <jwt>` must
+    // authenticate exactly like `Bearer <jwt>` (and JIT-provision on the way in).
+    let token = idp.bearer("lowercase-bearer", Some("lower@example.com"), "paigasus", 3600);
+    let response = send_raw_parts(&app, "GET", "/v1/organizations", Some(&format!("bearer {token}")), None, None).await;
+    assert_eq!(response.status(), StatusCode::OK, "a lowercase bearer scheme must be accepted");
 }
 
 #[tokio::test]

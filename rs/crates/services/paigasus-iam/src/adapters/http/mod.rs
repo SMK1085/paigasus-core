@@ -75,6 +75,12 @@ impl Authenticator for WiredAuthenticator {
 /// `AppState.authn` for the middleware `resolve` path and the gRPC `Introspect`).
 pub type AuthnSvc = AuthenticateToken<WiredAuthenticator, PgExternalIdentityRepository, PgPrincipalRepository, PgMembershipRepository, KernelIdGenerator, SystemClock>;
 
+/// Headroom over `max_token_bytes` for the introspect JSON envelope (`{"token":"…"}` —
+/// braces, quotes, key, and any insignificant whitespace): a request larger than
+/// `max_token_bytes` + this can never carry a valid token, so the route body limit
+/// rejects it before JSON parsing (spec H1).
+const INTROSPECT_BODY_OVERHEAD_BYTES: usize = 1024;
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: DatabaseConnection,
@@ -84,6 +90,9 @@ pub struct AppState {
     pub memberships: MembershipSvc,
     pub users: UserSvc,
     pub authn: AuthnSvc,
+    /// Route-level body cap for `POST /v1/authn/introspect` (H1): `max_token_bytes` +
+    /// [`INTROSPECT_BODY_OVERHEAD_BYTES`], computed once at wiring time.
+    pub introspect_body_limit: usize,
 }
 
 impl AppState {
@@ -114,7 +123,7 @@ impl AppState {
                 JwksProvider::new(fetcher, InMemoryJwksCache::new(), SystemClock, ttl, cooldown),
                 authn_cfg.leeway_secs,
                 authn_cfg.max_token_bytes,
-            ))),
+            )?)),
             JwksCacheBackend::Redis => {
                 // `IamConfig::validate` rejects a redis backend without a URL at boot; a
                 // `None` here is a wiring defect, not an operator error.
@@ -129,7 +138,7 @@ impl AppState {
                     JwksProvider::new(fetcher, cache, SystemClock, ttl, cooldown),
                     authn_cfg.leeway_secs,
                     authn_cfg.max_token_bytes,
-                )))
+                )?))
             }
         };
 
@@ -157,6 +166,7 @@ impl AppState {
             memberships,
             users,
             authn,
+            introspect_body_limit: cfg.authn.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
         })
     }
 }
@@ -184,7 +194,7 @@ pub fn router(state: AppState) -> Router {
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware::require_bearer))
         .with_state(state.clone());
     let public = Router::new().route("/readyz", get(readyz)).with_state(state.clone());
-    let authn_api = authn::router().with_state(state);
+    let authn_api = authn::router(state.introspect_body_limit).with_state(state);
     health_router().merge(protected).merge(public).merge(authn_api)
 }
 

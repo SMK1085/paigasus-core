@@ -25,8 +25,8 @@ use tonic::{Request, Response, Status};
 use tower::{Layer, Service};
 
 use super::convert;
+use crate::adapters::auth::{AuthContext, bearer_from_headers};
 use crate::adapters::http::AppState;
-use crate::adapters::http::auth_middleware::AuthContext;
 use crate::application::authenticate_token::Provisioning;
 
 /// The `AuthnService` gRPC server — a thin adapter over the same `AppState.authn` use case
@@ -120,7 +120,7 @@ where
             }
             // A missing or malformed `authorization` header is treated exactly like a rejected
             // token (D12): both are `Unauthenticated`.
-            let Some(token) = bearer_token(req.headers()) else {
+            let Some(token) = bearer_from_headers(req.headers()) else {
                 return Ok(reject(&AuthnError::InvalidToken(TokenDefect::Malformed)));
             };
             match state.authn.resolve(&token, Provisioning::Enabled).await {
@@ -143,21 +143,4 @@ where
 /// `Status::into_http` — never a bare HTTP 401, which a gRPC client can't interpret.
 fn reject(err: &AuthnError) -> http::Response<Body> {
     convert::authn_status(err).into_http()
-}
-
-/// Extracts the bearer token from the `authorization` metadata (an HTTP header on the wrapped
-/// gRPC request) — the sole accepted credential source, mirroring the HTTP middleware. Returns
-/// `None` for an absent header, a non-ASCII value, a non-`Bearer` scheme, or an empty
-/// credential. The scheme match is ASCII-case-insensitive per RFC 7235 §2.1.
-fn bearer_token(headers: &http::HeaderMap) -> Option<String> {
-    let value = headers.get(http::header::AUTHORIZATION)?.to_str().ok()?;
-    let (scheme, token) = value.split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("Bearer") {
-        return None;
-    }
-    let token = token.trim();
-    if token.is_empty() {
-        return None;
-    }
-    Some(token.to_string())
 }
