@@ -948,6 +948,11 @@ export const AttachMembershipResponseSchema: GenMessage<AttachMembershipResponse
   messageDesc(file_paigasus_iam_v1_iam, 42);
 
 /**
+ * Detaching an org membership cascades: the principal's team/project
+ * memberships within that same org are removed in the same transaction
+ * (spec §5.1 rule 5). Detaching a team/project membership removes only
+ * itself.
+ *
  * @generated from message paigasus.iam.v1.DetachMembershipRequest
  */
 export type DetachMembershipRequest = Message<"paigasus.iam.v1.DetachMembershipRequest"> & {
@@ -1216,6 +1221,9 @@ export const TenancyService: GenService<{
     output: typeof AttachMembershipResponseSchema;
   },
   /**
+   * Detaching an ORG membership also removes that principal's team/project
+   * memberships in that same org (cascade detach, spec §5.1 rule 5).
+   *
    * @generated from rpc paigasus.iam.v1.TenancyService.DetachMembership
    */
   detachMembership: {

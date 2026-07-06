@@ -609,7 +609,9 @@ pub mod tenancy_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        ///
+        /** Detaching an ORG membership also removes that principal's team/project
+ memberships in that same org (cascade detach, spec §5.1 rule 5).
+*/
         pub async fn detach_membership(
             &mut self,
             request: impl tonic::IntoRequest<super::DetachMembershipRequest>,
@@ -827,7 +829,9 @@ pub mod tenancy_service_server {
             tonic::Response<super::AttachMembershipResponse>,
             tonic::Status,
         >;
-        ///
+        /** Detaching an ORG membership also removes that principal's team/project
+ memberships in that same org (cascade detach, spec §5.1 rule 5).
+*/
         async fn detach_membership(
             &self,
             request: tonic::Request<super::DetachMembershipRequest>,

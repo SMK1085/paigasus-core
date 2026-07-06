@@ -75,6 +75,13 @@ Membership   { id: Uuid, principal_id: PrincipalId, node: TenancyNodeRef, create
 membership invariant check don't need an extra join; the DB makes disagreement impossible
 (§4). Timestamps are µs-truncated `DateTime<Utc>` from the `Clock` port (M0 convention).
 
+**Implementation note:** the entity shapes above are the logical model; in the implemented
+code, `Team.org_id`/`Project.org_id` are not separate struct fields. They live inside the
+typed ids (`TeamId`/`ProjectId` are PRN-derived and embed the org UUID in the PRN's org slot),
+exposed via the `org_uuid()` accessor. The physical `org_id` columns described in §4 exist
+only in persistence, and the composite FK (`fk_project_team … REFERENCES team (id, org_id)`)
+makes them incapable of disagreeing with the owning team's org.
+
 ### 3.3 PRN minting
 
 Via the existing kernel surface (no kernel changes):

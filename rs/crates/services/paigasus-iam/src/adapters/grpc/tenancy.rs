@@ -279,6 +279,10 @@ impl TenancyService for TenancyGrpc {
         // UUID", so this reuses `InvalidPrn` with a static string as context (same sentinel
         // the PRN parsers use for "malformed input", just not itself a PRN here). The error
         // payload is server-side context only; InvalidPrn's Display never surfaces it.
+        //
+        // Detaching an ORG membership cascades: the principal's team/project memberships in
+        // that same org are removed in the same transaction (spec §5.1 rule 5). Detaching a
+        // team/project membership removes only itself.
         let id = Uuid::parse_str(&req.id).map_err(|_| convert::status_to_grpc(TenancyError::InvalidPrn("membership id must be a uuid".to_string())))?;
         self.state.memberships.detach(id).await.map_err(convert::status_to_grpc)?;
         Ok(Response::new(DetachMembershipResponse {}))

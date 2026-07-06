@@ -197,6 +197,11 @@ message AttachMembershipRequest {
 message AttachMembershipResponse {
   Membership membership = 1;
 }
+
+// Detaching an org membership cascades: the principal's team/project
+// memberships within that same org are removed in the same transaction
+// (spec §5.1 rule 5). Detaching a team/project membership removes only
+// itself.
 message DetachMembershipRequest {
   string id = 1;
 } // membership uuid
@@ -233,6 +238,8 @@ service TenancyService {
   rpc ArchiveProject(ArchiveProjectRequest) returns (ArchiveProjectResponse);
   rpc RestoreProject(RestoreProjectRequest) returns (RestoreProjectResponse);
   rpc AttachMembership(AttachMembershipRequest) returns (AttachMembershipResponse);
+  // Detaching an ORG membership also removes that principal's team/project
+  // memberships in that same org (cascade detach, spec §5.1 rule 5).
   rpc DetachMembership(DetachMembershipRequest) returns (DetachMembershipResponse);
   rpc ListMemberships(ListMembershipsRequest) returns (ListMembershipsResponse);
 }

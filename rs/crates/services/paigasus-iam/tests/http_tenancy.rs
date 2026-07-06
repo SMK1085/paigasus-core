@@ -8,38 +8,10 @@
 
 mod support;
 
-use axum::Router;
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use paigasus_iam::adapters::http::{AppState, router};
-use sea_orm::DatabaseConnection;
-use serde_json::{Value, json};
-use tower::ServiceExt;
+use axum::http::StatusCode;
+use serde_json::json;
+use support::{app, send};
 use uuid::Uuid;
-
-fn app(db: DatabaseConnection) -> Router {
-    router(AppState::new(db))
-}
-
-/// Drives one request through the router and returns `(status, json body)`. `Value::Null`
-/// stands in for an empty body (the archive/restore/health endpoints don't all have one, but
-/// every endpoint under test here does).
-async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
-    let mut builder = Request::builder().method(method).uri(uri);
-    let body = match body {
-        Some(b) => {
-            builder = builder.header("content-type", "application/json");
-            Body::from(serde_json::to_vec(&b).unwrap())
-        }
-        None => Body::empty(),
-    };
-    let request = builder.body(body).unwrap();
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let value = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
-    (status, value)
-}
 
 #[tokio::test]
 async fn org_lifecycle_over_http() {

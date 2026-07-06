@@ -30,6 +30,11 @@ async fn create_membership(State(s): State<AppState>, Json(b): Json<CreateMember
     Ok((StatusCode::CREATED, Json(record.into())))
 }
 
+/// `DELETE /v1/memberships/{id}`. Detaching an ORG membership cascades: the
+/// principal's team/project memberships within that same org are removed in
+/// the same transaction (spec §5.1 rule 5). Detaching a team/project
+/// membership removes only itself. Detaching a nonexistent id is a 404, not
+/// an idempotent no-op.
 async fn delete_membership(State(s): State<AppState>, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
     s.memberships.detach(id).await?;
     Ok(StatusCode::NO_CONTENT)

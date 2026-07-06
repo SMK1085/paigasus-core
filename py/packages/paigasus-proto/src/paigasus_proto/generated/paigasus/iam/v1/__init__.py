@@ -267,6 +267,13 @@ default_message_pool.register_message(
 
 @dataclass(eq=False, repr=False)
 class DetachMembershipRequest(betterproto2.Message):
+    """
+    Detaching an org membership cascades: the principal's team/project
+    memberships within that same org are removed in the same transaction
+    (spec §5.1 rule 5). Detaching a team/project membership removes only
+    itself.
+    """
+
     id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
 
@@ -1094,6 +1101,10 @@ class TenancyServiceStub(betterproto2_grpclib.ServiceStub):
         deadline: "Deadline | None" = None,
         metadata: "MetadataLike | None" = None,
     ) -> "DetachMembershipResponse":
+        """
+        Detaching an ORG membership also removes that principal's team/project
+        memberships in that same org (cascade detach, spec §5.1 rule 5).
+        """
 
         return await self._unary_unary(
             "/paigasus.iam.v1.TenancyService/DetachMembership",
