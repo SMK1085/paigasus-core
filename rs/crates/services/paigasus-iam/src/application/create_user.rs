@@ -97,6 +97,9 @@ mod tests {
         async fn find_user(&self, id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError> {
             Ok(self.rows.lock().unwrap().get(&id.uuid()).cloned())
         }
+        async fn find_principal(&self, id: &PrincipalId) -> Result<Option<Principal>, RepositoryError> {
+            Ok(self.rows.lock().unwrap().get(&id.uuid()).map(|(p, _)| p.clone()))
+        }
     }
 
     // `CreateUser<R, ..>` takes `R` by value, but the tests below pass `&repo` so they can
@@ -110,6 +113,9 @@ mod tests {
         }
         async fn find_user(&self, id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError> {
             InMemoryPrincipalRepository::find_user(self, id).await
+        }
+        async fn find_principal(&self, id: &PrincipalId) -> Result<Option<Principal>, RepositoryError> {
+            InMemoryPrincipalRepository::find_principal(self, id).await
         }
     }
 
@@ -128,6 +134,9 @@ mod tests {
             ProjectId::from_parts(org, self.0)
         }
         fn new_membership_id(&self) -> Uuid {
+            self.0
+        }
+        fn new_external_identity_id(&self) -> Uuid {
             self.0
         }
     }

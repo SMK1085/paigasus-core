@@ -2,6 +2,7 @@
 
 //! Application layer — use cases orchestrating the domain + ports.
 
+pub mod authenticate_token;
 pub mod create_user;
 pub mod error;
 #[cfg(test)]

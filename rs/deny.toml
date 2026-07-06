@@ -15,6 +15,16 @@ ignore = [
   # calls that API either, so the affected reader (`Archive::new`/`ArchiveBuilder::new`) is
   # unreached. No patched tokio-tar exists upstream (crate is archived/unmaintained).
   "RUSTSEC-2025-0111",
+  # RUSTSEC-2023-0071 ("Marvin Attack"): the `rsa` crate's PKCS#1v1.5 implementation leaks
+  # PRIVATE-key timing information over the network during decrypt/sign. Pulled in
+  # transitively via jsonwebtoken's `rust_crypto` CryptoProvider feature (SMA-443 Task 7's
+  # OIDC validator — `aws_lc_rs`, the other provider choice, needs a cmake/C toolchain this
+  # repo's build environments don't carry). `paigasus-iam` only ever uses RSA in
+  # SIGNATURE-VERIFICATION mode: `DecodingKey::from_jwk` builds a key from an IdP's
+  # published JWKS PUBLIC (n, e) components, and the validator never holds or exercises an
+  # RSA private key — the vulnerable decrypt/sign timing path is unreached. No patched
+  # `rsa` release exists upstream ("No safe upgrade is available").
+  "RUSTSEC-2023-0071",
 ]
 
 [licenses]
@@ -29,6 +39,9 @@ allow = [                   # v2: anything NOT listed is denied
   "Unicode-DFS-2016",        # older Unicode data-files license (pre-3.0 unicode-* crates)
   "Zlib",
   "MPL-2.0",                # Apache-compatible weak file-level copyleft (review F4)
+  "BSL-1.0",                 # Boost Software License 1.0: permissive, OSI-approved; pulled
+                             # in unconditionally by xxhash-rust via redis (SMA-443 Task 8's
+                             # RedisJwksCache)
 ]
 confidence-threshold = 0.8
 unused-allowed-license = "allow"   # don't warn on allowlist entries no crate matches yet (near-empty lock)
