@@ -104,12 +104,14 @@ them exactly like `new_principal_id` (SystemTime ms + 10 random bytes → `mint_
   index, surfaced as a typed conflict on insert/rename.)
 - `TeamRepository` — `create`, `find`, `rename`, `set_status`, `list_by_org(org, limit, offset)`.
 - `ProjectRepository` — `create`, `find`, `rename`, `set_status`, `list_by_team(team, limit, offset)`.
-- `MembershipRepository` — `attach(&Membership)`, `detach(id)` /
-  `detach_org_cascade(principal, org)`, `find(id)`,
-  `list_by_principal(principal, limit, offset)`, `list_by_node(node, limit, offset)`,
-  `org_membership_exists(principal, org)`.
-- `PrincipalRepository` — grows `exists(&PrincipalId) -> Result<bool, RepositoryError>`
-  (needed by attach; the M0 surface is otherwise untouched).
+- `MembershipRepository` — `attach(&Membership)`, `detach(id)` (org memberships cascade
+  internally, rule 5), `find(id)`, `list_by_principal(principal, limit, offset)`,
+  `list_by_node(node, limit, offset)`. The org-membership invariant check and the principal
+  existence + stored-canonical check run **inside `attach`'s transaction** (D8) rather than
+  as separate port methods.
+- `PrincipalRepository` — stays at the M0 surface: no `exists` method. The principal check
+  is part of `attach`'s in-transaction guard sequence (a standalone pre-check would be
+  weaker — it could not hold the lock across the insert).
 
 **Transactional guard enforcement (D8).** Atomicity alone is not isolation: under Postgres
 READ COMMITTED, a concurrent `archive` UPDATE does not conflict with a plain INSERT, so a
