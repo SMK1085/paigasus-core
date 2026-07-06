@@ -4,12 +4,14 @@
 //! No I/O, no SeaORM, no axum/tonic — the service crate provides adapters (ADR-0005,
 //! hexagonal). IDs/PRNs come from `paigasus-kernel`; time/entropy are injected via ports.
 
+pub mod authn;
 pub mod ports;
 pub mod principal;
 pub mod tenancy;
 pub mod user;
 pub mod value;
 
+pub use authn::{AuthnError, AuthnPrincipal, ExternalIdentity, Issuer, PrincipalContext, ProvisioningDefect, TokenDefect, ValidatedClaims};
 pub use ports::{
     Clock, ConflictKind, IdGenerator, MembershipRecord, MembershipRepository, NodeView, OrganizationRepository, PreconditionKind, PrincipalRepository, ProjectRepository, RepositoryError,
     TeamRepository,

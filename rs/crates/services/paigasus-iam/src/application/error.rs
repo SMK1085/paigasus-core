@@ -111,6 +111,9 @@ impl From<DomainError> for TenancyError {
             DomainError::InvalidSlug(s) => Self::InvalidSlug(s),
             DomainError::InvalidName(s) => Self::InvalidName(s),
             DomainError::InvalidNodePrn(s) => Self::InvalidPrn(s),
+            // Authn-only variant (SMA-443): tenancy operations never produce it, but the
+            // match must stay exhaustive as `DomainError` grows across milestones.
+            DomainError::InvalidIssuer(_) => Self::Internal,
         }
     }
 }
