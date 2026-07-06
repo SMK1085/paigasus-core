@@ -39,6 +39,9 @@ allow = [                   # v2: anything NOT listed is denied
   "Unicode-DFS-2016",        # older Unicode data-files license (pre-3.0 unicode-* crates)
   "Zlib",
   "MPL-2.0",                # Apache-compatible weak file-level copyleft (review F4)
+  "BSL-1.0",                 # Boost Software License 1.0: permissive, OSI-approved; pulled
+                             # in unconditionally by xxhash-rust via redis (SMA-443 Task 8's
+                             # RedisJwksCache)
 ]
 confidence-threshold = 0.8
 unused-allowed-license = "allow"   # don't warn on allowlist entries no crate matches yet (near-empty lock)

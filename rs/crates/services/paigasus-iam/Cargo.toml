@@ -74,6 +74,9 @@ async-trait = { workspace = true }
 # `adapters::http`'s `Path<Uuid>` extractor and `dto::MembershipDto.id` need
 # `Uuid: Deserialize`/`Serialize` (Task 14, SMA-442).
 uuid = { workspace = true, features = ["serde"] }
+# `adapters::oidc::redis_cache::RedisJwksCache` — external `JwksCache` backend so cached
+# JWKS survive process restarts and are shared across replicas (SMA-443 Task 8).
+redis = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as
@@ -88,7 +91,9 @@ tokio-stream = { workspace = true, features = ["net"] }
 # `tests/roundtrip.rs` — AC #2: a real Postgres round-trip via an ephemeral Docker
 # container. Dev-only: never enters the published/shipped binary.
 testcontainers = "0.27"
-testcontainers-modules = { version = "0.15", features = ["postgres"] }
+# `tests/redis_jwks_cache.rs` — AC #8: a real Redis round-trip via an ephemeral Docker
+# container (SMA-443 Task 8), same pattern as the Postgres round-trip above.
+testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
 # `adapters::oidc::validator` tests — mints runtime EC P-256 keypairs so ES256 tokens can
 # be signed locally without committing PEM/JWK fixtures (spec §8 mock-IdP refinement,
 # SMA-443 Task 7). Dev-only: never enters the shipped binary; the workspace baseline
