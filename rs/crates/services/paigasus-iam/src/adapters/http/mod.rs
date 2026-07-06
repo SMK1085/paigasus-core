@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! axum HTTP surface: `/healthz` (liveness), `/readyz` (DB-backed readiness), and the
-//! `/v1` tenancy API (organizations/teams/projects — memberships/users routes land in
-//! Task 15, ADR-0014).
+//! `/v1` tenancy API (organizations/teams/projects/memberships/users, ADR-0014).
 
 pub mod dto;
 pub mod error;
+mod memberships;
 mod organizations;
 mod projects;
 mod teams;
+mod users;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
@@ -39,8 +40,6 @@ pub struct AppState {
     pub orgs: OrgSvc,
     pub teams: TeamSvc,
     pub projects: ProjectSvc,
-    // Constructed now so the composition root is stable across Task 14/15; the HTTP routes
-    // that call these land in Task 15 (memberships + user-creation endpoints).
     pub memberships: MembershipSvc,
     pub users: UserSvc,
 }
@@ -78,6 +77,8 @@ pub fn router(state: AppState) -> Router {
         .merge(organizations::router())
         .merge(teams::router())
         .merge(projects::router())
+        .merge(memberships::router())
+        .merge(users::router())
         .route("/readyz", get(readyz))
         .with_state(state);
     health_router().merge(api)

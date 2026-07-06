@@ -2,13 +2,9 @@
 
 //! `CreateUser` use case: mint an identity, build a `User` principal, persist it.
 
-// Nothing in `main.rs` invokes this use case yet — the composition root (wiring a real
-// `PrincipalRepository` adapter behind an HTTP/gRPC handler) lands in Task 11. Until then
-// it's exercised only via the `#[cfg(test)]` fakes below; same reasoning as `config::load`
-// (Task 5).
-#![allow(dead_code)]
-
 use paigasus_iam_core::{Clock, Email, IdGenerator, Principal, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, RepositoryError, User};
+
+use crate::application::error::TenancyError;
 
 /// Input to create a user principal.
 #[derive(Debug, Clone)]
@@ -25,6 +21,17 @@ pub enum CreateUserError {
     InvalidEmail(String),
     #[error(transparent)]
     Repository(#[from] RepositoryError),
+}
+
+/// Lets the `/v1/users` handler use `?` against `ApiError` (which requires
+/// `Into<TenancyError>`) the same way the tenancy-service handlers do.
+impl From<CreateUserError> for TenancyError {
+    fn from(err: CreateUserError) -> Self {
+        match err {
+            CreateUserError::InvalidEmail(e) => TenancyError::InvalidEmail(e),
+            CreateUserError::Repository(r) => r.into(),
+        }
+    }
 }
 
 // `Clone` lets the composition root (`http::AppState`, Task 14) hold a `UserSvc` handle

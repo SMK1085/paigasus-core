@@ -3,11 +3,6 @@
 //! `MembershipService`: attach/detach/list principal-to-tenancy-node memberships
 //! (SMA-442, ADR-0014).
 
-// Nothing in `main.rs` wires this into a route yet — the composition root (HTTP/gRPC
-// handlers) lands in later tasks. Until then it's exercised only via the `#[cfg(test)]`
-// fakes in `fakes.rs`; same reasoning as `OrganizationService`/`TeamService`/`ProjectService`.
-#![allow(dead_code)]
-
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
 use paigasus_iam_core::{Clock, IdGenerator, Membership, MembershipRecord, MembershipRepository, PrincipalId, TenancyNodeRef};

@@ -6,7 +6,7 @@
 //! RFC3339 via chrono's serde feature).
 
 use chrono::{DateTime, Utc};
-use paigasus_iam_core::{NodeStatus, NodeView, Organization, OrganizationId, Project, Team};
+use paigasus_iam_core::{MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, Project, Team};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -153,10 +153,31 @@ pub struct MembershipDto {
     pub created_at: DateTime<Utc>,
 }
 
+impl From<MembershipRecord> for MembershipDto {
+    fn from(record: MembershipRecord) -> Self {
+        MembershipDto {
+            id: record.id,
+            principal_prn: record.principal_prn,
+            node_prn: record.node_prn,
+            created_at: record.created_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateMembershipBody {
     pub principal_prn: String,
     pub node_prn: String,
+}
+
+/// Query params for `GET /v1/memberships`: exactly one of `principal`/`node` must be set
+/// (else `TenancyError::InvalidPrn` — mirrors the proto oneof rule).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MembershipQuery {
+    pub principal: Option<String>,
+    pub node: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
