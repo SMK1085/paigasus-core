@@ -89,8 +89,17 @@ impl HttpJwksFetcher {
     /// Builds the fetcher's `reqwest::Client` (rustls, per the workspace baseline) with the
     /// given request timeout. No custom redirect policy is needed — reqwest's default is fine
     /// for a discovery endpoint operators configure directly.
-    pub fn new(timeout: Duration) -> Result<Self, AuthnError> {
-        let client = reqwest::Client::builder().timeout(timeout).build().map_err(|_| AuthnError::Unavailable)?;
+    ///
+    /// `accept_invalid_tls` is `AuthnConfig::accept_invalid_tls`, the TEST-ONLY escape for
+    /// self-signed IdP certificates (mock IdP / Keycloak-in-Docker): `true` DISABLES
+    /// certificate verification for every fetch this client makes — never enable it in
+    /// production (a forged JWKS is a full authentication bypass).
+    pub fn new(timeout: Duration, accept_invalid_tls: bool) -> Result<Self, AuthnError> {
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .danger_accept_invalid_certs(accept_invalid_tls)
+            .build()
+            .map_err(|_| AuthnError::Unavailable)?;
         Ok(Self { client, clock: SystemClock })
     }
 

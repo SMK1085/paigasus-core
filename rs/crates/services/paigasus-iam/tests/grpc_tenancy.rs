@@ -2,7 +2,7 @@
 
 //! End-to-end gRPC coverage for `TenancyService`: organization create/get/duplicate-slug/
 //! not-found, and a team + membership flow covering the org-membership invariant and the
-//! forged-org-slot (`prn-mismatch`) defense. Drives the real `grpc::router(AppState::new(db),
+//! forged-org-slot (`prn-mismatch`) defense. Drives the real `grpc::router(AppState::new(db, &cfg),
 //! ..)` over an ephemeral `TcpListener` (mirrors `tests/grpc_health.rs`) against an ephemeral
 //! Postgres (Docker; see `tests/support/mod.rs`).
 
@@ -46,7 +46,8 @@ async fn organization_lifecycle_over_grpc() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let state = AppState::new(db);
+    let _idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&_idp)).await.unwrap();
     let (addr, server) = spawn_tenancy_server(state).await;
     let mut client = connect(addr).await;
 
@@ -97,7 +98,8 @@ async fn team_membership_flow_over_grpc() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let state = AppState::new(db);
+    let _idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&_idp)).await.unwrap();
 
     // Mint a principal via the application service directly — `TenancyService` has no
     // `CreateUser` RPC (users stay HTTP-only per Task 15); `AppState.users` is the same

@@ -28,6 +28,14 @@ pub struct AuthnConfig {
     pub jwks_ttl_secs: u64,
     pub jwks_refresh_cooldown_secs: u64,
     pub max_token_bytes: usize,
+    /// TEST-ONLY escape hatch for self-signed IdP TLS: when `true`, certificate
+    /// verification is DISABLED for the discovery/JWKS fetches (`reqwest`'s
+    /// `danger_accept_invalid_certs`). NEVER enable this in production — it lets any
+    /// on-path attacker serve a forged JWKS, which is a full authentication bypass.
+    /// Exists solely so the integration suites (in-process mock IdP, Keycloak-in-Docker,
+    /// SMA-443 Tasks 10/13) can fetch from HTTPS endpoints with self-signed dev certs.
+    #[serde(default)]
+    pub accept_invalid_tls: bool,
     pub jwks_cache: JwksCacheConfig,
     pub issuers: Vec<IssuerConfig>,
 }
@@ -75,6 +83,7 @@ struct AuthnDefaults {
     jwks_ttl_secs: u64,
     jwks_refresh_cooldown_secs: u64,
     max_token_bytes: usize,
+    accept_invalid_tls: bool,
     jwks_cache: JwksCacheConfig,
 }
 
@@ -97,6 +106,7 @@ impl Default for AuthnDefaults {
             jwks_ttl_secs: 3600,
             jwks_refresh_cooldown_secs: 30,
             max_token_bytes: 16384,
+            accept_invalid_tls: false,
             jwks_cache: JwksCacheConfig {
                 backend: JwksCacheBackend::Memory,
                 redis_url: None,
@@ -198,6 +208,7 @@ mod tests {
             assert_eq!(cfg.authn.jwks_ttl_secs, 3600);
             assert_eq!(cfg.authn.jwks_refresh_cooldown_secs, 30);
             assert_eq!(cfg.authn.max_token_bytes, 16384);
+            assert!(!cfg.authn.accept_invalid_tls, "accept_invalid_tls must default to false (test-only escape)");
             assert_eq!(cfg.authn.jwks_cache.backend, JwksCacheBackend::Memory);
             assert_eq!(cfg.authn.jwks_cache.redis_url, None);
             assert_eq!(cfg.authn.issuers.len(), 1);

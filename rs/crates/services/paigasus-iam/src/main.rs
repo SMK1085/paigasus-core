@@ -21,9 +21,12 @@ async fn main() -> anyhow::Result<()> {
     let db = Database::connect(&config.database_url).await?;
     Migrator::up(&db, None).await?;
     // Built once and cloned into each server task below (a cheap handle-clone: every
-    // per-aggregate service just wraps the same underlying connection pool) — HTTP and gRPC
-    // now share one `AppState` (Task 16, SMA-442).
-    let state = AppState::new(db);
+    // per-aggregate service just wraps the same underlying connection pool, and the wired
+    // authenticator's JWKS cache/single-flight state is `Arc`-shared) — HTTP and gRPC
+    // share one `AppState` (Task 16, SMA-442; authn wiring SMA-443). Fails fast when the
+    // Redis JWKS cache is configured but unreachable; JWKS themselves are fetched lazily
+    // on first use, so startup stays independent of IdP availability (spec §6.4).
+    let state = AppState::new(db, &config).await?;
 
     let request_timeout = Duration::from_secs(30);
     let (tx, rx) = tokio::sync::watch::channel(());

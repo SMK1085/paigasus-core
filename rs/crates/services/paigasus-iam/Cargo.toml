@@ -99,6 +99,14 @@ testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
 # SMA-443 Task 7). Dev-only: never enters the shipped binary; the workspace baseline
 # carries no `p256` entry since this is its only consumer.
 p256 = { version = "0.13", features = ["pkcs8", "pem"] }
+# `tests/support::start_mock_idp` — the in-process mock IdP serves discovery + JWKS over
+# HTTPS with a runtime self-signed certificate (SMA-443 Task 10; the fetcher hard-requires
+# https, spec §4.2). `ring` is pinned explicitly on both: their defaults would pull
+# `aws-lc-rs` in as a SECOND rustls CryptoProvider, breaking rustls's sole-provider
+# auto-selection everywhere AND adding a native cmake build dep (see the jsonwebtoken
+# note above for the workspace's pure-Rust posture).
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 
 [lints]
 workspace = true

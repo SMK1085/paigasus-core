@@ -17,6 +17,12 @@
 # jwks_ttl_secs = 3600                # JWKS cache TTL before refetch — default shown
 # jwks_refresh_cooldown_secs = 30     # min gap between forced kid-miss refetches — default shown
 # max_token_bytes = 16384             # reject larger bearer tokens before parsing — default shown
+#
+# TEST-ONLY — NEVER enable in production. `true` DISABLES TLS certificate verification
+# for the discovery/JWKS fetches, letting any on-path attacker serve a forged JWKS
+# (a full authentication bypass). Exists solely for integration tests against IdPs
+# with self-signed dev certificates (mock IdP / Keycloak-in-Docker).
+# accept_invalid_tls = false          # default shown
 
 # [authn.jwks_cache]
 # backend = "memory"                  # "memory" (default) | "redis"
