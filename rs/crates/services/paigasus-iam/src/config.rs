@@ -129,9 +129,11 @@ impl IamConfig {
     }
 
     /// Boot-time validation beyond what serde/figment structurally enforce (spec §6.4):
-    /// at least one issuer, issuers unique, each issuer's `audiences` non-empty, each
-    /// issuer string a valid absolute `https` URL (`Issuer::parse`), and a `redis` JWKS
-    /// cache backend has `redis_url` configured.
+    /// at least one issuer, issuers unique (compared on the TRIMMED string, so a padded
+    /// duplicate is still caught), each issuer string carries no leading/trailing
+    /// whitespace of its own (padding is never valid config, even when unique), each
+    /// issuer's `audiences` non-empty, each issuer string a valid absolute `https` URL
+    /// (`Issuer::parse`), and a `redis` JWKS cache backend has `redis_url` configured.
     pub fn validate(&self) -> Result<(), String> {
         if self.authn.issuers.is_empty() {
             return Err("authn.issuers must contain at least one issuer".to_string());
@@ -139,14 +141,19 @@ impl IamConfig {
 
         let mut seen = HashSet::with_capacity(self.authn.issuers.len());
         for issuer_cfg in &self.authn.issuers {
-            if !seen.insert(issuer_cfg.issuer.as_str()) {
-                return Err(format!("authn.issuers contains a duplicate issuer: {}", issuer_cfg.issuer));
+            let raw = issuer_cfg.issuer.as_str();
+            let trimmed = raw.trim();
+            if !seen.insert(trimmed) {
+                return Err(format!("authn.issuers contains a duplicate issuer (after trimming whitespace): {trimmed}"));
+            }
+            if raw != trimmed {
+                return Err(format!("authn.issuers[{trimmed}] has leading/trailing whitespace, which is never valid config: {raw:?}"));
             }
             if issuer_cfg.audiences.is_empty() {
-                return Err(format!("authn.issuers[{}].audiences must not be empty", issuer_cfg.issuer));
+                return Err(format!("authn.issuers[{trimmed}].audiences must not be empty"));
             }
             if let Err(e) = Issuer::parse(&issuer_cfg.issuer) {
-                return Err(format!("authn.issuers[{}] is not a valid issuer: {e}", issuer_cfg.issuer));
+                return Err(format!("authn.issuers[{trimmed}] is not a valid issuer: {e}"));
             }
         }
 
@@ -265,6 +272,46 @@ mod tests {
             )?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert!(cfg.validate().is_err(), "expected a duplicate issuer to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_a_padded_issuer() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                r#"
+                    [[authn.issuers]]
+                    issuer = " https://idp.example.com/realms/acme"
+                    audiences = ["paigasus"]
+                "#,
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "expected a padded issuer to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_issuers_differing_only_by_padding() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                r#"
+                    [[authn.issuers]]
+                    issuer = "https://idp.example.com/realms/acme"
+                    audiences = ["paigasus"]
+
+                    [[authn.issuers]]
+                    issuer = "https://idp.example.com/realms/acme "
+                    audiences = ["other"]
+                "#,
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "expected two issuers differing only by padding to fail validation as duplicates");
             Ok(())
         });
     }

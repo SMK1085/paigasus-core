@@ -116,6 +116,7 @@ struct WireClaims {
 fn map_jwt_error(err: jsonwebtoken::errors::Error) -> AuthnError {
     match err.into_kind() {
         ErrorKind::ExpiredSignature => invalid(TokenDefect::Expired),
+        ErrorKind::ImmatureSignature => invalid(TokenDefect::NotYetValid),
         ErrorKind::InvalidSignature => invalid(TokenDefect::BadSignature),
         ErrorKind::InvalidAudience => invalid(TokenDefect::AudienceMismatch),
         ErrorKind::InvalidIssuer => invalid(TokenDefect::IssuerNotConfigured),
@@ -166,6 +167,7 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator
         validation.set_issuer(&[issuer.as_str()]);
         validation.set_audience(&issuer_config.audiences);
         validation.leeway = self.leeway_secs;
+        validation.validate_nbf = true;
 
         let token_data = decode::<WireClaims>(token, &decoding_key, &validation).map_err(map_jwt_error)?;
 
@@ -240,6 +242,8 @@ mod tests {
         aud: String,
         exp: i64,
         #[serde(skip_serializing_if = "Option::is_none")]
+        nbf: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         email: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
@@ -255,6 +259,7 @@ mod tests {
             sub: "sub-1".to_string(),
             aud: aud.to_string(),
             exp,
+            nbf: None,
             email: None,
             name: None,
             locale: None,
@@ -337,6 +342,7 @@ mod tests {
             sub: "sub-1".to_string(),
             aud: "my-aud".to_string(),
             exp: now + 3600,
+            nbf: None,
             email: Some("alice@example.com".to_string()),
             name: Some("Alice".to_string()),
             locale: Some("en-US".to_string()),
@@ -455,5 +461,47 @@ mod tests {
         let err = authenticator.authenticate(&token).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::UnknownKid)));
         assert_eq!(calls.load(Ordering::SeqCst), 0, "a missing kid must be rejected before any key lookup");
+    }
+
+    #[tokio::test]
+    async fn not_yet_valid_token_rejected_and_leeway_honored() {
+        let issuer = "https://idp.example.com";
+        let now = Utc::now().timestamp();
+        let (encoding_key, jwk, kid) = es256_keypair();
+
+        // `nbf` 30s in the future, but a 60s leeway is configured -> still accepted
+        // (jsonwebtoken applies the same leeway to `nbf` as it does to `exp`).
+        let mut ok_claims = bare_claims(issuer, "aud", now + 3600);
+        ok_claims.nbf = Some(now + 30);
+        let ok_token = sign(&encoding_key, Some(&kid), &ok_claims);
+        let ok_authenticator = make_authenticator(StubFetcher::new(jwk.clone()), vec![issuer_config(issuer, &["aud"])], 60, 16_384);
+        ok_authenticator.authenticate(&ok_token).await.expect("an nbf 30s in the future within a 60s leeway must be accepted");
+
+        // `nbf` 120s in the future -> beyond the same 60s leeway, must be rejected.
+        let mut future_claims = bare_claims(issuer, "aud", now + 3600);
+        future_claims.nbf = Some(now + 120);
+        let future_token = sign(&encoding_key, Some(&kid), &future_claims);
+        let future_authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(issuer, &["aud"])], 60, 16_384);
+        let err = future_authenticator.authenticate(&future_token).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::NotYetValid)));
+    }
+
+    #[tokio::test]
+    async fn wrong_signing_key_under_the_same_kid_is_bad_signature() {
+        // Two DIFFERENT keypairs — `es256_keypair()` always tags its JWK with the same fixed
+        // `kid`, so signing with keypair A but serving keypair B's JWK reaches signature
+        // verification (kid lookup and kty/alg consistency both succeed) and must fail there,
+        // not earlier in the pipeline.
+        let (encoding_key_a, _jwk_a, kid) = es256_keypair();
+        let (_encoding_key_b, jwk_b, _kid_b) = es256_keypair();
+        let issuer = "https://idp.example.com";
+        let now = Utc::now().timestamp();
+        let token = sign(&encoding_key_a, Some(&kid), &bare_claims(issuer, "aud", now + 3600));
+
+        let fetcher = StubFetcher::new(jwk_b);
+        let authenticator = make_authenticator(fetcher, vec![issuer_config(issuer, &["aud"])], 60, 16_384);
+
+        let err = authenticator.authenticate(&token).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::BadSignature)));
     }
 }

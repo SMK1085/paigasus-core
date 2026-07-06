@@ -17,6 +17,7 @@ use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::application::authenticate_token::Provisioning;
 use serde_json::json;
 use support::{send, send_raw, start_mock_idp, test_config, test_config_with};
+use uuid::Uuid;
 
 #[tokio::test]
 async fn introspect_unknown_identity_is_403_and_never_provisions() {
@@ -249,4 +250,71 @@ async fn key_rotation_validates_tokens_signed_with_the_new_key() {
     let after = idp.bearer("rotating-user", Some("rotate@example.com"), "paigasus", 3600);
     let (status, body) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "post", "name": "Post" })), Some(&after)).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+/// Every `/v1` route the tenancy sub-routers expose (organizations/teams/projects/
+/// memberships/users), paired with its method — the enumeration mirrors
+/// `src/adapters/http/{organizations,teams,projects,memberships,users}.rs` route tables
+/// exactly. When adding a new /v1 route, it must appear here — this test converts
+/// default-open HTTP routing into a tested invariant (final-review Important 3).
+#[tokio::test]
+async fn every_protected_v1_route_requires_bearer() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, idp) = support::app(db).await;
+
+    let id = Uuid::nil();
+    let protected_routes: Vec<(&str, String)> = vec![
+        // organizations.rs
+        ("POST", "/v1/organizations".to_string()),
+        ("GET", "/v1/organizations".to_string()),
+        ("GET", format!("/v1/organizations/{id}")),
+        ("PATCH", format!("/v1/organizations/{id}")),
+        ("POST", format!("/v1/organizations/{id}/archive")),
+        ("POST", format!("/v1/organizations/{id}/restore")),
+        ("POST", format!("/v1/organizations/{id}/teams")),
+        ("GET", format!("/v1/organizations/{id}/teams")),
+        // teams.rs
+        ("GET", format!("/v1/teams/{id}")),
+        ("PATCH", format!("/v1/teams/{id}")),
+        ("POST", format!("/v1/teams/{id}/archive")),
+        ("POST", format!("/v1/teams/{id}/restore")),
+        ("POST", format!("/v1/teams/{id}/projects")),
+        ("GET", format!("/v1/teams/{id}/projects")),
+        // projects.rs
+        ("GET", format!("/v1/projects/{id}")),
+        ("PATCH", format!("/v1/projects/{id}")),
+        ("POST", format!("/v1/projects/{id}/archive")),
+        ("POST", format!("/v1/projects/{id}/restore")),
+        // memberships.rs
+        ("POST", "/v1/memberships".to_string()),
+        ("GET", "/v1/memberships".to_string()),
+        ("DELETE", format!("/v1/memberships/{id}")),
+        // users.rs
+        ("POST", "/v1/users".to_string()),
+    ];
+
+    for (method, path) in &protected_routes {
+        let response = send_raw(&app, method, path, None, None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "route {method} {path} must be 401 without a bearer token");
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "invalid_token", "route {method} {path}: unexpected body {body}");
+    }
+
+    // Expected-200-without-token: liveness/readiness stay reachable with no bearer at all.
+    let (status, body) = send(&app, "GET", "/healthz", None, None).await;
+    assert_eq!(status, StatusCode::OK, "/healthz must be reachable without a bearer: {body}");
+    let (status, body) = send(&app, "GET", "/readyz", None, None).await;
+    assert_eq!(status, StatusCode::OK, "/readyz must be reachable without a bearer: {body}");
+
+    // Exception: POST /v1/authn/introspect is deliberately bearer-free (D10) — the credential
+    // travels in the body, not the header. Proof it's NOT enforced: an unprovisioned-but-valid
+    // token reaches the handler and gets the handler's OWN 403 (identity_not_provisioned), not
+    // the middleware's 401 invalid_token that every route above returns when bearer-free.
+    let token = idp.bearer("sweep-exempt", Some("sweep@example.com"), "paigasus", 3600);
+    let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": token })), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "/v1/authn/introspect must stay exempt from bearer enforcement: {body}");
+    assert_eq!(body["error"]["code"], "identity_not_provisioned");
 }

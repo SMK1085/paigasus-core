@@ -106,6 +106,7 @@ pub enum TokenDefect {
     UnknownKid,
     BadSignature,
     Expired,
+    NotYetValid,
     IssuerNotConfigured,
     AudienceMismatch,
     Oversized,

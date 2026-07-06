@@ -102,6 +102,9 @@ impl AppState {
         let users = CreateUser::new(PgPrincipalRepository::new(db.clone()), KernelIdGenerator, SystemClock);
 
         let authn_cfg = &cfg.authn;
+        if authn_cfg.accept_invalid_tls {
+            tracing::warn!("accept_invalid_tls is enabled: TLS certificate verification for IdP discovery/JWKS fetches is DISABLED — test-only configuration, never use in production");
+        }
         let fetcher = HttpJwksFetcher::new(Duration::from_secs(authn_cfg.http_timeout_secs), authn_cfg.accept_invalid_tls)?;
         let ttl = Duration::from_secs(authn_cfg.jwks_ttl_secs);
         let cooldown = Duration::from_secs(authn_cfg.jwks_refresh_cooldown_secs);
