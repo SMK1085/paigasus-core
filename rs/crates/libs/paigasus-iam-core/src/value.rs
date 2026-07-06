@@ -16,6 +16,8 @@ pub enum DomainError {
     InvalidName(String),
     #[error("invalid tenancy prn: {0}")]
     InvalidNodePrn(String),
+    #[error("invalid issuer: {0}")]
+    InvalidIssuer(String),
 }
 
 /// A validated email address. M0 rule: non-empty, exactly one `@`, non-empty local

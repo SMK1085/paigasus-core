@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Wire DTOs for the `/v1` tenancy HTTP API. Plain serde structs; the `From<NodeView<_>>`
-//! impls do the only real work — projecting a domain node + its effective status into the
-//! stable JSON shape (status fields as strings via `NodeStatus::as_str`, timestamps as
-//! RFC3339 via chrono's serde feature).
+//! Wire DTOs for the `/v1` tenancy + authn HTTP API. Plain serde structs; the
+//! `From<NodeView<_>>`/`From<PrincipalContext>` impls do the only real work — projecting a
+//! domain value into the stable JSON shape (status fields as strings via `as_str`,
+//! timestamps as RFC3339 via chrono's serde feature, PRNs as canonical strings).
 
 use chrono::{DateTime, Utc};
-use paigasus_iam_core::{MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, Project, Team};
+use paigasus_iam_core::{MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, PrincipalContext, Project, Team};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -191,4 +191,39 @@ pub struct CreateUserBody {
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateUserResponse {
     pub principal_prn: String,
+}
+
+/// Body for `POST /v1/authn/introspect` — mirrors proto `IntrospectRequest` (spec §7.2).
+/// The token IS the credential: this body must never be logged (see the handler doc).
+#[derive(Clone, Deserialize)]
+pub struct IntrospectBody {
+    pub token: String,
+}
+
+/// `IntrospectResponse`-shaped JSON (spec §7.2): mirrors proto
+/// `paigasus.iam.v1.IntrospectResponse` field-for-field — snake_case, PRN strings,
+/// `expires_at` as RFC3339, `role_group_prns` empty until M3.
+#[derive(Debug, Clone, Serialize)]
+pub struct IntrospectResponseDto {
+    pub principal_prn: String,
+    pub status: String,
+    pub issuer: String,
+    pub subject: String,
+    pub expires_at: DateTime<Utc>,
+    pub memberships: Vec<MembershipDto>,
+    pub role_group_prns: Vec<String>,
+}
+
+impl From<PrincipalContext> for IntrospectResponseDto {
+    fn from(ctx: PrincipalContext) -> Self {
+        IntrospectResponseDto {
+            principal_prn: ctx.principal.principal_id.canonical(),
+            status: ctx.principal.status.as_str().to_string(),
+            issuer: ctx.principal.issuer.as_str().to_string(),
+            subject: ctx.principal.subject,
+            expires_at: ctx.principal.expires_at,
+            memberships: ctx.memberships.into_iter().map(MembershipDto::from).collect(),
+            role_group_prns: ctx.role_groups.iter().map(paigasus_kernel::Prn::canonical).collect(),
+        }
+    }
 }

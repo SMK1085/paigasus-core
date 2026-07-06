@@ -5,10 +5,10 @@
 //! logic in this layer (task-16 brief).
 
 use chrono::{DateTime, Utc};
-use paigasus_iam_core::{MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, Project, Team};
+use paigasus_iam_core::{AuthnError, MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, PrincipalContext, Project, Team};
 use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::common::v1::AuditMetadata;
-use paigasus_proto::paigasus::iam::v1::{Membership, NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Project as ProtoProject, Team as ProtoTeam};
+use paigasus_proto::paigasus::iam::v1::{IntrospectResponse, Membership, NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Project as ProtoProject, Team as ProtoTeam};
 use tonic::{Code, Status};
 use uuid::Uuid;
 
@@ -32,6 +32,30 @@ pub fn status_to_grpc(e: TenancyError) -> Status {
         }
     };
     Status::new(code, format!("{}: {}", e.code(), e))
+}
+
+/// Maps an `AuthnError` to a `tonic::Status` for the gRPC authn surface (spec §6.3, D12).
+/// Deliberately SEPARATE from the tenancy `status_to_grpc`: authn needs `Unauthenticated`,
+/// `PermissionDenied`, `Unavailable`, and `Internal`, none of which the tenancy `ErrorClass`
+/// expresses. Every message is STATIC per code — no token, claim, or upstream error text
+/// ever reaches the wire (mirrors the HTTP `AuthnApiError` funnel). The enforcement layer
+/// renders the returned `Status` as a trailers-only gRPC response via `Status::into_http`;
+/// the `Introspect` handler returns it directly.
+pub fn authn_status(err: &AuthnError) -> Status {
+    let (code, message) = match err {
+        AuthnError::InvalidToken(_) => (Code::Unauthenticated, "invalid bearer token"),
+        AuthnError::IdentityNotProvisioned => (Code::PermissionDenied, "identity not provisioned"),
+        AuthnError::ProvisioningFailed(_) => (Code::PermissionDenied, "provisioning failed"),
+        AuthnError::PrincipalInactive => (Code::PermissionDenied, "principal inactive"),
+        AuthnError::Unavailable => (Code::Unavailable, "authentication backend unavailable"),
+        AuthnError::Backend(_) => {
+            // `Debug` carries the boxed repository/infra source (never token or claim
+            // material, by `AuthnError`'s own contract) — logged here, never surfaced.
+            tracing::error!(error = ?err, "internal error handling a gRPC authn request");
+            (Code::Internal, "internal error")
+        }
+    };
+    Status::new(code, message)
 }
 
 /// Parses a wire PRN, requiring the `"iam"` service and an `expect`ed resource type. Returns
@@ -134,5 +158,21 @@ pub fn to_proto_membership(r: &MembershipRecord) -> Membership {
         principal_prn: r.principal_prn.clone(),
         node_prn: r.node_prn.clone(),
         audit: Some(audit(r.created_at, r.created_at)),
+    }
+}
+
+/// Projects a `PrincipalContext` into the wire `IntrospectResponse` (spec §7.2/§7.3): PRN
+/// strings, principal status as its stable `as_str`, `expires_at` as a prost `Timestamp`,
+/// memberships via the shared tenancy `Membership` mapping, and `role_group_prns` from the
+/// role-group PRN canonicals — always empty until M3 (D4).
+pub fn to_introspect_response(ctx: &PrincipalContext) -> IntrospectResponse {
+    IntrospectResponse {
+        principal_prn: ctx.principal.principal_id.canonical(),
+        status: ctx.principal.status.as_str().to_string(),
+        issuer: ctx.principal.issuer.as_str().to_string(),
+        subject: ctx.principal.subject.clone(),
+        expires_at: Some(ts(ctx.principal.expires_at)),
+        memberships: ctx.memberships.iter().map(to_proto_membership).collect(),
+        role_group_prns: ctx.role_groups.iter().map(Prn::canonical).collect(),
     }
 }

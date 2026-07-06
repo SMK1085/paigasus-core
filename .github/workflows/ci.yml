@@ -21,6 +21,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # The hosted runner's ~14 GB free root disk is exhausted by this repo's Rust target
+      # + restored caches + testcontainers images (Postgres/Redis/Keycloak since SMA-443)
+      # — the runner dies mid `moon ci` with "No space left on device". Reclaim ~15 GB by
+      # dropping preinstalled toolchains this workflow never uses (inline rm, no
+      # third-party action to pin/audit). Errors are tolerated (paths shift across
+      # runner images); `df` lines make the reclaimed headroom visible in the log.
+      - name: Reclaim runner disk (drop unused preinstalled toolchains)
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
+
       - name: Checkout (full history for Moon's affected-graph)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:

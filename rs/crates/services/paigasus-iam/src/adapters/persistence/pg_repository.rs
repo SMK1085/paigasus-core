@@ -25,6 +25,16 @@ impl PgPrincipalRepository {
     }
 }
 
+/// Maps a `principal` row to the domain `Principal` (PRN/kind/status parsing, each
+/// failure wrapped as a backend error) — the shared half of `find_user`/`find_principal`.
+fn map_principal_row(pm: principal::Model) -> Result<Principal, RepositoryError> {
+    let prn = Prn::parse(&pm.prn).map_err(|e| RepositoryError::Backend(Box::new(std::io::Error::other(e.to_string()))))?;
+    let pid = PrincipalId::from_prn(prn);
+    let kind = PrincipalKind::parse(&pm.kind).ok_or_else(|| RepositoryError::Backend(Box::new(std::io::Error::other("bad kind"))))?;
+    let status = PrincipalStatus::parse(&pm.status).ok_or_else(|| RepositoryError::Backend(Box::new(std::io::Error::other("bad status"))))?;
+    Ok(Principal::new(pid, kind, status, pm.created_at, pm.updated_at))
+}
+
 #[async_trait]
 impl PrincipalRepository for PgPrincipalRepository {
     async fn create_user(&self, p: &Principal, u: &User) -> Result<(), RepositoryError> {
@@ -67,14 +77,16 @@ impl PrincipalRepository for PgPrincipalRepository {
             return Ok(None);
         };
 
-        let prn = Prn::parse(&pm.prn).map_err(|e| RepositoryError::Backend(Box::new(std::io::Error::other(e.to_string()))))?;
-        let pid = PrincipalId::from_prn(prn);
-        let kind = PrincipalKind::parse(&pm.kind).ok_or_else(|| RepositoryError::Backend(Box::new(std::io::Error::other("bad kind"))))?;
-        let status = PrincipalStatus::parse(&pm.status).ok_or_else(|| RepositoryError::Backend(Box::new(std::io::Error::other("bad status"))))?;
+        let principal = map_principal_row(pm)?;
         let email = Email::parse(&um.email).map_err(|e| RepositoryError::Backend(Box::new(std::io::Error::other(format!("{e}")))))?;
-
-        let principal = Principal::new(pid.clone(), kind, status, pm.created_at, pm.updated_at);
-        let user = User::new(pid, email, um.display_name, um.locale, um.timezone, um.created_at, um.updated_at);
+        let user = User::new(principal.id.clone(), email, um.display_name, um.locale, um.timezone, um.created_at, um.updated_at);
         Ok(Some((principal, user)))
+    }
+
+    async fn find_principal(&self, id: &PrincipalId) -> Result<Option<Principal>, RepositoryError> {
+        let Some(pm) = principal::Entity::find_by_id(id.uuid()).one(&self.db).await.map_err(map_err)? else {
+            return Ok(None);
+        };
+        map_principal_row(pm).map(Some)
     }
 }

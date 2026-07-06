@@ -4,7 +4,7 @@
 //! attach/list/detach lifecycle across a user, an organization, and a team — including the
 //! org-membership invariant, the forged-node-prn defense, cascade-on-detach, and the
 //! membership-filter/user-creation validation errors. Drives the real
-//! `router(AppState::new(db))` via `tower::ServiceExt::oneshot` — no listening socket —
+//! `router(AppState::new(db, &cfg))` via `tower::ServiceExt::oneshot` — no listening socket —
 //! against an ephemeral Postgres (Docker; see `tests/support/mod.rs`).
 
 mod support;
@@ -16,8 +16,8 @@ use support::{app, send};
 use uuid::Uuid;
 
 /// Creates a user via `POST /v1/users` and returns its `principal_prn`.
-async fn create_user(app: &Router, email: &str) -> String {
-    let (status, body) = send(app, "POST", "/v1/users", Some(json!({"email": email, "display_name": "Test User"}))).await;
+async fn create_user(app: &Router, token: &str, email: &str) -> String {
+    let (status, body) = send(app, "POST", "/v1/users", Some(json!({"email": email, "display_name": "Test User"})), Some(token)).await;
     assert_eq!(status, StatusCode::CREATED, "create_user({email}) failed: {body}");
     body["principal_prn"].as_str().expect("principal_prn").to_string()
 }
@@ -33,38 +33,46 @@ async fn ac1_membership_lifecycle_over_http() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let app = app(db);
+    let (app, idp) = app(db).await;
+    let token = idp.bearer("sweep-user", Some("sweep@example.com"), "paigasus", 3600);
 
     // 1. Create the principal.
-    let user_prn = create_user(&app, "alice@example.com").await;
+    let user_prn = create_user(&app, &token, "alice@example.com").await;
 
     // 2. Create the organization.
-    let (status, org_body) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "acme", "name": "Acme Corp."}))).await;
+    let (status, org_body) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "acme", "name": "Acme Corp."})), Some(token.as_str())).await;
     assert_eq!(status, StatusCode::CREATED);
     let org_prn = org_body["organization"]["prn"].as_str().unwrap().to_string();
     let org_id = org_prn.rsplit('/').next().unwrap().to_string();
 
     // 3. Attach principal -> org: 201.
-    let (status, org_membership) = send(&app, "POST", "/v1/memberships", Some(json!({"principal_prn": user_prn, "node_prn": org_prn}))).await;
+    let (status, org_membership) = send(&app, "POST", "/v1/memberships", Some(json!({"principal_prn": user_prn, "node_prn": org_prn})), Some(token.as_str())).await;
     assert_eq!(status, StatusCode::CREATED, "{org_membership}");
     assert_eq!(org_membership["principal_prn"], user_prn);
     assert_eq!(org_membership["node_prn"], org_prn);
     let org_membership_id = org_membership["id"].as_str().unwrap().to_string();
 
     // 4. Create a team under the org.
-    let (status, team_body) = send(&app, "POST", &format!("/v1/organizations/{org_id}/teams"), Some(json!({"slug": "eng", "name": "Engineering"}))).await;
+    let (status, team_body) = send(
+        &app,
+        "POST",
+        &format!("/v1/organizations/{org_id}/teams"),
+        Some(json!({"slug": "eng", "name": "Engineering"})),
+        Some(token.as_str()),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
     let team_prn = team_body["prn"].as_str().unwrap().to_string();
     let team_id = team_prn.rsplit('/').next().unwrap().to_string();
 
     // 5. Attach principal -> team: 201 (the org membership from step 3 satisfies the
     // org-membership invariant).
-    let (status, team_membership) = send(&app, "POST", "/v1/memberships", Some(json!({"principal_prn": user_prn, "node_prn": team_prn}))).await;
+    let (status, team_membership) = send(&app, "POST", "/v1/memberships", Some(json!({"principal_prn": user_prn, "node_prn": team_prn})), Some(token.as_str())).await;
     assert_eq!(status, StatusCode::CREATED, "{team_membership}");
     assert_eq!(team_membership["node_prn"], team_prn);
 
     // 6. List by principal: both, ordered (org attached first, so it comes first).
-    let (status, listed) = send(&app, "GET", &format!("/v1/memberships?principal={user_prn}"), None).await;
+    let (status, listed) = send(&app, "GET", &format!("/v1/memberships?principal={user_prn}"), None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::OK);
     let listed = listed.as_array().unwrap();
     assert_eq!(listed.len(), 2);
@@ -75,30 +83,44 @@ async fn ac1_membership_lifecycle_over_http() {
     // A fixed low-value uuid never collides with a real (UUIDv7, clock-derived) org id.
     let wrong_org = Uuid::from_u128(9_999);
     let forged_team_prn = format!("prn:pgs:iam::{wrong_org}:team/{team_id}");
-    let (status, err) = send(&app, "POST", "/v1/memberships", Some(json!({"principal_prn": user_prn, "node_prn": forged_team_prn}))).await;
+    let (status, err) = send(
+        &app,
+        "POST",
+        "/v1/memberships",
+        Some(json!({"principal_prn": user_prn, "node_prn": forged_team_prn})),
+        Some(token.as_str()),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
     assert_eq!(err["error"]["code"], "prn-mismatch");
 
     // 8. A second principal, with no org membership, attaching to the team: 409
     // `missing-org-membership`.
-    let second_user_prn = create_user(&app, "bob@example.com").await;
-    let (status, err) = send(&app, "POST", "/v1/memberships", Some(json!({"principal_prn": second_user_prn, "node_prn": team_prn}))).await;
+    let second_user_prn = create_user(&app, &token, "bob@example.com").await;
+    let (status, err) = send(
+        &app,
+        "POST",
+        "/v1/memberships",
+        Some(json!({"principal_prn": second_user_prn, "node_prn": team_prn})),
+        Some(token.as_str()),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT, "{err}");
     assert_eq!(err["error"]["code"], "missing-org-membership");
 
     // 9. Detach the org membership: 204.
-    let (status, body) = send(&app, "DELETE", &format!("/v1/memberships/{org_membership_id}"), None).await;
+    let (status, body) = send(&app, "DELETE", &format!("/v1/memberships/{org_membership_id}"), None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(body, Value::Null);
 
     // 10. Listing by principal is now empty — detaching the org membership cascades onto the
     // same principal's team membership in that org (rule 5).
-    let (status, listed) = send(&app, "GET", &format!("/v1/memberships?principal={user_prn}"), None).await;
+    let (status, listed) = send(&app, "GET", &format!("/v1/memberships?principal={user_prn}"), None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::OK);
     assert!(listed.as_array().unwrap().is_empty());
 
     // 11. Detaching the same id again: 404 `not-found`.
-    let (status, err) = send(&app, "DELETE", &format!("/v1/memberships/{org_membership_id}"), None).await;
+    let (status, err) = send(&app, "DELETE", &format!("/v1/memberships/{org_membership_id}"), None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{err}");
     assert_eq!(err["error"]["code"], "not-found");
 }
@@ -108,19 +130,20 @@ async fn list_memberships_requires_exactly_one_filter() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let app = app(db);
+    let (app, idp) = app(db).await;
+    let token = idp.bearer("sweep-user", Some("sweep@example.com"), "paigasus", 3600);
 
     // Neither `principal` nor `node` set: 400 `invalid-prn`. (`TenancyError::InvalidPrn`'s
     // `Display` is a fixed, generic message across every construction site — the same
     // convention as `parse_principal_prn`/`parse_node_prn` in `application::memberships` — so
     // only the stable `code` is asserted here, matching `http_tenancy.rs`'s convention.)
-    let (status, err) = send(&app, "GET", "/v1/memberships", None).await;
+    let (status, err) = send(&app, "GET", "/v1/memberships", None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
     assert_eq!(err["error"]["code"], "invalid-prn");
 
     // Both set: 400 `invalid-prn`.
-    let user_prn = create_user(&app, "carol@example.com").await;
-    let (status, err) = send(&app, "GET", &format!("/v1/memberships?principal={user_prn}&node={user_prn}"), None).await;
+    let user_prn = create_user(&app, &token, "carol@example.com").await;
+    let (status, err) = send(&app, "GET", &format!("/v1/memberships?principal={user_prn}&node={user_prn}"), None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
     assert_eq!(err["error"]["code"], "invalid-prn");
 }
@@ -130,11 +153,12 @@ async fn create_user_rejects_duplicate_email() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let app = app(db);
+    let (app, idp) = app(db).await;
+    let token = idp.bearer("sweep-user", Some("sweep@example.com"), "paigasus", 3600);
 
-    let _ = create_user(&app, "dupe@example.com").await;
+    let _ = create_user(&app, &token, "dupe@example.com").await;
 
-    let (status, err) = send(&app, "POST", "/v1/users", Some(json!({"email": "dupe@example.com", "display_name": "Second"}))).await;
+    let (status, err) = send(&app, "POST", "/v1/users", Some(json!({"email": "dupe@example.com", "display_name": "Second"})), Some(token.as_str())).await;
     assert_eq!(status, StatusCode::CONFLICT, "{err}");
     assert_eq!(err["error"]["code"], "email-conflict");
 }
@@ -144,9 +168,10 @@ async fn create_user_rejects_invalid_email() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let app = app(db);
+    let (app, idp) = app(db).await;
+    let token = idp.bearer("sweep-user", Some("sweep@example.com"), "paigasus", 3600);
 
-    let (status, err) = send(&app, "POST", "/v1/users", Some(json!({"email": "not-an-email", "display_name": "Nope"}))).await;
+    let (status, err) = send(&app, "POST", "/v1/users", Some(json!({"email": "not-an-email", "display_name": "Nope"})), Some(token.as_str())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
     assert_eq!(err["error"]["code"], "invalid-email");
 }
