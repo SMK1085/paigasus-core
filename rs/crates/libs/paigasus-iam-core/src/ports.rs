@@ -3,6 +3,7 @@
 //! Hexagonal ports (traits) the service's adapters implement. Kept in the pure core so
 //! use cases depend on abstractions, not on SeaORM/axum (ADR-0005).
 
+use crate::authn::{AuthnError, ExternalIdentity, Issuer, ValidatedClaims};
 use crate::principal::Principal;
 use crate::tenancy::{Membership, NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId, TenancyNodeRef};
 use crate::user::User;
@@ -17,6 +18,7 @@ pub enum ConflictKind {
     SlugTaken,
     DuplicateMembership,
     EmailTaken,
+    ExternalIdentityExists,
     Other,
 }
 
@@ -65,6 +67,15 @@ pub struct MembershipRecord {
 pub trait PrincipalRepository: Send + Sync {
     async fn create_user(&self, principal: &Principal, user: &User) -> Result<(), RepositoryError>;
     async fn find_user(&self, id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError>;
+    async fn find_principal(&self, id: &PrincipalId) -> Result<Option<Principal>, RepositoryError>;
+}
+
+/// Persistence port for external (IdP) identities linked to a principal.
+#[async_trait]
+pub trait ExternalIdentityRepository: Send + Sync {
+    async fn find_by_issuer_subject(&self, issuer: &Issuer, subject: &str) -> Result<Option<ExternalIdentity>, RepositoryError>;
+    /// One transaction spanning principal + user + external_identity (D9).
+    async fn provision(&self, principal: &Principal, user: &User, identity: &ExternalIdentity) -> Result<(), RepositoryError>;
 }
 
 /// Persistence port for organizations.
@@ -131,6 +142,7 @@ pub trait IdGenerator: Send + Sync {
     fn new_team_id(&self, org: Uuid) -> TeamId;
     fn new_project_id(&self, org: Uuid) -> ProjectId;
     fn new_membership_id(&self) -> Uuid;
+    fn new_external_identity_id(&self) -> Uuid;
 }
 
 /// A source of the current time, truncated to microseconds so values round-trip through
@@ -139,13 +151,29 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
 
+/// Verifies a presented bearer token and extracts its claims.
+#[async_trait]
+pub trait Authenticator: Send + Sync {
+    /// The pluggable port (ADR-0015). OIDC validator is the v1 impl.
+    async fn authenticate(&self, token: &str) -> Result<ValidatedClaims, AuthnError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // Compile-time proof the repository ports are object-safe (injected as trait objects).
     #[allow(dead_code)]
-    fn assert_object_safe(_: &dyn PrincipalRepository, _: &dyn OrganizationRepository, _: &dyn TeamRepository, _: &dyn ProjectRepository, _: &dyn MembershipRepository) {}
+    fn assert_object_safe(
+        _: &dyn PrincipalRepository,
+        _: &dyn OrganizationRepository,
+        _: &dyn TeamRepository,
+        _: &dyn ProjectRepository,
+        _: &dyn MembershipRepository,
+        _: &dyn ExternalIdentityRepository,
+        _: &dyn Authenticator,
+    ) {
+    }
 
     #[test]
     fn repository_error_wraps_a_source_error() {

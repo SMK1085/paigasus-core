@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod external_identity;
 pub mod membership;
 pub mod organization;
 pub mod principal;

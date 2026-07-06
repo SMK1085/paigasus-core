@@ -90,6 +90,9 @@ impl From<RepositoryError> for TenancyError {
                 ConflictKind::SlugTaken => Self::SlugConflict,
                 ConflictKind::DuplicateMembership => Self::DuplicateMembership,
                 ConflictKind::EmailTaken => Self::EmailConflict,
+                // Authn-only variant (SMA-443): tenancy operations never produce it, but the
+                // match must stay exhaustive as `ConflictKind` grows across milestones.
+                ConflictKind::ExternalIdentityExists => Self::Internal,
                 ConflictKind::Other => Self::Internal,
             },
             RepositoryError::NotFound => Self::NotFound,
@@ -111,6 +114,9 @@ impl From<DomainError> for TenancyError {
             DomainError::InvalidSlug(s) => Self::InvalidSlug(s),
             DomainError::InvalidName(s) => Self::InvalidName(s),
             DomainError::InvalidNodePrn(s) => Self::InvalidPrn(s),
+            // Authn-only variant (SMA-443): tenancy operations never produce it, but the
+            // match must stay exhaustive as `DomainError` grows across milestones.
+            DomainError::InvalidIssuer(_) => Self::Internal,
         }
     }
 }
