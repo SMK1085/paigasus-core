@@ -133,7 +133,7 @@ impl IamConfig {
     /// duplicate is still caught), each issuer string carries no leading/trailing
     /// whitespace of its own (padding is never valid config, even when unique), each
     /// issuer's `audiences` non-empty, each issuer string a valid absolute `https` URL
-    /// (`Issuer::parse`), and a `redis` JWKS cache backend has `redis_url` configured.
+    /// (`Issuer::parse`), a `redis` JWKS cache backend has `redis_url` configured, and `jwks_ttl_secs` is non-zero (a zero TTL breaks both cache backends).
     pub fn validate(&self) -> Result<(), String> {
         if self.authn.issuers.is_empty() {
             return Err("authn.issuers must contain at least one issuer".to_string());
@@ -161,6 +161,14 @@ impl IamConfig {
             return Err("authn.jwks_cache.backend = \"redis\" requires authn.jwks_cache.redis_url".to_string());
         }
 
+        // `jwks_ttl_secs = 0` is broken with EITHER backend: redis `SET EX 0` is a command
+        // error (every JWKS put fails -> permanent Unavailable), and the memory cache
+        // treats every entry as already expired (never fresh + refresh cooldown -> requests
+        // inside the cooldown window fail Unavailable). Reject at boot instead.
+        if self.authn.jwks_ttl_secs == 0 {
+            return Err("authn.jwks_ttl_secs must be at least 1 (0 disables JWKS caching and breaks both cache backends)".to_string());
+        }
+
         Ok(())
     }
 }
@@ -168,7 +176,7 @@ impl IamConfig {
 #[cfg(test)]
 // `figment::Jail::expect_with` fixes its closure's `Err` type to `figment::Error`
 // (~208B) — not something callers control, so the size lint is allowed here, scoped
-// to this test module's two Jail tests, rather than reshaped away.
+// to this test module's Jail-based tests, rather than reshaped away.
 #[allow(clippy::result_large_err)]
 mod tests {
     use super::*;
@@ -393,6 +401,27 @@ mod tests {
             assert_eq!(cfg.authn.jwks_cache.backend, JwksCacheBackend::Redis);
             assert_eq!(cfg.authn.jwks_cache.redis_url.as_deref(), Some("redis://localhost:6379"));
             assert!(cfg.validate().is_ok(), "expected a redis backend with redis_url to pass validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_zero_jwks_ttl() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                r#"
+                    [authn]
+                    jwks_ttl_secs = 0
+
+                    [[authn.issuers]]
+                    issuer = "https://idp.example.com/realms/acme"
+                    audiences = ["paigasus"]
+                "#,
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "expected jwks_ttl_secs = 0 to fail validation");
             Ok(())
         });
     }
