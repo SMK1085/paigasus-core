@@ -12,6 +12,11 @@ use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryOrder, QuerySelect, Set, TransactionTrait};
 use uuid::Uuid;
 
+// `Clone` lets the composition root (`http::AppState::new`) hold a repo handle inside a
+// `#[derive(Clone)] OrganizationService` (generic-DI-by-value, mirroring `CreateUser`'s
+// Task 6 precedent) — cheap, since `DatabaseConnection` clones an `Arc`-backed pool handle,
+// not a connection.
+#[derive(Clone)]
 pub struct PgOrganizationRepository {
     db: DatabaseConnection,
 }

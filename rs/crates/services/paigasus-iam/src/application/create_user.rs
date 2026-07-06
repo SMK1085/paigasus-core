@@ -27,6 +27,9 @@ pub enum CreateUserError {
     Repository(#[from] RepositoryError),
 }
 
+// `Clone` lets the composition root (`http::AppState`, Task 14) hold a `UserSvc` handle
+// inside its own `#[derive(Clone)] AppState`, mirroring the tenancy services' shape.
+#[derive(Clone)]
 pub struct CreateUser<R, I, C> {
     repo: R,
     id_gen: I,

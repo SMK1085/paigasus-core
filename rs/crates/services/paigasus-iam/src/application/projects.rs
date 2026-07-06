@@ -3,11 +3,6 @@
 //! `ProjectService`: project lifecycle (create, get, list, rename, archive, restore)
 //! scoped to a team (SMA-442, ADR-0014).
 
-// Nothing in `main.rs` wires this into a route yet — the composition root (HTTP/gRPC
-// handlers) lands in later tasks. Until then it's exercised only via the `#[cfg(test)]`
-// fakes in `fakes.rs`; same reasoning as `TeamService`/`OrganizationService`.
-#![allow(dead_code)]
-
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
 use paigasus_iam_core::{Clock, IdGenerator, NodeStatus, NodeView, Project, ProjectRepository, Slug, TeamRepository};

@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
     let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
     {
         let mut rx = rx.clone();
-        let state = AppState { db: db.clone() };
+        let state = AppState::new(db.clone());
         let addr = config.http_addr;
         servers.spawn(async move {
             serve_http(addr, state, request_timeout, async move {

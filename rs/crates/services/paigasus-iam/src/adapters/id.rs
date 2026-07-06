@@ -3,11 +3,6 @@
 //! `KernelIdGenerator` — mints a UUIDv7 + PRN via `paigasus-kernel`, supplying the host's
 //! clock and entropy (the kernel is pure and does neither).
 
-// Nothing in `main.rs` wires this into a use case yet — the composition root lands in
-// Task 11. Until then it's exercised only via the `#[cfg(test)]` test below; same
-// reasoning as `application::create_user` (Task 6).
-#![allow(dead_code)]
-
 use paigasus_iam_core::{IdGenerator, OrganizationId, PrincipalId, ProjectId, TeamId};
 use paigasus_kernel::{Prn, mint_uuid7};
 use std::time::{SystemTime, UNIX_EPOCH};

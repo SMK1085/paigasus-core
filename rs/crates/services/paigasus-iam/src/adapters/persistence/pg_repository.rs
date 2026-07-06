@@ -10,6 +10,10 @@ use paigasus_iam_core::{Email, Principal, PrincipalId, PrincipalKind, PrincipalR
 use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 
+// `Clone` lets the composition root (`http::AppState::new`) hold a repo handle inside a
+// `#[derive(Clone)] CreateUser` — cheap, `DatabaseConnection` clones an `Arc`-backed pool
+// handle, not a connection.
+#[derive(Clone)]
 pub struct PgPrincipalRepository {
     db: DatabaseConnection,
 }

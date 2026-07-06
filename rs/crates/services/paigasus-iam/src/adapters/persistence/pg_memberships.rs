@@ -15,6 +15,10 @@ use paigasus_iam_core::{Membership, MembershipRecord, MembershipRepository, Node
 use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Set, Statement, TransactionTrait};
 use uuid::Uuid;
 
+// `Clone` lets the composition root (`http::AppState::new`) hold a repo handle inside a
+// `#[derive(Clone)] MembershipService` — cheap, `DatabaseConnection` clones an `Arc`-backed
+// pool handle, not a connection.
+#[derive(Clone)]
 pub struct PgMembershipRepository {
     db: DatabaseConnection,
 }
