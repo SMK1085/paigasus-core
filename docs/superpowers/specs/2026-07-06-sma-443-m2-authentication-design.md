@@ -2,10 +2,10 @@
 
 - **Issue:** [SMA-443](https://linear.app/smaschek/issue/SMA-443) · Epic M2 of 6 · IAM v1 vertical slice
 - **Date:** 2026-07-06
-- **Status:** Challenged + revised (Stage 2 folded in; GATE 1 pending)
-- **Governing ADRs:** new **Authenticator port & OIDC strategy** ADR (opened by this epic,
-  drafted at GATE 1; next free number), ADR-0005 (kernel-first), ADR-0004 (proto contracts),
-  ADR-0014 (tenancy hierarchy & PRN scheme)
+- **Status:** Approved (GATE 1 passed 2026-07-06; challenge folded in)
+- **Governing ADRs:** ADR-0015 (Authenticator port & OIDC strategy — opened by this epic,
+  Proposed), ADR-0005 (kernel-first), ADR-0004 (proto contracts), ADR-0014 (tenancy
+  hierarchy & PRN scheme)
 - **Precedents:** `docs/superpowers/specs/2026-07-05-sma-442-m1-tenancy-design.md` (M1 tenancy),
   `docs/superpowers/specs/2026-07-04-sma-441-paigasus-iam-walking-skeleton-design.md` (M0 skeleton)
 
@@ -37,7 +37,7 @@ Acceptance criteria (from the issue):
 | D5 | JIT semantics | Per-issuer `jit_provisioning` flag, **default `true`** (trusting an issuer implies trusting its user base). `email` claim **required** for JIT. **Never auto-link by email** — an email-uniqueness conflict fails provisioning (auto-linking is an account-takeover vector). |
 | D6 | Algorithms | **RS256 + ES256 only**, asymmetric by construction; every other `alg` (incl. `none`, HS*) is rejected before key lookup. |
 | D7 | gRPC auth mechanism | A shared **tower middleware** wraps both the axum router and the tonic server — tonic interceptors are synchronous and token validation is async (JWKS fetch). One implementation, two transports. |
-| D8 | ADR | This epic opens the **Authenticator port & OIDC strategy** ADR (Notion, next free number). Drafted from this spec's decisions at GATE 1 approval, Proposed → Accepted before implementation. |
+| D8 | ADR | This epic opens **ADR-0015: Authenticator port & OIDC strategy** (Notion, drafted at GATE 1 approval, currently Proposed → flipped Accepted by Sven). |
 
 Decisions added by the adversarial challenge (Stage 2):
 
