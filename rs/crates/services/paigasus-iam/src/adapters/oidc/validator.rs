@@ -297,7 +297,7 @@ mod tests {
         }
     }
 
-    fn sign(encoding_key: &EncodingKey, kid: Option<&str>, claims: &TestClaims) -> String {
+    fn sign<C: serde::Serialize>(encoding_key: &EncodingKey, kid: Option<&str>, claims: &C) -> String {
         let mut header = jsonwebtoken::Header::new(Algorithm::ES256);
         header.kid = kid.map(str::to_string);
         jsonwebtoken::encode(&header, claims, encoding_key).expect("signing a test token")
@@ -544,5 +544,48 @@ mod tests {
 
         let err = authenticator.authenticate(&token).await.unwrap_err();
         assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::BadSignature)));
+    }
+
+    #[tokio::test]
+    async fn jwk_kty_mismatching_header_alg_is_unsupported_alg() {
+        // The stub JWKS serves an EC P-256 key under `kid`, but the crafted header claims
+        // RS256 under that SAME kid: allowlist passes (RS256 is allowed), kid lookup
+        // succeeds, and the kty/alg consistency check must reject — an EC key can never
+        // have produced an RS256 signature — BEFORE signature verification (the
+        // placeholder signature is never inspected).
+        let (_encoding_key, jwk, kid) = es256_keypair();
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config("https://idp.example.com", &["aud"])], 60, 16_384);
+
+        let token = manual_token(&format!(r#"{{"alg":"RS256","typ":"JWT","kid":"{kid}"}}"#));
+        let err = authenticator.authenticate(&token).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::UnsupportedAlg)));
+    }
+
+    #[tokio::test]
+    async fn empty_audience_array_is_audience_mismatch() {
+        // RFC 7519 §4.1.3 allows `aud` as an array; an EMPTY array can never intersect the
+        // configured audience set, so validation must reject it as an audience mismatch
+        // (verified against jsonwebtoken 10.4's is_subset: empty intersection -> InvalidAudience).
+        #[derive(Serialize)]
+        struct EmptyAudClaims {
+            iss: String,
+            sub: String,
+            aud: Vec<String>,
+            exp: i64,
+        }
+        let (encoding_key, jwk, kid) = es256_keypair();
+        let issuer = "https://idp.example.com";
+        let now = Utc::now().timestamp();
+        let claims = EmptyAudClaims {
+            iss: issuer.to_string(),
+            sub: "sub-1".to_string(),
+            aud: vec![],
+            exp: now + 3600,
+        };
+        let token = sign(&encoding_key, Some(&kid), &claims);
+
+        let authenticator = make_authenticator(StubFetcher::new(jwk), vec![issuer_config(issuer, &["expected-aud"])], 60, 16_384);
+        let err = authenticator.authenticate(&token).await.unwrap_err();
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::AudienceMismatch)));
     }
 }
