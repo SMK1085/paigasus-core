@@ -202,3 +202,70 @@ async fn set_status_is_always_permitted_and_restore_preserves_own_flags() {
     assert_eq!(view.node.status, NodeStatus::Archived);
     assert_eq!(view.effective_status, NodeStatus::Archived);
 }
+
+#[tokio::test]
+async fn rename_guards_and_lists_round_trip() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let clock = SystemClock;
+    let org_repo = PgOrganizationRepository::new(db.clone());
+    let team_repo = PgTeamRepository::new(db.clone());
+    let project_repo = PgProjectRepository::new(db.clone());
+
+    let (org, team, project) = seed_chain(&db).await;
+    let team_uuid = team.id.uuid();
+    let project_uuid = project.id.uuid();
+
+    // Archive the org.
+    org_repo.set_status(org.id.uuid(), NodeStatus::Archived, clock.now()).await.unwrap();
+
+    // Attempt to rename team when org is archived (effective guard, even though team's own
+    // status is Active) -> NodeArchived.
+    let now = clock.now();
+    let result = team_repo.rename(team_uuid, Some(&Slug::parse("team-renamed").unwrap()), None, now).await;
+    assert!(
+        matches!(result, Err(RepositoryError::Precondition(PreconditionKind::NodeArchived))),
+        "expected Precondition(NodeArchived) for team rename with archived org, got {result:?}"
+    );
+
+    // Attempt to rename project when org is archived -> NodeArchived.
+    let result = project_repo.rename(project_uuid, None, Some("Renamed"), now).await;
+    assert!(
+        matches!(result, Err(RepositoryError::Precondition(PreconditionKind::NodeArchived))),
+        "expected Precondition(NodeArchived) for project rename with archived org, got {result:?}"
+    );
+
+    // Restore the org.
+    org_repo.set_status(org.id.uuid(), NodeStatus::Active, clock.now()).await.unwrap();
+
+    // Rename the team: slug only (name stays unchanged).
+    let now2 = clock.now();
+    let renamed_team = team_repo
+        .rename(team_uuid, Some(&Slug::parse("team-renamed").unwrap()), None, now2)
+        .await
+        .expect("team rename should succeed");
+    assert_eq!(renamed_team.node.slug.as_str(), "team-renamed", "team slug should be updated");
+    assert_eq!(renamed_team.node.name, team.name, "team name should remain unchanged");
+    assert!(renamed_team.node.updated_at > team.created_at, "updated_at should have advanced");
+
+    // Rename the project: name only (slug stays unchanged).
+    let now3 = clock.now();
+    let renamed_project = project_repo.rename(project_uuid, None, Some("Project Renamed"), now3).await.expect("project rename should succeed");
+    assert_eq!(renamed_project.node.name, "Project Renamed", "project name should be updated");
+    assert_eq!(renamed_project.node.slug.as_str(), project.slug.as_str(), "project slug should remain unchanged");
+    assert_eq!(renamed_project.effective_status, NodeStatus::Active, "project should remain effectively Active");
+
+    // List teams by org: should include both the default team (auto-provisioned) and the renamed team.
+    let teams = team_repo.list_by_org(org.id.uuid(), 10, 0).await.expect("list_by_org should succeed");
+    assert_eq!(teams.len(), 2, "org should have 2 teams (default + eng)");
+    // Verify ordering: created_at then id.
+    assert!(teams[0].node.created_at <= teams[1].node.created_at, "teams should be ordered by created_at");
+
+    // List projects by team: should include the renamed project.
+    let projects = project_repo.list_by_team(team_uuid, 10, 0).await.expect("list_by_team should succeed");
+    assert!(projects.iter().any(|p| p.node.id.uuid() == project_uuid), "project should be in list_by_team result");
+    let found = projects.iter().find(|p| p.node.id.uuid() == project_uuid).unwrap();
+    assert_eq!(found.node.name, "Project Renamed", "renamed project should have updated name");
+    assert_eq!(found.effective_status, NodeStatus::Active, "project should remain effectively Active");
+}
