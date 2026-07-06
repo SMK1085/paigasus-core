@@ -17,6 +17,11 @@
 //! trust it — the latter is still config-only. Because Keycloak derives a token's `iss` from
 //! the request host in dev mode, the config issuer and the token-endpoint call MUST use the
 //! same `127.0.0.1:{mapped}` form so `iss` matches the configured issuer byte-for-byte.
+//!
+//! The realm fixture also sets `"sslRequired": "none"` deliberately — that only relaxes
+//! Keycloak's OWN internal requirement that its clients connect over TLS; this test never
+//! reaches the container any other way than through its mapped HTTPS port (JSON has no
+//! comments, hence this note living here instead).
 
 mod support;
 

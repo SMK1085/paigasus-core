@@ -48,7 +48,7 @@ impl fmt::Display for Issuer {
     }
 }
 
-/// The claims extracted from a verified ID token, after signature/expiry/audience checks
+/// The claims extracted from a verified access token, after signature/expiry/audience checks
 /// have already passed (spec §3.2). Optional profile fields are best-effort — the IdP may
 /// omit any of them.
 #[derive(Debug, Clone, PartialEq)]

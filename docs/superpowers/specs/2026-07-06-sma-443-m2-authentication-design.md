@@ -110,7 +110,8 @@ external identity is a mapping, never referenced by policies/keys/budgets. Times
   and unreachable in M2**: `PrincipalStatus` currently has only `Active`; there is no local
   disable path, so account revocation in M2 is delegated entirely to the IdP. The guard is
   specified now so suspend/delete (later milestone) needs no authn change; its failing
-  branch is unit-tested via a fake repository, not the Pg adapter.
+  branch is currently unreachable (`PrincipalStatus` has only `Active`); only the funnel
+  rendering of `PrincipalInactive` is unit-tested until a suspend path exists.
 - `Unavailable` — JWKS/discovery unreachable or cache backend down; retryable, distinct
   from token invalidity.
 - `Backend(String)` — persistence failure during lookup/provisioning.
@@ -398,11 +399,10 @@ through `main.rs` and every test constructor) and grows the wired `AuthnSvc` typ
   kid-miss refetch, cooldown suppression, single-flight) with a fake clock + counting fake
   fetcher; middleware mapping table (§6.3); config boot validation.
 - **Mock IdP integration (`tests/support`):** an in-process axum server serving
-  `/.well-known/openid-configuration` + JWKS, signing tokens with **committed test-only key
-  fixtures**: an RSA private PEM **plus its precomputed public JWK** (`n`/`e` — jsonwebtoken
-  has no PEM→JWK conversion, and this avoids the `rsa` crate / RUSTSEC-2023-0071), and an
-  EC P-256 pair likewise so the **ES256 path is exercised end-to-end** (D6), all clearly
-  marked as fixtures with no secret value. `support::mod` gains `start_mock_idp()` and
+  `/.well-known/openid-configuration` + JWKS, signing tokens with **runtime-generated EC
+  P-256 keys** (dev-only `p256` crate — no committed private keys; ES256 exercised
+  end-to-end (D6), RS256's accept path covered by the Keycloak e2e which signs RS256).
+  `support::mod` gains `start_mock_idp()` and
   `bearer(claims)`; `app(...)` wires the test issuer. **Suite-wide refactor, stated
   plainly:** every existing HTTP/gRPC integration test constructs `AppState` via the new
   `AppState::new(db, &IamConfig)` and sends bearer tokens — all ~10 tenancy/health test

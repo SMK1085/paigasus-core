@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `Authenticator` v1 implementation (spec §4.1): a provider-agnostic OIDC ID token
+//! The `Authenticator` v1 implementation (spec §4.1): a provider-agnostic OIDC access token
 //! validator. Pipeline: length cap -> header decode + alg allowlist + `kid` presence ->
 //! unverified `iss` read -> exact issuer match -> JWKS `kid` lookup -> JWK/alg family
 //! consistency -> signature + claims validation (issuer/audience/expiry) -> `ValidatedClaims`.
