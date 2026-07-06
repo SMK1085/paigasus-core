@@ -290,3 +290,13 @@ pub async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>, to
     let value = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
     (status, value)
 }
+
+/// Attaches an `authorization: Bearer <token>` metadata entry to a gRPC request — the gRPC
+/// surface's bearer credential (Task 12 enforcement), mirroring the HTTP `Authorization`
+/// header the axum middleware reads. Protected `TenancyService` calls carry it; the exempt
+/// routes (`Introspect`, health) are called without it.
+#[allow(dead_code)]
+pub fn grpc_bearer<T>(req: &mut tonic::Request<T>, token: &str) {
+    let value: tonic::metadata::MetadataValue<tonic::metadata::Ascii> = format!("Bearer {token}").parse().expect("bearer token is valid ascii metadata");
+    req.metadata_mut().insert("authorization", value);
+}
