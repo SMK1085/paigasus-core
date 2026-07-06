@@ -38,9 +38,14 @@ serde_json = { workspace = true }
 tower-http = { workspace = true }
 # `adapters::http::AppState.db` + the `/readyz` ping.
 sea-orm = { workspace = true }
-# `adapters::grpc` — tonic Server hosting the well-known `grpc.health.v1.Health` service.
+# `adapters::grpc` — tonic Server hosting the well-known `grpc.health.v1.Health` service and
+# (Task 16) the `TenancyService` gRPC server.
 tonic = { workspace = true }
 tonic-health = { workspace = true }
+# `adapters::grpc::tenancy` — the generated `paigasus.iam.v1` request/response/service types.
+paigasus-proto = { workspace = true }
+# `adapters::grpc::convert::ts` — builds the `AuditMetadata.created_at`/`modified_at` fields.
+prost-types = { workspace = true }
 # `adapters::persistence::migration` — sea-orm-migration's `SchemaManager`/`MigrationTrait`
 # build the m0001 DDL (production code, not test-only: `PgPrincipalRepository` + the
 # migrator are wired at boot, not just under `#[cfg(test)]`).
