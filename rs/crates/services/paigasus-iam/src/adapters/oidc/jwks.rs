@@ -189,6 +189,11 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> JwksProvider<F, K, C> {
     /// Resolves the JWK identified by `kid` for `issuer`, per the rotation algorithm in
     /// spec §4.3: a fresh cache entry containing `kid` returns immediately; otherwise a
     /// (possibly single-flighted, cooldown-gated) refetch is attempted.
+    ///
+    /// Precondition: `issuer` must already be one of the configured, allowlisted issuers —
+    /// the validator checks `AuthnError::IssuerNotConfigured` before ever reaching this call.
+    /// The per-issuer cache and refetch-cooldown maps grow one entry per distinct issuer seen
+    /// here and never evict, so passing arbitrary/unconfigured issuers would leak memory.
     pub async fn key_for(&self, issuer: &Issuer, kid: &str) -> Result<Jwk, AuthnError> {
         if let Some(jwk) = self.cache_state(issuer, kid).await?.hit {
             return Ok(jwk);
@@ -203,11 +208,19 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> JwksProvider<F, K, C> {
         if let Some(jwk) = state.hit {
             return Ok(jwk);
         }
-        let existed = state.entry.is_some();
+        let entry_is_fresh = state.entry.as_ref().is_some_and(|entry| self.is_fresh(entry));
 
         let cooldown_active = last_refetch.is_some_and(|attempted_at| self.clock.now().signed_duration_since(attempted_at) < self.cooldown);
-        if existed && cooldown_active {
-            return Err(AuthnError::InvalidToken(TokenDefect::UnknownKid));
+        if cooldown_active {
+            return if entry_is_fresh {
+                // The cached entry was refreshed recently and genuinely lacks this kid;
+                // the cooldown just prevents a needless repeat refetch.
+                Err(AuthnError::InvalidToken(TokenDefect::UnknownKid))
+            } else {
+                // No entry, or a stale one: we cannot validate right now, and the cooldown
+                // blocks retrying the fetch immediately. A stale key is never served.
+                Err(AuthnError::Unavailable)
+            };
         }
 
         *last_refetch = Some(self.clock.now());
@@ -217,10 +230,8 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> JwksProvider<F, K, C> {
                 self.cache.put(issuer, fetched).await?;
                 hit.ok_or(AuthnError::InvalidToken(TokenDefect::UnknownKid))
             }
-            // No usable cached entry to fall back on → surface the fetcher's own error
-            // (`Unavailable`); an entry existed (just not fresh/matching) → the caller gets
-            // the same outcome a cooldown-blocked attempt would have produced (spec §4.3).
-            Err(_) if existed => Err(AuthnError::InvalidToken(TokenDefect::UnknownKid)),
+            // A refetch failure is always `Unavailable`, whether or not a stale cached
+            // entry exists — a stale key is never served as a substitute (spec §4.3).
             Err(err) => Err(err),
         }
     }
@@ -444,6 +455,60 @@ mod tests {
 
         assert!(matches!(err, AuthnError::Unavailable));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_failure_with_stale_entry_is_unavailable() {
+        let issuer = test_issuer();
+        let clock = FakeClock::at(base_time());
+        let cache = InMemoryJwksCache::new();
+        cache.put(&issuer, cached("kid-a", clock.now())).await.unwrap();
+        clock.advance(chrono::Duration::seconds(3601));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher = FakeFetcher {
+            calls: calls.clone(),
+            clock: clock.clone(),
+            serves_kid: "kid-a",
+            fail: true,
+            delay: Duration::ZERO,
+        };
+        let provider = JwksProvider::new(fetcher, cache, clock, Duration::from_secs(3600), Duration::from_secs(30));
+
+        let err = provider.key_for(&issuer, "kid-a").await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::Unavailable), "a stale entry must never be served in place of a failed refetch");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cooldown_blocked_stale_entry_is_unavailable() {
+        let issuer = test_issuer();
+        let clock = FakeClock::at(base_time());
+        let cache = InMemoryJwksCache::new();
+        cache.put(&issuer, cached("kid-old", clock.now())).await.unwrap();
+        clock.advance(chrono::Duration::seconds(3601));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher = FakeFetcher {
+            calls: calls.clone(),
+            clock: clock.clone(),
+            serves_kid: "kid-old",
+            fail: true,
+            delay: Duration::ZERO,
+        };
+        let provider = JwksProvider::new(fetcher, cache, clock.clone(), Duration::from_secs(3600), Duration::from_secs(30));
+
+        let first = provider.key_for(&issuer, "kid-old").await.unwrap_err();
+        assert!(matches!(first, AuthnError::Unavailable));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Still within the 30s cooldown: the second call must not fetch again. Since the
+        // failed refetch never updated the cache, the entry is still stale, so this must
+        // stay `Unavailable` rather than falling back to `UnknownKid`.
+        clock.advance(chrono::Duration::seconds(5));
+        let second = provider.key_for(&issuer, "kid-old").await.unwrap_err();
+
+        assert!(matches!(second, AuthnError::Unavailable));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the cooldown must suppress the second refetch attempt");
     }
 
     #[tokio::test]
