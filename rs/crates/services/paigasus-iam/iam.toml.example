@@ -26,12 +26,13 @@
 
 # [authn.jwks_cache]
 # backend = "memory"                  # "memory" (default) | "redis"
-# # redis_url = "redis://..."         # required iff backend = "redis"
+# # redis_url = "rediss://..."        # required iff backend = "redis"; use the TLS
+# #                                   # scheme (rediss://) + AUTH credentials in the URL
 #
 # TRUST NOTE (D15): the JWKS cache holds the configured issuers' *public signing keys* —
 # whoever can write to it can forge tokens. `backend = "redis"` therefore requires a
-# dedicated instance, TLS + AUTH — a writable JWKS cache is an auth bypass. `memory`
-# stays the default for exactly this reason.
+# dedicated instance, TLS (`rediss://`, supported via rustls) + AUTH — a writable JWKS
+# cache is an auth bypass. `memory` stays the default for exactly this reason.
 
 # REQUIRED — no default. At least one issuer:
 # [[authn.issuers]]

@@ -119,10 +119,15 @@ sea-orm-migration = { version = "1", default-features = false, features = [
 # redis — external, shared `JwksCache` backend (paigasus-iam's `RedisJwksCache`, SMA-443
 # Task 8). `tokio-comp` selects the tokio async runtime (matches the workspace's tokio
 # baseline); `connection-manager` gives an auto-reconnecting client so a transient Redis
-# blip doesn't need bespoke retry logic in the adapter. Default features (acl/streams/
-# geospatial/script/num-bigint) are all unneeded for a plain SET/GET cache, so trimmed —
-# same "minimal baseline, add per-crate" posture as reqwest/sea-orm above.
-redis = { version = "1", default-features = false, features = ["tokio-comp", "connection-manager"] }
+# blip doesn't need bespoke retry logic in the adapter. `tokio-rustls-comp` +
+# `tls-rustls-webpki-roots` enable `rediss://` URLs (the D15 trust note requires TLS on
+# the JWKS cache; rustls + bundled webpki roots match the reqwest posture above — no
+# second crypto provider). Default features (acl/streams/geospatial/script/num-bigint)
+# are all unneeded for a plain SET/GET cache, so trimmed — same "minimal baseline, add
+# per-crate" posture as reqwest/sea-orm above.
+redis = { version = "1", default-features = false, features = [
+  "tokio-comp", "connection-manager", "tokio-rustls-comp", "tls-rustls-webpki-roots",
+] }
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
 # via the Moon `lint` task's `-D warnings`.
