@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! tonic gRPC surface. M0 serves only the well-known `grpc.health.v1.Health` (via
-//! tonic-health); IAM RPCs arrive in later milestones.
+//! tonic gRPC surface: the well-known `grpc.health.v1.Health` service (via tonic-health) plus
+//! the IAM `TenancyService` (task-16 brief, SMA-442).
+
+pub mod convert;
+pub mod tenancy;
 
 use std::net::SocketAddr;
 use tonic::transport::Server;
 use tonic::transport::server::Router as TonicRouter;
 use tonic_health::ServingStatus;
+
+use crate::adapters::http::AppState;
+use paigasus_proto::paigasus::iam::v1::tenancy_service_server::TenancyServiceServer;
+use tenancy::TenancyGrpc;
 
 /// Build a health service with the overall server marked SERVING, plus its reporter.
 /// M0 serves a **static** `SERVING` status — there is no gRPC readiness wiring in scope
@@ -23,16 +30,16 @@ pub async fn health_service() -> (
     (reporter, service)
 }
 
-/// A tonic `Server` router with the health service mounted, serving a static `SERVING`
-/// status (M0; see `health_service`). `main` calls `.serve_with_shutdown`. The reporter is
-/// dropped here — dynamic readiness is deferred to M1.
-pub async fn router(timeout: std::time::Duration) -> TonicRouter {
+/// A tonic `Server` router with the health service and the `TenancyService` (Task 16) mounted,
+/// serving a static `SERVING` health status (see `health_service`). `main` calls
+/// `.serve_with_shutdown`. The reporter is dropped here — dynamic readiness is deferred to M1.
+pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRouter {
     let (_reporter, health) = health_service().await;
-    Server::builder().timeout(timeout).add_service(health)
+    Server::builder().timeout(timeout).add_service(health).add_service(TenancyServiceServer::new(TenancyGrpc::new(state)))
 }
 
 /// Serve gRPC on `addr` until `shutdown` resolves. gRPC health is a static `SERVING` for M0
 /// (see `health_service`); dynamic readiness is a deferred M1 concern.
-pub async fn serve(addr: SocketAddr, timeout: std::time::Duration, shutdown: impl std::future::Future<Output = ()> + Send + 'static) -> Result<(), tonic::transport::Error> {
-    router(timeout).await.serve_with_shutdown(addr, shutdown).await
+pub async fn serve(addr: SocketAddr, state: AppState, timeout: std::time::Duration, shutdown: impl std::future::Future<Output = ()> + Send + 'static) -> Result<(), tonic::transport::Error> {
+    router(state, timeout).await.serve_with_shutdown(addr, shutdown).await
 }

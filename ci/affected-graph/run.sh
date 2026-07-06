@@ -101,9 +101,10 @@ run_case() {
 
 run_suite() {
   SUITE_RC=0
-  # contracts proto edit -> proto packages in all three languages + the gateway rebuild.
+  # contracts proto edit -> proto packages in all three languages + the gateway rebuild + the
+  # IAM service crate that consumes paigasus-proto-rs for its gRPC surface (SMA-442).
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
-    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs"
+    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs"
   # kernel edit -> kernel + all three bindings (py/node/wasm) + gateway + both language wrappers (SMA-419/420/427)
   # + the IAM crates that consume the kernel's PRN/UUIDv7 (paigasus-iam-core-rs & the paigasus-iam-rs
   # service, SMA-441). paigasus-logging-rs is deliberately ABSENT — it has no kernel edge.

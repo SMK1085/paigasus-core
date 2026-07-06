@@ -25,7 +25,9 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-# `adapters::clock::SystemClock` names `chrono::{DateTime, SubsecRound, Utc}` directly.
+# `adapters::clock::SystemClock` names `chrono::{DateTime, SubsecRound, Utc}` directly;
+# `http::dto`'s RFC3339 timestamp fields need `DateTime<Utc>: Deserialize`/`Serialize` — the
+# workspace baseline already carries chrono's `serde` feature, so no override is needed here.
 chrono = { workspace = true }
 # `adapters::id::KernelIdGenerator` draws the kernel's required entropy via `rand::random`.
 rand = { workspace = true }
@@ -36,9 +38,14 @@ serde_json = { workspace = true }
 tower-http = { workspace = true }
 # `adapters::http::AppState.db` + the `/readyz` ping.
 sea-orm = { workspace = true }
-# `adapters::grpc` — tonic Server hosting the well-known `grpc.health.v1.Health` service.
+# `adapters::grpc` — tonic Server hosting the well-known `grpc.health.v1.Health` service and
+# (Task 16) the `TenancyService` gRPC server.
 tonic = { workspace = true }
 tonic-health = { workspace = true }
+# `adapters::grpc::tenancy` — the generated `paigasus.iam.v1` request/response/service types.
+paigasus-proto = { workspace = true }
+# `adapters::grpc::convert::ts` — builds the `AuditMetadata.created_at`/`modified_at` fields.
+prost-types = { workspace = true }
 # `adapters::persistence::migration` — sea-orm-migration's `SchemaManager`/`MigrationTrait`
 # build the m0001 DDL (production code, not test-only: `PgPrincipalRepository` + the
 # migrator are wired at boot, not just under `#[cfg(test)]`).
@@ -47,16 +54,19 @@ sea-orm-migration = { workspace = true }
 # (`PrincipalRepository`, `MigrationTrait`) — production code, so this moved out of
 # dev-dependencies (Task 6 had it dev-only for the in-memory test fakes).
 async-trait = { workspace = true }
+# `adapters::id::KernelIdGenerator` names `Uuid` directly in the tenancy `IdGenerator`
+# methods' signatures (`new_team_id(&self, org: Uuid)`, `new_membership_id() -> Uuid`) —
+# production code, not just test fakes, since Task 4 (SMA-442). The workspace baseline
+# carries no `uuid` features (kernel/wasm keep it rng-free); `serde` is added here only —
+# `adapters::http`'s `Path<Uuid>` extractor and `dto::MembershipDto.id` need
+# `Uuid: Deserialize`/`Serialize` (Task 14, SMA-442).
+uuid = { workspace = true, features = ["serde"] }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as
-# a dev-dependency — it's unified into test builds only, never the shipped binary. Same
-# reasoning for uuid: `create_user`'s in-memory test fakes use it directly, but production
-# code only reaches `Uuid` through `paigasus-iam-core`/`paigasus-kernel` without naming the
-# `uuid` crate itself.
+# a dev-dependency — it's unified into test builds only, never the shipped binary.
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
-uuid = { workspace = true }
 # `tests/health.rs` drives the health router via `ServiceExt::oneshot` (no real listener).
 tower = { workspace = true }
 # `tests/grpc_health.rs` wraps an ephemeral `TcpListener` into a `Stream` for

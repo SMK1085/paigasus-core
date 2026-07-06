@@ -10,6 +10,12 @@ use uuid::Uuid;
 pub enum DomainError {
     #[error("invalid email: {0}")]
     InvalidEmail(String),
+    #[error("invalid slug: {0}")]
+    InvalidSlug(String),
+    #[error("invalid name: {0}")]
+    InvalidName(String),
+    #[error("invalid tenancy prn: {0}")]
+    InvalidNodePrn(String),
 }
 
 /// A validated email address. M0 rule: non-empty, exactly one `@`, non-empty local

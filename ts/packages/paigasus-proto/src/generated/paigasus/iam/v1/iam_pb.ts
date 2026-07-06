@@ -4,15 +4,17 @@
 // @generated from file paigasus/iam/v1/iam.proto (package paigasus.iam.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import type { AuditMetadata } from "../../common/v1/audit_pb.js";
+import { file_paigasus_common_v1_audit } from "../../common/v1/audit_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file paigasus/iam/v1/iam.proto.
  */
 export const file_paigasus_iam_v1_iam: GenFile = /*@__PURE__*/
-  fileDesc("ChlwYWlnYXN1cy9pYW0vdjEvaWFtLnByb3RvEg9wYWlnYXN1cy5pYW0udjEiGgoLU2VydmljZUluZm8SCwoDcHJuGAEgASgJYgZwcm90bzM");
+  fileDesc("ChlwYWlnYXN1cy9pYW0vdjEvaWFtLnByb3RvEg9wYWlnYXN1cy5pYW0udjEiGgoLU2VydmljZUluZm8SCwoDcHJuGAEgASgJIs0BCgxPcmdhbml6YXRpb24SCwoDcHJuGAEgASgJEgwKBHNsdWcYAiABKAkSDAoEbmFtZRgDIAEoCRIrCgZzdGF0dXMYBCABKA4yGy5wYWlnYXN1cy5pYW0udjEuTm9kZVN0YXR1cxI1ChBlZmZlY3RpdmVfc3RhdHVzGAUgASgOMhsucGFpZ2FzdXMuaWFtLnYxLk5vZGVTdGF0dXMSMAoFYXVkaXQYBiABKAsyIS5wYWlnYXN1cy5jb21tb24udjEuQXVkaXRNZXRhZGF0YSLWAQoEVGVhbRILCgNwcm4YASABKAkSDwoHb3JnX3BybhgCIAEoCRIMCgRzbHVnGAMgASgJEgwKBG5hbWUYBCABKAkSKwoGc3RhdHVzGAUgASgOMhsucGFpZ2FzdXMuaWFtLnYxLk5vZGVTdGF0dXMSNQoQZWZmZWN0aXZlX3N0YXR1cxgGIAEoDjIbLnBhaWdhc3VzLmlhbS52MS5Ob2RlU3RhdHVzEjAKBWF1ZGl0GAcgASgLMiEucGFpZ2FzdXMuY29tbW9uLnYxLkF1ZGl0TWV0YWRhdGEi6wEKB1Byb2plY3QSCwoDcHJuGAEgASgJEhAKCHRlYW1fcHJuGAIgASgJEg8KB29yZ19wcm4YAyABKAkSDAoEc2x1ZxgEIAEoCRIMCgRuYW1lGAUgASgJEisKBnN0YXR1cxgGIAEoDjIbLnBhaWdhc3VzLmlhbS52MS5Ob2RlU3RhdHVzEjUKEGVmZmVjdGl2ZV9zdGF0dXMYByABKA4yGy5wYWlnYXN1cy5pYW0udjEuTm9kZVN0YXR1cxIwCgVhdWRpdBgIIAEoCzIhLnBhaWdhc3VzLmNvbW1vbi52MS5BdWRpdE1ldGFkYXRhInMKCk1lbWJlcnNoaXASCgoCaWQYASABKAkSFQoNcHJpbmNpcGFsX3BybhgCIAEoCRIQCghub2RlX3BybhgDIAEoCRIwCgVhdWRpdBgEIAEoCzIhLnBhaWdhc3VzLmNvbW1vbi52MS5BdWRpdE1ldGFkYXRhIjcKGUNyZWF0ZU9yZ2FuaXphdGlvblJlcXVlc3QSDAoEc2x1ZxgBIAEoCRIMCgRuYW1lGAIgASgJIn4KGkNyZWF0ZU9yZ2FuaXphdGlvblJlc3BvbnNlEjMKDG9yZ2FuaXphdGlvbhgBIAEoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24SKwoMZGVmYXVsdF90ZWFtGAIgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iJQoWR2V0T3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkiTgoXR2V0T3JnYW5pemF0aW9uUmVzcG9uc2USMwoMb3JnYW5pemF0aW9uGAEgASgLMh0ucGFpZ2FzdXMuaWFtLnYxLk9yZ2FuaXphdGlvbiI5ChhMaXN0T3JnYW5pemF0aW9uc1JlcXVlc3QSDQoFbGltaXQYASABKA0SDgoGb2Zmc2V0GAIgASgEIlEKGUxpc3RPcmdhbml6YXRpb25zUmVzcG9uc2USNAoNb3JnYW5pemF0aW9ucxgBIAMoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24icAoZUmVuYW1lT3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkSFQoIbmV3X3NsdWcYAiABKAlIAIgBARIVCghuZXdfbmFtZRgDIAEoCUgBiAEBQgsKCV9uZXdfc2x1Z0ILCglfbmV3X25hbWUiUQoaUmVuYW1lT3JnYW5pemF0aW9uUmVzcG9uc2USMwoMb3JnYW5pemF0aW9uGAEgASgLMh0ucGFpZ2FzdXMuaWFtLnYxLk9yZ2FuaXphdGlvbiIpChpBcmNoaXZlT3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkiUgobQXJjaGl2ZU9yZ2FuaXphdGlvblJlc3BvbnNlEjMKDG9yZ2FuaXphdGlvbhgBIAEoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24iKQoaUmVzdG9yZU9yZ2FuaXphdGlvblJlcXVlc3QSCwoDcHJuGAEgASgJIlIKG1Jlc3RvcmVPcmdhbml6YXRpb25SZXNwb25zZRIzCgxvcmdhbml6YXRpb24YASABKAsyHS5wYWlnYXN1cy5pYW0udjEuT3JnYW5pemF0aW9uIkAKEUNyZWF0ZVRlYW1SZXF1ZXN0Eg8KB29yZ19wcm4YASABKAkSDAoEc2x1ZxgCIAEoCRIMCgRuYW1lGAMgASgJIjkKEkNyZWF0ZVRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iHQoOR2V0VGVhbVJlcXVlc3QSCwoDcHJuGAEgASgJIjYKD0dldFRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iQgoQTGlzdFRlYW1zUmVxdWVzdBIPCgdvcmdfcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCI5ChFMaXN0VGVhbXNSZXNwb25zZRIkCgV0ZWFtcxgBIAMoCzIVLnBhaWdhc3VzLmlhbS52MS5UZWFtImgKEVJlbmFtZVRlYW1SZXF1ZXN0EgsKA3BybhgBIAEoCRIVCghuZXdfc2x1ZxgCIAEoCUgAiAEBEhUKCG5ld19uYW1lGAMgASgJSAGIAQFCCwoJX25ld19zbHVnQgsKCV9uZXdfbmFtZSI5ChJSZW5hbWVUZWFtUmVzcG9uc2USIwoEdGVhbRgBIAEoCzIVLnBhaWdhc3VzLmlhbS52MS5UZWFtIiEKEkFyY2hpdmVUZWFtUmVxdWVzdBILCgNwcm4YASABKAkiOgoTQXJjaGl2ZVRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iIQoSUmVzdG9yZVRlYW1SZXF1ZXN0EgsKA3BybhgBIAEoCSI6ChNSZXN0b3JlVGVhbVJlc3BvbnNlEiMKBHRlYW0YASABKAsyFS5wYWlnYXN1cy5pYW0udjEuVGVhbSJEChRDcmVhdGVQcm9qZWN0UmVxdWVzdBIQCgh0ZWFtX3BybhgBIAEoCRIMCgRzbHVnGAIgASgJEgwKBG5hbWUYAyABKAkiQgoVQ3JlYXRlUHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCIgChFHZXRQcm9qZWN0UmVxdWVzdBILCgNwcm4YASABKAkiPwoSR2V0UHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCJGChNMaXN0UHJvamVjdHNSZXF1ZXN0EhAKCHRlYW1fcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCJCChRMaXN0UHJvamVjdHNSZXNwb25zZRIqCghwcm9qZWN0cxgBIAMoCzIYLnBhaWdhc3VzLmlhbS52MS5Qcm9qZWN0ImsKFFJlbmFtZVByb2plY3RSZXF1ZXN0EgsKA3BybhgBIAEoCRIVCghuZXdfc2x1ZxgCIAEoCUgAiAEBEhUKCG5ld19uYW1lGAMgASgJSAGIAQFCCwoJX25ld19zbHVnQgsKCV9uZXdfbmFtZSJCChVSZW5hbWVQcm9qZWN0UmVzcG9uc2USKQoHcHJvamVjdBgBIAEoCzIYLnBhaWdhc3VzLmlhbS52MS5Qcm9qZWN0IiQKFUFyY2hpdmVQcm9qZWN0UmVxdWVzdBILCgNwcm4YASABKAkiQwoWQXJjaGl2ZVByb2plY3RSZXNwb25zZRIpCgdwcm9qZWN0GAEgASgLMhgucGFpZ2FzdXMuaWFtLnYxLlByb2plY3QiJAoVUmVzdG9yZVByb2plY3RSZXF1ZXN0EgsKA3BybhgBIAEoCSJDChZSZXN0b3JlUHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCJCChdBdHRhY2hNZW1iZXJzaGlwUmVxdWVzdBIVCg1wcmluY2lwYWxfcHJuGAEgASgJEhAKCG5vZGVfcHJuGAIgASgJIksKGEF0dGFjaE1lbWJlcnNoaXBSZXNwb25zZRIvCgptZW1iZXJzaGlwGAEgASgLMhsucGFpZ2FzdXMuaWFtLnYxLk1lbWJlcnNoaXAiJQoXRGV0YWNoTWVtYmVyc2hpcFJlcXVlc3QSCgoCaWQYASABKAkiGgoYRGV0YWNoTWVtYmVyc2hpcFJlc3BvbnNlIm4KFkxpc3RNZW1iZXJzaGlwc1JlcXVlc3QSFwoNcHJpbmNpcGFsX3BybhgBIAEoCUgAEhIKCG5vZGVfcHJuGAIgASgJSAASDQoFbGltaXQYAyABKA0SDgoGb2Zmc2V0GAQgASgEQggKBmZpbHRlciJLChdMaXN0TWVtYmVyc2hpcHNSZXNwb25zZRIwCgttZW1iZXJzaGlwcxgBIAMoCzIbLnBhaWdhc3VzLmlhbS52MS5NZW1iZXJzaGlwKlsKCk5vZGVTdGF0dXMSGwoXTk9ERV9TVEFUVVNfVU5TUEVDSUZJRUQQABIWChJOT0RFX1NUQVRVU19BQ1RJVkUQARIYChROT0RFX1NUQVRVU19BUkNISVZFRBACMpoQCg5UZW5hbmN5U2VydmljZRJtChJDcmVhdGVPcmdhbml6YXRpb24SKi5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlT3JnYW5pemF0aW9uUmVxdWVzdBorLnBhaWdhc3VzLmlhbS52MS5DcmVhdGVPcmdhbml6YXRpb25SZXNwb25zZRJkCg9HZXRPcmdhbml6YXRpb24SJy5wYWlnYXN1cy5pYW0udjEuR2V0T3JnYW5pemF0aW9uUmVxdWVzdBooLnBhaWdhc3VzLmlhbS52MS5HZXRPcmdhbml6YXRpb25SZXNwb25zZRJqChFMaXN0T3JnYW5pemF0aW9ucxIpLnBhaWdhc3VzLmlhbS52MS5MaXN0T3JnYW5pemF0aW9uc1JlcXVlc3QaKi5wYWlnYXN1cy5pYW0udjEuTGlzdE9yZ2FuaXphdGlvbnNSZXNwb25zZRJtChJSZW5hbWVPcmdhbml6YXRpb24SKi5wYWlnYXN1cy5pYW0udjEuUmVuYW1lT3JnYW5pemF0aW9uUmVxdWVzdBorLnBhaWdhc3VzLmlhbS52MS5SZW5hbWVPcmdhbml6YXRpb25SZXNwb25zZRJwChNBcmNoaXZlT3JnYW5pemF0aW9uEisucGFpZ2FzdXMuaWFtLnYxLkFyY2hpdmVPcmdhbml6YXRpb25SZXF1ZXN0GiwucGFpZ2FzdXMuaWFtLnYxLkFyY2hpdmVPcmdhbml6YXRpb25SZXNwb25zZRJwChNSZXN0b3JlT3JnYW5pemF0aW9uEisucGFpZ2FzdXMuaWFtLnYxLlJlc3RvcmVPcmdhbml6YXRpb25SZXF1ZXN0GiwucGFpZ2FzdXMuaWFtLnYxLlJlc3RvcmVPcmdhbml6YXRpb25SZXNwb25zZRJVCgpDcmVhdGVUZWFtEiIucGFpZ2FzdXMuaWFtLnYxLkNyZWF0ZVRlYW1SZXF1ZXN0GiMucGFpZ2FzdXMuaWFtLnYxLkNyZWF0ZVRlYW1SZXNwb25zZRJMCgdHZXRUZWFtEh8ucGFpZ2FzdXMuaWFtLnYxLkdldFRlYW1SZXF1ZXN0GiAucGFpZ2FzdXMuaWFtLnYxLkdldFRlYW1SZXNwb25zZRJSCglMaXN0VGVhbXMSIS5wYWlnYXN1cy5pYW0udjEuTGlzdFRlYW1zUmVxdWVzdBoiLnBhaWdhc3VzLmlhbS52MS5MaXN0VGVhbXNSZXNwb25zZRJVCgpSZW5hbWVUZWFtEiIucGFpZ2FzdXMuaWFtLnYxLlJlbmFtZVRlYW1SZXF1ZXN0GiMucGFpZ2FzdXMuaWFtLnYxLlJlbmFtZVRlYW1SZXNwb25zZRJYCgtBcmNoaXZlVGVhbRIjLnBhaWdhc3VzLmlhbS52MS5BcmNoaXZlVGVhbVJlcXVlc3QaJC5wYWlnYXN1cy5pYW0udjEuQXJjaGl2ZVRlYW1SZXNwb25zZRJYCgtSZXN0b3JlVGVhbRIjLnBhaWdhc3VzLmlhbS52MS5SZXN0b3JlVGVhbVJlcXVlc3QaJC5wYWlnYXN1cy5pYW0udjEuUmVzdG9yZVRlYW1SZXNwb25zZRJeCg1DcmVhdGVQcm9qZWN0EiUucGFpZ2FzdXMuaWFtLnYxLkNyZWF0ZVByb2plY3RSZXF1ZXN0GiYucGFpZ2FzdXMuaWFtLnYxLkNyZWF0ZVByb2plY3RSZXNwb25zZRJVCgpHZXRQcm9qZWN0EiIucGFpZ2FzdXMuaWFtLnYxLkdldFByb2plY3RSZXF1ZXN0GiMucGFpZ2FzdXMuaWFtLnYxLkdldFByb2plY3RSZXNwb25zZRJbCgxMaXN0UHJvamVjdHMSJC5wYWlnYXN1cy5pYW0udjEuTGlzdFByb2plY3RzUmVxdWVzdBolLnBhaWdhc3VzLmlhbS52MS5MaXN0UHJvamVjdHNSZXNwb25zZRJeCg1SZW5hbWVQcm9qZWN0EiUucGFpZ2FzdXMuaWFtLnYxLlJlbmFtZVByb2plY3RSZXF1ZXN0GiYucGFpZ2FzdXMuaWFtLnYxLlJlbmFtZVByb2plY3RSZXNwb25zZRJhCg5BcmNoaXZlUHJvamVjdBImLnBhaWdhc3VzLmlhbS52MS5BcmNoaXZlUHJvamVjdFJlcXVlc3QaJy5wYWlnYXN1cy5pYW0udjEuQXJjaGl2ZVByb2plY3RSZXNwb25zZRJhCg5SZXN0b3JlUHJvamVjdBImLnBhaWdhc3VzLmlhbS52MS5SZXN0b3JlUHJvamVjdFJlcXVlc3QaJy5wYWlnYXN1cy5pYW0udjEuUmVzdG9yZVByb2plY3RSZXNwb25zZRJnChBBdHRhY2hNZW1iZXJzaGlwEigucGFpZ2FzdXMuaWFtLnYxLkF0dGFjaE1lbWJlcnNoaXBSZXF1ZXN0GikucGFpZ2FzdXMuaWFtLnYxLkF0dGFjaE1lbWJlcnNoaXBSZXNwb25zZRJnChBEZXRhY2hNZW1iZXJzaGlwEigucGFpZ2FzdXMuaWFtLnYxLkRldGFjaE1lbWJlcnNoaXBSZXF1ZXN0GikucGFpZ2FzdXMuaWFtLnYxLkRldGFjaE1lbWJlcnNoaXBSZXNwb25zZRJkCg9MaXN0TWVtYmVyc2hpcHMSJy5wYWlnYXN1cy5pYW0udjEuTGlzdE1lbWJlcnNoaXBzUmVxdWVzdBooLnBhaWdhc3VzLmlhbS52MS5MaXN0TWVtYmVyc2hpcHNSZXNwb25zZWIGcHJvdG8z", [file_paigasus_common_v1_audit]);
 
 /**
  * Placeholder so the package generates a concrete type in all three languages.
@@ -33,4 +35,1210 @@ export type ServiceInfo = Message<"paigasus.iam.v1.ServiceInfo"> & {
  */
 export const ServiceInfoSchema: GenMessage<ServiceInfo> = /*@__PURE__*/
   messageDesc(file_paigasus_iam_v1_iam, 0);
+
+/**
+ * @generated from message paigasus.iam.v1.Organization
+ */
+export type Organization = Message<"paigasus.iam.v1.Organization"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+
+  /**
+   * @generated from field: string slug = 2;
+   */
+  slug: string;
+
+  /**
+   * @generated from field: string name = 3;
+   */
+  name: string;
+
+  /**
+   * @generated from field: paigasus.iam.v1.NodeStatus status = 4;
+   */
+  status: NodeStatus;
+
+  /**
+   * @generated from field: paigasus.iam.v1.NodeStatus effective_status = 5;
+   */
+  effectiveStatus: NodeStatus;
+
+  /**
+   * @generated from field: paigasus.common.v1.AuditMetadata audit = 6;
+   */
+  audit?: AuditMetadata | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.Organization.
+ * Use `create(OrganizationSchema)` to create a new message.
+ */
+export const OrganizationSchema: GenMessage<Organization> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 1);
+
+/**
+ * @generated from message paigasus.iam.v1.Team
+ */
+export type Team = Message<"paigasus.iam.v1.Team"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+
+  /**
+   * @generated from field: string org_prn = 2;
+   */
+  orgPrn: string;
+
+  /**
+   * @generated from field: string slug = 3;
+   */
+  slug: string;
+
+  /**
+   * @generated from field: string name = 4;
+   */
+  name: string;
+
+  /**
+   * @generated from field: paigasus.iam.v1.NodeStatus status = 5;
+   */
+  status: NodeStatus;
+
+  /**
+   * @generated from field: paigasus.iam.v1.NodeStatus effective_status = 6;
+   */
+  effectiveStatus: NodeStatus;
+
+  /**
+   * @generated from field: paigasus.common.v1.AuditMetadata audit = 7;
+   */
+  audit?: AuditMetadata | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.Team.
+ * Use `create(TeamSchema)` to create a new message.
+ */
+export const TeamSchema: GenMessage<Team> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 2);
+
+/**
+ * @generated from message paigasus.iam.v1.Project
+ */
+export type Project = Message<"paigasus.iam.v1.Project"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+
+  /**
+   * @generated from field: string team_prn = 2;
+   */
+  teamPrn: string;
+
+  /**
+   * @generated from field: string org_prn = 3;
+   */
+  orgPrn: string;
+
+  /**
+   * @generated from field: string slug = 4;
+   */
+  slug: string;
+
+  /**
+   * @generated from field: string name = 5;
+   */
+  name: string;
+
+  /**
+   * @generated from field: paigasus.iam.v1.NodeStatus status = 6;
+   */
+  status: NodeStatus;
+
+  /**
+   * @generated from field: paigasus.iam.v1.NodeStatus effective_status = 7;
+   */
+  effectiveStatus: NodeStatus;
+
+  /**
+   * @generated from field: paigasus.common.v1.AuditMetadata audit = 8;
+   */
+  audit?: AuditMetadata | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.Project.
+ * Use `create(ProjectSchema)` to create a new message.
+ */
+export const ProjectSchema: GenMessage<Project> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 3);
+
+/**
+ * @generated from message paigasus.iam.v1.Membership
+ */
+export type Membership = Message<"paigasus.iam.v1.Membership"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string principal_prn = 2;
+   */
+  principalPrn: string;
+
+  /**
+   * @generated from field: string node_prn = 3;
+   */
+  nodePrn: string;
+
+  /**
+   * modified_at == created_at (immutable)
+   *
+   * @generated from field: paigasus.common.v1.AuditMetadata audit = 4;
+   */
+  audit?: AuditMetadata | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.Membership.
+ * Use `create(MembershipSchema)` to create a new message.
+ */
+export const MembershipSchema: GenMessage<Membership> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 4);
+
+/**
+ * @generated from message paigasus.iam.v1.CreateOrganizationRequest
+ */
+export type CreateOrganizationRequest = Message<"paigasus.iam.v1.CreateOrganizationRequest"> & {
+  /**
+   * @generated from field: string slug = 1;
+   */
+  slug: string;
+
+  /**
+   * @generated from field: string name = 2;
+   */
+  name: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.CreateOrganizationRequest.
+ * Use `create(CreateOrganizationRequestSchema)` to create a new message.
+ */
+export const CreateOrganizationRequestSchema: GenMessage<CreateOrganizationRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 5);
+
+/**
+ * @generated from message paigasus.iam.v1.CreateOrganizationResponse
+ */
+export type CreateOrganizationResponse = Message<"paigasus.iam.v1.CreateOrganizationResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Organization organization = 1;
+   */
+  organization?: Organization | undefined;
+
+  /**
+   * @generated from field: paigasus.iam.v1.Team default_team = 2;
+   */
+  defaultTeam?: Team | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.CreateOrganizationResponse.
+ * Use `create(CreateOrganizationResponseSchema)` to create a new message.
+ */
+export const CreateOrganizationResponseSchema: GenMessage<CreateOrganizationResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 6);
+
+/**
+ * @generated from message paigasus.iam.v1.GetOrganizationRequest
+ */
+export type GetOrganizationRequest = Message<"paigasus.iam.v1.GetOrganizationRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.GetOrganizationRequest.
+ * Use `create(GetOrganizationRequestSchema)` to create a new message.
+ */
+export const GetOrganizationRequestSchema: GenMessage<GetOrganizationRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 7);
+
+/**
+ * @generated from message paigasus.iam.v1.GetOrganizationResponse
+ */
+export type GetOrganizationResponse = Message<"paigasus.iam.v1.GetOrganizationResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Organization organization = 1;
+   */
+  organization?: Organization | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.GetOrganizationResponse.
+ * Use `create(GetOrganizationResponseSchema)` to create a new message.
+ */
+export const GetOrganizationResponseSchema: GenMessage<GetOrganizationResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 8);
+
+/**
+ * @generated from message paigasus.iam.v1.ListOrganizationsRequest
+ */
+export type ListOrganizationsRequest = Message<"paigasus.iam.v1.ListOrganizationsRequest"> & {
+  /**
+   * @generated from field: uint32 limit = 1;
+   */
+  limit: number;
+
+  /**
+   * @generated from field: uint64 offset = 2;
+   */
+  offset: bigint;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListOrganizationsRequest.
+ * Use `create(ListOrganizationsRequestSchema)` to create a new message.
+ */
+export const ListOrganizationsRequestSchema: GenMessage<ListOrganizationsRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 9);
+
+/**
+ * @generated from message paigasus.iam.v1.ListOrganizationsResponse
+ */
+export type ListOrganizationsResponse = Message<"paigasus.iam.v1.ListOrganizationsResponse"> & {
+  /**
+   * @generated from field: repeated paigasus.iam.v1.Organization organizations = 1;
+   */
+  organizations: Organization[];
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListOrganizationsResponse.
+ * Use `create(ListOrganizationsResponseSchema)` to create a new message.
+ */
+export const ListOrganizationsResponseSchema: GenMessage<ListOrganizationsResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 10);
+
+/**
+ * @generated from message paigasus.iam.v1.RenameOrganizationRequest
+ */
+export type RenameOrganizationRequest = Message<"paigasus.iam.v1.RenameOrganizationRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+
+  /**
+   * @generated from field: optional string new_slug = 2;
+   */
+  newSlug?: string | undefined;
+
+  /**
+   * @generated from field: optional string new_name = 3;
+   */
+  newName?: string | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RenameOrganizationRequest.
+ * Use `create(RenameOrganizationRequestSchema)` to create a new message.
+ */
+export const RenameOrganizationRequestSchema: GenMessage<RenameOrganizationRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 11);
+
+/**
+ * @generated from message paigasus.iam.v1.RenameOrganizationResponse
+ */
+export type RenameOrganizationResponse = Message<"paigasus.iam.v1.RenameOrganizationResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Organization organization = 1;
+   */
+  organization?: Organization | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RenameOrganizationResponse.
+ * Use `create(RenameOrganizationResponseSchema)` to create a new message.
+ */
+export const RenameOrganizationResponseSchema: GenMessage<RenameOrganizationResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 12);
+
+/**
+ * @generated from message paigasus.iam.v1.ArchiveOrganizationRequest
+ */
+export type ArchiveOrganizationRequest = Message<"paigasus.iam.v1.ArchiveOrganizationRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ArchiveOrganizationRequest.
+ * Use `create(ArchiveOrganizationRequestSchema)` to create a new message.
+ */
+export const ArchiveOrganizationRequestSchema: GenMessage<ArchiveOrganizationRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 13);
+
+/**
+ * @generated from message paigasus.iam.v1.ArchiveOrganizationResponse
+ */
+export type ArchiveOrganizationResponse = Message<"paigasus.iam.v1.ArchiveOrganizationResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Organization organization = 1;
+   */
+  organization?: Organization | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ArchiveOrganizationResponse.
+ * Use `create(ArchiveOrganizationResponseSchema)` to create a new message.
+ */
+export const ArchiveOrganizationResponseSchema: GenMessage<ArchiveOrganizationResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 14);
+
+/**
+ * @generated from message paigasus.iam.v1.RestoreOrganizationRequest
+ */
+export type RestoreOrganizationRequest = Message<"paigasus.iam.v1.RestoreOrganizationRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RestoreOrganizationRequest.
+ * Use `create(RestoreOrganizationRequestSchema)` to create a new message.
+ */
+export const RestoreOrganizationRequestSchema: GenMessage<RestoreOrganizationRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 15);
+
+/**
+ * @generated from message paigasus.iam.v1.RestoreOrganizationResponse
+ */
+export type RestoreOrganizationResponse = Message<"paigasus.iam.v1.RestoreOrganizationResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Organization organization = 1;
+   */
+  organization?: Organization | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RestoreOrganizationResponse.
+ * Use `create(RestoreOrganizationResponseSchema)` to create a new message.
+ */
+export const RestoreOrganizationResponseSchema: GenMessage<RestoreOrganizationResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 16);
+
+/**
+ * @generated from message paigasus.iam.v1.CreateTeamRequest
+ */
+export type CreateTeamRequest = Message<"paigasus.iam.v1.CreateTeamRequest"> & {
+  /**
+   * @generated from field: string org_prn = 1;
+   */
+  orgPrn: string;
+
+  /**
+   * @generated from field: string slug = 2;
+   */
+  slug: string;
+
+  /**
+   * @generated from field: string name = 3;
+   */
+  name: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.CreateTeamRequest.
+ * Use `create(CreateTeamRequestSchema)` to create a new message.
+ */
+export const CreateTeamRequestSchema: GenMessage<CreateTeamRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 17);
+
+/**
+ * @generated from message paigasus.iam.v1.CreateTeamResponse
+ */
+export type CreateTeamResponse = Message<"paigasus.iam.v1.CreateTeamResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Team team = 1;
+   */
+  team?: Team | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.CreateTeamResponse.
+ * Use `create(CreateTeamResponseSchema)` to create a new message.
+ */
+export const CreateTeamResponseSchema: GenMessage<CreateTeamResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 18);
+
+/**
+ * @generated from message paigasus.iam.v1.GetTeamRequest
+ */
+export type GetTeamRequest = Message<"paigasus.iam.v1.GetTeamRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.GetTeamRequest.
+ * Use `create(GetTeamRequestSchema)` to create a new message.
+ */
+export const GetTeamRequestSchema: GenMessage<GetTeamRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 19);
+
+/**
+ * @generated from message paigasus.iam.v1.GetTeamResponse
+ */
+export type GetTeamResponse = Message<"paigasus.iam.v1.GetTeamResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Team team = 1;
+   */
+  team?: Team | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.GetTeamResponse.
+ * Use `create(GetTeamResponseSchema)` to create a new message.
+ */
+export const GetTeamResponseSchema: GenMessage<GetTeamResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 20);
+
+/**
+ * @generated from message paigasus.iam.v1.ListTeamsRequest
+ */
+export type ListTeamsRequest = Message<"paigasus.iam.v1.ListTeamsRequest"> & {
+  /**
+   * @generated from field: string org_prn = 1;
+   */
+  orgPrn: string;
+
+  /**
+   * @generated from field: uint32 limit = 2;
+   */
+  limit: number;
+
+  /**
+   * @generated from field: uint64 offset = 3;
+   */
+  offset: bigint;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListTeamsRequest.
+ * Use `create(ListTeamsRequestSchema)` to create a new message.
+ */
+export const ListTeamsRequestSchema: GenMessage<ListTeamsRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 21);
+
+/**
+ * @generated from message paigasus.iam.v1.ListTeamsResponse
+ */
+export type ListTeamsResponse = Message<"paigasus.iam.v1.ListTeamsResponse"> & {
+  /**
+   * @generated from field: repeated paigasus.iam.v1.Team teams = 1;
+   */
+  teams: Team[];
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListTeamsResponse.
+ * Use `create(ListTeamsResponseSchema)` to create a new message.
+ */
+export const ListTeamsResponseSchema: GenMessage<ListTeamsResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 22);
+
+/**
+ * @generated from message paigasus.iam.v1.RenameTeamRequest
+ */
+export type RenameTeamRequest = Message<"paigasus.iam.v1.RenameTeamRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+
+  /**
+   * @generated from field: optional string new_slug = 2;
+   */
+  newSlug?: string | undefined;
+
+  /**
+   * @generated from field: optional string new_name = 3;
+   */
+  newName?: string | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RenameTeamRequest.
+ * Use `create(RenameTeamRequestSchema)` to create a new message.
+ */
+export const RenameTeamRequestSchema: GenMessage<RenameTeamRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 23);
+
+/**
+ * @generated from message paigasus.iam.v1.RenameTeamResponse
+ */
+export type RenameTeamResponse = Message<"paigasus.iam.v1.RenameTeamResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Team team = 1;
+   */
+  team?: Team | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RenameTeamResponse.
+ * Use `create(RenameTeamResponseSchema)` to create a new message.
+ */
+export const RenameTeamResponseSchema: GenMessage<RenameTeamResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 24);
+
+/**
+ * @generated from message paigasus.iam.v1.ArchiveTeamRequest
+ */
+export type ArchiveTeamRequest = Message<"paigasus.iam.v1.ArchiveTeamRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ArchiveTeamRequest.
+ * Use `create(ArchiveTeamRequestSchema)` to create a new message.
+ */
+export const ArchiveTeamRequestSchema: GenMessage<ArchiveTeamRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 25);
+
+/**
+ * @generated from message paigasus.iam.v1.ArchiveTeamResponse
+ */
+export type ArchiveTeamResponse = Message<"paigasus.iam.v1.ArchiveTeamResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Team team = 1;
+   */
+  team?: Team | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ArchiveTeamResponse.
+ * Use `create(ArchiveTeamResponseSchema)` to create a new message.
+ */
+export const ArchiveTeamResponseSchema: GenMessage<ArchiveTeamResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 26);
+
+/**
+ * @generated from message paigasus.iam.v1.RestoreTeamRequest
+ */
+export type RestoreTeamRequest = Message<"paigasus.iam.v1.RestoreTeamRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RestoreTeamRequest.
+ * Use `create(RestoreTeamRequestSchema)` to create a new message.
+ */
+export const RestoreTeamRequestSchema: GenMessage<RestoreTeamRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 27);
+
+/**
+ * @generated from message paigasus.iam.v1.RestoreTeamResponse
+ */
+export type RestoreTeamResponse = Message<"paigasus.iam.v1.RestoreTeamResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Team team = 1;
+   */
+  team?: Team | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RestoreTeamResponse.
+ * Use `create(RestoreTeamResponseSchema)` to create a new message.
+ */
+export const RestoreTeamResponseSchema: GenMessage<RestoreTeamResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 28);
+
+/**
+ * @generated from message paigasus.iam.v1.CreateProjectRequest
+ */
+export type CreateProjectRequest = Message<"paigasus.iam.v1.CreateProjectRequest"> & {
+  /**
+   * @generated from field: string team_prn = 1;
+   */
+  teamPrn: string;
+
+  /**
+   * @generated from field: string slug = 2;
+   */
+  slug: string;
+
+  /**
+   * @generated from field: string name = 3;
+   */
+  name: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.CreateProjectRequest.
+ * Use `create(CreateProjectRequestSchema)` to create a new message.
+ */
+export const CreateProjectRequestSchema: GenMessage<CreateProjectRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 29);
+
+/**
+ * @generated from message paigasus.iam.v1.CreateProjectResponse
+ */
+export type CreateProjectResponse = Message<"paigasus.iam.v1.CreateProjectResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Project project = 1;
+   */
+  project?: Project | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.CreateProjectResponse.
+ * Use `create(CreateProjectResponseSchema)` to create a new message.
+ */
+export const CreateProjectResponseSchema: GenMessage<CreateProjectResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 30);
+
+/**
+ * @generated from message paigasus.iam.v1.GetProjectRequest
+ */
+export type GetProjectRequest = Message<"paigasus.iam.v1.GetProjectRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.GetProjectRequest.
+ * Use `create(GetProjectRequestSchema)` to create a new message.
+ */
+export const GetProjectRequestSchema: GenMessage<GetProjectRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 31);
+
+/**
+ * @generated from message paigasus.iam.v1.GetProjectResponse
+ */
+export type GetProjectResponse = Message<"paigasus.iam.v1.GetProjectResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Project project = 1;
+   */
+  project?: Project | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.GetProjectResponse.
+ * Use `create(GetProjectResponseSchema)` to create a new message.
+ */
+export const GetProjectResponseSchema: GenMessage<GetProjectResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 32);
+
+/**
+ * @generated from message paigasus.iam.v1.ListProjectsRequest
+ */
+export type ListProjectsRequest = Message<"paigasus.iam.v1.ListProjectsRequest"> & {
+  /**
+   * @generated from field: string team_prn = 1;
+   */
+  teamPrn: string;
+
+  /**
+   * @generated from field: uint32 limit = 2;
+   */
+  limit: number;
+
+  /**
+   * @generated from field: uint64 offset = 3;
+   */
+  offset: bigint;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListProjectsRequest.
+ * Use `create(ListProjectsRequestSchema)` to create a new message.
+ */
+export const ListProjectsRequestSchema: GenMessage<ListProjectsRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 33);
+
+/**
+ * @generated from message paigasus.iam.v1.ListProjectsResponse
+ */
+export type ListProjectsResponse = Message<"paigasus.iam.v1.ListProjectsResponse"> & {
+  /**
+   * @generated from field: repeated paigasus.iam.v1.Project projects = 1;
+   */
+  projects: Project[];
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListProjectsResponse.
+ * Use `create(ListProjectsResponseSchema)` to create a new message.
+ */
+export const ListProjectsResponseSchema: GenMessage<ListProjectsResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 34);
+
+/**
+ * @generated from message paigasus.iam.v1.RenameProjectRequest
+ */
+export type RenameProjectRequest = Message<"paigasus.iam.v1.RenameProjectRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+
+  /**
+   * @generated from field: optional string new_slug = 2;
+   */
+  newSlug?: string | undefined;
+
+  /**
+   * @generated from field: optional string new_name = 3;
+   */
+  newName?: string | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RenameProjectRequest.
+ * Use `create(RenameProjectRequestSchema)` to create a new message.
+ */
+export const RenameProjectRequestSchema: GenMessage<RenameProjectRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 35);
+
+/**
+ * @generated from message paigasus.iam.v1.RenameProjectResponse
+ */
+export type RenameProjectResponse = Message<"paigasus.iam.v1.RenameProjectResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Project project = 1;
+   */
+  project?: Project | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RenameProjectResponse.
+ * Use `create(RenameProjectResponseSchema)` to create a new message.
+ */
+export const RenameProjectResponseSchema: GenMessage<RenameProjectResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 36);
+
+/**
+ * @generated from message paigasus.iam.v1.ArchiveProjectRequest
+ */
+export type ArchiveProjectRequest = Message<"paigasus.iam.v1.ArchiveProjectRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ArchiveProjectRequest.
+ * Use `create(ArchiveProjectRequestSchema)` to create a new message.
+ */
+export const ArchiveProjectRequestSchema: GenMessage<ArchiveProjectRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 37);
+
+/**
+ * @generated from message paigasus.iam.v1.ArchiveProjectResponse
+ */
+export type ArchiveProjectResponse = Message<"paigasus.iam.v1.ArchiveProjectResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Project project = 1;
+   */
+  project?: Project | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ArchiveProjectResponse.
+ * Use `create(ArchiveProjectResponseSchema)` to create a new message.
+ */
+export const ArchiveProjectResponseSchema: GenMessage<ArchiveProjectResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 38);
+
+/**
+ * @generated from message paigasus.iam.v1.RestoreProjectRequest
+ */
+export type RestoreProjectRequest = Message<"paigasus.iam.v1.RestoreProjectRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RestoreProjectRequest.
+ * Use `create(RestoreProjectRequestSchema)` to create a new message.
+ */
+export const RestoreProjectRequestSchema: GenMessage<RestoreProjectRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 39);
+
+/**
+ * @generated from message paigasus.iam.v1.RestoreProjectResponse
+ */
+export type RestoreProjectResponse = Message<"paigasus.iam.v1.RestoreProjectResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Project project = 1;
+   */
+  project?: Project | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RestoreProjectResponse.
+ * Use `create(RestoreProjectResponseSchema)` to create a new message.
+ */
+export const RestoreProjectResponseSchema: GenMessage<RestoreProjectResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 40);
+
+/**
+ * @generated from message paigasus.iam.v1.AttachMembershipRequest
+ */
+export type AttachMembershipRequest = Message<"paigasus.iam.v1.AttachMembershipRequest"> & {
+  /**
+   * @generated from field: string principal_prn = 1;
+   */
+  principalPrn: string;
+
+  /**
+   * @generated from field: string node_prn = 2;
+   */
+  nodePrn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.AttachMembershipRequest.
+ * Use `create(AttachMembershipRequestSchema)` to create a new message.
+ */
+export const AttachMembershipRequestSchema: GenMessage<AttachMembershipRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 41);
+
+/**
+ * @generated from message paigasus.iam.v1.AttachMembershipResponse
+ */
+export type AttachMembershipResponse = Message<"paigasus.iam.v1.AttachMembershipResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Membership membership = 1;
+   */
+  membership?: Membership | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.AttachMembershipResponse.
+ * Use `create(AttachMembershipResponseSchema)` to create a new message.
+ */
+export const AttachMembershipResponseSchema: GenMessage<AttachMembershipResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 42);
+
+/**
+ * Detaching an org membership cascades: the principal's team/project
+ * memberships within that same org are removed in the same transaction
+ * (spec §5.1 rule 5). Detaching a team/project membership removes only
+ * itself.
+ *
+ * @generated from message paigasus.iam.v1.DetachMembershipRequest
+ */
+export type DetachMembershipRequest = Message<"paigasus.iam.v1.DetachMembershipRequest"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.DetachMembershipRequest.
+ * Use `create(DetachMembershipRequestSchema)` to create a new message.
+ */
+export const DetachMembershipRequestSchema: GenMessage<DetachMembershipRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 43);
+
+/**
+ * @generated from message paigasus.iam.v1.DetachMembershipResponse
+ */
+export type DetachMembershipResponse = Message<"paigasus.iam.v1.DetachMembershipResponse"> & {
+};
+
+/**
+ * Describes the message paigasus.iam.v1.DetachMembershipResponse.
+ * Use `create(DetachMembershipResponseSchema)` to create a new message.
+ */
+export const DetachMembershipResponseSchema: GenMessage<DetachMembershipResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 44);
+
+/**
+ * @generated from message paigasus.iam.v1.ListMembershipsRequest
+ */
+export type ListMembershipsRequest = Message<"paigasus.iam.v1.ListMembershipsRequest"> & {
+  /**
+   * @generated from oneof paigasus.iam.v1.ListMembershipsRequest.filter
+   */
+  filter: {
+    /**
+     * @generated from field: string principal_prn = 1;
+     */
+    value: string;
+    case: "principalPrn";
+  } | {
+    /**
+     * @generated from field: string node_prn = 2;
+     */
+    value: string;
+    case: "nodePrn";
+  } | { case: undefined; value?: undefined };
+
+  /**
+   * @generated from field: uint32 limit = 3;
+   */
+  limit: number;
+
+  /**
+   * @generated from field: uint64 offset = 4;
+   */
+  offset: bigint;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListMembershipsRequest.
+ * Use `create(ListMembershipsRequestSchema)` to create a new message.
+ */
+export const ListMembershipsRequestSchema: GenMessage<ListMembershipsRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 45);
+
+/**
+ * @generated from message paigasus.iam.v1.ListMembershipsResponse
+ */
+export type ListMembershipsResponse = Message<"paigasus.iam.v1.ListMembershipsResponse"> & {
+  /**
+   * @generated from field: repeated paigasus.iam.v1.Membership memberships = 1;
+   */
+  memberships: Membership[];
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListMembershipsResponse.
+ * Use `create(ListMembershipsResponseSchema)` to create a new message.
+ */
+export const ListMembershipsResponseSchema: GenMessage<ListMembershipsResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 46);
+
+/**
+ * @generated from enum paigasus.iam.v1.NodeStatus
+ */
+export enum NodeStatus {
+  /**
+   * @generated from enum value: NODE_STATUS_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: NODE_STATUS_ACTIVE = 1;
+   */
+  ACTIVE = 1,
+
+  /**
+   * @generated from enum value: NODE_STATUS_ARCHIVED = 2;
+   */
+  ARCHIVED = 2,
+}
+
+/**
+ * Describes the enum paigasus.iam.v1.NodeStatus.
+ */
+export const NodeStatusSchema: GenEnum<NodeStatus> = /*@__PURE__*/
+  enumDesc(file_paigasus_iam_v1_iam, 0);
+
+/**
+ * @generated from service paigasus.iam.v1.TenancyService
+ */
+export const TenancyService: GenService<{
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.CreateOrganization
+   */
+  createOrganization: {
+    methodKind: "unary";
+    input: typeof CreateOrganizationRequestSchema;
+    output: typeof CreateOrganizationResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.GetOrganization
+   */
+  getOrganization: {
+    methodKind: "unary";
+    input: typeof GetOrganizationRequestSchema;
+    output: typeof GetOrganizationResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.ListOrganizations
+   */
+  listOrganizations: {
+    methodKind: "unary";
+    input: typeof ListOrganizationsRequestSchema;
+    output: typeof ListOrganizationsResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.RenameOrganization
+   */
+  renameOrganization: {
+    methodKind: "unary";
+    input: typeof RenameOrganizationRequestSchema;
+    output: typeof RenameOrganizationResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.ArchiveOrganization
+   */
+  archiveOrganization: {
+    methodKind: "unary";
+    input: typeof ArchiveOrganizationRequestSchema;
+    output: typeof ArchiveOrganizationResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.RestoreOrganization
+   */
+  restoreOrganization: {
+    methodKind: "unary";
+    input: typeof RestoreOrganizationRequestSchema;
+    output: typeof RestoreOrganizationResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.CreateTeam
+   */
+  createTeam: {
+    methodKind: "unary";
+    input: typeof CreateTeamRequestSchema;
+    output: typeof CreateTeamResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.GetTeam
+   */
+  getTeam: {
+    methodKind: "unary";
+    input: typeof GetTeamRequestSchema;
+    output: typeof GetTeamResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.ListTeams
+   */
+  listTeams: {
+    methodKind: "unary";
+    input: typeof ListTeamsRequestSchema;
+    output: typeof ListTeamsResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.RenameTeam
+   */
+  renameTeam: {
+    methodKind: "unary";
+    input: typeof RenameTeamRequestSchema;
+    output: typeof RenameTeamResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.ArchiveTeam
+   */
+  archiveTeam: {
+    methodKind: "unary";
+    input: typeof ArchiveTeamRequestSchema;
+    output: typeof ArchiveTeamResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.RestoreTeam
+   */
+  restoreTeam: {
+    methodKind: "unary";
+    input: typeof RestoreTeamRequestSchema;
+    output: typeof RestoreTeamResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.CreateProject
+   */
+  createProject: {
+    methodKind: "unary";
+    input: typeof CreateProjectRequestSchema;
+    output: typeof CreateProjectResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.GetProject
+   */
+  getProject: {
+    methodKind: "unary";
+    input: typeof GetProjectRequestSchema;
+    output: typeof GetProjectResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.ListProjects
+   */
+  listProjects: {
+    methodKind: "unary";
+    input: typeof ListProjectsRequestSchema;
+    output: typeof ListProjectsResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.RenameProject
+   */
+  renameProject: {
+    methodKind: "unary";
+    input: typeof RenameProjectRequestSchema;
+    output: typeof RenameProjectResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.ArchiveProject
+   */
+  archiveProject: {
+    methodKind: "unary";
+    input: typeof ArchiveProjectRequestSchema;
+    output: typeof ArchiveProjectResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.RestoreProject
+   */
+  restoreProject: {
+    methodKind: "unary";
+    input: typeof RestoreProjectRequestSchema;
+    output: typeof RestoreProjectResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.AttachMembership
+   */
+  attachMembership: {
+    methodKind: "unary";
+    input: typeof AttachMembershipRequestSchema;
+    output: typeof AttachMembershipResponseSchema;
+  },
+  /**
+   * Detaching an ORG membership also removes that principal's team/project
+   * memberships in that same org (cascade detach, spec §5.1 rule 5).
+   *
+   * @generated from rpc paigasus.iam.v1.TenancyService.DetachMembership
+   */
+  detachMembership: {
+    methodKind: "unary";
+    input: typeof DetachMembershipRequestSchema;
+    output: typeof DetachMembershipResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.TenancyService.ListMemberships
+   */
+  listMemberships: {
+    methodKind: "unary";
+    input: typeof ListMembershipsRequestSchema;
+    output: typeof ListMembershipsResponseSchema;
+  },
+}> = /*@__PURE__*/
+  serviceDesc(file_paigasus_iam_v1_iam, 0);
 

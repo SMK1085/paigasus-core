@@ -4,19 +4,60 @@
 //! use cases depend on abstractions, not on SeaORM/axum (ADR-0005).
 
 use crate::principal::Principal;
+use crate::tenancy::{Membership, NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId, TenancyNodeRef};
 use crate::user::User;
 use crate::value::PrincipalId;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
+
+/// Kinds of uniqueness conflicts a repository can report (D7: never surface raw backend text).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictKind {
+    SlugTaken,
+    DuplicateMembership,
+    EmailTaken,
+    Other,
+}
+
+/// Kinds of precondition failures a repository can report (in-txn guards, D8/D10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreconditionKind {
+    ParentArchived,
+    NodeArchived,
+    MissingOrgMembership,
+}
 
 /// Persistence errors, source-preserving. The adapter maps its backend error (e.g. SeaORM
 /// `DbErr`) into these; the core never imports the backend.
 #[derive(Debug, thiserror::Error)]
 pub enum RepositoryError {
-    #[error("conflict: {0}")]
-    Conflict(String),
-    #[error(transparent)]
+    #[error("conflict: {0:?}")]
+    Conflict(ConflictKind),
+    #[error("not found")]
+    NotFound,
+    #[error("prn does not match stored resource")]
+    PrnMismatch,
+    #[error("precondition failed: {0:?}")]
+    Precondition(PreconditionKind),
+    #[error("backend error")]
     Backend(#[from] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// A tenancy node together with its effective status (own status folded with ancestors, D1/D10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeView<T> {
+    pub node: T,
+    pub effective_status: NodeStatus,
+}
+
+/// A persisted membership row (D5: plain UUIDv7 id, no PRN).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipRecord {
+    pub id: Uuid,
+    pub principal_prn: String,
+    pub node_prn: String,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Persistence port for user-principals.
@@ -26,9 +67,70 @@ pub trait PrincipalRepository: Send + Sync {
     async fn find_user(&self, id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError>;
 }
 
-/// Mints new principal identities (UUIDv7 + PRN). Impure (clock + entropy) — hence a port.
+/// Persistence port for organizations.
+#[async_trait]
+pub trait OrganizationRepository: Send + Sync {
+    /// One transaction: org + auto-provisioned default team (ADR-0014).
+    async fn create(&self, org: &Organization, default_team: &Team) -> Result<(), RepositoryError>;
+    async fn find(&self, id: Uuid) -> Result<Option<NodeView<Organization>>, RepositoryError>;
+    /// ORDER BY created_at, id (rule 9).
+    async fn list(&self, limit: u64, offset: u64) -> Result<Vec<NodeView<Organization>>, RepositoryError>;
+    /// In-txn guard: NotFound if missing; Precondition(NodeArchived) if own status archived.
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Organization>, RepositoryError>;
+    /// Sets own status (D10). Idempotent: no-op (updated_at untouched) when already `status`.
+    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Organization>, RepositoryError>;
+}
+
+/// Persistence port for teams.
+#[async_trait]
+pub trait TeamRepository: Send + Sync {
+    /// In-txn guards (D8): org row locked FOR SHARE; NotFound if org missing;
+    /// Precondition(ParentArchived) if org effectively archived.
+    async fn create(&self, team: &Team) -> Result<(), RepositoryError>;
+    async fn find(&self, id: Uuid) -> Result<Option<NodeView<Team>>, RepositoryError>;
+    async fn list_by_org(&self, org: Uuid, limit: u64, offset: u64) -> Result<Vec<NodeView<Team>>, RepositoryError>;
+    /// Guard: Precondition(NodeArchived) if team is EFFECTIVELY archived (own or org).
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Team>, RepositoryError>;
+    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Team>, RepositoryError>;
+}
+
+/// Persistence port for projects.
+#[async_trait]
+pub trait ProjectRepository: Send + Sync {
+    /// In-txn guards: team+org locked FOR SHARE; NotFound if team missing; Precondition(ParentArchived)
+    /// if team effectively archived; Backend if project.org != team.org (belt-and-braces, composite FK).
+    async fn create(&self, project: &Project) -> Result<(), RepositoryError>;
+    async fn find(&self, id: Uuid) -> Result<Option<NodeView<Project>>, RepositoryError>;
+    async fn list_by_team(&self, team: Uuid, limit: u64, offset: u64) -> Result<Vec<NodeView<Project>>, RepositoryError>;
+    async fn rename(&self, id: Uuid, new_slug: Option<&Slug>, new_name: Option<&str>, now: DateTime<Utc>) -> Result<NodeView<Project>, RepositoryError>;
+    async fn set_status(&self, id: Uuid, status: NodeStatus, now: DateTime<Utc>) -> Result<NodeView<Project>, RepositoryError>;
+}
+
+/// Persistence port for memberships.
+#[async_trait]
+pub trait MembershipRepository: Send + Sync {
+    /// One transaction, all guards in-txn with FOR SHARE locks (D8, rule 8):
+    /// principal exists + stored-prn byte-match (else NotFound / PrnMismatch);
+    /// node exists + stored-prn byte-match; node effectively active (else Precondition(NodeArchived));
+    /// team/project targets: org membership exists, locked (else Precondition(MissingOrgMembership));
+    /// duplicate -> Conflict(DuplicateMembership).
+    async fn attach(&self, membership: &Membership) -> Result<MembershipRecord, RepositoryError>;
+    async fn find(&self, id: Uuid) -> Result<Option<MembershipRecord>, RepositoryError>;
+    /// NotFound if missing. Org memberships cascade: also deletes the principal's
+    /// team/project memberships in that org, one transaction (rule 5).
+    async fn detach(&self, id: Uuid) -> Result<(), RepositoryError>;
+    async fn list_by_principal(&self, principal: Uuid, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
+    /// Resolves node by uuid; PrnMismatch if the supplied ref's canonical != stored prn; NotFound if absent.
+    async fn list_by_node(&self, node: &TenancyNodeRef, limit: u64, offset: u64) -> Result<Vec<MembershipRecord>, RepositoryError>;
+}
+
+/// Mints new identities (UUIDv7 + PRN). Impure (clock + entropy) — hence a port.
 pub trait IdGenerator: Send + Sync {
     fn new_principal_id(&self) -> PrincipalId;
+    fn new_organization_id(&self) -> OrganizationId;
+    fn new_team_id(&self, org: Uuid) -> TeamId;
+    fn new_project_id(&self, org: Uuid) -> ProjectId;
+    fn new_membership_id(&self) -> Uuid;
 }
 
 /// A source of the current time, truncated to microseconds so values round-trip through
@@ -41,9 +143,9 @@ pub trait Clock: Send + Sync {
 mod tests {
     use super::*;
 
-    // Compile-time proof the repository port is object-safe (injected as a trait object).
+    // Compile-time proof the repository ports are object-safe (injected as trait objects).
     #[allow(dead_code)]
-    fn assert_object_safe(_: &dyn PrincipalRepository) {}
+    fn assert_object_safe(_: &dyn PrincipalRepository, _: &dyn OrganizationRepository, _: &dyn TeamRepository, _: &dyn ProjectRepository, _: &dyn MembershipRepository) {}
 
     #[test]
     fn repository_error_wraps_a_source_error() {

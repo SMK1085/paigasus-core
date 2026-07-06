@@ -28,9 +28,8 @@ pub mod paigasus {
         pub mod v1 {
             // Generated code is excluded from the strict lint gate.
             #![allow(clippy::all, warnings)]
-            // Only the prost file: iam.proto (M0) declares no service, so
-            // neoeinstein-tonic emits no `.tonic.rs` for this package.
             include!("generated/paigasus/iam/v1/paigasus.iam.v1.rs");
+            include!("generated/paigasus/iam/v1/paigasus.iam.v1.tonic.rs");
         }
     }
 }

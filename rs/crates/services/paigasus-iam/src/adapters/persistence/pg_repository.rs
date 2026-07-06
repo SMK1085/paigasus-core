@@ -4,11 +4,16 @@
 //! backend errors into the core's `RepositoryError`.
 
 use super::entities::{principal, user};
+use super::map_err;
 use async_trait::async_trait;
 use paigasus_iam_core::{Email, Principal, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, RepositoryError, User};
 use paigasus_kernel::Prn;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, DbErr, EntityTrait, Set, SqlErr, TransactionTrait};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 
+// `Clone` lets the composition root (`http::AppState::new`) hold a repo handle inside a
+// `#[derive(Clone)] CreateUser` — cheap, `DatabaseConnection` clones an `Arc`-backed pool
+// handle, not a connection.
+#[derive(Clone)]
 pub struct PgPrincipalRepository {
     db: DatabaseConnection,
 }
@@ -17,15 +22,6 @@ impl PgPrincipalRepository {
     #[must_use]
     pub fn new(db: DatabaseConnection) -> Self {
         PgPrincipalRepository { db }
-    }
-}
-
-fn map_err(e: DbErr) -> RepositoryError {
-    match e.sql_err() {
-        // The raw Postgres message embeds `DETAIL: Key (email)=(...)` — PII. Return a
-        // generic message so callers/logs never surface the offending value.
-        Some(SqlErr::UniqueConstraintViolation(_)) => RepositoryError::Conflict("unique constraint violated".to_string()),
-        _ => RepositoryError::Backend(Box::new(e)),
     }
 }
 

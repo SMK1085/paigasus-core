@@ -3,16 +3,701 @@
 # plugin: python-betterproto2
 # This file has been @generated
 
-__all__ = ("ServiceInfo",)
+__all__ = (
+    "ArchiveOrganizationRequest",
+    "ArchiveOrganizationResponse",
+    "ArchiveProjectRequest",
+    "ArchiveProjectResponse",
+    "ArchiveTeamRequest",
+    "ArchiveTeamResponse",
+    "AttachMembershipRequest",
+    "AttachMembershipResponse",
+    "CreateOrganizationRequest",
+    "CreateOrganizationResponse",
+    "CreateProjectRequest",
+    "CreateProjectResponse",
+    "CreateTeamRequest",
+    "CreateTeamResponse",
+    "DetachMembershipRequest",
+    "DetachMembershipResponse",
+    "GetOrganizationRequest",
+    "GetOrganizationResponse",
+    "GetProjectRequest",
+    "GetProjectResponse",
+    "GetTeamRequest",
+    "GetTeamResponse",
+    "ListMembershipsRequest",
+    "ListMembershipsResponse",
+    "ListOrganizationsRequest",
+    "ListOrganizationsResponse",
+    "ListProjectsRequest",
+    "ListProjectsResponse",
+    "ListTeamsRequest",
+    "ListTeamsResponse",
+    "Membership",
+    "NodeStatus",
+    "Organization",
+    "Project",
+    "RenameOrganizationRequest",
+    "RenameOrganizationResponse",
+    "RenameProjectRequest",
+    "RenameProjectResponse",
+    "RenameTeamRequest",
+    "RenameTeamResponse",
+    "RestoreOrganizationRequest",
+    "RestoreOrganizationResponse",
+    "RestoreProjectRequest",
+    "RestoreProjectResponse",
+    "RestoreTeamRequest",
+    "RestoreTeamResponse",
+    "ServiceInfo",
+    "Team",
+    "TenancyServiceStub",
+)
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import betterproto2
+from betterproto2 import grpclib as betterproto2_grpclib
 
 from ....message_pool import default_message_pool
 
+if TYPE_CHECKING:
+    from betterproto2.grpclib.grpclib_client import MetadataLike
+    from grpclib.metadata import Deadline
+
 _COMPILER_VERSION = "0.10.1"
 betterproto2.check_compiler_version(_COMPILER_VERSION)
+
+
+class NodeStatus(betterproto2.Enum):
+    UNSPECIFIED = 0
+
+    ACTIVE = 1
+
+    ARCHIVED = 2
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "NODE_STATUS_UNSPECIFIED",
+            1: "NODE_STATUS_ACTIVE",
+            2: "NODE_STATUS_ARCHIVED",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "NODE_STATUS_UNSPECIFIED": 0,
+            "NODE_STATUS_ACTIVE": 1,
+            "NODE_STATUS_ARCHIVED": 2,
+        }
+
+
+@dataclass(eq=False, repr=False)
+class ArchiveOrganizationRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ArchiveOrganizationRequest", ArchiveOrganizationRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ArchiveOrganizationResponse(betterproto2.Message):
+    organization: "Organization | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ArchiveOrganizationResponse", ArchiveOrganizationResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ArchiveProjectRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ArchiveProjectRequest", ArchiveProjectRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ArchiveProjectResponse(betterproto2.Message):
+    project: "Project | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ArchiveProjectResponse", ArchiveProjectResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ArchiveTeamRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ArchiveTeamRequest", ArchiveTeamRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ArchiveTeamResponse(betterproto2.Message):
+    team: "Team | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ArchiveTeamResponse", ArchiveTeamResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class AttachMembershipRequest(betterproto2.Message):
+    principal_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    node_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "AttachMembershipRequest", AttachMembershipRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class AttachMembershipResponse(betterproto2.Message):
+    membership: "Membership | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "AttachMembershipResponse", AttachMembershipResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateOrganizationRequest(betterproto2.Message):
+    slug: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    name: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CreateOrganizationRequest", CreateOrganizationRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateOrganizationResponse(betterproto2.Message):
+    organization: "Organization | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+    default_team: "Team | None" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CreateOrganizationResponse", CreateOrganizationResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateProjectRequest(betterproto2.Message):
+    team_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    slug: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    name: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CreateProjectRequest", CreateProjectRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateProjectResponse(betterproto2.Message):
+    project: "Project | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CreateProjectResponse", CreateProjectResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateTeamRequest(betterproto2.Message):
+    org_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    slug: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    name: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CreateTeamRequest", CreateTeamRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateTeamResponse(betterproto2.Message):
+    team: "Team | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CreateTeamResponse", CreateTeamResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class DetachMembershipRequest(betterproto2.Message):
+    """
+    Detaching an org membership cascades: the principal's team/project
+    memberships within that same org are removed in the same transaction
+    (spec §5.1 rule 5). Detaching a team/project membership removes only
+    itself.
+    """
+
+    id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "DetachMembershipRequest", DetachMembershipRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class DetachMembershipResponse(betterproto2.Message):
+    pass
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "DetachMembershipResponse", DetachMembershipResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetOrganizationRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GetOrganizationRequest", GetOrganizationRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetOrganizationResponse(betterproto2.Message):
+    organization: "Organization | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GetOrganizationResponse", GetOrganizationResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetProjectRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GetProjectRequest", GetProjectRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetProjectResponse(betterproto2.Message):
+    project: "Project | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GetProjectResponse", GetProjectResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetTeamRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GetTeamRequest", GetTeamRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetTeamResponse(betterproto2.Message):
+    team: "Team | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GetTeamResponse", GetTeamResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListMembershipsRequest(betterproto2.Message):
+    """
+
+
+    Oneofs:
+        - filter:
+    """
+
+    principal_prn: "str | None" = betterproto2.field(
+        1, betterproto2.TYPE_STRING, optional=True, group="filter"
+    )
+
+    node_prn: "str | None" = betterproto2.field(
+        2, betterproto2.TYPE_STRING, optional=True, group="filter"
+    )
+
+    limit: "int" = betterproto2.field(3, betterproto2.TYPE_UINT32)
+
+    offset: "int" = betterproto2.field(4, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListMembershipsRequest", ListMembershipsRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListMembershipsResponse(betterproto2.Message):
+    memberships: "list[Membership]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListMembershipsResponse", ListMembershipsResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListOrganizationsRequest(betterproto2.Message):
+    limit: "int" = betterproto2.field(1, betterproto2.TYPE_UINT32)
+
+    offset: "int" = betterproto2.field(2, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListOrganizationsRequest", ListOrganizationsRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListOrganizationsResponse(betterproto2.Message):
+    organizations: "list[Organization]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListOrganizationsResponse", ListOrganizationsResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListProjectsRequest(betterproto2.Message):
+    team_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    limit: "int" = betterproto2.field(2, betterproto2.TYPE_UINT32)
+
+    offset: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListProjectsRequest", ListProjectsRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListProjectsResponse(betterproto2.Message):
+    projects: "list[Project]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListProjectsResponse", ListProjectsResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListTeamsRequest(betterproto2.Message):
+    org_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    limit: "int" = betterproto2.field(2, betterproto2.TYPE_UINT32)
+
+    offset: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListTeamsRequest", ListTeamsRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListTeamsResponse(betterproto2.Message):
+    teams: "list[Team]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListTeamsResponse", ListTeamsResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class Membership(betterproto2.Message):
+    id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    principal_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    node_prn: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    audit: "__common__v1__.AuditMetadata | None" = betterproto2.field(
+        4, betterproto2.TYPE_MESSAGE, optional=True
+    )
+    """
+    modified_at == created_at (immutable)
+    """
+
+
+default_message_pool.register_message("paigasus.iam.v1", "Membership", Membership)
+
+
+@dataclass(eq=False, repr=False)
+class Organization(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    slug: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    name: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    status: "NodeStatus" = betterproto2.field(
+        4, betterproto2.TYPE_ENUM, default_factory=lambda: NodeStatus(0)
+    )
+
+    effective_status: "NodeStatus" = betterproto2.field(
+        5, betterproto2.TYPE_ENUM, default_factory=lambda: NodeStatus(0)
+    )
+
+    audit: "__common__v1__.AuditMetadata | None" = betterproto2.field(
+        6, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message("paigasus.iam.v1", "Organization", Organization)
+
+
+@dataclass(eq=False, repr=False)
+class Project(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    team_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    org_prn: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    slug: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    name: "str" = betterproto2.field(5, betterproto2.TYPE_STRING)
+
+    status: "NodeStatus" = betterproto2.field(
+        6, betterproto2.TYPE_ENUM, default_factory=lambda: NodeStatus(0)
+    )
+
+    effective_status: "NodeStatus" = betterproto2.field(
+        7, betterproto2.TYPE_ENUM, default_factory=lambda: NodeStatus(0)
+    )
+
+    audit: "__common__v1__.AuditMetadata | None" = betterproto2.field(
+        8, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message("paigasus.iam.v1", "Project", Project)
+
+
+@dataclass(eq=False, repr=False)
+class RenameOrganizationRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    new_slug: "str | None" = betterproto2.field(
+        2, betterproto2.TYPE_STRING, optional=True
+    )
+
+    new_name: "str | None" = betterproto2.field(
+        3, betterproto2.TYPE_STRING, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RenameOrganizationRequest", RenameOrganizationRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class RenameOrganizationResponse(betterproto2.Message):
+    organization: "Organization | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RenameOrganizationResponse", RenameOrganizationResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class RenameProjectRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    new_slug: "str | None" = betterproto2.field(
+        2, betterproto2.TYPE_STRING, optional=True
+    )
+
+    new_name: "str | None" = betterproto2.field(
+        3, betterproto2.TYPE_STRING, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RenameProjectRequest", RenameProjectRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class RenameProjectResponse(betterproto2.Message):
+    project: "Project | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RenameProjectResponse", RenameProjectResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class RenameTeamRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    new_slug: "str | None" = betterproto2.field(
+        2, betterproto2.TYPE_STRING, optional=True
+    )
+
+    new_name: "str | None" = betterproto2.field(
+        3, betterproto2.TYPE_STRING, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RenameTeamRequest", RenameTeamRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class RenameTeamResponse(betterproto2.Message):
+    team: "Team | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RenameTeamResponse", RenameTeamResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class RestoreOrganizationRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RestoreOrganizationRequest", RestoreOrganizationRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class RestoreOrganizationResponse(betterproto2.Message):
+    organization: "Organization | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RestoreOrganizationResponse", RestoreOrganizationResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class RestoreProjectRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RestoreProjectRequest", RestoreProjectRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class RestoreProjectResponse(betterproto2.Message):
+    project: "Project | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RestoreProjectResponse", RestoreProjectResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class RestoreTeamRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RestoreTeamRequest", RestoreTeamRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class RestoreTeamResponse(betterproto2.Message):
+    team: "Team | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RestoreTeamResponse", RestoreTeamResponse
+)
 
 
 @dataclass(eq=False, repr=False)
@@ -37,3 +722,416 @@ class ServiceInfo(betterproto2.Message):
 
 
 default_message_pool.register_message("paigasus.iam.v1", "ServiceInfo", ServiceInfo)
+
+
+@dataclass(eq=False, repr=False)
+class Team(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    org_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    slug: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    name: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    status: "NodeStatus" = betterproto2.field(
+        5, betterproto2.TYPE_ENUM, default_factory=lambda: NodeStatus(0)
+    )
+
+    effective_status: "NodeStatus" = betterproto2.field(
+        6, betterproto2.TYPE_ENUM, default_factory=lambda: NodeStatus(0)
+    )
+
+    audit: "__common__v1__.AuditMetadata | None" = betterproto2.field(
+        7, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message("paigasus.iam.v1", "Team", Team)
+
+
+class TenancyServiceStub(betterproto2_grpclib.ServiceStub):
+    async def create_organization(
+        self,
+        message: "CreateOrganizationRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "CreateOrganizationResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/CreateOrganization",
+            message,
+            CreateOrganizationResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def get_organization(
+        self,
+        message: "GetOrganizationRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "GetOrganizationResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/GetOrganization",
+            message,
+            GetOrganizationResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def list_organizations(
+        self,
+        message: "ListOrganizationsRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListOrganizationsResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/ListOrganizations",
+            message,
+            ListOrganizationsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def rename_organization(
+        self,
+        message: "RenameOrganizationRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "RenameOrganizationResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/RenameOrganization",
+            message,
+            RenameOrganizationResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def archive_organization(
+        self,
+        message: "ArchiveOrganizationRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ArchiveOrganizationResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/ArchiveOrganization",
+            message,
+            ArchiveOrganizationResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def restore_organization(
+        self,
+        message: "RestoreOrganizationRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "RestoreOrganizationResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/RestoreOrganization",
+            message,
+            RestoreOrganizationResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def create_team(
+        self,
+        message: "CreateTeamRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "CreateTeamResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/CreateTeam",
+            message,
+            CreateTeamResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def get_team(
+        self,
+        message: "GetTeamRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "GetTeamResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/GetTeam",
+            message,
+            GetTeamResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def list_teams(
+        self,
+        message: "ListTeamsRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListTeamsResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/ListTeams",
+            message,
+            ListTeamsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def rename_team(
+        self,
+        message: "RenameTeamRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "RenameTeamResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/RenameTeam",
+            message,
+            RenameTeamResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def archive_team(
+        self,
+        message: "ArchiveTeamRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ArchiveTeamResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/ArchiveTeam",
+            message,
+            ArchiveTeamResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def restore_team(
+        self,
+        message: "RestoreTeamRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "RestoreTeamResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/RestoreTeam",
+            message,
+            RestoreTeamResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def create_project(
+        self,
+        message: "CreateProjectRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "CreateProjectResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/CreateProject",
+            message,
+            CreateProjectResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def get_project(
+        self,
+        message: "GetProjectRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "GetProjectResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/GetProject",
+            message,
+            GetProjectResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def list_projects(
+        self,
+        message: "ListProjectsRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListProjectsResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/ListProjects",
+            message,
+            ListProjectsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def rename_project(
+        self,
+        message: "RenameProjectRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "RenameProjectResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/RenameProject",
+            message,
+            RenameProjectResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def archive_project(
+        self,
+        message: "ArchiveProjectRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ArchiveProjectResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/ArchiveProject",
+            message,
+            ArchiveProjectResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def restore_project(
+        self,
+        message: "RestoreProjectRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "RestoreProjectResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/RestoreProject",
+            message,
+            RestoreProjectResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def attach_membership(
+        self,
+        message: "AttachMembershipRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "AttachMembershipResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/AttachMembership",
+            message,
+            AttachMembershipResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def detach_membership(
+        self,
+        message: "DetachMembershipRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "DetachMembershipResponse":
+        """
+        Detaching an ORG membership also removes that principal's team/project
+        memberships in that same org (cascade detach, spec §5.1 rule 5).
+        """
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/DetachMembership",
+            message,
+            DetachMembershipResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def list_memberships(
+        self,
+        message: "ListMembershipsRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListMembershipsResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.TenancyService/ListMemberships",
+            message,
+            ListMembershipsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+
+from ...common import v1 as __common__v1__

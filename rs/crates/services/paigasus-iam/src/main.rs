@@ -19,6 +19,10 @@ async fn main() -> anyhow::Result<()> {
 
     let db = Database::connect(&config.database_url).await?;
     Migrator::up(&db, None).await?;
+    // Built once and cloned into each server task below (a cheap handle-clone: every
+    // per-aggregate service just wraps the same underlying connection pool) — HTTP and gRPC
+    // now share one `AppState` (Task 16, SMA-442).
+    let state = AppState::new(db);
 
     let request_timeout = Duration::from_secs(30);
     let (tx, rx) = tokio::sync::watch::channel(());
@@ -26,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
     {
         let mut rx = rx.clone();
-        let state = AppState { db: db.clone() };
+        let state = state.clone();
         let addr = config.http_addr;
         servers.spawn(async move {
             serve_http(addr, state, request_timeout, async move {
@@ -38,9 +42,10 @@ async fn main() -> anyhow::Result<()> {
     }
     {
         let mut rx = rx.clone();
+        let state = state.clone();
         let addr = config.grpc_addr;
         servers.spawn(async move {
-            grpc::serve(addr, request_timeout, async move {
+            grpc::serve(addr, state, request_timeout, async move {
                 let _ = rx.changed().await;
             })
             .await

@@ -5,45 +5,18 @@
 //! Runs against an ephemeral Postgres in Docker. In CI (`CI` env set) a missing Docker
 //! daemon is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note.
 
+mod support;
+
 use chrono::{SubsecRound, Utc};
+use paigasus_iam::adapters::persistence::PgPrincipalRepository;
 use paigasus_iam::adapters::persistence::entities::principal;
-use paigasus_iam::adapters::persistence::{Migrator, PgPrincipalRepository};
-use paigasus_iam_core::{Email, Principal, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, RepositoryError, User};
+use paigasus_iam_core::{ConflictKind, Email, Principal, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, RepositoryError, User};
 use paigasus_kernel::{Prn, mint_uuid7};
-use sea_orm::{Database, DatabaseConnection, EntityTrait};
-use sea_orm_migration::MigratorTrait;
-use testcontainers_modules::postgres::Postgres;
-use testcontainers_modules::testcontainers::ContainerAsync;
-use testcontainers_modules::testcontainers::ImageExt;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
-
-/// Starts an ephemeral Postgres container, connects, and runs migrations.
-///
-/// Returns `None` when Docker is unavailable and `CI` is unset (local skip path). Panics
-/// when `CI` is set and Docker is unreachable — Docker must be present in CI.
-async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseConnection)> {
-    let node = match Postgres::default().with_tag("16-alpine").start().await {
-        Ok(n) => n,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker is required for the round-trip test in CI: {e}");
-            }
-            eprintln!("skipping round-trip: Docker unavailable ({e})");
-            return None;
-        }
-    };
-
-    let port = node.get_host_port_ipv4(5432).await.unwrap();
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let db = Database::connect(&url).await.unwrap();
-    Migrator::up(&db, None).await.unwrap();
-
-    Some((node, db))
-}
+use sea_orm::EntityTrait;
 
 #[tokio::test]
 async fn principal_user_round_trips_through_postgres() {
-    let Some((_node, db)) = start_migrated_postgres().await else {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
 
@@ -66,7 +39,7 @@ async fn principal_user_round_trips_through_postgres() {
 /// insert must roll back the first, leaving no orphaned `principal` row.
 #[tokio::test]
 async fn create_user_rolls_back_principal_on_duplicate_email() {
-    let Some((_node, db)) = start_migrated_postgres().await else {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
 
@@ -90,7 +63,10 @@ async fn create_user_rolls_back_principal_on_duplicate_email() {
     let second_user = User::new(second_id.clone(), Email::parse("dupe@example.com").unwrap(), "Second User".into(), None, None, now, now);
 
     let result = repo.create_user(&second_principal, &second_user).await;
-    assert!(matches!(result, Err(RepositoryError::Conflict(_))), "expected Conflict, got {result:?}");
+    assert!(
+        matches!(result, Err(RepositoryError::Conflict(ConflictKind::EmailTaken))),
+        "expected Conflict(EmailTaken), got {result:?}"
+    );
 
     // The second principal must NOT be orphaned: the transaction rolled back its insert.
     // `find_user` alone is a weak check (it returns `None` if EITHER row is missing), so also

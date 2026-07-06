@@ -2,13 +2,9 @@
 
 //! `CreateUser` use case: mint an identity, build a `User` principal, persist it.
 
-// Nothing in `main.rs` invokes this use case yet — the composition root (wiring a real
-// `PrincipalRepository` adapter behind an HTTP/gRPC handler) lands in Task 11. Until then
-// it's exercised only via the `#[cfg(test)]` fakes below; same reasoning as `config::load`
-// (Task 5).
-#![allow(dead_code)]
-
 use paigasus_iam_core::{Clock, Email, IdGenerator, Principal, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, RepositoryError, User};
+
+use crate::application::error::TenancyError;
 
 /// Input to create a user principal.
 #[derive(Debug, Clone)]
@@ -27,6 +23,20 @@ pub enum CreateUserError {
     Repository(#[from] RepositoryError),
 }
 
+/// Lets the `/v1/users` handler use `?` against `ApiError` (which requires
+/// `Into<TenancyError>`) the same way the tenancy-service handlers do.
+impl From<CreateUserError> for TenancyError {
+    fn from(err: CreateUserError) -> Self {
+        match err {
+            CreateUserError::InvalidEmail(e) => TenancyError::InvalidEmail(e),
+            CreateUserError::Repository(r) => r.into(),
+        }
+    }
+}
+
+// `Clone` lets the composition root (`http::AppState`, Task 14) hold a `UserSvc` handle
+// inside its own `#[derive(Clone)] AppState`, mirroring the tenancy services' shape.
+#[derive(Clone)]
 pub struct CreateUser<R, I, C> {
     repo: R,
     id_gen: I,
@@ -61,6 +71,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use chrono::{DateTime, TimeZone, Utc};
+    use paigasus_iam_core::{ConflictKind, OrganizationId, ProjectId, TeamId};
     use paigasus_kernel::Prn;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -76,7 +87,9 @@ mod tests {
         async fn create_user(&self, p: &Principal, u: &User) -> Result<(), RepositoryError> {
             let mut rows = self.rows.lock().unwrap();
             if rows.contains_key(&p.id.uuid()) {
-                return Err(RepositoryError::Conflict("duplicate principal".into()));
+                // A duplicate principal id is a UUIDv7 collision, not a genuine business
+                // conflict — `conflict_kind` maps that case to `Other` (see pg_repository.rs).
+                return Err(RepositoryError::Conflict(ConflictKind::Other));
             }
             rows.insert(p.id.uuid(), (p.clone(), u.clone()));
             Ok(())
@@ -104,6 +117,18 @@ mod tests {
     impl IdGenerator for FixedIdGenerator {
         fn new_principal_id(&self) -> PrincipalId {
             PrincipalId::from_prn(Prn::build("iam", "", None, "principal", self.0).unwrap())
+        }
+        fn new_organization_id(&self) -> OrganizationId {
+            OrganizationId::from_uuid(self.0)
+        }
+        fn new_team_id(&self, org: Uuid) -> TeamId {
+            TeamId::from_parts(org, self.0)
+        }
+        fn new_project_id(&self, org: Uuid) -> ProjectId {
+            ProjectId::from_parts(org, self.0)
+        }
+        fn new_membership_id(&self) -> Uuid {
+            self.0
         }
     }
 
