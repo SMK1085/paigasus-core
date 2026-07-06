@@ -114,7 +114,7 @@ impl AppState {
                 JwksProvider::new(fetcher, InMemoryJwksCache::new(), SystemClock, ttl, cooldown),
                 authn_cfg.leeway_secs,
                 authn_cfg.max_token_bytes,
-            ))),
+            )?)),
             JwksCacheBackend::Redis => {
                 // `IamConfig::validate` rejects a redis backend without a URL at boot; a
                 // `None` here is a wiring defect, not an operator error.
@@ -129,7 +129,7 @@ impl AppState {
                     JwksProvider::new(fetcher, cache, SystemClock, ttl, cooldown),
                     authn_cfg.leeway_secs,
                     authn_cfg.max_token_bytes,
-                )))
+                )?))
             }
         };
 

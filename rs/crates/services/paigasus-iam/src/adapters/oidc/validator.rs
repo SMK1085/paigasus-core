@@ -25,33 +25,63 @@ use crate::config::IssuerConfig;
 /// model as an `Algorithm` variant).
 const ALLOWED_ALGORITHMS: [Algorithm; 2] = [Algorithm::RS256, Algorithm::ES256];
 
+/// One configured issuer, parsed once at construction — replacing the per-request
+/// `Issuer::parse` the request path used to run after every issuer match.
+/// `jit_provisioning` is deliberately absent: the validator never reads it.
+struct ConfiguredIssuer {
+    issuer: Issuer,
+    audiences: Vec<String>,
+}
+
 /// The `Authenticator` v1 implementation: validates a presented bearer token against a
 /// fixed, operator-configured set of OIDC issuers (spec §4.1). Generic-by-value over its
 /// `JwksProvider`'s three collaborators (fetcher/cache/clock), mirroring the provider's own
 /// composition convention — the concrete adapters are chosen once at the composition root
 /// (Task 14), not boxed as trait objects here.
 pub struct OidcAuthenticator<F: JwksFetcher, K: JwksCache, C: Clock> {
-    issuers: Vec<IssuerConfig>,
+    issuers: Vec<ConfiguredIssuer>,
     provider: JwksProvider<F, K, C>,
     leeway_secs: u64,
     max_token_bytes: usize,
 }
 
 impl<F: JwksFetcher, K: JwksCache, C: Clock> OidcAuthenticator<F, K, C> {
-    pub fn new(issuers: Vec<IssuerConfig>, provider: JwksProvider<F, K, C>, leeway_secs: u64, max_token_bytes: usize) -> Self {
-        Self {
+    /// Parses every configured issuer once, up front. Fails when one doesn't parse —
+    /// `IamConfig::validate` already rejects that at boot, so an `Err` here is a wiring
+    /// defect, mirroring the `redis_url` guard in `AppState::new`.
+    pub fn new(issuers: Vec<IssuerConfig>, provider: JwksProvider<F, K, C>, leeway_secs: u64, max_token_bytes: usize) -> Result<Self, AuthnError> {
+        let issuers = issuers
+            .into_iter()
+            .map(|cfg| {
+                let issuer = Issuer::parse(&cfg.issuer).map_err(|e| AuthnError::Backend(e.to_string().into()))?;
+                Ok(ConfiguredIssuer { issuer, audiences: cfg.audiences })
+            })
+            .collect::<Result<Vec<_>, AuthnError>>()?;
+        Ok(Self {
             issuers,
             provider,
             leeway_secs,
             max_token_bytes,
-        }
+        })
     }
 
     /// Exact string match against the configured issuer list (spec §3.1's "no
-    /// normalization" rule applies here too — this is compared byte-for-byte, same as
-    /// `Issuer::parse`'s own equality semantics).
-    fn find_issuer_config(&self, iss: &str) -> Option<&IssuerConfig> {
-        self.issuers.iter().find(|cfg| cfg.issuer == iss)
+    /// normalization" rule applies here too — compared byte-for-byte, same as
+    /// `Issuer::parse`'s own equality semantics). Matching against the PARSED (trimmed)
+    /// form is equivalent to the raw config string because `IamConfig::validate` rejects
+    /// padded issuers before any authenticator is constructed.
+    fn find_issuer_config(&self, iss: &str) -> Option<&ConfiguredIssuer> {
+        self.issuers.iter().find(|cfg| cfg.issuer.as_str() == iss)
+    }
+}
+
+/// Manual, not derived: a `#[derive(Debug)]` here would require `F`/`K`/`C` (and in turn
+/// `JwksProvider`) to implement `Debug` too. This exists solely so
+/// `Result<Self, AuthnError>::unwrap_err()` type-checks in the constructor test below —
+/// `unwrap_err` requires the `Ok` side to be `Debug` even though it's never printed here.
+impl<F: JwksFetcher, K: JwksCache, C: Clock> std::fmt::Debug for OidcAuthenticator<F, K, C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcAuthenticator").finish_non_exhaustive()
     }
 }
 
@@ -155,7 +185,7 @@ impl<F: JwksFetcher, K: JwksCache, C: Clock> Authenticator for OidcAuthenticator
         // 3. Unverified `iss` read, then exact match against configured issuers.
         let unverified_iss = read_unverified_issuer(token)?;
         let issuer_config = self.find_issuer_config(&unverified_iss).ok_or_else(|| invalid(TokenDefect::IssuerNotConfigured))?;
-        let issuer = Issuer::parse(&issuer_config.issuer).map_err(|_| invalid(TokenDefect::IssuerNotConfigured))?;
+        let issuer = issuer_config.issuer.clone();
 
         // 4. JWKS lookup + kty/alg consistency.
         let jwk = self.provider.key_for(&issuer, &kid).await?;
@@ -321,7 +351,7 @@ mod tests {
 
     fn make_authenticator(fetcher: StubFetcher, issuers: Vec<IssuerConfig>, leeway_secs: u64, max_token_bytes: usize) -> OidcAuthenticator<StubFetcher, InMemoryJwksCache, SystemClock> {
         let provider = JwksProvider::new(fetcher, InMemoryJwksCache::new(), SystemClock, Duration::from_secs(3600), Duration::from_secs(30));
-        OidcAuthenticator::new(issuers, provider, leeway_secs, max_token_bytes)
+        OidcAuthenticator::new(issuers, provider, leeway_secs, max_token_bytes).expect("test issuers parse")
     }
 
     fn issuer_config(issuer: &str, audiences: &[&str]) -> IssuerConfig {
@@ -330,6 +360,17 @@ mod tests {
             audiences: audiences.iter().map(|a| (*a).to_string()).collect(),
             jit_provisioning: true,
         }
+    }
+
+    #[test]
+    fn unparseable_configured_issuer_fails_construction() {
+        // `IamConfig::validate` rejects this at boot, so an Err here is a wiring-defect
+        // guard — but the constructor must still refuse rather than defer to per-request
+        // parse failures (which this change removes).
+        let (_encoding_key, jwk, _kid) = es256_keypair();
+        let provider = JwksProvider::new(StubFetcher::new(jwk), InMemoryJwksCache::new(), SystemClock, Duration::from_secs(3600), Duration::from_secs(30));
+        let err = OidcAuthenticator::new(vec![issuer_config("http://not-https.example.com", &["aud"])], provider, 60, 16_384).unwrap_err();
+        assert!(matches!(err, AuthnError::Backend(_)));
     }
 
     #[tokio::test]
