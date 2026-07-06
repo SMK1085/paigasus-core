@@ -178,16 +178,33 @@ async fn protected_route_without_token_is_401() {
     };
     let (app, _idp) = support::app(db).await;
 
-    // No `Authorization` header on a protected tenancy route: the middleware short-circuits
-    // with 401 `invalid_token` + the RFC 6750 `WWW-Authenticate` challenge, before any
-    // handler runs (a missing header is treated exactly like a rejected token, D12).
+    // No `Authorization` header at all on a protected tenancy route: 401 with the same
+    // `invalid_token` body as any rejected credential, but a BARE `Bearer` challenge —
+    // RFC 6750 §3.1 says a request with no authentication information gets a challenge
+    // without an error attribute (H3). Only the header distinguishes the cases.
     let response = send_raw(&app, "POST", "/v1/organizations", Some(json!({ "slug": "acme", "name": "Acme" })), None).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let challenge = response.headers().get("www-authenticate").expect("WWW-Authenticate header").to_str().unwrap();
-    assert_eq!(challenge, "Bearer error=\"invalid_token\"");
+    assert_eq!(challenge, "Bearer");
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["error"]["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn present_but_malformed_authorization_keeps_error_challenge() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, _idp) = support::app(db).await;
+
+    // A PRESENT-but-unusable header (foreign scheme) is NOT "missing credentials": the
+    // client did attempt authentication, so the challenge keeps the error attribute
+    // (H3 differentiates only the fully-absent case).
+    let response = send_raw_parts(&app, "GET", "/v1/organizations", Some("Basic dXNlcjpwdw=="), None, None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let challenge = response.headers().get("www-authenticate").expect("WWW-Authenticate header").to_str().unwrap();
+    assert_eq!(challenge, "Bearer error=\"invalid_token\"");
 }
 
 #[tokio::test]
