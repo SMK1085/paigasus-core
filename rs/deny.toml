@@ -7,14 +7,6 @@ yanked = "deny"             # reject crates yanked from crates.io
 # vulnerability advisories are deny-by-default in v2 — no separate key needed
 unmaintained = "workspace"  # police crates we pull in, not every deep transitive (noise control)
 ignore = [
-  # RUSTSEC-2025-0111 ("Tarmageddon"): tokio-tar mis-parses PAX headers with a
-  # zero-size ustar header, letting a tar file smuggle content past `tokio_tar::Archive`.
-  # Reached only via testcontainers-modules (SMA-441 Task 10's Postgres round-trip test) —
-  # a dev-dependency, never in the shipped binary. testcontainers itself only calls the
-  # *writer* side (`tokio_tar::Builder`/`Header`, for `copy_to_container`); our test never
-  # calls that API either, so the affected reader (`Archive::new`/`ArchiveBuilder::new`) is
-  # unreached. No patched tokio-tar exists upstream (crate is archived/unmaintained).
-  "RUSTSEC-2025-0111",
   # RUSTSEC-2023-0071 ("Marvin Attack"): the `rsa` crate's PKCS#1v1.5 implementation leaks
   # PRIVATE-key timing information over the network during decrypt/sign. Pulled in
   # transitively via jsonwebtoken's `rust_crypto` CryptoProvider feature (SMA-443 Task 7's
@@ -39,9 +31,6 @@ allow = [                   # v2: anything NOT listed is denied
   "Unicode-DFS-2016",        # older Unicode data-files license (pre-3.0 unicode-* crates)
   "Zlib",
   "MPL-2.0",                # Apache-compatible weak file-level copyleft (review F4)
-  "BSL-1.0",                 # Boost Software License 1.0: permissive, OSI-approved; pulled
-                             # in unconditionally by xxhash-rust via redis (SMA-443 Task 8's
-                             # RedisJwksCache)
 ]
 confidence-threshold = 0.8
 unused-allowed-license = "allow"   # don't warn on allowlist entries no crate matches yet (near-empty lock)
@@ -51,6 +40,10 @@ exceptions = [
   # a permissive (non-copyleft) data license, not code-copyleft — which predates this repo's
   # allow-list. Covers both the legacy 0.26.x series and the 1.x it now re-exports from.
   { name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+  # xxhash-rust is BSL-1.0-only (Boost Software License 1.0: permissive, OSI-approved),
+  # pulled in unconditionally by redis (SMA-443 Task 8's RedisJwksCache). Scoped here
+  # rather than globally allowed so a future BSL-1.0 dependency is a conscious decision.
+  { name = "xxhash-rust", allow = ["BSL-1.0"] },
 ]
 
 [bans]
