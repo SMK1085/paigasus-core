@@ -66,6 +66,13 @@ futures = "0.3"
 # TLS baseline is rustls + json. If a service needs gzip/brotli/cookies, opt in PER CRATE —
 # do NOT set default-features = true here (it re-introduces openssl across the workspace).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# jsonwebtoken — JWT decode/verify + the `jwk` module (`JwkSet`/`Jwk`, `DecodingKey::from_jwk`)
+# for the OIDC adapter's JWKS cache (SMA-443 Task 6) and validator (Task 7). MIT-licensed.
+jsonwebtoken = "10"
+# base64 — already an indirect dep via jsonwebtoken; the validator (SMA-443 Task 7) uses it
+# directly (URL_SAFE_NO_PAD engine) to base64url-decode a token's payload segment for the
+# UNVERIFIED `iss` read that picks which issuer's JWKS to check against.
+base64 = "0.22"
 # PyO3 — Rust↔Python FFI for the bindings crates (ADR-0005). `abi3-py312` builds one
 # stable-ABI wheel for CPython >=3.12 (matches the py workspace's requires-python); the
 # `extension-module` feature omits the libpython link so plain `cargo build` works without
@@ -108,6 +115,18 @@ sea-orm = { version = "1", default-features = false, features = [
 # DDL. Same backend posture as `sea-orm` above (sqlx-postgres + rustls).
 sea-orm-migration = { version = "1", default-features = false, features = [
   "sqlx-postgres", "runtime-tokio-rustls",
+] }
+# redis — external, shared `JwksCache` backend (paigasus-iam's `RedisJwksCache`, SMA-443
+# Task 8). `tokio-comp` selects the tokio async runtime (matches the workspace's tokio
+# baseline); `connection-manager` gives an auto-reconnecting client so a transient Redis
+# blip doesn't need bespoke retry logic in the adapter. `tokio-rustls-comp` +
+# `tls-rustls-webpki-roots` enable `rediss://` URLs (the D15 trust note requires TLS on
+# the JWKS cache; rustls + bundled webpki roots match the reqwest posture above — no
+# second crypto provider). Default features (acl/streams/geospatial/script/num-bigint)
+# are all unneeded for a plain SET/GET cache, so trimmed — same "minimal baseline, add
+# per-crate" posture as reqwest/sea-orm above.
+redis = { version = "1", default-features = false, features = [
+  "tokio-comp", "connection-manager", "tokio-rustls-comp", "tls-rustls-webpki-roots",
 ] }
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI

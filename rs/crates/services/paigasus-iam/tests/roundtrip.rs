@@ -33,6 +33,13 @@ async fn principal_user_round_trips_through_postgres() {
     let (got_p, got_u) = repo.find_user(&id).await.unwrap().expect("row present");
     assert_eq!(got_p, principal);
     assert_eq!(got_u, user);
+
+    let got_principal_only = repo.find_principal(&id).await.unwrap().expect("principal row present");
+    assert_eq!(got_principal_only, principal);
+
+    let missing_uuid = mint_uuid7(1_700_000_000_999, [9u8; 10]);
+    let missing_id = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", missing_uuid).unwrap());
+    assert!(repo.find_principal(&missing_id).await.unwrap().is_none());
 }
 
 /// AC — the two-insert `create_user` is atomic: a duplicate-email failure on the second

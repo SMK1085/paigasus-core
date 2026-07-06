@@ -43,6 +43,10 @@ impl IdGenerator for KernelIdGenerator {
     fn new_membership_id(&self) -> Uuid {
         self.mint()
     }
+
+    fn new_external_identity_id(&self) -> Uuid {
+        self.mint()
+    }
 }
 
 #[cfg(test)]
@@ -76,7 +80,11 @@ mod tests {
         let membership_id = KernelIdGenerator.new_membership_id();
         assert_eq!(membership_id.get_version_num(), 7);
 
+        let external_identity_id = KernelIdGenerator.new_external_identity_id();
+        assert_eq!(external_identity_id.get_version_num(), 7);
+
         // Distinct calls mint distinct ids.
         assert_ne!(KernelIdGenerator.new_organization_id().uuid(), org.uuid());
+        assert_ne!(KernelIdGenerator.new_external_identity_id(), external_identity_id);
     }
 }

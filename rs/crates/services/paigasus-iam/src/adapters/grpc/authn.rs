@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! The gRPC authn surface (spec §7.3/§7.4, D12/D14): `AuthnGrpc` implements the generated
+//! `AuthnService.Introspect`, and `AuthLayer` is the bearer-enforcement tower layer wrapping
+//! the whole `grpc::router` (health + tenancy + authn) via `Server::builder().layer(..)`.
+//!
+//! Interceptors in tonic are sync-only, but `resolve` is async (a JWKS fetch may await), so
+//! enforcement is a small tower `Service` rather than an interceptor. The layer wraps ALL
+//! services on the server — including health — so the `:path` exemption check
+//! (`/grpc.health.v1.Health/`, `/paigasus.iam.v1.AuthnService/Introspect`) runs BEFORE any
+//! token extraction. A rejection renders a proper trailers-only gRPC response (HTTP 200,
+//! `content-type: application/grpc`, `grpc-status` + ASCII-safe `grpc-message`) via
+//! `tonic::Status::into_http` — never a bare HTTP 401, which a gRPC client can't interpret.
+
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use paigasus_iam_core::{AuthnError, TokenDefect};
+use paigasus_proto::paigasus::iam::v1::authn_service_server::AuthnService;
+use paigasus_proto::paigasus::iam::v1::{IntrospectRequest, IntrospectResponse};
+use tonic::body::Body;
+use tonic::codegen::http;
+use tonic::{Request, Response, Status};
+use tower::{Layer, Service};
+
+use super::convert;
+use crate::adapters::auth::{AuthContext, bearer_from_headers};
+use crate::adapters::http::AppState;
+use crate::application::authenticate_token::Provisioning;
+
+/// The `AuthnService` gRPC server — a thin adapter over the same `AppState.authn` use case
+/// the HTTP `/v1/authn/introspect` handler drives.
+pub struct AuthnGrpc {
+    state: AppState,
+}
+
+impl AuthnGrpc {
+    pub fn new(state: AppState) -> Self {
+        Self { state }
+    }
+}
+
+#[tonic::async_trait]
+impl AuthnService for AuthnGrpc {
+    /// `Introspect` (spec §7.2): the full `PrincipalContext` for a presented token. READ-ONLY
+    /// (D10) — `AuthenticateToken::introspect` resolves with `Provisioning::Disabled`, so an
+    /// unknown identity is `PermissionDenied` and this exempt RPC never has a user-creation
+    /// side effect. The token IS the credential (in the request body, never the metadata):
+    /// nothing here logs it, and errors funnel through `authn_status` (static messages only).
+    async fn introspect(&self, request: Request<IntrospectRequest>) -> Result<Response<IntrospectResponse>, Status> {
+        let token = request.into_inner().token;
+        let ctx = self.state.authn.introspect(&token).await.map_err(|e| convert::authn_status(&e))?;
+        Ok(Response::new(convert::to_introspect_response(&ctx)))
+    }
+}
+
+/// The bearer-enforcement tower `Layer`, applied to the whole gRPC server via
+/// `Server::builder().layer(AuthLayer::new(state))` (D14 — wrapping the router is where the
+/// integration tests exercise it). Clones cheaply (`AppState` is `Clone`).
+#[derive(Clone)]
+pub struct AuthLayer {
+    state: AppState,
+}
+
+impl AuthLayer {
+    pub fn new(state: AppState) -> Self {
+        Self { state }
+    }
+}
+
+impl<S> Layer<S> for AuthLayer {
+    type Service = AuthEnforce<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        AuthEnforce { inner, state: self.state.clone() }
+    }
+}
+
+/// The `Service` `AuthLayer` produces: on every request it runs the `:path` exemption check,
+/// then (for a protected path) extracts the bearer, `resolve`s it with `Provisioning::Enabled`
+/// (JIT-provisioning an unknown identity, mirroring the HTTP middleware), and either forwards
+/// with an [`AuthContext`] extension attached or short-circuits with a trailers-only gRPC
+/// error WITHOUT calling the inner service.
+#[derive(Clone)]
+pub struct AuthEnforce<S> {
+    inner: S,
+    state: AppState,
+}
+
+/// Requests whose `:path` bypasses bearer enforcement (spec §7.4): the well-known health
+/// service (all its methods, hence the prefix) and the unauthenticated `Introspect` RPC.
+fn is_exempt(path: &str) -> bool {
+    path.starts_with("/grpc.health.v1.Health/") || path == "/paigasus.iam.v1.AuthnService/Introspect"
+}
+
+impl<S> Service<http::Request<Body>> for AuthEnforce<S>
+where
+    S: Service<http::Request<Body>, Response = http::Response<Body>> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = http::Response<Body>;
+    type Error = S::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut req: http::Request<Body>) -> Self::Future {
+        // Swap the `poll_ready`-readied inner out and leave a clone behind, so the instance
+        // moved into the boxed future is exactly the one that was readied (the canonical tower
+        // middleware pattern). The clone will be readied on the next `poll_ready`.
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+        let state = self.state.clone();
+        Box::pin(async move {
+            if is_exempt(req.uri().path()) {
+                return inner.call(req).await;
+            }
+            // A missing or malformed `authorization` header is treated exactly like a rejected
+            // token (D12): both are `Unauthenticated`.
+            let Some(token) = bearer_from_headers(req.headers()) else {
+                return Ok(reject(&AuthnError::InvalidToken(TokenDefect::Malformed)));
+            };
+            match state.authn.resolve(&token, Provisioning::Enabled).await {
+                Ok(principal) => {
+                    req.extensions_mut().insert(AuthContext {
+                        principal_id: principal.principal_id,
+                        issuer: principal.issuer,
+                        subject: principal.subject,
+                    });
+                    inner.call(req).await
+                }
+                Err(err) => Ok(reject(&err)),
+            }
+        })
+    }
+}
+
+/// Renders an `AuthnError` as a trailers-only gRPC error response (HTTP 200,
+/// `content-type: application/grpc`, `grpc-status` + ASCII-safe `grpc-message`) via
+/// `Status::into_http` — never a bare HTTP 401, which a gRPC client can't interpret.
+fn reject(err: &AuthnError) -> http::Response<Body> {
+    convert::authn_status(err).into_http()
+}

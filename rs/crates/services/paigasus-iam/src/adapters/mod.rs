@@ -2,8 +2,10 @@
 
 //! Adapters — concrete implementations of the core's ports.
 
+pub mod auth;
 pub mod clock;
 pub mod grpc;
 pub mod http;
 pub mod id;
+pub mod oidc;
 pub mod persistence;

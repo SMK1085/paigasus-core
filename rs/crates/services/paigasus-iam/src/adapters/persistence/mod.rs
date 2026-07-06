@@ -4,6 +4,7 @@
 
 pub mod entities;
 pub mod migration;
+pub mod pg_external_identities;
 pub mod pg_memberships;
 pub mod pg_organizations;
 pub mod pg_projects;
@@ -11,6 +12,7 @@ pub mod pg_repository;
 pub mod pg_teams;
 
 pub use migration::Migrator;
+pub use pg_external_identities::PgExternalIdentityRepository;
 pub use pg_memberships::PgMembershipRepository;
 pub use pg_organizations::PgOrganizationRepository;
 pub use pg_projects::PgProjectRepository;
@@ -42,6 +44,8 @@ pub(crate) fn conflict_kind(msg: &str) -> ConflictKind {
         ConflictKind::DuplicateMembership
     } else if msg.contains("user_email_key") {
         ConflictKind::EmailTaken
+    } else if msg.contains("uq_external_identity_issuer_subject") {
+        ConflictKind::ExternalIdentityExists
     } else {
         ConflictKind::Other // includes uq_*_prn: a UUIDv7 collision is an internal error
     }
@@ -61,6 +65,7 @@ mod tests {
         assert_eq!(conflict_kind("uq_project_team_slug"), ConflictKind::SlugTaken);
         assert_eq!(conflict_kind("uq_membership_principal_node"), ConflictKind::DuplicateMembership);
         assert_eq!(conflict_kind("user_email_key"), ConflictKind::EmailTaken);
+        assert_eq!(conflict_kind("uq_external_identity_issuer_subject"), ConflictKind::ExternalIdentityExists);
         assert_eq!(conflict_kind("uq_organization_prn"), ConflictKind::Other);
         assert_eq!(conflict_kind("some other constraint"), ConflictKind::Other);
     }

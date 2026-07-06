@@ -34,10 +34,28 @@ rand = { workspace = true }
 # `adapters::http` — axum liveness/readiness routes; serde_json builds the JSON bodies.
 axum = { workspace = true }
 serde_json = { workspace = true }
+# `adapters::grpc::authn::AuthLayer` — the bearer-enforcement tower `Layer`/`Service` pair
+# wrapping the gRPC server (`tower::{Layer, Service}` + `tower::layer::util::{Identity,
+# Stack}` name the layered router type, SMA-443 Task 12). Also used by `adapters::http`'s
+# `TimeoutLayer`/`TraceLayer` indirectly via tower-http; promoted from dev-dependencies here.
+tower = { workspace = true }
 # `adapters::http::serve_http` — TraceLayer + TimeoutLayer wrapping the axum router.
 tower-http = { workspace = true }
 # `adapters::http::AppState.db` + the `/readyz` ping.
 sea-orm = { workspace = true }
+# `adapters::oidc::jwks::HttpJwksFetcher` — discovery + JWKS document fetch over HTTPS
+# (rustls, per the workspace baseline); first service consumer (SMA-443 Task 6).
+reqwest = { workspace = true }
+# `adapters::oidc::jwks` — `jsonwebtoken::jwk::{Jwk, JwkSet}` is the JWKS cache/rotation
+# payload type; the validator (Task 7) additionally uses `DecodingKey`/`decode`/`Validation`,
+# which need an actual `CryptoProvider`. `rust_crypto` (RustCrypto's pure-Rust rsa/p256/p384
+# crates) is picked over `aws_lc_rs` to avoid a native/cmake build dependency, matching the
+# workspace's existing rustls-over-openssl posture (see `reqwest` above) — first consumer
+# to need either.
+jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
+# `adapters::oidc::validator` — base64url-decodes a token's payload segment for the
+# UNVERIFIED `iss` read that selects which issuer's JWKS to check against (Task 7).
+base64 = { workspace = true }
 # `adapters::grpc` — tonic Server hosting the well-known `grpc.health.v1.Health` service and
 # (Task 16) the `TenancyService` gRPC server.
 tonic = { workspace = true }
@@ -61,21 +79,39 @@ async-trait = { workspace = true }
 # `adapters::http`'s `Path<Uuid>` extractor and `dto::MembershipDto.id` need
 # `Uuid: Deserialize`/`Serialize` (Task 14, SMA-442).
 uuid = { workspace = true, features = ["serde"] }
+# `adapters::oidc::redis_cache::RedisJwksCache` — external `JwksCache` backend so cached
+# JWKS survive process restarts and are shared across replicas (SMA-443 Task 8).
+redis = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as
 # a dev-dependency — it's unified into test builds only, never the shipped binary.
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
-# `tests/health.rs` drives the health router via `ServiceExt::oneshot` (no real listener).
-tower = { workspace = true }
+# `tests/health.rs` drives the health router via `ServiceExt::oneshot` (no real listener);
+# `tower` is now a normal dependency (Task 12's gRPC `AuthLayer`), visible to tests too.
 # `tests/grpc_health.rs` wraps an ephemeral `TcpListener` into a `Stream` for
 # `Server::serve_with_incoming`.
 tokio-stream = { workspace = true, features = ["net"] }
 # `tests/roundtrip.rs` — AC #2: a real Postgres round-trip via an ephemeral Docker
 # container. Dev-only: never enters the published/shipped binary.
 testcontainers = "0.27"
-testcontainers-modules = { version = "0.15", features = ["postgres"] }
+# `tests/redis_jwks_cache.rs` — AC #8: a real Redis round-trip via an ephemeral Docker
+# container (SMA-443 Task 8), same pattern as the Postgres round-trip above.
+testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
+# `adapters::oidc::validator` tests — mints runtime EC P-256 keypairs so ES256 tokens can
+# be signed locally without committing PEM/JWK fixtures (spec §8 mock-IdP refinement,
+# SMA-443 Task 7). Dev-only: never enters the shipped binary; the workspace baseline
+# carries no `p256` entry since this is its only consumer.
+p256 = { version = "0.13", features = ["pkcs8", "pem"] }
+# `tests/support::start_mock_idp` — the in-process mock IdP serves discovery + JWKS over
+# HTTPS with a runtime self-signed certificate (SMA-443 Task 10; the fetcher hard-requires
+# https, spec §4.2). `ring` is pinned explicitly on both: their defaults would pull
+# `aws-lc-rs` in as a SECOND rustls CryptoProvider, breaking rustls's sole-provider
+# auto-selection everywhere AND adding a native cmake build dep (see the jsonwebtoken
+# note above for the workspace's pure-Rust posture).
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 
 [lints]
 workspace = true
