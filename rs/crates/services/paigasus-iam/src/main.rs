@@ -15,6 +15,7 @@ use tokio::task::JoinSet;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = IamConfig::load()?;
+    config.validate().map_err(|e| anyhow::anyhow!(e))?;
     paigasus_logging::init("paigasus-iam", &config.log_level);
 
     let db = Database::connect(&config.database_url).await?;
