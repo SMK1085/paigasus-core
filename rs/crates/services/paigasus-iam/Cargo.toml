@@ -38,6 +38,12 @@ serde_json = { workspace = true }
 tower-http = { workspace = true }
 # `adapters::http::AppState.db` + the `/readyz` ping.
 sea-orm = { workspace = true }
+# `adapters::oidc::jwks::HttpJwksFetcher` — discovery + JWKS document fetch over HTTPS
+# (rustls, per the workspace baseline); first service consumer (SMA-443 Task 6).
+reqwest = { workspace = true }
+# `adapters::oidc::jwks` — `jsonwebtoken::jwk::{Jwk, JwkSet}` is the JWKS cache/rotation
+# payload type; the validator (Task 7) additionally uses `DecodingKey`/`decode`/`Validation`.
+jsonwebtoken = { workspace = true }
 # `adapters::grpc` — tonic Server hosting the well-known `grpc.health.v1.Health` service and
 # (Task 16) the `TenancyService` gRPC server.
 tonic = { workspace = true }

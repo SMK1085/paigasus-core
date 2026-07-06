@@ -1,0 +1,478 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! JWKS fetch + cache + rotation (spec §4.2/§4.3): a `CachedJwks` entry is fresh while its
+//! `fetched_at` is within `authn.jwks_ttl_secs` of the injected `Clock`'s `now()`. An unknown
+//! `kid` forces at most one refetch per issuer per `authn.jwks_refresh_cooldown_secs` cooldown
+//! window, so a burst of tokens carrying an unrecognized `kid` cannot be used to hammer the
+//! IdP. Concurrent callers needing a refetch for the same issuer coalesce onto a single HTTP
+//! fetch via a per-issuer `tokio::sync::Mutex` (single-flight), which doubles as the cooldown
+//! state's guard.
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use jsonwebtoken::jwk::{Jwk, JwkSet};
+use paigasus_iam_core::{AuthnError, Clock, Issuer, TokenDefect};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Mutex, RwLock};
+
+use crate::adapters::clock::SystemClock;
+
+/// A cached JWKS payload plus fetch bookkeeping (spec §4.3). The discovery doc's `jwks_uri`
+/// is cached alongside the keys since discovery + JWKS share one TTL/refresh cycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedJwks {
+    pub jwks: JwkSet,
+    pub jwks_uri: String,
+    pub fetched_at: DateTime<Utc>,
+}
+
+/// Per-issuer JWKS storage (D2: an infra detail of the OIDC adapter, not a domain port).
+#[async_trait]
+pub trait JwksCache: Send + Sync {
+    async fn get(&self, issuer: &Issuer) -> Result<Option<CachedJwks>, AuthnError>;
+    async fn put(&self, issuer: &Issuer, jwks: CachedJwks) -> Result<(), AuthnError>;
+}
+
+/// In-process `JwksCache` (default backend, D2). Never fails: this is the fallback used
+/// even when no external cache is configured.
+#[derive(Default)]
+pub struct InMemoryJwksCache(RwLock<HashMap<Issuer, CachedJwks>>);
+
+impl InMemoryJwksCache {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl JwksCache for InMemoryJwksCache {
+    async fn get(&self, issuer: &Issuer) -> Result<Option<CachedJwks>, AuthnError> {
+        Ok(self.0.read().await.get(issuer).cloned())
+    }
+
+    async fn put(&self, issuer: &Issuer, jwks: CachedJwks) -> Result<(), AuthnError> {
+        self.0.write().await.insert(issuer.clone(), jwks);
+        Ok(())
+    }
+}
+
+/// Fetches a fresh discovery + JWKS document pair for an issuer. A seam so `JwksProvider`'s
+/// cache/rotation logic can be unit-tested without real HTTP (spec §4.3).
+#[async_trait]
+pub trait JwksFetcher: Send + Sync {
+    async fn fetch(&self, issuer: &Issuer) -> Result<CachedJwks, AuthnError>;
+}
+
+/// Response bodies (discovery doc and JWKS document) are capped at 1 MiB, read via bounded
+/// `chunk()` streaming rather than an unbounded `.text()`/`.bytes()` read (spec §4.2).
+const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
+
+#[derive(Deserialize)]
+struct DiscoveryDocument {
+    issuer: String,
+    jwks_uri: String,
+}
+
+/// Live `JwksFetcher`: `GET {issuer}/.well-known/openid-configuration`, verify the document's
+/// `issuer` field exactly matches and its `jwks_uri` is `https`, then `GET` the JWKS itself
+/// (spec §4.2).
+pub struct HttpJwksFetcher {
+    client: reqwest::Client,
+    clock: SystemClock,
+}
+
+impl HttpJwksFetcher {
+    /// Builds the fetcher's `reqwest::Client` (rustls, per the workspace baseline) with the
+    /// given request timeout. No custom redirect policy is needed — reqwest's default is fine
+    /// for a discovery endpoint operators configure directly.
+    pub fn new(timeout: Duration) -> Result<Self, AuthnError> {
+        let client = reqwest::Client::builder().timeout(timeout).build().map_err(|_| AuthnError::Unavailable)?;
+        Ok(Self { client, clock: SystemClock })
+    }
+
+    /// Logs the issuer and a static defect-kind tag — never response bodies or full URLs
+    /// beyond the issuer itself (spec §4.2's "no bodies in logs" constraint).
+    fn unavailable(&self, issuer: &Issuer, defect: &'static str) -> AuthnError {
+        tracing::warn!(issuer = %issuer, defect, "jwks fetch failed");
+        AuthnError::Unavailable
+    }
+}
+
+/// Reads a response body capped at `MAX_RESPONSE_BODY_BYTES`, streaming via `chunk()` so an
+/// oversized or slow-loris body never gets buffered unbounded. A non-success status is also
+/// treated as a read failure (caller only cares "did we get a usable body").
+async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>, &'static str> {
+    if !response.status().is_success() {
+        return Err("non-success http status");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| "body read error")? {
+        body.extend_from_slice(&chunk);
+        if body.len() > MAX_RESPONSE_BODY_BYTES {
+            return Err("response body exceeded size cap");
+        }
+    }
+    Ok(body)
+}
+
+#[async_trait]
+impl JwksFetcher for HttpJwksFetcher {
+    async fn fetch(&self, issuer: &Issuer) -> Result<CachedJwks, AuthnError> {
+        let discovery_url = format!("{}/.well-known/openid-configuration", issuer.as_str());
+        let discovery_response = self.client.get(&discovery_url).send().await.map_err(|_| self.unavailable(issuer, "discovery request failed"))?;
+        let discovery_body = read_capped_body(discovery_response).await.map_err(|defect| self.unavailable(issuer, defect))?;
+        let discovery: DiscoveryDocument = serde_json::from_slice(&discovery_body).map_err(|_| self.unavailable(issuer, "discovery body malformed"))?;
+
+        if discovery.issuer != issuer.as_str() {
+            return Err(self.unavailable(issuer, "discovery issuer mismatch"));
+        }
+        if !discovery.jwks_uri.starts_with("https://") {
+            return Err(self.unavailable(issuer, "jwks_uri not https"));
+        }
+
+        let jwks_response = self.client.get(&discovery.jwks_uri).send().await.map_err(|_| self.unavailable(issuer, "jwks request failed"))?;
+        let jwks_body = read_capped_body(jwks_response).await.map_err(|defect| self.unavailable(issuer, defect))?;
+        let jwks: JwkSet = serde_json::from_slice(&jwks_body).map_err(|_| self.unavailable(issuer, "jwks body malformed"))?;
+
+        Ok(CachedJwks {
+            jwks,
+            jwks_uri: discovery.jwks_uri,
+            fetched_at: self.clock.now(),
+        })
+    }
+}
+
+/// The result of a cache lookup: whether an entry existed at all (regardless of freshness),
+/// and whether it yielded a usable (fresh + matching-`kid`) key.
+struct CacheState {
+    entry: Option<CachedJwks>,
+    hit: Option<Jwk>,
+}
+
+/// Per-issuer single-flight lock + "last forced refetch attempt" cooldown clock (see
+/// `JwksProvider::refetch_state`).
+type RefetchState = Mutex<HashMap<Issuer, Arc<Mutex<Option<DateTime<Utc>>>>>>;
+
+/// Fetch + cache + rotation orchestration (spec §4.3). Generic-by-value over its three
+/// collaborators (no `Arc<dyn Trait>`, per the hexagonal composition convention) so the
+/// concrete production wiring (`HttpJwksFetcher` + `InMemoryJwksCache`/`RedisJwksCache` +
+/// `SystemClock`) is chosen once, at the composition root.
+pub struct JwksProvider<F: JwksFetcher, K: JwksCache, C: Clock> {
+    fetcher: F,
+    cache: K,
+    clock: C,
+    ttl: chrono::Duration,
+    cooldown: chrono::Duration,
+    /// Per-issuer single-flight lock, doubling as the "last forced refetch attempt" cooldown
+    /// clock: whoever holds an issuer's inner `Mutex` guard owns that issuer's in-flight
+    /// fetch, so concurrent callers needing a refetch simply await the same guard instead of
+    /// racing separate HTTP requests (spec §4.3 "single-flight").
+    refetch_state: RefetchState,
+}
+
+impl<F: JwksFetcher, K: JwksCache, C: Clock> JwksProvider<F, K, C> {
+    pub fn new(fetcher: F, cache: K, clock: C, ttl: Duration, cooldown: Duration) -> Self {
+        Self {
+            fetcher,
+            cache,
+            clock,
+            ttl: chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::MAX),
+            cooldown: chrono::Duration::from_std(cooldown).unwrap_or(chrono::Duration::MAX),
+            refetch_state: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Resolves the JWK identified by `kid` for `issuer`, per the rotation algorithm in
+    /// spec §4.3: a fresh cache entry containing `kid` returns immediately; otherwise a
+    /// (possibly single-flighted, cooldown-gated) refetch is attempted.
+    pub async fn key_for(&self, issuer: &Issuer, kid: &str) -> Result<Jwk, AuthnError> {
+        if let Some(jwk) = self.cache_state(issuer, kid).await?.hit {
+            return Ok(jwk);
+        }
+
+        let issuer_lock = self.lock_for(issuer).await;
+        let mut last_refetch = issuer_lock.lock().await;
+
+        // Double-check: another caller may have refreshed the cache while we waited for the
+        // per-issuer lock (spec §4.3's "double-check the cache after acquiring").
+        let state = self.cache_state(issuer, kid).await?;
+        if let Some(jwk) = state.hit {
+            return Ok(jwk);
+        }
+        let existed = state.entry.is_some();
+
+        let cooldown_active = last_refetch.is_some_and(|attempted_at| self.clock.now().signed_duration_since(attempted_at) < self.cooldown);
+        if existed && cooldown_active {
+            return Err(AuthnError::InvalidToken(TokenDefect::UnknownKid));
+        }
+
+        *last_refetch = Some(self.clock.now());
+        match self.fetcher.fetch(issuer).await {
+            Ok(fetched) => {
+                let hit = find_kid(&fetched.jwks, kid);
+                self.cache.put(issuer, fetched).await?;
+                hit.ok_or(AuthnError::InvalidToken(TokenDefect::UnknownKid))
+            }
+            // No usable cached entry to fall back on → surface the fetcher's own error
+            // (`Unavailable`); an entry existed (just not fresh/matching) → the caller gets
+            // the same outcome a cooldown-blocked attempt would have produced (spec §4.3).
+            Err(_) if existed => Err(AuthnError::InvalidToken(TokenDefect::UnknownKid)),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn cache_state(&self, issuer: &Issuer, kid: &str) -> Result<CacheState, AuthnError> {
+        let entry = self.cache.get(issuer).await?;
+        let hit = entry.as_ref().filter(|cached| self.is_fresh(cached)).and_then(|cached| find_kid(&cached.jwks, kid));
+        Ok(CacheState { entry, hit })
+    }
+
+    fn is_fresh(&self, entry: &CachedJwks) -> bool {
+        self.clock.now().signed_duration_since(entry.fetched_at) < self.ttl
+    }
+
+    async fn lock_for(&self, issuer: &Issuer) -> Arc<Mutex<Option<DateTime<Utc>>>> {
+        let mut locks = self.refetch_state.lock().await;
+        locks.entry(issuer.clone()).or_insert_with(|| Arc::new(Mutex::new(None))).clone()
+    }
+}
+
+fn find_kid(jwks: &JwkSet, kid: &str) -> Option<Jwk> {
+    jwks.keys.iter().find(|jwk| jwk.common.key_id.as_deref() == Some(kid)).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn test_issuer() -> Issuer {
+        Issuer::parse("https://idp.example.com").unwrap()
+    }
+
+    fn base_time() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
+    }
+
+    fn jwk_set_with_kid(kid: &str) -> JwkSet {
+        serde_json::from_value(serde_json::json!({
+            "keys": [{
+                "kty": "RSA",
+                "kid": kid,
+                "use": "sig",
+                "alg": "RS256",
+                "n": "test-modulus",
+                "e": "AQAB",
+            }]
+        }))
+        .expect("valid jwk set fixture")
+    }
+
+    fn cached(kid: &str, fetched_at: DateTime<Utc>) -> CachedJwks {
+        CachedJwks {
+            jwks: jwk_set_with_kid(kid),
+            jwks_uri: "https://idp.example.com/jwks".to_string(),
+            fetched_at,
+        }
+    }
+
+    /// Adjustable clock so tests can drive TTL expiry and cooldown windows deterministically.
+    #[derive(Clone)]
+    struct FakeClock(Arc<StdMutex<DateTime<Utc>>>);
+
+    impl FakeClock {
+        fn at(t: DateTime<Utc>) -> Self {
+            Self(Arc::new(StdMutex::new(t)))
+        }
+
+        fn advance(&self, delta: chrono::Duration) {
+            let mut guard = self.0.lock().unwrap();
+            *guard += delta;
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now(&self) -> DateTime<Utc> {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    /// Fake `JwksFetcher`: counts calls, optionally sleeps (to force single-flight overlap),
+    /// optionally fails, and otherwise "serves" a fresh `JwkSet` containing exactly one kid.
+    struct FakeFetcher {
+        calls: Arc<AtomicUsize>,
+        clock: FakeClock,
+        serves_kid: &'static str,
+        fail: bool,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl JwksFetcher for FakeFetcher {
+        async fn fetch(&self, issuer: &Issuer) -> Result<CachedJwks, AuthnError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            if self.fail {
+                return Err(AuthnError::Unavailable);
+            }
+            let _ = issuer;
+            Ok(cached(self.serves_kid, self.clock.now()))
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_cache_hit_does_not_fetch() {
+        let issuer = test_issuer();
+        let clock = FakeClock::at(base_time());
+        let cache = InMemoryJwksCache::new();
+        cache.put(&issuer, cached("kid-a", clock.now())).await.unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher = FakeFetcher {
+            calls: calls.clone(),
+            clock: clock.clone(),
+            serves_kid: "kid-a",
+            fail: false,
+            delay: Duration::ZERO,
+        };
+        let provider = JwksProvider::new(fetcher, cache, clock, Duration::from_secs(3600), Duration::from_secs(30));
+
+        let jwk = provider.key_for(&issuer, "kid-a").await.unwrap();
+
+        assert_eq!(jwk.common.key_id.as_deref(), Some("kid-a"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "a fresh hit must not fetch");
+    }
+
+    #[tokio::test]
+    async fn ttl_expiry_triggers_refetch() {
+        let issuer = test_issuer();
+        let clock = FakeClock::at(base_time());
+        let cache = InMemoryJwksCache::new();
+        cache.put(&issuer, cached("kid-a", clock.now())).await.unwrap();
+        clock.advance(chrono::Duration::seconds(3601));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher = FakeFetcher {
+            calls: calls.clone(),
+            clock: clock.clone(),
+            serves_kid: "kid-a",
+            fail: false,
+            delay: Duration::ZERO,
+        };
+        let provider = JwksProvider::new(fetcher, cache, clock, Duration::from_secs(3600), Duration::from_secs(30));
+
+        let jwk = provider.key_for(&issuer, "kid-a").await.unwrap();
+
+        assert_eq!(jwk.common.key_id.as_deref(), Some("kid-a"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a stale entry must trigger exactly one refetch");
+    }
+
+    #[tokio::test]
+    async fn kid_miss_triggers_one_refetch_then_unknown_kid() {
+        let issuer = test_issuer();
+        let clock = FakeClock::at(base_time());
+        let cache = InMemoryJwksCache::new();
+        cache.put(&issuer, cached("kid-old", clock.now())).await.unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        // The upstream JWKS hasn't actually rotated yet, so `kid-new` stays unknown even
+        // after the forced refetch.
+        let fetcher = FakeFetcher {
+            calls: calls.clone(),
+            clock: clock.clone(),
+            serves_kid: "kid-old",
+            fail: false,
+            delay: Duration::ZERO,
+        };
+        let provider = JwksProvider::new(fetcher, cache, clock, Duration::from_secs(3600), Duration::from_secs(30));
+
+        let err = provider.key_for(&issuer, "kid-new").await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::InvalidToken(TokenDefect::UnknownKid)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "an unknown kid must force exactly one refetch");
+    }
+
+    #[tokio::test]
+    async fn cooldown_suppresses_repeated_kid_miss_refetch() {
+        let issuer = test_issuer();
+        let clock = FakeClock::at(base_time());
+        let cache = InMemoryJwksCache::new();
+        cache.put(&issuer, cached("kid-old", clock.now())).await.unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher = FakeFetcher {
+            calls: calls.clone(),
+            clock: clock.clone(),
+            serves_kid: "kid-old",
+            fail: false,
+            delay: Duration::ZERO,
+        };
+        let provider = JwksProvider::new(fetcher, cache, clock.clone(), Duration::from_secs(3600), Duration::from_secs(30));
+
+        let first = provider.key_for(&issuer, "kid-new").await.unwrap_err();
+        assert!(matches!(first, AuthnError::InvalidToken(TokenDefect::UnknownKid)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Still well within the 30s cooldown window: the second miss must not fetch again.
+        clock.advance(chrono::Duration::seconds(5));
+        let second = provider.key_for(&issuer, "kid-new").await.unwrap_err();
+
+        assert!(matches!(second, AuthnError::InvalidToken(TokenDefect::UnknownKid)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the cooldown must suppress the second forced refetch");
+    }
+
+    #[tokio::test]
+    async fn fetch_failure_without_cache_is_unavailable() {
+        let issuer = test_issuer();
+        let clock = FakeClock::at(base_time());
+        let cache = InMemoryJwksCache::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher = FakeFetcher {
+            calls: calls.clone(),
+            clock: clock.clone(),
+            serves_kid: "kid-a",
+            fail: true,
+            delay: Duration::ZERO,
+        };
+        let provider = JwksProvider::new(fetcher, cache, clock, Duration::from_secs(3600), Duration::from_secs(30));
+
+        let err = provider.key_for(&issuer, "kid-a").await.unwrap_err();
+
+        assert!(matches!(err, AuthnError::Unavailable));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn single_flight_coalesces_concurrent_refetches() {
+        let issuer = test_issuer();
+        let clock = FakeClock::at(base_time());
+        let cache = InMemoryJwksCache::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher = FakeFetcher {
+            calls: calls.clone(),
+            clock: clock.clone(),
+            serves_kid: "kid-a",
+            fail: false,
+            delay: Duration::from_millis(50),
+        };
+        let provider = Arc::new(JwksProvider::new(fetcher, cache, clock, Duration::from_secs(3600), Duration::from_secs(30)));
+
+        let mut tasks = Vec::new();
+        for _ in 0..10 {
+            let provider = provider.clone();
+            let issuer = issuer.clone();
+            tasks.push(tokio::spawn(async move { provider.key_for(&issuer, "kid-a").await }));
+        }
+
+        for task in tasks {
+            let jwk = task.await.unwrap().unwrap();
+            assert_eq!(jwk.common.key_id.as_deref(), Some("kid-a"));
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "concurrent cold-cache callers must coalesce onto one fetch");
+    }
+}

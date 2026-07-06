@@ -66,6 +66,9 @@ futures = "0.3"
 # TLS baseline is rustls + json. If a service needs gzip/brotli/cookies, opt in PER CRATE —
 # do NOT set default-features = true here (it re-introduces openssl across the workspace).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# jsonwebtoken — JWT decode/verify + the `jwk` module (`JwkSet`/`Jwk`, `DecodingKey::from_jwk`)
+# for the OIDC adapter's JWKS cache (SMA-443 Task 6) and validator (Task 7). MIT-licensed.
+jsonwebtoken = "10"
 # PyO3 — Rust↔Python FFI for the bindings crates (ADR-0005). `abi3-py312` builds one
 # stable-ABI wheel for CPython >=3.12 (matches the py workspace's requires-python); the
 # `extension-module` feature omits the libpython link so plain `cargo build` works without
