@@ -276,9 +276,10 @@ impl TenancyService for TenancyGrpc {
     async fn detach_membership(&self, request: Request<DetachMembershipRequest>) -> Result<Response<DetachMembershipResponse>, Status> {
         let req = request.into_inner();
         // `id` is a plain UUIDv7, not a PRN (D5) — there is no dedicated error code for "not a
-        // UUID", so this reuses `InvalidPrn` with the parse failure as context (same sentinel
-        // the PRN parsers use for "malformed input", just not itself a PRN here).
-        let id = Uuid::parse_str(&req.id).map_err(|e| convert::status_to_grpc(TenancyError::InvalidPrn(format!("invalid membership id {:?}: {e}", req.id))))?;
+        // UUID", so this reuses `InvalidPrn` with a static string as context (same sentinel
+        // the PRN parsers use for "malformed input", just not itself a PRN here). The error
+        // payload is server-side context only; InvalidPrn's Display never surfaces it.
+        let id = Uuid::parse_str(&req.id).map_err(|_| convert::status_to_grpc(TenancyError::InvalidPrn("membership id must be a uuid".to_string())))?;
         self.state.memberships.detach(id).await.map_err(convert::status_to_grpc)?;
         Ok(Response::new(DetachMembershipResponse {}))
     }

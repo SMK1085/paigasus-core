@@ -26,7 +26,10 @@ pub fn status_to_grpc(e: TenancyError) -> Status {
         ErrorClass::NotFound => Code::NotFound,
         ErrorClass::Conflict => Code::AlreadyExists,
         ErrorClass::Precondition => Code::FailedPrecondition,
-        ErrorClass::Internal => Code::Internal,
+        ErrorClass::Internal => {
+            tracing::error!(error = %e, code = e.code(), "internal error handling gRPC request");
+            Code::Internal
+        }
     };
     Status::new(code, format!("{}: {}", e.code(), e))
 }
