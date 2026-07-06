@@ -3,18 +3,20 @@ syntax = "proto3";
 
 package paigasus.iam.v1;
 
+import "google/protobuf/timestamp.proto";
 import "paigasus/common/v1/audit.proto";
 
-// IAM v1 wire model — SCAFFOLD ONLY (SMA-441, M0 walking skeleton).
+// IAM v1 wire model.
 //
-// M0 defines no RPCs: the service's health surface is the well-known
-// grpc.health.v1.Health (served via tonic-health), not an IAM RPC. This file
-// exists to establish the paigasus.iam.v1 package and exercise the buf codegen
-// path end-to-end (prost / betterproto2 / protobuf-es).
+// Hosts the tenancy hierarchy — `TenancyService` (M1) — and authentication
+// introspection — `AuthnService` (M2).
 //
 // Reserved for later milestones (do not repurpose without an ADR):
-//   service AuthorizationService { rpc IsAuthorized(...); rpc Introspect(...); }  // M4/M5
-//   messages: Principal, User, Organization, Team, Project, ApiKey, Policy, ...   // M1+
+//   service AuthorizationService { rpc IsAuthorized(...); }  // M4/M5
+//   messages: Principal, User, ApiKey, Policy, ...            // M1+
+//
+// AuthorizationService's originally-planned Introspect rpc is not duplicated
+// there: it folds into AuthnService.Introspect below (spec D4).
 
 // Placeholder so the package generates a concrete type in all three languages.
 // Replaced by real messages in M1; carries a service PRN string for now.
@@ -218,6 +220,19 @@ message ListMembershipsResponse {
   repeated Membership memberships = 1;
 }
 
+message IntrospectRequest {
+  string token = 1;
+}
+message IntrospectResponse {
+  string principal_prn = 1;
+  string status = 2; // principal status
+  string issuer = 3;
+  string subject = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  repeated Membership memberships = 6; // reuse tenancy message
+  repeated string role_group_prns = 7; // empty until M3
+}
+
 service TenancyService {
   rpc CreateOrganization(CreateOrganizationRequest) returns (CreateOrganizationResponse);
   rpc GetOrganization(GetOrganizationRequest) returns (GetOrganizationResponse);
@@ -242,4 +257,8 @@ service TenancyService {
   // memberships in that same org (cascade detach, spec §5.1 rule 5).
   rpc DetachMembership(DetachMembershipRequest) returns (DetachMembershipResponse);
   rpc ListMemberships(ListMembershipsRequest) returns (ListMembershipsResponse);
+}
+
+service AuthnService {
+  rpc Introspect(IntrospectRequest) returns (IntrospectResponse);
 }

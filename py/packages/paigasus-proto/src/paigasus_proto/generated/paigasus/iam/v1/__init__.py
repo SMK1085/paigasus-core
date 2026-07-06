@@ -12,6 +12,7 @@ __all__ = (
     "ArchiveTeamResponse",
     "AttachMembershipRequest",
     "AttachMembershipResponse",
+    "AuthnServiceStub",
     "CreateOrganizationRequest",
     "CreateOrganizationResponse",
     "CreateProjectRequest",
@@ -26,6 +27,8 @@ __all__ = (
     "GetProjectResponse",
     "GetTeamRequest",
     "GetTeamResponse",
+    "IntrospectRequest",
+    "IntrospectResponse",
     "ListMembershipsRequest",
     "ListMembershipsResponse",
     "ListOrganizationsRequest",
@@ -55,6 +58,7 @@ __all__ = (
     "TenancyServiceStub",
 )
 
+import datetime
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -355,6 +359,56 @@ class GetTeamResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "GetTeamResponse", GetTeamResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class IntrospectRequest(betterproto2.Message):
+    token: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "IntrospectRequest", IntrospectRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class IntrospectResponse(betterproto2.Message):
+    principal_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    status: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+    """
+    principal status
+    """
+
+    issuer: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    subject: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    expires_at: "datetime.datetime | None" = betterproto2.field(
+        5,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    memberships: "list[Membership]" = betterproto2.field(
+        6, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+    """
+    reuse tenancy message
+    """
+
+    role_group_prns: "list[str]" = betterproto2.field(
+        7, betterproto2.TYPE_STRING, repeated=True
+    )
+    """
+    empty until M3
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "IntrospectResponse", IntrospectResponse
 )
 
 
@@ -703,16 +757,17 @@ default_message_pool.register_message(
 @dataclass(eq=False, repr=False)
 class ServiceInfo(betterproto2.Message):
     """
-    IAM v1 wire model — SCAFFOLD ONLY (SMA-441, M0 walking skeleton).
+    IAM v1 wire model.
 
-    M0 defines no RPCs: the service's health surface is the well-known
-    grpc.health.v1.Health (served via tonic-health), not an IAM RPC. This file
-    exists to establish the paigasus.iam.v1 package and exercise the buf codegen
-    path end-to-end (prost / betterproto2 / protobuf-es).
+    Hosts the tenancy hierarchy — `TenancyService` (M1) — and authentication
+    introspection — `AuthnService` (M2).
 
     Reserved for later milestones (do not repurpose without an ADR):
-      service AuthorizationService { rpc IsAuthorized(...); rpc Introspect(...); }  // M4/M5
-      messages: Principal, User, Organization, Team, Project, ApiKey, Policy, ...   // M1+
+      service AuthorizationService { rpc IsAuthorized(...); }  // M4/M5
+      messages: Principal, User, ApiKey, Policy, ...            // M1+
+
+    AuthorizationService's originally-planned Introspect rpc is not duplicated
+    there: it folds into AuthnService.Introspect below (spec D4).
 
     Placeholder so the package generates a concrete type in all three languages.
     Replaced by real messages in M1; carries a service PRN string for now.
@@ -748,6 +803,26 @@ class Team(betterproto2.Message):
 
 
 default_message_pool.register_message("paigasus.iam.v1", "Team", Team)
+
+
+class AuthnServiceStub(betterproto2_grpclib.ServiceStub):
+    async def introspect(
+        self,
+        message: "IntrospectRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "IntrospectResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuthnService/Introspect",
+            message,
+            IntrospectResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
 
 
 class TenancyServiceStub(betterproto2_grpclib.ServiceStub):
@@ -1134,4 +1209,5 @@ class TenancyServiceStub(betterproto2_grpclib.ServiceStub):
         )
 
 
+from ....google import protobuf as ___google__protobuf__
 from ...common import v1 as __common__v1__
