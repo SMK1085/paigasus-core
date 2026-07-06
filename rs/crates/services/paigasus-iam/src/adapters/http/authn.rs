@@ -7,10 +7,12 @@
 //! `{"error":{code,message}}` envelope; every message is STATIC per code — no claim
 //! values, token fragments, or upstream error text ever reach the response (spec §6.3).
 
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{DefaultBodyLimit, FromRequest, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use axum::{Json, Router, extract::State};
+use axum::{Json, Router};
 use paigasus_iam_core::AuthnError;
 use serde_json::json;
 
@@ -54,11 +56,43 @@ impl IntoResponse for AuthnApiError {
     }
 }
 
+/// `Json<T>` with the authn error envelope on rejection (spec H1): axum's default
+/// plain-text rejections (malformed JSON, wrong content-type, oversized body) become the
+/// same `{"error":{code,message}}` shape every other authn response uses. The status is
+/// the rejection's own; messages are static — nothing ever echoes the request body.
+struct EnvelopeJson<T>(T);
+
+impl<S, T> FromRequest<S> for EnvelopeJson<T>
+where
+    Json<T>: FromRequest<S, Rejection = JsonRejection>,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(EnvelopeJson(value)),
+            Err(rejection) => {
+                let (code, message) = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                    ("request_too_large", "request body too large")
+                } else {
+                    ("invalid_request", "invalid request body")
+                };
+                Err((rejection.status(), Json(json!({ "error": { "code": code, "message": message } }))).into_response())
+            }
+        }
+    }
+}
+
 /// The introspect sub-router. Merged alongside (NOT inside) the tenancy `/v1` sub-router
 /// in `super::router` so Task 11's bearer-enforcement layer, which wraps the tenancy
-/// sub-router only, never covers this route (middleware-exempt, spec §7.4).
-pub fn router() -> Router<AppState> {
-    Router::new().route("/v1/authn/introspect", post(introspect))
+/// sub-router only, never covers this route (middleware-exempt, spec §7.4). `body_limit`
+/// (from `AppState::introspect_body_limit`) caps the request body at
+/// `max_token_bytes` + envelope headroom — the only legitimate payload is
+/// `{"token":"<= max_token_bytes>"}`, so anything larger is rejected before JSON parsing
+/// (H1; deliberately far below axum's 2 MB default).
+pub fn router(body_limit: usize) -> Router<AppState> {
+    Router::new().route("/v1/authn/introspect", post(introspect)).route_layer(DefaultBodyLimit::max(body_limit))
 }
 
 /// `POST /v1/authn/introspect` (spec §7.2): the full `PrincipalContext` for a presented
@@ -67,7 +101,7 @@ pub fn router() -> Router<AppState> {
 /// this unauthenticated endpoint never has a user-creation side effect. The body carries
 /// the credential itself and is NEVER logged (nothing here logs, and an oversized token is
 /// rejected by the validator's own length cap — no pre-filtering, no echo).
-async fn introspect(State(state): State<AppState>, Json(body): Json<IntrospectBody>) -> Result<Json<IntrospectResponseDto>, AuthnApiError> {
+async fn introspect(State(state): State<AppState>, EnvelopeJson(body): EnvelopeJson<IntrospectBody>) -> Result<Json<IntrospectResponseDto>, AuthnApiError> {
     let ctx = state.authn.introspect(&body.token).await?;
     Ok(Json(ctx.into()))
 }

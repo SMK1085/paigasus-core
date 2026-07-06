@@ -29,7 +29,7 @@ impl Issuer {
         if rest.contains('#') || trimmed.contains(char::is_whitespace) {
             return Err(bad());
         }
-        let host = rest.split('/').next().unwrap_or("");
+        let host = rest.split_once('/').map_or(rest, |(host, _)| host);
         if host.is_empty() {
             return Err(bad());
         }
@@ -153,6 +153,15 @@ mod tests {
     #[test]
     fn issuer_rejects_non_https_fragments_and_garbage() {
         for bad in ["", "http://idp.example.com", "idp.example.com", "https://", "https://idp.example.com/#frag", "not a url"] {
+            assert!(Issuer::parse(bad).is_err(), "expected {bad:?} rejected");
+        }
+    }
+
+    #[test]
+    fn issuer_rejects_interior_whitespace() {
+        // The whitespace check must catch spaces/tabs INSIDE the trimmed string — both in
+        // the host and in the path — not just the surrounding padding `parse` trims away.
+        for bad in ["https://idp.example .com", "https://idp.example.com/realms acme", "https://idp.example.com/realms\tacme"] {
             assert!(Issuer::parse(bad).is_err(), "expected {bad:?} rejected");
         }
     }

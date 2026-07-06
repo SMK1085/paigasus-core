@@ -260,23 +260,33 @@ pub async fn app(db: DatabaseConnection) -> (Router, MockIdp) {
     (router(state), idp)
 }
 
+/// Lowest-level request driver: full control over the `Authorization` value, the
+/// `content-type`, and the raw body bytes — for tests that need a non-`Bearer {token}`
+/// credential shape (scheme casing, fused scheme, foreign scheme) or a deliberately
+/// broken/oversized body. Everything else goes through `send_raw`/`send`.
+#[allow(dead_code)]
+pub async fn send_raw_parts(app: &Router, method: &str, uri: &str, authorization: Option<&str>, content_type: Option<&str>, body: Option<Vec<u8>>) -> Response {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(authorization) = authorization {
+        builder = builder.header("authorization", authorization);
+    }
+    if let Some(content_type) = content_type {
+        builder = builder.header("content-type", content_type);
+    }
+    let request = builder.body(body.map_or_else(Body::empty, Body::from)).unwrap();
+    app.clone().oneshot(request).await.unwrap()
+}
+
 /// Drives one request through the router and returns the raw response — for tests that
 /// assert on headers (e.g. `WWW-Authenticate`). `token` sets `Authorization: Bearer …`.
 #[allow(dead_code)]
 pub async fn send_raw(app: &Router, method: &str, uri: &str, body: Option<Value>, token: Option<&str>) -> Response {
-    let mut builder = Request::builder().method(method).uri(uri);
-    if let Some(token) = token {
-        builder = builder.header("authorization", format!("Bearer {token}"));
-    }
-    let body = match body {
-        Some(b) => {
-            builder = builder.header("content-type", "application/json");
-            Body::from(serde_json::to_vec(&b).unwrap())
-        }
-        None => Body::empty(),
+    let authorization = token.map(|token| format!("Bearer {token}"));
+    let (content_type, body) = match body {
+        Some(b) => (Some("application/json"), Some(serde_json::to_vec(&b).unwrap())),
+        None => (None, None),
     };
-    let request = builder.body(body).unwrap();
-    app.clone().oneshot(request).await.unwrap()
+    send_raw_parts(app, method, uri, authorization.as_deref(), content_type, body).await
 }
 
 /// Drives one request through the router and returns `(status, json body)`. `Value::Null`

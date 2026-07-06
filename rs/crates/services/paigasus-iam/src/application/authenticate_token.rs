@@ -226,7 +226,7 @@ mod tests {
         Utc.timestamp_opt(0, 0).unwrap()
     }
 
-    fn claims(issuer: &str, subject: &str, email: Option<&str>, name: Option<&str>) -> ValidatedClaims {
+    fn claims_with_profile(issuer: &str, subject: &str, email: Option<&str>, name: Option<&str>, locale: Option<&str>, zoneinfo: Option<&str>) -> ValidatedClaims {
         ValidatedClaims {
             issuer: Issuer::parse(issuer).unwrap(),
             subject: subject.to_string(),
@@ -234,9 +234,13 @@ mod tests {
             expires_at: Utc.timestamp_opt(2_000_000_000, 0).unwrap(),
             email: email.map(str::to_string),
             name: name.map(str::to_string),
-            locale: None,
-            zoneinfo: None,
+            locale: locale.map(str::to_string),
+            zoneinfo: zoneinfo.map(str::to_string),
         }
+    }
+
+    fn claims(issuer: &str, subject: &str, email: Option<&str>, name: Option<&str>) -> ValidatedClaims {
+        claims_with_profile(issuer, subject, email, name, None, None)
     }
 
     /// Shared backing store for the authn in-memory fakes — mirrors `application::fakes`'
@@ -540,6 +544,75 @@ mod tests {
         let err = uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
         assert!(matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)));
         assert!(store.principals.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_name_falls_back_to_email_local_part() {
+        let store = AuthnStore::default();
+        let issuer = Issuer::parse("https://idp.example.com").unwrap();
+        let uc = AuthenticateToken::new(
+            FakeAuthenticator::ok(claims("https://idp.example.com", "sub-lp", Some("carol.smith@example.com"), None)),
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(issuer, true)]),
+        );
+
+        let resolved = uc.resolve("token", Provisioning::Enabled).await.unwrap();
+
+        let (_, user) = store.principals.lock().unwrap().get(&resolved.principal_id.uuid()).cloned().unwrap();
+        assert_eq!(user.display_name, "carol.smith", "display_name must fall back to the email local part when the name claim is absent");
+    }
+
+    #[tokio::test]
+    async fn unparseable_email_fails_provisioning_as_missing_email() {
+        // An email claim that is PRESENT but unparseable (no '@') is the same defect as an
+        // absent one: MissingEmail, and nothing is provisioned.
+        let store = AuthnStore::default();
+        let issuer = Issuer::parse("https://idp.example.com").unwrap();
+        let uc = AuthenticateToken::new(
+            FakeAuthenticator::ok(claims("https://idp.example.com", "sub-bad-email", Some("not-an-email"), Some("Broken"))),
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(issuer, true)]),
+        );
+
+        let err = uc.resolve("token", Provisioning::Enabled).await.unwrap_err();
+        assert!(matches!(err, AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail)));
+        assert!(store.principals.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn locale_and_zoneinfo_pass_through_to_the_provisioned_user() {
+        let store = AuthnStore::default();
+        let issuer = Issuer::parse("https://idp.example.com").unwrap();
+        let uc = AuthenticateToken::new(
+            FakeAuthenticator::ok(claims_with_profile(
+                "https://idp.example.com",
+                "sub-loc",
+                Some("dora@example.com"),
+                Some("Dora"),
+                Some("de-DE"),
+                Some("Europe/Berlin"),
+            )),
+            InMemoryIdentities(store.clone()),
+            InMemoryPrincipals(store.clone()),
+            InMemoryMemberships::default(),
+            SeqIds::default(),
+            FixedClock::default(),
+            JitPolicy::from_issuers(&[(issuer, true)]),
+        );
+
+        let resolved = uc.resolve("token", Provisioning::Enabled).await.unwrap();
+
+        let (_, user) = store.principals.lock().unwrap().get(&resolved.principal_id.uuid()).cloned().unwrap();
+        assert_eq!(user.locale.as_deref(), Some("de-DE"));
+        assert_eq!(user.timezone.as_deref(), Some("Europe/Berlin"), "the zoneinfo claim lands on User.timezone untouched");
     }
 
     #[tokio::test]

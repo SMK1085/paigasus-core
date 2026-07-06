@@ -68,10 +68,9 @@ async fn put_then_get_round_trips() {
     cache.put(&issuer, jwks.clone()).await.unwrap();
     let got = cache.get(&issuer).await.unwrap().expect("entry present after put");
 
+    assert_eq!(got.jwks, jwks.jwks, "the full JwkSet must survive the round-trip byte-for-byte");
     assert_eq!(got.jwks_uri, jwks.jwks_uri);
     assert_eq!(got.fetched_at, jwks.fetched_at);
-    assert_eq!(got.jwks.keys.len(), jwks.jwks.keys.len());
-    assert_eq!(got.jwks.keys[0].common.key_id, jwks.jwks.keys[0].common.key_id);
 }
 
 #[tokio::test]
