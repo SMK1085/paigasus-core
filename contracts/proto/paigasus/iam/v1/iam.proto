@@ -3,6 +3,8 @@ syntax = "proto3";
 
 package paigasus.iam.v1;
 
+import "paigasus/common/v1/audit.proto";
+
 // IAM v1 wire model — SCAFFOLD ONLY (SMA-441, M0 walking skeleton).
 //
 // M0 defines no RPCs: the service's health surface is the well-known
@@ -18,4 +20,219 @@ package paigasus.iam.v1;
 // Replaced by real messages in M1; carries a service PRN string for now.
 message ServiceInfo {
   string prn = 1;
+}
+
+enum NodeStatus {
+  NODE_STATUS_UNSPECIFIED = 0;
+  NODE_STATUS_ACTIVE = 1;
+  NODE_STATUS_ARCHIVED = 2;
+}
+
+message Organization {
+  string prn = 1;
+  string slug = 2;
+  string name = 3;
+  NodeStatus status = 4;
+  NodeStatus effective_status = 5;
+  paigasus.common.v1.AuditMetadata audit = 6;
+}
+message Team {
+  string prn = 1;
+  string org_prn = 2;
+  string slug = 3;
+  string name = 4;
+  NodeStatus status = 5;
+  NodeStatus effective_status = 6;
+  paigasus.common.v1.AuditMetadata audit = 7;
+}
+message Project {
+  string prn = 1;
+  string team_prn = 2;
+  string org_prn = 3;
+  string slug = 4;
+  string name = 5;
+  NodeStatus status = 6;
+  NodeStatus effective_status = 7;
+  paigasus.common.v1.AuditMetadata audit = 8;
+}
+message Membership {
+  string id = 1;
+  string principal_prn = 2;
+  string node_prn = 3;
+  paigasus.common.v1.AuditMetadata audit = 4; // modified_at == created_at (immutable)
+}
+
+message CreateOrganizationRequest {
+  string slug = 1;
+  string name = 2;
+}
+message CreateOrganizationResponse {
+  Organization organization = 1;
+  Team default_team = 2;
+}
+message GetOrganizationRequest {
+  string prn = 1;
+}
+message GetOrganizationResponse {
+  Organization organization = 1;
+}
+message ListOrganizationsRequest {
+  uint32 limit = 1;
+  uint64 offset = 2;
+} // limit 0 => server default 50
+message ListOrganizationsResponse {
+  repeated Organization organizations = 1;
+}
+message RenameOrganizationRequest {
+  string prn = 1;
+  optional string new_slug = 2;
+  optional string new_name = 3;
+}
+message RenameOrganizationResponse {
+  Organization organization = 1;
+}
+message ArchiveOrganizationRequest {
+  string prn = 1;
+}
+message ArchiveOrganizationResponse {
+  Organization organization = 1;
+}
+message RestoreOrganizationRequest {
+  string prn = 1;
+}
+message RestoreOrganizationResponse {
+  Organization organization = 1;
+}
+
+message CreateTeamRequest {
+  string org_prn = 1;
+  string slug = 2;
+  string name = 3;
+}
+message CreateTeamResponse {
+  Team team = 1;
+}
+message GetTeamRequest {
+  string prn = 1;
+}
+message GetTeamResponse {
+  Team team = 1;
+}
+message ListTeamsRequest {
+  string org_prn = 1;
+  uint32 limit = 2;
+  uint64 offset = 3;
+}
+message ListTeamsResponse {
+  repeated Team teams = 1;
+}
+message RenameTeamRequest {
+  string prn = 1;
+  optional string new_slug = 2;
+  optional string new_name = 3;
+}
+message RenameTeamResponse {
+  Team team = 1;
+}
+message ArchiveTeamRequest {
+  string prn = 1;
+}
+message ArchiveTeamResponse {
+  Team team = 1;
+}
+message RestoreTeamRequest {
+  string prn = 1;
+}
+message RestoreTeamResponse {
+  Team team = 1;
+}
+
+message CreateProjectRequest {
+  string team_prn = 1;
+  string slug = 2;
+  string name = 3;
+}
+message CreateProjectResponse {
+  Project project = 1;
+}
+message GetProjectRequest {
+  string prn = 1;
+}
+message GetProjectResponse {
+  Project project = 1;
+}
+message ListProjectsRequest {
+  string team_prn = 1;
+  uint32 limit = 2;
+  uint64 offset = 3;
+}
+message ListProjectsResponse {
+  repeated Project projects = 1;
+}
+message RenameProjectRequest {
+  string prn = 1;
+  optional string new_slug = 2;
+  optional string new_name = 3;
+}
+message RenameProjectResponse {
+  Project project = 1;
+}
+message ArchiveProjectRequest {
+  string prn = 1;
+}
+message ArchiveProjectResponse {
+  Project project = 1;
+}
+message RestoreProjectRequest {
+  string prn = 1;
+}
+message RestoreProjectResponse {
+  Project project = 1;
+}
+
+message AttachMembershipRequest {
+  string principal_prn = 1;
+  string node_prn = 2;
+}
+message AttachMembershipResponse {
+  Membership membership = 1;
+}
+message DetachMembershipRequest {
+  string id = 1;
+} // membership uuid
+message DetachMembershipResponse {}
+message ListMembershipsRequest {
+  oneof filter {
+    string principal_prn = 1;
+    string node_prn = 2;
+  }
+  uint32 limit = 3;
+  uint64 offset = 4;
+}
+message ListMembershipsResponse {
+  repeated Membership memberships = 1;
+}
+
+service TenancyService {
+  rpc CreateOrganization(CreateOrganizationRequest) returns (CreateOrganizationResponse);
+  rpc GetOrganization(GetOrganizationRequest) returns (GetOrganizationResponse);
+  rpc ListOrganizations(ListOrganizationsRequest) returns (ListOrganizationsResponse);
+  rpc RenameOrganization(RenameOrganizationRequest) returns (RenameOrganizationResponse);
+  rpc ArchiveOrganization(ArchiveOrganizationRequest) returns (ArchiveOrganizationResponse);
+  rpc RestoreOrganization(RestoreOrganizationRequest) returns (RestoreOrganizationResponse);
+  rpc CreateTeam(CreateTeamRequest) returns (CreateTeamResponse);
+  rpc GetTeam(GetTeamRequest) returns (GetTeamResponse);
+  rpc ListTeams(ListTeamsRequest) returns (ListTeamsResponse);
+  rpc RenameTeam(RenameTeamRequest) returns (RenameTeamResponse);
+  rpc ArchiveTeam(ArchiveTeamRequest) returns (ArchiveTeamResponse);
+  rpc RestoreTeam(RestoreTeamRequest) returns (RestoreTeamResponse);
+  rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
+  rpc GetProject(GetProjectRequest) returns (GetProjectResponse);
+  rpc ListProjects(ListProjectsRequest) returns (ListProjectsResponse);
+  rpc RenameProject(RenameProjectRequest) returns (RenameProjectResponse);
+  rpc ArchiveProject(ArchiveProjectRequest) returns (ArchiveProjectResponse);
+  rpc RestoreProject(RestoreProjectRequest) returns (RestoreProjectResponse);
+  rpc AttachMembership(AttachMembershipRequest) returns (AttachMembershipResponse);
+  rpc DetachMembership(DetachMembershipRequest) returns (DetachMembershipResponse);
+  rpc ListMemberships(ListMembershipsRequest) returns (ListMembershipsResponse);
 }
