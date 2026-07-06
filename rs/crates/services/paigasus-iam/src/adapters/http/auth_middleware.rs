@@ -11,32 +11,21 @@
 //! claim/token material out of its `Display`).
 
 use axum::extract::{Request, State};
-use axum::http::header;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use paigasus_iam_core::{AuthnError, Issuer, PrincipalId, TokenDefect};
+use paigasus_iam_core::{AuthnError, TokenDefect};
 
 use super::AppState;
 use super::authn::AuthnApiError;
+use crate::adapters::auth::{AuthContext, bearer_from_headers};
 use crate::application::authenticate_token::Provisioning;
-
-/// The authenticated request context the middleware attaches on success (D13: the hot path
-/// resolves the principal only — no membership fetch; that stays in `Introspect`). M2
-/// handlers don't read it yet; M3 (authorization) and M5 (audit) will, and Task 12 reuses
-/// this exact shape for the gRPC surface — so the field set is deliberately fixed here.
-#[derive(Clone)]
-pub struct AuthContext {
-    pub principal_id: PrincipalId,
-    pub issuer: Issuer,
-    pub subject: String,
-}
 
 /// Enforces a valid bearer token on the request before it reaches a protected handler
 /// (D14 — wired via `route_layer` inside `router()`, so the `oneshot` test harness
 /// exercises it too). Applied only to the tenancy sub-router; `/healthz`, `/readyz`, and
 /// `POST /v1/authn/introspect` stay outside it (spec §7.4).
 pub async fn require_bearer(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    let Some(token) = bearer_token(&request) else {
+    let Some(token) = bearer_from_headers(request.headers()) else {
         // A missing or malformed `Authorization` header is indistinguishable, to a caller,
         // from a rejected token: both are 401 `invalid_token` + `WWW-Authenticate` (D12).
         return AuthnApiError(AuthnError::InvalidToken(TokenDefect::Malformed)).into_response();
@@ -53,20 +42,4 @@ pub async fn require_bearer(State(state): State<AppState>, mut request: Request,
         }
         Err(err) => AuthnApiError(err).into_response(),
     }
-}
-
-/// Extracts the bearer token from the `Authorization` header — the sole accepted source.
-/// Returns `None` for an absent header, a non-UTF-8 value, a non-`Bearer` scheme, or an
-/// empty credential. The scheme match is ASCII-case-insensitive per RFC 7235 §2.1.
-fn bearer_token(request: &Request) -> Option<String> {
-    let value = request.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
-    let (scheme, token) = value.split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("Bearer") {
-        return None;
-    }
-    let token = token.trim();
-    if token.is_empty() {
-        return None;
-    }
-    Some(token.to_string())
 }
