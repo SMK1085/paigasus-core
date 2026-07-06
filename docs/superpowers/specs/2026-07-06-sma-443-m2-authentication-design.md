@@ -431,6 +431,11 @@ through `main.rs` and every test constructor) and grows the wired `AuthnSvc` typ
   features `tokio-comp` + `connection-manager`) — `rs/deny.toml` license review (add
   exceptions only if `:deny` says so). `reqwest` (already declared workspace-level) becomes
   consumed for the first time.
+- **Decision (implementation, GATE-1-holder approved):** jsonwebtoken 10's `rust_crypto`
+  backend transitively pulls the `rsa` crate → RUSTSEC-2023-0071 (Marvin) is ignored in
+  `rs/deny.toml`, scoped to that advisory, with a written justification: IAM performs
+  RSA *verification only* (public keys); the advisory's timing side-channel requires
+  private-key operations that never occur here. Revisit if IAM ever holds RSA private keys.
 - No new crates, no kernel changes → no `ci/affected-graph/run.sh` expected-set edits, no
   binding glue churn.
 - `contracts:generate` regen committed (ADR-0004); `:breaking` additive.
