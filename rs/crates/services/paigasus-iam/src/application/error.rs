@@ -90,6 +90,9 @@ impl From<RepositoryError> for TenancyError {
                 ConflictKind::SlugTaken => Self::SlugConflict,
                 ConflictKind::DuplicateMembership => Self::DuplicateMembership,
                 ConflictKind::EmailTaken => Self::EmailConflict,
+                // Authn-only variant (SMA-443): tenancy operations never produce it, but the
+                // match must stay exhaustive as `ConflictKind` grows across milestones.
+                ConflictKind::ExternalIdentityExists => Self::Internal,
                 ConflictKind::Other => Self::Internal,
             },
             RepositoryError::NotFound => Self::NotFound,

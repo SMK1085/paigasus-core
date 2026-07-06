@@ -479,6 +479,10 @@ impl IdGenerator for SeqIds {
     fn new_membership_id(&self) -> Uuid {
         self.next()
     }
+
+    fn new_external_identity_id(&self) -> Uuid {
+        self.next()
+    }
 }
 
 #[cfg(test)]

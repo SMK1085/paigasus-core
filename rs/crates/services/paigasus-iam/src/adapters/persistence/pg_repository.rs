@@ -77,4 +77,18 @@ impl PrincipalRepository for PgPrincipalRepository {
         let user = User::new(pid, email, um.display_name, um.locale, um.timezone, um.created_at, um.updated_at);
         Ok(Some((principal, user)))
     }
+
+    async fn find_principal(&self, id: &PrincipalId) -> Result<Option<Principal>, RepositoryError> {
+        let uuid = id.uuid();
+        let Some(pm) = principal::Entity::find_by_id(uuid).one(&self.db).await.map_err(map_err)? else {
+            return Ok(None);
+        };
+
+        let prn = Prn::parse(&pm.prn).map_err(|e| RepositoryError::Backend(Box::new(std::io::Error::other(e.to_string()))))?;
+        let pid = PrincipalId::from_prn(prn);
+        let kind = PrincipalKind::parse(&pm.kind).ok_or_else(|| RepositoryError::Backend(Box::new(std::io::Error::other("bad kind"))))?;
+        let status = PrincipalStatus::parse(&pm.status).ok_or_else(|| RepositoryError::Backend(Box::new(std::io::Error::other("bad status"))))?;
+
+        Ok(Some(Principal::new(pid, kind, status, pm.created_at, pm.updated_at)))
+    }
 }

@@ -13,8 +13,8 @@ pub mod value;
 
 pub use authn::{AuthnError, AuthnPrincipal, ExternalIdentity, Issuer, PrincipalContext, ProvisioningDefect, TokenDefect, ValidatedClaims};
 pub use ports::{
-    Clock, ConflictKind, IdGenerator, MembershipRecord, MembershipRepository, NodeView, OrganizationRepository, PreconditionKind, PrincipalRepository, ProjectRepository, RepositoryError,
-    TeamRepository,
+    Authenticator, Clock, ConflictKind, ExternalIdentityRepository, IdGenerator, MembershipRecord, MembershipRepository, NodeView, OrganizationRepository, PreconditionKind, PrincipalRepository,
+    ProjectRepository, RepositoryError, TeamRepository,
 };
 pub use principal::{Principal, PrincipalKind, PrincipalStatus};
 pub use tenancy::{Membership, NAME_MAX_CHARS, NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId, TenancyNodeRef, validate_name};
