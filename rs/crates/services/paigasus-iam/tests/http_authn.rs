@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::application::authenticate_token::Provisioning;
 use serde_json::json;
-use support::{send, send_raw, start_mock_idp, test_config};
+use support::{send, send_raw, start_mock_idp, test_config, test_config_with};
 
 #[tokio::test]
 async fn introspect_unknown_identity_is_403_and_never_provisions() {
@@ -68,11 +68,12 @@ async fn introspect_resolved_identity_returns_full_context() {
     assert!(body["memberships"].as_array().expect("memberships array").is_empty());
 
     // Attach an org membership; introspect reflects it (D13: introspect is the one
-    // entry point that assembles memberships).
-    let (status, org) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "acme", "name": "Acme" })), None).await;
+    // entry point that assembles memberships). These are PROTECTED tenancy routes, so they
+    // carry the same bearer token (Task 11 enforcement); introspect itself stays bearer-free.
+    let (status, org) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "acme", "name": "Acme" })), Some(&token)).await;
     assert_eq!(status, StatusCode::CREATED);
     let org_prn = org["organization"]["prn"].as_str().expect("organization.prn").to_string();
-    let (status, membership) = send(&app, "POST", "/v1/memberships", Some(json!({ "principal_prn": principal_prn, "node_prn": org_prn })), None).await;
+    let (status, membership) = send(&app, "POST", "/v1/memberships", Some(json!({ "principal_prn": principal_prn, "node_prn": org_prn })), Some(&token)).await;
     assert_eq!(status, StatusCode::CREATED, "{membership}");
 
     let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": token })), None).await;
@@ -114,4 +115,138 @@ async fn introspect_oversized_token_is_401_invalid_token() {
     let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": oversized })), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(body["error"]["code"], "invalid_token");
+}
+
+// --- Task 11: bearer enforcement on the protected `/v1` surface (D14, spec §7.4) ---
+
+#[tokio::test]
+async fn protected_route_without_token_is_401() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, _idp) = support::app(db).await;
+
+    // No `Authorization` header on a protected tenancy route: the middleware short-circuits
+    // with 401 `invalid_token` + the RFC 6750 `WWW-Authenticate` challenge, before any
+    // handler runs (a missing header is treated exactly like a rejected token, D12).
+    let response = send_raw(&app, "POST", "/v1/organizations", Some(json!({ "slug": "acme", "name": "Acme" })), None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let challenge = response.headers().get("www-authenticate").expect("WWW-Authenticate header").to_str().unwrap();
+    assert_eq!(challenge, "Bearer error=\"invalid_token\"");
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn protected_route_with_invalid_token_is_401_with_www_authenticate() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, _idp) = support::app(db).await;
+
+    // A syntactically-broken bearer token on a protected GET: the validator rejects it and
+    // the middleware funnels that through the same 401 `invalid_token` + challenge path.
+    let response = send_raw(&app, "GET", "/v1/organizations", None, Some("not-a-jwt")).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let challenge = response.headers().get("www-authenticate").expect("WWW-Authenticate header").to_str().unwrap();
+    assert_eq!(challenge, "Bearer error=\"invalid_token\"");
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn protected_route_with_valid_token_succeeds_and_jit_provisions() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, idp) = support::app(db).await;
+
+    // A valid token for a brand-new (issuer, subject): the middleware's resolve(.., Enabled)
+    // JIT-provisions the principal on the way in (AC 2), so the protected write succeeds.
+    let token = idp.bearer("jit-newcomer", Some("newcomer@example.com"), "paigasus", 3600);
+    let (status, created) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "acme", "name": "Acme" })), Some(&token)).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    // Introspect the SAME token (bearer-free — introspect is exempt): the identity now
+    // resolves to a real principal. Since introspect never provisions (D10), a 200 here is
+    // only possible because the middleware already ran JIT on the write above — the AC 2 proof.
+    let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": token })), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["subject"], "jit-newcomer");
+    assert_eq!(body["issuer"], idp.issuer);
+    assert!(body["principal_prn"].as_str().is_some_and(|prn| prn.starts_with("prn:pgs:iam:::principal/")), "{body}");
+}
+
+#[tokio::test]
+async fn readyz_and_introspect_do_not_require_bearer() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, idp) = support::app(db).await;
+
+    // `/readyz` is exempt: reachable (200) with no `Authorization` header at all.
+    let (status, body) = send(&app, "GET", "/readyz", None, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "ready");
+
+    // `POST /v1/authn/introspect` is exempt too: a bearer-free request reaches the handler.
+    // The token (in the body, not the header) is a valid but never-provisioned identity, so
+    // the handler's own D10 read-only path answers 403 `identity_not_provisioned` — crucially
+    // NOT the middleware's 401 `invalid_token`, the tell-tale of an enforced route.
+    let token = idp.bearer("introspect-exempt", Some("exempt@example.com"), "paigasus", 3600);
+    let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": token })), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "identity_not_provisioned");
+}
+
+#[tokio::test]
+async fn jit_disabled_unknown_identity_is_403() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let jit_enabled = start_mock_idp().await;
+    let jit_disabled = start_mock_idp().await;
+    // Two configured issuers; the second has jit_provisioning = false.
+    let state = AppState::new(db, &test_config_with(&[(&jit_enabled, true), (&jit_disabled, false)], 30)).await.expect("AppState::new");
+    let app = router(state);
+
+    // A valid token from the JIT-disabled issuer for an unknown identity: the middleware
+    // verifies the signature but refuses to provision (per-issuer flag, D5), so the request
+    // is 403 `identity_not_provisioned` instead of a JIT success.
+    let token = jit_disabled.bearer("no-jit-user", Some("nojit@example.com"), "paigasus", 3600);
+    let (status, body) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "acme", "name": "Acme" })), Some(&token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "identity_not_provisioned");
+}
+
+#[tokio::test]
+async fn key_rotation_validates_tokens_signed_with_the_new_key() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let mut idp = start_mock_idp().await;
+    // Cooldown 0 so the kid-miss refetch triggered by the post-swap token isn't suppressed
+    // by the cooldown from the first fetch. The default-cooldown suppression path is already
+    // unit-tested in the JWKS provider (spec §4.3), so this test targets the swap-then-succeed
+    // path only.
+    let state = AppState::new(db, &test_config_with(&[(&idp, true)], 0)).await.expect("AppState::new");
+    let app = router(state);
+
+    // 1. A token under the ORIGINAL key validates (and warms the per-issuer JWKS cache).
+    let before = idp.bearer("rotating-user", Some("rotate@example.com"), "paigasus", 3600);
+    let (status, body) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "pre", "name": "Pre" })), Some(&before)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // 2. Rotate the IdP's signing key: the served JWKS now carries only the NEW kid, while
+    // the validator's cache still holds the old one.
+    idp.rotate();
+
+    // 3. A token under the NEW key: its unknown kid forces a single refetch (cooldown 0), the
+    // IdP serves the rotated JWKS, the signature verifies against the fresh key, and the
+    // protected write succeeds.
+    let after = idp.bearer("rotating-user", Some("rotate@example.com"), "paigasus", 3600);
+    let (status, body) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "post", "name": "Post" })), Some(&after)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
 }

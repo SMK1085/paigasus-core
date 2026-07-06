@@ -4,6 +4,7 @@
 //! `/v1` tenancy API (organizations/teams/projects/memberships/users, ADR-0014), and the
 //! authn introspection endpoint (`/v1/authn/introspect`, SMA-443).
 
+pub mod auth_middleware;
 pub mod authn;
 pub mod dto;
 pub mod error;
@@ -163,20 +164,25 @@ pub fn health_router() -> Router {
 }
 
 /// Full HTTP surface: liveness + DB-backed readiness + the `/v1` tenancy API + authn
-/// introspection. Introspect lives on its OWN sub-router, merged alongside the tenancy
-/// one: Task 11's bearer-enforcement layer wraps the tenancy sub-router only, and
-/// `/v1/authn/introspect` (like `/readyz` and `/healthz`) stays outside it (spec §7.4).
+/// introspection. The tenancy routes (organizations/teams/projects/memberships/users) sit
+/// on their own sub-router carrying the bearer-enforcement `route_layer` (D14 — attached
+/// HERE, inside `router()`, not in `serve_http`, so the `oneshot` test harness exercises
+/// it). `/healthz`, `/readyz`, and `POST /v1/authn/introspect` are merged OUTSIDE that
+/// layer and stay unauthenticated (spec §7.4).
 pub fn router(state: AppState) -> Router {
-    let api = Router::new()
+    let protected = Router::new()
         .merge(organizations::router())
         .merge(teams::router())
         .merge(projects::router())
         .merge(memberships::router())
         .merge(users::router())
-        .route("/readyz", get(readyz))
+        // `route_layer` (not `layer`): the enforcement covers exactly the routes defined
+        // above and never the merged-in `/healthz`/`/readyz`/introspect or the 404 fallback.
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware::require_bearer))
         .with_state(state.clone());
+    let public = Router::new().route("/readyz", get(readyz)).with_state(state.clone());
     let authn_api = authn::router().with_state(state);
-    health_router().merge(api).merge(authn_api)
+    health_router().merge(protected).merge(public).merge(authn_api)
 }
 
 async fn healthz() -> impl IntoResponse {

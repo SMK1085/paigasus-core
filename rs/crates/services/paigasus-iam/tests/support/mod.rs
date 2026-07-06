@@ -39,6 +39,7 @@ use paigasus_iam::config::{AuthnConfig, IamConfig, IssuerConfig, JwksCacheBacken
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
+use std::sync::{Arc, RwLock};
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ContainerAsync;
 use testcontainers_modules::testcontainers::ImageExt;
@@ -72,12 +73,17 @@ pub async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, Data
 
 /// An in-process mock OIDC IdP: an HTTPS axum server (self-signed runtime cert) serving
 /// the discovery document + JWKS, plus the ES256 signing key to mint bearer tokens whose
-/// signatures verify against that JWKS. The server task is aborted on drop.
+/// signatures verify against that JWKS. The served JWKS lives behind an `Arc<RwLock<..>>`
+/// shared with the server task so [`MockIdp::rotate`] can swap the keypair at runtime
+/// (the key-rotation integration test, spec §8). The server task is aborted on drop.
 #[allow(dead_code)]
 pub struct MockIdp {
     pub issuer: String,
     sign: EncodingKey,
     kid: String,
+    /// The serialized JWKS the `/jwks` route serves; `rotate` replaces it in place, and the
+    /// server reads it (under the same lock) on every request.
+    jwks_body: Arc<RwLock<String>>,
     handle: JoinHandle<()>,
 }
 
@@ -85,7 +91,8 @@ pub struct MockIdp {
 impl MockIdp {
     /// Mints a signed ES256 bearer token: `iss` = this IdP, plus the given `sub`/`aud`,
     /// `exp` = now + `exp_offset_secs` (negative for an already-expired token), and an
-    /// optional `email` claim (JIT provisioning requires one, spec §6.2).
+    /// optional `email` claim (JIT provisioning requires one, spec §6.2). Signs with the
+    /// CURRENT keypair, so a token minted after [`rotate`](Self::rotate) carries the new `kid`.
     pub fn bearer(&self, sub: &str, email: Option<&str>, aud: &str, exp_offset_secs: i64) -> String {
         let mut header = Header::new(Algorithm::ES256);
         header.kid = Some(self.kid.clone());
@@ -100,6 +107,20 @@ impl MockIdp {
         }
         jsonwebtoken::encode(&header, &claims, &self.sign).expect("signing a test token")
     }
+
+    /// Rotates the IdP's signing key: mints a fresh ES256 keypair under a NEW `kid`, swaps
+    /// it into the served JWKS, and switches `bearer` to sign with it. A token minted after
+    /// this carries the new `kid`, so the validator's cached JWKS (keyed by the old `kid`)
+    /// misses and must refetch (§4.3) — the key-rotation integration test. The timestamp
+    /// suffix guarantees the new `kid` differs from the old one across repeated rotations.
+    pub fn rotate(&mut self) {
+        let kid = format!("mock-idp-es256-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default());
+        let (sign, jwk) = es256_keypair(&kid);
+        let body = serde_json::to_string(&JwkSet { keys: vec![jwk] }).expect("jwks serializes");
+        *self.jwks_body.write().expect("jwks lock not poisoned") = body;
+        self.sign = sign;
+        self.kid = kid;
+    }
 }
 
 impl Drop for MockIdp {
@@ -108,10 +129,11 @@ impl Drop for MockIdp {
     }
 }
 
-/// Mints a runtime EC P-256 keypair (test-support copy of the validator's inline helper —
-/// spec §8 mock-IdP refinement: no committed PEM/JWK fixtures, no `rsa` crate). Returns
-/// the signing key, the corresponding public JWK, and a fixed `kid` tying the two together.
-fn es256_keypair() -> (EncodingKey, Jwk, String) {
+/// Mints a runtime EC P-256 keypair under the given `kid` (test-support copy of the
+/// validator's inline helper — spec §8 mock-IdP refinement: no committed PEM/JWK fixtures,
+/// no `rsa` crate). Returns the signing key and the corresponding public JWK, both tagged
+/// with `kid`. The caller owns `kid` so `rotate` can mint a distinct one per rotation.
+fn es256_keypair(kid: &str) -> (EncodingKey, Jwk) {
     let secret_key = p256::SecretKey::random(&mut OsRng);
     let pem = secret_key.to_pkcs8_pem(LineEnding::LF).expect("valid pkcs8 pem");
     let encoding_key = EncodingKey::from_ec_pem(pem.as_bytes()).expect("valid ec pem");
@@ -120,11 +142,10 @@ fn es256_keypair() -> (EncodingKey, Jwk, String) {
     let x = URL_SAFE_NO_PAD.encode(encoded_point.x().expect("uncompressed point has x"));
     let y = URL_SAFE_NO_PAD.encode(encoded_point.y().expect("uncompressed point has y"));
 
-    let kid = "mock-idp-es256".to_string();
     let jwk = Jwk {
         common: CommonParameters {
             key_algorithm: Some(KeyAlgorithm::ES256),
-            key_id: Some(kid.clone()),
+            key_id: Some(kid.to_string()),
             ..Default::default()
         },
         algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
@@ -135,14 +156,15 @@ fn es256_keypair() -> (EncodingKey, Jwk, String) {
         }),
     };
 
-    (encoding_key, jwk, kid)
+    (encoding_key, jwk)
 }
 
 /// Starts the mock IdP on an ephemeral 127.0.0.1 port, HTTPS via a runtime self-signed
 /// certificate (`rcgen`), serving `/.well-known/openid-configuration` + `/jwks`.
 #[allow(dead_code)]
 pub async fn start_mock_idp() -> MockIdp {
-    let (sign, jwk, kid) = es256_keypair();
+    let kid = "mock-idp-es256-initial".to_string();
+    let (sign, jwk) = es256_keypair(&kid);
 
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()]).expect("self-signed cert");
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem(cert.cert.pem().into_bytes(), cert.key_pair.serialize_pem().into_bytes())
@@ -154,10 +176,12 @@ pub async fn start_mock_idp() -> MockIdp {
     let addr = listener.local_addr().unwrap();
     let issuer = format!("https://{addr}");
 
-    // Both bodies are static per IdP instance — precomputed strings, served verbatim.
+    // The discovery doc is static (the issuer never changes); the JWKS body lives behind a
+    // shared lock so `rotate` can swap it while the server keeps serving from the same Arc.
     let discovery_body = serde_json::json!({ "issuer": issuer, "jwks_uri": format!("{issuer}/jwks") }).to_string();
-    let jwks_body = serde_json::to_string(&JwkSet { keys: vec![jwk] }).expect("jwks serializes");
+    let jwks_body = Arc::new(RwLock::new(serde_json::to_string(&JwkSet { keys: vec![jwk] }).expect("jwks serializes")));
 
+    let jwks_for_route = jwks_body.clone();
     let idp_routes = Router::new()
         .route(
             "/.well-known/openid-configuration",
@@ -169,7 +193,10 @@ pub async fn start_mock_idp() -> MockIdp {
         .route(
             "/jwks",
             get(move || {
-                let body = jwks_body.clone();
+                let shared = jwks_for_route.clone();
+                // Snapshot the current JWKS under the read lock, then drop it before
+                // returning — the guard is never held across an `.await`.
+                let body = shared.read().expect("jwks lock not poisoned").clone();
                 async move { ([("content-type", "application/json")], body) }
             }),
         );
@@ -178,7 +205,7 @@ pub async fn start_mock_idp() -> MockIdp {
         axum_server::from_tcp_rustls(listener, tls).serve(idp_routes.into_make_service()).await.expect("mock idp server");
     });
 
-    MockIdp { issuer, sign, kid, handle }
+    MockIdp { issuer, sign, kid, jwks_body, handle }
 }
 
 /// An `IamConfig` wired to the mock IdP: test defaults, the mock issuer with audience
@@ -186,6 +213,16 @@ pub async fn start_mock_idp() -> MockIdp {
 /// self-signed — the flag exists exactly for this, and is `false` by default in prod).
 #[allow(dead_code)]
 pub fn test_config(idp: &MockIdp) -> IamConfig {
+    test_config_with(&[(idp, true)], 30)
+}
+
+/// A flexible `test_config`: each `(idp, jit_provisioning)` pair becomes a configured
+/// issuer (audience `"paigasus"`), and `jwks_refresh_cooldown_secs` is caller-controlled so
+/// the key-rotation test can drop it to `0` — otherwise the cooldown from the first JWKS
+/// fetch would suppress the kid-miss refetch that a post-swap token needs (spec §4.3). All
+/// other fields are the standard test defaults (`accept_invalid_tls` on, memory cache).
+#[allow(dead_code)]
+pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u64) -> IamConfig {
     IamConfig {
         http_addr: "127.0.0.1:0".parse().unwrap(),
         grpc_addr: "127.0.0.1:0".parse().unwrap(),
@@ -195,18 +232,21 @@ pub fn test_config(idp: &MockIdp) -> IamConfig {
             leeway_secs: 60,
             http_timeout_secs: 5,
             jwks_ttl_secs: 3600,
-            jwks_refresh_cooldown_secs: 30,
+            jwks_refresh_cooldown_secs,
             max_token_bytes: 16384,
             accept_invalid_tls: true,
             jwks_cache: JwksCacheConfig {
                 backend: JwksCacheBackend::Memory,
                 redis_url: None,
             },
-            issuers: vec![IssuerConfig {
-                issuer: idp.issuer.clone(),
-                audiences: vec!["paigasus".to_string()],
-                jit_provisioning: true,
-            }],
+            issuers: idps
+                .iter()
+                .map(|(idp, jit_provisioning)| IssuerConfig {
+                    issuer: idp.issuer.clone(),
+                    audiences: vec!["paigasus".to_string()],
+                    jit_provisioning: *jit_provisioning,
+                })
+                .collect(),
         },
     }
 }
