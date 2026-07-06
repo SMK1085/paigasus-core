@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::application::authenticate_token::Provisioning;
 use serde_json::json;
-use support::{send, send_raw, start_mock_idp, test_config, test_config_with};
+use support::{send, send_raw, send_raw_parts, start_mock_idp, test_config, test_config_with};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -155,6 +155,38 @@ async fn protected_route_with_invalid_token_is_401_with_www_authenticate() {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["error"]["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn fused_bearer_scheme_is_401() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, idp) = support::app(db).await;
+
+    // A perfectly VALID token, but the scheme is fused with the credential ("Bearer<jwt>",
+    // no space): header parsing requires `<scheme> <credential>`, so this must 401 without
+    // the token ever reaching the validator.
+    let token = idp.bearer("fused-scheme", Some("fused@example.com"), "paigasus", 3600);
+    let response = send_raw_parts(&app, "GET", "/v1/organizations", Some(&format!("Bearer{token}")), None, None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn lowercase_bearer_scheme_is_accepted() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, idp) = support::app(db).await;
+
+    // RFC 7235 §2.1: the auth-scheme is case-insensitive, so `bearer <jwt>` must
+    // authenticate exactly like `Bearer <jwt>` (and JIT-provision on the way in).
+    let token = idp.bearer("lowercase-bearer", Some("lower@example.com"), "paigasus", 3600);
+    let response = send_raw_parts(&app, "GET", "/v1/organizations", Some(&format!("bearer {token}")), None, None).await;
+    assert_eq!(response.status(), StatusCode::OK, "a lowercase bearer scheme must be accepted");
 }
 
 #[tokio::test]
