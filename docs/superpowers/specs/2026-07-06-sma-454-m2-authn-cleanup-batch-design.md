@@ -28,35 +28,49 @@ than value.
     `manual_token` pattern — the check fires after the JWKS lookup but before any
     signature verification). Expect `InvalidToken(UnsupportedAlg)`.
   - *empty `aud`:* a signed token whose `aud` is `[]` (test-local claims struct
-    with `aud: Vec<String>`). Expect `InvalidToken(AudienceMismatch)`.
+    with `aud: Vec<String>`; the existing `sign` helper is generalized to accept
+    any `impl Serialize` claims). Expect `InvalidToken(AudienceMismatch)` —
+    verified against jsonwebtoken 10.4.0 source: an empty `aud` can never
+    intersect the configured set, so validation returns `InvalidAudience`.
 - **T2 — use-case tests** (`application/authenticate_token.rs` tests):
   - `name` claim absent + valid email → provisioned `display_name` equals the
     email local part.
   - `email` claim present but unparseable (e.g. `"not-an-email"`) →
     `ProvisioningFailed(MissingEmail)` (same as absent).
   - `locale`/`zoneinfo` claims pass through untouched onto the provisioned `User`.
+  - The existing test-local `claims()` helper hardcodes `locale`/`zoneinfo` to
+    `None`, so the passthrough case needs its own claims builder (or a
+    parameterized variant).
 - **T3 — bearer-parsing negatives:** unit tests on the new shared
   `bearer_from_headers` (C1): `Bearertoken abc` (no space) → `None`; lowercase
   `bearer abc` → `Some("abc")`; `Basic abc` → `None`; `Bearer ` (empty credential)
   → `None`. Plus two integration cases in `tests/http_authn.rs`: `Bearertoken <valid>`
-  → 401; lowercase `bearer <valid token>` → 200 (piggybacks the existing
-  valid-token harness).
+  → 401; lowercase `bearer <valid token>` → 200. **Harness gap:** the existing
+  `tests/support/mod.rs::send_raw` hardcodes `Bearer {token}` and always sends a
+  `serde_json::Value` body with `content-type: application/json`, so these cases
+  (and H1's) need a new low-level helper there — e.g.
+  `send_raw_parts(method, path, authorization: Option<&str>, content_type:
+  Option<&str>, body: Option<Vec<u8>>)` — with `send_raw` reimplemented on top of
+  it. The helper is shared across test binaries, so it lives in `support/mod.rs`.
 - **T4 — `Issuer::parse` interior whitespace** (`paigasus-iam-core` authn tests):
   `https://idp.example .com` and a tab variant → rejected (the branch at
   `authn.rs:29` is currently uncovered).
 - **T5 — Redis JWKS round-trip full equality** (`tests/redis_jwks_cache.rs`):
   replace the piecemeal field asserts with `assert_eq!(got.jwks, jwks.jwks)`
-  (jsonwebtoken's `JwkSet` derives `PartialEq`; if that assumption fails at build
-  time, fall back to comparing `serde_json::to_value` of both).
+  (verified: `JwkSet` derives `PartialEq, Eq` in jsonwebtoken 10.4.0, the locked
+  version).
 
 ## 3. Cleanups
 
 - **C1 — shared bearer extraction + `adapters::auth` home.** New module
   `adapters/auth.rs` holding:
-  - `pub fn bearer_from_headers(headers: &http::HeaderMap) -> Option<String>` —
-    the single copy of the 8-line extractor (RFC 7235 case-insensitive scheme,
+  - `pub fn bearer_from_headers(headers: &axum::http::HeaderMap) -> Option<String>`
+    — the single copy of the 8-line extractor (RFC 7235 case-insensitive scheme,
     trim, reject empty). The HTTP middleware calls it with `request.headers()`;
-    the gRPC layer calls it directly. Both local copies deleted.
+    the gRPC layer calls it directly (`tonic::codegen::http` re-exports the same
+    `http` crate — the lockfile unifies on a single `http 1.4.2`, so no new
+    direct `http` dependency is added; adding one would trip
+    `:deny`/`:machete`). Both local copies deleted.
   - `AuthContext` moves here from `http/auth_middleware.rs` (**D1**, see §5).
     Import sites updated (middleware, gRPC layer); no re-export shim — the crate
     is private, and M3 will consume it from the new home.
@@ -79,7 +93,10 @@ than value.
   `Issuer::parse(&issuer_config.issuer)` at `validator.rs:158` disappears; the
   request path matches `iss` against `configured.issuer.as_str()`. Call sites:
   two arms in `AppState::new` (already `Result`-returning) and the test helper.
-- **C5 — dead `unwrap_or("")`** (`paigasus-iam-core/src/authn.rs:33`):
+  Note: matching moves from the raw config string to the parsed (trimmed) form;
+  the two are identical because `IamConfig::validate` rejects padded issuers
+  before any authenticator is constructed (`main.rs` runs `validate()` first).
+- **C5 — dead `unwrap_or("")`** (`paigasus-iam-core/src/authn.rs:32`):
   `rest.split('/').next()` can never be `None` (split yields ≥1 element), so the
   fallback is dead. Replace with
   `let host = rest.split_once('/').map_or(rest, |(host, _)| host);` — both arms
@@ -89,8 +106,11 @@ than value.
   - Move `BSL-1.0` from the global `[licenses].allow` list to a crate-scoped
     exception: `{ name = "xxhash-rust", allow = ["BSL-1.0"] }`.
   - Drop the `RUSTSEC-2025-0111` (tokio-tar) ignore — stale since SMA-453 bumped
-    testcontainers to 0.27, which no longer pulls tokio-tar.
-  - Verified by the `repo:deny` gate in the full CI graph run.
+    testcontainers to 0.27, which no longer pulls tokio-tar (verified absent from
+    `Cargo.lock`).
+  - Verified by the `repo:deny` gate in the full CI graph run. If the licenses
+    check surfaces another BSL-1.0-*only* crate beyond `xxhash-rust`, it gets its
+    own scoped exception rather than restoring the global allow.
 
 ## 4. Hardening
 
@@ -109,15 +129,30 @@ than value.
     `{"error":{code,message}}` envelope: status 413 → `request_too_large` /
     "request body too large"; every other rejection keeps its axum status
     (400/415/422) with `invalid_request` / "invalid request body". Messages are
-    static — nothing echoes the body.
-  - Tests: oversized body → 413 with envelope; malformed JSON → envelope (not
-    plain text); wrong content-type → envelope.
-- **H2 — boot-reject `jwks_ttl_secs = 0` with the redis backend** (`config.rs`):
-  `IamConfig::validate` errors when `jwks_cache.backend == Redis &&
-  jwks_ttl_secs == 0` (Redis `SET EX 0` is a command error → every JWKS fetch
-  becomes `Unavailable` at runtime; failing at boot is strictly better). The
-  memory backend keeps allowing `0` (it just means "always refetch", throttled by
-  the cooldown). Jail test added.
+    static — nothing echoes the body. (Verified: axum-core 0.5.6 maps a
+    `DefaultBodyLimit` overflow to `PAYLOAD_TOO_LARGE` 413 via
+    `LengthLimitError`.)
+  - **Contract notes:** this intentionally adds two new `code` values
+    (`request_too_large`, `invalid_request`) to the introspect error vocabulary.
+    And the "too big" behavior is two-tier by design: a token over
+    `max_token_bytes` inside a body that still fits the body limit → 401
+    `invalid_token` (validator length cap, existing behavior); a body over
+    `max_token_bytes + 1024` → 413 `request_too_large` before JSON parsing. The
+    existing `introspect_oversized_token_is_401` test sits in the first band and
+    keeps passing unchanged.
+  - Tests (via the new `send_raw_parts` helper, see T3): oversized body → 413
+    with envelope; malformed JSON → envelope (not plain text); wrong
+    content-type → envelope.
+- **H2 — boot-reject `jwks_ttl_secs = 0` for BOTH backends** (`config.rs`):
+  `IamConfig::validate` errors when `jwks_ttl_secs == 0`, regardless of backend.
+  The issue asked for redis only (`SET EX 0` is a command error → every JWKS
+  `put` fails → permanent `Unavailable`), but the spec challenge surfaced that
+  the memory backend is pathological too: `JwksProvider::is_fresh` is
+  `now - fetched_at < ttl`, which with `ttl = 0` is never true, so every cache
+  entry is stale on arrival and every request inside the refresh-cooldown window
+  returns `Unavailable` (a stale key is never served). `0` is a broken config
+  either way; rejecting it unconditionally is the simpler, honest rule. Jail
+  test added.
 - **H3 — bare `WWW-Authenticate: Bearer` on missing credentials** (RFC 6750 §3.1;
   `http/auth_middleware.rs`): when the `Authorization` header is entirely absent,
   the 401 carries a bare `Bearer` challenge (no `error` attribute — the client
@@ -130,8 +165,24 @@ than value.
   and `TokenDefect` are NOT extended — the funnel's "every defect renders
   identically" invariant stays intact. gRPC is unchanged (no
   `WWW-Authenticate` concept in trailers-only responses; missing and invalid are
-  both `Unauthenticated`, as today). Tests: no-header case asserts the bare
-  challenge; existing invalid-token cases keep asserting the error challenge.
+  both `Unauthenticated`, as today).
+  - **Accepted inconsistency (explicit):** the body for the absent-header case
+    keeps the `invalid_token` code even though no token was presented. RFC 6750
+    governs only the challenge header; making the body "consistent" would grow
+    the public error vocabulary and force a `TokenDefect`/funnel extension for
+    marginal value. Uniform body + differentiated challenge is the deliberate
+    trade-off.
+  - **Ripples this change owns:**
+    `tests/http_authn.rs::protected_route_without_token_is_401` currently
+    asserts `Bearer error="invalid_token"` for the no-header case — it must be
+    updated to assert the bare challenge. The D12 doc comments in
+    `auth_middleware.rs` (module header and inside `require_bearer`) claim a
+    missing header is indistinguishable from a rejected token — reword to "the
+    status and body are identical; only the challenge header distinguishes
+    absent (bare `Bearer`) from rejected (`error="invalid_token"`)". The
+    gRPC-side comment stays as-is (still true there).
+  - Tests: no-header case asserts the bare challenge; header-present-but-
+    malformed and rejected-token cases keep asserting the error challenge.
 
 ## 5. Decisions (judgment calls, flagged for GATE 1)
 
@@ -148,6 +199,12 @@ than value.
   pre-validated-by-contract with a panic or silent skip. Honest signature, both
   call sites already return `Result`, and it mirrors the existing wiring-defect
   guard pattern in `AppState::new`.
+- **D4 — H2 rejects `jwks_ttl_secs = 0` for both backends**, going beyond the
+  issue's redis-only wording. The spec challenge verified that `ttl = 0` also
+  breaks the memory backend (never-fresh cache + cooldown → intermittent
+  `Unavailable`), so the narrow check would bless a config that still doesn't
+  work. *Alternative (rejected): redis-only as written — leaves a known-broken
+  memory config bootable.*
 
 ## 6. Error handling
 
