@@ -118,6 +118,57 @@ async fn introspect_oversized_token_is_401_invalid_token() {
     assert_eq!(body["error"]["code"], "invalid_token");
 }
 
+#[tokio::test]
+async fn introspect_oversized_body_is_413_request_too_large() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, _idp) = support::app(db).await;
+
+    // Past max_token_bytes (16384) + the 1024-byte envelope headroom: rejected by the
+    // route-level body limit BEFORE JSON parsing, in the standard envelope (H1). The
+    // 401 band just above max_token_bytes stays covered by
+    // introspect_oversized_token_is_401_invalid_token — the two-tier behavior is by design.
+    let huge = format!(r#"{{"token":"{}"}}"#, "a".repeat(20_000));
+    let response = send_raw_parts(&app, "POST", "/v1/authn/introspect", None, Some("application/json"), Some(huge.into_bytes())).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "request_too_large");
+    assert_eq!(body["error"]["message"], "request body too large");
+}
+
+#[tokio::test]
+async fn introspect_malformed_json_is_enveloped() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, _idp) = support::app(db).await;
+
+    // Broken JSON must render the same {"error":{code,message}} envelope as every other
+    // authn error — not axum's default plain-text rejection (H1).
+    let response = send_raw_parts(&app, "POST", "/v1/authn/introspect", None, Some("application/json"), Some(b"{not json".to_vec())).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(body["error"]["message"], "invalid request body");
+}
+
+#[tokio::test]
+async fn introspect_wrong_content_type_is_enveloped() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, _idp) = support::app(db).await;
+
+    let response = send_raw_parts(&app, "POST", "/v1/authn/introspect", None, Some("text/plain"), Some(br#"{"token":"x"}"#.to_vec())).await;
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
 // --- Task 11: bearer enforcement on the protected `/v1` surface (D14, spec §7.4) ---
 
 #[tokio::test]
