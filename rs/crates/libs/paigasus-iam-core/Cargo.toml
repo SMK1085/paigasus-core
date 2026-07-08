@@ -13,10 +13,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-# cedar-policy — embedded authorization engine (ADR-0013). Pure evaluation (no I/O), so it
-# lives in the pure core. NOT in the wasm/binding tree (bindings depend on paigasus-kernel),
-# so `repo:wasm-getrandom-free` is unaffected.
-cedar-policy = "4"
+cedar-policy = { workspace = true }
 
 [lints]
 workspace = true
