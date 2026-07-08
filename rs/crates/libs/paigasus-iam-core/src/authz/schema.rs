@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Embedded Cedar schema (ADR-0013) + write-time policy validation. Parsed once.
 
+use super::model::AuthzError;
 use cedar_policy::Schema;
 use std::str::FromStr;
 use std::sync::OnceLock;
@@ -30,11 +31,15 @@ pub fn schema() -> &'static Schema {
 }
 
 /// Validate a policy's syntax + schema conformance at write time.
-pub fn validate_policy(src: &str) -> Result<(), String> {
+pub fn validate_policy(src: &str) -> Result<(), AuthzError> {
     use cedar_policy::{PolicySet, ValidationMode, Validator};
-    let pset = PolicySet::from_str(src).map_err(|e| e.to_string())?;
+    let pset = PolicySet::from_str(src).map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
     let result = Validator::new(schema().clone()).validate(&pset, ValidationMode::default());
-    if result.validation_passed() { Ok(()) } else { Err(format!("{result:?}")) }
+    if result.validation_passed() {
+        Ok(())
+    } else {
+        Err(AuthzError::SchemaValidation(format!("{result:?}")))
+    }
 }
 
 #[cfg(test)]
