@@ -5,6 +5,7 @@
 //! hexagonal). IDs/PRNs come from `paigasus-kernel`; time/entropy are injected via ports.
 
 pub mod authn;
+pub mod authz;
 pub mod ports;
 pub mod principal;
 pub mod tenancy;
