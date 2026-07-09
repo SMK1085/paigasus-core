@@ -12,6 +12,7 @@
 use super::entities::policy;
 use crate::adapters::authz::Generations;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
 use paigasus_iam_core::authz::schema::validate_policy;
 use paigasus_iam_core::{AuthzError, PolicyDocument, PolicyStore};
@@ -58,14 +59,19 @@ fn kind_from_str(raw: &str) -> Result<PolicyKind, AuthzError> {
 /// Builds the insertable/updatable `policy` row from a domain `PolicyDocument`. An empty
 /// `description` is stored as `NULL` (the column is nullable; the domain field is not) so
 /// an untouched-by-hand row round-trips byte-for-byte either way.
-fn doc_to_model(doc: &PolicyDocument) -> policy::ActiveModel {
+///
+/// `created_at` is threaded in separately from `doc`: on INSERT it's `doc.created_at` (the
+/// row is new), but on UPDATE the caller must pass the *stored* row's `created_at` — the
+/// incoming `doc.created_at` is untrusted client input and must never overwrite the
+/// original creation timestamp.
+fn doc_to_model(doc: &PolicyDocument, created_at: DateTime<Utc>) -> policy::ActiveModel {
     policy::ActiveModel {
         policy_id: Set(doc.policy_id.clone()),
         kind: Set(kind_to_str(doc.kind).to_string()),
         source: Set(doc.source.clone()),
         description: Set(if doc.description.is_empty() { None } else { Some(doc.description.clone()) }),
         system: Set(doc.system),
-        created_at: Set(doc.created_at),
+        created_at: Set(created_at),
         updated_at: Set(doc.updated_at),
     }
 }
@@ -106,11 +112,18 @@ impl PolicyStore for PgPolicyStore {
             return Err(AuthzError::SystemImmutable(doc.policy_id.clone()));
         }
 
-        let active = doc_to_model(doc);
-        if existing.is_some() {
-            active.update(&txn).await.map_err(map_err)?;
-        } else {
-            active.insert(&txn).await.map_err(map_err)?;
+        // On UPDATE, preserve the stored row's `created_at` — only INSERT takes it from
+        // `doc` (the row is genuinely new then). This must read the fetched `existing`, not
+        // `doc.system`/`doc.created_at`, or a caller could silently rewrite history.
+        match existing {
+            Some(existing) => {
+                let active = doc_to_model(doc, existing.created_at);
+                active.update(&txn).await.map_err(map_err)?;
+            }
+            None => {
+                let active = doc_to_model(doc, doc.created_at);
+                active.insert(&txn).await.map_err(map_err)?;
+            }
         }
 
         txn.commit().await.map_err(map_err)?;

@@ -64,6 +64,43 @@ async fn put_on_an_existing_system_policy_is_rejected() {
     assert!(matches!(&err, AuthzError::SystemImmutable(id) if id == "system-policy-put"), "expected SystemImmutable, got {err:?}");
 }
 
+/// A `put` carrying `system: false` for an id that is *already* persisted with
+/// `system = true` must still be rejected as `SystemImmutable` — the guard has to read the
+/// STORED row's `system` flag, not the incoming `doc`'s. If a future refactor swapped
+/// `existing.system` for `doc.system` in the check, this is the bypass it would let through
+/// (an attacker simply sets `system: false` on the request to edit a protected row), so this
+/// test pins that the stored row wins.
+#[tokio::test]
+async fn put_with_system_false_cannot_bypass_an_existing_system_true_row() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+    seed_system_policy(&db, "system-policy-bypass-attempt", now).await;
+
+    let store = PgPolicyStore::new(db, Generations::memory());
+    let mut bypass_attempt = valid_static_doc("system-policy-bypass-attempt", false, now);
+    bypass_attempt.source = r#"permit(principal, action == Pgs::Iam::Action::"CreateOrganization", resource);"#.to_string();
+    bypass_attempt.description = "attacker-supplied description".to_string();
+
+    let err = store.put(&bypass_attempt).await.unwrap_err();
+    assert!(
+        matches!(&err, AuthzError::SystemImmutable(id) if id == "system-policy-bypass-attempt"),
+        "expected SystemImmutable even though the request claimed system: false, got {err:?}"
+    );
+
+    // The stored row must be untouched — not just rejected, but never written.
+    let all = store.list_all().await.unwrap();
+    let got = all
+        .iter()
+        .find(|d| d.policy_id == "system-policy-bypass-attempt")
+        .expect("seeded system row must survive the rejected put");
+    assert!(got.system, "stored row's system flag must remain true");
+    assert_eq!(
+        got.source, r#"permit(principal, action == Pgs::Iam::Action::"GetOrganization", resource);"#,
+        "seeded source must be unchanged, not overwritten by the bypass attempt"
+    );
+    assert_eq!(got.description, "seeded system policy", "seeded description must be unchanged");
+}
+
 #[tokio::test]
 async fn put_a_non_system_valid_policy_succeeds_and_bumps_policy_gen() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
@@ -86,11 +123,18 @@ async fn put_a_non_system_valid_policy_succeeds_and_bumps_policy_gen() {
     // the generation again.
     let mut updated = doc.clone();
     updated.description = "updated description".to_string();
+    // A forged, different `created_at` on the incoming doc must be ignored on the UPDATE
+    // path — the stored row's original `created_at` is preserved, not overwritten.
+    updated.created_at = now + chrono::Duration::days(1);
     store.put(&updated).await.unwrap();
     assert_eq!(store.policy_gen().await.unwrap(), before + 2);
     let all = store.list_all().await.unwrap();
     let got = all.iter().find(|d| d.policy_id == "non-system-policy").expect("row still present after update");
     assert_eq!(got.description, "updated description");
+    assert_eq!(
+        got.created_at, doc.created_at,
+        "created_at must be preserved from the original row, not overwritten by an update's doc.created_at"
+    );
 }
 
 #[tokio::test]
