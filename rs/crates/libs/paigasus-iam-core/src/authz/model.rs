@@ -9,6 +9,7 @@ use crate::tenancy::TenancyNodeRef;
 use crate::value::PrincipalId;
 use chrono::{DateTime, Utc};
 use paigasus_kernel::Prn;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -31,7 +32,7 @@ pub fn root_prn() -> Prn {
 }
 
 /// The outcome of an authorization decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Effect {
     Allow,
     Deny,
@@ -39,8 +40,10 @@ pub enum Effect {
 
 /// An authorization decision: the [`Effect`] plus the id(s) of the policy/policies that
 /// determined it (Cedar diagnostics, or a synthetic marker for default-deny / evaluation
-/// errors — see `authz::engine`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// errors — see `authz::engine`). `Serialize`/`Deserialize` so adapters can round-trip a
+/// `Decision` through an external cache payload (`adapters::authz::decision_cache`, SMA-444
+/// Task 14) without a bespoke wire format.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Decision {
     pub effect: Effect,
     pub determining_policies: Vec<String>,
@@ -48,7 +51,7 @@ pub struct Decision {
 
 /// A Cedar request-context attribute value. Deliberately minimal — only the primitive
 /// kinds the embedded schema's actions currently need.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextValue {
     Str(String),
     Long(i64),
@@ -56,8 +59,10 @@ pub enum ContextValue {
 }
 
 /// Extra attributes for an [`AccessRequest`], beyond principal/action/resource. A
-/// `BTreeMap` for deterministic ordering (stable test/log output).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// `BTreeMap` for deterministic ordering (stable test/log output, and a stable byte
+/// sequence when serialized as part of `adapters::authz::decision_cache::decision_key`'s
+/// hash input).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RequestContext(pub BTreeMap<String, ContextValue>);
 
 impl RequestContext {
@@ -175,7 +180,7 @@ pub struct PolicyDocument {
 
 /// One entity in an [`EntitySlice`]: its Cedar uid (`(entity_type, entity_id)`), parent
 /// uids (membership-hierarchy edges), and attributes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SliceEntity {
     pub uid: (String, String),
     pub parents: Vec<(String, String)>,
@@ -183,8 +188,10 @@ pub struct SliceEntity {
 }
 
 /// The minimal set of Cedar entities (principal, resource, ancestor chain, synthetic
-/// `Root`) needed to decide one [`AccessRequest`].
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// `Root`) needed to decide one [`AccessRequest`]. `Serialize`/`Deserialize` so the
+/// entity-slice cache (`adapters::authz::entity_cache`, SMA-444 Task 14) can round-trip a
+/// slice through Redis.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct EntitySlice {
     pub entities: Vec<SliceEntity>,
 }

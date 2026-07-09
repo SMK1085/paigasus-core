@@ -87,6 +87,10 @@ uuid = { workspace = true, features = ["serde"] }
 # `adapters::oidc::redis_cache::RedisJwksCache` — external `JwksCache` backend so cached
 # JWKS survive process restarts and are shared across replicas (SMA-443 Task 8).
 redis = { workspace = true }
+# `adapters::authz::decision_cache::decision_key` — blake3-hashes the canonical
+# `(principal, action, resource, context)` serialization into the decision cache's key
+# (SMA-444 Task 14).
+blake3 = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as

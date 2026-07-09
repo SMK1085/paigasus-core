@@ -14,6 +14,11 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 cedar-policy = { workspace = true }
+# `authz::model`'s `Decision`/`EntitySlice` (+ their `Effect`/`ContextValue`/`SliceEntity`
+# parts) derive `Serialize`/`Deserialize` so the service crate's Redis-backed decision +
+# entity-slice caches (`adapters::authz::{decision_cache,entity_cache}`, SMA-444 Task 14)
+# can round-trip them as cache payloads without a bespoke wire format.
+serde = { workspace = true }
 
 [lints]
 workspace = true
