@@ -92,7 +92,7 @@ async fn introspect_over_grpc_round_trips_a_jit_provisioned_principal() {
     assert_eq!(ctx.subject, "grpc-alice");
     assert!(ctx.expires_at.is_some(), "expires_at is set");
     assert!(ctx.memberships.is_empty(), "no memberships yet");
-    assert!(ctx.role_group_prns.is_empty(), "role groups empty until M3");
+    assert!(ctx.role_grants.is_empty(), "role grants empty until a later M3 task populates them");
     let principal_prn = ctx.principal_prn.clone();
 
     // Attach an org membership to the resolved principal, then re-introspect: the membership

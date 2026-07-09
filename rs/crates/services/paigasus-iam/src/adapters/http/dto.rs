@@ -6,7 +6,7 @@
 //! timestamps as RFC3339 via chrono's serde feature, PRNs as canonical strings).
 
 use chrono::{DateTime, Utc};
-use paigasus_iam_core::{MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, PrincipalContext, Project, Team};
+use paigasus_iam_core::{MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, PrincipalContext, Project, RoleGrantRef, Team};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -200,9 +200,26 @@ pub struct IntrospectBody {
     pub token: String,
 }
 
+/// A [`RoleGrantRef`]-shaped JSON entry: mirrors the proto `RoleGrantRef` message field-for-
+/// field (`scope_prn`, `role_key`).
+#[derive(Debug, Clone, Serialize)]
+pub struct RoleGrantRefDto {
+    pub scope_prn: String,
+    pub role_key: String,
+}
+
+impl From<RoleGrantRef> for RoleGrantRefDto {
+    fn from(r: RoleGrantRef) -> Self {
+        RoleGrantRefDto {
+            scope_prn: r.scope_prn,
+            role_key: r.role_key,
+        }
+    }
+}
+
 /// `IntrospectResponse`-shaped JSON (spec §7.2): mirrors proto
 /// `paigasus.iam.v1.IntrospectResponse` field-for-field — snake_case, PRN strings,
-/// `expires_at` as RFC3339, `role_group_prns` empty until M3.
+/// `expires_at` as RFC3339, `role_grants` empty until a later M3 task populates it.
 #[derive(Debug, Clone, Serialize)]
 pub struct IntrospectResponseDto {
     pub principal_prn: String,
@@ -211,7 +228,7 @@ pub struct IntrospectResponseDto {
     pub subject: String,
     pub expires_at: DateTime<Utc>,
     pub memberships: Vec<MembershipDto>,
-    pub role_group_prns: Vec<String>,
+    pub role_grants: Vec<RoleGrantRefDto>,
 }
 
 impl From<PrincipalContext> for IntrospectResponseDto {
@@ -223,7 +240,7 @@ impl From<PrincipalContext> for IntrospectResponseDto {
             subject: ctx.principal.subject,
             expires_at: ctx.principal.expires_at,
             memberships: ctx.memberships.into_iter().map(MembershipDto::from).collect(),
-            role_group_prns: ctx.role_groups.iter().map(paigasus_kernel::Prn::canonical).collect(),
+            role_grants: ctx.role_grants.into_iter().map(RoleGrantRefDto::from).collect(),
         }
     }
 }

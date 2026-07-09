@@ -57,7 +57,7 @@ async fn introspect_resolved_identity_returns_full_context() {
     let principal_prn = principal.principal_id.canonical();
 
     // Introspect over HTTP: 200 with the full context; no memberships yet, and
-    // role_group_prns stays empty until M3.
+    // role_grants stays empty until a later M3 task populates it.
     let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": token })), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["principal_prn"], principal_prn);
@@ -65,7 +65,7 @@ async fn introspect_resolved_identity_returns_full_context() {
     assert_eq!(body["issuer"], idp.issuer);
     assert_eq!(body["subject"], "sub-alice");
     assert!(body["expires_at"].is_string(), "expires_at must be an RFC3339 string: {body}");
-    assert!(body["role_group_prns"].as_array().expect("role_group_prns array").is_empty());
+    assert!(body["role_grants"].as_array().expect("role_grants array").is_empty());
     assert!(body["memberships"].as_array().expect("memberships array").is_empty());
 
     // Attach an org membership; introspect reflects it (D13: introspect is the one

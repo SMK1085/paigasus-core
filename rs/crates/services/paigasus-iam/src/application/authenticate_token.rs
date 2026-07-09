@@ -159,7 +159,7 @@ where
         Ok(PrincipalContext {
             principal,
             memberships,
-            role_groups: Vec::new(),
+            role_grants: Vec::new(),
         })
     }
 
@@ -710,7 +710,7 @@ mod tests {
 
         let ctx = uc.introspect("token").await.unwrap();
         assert_eq!(ctx.memberships.len(), 450);
-        assert!(ctx.role_groups.is_empty());
+        assert!(ctx.role_grants.is_empty());
     }
 
     #[tokio::test]

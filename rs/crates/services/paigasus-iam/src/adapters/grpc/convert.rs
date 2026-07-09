@@ -5,10 +5,12 @@
 //! logic in this layer (task-16 brief).
 
 use chrono::{DateTime, Utc};
-use paigasus_iam_core::{AuthnError, MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, PrincipalContext, Project, Team};
+use paigasus_iam_core::{AuthnError, MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, PrincipalContext, Project, RoleGrantRef, Team};
 use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::common::v1::AuditMetadata;
-use paigasus_proto::paigasus::iam::v1::{IntrospectResponse, Membership, NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Project as ProtoProject, Team as ProtoTeam};
+use paigasus_proto::paigasus::iam::v1::{
+    IntrospectResponse, Membership, NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Project as ProtoProject, RoleGrantRef as ProtoRoleGrantRef, Team as ProtoTeam,
+};
 use tonic::{Code, Status};
 use uuid::Uuid;
 
@@ -161,10 +163,19 @@ pub fn to_proto_membership(r: &MembershipRecord) -> Membership {
     }
 }
 
+/// Projects a core `RoleGrantRef` into its wire message: a direct field-for-field mapping
+/// (both carry `scope_prn`/`role_key` already as plain strings — no PRN parsing needed here).
+pub fn to_proto_role_grant_ref(r: &RoleGrantRef) -> ProtoRoleGrantRef {
+    ProtoRoleGrantRef {
+        scope_prn: r.scope_prn.clone(),
+        role_key: r.role_key.clone(),
+    }
+}
+
 /// Projects a `PrincipalContext` into the wire `IntrospectResponse` (spec §7.2/§7.3): PRN
 /// strings, principal status as its stable `as_str`, `expires_at` as a prost `Timestamp`,
-/// memberships via the shared tenancy `Membership` mapping, and `role_group_prns` from the
-/// role-group PRN canonicals — always empty until M3 (D4).
+/// memberships via the shared tenancy `Membership` mapping, and `role_grants` from the
+/// core's structured role-grant refs — always empty until a later M3 task populates it (D4).
 pub fn to_introspect_response(ctx: &PrincipalContext) -> IntrospectResponse {
     IntrospectResponse {
         principal_prn: ctx.principal.principal_id.canonical(),
@@ -173,6 +184,6 @@ pub fn to_introspect_response(ctx: &PrincipalContext) -> IntrospectResponse {
         subject: ctx.principal.subject.clone(),
         expires_at: Some(ts(ctx.principal.expires_at)),
         memberships: ctx.memberships.iter().map(to_proto_membership).collect(),
-        role_group_prns: ctx.role_groups.iter().map(Prn::canonical).collect(),
+        role_grants: ctx.role_grants.iter().map(to_proto_role_grant_ref).collect(),
     }
 }
