@@ -249,7 +249,7 @@ fn action_refs(actions: &[Action]) -> String {
 mod tests {
     use super::*;
     use crate::authz::engine::PolicyEngine;
-    use crate::authz::model::{AccessRequest, ContextValue, Decision, Effect, EntitySlice, GrantScope, ROOT_ENTITY, RequestContext, RoleGrant, SliceEntity};
+    use crate::authz::model::{AccessRequest, ContextValue, Decision, Effect, EntitySlice, GrantScope, ROOT_ENTITY, RequestContext, RoleGrant, SliceEntity, root_prn};
     use crate::authz::schema::validate_policy;
     use crate::tenancy::{OrganizationId, ProjectId, TeamId, TenancyNodeRef};
     use crate::value::PrincipalId;
@@ -382,16 +382,10 @@ mod tests {
                 expect: Effect::Deny,
             },
             Case {
-                // `Prn` cannot represent the synthetic `Root` entity (see `model::ROOT_ENTITY`
-                // docs), so this exercises the grant against a concrete resource in the
-                // hierarchy instead of `Root` itself. Every node's Cedar ancestor chain
-                // includes `Root`, so `resource in ?resource == Root` still holds — correctly
-                // demonstrating that a `platform_admin` grant at `Root` allows
-                // `CreateOrganization` (and every other action) anywhere.
-                name: "platform_admin at Root allows CreateOrganization anywhere in the hierarchy",
+                name: "platform_admin at Root allows CreateOrganization at Root itself",
                 grants: vec![grant(1, &uni.principal, "platform_admin", GrantScope::Root)],
                 action: Action::CreateOrganization,
-                resource: uni.org_o.prn().clone(),
+                resource: root_prn(),
                 expect: Effect::Allow,
             },
             Case {

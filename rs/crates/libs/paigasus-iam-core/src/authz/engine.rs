@@ -12,7 +12,7 @@
 //! plan's "roles.rs") **must** give each role's Cedar template document a `policy_id`
 //! equal to that role's `key` for grants to link correctly.
 
-use super::model::{AccessRequest, AuthzError, ContextValue, Decision, Effect, EntitySlice, GrantScope, PolicyDocument, PolicyKind, ROOT_ENTITY, RoleGrant, SliceEntity};
+use super::model::{AccessRequest, AuthzError, ContextValue, Decision, Effect, EntitySlice, GrantScope, PolicyDocument, PolicyKind, RoleGrant, SliceEntity, root_prn};
 use super::schema::schema;
 use crate::tenancy::TenancyNodeRef;
 use cedar_policy::entities_errors::EntitiesError;
@@ -148,8 +148,9 @@ impl PolicyEngine {
 
 /// Link `template_id` into a concrete `grant:<uuid>` policy for `grant`, binding
 /// `?principal` to the grantee (via [`to_cedar_uid`] on [`RoleGrant::principal`]) and
-/// `?resource` to the grant's [`GrantScope`] (special-casing [`GrantScope::Root`], which
-/// is not a real `Prn` — see [`ROOT_ENTITY`]).
+/// `?resource` to the grant's [`GrantScope`] — both routed uniformly through
+/// [`to_cedar_uid`] (see [`scope_entity_uid`]; `GrantScope::Root` uses [`root_prn`], not a
+/// special case).
 ///
 /// # Errors
 /// [`AuthzError::TemplateLink`] if the principal/scope can't be turned into a Cedar
@@ -231,22 +232,18 @@ fn entity_uid(entity_type: &str, entity_id: &str) -> Result<EntityUid, Box<Parse
     Ok(EntityUid::from_type_name_and_id(type_name, EntityId::new(entity_id)))
 }
 
-/// The `EntityUid` for a [`GrantScope`]: the constant [`ROOT_ENTITY`] uid for
-/// [`GrantScope::Root`] (which is not a real `Prn` and must never be routed through
-/// `to_cedar_uid`/`Prn::parse`), or `to_cedar_uid` on the node's `Prn` otherwise.
+/// The `EntityUid` for a [`GrantScope`]: [`root_prn`] for [`GrantScope::Root`], or the
+/// node's own `Prn` for [`GrantScope::Node`] — both routed uniformly through
+/// [`to_cedar_uid`], with no special-casing.
 fn scope_entity_uid(scope: &GrantScope) -> Result<EntityUid, Box<ParseErrors>> {
-    match scope {
-        GrantScope::Root => entity_uid(ROOT_ENTITY.0, ROOT_ENTITY.1),
-        GrantScope::Node(node) => {
-            let prn = match node {
-                TenancyNodeRef::Organization(id) => id.prn(),
-                TenancyNodeRef::Team(id) => id.prn(),
-                TenancyNodeRef::Project(id) => id.prn(),
-            };
-            let cedar = to_cedar_uid(prn);
-            entity_uid(&cedar.entity_type, &cedar.entity_id)
-        }
-    }
+    let prn = match scope {
+        GrantScope::Root => root_prn(),
+        GrantScope::Node(TenancyNodeRef::Organization(id)) => id.prn().clone(),
+        GrantScope::Node(TenancyNodeRef::Team(id)) => id.prn().clone(),
+        GrantScope::Node(TenancyNodeRef::Project(id)) => id.prn().clone(),
+    };
+    let cedar = to_cedar_uid(&prn);
+    entity_uid(&cedar.entity_type, &cedar.entity_id)
 }
 
 /// Map a [`ContextValue`] to the `RestrictedExpression` Cedar needs for entity attrs and

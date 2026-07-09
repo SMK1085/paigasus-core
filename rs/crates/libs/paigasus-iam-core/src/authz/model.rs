@@ -13,9 +13,22 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// The synthetic Cedar entity that sits above every organization (D4): `(entity_type,
-/// entity_id)`. Not representable as a `Prn` — `"paigasus"` is not a UUID, so `Root`
-/// cannot be a resource PRN; it is injected directly into every `EntitySlice`.
-pub const ROOT_ENTITY: (&str, &str) = ("Pgs::Iam::Root", "paigasus");
+/// entity_id)`, pinned to equal [`root_prn`]'s Cedar uid by a unit test below. Still
+/// injected directly into every `EntitySlice` — there is no tenancy store row for it —
+/// but as of [`root_prn`] it is also expressible as an ordinary `Prn`, so callers that
+/// need a `Cedar` uid without building a `Prn` first (test fixtures, mostly) can use this
+/// constant interchangeably with `to_cedar_uid(&root_prn())`.
+pub const ROOT_ENTITY: (&str, &str) = ("Pgs::Iam::Root", "00000000-0000-0000-0000-000000000000");
+
+/// The canonical sentinel `Prn` for the synthetic Cedar `Root` entity (D4): a well-known
+/// nil-UUID `Prn` (`resource_type = "root"`) rather than a non-`Prn` special case, so every
+/// PRN-shaped surface (`AccessRequest::resource`, wire `resource_prn`, `GrantScope`) can
+/// express Root uniformly through `paigasus_kernel::to_cedar_uid` — no special-casing
+/// anywhere. Its Cedar uid is pinned to equal [`ROOT_ENTITY`] by a unit test below.
+#[must_use]
+pub fn root_prn() -> Prn {
+    Prn::build("iam", "", None, "root", Uuid::nil()).expect("root sentinel prn parts are valid")
+}
 
 /// The outcome of an authorization decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,13 +97,13 @@ pub enum GrantScope {
 }
 
 impl GrantScope {
-    /// The scope's canonical identity string: the constant Root uid (`ROOT_ENTITY.1`) for
+    /// The scope's canonical identity string: [`root_prn`]'s canonical PRN string for
     /// [`GrantScope::Root`], or the node's canonical PRN — delegates to
     /// [`TenancyNodeRef::canonical`] for [`GrantScope::Node`].
     #[must_use]
     pub fn canonical_prn(&self) -> String {
         match self {
-            GrantScope::Root => ROOT_ENTITY.1.to_string(),
+            GrantScope::Root => root_prn().canonical(),
             GrantScope::Node(node) => node.canonical(),
         }
     }
@@ -132,8 +145,8 @@ pub struct RoleGrant {
 }
 
 /// A lightweight, wire-friendly reference to a [`RoleGrant`]'s scope + role — the scope's
-/// canonical identity string (a tenancy PRN, or `ROOT_ENTITY.1` for `Root`) plus the role
-/// key, without the grant's own id/timestamps/linked-policy.
+/// canonical identity string (a tenancy PRN, or [`root_prn`]'s canonical PRN for `Root`)
+/// plus the role key, without the grant's own id/timestamps/linked-policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleGrantRef {
     pub scope_prn: String,
@@ -236,9 +249,19 @@ mod tests {
     }
 
     #[test]
-    fn grant_scope_canonical_prn_for_root_is_the_constant_root_uid() {
-        assert_eq!(GrantScope::Root.canonical_prn(), ROOT_ENTITY.1);
+    fn grant_scope_canonical_prn_for_root_is_the_sentinel_prns_canonical_string() {
+        assert_eq!(GrantScope::Root.canonical_prn(), root_prn().canonical());
         assert_eq!(GrantScope::Root.kind(), NodeKind::Root);
+    }
+
+    /// Pins the two Root representations together: [`root_prn`]'s Cedar uid (via
+    /// `paigasus_kernel::to_cedar_uid`) must equal [`ROOT_ENTITY`] exactly, so every call
+    /// site free to choose either one gets the identical Cedar entity.
+    #[test]
+    fn to_cedar_uid_of_root_prn_matches_root_entity_constant() {
+        let uid = paigasus_kernel::to_cedar_uid(&root_prn());
+        assert_eq!(uid.entity_type, ROOT_ENTITY.0);
+        assert_eq!(uid.entity_id, ROOT_ENTITY.1);
     }
 
     #[test]
