@@ -16,7 +16,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file paigasus/iam/v1/iam.proto.
  */
 export const file_paigasus_iam_v1_iam: GenFile = /*@__PURE__*/
-  fileDesc("ChlwYWlnYXN1cy9pYW0vdjEvaWFtLnByb3RvEg9wYWlnYXN1cy5pYW0udjEiGgoLU2VydmljZUluZm8SCwoDcHJuGAEgASgJIs0BCgxPcmdhbml6YXRpb24SCwoDcHJuGAEgASgJEgwKBHNsdWcYAiABKAkSDAoEbmFtZRgDIAEoCRIrCgZzdGF0dXMYBCABKA4yGy5wYWlnYXN1cy5pYW0udjEuTm9kZVN0YXR1cxI1ChBlZmZlY3RpdmVfc3RhdHVzGAUgASgOMhsucGFpZ2FzdXMuaWFtLnYxLk5vZGVTdGF0dXMSMAoFYXVkaXQYBiABKAsyIS5wYWlnYXN1cy5jb21tb24udjEuQXVkaXRNZXRhZGF0YSLWAQoEVGVhbRILCgNwcm4YASABKAkSDwoHb3JnX3BybhgCIAEoCRIMCgRzbHVnGAMgASgJEgwKBG5hbWUYBCABKAkSKwoGc3RhdHVzGAUgASgOMhsucGFpZ2FzdXMuaWFtLnYxLk5vZGVTdGF0dXMSNQoQZWZmZWN0aXZlX3N0YXR1cxgGIAEoDjIbLnBhaWdhc3VzLmlhbS52MS5Ob2RlU3RhdHVzEjAKBWF1ZGl0GAcgASgLMiEucGFpZ2FzdXMuY29tbW9uLnYxLkF1ZGl0TWV0YWRhdGEi6wEKB1Byb2plY3QSCwoDcHJuGAEgASgJEhAKCHRlYW1fcHJuGAIgASgJEg8KB29yZ19wcm4YAyABKAkSDAoEc2x1ZxgEIAEoCRIMCgRuYW1lGAUgASgJEisKBnN0YXR1cxgGIAEoDjIbLnBhaWdhc3VzLmlhbS52MS5Ob2RlU3RhdHVzEjUKEGVmZmVjdGl2ZV9zdGF0dXMYByABKA4yGy5wYWlnYXN1cy5pYW0udjEuTm9kZVN0YXR1cxIwCgVhdWRpdBgIIAEoCzIhLnBhaWdhc3VzLmNvbW1vbi52MS5BdWRpdE1ldGFkYXRhInMKCk1lbWJlcnNoaXASCgoCaWQYASABKAkSFQoNcHJpbmNpcGFsX3BybhgCIAEoCRIQCghub2RlX3BybhgDIAEoCRIwCgVhdWRpdBgEIAEoCzIhLnBhaWdhc3VzLmNvbW1vbi52MS5BdWRpdE1ldGFkYXRhIjcKGUNyZWF0ZU9yZ2FuaXphdGlvblJlcXVlc3QSDAoEc2x1ZxgBIAEoCRIMCgRuYW1lGAIgASgJIn4KGkNyZWF0ZU9yZ2FuaXphdGlvblJlc3BvbnNlEjMKDG9yZ2FuaXphdGlvbhgBIAEoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24SKwoMZGVmYXVsdF90ZWFtGAIgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iJQoWR2V0T3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkiTgoXR2V0T3JnYW5pemF0aW9uUmVzcG9uc2USMwoMb3JnYW5pemF0aW9uGAEgASgLMh0ucGFpZ2FzdXMuaWFtLnYxLk9yZ2FuaXphdGlvbiI5ChhMaXN0T3JnYW5pemF0aW9uc1JlcXVlc3QSDQoFbGltaXQYASABKA0SDgoGb2Zmc2V0GAIgASgEIlEKGUxpc3RPcmdhbml6YXRpb25zUmVzcG9uc2USNAoNb3JnYW5pemF0aW9ucxgBIAMoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24icAoZUmVuYW1lT3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkSFQoIbmV3X3NsdWcYAiABKAlIAIgBARIVCghuZXdfbmFtZRgDIAEoCUgBiAEBQgsKCV9uZXdfc2x1Z0ILCglfbmV3X25hbWUiUQoaUmVuYW1lT3JnYW5pemF0aW9uUmVzcG9uc2USMwoMb3JnYW5pemF0aW9uGAEgASgLMh0ucGFpZ2FzdXMuaWFtLnYxLk9yZ2FuaXphdGlvbiIpChpBcmNoaXZlT3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkiUgobQXJjaGl2ZU9yZ2FuaXphdGlvblJlc3BvbnNlEjMKDG9yZ2FuaXphdGlvbhgBIAEoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24iKQoaUmVzdG9yZU9yZ2FuaXphdGlvblJlcXVlc3QSCwoDcHJuGAEgASgJIlIKG1Jlc3RvcmVPcmdhbml6YXRpb25SZXNwb25zZRIzCgxvcmdhbml6YXRpb24YASABKAsyHS5wYWlnYXN1cy5pYW0udjEuT3JnYW5pemF0aW9uIkAKEUNyZWF0ZVRlYW1SZXF1ZXN0Eg8KB29yZ19wcm4YASABKAkSDAoEc2x1ZxgCIAEoCRIMCgRuYW1lGAMgASgJIjkKEkNyZWF0ZVRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iHQoOR2V0VGVhbVJlcXVlc3QSCwoDcHJuGAEgASgJIjYKD0dldFRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iQgoQTGlzdFRlYW1zUmVxdWVzdBIPCgdvcmdfcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCI5ChFMaXN0VGVhbXNSZXNwb25zZRIkCgV0ZWFtcxgBIAMoCzIVLnBhaWdhc3VzLmlhbS52MS5UZWFtImgKEVJlbmFtZVRlYW1SZXF1ZXN0EgsKA3BybhgBIAEoCRIVCghuZXdfc2x1ZxgCIAEoCUgAiAEBEhUKCG5ld19uYW1lGAMgASgJSAGIAQFCCwoJX25ld19zbHVnQgsKCV9uZXdfbmFtZSI5ChJSZW5hbWVUZWFtUmVzcG9uc2USIwoEdGVhbRgBIAEoCzIVLnBhaWdhc3VzLmlhbS52MS5UZWFtIiEKEkFyY2hpdmVUZWFtUmVxdWVzdBILCgNwcm4YASABKAkiOgoTQXJjaGl2ZVRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iIQoSUmVzdG9yZVRlYW1SZXF1ZXN0EgsKA3BybhgBIAEoCSI6ChNSZXN0b3JlVGVhbVJlc3BvbnNlEiMKBHRlYW0YASABKAsyFS5wYWlnYXN1cy5pYW0udjEuVGVhbSJEChRDcmVhdGVQcm9qZWN0UmVxdWVzdBIQCgh0ZWFtX3BybhgBIAEoCRIMCgRzbHVnGAIgASgJEgwKBG5hbWUYAyABKAkiQgoVQ3JlYXRlUHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCIgChFHZXRQcm9qZWN0UmVxdWVzdBILCgNwcm4YASABKAkiPwoSR2V0UHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCJGChNMaXN0UHJvamVjdHNSZXF1ZXN0EhAKCHRlYW1fcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCJCChRMaXN0UHJvamVjdHNSZXNwb25zZRIqCghwcm9qZWN0cxgBIAMoCzIYLnBhaWdhc3VzLmlhbS52MS5Qcm9qZWN0ImsKFFJlbmFtZVByb2plY3RSZXF1ZXN0EgsKA3BybhgBIAEoCRIVCghuZXdfc2x1ZxgCIAEoCUgAiAEBEhUKCG5ld19uYW1lGAMgASgJSAGIAQFCCwoJX25ld19zbHVnQgsKCV9uZXdfbmFtZSJCChVSZW5hbWVQcm9qZWN0UmVzcG9uc2USKQoHcHJvamVjdBgBIAEoCzIYLnBhaWdhc3VzLmlhbS52MS5Qcm9qZWN0IiQKFUFyY2hpdmVQcm9qZWN0UmVxdWVzdBILCgNwcm4YASABKAkiQwoWQXJjaGl2ZVByb2plY3RSZXNwb25zZRIpCgdwcm9qZWN0GAEgASgLMhgucGFpZ2FzdXMuaWFtLnYxLlByb2plY3QiJAoVUmVzdG9yZVByb2plY3RSZXF1ZXN0EgsKA3BybhgBIAEoCSJDChZSZXN0b3JlUHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCJCChdBdHRhY2hNZW1iZXJzaGlwUmVxdWVzdBIVCg1wcmluY2lwYWxfcHJuGAEgASgJEhAKCG5vZGVfcHJuGAIgASgJIksKGEF0dGFjaE1lbWJlcnNoaXBSZXNwb25zZRIvCgptZW1iZXJzaGlwGAEgASgLMhsucGFpZ2FzdXMuaWFtLnYxLk1lbWJlcnNoaXAiJQoXRGV0YWNoTWVtYmVyc2hpcFJlcXVlc3QSCgoCaWQYASABKAkiGgoYRGV0YWNoTWVtYmVyc2hpcFJlc3BvbnNlIm4KFkxpc3RNZW1iZXJzaGlwc1JlcXVlc3QSFwoNcHJpbmNpcGFsX3BybhgBIAEoCUgAEhIKCG5vZGVfcHJuGAIgASgJSAASDQoFbGltaXQYAyABKA0SDgoGb2Zmc2V0GAQgASgEQggKBmZpbHRlciJLChdMaXN0TWVtYmVyc2hpcHNSZXNwb25zZRIwCgttZW1iZXJzaGlwcxgBIAMoCzIbLnBhaWdhc3VzLmlhbS52MS5NZW1iZXJzaGlwIiIKEUludHJvc3BlY3RSZXF1ZXN0Eg0KBXRva2VuGAEgASgJItcBChJJbnRyb3NwZWN0UmVzcG9uc2USFQoNcHJpbmNpcGFsX3BybhgBIAEoCRIOCgZzdGF0dXMYAiABKAkSDgoGaXNzdWVyGAMgASgJEg8KB3N1YmplY3QYBCABKAkSLgoKZXhwaXJlc19hdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASMAoLbWVtYmVyc2hpcHMYBiADKAsyGy5wYWlnYXN1cy5pYW0udjEuTWVtYmVyc2hpcBIXCg9yb2xlX2dyb3VwX3BybnMYByADKAkqWwoKTm9kZVN0YXR1cxIbChdOT0RFX1NUQVRVU19VTlNQRUNJRklFRBAAEhYKEk5PREVfU1RBVFVTX0FDVElWRRABEhgKFE5PREVfU1RBVFVTX0FSQ0hJVkVEEAIymhAKDlRlbmFuY3lTZXJ2aWNlEm0KEkNyZWF0ZU9yZ2FuaXphdGlvbhIqLnBhaWdhc3VzLmlhbS52MS5DcmVhdGVPcmdhbml6YXRpb25SZXF1ZXN0GisucGFpZ2FzdXMuaWFtLnYxLkNyZWF0ZU9yZ2FuaXphdGlvblJlc3BvbnNlEmQKD0dldE9yZ2FuaXphdGlvbhInLnBhaWdhc3VzLmlhbS52MS5HZXRPcmdhbml6YXRpb25SZXF1ZXN0GigucGFpZ2FzdXMuaWFtLnYxLkdldE9yZ2FuaXphdGlvblJlc3BvbnNlEmoKEUxpc3RPcmdhbml6YXRpb25zEikucGFpZ2FzdXMuaWFtLnYxLkxpc3RPcmdhbml6YXRpb25zUmVxdWVzdBoqLnBhaWdhc3VzLmlhbS52MS5MaXN0T3JnYW5pemF0aW9uc1Jlc3BvbnNlEm0KElJlbmFtZU9yZ2FuaXphdGlvbhIqLnBhaWdhc3VzLmlhbS52MS5SZW5hbWVPcmdhbml6YXRpb25SZXF1ZXN0GisucGFpZ2FzdXMuaWFtLnYxLlJlbmFtZU9yZ2FuaXphdGlvblJlc3BvbnNlEnAKE0FyY2hpdmVPcmdhbml6YXRpb24SKy5wYWlnYXN1cy5pYW0udjEuQXJjaGl2ZU9yZ2FuaXphdGlvblJlcXVlc3QaLC5wYWlnYXN1cy5pYW0udjEuQXJjaGl2ZU9yZ2FuaXphdGlvblJlc3BvbnNlEnAKE1Jlc3RvcmVPcmdhbml6YXRpb24SKy5wYWlnYXN1cy5pYW0udjEuUmVzdG9yZU9yZ2FuaXphdGlvblJlcXVlc3QaLC5wYWlnYXN1cy5pYW0udjEuUmVzdG9yZU9yZ2FuaXphdGlvblJlc3BvbnNlElUKCkNyZWF0ZVRlYW0SIi5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlVGVhbVJlcXVlc3QaIy5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlVGVhbVJlc3BvbnNlEkwKB0dldFRlYW0SHy5wYWlnYXN1cy5pYW0udjEuR2V0VGVhbVJlcXVlc3QaIC5wYWlnYXN1cy5pYW0udjEuR2V0VGVhbVJlc3BvbnNlElIKCUxpc3RUZWFtcxIhLnBhaWdhc3VzLmlhbS52MS5MaXN0VGVhbXNSZXF1ZXN0GiIucGFpZ2FzdXMuaWFtLnYxLkxpc3RUZWFtc1Jlc3BvbnNlElUKClJlbmFtZVRlYW0SIi5wYWlnYXN1cy5pYW0udjEuUmVuYW1lVGVhbVJlcXVlc3QaIy5wYWlnYXN1cy5pYW0udjEuUmVuYW1lVGVhbVJlc3BvbnNlElgKC0FyY2hpdmVUZWFtEiMucGFpZ2FzdXMuaWFtLnYxLkFyY2hpdmVUZWFtUmVxdWVzdBokLnBhaWdhc3VzLmlhbS52MS5BcmNoaXZlVGVhbVJlc3BvbnNlElgKC1Jlc3RvcmVUZWFtEiMucGFpZ2FzdXMuaWFtLnYxLlJlc3RvcmVUZWFtUmVxdWVzdBokLnBhaWdhc3VzLmlhbS52MS5SZXN0b3JlVGVhbVJlc3BvbnNlEl4KDUNyZWF0ZVByb2plY3QSJS5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlUHJvamVjdFJlcXVlc3QaJi5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlUHJvamVjdFJlc3BvbnNlElUKCkdldFByb2plY3QSIi5wYWlnYXN1cy5pYW0udjEuR2V0UHJvamVjdFJlcXVlc3QaIy5wYWlnYXN1cy5pYW0udjEuR2V0UHJvamVjdFJlc3BvbnNlElsKDExpc3RQcm9qZWN0cxIkLnBhaWdhc3VzLmlhbS52MS5MaXN0UHJvamVjdHNSZXF1ZXN0GiUucGFpZ2FzdXMuaWFtLnYxLkxpc3RQcm9qZWN0c1Jlc3BvbnNlEl4KDVJlbmFtZVByb2plY3QSJS5wYWlnYXN1cy5pYW0udjEuUmVuYW1lUHJvamVjdFJlcXVlc3QaJi5wYWlnYXN1cy5pYW0udjEuUmVuYW1lUHJvamVjdFJlc3BvbnNlEmEKDkFyY2hpdmVQcm9qZWN0EiYucGFpZ2FzdXMuaWFtLnYxLkFyY2hpdmVQcm9qZWN0UmVxdWVzdBonLnBhaWdhc3VzLmlhbS52MS5BcmNoaXZlUHJvamVjdFJlc3BvbnNlEmEKDlJlc3RvcmVQcm9qZWN0EiYucGFpZ2FzdXMuaWFtLnYxLlJlc3RvcmVQcm9qZWN0UmVxdWVzdBonLnBhaWdhc3VzLmlhbS52MS5SZXN0b3JlUHJvamVjdFJlc3BvbnNlEmcKEEF0dGFjaE1lbWJlcnNoaXASKC5wYWlnYXN1cy5pYW0udjEuQXR0YWNoTWVtYmVyc2hpcFJlcXVlc3QaKS5wYWlnYXN1cy5pYW0udjEuQXR0YWNoTWVtYmVyc2hpcFJlc3BvbnNlEmcKEERldGFjaE1lbWJlcnNoaXASKC5wYWlnYXN1cy5pYW0udjEuRGV0YWNoTWVtYmVyc2hpcFJlcXVlc3QaKS5wYWlnYXN1cy5pYW0udjEuRGV0YWNoTWVtYmVyc2hpcFJlc3BvbnNlEmQKD0xpc3RNZW1iZXJzaGlwcxInLnBhaWdhc3VzLmlhbS52MS5MaXN0TWVtYmVyc2hpcHNSZXF1ZXN0GigucGFpZ2FzdXMuaWFtLnYxLkxpc3RNZW1iZXJzaGlwc1Jlc3BvbnNlMmUKDEF1dGhuU2VydmljZRJVCgpJbnRyb3NwZWN0EiIucGFpZ2FzdXMuaWFtLnYxLkludHJvc3BlY3RSZXF1ZXN0GiMucGFpZ2FzdXMuaWFtLnYxLkludHJvc3BlY3RSZXNwb25zZWIGcHJvdG8z", [file_google_protobuf_timestamp, file_paigasus_common_v1_audit]);
+  fileDesc("ChlwYWlnYXN1cy9pYW0vdjEvaWFtLnByb3RvEg9wYWlnYXN1cy5pYW0udjEiGgoLU2VydmljZUluZm8SCwoDcHJuGAEgASgJIs0BCgxPcmdhbml6YXRpb24SCwoDcHJuGAEgASgJEgwKBHNsdWcYAiABKAkSDAoEbmFtZRgDIAEoCRIrCgZzdGF0dXMYBCABKA4yGy5wYWlnYXN1cy5pYW0udjEuTm9kZVN0YXR1cxI1ChBlZmZlY3RpdmVfc3RhdHVzGAUgASgOMhsucGFpZ2FzdXMuaWFtLnYxLk5vZGVTdGF0dXMSMAoFYXVkaXQYBiABKAsyIS5wYWlnYXN1cy5jb21tb24udjEuQXVkaXRNZXRhZGF0YSLWAQoEVGVhbRILCgNwcm4YASABKAkSDwoHb3JnX3BybhgCIAEoCRIMCgRzbHVnGAMgASgJEgwKBG5hbWUYBCABKAkSKwoGc3RhdHVzGAUgASgOMhsucGFpZ2FzdXMuaWFtLnYxLk5vZGVTdGF0dXMSNQoQZWZmZWN0aXZlX3N0YXR1cxgGIAEoDjIbLnBhaWdhc3VzLmlhbS52MS5Ob2RlU3RhdHVzEjAKBWF1ZGl0GAcgASgLMiEucGFpZ2FzdXMuY29tbW9uLnYxLkF1ZGl0TWV0YWRhdGEi6wEKB1Byb2plY3QSCwoDcHJuGAEgASgJEhAKCHRlYW1fcHJuGAIgASgJEg8KB29yZ19wcm4YAyABKAkSDAoEc2x1ZxgEIAEoCRIMCgRuYW1lGAUgASgJEisKBnN0YXR1cxgGIAEoDjIbLnBhaWdhc3VzLmlhbS52MS5Ob2RlU3RhdHVzEjUKEGVmZmVjdGl2ZV9zdGF0dXMYByABKA4yGy5wYWlnYXN1cy5pYW0udjEuTm9kZVN0YXR1cxIwCgVhdWRpdBgIIAEoCzIhLnBhaWdhc3VzLmNvbW1vbi52MS5BdWRpdE1ldGFkYXRhInMKCk1lbWJlcnNoaXASCgoCaWQYASABKAkSFQoNcHJpbmNpcGFsX3BybhgCIAEoCRIQCghub2RlX3BybhgDIAEoCRIwCgVhdWRpdBgEIAEoCzIhLnBhaWdhc3VzLmNvbW1vbi52MS5BdWRpdE1ldGFkYXRhIjcKGUNyZWF0ZU9yZ2FuaXphdGlvblJlcXVlc3QSDAoEc2x1ZxgBIAEoCRIMCgRuYW1lGAIgASgJIn4KGkNyZWF0ZU9yZ2FuaXphdGlvblJlc3BvbnNlEjMKDG9yZ2FuaXphdGlvbhgBIAEoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24SKwoMZGVmYXVsdF90ZWFtGAIgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iJQoWR2V0T3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkiTgoXR2V0T3JnYW5pemF0aW9uUmVzcG9uc2USMwoMb3JnYW5pemF0aW9uGAEgASgLMh0ucGFpZ2FzdXMuaWFtLnYxLk9yZ2FuaXphdGlvbiI5ChhMaXN0T3JnYW5pemF0aW9uc1JlcXVlc3QSDQoFbGltaXQYASABKA0SDgoGb2Zmc2V0GAIgASgEIlEKGUxpc3RPcmdhbml6YXRpb25zUmVzcG9uc2USNAoNb3JnYW5pemF0aW9ucxgBIAMoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24icAoZUmVuYW1lT3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkSFQoIbmV3X3NsdWcYAiABKAlIAIgBARIVCghuZXdfbmFtZRgDIAEoCUgBiAEBQgsKCV9uZXdfc2x1Z0ILCglfbmV3X25hbWUiUQoaUmVuYW1lT3JnYW5pemF0aW9uUmVzcG9uc2USMwoMb3JnYW5pemF0aW9uGAEgASgLMh0ucGFpZ2FzdXMuaWFtLnYxLk9yZ2FuaXphdGlvbiIpChpBcmNoaXZlT3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkiUgobQXJjaGl2ZU9yZ2FuaXphdGlvblJlc3BvbnNlEjMKDG9yZ2FuaXphdGlvbhgBIAEoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24iKQoaUmVzdG9yZU9yZ2FuaXphdGlvblJlcXVlc3QSCwoDcHJuGAEgASgJIlIKG1Jlc3RvcmVPcmdhbml6YXRpb25SZXNwb25zZRIzCgxvcmdhbml6YXRpb24YASABKAsyHS5wYWlnYXN1cy5pYW0udjEuT3JnYW5pemF0aW9uIkAKEUNyZWF0ZVRlYW1SZXF1ZXN0Eg8KB29yZ19wcm4YASABKAkSDAoEc2x1ZxgCIAEoCRIMCgRuYW1lGAMgASgJIjkKEkNyZWF0ZVRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iHQoOR2V0VGVhbVJlcXVlc3QSCwoDcHJuGAEgASgJIjYKD0dldFRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iQgoQTGlzdFRlYW1zUmVxdWVzdBIPCgdvcmdfcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCI5ChFMaXN0VGVhbXNSZXNwb25zZRIkCgV0ZWFtcxgBIAMoCzIVLnBhaWdhc3VzLmlhbS52MS5UZWFtImgKEVJlbmFtZVRlYW1SZXF1ZXN0EgsKA3BybhgBIAEoCRIVCghuZXdfc2x1ZxgCIAEoCUgAiAEBEhUKCG5ld19uYW1lGAMgASgJSAGIAQFCCwoJX25ld19zbHVnQgsKCV9uZXdfbmFtZSI5ChJSZW5hbWVUZWFtUmVzcG9uc2USIwoEdGVhbRgBIAEoCzIVLnBhaWdhc3VzLmlhbS52MS5UZWFtIiEKEkFyY2hpdmVUZWFtUmVxdWVzdBILCgNwcm4YASABKAkiOgoTQXJjaGl2ZVRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iIQoSUmVzdG9yZVRlYW1SZXF1ZXN0EgsKA3BybhgBIAEoCSI6ChNSZXN0b3JlVGVhbVJlc3BvbnNlEiMKBHRlYW0YASABKAsyFS5wYWlnYXN1cy5pYW0udjEuVGVhbSJEChRDcmVhdGVQcm9qZWN0UmVxdWVzdBIQCgh0ZWFtX3BybhgBIAEoCRIMCgRzbHVnGAIgASgJEgwKBG5hbWUYAyABKAkiQgoVQ3JlYXRlUHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCIgChFHZXRQcm9qZWN0UmVxdWVzdBILCgNwcm4YASABKAkiPwoSR2V0UHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCJGChNMaXN0UHJvamVjdHNSZXF1ZXN0EhAKCHRlYW1fcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCJCChRMaXN0UHJvamVjdHNSZXNwb25zZRIqCghwcm9qZWN0cxgBIAMoCzIYLnBhaWdhc3VzLmlhbS52MS5Qcm9qZWN0ImsKFFJlbmFtZVByb2plY3RSZXF1ZXN0EgsKA3BybhgBIAEoCRIVCghuZXdfc2x1ZxgCIAEoCUgAiAEBEhUKCG5ld19uYW1lGAMgASgJSAGIAQFCCwoJX25ld19zbHVnQgsKCV9uZXdfbmFtZSJCChVSZW5hbWVQcm9qZWN0UmVzcG9uc2USKQoHcHJvamVjdBgBIAEoCzIYLnBhaWdhc3VzLmlhbS52MS5Qcm9qZWN0IiQKFUFyY2hpdmVQcm9qZWN0UmVxdWVzdBILCgNwcm4YASABKAkiQwoWQXJjaGl2ZVByb2plY3RSZXNwb25zZRIpCgdwcm9qZWN0GAEgASgLMhgucGFpZ2FzdXMuaWFtLnYxLlByb2plY3QiJAoVUmVzdG9yZVByb2plY3RSZXF1ZXN0EgsKA3BybhgBIAEoCSJDChZSZXN0b3JlUHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCJCChdBdHRhY2hNZW1iZXJzaGlwUmVxdWVzdBIVCg1wcmluY2lwYWxfcHJuGAEgASgJEhAKCG5vZGVfcHJuGAIgASgJIksKGEF0dGFjaE1lbWJlcnNoaXBSZXNwb25zZRIvCgptZW1iZXJzaGlwGAEgASgLMhsucGFpZ2FzdXMuaWFtLnYxLk1lbWJlcnNoaXAiJQoXRGV0YWNoTWVtYmVyc2hpcFJlcXVlc3QSCgoCaWQYASABKAkiGgoYRGV0YWNoTWVtYmVyc2hpcFJlc3BvbnNlIm4KFkxpc3RNZW1iZXJzaGlwc1JlcXVlc3QSFwoNcHJpbmNpcGFsX3BybhgBIAEoCUgAEhIKCG5vZGVfcHJuGAIgASgJSAASDQoFbGltaXQYAyABKA0SDgoGb2Zmc2V0GAQgASgEQggKBmZpbHRlciJLChdMaXN0TWVtYmVyc2hpcHNSZXNwb25zZRIwCgttZW1iZXJzaGlwcxgBIAMoCzIbLnBhaWdhc3VzLmlhbS52MS5NZW1iZXJzaGlwIiIKEUludHJvc3BlY3RSZXF1ZXN0Eg0KBXRva2VuGAEgASgJIokCChJJbnRyb3NwZWN0UmVzcG9uc2USFQoNcHJpbmNpcGFsX3BybhgBIAEoCRIOCgZzdGF0dXMYAiABKAkSDgoGaXNzdWVyGAMgASgJEg8KB3N1YmplY3QYBCABKAkSLgoKZXhwaXJlc19hdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASMAoLbWVtYmVyc2hpcHMYBiADKAsyGy5wYWlnYXN1cy5pYW0udjEuTWVtYmVyc2hpcBIyCgtyb2xlX2dyYW50cxgIIAMoCzIdLnBhaWdhc3VzLmlhbS52MS5Sb2xlR3JhbnRSZWZKBAgHEAhSD3JvbGVfZ3JvdXBfcHJucyIzCgxSb2xlR3JhbnRSZWYSEQoJc2NvcGVfcHJuGAEgASgJEhAKCHJvbGVfa2V5GAIgASgJIsYBChNJc0F1dGhvcml6ZWRSZXF1ZXN0EhUKDXByaW5jaXBhbF9wcm4YASABKAkSDgoGYWN0aW9uGAIgASgJEhQKDHJlc291cmNlX3BybhgDIAEoCRJCCgdjb250ZXh0GAQgAygLMjEucGFpZ2FzdXMuaWFtLnYxLklzQXV0aG9yaXplZFJlcXVlc3QuQ29udGV4dEVudHJ5Gi4KDENvbnRleHRFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIlUKFElzQXV0aG9yaXplZFJlc3BvbnNlEg8KB2FsbG93ZWQYASABKAgSHAoUZGV0ZXJtaW5pbmdfcG9saWNpZXMYAiADKAkSDgoGcmVhc29uGAMgASgJIl4KBlBvbGljeRIRCglwb2xpY3lfaWQYASABKAkSDAoEa2luZBgCIAEoCRIOCgZzb3VyY2UYAyABKAkSEwoLZGVzY3JpcHRpb24YBCABKAkSDgoGc3lzdGVtGAUgASgIIjsKEFB1dFBvbGljeVJlcXVlc3QSJwoGcG9saWN5GAEgASgLMhcucGFpZ2FzdXMuaWFtLnYxLlBvbGljeSI8ChFQdXRQb2xpY3lSZXNwb25zZRInCgZwb2xpY3kYASABKAsyFy5wYWlnYXN1cy5pYW0udjEuUG9saWN5IigKE0RlbGV0ZVBvbGljeVJlcXVlc3QSEQoJcG9saWN5X2lkGAEgASgJIhYKFERlbGV0ZVBvbGljeVJlc3BvbnNlIjQKE0xpc3RQb2xpY2llc1JlcXVlc3QSDQoFbGltaXQYASABKA0SDgoGb2Zmc2V0GAIgASgEIkEKFExpc3RQb2xpY2llc1Jlc3BvbnNlEikKCHBvbGljaWVzGAEgAygLMhcucGFpZ2FzdXMuaWFtLnYxLlBvbGljeSJTCglSb2xlR3JhbnQSCgoCaWQYASABKAkSFQoNcHJpbmNpcGFsX3BybhgCIAEoCRIQCghyb2xlX2tleRgDIAEoCRIRCglzY29wZV9wcm4YBCABKAkiTgoQR3JhbnRSb2xlUmVxdWVzdBIVCg1wcmluY2lwYWxfcHJuGAEgASgJEhAKCHJvbGVfa2V5GAIgASgJEhEKCXNjb3BlX3BybhgDIAEoCSI+ChFHcmFudFJvbGVSZXNwb25zZRIpCgVncmFudBgBIAEoCzIaLnBhaWdhc3VzLmlhbS52MS5Sb2xlR3JhbnQiHwoRUmV2b2tlUm9sZVJlcXVlc3QSCgoCaWQYASABKAkiFAoSUmV2b2tlUm9sZVJlc3BvbnNlIk0KFUxpc3RSb2xlR3JhbnRzUmVxdWVzdBIVCg1wcmluY2lwYWxfcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCJEChZMaXN0Um9sZUdyYW50c1Jlc3BvbnNlEioKBmdyYW50cxgBIAMoCzIaLnBhaWdhc3VzLmlhbS52MS5Sb2xlR3JhbnQqWwoKTm9kZVN0YXR1cxIbChdOT0RFX1NUQVRVU19VTlNQRUNJRklFRBAAEhYKEk5PREVfU1RBVFVTX0FDVElWRRABEhgKFE5PREVfU1RBVFVTX0FSQ0hJVkVEEAIymhAKDlRlbmFuY3lTZXJ2aWNlEm0KEkNyZWF0ZU9yZ2FuaXphdGlvbhIqLnBhaWdhc3VzLmlhbS52MS5DcmVhdGVPcmdhbml6YXRpb25SZXF1ZXN0GisucGFpZ2FzdXMuaWFtLnYxLkNyZWF0ZU9yZ2FuaXphdGlvblJlc3BvbnNlEmQKD0dldE9yZ2FuaXphdGlvbhInLnBhaWdhc3VzLmlhbS52MS5HZXRPcmdhbml6YXRpb25SZXF1ZXN0GigucGFpZ2FzdXMuaWFtLnYxLkdldE9yZ2FuaXphdGlvblJlc3BvbnNlEmoKEUxpc3RPcmdhbml6YXRpb25zEikucGFpZ2FzdXMuaWFtLnYxLkxpc3RPcmdhbml6YXRpb25zUmVxdWVzdBoqLnBhaWdhc3VzLmlhbS52MS5MaXN0T3JnYW5pemF0aW9uc1Jlc3BvbnNlEm0KElJlbmFtZU9yZ2FuaXphdGlvbhIqLnBhaWdhc3VzLmlhbS52MS5SZW5hbWVPcmdhbml6YXRpb25SZXF1ZXN0GisucGFpZ2FzdXMuaWFtLnYxLlJlbmFtZU9yZ2FuaXphdGlvblJlc3BvbnNlEnAKE0FyY2hpdmVPcmdhbml6YXRpb24SKy5wYWlnYXN1cy5pYW0udjEuQXJjaGl2ZU9yZ2FuaXphdGlvblJlcXVlc3QaLC5wYWlnYXN1cy5pYW0udjEuQXJjaGl2ZU9yZ2FuaXphdGlvblJlc3BvbnNlEnAKE1Jlc3RvcmVPcmdhbml6YXRpb24SKy5wYWlnYXN1cy5pYW0udjEuUmVzdG9yZU9yZ2FuaXphdGlvblJlcXVlc3QaLC5wYWlnYXN1cy5pYW0udjEuUmVzdG9yZU9yZ2FuaXphdGlvblJlc3BvbnNlElUKCkNyZWF0ZVRlYW0SIi5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlVGVhbVJlcXVlc3QaIy5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlVGVhbVJlc3BvbnNlEkwKB0dldFRlYW0SHy5wYWlnYXN1cy5pYW0udjEuR2V0VGVhbVJlcXVlc3QaIC5wYWlnYXN1cy5pYW0udjEuR2V0VGVhbVJlc3BvbnNlElIKCUxpc3RUZWFtcxIhLnBhaWdhc3VzLmlhbS52MS5MaXN0VGVhbXNSZXF1ZXN0GiIucGFpZ2FzdXMuaWFtLnYxLkxpc3RUZWFtc1Jlc3BvbnNlElUKClJlbmFtZVRlYW0SIi5wYWlnYXN1cy5pYW0udjEuUmVuYW1lVGVhbVJlcXVlc3QaIy5wYWlnYXN1cy5pYW0udjEuUmVuYW1lVGVhbVJlc3BvbnNlElgKC0FyY2hpdmVUZWFtEiMucGFpZ2FzdXMuaWFtLnYxLkFyY2hpdmVUZWFtUmVxdWVzdBokLnBhaWdhc3VzLmlhbS52MS5BcmNoaXZlVGVhbVJlc3BvbnNlElgKC1Jlc3RvcmVUZWFtEiMucGFpZ2FzdXMuaWFtLnYxLlJlc3RvcmVUZWFtUmVxdWVzdBokLnBhaWdhc3VzLmlhbS52MS5SZXN0b3JlVGVhbVJlc3BvbnNlEl4KDUNyZWF0ZVByb2plY3QSJS5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlUHJvamVjdFJlcXVlc3QaJi5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlUHJvamVjdFJlc3BvbnNlElUKCkdldFByb2plY3QSIi5wYWlnYXN1cy5pYW0udjEuR2V0UHJvamVjdFJlcXVlc3QaIy5wYWlnYXN1cy5pYW0udjEuR2V0UHJvamVjdFJlc3BvbnNlElsKDExpc3RQcm9qZWN0cxIkLnBhaWdhc3VzLmlhbS52MS5MaXN0UHJvamVjdHNSZXF1ZXN0GiUucGFpZ2FzdXMuaWFtLnYxLkxpc3RQcm9qZWN0c1Jlc3BvbnNlEl4KDVJlbmFtZVByb2plY3QSJS5wYWlnYXN1cy5pYW0udjEuUmVuYW1lUHJvamVjdFJlcXVlc3QaJi5wYWlnYXN1cy5pYW0udjEuUmVuYW1lUHJvamVjdFJlc3BvbnNlEmEKDkFyY2hpdmVQcm9qZWN0EiYucGFpZ2FzdXMuaWFtLnYxLkFyY2hpdmVQcm9qZWN0UmVxdWVzdBonLnBhaWdhc3VzLmlhbS52MS5BcmNoaXZlUHJvamVjdFJlc3BvbnNlEmEKDlJlc3RvcmVQcm9qZWN0EiYucGFpZ2FzdXMuaWFtLnYxLlJlc3RvcmVQcm9qZWN0UmVxdWVzdBonLnBhaWdhc3VzLmlhbS52MS5SZXN0b3JlUHJvamVjdFJlc3BvbnNlEmcKEEF0dGFjaE1lbWJlcnNoaXASKC5wYWlnYXN1cy5pYW0udjEuQXR0YWNoTWVtYmVyc2hpcFJlcXVlc3QaKS5wYWlnYXN1cy5pYW0udjEuQXR0YWNoTWVtYmVyc2hpcFJlc3BvbnNlEmcKEERldGFjaE1lbWJlcnNoaXASKC5wYWlnYXN1cy5pYW0udjEuRGV0YWNoTWVtYmVyc2hpcFJlcXVlc3QaKS5wYWlnYXN1cy5pYW0udjEuRGV0YWNoTWVtYmVyc2hpcFJlc3BvbnNlEmQKD0xpc3RNZW1iZXJzaGlwcxInLnBhaWdhc3VzLmlhbS52MS5MaXN0TWVtYmVyc2hpcHNSZXF1ZXN0GigucGFpZ2FzdXMuaWFtLnYxLkxpc3RNZW1iZXJzaGlwc1Jlc3BvbnNlMmUKDEF1dGhuU2VydmljZRJVCgpJbnRyb3NwZWN0EiIucGFpZ2FzdXMuaWFtLnYxLkludHJvc3BlY3RSZXF1ZXN0GiMucGFpZ2FzdXMuaWFtLnYxLkludHJvc3BlY3RSZXNwb25zZTKPBQoUQXV0aG9yaXphdGlvblNlcnZpY2USWwoMSXNBdXRob3JpemVkEiQucGFpZ2FzdXMuaWFtLnYxLklzQXV0aG9yaXplZFJlcXVlc3QaJS5wYWlnYXN1cy5pYW0udjEuSXNBdXRob3JpemVkUmVzcG9uc2USUgoJUHV0UG9saWN5EiEucGFpZ2FzdXMuaWFtLnYxLlB1dFBvbGljeVJlcXVlc3QaIi5wYWlnYXN1cy5pYW0udjEuUHV0UG9saWN5UmVzcG9uc2USWwoMRGVsZXRlUG9saWN5EiQucGFpZ2FzdXMuaWFtLnYxLkRlbGV0ZVBvbGljeVJlcXVlc3QaJS5wYWlnYXN1cy5pYW0udjEuRGVsZXRlUG9saWN5UmVzcG9uc2USWwoMTGlzdFBvbGljaWVzEiQucGFpZ2FzdXMuaWFtLnYxLkxpc3RQb2xpY2llc1JlcXVlc3QaJS5wYWlnYXN1cy5pYW0udjEuTGlzdFBvbGljaWVzUmVzcG9uc2USUgoJR3JhbnRSb2xlEiEucGFpZ2FzdXMuaWFtLnYxLkdyYW50Um9sZVJlcXVlc3QaIi5wYWlnYXN1cy5pYW0udjEuR3JhbnRSb2xlUmVzcG9uc2USVQoKUmV2b2tlUm9sZRIiLnBhaWdhc3VzLmlhbS52MS5SZXZva2VSb2xlUmVxdWVzdBojLnBhaWdhc3VzLmlhbS52MS5SZXZva2VSb2xlUmVzcG9uc2USYQoOTGlzdFJvbGVHcmFudHMSJi5wYWlnYXN1cy5pYW0udjEuTGlzdFJvbGVHcmFudHNSZXF1ZXN0GicucGFpZ2FzdXMuaWFtLnYxLkxpc3RSb2xlR3JhbnRzUmVzcG9uc2ViBnByb3RvMw", [file_google_protobuf_timestamp, file_paigasus_common_v1_audit]);
 
 /**
  * Placeholder so the package generates a concrete type in all three languages.
@@ -1096,11 +1096,9 @@ export type IntrospectResponse = Message<"paigasus.iam.v1.IntrospectResponse"> &
   memberships: Membership[];
 
   /**
-   * empty until M3
-   *
-   * @generated from field: repeated string role_group_prns = 7;
+   * @generated from field: repeated paigasus.iam.v1.RoleGrantRef role_grants = 8;
    */
-  roleGroupPrns: string[];
+  roleGrants: RoleGrantRef[];
 };
 
 /**
@@ -1109,6 +1107,377 @@ export type IntrospectResponse = Message<"paigasus.iam.v1.IntrospectResponse"> &
  */
 export const IntrospectResponseSchema: GenMessage<IntrospectResponse> = /*@__PURE__*/
   messageDesc(file_paigasus_iam_v1_iam, 48);
+
+/**
+ * @generated from message paigasus.iam.v1.RoleGrantRef
+ */
+export type RoleGrantRef = Message<"paigasus.iam.v1.RoleGrantRef"> & {
+  /**
+   * @generated from field: string scope_prn = 1;
+   */
+  scopePrn: string;
+
+  /**
+   * @generated from field: string role_key = 2;
+   */
+  roleKey: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RoleGrantRef.
+ * Use `create(RoleGrantRefSchema)` to create a new message.
+ */
+export const RoleGrantRefSchema: GenMessage<RoleGrantRef> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 49);
+
+/**
+ * @generated from message paigasus.iam.v1.IsAuthorizedRequest
+ */
+export type IsAuthorizedRequest = Message<"paigasus.iam.v1.IsAuthorizedRequest"> & {
+  /**
+   * @generated from field: string principal_prn = 1;
+   */
+  principalPrn: string;
+
+  /**
+   * @generated from field: string action = 2;
+   */
+  action: string;
+
+  /**
+   * @generated from field: string resource_prn = 3;
+   */
+  resourcePrn: string;
+
+  /**
+   * @generated from field: map<string, string> context = 4;
+   */
+  context: { [key: string]: string };
+};
+
+/**
+ * Describes the message paigasus.iam.v1.IsAuthorizedRequest.
+ * Use `create(IsAuthorizedRequestSchema)` to create a new message.
+ */
+export const IsAuthorizedRequestSchema: GenMessage<IsAuthorizedRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 50);
+
+/**
+ * @generated from message paigasus.iam.v1.IsAuthorizedResponse
+ */
+export type IsAuthorizedResponse = Message<"paigasus.iam.v1.IsAuthorizedResponse"> & {
+  /**
+   * @generated from field: bool allowed = 1;
+   */
+  allowed: boolean;
+
+  /**
+   * @generated from field: repeated string determining_policies = 2;
+   */
+  determiningPolicies: string[];
+
+  /**
+   * @generated from field: string reason = 3;
+   */
+  reason: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.IsAuthorizedResponse.
+ * Use `create(IsAuthorizedResponseSchema)` to create a new message.
+ */
+export const IsAuthorizedResponseSchema: GenMessage<IsAuthorizedResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 51);
+
+/**
+ * @generated from message paigasus.iam.v1.Policy
+ */
+export type Policy = Message<"paigasus.iam.v1.Policy"> & {
+  /**
+   * @generated from field: string policy_id = 1;
+   */
+  policyId: string;
+
+  /**
+   * @generated from field: string kind = 2;
+   */
+  kind: string;
+
+  /**
+   * @generated from field: string source = 3;
+   */
+  source: string;
+
+  /**
+   * @generated from field: string description = 4;
+   */
+  description: string;
+
+  /**
+   * @generated from field: bool system = 5;
+   */
+  system: boolean;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.Policy.
+ * Use `create(PolicySchema)` to create a new message.
+ */
+export const PolicySchema: GenMessage<Policy> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 52);
+
+/**
+ * @generated from message paigasus.iam.v1.PutPolicyRequest
+ */
+export type PutPolicyRequest = Message<"paigasus.iam.v1.PutPolicyRequest"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Policy policy = 1;
+   */
+  policy?: Policy | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.PutPolicyRequest.
+ * Use `create(PutPolicyRequestSchema)` to create a new message.
+ */
+export const PutPolicyRequestSchema: GenMessage<PutPolicyRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 53);
+
+/**
+ * @generated from message paigasus.iam.v1.PutPolicyResponse
+ */
+export type PutPolicyResponse = Message<"paigasus.iam.v1.PutPolicyResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.Policy policy = 1;
+   */
+  policy?: Policy | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.PutPolicyResponse.
+ * Use `create(PutPolicyResponseSchema)` to create a new message.
+ */
+export const PutPolicyResponseSchema: GenMessage<PutPolicyResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 54);
+
+/**
+ * @generated from message paigasus.iam.v1.DeletePolicyRequest
+ */
+export type DeletePolicyRequest = Message<"paigasus.iam.v1.DeletePolicyRequest"> & {
+  /**
+   * @generated from field: string policy_id = 1;
+   */
+  policyId: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.DeletePolicyRequest.
+ * Use `create(DeletePolicyRequestSchema)` to create a new message.
+ */
+export const DeletePolicyRequestSchema: GenMessage<DeletePolicyRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 55);
+
+/**
+ * @generated from message paigasus.iam.v1.DeletePolicyResponse
+ */
+export type DeletePolicyResponse = Message<"paigasus.iam.v1.DeletePolicyResponse"> & {
+};
+
+/**
+ * Describes the message paigasus.iam.v1.DeletePolicyResponse.
+ * Use `create(DeletePolicyResponseSchema)` to create a new message.
+ */
+export const DeletePolicyResponseSchema: GenMessage<DeletePolicyResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 56);
+
+/**
+ * @generated from message paigasus.iam.v1.ListPoliciesRequest
+ */
+export type ListPoliciesRequest = Message<"paigasus.iam.v1.ListPoliciesRequest"> & {
+  /**
+   * @generated from field: uint32 limit = 1;
+   */
+  limit: number;
+
+  /**
+   * @generated from field: uint64 offset = 2;
+   */
+  offset: bigint;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListPoliciesRequest.
+ * Use `create(ListPoliciesRequestSchema)` to create a new message.
+ */
+export const ListPoliciesRequestSchema: GenMessage<ListPoliciesRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 57);
+
+/**
+ * @generated from message paigasus.iam.v1.ListPoliciesResponse
+ */
+export type ListPoliciesResponse = Message<"paigasus.iam.v1.ListPoliciesResponse"> & {
+  /**
+   * @generated from field: repeated paigasus.iam.v1.Policy policies = 1;
+   */
+  policies: Policy[];
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListPoliciesResponse.
+ * Use `create(ListPoliciesResponseSchema)` to create a new message.
+ */
+export const ListPoliciesResponseSchema: GenMessage<ListPoliciesResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 58);
+
+/**
+ * @generated from message paigasus.iam.v1.RoleGrant
+ */
+export type RoleGrant = Message<"paigasus.iam.v1.RoleGrant"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string principal_prn = 2;
+   */
+  principalPrn: string;
+
+  /**
+   * @generated from field: string role_key = 3;
+   */
+  roleKey: string;
+
+  /**
+   * @generated from field: string scope_prn = 4;
+   */
+  scopePrn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RoleGrant.
+ * Use `create(RoleGrantSchema)` to create a new message.
+ */
+export const RoleGrantSchema: GenMessage<RoleGrant> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 59);
+
+/**
+ * @generated from message paigasus.iam.v1.GrantRoleRequest
+ */
+export type GrantRoleRequest = Message<"paigasus.iam.v1.GrantRoleRequest"> & {
+  /**
+   * @generated from field: string principal_prn = 1;
+   */
+  principalPrn: string;
+
+  /**
+   * @generated from field: string role_key = 2;
+   */
+  roleKey: string;
+
+  /**
+   * @generated from field: string scope_prn = 3;
+   */
+  scopePrn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.GrantRoleRequest.
+ * Use `create(GrantRoleRequestSchema)` to create a new message.
+ */
+export const GrantRoleRequestSchema: GenMessage<GrantRoleRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 60);
+
+/**
+ * @generated from message paigasus.iam.v1.GrantRoleResponse
+ */
+export type GrantRoleResponse = Message<"paigasus.iam.v1.GrantRoleResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.RoleGrant grant = 1;
+   */
+  grant?: RoleGrant | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.GrantRoleResponse.
+ * Use `create(GrantRoleResponseSchema)` to create a new message.
+ */
+export const GrantRoleResponseSchema: GenMessage<GrantRoleResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 61);
+
+/**
+ * @generated from message paigasus.iam.v1.RevokeRoleRequest
+ */
+export type RevokeRoleRequest = Message<"paigasus.iam.v1.RevokeRoleRequest"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RevokeRoleRequest.
+ * Use `create(RevokeRoleRequestSchema)` to create a new message.
+ */
+export const RevokeRoleRequestSchema: GenMessage<RevokeRoleRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 62);
+
+/**
+ * @generated from message paigasus.iam.v1.RevokeRoleResponse
+ */
+export type RevokeRoleResponse = Message<"paigasus.iam.v1.RevokeRoleResponse"> & {
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RevokeRoleResponse.
+ * Use `create(RevokeRoleResponseSchema)` to create a new message.
+ */
+export const RevokeRoleResponseSchema: GenMessage<RevokeRoleResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 63);
+
+/**
+ * @generated from message paigasus.iam.v1.ListRoleGrantsRequest
+ */
+export type ListRoleGrantsRequest = Message<"paigasus.iam.v1.ListRoleGrantsRequest"> & {
+  /**
+   * @generated from field: string principal_prn = 1;
+   */
+  principalPrn: string;
+
+  /**
+   * @generated from field: uint32 limit = 2;
+   */
+  limit: number;
+
+  /**
+   * @generated from field: uint64 offset = 3;
+   */
+  offset: bigint;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListRoleGrantsRequest.
+ * Use `create(ListRoleGrantsRequestSchema)` to create a new message.
+ */
+export const ListRoleGrantsRequestSchema: GenMessage<ListRoleGrantsRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 64);
+
+/**
+ * @generated from message paigasus.iam.v1.ListRoleGrantsResponse
+ */
+export type ListRoleGrantsResponse = Message<"paigasus.iam.v1.ListRoleGrantsResponse"> & {
+  /**
+   * @generated from field: repeated paigasus.iam.v1.RoleGrant grants = 1;
+   */
+  grants: RoleGrant[];
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListRoleGrantsResponse.
+ * Use `create(ListRoleGrantsResponseSchema)` to create a new message.
+ */
+export const ListRoleGrantsResponseSchema: GenMessage<ListRoleGrantsResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 65);
 
 /**
  * @generated from enum paigasus.iam.v1.NodeStatus
@@ -1328,4 +1697,67 @@ export const AuthnService: GenService<{
   },
 }> = /*@__PURE__*/
   serviceDesc(file_paigasus_iam_v1_iam, 1);
+
+/**
+ * @generated from service paigasus.iam.v1.AuthorizationService
+ */
+export const AuthorizationService: GenService<{
+  /**
+   * @generated from rpc paigasus.iam.v1.AuthorizationService.IsAuthorized
+   */
+  isAuthorized: {
+    methodKind: "unary";
+    input: typeof IsAuthorizedRequestSchema;
+    output: typeof IsAuthorizedResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.AuthorizationService.PutPolicy
+   */
+  putPolicy: {
+    methodKind: "unary";
+    input: typeof PutPolicyRequestSchema;
+    output: typeof PutPolicyResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.AuthorizationService.DeletePolicy
+   */
+  deletePolicy: {
+    methodKind: "unary";
+    input: typeof DeletePolicyRequestSchema;
+    output: typeof DeletePolicyResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.AuthorizationService.ListPolicies
+   */
+  listPolicies: {
+    methodKind: "unary";
+    input: typeof ListPoliciesRequestSchema;
+    output: typeof ListPoliciesResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.AuthorizationService.GrantRole
+   */
+  grantRole: {
+    methodKind: "unary";
+    input: typeof GrantRoleRequestSchema;
+    output: typeof GrantRoleResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.AuthorizationService.RevokeRole
+   */
+  revokeRole: {
+    methodKind: "unary";
+    input: typeof RevokeRoleRequestSchema;
+    output: typeof RevokeRoleResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.AuthorizationService.ListRoleGrants
+   */
+  listRoleGrants: {
+    methodKind: "unary";
+    input: typeof ListRoleGrantsRequestSchema;
+    output: typeof ListRoleGrantsResponseSchema;
+  },
+}> = /*@__PURE__*/
+  serviceDesc(file_paigasus_iam_v1_iam, 2);
 
