@@ -19,6 +19,11 @@ path = "src/main.rs"
 paigasus-iam-core = { path = "../../libs/paigasus-iam-core", version = "0.0.0" }
 paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0" }
 paigasus-kernel = { workspace = true }
+# `adapters::authz::policy_snapshot` names `cedar_policy::PolicyId` directly to detect
+# (and `tracing::warn!` on) a role grant whose template `PolicyEngine::compile` silently
+# skipped — the root Cargo.toml already anticipates this crate as cedar-policy's second
+# consumer alongside `paigasus-iam-core` (SMA-444 Task 13).
+cedar-policy = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 figment = { workspace = true }
 serde = { workspace = true }
