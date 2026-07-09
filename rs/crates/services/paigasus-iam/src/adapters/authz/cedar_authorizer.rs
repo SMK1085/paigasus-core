@@ -1,0 +1,574 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! `CedarAuthorizer`: the `Authorizer` port's implementation (ADR-0013, spec §7) — composes
+//! the compiled-policy snapshot (Task 13), the entity-slice loader/cache (Task 12/14), the
+//! generation-keyed decision cache (Task 14), and an [`AuditSink`] into the one component
+//! `is_authorized` callers reach for. AppState wiring (`main.rs`/`adapters::http::AppState`)
+//! is a separate follow-up task — this module only builds and unit-tests the authorizer
+//! itself.
+//!
+//! **`is_authorized` flow (spec D11/D12, AC1):**
+//! 1. Best-effort synchronous [`PolicySnapshot::reload_if_stale`] — a grant made moments ago
+//!    is visible to THIS decision without waiting out the background poll interval (AC1). An
+//!    `Err` (e.g. a transient store hiccup) is logged and swallowed: reload failures never
+//!    fail a decision, they just mean this call evaluates against the last-known-good
+//!    snapshot.
+//! 2. Read both generation counters via [`GenerationsReader`] to build the decision-cache
+//!    key. If EITHER read errors (the Redis-backed counters are unreachable), the cache is
+//!    bypassed entirely for this call — no key, no `get`, no `put` — and evaluation proceeds
+//!    unconditionally (D11/D12's fail-open property: an accelerator outage costs latency,
+//!    never correctness). If both succeed and the key is already cached, that cached
+//!    [`Decision`] is returned immediately WITHOUT touching the audit sink again — the
+//!    original miss that populated the cache already recorded the one audit event for this
+//!    exact question.
+//! 3. On a miss (or a bypassed cache), the authoritative path: load the current compiled
+//!    policies, load the [`EntitySlice`] for `(resource, principal)`, and decide via
+//!    [`PolicyEngine::decide`]. A slice-load error is propagated — it's a real failure (the
+//!    request can't be decided at all), never swallowed.
+//! 4. Record one [`AuthzDecisionEvent`] via the injected [`AuditSink`].
+//! 5. Best-effort populate the decision cache (only if step 2 computed a key).
+//!
+//! **Timestamps:** [`AuthzDecisionEvent::at`] is stamped with `chrono::Utc::now()` directly
+//! rather than through an injected `Clock` port. `CedarAuthorizer` doesn't otherwise need a
+//! clock, and every existing `Clock` consumer in this crate (`adapters::clock::SystemClock`)
+//! exists to make a *tested* time-dependent computation (JWKS TTL expiry, etc.)
+//! deterministic; nothing here asserts on `at`'s value, so adding a clock dependency here
+//! would be DI ceremony without a corresponding test benefit. If a future task needs to
+//! assert audit timestamps precisely, threading a `Clock` through here is the natural
+//! extension.
+
+use super::decision_cache::decision_key;
+use super::generation::Generations;
+use super::policy_snapshot::PolicySnapshot;
+use async_trait::async_trait;
+use paigasus_iam_core::authz::engine::PolicyEngine;
+use paigasus_iam_core::authz::model::AuthzDecisionEvent;
+use paigasus_iam_core::{AccessRequest, AuditSink, Authorizer, AuthzError, Decision, DecisionCache, EntitySliceLoader};
+use std::sync::Arc;
+
+/// Abstraction over "read the two authz generation counters", so `CedarAuthorizer` can be
+/// exercised against a fake that errors (simulating a `Generations::Redis` outage) without
+/// any real Redis connection in a unit test. [`Generations`] (Task 10's concrete
+/// memory/redis backend) implements this directly below, so production callers just wrap a
+/// plain `Generations` in an `Arc`.
+#[async_trait]
+pub trait GenerationsReader: Send + Sync {
+    async fn policy_gen(&self) -> Result<u64, AuthzError>;
+    async fn entity_gen(&self) -> Result<u64, AuthzError>;
+}
+
+#[async_trait]
+impl GenerationsReader for Generations {
+    async fn policy_gen(&self) -> Result<u64, AuthzError> {
+        Generations::policy_gen(self).await
+    }
+
+    async fn entity_gen(&self) -> Result<u64, AuthzError> {
+        Generations::entity_gen(self).await
+    }
+}
+
+/// The `Authorizer` port's implementation (ADR-0013): composes a [`PolicySnapshot`] (the
+/// authoritative compiled policy set), an [`EntitySliceLoader`] (typically `SliceCache`
+/// wrapping a Postgres-backed loader), a [`DecisionCache`] accelerator, the
+/// [`GenerationsReader`] the cache key is derived from, and an [`AuditSink`]. Not `Clone` —
+/// callers share ONE instance across every `AppState` clone via `Arc<CedarAuthorizer>`
+/// (mirroring `PolicySnapshot`'s own Arc-sharing posture).
+pub struct CedarAuthorizer {
+    snapshot: Arc<PolicySnapshot>,
+    slices: Arc<dyn EntitySliceLoader>,
+    decisions: Arc<dyn DecisionCache>,
+    gens: Arc<dyn GenerationsReader>,
+    audit: Arc<dyn AuditSink>,
+}
+
+impl CedarAuthorizer {
+    #[must_use]
+    pub fn new(snapshot: Arc<PolicySnapshot>, slices: Arc<dyn EntitySliceLoader>, decisions: Arc<dyn DecisionCache>, gens: Arc<dyn GenerationsReader>, audit: Arc<dyn AuditSink>) -> Self {
+        Self {
+            snapshot,
+            slices,
+            decisions,
+            gens,
+            audit,
+        }
+    }
+
+    /// Reads both generation counters and computes the decision-cache key iff BOTH succeed
+    /// (D11/D12 fail-open): a lone error on either counter (a Redis outage) is logged and
+    /// mapped to `None` — the caller then skips the cache entirely for this call rather than
+    /// caching under a partial/guessed key.
+    async fn cache_key(&self, req: &AccessRequest) -> Option<String> {
+        match (self.gens.policy_gen().await, self.gens.entity_gen().await) {
+            (Ok(policy_gen), Ok(entity_gen)) => Some(decision_key(policy_gen, entity_gen, req)),
+            _ => {
+                tracing::warn!("cedar_authorizer: generation counters unreadable — bypassing the decision cache for this call (fail-open, D11/D12)");
+                None
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Authorizer for CedarAuthorizer {
+    async fn is_authorized(&self, req: &AccessRequest) -> Result<Decision, AuthzError> {
+        // Step 1 (AC1): best-effort synchronous staleness reload. A reload error never fails
+        // the decision — it just means this call evaluates against the last-known-good
+        // snapshot rather than a fresher one.
+        if let Err(err) = self.snapshot.reload_if_stale().await {
+            tracing::warn!(error = %err, "cedar_authorizer: policy snapshot reload_if_stale failed — deciding against the last-known-good snapshot");
+        }
+
+        // Step 2: fail-open cache lookup.
+        let cache_key = self.cache_key(req).await;
+        if let Some(key) = &cache_key
+            && let Some(cached) = self.decisions.get(key).await
+        {
+            // A cache hit was already audited on the miss that populated it — auditing again
+            // here would double-record the same decision.
+            return Ok(cached);
+        }
+
+        // Step 3: the authoritative path — always runs on a miss OR a bypassed cache.
+        let compiled = self.snapshot.current().await;
+        let slice = self.slices.load(&req.resource, &req.principal).await?;
+        let decision = PolicyEngine::decide(&compiled.policy_set, &slice, req);
+
+        // Step 4: audit every decision this method actually computes (never on a cache hit).
+        let event = AuthzDecisionEvent {
+            principal_prn: req.principal.canonical(),
+            action: req.action.as_wire().to_string(),
+            resource_prn: req.resource.canonical(),
+            effect: decision.effect,
+            determining_policies: decision.determining_policies.clone(),
+            at: chrono::Utc::now(),
+        };
+        self.audit.record(&event).await;
+
+        // Step 5: best-effort populate the cache (only if step 2 minted a key).
+        if let Some(key) = cache_key {
+            self.decisions.put(&key, &decision).await;
+        }
+
+        Ok(decision)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::authz::decision_cache::MemoryDecisionCache;
+    use paigasus_iam_core::authz::model::{ContextValue, EntitySlice, GrantScope, ROOT_ENTITY, SliceEntity};
+    use paigasus_iam_core::authz::roles::starter_policies;
+    use paigasus_iam_core::tenancy::{OrganizationId, ProjectId, TeamId, TenancyNodeRef};
+    use paigasus_iam_core::{Action, Effect, PolicyDocument, PolicyStore, PrincipalId, RequestContext, RoleGrant, RoleGrantStore};
+    use paigasus_kernel::{Prn, to_cedar_uid};
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use uuid::Uuid;
+
+    fn u(n: u128) -> Uuid {
+        Uuid::from_u128(n)
+    }
+
+    fn principal_prn(n: u128) -> Prn {
+        Prn::build("iam", "", None, "principal", u(n)).expect("static test prn parts are valid")
+    }
+
+    fn cedar_tuple(prn: &Prn) -> (String, String) {
+        let uid = to_cedar_uid(prn);
+        (uid.entity_type, uid.entity_id)
+    }
+
+    fn root_tuple() -> (String, String) {
+        (ROOT_ENTITY.0.to_string(), ROOT_ENTITY.1.to_string())
+    }
+
+    fn active_attrs() -> BTreeMap<String, ContextValue> {
+        BTreeMap::from([("effective_status".to_string(), ContextValue::Str("active".to_string()))])
+    }
+
+    /// A `Root -> org -> team -> project` hierarchy plus one principal — the same shared
+    /// entity universe every test in this module decides requests against. The
+    /// [`FixtureSliceLoader`] fake below always returns this same slice; every test here
+    /// only ever asks about `project`, so a canned, unvarying slice is enough.
+    struct Fixture {
+        org: OrganizationId,
+        project: ProjectId,
+        principal: Prn,
+        slice: EntitySlice,
+    }
+
+    fn fixture() -> Fixture {
+        let org = OrganizationId::from_uuid(u(1));
+        let team = TeamId::from_parts(org.uuid(), u(2));
+        let project = ProjectId::from_parts(org.uuid(), u(3));
+        let principal = principal_prn(4);
+
+        let entities = vec![
+            SliceEntity {
+                uid: root_tuple(),
+                parents: vec![],
+                attrs: BTreeMap::new(),
+            },
+            SliceEntity {
+                uid: cedar_tuple(org.prn()),
+                parents: vec![root_tuple()],
+                attrs: active_attrs(),
+            },
+            SliceEntity {
+                uid: cedar_tuple(team.prn()),
+                parents: vec![cedar_tuple(org.prn())],
+                attrs: active_attrs(),
+            },
+            SliceEntity {
+                uid: cedar_tuple(project.prn()),
+                parents: vec![cedar_tuple(team.prn())],
+                attrs: active_attrs(),
+            },
+            SliceEntity {
+                uid: cedar_tuple(&principal),
+                parents: vec![],
+                attrs: BTreeMap::from([
+                    ("kind".to_string(), ContextValue::Str("user".to_string())),
+                    ("status".to_string(), ContextValue::Str("active".to_string())),
+                ]),
+            },
+        ];
+
+        Fixture {
+            org,
+            project,
+            principal,
+            slice: EntitySlice { entities },
+        }
+    }
+
+    fn org_admin_grant(id: Uuid, principal: &Prn, org: &OrganizationId) -> RoleGrant {
+        RoleGrant {
+            id,
+            principal: PrincipalId::from_prn(principal.clone()),
+            role_key: "org_admin".to_string(),
+            scope: GrantScope::Node(TenancyNodeRef::Organization(org.clone())),
+            linked_policy_id: format!("grant:{id}"),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// In-memory `PolicyStore` fake sharing a caller-supplied [`Generations`] handle for its
+    /// own `policy_gen`/`bump_policy_gen` — mirroring how the real `PgPolicyStore` (Task 10)
+    /// and `CedarAuthorizer::gens` share ONE `Generations` handle in production wiring. This
+    /// is load-bearing for the AC1 test below: bumping through this store must ALSO be
+    /// visible to a `CedarAuthorizer` built over the same `Generations` clone, so the second
+    /// call mints a different decision-cache key rather than replaying the first call's
+    /// cached (stale) deny.
+    struct FakePolicyStore {
+        docs: Mutex<Vec<PolicyDocument>>,
+        gens: Generations,
+    }
+
+    impl FakePolicyStore {
+        fn new(docs: Vec<PolicyDocument>, gens: Generations) -> Self {
+            Self { docs: Mutex::new(docs), gens }
+        }
+    }
+
+    #[async_trait]
+    impl PolicyStore for FakePolicyStore {
+        async fn list_all(&self) -> Result<Vec<PolicyDocument>, AuthzError> {
+            Ok(self.docs.lock().unwrap().clone())
+        }
+
+        async fn put(&self, _doc: &PolicyDocument) -> Result<(), AuthzError> {
+            unimplemented!("cedar_authorizer tests never write through PolicyStore::put")
+        }
+
+        async fn delete(&self, _policy_id: &str) -> Result<(), AuthzError> {
+            unimplemented!("cedar_authorizer tests never write through PolicyStore::delete")
+        }
+
+        async fn policy_gen(&self) -> Result<u64, AuthzError> {
+            self.gens.policy_gen().await
+        }
+
+        async fn bump_policy_gen(&self) -> Result<u64, AuthzError> {
+            self.gens.bump_policy_gen().await
+        }
+    }
+
+    /// In-memory `RoleGrantStore` fake: a plain `Mutex<Vec<RoleGrant>>`, seeded up front.
+    struct FakeRoleGrantStore {
+        grants: Mutex<Vec<RoleGrant>>,
+    }
+
+    impl FakeRoleGrantStore {
+        fn new(grants: Vec<RoleGrant>) -> Self {
+            Self { grants: Mutex::new(grants) }
+        }
+    }
+
+    #[async_trait]
+    impl RoleGrantStore for FakeRoleGrantStore {
+        async fn grant(&self, g: &RoleGrant) -> Result<(), AuthzError> {
+            self.grants.lock().unwrap().push(g.clone());
+            Ok(())
+        }
+
+        async fn revoke(&self, id: Uuid) -> Result<(), AuthzError> {
+            self.grants.lock().unwrap().retain(|g| g.id != id);
+            Ok(())
+        }
+
+        async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError> {
+            Ok(self.grants.lock().unwrap().clone())
+        }
+
+        async fn list_by_principal(&self, _p: &PrincipalId) -> Result<Vec<RoleGrant>, AuthzError> {
+            unimplemented!("cedar_authorizer tests never query by principal")
+        }
+    }
+
+    /// An `EntitySliceLoader` fake that always returns the same canned slice, counting calls
+    /// so tests can assert whether the decision cache actually short-circuited it.
+    struct FixtureSliceLoader {
+        slice: EntitySlice,
+        calls: AtomicUsize,
+    }
+
+    impl FixtureSliceLoader {
+        fn new(slice: EntitySlice) -> Self {
+            Self { slice, calls: AtomicUsize::new(0) }
+        }
+    }
+
+    #[async_trait]
+    impl EntitySliceLoader for FixtureSliceLoader {
+        async fn load(&self, _resource: &Prn, _principal: &Prn) -> Result<EntitySlice, AuthzError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.slice.clone())
+        }
+
+        async fn entity_gen(&self) -> Result<u64, AuthzError> {
+            Ok(0)
+        }
+    }
+
+    /// An `EntitySliceLoader` fake that always fails — proves a slice-load error propagates
+    /// out of `is_authorized` rather than being swallowed into a `Deny`.
+    struct FailingSliceLoader;
+
+    #[async_trait]
+    impl EntitySliceLoader for FailingSliceLoader {
+        async fn load(&self, _resource: &Prn, _principal: &Prn) -> Result<EntitySlice, AuthzError> {
+            Err(AuthzError::Backend("simulated postgres outage loading the entity slice".into()))
+        }
+
+        async fn entity_gen(&self) -> Result<u64, AuthzError> {
+            Ok(0)
+        }
+    }
+
+    /// A capturing `AuditSink` fake: records every event into a `Mutex<Vec<_>>` so tests can
+    /// assert both content and count (in particular, that a cache hit never double-audits).
+    #[derive(Default)]
+    struct CapturingAuditSink {
+        events: Mutex<Vec<AuthzDecisionEvent>>,
+    }
+
+    #[async_trait]
+    impl AuditSink for CapturingAuditSink {
+        async fn record(&self, ev: &AuthzDecisionEvent) {
+            self.events.lock().unwrap().push(ev.clone());
+        }
+    }
+
+    /// A `GenerationsReader` fake whose both reads always fail — simulates a
+    /// `Generations::Redis` backend whose Redis is down, without any real network I/O.
+    struct FailingGenerations;
+
+    #[async_trait]
+    impl GenerationsReader for FailingGenerations {
+        async fn policy_gen(&self) -> Result<u64, AuthzError> {
+            Err(AuthzError::Backend("simulated generations-redis outage".into()))
+        }
+
+        async fn entity_gen(&self) -> Result<u64, AuthzError> {
+            Err(AuthzError::Backend("simulated generations-redis outage".into()))
+        }
+    }
+
+    fn base_request(fx: &Fixture, action: Action) -> AccessRequest {
+        AccessRequest {
+            principal: fx.principal.clone(),
+            action,
+            resource: fx.project.prn().clone(),
+            context: RequestContext::empty(),
+        }
+    }
+
+    #[tokio::test]
+    async fn default_deny_records_exactly_one_audit_event() {
+        let fx = fixture();
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("snapshot builds"));
+        let slices = Arc::new(FixtureSliceLoader::new(fx.slice.clone()));
+        let audit = Arc::new(CapturingAuditSink::default());
+
+        let authorizer = CedarAuthorizer::new(
+            snapshot,
+            slices as Arc<dyn EntitySliceLoader>,
+            Arc::new(MemoryDecisionCache::new()) as Arc<dyn DecisionCache>,
+            Arc::new(Generations::memory()) as Arc<dyn GenerationsReader>,
+            audit.clone() as Arc<dyn AuditSink>,
+        );
+
+        let req = base_request(&fx, Action::GetProject);
+        let decision = authorizer.is_authorized(&req).await.expect("decision succeeds");
+        assert_eq!(decision.effect, Effect::Deny);
+
+        let events = audit.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "exactly one decision must be audited");
+        assert_eq!(events[0].effect, Effect::Deny);
+        assert_eq!(events[0].determining_policies, vec![paigasus_iam_core::authz::engine::DEFAULT_DENY_MARKER.to_string()]);
+        assert_eq!(events[0].principal_prn, fx.principal.canonical());
+        assert_eq!(events[0].resource_prn, fx.project.prn().canonical());
+    }
+
+    /// AC1: a grant made after construction must be visible to the SAME `CedarAuthorizer`
+    /// instance's very next call — proving `is_authorized` calls `reload_if_stale`
+    /// synchronously rather than relying on the background poll loop.
+    #[tokio::test]
+    async fn allow_after_grant_reloads_synchronously_ac1() {
+        let fx = fixture();
+        let gens = Generations::memory();
+        let policies_store = Arc::new(FakePolicyStore::new(starter_policies(), gens.clone()));
+        let grants_store = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let policies: Arc<dyn PolicyStore> = policies_store.clone();
+        let grants: Arc<dyn RoleGrantStore> = grants_store.clone();
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("snapshot builds"));
+        let slices = Arc::new(FixtureSliceLoader::new(fx.slice.clone()));
+        let audit = Arc::new(CapturingAuditSink::default());
+
+        let authorizer = CedarAuthorizer::new(
+            snapshot,
+            slices as Arc<dyn EntitySliceLoader>,
+            Arc::new(MemoryDecisionCache::new()) as Arc<dyn DecisionCache>,
+            // Share the SAME `Generations` handle the `FakePolicyStore` bumps below — this
+            // mirrors production wiring (one `Generations` behind both `PgPolicyStore` and
+            // `CedarAuthorizer::gens`) and, just as importantly, means the bump that makes
+            // `PolicySnapshot` reload ALSO mints a fresh decision-cache key, so the second
+            // call below can't be served the first call's cached `Deny`.
+            Arc::new(gens) as Arc<dyn GenerationsReader>,
+            audit.clone() as Arc<dyn AuditSink>,
+        );
+
+        let req = base_request(&fx, Action::CreateProject);
+
+        let before = authorizer.is_authorized(&req).await.expect("decision succeeds");
+        assert_eq!(before.effect, Effect::Deny, "no grant yet");
+
+        let grant_id = u(200);
+        grants_store.grant(&org_admin_grant(grant_id, &fx.principal, &fx.org)).await.expect("grant succeeds");
+        policies_store.bump_policy_gen().await.expect("bump succeeds");
+
+        let after = authorizer.is_authorized(&req).await.expect("decision succeeds");
+        assert_eq!(after.effect, Effect::Allow);
+        assert_eq!(after.determining_policies, vec![format!("grant:{grant_id}")]);
+
+        assert_eq!(audit.events.lock().unwrap().len(), 2, "two distinct decisions were computed, both audited");
+    }
+
+    #[tokio::test]
+    async fn cache_hit_short_circuits_the_slice_load_and_does_not_double_audit() {
+        let fx = fixture();
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("snapshot builds"));
+        let slices = Arc::new(FixtureSliceLoader::new(fx.slice.clone()));
+        let audit = Arc::new(CapturingAuditSink::default());
+
+        let authorizer = CedarAuthorizer::new(
+            snapshot,
+            slices.clone() as Arc<dyn EntitySliceLoader>,
+            Arc::new(MemoryDecisionCache::new()) as Arc<dyn DecisionCache>,
+            Arc::new(Generations::memory()) as Arc<dyn GenerationsReader>,
+            audit.clone() as Arc<dyn AuditSink>,
+        );
+
+        let req = base_request(&fx, Action::GetProject);
+
+        let first = authorizer.is_authorized(&req).await.expect("first call succeeds");
+        let second = authorizer.is_authorized(&req).await.expect("second call succeeds");
+
+        assert_eq!(first, second);
+        assert_eq!(slices.calls.load(Ordering::SeqCst), 1, "a cache hit must not re-invoke the slice loader");
+        assert_eq!(audit.events.lock().unwrap().len(), 1, "a cache hit must not double-audit");
+    }
+
+    /// D11/D12 fail-open: when the generation counters can't be read at all (a
+    /// `Generations::Redis` outage, simulated here without any real Redis), `is_authorized`
+    /// must still evaluate and return a correct `Decision` — it just can't accelerate future
+    /// identical calls, since neither `get` nor `put` can safely run without a key.
+    #[tokio::test]
+    async fn fail_open_on_a_generations_read_error_still_decides_and_never_caches() {
+        let fx = fixture();
+        let grant_id = u(300);
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
+        // Seed the grant at construction time so `PolicySnapshot::new` compiles it in from
+        // the start — this test is about the GENERATIONS read failing, not about reload
+        // timing, which the AC1 test above already covers.
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![org_admin_grant(grant_id, &fx.principal, &fx.org)]));
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("snapshot builds"));
+        let slices = Arc::new(FixtureSliceLoader::new(fx.slice.clone()));
+        let audit = Arc::new(CapturingAuditSink::default());
+
+        let authorizer = CedarAuthorizer::new(
+            snapshot,
+            slices.clone() as Arc<dyn EntitySliceLoader>,
+            Arc::new(MemoryDecisionCache::new()) as Arc<dyn DecisionCache>,
+            Arc::new(FailingGenerations) as Arc<dyn GenerationsReader>,
+            audit.clone() as Arc<dyn AuditSink>,
+        );
+
+        let req = base_request(&fx, Action::CreateProject);
+
+        let first = authorizer.is_authorized(&req).await.expect("a generations-read error must not fail the decision");
+        assert_eq!(first.effect, Effect::Allow);
+        assert_eq!(first.determining_policies, vec![format!("grant:{grant_id}")]);
+
+        // A second, identical call must ALSO re-evaluate — proving nothing was cached under
+        // a partial/guessed key when the generation reads failed.
+        let second = authorizer.is_authorized(&req).await.expect("still decides on the second call");
+        assert_eq!(second, first);
+        assert_eq!(
+            slices.calls.load(Ordering::SeqCst),
+            2,
+            "the cache must never be consulted when the generations read failed — every call re-evaluates"
+        );
+        assert_eq!(audit.events.lock().unwrap().len(), 2, "both (uncached) decisions are audited");
+    }
+
+    #[tokio::test]
+    async fn slice_load_error_propagates_rather_than_deciding_silently() {
+        let fx = fixture();
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("snapshot builds"));
+        let audit = Arc::new(CapturingAuditSink::default());
+
+        let authorizer = CedarAuthorizer::new(
+            snapshot,
+            Arc::new(FailingSliceLoader) as Arc<dyn EntitySliceLoader>,
+            Arc::new(MemoryDecisionCache::new()) as Arc<dyn DecisionCache>,
+            Arc::new(Generations::memory()) as Arc<dyn GenerationsReader>,
+            audit.clone() as Arc<dyn AuditSink>,
+        );
+
+        let req = base_request(&fx, Action::GetProject);
+        let err = authorizer.is_authorized(&req).await.expect_err("a slice-load failure must propagate");
+        assert!(matches!(err, AuthzError::Backend(_)));
+        assert!(audit.events.lock().unwrap().is_empty(), "no decision was computed, so nothing should be audited");
+    }
+}
