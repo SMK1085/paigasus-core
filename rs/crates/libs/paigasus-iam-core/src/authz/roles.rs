@@ -285,11 +285,13 @@ mod tests {
     }
 
     /// One shared entity universe for the whole table: the synthetic `Root`, two orgs
-    /// (`org_o`, `org_other`) each with one team and one active project under it, a third
-    /// ("archived") project under `org_o`'s team, and the one principal every case grants
-    /// roles to.
+    /// (`org_o`, `org_other`) each with one team (`team_o`, `team_other`) and one active
+    /// project under it, a third ("archived") project under `org_o`'s team, and the one
+    /// principal every case grants roles to.
     struct Universe {
         org_o: OrganizationId,
+        team_o: TeamId,
+        team_other: TeamId,
         project_in_o: ProjectId,
         project_in_other: ProjectId,
         archived_project_in_o: ProjectId,
@@ -332,6 +334,8 @@ mod tests {
 
         Universe {
             org_o,
+            team_o,
+            team_other,
             project_in_o,
             project_in_other,
             archived_project_in_o,
@@ -421,6 +425,95 @@ mod tests {
                 grants: vec![grant(6, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
                 action: Action::RenameProject,
                 resource: uni.archived_project_in_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            // -- GrantRole as the requested action: which principals may perform GrantRole
+            // itself (the use-case-layer anti-escalation check on *which* role a grant
+            // confers is separate, tested elsewhere).
+            Case {
+                name: "org_admin allows GrantRole on a project under its own org",
+                grants: vec![grant(7, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::GrantRole,
+                resource: uni.project_in_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "org_member denies GrantRole on a project under its own org",
+                grants: vec![grant(8, &uni.principal, "org_member", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::GrantRole,
+                resource: uni.project_in_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "team_admin allows GrantRole on a project within its own team",
+                grants: vec![grant(9, &uni.principal, "team_admin", GrantScope::Node(TenancyNodeRef::Team(uni.team_o.clone())))],
+                action: Action::GrantRole,
+                resource: uni.project_in_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "team_member denies GrantRole on a project within its own team",
+                grants: vec![grant(10, &uni.principal, "team_member", GrantScope::Node(TenancyNodeRef::Team(uni.team_o.clone())))],
+                action: Action::GrantRole,
+                resource: uni.project_in_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            // -- team_admin / team_member behavioral coverage (previously untested roles).
+            Case {
+                name: "team_admin allows RenameTeam on its own team",
+                grants: vec![grant(11, &uni.principal, "team_admin", GrantScope::Node(TenancyNodeRef::Team(uni.team_o.clone())))],
+                action: Action::RenameTeam,
+                resource: uni.team_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "team_admin denies RenameTeam on a team outside its own subtree",
+                grants: vec![grant(12, &uni.principal, "team_admin", GrantScope::Node(TenancyNodeRef::Team(uni.team_o.clone())))],
+                action: Action::RenameTeam,
+                resource: uni.team_other.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "team_member allows GetProject on a project within its own team",
+                grants: vec![grant(13, &uni.principal, "team_member", GrantScope::Node(TenancyNodeRef::Team(uni.team_o.clone())))],
+                action: Action::GetProject,
+                resource: uni.project_in_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "team_member denies RenameProject (a write) on a project within its own team",
+                grants: vec![grant(14, &uni.principal, "team_member", GrantScope::Node(TenancyNodeRef::Team(uni.team_o.clone())))],
+                action: Action::RenameProject,
+                resource: uni.project_in_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            // -- project_admin / project_member behavioral coverage (previously untested roles).
+            Case {
+                name: "project_admin allows RenameProject on its own project",
+                grants: vec![grant(15, &uni.principal, "project_admin", GrantScope::Node(TenancyNodeRef::Project(uni.project_in_o.clone())))],
+                action: Action::RenameProject,
+                resource: uni.project_in_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "project_admin denies RenameProject on a different project outside its scope",
+                grants: vec![grant(16, &uni.principal, "project_admin", GrantScope::Node(TenancyNodeRef::Project(uni.project_in_o.clone())))],
+                action: Action::RenameProject,
+                resource: uni.project_in_other.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "project_member allows GetProject on its own project",
+                grants: vec![grant(17, &uni.principal, "project_member", GrantScope::Node(TenancyNodeRef::Project(uni.project_in_o.clone())))],
+                action: Action::GetProject,
+                resource: uni.project_in_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "project_member denies RenameProject (a write) on its own project",
+                grants: vec![grant(18, &uni.principal, "project_member", GrantScope::Node(TenancyNodeRef::Project(uni.project_in_o.clone())))],
+                action: Action::RenameProject,
+                resource: uni.project_in_o.prn().clone(),
                 expect: Effect::Deny,
             },
         ];
