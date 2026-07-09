@@ -4,6 +4,7 @@ pub mod action;
 pub mod engine;
 pub mod model;
 pub mod ports;
+pub mod roles;
 pub mod schema;
 
 pub use action::Action;
