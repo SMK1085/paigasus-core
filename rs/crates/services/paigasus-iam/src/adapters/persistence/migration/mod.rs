@@ -5,6 +5,7 @@ use sea_orm_migration::prelude::*;
 mod m0001_create_principal_and_user;
 mod m0002_create_tenancy;
 mod m0003_create_external_identity;
+mod m0004_create_authz;
 
 pub struct Migrator;
 
@@ -15,6 +16,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0001_create_principal_and_user::Migration),
             Box::new(m0002_create_tenancy::Migration),
             Box::new(m0003_create_external_identity::Migration),
+            Box::new(m0004_create_authz::Migration),
         ]
     }
 }
