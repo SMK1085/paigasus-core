@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `PgRoleGrantStore` integration test (SMA-444 Task 11): `grant` inserts a `role_grant` row
-//! for a seeded principal at an organization scope and at the synthetic Root scope, in each
-//! case with the correct `scope_kind`/`scope_*_id` columns, and bumps `policy_gen`;
-//! `list_by_principal`/`list_all` reconstruct the domain `RoleGrant` (in particular its
-//! `GrantScope`) byte-for-byte; a duplicate `(principal, role, scope)` grant is rejected, not
-//! silently swallowed; `revoke` deletes the row and bumps the generation (idempotent — a
-//! second revoke of the same id, or of an id that never existed, is a no-op that does not
-//! bump again).
+//! for a seeded principal at each of the four `ck_role_grant_scope` kinds — the synthetic
+//! Root scope, and organization/team/project tenancy nodes — in each case with the correct
+//! `scope_kind`/`scope_*_id` columns, and bumps `policy_gen`; `list_by_principal`/`list_all`
+//! reconstruct the domain `RoleGrant` (in particular its `GrantScope`) byte-for-byte; a
+//! duplicate `(principal, role, scope)` grant is rejected, not silently swallowed; `revoke`
+//! deletes the row and bumps the generation (idempotent — a second revoke of the same id, or
+//! of an id that never existed, is a no-op that does not bump again).
 //!
 //! Runs against an ephemeral Postgres in Docker. In CI (`CI` env set) a missing Docker
 //! daemon is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note —
@@ -20,7 +20,7 @@ use paigasus_iam::adapters::authz::Generations;
 use paigasus_iam::adapters::persistence::PgRoleGrantStore;
 use paigasus_iam::adapters::persistence::entities::{policy, role, role_grant};
 use paigasus_iam_core::authz::model::root_prn;
-use paigasus_iam_core::{AuthzError, GrantScope, OrganizationId, PrincipalId, RoleGrant, RoleGrantStore, TenancyNodeRef};
+use paigasus_iam_core::{AuthzError, GrantScope, OrganizationId, PrincipalId, ProjectId, RoleGrant, RoleGrantStore, TeamId, TenancyNodeRef};
 use paigasus_kernel::{Prn, mint_uuid7};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Set, Statement};
 use uuid::Uuid;
@@ -47,6 +47,37 @@ async fn seed_principal_and_org(db: &DatabaseConnection, principal_id: Uuid, org
         format!(
             r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at)
                VALUES ('{org_id}', 'prn:pgs:iam:::organization/{org_id}', 'acme', 'Acme', 'active', now(), now())"#
+        ),
+        [],
+    ))
+    .await
+    .unwrap();
+}
+
+/// Seeds a `team` row under an already-seeded organization — the FK target
+/// `fk_team_org`/`fk_role_grant_team` needs. Mirrors `seed_principal_and_org`'s
+/// inline-literal convention (see its doc comment for why literals, not bind params).
+async fn seed_team(db: &DatabaseConnection, org_id: Uuid, team_id: Uuid) {
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        format!(
+            r#"INSERT INTO "team" (id, org_id, prn, slug, name, status, created_at, updated_at)
+               VALUES ('{team_id}', '{org_id}', 'prn:pgs:iam::{org_id}:team/{team_id}', 'core', 'Core', 'active', now(), now())"#
+        ),
+        [],
+    ))
+    .await
+    .unwrap();
+}
+
+/// Seeds a `project` row under an already-seeded team (which must itself already be under
+/// `org_id`) — the FK target `fk_project_team`/`fk_role_grant_project` needs.
+async fn seed_project(db: &DatabaseConnection, org_id: Uuid, team_id: Uuid, project_id: Uuid) {
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        format!(
+            r#"INSERT INTO "project" (id, team_id, org_id, prn, slug, name, status, created_at, updated_at)
+               VALUES ('{project_id}', '{team_id}', '{org_id}', 'prn:pgs:iam::{org_id}:project/{project_id}', 'svc', 'Svc', 'active', now(), now())"#
         ),
         [],
     ))
@@ -256,4 +287,84 @@ async fn authz_role_grant_list_all_returns_every_grant_with_scope_reconstructed(
     let mut all = store.list_all().await.unwrap();
     all.sort_by_key(|g| g.id);
     assert_eq!(all, vec![org_grant, root_grant]);
+}
+
+/// Closes the coverage gap on the other two `ck_role_grant_scope` arms (review finding):
+/// `organization`/`root` are round-tripped above, but `team`/`project` never were, even
+/// though this store feeds the policy-snapshot compile for every scope kind alike. A
+/// team-scoped grant must land with exactly `scope_team_id` set — `scope_org_id`/
+/// `scope_project_id` NULL (the `team` arm of `ck_role_grant_scope`) — and
+/// `list_by_principal` must reconstruct the exact `GrantScope::Node(TenancyNodeRef::Team)`.
+#[tokio::test]
+async fn authz_role_grant_team_scoped_round_trips() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    let principal_uuid = mint_uuid7(1_700_000_000_005, [6u8; 10]);
+    let org_uuid = Uuid::from_u128(6);
+    let team_uuid = Uuid::from_u128(60);
+    seed_principal_and_org(&db, principal_uuid, org_uuid).await;
+    seed_team(&db, org_uuid, team_uuid).await;
+    seed_role(&db, "team_admin", now).await;
+
+    let principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", principal_uuid).unwrap());
+    let team = TeamId::from_parts(org_uuid, team_uuid);
+    let grant_id = Uuid::from_u128(107);
+    let grant = make_grant(grant_id, &principal, "team_admin", GrantScope::Node(TenancyNodeRef::Team(team.clone())), now);
+
+    let store = PgRoleGrantStore::new(db.clone(), Generations::memory());
+    store.grant(&grant).await.unwrap();
+
+    // The row's scope columns are exactly what `ck_role_grant_scope`'s `team` arm requires:
+    // `scope_team_id` set, `scope_org_id`/`scope_project_id` NULL.
+    let row = role_grant::Entity::find_by_id(grant_id).one(&db).await.unwrap().expect("row present after grant");
+    assert_eq!(row.scope_kind, "team");
+    assert_eq!(row.scope_node_prn, team.canonical());
+    assert_eq!(row.scope_org_id, None);
+    assert_eq!(row.scope_team_id, Some(team_uuid));
+    assert_eq!(row.scope_project_id, None);
+
+    let listed = store.list_by_principal(&principal).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0], grant, "list_by_principal must reconstruct the exact RoleGrant, including its team-scoped GrantScope");
+}
+
+/// Same gap-closing round trip as the team-scoped test above, for `ck_role_grant_scope`'s
+/// `project` arm: a project-scoped grant must land with exactly `scope_project_id` set —
+/// `scope_org_id`/`scope_team_id` NULL — and reconstruct to
+/// `GrantScope::Node(TenancyNodeRef::Project)`.
+#[tokio::test]
+async fn authz_role_grant_project_scoped_round_trips() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    let principal_uuid = mint_uuid7(1_700_000_000_006, [7u8; 10]);
+    let org_uuid = Uuid::from_u128(7);
+    let team_uuid = Uuid::from_u128(70);
+    let project_uuid = Uuid::from_u128(700);
+    seed_principal_and_org(&db, principal_uuid, org_uuid).await;
+    seed_team(&db, org_uuid, team_uuid).await;
+    seed_project(&db, org_uuid, team_uuid, project_uuid).await;
+    seed_role(&db, "project_admin", now).await;
+
+    let principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", principal_uuid).unwrap());
+    let project = ProjectId::from_parts(org_uuid, project_uuid);
+    let grant_id = Uuid::from_u128(108);
+    let grant = make_grant(grant_id, &principal, "project_admin", GrantScope::Node(TenancyNodeRef::Project(project.clone())), now);
+
+    let store = PgRoleGrantStore::new(db.clone(), Generations::memory());
+    store.grant(&grant).await.unwrap();
+
+    // The row's scope columns are exactly what `ck_role_grant_scope`'s `project` arm requires:
+    // `scope_project_id` set, `scope_org_id`/`scope_team_id` NULL.
+    let row = role_grant::Entity::find_by_id(grant_id).one(&db).await.unwrap().expect("row present after grant");
+    assert_eq!(row.scope_kind, "project");
+    assert_eq!(row.scope_node_prn, project.canonical());
+    assert_eq!(row.scope_org_id, None);
+    assert_eq!(row.scope_team_id, None);
+    assert_eq!(row.scope_project_id, Some(project_uuid));
+
+    let listed = store.list_by_principal(&principal).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0], grant, "list_by_principal must reconstruct the exact RoleGrant, including its project-scoped GrantScope");
 }
