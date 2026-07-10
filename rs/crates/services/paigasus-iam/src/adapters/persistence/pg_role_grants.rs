@@ -136,4 +136,11 @@ impl RoleGrantStore for PgRoleGrantStore {
         let models = role_grant::Entity::find().filter(role_grant::Column::PrincipalId.eq(p.uuid())).all(&self.db).await.map_err(map_err)?;
         models.into_iter().map(model_to_grant).collect()
     }
+
+    async fn find(&self, id: Uuid) -> Result<Option<RoleGrant>, AuthzError> {
+        let Some(model) = role_grant::Entity::find_by_id(id).one(&self.db).await.map_err(map_err)? else {
+            return Ok(None);
+        };
+        Ok(Some(model_to_grant(model)?))
+    }
 }

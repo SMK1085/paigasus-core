@@ -39,6 +39,10 @@ pub trait RoleGrantStore: Send + Sync {
     async fn revoke(&self, id: Uuid) -> Result<(), AuthzError>;
     async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError>;
     async fn list_by_principal(&self, p: &PrincipalId) -> Result<Vec<RoleGrant>, AuthzError>;
+    /// Looks up a single grant by id — `None` if it was never granted or has since been
+    /// revoked. `RoleService::revoke` (SMA-444 Task 17) uses this to resolve the grant's
+    /// `GrantScope` before authorizing the revoke itself against it.
+    async fn find(&self, id: Uuid) -> Result<Option<RoleGrant>, AuthzError>;
 }
 
 /// Loads the minimal [`EntitySlice`] needed to decide one request (principal, resource,

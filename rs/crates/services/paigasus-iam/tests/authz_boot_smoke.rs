@@ -7,10 +7,13 @@
 //! `AppState.authz` actually runs `is_authorized` end-to-end (snapshot load -> entity-slice
 //! load -> Cedar evaluation -> audit) without erroring.
 //!
-//! No policies are seeded here (seeding is a later task), so `PolicySnapshot::new` compiles
-//! an empty policy set and every request falls through to Cedar's implicit-deny default —
-//! `Effect::Deny` below is proof the whole chain wires up and runs, not a claim that
-//! authorization logic itself is under test (that's `cedar_authorizer.rs`'s unit suite).
+//! `AppState::new` seeds the starter Cedar policy set + system role catalog at boot
+//! (`bootstrap::reconcile_starter`, SMA-444 Task 17), but seeding the TEMPLATES grants no
+//! permission by itself — a template only materializes into a live permission once a
+//! `RoleGrant` links it, and this test's principal has none. So the request below still
+//! falls through to Cedar's implicit-deny default: `Effect::Deny` is proof the whole chain
+//! wires up and runs (including the boot-time seed), not a claim that authorization logic
+//! itself is under test (that's `cedar_authorizer.rs`'s/`authz::roles`'s unit suites).
 //!
 //! Runs against an ephemeral Postgres in Docker. In CI (`CI` env set) a missing Docker
 //! daemon is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note —
@@ -53,5 +56,9 @@ async fn app_state_composes_a_working_authorizer_that_default_denies_when_unseed
     };
 
     let decision = state.authz.is_authorized(&req).await.expect("is_authorized must run end-to-end against real Postgres without erroring");
-    assert_eq!(decision.effect, Effect::Deny, "no policies are seeded yet (a later task) — Cedar's implicit-deny default");
+    assert_eq!(
+        decision.effect,
+        Effect::Deny,
+        "the boot-seeded starter templates grant nothing without a RoleGrant linking one — Cedar's implicit-deny default"
+    );
 }

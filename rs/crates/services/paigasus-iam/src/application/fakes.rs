@@ -10,11 +10,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
-    Clock, ConflictKind, IdGenerator, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, PreconditionKind, PrincipalId,
-    Project, ProjectId, ProjectRepository, RepositoryError, Slug, Team, TeamId, TeamRepository, TenancyNodeRef,
+    AccessRequest, Action, Authorizer, AuthzError, Clock, ConflictKind, Decision, Effect, IdGenerator, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization,
+    OrganizationId, OrganizationRepository, PolicyDocument, PolicyStore, PreconditionKind, PrincipalId, Project, ProjectId, ProjectRepository, RepositoryError, RoleGrant, RoleGrantStore, Slug, Team,
+    TeamId, TeamRepository, TenancyNodeRef,
 };
 use paigasus_kernel::Prn;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -482,6 +483,111 @@ impl IdGenerator for SeqIds {
 
     fn new_external_identity_id(&self) -> Uuid {
         self.next()
+    }
+}
+
+/// Programmable `Authorizer` fake for application-service unit tests (`authorize.rs`,
+/// `roles.rs`, `policies.rs`): `allow(action, resource)` whitelists an exact
+/// `(Action, resource-canonical-prn)` pair — every other request denies, mirroring Cedar's
+/// own default-deny posture. Keyed on the resource's canonical prn string rather than `Prn`
+/// itself (no `Hash`/`Eq` on `Prn`, and canonical-string equality is exactly what this authz
+/// layer's identity comparison reduces to).
+#[derive(Clone, Default)]
+pub struct FakeAuthorizer {
+    allowed: Arc<Mutex<HashSet<(Action, String)>>>,
+}
+
+impl FakeAuthorizer {
+    pub fn allow(&self, action: Action, resource: &Prn) {
+        self.allowed.lock().unwrap().insert((action, resource.canonical()));
+    }
+}
+
+#[async_trait]
+impl Authorizer for FakeAuthorizer {
+    async fn is_authorized(&self, req: &AccessRequest) -> Result<Decision, AuthzError> {
+        let allow = self.allowed.lock().unwrap().contains(&(req.action, req.resource.canonical()));
+        Ok(Decision {
+            effect: if allow { Effect::Allow } else { Effect::Deny },
+            determining_policies: Vec::new(),
+        })
+    }
+}
+
+/// In-memory `RoleGrantStore` fake for `roles.rs` unit tests: a plain
+/// `Mutex<HashMap<Uuid, RoleGrant>>`, no generation-counter bookkeeping (that's
+/// `PgRoleGrantStore`'s job, exercised by the Docker integration tests).
+#[derive(Clone, Default)]
+pub struct InMemoryRoleGrants(pub Arc<Mutex<HashMap<Uuid, RoleGrant>>>);
+
+#[async_trait]
+impl RoleGrantStore for InMemoryRoleGrants {
+    async fn grant(&self, g: &RoleGrant) -> Result<(), AuthzError> {
+        self.0.lock().unwrap().insert(g.id, g.clone());
+        Ok(())
+    }
+
+    async fn revoke(&self, id: Uuid) -> Result<(), AuthzError> {
+        self.0.lock().unwrap().remove(&id);
+        Ok(())
+    }
+
+    async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError> {
+        Ok(self.0.lock().unwrap().values().cloned().collect())
+    }
+
+    async fn list_by_principal(&self, p: &PrincipalId) -> Result<Vec<RoleGrant>, AuthzError> {
+        Ok(self.0.lock().unwrap().values().filter(|g| g.principal == *p).cloned().collect())
+    }
+
+    async fn find(&self, id: Uuid) -> Result<Option<RoleGrant>, AuthzError> {
+        Ok(self.0.lock().unwrap().get(&id).cloned())
+    }
+}
+
+/// In-memory `PolicyStore` fake for `policies.rs` unit tests: rejects mutation of an
+/// already-persisted `system = true` row, mirroring `PgPolicyStore`'s posture, without any
+/// Cedar parse/schema validation (that's `authz::schema::validate_policy`'s own unit suite).
+#[derive(Clone, Default)]
+pub struct InMemoryPolicies {
+    docs: Arc<Mutex<HashMap<String, PolicyDocument>>>,
+    gen_counter: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl PolicyStore for InMemoryPolicies {
+    async fn list_all(&self) -> Result<Vec<PolicyDocument>, AuthzError> {
+        Ok(self.docs.lock().unwrap().values().cloned().collect())
+    }
+
+    async fn put(&self, doc: &PolicyDocument) -> Result<(), AuthzError> {
+        let mut docs = self.docs.lock().unwrap();
+        if docs.get(&doc.policy_id).is_some_and(|existing| existing.system) {
+            return Err(AuthzError::SystemImmutable(doc.policy_id.clone()));
+        }
+        docs.insert(doc.policy_id.clone(), doc.clone());
+        drop(docs);
+        self.gen_counter.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn delete(&self, policy_id: &str) -> Result<(), AuthzError> {
+        let mut docs = self.docs.lock().unwrap();
+        if docs.get(policy_id).is_some_and(|existing| existing.system) {
+            return Err(AuthzError::SystemImmutable(policy_id.to_string()));
+        }
+        docs.remove(policy_id);
+        drop(docs);
+        self.gen_counter.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn policy_gen(&self) -> Result<u64, AuthzError> {
+        Ok(self.gen_counter.load(Ordering::SeqCst))
+    }
+
+    async fn bump_policy_gen(&self) -> Result<u64, AuthzError> {
+        Ok(self.gen_counter.fetch_add(1, Ordering::SeqCst) + 1)
     }
 }
 

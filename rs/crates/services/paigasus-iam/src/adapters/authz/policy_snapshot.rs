@@ -328,6 +328,10 @@ mod tests {
         async fn list_by_principal(&self, _p: &PrincipalId) -> Result<Vec<RoleGrant>, AuthzError> {
             unimplemented!("policy_snapshot tests never query by principal")
         }
+
+        async fn find(&self, id: Uuid) -> Result<Option<RoleGrant>, AuthzError> {
+            Ok(self.grants.lock().unwrap().iter().find(|g| g.id == id).cloned())
+        }
     }
 
     #[tokio::test]

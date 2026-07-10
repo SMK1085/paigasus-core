@@ -2,7 +2,7 @@
 
 //! Service-layer error taxonomy, mapping domain/repository errors into a stable API.
 
-use paigasus_iam_core::{ConflictKind, DomainError, PreconditionKind, RepositoryError};
+use paigasus_iam_core::{AuthzError, ConflictKind, DomainError, PreconditionKind, RepositoryError};
 
 /// Classification of errors for routing to client handlers (HTTP status, gRPC code).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +52,23 @@ pub enum TenancyError {
     /// authorized callers, never in a 403 wire body (SMA-444 task-16 brief).
     #[error("access denied")]
     Forbidden,
+    /// `RoleService::grant` was asked to grant a role key `authz::roles::role` doesn't
+    /// recognize (SMA-444 Task 17).
+    #[error("unknown role: {0}")]
+    UnknownRole(String),
+    /// `RoleService::grant`'s scope PRN parsed fine, but its `NodeKind` isn't in the role's
+    /// `scope_kinds` allow-list (e.g. granting an `Organization`-scoped role at a `Team`) —
+    /// SMA-444 Task 17.
+    #[error("invalid grant scope: {0}")]
+    InvalidScope(String),
+    /// `PolicyService::put`/`delete` targeted an already-persisted `system = true` policy
+    /// row — immutable via the CRUD API (`AuthzError::SystemImmutable`, SMA-444 Task 17).
+    #[error("system-owned resource is immutable: {0}")]
+    SystemImmutable(String),
+    /// `PolicyService::put`'s document failed Cedar parse/schema/template-link validation
+    /// (`AuthzError::PolicyParse`/`SchemaValidation`/`TemplateLink`, SMA-444 Task 17).
+    #[error("invalid policy: {0}")]
+    PolicyInvalid(String),
     #[error("internal server error")]
     Internal,
 }
@@ -75,6 +92,10 @@ impl TenancyError {
             Self::NodeArchived => "node-archived",
             Self::MissingOrgMembership => "missing-org-membership",
             Self::Forbidden => "forbidden",
+            Self::UnknownRole(_) => "unknown-role",
+            Self::InvalidScope(_) => "invalid-scope",
+            Self::SystemImmutable(_) => "system-immutable",
+            Self::PolicyInvalid(_) => "policy-invalid",
             Self::Internal => "internal",
         }
     }
@@ -82,10 +103,19 @@ impl TenancyError {
     /// Returns the error's classification for routing to client handlers.
     pub fn class(&self) -> ErrorClass {
         match self {
-            Self::InvalidEmail(_) | Self::InvalidSlug(_) | Self::InvalidName(_) | Self::InvalidPrn(_) | Self::PrnMismatch | Self::InvalidPagination | Self::NothingToRename => ErrorClass::Validation,
+            Self::InvalidEmail(_)
+            | Self::InvalidSlug(_)
+            | Self::InvalidName(_)
+            | Self::InvalidPrn(_)
+            | Self::PrnMismatch
+            | Self::InvalidPagination
+            | Self::NothingToRename
+            | Self::UnknownRole(_)
+            | Self::InvalidScope(_)
+            | Self::PolicyInvalid(_) => ErrorClass::Validation,
             Self::NotFound => ErrorClass::NotFound,
             Self::SlugConflict | Self::DuplicateMembership | Self::EmailConflict => ErrorClass::Conflict,
-            Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership => ErrorClass::Precondition,
+            Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership | Self::SystemImmutable(_) => ErrorClass::Precondition,
             Self::Forbidden => ErrorClass::Forbidden,
             Self::Internal => ErrorClass::Internal,
         }
@@ -130,6 +160,22 @@ impl From<DomainError> for TenancyError {
     }
 }
 
+/// Maps the authz core's error taxonomy onto `TenancyError` (SMA-444 Task 17) — used by
+/// `Authorize::check`/`RoleService`/`PolicyService` via `?`. `Evaluation`/`Backend` are
+/// genuine engine/storage failures, never a denial — they surface as `Internal`, NOT
+/// `Forbidden` (a deny is `Authorize::check`'s own `Effect::Deny` branch, not this impl).
+impl From<AuthzError> for TenancyError {
+    fn from(err: AuthzError) -> Self {
+        match err {
+            AuthzError::UnknownRole(s) => Self::UnknownRole(s),
+            AuthzError::InvalidScope(s) => Self::InvalidScope(s),
+            AuthzError::SystemImmutable(s) => Self::SystemImmutable(s),
+            AuthzError::PolicyParse(s) | AuthzError::SchemaValidation(s) | AuthzError::TemplateLink(s) => Self::PolicyInvalid(s),
+            AuthzError::Evaluation(_) | AuthzError::Backend(_) => Self::Internal,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +196,23 @@ mod tests {
         assert_eq!(TenancyError::ParentArchived.class(), ErrorClass::Precondition);
         assert_eq!(TenancyError::Forbidden.class(), ErrorClass::Forbidden);
         assert_eq!(TenancyError::Internal.class(), ErrorClass::Internal);
+        assert_eq!(TenancyError::UnknownRole("x".to_string()).class(), ErrorClass::Validation);
+        assert_eq!(TenancyError::InvalidScope("x".to_string()).class(), ErrorClass::Validation);
+        assert_eq!(TenancyError::PolicyInvalid("x".to_string()).class(), ErrorClass::Validation);
+        assert_eq!(TenancyError::SystemImmutable("x".to_string()).class(), ErrorClass::Precondition);
+    }
+
+    #[test]
+    fn from_authz_error_maps_correctly() {
+        assert_eq!(TenancyError::from(AuthzError::UnknownRole("r".to_string())), TenancyError::UnknownRole("r".to_string()));
+        assert_eq!(TenancyError::from(AuthzError::InvalidScope("s".to_string())), TenancyError::InvalidScope("s".to_string()));
+        assert_eq!(TenancyError::from(AuthzError::SystemImmutable("p".to_string())), TenancyError::SystemImmutable("p".to_string()));
+        assert_eq!(TenancyError::from(AuthzError::PolicyParse("bad".to_string())), TenancyError::PolicyInvalid("bad".to_string()));
+        assert_eq!(TenancyError::from(AuthzError::SchemaValidation("bad".to_string())), TenancyError::PolicyInvalid("bad".to_string()));
+        assert_eq!(TenancyError::from(AuthzError::TemplateLink("bad".to_string())), TenancyError::PolicyInvalid("bad".to_string()));
+        assert_eq!(TenancyError::from(AuthzError::Evaluation("boom".to_string())), TenancyError::Internal);
+        let backend: Box<dyn std::error::Error + Send + Sync> = "boom".into();
+        assert_eq!(TenancyError::from(AuthzError::Backend(backend)), TenancyError::Internal);
     }
 
     #[test]

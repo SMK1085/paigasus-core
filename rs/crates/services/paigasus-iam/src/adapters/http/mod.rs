@@ -35,6 +35,7 @@ use crate::adapters::persistence::{
     PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgPolicyStore, PgPrincipalRepository, PgProjectRepository, PgRoleGrantStore, PgTeamRepository,
 };
 use crate::application::authenticate_token::{AuthenticateToken, JitPolicy};
+use crate::application::bootstrap;
 use crate::application::create_user::CreateUser;
 use crate::application::memberships::MembershipService;
 use crate::application::organizations::OrganizationService;
@@ -147,9 +148,10 @@ impl AppState {
     /// `PgEntitySliceLoader`) AND the three tenancy repositories below, so a policy/grant
     /// change bumps `policy_gen` and a tenancy structure/status change bumps `entity_gen` —
     /// both observed by the SAME counters `CedarAuthorizer`'s decision cache keys off. The
-    /// initial [`PolicySnapshot`] build reads whatever the policy store currently holds; on a
-    /// fresh/unseeded database that's nothing, so `authz` default-denies until policies are
-    /// seeded (a later task) — expected, not a defect, here.
+    /// initial [`PolicySnapshot`] build reads whatever the policy store currently holds —
+    /// [`bootstrap::reconcile_starter`] (SMA-444 Task 17) runs first and seeds the starter
+    /// Cedar policy set + the system role catalog on a fresh/unseeded database, so the
+    /// initial snapshot always compiles at least that starter set, never an empty one.
     pub async fn new(db: DatabaseConnection, cfg: &IamConfig) -> Result<AppState, AuthnError> {
         let gens = Generations::memory();
 
@@ -166,6 +168,7 @@ impl AppState {
 
         let policy_store: Arc<dyn PolicyStore> = Arc::new(PgPolicyStore::new(db.clone(), gens.clone()));
         let role_grant_store: Arc<dyn RoleGrantStore> = Arc::new(PgRoleGrantStore::new(db.clone(), gens.clone()));
+        bootstrap::reconcile_starter(policy_store.as_ref(), &db).await.map_err(|e| AuthnError::Backend(Box::new(e)))?;
         let snapshot = Arc::new(PolicySnapshot::new(policy_store, role_grant_store).await.map_err(|e| AuthnError::Backend(Box::new(e)))?);
         let slices: Arc<dyn EntitySliceLoader> = Arc::new(PgEntitySliceLoader::new(db.clone(), gens.clone()));
         let decisions: Arc<dyn DecisionCache> = Arc::new(MemoryDecisionCache::new());
