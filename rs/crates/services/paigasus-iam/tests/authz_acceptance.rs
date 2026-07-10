@@ -1,0 +1,583 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Explicit, AC-labeled acceptance tests for the SMA-444 (M3 authorization/Cedar) issue's
+//! three acceptance criteria, plus the Redis cross-replica + fail-open cases (spec D11/D12).
+//! Every other authz integration test file (`tests/http_authz.rs`, `tests/grpc_authz.rs`,
+//! `tests/authz_bootstrap.rs`, `tests/authz_cache_redis.rs`, `tests/cedar_authorizer.rs` unit
+//! tests, ...) already exercises these mechanisms incidentally; this file names each
+//! acceptance criterion explicitly, end-to-end, over the real HTTP/gRPC surfaces, against a
+//! real Postgres (Docker) and — for the cross-replica/fail-open cases — a real Redis (Docker).
+//!
+//! **AC1** (a role grant changes effective access, immediately, on the same replica): granted
+//! via the real `/v1/authz/role-grants` (HTTP) / `GrantRole` (gRPC) API by a seeded
+//! `platform_admin` actor, observed via the real `/v1/authz/is-authorized` (HTTP) /
+//! `IsAuthorized` (gRPC) API — deny before, allow after, same test, no sleep. This works
+//! because `CedarAuthorizer::is_authorized` calls `PolicySnapshot::reload_if_stale`
+//! *synchronously* before every decision (`src/adapters/authz/cedar_authorizer.rs`), not only
+//! on a background poll interval.
+//!
+//! **AC2** (a denial/allow names its determining policy): a default-deny names
+//! `DEFAULT_DENY_MARKER`; a grant-backed allow names `grant:<uuid>`; a `forbid` (the starter
+//! `forbid-archived-writes` policy) names its own policy id and wins over a permitting grant.
+//! Every assertion here is a SELF-query (the caller asks about their own access), so
+//! `Authorize::decide_gated`'s self/admin exposure rule never redacts the response.
+//!
+//! **AC3** (a policy change takes effect within the cache-TTL bound): built against an
+//! `AppState` whose `authz.policy_cache_ttl_secs` is 1 — the SAME synchronous
+//! `reload_if_stale` AC1 exercises makes a `PutPolicy` change visible on the very next
+//! decision, trivially satisfying any positive TTL bound. `policy_cache_ttl_secs` is actually
+//! the BACKSTOP for a replica that never observes a `policy_gen` bump on its own (e.g. two
+//! processes on the `memory` backend, or a `redis` replica between poll ticks) — the section
+//! below exercises that cross-replica case directly.
+//!
+//! **Redis cross-replica + fail-open** (spec D11/D12): two independently-constructed
+//! `AppState`s share one Postgres AND one Redis `authz.cache` backend. A grant made through
+//! replica A's API is visible to replica B's very next decision — not because of the TTL
+//! backstop, but because `Generations::Redis`'s `policy_gen` counter lives IN Redis itself
+//! (`INCR`/`GET` on a well-known key), so `reload_if_stale`'s synchronous check on ANY
+//! replica's next call observes ANY other replica's bump. A second case stops the Redis
+//! container mid-flight and asserts a request still gets a real (default-deny) decision —
+//! never a hung or errored request — evaluated against the last-known-good in-memory snapshot
+//! plus a live Postgres entity-slice load.
+
+mod support;
+
+use axum::http::StatusCode;
+use paigasus_iam::adapters::grpc;
+use paigasus_iam::adapters::http::AppState;
+use paigasus_iam::config::{AuthzCacheBackend, AuthzCacheConfig};
+use paigasus_iam_core::authz::engine::DEFAULT_DENY_MARKER;
+use paigasus_iam_core::authz::model::root_prn;
+use paigasus_iam_core::authz::roles::FORBID_ARCHIVED_WRITES_ID;
+use paigasus_proto::paigasus::iam::v1::authorization_service_client::AuthorizationServiceClient;
+use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceClient;
+use paigasus_proto::paigasus::iam::v1::{CreateOrganizationRequest, GrantRoleRequest, IsAuthorizedRequest};
+use serde_json::json;
+use std::net::SocketAddr;
+use std::time::Duration;
+use support::{app_with_config, app_with_state, provision, provision_platform_admin, send};
+use testcontainers_modules::redis::Redis;
+use testcontainers_modules::testcontainers::ContainerAsync;
+use testcontainers_modules::testcontainers::runners::AsyncRunner;
+use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
+use tonic::transport::Channel;
+
+/// Starts an ephemeral Redis container, returning its connection URL. Same CI-hard-fail /
+/// local-skip gating as `support::start_migrated_postgres`/`tests/authz_cache_redis.rs`;
+/// self-contained here since this file's Redis cross-replica/fail-open cases are its only
+/// consumer.
+async fn start_redis() -> Option<(ContainerAsync<Redis>, String)> {
+    let node = match Redis::default().start().await {
+        Ok(n) => n,
+        Err(e) => {
+            if std::env::var_os("CI").is_some() {
+                panic!("Docker is required for the authz acceptance redis cases in CI: {e}");
+            }
+            eprintln!("skipping authz_acceptance redis cases: Docker unavailable ({e})");
+            return None;
+        }
+    };
+
+    let port = node.get_host_port_ipv4(6379).await.unwrap();
+    let url = format!("redis://127.0.0.1:{port}");
+    Some((node, url))
+}
+
+/// Spawns the full `grpc::router` (health + tenancy + authn + authorization, all wrapped by
+/// the bearer layer) on an ephemeral port, mirroring `tests/grpc_authz.rs`/
+/// `tests/grpc_tenancy.rs`; `abort()` the returned handle when the test finishes.
+async fn spawn_server(state: AppState) -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let router = grpc::router(state, Duration::from_secs(5)).await;
+    let server = tokio::spawn(async move {
+        router.serve_with_incoming(incoming).await.unwrap();
+    });
+    (addr, server)
+}
+
+async fn channel(addr: SocketAddr) -> Channel {
+    tonic::transport::Endpoint::new(format!("http://{addr}")).unwrap().connect().await.unwrap()
+}
+
+/// Builds a `tonic::Request` carrying an `authorization: Bearer <token>` metadata entry.
+fn authed<T>(msg: T, token: &str) -> tonic::Request<T> {
+    let mut req = tonic::Request::new(msg);
+    support::grpc_bearer(&mut req, token);
+    req
+}
+
+// --- AC1: a role grant changes effective access, immediately, same replica ------------------
+
+#[tokio::test]
+async fn ac1_role_grant_changes_effective_access_over_http() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+
+    let admin_token = idp.bearer("ac1-http-admin", Some("ac1-http-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin_token).await;
+
+    let principal_token = idp.bearer("ac1-http-principal", Some("ac1-http-principal@example.com"), "paigasus", 3600);
+    let principal_prn = provision(&state, &principal_token).await;
+
+    // Set up an org (+ its default team) as the admin. `CreateProject` authorizes against
+    // the *parent team* (`src/adapters/http/teams.rs`), so the team is the resource under
+    // test — a tenancy node genuinely under org O, per the AC.
+    let (status, org_body) = send(
+        &app,
+        "POST",
+        "/v1/organizations",
+        Some(json!({"slug": "ac1-http-org", "name": "AC1 Http Org"})),
+        Some(admin_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{org_body}");
+    let org_prn = org_body["organization"]["prn"].as_str().expect("organization.prn").to_string();
+    let team_prn = org_body["default_team"]["prn"].as_str().expect("default_team.prn").to_string();
+
+    // Before the grant: P is default-denied CreateProject on the team.
+    let (status, before) = send(
+        &app,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({"principal_prn": principal_prn, "action": "CreateProject", "resource_prn": team_prn})),
+        Some(principal_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    assert_eq!(before["allowed"], false, "{before}");
+    assert_eq!(before["determining_policies"], json!([DEFAULT_DENY_MARKER]));
+
+    // GrantRole(org_admin, P, O) — via the API, as the platform_admin actor.
+    let (status, granted) = send(
+        &app,
+        "POST",
+        "/v1/authz/role-grants",
+        Some(json!({"principal_prn": principal_prn, "role_key": "org_admin", "scope_prn": org_prn})),
+        Some(admin_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{granted}");
+    let grant_id = granted["id"].as_str().expect("id").to_string();
+
+    // AC1: the SAME is-authorized call, right after the grant, in the same test, on the same
+    // replica — no sleep, no poll wait — now allows.
+    let (status, after) = send(
+        &app,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({"principal_prn": principal_prn, "action": "CreateProject", "resource_prn": team_prn})),
+        Some(principal_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(after["allowed"], true, "{after}");
+    assert_eq!(after["determining_policies"], json!([format!("grant:{grant_id}")]));
+}
+
+#[tokio::test]
+async fn ac1_role_grant_changes_effective_access_over_grpc() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+
+    let admin_token = idp.bearer("ac1-grpc-admin", Some("ac1-grpc-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin_token).await;
+
+    let principal_token = idp.bearer("ac1-grpc-principal", Some("ac1-grpc-principal@example.com"), "paigasus", 3600);
+    let principal_prn = provision(&state, &principal_token).await;
+
+    let (addr, server) = spawn_server(state).await;
+    let ch = channel(addr).await;
+
+    let mut tenancy = TenancyServiceClient::new(ch.clone());
+    let created = tenancy
+        .create_organization(authed(
+            CreateOrganizationRequest {
+                slug: "ac1-grpc-org".to_string(),
+                name: "AC1 Grpc Org".to_string(),
+            },
+            &admin_token,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let org_prn = created.organization.expect("organization").prn;
+    let team_prn = created.default_team.expect("default_team").prn;
+
+    let mut authz = AuthorizationServiceClient::new(ch);
+
+    // Before the grant: P is default-denied CreateProject on the team.
+    let before = authz
+        .is_authorized(authed(
+            IsAuthorizedRequest {
+                principal_prn: principal_prn.clone(),
+                action: "CreateProject".to_string(),
+                resource_prn: team_prn.clone(),
+                context: Default::default(),
+            },
+            &principal_token,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!before.allowed);
+    assert_eq!(before.determining_policies, vec![DEFAULT_DENY_MARKER.to_string()]);
+
+    // GrantRole(org_admin, P, O) — via the API, as the platform_admin actor.
+    let granted = authz
+        .grant_role(authed(
+            GrantRoleRequest {
+                principal_prn: principal_prn.clone(),
+                role_key: "org_admin".to_string(),
+                scope_prn: org_prn,
+            },
+            &admin_token,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .grant
+        .expect("grant");
+
+    // AC1: the SAME IsAuthorized call, right after the grant, in the same test, on the same
+    // replica — no sleep, no poll wait — now allows.
+    let after = authz
+        .is_authorized(authed(
+            IsAuthorizedRequest {
+                principal_prn,
+                action: "CreateProject".to_string(),
+                resource_prn: team_prn,
+                context: Default::default(),
+            },
+            &principal_token,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(after.allowed);
+    assert_eq!(after.determining_policies, vec![format!("grant:{}", granted.id)]);
+
+    server.abort();
+}
+
+// --- AC2: a denial/allow names its determining policy ----------------------------------------
+
+/// One self-querying principal, over HTTP, walked through all three `determining_policies`
+/// shapes AC2 requires: (a) an ungranted default-deny names [`DEFAULT_DENY_MARKER`]; (b) an
+/// allow backed by a role grant names `grant:<uuid>`; (c) a write on a now-archived resource
+/// is denied naming the starter `forbid-archived-writes` policy id — even though the SAME
+/// grant from (b) would otherwise permit it (a Cedar `forbid` always wins over a `permit`).
+/// Every query below is a SELF-query (`principal_prn` == the bearer token's own principal), so
+/// `Authorize::decide_gated`'s self/admin exposure rule never redacts the response — the raw
+/// `determining_policies` is exactly what a non-self, unauthorized caller would NOT see
+/// (`tests/http_authz.rs::is_authorized_non_self_query_by_an_unauthorized_actor_is_forbidden`
+/// already covers that redaction).
+#[tokio::test]
+async fn ac2_denial_and_allow_decisions_name_their_determining_policy_over_http() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+
+    let admin_token = idp.bearer("ac2-admin", Some("ac2-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin_token).await;
+
+    let principal_token = idp.bearer("ac2-principal", Some("ac2-principal@example.com"), "paigasus", 3600);
+    let principal_prn = provision(&state, &principal_token).await;
+
+    // Org -> default team -> project hierarchy, created by the admin.
+    let (status, org_body) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "ac2-org", "name": "AC2 Org"})), Some(admin_token.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED, "{org_body}");
+    let org_prn = org_body["organization"]["prn"].as_str().expect("organization.prn").to_string();
+    let org_id = org_prn.rsplit('/').next().unwrap().to_string();
+    let team_prn = org_body["default_team"]["prn"].as_str().expect("default_team.prn").to_string();
+    let team_id = team_prn.rsplit('/').next().unwrap().to_string();
+
+    let (status, project_body) = send(
+        &app,
+        "POST",
+        &format!("/v1/teams/{team_id}/projects"),
+        Some(json!({"slug": "ac2-proj", "name": "AC2 Project"})),
+        Some(admin_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project_body}");
+    let project_prn = project_body["prn"].as_str().expect("project.prn").to_string();
+
+    // (a) Default-deny names DEFAULT_DENY_MARKER.
+    let (status, deny) = send(
+        &app,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({"principal_prn": principal_prn, "action": "GetProject", "resource_prn": project_prn})),
+        Some(principal_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deny}");
+    assert_eq!(deny["allowed"], false, "{deny}");
+    assert_eq!(deny["determining_policies"], json!([DEFAULT_DENY_MARKER]));
+
+    // (b) An allow, once granted, names the linked `grant:<uuid>` policy.
+    let (status, granted) = send(
+        &app,
+        "POST",
+        "/v1/authz/role-grants",
+        Some(json!({"principal_prn": principal_prn, "role_key": "org_admin", "scope_prn": org_prn})),
+        Some(admin_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{granted}");
+    let grant_id = granted["id"].as_str().expect("id").to_string();
+
+    let (status, allow) = send(
+        &app,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({"principal_prn": principal_prn, "action": "GetProject", "resource_prn": project_prn})),
+        Some(principal_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{allow}");
+    assert_eq!(allow["allowed"], true, "{allow}");
+    assert_eq!(allow["determining_policies"], json!([format!("grant:{grant_id}")]));
+
+    // (c) Archiving the org folds the project's effective_status to "archived"; a subsequent
+    // WRITE (RenameProject) is denied naming `forbid-archived-writes` — the org_admin grant
+    // from (b) still exists and would otherwise permit RenameProject, but the starter forbid
+    // policy takes precedence (Cedar semantics: a matching forbid always wins).
+    let (status, archived) = send(&app, "POST", &format!("/v1/organizations/{org_id}/archive"), None, Some(admin_token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+
+    let (status, forbidden) = send(
+        &app,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({"principal_prn": principal_prn, "action": "RenameProject", "resource_prn": project_prn})),
+        Some(principal_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{forbidden}");
+    assert_eq!(forbidden["allowed"], false, "{forbidden}");
+    assert_eq!(forbidden["determining_policies"], json!([FORBID_ARCHIVED_WRITES_ID]));
+}
+
+// --- AC3: a policy change takes effect within the cache-TTL bound ---------------------------
+
+/// Builds an `AppState` with a deliberately short `authz.policy_cache_ttl_secs` (1s), then
+/// `PutPolicy`s a brand-new static permit and asserts the very next decision reflects it — no
+/// sleep, no poll wait needed, since `CedarAuthorizer::is_authorized` calls
+/// `PolicySnapshot::reload_if_stale` synchronously before every decision (the same mechanism
+/// AC1 exercises). That makes "within the TTL bound" trivially true here: the change is
+/// visible immediately, which is stronger than the TTL requires. `policy_cache_ttl_secs`
+/// itself is the bound for a replica that does NOT observe a `policy_gen` bump synchronously
+/// (a cross-replica change under the `memory` backend, or a `redis` replica between poll
+/// ticks) — the Redis cross-replica case below exercises that scenario directly, over two
+/// independently-constructed `AppState`s.
+#[tokio::test]
+async fn ac3_policy_change_takes_effect_within_the_cache_ttl_bound_over_http() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let mut cfg = support::test_config(&idp);
+    cfg.authz.policy_cache_ttl_secs = 1;
+    let (app, state) = app_with_config(db, &cfg).await;
+
+    let admin_token = idp.bearer("ac3-admin", Some("ac3-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin_token).await;
+
+    let principal_token = idp.bearer("ac3-principal", Some("ac3-principal@example.com"), "paigasus", 3600);
+    let principal_prn = provision(&state, &principal_token).await;
+
+    // Before PutPolicy: nothing permits P to ListOrganizations at Root.
+    let (status, before) = send(
+        &app,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({"principal_prn": principal_prn, "action": "ListOrganizations", "resource_prn": root_prn().canonical()})),
+        Some(principal_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    assert_eq!(before["allowed"], false, "{before}");
+    assert_eq!(before["determining_policies"], json!([DEFAULT_DENY_MARKER]));
+
+    // PutPolicy: a broad static permit for ListOrganizations, authored by the seeded
+    // platform_admin (Action::PutPolicy is Root-only, per `PolicyService::put`).
+    let policy_body = json!({
+        "policy_id": "ac3-ttl-policy",
+        "kind": "static",
+        "source": r#"permit(principal, action == Pgs::Iam::Action::"ListOrganizations", resource);"#,
+        "description": "AC3 short-TTL test policy",
+    });
+    let (status, put) = send(&app, "POST", "/v1/authz/policies", Some(policy_body), Some(admin_token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+
+    // AC3: the very next decision, immediately after PutPolicy — trivially within the
+    // `policy_cache_ttl_secs = 1` bound — reflects the new policy.
+    let (status, after) = send(
+        &app,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({"principal_prn": principal_prn, "action": "ListOrganizations", "resource_prn": root_prn().canonical()})),
+        Some(principal_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(after["allowed"], true, "{after}");
+    assert_eq!(after["determining_policies"], json!(["ac3-ttl-policy"]));
+}
+
+// --- Redis cross-replica + fail-open (spec D11/D12) ------------------------------------------
+
+/// Two independently-constructed `AppState`s (A and B), sharing the SAME Postgres AND the
+/// SAME Redis `authz.cache` backend: a grant made through A's API is visible to B's very next
+/// decision. This is NOT the AC1/AC3 synchronous-reload mechanism operating twice by
+/// coincidence — A and B are genuinely separate `CedarAuthorizer`/`PolicySnapshot`/
+/// `Generations::Redis` instances (separate `ConnectionManager`s, even), so the only way B can
+/// observe A's grant is the shared Redis `policy_gen` counter (`INCR`/`GET` on a well-known
+/// key, `src/adapters/authz/generation.rs`) — the actual cross-replica premise `authz.
+/// policy_cache_ttl_secs`/`refresh_interval_secs` exist to bound.
+#[tokio::test]
+async fn redis_cross_replica_grant_via_one_appstate_is_visible_to_another_sharing_redis() {
+    let Some((_pg_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let Some((_redis_node, redis_url)) = start_redis().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+
+    let mut cfg = support::test_config(&idp);
+    cfg.authz.cache = AuthzCacheConfig {
+        backend: AuthzCacheBackend::Redis,
+        redis_url: Some(redis_url),
+    };
+
+    let (app_a, state_a) = app_with_config(db.clone(), &cfg).await;
+    let (app_b, _state_b) = app_with_config(db, &cfg).await;
+
+    let admin_token = idp.bearer("redis-xr-admin", Some("redis-xr-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state_a, &admin_token).await;
+
+    let principal_token = idp.bearer("redis-xr-principal", Some("redis-xr-principal@example.com"), "paigasus", 3600);
+    // Provisioned through A; shared Postgres means B's bearer middleware resolves the same
+    // principal row without JIT-provisioning it a second time.
+    let principal_prn = provision(&state_a, &principal_token).await;
+
+    let (status, org_body) = send(
+        &app_a,
+        "POST",
+        "/v1/organizations",
+        Some(json!({"slug": "redis-xr-org", "name": "Redis XR Org"})),
+        Some(admin_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{org_body}");
+    let org_prn = org_body["organization"]["prn"].as_str().expect("organization.prn").to_string();
+
+    // Before the grant: B (a wholly separate CedarAuthorizer/PolicySnapshot instance) denies
+    // P too — sanity, proving B independently evaluates rather than trivially agreeing.
+    let (status, before) = send(
+        &app_b,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({"principal_prn": principal_prn, "action": "GetOrganization", "resource_prn": org_prn})),
+        Some(principal_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    assert_eq!(before["allowed"], false, "{before}");
+
+    // Grant, made through replica A only.
+    let (status, granted) = send(
+        &app_a,
+        "POST",
+        "/v1/authz/role-grants",
+        Some(json!({"principal_prn": principal_prn, "role_key": "org_admin", "scope_prn": org_prn})),
+        Some(admin_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{granted}");
+    let grant_id = granted["id"].as_str().expect("id").to_string();
+
+    // Cross-replica visibility: B's very next decision (no sleep — `reload_if_stale` reads
+    // Redis's shared `policy_gen` synchronously before every decision) reflects A's grant.
+    let (status, after) = send(
+        &app_b,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({"principal_prn": principal_prn, "action": "GetOrganization", "resource_prn": org_prn})),
+        Some(principal_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(after["allowed"], true, "{after}");
+    assert_eq!(after["determining_policies"], json!([format!("grant:{grant_id}")]));
+}
+
+/// D11/D12's fail-open contract, end-to-end: with `authz.cache.backend = redis`, stopping the
+/// Redis container mid-flight must never fail (or hang) an `is-authorized` request.
+/// `PolicySnapshot::reload_if_stale`'s `policy_gen` read fails and is logged+swallowed
+/// (`cedar_authorizer.rs` step 1 — never propagated); `GenerationsReader::entity_gen()` also
+/// fails, so the decision cache is bypassed entirely rather than consulted under a
+/// partial/guessed key; and `SliceCache` falls through to its inner Postgres-backed loader on
+/// a Redis miss (`tests/authz_cache_redis.rs` covers each of these in isolation at the
+/// component level — this asserts the composed, end-to-end HTTP behavior). The request still
+/// gets a real, correctly-evaluated decision: default-deny for the still-ungranted principal.
+#[tokio::test]
+async fn redis_cache_backend_fails_open_when_redis_becomes_unavailable_mid_flight() {
+    let Some((_pg_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let Some((redis_node, redis_url)) = start_redis().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+
+    let mut cfg = support::test_config(&idp);
+    cfg.authz.cache = AuthzCacheConfig {
+        backend: AuthzCacheBackend::Redis,
+        redis_url: Some(redis_url),
+    };
+    let (app, state) = app_with_config(db, &cfg).await;
+
+    let principal_token = idp.bearer("redis-failopen-principal", Some("redis-failopen-principal@example.com"), "paigasus", 3600);
+    let principal_prn = provision(&state, &principal_token).await;
+
+    // While Redis is up: a normal decision (sanity — not the point of this test, but proves
+    // the redis-backed wiring itself works before we pull it out from under the request).
+    let (status, up) = send(
+        &app,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({"principal_prn": principal_prn, "action": "ListOrganizations", "resource_prn": root_prn().canonical()})),
+        Some(principal_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{up}");
+    assert_eq!(up["allowed"], false, "{up}");
+
+    redis_node.stop_with_timeout(Some(0)).await.expect("stop redis container");
+
+    // With Redis gone: still a clean 200 with a correctly-evaluated (default-deny) decision —
+    // never an error, never a hang.
+    let (status, down) = send(
+        &app,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({"principal_prn": principal_prn, "action": "ListOrganizations", "resource_prn": root_prn().canonical()})),
+        Some(principal_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{down}: a Redis outage must never fail the request (D11/D12 fail-open)");
+    assert_eq!(down["allowed"], false, "{down}");
+    assert_eq!(down["determining_policies"], json!([DEFAULT_DENY_MARKER]));
+}
