@@ -13,14 +13,23 @@
 //! feeding the Cedar decision), not just a cache-efficiency one. The key therefore folds in
 //! both PRNs.
 //!
-//! **Fail-open to the inner loader (D11):** `load` always calls the inner loader's own
-//! `entity_gen()` first (not a Redis read), then tries a Redis `GET` for the computed key.
-//! On a hit it deserializes and returns straight from Redis. On a miss OR any Redis problem
-//! (connect/I/O error, or a payload that fails to deserialize), it falls through to
-//! `inner.load(..)` and best-effort caches that result (a `put`-time Redis error is logged
-//! and swallowed — it never turns a successful inner load into a failure). A Redis outage
-//! therefore only ever costs the accelerator; it can never fail a decision that the inner
-//! (Postgres) loader could otherwise serve.
+//! **Fail-open to the inner loader (D11):** `load` first calls the inner loader's own
+//! `entity_gen()` to build the cache key. That call is **not guaranteed to be Redis-free**:
+//! when `authz.cache.backend = redis`, the inner (`PgEntitySliceLoader`) loader's
+//! `entity_gen()` delegates to the very same Redis-backed `Generations` handle this decorator
+//! itself reads elsewhere in the crate — so a Redis outage can surface right here, before any
+//! `GET`/`SET` in this file even runs. If `entity_gen()` errors, `load` treats it exactly like
+//! a Redis `GET`/`SET` problem below: log and skip the redis slice cache ENTIRELY (no key can
+//! be computed without a generation), falling straight through to `inner.load(..)` — which
+//! for `PgEntitySliceLoader` only ever reads Postgres. Only once `entity_gen()` succeeds does
+//! `load` attempt the Redis `GET` for the computed key; on a hit it deserializes and returns
+//! straight from Redis, and on a miss OR any Redis problem (connect/I/O error, or a payload
+//! that fails to deserialize), it likewise falls through to `inner.load(..)` and best-effort
+//! caches that result (a `put`-time Redis error is logged and swallowed — it never turns a
+//! successful inner load into a failure). A Redis outage therefore only ever costs the
+//! accelerator; it can never fail a decision that the inner (Postgres) loader could otherwise
+//! serve — a genuine `inner.load(..)` failure (e.g. Postgres down) still propagates, since
+//! that is a real backend failure, not a cache-bypass case.
 
 use async_trait::async_trait;
 use paigasus_iam_core::authz::model::EntitySlice;
@@ -71,10 +80,19 @@ impl SliceCache {
 #[async_trait]
 impl EntitySliceLoader for SliceCache {
     async fn load(&self, resource: &Prn, principal: &Prn) -> Result<EntitySlice, AuthzError> {
-        // The inner loader's own generation read — not a Redis round-trip. If this errors,
-        // it's an inner-loader (e.g. Postgres) failure, not a cache problem, so it
-        // propagates like any other inner-loader error would.
-        let entity_gen = self.inner.entity_gen().await?;
+        // The inner loader's own generation read. Under `authz.cache.backend = redis` this is
+        // ALSO a Redis round-trip (see module docs) — so an error here must fail OPEN, same
+        // as the GET/SET below: skip the redis slice cache entirely (no key without a
+        // generation) and fall straight through to `inner.load`, which for
+        // `PgEntitySliceLoader` only ever reads Postgres. A genuine `inner.load` failure below
+        // still propagates — that's a real backend failure, not a cache bypass (D11/D12).
+        let entity_gen = match self.inner.entity_gen().await {
+            Ok(entity_gen) => entity_gen,
+            Err(err) => {
+                log_entity_gen_bypass(&err);
+                return self.inner.load(resource, principal).await;
+            }
+        };
         let key = slice_key(entity_gen, resource, principal);
 
         let mut conn = self.conn.clone();
@@ -113,6 +131,19 @@ impl EntitySliceLoader for SliceCache {
 
 fn redis_connect_err(e: redis::RedisError) -> AuthzError {
     AuthzError::Backend(Box::new(e))
+}
+
+/// Logs the inner loader's `entity_gen()` failure — Redis `ErrorKind` only when the
+/// `AuthzError::Backend` wraps a `redis::RedisError` (the `authz.cache.backend = redis` case
+/// this decorator cares about), `None` otherwise — never `Display`/message (same posture as
+/// `log_get_bypass` et al.), then the fail-open mapping: skip the redis slice cache
+/// altogether and bypass straight to the inner loader (D11/D12).
+fn log_entity_gen_bypass(err: &AuthzError) {
+    let kind = match err {
+        AuthzError::Backend(source) => source.downcast_ref::<redis::RedisError>().map(redis::RedisError::kind),
+        _ => None,
+    };
+    tracing::warn!(error_kind = ?kind, "entity generation counter unreadable — bypassing the redis slice cache entirely, falling through to the inner loader (fail-open, D11)");
 }
 
 /// Logs the Redis error's `ErrorKind` only — never `Display`/message (same posture as
@@ -170,5 +201,45 @@ mod tests {
     fn slice_key_changes_when_principal_changes_even_for_the_same_resource_and_gen() {
         let resource = prn("project", 1);
         assert_ne!(slice_key(5, &resource, &prn("principal", 2)), slice_key(5, &resource, &prn("principal", 3)));
+    }
+
+    /// A fake `EntitySliceLoader` whose `entity_gen()` always fails (mirroring
+    /// `PgEntitySliceLoader::entity_gen()` surfacing a Redis error when `authz.cache.backend =
+    /// redis`, see module docs) but whose `load()` always succeeds (mirroring
+    /// `PgEntitySliceLoader::load`, which never touches Redis).
+    struct FailingGenLoader;
+
+    #[async_trait]
+    impl EntitySliceLoader for FailingGenLoader {
+        async fn load(&self, _resource: &Prn, _principal: &Prn) -> Result<EntitySlice, AuthzError> {
+            Ok(EntitySlice::default())
+        }
+
+        async fn entity_gen(&self) -> Result<u64, AuthzError> {
+            Err(AuthzError::Backend(Box::new(redis::RedisError::from((redis::ErrorKind::Io, "simulated redis outage")))))
+        }
+    }
+
+    /// D11/D12's core regression guard: when the inner loader's `entity_gen()` errors (a
+    /// Redis-only outage under `authz.cache.backend = redis`), `SliceCache::load` must fail
+    /// OPEN — returning the inner loader's `Ok` slice — never propagate the `entity_gen()`
+    /// error. Uses a lazily-connecting `ConnectionManager` (never dials out) since the
+    /// fail-open path returns before touching Redis at all, so this needs no live Redis
+    /// server / Docker.
+    #[tokio::test]
+    async fn load_fails_open_to_the_inner_loader_when_entity_gen_errors() {
+        let client = Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never actually dialed");
+        let conn = ConnectionManager::new_lazy_with_config(client, redis::aio::ConnectionManagerConfig::new()).expect("lazy ConnectionManager construction never connects");
+
+        let cache = SliceCache::from_connection(Arc::new(FailingGenLoader), conn, 60);
+        let resource = prn("project", 1);
+        let principal = prn("principal", 2);
+
+        let slice = cache
+            .load(&resource, &principal)
+            .await
+            .expect("an entity_gen()-only Redis failure must fail open to the inner (Postgres) loader, not error");
+
+        assert_eq!(slice, EntitySlice::default());
     }
 }
