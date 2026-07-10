@@ -33,9 +33,15 @@
 //!    exact question.
 //! 4. On a miss (or a bypassed cache), the authoritative path: load the [`EntitySlice`] for
 //!    `(resource, principal)` and decide via [`PolicyEngine::decide`] against the SAME
-//!    compiled snapshot read in step 2 (never a second `snapshot.current()` read). A
-//!    slice-load error is propagated — it's a real failure (the request can't be decided at
-//!    all), never swallowed.
+//!    compiled snapshot read in step 2 (never a second `snapshot.current()` read). An
+//!    `AuthzError::ResourceNotFound` slice-load error — the request names a tenancy node that
+//!    doesn't (or no longer does) exist, reachable via the direct
+//!    `POST /v1/authz/is-authorized` API with an arbitrary caller-supplied `resource_prn` —
+//!    is caught here and turned into a fail-closed `Deny` (marked
+//!    [`RESOURCE_NOT_FOUND_MARKER`]) rather than propagated: never a 500, and never an
+//!    existence oracle that would let an unauthorized caller distinguish "denied" from
+//!    "doesn't exist". Every OTHER slice-load error still propagates unchanged — it's a
+//!    genuine backend failure (the request can't be decided at all), never swallowed.
 //! 5. Record one [`AuthzDecisionEvent`] via the injected [`AuditSink`].
 //! 6. Best-effort populate the decision cache (only if step 3 computed a key).
 //!
@@ -54,8 +60,14 @@ use super::policy_snapshot::PolicySnapshot;
 use async_trait::async_trait;
 use paigasus_iam_core::authz::engine::PolicyEngine;
 use paigasus_iam_core::authz::model::AuthzDecisionEvent;
-use paigasus_iam_core::{AccessRequest, AuditSink, Authorizer, AuthzError, Decision, DecisionCache, EntitySliceLoader};
+use paigasus_iam_core::{AccessRequest, AuditSink, Authorizer, AuthzError, Decision, DecisionCache, Effect, EntitySliceLoader};
 use std::sync::Arc;
+
+/// The `determining_policies` marker for the fail-closed `Deny` `is_authorized` returns when
+/// the entity-slice loader reports the request's resource doesn't exist (SMA-444 review fix)
+/// — mirrors `authz::engine::DEFAULT_DENY_MARKER`'s role as a synthetic, non-Cedar-policy-id
+/// diagnostic string.
+pub const RESOURCE_NOT_FOUND_MARKER: &str = "resource-not-found";
 
 /// Abstraction over "read the two authz generation counters", so `CedarAuthorizer` can be
 /// exercised against a fake that errors (simulating a `Generations::Redis` outage) without
@@ -153,9 +165,17 @@ impl Authorizer for CedarAuthorizer {
         // Step 4: the authoritative path — always runs on a miss OR a bypassed cache. Uses
         // the SAME `compiled` snapshot read in step 2, so the policy set evaluated here can
         // never be a different generation than the one the cache key (step 3) was minted
-        // from.
-        let slice = self.slices.load(&req.resource, &req.principal).await?;
-        let decision = PolicyEngine::decide(&compiled.policy_set, &slice, req);
+        // from. `ResourceNotFound` is caught and turned into a fail-closed `Deny` — never a
+        // 500, and never an existence oracle — while every other slice-load error (a genuine
+        // backend failure) still propagates unchanged.
+        let decision = match self.slices.load(&req.resource, &req.principal).await {
+            Ok(slice) => PolicyEngine::decide(&compiled.policy_set, &slice, req),
+            Err(AuthzError::ResourceNotFound(_)) => Decision {
+                effect: Effect::Deny,
+                determining_policies: vec![RESOURCE_NOT_FOUND_MARKER.to_string()],
+            },
+            Err(err) => return Err(err),
+        };
 
         // Step 5: audit every decision this method actually computes (never on a cache hit).
         let event = AuthzDecisionEvent {
@@ -381,14 +401,33 @@ mod tests {
         }
     }
 
-    /// An `EntitySliceLoader` fake that always fails — proves a slice-load error propagates
-    /// out of `is_authorized` rather than being swallowed into a `Deny`.
+    /// An `EntitySliceLoader` fake that always fails with a genuine backend error — proves a
+    /// non-`ResourceNotFound` slice-load error propagates out of `is_authorized` rather than
+    /// being swallowed into a `Deny` (distinct from `ResourceNotFoundSliceLoader` below, whose
+    /// specific error variant DOES get caught and turned into a `Deny`).
     struct FailingSliceLoader;
 
     #[async_trait]
     impl EntitySliceLoader for FailingSliceLoader {
         async fn load(&self, _resource: &Prn, _principal: &Prn) -> Result<EntitySlice, AuthzError> {
             Err(AuthzError::Backend("simulated postgres outage loading the entity slice".into()))
+        }
+
+        async fn entity_gen(&self) -> Result<u64, AuthzError> {
+            Ok(0)
+        }
+    }
+
+    /// An `EntitySliceLoader` fake that always fails with `AuthzError::ResourceNotFound` —
+    /// mirrors `PgEntitySliceLoader::load`'s `missing(..)` case (the request names a tenancy
+    /// node that doesn't exist). Proves `is_authorized` catches exactly this variant and
+    /// turns it into a fail-closed `Deny`, never a propagated error (SMA-444 review fix).
+    struct ResourceNotFoundSliceLoader;
+
+    #[async_trait]
+    impl EntitySliceLoader for ResourceNotFoundSliceLoader {
+        async fn load(&self, _resource: &Prn, _principal: &Prn) -> Result<EntitySlice, AuthzError> {
+            Err(AuthzError::ResourceNotFound("organization deadbeef not found for entity-slice load".to_string()))
         }
 
         async fn entity_gen(&self) -> Result<u64, AuthzError> {
@@ -670,5 +709,35 @@ mod tests {
         let err = authorizer.is_authorized(&req).await.expect_err("a slice-load failure must propagate");
         assert!(matches!(err, AuthzError::Backend(_)));
         assert!(audit.events.lock().unwrap().is_empty(), "no decision was computed, so nothing should be audited");
+    }
+
+    /// SMA-444 review fix: unlike a genuine backend failure (the test above), a
+    /// `ResourceNotFound` slice-load error must NOT propagate — `is_authorized` catches it and
+    /// returns a fail-closed `Deny` marked `RESOURCE_NOT_FOUND_MARKER`, and that decision is
+    /// still audited like any other (never a silent no-op, and never a 500).
+    #[tokio::test]
+    async fn resource_not_found_slice_load_denies_instead_of_propagating_and_is_audited() {
+        let fx = fixture();
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("snapshot builds"));
+        let audit = Arc::new(CapturingAuditSink::default());
+
+        let authorizer = CedarAuthorizer::new(
+            snapshot,
+            Arc::new(ResourceNotFoundSliceLoader) as Arc<dyn EntitySliceLoader>,
+            Arc::new(MemoryDecisionCache::new()) as Arc<dyn DecisionCache>,
+            Arc::new(Generations::memory()) as Arc<dyn GenerationsReader>,
+            audit.clone() as Arc<dyn AuditSink>,
+        );
+
+        let req = base_request(&fx, Action::GetProject);
+        let decision = authorizer.is_authorized(&req).await.expect("a missing resource must deny, never error");
+        assert_eq!(decision.effect, Effect::Deny);
+        assert_eq!(decision.determining_policies, vec![RESOURCE_NOT_FOUND_MARKER.to_string()]);
+
+        let events = audit.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "the fail-closed deny must still be audited, like any other decision");
+        assert_eq!(events[0].effect, Effect::Deny);
     }
 }

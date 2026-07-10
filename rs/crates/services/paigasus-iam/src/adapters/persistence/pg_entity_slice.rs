@@ -187,10 +187,12 @@ fn backend(e: RepositoryError) -> AuthzError {
 }
 
 /// A missing node for a PRN the caller asked to slice: the request names a resource that
-/// doesn't exist (or no longer does), and there is no slice to build — surfaced as
-/// `AuthzError::Backend`, the only variant that fits an unexpected-state backend failure
-/// (mirrors `pg_teams.rs`/`pg_projects.rs`'s `missing_ancestor` posture for a broken FK,
-/// though here the row is simply absent, not a data-integrity break).
+/// doesn't exist (or no longer does), and there is no slice to build. Surfaced as its own
+/// `AuthzError::ResourceNotFound` — distinct from a genuine `AuthzError::Backend` failure —
+/// so `CedarAuthorizer::is_authorized` can fail CLOSED as a `Deny` for this case instead of
+/// propagating it into a 500 (SMA-444 review fix): the direct `POST /v1/authz/is-authorized`
+/// API is reachable with an arbitrary caller-supplied `resource_prn`, unlike the enforced
+/// tenancy routes, which fetch-first and 404 earlier.
 fn missing(kind: &str, id: Uuid) -> AuthzError {
-    AuthzError::Backend(Box::new(std::io::Error::other(format!("{kind} {id} not found for entity-slice load"))))
+    AuthzError::ResourceNotFound(format!("{kind} {id} not found for entity-slice load"))
 }

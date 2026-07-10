@@ -233,9 +233,12 @@ impl IamConfig {
     /// (`Issuer::parse`), a `redis` JWKS cache backend has `redis_url` configured, and
     /// `jwks_ttl_secs` is non-zero (a zero TTL breaks both cache backends). Mirrors that same
     /// posture for `[authz]`: a `redis` cache backend has `redis_url` configured, every one of
-    /// the four `*_secs` TTL/interval fields is non-zero, and every `bootstrap_admins` entry
-    /// (if any — the list itself is allowed to be empty) has a valid `https` issuer and a
-    /// non-empty subject.
+    /// the four `*_secs` TTL/interval fields is non-zero, `refresh_interval_secs` is at most
+    /// `policy_cache_ttl_secs` (else the snapshot's background reload poll could fire less
+    /// often than its own staleness bound expects, letting evaluated-policy freshness
+    /// overshoot the TTL the rest of the system assumes it's bounded by), and every
+    /// `bootstrap_admins` entry (if any — the list itself is allowed to be empty) has a valid
+    /// `https` issuer and a non-empty subject.
     pub fn validate(&self) -> Result<(), String> {
         if self.authn.issuers.is_empty() {
             return Err("authn.issuers must contain at least one issuer".to_string());
@@ -287,6 +290,18 @@ impl IamConfig {
             if secs == 0 {
                 return Err(format!("{name} must be at least 1 (0 breaks the corresponding authz cache/reload loop)"));
             }
+        }
+
+        // The snapshot's background reload poll must fire at least as often as its own
+        // staleness bound: a `refresh_interval_secs` GREATER than `policy_cache_ttl_secs`
+        // would let the in-process compiled-policy snapshot go stale for longer than the TTL
+        // the rest of the system (decision cache keys, freshness guarantees) assumes it's
+        // bounded by. Equal is fine (the poll fires exactly at the TTL boundary).
+        if self.authz.refresh_interval_secs > self.authz.policy_cache_ttl_secs {
+            return Err(format!(
+                "authz.refresh_interval_secs ({}) must be <= authz.policy_cache_ttl_secs ({}): a slower reload poll than the staleness TTL lets policy freshness overshoot the TTL bound",
+                self.authz.refresh_interval_secs, self.authz.policy_cache_ttl_secs
+            ));
         }
 
         // `bootstrap_admins` is allowed to be EMPTY (a fresh deployment with no platform
@@ -618,6 +633,50 @@ mod tests {
             )?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert!(cfg.validate().is_err(), "expected authz.policy_cache_ttl_secs = 0 to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_refresh_interval_exceeding_policy_cache_ttl() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                r#"
+                    [authz]
+                    policy_cache_ttl_secs = 10
+                    refresh_interval_secs = 20
+
+                    [[authn.issuers]]
+                    issuer = "https://idp.example.com/realms/acme"
+                    audiences = ["paigasus"]
+                "#,
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "expected authz.refresh_interval_secs > authz.policy_cache_ttl_secs to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_accepts_refresh_interval_equal_to_policy_cache_ttl() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                r#"
+                    [authz]
+                    policy_cache_ttl_secs = 10
+                    refresh_interval_secs = 10
+
+                    [[authn.issuers]]
+                    issuer = "https://idp.example.com/realms/acme"
+                    audiences = ["paigasus"]
+                "#,
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_ok(), "expected authz.refresh_interval_secs == authz.policy_cache_ttl_secs to pass validation");
             Ok(())
         });
     }

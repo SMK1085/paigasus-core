@@ -20,10 +20,12 @@ mod support;
 use axum::Router;
 use axum::http::StatusCode;
 use paigasus_iam::adapters::http::AppState;
+use paigasus_iam_core::OrganizationId;
 use paigasus_iam_core::authz::engine::DEFAULT_DENY_MARKER;
 use paigasus_iam_core::authz::model::root_prn;
 use serde_json::json;
 use support::{app_with_state, seed_platform_admin, send};
+use uuid::Uuid;
 
 /// Resolves `token`'s principal directly through `state.authn` (SMA-444 Task 20's
 /// `support::provision`, inlined here since this file already threads `app`/`state`
@@ -218,4 +220,40 @@ async fn is_authorized_rejects_an_unknown_action_and_a_malformed_prn() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
     assert_eq!(err["error"]["code"], "invalid-prn");
+}
+
+/// SMA-444 review fix: unlike the enforced tenancy routes (which fetch-first and 404 on a
+/// nonexistent resource before authz is ever consulted), the direct
+/// `POST /v1/authz/is-authorized` API is reachable with an arbitrary, well-formed but
+/// nonexistent `resource_prn`. A missing tenancy node must fail CLOSED as a `Deny`, never a
+/// 500 — and never distinguishable from an ordinary access denial (no existence oracle).
+#[tokio::test]
+async fn is_authorized_self_query_against_a_nonexistent_resource_denies_not_500() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("henry", Some("henry@example.com"), "paigasus", 3600);
+    let principal_prn = self_principal_prn(&app, &state, &token).await;
+
+    // A well-formed organization PRN that was never created.
+    let bogus_org = OrganizationId::from_uuid(Uuid::from_u128(0xDEAD_BEEF));
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({
+            "principal_prn": principal_prn,
+            "action": "GetOrganization",
+            "resource_prn": bogus_org.prn().canonical(),
+        })),
+        Some(token.as_str()),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "a missing resource must deny, never 500: {body}");
+    assert_eq!(body["allowed"], false);
+    assert_eq!(body["reason"], "denied");
+    assert_eq!(body["determining_policies"], json!(["resource-not-found"]));
 }

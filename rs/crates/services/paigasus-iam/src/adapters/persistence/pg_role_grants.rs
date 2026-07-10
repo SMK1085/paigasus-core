@@ -3,11 +3,14 @@
 //! Postgres-backed `RoleGrantStore` (SeaORM). `grant` persists exactly the caller-built
 //! `RoleGrant` — including its `linked_policy_id` (the Cedar template-linked policy itself
 //! is materialized from grant rows at snapshot-compile time, Task 12, so this store never
-//! touches `policy`/`role` rows) — then bumps `policy_gen` via the shared `Generations`
-//! handle (spec §7/D11: "bumped on any policy CRUD or role grant/revoke"). `revoke` mirrors
-//! `PgPolicyStore::delete`'s idempotent-DELETE posture: a missing id is a no-op success (no
-//! `AuthzError::NotFound` variant exists — see `authz::model::AuthzError`) and only a row
-//! that actually existed bumps the generation.
+//! touches `policy`/`role` rows) — then best-effort bumps `policy_gen` via the shared
+//! `Generations` handle (spec §7/D11: "bumped on any policy CRUD or role grant/revoke"),
+//! logged and swallowed on error, mirroring `pg_organizations.rs::bump_entity_gen`: the
+//! write already committed, so a Redis-down bump failure must never fail it, it just means
+//! the decision cache self-heals on its next TTL expiry instead of immediately. `revoke`
+//! mirrors `PgPolicyStore::delete`'s idempotent-DELETE posture: a missing id is a no-op
+//! success (no `AuthzError::NotFound` variant exists — see `authz::model::AuthzError`) and
+//! only a row that actually existed bumps the generation.
 
 use super::entities::role_grant;
 use crate::adapters::authz::Generations;
@@ -30,6 +33,18 @@ impl PgRoleGrantStore {
     #[must_use]
     pub fn new(db: DatabaseConnection, gens: Generations) -> Self {
         PgRoleGrantStore { db, gens }
+    }
+
+    /// Best-effort `policy_gen` bump (spec §7/D11): logged and swallowed on error — mirrors
+    /// `pg_organizations.rs::bump_entity_gen`/`bump_policy_gen` exactly: `grant`/`revoke`'s
+    /// mutation already committed, so a Redis-down bump failure must never fail an
+    /// already-successful write; it just means the decision cache self-heals on its next TTL
+    /// expiry instead of immediately (D11: a swallowed bump degrades to TTL-bounded
+    /// staleness).
+    async fn bump_policy_gen_best_effort(&self) {
+        if let Err(err) = self.gens.bump_policy_gen().await {
+            tracing::warn!(error = %err, "pg_role_grants: policy_gen bump failed after a committed write — authz caches may serve stale data until TTL");
+        }
     }
 }
 
@@ -112,7 +127,7 @@ impl RoleGrantStore for PgRoleGrantStore {
         // as `AuthzError::Backend` wrapping the SeaORM/Postgres error — never silently
         // swallowed, and no row is written.
         grant_to_model(g).insert(&self.db).await.map_err(map_err)?;
-        self.gens.bump_policy_gen().await?;
+        self.bump_policy_gen_best_effort().await;
         Ok(())
     }
 
@@ -122,7 +137,7 @@ impl RoleGrantStore for PgRoleGrantStore {
         // success, mirroring `PgPolicyStore::delete`'s posture (no `NotFound` variant exists
         // on `AuthzError`) — and only a row that actually existed bumps the generation.
         if result.rows_affected > 0 {
-            self.gens.bump_policy_gen().await?;
+            self.bump_policy_gen_best_effort().await;
         }
         Ok(())
     }

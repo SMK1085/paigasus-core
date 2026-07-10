@@ -226,6 +226,19 @@ pub enum AuthzError {
     InvalidScope(String),
     #[error("system-owned resource is immutable: {0}")]
     SystemImmutable(String),
+    /// A tenancy node an [`EntitySliceLoader`](super::ports::EntitySliceLoader) needed to
+    /// slice — typically the request's resource, sometimes an ancestor — does not exist.
+    /// Surfaced as its own variant, distinct from [`Self::Backend`], so `CedarAuthorizer` can
+    /// tell "the resource is genuinely missing" apart from "the backend broke" and fail
+    /// CLOSED as a `Deny` for the former instead of a 500 (SMA-444 review fix) — never a
+    /// silent existence oracle, and never a false deny for a real outage.
+    #[error("resource not found: {0}")]
+    ResourceNotFound(String),
+    /// A mutation lost a concurrent-create race against a DIFFERENT document for the same id
+    /// (e.g. `PolicyStore::put`, SMA-444 review fix): the caller's write was NOT applied — the
+    /// stored row belongs to the race's winner, not this caller.
+    #[error("conflict: {0}")]
+    Conflict(String),
     /// A backend (storage/transport) failure. `#[error(transparent)]` forwards `Display`
     /// (and `source()`) to the wrapped error verbatim — callers never see more than what
     /// the underlying source already exposes.
@@ -294,6 +307,8 @@ mod tests {
             AuthzError::UnknownRole("x".to_string()),
             AuthzError::InvalidScope("x".to_string()),
             AuthzError::SystemImmutable("x".to_string()),
+            AuthzError::ResourceNotFound("x".to_string()),
+            AuthzError::Conflict("x".to_string()),
         ];
         for v in &variants {
             assert!(!v.to_string().is_empty(), "{v:?}");

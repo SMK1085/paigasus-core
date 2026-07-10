@@ -69,6 +69,11 @@ pub enum TenancyError {
     /// (`AuthzError::PolicyParse`/`SchemaValidation`/`TemplateLink`, SMA-444 Task 17).
     #[error("invalid policy: {0}")]
     PolicyInvalid(String),
+    /// `PolicyService::put` lost a concurrent-create race against a DIFFERENT document for
+    /// the same `policy_id` (`AuthzError::Conflict`, SMA-444 review fix): the stored row
+    /// belongs to the race's winner, not this caller's write — a 409, not a silent success.
+    #[error("policy conflict: {0}")]
+    PolicyConflict(String),
     /// `POST /v1/authz/is-authorized`'s `action` field didn't name a known `Action` variant
     /// (`Action::parse` returned `None`, SMA-444 Task 18) — a client error, not an authz
     /// decision, so it's a 400 rather than a `Deny`.
@@ -101,6 +106,7 @@ impl TenancyError {
             Self::InvalidScope(_) => "invalid-scope",
             Self::SystemImmutable(_) => "system-immutable",
             Self::PolicyInvalid(_) => "policy-invalid",
+            Self::PolicyConflict(_) => "policy-conflict",
             Self::InvalidAction(_) => "invalid-action",
             Self::Internal => "internal",
         }
@@ -121,7 +127,7 @@ impl TenancyError {
             | Self::PolicyInvalid(_)
             | Self::InvalidAction(_) => ErrorClass::Validation,
             Self::NotFound => ErrorClass::NotFound,
-            Self::SlugConflict | Self::DuplicateMembership | Self::EmailConflict => ErrorClass::Conflict,
+            Self::SlugConflict | Self::DuplicateMembership | Self::EmailConflict | Self::PolicyConflict(_) => ErrorClass::Conflict,
             Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership | Self::SystemImmutable(_) => ErrorClass::Precondition,
             Self::Forbidden => ErrorClass::Forbidden,
             Self::Internal => ErrorClass::Internal,
@@ -171,6 +177,13 @@ impl From<DomainError> for TenancyError {
 /// `Authorize::check`/`RoleService`/`PolicyService` via `?`. `Evaluation`/`Backend` are
 /// genuine engine/storage failures, never a denial — they surface as `Internal`, NOT
 /// `Forbidden` (a deny is `Authorize::check`'s own `Effect::Deny` branch, not this impl).
+/// `Conflict` (a lost concurrent-create race, e.g. `PolicyStore::put`) maps to
+/// `PolicyConflict`, a 409. `ResourceNotFound` is caught and turned into a fail-closed `Deny`
+/// by `CedarAuthorizer::is_authorized` before it ever reaches this funnel (SMA-444 review
+/// fix); if it somehow leaked past that — a future `AuthzError`-returning call site that
+/// doesn't handle it — that is a bug, not an expected client-facing case, so it maps to
+/// `Internal` rather than `NotFound`: an authz-layer error must never double as a
+/// resource-existence oracle.
 impl From<AuthzError> for TenancyError {
     fn from(err: AuthzError) -> Self {
         match err {
@@ -178,7 +191,8 @@ impl From<AuthzError> for TenancyError {
             AuthzError::InvalidScope(s) => Self::InvalidScope(s),
             AuthzError::SystemImmutable(s) => Self::SystemImmutable(s),
             AuthzError::PolicyParse(s) | AuthzError::SchemaValidation(s) | AuthzError::TemplateLink(s) => Self::PolicyInvalid(s),
-            AuthzError::Evaluation(_) | AuthzError::Backend(_) => Self::Internal,
+            AuthzError::Conflict(s) => Self::PolicyConflict(s),
+            AuthzError::Evaluation(_) | AuthzError::Backend(_) | AuthzError::ResourceNotFound(_) => Self::Internal,
         }
     }
 }
@@ -208,6 +222,7 @@ mod tests {
         assert_eq!(TenancyError::PolicyInvalid("x".to_string()).class(), ErrorClass::Validation);
         assert_eq!(TenancyError::SystemImmutable("x".to_string()).class(), ErrorClass::Precondition);
         assert_eq!(TenancyError::InvalidAction("x".to_string()).class(), ErrorClass::Validation);
+        assert_eq!(TenancyError::PolicyConflict("x".to_string()).class(), ErrorClass::Conflict);
     }
 
     #[test]
@@ -226,6 +241,8 @@ mod tests {
         assert_eq!(TenancyError::from(AuthzError::Evaluation("boom".to_string())), TenancyError::Internal);
         let backend: Box<dyn std::error::Error + Send + Sync> = "boom".into();
         assert_eq!(TenancyError::from(AuthzError::Backend(backend)), TenancyError::Internal);
+        assert_eq!(TenancyError::from(AuthzError::Conflict("p1".to_string())), TenancyError::PolicyConflict("p1".to_string()));
+        assert_eq!(TenancyError::from(AuthzError::ResourceNotFound("org 1".to_string())), TenancyError::Internal);
     }
 
     #[test]

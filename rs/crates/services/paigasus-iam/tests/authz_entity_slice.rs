@@ -263,7 +263,10 @@ async fn authz_slice_principal_without_a_row_falls_back_to_active_status() {
 }
 
 /// A resource PRN naming a tenancy node that doesn't exist can't be sliced — `load` must
-/// surface an error, never silently return a partial/empty chain.
+/// surface an error, never silently return a partial/empty chain. That error is specifically
+/// `AuthzError::ResourceNotFound` (SMA-444 review fix), distinct from a genuine
+/// `AuthzError::Backend` failure, so `CedarAuthorizer` can fail CLOSED as a `Deny` for a
+/// missing resource instead of a 500.
 #[tokio::test]
 async fn authz_slice_nonexistent_resource_node_is_an_error() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -277,7 +280,7 @@ async fn authz_slice_nonexistent_resource_node_is_an_error() {
     let loader = PgEntitySliceLoader::new(db.clone(), Generations::memory());
     let missing_org = paigasus_iam_core::OrganizationId::from_uuid(Uuid::from_u128(999_999));
     let err = loader.load(missing_org.prn(), &principal).await.unwrap_err();
-    assert!(matches!(err, paigasus_iam_core::AuthzError::Backend(_)), "expected AuthzError::Backend, got {err:?}");
+    assert!(matches!(err, paigasus_iam_core::AuthzError::ResourceNotFound(_)), "expected AuthzError::ResourceNotFound, got {err:?}");
 }
 
 /// SMA-444 cross-tenant-escalation regression (FIX 1, the root-cause fix): loading a slice for
