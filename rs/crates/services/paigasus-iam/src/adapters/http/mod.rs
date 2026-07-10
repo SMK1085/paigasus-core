@@ -41,6 +41,7 @@ use crate::adapters::persistence::{
 use crate::application::authenticate_token::{AuthenticateToken, JitPolicy};
 use crate::application::authorize::Authorize;
 use crate::application::bootstrap;
+use crate::application::bootstrap_admin::BootstrapAdminSeeder;
 use crate::application::create_user::CreateUser;
 use crate::application::memberships::MembershipService;
 use crate::application::organizations::OrganizationService;
@@ -60,6 +61,9 @@ pub type UserSvc = CreateUser<PgPrincipalRepository, KernelIdGenerator, SystemCl
 /// RoleGrantStore>` `AppState.role_grant_store` holds — mirrors every other `*Svc` alias's
 /// `KernelIdGenerator`/`SystemClock` DI posture.
 pub type RoleSvc = RoleService<KernelIdGenerator, SystemClock>;
+/// The cold-start bootstrap-admin seeder (SMA-444 Task 21b), wired over the same `Arc<dyn
+/// RoleGrantStore>` `AppState.role_grant_store` holds — mirrors `RoleSvc`'s DI posture.
+pub type BootstrapAdminSvc = BootstrapAdminSeeder<KernelIdGenerator, SystemClock>;
 
 /// The OIDC authenticator over the in-process JWKS cache (the `memory` backend, D2).
 pub type Oidc = OidcAuthenticator<HttpJwksFetcher, InMemoryJwksCache, SystemClock>;
@@ -147,6 +151,15 @@ pub struct AppState {
     /// `memberships.rs`, and their gRPC mirrors in `adapters::grpc::tenancy`) reads this
     /// field before deciding whether to call `AppState.authorize.check`.
     pub enforce_tenancy: bool,
+    /// Cold-start bootstrap-admin seeding (SMA-444 Task 21b, spec D9/challenge M4):
+    /// `adapters::http::auth_middleware::require_bearer` and
+    /// `adapters::grpc::authn::AuthEnforce` both call
+    /// `ensure_platform_admin` right after a successful `authn.resolve(.., Enabled)`, so a
+    /// configured `authz.bootstrap_admins` identity is JIT-granted `platform_admin`@`Root`
+    /// on its first authentication. Built from `cfg.authz.bootstrap_admins` — empty by
+    /// default, in which case every call is a no-op `HashSet` lookup. Deliberately NOT
+    /// consulted by the read-only `introspect` path (D10).
+    pub bootstrap_seeder: BootstrapAdminSvc,
 }
 
 impl AppState {
@@ -247,6 +260,10 @@ impl AppState {
         let authorize = Authorize::new(authz.clone() as Arc<dyn Authorizer>);
         let roles = RoleService::new(role_grant_store.clone(), authorize.clone(), KernelIdGenerator, SystemClock);
         let policies = PolicyService::new(policy_store.clone(), authorize.clone());
+        // Shares the SAME `role_grant_store` handle `roles`/`snapshot` do (Task 21b): a
+        // bootstrap-admin seed bumps the identical `policy_gen` counter `CedarAuthorizer`
+        // polls, exactly like every other role-grant mutation in this composition root.
+        let bootstrap_seeder = BootstrapAdminSeeder::new(&authz_cfg.bootstrap_admins, role_grant_store.clone(), KernelIdGenerator, SystemClock);
 
         let authn_cfg = &cfg.authn;
         if authn_cfg.accept_invalid_tls {
@@ -312,6 +329,7 @@ impl AppState {
             authorize,
             role_grant_store,
             enforce_tenancy: authz_cfg.enforce_tenancy,
+            bootstrap_seeder,
         })
     }
 }

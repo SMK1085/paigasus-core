@@ -43,6 +43,10 @@ pub async fn require_bearer(State(state): State<AppState>, mut request: Request,
 
     match state.authn.resolve(&token, Provisioning::Enabled).await {
         Ok(principal) => {
+            // Cold-start bootstrap-admin seeding (SMA-444 Task 21b, D9/M4): only ever a
+            // no-op HashSet lookup for a non-bootstrap identity. Runs on the `Enabled`
+            // (JIT-provisioning) path only — never `introspect`'s `Disabled` path (D10).
+            state.bootstrap_seeder.ensure_platform_admin(&principal.principal_id, &principal.issuer, &principal.subject).await;
             request.extensions_mut().insert(AuthContext {
                 principal_id: principal.principal_id,
                 issuer: principal.issuer,

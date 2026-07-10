@@ -125,6 +125,11 @@ where
             };
             match state.authn.resolve(&token, Provisioning::Enabled).await {
                 Ok(principal) => {
+                    // Cold-start bootstrap-admin seeding (SMA-444 Task 21b, D9/M4): mirrors
+                    // the HTTP `require_bearer` middleware's call site exactly — only ever a
+                    // no-op HashSet lookup for a non-bootstrap identity, and never reached
+                    // by the exempt `Introspect` RPC (D10, `is_exempt` above).
+                    state.bootstrap_seeder.ensure_platform_admin(&principal.principal_id, &principal.issuer, &principal.subject).await;
                     req.extensions_mut().insert(AuthContext {
                         principal_id: principal.principal_id,
                         issuer: principal.issuer,
