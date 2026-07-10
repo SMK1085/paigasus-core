@@ -60,7 +60,16 @@ impl PgEntitySliceLoader {
                 let team_repo = PgTeamRepository::new(self.db.clone(), self.gens.clone());
                 let team_view = team_repo.find(id.uuid()).await.map_err(backend)?.ok_or_else(|| missing("team", id.uuid()))?;
 
-                let org_id = OrganizationId::from_uuid(id.org_uuid());
+                // SMA-444 cross-tenant-escalation fix: `id` is `TenancyNodeRef::from_prn`'d
+                // straight from the caller-supplied resource PRN, whose org slot
+                // `TeamId::from_prn` only checks is PRESENT, never that it's CORRECT
+                // (`tenancy::check`) — so `id.org_uuid()` is caller-controlled. The team's
+                // REAL parent org lives in `team_view.node.id` (reconstructed by
+                // `pg_teams.rs::model_to_team` from the DB row's own `prn`/`org_id` columns,
+                // written together in lockstep at creation and never touched by
+                // rename/set_status), exactly mirroring how the `Project` branch below derives
+                // its parent from `project_view.node.team_id`, never the caller's PRN.
+                let org_id = OrganizationId::from_uuid(team_view.node.id.org_uuid());
                 let org_repo = PgOrganizationRepository::new(self.db.clone(), self.gens.clone());
                 let org_view = org_repo.find(org_id.uuid()).await.map_err(backend)?.ok_or_else(|| missing("organization", org_id.uuid()))?;
 

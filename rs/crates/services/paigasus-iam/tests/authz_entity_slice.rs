@@ -19,7 +19,7 @@ use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::{PgEntitySliceLoader, PgOrganizationRepository, PgProjectRepository, PgTeamRepository};
 use paigasus_iam_core::authz::model::{ContextValue, ROOT_ENTITY, root_prn};
-use paigasus_iam_core::{Clock, EntitySliceLoader, IdGenerator, NodeStatus, Organization, OrganizationRepository, Project, ProjectRepository, Slug, Team, TeamRepository};
+use paigasus_iam_core::{Clock, EntitySliceLoader, IdGenerator, NodeStatus, Organization, OrganizationRepository, Project, ProjectRepository, Slug, Team, TeamId, TeamRepository};
 use paigasus_kernel::{Prn, mint_uuid7, to_cedar_uid};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use std::collections::BTreeMap;
@@ -278,6 +278,87 @@ async fn authz_slice_nonexistent_resource_node_is_an_error() {
     let missing_org = paigasus_iam_core::OrganizationId::from_uuid(Uuid::from_u128(999_999));
     let err = loader.load(missing_org.prn(), &principal).await.unwrap_err();
     assert!(matches!(err, paigasus_iam_core::AuthzError::Backend(_)), "expected AuthzError::Backend, got {err:?}");
+}
+
+/// SMA-444 cross-tenant-escalation regression (FIX 1, the root-cause fix): loading a slice for
+/// a team PRN whose org slot is WRONG must parent the team on its REAL stored org, never the
+/// PRN's (forgeable) org slot. `TenancyNodeRef::from_prn`/`TeamId::from_prn` only check that a
+/// team PRN's org slot is PRESENT, never that it's CORRECT (`tenancy::check`), so a caller can
+/// pair a team's real uuid with an arbitrary org uuid — before this fix, `PgEntitySliceLoader`'s
+/// `Team` branch parented the team on exactly that caller-controlled slot, so e.g. an
+/// `org_admin` of the WRONG org could pass a Cedar `resource in ?resource` check for a team it
+/// (and its org) has no real authority over (see `RoleService::grant`'s anti-escalation check,
+/// which authorizes against exactly this slice). This test FAILS pre-fix: it would assert the
+/// team is parented on `real_org_uid` but the pre-fix loader parents it on `wrong_org_uid`
+/// instead.
+#[tokio::test]
+async fn authz_slice_team_with_a_forged_org_slot_parents_on_its_real_org_not_the_forged_one() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+
+    let ids = KernelIdGenerator;
+    let clock = SystemClock;
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
+
+    // Two independent orgs. `real_team` genuinely lives under `real_org`, NEVER under
+    // `wrong_org` — `wrong_org` only ever appears in the forged resource PRN below.
+    let (wrong_org, wrong_default_team) = new_org_and_default_team(&ids, &clock, "wrong-org", "Wrong Org");
+    let wrong_owner = ids.new_principal_id();
+    let wrong_grant = support::pg_owner_grant(&db, &wrong_owner, ids.new_membership_id(), &wrong_org.id).await;
+    org_repo.create(&wrong_org, &wrong_default_team, &wrong_grant).await.unwrap();
+
+    let (real_org, real_default_team) = new_org_and_default_team(&ids, &clock, "real-org", "Real Org");
+    let real_owner = ids.new_principal_id();
+    let real_grant = support::pg_owner_grant(&db, &real_owner, ids.new_membership_id(), &real_org.id).await;
+    org_repo.create(&real_org, &real_default_team, &real_grant).await.unwrap();
+
+    let real_team = Team::new(ids.new_team_id(real_org.id.uuid()), Slug::parse("eng").unwrap(), "Engineering", clock.now()).unwrap();
+    team_repo.create(&real_team).await.unwrap();
+
+    let principal_uuid = mint_uuid7(1_700_000_000_105, [15u8; 10]);
+    seed_principal(&db, principal_uuid).await;
+    let principal = principal_prn(principal_uuid);
+
+    // The forged resource PRN: `real_team`'s REAL uuid, paired with `wrong_org`'s uuid in the
+    // PRN's org slot — exactly the shape `RoleService::grant`'s `scope_resource_prn` would hand
+    // to `Authorize::check` for a forged `scope_prn`.
+    let forged_team_prn = TeamId::from_parts(wrong_org.id.uuid(), real_team.id.uuid()).prn().clone();
+    assert_ne!(
+        forged_team_prn.canonical(),
+        real_team.id.canonical(),
+        "sanity: the forged prn must differ from the team's real canonical prn"
+    );
+
+    let loader = PgEntitySliceLoader::new(db.clone(), Generations::memory());
+    let slice = loader.load(&forged_team_prn, &principal).await.unwrap();
+
+    let team_uid = {
+        let u = to_cedar_uid(real_team.id.prn());
+        (u.entity_type, u.entity_id)
+    };
+    let real_org_uid = {
+        let u = to_cedar_uid(real_org.id.prn());
+        (u.entity_type, u.entity_id)
+    };
+    let wrong_org_uid = {
+        let u = to_cedar_uid(wrong_org.id.prn());
+        (u.entity_type, u.entity_id)
+    };
+
+    let team_entity = find_entity(&slice, &team_uid);
+    assert_eq!(
+        team_entity.parents,
+        vec![real_org_uid.clone()],
+        "the team must be parented on its REAL stored org, never the forged PRN's org slot"
+    );
+    assert_ne!(team_entity.parents, vec![wrong_org_uid.clone()], "sanity: must NOT be parented on the forged org");
+
+    // The slice's own org entity is `real_org` — the loader never even fetches `wrong_org` for
+    // this resource.
+    assert!(slice.entities.iter().any(|e| e.uid == real_org_uid));
+    assert!(!slice.entities.iter().any(|e| e.uid == wrong_org_uid), "the forged org must never appear in a team's own slice");
 }
 
 #[tokio::test]
