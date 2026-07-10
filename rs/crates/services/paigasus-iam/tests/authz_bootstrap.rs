@@ -23,13 +23,14 @@ use paigasus_iam::adapters::authz::{CedarAuthorizer, Generations, GenerationsRea
 use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::entities::role;
-use paigasus_iam::adapters::persistence::{PgEntitySliceLoader, PgPolicyStore, PgRoleGrantStore};
+use paigasus_iam::adapters::persistence::{PgEntitySliceLoader, PgOrganizationRepository, PgPolicyStore, PgProjectRepository, PgRoleGrantStore, PgTeamRepository};
 use paigasus_iam::application::authorize::Authorize;
 use paigasus_iam::application::bootstrap::reconcile_starter;
 use paigasus_iam::application::roles::RoleService;
 use paigasus_iam_core::authz::roles::{starter_policies, system_roles};
 use paigasus_iam_core::{
-    AccessRequest, Action, AuditSink, Authorizer, DecisionCache, Effect, EntitySliceLoader, GrantScope, OrganizationId, PolicyStore, PrincipalId, RequestContext, RoleGrant, RoleGrantStore,
+    AccessRequest, Action, AuditSink, Authorizer, DecisionCache, Effect, EntitySliceLoader, GrantScope, OrganizationId, OrganizationRepository, PolicyStore, PrincipalId, ProjectRepository,
+    RequestContext, RoleGrant, RoleGrantStore, TeamRepository,
 };
 use paigasus_kernel::{Prn, mint_uuid7};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Statement};
@@ -162,7 +163,10 @@ async fn seeded_starter_set_plus_a_real_grant_enforces_end_to_end() {
     // The real use case under test: a `platform_admin`-scoped actor grants `org_admin` on a
     // real organization to another principal, through `RoleService::grant`'s full
     // parse/validate/anti-escalation-authorize/persist pipeline against a real Cedar engine.
-    let role_service = RoleService::new(role_grant_store, Authorize::new(authz.clone()), KernelIdGenerator, SystemClock);
+    let role_orgs: Arc<dyn OrganizationRepository> = Arc::new(PgOrganizationRepository::new(db.clone(), gens.clone()));
+    let role_teams: Arc<dyn TeamRepository> = Arc::new(PgTeamRepository::new(db.clone(), gens.clone()));
+    let role_projects: Arc<dyn ProjectRepository> = Arc::new(PgProjectRepository::new(db.clone(), gens.clone()));
+    let role_service = RoleService::new(role_grant_store, role_orgs, role_teams, role_projects, Authorize::new(authz.clone()), KernelIdGenerator, SystemClock);
     let bootstrap_actor = bootstrap_principal.prn().clone();
     let member_principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", member_uuid).unwrap());
     let org = OrganizationId::from_uuid(org_uuid);

@@ -50,7 +50,7 @@ use crate::application::projects::ProjectService;
 use crate::application::roles::RoleService;
 use crate::application::teams::TeamService;
 use crate::config::{AuthzCacheBackend, IamConfig, JwksCacheBackend};
-use paigasus_iam_core::{AuditSink, DecisionCache, EntitySliceLoader, PolicyStore, RoleGrantStore};
+use paigasus_iam_core::{AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, PolicyStore, ProjectRepository, RoleGrantStore, TeamRepository};
 
 pub type OrgSvc = OrganizationService<PgOrganizationRepository, KernelIdGenerator, SystemClock>;
 pub type TeamSvc = TeamService<PgTeamRepository, KernelIdGenerator, SystemClock>;
@@ -258,7 +258,15 @@ impl AppState {
         // — so a grant/policy change made through these use cases bumps the same `gens`
         // counter `authz`'s `PolicySnapshot::reload_if_stale` polls (AC1).
         let authorize = Authorize::new(authz.clone() as Arc<dyn Authorizer>);
-        let roles = RoleService::new(role_grant_store.clone(), authorize.clone(), KernelIdGenerator, SystemClock);
+        // SMA-444 cross-tenant-escalation fix (FIX 2): `RoleService::resolve_scope`'s own
+        // DB-lookup defense needs read access to the tenancy repos, independent of
+        // `orgs`/`teams`/`projects` above (those are wrapped in `OrganizationService`/etc.,
+        // not exposed as bare repos) — cheap fresh instances, `DatabaseConnection` clones an
+        // `Arc`-backed pool handle.
+        let role_orgs: Arc<dyn OrganizationRepository> = Arc::new(PgOrganizationRepository::new(db.clone(), gens.clone()));
+        let role_teams: Arc<dyn TeamRepository> = Arc::new(PgTeamRepository::new(db.clone(), gens.clone()));
+        let role_projects: Arc<dyn ProjectRepository> = Arc::new(PgProjectRepository::new(db.clone(), gens.clone()));
+        let roles = RoleService::new(role_grant_store.clone(), role_orgs, role_teams, role_projects, authorize.clone(), KernelIdGenerator, SystemClock);
         let policies = PolicyService::new(policy_store.clone(), authorize.clone());
         // Shares the SAME `role_grant_store` handle `roles`/`snapshot` do (Task 21b): a
         // bootstrap-admin seed bumps the identical `policy_gen` counter `CedarAuthorizer`
