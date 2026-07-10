@@ -3,7 +3,10 @@
 //! End-to-end gRPC coverage for `AuthorizationService` (SMA-444 Task 19): `IsAuthorized`'s
 //! self-query default-deny and its self/admin exposure rule's `PermissionDenied` (nothing
 //! leaked) on an unauthorized non-self query; the role-grant grant -> list -> revoke
-//! lifecycle; and `PutPolicy` forbidden for a non-admin. Mirrors `tests/http_authz.rs`'s
+//! lifecycle; `PutPolicy` forbidden for a non-admin; and, for a seeded platform_admin actor,
+//! the `PutPolicy` -> `ListPolicies` -> `DeletePolicy` round trip for a non-system policy
+//! (asserting `convert::to_proto_policy`'s field mapping) plus `DeletePolicy`'s
+//! `FailedPrecondition` on a `system == true` starter policy. Mirrors `tests/http_authz.rs`'s
 //! scenarios (same shared `Authorize::decide_gated` rule, SMA-444 Task 19 brief — the two
 //! transports must never diverge) and `tests/grpc_tenancy.rs`'s harness: the real
 //! `grpc::router(AppState::new(db, &cfg), ..)` over an ephemeral `TcpListener`, against an
@@ -28,12 +31,15 @@ use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::AppState;
 use paigasus_iam_core::authz::engine::DEFAULT_DENY_MARKER;
 use paigasus_iam_core::authz::model::root_prn;
+use paigasus_iam_core::authz::roles::FORBID_ARCHIVED_WRITES_ID;
 use paigasus_iam_core::{GrantScope, PrincipalId, RoleGrant};
 use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::iam::v1::authn_service_client::AuthnServiceClient;
 use paigasus_proto::paigasus::iam::v1::authorization_service_client::AuthorizationServiceClient;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceClient;
-use paigasus_proto::paigasus::iam::v1::{GrantRoleRequest, IntrospectRequest, IsAuthorizedRequest, ListOrganizationsRequest, ListRoleGrantsRequest, Policy, PutPolicyRequest, RevokeRoleRequest};
+use paigasus_proto::paigasus::iam::v1::{
+    DeletePolicyRequest, GrantRoleRequest, IntrospectRequest, IsAuthorizedRequest, ListOrganizationsRequest, ListPoliciesRequest, ListRoleGrantsRequest, Policy, PutPolicyRequest, RevokeRoleRequest,
+};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tonic::Code;
@@ -272,6 +278,125 @@ async fn put_policy_over_grpc_is_permission_denied_for_a_non_admin() {
         .unwrap_err();
 
     assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn put_list_delete_policy_lifecycle_over_grpc() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let (addr, server) = spawn_server(state.clone()).await;
+    let ch = channel(addr).await;
+
+    let admin_token = idp.bearer("grpc-authz-policy-admin", Some("grpc-authz-policy-admin@example.com"), "paigasus", 3600);
+    let admin_prn = self_principal_prn(ch.clone(), &admin_token).await;
+    seed_platform_admin(&state, Uuid::from_u128(9_201), &admin_prn).await;
+
+    let mut authz = AuthorizationServiceClient::new(ch);
+    let source = r#"permit(principal, action == Pgs::Iam::Action::"GetOrganization", resource);"#.to_string();
+
+    // PutPolicy: a seeded platform_admin can author a non-system policy; the returned proto
+    // `Policy` round-trips every field `convert::to_proto_policy` maps.
+    let put = authz
+        .put_policy(authed(
+            PutPolicyRequest {
+                policy: Some(Policy {
+                    policy_id: "grpc-authz-lifecycle-policy".to_string(),
+                    kind: "static".to_string(),
+                    source: source.clone(),
+                    description: "grpc lifecycle test policy".to_string(),
+                    system: false,
+                }),
+            },
+            &admin_token,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .policy
+        .expect("policy");
+    assert_eq!(put.policy_id, "grpc-authz-lifecycle-policy");
+    assert_eq!(put.kind, "static");
+    assert_eq!(put.source, source);
+    assert_eq!(put.description, "grpc lifecycle test policy");
+    assert!(!put.system);
+
+    // ListPolicies: the just-put policy is present alongside the reconcile-seeded starter
+    // policies (`bootstrap::reconcile_starter` seeds `authz::roles::starter_policies()` at
+    // `AppState::new`, all `system == true`) — assert `to_proto_policy`'s field mapping on
+    // the returned entry too.
+    let listed = authz
+        .list_policies(authed(ListPoliciesRequest { limit: 0, offset: 0 }, &admin_token))
+        .await
+        .unwrap()
+        .into_inner()
+        .policies;
+    let found = listed.iter().find(|p| p.policy_id == "grpc-authz-lifecycle-policy").expect("just-put policy listed");
+    assert_eq!(found.kind, "static");
+    assert_eq!(found.source, source);
+    assert_eq!(found.description, "grpc lifecycle test policy");
+    assert!(!found.system);
+    assert!(listed.iter().any(|p| p.system), "the reconcile-seeded starter policies should also be listed");
+
+    // DeletePolicy: delete the just-put policy, then confirm `ListPolicies` no longer
+    // returns it.
+    authz
+        .delete_policy(authed(
+            DeletePolicyRequest {
+                policy_id: "grpc-authz-lifecycle-policy".to_string(),
+            },
+            &admin_token,
+        ))
+        .await
+        .unwrap();
+
+    let listed_after = authz
+        .list_policies(authed(ListPoliciesRequest { limit: 0, offset: 0 }, &admin_token))
+        .await
+        .unwrap()
+        .into_inner()
+        .policies;
+    assert!(!listed_after.iter().any(|p| p.policy_id == "grpc-authz-lifecycle-policy"));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn delete_policy_over_grpc_is_failed_precondition_for_a_system_policy() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let (addr, server) = spawn_server(state.clone()).await;
+    let ch = channel(addr).await;
+
+    let admin_token = idp.bearer("grpc-authz-policy-sys-admin", Some("grpc-authz-policy-sys-admin@example.com"), "paigasus", 3600);
+    let admin_prn = self_principal_prn(ch.clone(), &admin_token).await;
+    seed_platform_admin(&state, Uuid::from_u128(9_301), &admin_prn).await;
+
+    let mut authz = AuthorizationServiceClient::new(ch);
+
+    // `PgPolicyStore::delete` rejects mutating an existing `system == true` row with
+    // `AuthzError::SystemImmutable`, which `TenancyError::class()` maps to
+    // `ErrorClass::Precondition` -> `Code::FailedPrecondition` (`convert::status_to_grpc`) —
+    // NOT `PermissionDenied`: the actor IS authorized for `DeletePolicy@Root` (seeded
+    // platform_admin); it's the store itself that refuses to touch a system row.
+    let err = authz
+        .delete_policy(authed(
+            DeletePolicyRequest {
+                policy_id: FORBID_ARCHIVED_WRITES_ID.to_string(),
+            },
+            &admin_token,
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
 
     server.abort();
 }
