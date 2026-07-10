@@ -97,12 +97,18 @@ impl TenancyService for TenancyGrpc {
     // ---- organizations ----
 
     async fn create_organization(&self, request: Request<CreateOrganizationRequest>) -> Result<Response<CreateOrganizationResponse>, Status> {
-        let actor = actor_context(&request)?.principal_id.prn().clone();
+        let actor_principal = actor_context(&request)?.principal_id;
         if ENFORCE_TENANCY {
-            self.state.authorize.check(&actor, Action::CreateOrganization, &root_prn()).await.map_err(convert::status_to_grpc)?;
+            self.state
+                .authorize
+                .check(actor_principal.prn(), Action::CreateOrganization, &root_prn())
+                .await
+                .map_err(convert::status_to_grpc)?;
         }
         let req = request.into_inner();
-        let out = self.state.orgs.create(&req.slug, &req.name).await.map_err(convert::status_to_grpc)?;
+        // The creating principal becomes the new org's `org_admin` owner (spec D8) — seeded
+        // atomically with the org + default team, regardless of `ENFORCE_TENANCY`.
+        let out = self.state.orgs.create(&actor_principal, &req.slug, &req.name).await.map_err(convert::status_to_grpc)?;
         // `OrganizationService::create` returns the plain (non-`NodeView`) domain values —
         // both are freshly minted `Active`, and an org has no ancestors (D1/D10), so folding
         // the org's own status through as the team's one ancestor computes the correct

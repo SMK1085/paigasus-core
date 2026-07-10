@@ -9,6 +9,8 @@
 mod support;
 
 use axum::http::StatusCode;
+use paigasus_iam_core::PrincipalId;
+use paigasus_kernel::Prn;
 use serde_json::json;
 use support::{app_with_state, provision_platform_admin, send};
 use uuid::Uuid;
@@ -226,4 +228,41 @@ async fn create_team_and_list_teams_404_on_a_nonexistent_org() {
     let (status, err) = send(&app, "GET", &format!("/v1/organizations/{unknown_org_id}/teams"), None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{err}");
     assert_eq!(err["error"]["code"], "not-found");
+}
+
+/// SMA-444 Task 20b (spec D8): `CreateOrganization` atomically seeds an `org_admin` owner
+/// grant for the CREATING principal, scoped to the new org — the creator becomes the owner
+/// of what it creates. `provision_platform_admin` seeds P as `platform_admin` first purely
+/// so the `CreateOrganization`@`Root` authorize check passes (enforcement is Task 20's own
+/// concern, not this test's); the owner grant asserted below is a SEPARATE, org-scoped
+/// `org_admin` grant the create call itself seeds, not the platform_admin one. Atomicity
+/// (org + default team + owner grant all present after the one create call, all in the SAME
+/// transaction, ADR-0014) and the `policy_gen` bump are proven at the repository layer by
+/// `tests/tenancy_orgs.rs`/`tests/authz_entity_gen_bumps.rs` (same `Generations`-handle idiom
+/// every other generation-bump test in this suite uses) — this test proves the actor
+/// threads correctly end to end through the real, wired HTTP path.
+#[tokio::test]
+async fn create_organization_seeds_an_org_admin_owner_grant_for_the_creating_principal() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("org-creator", Some("creator@example.com"), "paigasus", 3600);
+    let principal_prn = provision_platform_admin(&state, &token).await;
+    let principal = PrincipalId::from_prn(Prn::parse(&principal_prn).expect("valid principal prn"));
+
+    let (status, created) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "owned-co", "name": "Owned Co."})), Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let org_prn = created["organization"]["prn"].as_str().expect("organization.prn").to_string();
+    let team_prn = created["default_team"]["prn"].as_str().expect("default_team.prn");
+    assert!(team_prn.contains(":team/"), "unexpected team prn: {team_prn}");
+
+    // The owner grant: `org_admin`, scoped to exactly the new org, held by the creator.
+    let grants = state.role_grant_store.list_by_principal(&principal).await.expect("list_by_principal");
+    let owner_grant = grants
+        .iter()
+        .find(|g| g.role_key == "org_admin" && g.scope.canonical_prn() == org_prn)
+        .unwrap_or_else(|| panic!("expected an org_admin owner grant scoped to {org_prn}, got {grants:?}"));
+    assert_eq!(owner_grant.principal, principal);
+    assert_eq!(owner_grant.linked_policy_id, format!("grant:{}", owner_grant.id));
 }

@@ -58,7 +58,9 @@ async fn seed_chain(db: &DatabaseConnection) -> (Organization, Team, Project) {
     let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
 
     let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
-    org_repo.create(&org, &default_team).await.unwrap();
+    let owner = ids.new_principal_id();
+    let grant = support::pg_owner_grant(db, &owner, ids.new_membership_id(), &org.id).await;
+    org_repo.create(&org, &default_team, &grant).await.unwrap();
 
     let team_id = ids.new_team_id(org.id.uuid());
     let team = Team::new(team_id, Slug::parse("eng").unwrap(), "Engineering", clock.now()).unwrap();

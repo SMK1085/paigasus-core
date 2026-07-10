@@ -53,7 +53,9 @@ async fn create_org(State(s): State<AppState>, Extension(ctx): Extension<AuthCon
     if ENFORCE_TENANCY {
         s.authorize.check(&actor_prn(&ctx), Action::CreateOrganization, &root_prn()).await?;
     }
-    let out = s.orgs.create(&b.slug, &b.name).await?;
+    // The creating principal becomes the new org's `org_admin` owner (spec D8) — seeded
+    // atomically with the org + default team, regardless of `ENFORCE_TENANCY`.
+    let out = s.orgs.create(&ctx.principal_id, &b.slug, &b.name).await?;
     Ok((StatusCode::CREATED, Json(out.into())))
 }
 

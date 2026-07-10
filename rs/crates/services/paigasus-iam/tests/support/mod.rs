@@ -38,7 +38,7 @@ use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::persistence::Migrator;
 use paigasus_iam::application::authenticate_token::Provisioning;
 use paigasus_iam::config::{AuthnConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig};
-use paigasus_iam_core::{GrantScope, PrincipalId, RoleGrant, TenancyNodeRef};
+use paigasus_iam_core::{GrantScope, OrganizationId, PrincipalId, RoleGrant, TenancyNodeRef};
 use paigasus_kernel::Prn;
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -412,4 +412,96 @@ pub async fn provision_platform_admin(state: &AppState, token: &str) -> String {
     let principal_prn = provision(state, token).await;
     seed_platform_admin(state, &principal_prn).await;
     principal_prn
+}
+
+// --- SMA-444 Task 20b: direct-`PgOrganizationRepository`-driven owner-grant helpers --------
+//
+// `PgOrganizationRepository::create` now takes a third `owner_grant: &RoleGrant` argument
+// (spec D8): the `org_admin` grant seeded for the creating principal, inserted in the SAME
+// transaction as the org + default team. Tests that drive `PgOrganizationRepository`
+// directly (not through `AppState::new`, so `bootstrap::reconcile_starter` never ran) need
+// that grant's two FK targets to exist first: an `org_admin` `role` row (+ its backing
+// `policy` template row, `fk_role_template`), and a `principal` row for the owner
+// (`fk_role_grant_principal`). These three helpers are the direct-Pg-repo analog of
+// `seed_platform_admin`/`seed_org_admin` above (which seed through an `AppState`'s
+// `role_grant_store` instead).
+
+/// Seeds the `org_admin`-keyed `role` row (and its backing `policy` template row) if not
+/// already present — idempotent, so callers can invoke it once per test or once per org
+/// creation without a duplicate-key error.
+#[allow(dead_code)]
+pub async fn seed_org_admin_role_row(db: &DatabaseConnection) {
+    use paigasus_iam::adapters::persistence::entities::{policy, role};
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+    if role::Entity::find_by_id("org_admin".to_string()).one(db).await.unwrap().is_some() {
+        return;
+    }
+    let now = Utc::now();
+    policy::ActiveModel {
+        policy_id: Set("org_admin".to_string()),
+        kind: Set("template".to_string()),
+        source: Set("permit(principal == ?principal, action, resource in ?resource);".to_string()),
+        description: Set(None),
+        system: Set(false),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(db)
+    .await
+    .unwrap();
+    role::ActiveModel {
+        key: Set("org_admin".to_string()),
+        template_id: Set("org_admin".to_string()),
+        scope_kinds: Set(r#"["organization"]"#.to_string()),
+        description: Set(None),
+        system: Set(false),
+        created_at: Set(now),
+    }
+    .insert(db)
+    .await
+    .unwrap();
+}
+
+/// Seeds a bare `principal` row (no `user`/email — this owner only needs to exist for the
+/// `RoleGrant`'s `fk_role_grant_principal` target) if not already present — idempotent, so
+/// the same owner can be reused across several org creations within one test.
+#[allow(dead_code)]
+pub async fn seed_bare_principal_row(db: &DatabaseConnection, principal_id: Uuid) {
+    use paigasus_iam::adapters::persistence::entities::principal;
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+    if principal::Entity::find_by_id(principal_id).one(db).await.unwrap().is_some() {
+        return;
+    }
+    let now = Utc::now();
+    principal::ActiveModel {
+        id: Set(principal_id),
+        prn: Set(format!("prn:pgs:iam:::principal/{principal_id}")),
+        kind: Set("user".to_string()),
+        status: Set("active".to_string()),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(db)
+    .await
+    .unwrap();
+}
+
+/// Seeds both FK prerequisites (the `org_admin` role row, and a bare principal row for
+/// `owner`) and returns the `org_admin` owner [`RoleGrant`] for `org` — the one-line-per-call
+/// helper direct-`PgOrganizationRepository::create`-driven tests need to build its third
+/// argument (SMA-444 Task 20b, spec D8).
+#[allow(dead_code)]
+pub async fn pg_owner_grant(db: &DatabaseConnection, owner: &PrincipalId, grant_id: Uuid, org: &OrganizationId) -> RoleGrant {
+    seed_org_admin_role_row(db).await;
+    seed_bare_principal_row(db, owner.uuid()).await;
+    RoleGrant {
+        id: grant_id,
+        principal: owner.clone(),
+        role_key: "org_admin".to_string(),
+        scope: GrantScope::Node(TenancyNodeRef::Organization(org.clone())),
+        linked_policy_id: format!("grant:{grant_id}"),
+        created_at: Utc::now(),
+    }
 }

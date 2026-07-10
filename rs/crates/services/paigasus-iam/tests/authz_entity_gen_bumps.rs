@@ -6,7 +6,9 @@
 //! decision/entity-slice caches (keyed off it) see the change without any SCAN/DEL.
 //! `tests/authz_entity_slice.rs` already proves the READ side (an archived ancestor's
 //! `effective_status` flips on the very next `load`); this file proves the counter itself
-//! actually moves.
+//! actually moves. It also proves `policy_gen`'s independence — except for `create`'s own
+//! `org_admin` owner grant (SMA-444 Task 20b, spec D8), itself a policy change, which bumps
+//! `policy_gen` exactly once alongside the usual `entity_gen` bump.
 //!
 //! Runs against an ephemeral Postgres in Docker. In CI (`CI` env set) a missing Docker
 //! daemon is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note —
@@ -48,8 +50,10 @@ async fn tenancy_writes_bump_the_shared_entity_gen_across_org_team_project() {
 
     assert_eq!(gens.entity_gen().await.unwrap(), 0, "starts at zero");
 
+    let owner = ids.new_principal_id();
     let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme-gen", "Acme Gen");
-    org_repo.create(&org, &default_team).await.unwrap();
+    let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
+    org_repo.create(&org, &default_team, &grant).await.unwrap();
     assert_eq!(gens.entity_gen().await.unwrap(), 1, "org create must bump entity_gen");
 
     let team_id = ids.new_team_id(org.id.uuid());
@@ -84,9 +88,12 @@ async fn tenancy_writes_bump_the_shared_entity_gen_across_org_team_project() {
 }
 
 /// `entity_gen` is independent of `policy_gen` (a completely separate counter under the
-/// shared `Generations` handle, spec §7/D11) — a tenancy write must never move `policy_gen`.
+/// shared `Generations` handle, spec §7/D11): a pure tenancy write (no grant involved, e.g.
+/// `set_status`) must never move `policy_gen`. `create` is the one exception — its
+/// owner-grant side effect (SMA-444 Task 20b, spec D8) is itself a policy change, so it
+/// bumps `policy_gen` exactly once, same as `PgRoleGrantStore::grant` would.
 #[tokio::test]
-async fn tenancy_writes_never_bump_policy_gen() {
+async fn only_creates_owner_grant_bumps_policy_gen_not_plain_tenancy_writes() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
@@ -94,13 +101,17 @@ async fn tenancy_writes_never_bump_policy_gen() {
     let ids = KernelIdGenerator;
     let clock = SystemClock;
     let org_repo = PgOrganizationRepository::new(db.clone(), gens.clone());
+    let owner = ids.new_principal_id();
 
     assert_eq!(gens.policy_gen().await.unwrap(), 0);
 
     let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme-policy-gen", "Acme Policy Gen");
-    org_repo.create(&org, &default_team).await.unwrap();
+    let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
+    org_repo.create(&org, &default_team, &grant).await.unwrap();
+    assert_eq!(gens.policy_gen().await.unwrap(), 1, "create's owner grant must bump policy_gen exactly once");
+
     org_repo.set_status(org.id.uuid(), NodeStatus::Archived, clock.now()).await.unwrap();
 
-    assert_eq!(gens.policy_gen().await.unwrap(), 0, "a tenancy write must never bump policy_gen");
+    assert_eq!(gens.policy_gen().await.unwrap(), 1, "a plain tenancy write (set_status) must never bump policy_gen further");
     assert_eq!(gens.entity_gen().await.unwrap(), 2, "sanity: entity_gen did move for the same two writes");
 }

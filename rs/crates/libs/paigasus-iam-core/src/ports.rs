@@ -4,6 +4,7 @@
 //! use cases depend on abstractions, not on SeaORM/axum (ADR-0005).
 
 use crate::authn::{AuthnError, ExternalIdentity, Issuer, ValidatedClaims};
+use crate::authz::model::RoleGrant;
 use crate::principal::Principal;
 use crate::tenancy::{Membership, NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId, TenancyNodeRef};
 use crate::user::User;
@@ -81,8 +82,11 @@ pub trait ExternalIdentityRepository: Send + Sync {
 /// Persistence port for organizations.
 #[async_trait]
 pub trait OrganizationRepository: Send + Sync {
-    /// One transaction: org + auto-provisioned default team (ADR-0014).
-    async fn create(&self, org: &Organization, default_team: &Team) -> Result<(), RepositoryError>;
+    /// One transaction: org + auto-provisioned default team (ADR-0014) + the creating
+    /// principal's `org_admin` owner grant, scoped to the new org (spec D8) — a grant is a
+    /// policy change, so implementations must also bump `policy_gen` (in addition to the
+    /// usual `entity_gen` bump every tenancy mutation gets).
+    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant) -> Result<(), RepositoryError>;
     async fn find(&self, id: Uuid) -> Result<Option<NodeView<Organization>>, RepositoryError>;
     /// ORDER BY created_at, id (rule 9).
     async fn list(&self, limit: u64, offset: u64) -> Result<Vec<NodeView<Organization>>, RepositoryError>;

@@ -43,7 +43,9 @@ async fn seed_chain(db: &DatabaseConnection) -> (Organization, Team, Project) {
     let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
 
     let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
-    org_repo.create(&org, &default_team).await.unwrap();
+    let owner = ids.new_principal_id();
+    let grant = support::pg_owner_grant(db, &owner, ids.new_membership_id(), &org.id).await;
+    org_repo.create(&org, &default_team, &grant).await.unwrap();
 
     let team_id = ids.new_team_id(org.id.uuid());
     let team = Team::new(team_id, Slug::parse("eng").unwrap(), "Engineering", clock.now()).unwrap();
@@ -75,7 +77,9 @@ async fn create_guards_against_missing_and_archived_parents() {
 
     // Seed a real org, then archive it.
     let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
-    org_repo.create(&org, &default_team).await.unwrap();
+    let owner = ids.new_principal_id();
+    let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
+    org_repo.create(&org, &default_team, &grant).await.unwrap();
     org_repo.set_status(org.id.uuid(), NodeStatus::Archived, clock.now()).await.unwrap();
 
     // Team create under an (effectively) archived org -> Precondition(ParentArchived).
@@ -142,10 +146,13 @@ async fn slug_scopes_are_per_parent() {
     let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
     let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
 
+    let owner = ids.new_principal_id();
     let (org1, default1) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
-    org_repo.create(&org1, &default1).await.unwrap();
+    let grant1 = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org1.id).await;
+    org_repo.create(&org1, &default1, &grant1).await.unwrap();
     let (org2, default2) = new_org_and_default_team(&ids, &clock, "beta", "Beta Corp.");
-    org_repo.create(&org2, &default2).await.unwrap();
+    let grant2 = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org2.id).await;
+    org_repo.create(&org2, &default2, &grant2).await.unwrap();
 
     // Same team slug in two different orgs -> both ok.
     let team1 = Team::new(ids.new_team_id(org1.id.uuid()), Slug::parse("eng").unwrap(), "Engineering", clock.now()).unwrap();
