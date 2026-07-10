@@ -10,7 +10,7 @@ mod support;
 
 use axum::http::StatusCode;
 use serde_json::json;
-use support::{app, send};
+use support::{app_with_state, provision_platform_admin, send};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -18,8 +18,12 @@ async fn org_lifecycle_over_http() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, idp) = app(db).await;
+    let (app, state, idp) = app_with_state(db).await;
     let token = idp.bearer("sweep-user", Some("sweep@example.com"), "paigasus", 3600);
+    // SMA-444 Task 20: every tenancy route below is now enforced — seed the acting
+    // principal a `platform_admin` grant so this pre-authorization test's assertions keep
+    // testing what they always tested (the tenancy lifecycle), not authorization itself.
+    provision_platform_admin(&state, &token).await;
 
     // Create: 201, body has `organization` + `default_team` with parseable PRNs.
     let (status, created) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "acme", "name": "Acme Corp."})), Some(token.as_str())).await;
@@ -59,10 +63,16 @@ async fn org_lifecycle_over_http() {
     assert_eq!(archived["status"], "archived");
     assert_eq!(archived["effective_status"], "archived");
 
-    let (status, restored) = send(&app, "POST", &format!("/v1/organizations/{org_id}/restore"), None, Some(token.as_str())).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(restored["status"], "active");
-    assert_eq!(restored["effective_status"], "active");
+    // Restoring an ARCHIVED resource is itself denied by the `forbid-archived-writes`
+    // starter policy (spec §3.2, belt-and-braces over M1's guards): its write-action list is
+    // *derived* from `Action::is_write()`, which classifies every `Restore*` action as a
+    // write — so `resource.effective_status == "archived"` blocks `RestoreOrganization` on
+    // the very resource it targets, even for a seeded platform_admin (Cedar `forbid` always
+    // overrides `permit`). SMA-444 Task 20 wires this policy onto the real route for the
+    // first time — 403 `forbidden`, not the pre-enforcement 200.
+    let (status, err) = send(&app, "POST", &format!("/v1/organizations/{org_id}/restore"), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{err}");
+    assert_eq!(err["error"]["code"], "forbidden");
 
     // Unknown id -> 404 `not-found`.
     let (status, err) = send(&app, "GET", &format!("/v1/organizations/{}", Uuid::nil()), None, Some(token.as_str())).await;
@@ -75,8 +85,9 @@ async fn nested_team_and_project_creation_folds_effective_status() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, idp) = app(db).await;
+    let (app, state, idp) = app_with_state(db).await;
     let token = idp.bearer("sweep-user", Some("sweep@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &token).await;
 
     let (status, org_body) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "beta", "name": "Beta"})), Some(token.as_str())).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -138,29 +149,21 @@ async fn nested_team_and_project_creation_folds_effective_status() {
 
     // Renaming a project that is only *effectively* archived (via the still-archived org)
     // is rejected too — the guard folds ancestors, not just the project's own status.
+    // SMA-444 Task 20: the `forbid-archived-writes` starter policy now enforces this on the
+    // real route (spec §3.2, belt-and-braces over M1's own `node-archived` guard) and,
+    // being a Cedar `forbid`, takes precedence — 403 `forbidden`, not the pre-enforcement
+    // 409 `node-archived` (`org_lifecycle_over_http` covers the same policy on `Restore*`).
     let (status, err) = send(&app, "PATCH", &format!("/v1/projects/{project_id}"), Some(json!({"slug": "web2"})), Some(token.as_str())).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(err["error"]["code"], "node-archived");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{err}");
+    assert_eq!(err["error"]["code"], "forbidden");
 
-    // Restore the org, unblocking the project again; rename/archive/restore then work
-    // through the project's own routes.
-    let (status, _) = send(&app, "POST", &format!("/v1/organizations/{org_id}/restore"), None, Some(token.as_str())).await;
-    assert_eq!(status, StatusCode::OK);
-
-    let (status, renamed) = send(&app, "PATCH", &format!("/v1/projects/{project_id}"), Some(json!({"slug": "web2"})), Some(token.as_str())).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(renamed["slug"], "web2");
-    assert_eq!(renamed["effective_status"], "active");
-
-    let (status, archived) = send(&app, "POST", &format!("/v1/projects/{project_id}/archive"), None, Some(token.as_str())).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(archived["status"], "archived");
-    assert_eq!(archived["effective_status"], "archived");
-
-    let (status, restored) = send(&app, "POST", &format!("/v1/projects/{project_id}/restore"), None, Some(token.as_str())).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(restored["status"], "active");
-    assert_eq!(restored["effective_status"], "active");
+    // Restoring the archived org is ALSO forbidden by the same policy (applied to
+    // `RestoreOrganization` itself, `org_lifecycle_over_http`'s own scenario) — archiving is
+    // one-way through the enforced API in this M3 slice, so this subtree has no path back to
+    // active; there is nothing further to assert on it.
+    let (status, err) = send(&app, "POST", &format!("/v1/organizations/{org_id}/restore"), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{err}");
+    assert_eq!(err["error"]["code"], "forbidden");
 }
 
 #[tokio::test]
@@ -168,8 +171,9 @@ async fn list_pagination_and_invalid_limit() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, idp) = app(db).await;
+    let (app, state, idp) = app_with_state(db).await;
     let token = idp.bearer("sweep-user", Some("sweep@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &token).await;
 
     for slug in ["alpha", "bravo", "charlie"] {
         let (status, _) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": slug, "name": slug})), Some(token.as_str())).await;

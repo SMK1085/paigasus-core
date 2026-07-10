@@ -62,9 +62,13 @@ async fn organization_lifecycle_over_grpc() {
     };
     let idp = support::start_mock_idp().await;
     let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let token = idp.bearer("grpc-org-tester", Some("grpc-org-tester@example.com"), "paigasus", 3600);
+    // SMA-444 Task 20: every `TenancyService` RPC below is now enforced — seed the acting
+    // principal a `platform_admin` grant before spawning the server (the same `AppState`,
+    // just cloned into the server task, so the seeded grant is visible to it).
+    support::provision_platform_admin(&state, &token).await;
     let (addr, server) = spawn_tenancy_server(state).await;
     let mut client = connect(addr).await;
-    let token = idp.bearer("grpc-org-tester", Some("grpc-org-tester@example.com"), "paigasus", 3600);
 
     // Create: response has `organization` + `default_team`, both with PRNs parseable by the
     // kernel; the team's `org_prn` matches the org's own `prn`.
@@ -137,12 +141,15 @@ async fn team_membership_flow_over_grpc() {
         .unwrap()
         .canonical();
 
-    let (addr, server) = spawn_tenancy_server(state).await;
-    let mut client = connect(addr).await;
     // The bearer used to authenticate the RPCs below JIT-provisions its OWN principal on the
     // way in (a separate identity from `alice` above); the membership assertions target
     // `alice`'s `principal_prn`, so that extra principal is inert here.
     let token = idp.bearer("grpc-team-tester", Some("grpc-team-tester@example.com"), "paigasus", 3600);
+    // SMA-444 Task 20: seed the ACTOR (`grpc-team-tester`, not `alice`) a `platform_admin`
+    // grant — every RPC below authorizes the caller, not the membership's target principal.
+    support::provision_platform_admin(&state, &token).await;
+    let (addr, server) = spawn_tenancy_server(state).await;
+    let mut client = connect(addr).await;
 
     let created = client
         .create_organization(authed(

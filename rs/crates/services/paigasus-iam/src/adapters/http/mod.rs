@@ -8,6 +8,7 @@
 pub mod auth_middleware;
 pub mod authn;
 mod authz;
+pub mod authz_middleware;
 pub mod dto;
 pub mod error;
 mod memberships;
@@ -109,6 +110,13 @@ pub const AUTHZ_POLICY_SNAPSHOT_TTL: Duration = Duration::from_secs(30);
 /// cross-replica/background staleness, never same-replica visibility of a fresh grant.
 /// Hardcoded for now; see [`AUTHZ_POLICY_SNAPSHOT_TTL`].
 pub const AUTHZ_POLICY_RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Gates the SMA-444 Task 20 tenancy-retrofit enforcement (`organizations.rs`/`teams.rs`/
+/// `projects.rs`/`memberships.rs`, and their gRPC mirrors in `adapters::grpc::tenancy`): when
+/// `true`, every handler calls `AppState.authorize.check` before performing its operation and
+/// maps a deny to `TenancyError::Forbidden` (403 / `PermissionDenied`). Hardcoded `true` for
+/// now — a later task swaps this for the config-driven `authz.enforce_tenancy` (spec §11).
+pub const ENFORCE_TENANCY: bool = true;
 
 #[derive(Clone)]
 pub struct AppState {

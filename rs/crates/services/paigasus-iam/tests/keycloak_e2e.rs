@@ -34,7 +34,7 @@ use paigasus_iam::config::{AuthnConfig, IamConfig, IssuerConfig, JwksCacheBacken
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
 use std::time::Duration;
-use support::{send, start_migrated_postgres};
+use support::{provision_platform_admin, send, start_migrated_postgres};
 use testcontainers_modules::testcontainers::core::IntoContainerPort;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, GenericImage, ImageExt};
@@ -154,6 +154,10 @@ async fn keycloak_end_to_end_config_only_oidc() {
     // A protected write with the real Keycloak bearer: the middleware's `resolve(.., Enabled)`
     // JIT-provisions the principal (which REQUIRES the `email` claim, spec §6.2), so a 201 here
     // is itself proof the audience + email mappers landed both claims in the ACCESS token.
+    // SMA-444 Task 20: `POST /v1/organizations` is now also authorization-enforced — seed a
+    // `platform_admin` grant up front (`provision_platform_admin`'s `state.authn.resolve` runs
+    // the exact same JIT path against the REAL Keycloak issuer the middleware itself would).
+    provision_platform_admin(&state, &access_token).await;
     let (status, created) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "acme", "name": "Acme" })), Some(&access_token)).await;
     assert_eq!(status, StatusCode::CREATED, "JIT-authenticated org create must succeed: {created}");
 

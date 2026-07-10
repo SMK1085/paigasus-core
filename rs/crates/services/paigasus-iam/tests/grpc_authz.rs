@@ -14,37 +14,28 @@
 //!
 //! Every `AuthorizationService` RPC is bearer-enforced (Task 12, D14) — each request carries
 //! an `authorization: Bearer <token>` metadata entry via the [`authed`] wrapper. Getting a
-//! principal's own PRN mirrors `tests/http_authz.rs::self_principal_prn`: JIT-provision it
-//! with any protected call, then read it back via the unauthenticated `Introspect` RPC.
-//! Seeding the bootstrap `platform_admin` grant mirrors `tests/http_authz.rs::
-//! seed_platform_admin`: directly through `AppState.role_grant_store`, bypassing
-//! `RoleService::grant`'s anti-escalation check (there is no prior authority to authorize the
-//! very first grant against).
+//! principal's own PRN (`self_principal_prn`) and seeding the bootstrap `platform_admin`
+//! grant delegate to `support::provision`/`support::seed_platform_admin` (SMA-444 Task 20):
+//! `provision` resolves directly through `state.authn` rather than by driving
+//! `TenancyService.ListOrganizations` (that RPC is itself enforced now, so its own status
+//! would depend on a grant that doesn't exist yet at that point).
 
 mod support;
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use chrono::Utc;
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::AppState;
 use paigasus_iam_core::authz::engine::DEFAULT_DENY_MARKER;
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::authz::roles::FORBID_ARCHIVED_WRITES_ID;
-use paigasus_iam_core::{GrantScope, PrincipalId, RoleGrant};
-use paigasus_kernel::Prn;
-use paigasus_proto::paigasus::iam::v1::authn_service_client::AuthnServiceClient;
 use paigasus_proto::paigasus::iam::v1::authorization_service_client::AuthorizationServiceClient;
-use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceClient;
-use paigasus_proto::paigasus::iam::v1::{
-    DeletePolicyRequest, GrantRoleRequest, IntrospectRequest, IsAuthorizedRequest, ListOrganizationsRequest, ListPoliciesRequest, ListRoleGrantsRequest, Policy, PutPolicyRequest, RevokeRoleRequest,
-};
+use paigasus_proto::paigasus::iam::v1::{DeletePolicyRequest, GrantRoleRequest, IsAuthorizedRequest, ListPoliciesRequest, ListRoleGrantsRequest, Policy, PutPolicyRequest, RevokeRoleRequest};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tonic::Code;
 use tonic::transport::Channel;
-use uuid::Uuid;
 
 /// Spawns the full `grpc::router` (health + tenancy + authn + authorization, all wrapped by
 /// the bearer layer) on an ephemeral port; `abort()` the returned handle when the test
@@ -71,35 +62,6 @@ fn authed<T>(msg: T, token: &str) -> tonic::Request<T> {
     req
 }
 
-/// Triggers JIT-provisioning of `token`'s own principal (any bearer-enforced RPC does this —
-/// `AuthEnforce` resolves the caller before the handler ever runs) via a protected
-/// `TenancyService.ListOrganizations` call, then reads its `principal_prn` back via the
-/// unauthenticated `AuthnService.Introspect` RPC (mirrors `tests/http_authz.rs::
-/// self_principal_prn`).
-async fn self_principal_prn(ch: Channel, token: &str) -> String {
-    let mut tenancy = TenancyServiceClient::new(ch.clone());
-    tenancy.list_organizations(authed(ListOrganizationsRequest { limit: 0, offset: 0 }, token)).await.unwrap();
-    let mut authn = AuthnServiceClient::new(ch);
-    authn.introspect(IntrospectRequest { token: token.to_string() }).await.unwrap().into_inner().principal_prn
-}
-
-/// Seeds a `platform_admin`-at-`Root` grant for `principal_prn` directly through
-/// `state.role_grant_store` — mirrors `tests/http_authz.rs::seed_platform_admin` exactly (see
-/// its doc for why this bypasses `RoleService::grant`'s anti-escalation check and why sharing
-/// this exact store matters for the `CedarAuthorizer`'s generation-counter visibility).
-async fn seed_platform_admin(state: &AppState, grant_id: Uuid, principal_prn: &str) {
-    let principal = PrincipalId::from_prn(Prn::parse(principal_prn).expect("valid principal prn"));
-    let grant = RoleGrant {
-        id: grant_id,
-        principal,
-        role_key: "platform_admin".to_string(),
-        scope: GrantScope::Root,
-        linked_policy_id: format!("grant:{grant_id}"),
-        created_at: Utc::now(),
-    };
-    state.role_grant_store.grant(&grant).await.expect("seed platform_admin grant");
-}
-
 #[tokio::test]
 async fn is_authorized_self_query_over_grpc_returns_a_default_deny_decision_for_an_ungranted_principal() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -107,10 +69,10 @@ async fn is_authorized_self_query_over_grpc_returns_a_default_deny_decision_for_
     };
     let idp = support::start_mock_idp().await;
     let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let token = idp.bearer("grpc-authz-alice", Some("grpc-authz-alice@example.com"), "paigasus", 3600);
+    let principal_prn = support::provision(&state, &token).await;
     let (addr, server) = spawn_server(state).await;
     let ch = channel(addr).await;
-    let token = idp.bearer("grpc-authz-alice", Some("grpc-authz-alice@example.com"), "paigasus", 3600);
-    let principal_prn = self_principal_prn(ch.clone(), &token).await;
 
     let mut authz = AuthorizationServiceClient::new(ch);
     let resp = authz
@@ -141,12 +103,12 @@ async fn is_authorized_non_self_query_by_an_unauthorized_actor_over_grpc_is_perm
     };
     let idp = support::start_mock_idp().await;
     let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
-    let (addr, server) = spawn_server(state).await;
-    let ch = channel(addr).await;
     let actor_token = idp.bearer("grpc-authz-bob", Some("grpc-authz-bob@example.com"), "paigasus", 3600);
     let other_token = idp.bearer("grpc-authz-carol", Some("grpc-authz-carol@example.com"), "paigasus", 3600);
-    self_principal_prn(ch.clone(), &actor_token).await;
-    let other_prn = self_principal_prn(ch.clone(), &other_token).await;
+    support::provision(&state, &actor_token).await;
+    let other_prn = support::provision(&state, &other_token).await;
+    let (addr, server) = spawn_server(state).await;
+    let ch = channel(addr).await;
 
     let mut authz = AuthorizationServiceClient::new(ch);
     let err = authz
@@ -183,11 +145,11 @@ async fn grant_list_revoke_role_grant_lifecycle_over_grpc() {
     let ch = channel(addr).await;
 
     let admin_token = idp.bearer("grpc-authz-admin", Some("grpc-authz-admin@example.com"), "paigasus", 3600);
-    let admin_prn = self_principal_prn(ch.clone(), &admin_token).await;
-    seed_platform_admin(&state, Uuid::from_u128(9_101), &admin_prn).await;
+    let admin_prn = support::provision(&state, &admin_token).await;
+    support::seed_platform_admin(&state, &admin_prn).await;
 
     let member_token = idp.bearer("grpc-authz-member", Some("grpc-authz-member@example.com"), "paigasus", 3600);
-    let member_prn = self_principal_prn(ch.clone(), &member_token).await;
+    let member_prn = support::provision(&state, &member_token).await;
 
     let mut authz = AuthorizationServiceClient::new(ch);
 
@@ -255,10 +217,10 @@ async fn put_policy_over_grpc_is_permission_denied_for_a_non_admin() {
     };
     let idp = support::start_mock_idp().await;
     let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let token = idp.bearer("grpc-authz-nonadmin", Some("grpc-authz-nonadmin@example.com"), "paigasus", 3600);
+    support::provision(&state, &token).await;
     let (addr, server) = spawn_server(state).await;
     let ch = channel(addr).await;
-    let token = idp.bearer("grpc-authz-nonadmin", Some("grpc-authz-nonadmin@example.com"), "paigasus", 3600);
-    self_principal_prn(ch.clone(), &token).await;
 
     let mut authz = AuthorizationServiceClient::new(ch);
     let err = authz
@@ -293,8 +255,8 @@ async fn put_list_delete_policy_lifecycle_over_grpc() {
     let ch = channel(addr).await;
 
     let admin_token = idp.bearer("grpc-authz-policy-admin", Some("grpc-authz-policy-admin@example.com"), "paigasus", 3600);
-    let admin_prn = self_principal_prn(ch.clone(), &admin_token).await;
-    seed_platform_admin(&state, Uuid::from_u128(9_201), &admin_prn).await;
+    let admin_prn = support::provision(&state, &admin_token).await;
+    support::seed_platform_admin(&state, &admin_prn).await;
 
     let mut authz = AuthorizationServiceClient::new(ch);
     let source = r#"permit(principal, action == Pgs::Iam::Action::"GetOrganization", resource);"#.to_string();
@@ -376,8 +338,8 @@ async fn delete_policy_over_grpc_is_failed_precondition_for_a_system_policy() {
     let ch = channel(addr).await;
 
     let admin_token = idp.bearer("grpc-authz-policy-sys-admin", Some("grpc-authz-policy-sys-admin@example.com"), "paigasus", 3600);
-    let admin_prn = self_principal_prn(ch.clone(), &admin_token).await;
-    seed_platform_admin(&state, Uuid::from_u128(9_301), &admin_prn).await;
+    let admin_prn = support::provision(&state, &admin_token).await;
+    support::seed_platform_admin(&state, &admin_prn).await;
 
     let mut authz = AuthorizationServiceClient::new(ch);
 

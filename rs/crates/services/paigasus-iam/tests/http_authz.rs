@@ -7,57 +7,34 @@
 //! Drives the real `router(AppState::new(db, &cfg))` via `tower::ServiceExt::oneshot` — no
 //! listening socket — against an ephemeral Postgres (Docker; see `tests/support/mod.rs`).
 //!
-//! Every scenario needs the acting principal provisioned (a first authenticated call
-//! JIT-provisions it) and, for the admin-only scenarios, a `platform_admin` grant seeded
-//! directly through `AppState.role_grant_store` — `RoleService::grant`'s own anti-escalation
-//! check has no prior authority to authorize the very first grant against (mirrors
-//! `tests/authz_bootstrap.rs`'s bootstrap-grant pattern).
+//! Every scenario needs the acting principal provisioned and, for the admin-only scenarios,
+//! a `platform_admin` grant — `support::provision`/`support::seed_platform_admin` (SMA-444
+//! Task 20), bypassing `RoleService::grant`'s anti-escalation check (there is no prior
+//! authority to authorize the very first grant against). `self_principal_prn` below resolves
+//! the caller directly through `state.authn` rather than by driving a tenancy route (the
+//! pre-Task-20 `GET /v1/organizations` trigger is itself enforced now, so its OWN status
+//! would depend on a grant that doesn't exist yet at that point).
 
 mod support;
 
 use axum::Router;
 use axum::http::StatusCode;
-use chrono::Utc;
 use paigasus_iam::adapters::http::AppState;
 use paigasus_iam_core::authz::engine::DEFAULT_DENY_MARKER;
 use paigasus_iam_core::authz::model::root_prn;
-use paigasus_iam_core::{GrantScope, PrincipalId, RoleGrant};
-use paigasus_kernel::Prn;
 use serde_json::json;
-use support::{app_with_state, send};
-use uuid::Uuid;
+use support::{app_with_state, seed_platform_admin, send};
 
-/// Triggers JIT-provisioning of `token`'s own principal (ANY protected call does this
-/// regardless of the route's business logic — `require_bearer` resolves the caller before
-/// the handler ever runs) and then reads back its `principal_prn` via `POST
-/// /v1/authn/introspect` (unauthenticated, but `Provisioning::Disabled` — D10 — so it only
-/// succeeds once the principal already exists, which the prior call just ensured).
-async fn self_principal_prn(app: &Router, token: &str) -> String {
-    let (status, body) = send(app, "GET", "/v1/organizations", None, Some(token)).await;
-    assert_eq!(status, StatusCode::OK, "JIT-provisioning call failed: {body}");
-
+/// Resolves `token`'s principal directly through `state.authn` (SMA-444 Task 20's
+/// `support::provision`, inlined here since this file already threads `app`/`state`
+/// separately in most scenarios) and reads it back via `POST /v1/authn/introspect`
+/// (unauthenticated, but `Provisioning::Disabled` — D10 — so it only succeeds once the
+/// principal already exists, which the direct `resolve` call just ensured).
+async fn self_principal_prn(app: &Router, state: &AppState, token: &str) -> String {
+    support::provision(state, token).await;
     let (status, body) = send(app, "POST", "/v1/authn/introspect", Some(json!({"token": token})), None).await;
     assert_eq!(status, StatusCode::OK, "introspect failed: {body}");
     body["principal_prn"].as_str().expect("principal_prn").to_string()
-}
-
-/// Seeds a `platform_admin`-at-`Root` grant for `principal_prn` directly through
-/// `state.role_grant_store` — bypassing `RoleService::grant`'s anti-escalation authorize
-/// check (there is no prior authority to authorize the very first grant against). Sharing
-/// this exact store (rather than a freshly constructed one) matters: it bumps the same
-/// `Generations` counter `AppState`'s `CedarAuthorizer` reloads against, so the grant is
-/// visible to the very next decision (AC1) with no extra wait.
-async fn seed_platform_admin(state: &AppState, grant_id: Uuid, principal_prn: &str) {
-    let principal = PrincipalId::from_prn(Prn::parse(principal_prn).expect("valid principal prn"));
-    let grant = RoleGrant {
-        id: grant_id,
-        principal,
-        role_key: "platform_admin".to_string(),
-        scope: GrantScope::Root,
-        linked_policy_id: format!("grant:{grant_id}"),
-        created_at: Utc::now(),
-    };
-    state.role_grant_store.grant(&grant).await.expect("seed platform_admin grant");
 }
 
 #[tokio::test]
@@ -65,9 +42,9 @@ async fn is_authorized_self_query_returns_a_default_deny_decision_for_an_ungrant
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, _state, idp) = app_with_state(db).await;
+    let (app, state, idp) = app_with_state(db).await;
     let token = idp.bearer("alice", Some("alice@example.com"), "paigasus", 3600);
-    let principal_prn = self_principal_prn(&app, &token).await;
+    let principal_prn = self_principal_prn(&app, &state, &token).await;
 
     let (status, body) = send(
         &app,
@@ -93,11 +70,11 @@ async fn is_authorized_non_self_query_by_an_unauthorized_actor_is_forbidden() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, _state, idp) = app_with_state(db).await;
+    let (app, state, idp) = app_with_state(db).await;
     let actor_token = idp.bearer("bob", Some("bob@example.com"), "paigasus", 3600);
     let other_token = idp.bearer("carol", Some("carol@example.com"), "paigasus", 3600);
-    self_principal_prn(&app, &actor_token).await;
-    let other_prn = self_principal_prn(&app, &other_token).await;
+    self_principal_prn(&app, &state, &actor_token).await;
+    let other_prn = self_principal_prn(&app, &state, &other_token).await;
 
     let (status, body) = send(
         &app,
@@ -126,7 +103,7 @@ async fn put_policy_is_forbidden_for_a_non_admin_then_succeeds_once_platform_adm
     };
     let (app, state, idp) = app_with_state(db).await;
     let token = idp.bearer("dave", Some("dave@example.com"), "paigasus", 3600);
-    let principal_prn = self_principal_prn(&app, &token).await;
+    let principal_prn = self_principal_prn(&app, &state, &token).await;
 
     let policy_body = json!({
         "policy_id": "http-authz-test-policy",
@@ -138,7 +115,7 @@ async fn put_policy_is_forbidden_for_a_non_admin_then_succeeds_once_platform_adm
     let (status, body) = send(&app, "POST", "/v1/authz/policies", Some(policy_body.clone()), Some(token.as_str())).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 
-    seed_platform_admin(&state, Uuid::from_u128(1_001), &principal_prn).await;
+    seed_platform_admin(&state, &principal_prn).await;
 
     let (status, body) = send(&app, "POST", "/v1/authz/policies", Some(policy_body), Some(token.as_str())).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -162,11 +139,11 @@ async fn role_grant_lifecycle_over_http() {
     let (app, state, idp) = app_with_state(db).await;
 
     let admin_token = idp.bearer("erin", Some("erin@example.com"), "paigasus", 3600);
-    let admin_prn = self_principal_prn(&app, &admin_token).await;
-    seed_platform_admin(&state, Uuid::from_u128(1_002), &admin_prn).await;
+    let admin_prn = self_principal_prn(&app, &state, &admin_token).await;
+    seed_platform_admin(&state, &admin_prn).await;
 
     let member_token = idp.bearer("frank", Some("frank@example.com"), "paigasus", 3600);
-    let member_prn = self_principal_prn(&app, &member_token).await;
+    let member_prn = self_principal_prn(&app, &state, &member_token).await;
 
     // Grant: platform_admin at Root can grant anywhere, including Root itself.
     let (status, granted) = send(
@@ -208,9 +185,9 @@ async fn is_authorized_rejects_an_unknown_action_and_a_malformed_prn() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, _state, idp) = app_with_state(db).await;
+    let (app, state, idp) = app_with_state(db).await;
     let token = idp.bearer("grace", Some("grace@example.com"), "paigasus", 3600);
-    let principal_prn = self_principal_prn(&app, &token).await;
+    let principal_prn = self_principal_prn(&app, &state, &token).await;
 
     let (status, err) = send(
         &app,
