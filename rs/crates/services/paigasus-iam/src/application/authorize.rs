@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `Authorize`: the application-layer wrapper around the `Authorizer` port (ADR-0013) that
-//! every authz-aware use case (`RoleService`, `PolicyService`, and later Task 18/19's
-//! `IsAuthorized` query handler) calls through, rather than reaching for the shared
-//! `Arc<dyn Authorizer>` directly. `check` is the enforcement entry point: it collapses a
-//! `Decision` into a `Result`, mapping `Effect::Deny` onto the wire-stable
-//! `TenancyError::Forbidden` (SMA-444 task-16 brief: the 403 body never carries the denying
-//! policy id) while a genuine evaluation/backend failure from the authorizer itself surfaces
-//! as `TenancyError::Internal` via `From<AuthzError>` — a deny and an error are never
-//! conflated. `decide` is a thin passthrough for callers (the `IsAuthorized` query) that need
-//! the raw `Decision` (including `determining_policies`) rather than a collapsed
-//! allow/deny `Result`.
+//! every authz-aware use case (`RoleService`, `PolicyService`, and the `IsAuthorized` query
+//! handlers) calls through, rather than reaching for the shared `Arc<dyn Authorizer>`
+//! directly. `check` is the enforcement entry point: it collapses a `Decision` into a
+//! `Result`, mapping `Effect::Deny` onto the wire-stable `TenancyError::Forbidden` (SMA-444
+//! task-16 brief: the 403 body never carries the denying policy id) while a genuine
+//! evaluation/backend failure from the authorizer itself surfaces as `TenancyError::Internal`
+//! via `From<AuthzError>` — a deny and an error are never conflated. `decide` is a thin
+//! passthrough for callers that need the raw `Decision` (including `determining_policies`)
+//! rather than a collapsed allow/deny `Result`. `decide_gated` layers the `IsAuthorized`
+//! self/admin exposure rule on top of `decide` — see its own doc for the rule itself; both
+//! `adapters::http::authz::is_authorized` and `adapters::grpc::authz::AuthzGrpc::is_authorized`
+//! (SMA-444 Task 18/19) call it exclusively, so the two transports can never diverge.
 
 use crate::application::error::TenancyError;
 use paigasus_iam_core::{AccessRequest, Action, Authorizer, AuthzError, Decision, Effect, RequestContext};
@@ -52,10 +54,29 @@ impl Authorize {
         }
     }
 
-    /// Passthrough for the `IsAuthorized` query handler (Task 18/19 adds the self/admin
-    /// exposure rule on top of this): the raw `Decision`, not collapsed into a `Result<(), _>`.
+    /// Passthrough for callers that need the raw `Decision`, not collapsed into a
+    /// `Result<(), _>`. `decide_gated` is what the `IsAuthorized` query handlers actually
+    /// call; this stays public for `decide_gated`'s own self-query path and for tests.
     pub async fn decide(&self, req: &AccessRequest) -> Result<Decision, AuthzError> {
         self.authorizer.is_authorized(req).await
+    }
+
+    /// The `IsAuthorized` self/admin exposure rule (spec §9.2, SMA-444 Task 18/19), shared by
+    /// every transport so they can never diverge: `actor` may always ask about themselves
+    /// (`req.principal == actor`) and gets back the raw `Decision`. Asking about a DIFFERENT
+    /// principal requires `actor` to already hold `Action::ListRoleGrants` AT `req.resource`
+    /// — i.e. to already administer roles there. If that check denies,
+    /// `TenancyError::Forbidden` propagates BEFORE `req` is ever decided for the probed
+    /// principal — a caller who wasn't permitted to ask the question never sees a `Decision`
+    /// (whose `determining_policies` can carry `grant:<uuid>` ids) or even the `allowed` bit.
+    /// `adapters::http::authz::is_authorized` and `adapters::grpc::authz::AuthzGrpc::
+    /// is_authorized` both call ONLY this (never `decide` directly) to decide a wire
+    /// `IsAuthorized` request.
+    pub async fn decide_gated(&self, actor: &Prn, req: &AccessRequest) -> Result<Decision, TenancyError> {
+        if req.principal.canonical() != actor.canonical() {
+            self.check(actor, Action::ListRoleGrants, &req.resource).await?;
+        }
+        Ok(self.decide(req).await?)
     }
 }
 
@@ -102,6 +123,59 @@ mod tests {
             context: RequestContext::empty(),
         };
         let decision = authorize.decide(&req).await.unwrap();
+        assert_eq!(decision.effect, Effect::Allow);
+    }
+
+    #[tokio::test]
+    async fn decide_gated_self_query_never_consults_the_authorizer_for_the_gate() {
+        // Self is always visible — the default-deny fake never grants `ListRoleGrants`, so a
+        // gate check here would fail; the raw (denied) `Decision` for the query itself is
+        // still returned, not an error.
+        let authorize = Authorize::new(Arc::new(FakeAuthorizer::default()));
+        let actor = principal(1);
+        let req = AccessRequest {
+            principal: actor.clone(),
+            action: Action::ListOrganizations,
+            resource: root_prn(),
+            context: RequestContext::empty(),
+        };
+
+        let decision = authorize.decide_gated(&actor, &req).await.unwrap();
+        assert_eq!(decision.effect, Effect::Deny);
+    }
+
+    #[tokio::test]
+    async fn decide_gated_non_self_denies_without_list_role_grants_at_the_resource() {
+        let authorize = Authorize::new(Arc::new(FakeAuthorizer::default()));
+        let actor = principal(1);
+        let other = principal(2);
+        let req = AccessRequest {
+            principal: other,
+            action: Action::ListOrganizations,
+            resource: root_prn(),
+            context: RequestContext::empty(),
+        };
+
+        assert_eq!(authorize.decide_gated(&actor, &req).await.unwrap_err(), TenancyError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn decide_gated_non_self_succeeds_once_the_actor_holds_list_role_grants() {
+        let fake = FakeAuthorizer::default();
+        let resource = root_prn();
+        fake.allow(Action::ListRoleGrants, &resource);
+        fake.allow(Action::ListOrganizations, &resource);
+        let authorize = Authorize::new(Arc::new(fake));
+        let actor = principal(1);
+        let other = principal(2);
+        let req = AccessRequest {
+            principal: other,
+            action: Action::ListOrganizations,
+            resource,
+            context: RequestContext::empty(),
+        };
+
+        let decision = authorize.decide_gated(&actor, &req).await.unwrap();
         assert_eq!(decision.effect, Effect::Allow);
     }
 }

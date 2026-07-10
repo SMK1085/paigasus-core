@@ -5,11 +5,13 @@
 //! logic in this layer (task-16 brief).
 
 use chrono::{DateTime, Utc};
-use paigasus_iam_core::{AuthnError, MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, PrincipalContext, Project, RoleGrantRef, Team};
+use paigasus_iam_core::authz::model::PolicyKind;
+use paigasus_iam_core::{AuthnError, MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant, RoleGrantRef, Team};
 use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::common::v1::AuditMetadata;
 use paigasus_proto::paigasus::iam::v1::{
-    IntrospectResponse, Membership, NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Project as ProtoProject, RoleGrantRef as ProtoRoleGrantRef, Team as ProtoTeam,
+    IntrospectResponse, Membership, NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RoleGrant as ProtoRoleGrant,
+    RoleGrantRef as ProtoRoleGrantRef, Team as ProtoTeam,
 };
 use tonic::{Code, Status};
 use uuid::Uuid;
@@ -170,6 +172,36 @@ pub fn to_proto_role_grant_ref(r: &RoleGrantRef) -> ProtoRoleGrantRef {
     ProtoRoleGrantRef {
         scope_prn: r.scope_prn.clone(),
         role_key: r.role_key.clone(),
+    }
+}
+
+/// Projects an authored `PolicyDocument` into its wire `Policy` message (SMA-444 Task 19):
+/// `kind` as its stable lowercase string (mirrors `adapters::http::dto::PolicyDto`'s `From`
+/// impl) — `created_at`/`updated_at` have no proto field (the `Policy` message carries none,
+/// unlike `RoleGrantDto`'s HTTP-only `created_at`).
+pub fn to_proto_policy(doc: &PolicyDocument) -> ProtoPolicy {
+    ProtoPolicy {
+        policy_id: doc.policy_id.clone(),
+        kind: match doc.kind {
+            PolicyKind::Static => "static".to_string(),
+            PolicyKind::Template => "template".to_string(),
+        },
+        source: doc.source.clone(),
+        description: doc.description.clone(),
+        system: doc.system,
+    }
+}
+
+/// Projects a core `RoleGrant` into its wire `RoleGrant` message (SMA-444 Task 19):
+/// `principal_prn`/`scope_prn` as canonical PRN strings — mirrors
+/// `adapters::http::dto::RoleGrantDto`'s `From` impl, minus its HTTP-only `created_at` (the
+/// proto `RoleGrant` message carries no timestamp).
+pub fn to_proto_role_grant(g: &RoleGrant) -> ProtoRoleGrant {
+    ProtoRoleGrant {
+        id: g.id.to_string(),
+        principal_prn: g.principal.canonical(),
+        role_key: g.role_key.clone(),
+        scope_prn: g.scope.canonical_prn(),
     }
 }
 

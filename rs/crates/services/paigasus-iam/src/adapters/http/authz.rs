@@ -11,14 +11,16 @@
 //! self-authorized by the application services themselves (`PutPolicy`/`GrantRole` etc.).
 //!
 //! **`IsAuthorized` self/admin exposure rule (spec §9.2, challenge M6, as scoped for this
-//! task):** a caller may always ask about their OWN access — `request.principal_prn ==
-//! actor` — and gets back the full [`Decision`] (`allowed` + `determining_policies` +
-//! `reason`). Asking about a DIFFERENT principal requires the caller to already hold
-//! `Action::ListRoleGrants` on the target resource — i.e., to already administer roles
-//! there. If that check denies, the handler returns `403 Forbidden` and nothing else: a
-//! caller who wasn't permitted to ask the question never sees `determining_policies` (which
-//! can carry `grant:<uuid>` ids) or even the `allowed` bit — the 403 path never calls
-//! `Authorize::decide` for the probed principal at all.
+//! task):** enforced by [`Authorize::decide_gated`] — a caller may always ask about their
+//! OWN access — `request.principal_prn == actor` — and gets back the full [`Decision`]
+//! (`allowed` + `determining_policies` + `reason`). Asking about a DIFFERENT principal
+//! requires the caller to already hold `Action::ListRoleGrants` on the target resource —
+//! i.e., to already administer roles there. If that check denies, the handler returns `403
+//! Forbidden` and nothing else: a caller who wasn't permitted to ask the question never sees
+//! `determining_policies` (which can carry `grant:<uuid>` ids) or even the `allowed` bit —
+//! the 403 path never decides `req` for the probed principal at all. `decide_gated` lives on
+//! `Authorize` (not here) so the gRPC `IsAuthorized` surface (SMA-444 Task 19) calls the
+//! exact same rule and the two transports can never diverge.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -64,23 +66,17 @@ fn parse_policy_kind(raw: &str) -> Result<PolicyKind, TenancyError> {
     }
 }
 
-/// `POST /v1/authz/is-authorized`: see the module docs for the self/admin exposure rule.
+/// `POST /v1/authz/is-authorized`: see the module docs for the self/admin exposure rule
+/// (enforced by [`Authorize::decide_gated`]).
 async fn is_authorized(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Json(body): Json<IsAuthorizedBody>) -> Result<Json<IsAuthorizedResponseDto>, ApiError> {
     let actor = actor_prn(&ctx);
     let action = Action::parse(&body.action).ok_or_else(|| TenancyError::InvalidAction(body.action.clone()))?;
     let principal = parse_prn(&body.principal_prn)?;
     let resource = parse_prn(&body.resource_prn)?;
 
-    // Self/admin exposure rule — see module docs. A non-self caller who isn't authorized to
-    // administer roles at `resource` is rejected here, BEFORE `decide` (and therefore
-    // `determining_policies`) is ever computed for the probed principal.
-    if principal.canonical() != actor.canonical() {
-        s.authorize.check(&actor, Action::ListRoleGrants, &resource).await?;
-    }
-
     let context = RequestContext(body.context.into_iter().map(|(k, v)| (k, ContextValue::Str(v))).collect());
     let req = AccessRequest { principal, action, resource, context };
-    let decision = s.authorize.decide(&req).await?;
+    let decision = s.authorize.decide_gated(&actor, &req).await?;
 
     Ok(Json(IsAuthorizedResponseDto {
         allowed: decision.effect == Effect::Allow,
