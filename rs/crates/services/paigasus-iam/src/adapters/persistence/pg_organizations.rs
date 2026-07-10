@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Postgres-backed `OrganizationRepository` (SeaORM). Maps domain <-> entity models and
-//! backend errors into the core's `RepositoryError`.
+//! backend errors into the core's `RepositoryError`. Every successful `create`/`rename`/
+//! `set_status` bumps `entity_gen` via the shared `Generations` handle (spec §7/D11: "bumped
+//! on any tenancy mutation that can change a slice or `effective_status`") — best-effort: a
+//! bump failure is logged and swallowed, never surfaced, since the tenancy write already
+//! committed and must not be rolled back or reported as failed over a cache-invalidation
+//! hiccup (SMA-444 Task 15).
 
 use super::entities::{organization, team};
 use super::map_err;
+use crate::adapters::authz::Generations;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, PreconditionKind, RepositoryError, Slug, Team};
@@ -15,16 +21,27 @@ use uuid::Uuid;
 // `Clone` lets the composition root (`http::AppState::new`) hold a repo handle inside a
 // `#[derive(Clone)] OrganizationService` (generic-DI-by-value, mirroring `CreateUser`'s
 // Task 6 precedent) — cheap, since `DatabaseConnection` clones an `Arc`-backed pool handle,
-// not a connection.
+// not a connection, and `Generations` is `Arc`-backed too.
 #[derive(Clone)]
 pub struct PgOrganizationRepository {
     db: DatabaseConnection,
+    gens: Generations,
 }
 
 impl PgOrganizationRepository {
     #[must_use]
-    pub fn new(db: DatabaseConnection) -> Self {
-        PgOrganizationRepository { db }
+    pub fn new(db: DatabaseConnection, gens: Generations) -> Self {
+        PgOrganizationRepository { db, gens }
+    }
+
+    /// Best-effort `entity_gen` bump (spec §7/D11): logged and swallowed on error — a failed
+    /// cache-invalidation bump must never fail an already-committed tenancy write, it just
+    /// means the decision/slice caches self-heal on their next TTL expiry instead of
+    /// immediately.
+    async fn bump_entity_gen(&self) {
+        if let Err(err) = self.gens.bump_entity_gen().await {
+            tracing::warn!(error = %err, "pg_organizations: entity_gen bump failed after a committed write — authz caches may serve stale data until TTL");
+        }
     }
 }
 
@@ -96,6 +113,7 @@ impl OrganizationRepository for PgOrganizationRepository {
         team_to_model(default_team).insert(&txn).await.map_err(map_err)?;
 
         txn.commit().await.map_err(map_err)?;
+        self.bump_entity_gen().await;
         Ok(())
     }
 
@@ -140,6 +158,7 @@ impl OrganizationRepository for PgOrganizationRepository {
         let updated = active.update(&txn).await.map_err(map_err)?;
 
         txn.commit().await.map_err(map_err)?;
+        self.bump_entity_gen().await;
         Ok(org_view(model_to_org(updated)?))
     }
 
@@ -161,6 +180,7 @@ impl OrganizationRepository for PgOrganizationRepository {
         };
 
         txn.commit().await.map_err(map_err)?;
+        self.bump_entity_gen().await;
         Ok(org_view(model_to_org(final_model)?))
     }
 }

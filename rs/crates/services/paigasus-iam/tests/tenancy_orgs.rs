@@ -9,6 +9,7 @@
 
 mod support;
 
+use paigasus_iam::adapters::authz::Generations;
 use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::PgOrganizationRepository;
@@ -36,7 +37,7 @@ async fn create_is_transactional_and_provisions_default_team() {
     };
     let ids = KernelIdGenerator;
     let clock = SystemClock;
-    let repo = PgOrganizationRepository::new(db.clone());
+    let repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
 
     let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
     repo.create(&org, &default_team).await.unwrap();
@@ -70,7 +71,7 @@ async fn rename_and_lifecycle_contracts() {
     };
     let ids = KernelIdGenerator;
     let clock = SystemClock;
-    let repo = PgOrganizationRepository::new(db.clone());
+    let repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
 
     // rename missing id -> NotFound.
     let missing = repo.rename(Uuid::from_u128(999), None, Some("x"), clock.now()).await;
@@ -129,7 +130,7 @@ async fn list_orders_by_created_at_then_id() {
     };
     let ids = KernelIdGenerator;
     let clock = SystemClock;
-    let repo = PgOrganizationRepository::new(db.clone());
+    let repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
 
     // Three orgs, minted (and inserted) one at a time so `SystemClock`'s µs-truncated
     // `now()` calls land on distinct instants (real round-trips to Postgres between

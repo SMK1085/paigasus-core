@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use paigasus_iam::adapters::http::{AppState, serve_http};
+use paigasus_iam::adapters::http::{AUTHZ_POLICY_RELOAD_POLL_INTERVAL, AUTHZ_POLICY_SNAPSHOT_TTL, AppState, serve_http};
 use paigasus_iam::adapters::{grpc, persistence::Migrator};
 use paigasus_iam::config::IamConfig;
 use sea_orm::Database;
@@ -55,6 +55,21 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(anyhow::Error::from)
         });
+    }
+    {
+        // The policy-snapshot background reload (SMA-444 Task 15, spec §7/D11 AC3): bounds
+        // staleness even when `policy_gen` never visibly advances on this replica.
+        // `CedarAuthorizer::is_authorized` (`AppState::authz`) additionally reloads
+        // synchronously before every decision (AC1), so this loop only backstops
+        // cross-replica/background staleness. `spawn_reload` already `tokio::spawn`s its own
+        // task and hands back a `JoinHandle<()>`; wrapping that await in a `servers.spawn`
+        // makes it exit on the same shutdown-watch signal as the HTTP/gRPC server tasks,
+        // and surfaces a reload-task panic the same way a server-task panic would.
+        let mut rx = rx.clone();
+        let handle = state.snapshot().spawn_reload(AUTHZ_POLICY_SNAPSHOT_TTL, AUTHZ_POLICY_RELOAD_POLL_INTERVAL, async move {
+            let _ = rx.changed().await;
+        });
+        servers.spawn(async move { handle.await.map_err(anyhow::Error::from) });
     }
 
     tracing::info!(%config.http_addr, %config.grpc_addr, "paigasus-iam started");

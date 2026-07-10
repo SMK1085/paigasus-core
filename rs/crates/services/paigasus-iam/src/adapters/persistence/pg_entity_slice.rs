@@ -47,7 +47,7 @@ impl PgEntitySliceLoader {
     async fn load_chain(&self, node: TenancyNodeRef, root_uid: &(String, String)) -> Result<Vec<SliceEntity>, AuthzError> {
         match node {
             TenancyNodeRef::Organization(id) => {
-                let org_repo = PgOrganizationRepository::new(self.db.clone());
+                let org_repo = PgOrganizationRepository::new(self.db.clone(), self.gens.clone());
                 let view = org_repo.find(id.uuid()).await.map_err(backend)?.ok_or_else(|| missing("organization", id.uuid()))?;
 
                 Ok(vec![SliceEntity {
@@ -57,11 +57,11 @@ impl PgEntitySliceLoader {
                 }])
             }
             TenancyNodeRef::Team(id) => {
-                let team_repo = PgTeamRepository::new(self.db.clone());
+                let team_repo = PgTeamRepository::new(self.db.clone(), self.gens.clone());
                 let team_view = team_repo.find(id.uuid()).await.map_err(backend)?.ok_or_else(|| missing("team", id.uuid()))?;
 
                 let org_id = OrganizationId::from_uuid(id.org_uuid());
-                let org_repo = PgOrganizationRepository::new(self.db.clone());
+                let org_repo = PgOrganizationRepository::new(self.db.clone(), self.gens.clone());
                 let org_view = org_repo.find(org_id.uuid()).await.map_err(backend)?.ok_or_else(|| missing("organization", org_id.uuid()))?;
 
                 let org_uid = uid_pair(org_id.prn());
@@ -79,15 +79,15 @@ impl PgEntitySliceLoader {
                 ])
             }
             TenancyNodeRef::Project(id) => {
-                let project_repo = PgProjectRepository::new(self.db.clone());
+                let project_repo = PgProjectRepository::new(self.db.clone(), self.gens.clone());
                 let project_view = project_repo.find(id.uuid()).await.map_err(backend)?.ok_or_else(|| missing("project", id.uuid()))?;
                 let team_id = project_view.node.team_id;
 
-                let team_repo = PgTeamRepository::new(self.db.clone());
+                let team_repo = PgTeamRepository::new(self.db.clone(), self.gens.clone());
                 let team_view = team_repo.find(team_id.uuid()).await.map_err(backend)?.ok_or_else(|| missing("team", team_id.uuid()))?;
 
                 let org_id = OrganizationId::from_uuid(team_id.org_uuid());
-                let org_repo = PgOrganizationRepository::new(self.db.clone());
+                let org_repo = PgOrganizationRepository::new(self.db.clone(), self.gens.clone());
                 let org_view = org_repo.find(org_id.uuid()).await.map_err(backend)?.ok_or_else(|| missing("organization", org_id.uuid()))?;
 
                 let team_uid = uid_pair(team_id.prn());

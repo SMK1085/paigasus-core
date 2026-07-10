@@ -42,9 +42,9 @@ fn new_org_and_default_team(ids: &KernelIdGenerator, clock: &SystemClock, slug: 
 async fn seed_chain(db: &DatabaseConnection) -> (Organization, Team, Project) {
     let ids = KernelIdGenerator;
     let clock = SystemClock;
-    let org_repo = PgOrganizationRepository::new(db.clone());
-    let team_repo = PgTeamRepository::new(db.clone());
-    let project_repo = PgProjectRepository::new(db.clone());
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
+    let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
 
     let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
     org_repo.create(&org, &default_team).await.unwrap();
@@ -194,9 +194,10 @@ async fn authz_slice_archiving_the_org_flips_effective_status_on_the_whole_subtr
     };
     assert_eq!(find_entity(&before, &org_uid).attrs, effective_status_attrs("active"));
 
-    // Archive the org via the real repo (D1/D10's own invalidation path — Task 15 wires the
-    // entity_gen bump; this test only asserts the read side folds the new status).
-    let org_repo = PgOrganizationRepository::new(db.clone());
+    // Archive the org via the real repo (D1/D10's own invalidation path — Task 15's
+    // `entity_gen` bump is covered separately by `authz_entity_gen_bumps.rs`; this test only
+    // asserts the read side folds the new status).
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
     let clock = SystemClock;
     org_repo.set_status(org.id.uuid(), NodeStatus::Archived, clock.now()).await.unwrap();
 

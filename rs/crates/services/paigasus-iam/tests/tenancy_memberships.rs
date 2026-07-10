@@ -11,6 +11,7 @@
 mod support;
 
 use chrono::{DateTime, Duration, SubsecRound, Utc};
+use paigasus_iam::adapters::authz::Generations;
 use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::{PgMembershipRepository, PgOrganizationRepository, PgPrincipalRepository, PgProjectRepository, PgTeamRepository};
@@ -52,9 +53,9 @@ fn new_org_and_default_team(ids: &KernelIdGenerator, clock: &SystemClock, slug: 
 async fn seed_chain(db: &DatabaseConnection) -> (Organization, Team, Project) {
     let ids = KernelIdGenerator;
     let clock = SystemClock;
-    let org_repo = PgOrganizationRepository::new(db.clone());
-    let team_repo = PgTeamRepository::new(db.clone());
-    let project_repo = PgProjectRepository::new(db.clone());
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
+    let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
 
     let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
     org_repo.create(&org, &default_team).await.unwrap();
@@ -177,7 +178,7 @@ async fn attach_to_archived_team_is_node_archived() {
     let clock = SystemClock;
     let (_org, team, _project) = seed_chain(&db).await;
     let principal = seed_user(&db, 5).await;
-    let team_repo = PgTeamRepository::new(db.clone());
+    let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
     let repo = PgMembershipRepository::new(db.clone());
 
     team_repo.set_status(team.id.uuid(), NodeStatus::Archived, clock.now()).await.unwrap();

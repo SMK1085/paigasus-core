@@ -25,12 +25,15 @@ use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::adapters::authz::{CedarAuthorizer, Generations, GenerationsReader, MemoryDecisionCache, PolicySnapshot, TracingAuditSink};
 use crate::adapters::clock::SystemClock;
 use crate::adapters::id::KernelIdGenerator;
 use crate::adapters::oidc::jwks::{HttpJwksFetcher, InMemoryJwksCache, JwksProvider};
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
-use crate::adapters::persistence::{PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgPrincipalRepository, PgProjectRepository, PgTeamRepository};
+use crate::adapters::persistence::{
+    PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgPolicyStore, PgPrincipalRepository, PgProjectRepository, PgRoleGrantStore, PgTeamRepository,
+};
 use crate::application::authenticate_token::{AuthenticateToken, JitPolicy};
 use crate::application::create_user::CreateUser;
 use crate::application::memberships::MembershipService;
@@ -38,6 +41,7 @@ use crate::application::organizations::OrganizationService;
 use crate::application::projects::ProjectService;
 use crate::application::teams::TeamService;
 use crate::config::{IamConfig, JwksCacheBackend};
+use paigasus_iam_core::{AuditSink, DecisionCache, EntitySliceLoader, PolicyStore, RoleGrantStore};
 
 pub type OrgSvc = OrganizationService<PgOrganizationRepository, KernelIdGenerator, SystemClock>;
 pub type TeamSvc = TeamService<PgTeamRepository, KernelIdGenerator, SystemClock>;
@@ -81,6 +85,21 @@ pub type AuthnSvc = AuthenticateToken<WiredAuthenticator, PgExternalIdentityRepo
 /// rejects it before JSON parsing (spec H1).
 const INTROSPECT_BODY_OVERHEAD_BYTES: usize = 1024;
 
+/// Max staleness bound for the in-process [`PolicySnapshot`] (spec §7/D11 AC3): `main.rs`
+/// spawns [`PolicySnapshot::spawn_reload`] with this as its `ttl` — a forced, unconditional
+/// reload once this much time has passed since the last successful (re)load, even if
+/// `policy_gen` never visibly advanced on this replica (the `memory` backend under a change
+/// made through a different process). Hardcoded for now; a later task makes this
+/// config-driven (`authz.cache.*`, mirroring `authn.jwks_cache`).
+pub const AUTHZ_POLICY_SNAPSHOT_TTL: Duration = Duration::from_secs(30);
+
+/// Poll cadence for the same background reload loop: how often it checks whether
+/// `policy_gen` has advanced past the compiled snapshot's own generation. A `CedarAuthorizer`
+/// decision also reloads synchronously before deciding (AC1), so this interval only bounds
+/// cross-replica/background staleness, never same-replica visibility of a fresh grant.
+/// Hardcoded for now; see [`AUTHZ_POLICY_SNAPSHOT_TTL`].
+pub const AUTHZ_POLICY_RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: DatabaseConnection,
@@ -90,12 +109,30 @@ pub struct AppState {
     pub memberships: MembershipSvc,
     pub users: UserSvc,
     pub authn: AuthnSvc,
+    /// The `Authorizer` port's implementation (ADR-0013, SMA-444 Task 15) — `Arc`-shared
+    /// across every `AppState` clone (mirroring `WiredAuthenticator`'s posture) so every
+    /// HTTP/gRPC worker decides against the SAME in-process policy snapshot, decision cache,
+    /// and background reload task rather than a per-clone duplicate.
+    pub authz: Arc<CedarAuthorizer>,
+    /// The compiled-policy snapshot `authz` itself evaluates against — kept as its own field
+    /// (rather than only reachable through `authz`) so `main.rs` can spawn its background
+    /// reload task ([`PolicySnapshot::spawn_reload`]) without `CedarAuthorizer` needing to
+    /// expose its private internals.
+    snapshot: Arc<PolicySnapshot>,
     /// Route-level body cap for `POST /v1/authn/introspect` (H1): `max_token_bytes` +
     /// [`INTROSPECT_BODY_OVERHEAD_BYTES`], computed once at wiring time.
     pub introspect_body_limit: usize,
 }
 
 impl AppState {
+    /// The compiled-policy snapshot `self.authz` decides against — `main.rs` spawns its
+    /// background reload task (`PolicySnapshot::spawn_reload`) off this handle, exactly once
+    /// per process (every `AppState` clone shares the same underlying `Arc`).
+    #[must_use]
+    pub fn snapshot(&self) -> Arc<PolicySnapshot> {
+        self.snapshot.clone()
+    }
+
     /// Builds every tenancy service from `db` (each wired to its own Postgres repository —
     /// a cheap clone of the same connection pool handle — `KernelIdGenerator`, and
     /// `SystemClock`) plus the wired `AuthnSvc` from `cfg.authn`: the OIDC authenticator
@@ -103,12 +140,42 @@ impl AppState {
     /// per-issuer `JitPolicy`. Fails when the Redis JWKS cache is configured but
     /// unreachable (`RedisJwksCache::connect` is the async part) — `IamConfig::validate`
     /// has already guaranteed `redis_url` is present and every issuer parses.
+    ///
+    /// **Authorizer wiring (SMA-444 Task 15):** ONE shared [`Generations`] handle (the
+    /// `memory` backend — config-driven backend/TTL selection, mirroring `authn.jwks_cache`,
+    /// is a later task) feeds the authz Postgres stores (`PgPolicyStore`, `PgRoleGrantStore`,
+    /// `PgEntitySliceLoader`) AND the three tenancy repositories below, so a policy/grant
+    /// change bumps `policy_gen` and a tenancy structure/status change bumps `entity_gen` —
+    /// both observed by the SAME counters `CedarAuthorizer`'s decision cache keys off. The
+    /// initial [`PolicySnapshot`] build reads whatever the policy store currently holds; on a
+    /// fresh/unseeded database that's nothing, so `authz` default-denies until policies are
+    /// seeded (a later task) — expected, not a defect, here.
     pub async fn new(db: DatabaseConnection, cfg: &IamConfig) -> Result<AppState, AuthnError> {
-        let orgs = OrganizationService::new(PgOrganizationRepository::new(db.clone()), KernelIdGenerator, SystemClock);
-        let teams = TeamService::new(PgTeamRepository::new(db.clone()), KernelIdGenerator, SystemClock);
-        let projects = ProjectService::new(PgProjectRepository::new(db.clone()), PgTeamRepository::new(db.clone()), KernelIdGenerator, SystemClock);
+        let gens = Generations::memory();
+
+        let orgs = OrganizationService::new(PgOrganizationRepository::new(db.clone(), gens.clone()), KernelIdGenerator, SystemClock);
+        let teams = TeamService::new(PgTeamRepository::new(db.clone(), gens.clone()), KernelIdGenerator, SystemClock);
+        let projects = ProjectService::new(
+            PgProjectRepository::new(db.clone(), gens.clone()),
+            PgTeamRepository::new(db.clone(), gens.clone()),
+            KernelIdGenerator,
+            SystemClock,
+        );
         let memberships = MembershipService::new(PgMembershipRepository::new(db.clone()), KernelIdGenerator, SystemClock);
         let users = CreateUser::new(PgPrincipalRepository::new(db.clone()), KernelIdGenerator, SystemClock);
+
+        let policy_store: Arc<dyn PolicyStore> = Arc::new(PgPolicyStore::new(db.clone(), gens.clone()));
+        let role_grant_store: Arc<dyn RoleGrantStore> = Arc::new(PgRoleGrantStore::new(db.clone(), gens.clone()));
+        let snapshot = Arc::new(PolicySnapshot::new(policy_store, role_grant_store).await.map_err(|e| AuthnError::Backend(Box::new(e)))?);
+        let slices: Arc<dyn EntitySliceLoader> = Arc::new(PgEntitySliceLoader::new(db.clone(), gens.clone()));
+        let decisions: Arc<dyn DecisionCache> = Arc::new(MemoryDecisionCache::new());
+        let authz = Arc::new(CedarAuthorizer::new(
+            snapshot.clone(),
+            slices,
+            decisions,
+            Arc::new(gens.clone()) as Arc<dyn GenerationsReader>,
+            Arc::new(TracingAuditSink) as Arc<dyn AuditSink>,
+        ));
 
         let authn_cfg = &cfg.authn;
         if authn_cfg.accept_invalid_tls {
@@ -166,6 +233,8 @@ impl AppState {
             memberships,
             users,
             authn,
+            authz,
+            snapshot,
             introspect_body_limit: cfg.authn.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
         })
     }
