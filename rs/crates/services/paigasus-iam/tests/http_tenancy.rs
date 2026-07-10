@@ -63,16 +63,16 @@ async fn org_lifecycle_over_http() {
     assert_eq!(archived["status"], "archived");
     assert_eq!(archived["effective_status"], "archived");
 
-    // Restoring an ARCHIVED resource is itself denied by the `forbid-archived-writes`
-    // starter policy (spec §3.2, belt-and-braces over M1's guards): its write-action list is
-    // *derived* from `Action::is_write()`, which classifies every `Restore*` action as a
-    // write — so `resource.effective_status == "archived"` blocks `RestoreOrganization` on
-    // the very resource it targets, even for a seeded platform_admin (Cedar `forbid` always
-    // overrides `permit`). SMA-444 Task 20 wires this policy onto the real route for the
-    // first time — 403 `forbidden`, not the pre-enforcement 200.
-    let (status, err) = send(&app, "POST", &format!("/v1/organizations/{org_id}/restore"), None, Some(token.as_str())).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{err}");
-    assert_eq!(err["error"]["code"], "forbidden");
+    // Restoring an ARCHIVED resource succeeds: `RestoreOrganization` is deliberately exempt
+    // from the `forbid-archived-writes` starter policy's action list (`Action::is_write()`
+    // filtered further by `!Action::is_restore()`) — restoring is the one legitimate write on
+    // an archived node (its whole purpose), so the forbid must not fire on it. SMA-444 Task 20
+    // wires this policy onto the real route for the first time — 200, own + effective status
+    // flip back to active, not a 403 `forbidden`.
+    let (status, restored) = send(&app, "POST", &format!("/v1/organizations/{org_id}/restore"), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["status"], "active");
+    assert_eq!(restored["effective_status"], "active");
 
     // Unknown id -> 404 `not-found`.
     let (status, err) = send(&app, "GET", &format!("/v1/organizations/{}", Uuid::nil()), None, Some(token.as_str())).await;
@@ -157,13 +157,13 @@ async fn nested_team_and_project_creation_folds_effective_status() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{err}");
     assert_eq!(err["error"]["code"], "forbidden");
 
-    // Restoring the archived org is ALSO forbidden by the same policy (applied to
-    // `RestoreOrganization` itself, `org_lifecycle_over_http`'s own scenario) — archiving is
-    // one-way through the enforced API in this M3 slice, so this subtree has no path back to
-    // active; there is nothing further to assert on it.
-    let (status, err) = send(&app, "POST", &format!("/v1/organizations/{org_id}/restore"), None, Some(token.as_str())).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{err}");
-    assert_eq!(err["error"]["code"], "forbidden");
+    // Restoring the archived org succeeds (same exemption as `org_lifecycle_over_http`'s own
+    // scenario: `RestoreOrganization` is deliberately carved out of `forbid-archived-writes`)
+    // — 200, own + effective status flip back to active.
+    let (status, restored) = send(&app, "POST", &format!("/v1/organizations/{org_id}/restore"), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["status"], "active");
+    assert_eq!(restored["effective_status"], "active");
 }
 
 #[tokio::test]
@@ -192,4 +192,38 @@ async fn list_pagination_and_invalid_limit() {
     let (status, err) = send(&app, "GET", "/v1/organizations?limit=0", None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(err["error"]["code"], "invalid-pagination");
+}
+
+#[tokio::test]
+async fn create_team_and_list_teams_404_on_a_nonexistent_org() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("sweep-user", Some("sweep@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &token).await;
+
+    // `CreateTeam`/`ListTeams` authorize against the PARENT org's PRN. Before the fix, that
+    // PRN was built straight from the path's `org_id` uuid without first confirming the org
+    // exists, so a nonexistent org made the authorize call's entity-slice loader error out ->
+    // 500 (CreateTeam) / a bare empty 200 pre-enforcement (ListTeams). The handlers now fetch
+    // the org first (mirroring `CreateProject`/`ListProjects`'s team fetch), so a nonexistent
+    // org 404s BEFORE authorization ever runs — for even a seeded platform_admin, who is
+    // authorized for every action everywhere and so isn't itself the reason for the 404.
+    let unknown_org_id = Uuid::from_u128(0xdead_beef);
+
+    let (status, err) = send(
+        &app,
+        "POST",
+        &format!("/v1/organizations/{unknown_org_id}/teams"),
+        Some(json!({"slug": "eng", "name": "Engineering"})),
+        Some(token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{err}");
+    assert_eq!(err["error"]["code"], "not-found");
+
+    let (status, err) = send(&app, "GET", &format!("/v1/organizations/{unknown_org_id}/teams"), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{err}");
+    assert_eq!(err["error"]["code"], "not-found");
 }

@@ -112,6 +112,14 @@ impl Action {
         Action::ALL.iter().copied().find(|a| a.as_wire() == s)
     }
 
+    /// `true` for the three `Restore*` actions (`RestoreOrganization`/`RestoreTeam`/
+    /// `RestoreProject`); `false` for everything else. Restores are writes (see
+    /// [`Action::is_write`]) but are the one legitimate write on an archived resource — the
+    /// `forbid-archived-writes` starter policy (`super::roles`) excludes them via this method.
+    pub fn is_restore(&self) -> bool {
+        matches!(self, Action::RestoreOrganization | Action::RestoreTeam | Action::RestoreProject)
+    }
+
     /// `true` for mutating actions (Create/Rename/Archive/Restore/Attach/Detach/Put/
     /// Delete/Grant/Revoke); `false` for read-only Get/List actions. Exhaustive over
     /// every variant so a newly added action must be explicitly classified.
@@ -170,5 +178,19 @@ mod tests {
     fn write_classification() {
         assert!(Action::CreateTeam.is_write());
         assert!(!Action::GetTeam.is_write());
+    }
+    #[test]
+    fn restore_classification() {
+        assert!(Action::RestoreOrganization.is_restore());
+        assert!(Action::RestoreTeam.is_restore());
+        assert!(Action::RestoreProject.is_restore());
+        assert!(!Action::CreateTeam.is_restore());
+        assert!(!Action::ArchiveTeam.is_restore());
+        assert!(!Action::GetTeam.is_restore());
+        for a in Action::ALL {
+            if a.is_restore() {
+                assert!(a.is_write(), "{}: every restore action must also be a write", a.as_wire());
+            }
+        }
     }
 }

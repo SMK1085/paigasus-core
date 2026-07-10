@@ -19,9 +19,10 @@
 //! would silently hand the new action to every role unless whoever added the action remembered
 //! to add it to every exclusion list too — backwards for an authorization boundary. Only
 //! `forbid-archived-writes`'s action list is *derived* (`Action::ALL` filtered by
-//! `Action::is_write`, per the design's explicit instruction): that direction is safe because
-//! it's a `forbid`, so a missed action only weakens the belt-and-braces guard — it can never
-//! over-grant.
+//! `Action::is_write` and then `!Action::is_restore`, per the design's explicit instruction,
+//! with `Restore*` carved back out because restoring is the one legitimate write on an
+//! archived node): that direction is safe because it's a `forbid`, so a missed action only
+//! weakens the belt-and-braces guard — it can never over-grant.
 //!
 //! Action sets are derived from design §3.2's role table together with §9.4's action→resource
 //! binding table, using Cedar's `resource in ?resource` semantics (true iff `?resource` is
@@ -189,7 +190,8 @@ pub fn starter_policies() -> Vec<PolicyDocument> {
         policy_id: FORBID_ARCHIVED_WRITES_ID.to_string(),
         kind: PolicyKind::Static,
         source: forbid_archived_writes_source(),
-        description: "Forbid every write action on a resource whose effective_status is archived (belt-and-braces over M1's in-txn guards).".to_string(),
+        description: "Forbid every write action, except Restore*, on a resource whose effective_status is archived (belt-and-braces over M1's in-txn guards). Restores are exempt: restoring is the one legitimate write on an archived node — its whole purpose — and forbidding it here would make an archived node permanently un-restorable; M1's in-txn guards remain the real gate on restore ordering/validity."
+            .to_string(),
         system: true,
         created_at: now,
         updated_at: now,
@@ -206,12 +208,16 @@ pub fn starter_policies() -> Vec<PolicyDocument> {
     docs
 }
 
-/// `forbid(principal, action in [<every write action>], resource) when { resource has
-/// effective_status && resource.effective_status == "archived" };` — the write-action list is
-/// generated from [`Action::ALL`] filtered by [`Action::is_write`] so it can never drift from
-/// the action catalog (design §3.2).
+/// `forbid(principal, action in [<every write action except Restore*>], resource) when {
+/// resource has effective_status && resource.effective_status == "archived" };` — the
+/// action list is generated from [`Action::ALL`] filtered by [`Action::is_write`] and then
+/// [`Action::is_restore`] so it can never drift from the action catalog (design §3.2).
+/// `Restore*` actions are deliberately excluded: restoring is the one legitimate write on an
+/// archived resource (that's the whole point of restoring one), so forbidding it here would
+/// make an archived node permanently stuck — M1's in-txn guards remain the real gate on
+/// whether a given restore is valid/ordered correctly.
 fn forbid_archived_writes_source() -> String {
-    let write_actions = Action::ALL.iter().copied().filter(Action::is_write).collect::<Vec<_>>();
+    let write_actions = Action::ALL.iter().copied().filter(|a| a.is_write() && !a.is_restore()).collect::<Vec<_>>();
     let actions = action_refs(&write_actions);
     format!(r#"forbid(principal, action in [{actions}], resource) when {{ resource has effective_status && resource.effective_status == "archived" }};"#)
 }
@@ -421,11 +427,25 @@ mod tests {
                 expect: Effect::Deny,
             },
             Case {
-                name: "forbid-archived-writes denies a write on an archived project even for org_admin",
+                name: "forbid-archived-writes denies a non-restore write on an archived project even for org_admin",
                 grants: vec![grant(6, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
                 action: Action::RenameProject,
                 resource: uni.archived_project_in_o.prn().clone(),
                 expect: Effect::Deny,
+            },
+            Case {
+                name: "forbid-archived-writes does not fire on RestoreProject for an archived project: org_admin is allowed to restore it",
+                grants: vec![grant(19, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::RestoreProject,
+                resource: uni.archived_project_in_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "forbid-archived-writes does not fire on RestoreProject for an archived project: platform_admin is allowed to restore it",
+                grants: vec![grant(20, &uni.principal, "platform_admin", GrantScope::Root)],
+                action: Action::RestoreProject,
+                resource: uni.archived_project_in_o.prn().clone(),
+                expect: Effect::Allow,
             },
             // -- GrantRole as the requested action: which principals may perform GrantRole
             // itself (the use-case-layer anti-escalation check on *which* role a grant

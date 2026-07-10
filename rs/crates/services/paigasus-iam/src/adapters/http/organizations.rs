@@ -11,16 +11,19 @@
 //! (the pre-existing 404-on-unknown-id behavior, e.g. `org_lifecycle_over_http`) and
 //! authorize against its confirmed, stored PRN — never a caller-suppliable one — so an
 //! unauthorized caller never learns whether a forged id would otherwise 404 vs 403 before the
-//! authorization check runs against real data. `CreateTeam`/`ListTeams` authorize against the
-//! parent org's PRN, built directly from the path's `org_id` (no extra fetch needed — an
-//! `OrganizationId` PRN carries no other node's identity).
+//! authorization check runs against real data. `CreateTeam`/`ListTeams` mirror that same
+//! fetch-first pattern (mirroring `teams.rs`'s `CreateProject`/`ListProjects`): they fetch the
+//! *parent org* first (`s.orgs.get`) and authorize against its confirmed PRN — a PRN built
+//! directly from the path's bare `org_id` would resolve fine even for a nonexistent org (an
+//! `OrganizationId` PRN carries no other node's identity to validate), so the authorize call
+//! would reach the entity-slice loader with a dangling id and fail closed as an internal error
+//! rather than the expected `NotFound`/404.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use paigasus_iam_core::Action;
-use paigasus_iam_core::OrganizationId;
 use paigasus_iam_core::authz::model::root_prn;
 use uuid::Uuid;
 
@@ -100,7 +103,8 @@ async fn restore_org(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
 
 async fn create_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(org_id): Path<Uuid>, Json(b): Json<CreateNodeBody>) -> Result<(StatusCode, Json<TeamDto>), ApiError> {
     if ENFORCE_TENANCY {
-        s.authorize.check(&actor_prn(&ctx), Action::CreateTeam, OrganizationId::from_uuid(org_id).prn()).await?;
+        let org_view = s.orgs.get(org_id).await?;
+        s.authorize.check(&actor_prn(&ctx), Action::CreateTeam, org_view.node.id.prn()).await?;
     }
     let view = s.teams.create(org_id, &b.slug, &b.name).await?;
     Ok((StatusCode::CREATED, Json(view.into())))
@@ -108,7 +112,8 @@ async fn create_team(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
 
 async fn list_teams(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(org_id): Path<Uuid>, Query(q): Query<PageQuery>) -> Result<Json<Vec<TeamDto>>, ApiError> {
     if ENFORCE_TENANCY {
-        s.authorize.check(&actor_prn(&ctx), Action::ListTeams, OrganizationId::from_uuid(org_id).prn()).await?;
+        let org_view = s.orgs.get(org_id).await?;
+        s.authorize.check(&actor_prn(&ctx), Action::ListTeams, org_view.node.id.prn()).await?;
     }
     let page = Page::new(q.limit, q.offset)?;
     let teams = s.teams.list_by_org(org_id, page).await?;

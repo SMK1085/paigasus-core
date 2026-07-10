@@ -15,16 +15,20 @@
 //! ([`actor_context`]) before performing its operation, gated by
 //! `adapters::http::ENFORCE_TENANCY` — mirrors `adapters::http::{organizations,teams,
 //! projects,memberships}`'s fetch-then-authorize-then-act posture exactly (the same action
-//! to resource map, spec §9.4), so the two transports can never diverge. `CreateProject`/
-//! `ListProjects`/`AttachMembership`/`ListMemberships`(node-filtered) resolve their parent/
-//! target node by uuid through the owning service ([`resolve_node`]) rather than trusting the
-//! wire PRN's org slot directly — the existing forged-org-slot defense (this module's own
-//! stored-canonical recheck, and `MembershipService::attach`'s own `PrnMismatch` detection)
-//! still fires on the actual mutating call; this only keeps the AUTHORIZATION step itself
-//! from ever entity-slice-loading a claimed-but-nonexistent org.
+//! to resource map, spec §9.4), so the two transports can never diverge. `CreateTeam`/
+//! `ListTeams` fetch the parent org first (`orgs.get`); `CreateProject`/`ListProjects`/
+//! `AttachMembership`/`ListMemberships`(node-filtered) resolve their parent/target node by
+//! uuid through the owning service ([`resolve_node`]) — all rather than trusting the wire
+//! PRN's org slot directly (or building an unchecked PRN straight from a path/wire uuid),
+//! which would otherwise let a claimed-but-nonexistent parent reach the entity-slice loader
+//! and fail closed as an internal error instead of the expected `NotFound`. The existing
+//! forged-org-slot defense (this module's own stored-canonical recheck, and
+//! `MembershipService::attach`'s own `PrnMismatch` detection) still fires on the actual
+//! mutating call; this only keeps the AUTHORIZATION step itself from ever entity-slice-loading
+//! a claimed-but-nonexistent org.
 
 use paigasus_iam_core::authz::model::root_prn;
-use paigasus_iam_core::{Action, NodeStatus, NodeView, OrganizationId, TenancyNodeRef};
+use paigasus_iam_core::{Action, NodeStatus, NodeView, TenancyNodeRef};
 use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::iam::v1::list_memberships_request;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_server::TenancyService;
@@ -215,11 +219,13 @@ impl TenancyService for TenancyGrpc {
         let req = request.into_inner();
         let (org_id, _) = convert::node_uuid(&req.org_prn, "organization")?;
         if ENFORCE_TENANCY {
-            self.state
-                .authorize
-                .check(&actor, Action::CreateTeam, OrganizationId::from_uuid(org_id).prn())
-                .await
-                .map_err(convert::status_to_grpc)?;
+            // Resolved by uuid through `orgs.get` (not the wire `org_prn` string directly, and
+            // not a `OrganizationId::from_uuid` PRN built without confirming existence): a
+            // nonexistent org would otherwise reach the entity-slice loader with a dangling id
+            // and fail closed as an internal error rather than the expected `NotFound` — mirrors
+            // `create_project`/`list_projects`'s `teams.get` resolution below.
+            let org_view = self.state.orgs.get(org_id).await.map_err(convert::status_to_grpc)?;
+            self.state.authorize.check(&actor, Action::CreateTeam, org_view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
         }
         let view = self.state.teams.create(org_id, &req.slug, &req.name).await.map_err(convert::status_to_grpc)?;
         Ok(Response::new(CreateTeamResponse {
@@ -247,11 +253,8 @@ impl TenancyService for TenancyGrpc {
         let req = request.into_inner();
         let (org_id, _) = convert::node_uuid(&req.org_prn, "organization")?;
         if ENFORCE_TENANCY {
-            self.state
-                .authorize
-                .check(&actor, Action::ListTeams, OrganizationId::from_uuid(org_id).prn())
-                .await
-                .map_err(convert::status_to_grpc)?;
+            let org_view = self.state.orgs.get(org_id).await.map_err(convert::status_to_grpc)?;
+            self.state.authorize.check(&actor, Action::ListTeams, org_view.node.id.prn()).await.map_err(convert::status_to_grpc)?;
         }
         let page = convert::to_page(req.limit, req.offset).map_err(convert::status_to_grpc)?;
         let views = self.state.teams.list_by_org(org_id, page).await.map_err(convert::status_to_grpc)?;

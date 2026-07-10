@@ -251,18 +251,20 @@ async fn lowercase_bearer_scheme_is_accepted() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, idp) = support::app(db).await;
+    let (app, state, idp) = app_with_state(db).await;
 
     // RFC 7235 §2.1: the auth-scheme is case-insensitive, so `bearer <jwt>` must
-    // authenticate exactly like `Bearer <jwt>` (and JIT-provision on the way in). This only
-    // tests the AUTHENTICATION layer accepting the scheme — `!= UNAUTHORIZED` rather than
-    // the pre-SMA-444-Task-20 `== OK`, since `GET /v1/organizations` is now itself
-    // authorization-enforced (an unrelated, ungranted concern this test was never about);
-    // `protected_route_with_valid_token_succeeds_and_jit_provisions` below covers the
-    // authorized-write path.
+    // authenticate exactly like `Bearer <jwt>` (and JIT-provision on the way in).
+    // `GET /v1/organizations` (ListOrganizations) is now itself authorization-enforced
+    // (SMA-444 Task 20), so the already-resolved principal is seeded a `platform_admin`
+    // grant up front, mirroring `introspect_resolved_identity_returns_full_context`'s
+    // posture — that lets this test assert the precise `OK` the route actually returns,
+    // not merely `!= UNAUTHORIZED`.
     let token = idp.bearer("lowercase-bearer", Some("lower@example.com"), "paigasus", 3600);
+    let principal = state.authn.resolve(&token, Provisioning::Enabled).await.expect("resolve(Enabled) JIT-provisions");
+    seed_platform_admin(&state, &principal.principal_id.canonical()).await;
     let response = send_raw_parts(&app, "GET", "/v1/organizations", Some(&format!("bearer {token}")), None, None).await;
-    assert_ne!(response.status(), StatusCode::UNAUTHORIZED, "a lowercase bearer scheme must be accepted by authentication");
+    assert_eq!(response.status(), StatusCode::OK, "a lowercase bearer scheme must be accepted by authentication");
 }
 
 #[tokio::test]
