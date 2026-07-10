@@ -31,7 +31,6 @@ use paigasus_kernel::Prn;
 use uuid::Uuid;
 
 use super::AppState;
-use super::ENFORCE_TENANCY;
 use super::dto::{CreateMembershipBody, MembershipDto, MembershipQuery};
 use super::error::ApiError;
 use crate::adapters::auth::AuthContext;
@@ -66,7 +65,7 @@ async fn resolve_node(s: &AppState, node: &TenancyNodeRef) -> Result<Prn, Tenanc
 }
 
 async fn create_membership(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Json(b): Json<CreateMembershipBody>) -> Result<(StatusCode, Json<MembershipDto>), ApiError> {
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         let node = parse_node_prn(&b.node_prn)?;
         let resource = resolve_node(&s, &node).await?;
         s.authorize.check(&actor_prn(&ctx), Action::AttachMembership, &resource).await?;
@@ -81,7 +80,7 @@ async fn create_membership(State(s): State<AppState>, Extension(ctx): Extension<
 /// membership removes only itself. Detaching a nonexistent id is a 404, not
 /// an idempotent no-op.
 async fn delete_membership(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         let record = s.memberships.get(id).await?;
         let node_prn = Prn::parse(&record.node_prn).map_err(|e| TenancyError::InvalidPrn(e.kind().to_owned()))?;
         s.authorize.check(&actor_prn(&ctx), Action::DetachMembership, &node_prn).await?;
@@ -96,7 +95,7 @@ async fn list_memberships(State(s): State<AppState>, Extension(ctx): Extension<A
         (None, Some(node)) => MembershipFilter::Node(node),
         _ => return Err(ApiError(TenancyError::InvalidPrn("provide exactly one of principal|node".to_string()))),
     };
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         let resource = match &filter {
             MembershipFilter::Principal(_) => root_prn(),
             MembershipFilter::Node(raw) => resolve_node(&s, &parse_node_prn(raw)?).await?,

@@ -37,7 +37,7 @@ use p256::pkcs8::{EncodePrivateKey, LineEnding};
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::persistence::Migrator;
 use paigasus_iam::application::authenticate_token::Provisioning;
-use paigasus_iam::config::{AuthnConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig};
+use paigasus_iam::config::{AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig};
 use paigasus_iam_core::{GrantScope, OrganizationId, PrincipalId, RoleGrant, TenancyNodeRef};
 use paigasus_kernel::Prn;
 use sea_orm::{Database, DatabaseConnection};
@@ -253,6 +253,7 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
                 })
                 .collect(),
         },
+        authz: AuthzConfig::default(),
     }
 }
 
@@ -274,6 +275,16 @@ pub async fn app_with_state(db: DatabaseConnection) -> (Router, AppState, MockId
     let idp = start_mock_idp().await;
     let state = AppState::new(db, &test_config(&idp)).await.expect("AppState::new");
     (router(state.clone()), state, idp)
+}
+
+/// Like [`app_with_state`], but the caller supplies the `IamConfig` directly instead of
+/// getting `test_config(&idp)` — needed by tests that flip a config toggle away from the
+/// ordinary test defaults (e.g. `authz.enforce_tenancy = false`, SMA-444 Task 21). The caller
+/// still owns whichever `MockIdp` (if any) it wired into `cfg.authn.issuers`.
+#[allow(dead_code)]
+pub async fn app_with_config(db: DatabaseConnection, cfg: &IamConfig) -> (Router, AppState) {
+    let state = AppState::new(db, cfg).await.expect("AppState::new");
+    (router(state.clone()), state)
 }
 
 /// Lowest-level request driver: full control over the `Authorization` value, the

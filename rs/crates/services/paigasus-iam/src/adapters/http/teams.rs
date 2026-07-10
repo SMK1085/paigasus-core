@@ -19,7 +19,6 @@ use paigasus_iam_core::Action;
 use uuid::Uuid;
 
 use super::AppState;
-use super::ENFORCE_TENANCY;
 use super::dto::{CreateNodeBody, PageQuery, ProjectDto, RenameBody, TeamDto};
 use super::error::ApiError;
 use crate::adapters::auth::AuthContext;
@@ -39,14 +38,14 @@ fn actor_prn(ctx: &AuthContext) -> paigasus_kernel::Prn {
 
 async fn get_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<TeamDto>, ApiError> {
     let view = s.teams.get(id).await?;
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         s.authorize.check(&actor_prn(&ctx), Action::GetTeam, view.node.id.prn()).await?;
     }
     Ok(Json(view.into()))
 }
 
 async fn rename_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>, Json(b): Json<RenameBody>) -> Result<Json<TeamDto>, ApiError> {
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         let view = s.teams.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RenameTeam, view.node.id.prn()).await?;
     }
@@ -55,7 +54,7 @@ async fn rename_team(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
 }
 
 async fn archive_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<TeamDto>, ApiError> {
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         let view = s.teams.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::ArchiveTeam, view.node.id.prn()).await?;
     }
@@ -64,7 +63,7 @@ async fn archive_team(State(s): State<AppState>, Extension(ctx): Extension<AuthC
 }
 
 async fn restore_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<TeamDto>, ApiError> {
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         let view = s.teams.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RestoreTeam, view.node.id.prn()).await?;
     }
@@ -78,7 +77,7 @@ async fn create_project(
     Path(team_id): Path<Uuid>,
     Json(b): Json<CreateNodeBody>,
 ) -> Result<(StatusCode, Json<ProjectDto>), ApiError> {
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         let team_view = s.teams.get(team_id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::CreateProject, team_view.node.id.prn()).await?;
     }
@@ -87,7 +86,7 @@ async fn create_project(
 }
 
 async fn list_projects(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(team_id): Path<Uuid>, Query(q): Query<PageQuery>) -> Result<Json<Vec<ProjectDto>>, ApiError> {
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         let team_view = s.teams.get(team_id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::ListProjects, team_view.node.id.prn()).await?;
     }

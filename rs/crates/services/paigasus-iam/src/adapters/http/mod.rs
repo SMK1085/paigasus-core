@@ -20,6 +20,7 @@ mod users;
 use async_trait::async_trait;
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use paigasus_iam_core::{Authenticator, AuthnError, Authorizer, Issuer, ValidatedClaims};
+use redis::aio::ConnectionManager;
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde_json::json;
 use std::net::SocketAddr;
@@ -28,7 +29,7 @@ use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::adapters::authz::{CedarAuthorizer, Generations, GenerationsReader, MemoryDecisionCache, PolicySnapshot, TracingAuditSink};
+use crate::adapters::authz::{CedarAuthorizer, Generations, GenerationsReader, MemoryDecisionCache, PolicySnapshot, RedisDecisionCache, SliceCache, TracingAuditSink};
 use crate::adapters::clock::SystemClock;
 use crate::adapters::id::KernelIdGenerator;
 use crate::adapters::oidc::jwks::{HttpJwksFetcher, InMemoryJwksCache, JwksProvider};
@@ -47,7 +48,7 @@ use crate::application::policies::PolicyService;
 use crate::application::projects::ProjectService;
 use crate::application::roles::RoleService;
 use crate::application::teams::TeamService;
-use crate::config::{IamConfig, JwksCacheBackend};
+use crate::config::{AuthzCacheBackend, IamConfig, JwksCacheBackend};
 use paigasus_iam_core::{AuditSink, DecisionCache, EntitySliceLoader, PolicyStore, RoleGrantStore};
 
 pub type OrgSvc = OrganizationService<PgOrganizationRepository, KernelIdGenerator, SystemClock>;
@@ -96,28 +97,6 @@ pub type AuthnSvc = AuthenticateToken<WiredAuthenticator, PgExternalIdentityRepo
 /// rejects it before JSON parsing (spec H1).
 const INTROSPECT_BODY_OVERHEAD_BYTES: usize = 1024;
 
-/// Max staleness bound for the in-process [`PolicySnapshot`] (spec §7/D11 AC3): `main.rs`
-/// spawns [`PolicySnapshot::spawn_reload`] with this as its `ttl` — a forced, unconditional
-/// reload once this much time has passed since the last successful (re)load, even if
-/// `policy_gen` never visibly advanced on this replica (the `memory` backend under a change
-/// made through a different process). Hardcoded for now; a later task makes this
-/// config-driven (`authz.cache.*`, mirroring `authn.jwks_cache`).
-pub const AUTHZ_POLICY_SNAPSHOT_TTL: Duration = Duration::from_secs(30);
-
-/// Poll cadence for the same background reload loop: how often it checks whether
-/// `policy_gen` has advanced past the compiled snapshot's own generation. A `CedarAuthorizer`
-/// decision also reloads synchronously before deciding (AC1), so this interval only bounds
-/// cross-replica/background staleness, never same-replica visibility of a fresh grant.
-/// Hardcoded for now; see [`AUTHZ_POLICY_SNAPSHOT_TTL`].
-pub const AUTHZ_POLICY_RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Gates the SMA-444 Task 20 tenancy-retrofit enforcement (`organizations.rs`/`teams.rs`/
-/// `projects.rs`/`memberships.rs`, and their gRPC mirrors in `adapters::grpc::tenancy`): when
-/// `true`, every handler calls `AppState.authorize.check` before performing its operation and
-/// maps a deny to `TenancyError::Forbidden` (403 / `PermissionDenied`). Hardcoded `true` for
-/// now — a later task swaps this for the config-driven `authz.enforce_tenancy` (spec §11).
-pub const ENFORCE_TENANCY: bool = true;
-
 #[derive(Clone)]
 pub struct AppState {
     pub db: DatabaseConnection,
@@ -162,6 +141,12 @@ pub struct AppState {
     /// code should go through `roles`, never this; today it exists for integration-test
     /// seeding ahead of SMA-444 Task 21's config-driven bootstrap-admin seeding.
     pub role_grant_store: Arc<dyn RoleGrantStore>,
+    /// The SMA-444 Task 20 tenancy-retrofit enforcement toggle, config-driven from
+    /// `authz.enforce_tenancy` (Task 21 — replaces the old hardcoded `ENFORCE_TENANCY`
+    /// const): every tenancy handler (`organizations.rs`/`teams.rs`/`projects.rs`/
+    /// `memberships.rs`, and their gRPC mirrors in `adapters::grpc::tenancy`) reads this
+    /// field before deciding whether to call `AppState.authorize.check`.
+    pub enforce_tenancy: bool,
 }
 
 impl AppState {
@@ -181,18 +166,37 @@ impl AppState {
     /// unreachable (`RedisJwksCache::connect` is the async part) — `IamConfig::validate`
     /// has already guaranteed `redis_url` is present and every issuer parses.
     ///
-    /// **Authorizer wiring (SMA-444 Task 15):** ONE shared [`Generations`] handle (the
-    /// `memory` backend — config-driven backend/TTL selection, mirroring `authn.jwks_cache`,
-    /// is a later task) feeds the authz Postgres stores (`PgPolicyStore`, `PgRoleGrantStore`,
+    /// **Authorizer wiring (SMA-444 Task 15/21):** ONE shared [`Generations`] handle — the
+    /// `memory` backend, or a `redis` `ConnectionManager` selected by `authz.cache.backend`
+    /// (Task 21) — feeds the authz Postgres stores (`PgPolicyStore`, `PgRoleGrantStore`,
     /// `PgEntitySliceLoader`) AND the three tenancy repositories below, so a policy/grant
     /// change bumps `policy_gen` and a tenancy structure/status change bumps `entity_gen` —
-    /// both observed by the SAME counters `CedarAuthorizer`'s decision cache keys off. The
-    /// initial [`PolicySnapshot`] build reads whatever the policy store currently holds —
-    /// [`bootstrap::reconcile_starter`] (SMA-444 Task 17) runs first and seeds the starter
-    /// Cedar policy set + the system role catalog on a fresh/unseeded database, so the
-    /// initial snapshot always compiles at least that starter set, never an empty one.
+    /// both observed by the SAME counters `CedarAuthorizer`'s decision cache keys off. When
+    /// `redis` is configured, the SAME `ConnectionManager` (`redis_conn` below) also backs
+    /// the decision cache (`RedisDecisionCache`) and the entity-slice cache (`SliceCache`) —
+    /// one shared connection, not three independent ones. Fails fast (mirroring the JWKS
+    /// redis cache below) when redis is configured but unreachable — `IamConfig::validate`
+    /// has already guaranteed `redis_url` is present. The initial [`PolicySnapshot`] build
+    /// reads whatever the policy store currently holds — [`bootstrap::reconcile_starter`]
+    /// (SMA-444 Task 17) runs first and seeds the starter Cedar policy set + the system role
+    /// catalog on a fresh/unseeded database, so the initial snapshot always compiles at least
+    /// that starter set, never an empty one.
     pub async fn new(db: DatabaseConnection, cfg: &IamConfig) -> Result<AppState, AuthnError> {
-        let gens = Generations::memory();
+        let authz_cfg = &cfg.authz;
+        let (gens, redis_conn): (Generations, Option<ConnectionManager>) = match authz_cfg.cache.backend {
+            AuthzCacheBackend::Memory => (Generations::memory(), None),
+            AuthzCacheBackend::Redis => {
+                // `IamConfig::validate` rejects a redis backend without a URL at boot; a
+                // `None` here is a wiring defect, not an operator error.
+                let redis_url = authz_cfg
+                    .cache
+                    .redis_url
+                    .as_deref()
+                    .ok_or_else(|| AuthnError::Backend("authz.cache.backend = \"redis\" without redis_url (IamConfig::validate must run first)".into()))?;
+                let conn = connect_authz_redis(redis_url).await?;
+                (Generations::Redis(conn.clone()), Some(conn))
+            }
+        };
 
         let orgs = OrganizationService::new(PgOrganizationRepository::new(db.clone(), gens.clone()), KernelIdGenerator, SystemClock);
         let teams = TeamService::new(PgTeamRepository::new(db.clone(), gens.clone()), KernelIdGenerator, SystemClock);
@@ -213,8 +217,20 @@ impl AppState {
                 .await
                 .map_err(|e| AuthnError::Backend(Box::new(e)))?,
         );
-        let slices: Arc<dyn EntitySliceLoader> = Arc::new(PgEntitySliceLoader::new(db.clone(), gens.clone()));
-        let decisions: Arc<dyn DecisionCache> = Arc::new(MemoryDecisionCache::new());
+        // `slices`/`decisions` backend selection mirrors `gens` above: `memory` when no redis
+        // connection was opened, `redis` sharing `redis_conn` when one was (never a second,
+        // independent connection).
+        let slices: Arc<dyn EntitySliceLoader> = {
+            let pg_loader: Arc<dyn EntitySliceLoader> = Arc::new(PgEntitySliceLoader::new(db.clone(), gens.clone()));
+            match &redis_conn {
+                Some(conn) => Arc::new(SliceCache::from_connection(pg_loader, conn.clone(), authz_cfg.slice_cache_ttl_secs)) as Arc<dyn EntitySliceLoader>,
+                None => pg_loader,
+            }
+        };
+        let decisions: Arc<dyn DecisionCache> = match &redis_conn {
+            Some(conn) => Arc::new(RedisDecisionCache::from_connection(conn.clone(), authz_cfg.decision_cache_ttl_secs)),
+            None => Arc::new(MemoryDecisionCache::new()),
+        };
         let authz = Arc::new(CedarAuthorizer::new(
             snapshot.clone(),
             slices,
@@ -295,8 +311,17 @@ impl AppState {
             policies,
             authorize,
             role_grant_store,
+            enforce_tenancy: authz_cfg.enforce_tenancy,
         })
     }
+}
+
+/// Opens `redis_url` and wraps it in an auto-reconnecting `ConnectionManager` — the shared
+/// connection `AppState::new` hands to the redis-backed `Generations`/`RedisDecisionCache`/
+/// `SliceCache` (SMA-444 Task 21), mirroring `RedisJwksCache::connect`'s connect pattern.
+async fn connect_authz_redis(redis_url: &str) -> Result<ConnectionManager, AuthnError> {
+    let client = redis::Client::open(redis_url).map_err(|e| AuthnError::Backend(Box::new(e)))?;
+    ConnectionManager::new(client).await.map_err(|e| AuthnError::Backend(Box::new(e)))
 }
 
 /// Liveness only — stateless, so it is testable without a database.

@@ -30,7 +30,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::persistence::entities::user;
-use paigasus_iam::config::{AuthnConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig};
+use paigasus_iam::config::{AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -217,6 +217,7 @@ fn keycloak_config(issuer: &str) -> IamConfig {
                 jit_provisioning: true,
             }],
         },
+        authz: AuthzConfig::default(),
     }
 }
 

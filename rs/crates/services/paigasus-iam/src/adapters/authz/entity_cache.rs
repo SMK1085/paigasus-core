@@ -58,6 +58,14 @@ impl SliceCache {
         let conn = ConnectionManager::new(client).await.map_err(redis_connect_err)?;
         Ok(Self { inner, conn, ttl_secs })
     }
+
+    /// Wraps `inner` over an ALREADY-CONNECTED `ConnectionManager` (SMA-444 Task 21):
+    /// `AppState::new` shares ONE redis connection across the redis-backed `Generations` +
+    /// `RedisDecisionCache` + `SliceCache` rather than each opening its own — `connect` above
+    /// stays the standalone-caller/test entry point.
+    pub(crate) fn from_connection(inner: Arc<dyn EntitySliceLoader>, conn: ConnectionManager, ttl_secs: u64) -> Self {
+        Self { inner, conn, ttl_secs }
+    }
 }
 
 #[async_trait]

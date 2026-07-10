@@ -14,7 +14,6 @@ use paigasus_iam_core::Action;
 use uuid::Uuid;
 
 use super::AppState;
-use super::ENFORCE_TENANCY;
 use super::dto::{ProjectDto, RenameBody};
 use super::error::ApiError;
 use crate::adapters::auth::AuthContext;
@@ -32,14 +31,14 @@ fn actor_prn(ctx: &AuthContext) -> paigasus_kernel::Prn {
 
 async fn get_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<ProjectDto>, ApiError> {
     let view = s.projects.get(id).await?;
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         s.authorize.check(&actor_prn(&ctx), Action::GetProject, view.node.id.prn()).await?;
     }
     Ok(Json(view.into()))
 }
 
 async fn rename_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>, Json(b): Json<RenameBody>) -> Result<Json<ProjectDto>, ApiError> {
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         let view = s.projects.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RenameProject, view.node.id.prn()).await?;
     }
@@ -48,7 +47,7 @@ async fn rename_project(State(s): State<AppState>, Extension(ctx): Extension<Aut
 }
 
 async fn archive_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<ProjectDto>, ApiError> {
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         let view = s.projects.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::ArchiveProject, view.node.id.prn()).await?;
     }
@@ -57,7 +56,7 @@ async fn archive_project(State(s): State<AppState>, Extension(ctx): Extension<Au
 }
 
 async fn restore_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<ProjectDto>, ApiError> {
-    if ENFORCE_TENANCY {
+    if s.enforce_tenancy {
         let view = s.projects.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RestoreProject, view.node.id.prn()).await?;
     }
