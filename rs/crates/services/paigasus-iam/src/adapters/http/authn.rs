@@ -2,10 +2,12 @@
 
 //! Authn HTTP surface: `POST /v1/authn/introspect` plus the dedicated `AuthnError` →
 //! response funnel (spec §6.3, D12). This funnel is deliberately SEPARATE from the tenancy
-//! `ApiError`/`ErrorClass` machinery — that path can only express 400/404/409/500, while
-//! authn needs 401 (+ `WWW-Authenticate`), 403 subcodes, and 503. Bodies reuse the same
-//! `{"error":{code,message}}` envelope; every message is STATIC per code — no claim
-//! values, token fragments, or upstream error text ever reach the response (spec §6.3).
+//! `ApiError`/`ErrorClass` machinery — that path expresses 400/404/409/500 plus a single
+//! generic 403 (`forbidden`, SMA-444 task-16), while authn needs 401 (+ `WWW-Authenticate`),
+//! several DISTINCT 403 subcodes (`identity_not_provisioned`/`provisioning_failed`/
+//! `principal_inactive`), and 503. Bodies reuse the same `{"error":{code,message}}`
+//! envelope; every message is STATIC per code — no claim values, token fragments, or
+//! upstream error text ever reach the response (spec §6.3).
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, FromRequest, Request, State};

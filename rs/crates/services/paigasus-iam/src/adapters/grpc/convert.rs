@@ -28,6 +28,7 @@ pub fn status_to_grpc(e: TenancyError) -> Status {
         ErrorClass::NotFound => Code::NotFound,
         ErrorClass::Conflict => Code::AlreadyExists,
         ErrorClass::Precondition => Code::FailedPrecondition,
+        ErrorClass::Forbidden => Code::PermissionDenied,
         ErrorClass::Internal => {
             tracing::error!(error = %e, code = e.code(), "internal error handling gRPC request");
             Code::Internal
@@ -185,5 +186,25 @@ pub fn to_introspect_response(ctx: &PrincipalContext) -> IntrospectResponse {
         expires_at: Some(ts(ctx.principal.expires_at)),
         memberships: ctx.memberships.iter().map(to_proto_membership).collect(),
         role_grants: ctx.role_grants.iter().map(to_proto_role_grant_ref).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forbidden_maps_to_permission_denied() {
+        let status = status_to_grpc(TenancyError::Forbidden);
+        assert_eq!(status.code(), Code::PermissionDenied);
+        // Message stays "{code}: {display}", and `Forbidden`'s Display is static (SMA-444
+        // task-16 brief) — no denying-policy detail ever reaches the wire.
+        assert_eq!(status.message(), "forbidden: access denied");
+    }
+
+    #[test]
+    fn not_found_maps_to_grpc_not_found() {
+        let status = status_to_grpc(TenancyError::NotFound);
+        assert_eq!(status.code(), Code::NotFound);
     }
 }

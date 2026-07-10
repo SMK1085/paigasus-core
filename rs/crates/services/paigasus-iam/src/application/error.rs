@@ -11,6 +11,7 @@ pub enum ErrorClass {
     NotFound,
     Conflict,
     Precondition,
+    Forbidden,
     Internal,
 }
 
@@ -45,6 +46,12 @@ pub enum TenancyError {
     NodeArchived,
     #[error("principal is not a member of the organization")]
     MissingOrgMembership,
+    /// Cedar denied the request (or the caller lacks a matching grant). The message is
+    /// deliberately STATIC — never interpolated with the denying policy id or resource
+    /// detail; that detail belongs in the audit log / `IsAuthorized` response for
+    /// authorized callers, never in a 403 wire body (SMA-444 task-16 brief).
+    #[error("access denied")]
+    Forbidden,
     #[error("internal server error")]
     Internal,
 }
@@ -67,6 +74,7 @@ impl TenancyError {
             Self::ParentArchived => "parent-archived",
             Self::NodeArchived => "node-archived",
             Self::MissingOrgMembership => "missing-org-membership",
+            Self::Forbidden => "forbidden",
             Self::Internal => "internal",
         }
     }
@@ -78,6 +86,7 @@ impl TenancyError {
             Self::NotFound => ErrorClass::NotFound,
             Self::SlugConflict | Self::DuplicateMembership | Self::EmailConflict => ErrorClass::Conflict,
             Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership => ErrorClass::Precondition,
+            Self::Forbidden => ErrorClass::Forbidden,
             Self::Internal => ErrorClass::Internal,
         }
     }
@@ -129,6 +138,7 @@ mod tests {
     fn every_code_is_kebab_and_stable() {
         assert_eq!(TenancyError::SlugConflict.code(), "slug-conflict");
         assert_eq!(TenancyError::MissingOrgMembership.code(), "missing-org-membership");
+        assert_eq!(TenancyError::Forbidden.code(), "forbidden");
         assert_eq!(TenancyError::from(RepositoryError::Conflict(ConflictKind::Other)).code(), "internal");
     }
 
@@ -138,7 +148,15 @@ mod tests {
         assert_eq!(TenancyError::NotFound.class(), ErrorClass::NotFound);
         assert_eq!(TenancyError::InvalidEmail("test".to_string()).class(), ErrorClass::Validation);
         assert_eq!(TenancyError::ParentArchived.class(), ErrorClass::Precondition);
+        assert_eq!(TenancyError::Forbidden.class(), ErrorClass::Forbidden);
         assert_eq!(TenancyError::Internal.class(), ErrorClass::Internal);
+    }
+
+    #[test]
+    fn forbidden_message_is_static_and_generic() {
+        // The Display never carries interpolated data (mirrors `Internal`, D7-style
+        // contract) — the denying policy id belongs in the audit log, not the wire body.
+        assert_eq!(TenancyError::Forbidden.to_string(), "access denied");
     }
 
     #[test]
