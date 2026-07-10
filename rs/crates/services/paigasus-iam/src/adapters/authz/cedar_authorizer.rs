@@ -13,20 +13,31 @@
 //!    `Err` (e.g. a transient store hiccup) is logged and swallowed: reload failures never
 //!    fail a decision, they just mean this call evaluates against the last-known-good
 //!    snapshot.
-//! 2. Read both generation counters via [`GenerationsReader`] to build the decision-cache
-//!    key. If EITHER read errors (the Redis-backed counters are unreachable), the cache is
-//!    bypassed entirely for this call — no key, no `get`, no `put` — and evaluation proceeds
-//!    unconditionally (D11/D12's fail-open property: an accelerator outage costs latency,
-//!    never correctness). If both succeed and the key is already cached, that cached
+//! 2. Read the current compiled-policy snapshot via [`PolicySnapshot::current`] — a cheap,
+//!    in-memory `Arc` clone that never errors. Its `r#gen` is the authoritative policy
+//!    generation THIS call will evaluate against, and it is the ONLY source of the
+//!    decision-cache key's policy component: it is never re-derived from a second,
+//!    independently-timed [`GenerationsReader::policy_gen`] read. That second read used to
+//!    be able to observe a concurrent policy bump the just-taken snapshot predates, minting
+//!    a decision-cache key one generation NEWER than the policy set actually evaluated —
+//!    caching a decision under the wrong generation until TTL. Deriving the key's policy
+//!    component from `compiled.r#gen` itself closes that window: key and evaluated policy
+//!    set are always the same generation, by construction.
+//! 3. Read the entity generation counter via [`GenerationsReader::entity_gen`] to complete
+//!    the decision-cache key. If it errors (the Redis-backed counter is unreachable), the
+//!    cache is bypassed entirely for this call — no key, no `get`, no `put` — and evaluation
+//!    proceeds unconditionally (D11/D12's fail-open property: an accelerator outage costs
+//!    latency, never correctness). If it succeeds and the key is already cached, that cached
 //!    [`Decision`] is returned immediately WITHOUT touching the audit sink again — the
 //!    original miss that populated the cache already recorded the one audit event for this
 //!    exact question.
-//! 3. On a miss (or a bypassed cache), the authoritative path: load the current compiled
-//!    policies, load the [`EntitySlice`] for `(resource, principal)`, and decide via
-//!    [`PolicyEngine::decide`]. A slice-load error is propagated — it's a real failure (the
-//!    request can't be decided at all), never swallowed.
-//! 4. Record one [`AuthzDecisionEvent`] via the injected [`AuditSink`].
-//! 5. Best-effort populate the decision cache (only if step 2 computed a key).
+//! 4. On a miss (or a bypassed cache), the authoritative path: load the [`EntitySlice`] for
+//!    `(resource, principal)` and decide via [`PolicyEngine::decide`] against the SAME
+//!    compiled snapshot read in step 2 (never a second `snapshot.current()` read). A
+//!    slice-load error is propagated — it's a real failure (the request can't be decided at
+//!    all), never swallowed.
+//! 5. Record one [`AuthzDecisionEvent`] via the injected [`AuditSink`].
+//! 6. Best-effort populate the decision cache (only if step 3 computed a key).
 //!
 //! **Timestamps:** [`AuthzDecisionEvent::at`] is stamped with `chrono::Utc::now()` directly
 //! rather than through an injected `Clock` port. `CedarAuthorizer` doesn't otherwise need a
@@ -94,15 +105,18 @@ impl CedarAuthorizer {
         }
     }
 
-    /// Reads both generation counters and computes the decision-cache key iff BOTH succeed
-    /// (D11/D12 fail-open): a lone error on either counter (a Redis outage) is logged and
-    /// mapped to `None` — the caller then skips the cache entirely for this call rather than
-    /// caching under a partial/guessed key.
-    async fn cache_key(&self, req: &AccessRequest) -> Option<String> {
-        match (self.gens.policy_gen().await, self.gens.entity_gen().await) {
-            (Ok(policy_gen), Ok(entity_gen)) => Some(decision_key(policy_gen, entity_gen, req)),
-            _ => {
-                tracing::warn!("cedar_authorizer: generation counters unreadable — bypassing the decision cache for this call (fail-open, D11/D12)");
+    /// Reads the entity generation counter and completes the decision-cache key iff it
+    /// succeeds (D11/D12 fail-open): an error (a Redis outage) is logged and mapped to
+    /// `None` — the caller then skips the cache entirely for this call rather than caching
+    /// under a partial/guessed key. `policy_gen` is deliberately NOT read here (nor anywhere
+    /// else in this module) — the key's policy component is always `compiled_gen`, the
+    /// `r#gen` of the exact [`CompiledPolicies`] snapshot the caller evaluated, so the key
+    /// and the evaluated policy set can never drift apart.
+    async fn cache_key(&self, compiled_gen: u64, req: &AccessRequest) -> Option<String> {
+        match self.gens.entity_gen().await {
+            Ok(entity_gen) => Some(decision_key(compiled_gen, entity_gen, req)),
+            Err(err) => {
+                tracing::warn!(error = %err, "cedar_authorizer: entity generation counter unreadable — bypassing the decision cache for this call (fail-open, D11/D12)");
                 None
             }
         }
@@ -119,8 +133,15 @@ impl Authorizer for CedarAuthorizer {
             tracing::warn!(error = %err, "cedar_authorizer: policy snapshot reload_if_stale failed — deciding against the last-known-good snapshot");
         }
 
-        // Step 2: fail-open cache lookup.
-        let cache_key = self.cache_key(req).await;
+        // Step 2: read the snapshot that will actually be evaluated FIRST. `compiled.r#gen`
+        // is the authoritative policy generation this call decides against, and it's the
+        // source of the decision-cache key's policy component below — never a second,
+        // independently-timed `Generations::policy_gen()` read.
+        let compiled = self.snapshot.current().await;
+
+        // Step 3: fail-open cache lookup, keyed off `compiled.r#gen` (not a fresh
+        // `policy_gen()` read) plus the entity generation.
+        let cache_key = self.cache_key(compiled.r#gen, req).await;
         if let Some(key) = &cache_key
             && let Some(cached) = self.decisions.get(key).await
         {
@@ -129,12 +150,14 @@ impl Authorizer for CedarAuthorizer {
             return Ok(cached);
         }
 
-        // Step 3: the authoritative path — always runs on a miss OR a bypassed cache.
-        let compiled = self.snapshot.current().await;
+        // Step 4: the authoritative path — always runs on a miss OR a bypassed cache. Uses
+        // the SAME `compiled` snapshot read in step 2, so the policy set evaluated here can
+        // never be a different generation than the one the cache key (step 3) was minted
+        // from.
         let slice = self.slices.load(&req.resource, &req.principal).await?;
         let decision = PolicyEngine::decide(&compiled.policy_set, &slice, req);
 
-        // Step 4: audit every decision this method actually computes (never on a cache hit).
+        // Step 5: audit every decision this method actually computes (never on a cache hit).
         let event = AuthzDecisionEvent {
             principal_prn: req.principal.canonical(),
             action: req.action.as_wire().to_string(),
@@ -145,7 +168,7 @@ impl Authorizer for CedarAuthorizer {
         };
         self.audit.record(&event).await;
 
-        // Step 5: best-effort populate the cache (only if step 2 minted a key).
+        // Step 6: best-effort populate the cache (only if step 3 minted a key).
         if let Some(key) = cache_key {
             self.decisions.put(&key, &decision).await;
         }
@@ -398,6 +421,37 @@ mod tests {
         }
     }
 
+    /// A `GenerationsReader` fake whose `policy_gen()` returns a DIFFERENT value on every
+    /// single call (as if a policy bump landed in the window between every read), while
+    /// `entity_gen()` stays stable. This exists to prove the cache-key generation-drift fix:
+    /// `is_authorized` must never call `policy_gen()` at all, deriving the key's policy
+    /// component solely from the evaluated `CompiledPolicies::r#gen`. If `is_authorized`
+    /// still read `policy_gen()` to mint the key (the pre-fix behavior), two back-to-back
+    /// identical calls against an unchanged snapshot would mint two different keys and the
+    /// decision cache would never hit.
+    struct DriftingPolicyGenerations {
+        policy_gen_calls: AtomicUsize,
+    }
+
+    impl DriftingPolicyGenerations {
+        fn new() -> Self {
+            Self {
+                policy_gen_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl GenerationsReader for DriftingPolicyGenerations {
+        async fn policy_gen(&self) -> Result<u64, AuthzError> {
+            Ok(self.policy_gen_calls.fetch_add(1, Ordering::SeqCst) as u64)
+        }
+
+        async fn entity_gen(&self) -> Result<u64, AuthzError> {
+            Ok(0)
+        }
+    }
+
     fn base_request(fx: &Fixture, action: Action) -> AccessRequest {
         AccessRequest {
             principal: fx.principal.clone(),
@@ -548,6 +602,48 @@ mod tests {
             "the cache must never be consulted when the generations read failed — every call re-evaluates"
         );
         assert_eq!(audit.events.lock().unwrap().len(), 2, "both (uncached) decisions are audited");
+    }
+
+    /// Regression test for the cache-key generation-drift bug this fix closes: the
+    /// decision-cache key's policy component must come from `compiled.r#gen` (the exact
+    /// `PolicySnapshot` generation actually evaluated), never from a second,
+    /// independently-timed `GenerationsReader::policy_gen()` read. `DriftingPolicyGenerations`
+    /// returns a different `policy_gen()` value on every call while the compiled snapshot
+    /// never changes here (no grant/bump happens in this test) — if `is_authorized` still
+    /// read `policy_gen()` to mint the key, that would manifest as a permanent cache miss (a
+    /// fresh key every call, so the slice loader re-runs); with the fix, the key is stable
+    /// across calls at an unchanged snapshot generation, so the second call hits.
+    #[tokio::test]
+    async fn decision_cache_key_uses_the_evaluated_snapshot_gen_not_a_live_policy_gen_read() {
+        let fx = fixture();
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("snapshot builds"));
+        let slices = Arc::new(FixtureSliceLoader::new(fx.slice.clone()));
+        let audit = Arc::new(CapturingAuditSink::default());
+
+        let authorizer = CedarAuthorizer::new(
+            snapshot,
+            slices.clone() as Arc<dyn EntitySliceLoader>,
+            Arc::new(MemoryDecisionCache::new()) as Arc<dyn DecisionCache>,
+            Arc::new(DriftingPolicyGenerations::new()) as Arc<dyn GenerationsReader>,
+            audit.clone() as Arc<dyn AuditSink>,
+        );
+
+        let req = base_request(&fx, Action::GetProject);
+
+        let first = authorizer.is_authorized(&req).await.expect("first call succeeds");
+        let second = authorizer.is_authorized(&req).await.expect("second call succeeds");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            slices.calls.load(Ordering::SeqCst),
+            1,
+            "the cache key must stay stable across calls at an unchanged snapshot generation \
+             even though this fake's policy_gen() drifts on every call — proving the key is \
+             never derived from a live policy_gen() read"
+        );
+        assert_eq!(audit.events.lock().unwrap().len(), 1, "a cache hit must not double-audit");
     }
 
     #[tokio::test]
