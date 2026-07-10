@@ -255,9 +255,20 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
 /// `tower::ServiceExt::oneshot` HTTP tests, plus the mock IdP handle to mint tokens with.
 #[allow(dead_code)]
 pub async fn app(db: DatabaseConnection) -> (Router, MockIdp) {
+    let (router, _state, idp) = app_with_state(db).await;
+    (router, idp)
+}
+
+/// Like [`app`], but also hands back the `AppState` itself — needed by tests that must reach
+/// a raw store directly (e.g. `tests/http_authz.rs` seeding a bootstrap `platform_admin`
+/// role-grant through `AppState.role_grant_store`, bypassing `RoleService::grant`'s
+/// anti-escalation check — there is necessarily no prior authority to authorize the very
+/// first grant against, ahead of SMA-444 Task 21's config-driven bootstrap-admin seeding).
+#[allow(dead_code)]
+pub async fn app_with_state(db: DatabaseConnection) -> (Router, AppState, MockIdp) {
     let idp = start_mock_idp().await;
     let state = AppState::new(db, &test_config(&idp)).await.expect("AppState::new");
-    (router(state), idp)
+    (router(state.clone()), state, idp)
 }
 
 /// Lowest-level request driver: full control over the `Authorization` value, the

@@ -69,6 +69,11 @@ pub enum TenancyError {
     /// (`AuthzError::PolicyParse`/`SchemaValidation`/`TemplateLink`, SMA-444 Task 17).
     #[error("invalid policy: {0}")]
     PolicyInvalid(String),
+    /// `POST /v1/authz/is-authorized`'s `action` field didn't name a known `Action` variant
+    /// (`Action::parse` returned `None`, SMA-444 Task 18) — a client error, not an authz
+    /// decision, so it's a 400 rather than a `Deny`.
+    #[error("unknown action: {0}")]
+    InvalidAction(String),
     #[error("internal server error")]
     Internal,
 }
@@ -96,6 +101,7 @@ impl TenancyError {
             Self::InvalidScope(_) => "invalid-scope",
             Self::SystemImmutable(_) => "system-immutable",
             Self::PolicyInvalid(_) => "policy-invalid",
+            Self::InvalidAction(_) => "invalid-action",
             Self::Internal => "internal",
         }
     }
@@ -112,7 +118,8 @@ impl TenancyError {
             | Self::NothingToRename
             | Self::UnknownRole(_)
             | Self::InvalidScope(_)
-            | Self::PolicyInvalid(_) => ErrorClass::Validation,
+            | Self::PolicyInvalid(_)
+            | Self::InvalidAction(_) => ErrorClass::Validation,
             Self::NotFound => ErrorClass::NotFound,
             Self::SlugConflict | Self::DuplicateMembership | Self::EmailConflict => ErrorClass::Conflict,
             Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership | Self::SystemImmutable(_) => ErrorClass::Precondition,
@@ -200,6 +207,12 @@ mod tests {
         assert_eq!(TenancyError::InvalidScope("x".to_string()).class(), ErrorClass::Validation);
         assert_eq!(TenancyError::PolicyInvalid("x".to_string()).class(), ErrorClass::Validation);
         assert_eq!(TenancyError::SystemImmutable("x".to_string()).class(), ErrorClass::Precondition);
+        assert_eq!(TenancyError::InvalidAction("x".to_string()).class(), ErrorClass::Validation);
+    }
+
+    #[test]
+    fn invalid_action_code_is_stable() {
+        assert_eq!(TenancyError::InvalidAction("Bogus".to_string()).code(), "invalid-action");
     }
 
     #[test]

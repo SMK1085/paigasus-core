@@ -352,10 +352,10 @@ async fn key_rotation_validates_tokens_signed_with_the_new_key() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
-/// Every `/v1` route the tenancy sub-routers expose (organizations/teams/projects/
-/// memberships/users), paired with its method — the enumeration mirrors
-/// `src/adapters/http/{organizations,teams,projects,memberships,users}.rs` route tables
-/// exactly. When adding a new /v1 route, it must appear here — this test converts
+/// Every `/v1` route the tenancy + authz sub-routers expose (organizations/teams/projects/
+/// memberships/users/authz), paired with its method — the enumeration mirrors
+/// `src/adapters/http/{organizations,teams,projects,memberships,users,authz}.rs` route
+/// tables exactly. When adding a new /v1 route, it must appear here — this test converts
 /// default-open HTTP routing into a tested invariant (final-review Important 3).
 #[tokio::test]
 async fn every_protected_v1_route_requires_bearer() {
@@ -393,6 +393,14 @@ async fn every_protected_v1_route_requires_bearer() {
         ("DELETE", format!("/v1/memberships/{id}")),
         // users.rs
         ("POST", "/v1/users".to_string()),
+        // authz.rs
+        ("POST", "/v1/authz/is-authorized".to_string()),
+        ("POST", "/v1/authz/policies".to_string()),
+        ("GET", "/v1/authz/policies".to_string()),
+        ("DELETE", "/v1/authz/policies/some-policy-id".to_string()),
+        ("POST", "/v1/authz/role-grants".to_string()),
+        ("GET", "/v1/authz/role-grants".to_string()),
+        ("DELETE", format!("/v1/authz/role-grants/{id}")),
     ];
 
     for (method, path) in &protected_routes {

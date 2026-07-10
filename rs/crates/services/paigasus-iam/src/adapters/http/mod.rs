@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! axum HTTP surface: `/healthz` (liveness), `/readyz` (DB-backed readiness), the
-//! `/v1` tenancy API (organizations/teams/projects/memberships/users, ADR-0014), and the
-//! authn introspection endpoint (`/v1/authn/introspect`, SMA-443).
+//! `/v1` tenancy API (organizations/teams/projects/memberships/users, ADR-0014), the
+//! authn introspection endpoint (`/v1/authn/introspect`, SMA-443), and the `/v1/authz`
+//! authorization API (`is-authorized`/policies/role-grants, SMA-444 Task 18).
 
 pub mod auth_middleware;
 pub mod authn;
+mod authz;
 pub mod dto;
 pub mod error;
 mod memberships;
@@ -16,7 +18,7 @@ mod users;
 
 use async_trait::async_trait;
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
-use paigasus_iam_core::{Authenticator, AuthnError, Issuer, ValidatedClaims};
+use paigasus_iam_core::{Authenticator, AuthnError, Authorizer, Issuer, ValidatedClaims};
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde_json::json;
 use std::net::SocketAddr;
@@ -35,11 +37,14 @@ use crate::adapters::persistence::{
     PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgPolicyStore, PgPrincipalRepository, PgProjectRepository, PgRoleGrantStore, PgTeamRepository,
 };
 use crate::application::authenticate_token::{AuthenticateToken, JitPolicy};
+use crate::application::authorize::Authorize;
 use crate::application::bootstrap;
 use crate::application::create_user::CreateUser;
 use crate::application::memberships::MembershipService;
 use crate::application::organizations::OrganizationService;
+use crate::application::policies::PolicyService;
 use crate::application::projects::ProjectService;
+use crate::application::roles::RoleService;
 use crate::application::teams::TeamService;
 use crate::config::{IamConfig, JwksCacheBackend};
 use paigasus_iam_core::{AuditSink, DecisionCache, EntitySliceLoader, PolicyStore, RoleGrantStore};
@@ -49,6 +54,10 @@ pub type TeamSvc = TeamService<PgTeamRepository, KernelIdGenerator, SystemClock>
 pub type ProjectSvc = ProjectService<PgProjectRepository, PgTeamRepository, KernelIdGenerator, SystemClock>;
 pub type MembershipSvc = MembershipService<PgMembershipRepository, KernelIdGenerator, SystemClock>;
 pub type UserSvc = CreateUser<PgPrincipalRepository, KernelIdGenerator, SystemClock>;
+/// The `RoleGrant` CRUD use case (SMA-444 Task 18), wired over the same `Arc<dyn
+/// RoleGrantStore>` `AppState.role_grant_store` holds — mirrors every other `*Svc` alias's
+/// `KernelIdGenerator`/`SystemClock` DI posture.
+pub type RoleSvc = RoleService<KernelIdGenerator, SystemClock>;
 
 /// The OIDC authenticator over the in-process JWKS cache (the `memory` backend, D2).
 pub type Oidc = OidcAuthenticator<HttpJwksFetcher, InMemoryJwksCache, SystemClock>;
@@ -123,6 +132,28 @@ pub struct AppState {
     /// Route-level body cap for `POST /v1/authn/introspect` (H1): `max_token_bytes` +
     /// [`INTROSPECT_BODY_OVERHEAD_BYTES`], computed once at wiring time.
     pub introspect_body_limit: usize,
+    /// Role-grant CRUD use case (SMA-444 Task 18) — the `/v1/authz/role-grants` HTTP routes
+    /// call through this, mirroring `orgs`/`teams`/etc.'s posture.
+    pub roles: RoleSvc,
+    /// Policy/template CRUD use case — the `/v1/authz/policies` HTTP routes call through
+    /// this.
+    pub policies: PolicyService,
+    /// The same `Authorize` wrapper `roles`/`policies` embed internally, exposed directly for
+    /// the `POST /v1/authz/is-authorized` handler: it needs `Authorize::check` for the
+    /// self/admin exposure rule's authorization side-check AND `Authorize::decide` for the
+    /// raw `Decision` (`roles`/`policies` only ever need the collapsed `check`).
+    pub authorize: Authorize,
+    /// The same `Arc<dyn RoleGrantStore>` `roles` wraps internally, exposed directly so a
+    /// caller can seed a grant bypassing `RoleService::grant`'s anti-escalation check — there
+    /// is necessarily no prior authority to authorize the very first grant against (mirrors
+    /// `tests/authz_bootstrap.rs`'s bootstrap-grant pattern). Sharing THIS exact store (not a
+    /// freshly constructed one) matters: `PgRoleGrantStore::grant` bumps `policy_gen` via the
+    /// `Generations` handle embedded in `AppState::new`'s `gens` — a grant seeded through a
+    /// different store instance would bump a different, unobserved counter and never become
+    /// visible to `authz`'s `PolicySnapshot::reload_if_stale` (AC1). Production HTTP/gRPC
+    /// code should go through `roles`, never this; today it exists for integration-test
+    /// seeding ahead of SMA-444 Task 21's config-driven bootstrap-admin seeding.
+    pub role_grant_store: Arc<dyn RoleGrantStore>,
 }
 
 impl AppState {
@@ -169,7 +200,11 @@ impl AppState {
         let policy_store: Arc<dyn PolicyStore> = Arc::new(PgPolicyStore::new(db.clone(), gens.clone()));
         let role_grant_store: Arc<dyn RoleGrantStore> = Arc::new(PgRoleGrantStore::new(db.clone(), gens.clone()));
         bootstrap::reconcile_starter(policy_store.as_ref(), &db).await.map_err(|e| AuthnError::Backend(Box::new(e)))?;
-        let snapshot = Arc::new(PolicySnapshot::new(policy_store, role_grant_store).await.map_err(|e| AuthnError::Backend(Box::new(e)))?);
+        let snapshot = Arc::new(
+            PolicySnapshot::new(policy_store.clone(), role_grant_store.clone())
+                .await
+                .map_err(|e| AuthnError::Backend(Box::new(e)))?,
+        );
         let slices: Arc<dyn EntitySliceLoader> = Arc::new(PgEntitySliceLoader::new(db.clone(), gens.clone()));
         let decisions: Arc<dyn DecisionCache> = Arc::new(MemoryDecisionCache::new());
         let authz = Arc::new(CedarAuthorizer::new(
@@ -179,6 +214,15 @@ impl AppState {
             Arc::new(gens.clone()) as Arc<dyn GenerationsReader>,
             Arc::new(TracingAuditSink) as Arc<dyn AuditSink>,
         ));
+
+        // Application-layer authz use cases (SMA-444 Task 18): all three share the ONE
+        // `Arc<CedarAuthorizer>` built above (via `Authorize`), and `roles`/`policies` share
+        // the exact `policy_store`/`role_grant_store` handles the snapshot itself reads from
+        // — so a grant/policy change made through these use cases bumps the same `gens`
+        // counter `authz`'s `PolicySnapshot::reload_if_stale` polls (AC1).
+        let authorize = Authorize::new(authz.clone() as Arc<dyn Authorizer>);
+        let roles = RoleService::new(role_grant_store.clone(), authorize.clone(), KernelIdGenerator, SystemClock);
+        let policies = PolicyService::new(policy_store.clone(), authorize.clone());
 
         let authn_cfg = &cfg.authn;
         if authn_cfg.accept_invalid_tls {
@@ -239,6 +283,10 @@ impl AppState {
             authz,
             snapshot,
             introspect_body_limit: cfg.authn.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
+            roles,
+            policies,
+            authorize,
+            role_grant_store,
         })
     }
 }
@@ -261,6 +309,7 @@ pub fn router(state: AppState) -> Router {
         .merge(projects::router())
         .merge(memberships::router())
         .merge(users::router())
+        .merge(authz::router())
         // `route_layer` (not `layer`): the enforcement covers exactly the routes defined
         // above and never the merged-in `/healthz`/`/readyz`/introspect or the 404 fallback.
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware::require_bearer))
