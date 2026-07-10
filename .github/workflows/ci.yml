@@ -20,6 +20,13 @@ jobs:
     name: moon ci
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # cedar-policy + its crypto/parser tree (SMA-444) balloons the debug `target/` past even
+    # the reclaimed headroom below → `rustc-LLVM ERROR: ... No space left on device` mid-link
+    # of the paigasus-iam test binaries. Trim debug info to line tables (panic line numbers are
+    # retained) for the CI build+test profiles only — local dev builds keep full debuginfo.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       # The hosted runner's ~14 GB free root disk is exhausted by this repo's Rust target
       # + restored caches + testcontainers images (Postgres/Redis/Keycloak since SMA-443)
