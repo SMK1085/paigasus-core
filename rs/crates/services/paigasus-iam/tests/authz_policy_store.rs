@@ -201,6 +201,37 @@ async fn delete_of_an_unknown_policy_id_is_a_noop() {
     assert_eq!(store.policy_gen().await.unwrap(), before);
 }
 
+/// Boot-reliability fix (SMA-444 Task 17 review finding): `PgPolicyStore::put`'s existence
+/// check and its INSERT aren't atomic, so two replicas booting concurrently against a
+/// fresh, unseeded database can both observe `existing == None` for the same starter
+/// `policy_id` and both attempt to insert it — the loser must hit a unique-constraint
+/// violation and absorb it as an idempotent success (mirroring
+/// `bootstrap.rs::seed_role_row`), not fail its replica's `AppState::new`.
+///
+/// Drives two `PgPolicyStore` handles that share the same underlying connection pool
+/// (`DatabaseConnection` clones an `Arc`-backed pool handle, so this is a REAL race over
+/// the network, not a simulation) at the exact same, previously-absent `policy_id` via
+/// `tokio::join!`. Both `put` calls must return `Ok(())` — one takes the genuine INSERT
+/// path, the other absorbs the resulting unique-constraint violation — and exactly one row
+/// must exist afterward.
+#[tokio::test]
+async fn concurrent_put_of_the_same_new_policy_id_is_idempotent_not_a_conflict() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    let store_a = PgPolicyStore::new(db.clone(), Generations::memory());
+    let store_b = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = valid_static_doc("racing-policy", false, now);
+
+    let (result_a, result_b) = tokio::join!(store_a.put(&doc), store_b.put(&doc));
+    assert!(result_a.is_ok(), "first racer must not fail: {result_a:?}");
+    assert!(result_b.is_ok(), "second racer must not fail — the unique-violation loser must absorb, not error: {result_b:?}");
+
+    let all = store_a.list_all().await.unwrap();
+    let matches: Vec<_> = all.iter().filter(|d| d.policy_id == "racing-policy").collect();
+    assert_eq!(matches.len(), 1, "exactly one row must exist after the race, not zero or two: {matches:?}");
+}
+
 #[tokio::test]
 async fn list_all_returns_every_inserted_row() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };

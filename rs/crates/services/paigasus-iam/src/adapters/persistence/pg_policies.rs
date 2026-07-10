@@ -7,7 +7,10 @@
 //! of an already-persisted system row are. `list_all` reads every row in one REPEATABLE
 //! READ transaction so a concurrent write can't tear the snapshot (spec §6.2 challenge
 //! MINOR). Every successful mutation bumps `policy_gen` via the shared `Generations`
-//! handle (spec §7/D11: "bumped on any policy CRUD or role grant/revoke").
+//! handle (spec §7/D11: "bumped on any policy CRUD or role grant/revoke"). `put`'s INSERT
+//! branch absorbs a unique-constraint violation as an idempotent success (a concurrent
+//! cold-boot `reconcile_starter` race between replicas, Task 17 follow-up), mirroring
+//! `bootstrap.rs::seed_role_row` — see the inline comment on that branch.
 
 use super::entities::policy;
 use crate::adapters::authz::Generations;
@@ -16,7 +19,7 @@ use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
 use paigasus_iam_core::authz::schema::validate_policy;
 use paigasus_iam_core::{AuthzError, PolicyDocument, PolicyStore};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, DbErr, EntityTrait, IsolationLevel, QuerySelect, Set, TransactionTrait};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, DbErr, EntityTrait, IsolationLevel, QuerySelect, Set, SqlErr, TransactionTrait};
 
 // `Clone` lets the composition root hold a store handle inside a `#[derive(Clone))]`
 // service (mirrors `PgOrganizationRepository`'s precedent) — cheap: `DatabaseConnection`
@@ -122,7 +125,30 @@ impl PolicyStore for PgPolicyStore {
             }
             None => {
                 let active = doc_to_model(doc, doc.created_at);
-                active.insert(&txn).await.map_err(map_err)?;
+                if let Err(e) = active.insert(&txn).await {
+                    // Our existence check (`existing == None`) and this INSERT aren't
+                    // atomic: two replicas can both see an absent row and both attempt to
+                    // insert the same `policy_id` (the cold-boot `reconcile_starter` race,
+                    // SMA-444 Task 17, against a fresh/unseeded DB). The loser hits the
+                    // primary-key/unique constraint here — the row exists either way, so
+                    // the upsert intent ("this policy_id is present") is satisfied; absorb
+                    // it as an idempotent success, mirroring
+                    // `bootstrap.rs::seed_role_row`'s `SqlErr::UniqueConstraintViolation`
+                    // absorption. Any OTHER `DbErr` still propagates as `Backend`.
+                    //
+                    // The failed INSERT has already aborted this Postgres transaction, so
+                    // it must be rolled back, not committed (an aborted txn can't commit) —
+                    // there is nothing of ours left to persist. We also skip the
+                    // `bump_policy_gen` below: the winning writer's own `put` call already
+                    // bumped it for this row's creation, so bumping again here would just
+                    // be a redundant cache-invalidation signal for a change we didn't make.
+                    return if matches!(e.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
+                        txn.rollback().await.map_err(map_err)?;
+                        Ok(())
+                    } else {
+                        Err(map_err(e))
+                    };
+                }
             }
         }
 
