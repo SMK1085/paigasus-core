@@ -9,6 +9,7 @@
 
 mod support;
 
+use paigasus_iam::adapters::authz::Generations;
 use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::PgOrganizationRepository;
@@ -36,10 +37,12 @@ async fn create_is_transactional_and_provisions_default_team() {
     };
     let ids = KernelIdGenerator;
     let clock = SystemClock;
-    let repo = PgOrganizationRepository::new(db.clone());
+    let repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let owner = ids.new_principal_id();
 
     let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
-    repo.create(&org, &default_team).await.unwrap();
+    let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
+    repo.create(&org, &default_team, &grant).await.unwrap();
 
     // Both rows exist: the org row via the repo's own `find`, the team row via a direct
     // entity query (the repo has no team-lookup method yet — that's Task 11).
@@ -53,7 +56,8 @@ async fn create_is_transactional_and_provisions_default_team() {
     // A second org with the same slug must fail atomically: Conflict(SlugTaken), AND no
     // orphan team row is left behind for the failed org's auto-provisioned default team.
     let (org2, default_team2) = new_org_and_default_team(&ids, &clock, "acme", "Acme Duplicate");
-    let result = repo.create(&org2, &default_team2).await;
+    let grant2 = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org2.id).await;
+    let result = repo.create(&org2, &default_team2, &grant2).await;
     assert!(
         matches!(result, Err(RepositoryError::Conflict(ConflictKind::SlugTaken))),
         "expected Conflict(SlugTaken), got {result:?}"
@@ -70,14 +74,16 @@ async fn rename_and_lifecycle_contracts() {
     };
     let ids = KernelIdGenerator;
     let clock = SystemClock;
-    let repo = PgOrganizationRepository::new(db.clone());
+    let repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let owner = ids.new_principal_id();
 
     // rename missing id -> NotFound.
     let missing = repo.rename(Uuid::from_u128(999), None, Some("x"), clock.now()).await;
     assert!(matches!(missing, Err(RepositoryError::NotFound)), "expected NotFound, got {missing:?}");
 
     let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
-    repo.create(&org, &default_team).await.unwrap();
+    let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
+    repo.create(&org, &default_team, &grant).await.unwrap();
     let id = org.id.uuid();
     let created_at = org.updated_at;
 
@@ -108,7 +114,8 @@ async fn rename_and_lifecycle_contracts() {
 
     // rename slug to another org's slug -> Conflict(SlugTaken).
     let (other_org, other_default_team) = new_org_and_default_team(&ids, &clock, "other", "Other Corp.");
-    repo.create(&other_org, &other_default_team).await.unwrap();
+    let other_grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &other_org.id).await;
+    repo.create(&other_org, &other_default_team, &other_grant).await.unwrap();
 
     let slug_conflict = repo.rename(id, Some(&Slug::parse("other").unwrap()), None, clock.now()).await;
     assert!(
@@ -129,7 +136,8 @@ async fn list_orders_by_created_at_then_id() {
     };
     let ids = KernelIdGenerator;
     let clock = SystemClock;
-    let repo = PgOrganizationRepository::new(db.clone());
+    let repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let owner = ids.new_principal_id();
 
     // Three orgs, minted (and inserted) one at a time so `SystemClock`'s µs-truncated
     // `now()` calls land on distinct instants (real round-trips to Postgres between
@@ -137,7 +145,8 @@ async fn list_orders_by_created_at_then_id() {
     let mut created = Vec::new();
     for (slug, name) in [("alpha", "Alpha"), ("beta", "Beta"), ("gamma", "Gamma")] {
         let (org, default_team) = new_org_and_default_team(&ids, &clock, slug, name);
-        repo.create(&org, &default_team).await.unwrap();
+        let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
+        repo.create(&org, &default_team, &grant).await.unwrap();
         created.push(org);
     }
 

@@ -10,11 +10,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
-    Clock, ConflictKind, IdGenerator, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, PreconditionKind, PrincipalId,
-    Project, ProjectId, ProjectRepository, RepositoryError, Slug, Team, TeamId, TeamRepository, TenancyNodeRef,
+    AccessRequest, Action, Authorizer, AuthzError, Clock, ConflictKind, Decision, Effect, IdGenerator, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization,
+    OrganizationId, OrganizationRepository, PolicyDocument, PolicyStore, PreconditionKind, PrincipalId, Project, ProjectId, ProjectRepository, RepositoryError, RoleGrant, RoleGrantStore, Slug, Team,
+    TeamId, TeamRepository, TenancyNodeRef,
 };
 use paigasus_kernel::Prn;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -31,6 +32,10 @@ pub struct TenancyStore {
     pub projects: Arc<Mutex<HashMap<Uuid, Project>>>,
     pub memberships: Arc<Mutex<HashMap<Uuid, Membership>>>,
     pub principals: Arc<Mutex<HashMap<Uuid, String>>>,
+    /// `org_admin` owner grants seeded by [`InMemoryOrgs::create`] (SMA-444 Task 20b, spec
+    /// D8) — a separate map from `MembershipRepository`'s own fakes above, mirroring the
+    /// real schema's `role_grant` table being wholly separate from `membership`.
+    pub role_grants: Arc<Mutex<HashMap<Uuid, RoleGrant>>>,
 }
 
 /// In-memory `OrganizationRepository` fake, faithful to the port's doc contracts:
@@ -51,7 +56,7 @@ fn org_view(org: &Organization) -> NodeView<Organization> {
 
 #[async_trait]
 impl OrganizationRepository for InMemoryOrgs {
-    async fn create(&self, org: &Organization, default_team: &Team) -> Result<(), RepositoryError> {
+    async fn create(&self, org: &Organization, default_team: &Team, owner_grant: &RoleGrant) -> Result<(), RepositoryError> {
         let mut orgs = self.0.orgs.lock().unwrap();
         if orgs.values().any(|existing| existing.slug == org.slug) {
             return Err(RepositoryError::Conflict(ConflictKind::SlugTaken));
@@ -59,6 +64,7 @@ impl OrganizationRepository for InMemoryOrgs {
         orgs.insert(org.id.uuid(), org.clone());
         drop(orgs);
         self.0.teams.lock().unwrap().insert(default_team.id.uuid(), default_team.clone());
+        self.0.role_grants.lock().unwrap().insert(owner_grant.id, owner_grant.clone());
         Ok(())
     }
 
@@ -485,6 +491,111 @@ impl IdGenerator for SeqIds {
     }
 }
 
+/// Programmable `Authorizer` fake for application-service unit tests (`authorize.rs`,
+/// `roles.rs`, `policies.rs`): `allow(action, resource)` whitelists an exact
+/// `(Action, resource-canonical-prn)` pair — every other request denies, mirroring Cedar's
+/// own default-deny posture. Keyed on the resource's canonical prn string rather than `Prn`
+/// itself (no `Hash`/`Eq` on `Prn`, and canonical-string equality is exactly what this authz
+/// layer's identity comparison reduces to).
+#[derive(Clone, Default)]
+pub struct FakeAuthorizer {
+    allowed: Arc<Mutex<HashSet<(Action, String)>>>,
+}
+
+impl FakeAuthorizer {
+    pub fn allow(&self, action: Action, resource: &Prn) {
+        self.allowed.lock().unwrap().insert((action, resource.canonical()));
+    }
+}
+
+#[async_trait]
+impl Authorizer for FakeAuthorizer {
+    async fn is_authorized(&self, req: &AccessRequest) -> Result<Decision, AuthzError> {
+        let allow = self.allowed.lock().unwrap().contains(&(req.action, req.resource.canonical()));
+        Ok(Decision {
+            effect: if allow { Effect::Allow } else { Effect::Deny },
+            determining_policies: Vec::new(),
+        })
+    }
+}
+
+/// In-memory `RoleGrantStore` fake for `roles.rs` unit tests: a plain
+/// `Mutex<HashMap<Uuid, RoleGrant>>`, no generation-counter bookkeeping (that's
+/// `PgRoleGrantStore`'s job, exercised by the Docker integration tests).
+#[derive(Clone, Default)]
+pub struct InMemoryRoleGrants(pub Arc<Mutex<HashMap<Uuid, RoleGrant>>>);
+
+#[async_trait]
+impl RoleGrantStore for InMemoryRoleGrants {
+    async fn grant(&self, g: &RoleGrant) -> Result<(), AuthzError> {
+        self.0.lock().unwrap().insert(g.id, g.clone());
+        Ok(())
+    }
+
+    async fn revoke(&self, id: Uuid) -> Result<(), AuthzError> {
+        self.0.lock().unwrap().remove(&id);
+        Ok(())
+    }
+
+    async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError> {
+        Ok(self.0.lock().unwrap().values().cloned().collect())
+    }
+
+    async fn list_by_principal(&self, p: &PrincipalId) -> Result<Vec<RoleGrant>, AuthzError> {
+        Ok(self.0.lock().unwrap().values().filter(|g| g.principal == *p).cloned().collect())
+    }
+
+    async fn find(&self, id: Uuid) -> Result<Option<RoleGrant>, AuthzError> {
+        Ok(self.0.lock().unwrap().get(&id).cloned())
+    }
+}
+
+/// In-memory `PolicyStore` fake for `policies.rs` unit tests: rejects mutation of an
+/// already-persisted `system = true` row, mirroring `PgPolicyStore`'s posture, without any
+/// Cedar parse/schema validation (that's `authz::schema::validate_policy`'s own unit suite).
+#[derive(Clone, Default)]
+pub struct InMemoryPolicies {
+    docs: Arc<Mutex<HashMap<String, PolicyDocument>>>,
+    gen_counter: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl PolicyStore for InMemoryPolicies {
+    async fn list_all(&self) -> Result<Vec<PolicyDocument>, AuthzError> {
+        Ok(self.docs.lock().unwrap().values().cloned().collect())
+    }
+
+    async fn put(&self, doc: &PolicyDocument) -> Result<(), AuthzError> {
+        let mut docs = self.docs.lock().unwrap();
+        if docs.get(&doc.policy_id).is_some_and(|existing| existing.system) {
+            return Err(AuthzError::SystemImmutable(doc.policy_id.clone()));
+        }
+        docs.insert(doc.policy_id.clone(), doc.clone());
+        drop(docs);
+        self.gen_counter.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn delete(&self, policy_id: &str) -> Result<(), AuthzError> {
+        let mut docs = self.docs.lock().unwrap();
+        if docs.get(policy_id).is_some_and(|existing| existing.system) {
+            return Err(AuthzError::SystemImmutable(policy_id.to_string()));
+        }
+        docs.remove(policy_id);
+        drop(docs);
+        self.gen_counter.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn policy_gen(&self) -> Result<u64, AuthzError> {
+        Ok(self.gen_counter.load(Ordering::SeqCst))
+    }
+
+    async fn bump_policy_gen(&self) -> Result<u64, AuthzError> {
+        Ok(self.gen_counter.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,17 +605,37 @@ mod tests {
         Organization::new(OrganizationId::from_uuid(uuid), Slug::parse(slug).unwrap(), "Name", now).unwrap()
     }
 
+    fn principal(n: u128) -> PrincipalId {
+        PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(n)).unwrap())
+    }
+
+    /// An `org_admin` owner grant for `org`, mirroring `application::organizations::
+    /// OrganizationService::create`'s own construction (SMA-444 Task 20b, spec D8).
+    fn owner_grant(id: Uuid, owner: &PrincipalId, org: &OrganizationId) -> RoleGrant {
+        RoleGrant {
+            id,
+            principal: owner.clone(),
+            role_key: "org_admin".to_string(),
+            scope: paigasus_iam_core::GrantScope::Node(TenancyNodeRef::Organization(org.clone())),
+            linked_policy_id: format!("grant:{id}"),
+            created_at: Utc.timestamp_opt(0, 0).unwrap(),
+        }
+    }
+
     #[tokio::test]
-    async fn create_populates_the_shared_team_map() {
+    async fn create_populates_the_shared_team_map_and_records_the_owner_grant() {
         let store = TenancyStore::default();
         let repo = InMemoryOrgs(store.clone());
         let now = Utc.timestamp_opt(0, 0).unwrap();
         let organization = org(Uuid::from_u128(1), "acme", now);
         let team = Team::new(TeamId::from_parts(organization.id.uuid(), Uuid::from_u128(2)), Slug::parse("default").unwrap(), "Default", now).unwrap();
+        let owner = principal(3);
+        let grant = owner_grant(Uuid::from_u128(4), &owner, &organization.id);
 
-        repo.create(&organization, &team).await.unwrap();
+        repo.create(&organization, &team, &grant).await.unwrap();
 
         assert!(store.teams.lock().unwrap().contains_key(&team.id.uuid()));
+        assert_eq!(store.role_grants.lock().unwrap().get(&grant.id), Some(&grant));
     }
 
     /// `ProjectService::create` early-exits on an effectively-archived team before ever

@@ -10,6 +10,7 @@
 
 mod support;
 
+use paigasus_iam::adapters::authz::Generations;
 use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::{PgOrganizationRepository, PgProjectRepository, PgTeamRepository};
@@ -37,12 +38,14 @@ fn new_org_and_default_team(ids: &KernelIdGenerator, clock: &SystemClock, slug: 
 async fn seed_chain(db: &DatabaseConnection) -> (Organization, Team, Project) {
     let ids = KernelIdGenerator;
     let clock = SystemClock;
-    let org_repo = PgOrganizationRepository::new(db.clone());
-    let team_repo = PgTeamRepository::new(db.clone());
-    let project_repo = PgProjectRepository::new(db.clone());
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
+    let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
 
     let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
-    org_repo.create(&org, &default_team).await.unwrap();
+    let owner = ids.new_principal_id();
+    let grant = support::pg_owner_grant(db, &owner, ids.new_membership_id(), &org.id).await;
+    org_repo.create(&org, &default_team, &grant).await.unwrap();
 
     let team_id = ids.new_team_id(org.id.uuid());
     let team = Team::new(team_id, Slug::parse("eng").unwrap(), "Engineering", clock.now()).unwrap();
@@ -62,9 +65,9 @@ async fn create_guards_against_missing_and_archived_parents() {
     };
     let ids = KernelIdGenerator;
     let clock = SystemClock;
-    let org_repo = PgOrganizationRepository::new(db.clone());
-    let team_repo = PgTeamRepository::new(db.clone());
-    let project_repo = PgProjectRepository::new(db.clone());
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
+    let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
 
     // Team under a random/missing org -> NotFound.
     let missing_org = Uuid::from_u128(999);
@@ -74,7 +77,9 @@ async fn create_guards_against_missing_and_archived_parents() {
 
     // Seed a real org, then archive it.
     let (org, default_team) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
-    org_repo.create(&org, &default_team).await.unwrap();
+    let owner = ids.new_principal_id();
+    let grant = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org.id).await;
+    org_repo.create(&org, &default_team, &grant).await.unwrap();
     org_repo.set_status(org.id.uuid(), NodeStatus::Archived, clock.now()).await.unwrap();
 
     // Team create under an (effectively) archived org -> Precondition(ParentArchived).
@@ -105,9 +110,9 @@ async fn effective_status_matrix_matches_core() {
         return;
     };
     let clock = SystemClock;
-    let org_repo = PgOrganizationRepository::new(db.clone());
-    let team_repo = PgTeamRepository::new(db.clone());
-    let project_repo = PgProjectRepository::new(db.clone());
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
+    let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
 
     let (org, team, project) = seed_chain(&db).await;
 
@@ -137,14 +142,17 @@ async fn slug_scopes_are_per_parent() {
     };
     let ids = KernelIdGenerator;
     let clock = SystemClock;
-    let org_repo = PgOrganizationRepository::new(db.clone());
-    let team_repo = PgTeamRepository::new(db.clone());
-    let project_repo = PgProjectRepository::new(db.clone());
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
+    let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
 
+    let owner = ids.new_principal_id();
     let (org1, default1) = new_org_and_default_team(&ids, &clock, "acme", "Acme Corp.");
-    org_repo.create(&org1, &default1).await.unwrap();
+    let grant1 = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org1.id).await;
+    org_repo.create(&org1, &default1, &grant1).await.unwrap();
     let (org2, default2) = new_org_and_default_team(&ids, &clock, "beta", "Beta Corp.");
-    org_repo.create(&org2, &default2).await.unwrap();
+    let grant2 = support::pg_owner_grant(&db, &owner, ids.new_membership_id(), &org2.id).await;
+    org_repo.create(&org2, &default2, &grant2).await.unwrap();
 
     // Same team slug in two different orgs -> both ok.
     let team1 = Team::new(ids.new_team_id(org1.id.uuid()), Slug::parse("eng").unwrap(), "Engineering", clock.now()).unwrap();
@@ -181,8 +189,8 @@ async fn set_status_is_always_permitted_and_restore_preserves_own_flags() {
         return;
     };
     let clock = SystemClock;
-    let org_repo = PgOrganizationRepository::new(db.clone());
-    let team_repo = PgTeamRepository::new(db.clone());
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
 
     let (org, team, _project) = seed_chain(&db).await;
 
@@ -209,9 +217,9 @@ async fn rename_guards_and_lists_round_trip() {
         return;
     };
     let clock = SystemClock;
-    let org_repo = PgOrganizationRepository::new(db.clone());
-    let team_repo = PgTeamRepository::new(db.clone());
-    let project_repo = PgProjectRepository::new(db.clone());
+    let org_repo = PgOrganizationRepository::new(db.clone(), Generations::memory());
+    let team_repo = PgTeamRepository::new(db.clone(), Generations::memory());
+    let project_repo = PgProjectRepository::new(db.clone(), Generations::memory());
 
     let (org, team, project) = seed_chain(&db).await;
     let team_uuid = team.id.uuid();

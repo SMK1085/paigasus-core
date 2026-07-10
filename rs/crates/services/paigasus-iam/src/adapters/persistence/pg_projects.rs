@@ -4,9 +4,13 @@
 //! errors into the core's `RepositoryError`. Mirrors `pg_teams.rs` one level deeper: every
 //! guard/view computation folds the project's two ancestors (team, then org) through the
 //! shared `NodeStatus::effective` rule (D1/D10) rather than hand-rolling the combination.
+//! Every successful `create`/`rename`/`set_status` bumps `entity_gen` via the shared
+//! `Generations` handle (spec §7/D11), best-effort — see `pg_organizations.rs`'s doc comment
+//! for why a bump failure is logged and swallowed rather than surfaced (SMA-444 Task 15).
 
 use super::entities::{organization, project, team};
 use super::map_err;
+use crate::adapters::authz::Generations;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{NodeStatus, NodeView, PreconditionKind, Project, ProjectId, ProjectRepository, RepositoryError, Slug, TeamId};
@@ -16,16 +20,25 @@ use uuid::Uuid;
 
 // `Clone` lets the composition root (`http::AppState::new`) hold a repo handle inside a
 // `#[derive(Clone)] ProjectService` — cheap, `DatabaseConnection` clones an `Arc`-backed
-// pool handle, not a connection.
+// pool handle, not a connection, and `Generations` is `Arc`-backed too.
 #[derive(Clone)]
 pub struct PgProjectRepository {
     db: DatabaseConnection,
+    gens: Generations,
 }
 
 impl PgProjectRepository {
     #[must_use]
-    pub fn new(db: DatabaseConnection) -> Self {
-        PgProjectRepository { db }
+    pub fn new(db: DatabaseConnection, gens: Generations) -> Self {
+        PgProjectRepository { db, gens }
+    }
+
+    /// Best-effort `entity_gen` bump — see `pg_organizations.rs::bump_entity_gen`'s doc
+    /// comment for the fail-open rationale.
+    async fn bump_entity_gen(&self) {
+        if let Err(err) = self.gens.bump_entity_gen().await {
+            tracing::warn!(error = %err, "pg_projects: entity_gen bump failed after a committed write — authz caches may serve stale data until TTL");
+        }
     }
 }
 
@@ -113,6 +126,7 @@ impl ProjectRepository for PgProjectRepository {
 
         project_to_model(project).insert(&txn).await.map_err(map_err)?;
         txn.commit().await.map_err(map_err)?;
+        self.bump_entity_gen().await;
         Ok(())
     }
 
@@ -200,6 +214,7 @@ impl ProjectRepository for PgProjectRepository {
         let updated = active.update(&txn).await.map_err(map_err)?;
 
         txn.commit().await.map_err(map_err)?;
+        self.bump_entity_gen().await;
         Ok(project_view(model_to_project(updated)?, team_status, org_status))
     }
 
@@ -232,6 +247,7 @@ impl ProjectRepository for PgProjectRepository {
         let org_status = parse_status(&org.status)?;
 
         txn.commit().await.map_err(map_err)?;
+        self.bump_entity_gen().await;
         Ok(project_view(model_to_project(final_model)?, team_status, org_status))
     }
 }

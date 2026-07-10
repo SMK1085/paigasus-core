@@ -609,9 +609,6 @@ pub mod tenancy_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /** Detaching an ORG membership also removes that principal's team/project
- memberships in that same org (cascade detach, spec §5.1 rule 5).
-*/
         pub async fn detach_membership(
             &mut self,
             request: impl tonic::IntoRequest<super::DetachMembershipRequest>,
@@ -638,7 +635,6 @@ pub mod tenancy_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        ///
         pub async fn list_memberships(
             &mut self,
             request: impl tonic::IntoRequest<super::ListMembershipsRequest>,
@@ -829,9 +825,6 @@ pub mod tenancy_service_server {
             tonic::Response<super::AttachMembershipResponse>,
             tonic::Status,
         >;
-        /** Detaching an ORG membership also removes that principal's team/project
- memberships in that same org (cascade detach, spec §5.1 rule 5).
-*/
         async fn detach_membership(
             &self,
             request: tonic::Request<super::DetachMembershipRequest>,
@@ -839,7 +832,6 @@ pub mod tenancy_service_server {
             tonic::Response<super::DetachMembershipResponse>,
             tonic::Status,
         >;
-        ///
         async fn list_memberships(
             &self,
             request: tonic::Request<super::ListMembershipsRequest>,
@@ -1932,7 +1924,6 @@ pub mod authn_service_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    ///
     #[derive(Debug, Clone)]
     pub struct AuthnServiceClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -2013,7 +2004,6 @@ pub mod authn_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        ///
         pub async fn introspect(
             &mut self,
             request: impl tonic::IntoRequest<super::IntrospectRequest>,
@@ -2053,7 +2043,6 @@ pub mod authn_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with AuthnServiceServer.
     #[async_trait]
     pub trait AuthnService: std::marker::Send + std::marker::Sync + 'static {
-        ///
         async fn introspect(
             &self,
             request: tonic::Request<super::IntrospectRequest>,
@@ -2062,7 +2051,6 @@ pub mod authn_service_server {
             tonic::Status,
         >;
     }
-    ///
     #[derive(Debug)]
     pub struct AuthnServiceServer<T> {
         inner: Arc<T>,
@@ -2221,6 +2209,814 @@ pub mod authn_service_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "paigasus.iam.v1.AuthnService";
     impl<T> tonic::server::NamedService for AuthnServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Generated client implementations.
+pub mod authorization_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    ///
+    #[derive(Debug, Clone)]
+    pub struct AuthorizationServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl AuthorizationServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> AuthorizationServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> AuthorizationServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            AuthorizationServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        ///
+        pub async fn is_authorized(
+            &mut self,
+            request: impl tonic::IntoRequest<super::IsAuthorizedRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::IsAuthorizedResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.AuthorizationService/IsAuthorized",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.AuthorizationService",
+                        "IsAuthorized",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn put_policy(
+            &mut self,
+            request: impl tonic::IntoRequest<super::PutPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PutPolicyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.AuthorizationService/PutPolicy",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("paigasus.iam.v1.AuthorizationService", "PutPolicy"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn delete_policy(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeletePolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeletePolicyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.AuthorizationService/DeletePolicy",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.AuthorizationService",
+                        "DeletePolicy",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn list_policies(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListPoliciesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListPoliciesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.AuthorizationService/ListPolicies",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.AuthorizationService",
+                        "ListPolicies",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn grant_role(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GrantRoleRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GrantRoleResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.AuthorizationService/GrantRole",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("paigasus.iam.v1.AuthorizationService", "GrantRole"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn revoke_role(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RevokeRoleRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeRoleResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.AuthorizationService/RevokeRole",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("paigasus.iam.v1.AuthorizationService", "RevokeRole"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn list_role_grants(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListRoleGrantsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListRoleGrantsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.AuthorizationService/ListRoleGrants",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.AuthorizationService",
+                        "ListRoleGrants",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod authorization_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with AuthorizationServiceServer.
+    #[async_trait]
+    pub trait AuthorizationService: std::marker::Send + std::marker::Sync + 'static {
+        ///
+        async fn is_authorized(
+            &self,
+            request: tonic::Request<super::IsAuthorizedRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::IsAuthorizedResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn put_policy(
+            &self,
+            request: tonic::Request<super::PutPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PutPolicyResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn delete_policy(
+            &self,
+            request: tonic::Request<super::DeletePolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeletePolicyResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn list_policies(
+            &self,
+            request: tonic::Request<super::ListPoliciesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListPoliciesResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn grant_role(
+            &self,
+            request: tonic::Request<super::GrantRoleRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GrantRoleResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn revoke_role(
+            &self,
+            request: tonic::Request<super::RevokeRoleRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeRoleResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn list_role_grants(
+            &self,
+            request: tonic::Request<super::ListRoleGrantsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListRoleGrantsResponse>,
+            tonic::Status,
+        >;
+    }
+    ///
+    #[derive(Debug)]
+    pub struct AuthorizationServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> AuthorizationServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>>
+    for AuthorizationServiceServer<T>
+    where
+        T: AuthorizationService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/paigasus.iam.v1.AuthorizationService/IsAuthorized" => {
+                    #[allow(non_camel_case_types)]
+                    struct IsAuthorizedSvc<T: AuthorizationService>(pub Arc<T>);
+                    impl<
+                        T: AuthorizationService,
+                    > tonic::server::UnaryService<super::IsAuthorizedRequest>
+                    for IsAuthorizedSvc<T> {
+                        type Response = super::IsAuthorizedResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::IsAuthorizedRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AuthorizationService>::is_authorized(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = IsAuthorizedSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.AuthorizationService/PutPolicy" => {
+                    #[allow(non_camel_case_types)]
+                    struct PutPolicySvc<T: AuthorizationService>(pub Arc<T>);
+                    impl<
+                        T: AuthorizationService,
+                    > tonic::server::UnaryService<super::PutPolicyRequest>
+                    for PutPolicySvc<T> {
+                        type Response = super::PutPolicyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::PutPolicyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AuthorizationService>::put_policy(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PutPolicySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.AuthorizationService/DeletePolicy" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeletePolicySvc<T: AuthorizationService>(pub Arc<T>);
+                    impl<
+                        T: AuthorizationService,
+                    > tonic::server::UnaryService<super::DeletePolicyRequest>
+                    for DeletePolicySvc<T> {
+                        type Response = super::DeletePolicyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeletePolicyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AuthorizationService>::delete_policy(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeletePolicySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.AuthorizationService/ListPolicies" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListPoliciesSvc<T: AuthorizationService>(pub Arc<T>);
+                    impl<
+                        T: AuthorizationService,
+                    > tonic::server::UnaryService<super::ListPoliciesRequest>
+                    for ListPoliciesSvc<T> {
+                        type Response = super::ListPoliciesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListPoliciesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AuthorizationService>::list_policies(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListPoliciesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.AuthorizationService/GrantRole" => {
+                    #[allow(non_camel_case_types)]
+                    struct GrantRoleSvc<T: AuthorizationService>(pub Arc<T>);
+                    impl<
+                        T: AuthorizationService,
+                    > tonic::server::UnaryService<super::GrantRoleRequest>
+                    for GrantRoleSvc<T> {
+                        type Response = super::GrantRoleResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GrantRoleRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AuthorizationService>::grant_role(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GrantRoleSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.AuthorizationService/RevokeRole" => {
+                    #[allow(non_camel_case_types)]
+                    struct RevokeRoleSvc<T: AuthorizationService>(pub Arc<T>);
+                    impl<
+                        T: AuthorizationService,
+                    > tonic::server::UnaryService<super::RevokeRoleRequest>
+                    for RevokeRoleSvc<T> {
+                        type Response = super::RevokeRoleResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RevokeRoleRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AuthorizationService>::revoke_role(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RevokeRoleSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.AuthorizationService/ListRoleGrants" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListRoleGrantsSvc<T: AuthorizationService>(pub Arc<T>);
+                    impl<
+                        T: AuthorizationService,
+                    > tonic::server::UnaryService<super::ListRoleGrantsRequest>
+                    for ListRoleGrantsSvc<T> {
+                        type Response = super::ListRoleGrantsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListRoleGrantsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AuthorizationService>::list_role_grants(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListRoleGrantsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for AuthorizationServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "paigasus.iam.v1.AuthorizationService";
+    impl<T> tonic::server::NamedService for AuthorizationServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }

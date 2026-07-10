@@ -15,3 +15,12 @@ lint:
 breaking:
   use:
     - FILE
+    # FILE's default FIELD_NO_DELETE forbids ANY field removal, even a
+    # `reserved`-and-retired one (SMA-444 IntrospectResponse.role_group_prns ->
+    # role_grants). Swap it for the reserve-tolerant siblings so the
+    # reserve+add pattern (spec §9.1) stays legal without loosening any other
+    # FILE-category check.
+    - FIELD_NO_DELETE_UNLESS_NAME_RESERVED
+    - FIELD_NO_DELETE_UNLESS_NUMBER_RESERVED
+  except:
+    - FIELD_NO_DELETE

@@ -5,7 +5,7 @@
 
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
-use paigasus_iam_core::{Clock, IdGenerator, NodeStatus, NodeView, Organization, OrganizationRepository, Slug, Team};
+use paigasus_iam_core::{Clock, GrantScope, IdGenerator, NodeStatus, NodeView, Organization, OrganizationRepository, PrincipalId, RoleGrant, Slug, Team, TenancyNodeRef};
 use uuid::Uuid;
 
 /// Output of [`OrganizationService::create`]: the new org plus its auto-provisioned
@@ -36,9 +36,10 @@ where
         Self { repo, ids, clock }
     }
 
-    /// Creates an organization and its auto-provisioned `"default"` team in one
-    /// repository transaction (ADR-0014).
-    pub async fn create(&self, slug: &str, name: &str) -> Result<CreateOrgOutput, TenancyError> {
+    /// Creates an organization, its auto-provisioned `"default"` team, and an `org_admin`
+    /// owner grant for `actor` scoped to the new org, all in one repository transaction
+    /// (ADR-0014, spec D8) — the creating principal becomes the owner of what it creates.
+    pub async fn create(&self, actor: &PrincipalId, slug: &str, name: &str) -> Result<CreateOrgOutput, TenancyError> {
         let slug = Slug::parse(slug)?;
         let now = self.clock.now();
 
@@ -49,7 +50,17 @@ where
         let default_slug = Slug::parse("default").expect("\"default\" is a valid slug");
         let default_team = Team::new(team_id, default_slug, "Default", now)?;
 
-        self.repo.create(&organization, &default_team).await?;
+        let grant_id = self.ids.new_membership_id();
+        let owner_grant = RoleGrant {
+            id: grant_id,
+            principal: actor.clone(),
+            role_key: "org_admin".to_string(),
+            scope: GrantScope::Node(TenancyNodeRef::Organization(organization.id.clone())),
+            linked_policy_id: format!("grant:{grant_id}"),
+            created_at: now,
+        };
+
+        self.repo.create(&organization, &default_team, &owner_grant).await?;
         Ok(CreateOrgOutput { organization, default_team })
     }
 
@@ -99,10 +110,18 @@ mod tests {
         OrganizationService::new(InMemoryOrgs::default(), SeqIds::default(), FixedClock::default())
     }
 
+    /// A deterministic `PrincipalId` for `create`'s `actor` argument — the tests below don't
+    /// exercise authorization (that's `adapters::http`/`grpc`'s job), just that `create`
+    /// threads whatever actor it's given into the owner grant (see `fakes.rs`'s
+    /// `InMemoryOrgs` recording it).
+    fn actor(n: u128) -> PrincipalId {
+        PrincipalId::from_prn(paigasus_kernel::Prn::build("iam", "", None, "principal", Uuid::from_u128(n)).unwrap())
+    }
+
     #[tokio::test]
     async fn create_provisions_default_team() {
         let svc = new_service();
-        let out = svc.create("acme", "Acme Corp.").await.unwrap();
+        let out = svc.create(&actor(1), "acme", "Acme Corp.").await.unwrap();
         assert_eq!(out.default_team.slug.as_str(), "default");
         assert_eq!(out.default_team.id.org_uuid(), out.organization.id.uuid());
     }
@@ -110,8 +129,8 @@ mod tests {
     #[tokio::test]
     async fn duplicate_slug_is_conflict() {
         let svc = new_service();
-        svc.create("acme", "A").await.unwrap();
-        assert_eq!(svc.create("acme", "B").await.unwrap_err(), TenancyError::SlugConflict);
+        svc.create(&actor(1), "acme", "A").await.unwrap();
+        assert_eq!(svc.create(&actor(1), "acme", "B").await.unwrap_err(), TenancyError::SlugConflict);
     }
 
     #[tokio::test]
@@ -121,7 +140,7 @@ mod tests {
         clock.set(t0);
         let svc = OrganizationService::new(InMemoryOrgs::default(), SeqIds::default(), clock.clone());
 
-        let created = svc.create("acme", "Acme").await.unwrap();
+        let created = svc.create(&actor(1), "acme", "Acme").await.unwrap();
         let id = created.organization.id.uuid();
         assert_eq!(created.organization.updated_at, t0);
 
@@ -157,7 +176,7 @@ mod tests {
     #[tokio::test]
     async fn rename_rejects_empty_change_and_archived_node() {
         let svc = new_service();
-        let created = svc.create("acme", "Acme").await.unwrap();
+        let created = svc.create(&actor(1), "acme", "Acme").await.unwrap();
         let id = created.organization.id.uuid();
 
         assert_eq!(svc.rename(id, None, None).await.unwrap_err(), TenancyError::NothingToRename);

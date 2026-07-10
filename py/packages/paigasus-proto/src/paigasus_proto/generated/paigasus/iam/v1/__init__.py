@@ -13,12 +13,15 @@ __all__ = (
     "AttachMembershipRequest",
     "AttachMembershipResponse",
     "AuthnServiceStub",
+    "AuthorizationServiceStub",
     "CreateOrganizationRequest",
     "CreateOrganizationResponse",
     "CreateProjectRequest",
     "CreateProjectResponse",
     "CreateTeamRequest",
     "CreateTeamResponse",
+    "DeletePolicyRequest",
+    "DeletePolicyResponse",
     "DetachMembershipRequest",
     "DetachMembershipResponse",
     "GetOrganizationRequest",
@@ -27,20 +30,31 @@ __all__ = (
     "GetProjectResponse",
     "GetTeamRequest",
     "GetTeamResponse",
+    "GrantRoleRequest",
+    "GrantRoleResponse",
     "IntrospectRequest",
     "IntrospectResponse",
+    "IsAuthorizedRequest",
+    "IsAuthorizedResponse",
     "ListMembershipsRequest",
     "ListMembershipsResponse",
     "ListOrganizationsRequest",
     "ListOrganizationsResponse",
+    "ListPoliciesRequest",
+    "ListPoliciesResponse",
     "ListProjectsRequest",
     "ListProjectsResponse",
+    "ListRoleGrantsRequest",
+    "ListRoleGrantsResponse",
     "ListTeamsRequest",
     "ListTeamsResponse",
     "Membership",
     "NodeStatus",
     "Organization",
+    "Policy",
     "Project",
+    "PutPolicyRequest",
+    "PutPolicyResponse",
     "RenameOrganizationRequest",
     "RenameOrganizationResponse",
     "RenameProjectRequest",
@@ -53,6 +67,10 @@ __all__ = (
     "RestoreProjectResponse",
     "RestoreTeamRequest",
     "RestoreTeamResponse",
+    "RevokeRoleRequest",
+    "RevokeRoleResponse",
+    "RoleGrant",
+    "RoleGrantRef",
     "ServiceInfo",
     "Team",
     "TenancyServiceStub",
@@ -270,6 +288,26 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class DeletePolicyRequest(betterproto2.Message):
+    policy_id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "DeletePolicyRequest", DeletePolicyRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class DeletePolicyResponse(betterproto2.Message):
+    pass
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "DeletePolicyResponse", DeletePolicyResponse
+)
+
+
+@dataclass(eq=False, repr=False)
 class DetachMembershipRequest(betterproto2.Message):
     """
     Detaching an org membership cascades: the principal's team/project
@@ -363,6 +401,32 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class GrantRoleRequest(betterproto2.Message):
+    principal_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    role_key: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    scope_prn: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GrantRoleRequest", GrantRoleRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class GrantRoleResponse(betterproto2.Message):
+    grant: "RoleGrant | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GrantRoleResponse", GrantRoleResponse
+)
+
+
+@dataclass(eq=False, repr=False)
 class IntrospectRequest(betterproto2.Message):
     token: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -399,16 +463,51 @@ class IntrospectResponse(betterproto2.Message):
     reuse tenancy message
     """
 
-    role_group_prns: "list[str]" = betterproto2.field(
-        7, betterproto2.TYPE_STRING, repeated=True
+    role_grants: "list[RoleGrantRef]" = betterproto2.field(
+        8, betterproto2.TYPE_MESSAGE, repeated=True
     )
-    """
-    empty until M3
-    """
 
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "IntrospectResponse", IntrospectResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class IsAuthorizedRequest(betterproto2.Message):
+    principal_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    action: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    resource_prn: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    context: "dict[str, str]" = betterproto2.field(
+        4,
+        betterproto2.TYPE_MAP,
+        map_meta=betterproto2.map_meta(
+            betterproto2.TYPE_STRING, betterproto2.TYPE_STRING
+        ),
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "IsAuthorizedRequest", IsAuthorizedRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class IsAuthorizedResponse(betterproto2.Message):
+    allowed: "bool" = betterproto2.field(1, betterproto2.TYPE_BOOL)
+
+    determining_policies: "list[str]" = betterproto2.field(
+        2, betterproto2.TYPE_STRING, repeated=True
+    )
+
+    reason: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "IsAuthorizedResponse", IsAuthorizedResponse
 )
 
 
@@ -476,6 +575,30 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class ListPoliciesRequest(betterproto2.Message):
+    limit: "int" = betterproto2.field(1, betterproto2.TYPE_UINT32)
+
+    offset: "int" = betterproto2.field(2, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListPoliciesRequest", ListPoliciesRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListPoliciesResponse(betterproto2.Message):
+    policies: "list[Policy]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListPoliciesResponse", ListPoliciesResponse
+)
+
+
+@dataclass(eq=False, repr=False)
 class ListProjectsRequest(betterproto2.Message):
     team_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -498,6 +621,32 @@ class ListProjectsResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "ListProjectsResponse", ListProjectsResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListRoleGrantsRequest(betterproto2.Message):
+    principal_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    limit: "int" = betterproto2.field(2, betterproto2.TYPE_UINT32)
+
+    offset: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListRoleGrantsRequest", ListRoleGrantsRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListRoleGrantsResponse(betterproto2.Message):
+    grants: "list[RoleGrant]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListRoleGrantsResponse", ListRoleGrantsResponse
 )
 
 
@@ -571,6 +720,22 @@ default_message_pool.register_message("paigasus.iam.v1", "Organization", Organiz
 
 
 @dataclass(eq=False, repr=False)
+class Policy(betterproto2.Message):
+    policy_id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    kind: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    source: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    description: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    system: "bool" = betterproto2.field(5, betterproto2.TYPE_BOOL)
+
+
+default_message_pool.register_message("paigasus.iam.v1", "Policy", Policy)
+
+
+@dataclass(eq=False, repr=False)
 class Project(betterproto2.Message):
     prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -596,6 +761,30 @@ class Project(betterproto2.Message):
 
 
 default_message_pool.register_message("paigasus.iam.v1", "Project", Project)
+
+
+@dataclass(eq=False, repr=False)
+class PutPolicyRequest(betterproto2.Message):
+    policy: "Policy | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "PutPolicyRequest", PutPolicyRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class PutPolicyResponse(betterproto2.Message):
+    policy: "Policy | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "PutPolicyResponse", PutPolicyResponse
+)
 
 
 @dataclass(eq=False, repr=False)
@@ -755,16 +944,57 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class RevokeRoleRequest(betterproto2.Message):
+    id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RevokeRoleRequest", RevokeRoleRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class RevokeRoleResponse(betterproto2.Message):
+    pass
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RevokeRoleResponse", RevokeRoleResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class RoleGrant(betterproto2.Message):
+    id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    principal_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    role_key: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    scope_prn: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message("paigasus.iam.v1", "RoleGrant", RoleGrant)
+
+
+@dataclass(eq=False, repr=False)
+class RoleGrantRef(betterproto2.Message):
+    scope_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    role_key: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message("paigasus.iam.v1", "RoleGrantRef", RoleGrantRef)
+
+
+@dataclass(eq=False, repr=False)
 class ServiceInfo(betterproto2.Message):
     """
     IAM v1 wire model.
 
-    Hosts the tenancy hierarchy — `TenancyService` (M1) — and authentication
-    introspection — `AuthnService` (M2).
-
-    Reserved for later milestones (do not repurpose without an ADR):
-      service AuthorizationService { rpc IsAuthorized(...); }  // M4/M5
-      messages: Principal, User, ApiKey, Policy, ...            // M1+
+    Hosts the tenancy hierarchy — `TenancyService` (M1) — authentication
+    introspection — `AuthnService` (M2) — and authorization/policy
+    administration — `AuthorizationService` (M3).
 
     AuthorizationService's originally-planned Introspect rpc is not duplicated
     there: it folds into AuthnService.Introspect below (spec D4).
@@ -819,6 +1049,134 @@ class AuthnServiceStub(betterproto2_grpclib.ServiceStub):
             "/paigasus.iam.v1.AuthnService/Introspect",
             message,
             IntrospectResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+
+class AuthorizationServiceStub(betterproto2_grpclib.ServiceStub):
+    async def is_authorized(
+        self,
+        message: "IsAuthorizedRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "IsAuthorizedResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuthorizationService/IsAuthorized",
+            message,
+            IsAuthorizedResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def put_policy(
+        self,
+        message: "PutPolicyRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "PutPolicyResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuthorizationService/PutPolicy",
+            message,
+            PutPolicyResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def delete_policy(
+        self,
+        message: "DeletePolicyRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "DeletePolicyResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuthorizationService/DeletePolicy",
+            message,
+            DeletePolicyResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def list_policies(
+        self,
+        message: "ListPoliciesRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListPoliciesResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuthorizationService/ListPolicies",
+            message,
+            ListPoliciesResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def grant_role(
+        self,
+        message: "GrantRoleRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "GrantRoleResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuthorizationService/GrantRole",
+            message,
+            GrantRoleResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def revoke_role(
+        self,
+        message: "RevokeRoleRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "RevokeRoleResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuthorizationService/RevokeRole",
+            message,
+            RevokeRoleResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def list_role_grants(
+        self,
+        message: "ListRoleGrantsRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListRoleGrantsResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuthorizationService/ListRoleGrants",
+            message,
+            ListRoleGrantsResponse,
             timeout=timeout,
             deadline=deadline,
             metadata=metadata,

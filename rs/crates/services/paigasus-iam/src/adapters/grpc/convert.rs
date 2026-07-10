@@ -5,10 +5,14 @@
 //! logic in this layer (task-16 brief).
 
 use chrono::{DateTime, Utc};
-use paigasus_iam_core::{AuthnError, MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, PrincipalContext, Project, Team};
+use paigasus_iam_core::authz::model::PolicyKind;
+use paigasus_iam_core::{AuthnError, MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant, RoleGrantRef, Team};
 use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::common::v1::AuditMetadata;
-use paigasus_proto::paigasus::iam::v1::{IntrospectResponse, Membership, NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Project as ProtoProject, Team as ProtoTeam};
+use paigasus_proto::paigasus::iam::v1::{
+    IntrospectResponse, Membership, NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RoleGrant as ProtoRoleGrant,
+    RoleGrantRef as ProtoRoleGrantRef, Team as ProtoTeam,
+};
 use tonic::{Code, Status};
 use uuid::Uuid;
 
@@ -26,6 +30,7 @@ pub fn status_to_grpc(e: TenancyError) -> Status {
         ErrorClass::NotFound => Code::NotFound,
         ErrorClass::Conflict => Code::AlreadyExists,
         ErrorClass::Precondition => Code::FailedPrecondition,
+        ErrorClass::Forbidden => Code::PermissionDenied,
         ErrorClass::Internal => {
             tracing::error!(error = %e, code = e.code(), "internal error handling gRPC request");
             Code::Internal
@@ -161,10 +166,49 @@ pub fn to_proto_membership(r: &MembershipRecord) -> Membership {
     }
 }
 
+/// Projects a core `RoleGrantRef` into its wire message: a direct field-for-field mapping
+/// (both carry `scope_prn`/`role_key` already as plain strings — no PRN parsing needed here).
+pub fn to_proto_role_grant_ref(r: &RoleGrantRef) -> ProtoRoleGrantRef {
+    ProtoRoleGrantRef {
+        scope_prn: r.scope_prn.clone(),
+        role_key: r.role_key.clone(),
+    }
+}
+
+/// Projects an authored `PolicyDocument` into its wire `Policy` message (SMA-444 Task 19):
+/// `kind` as its stable lowercase string (mirrors `adapters::http::dto::PolicyDto`'s `From`
+/// impl) — `created_at`/`updated_at` have no proto field (the `Policy` message carries none,
+/// unlike `RoleGrantDto`'s HTTP-only `created_at`).
+pub fn to_proto_policy(doc: &PolicyDocument) -> ProtoPolicy {
+    ProtoPolicy {
+        policy_id: doc.policy_id.clone(),
+        kind: match doc.kind {
+            PolicyKind::Static => "static".to_string(),
+            PolicyKind::Template => "template".to_string(),
+        },
+        source: doc.source.clone(),
+        description: doc.description.clone(),
+        system: doc.system,
+    }
+}
+
+/// Projects a core `RoleGrant` into its wire `RoleGrant` message (SMA-444 Task 19):
+/// `principal_prn`/`scope_prn` as canonical PRN strings — mirrors
+/// `adapters::http::dto::RoleGrantDto`'s `From` impl, minus its HTTP-only `created_at` (the
+/// proto `RoleGrant` message carries no timestamp).
+pub fn to_proto_role_grant(g: &RoleGrant) -> ProtoRoleGrant {
+    ProtoRoleGrant {
+        id: g.id.to_string(),
+        principal_prn: g.principal.canonical(),
+        role_key: g.role_key.clone(),
+        scope_prn: g.scope.canonical_prn(),
+    }
+}
+
 /// Projects a `PrincipalContext` into the wire `IntrospectResponse` (spec §7.2/§7.3): PRN
 /// strings, principal status as its stable `as_str`, `expires_at` as a prost `Timestamp`,
-/// memberships via the shared tenancy `Membership` mapping, and `role_group_prns` from the
-/// role-group PRN canonicals — always empty until M3 (D4).
+/// memberships via the shared tenancy `Membership` mapping, and `role_grants` from the
+/// core's structured role-grant refs — always empty until a later M3 task populates it (D4).
 pub fn to_introspect_response(ctx: &PrincipalContext) -> IntrospectResponse {
     IntrospectResponse {
         principal_prn: ctx.principal.principal_id.canonical(),
@@ -173,6 +217,26 @@ pub fn to_introspect_response(ctx: &PrincipalContext) -> IntrospectResponse {
         subject: ctx.principal.subject.clone(),
         expires_at: Some(ts(ctx.principal.expires_at)),
         memberships: ctx.memberships.iter().map(to_proto_membership).collect(),
-        role_group_prns: ctx.role_groups.iter().map(Prn::canonical).collect(),
+        role_grants: ctx.role_grants.iter().map(to_proto_role_grant_ref).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forbidden_maps_to_permission_denied() {
+        let status = status_to_grpc(TenancyError::Forbidden);
+        assert_eq!(status.code(), Code::PermissionDenied);
+        // Message stays "{code}: {display}", and `Forbidden`'s Display is static (SMA-444
+        // task-16 brief) — no denying-policy detail ever reaches the wire.
+        assert_eq!(status.message(), "forbidden: access denied");
+    }
+
+    #[test]
+    fn not_found_maps_to_grpc_not_found() {
+        let status = status_to_grpc(TenancyError::NotFound);
+        assert_eq!(status.code(), Code::NotFound);
     }
 }

@@ -128,6 +128,15 @@ sea-orm-migration = { version = "1", default-features = false, features = [
 redis = { version = "1", default-features = false, features = [
   "tokio-comp", "connection-manager", "tokio-rustls-comp", "tls-rustls-webpki-roots",
 ] }
+# cedar-policy — embedded Cedar authorization engine (ADR-0013). Pure evaluation; only
+# consumed by paigasus-iam-core + paigasus-iam. NOT in the wasm/binding tree.
+cedar-policy = "4"
+# blake3 — decision-cache key hashing (`paigasus-iam`'s `adapters::authz::decision_cache`,
+# SMA-444 Task 14): a canonical `(principal, action, resource, context)` serialization is
+# blake3-hashed into the Redis/in-proc key `iam:authz:dec:<policy_gen>:<entity_gen>:<hash>`.
+# Only consumed by `paigasus-iam`; no wasm/binding exposure (SMA-448's getrandom-free posture
+# is unaffected — blake3's default features carry no OS-entropy dependency).
+blake3 = "1"
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
 # via the Moon `lint` task's `-D warnings`.

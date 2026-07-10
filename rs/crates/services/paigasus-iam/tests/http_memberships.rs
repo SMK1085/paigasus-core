@@ -12,7 +12,7 @@ mod support;
 use axum::Router;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use support::{app, send};
+use support::{app, app_with_state, provision_platform_admin, send};
 use uuid::Uuid;
 
 /// Creates a user via `POST /v1/users` and returns its `principal_prn`.
@@ -33,8 +33,11 @@ async fn ac1_membership_lifecycle_over_http() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, idp) = app(db).await;
+    let (app, state, idp) = app_with_state(db).await;
     let token = idp.bearer("sweep-user", Some("sweep@example.com"), "paigasus", 3600);
+    // SMA-444 Task 20: `/v1/organizations`, `/v1/memberships`, and the nested `.../teams`
+    // route below are now enforced — seed the acting principal a `platform_admin` grant.
+    provision_platform_admin(&state, &token).await;
 
     // 1. Create the principal.
     let user_prn = create_user(&app, &token, "alice@example.com").await;

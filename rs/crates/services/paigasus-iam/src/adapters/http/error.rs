@@ -21,6 +21,7 @@ impl IntoResponse for ApiError {
             ErrorClass::Validation => StatusCode::BAD_REQUEST,
             ErrorClass::NotFound => StatusCode::NOT_FOUND,
             ErrorClass::Conflict | ErrorClass::Precondition => StatusCode::CONFLICT,
+            ErrorClass::Forbidden => StatusCode::FORBIDDEN,
             ErrorClass::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
@@ -69,6 +70,19 @@ mod tests {
 
         let resp = ApiError(TenancyError::ParentArchived).into_response();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn forbidden_maps_to_403_with_generic_body_and_no_challenge() {
+        let resp = ApiError(TenancyError::Forbidden).into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(
+            resp.headers().get(axum::http::header::WWW_AUTHENTICATE).is_none(),
+            "403 forbidden must not carry a WWW-Authenticate challenge (that's a 401 concern)"
+        );
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["code"], "forbidden");
+        assert_eq!(body["error"]["message"], "access denied");
     }
 
     #[tokio::test]

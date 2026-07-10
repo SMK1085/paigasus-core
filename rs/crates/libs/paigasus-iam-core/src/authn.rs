@@ -3,11 +3,11 @@
 //! Core authentication domain types for OIDC BYO-IdP login (SMA-443, M2). Pure data +
 //! parsing — no I/O, no JWT/JWKS handling (that lives in the service's adapters, ADR-0005).
 
+use crate::authz::model::RoleGrantRef;
 use crate::ports::MembershipRecord;
 use crate::principal::{PrincipalKind, PrincipalStatus};
 use crate::value::{DomainError, PrincipalId};
 use chrono::{DateTime, Utc};
-use paigasus_kernel::Prn;
 use std::fmt;
 use uuid::Uuid;
 
@@ -76,12 +76,13 @@ pub struct AuthnPrincipal {
 }
 
 /// The full authorization context for a request: the authenticated principal plus the
-/// tenancy memberships and role groups it carries. `role_groups` is always empty until M3.
+/// tenancy memberships and role grants it carries. `role_grants` is always empty until a
+/// later M3 task populates it from the `RoleGrantStore`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrincipalContext {
     pub principal: AuthnPrincipal,
     pub memberships: Vec<MembershipRecord>,
-    pub role_groups: Vec<Prn>,
+    pub role_grants: Vec<RoleGrantRef>,
 }
 
 /// A persisted link between a principal and one external IdP identity (issuer, subject).

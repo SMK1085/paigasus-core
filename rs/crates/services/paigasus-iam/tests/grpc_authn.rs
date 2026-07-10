@@ -59,15 +59,20 @@ async fn introspect_over_grpc_round_trips_a_jit_provisioned_principal() {
     };
     let idp = support::start_mock_idp().await;
     let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+
+    // A valid token for a brand-new (issuer, subject). The authenticated CreateOrganization
+    // JIT-provisions the token's principal on the way through the enforcement layer (D5) and
+    // succeeds — proof that a valid bearer is accepted. SMA-444 Task 20: `CreateOrganization`/
+    // `AttachMembership` are now also authorization-enforced, so a `platform_admin` grant is
+    // seeded for this (issuer, subject) up front — `provision`'s `state.authn.resolve` is the
+    // exact JIT path the layer itself runs, so this doesn't change what's being proven.
+    let token = idp.bearer("grpc-alice", Some("grpc-alice@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&state, &token).await;
     let (addr, server) = spawn_server(state).await;
     let ch = channel(addr).await;
     let mut tenancy = TenancyServiceClient::new(ch.clone());
     let mut authn = AuthnServiceClient::new(ch);
 
-    // A valid token for a brand-new (issuer, subject). The authenticated CreateOrganization
-    // JIT-provisions the token's principal on the way through the enforcement layer (D5) and
-    // succeeds — proof that a valid bearer is accepted.
-    let token = idp.bearer("grpc-alice", Some("grpc-alice@example.com"), "paigasus", 3600);
     let org = tenancy
         .create_organization(authed(
             CreateOrganizationRequest {
@@ -92,7 +97,7 @@ async fn introspect_over_grpc_round_trips_a_jit_provisioned_principal() {
     assert_eq!(ctx.subject, "grpc-alice");
     assert!(ctx.expires_at.is_some(), "expires_at is set");
     assert!(ctx.memberships.is_empty(), "no memberships yet");
-    assert!(ctx.role_group_prns.is_empty(), "role groups empty until M3");
+    assert!(ctx.role_grants.is_empty(), "role grants empty until a later M3 task populates them");
     let principal_prn = ctx.principal_prn.clone();
 
     // Attach an org membership to the resolved principal, then re-introspect: the membership

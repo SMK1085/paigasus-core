@@ -18,6 +18,14 @@ async fn main() -> anyhow::Result<()> {
     config.validate().map_err(|e| anyhow::anyhow!(e))?;
     paigasus_logging::init("paigasus-iam", &config.log_level);
 
+    // A fresh/empty `authz.bootstrap_admins` is valid config (`IamConfig::validate` allows
+    // it — spec §11), but it means a fresh deployment has no way to grant itself the first
+    // `platform_admin` role: warn loudly rather than fail boot, since a later `moon`/`psql`
+    // operator path can still seed one directly. Task 21b wires the actual JIT seed.
+    if config.authz.bootstrap_admins.is_empty() {
+        tracing::warn!("no authz.bootstrap_admins configured — a fresh deployment has no platform administrator and cannot create organizations or grant roles");
+    }
+
     let db = Database::connect(&config.database_url).await?;
     Migrator::up(&db, None).await?;
     // Built once and cloned into each server task below (a cheap handle-clone: every
@@ -55,6 +63,28 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(anyhow::Error::from)
         });
+    }
+    {
+        // The policy-snapshot background reload (SMA-444 Task 15, spec §7/D11 AC3): bounds
+        // staleness even when `policy_gen` never visibly advances on this replica.
+        // `CedarAuthorizer::is_authorized` (`AppState::authz`) additionally reloads
+        // synchronously before every decision (AC1), so this loop only backstops
+        // cross-replica/background staleness. `spawn_reload` already `tokio::spawn`s its own
+        // task and hands back a `JoinHandle<()>`; wrapping that await in a `servers.spawn`
+        // makes it exit on the same shutdown-watch signal as the HTTP/gRPC server tasks,
+        // and surfaces a reload-task panic the same way a server-task panic would.
+        //
+        // `ttl`/`poll` are config-driven (`authz.policy_cache_ttl_secs`/
+        // `authz.refresh_interval_secs`, SMA-444 Task 21) rather than the old hardcoded
+        // `AUTHZ_POLICY_SNAPSHOT_TTL`/`AUTHZ_POLICY_RELOAD_POLL_INTERVAL` constants —
+        // `IamConfig::validate` has already guaranteed both are non-zero.
+        let mut rx = rx.clone();
+        let ttl = Duration::from_secs(config.authz.policy_cache_ttl_secs);
+        let poll = Duration::from_secs(config.authz.refresh_interval_secs);
+        let handle = state.snapshot().spawn_reload(ttl, poll, async move {
+            let _ = rx.changed().await;
+        });
+        servers.spawn(async move { handle.await.map_err(anyhow::Error::from) });
     }
 
     tracing::info!(%config.http_addr, %config.grpc_addr, "paigasus-iam started");

@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::application::authenticate_token::Provisioning;
 use serde_json::json;
-use support::{send, send_raw, send_raw_parts, start_mock_idp, test_config, test_config_with};
+use support::{app_with_state, seed_platform_admin, send, send_raw, send_raw_parts, start_mock_idp, test_config, test_config_with};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -55,9 +55,12 @@ async fn introspect_resolved_identity_returns_full_context() {
     let token = idp.bearer("sub-alice", Some("alice@example.com"), "paigasus", 3600);
     let principal = state.authn.resolve(&token, Provisioning::Enabled).await.expect("resolve(Enabled) JIT-provisions");
     let principal_prn = principal.principal_id.canonical();
+    // SMA-444 Task 20: `POST /v1/organizations`/`POST /v1/memberships` below are now
+    // enforced — seed the already-resolved principal a `platform_admin` grant.
+    seed_platform_admin(&state, &principal_prn).await;
 
     // Introspect over HTTP: 200 with the full context; no memberships yet, and
-    // role_group_prns stays empty until M3.
+    // role_grants stays empty until a later M3 task populates it.
     let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": token })), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["principal_prn"], principal_prn);
@@ -65,7 +68,7 @@ async fn introspect_resolved_identity_returns_full_context() {
     assert_eq!(body["issuer"], idp.issuer);
     assert_eq!(body["subject"], "sub-alice");
     assert!(body["expires_at"].is_string(), "expires_at must be an RFC3339 string: {body}");
-    assert!(body["role_group_prns"].as_array().expect("role_group_prns array").is_empty());
+    assert!(body["role_grants"].as_array().expect("role_grants array").is_empty());
     assert!(body["memberships"].as_array().expect("memberships array").is_empty());
 
     // Attach an org membership; introspect reflects it (D13: introspect is the one
@@ -248,13 +251,20 @@ async fn lowercase_bearer_scheme_is_accepted() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, idp) = support::app(db).await;
+    let (app, state, idp) = app_with_state(db).await;
 
     // RFC 7235 §2.1: the auth-scheme is case-insensitive, so `bearer <jwt>` must
     // authenticate exactly like `Bearer <jwt>` (and JIT-provision on the way in).
+    // `GET /v1/organizations` (ListOrganizations) is now itself authorization-enforced
+    // (SMA-444 Task 20), so the already-resolved principal is seeded a `platform_admin`
+    // grant up front, mirroring `introspect_resolved_identity_returns_full_context`'s
+    // posture — that lets this test assert the precise `OK` the route actually returns,
+    // not merely `!= UNAUTHORIZED`.
     let token = idp.bearer("lowercase-bearer", Some("lower@example.com"), "paigasus", 3600);
+    let principal = state.authn.resolve(&token, Provisioning::Enabled).await.expect("resolve(Enabled) JIT-provisions");
+    seed_platform_admin(&state, &principal.principal_id.canonical()).await;
     let response = send_raw_parts(&app, "GET", "/v1/organizations", Some(&format!("bearer {token}")), None, None).await;
-    assert_eq!(response.status(), StatusCode::OK, "a lowercase bearer scheme must be accepted");
+    assert_eq!(response.status(), StatusCode::OK, "a lowercase bearer scheme must be accepted by authentication");
 }
 
 #[tokio::test]
@@ -262,11 +272,17 @@ async fn protected_route_with_valid_token_succeeds_and_jit_provisions() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, idp) = support::app(db).await;
+    let (app, state, idp) = app_with_state(db).await;
 
     // A valid token for a brand-new (issuer, subject): the middleware's resolve(.., Enabled)
-    // JIT-provisions the principal on the way in (AC 2), so the protected write succeeds.
+    // JIT-provisions the principal on the way in (AC 2) — proven below by the introspect,
+    // exactly as `introspect_resolved_identity_returns_full_context` above already resolves
+    // directly through `state.authn` ahead of a protected call. SMA-444 Task 20: the
+    // protected write ALSO now requires authorization, so a `platform_admin` grant is seeded
+    // for this same (issuer, subject) up front — `provision`'s `state.authn.resolve` is the
+    // exact JIT path `require_bearer` itself runs, so this doesn't change what AC 2 proves.
     let token = idp.bearer("jit-newcomer", Some("newcomer@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&state, &token).await;
     let (status, created) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "acme", "name": "Acme" })), Some(&token)).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
 
@@ -333,10 +349,15 @@ async fn key_rotation_validates_tokens_signed_with_the_new_key() {
     // unit-tested in the JWKS provider (spec §4.3), so this test targets the swap-then-succeed
     // path only.
     let state = AppState::new(db, &test_config_with(&[(&idp, true)], 0)).await.expect("AppState::new");
-    let app = router(state);
 
     // 1. A token under the ORIGINAL key validates (and warms the per-issuer JWKS cache).
     let before = idp.bearer("rotating-user", Some("rotate@example.com"), "paigasus", 3600);
+    // SMA-444 Task 20: `POST /v1/organizations` is now enforced — seed a `platform_admin`
+    // grant for this (issuer, subject) up front. `before`/`after` (post-rotation) share the
+    // same subject, just a different signing key, so one seed covers both calls below.
+    support::provision_platform_admin(&state, &before).await;
+    let app = router(state);
+
     let (status, body) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "pre", "name": "Pre" })), Some(&before)).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 
@@ -352,10 +373,10 @@ async fn key_rotation_validates_tokens_signed_with_the_new_key() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
-/// Every `/v1` route the tenancy sub-routers expose (organizations/teams/projects/
-/// memberships/users), paired with its method — the enumeration mirrors
-/// `src/adapters/http/{organizations,teams,projects,memberships,users}.rs` route tables
-/// exactly. When adding a new /v1 route, it must appear here — this test converts
+/// Every `/v1` route the tenancy + authz sub-routers expose (organizations/teams/projects/
+/// memberships/users/authz), paired with its method — the enumeration mirrors
+/// `src/adapters/http/{organizations,teams,projects,memberships,users,authz}.rs` route
+/// tables exactly. When adding a new /v1 route, it must appear here — this test converts
 /// default-open HTTP routing into a tested invariant (final-review Important 3).
 #[tokio::test]
 async fn every_protected_v1_route_requires_bearer() {
@@ -393,6 +414,14 @@ async fn every_protected_v1_route_requires_bearer() {
         ("DELETE", format!("/v1/memberships/{id}")),
         // users.rs
         ("POST", "/v1/users".to_string()),
+        // authz.rs
+        ("POST", "/v1/authz/is-authorized".to_string()),
+        ("POST", "/v1/authz/policies".to_string()),
+        ("GET", "/v1/authz/policies".to_string()),
+        ("DELETE", "/v1/authz/policies/some-policy-id".to_string()),
+        ("POST", "/v1/authz/role-grants".to_string()),
+        ("GET", "/v1/authz/role-grants".to_string()),
+        ("DELETE", format!("/v1/authz/role-grants/{id}")),
     ];
 
     for (method, path) in &protected_routes {

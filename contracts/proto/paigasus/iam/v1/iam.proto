@@ -8,12 +8,9 @@ import "paigasus/common/v1/audit.proto";
 
 // IAM v1 wire model.
 //
-// Hosts the tenancy hierarchy — `TenancyService` (M1) — and authentication
-// introspection — `AuthnService` (M2).
-//
-// Reserved for later milestones (do not repurpose without an ADR):
-//   service AuthorizationService { rpc IsAuthorized(...); }  // M4/M5
-//   messages: Principal, User, ApiKey, Policy, ...            // M1+
+// Hosts the tenancy hierarchy — `TenancyService` (M1) — authentication
+// introspection — `AuthnService` (M2) — and authorization/policy
+// administration — `AuthorizationService` (M3).
 //
 // AuthorizationService's originally-planned Introspect rpc is not duplicated
 // there: it folds into AuthnService.Introspect below (spec D4).
@@ -230,7 +227,13 @@ message IntrospectResponse {
   string subject = 4;
   google.protobuf.Timestamp expires_at = 5;
   repeated Membership memberships = 6; // reuse tenancy message
-  repeated string role_group_prns = 7; // empty until M3
+  reserved 7;
+  reserved "role_group_prns";
+  repeated RoleGrantRef role_grants = 8;
+}
+message RoleGrantRef {
+  string scope_prn = 1;
+  string role_key = 2;
 }
 
 service TenancyService {
@@ -261,4 +264,76 @@ service TenancyService {
 
 service AuthnService {
   rpc Introspect(IntrospectRequest) returns (IntrospectResponse);
+}
+
+message IsAuthorizedRequest {
+  string principal_prn = 1;
+  string action = 2;
+  string resource_prn = 3;
+  map<string, string> context = 4;
+}
+message IsAuthorizedResponse {
+  bool allowed = 1;
+  repeated string determining_policies = 2;
+  string reason = 3;
+}
+message Policy {
+  string policy_id = 1;
+  string kind = 2;
+  string source = 3;
+  string description = 4;
+  bool system = 5;
+}
+message PutPolicyRequest {
+  Policy policy = 1;
+} // upsert; validated; rejects system ids
+message PutPolicyResponse {
+  Policy policy = 1;
+}
+message DeletePolicyRequest {
+  string policy_id = 1;
+}
+message DeletePolicyResponse {}
+message ListPoliciesRequest {
+  uint32 limit = 1;
+  uint64 offset = 2;
+}
+message ListPoliciesResponse {
+  repeated Policy policies = 1;
+}
+message RoleGrant {
+  string id = 1;
+  string principal_prn = 2;
+  string role_key = 3;
+  string scope_prn = 4;
+}
+message GrantRoleRequest {
+  string principal_prn = 1;
+  string role_key = 2;
+  string scope_prn = 3;
+}
+message GrantRoleResponse {
+  RoleGrant grant = 1;
+}
+message RevokeRoleRequest {
+  string id = 1;
+}
+message RevokeRoleResponse {}
+message ListRoleGrantsRequest {
+  string principal_prn = 1;
+  uint32 limit = 2;
+  uint64 offset = 3;
+}
+message ListRoleGrantsResponse {
+  repeated RoleGrant grants = 1;
+}
+
+service AuthorizationService {
+  rpc IsAuthorized(IsAuthorizedRequest) returns (IsAuthorizedResponse);
+  rpc PutPolicy(PutPolicyRequest) returns (PutPolicyResponse);
+  rpc DeletePolicy(DeletePolicyRequest) returns (DeletePolicyResponse);
+  rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
+  rpc GrantRole(GrantRoleRequest) returns (GrantRoleResponse);
+  rpc RevokeRole(RevokeRoleRequest) returns (RevokeRoleResponse);
+  rpc ListRoleGrants(ListRoleGrantsRequest) returns (ListRoleGrantsResponse);
 }

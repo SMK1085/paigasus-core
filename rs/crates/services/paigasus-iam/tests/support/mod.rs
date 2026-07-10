@@ -28,6 +28,7 @@ use axum::response::Response;
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use chrono::Utc;
 use jsonwebtoken::jwk::{AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters, EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use p256::elliptic_curve::rand_core::OsRng;
@@ -35,7 +36,10 @@ use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::{EncodePrivateKey, LineEnding};
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::persistence::Migrator;
-use paigasus_iam::config::{AuthnConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig};
+use paigasus_iam::application::authenticate_token::Provisioning;
+use paigasus_iam::config::{AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig};
+use paigasus_iam_core::{GrantScope, OrganizationId, PrincipalId, RoleGrant, TenancyNodeRef};
+use paigasus_kernel::Prn;
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
@@ -46,6 +50,7 @@ use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
+use uuid::Uuid;
 
 /// Starts an ephemeral Postgres container, connects, and runs migrations.
 ///
@@ -248,6 +253,7 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
                 })
                 .collect(),
         },
+        authz: AuthzConfig::default(),
     }
 }
 
@@ -255,9 +261,30 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
 /// `tower::ServiceExt::oneshot` HTTP tests, plus the mock IdP handle to mint tokens with.
 #[allow(dead_code)]
 pub async fn app(db: DatabaseConnection) -> (Router, MockIdp) {
+    let (router, _state, idp) = app_with_state(db).await;
+    (router, idp)
+}
+
+/// Like [`app`], but also hands back the `AppState` itself — needed by tests that must reach
+/// a raw store directly (e.g. `tests/http_authz.rs` seeding a bootstrap `platform_admin`
+/// role-grant through `AppState.role_grant_store`, bypassing `RoleService::grant`'s
+/// anti-escalation check — there is necessarily no prior authority to authorize the very
+/// first grant against, ahead of SMA-444 Task 21's config-driven bootstrap-admin seeding).
+#[allow(dead_code)]
+pub async fn app_with_state(db: DatabaseConnection) -> (Router, AppState, MockIdp) {
     let idp = start_mock_idp().await;
     let state = AppState::new(db, &test_config(&idp)).await.expect("AppState::new");
-    (router(state), idp)
+    (router(state.clone()), state, idp)
+}
+
+/// Like [`app_with_state`], but the caller supplies the `IamConfig` directly instead of
+/// getting `test_config(&idp)` — needed by tests that flip a config toggle away from the
+/// ordinary test defaults (e.g. `authz.enforce_tenancy = false`, SMA-444 Task 21). The caller
+/// still owns whichever `MockIdp` (if any) it wired into `cfg.authn.issuers`.
+#[allow(dead_code)]
+pub async fn app_with_config(db: DatabaseConnection, cfg: &IamConfig) -> (Router, AppState) {
+    let state = AppState::new(db, cfg).await.expect("AppState::new");
+    (router(state.clone()), state)
 }
 
 /// Lowest-level request driver: full control over the `Authorization` value, the
@@ -309,4 +336,183 @@ pub async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>, to
 pub fn grpc_bearer<T>(req: &mut tonic::Request<T>, token: &str) {
     let value: tonic::metadata::MetadataValue<tonic::metadata::Ascii> = format!("Bearer {token}").parse().expect("bearer token is valid ascii metadata");
     req.metadata_mut().insert("authorization", value);
+}
+
+// --- SMA-444 Task 20: tenancy-retrofit test-migration helpers -------------------------------
+//
+// Every M1/M2 tenancy test that drives an ENFORCED HTTP/gRPC route now needs its acting
+// principal authorized. `provision` + `seed_platform_admin` (or the `provision_platform_admin`
+// combinator) are the shared, one-line-per-test fix: `platform_admin`@`Root` covers every
+// `Action` at every resource (the `platform_admin` template is `permit(principal ==
+// ?principal, action, resource in ?resource)`, spec §3.2), so seeding it for a test's actor is
+// enough to satisfy `ENFORCE_TENANCY` everywhere that actor calls, without picking apart which
+// specific action/resource each pre-authorization test happens to exercise.
+
+/// A monotonic, process-local grant-id source: the crate's own `uuid` feature set is
+/// intentionally `v4`/`v7`-free everywhere except `serde` (kernel/wasm stay rng-free; see
+/// `paigasus-iam`'s `Cargo.toml`), so test-only grant ids can't call `Uuid::new_v4()` /
+/// `Uuid::now_v7()` either — this mirrors the crate's own `SeqIds` fake's posture. Each test
+/// runs against its OWN freshly migrated Postgres (`start_migrated_postgres` per test), so
+/// uniqueness only needs to hold within one test's calls, which a per-binary counter satisfies.
+static NEXT_GRANT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[allow(dead_code)]
+fn next_grant_id() -> Uuid {
+    Uuid::from_u128(u128::from(NEXT_GRANT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
+}
+
+/// Resolves (and JIT-provisions, if unknown) `token`'s principal directly through
+/// `state.authn` — bypassing HTTP/gRPC entirely, so provisioning never itself depends on
+/// whatever the tenancy authorization gate (SMA-444 Task 20) decides for a first protected
+/// call (the pre-Task-20 pattern of triggering provisioning via `GET /v1/organizations` /
+/// `ListOrganizations` and asserting/relying on its result no longer holds once that route
+/// itself requires a grant). Returns the principal's canonical PRN.
+#[allow(dead_code)]
+pub async fn provision(state: &AppState, token: &str) -> String {
+    let principal = state.authn.resolve(token, Provisioning::Enabled).await.expect("resolve(Enabled) JIT-provisions");
+    principal.principal_id.canonical()
+}
+
+/// Seeds a `platform_admin`-at-`Root` grant for `principal_prn` directly through
+/// `state.role_grant_store` — bypassing `RoleService::grant`'s anti-escalation authorize
+/// check (there is necessarily no prior authority to authorize the very first grant against).
+/// Sharing this exact store (rather than a freshly constructed one) matters: `PgRoleGrantStore
+/// ::grant` bumps `policy_gen` via the `Generations` handle `AppState::new` shares with
+/// `CedarAuthorizer`, so the grant is visible to the very next decision (AC1) with no extra
+/// wait. Mirrors `tests/http_authz.rs`'s (pre-existing, SMA-444 Task 18) bootstrap-grant
+/// pattern, generalized here as the canonical, shared helper the brief asks for.
+#[allow(dead_code)]
+pub async fn seed_platform_admin(state: &AppState, principal_prn: &str) {
+    let principal = PrincipalId::from_prn(Prn::parse(principal_prn).expect("valid principal prn"));
+    let grant_id = next_grant_id();
+    let grant = RoleGrant {
+        id: grant_id,
+        principal,
+        role_key: "platform_admin".to_string(),
+        scope: GrantScope::Root,
+        linked_policy_id: format!("grant:{grant_id}"),
+        created_at: Utc::now(),
+    };
+    state.role_grant_store.grant(&grant).await.expect("seed platform_admin grant");
+}
+
+/// Seeds an `org_admin` grant for `principal_prn`, scoped to `org_prn` (a canonical
+/// organization PRN) — narrower than [`seed_platform_admin`], for a test that wants to prove
+/// an org-scoped grant (rather than blanket platform authority) is enough. Mirrors
+/// `seed_platform_admin`'s bypass-`RoleService::grant` posture.
+#[allow(dead_code)]
+pub async fn seed_org_admin(state: &AppState, principal_prn: &str, org_prn: &str) {
+    let principal = PrincipalId::from_prn(Prn::parse(principal_prn).expect("valid principal prn"));
+    let scope = TenancyNodeRef::from_prn(Prn::parse(org_prn).expect("valid org prn")).expect("org_prn names a tenancy node");
+    let grant_id = next_grant_id();
+    let grant = RoleGrant {
+        id: grant_id,
+        principal,
+        role_key: "org_admin".to_string(),
+        scope: GrantScope::Node(scope),
+        linked_policy_id: format!("grant:{grant_id}"),
+        created_at: Utc::now(),
+    };
+    state.role_grant_store.grant(&grant).await.expect("seed org_admin grant");
+}
+
+/// Convenience: [`provision`] + [`seed_platform_admin`] in one call — the common case for a
+/// migrated tenancy test's one-line setup. Returns the principal's canonical PRN.
+#[allow(dead_code)]
+pub async fn provision_platform_admin(state: &AppState, token: &str) -> String {
+    let principal_prn = provision(state, token).await;
+    seed_platform_admin(state, &principal_prn).await;
+    principal_prn
+}
+
+// --- SMA-444 Task 20b: direct-`PgOrganizationRepository`-driven owner-grant helpers --------
+//
+// `PgOrganizationRepository::create` now takes a third `owner_grant: &RoleGrant` argument
+// (spec D8): the `org_admin` grant seeded for the creating principal, inserted in the SAME
+// transaction as the org + default team. Tests that drive `PgOrganizationRepository`
+// directly (not through `AppState::new`, so `bootstrap::reconcile_starter` never ran) need
+// that grant's two FK targets to exist first: an `org_admin` `role` row (+ its backing
+// `policy` template row, `fk_role_template`), and a `principal` row for the owner
+// (`fk_role_grant_principal`). These three helpers are the direct-Pg-repo analog of
+// `seed_platform_admin`/`seed_org_admin` above (which seed through an `AppState`'s
+// `role_grant_store` instead).
+
+/// Seeds the `org_admin`-keyed `role` row (and its backing `policy` template row) if not
+/// already present — idempotent, so callers can invoke it once per test or once per org
+/// creation without a duplicate-key error.
+#[allow(dead_code)]
+pub async fn seed_org_admin_role_row(db: &DatabaseConnection) {
+    use paigasus_iam::adapters::persistence::entities::{policy, role};
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+    if role::Entity::find_by_id("org_admin".to_string()).one(db).await.unwrap().is_some() {
+        return;
+    }
+    let now = Utc::now();
+    policy::ActiveModel {
+        policy_id: Set("org_admin".to_string()),
+        kind: Set("template".to_string()),
+        source: Set("permit(principal == ?principal, action, resource in ?resource);".to_string()),
+        description: Set(None),
+        system: Set(false),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(db)
+    .await
+    .unwrap();
+    role::ActiveModel {
+        key: Set("org_admin".to_string()),
+        template_id: Set("org_admin".to_string()),
+        scope_kinds: Set(r#"["organization"]"#.to_string()),
+        description: Set(None),
+        system: Set(false),
+        created_at: Set(now),
+    }
+    .insert(db)
+    .await
+    .unwrap();
+}
+
+/// Seeds a bare `principal` row (no `user`/email — this owner only needs to exist for the
+/// `RoleGrant`'s `fk_role_grant_principal` target) if not already present — idempotent, so
+/// the same owner can be reused across several org creations within one test.
+#[allow(dead_code)]
+pub async fn seed_bare_principal_row(db: &DatabaseConnection, principal_id: Uuid) {
+    use paigasus_iam::adapters::persistence::entities::principal;
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+    if principal::Entity::find_by_id(principal_id).one(db).await.unwrap().is_some() {
+        return;
+    }
+    let now = Utc::now();
+    principal::ActiveModel {
+        id: Set(principal_id),
+        prn: Set(format!("prn:pgs:iam:::principal/{principal_id}")),
+        kind: Set("user".to_string()),
+        status: Set("active".to_string()),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(db)
+    .await
+    .unwrap();
+}
+
+/// Seeds both FK prerequisites (the `org_admin` role row, and a bare principal row for
+/// `owner`) and returns the `org_admin` owner [`RoleGrant`] for `org` — the one-line-per-call
+/// helper direct-`PgOrganizationRepository::create`-driven tests need to build its third
+/// argument (SMA-444 Task 20b, spec D8).
+#[allow(dead_code)]
+pub async fn pg_owner_grant(db: &DatabaseConnection, owner: &PrincipalId, grant_id: Uuid, org: &OrganizationId) -> RoleGrant {
+    seed_org_admin_role_row(db).await;
+    seed_bare_principal_row(db, owner.uuid()).await;
+    RoleGrant {
+        id: grant_id,
+        principal: owner.clone(),
+        role_key: "org_admin".to_string(),
+        scope: GrantScope::Node(TenancyNodeRef::Organization(org.clone())),
+        linked_policy_id: format!("grant:{grant_id}"),
+        created_at: Utc::now(),
+    }
 }

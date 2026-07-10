@@ -71,6 +71,15 @@ where
         Ok(self.repo.attach(&membership).await?)
     }
 
+    /// Fetches a membership record by id. `NotFound` if absent. SMA-444 Task 20: the
+    /// `DetachMembership` HTTP/gRPC handlers call this FIRST to learn the membership's
+    /// `node_prn` (the resource `Action::DetachMembership` authorizes against) before
+    /// authorizing — mirrors `OrganizationService::get`/`TeamService::get`/
+    /// `ProjectService::get`'s existence-check posture.
+    pub async fn get(&self, id: Uuid) -> Result<MembershipRecord, TenancyError> {
+        self.repo.find(id).await?.ok_or(TenancyError::NotFound)
+    }
+
     /// Detaches a membership by id. `NotFound` if missing. Detaching an org membership
     /// cascades: the repo also detaches the principal's team/project memberships scoped to
     /// that org, in one transaction (rule 5).
@@ -222,5 +231,22 @@ mod tests {
         let remaining = svc.list(MembershipFilter::Principal(principal.canonical()), page).await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, org_membership2.id);
+    }
+
+    #[tokio::test]
+    async fn get_returns_the_record_or_not_found() {
+        let store = TenancyStore::default();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let principal = seed_principal(&store, 30);
+        let (org, _team) = seed_org_and_team(&store, 400, 401, now);
+        let svc = new_service(store.clone());
+        let org_prn = OrganizationId::from_uuid(org).canonical();
+
+        let membership = svc.attach(&principal.canonical(), &org_prn).await.unwrap();
+        let fetched = svc.get(membership.id).await.unwrap();
+        assert_eq!(fetched.node_prn, org_prn);
+        assert_eq!(fetched.principal_prn, principal.canonical());
+
+        assert_eq!(svc.get(Uuid::from_u128(999_999)).await.unwrap_err(), TenancyError::NotFound);
     }
 }

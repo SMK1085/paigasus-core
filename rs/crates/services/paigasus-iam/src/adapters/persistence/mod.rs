@@ -4,19 +4,25 @@
 
 pub mod entities;
 pub mod migration;
+pub mod pg_entity_slice;
 pub mod pg_external_identities;
 pub mod pg_memberships;
 pub mod pg_organizations;
+pub mod pg_policies;
 pub mod pg_projects;
 pub mod pg_repository;
+pub mod pg_role_grants;
 pub mod pg_teams;
 
 pub use migration::Migrator;
+pub use pg_entity_slice::PgEntitySliceLoader;
 pub use pg_external_identities::PgExternalIdentityRepository;
 pub use pg_memberships::PgMembershipRepository;
 pub use pg_organizations::PgOrganizationRepository;
+pub use pg_policies::PgPolicyStore;
 pub use pg_projects::PgProjectRepository;
 pub use pg_repository::PgPrincipalRepository;
+pub use pg_role_grants::PgRoleGrantStore;
 pub use pg_teams::PgTeamRepository;
 
 use paigasus_iam_core::{ConflictKind, RepositoryError};
