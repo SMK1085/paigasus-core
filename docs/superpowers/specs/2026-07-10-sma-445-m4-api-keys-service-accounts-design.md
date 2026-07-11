@@ -287,7 +287,7 @@ API-key auth errors funnel through the existing `AuthnApiError`/`authn_status` (
 
 ## 9. Introspection & caching (`adapters/api_keys/` or `adapters/authz/`-style)
 
-- Port `ApiKeyValidationCache { get(keyid) -> Option<CachedValidation>; put(keyid, &v, ttl);
+- Port `ApiKeyValidationCache { get(keyid) -> Option<CachedValidation>; put(keyid, &v);
   evict(keyid) }`. `CachedValidation` = `{ principal_id, sa_status, expires_at, key_hash }`. It stores
   the **peppered `key_hash`** (the same HMAC already in Postgres — safe to cache: useless without the
   in-process pepper) so the hot path can **re-verify the presented secret on every hit** without a DB
