@@ -552,7 +552,11 @@ fn pepper_debug_is_redacted() {
 
 **Interfaces (Produces):**
 ```rust
-#[derive(Clone)] pub struct CachedValidation { pub principal_id: PrincipalId, pub sa_status: PrincipalStatus, pub expires_at: Option<DateTime<Utc>> }
+// `key_hash` is the SAME peppered HMAC stored in Postgres (safe to cache; useless without the
+// in-process pepper). It is REQUIRED so every cache hit re-verifies the presented secret —
+// `key_id` is a non-secret identifier embedded in the token, so a hit must NEVER authenticate
+// on `key_id` alone (that would be an auth bypass). See Task 18 resolve.
+#[derive(Clone)] pub struct CachedValidation { pub principal_id: PrincipalId, pub sa_status: PrincipalStatus, pub expires_at: Option<DateTime<Utc>>, pub key_hash: Vec<u8> }
 #[async_trait] pub trait ApiKeyValidationCache: Send + Sync {
     async fn get(&self, key_id: ApiKeyId) -> Option<CachedValidation>;   // fail-open: errors -> None
     async fn put(&self, key_id: ApiKeyId, v: &CachedValidation);          // fail-open: errors swallowed
@@ -568,7 +572,7 @@ async fn memory_cache_put_get_evict() {
     let c = MemoryApiKeyCache::new(30);
     let id = ApiKeyId::from_uuid(Uuid::from_u128(9));
     assert!(c.get(id).await.is_none());
-    c.put(id, &CachedValidation { principal_id: pid(), sa_status: PrincipalStatus::Active, expires_at: None }).await;
+    c.put(id, &CachedValidation { principal_id: pid(), sa_status: PrincipalStatus::Active, expires_at: None, key_hash: vec![1,2,3] }).await;
     assert!(c.get(id).await.is_some());
     c.evict(id).await;
     assert!(c.get(id).await.is_none());
@@ -667,7 +671,7 @@ async fn revoke_evicts_cache() { /* revoke calls cache.evict(key_id) */ }
 - Create: `src/application/authenticate_api_key.rs`; Modify `application/mod.rs`
 
 **Interfaces (Produces):** `#[derive(Clone)] struct AuthenticateApiKey<K,S,H,C,Ca>` (api-key repo, SA repo, hasher, clock, cache). Methods:
-- `resolve(token: &str) -> Result<AuthnPrincipal, AuthnError>`: `parse_token(prefix, token, max_bytes)` (Malformed → `InvalidToken`); `cache.get(keyid)` → on hit re-check `expires_at` + `sa_status` (rebuild `AuthnPrincipal`); on miss `repo.find_by_id` → `hasher.verify(secret, stored_hash)` (BadSecret → `InvalidToken`) → assert key `status=Active` & not expired (→ `InvalidToken`) → load SA principal, assert `principal.status=Active` (→ `PrincipalInactive`, D16) → `cache.put` → build `AuthnPrincipal { kind: ServiceAccount, credential: ApiKey{key_id, expires_at} }`; best-effort `repo.touch_last_used`.
+- `resolve(token: &str) -> Result<AuthnPrincipal, AuthnError>`: `parse_token(prefix, token, max_bytes)` (Malformed → `InvalidToken`); `cache.get(keyid)` → **on hit, FIRST `hasher.verify(secret, cached.key_hash)` (constant-time; BadSecret → `InvalidToken` — never authenticate on `keyid` alone)**, then re-check `expires_at` + `sa_status` (rebuild `AuthnPrincipal`); on miss `repo.find_by_id` → `hasher.verify(secret, stored_hash)` (BadSecret → `InvalidToken`) → assert key `status=Active` & not expired (→ `InvalidToken`) → load SA principal, assert `principal.status=Active` (→ `PrincipalInactive`, D16) → `cache.put` (including the stored `key_hash`) → build `AuthnPrincipal { kind: ServiceAccount, credential: ApiKey{key_id, expires_at} }`; best-effort `repo.touch_last_used`.
 - `introspect(token) -> Result<PrincipalContext, AuthnError>`: `resolve` + page the SA's memberships/role-grants (reuse `AuthenticateToken::introspect` shape at `authenticate_token.rs:144-164`).
 
 - [ ] **Step 1: Write failing tests** (integration, `tests/api_key_auth.rs`, Docker):

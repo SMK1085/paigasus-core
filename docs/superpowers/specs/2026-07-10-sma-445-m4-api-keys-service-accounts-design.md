@@ -178,7 +178,7 @@ DTO/projection (§10). `PrincipalContext` is otherwise unchanged.
 
 ### 4.5 `ports.rs`
 - `IdGenerator`: add `new_service_account_id() -> PrincipalId`, `new_api_key_id() -> ApiKeyId`.
-- New `SecretHasher` port: `hmac(&self, secret: &[u8]) -> Vec<u8>` and
+- New `SecretHasher` port: `hash(&self, secret: &[u8]) -> Vec<u8>` and
   `verify(&self, secret: &[u8], expected: &[u8]) -> bool` (constant-time) — pepper injected into
   the adapter, so the domain never sees raw pepper.
 - New `KeyEntropy` port: `fn new_secret(&self) -> [u8; 32]` (adapter uses `OsRng`).
@@ -208,7 +208,7 @@ Add any needed `DomainError` variants (`InvalidServiceAccountName` reuses `Inval
   alias (per the m0002+ pattern).
 - **`api_key`** — `id UUID` PK; `service_account_id UUID` FK→`service_account(principal_id)`
   `ON DELETE CASCADE`; `scope_org_id`/`scope_team_id`/`scope_project_id` + `ck_api_key_scope`
-  disjunction; `prefix TEXT`, `key_hash TEXT` with `uq_api_key_hash UNIQUE`, `status TEXT`,
+  disjunction; `prefix TEXT`, `key_hash TEXT` (the peppered HMAC stored as **lowercase hex** — the `ApiKeyRepository` hex-encodes on write and decodes back to `Vec<u8>` on read; the raw HMAC bytes are not valid TEXT) with `uq_api_key_hash UNIQUE`, `status TEXT`,
   `expires_at TIMESTAMPTZ NULL`, `last_used_at TIMESTAMPTZ NULL`, `created_at`, `revoked_at NULL`,
   `scope_actions TEXT NULL` (JSON), `scope_roles TEXT NULL` (JSON); `ix_api_key_service_account`
   on the FK. All uniques/checks via raw `ALTER TABLE … ADD CONSTRAINT <name>` (names are
