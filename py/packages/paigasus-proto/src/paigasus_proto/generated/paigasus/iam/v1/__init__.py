@@ -4,10 +4,14 @@
 # This file has been @generated
 
 __all__ = (
+    "ApiKey",
+    "ApiKeyStatus",
     "ArchiveOrganizationRequest",
     "ArchiveOrganizationResponse",
     "ArchiveProjectRequest",
     "ArchiveProjectResponse",
+    "ArchiveServiceAccountRequest",
+    "ArchiveServiceAccountResponse",
     "ArchiveTeamRequest",
     "ArchiveTeamResponse",
     "AttachMembershipRequest",
@@ -18,6 +22,8 @@ __all__ = (
     "CreateOrganizationResponse",
     "CreateProjectRequest",
     "CreateProjectResponse",
+    "CreateServiceAccountRequest",
+    "CreateServiceAccountResponse",
     "CreateTeamRequest",
     "CreateTeamResponse",
     "DeletePolicyRequest",
@@ -28,14 +34,22 @@ __all__ = (
     "GetOrganizationResponse",
     "GetProjectRequest",
     "GetProjectResponse",
+    "GetServiceAccountRequest",
+    "GetServiceAccountResponse",
     "GetTeamRequest",
     "GetTeamResponse",
     "GrantRoleRequest",
     "GrantRoleResponse",
+    "IntrospectApiKeyRequest",
+    "IntrospectApiKeyResponse",
     "IntrospectRequest",
     "IntrospectResponse",
     "IsAuthorizedRequest",
     "IsAuthorizedResponse",
+    "IssueApiKeyRequest",
+    "IssueApiKeyResponse",
+    "ListApiKeysRequest",
+    "ListApiKeysResponse",
     "ListMembershipsRequest",
     "ListMembershipsResponse",
     "ListOrganizationsRequest",
@@ -46,6 +60,8 @@ __all__ = (
     "ListProjectsResponse",
     "ListRoleGrantsRequest",
     "ListRoleGrantsResponse",
+    "ListServiceAccountsRequest",
+    "ListServiceAccountsResponse",
     "ListTeamsRequest",
     "ListTeamsResponse",
     "Membership",
@@ -67,10 +83,14 @@ __all__ = (
     "RestoreProjectResponse",
     "RestoreTeamRequest",
     "RestoreTeamResponse",
+    "RevokeApiKeyRequest",
+    "RevokeApiKeyResponse",
     "RevokeRoleRequest",
     "RevokeRoleResponse",
     "RoleGrant",
     "RoleGrantRef",
+    "ServiceAccount",
+    "ServiceAccountServiceStub",
     "ServiceInfo",
     "Team",
     "TenancyServiceStub",
@@ -91,6 +111,30 @@ if TYPE_CHECKING:
 
 _COMPILER_VERSION = "0.10.1"
 betterproto2.check_compiler_version(_COMPILER_VERSION)
+
+
+class ApiKeyStatus(betterproto2.Enum):
+    UNSPECIFIED = 0
+
+    ACTIVE = 1
+
+    REVOKED = 2
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "API_KEY_STATUS_UNSPECIFIED",
+            1: "API_KEY_STATUS_ACTIVE",
+            2: "API_KEY_STATUS_REVOKED",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "API_KEY_STATUS_UNSPECIFIED": 0,
+            "API_KEY_STATUS_ACTIVE": 1,
+            "API_KEY_STATUS_REVOKED": 2,
+        }
 
 
 class NodeStatus(betterproto2.Enum):
@@ -115,6 +159,62 @@ class NodeStatus(betterproto2.Enum):
             "NODE_STATUS_ACTIVE": 1,
             "NODE_STATUS_ARCHIVED": 2,
         }
+
+
+@dataclass(eq=False, repr=False)
+class ApiKey(betterproto2.Message):
+    """
+    ApiKey never carries the secret or its hash — only display/lifecycle
+    metadata. The plaintext token is returned exactly once, in
+    IssueApiKeyResponse.token.
+    """
+
+    id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    service_account_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    scope_prn: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    prefix: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    status: "ApiKeyStatus" = betterproto2.field(
+        5, betterproto2.TYPE_ENUM, default_factory=lambda: ApiKeyStatus(0)
+    )
+
+    expires_at: "datetime.datetime | None" = betterproto2.field(
+        6,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    last_used_at: "datetime.datetime | None" = betterproto2.field(
+        7,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    scope_actions: "list[str]" = betterproto2.field(
+        8, betterproto2.TYPE_STRING, repeated=True
+    )
+    """
+    stored, unenforced in v1
+    """
+
+    scope_roles: "list[str]" = betterproto2.field(
+        9, betterproto2.TYPE_STRING, repeated=True
+    )
+    """
+    stored, unenforced in v1
+    """
+
+    audit: "__common__v1__.AuditMetadata | None" = betterproto2.field(
+        10, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message("paigasus.iam.v1", "ApiKey", ApiKey)
 
 
 @dataclass(eq=False, repr=False)
@@ -158,6 +258,32 @@ class ArchiveProjectResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "ArchiveProjectResponse", ArchiveProjectResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ArchiveServiceAccountRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ArchiveServiceAccountRequest", ArchiveServiceAccountRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ArchiveServiceAccountResponse(betterproto2.Message):
+    """
+    Archive is a lifecycle op with no meaningful payload (like DetachMembership):
+    an empty response avoids requiring GetServiceAccount authz alongside
+    ArchiveServiceAccount just to populate a body.
+    """
+
+    pass
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ArchiveServiceAccountResponse", ArchiveServiceAccountResponse
 )
 
 
@@ -258,6 +384,30 @@ class CreateProjectResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "CreateProjectResponse", CreateProjectResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateServiceAccountRequest(betterproto2.Message):
+    owner_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    name: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CreateServiceAccountRequest", CreateServiceAccountRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateServiceAccountResponse(betterproto2.Message):
+    service_account: "ServiceAccount | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CreateServiceAccountResponse", CreateServiceAccountResponse
 )
 
 
@@ -379,6 +529,28 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class GetServiceAccountRequest(betterproto2.Message):
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GetServiceAccountRequest", GetServiceAccountRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetServiceAccountResponse(betterproto2.Message):
+    service_account: "ServiceAccount | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "GetServiceAccountResponse", GetServiceAccountResponse
+)
+
+
+@dataclass(eq=False, repr=False)
 class GetTeamRequest(betterproto2.Message):
     prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -423,6 +595,51 @@ class GrantRoleResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "GrantRoleResponse", GrantRoleResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class IntrospectApiKeyRequest(betterproto2.Message):
+    token: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "IntrospectApiKeyRequest", IntrospectApiKeyRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class IntrospectApiKeyResponse(betterproto2.Message):
+    principal_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    status: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+    """
+    principal status
+    """
+
+    key_id: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    expires_at: "datetime.datetime | None" = betterproto2.field(
+        4,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    memberships: "list[Membership]" = betterproto2.field(
+        5, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+    """
+    reuse tenancy message
+    """
+
+    role_grants: "list[RoleGrantRef]" = betterproto2.field(
+        6, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "IntrospectApiKeyResponse", IntrospectApiKeyResponse
 )
 
 
@@ -508,6 +725,79 @@ class IsAuthorizedResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "IsAuthorizedResponse", IsAuthorizedResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class IssueApiKeyRequest(betterproto2.Message):
+    service_account_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    scope_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    expires_at: "datetime.datetime | None" = betterproto2.field(
+        3,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+    """
+    unset = uses the configured default expiry if one is set, else non-expiring
+    """
+
+    scope_actions: "list[str]" = betterproto2.field(
+        4, betterproto2.TYPE_STRING, repeated=True
+    )
+
+    scope_roles: "list[str]" = betterproto2.field(
+        5, betterproto2.TYPE_STRING, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "IssueApiKeyRequest", IssueApiKeyRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class IssueApiKeyResponse(betterproto2.Message):
+    api_key: "ApiKey | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+    token: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+    """
+    plaintext token, shown once
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "IssueApiKeyResponse", IssueApiKeyResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListApiKeysRequest(betterproto2.Message):
+    service_account_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    limit: "int" = betterproto2.field(2, betterproto2.TYPE_UINT32)
+
+    offset: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListApiKeysRequest", ListApiKeysRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListApiKeysResponse(betterproto2.Message):
+    api_keys: "list[ApiKey]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListApiKeysResponse", ListApiKeysResponse
 )
 
 
@@ -647,6 +937,32 @@ class ListRoleGrantsResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "ListRoleGrantsResponse", ListRoleGrantsResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListServiceAccountsRequest(betterproto2.Message):
+    owner_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    limit: "int" = betterproto2.field(2, betterproto2.TYPE_UINT32)
+
+    offset: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListServiceAccountsRequest", ListServiceAccountsRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListServiceAccountsResponse(betterproto2.Message):
+    service_accounts: "list[ServiceAccount]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListServiceAccountsResponse", ListServiceAccountsResponse
 )
 
 
@@ -944,6 +1260,26 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class RevokeApiKeyRequest(betterproto2.Message):
+    id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RevokeApiKeyRequest", RevokeApiKeyRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class RevokeApiKeyResponse(betterproto2.Message):
+    pass
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RevokeApiKeyResponse", RevokeApiKeyResponse
+)
+
+
+@dataclass(eq=False, repr=False)
 class RevokeRoleRequest(betterproto2.Message):
     id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -985,6 +1321,37 @@ class RoleGrantRef(betterproto2.Message):
 
 
 default_message_pool.register_message("paigasus.iam.v1", "RoleGrantRef", RoleGrantRef)
+
+
+@dataclass(eq=False, repr=False)
+class ServiceAccount(betterproto2.Message):
+    """
+    ServiceAccount is a machine identity: a principal PRN owned by exactly one
+    tenancy node (org/team/project). It reuses the unified Principal type
+    (M3 D1) — status lives on the principal row, not here — so `status` mirrors
+    IntrospectResponse.status (a free-form principal-status string) rather than
+    a dedicated enum.
+    """
+
+    prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    owner_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    name: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    status: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+    """
+    principal status
+    """
+
+    audit: "__common__v1__.AuditMetadata | None" = betterproto2.field(
+        5, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ServiceAccount", ServiceAccount
+)
 
 
 @dataclass(eq=False, repr=False)
@@ -1049,6 +1416,24 @@ class AuthnServiceStub(betterproto2_grpclib.ServiceStub):
             "/paigasus.iam.v1.AuthnService/Introspect",
             message,
             IntrospectResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def introspect_api_key(
+        self,
+        message: "IntrospectApiKeyRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "IntrospectApiKeyResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuthnService/IntrospectApiKey",
+            message,
+            IntrospectApiKeyResponse,
             timeout=timeout,
             deadline=deadline,
             metadata=metadata,
@@ -1177,6 +1562,134 @@ class AuthorizationServiceStub(betterproto2_grpclib.ServiceStub):
             "/paigasus.iam.v1.AuthorizationService/ListRoleGrants",
             message,
             ListRoleGrantsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+
+class ServiceAccountServiceStub(betterproto2_grpclib.ServiceStub):
+    async def create_service_account(
+        self,
+        message: "CreateServiceAccountRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "CreateServiceAccountResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ServiceAccountService/CreateServiceAccount",
+            message,
+            CreateServiceAccountResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def get_service_account(
+        self,
+        message: "GetServiceAccountRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "GetServiceAccountResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ServiceAccountService/GetServiceAccount",
+            message,
+            GetServiceAccountResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def list_service_accounts(
+        self,
+        message: "ListServiceAccountsRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListServiceAccountsResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ServiceAccountService/ListServiceAccounts",
+            message,
+            ListServiceAccountsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def archive_service_account(
+        self,
+        message: "ArchiveServiceAccountRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ArchiveServiceAccountResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ServiceAccountService/ArchiveServiceAccount",
+            message,
+            ArchiveServiceAccountResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def issue_api_key(
+        self,
+        message: "IssueApiKeyRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "IssueApiKeyResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ServiceAccountService/IssueApiKey",
+            message,
+            IssueApiKeyResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def revoke_api_key(
+        self,
+        message: "RevokeApiKeyRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "RevokeApiKeyResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ServiceAccountService/RevokeApiKey",
+            message,
+            RevokeApiKeyResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def list_api_keys(
+        self,
+        message: "ListApiKeysRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListApiKeysResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.ServiceAccountService/ListApiKeys",
+            message,
+            ListApiKeysResponse,
             timeout=timeout,
             deadline=deadline,
             metadata=metadata,

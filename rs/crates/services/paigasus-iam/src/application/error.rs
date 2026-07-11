@@ -24,6 +24,13 @@ pub enum TenancyError {
     DuplicateMembership,
     #[error("email address is already taken")]
     EmailConflict,
+    /// A `ServiceAccountService::create` targeted a name already taken by another service
+    /// account under the SAME owner node (`ConflictKind::ServiceAccountNameTaken`,
+    /// `uq_service_account_org_name`/`_team_name`/`_project_name`, SMA-445 D7) — a genuine
+    /// user-facing 409, not an `Internal` placeholder (Task 5 deferred this mapping; Task 16
+    /// fixes it).
+    #[error("service account name is already taken for this owner")]
+    ServiceAccountNameConflict,
     #[error("invalid email address")]
     InvalidEmail(String),
     #[error("invalid slug")]
@@ -90,6 +97,7 @@ impl TenancyError {
             Self::SlugConflict => "slug-conflict",
             Self::DuplicateMembership => "duplicate-membership",
             Self::EmailConflict => "email-conflict",
+            Self::ServiceAccountNameConflict => "service-account-name-conflict",
             Self::InvalidEmail(_) => "invalid-email",
             Self::InvalidSlug(_) => "invalid-slug",
             Self::InvalidName(_) => "invalid-name",
@@ -127,7 +135,7 @@ impl TenancyError {
             | Self::PolicyInvalid(_)
             | Self::InvalidAction(_) => ErrorClass::Validation,
             Self::NotFound => ErrorClass::NotFound,
-            Self::SlugConflict | Self::DuplicateMembership | Self::EmailConflict | Self::PolicyConflict(_) => ErrorClass::Conflict,
+            Self::SlugConflict | Self::DuplicateMembership | Self::EmailConflict | Self::ServiceAccountNameConflict | Self::PolicyConflict(_) => ErrorClass::Conflict,
             Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership | Self::SystemImmutable(_) => ErrorClass::Precondition,
             Self::Forbidden => ErrorClass::Forbidden,
             Self::Internal => ErrorClass::Internal,
@@ -145,6 +153,13 @@ impl From<RepositoryError> for TenancyError {
                 // Authn-only variant (SMA-443): tenancy operations never produce it, but the
                 // match must stay exhaustive as `ConflictKind` grows across milestones.
                 ConflictKind::ExternalIdentityExists => Self::Internal,
+                // M4 (SMA-445) variant: `ServiceAccountService::create` is the one caller
+                // that can actually hit this (Task 16) — a genuine 409, not a placeholder.
+                ConflictKind::ServiceAccountNameTaken => Self::ServiceAccountNameConflict,
+                // `ApiKeyRepository::issue`'s hash collision is a genuine internal
+                // shouldn't-happen event (an HMAC collision), not a user-facing conflict —
+                // stays `Internal` (Task 16 brief).
+                ConflictKind::ApiKeyHashCollision => Self::Internal,
                 ConflictKind::Other => Self::Internal,
             },
             RepositoryError::NotFound => Self::NotFound,
@@ -169,6 +184,9 @@ impl From<DomainError> for TenancyError {
             // Authn-only variant (SMA-443): tenancy operations never produce it, but the
             // match must stay exhaustive as `DomainError` grows across milestones.
             DomainError::InvalidIssuer(_) => Self::Internal,
+            // API-key-only variant (SMA-445): tenancy operations never produce it, but the
+            // match must stay exhaustive as `DomainError` grows across milestones.
+            DomainError::InvalidApiKeyToken(_) => Self::Internal,
         }
     }
 }
@@ -265,6 +283,21 @@ mod tests {
 
         let err = TenancyError::from(RepositoryError::Precondition(PreconditionKind::NodeArchived));
         assert_eq!(err, TenancyError::NodeArchived);
+    }
+
+    /// SMA-445 Task 16 fix: `ServiceAccountNameTaken` is a genuine user-facing 409 (the
+    /// per-owner unique-name conflict), not the `Internal` placeholder Task 5 left it as —
+    /// `ApiKeyHashCollision` stays `Internal` (an HMAC collision, a shouldn't-happen event,
+    /// not a client-facing conflict).
+    #[test]
+    fn service_account_name_taken_is_a_conflict_not_internal() {
+        let err = TenancyError::from(RepositoryError::Conflict(ConflictKind::ServiceAccountNameTaken));
+        assert_eq!(err, TenancyError::ServiceAccountNameConflict);
+        assert_eq!(err.class(), ErrorClass::Conflict);
+        assert_eq!(err.code(), "service-account-name-conflict");
+
+        let hash_collision = TenancyError::from(RepositoryError::Conflict(ConflictKind::ApiKeyHashCollision));
+        assert_eq!(hash_collision, TenancyError::Internal);
     }
 
     #[test]

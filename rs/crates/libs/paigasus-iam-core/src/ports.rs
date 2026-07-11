@@ -3,9 +3,11 @@
 //! Hexagonal ports (traits) the service's adapters implement. Kept in the pure core so
 //! use cases depend on abstractions, not on SeaORM/axum (ADR-0005).
 
+use crate::api_key::{ApiKey, ApiKeyId};
 use crate::authn::{AuthnError, ExternalIdentity, Issuer, ValidatedClaims};
 use crate::authz::model::RoleGrant;
-use crate::principal::Principal;
+use crate::principal::{Principal, PrincipalStatus};
+use crate::service_account::{ServiceAccount, ServiceAccountRecord};
 use crate::tenancy::{Membership, NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId, TenancyNodeRef};
 use crate::user::User;
 use crate::value::PrincipalId;
@@ -20,6 +22,8 @@ pub enum ConflictKind {
     DuplicateMembership,
     EmailTaken,
     ExternalIdentityExists,
+    ServiceAccountNameTaken,
+    ApiKeyHashCollision,
     Other,
 }
 
@@ -147,6 +151,11 @@ pub trait IdGenerator: Send + Sync {
     fn new_project_id(&self, org: Uuid) -> ProjectId;
     fn new_membership_id(&self) -> Uuid;
     fn new_external_identity_id(&self) -> Uuid;
+    /// Service accounts are kind-agnostic `Principal`s (D16), so this mints the same
+    /// `principal` PRN shape as [`IdGenerator::new_principal_id`].
+    fn new_service_account_id(&self) -> PrincipalId;
+    /// A bare UUIDv7 (API keys are not tenancy/authz resources, so no PRN wrapper).
+    fn new_api_key_id(&self) -> ApiKeyId;
 }
 
 /// A source of the current time, truncated to microseconds so values round-trip through
@@ -160,6 +169,56 @@ pub trait Clock: Send + Sync {
 pub trait Authenticator: Send + Sync {
     /// The pluggable port (ADR-0015). OIDC validator is the v1 impl.
     async fn authenticate(&self, token: &str) -> Result<ValidatedClaims, AuthnError>;
+}
+
+/// Hashes and verifies API-key secrets. Non-async — a pure keyed-hash computation, not I/O.
+/// The pepper is injected into the adapter (never into the core), so the port surface is
+/// just the two operations: `hash` for HMAC-SHA-256(pepper, secret) at issuance time, and
+/// `verify` for a constant-time comparison against the stored hash at authn time.
+pub trait SecretHasher: Send + Sync {
+    fn hash(&self, secret: &[u8]) -> Vec<u8>;
+    fn verify(&self, secret: &[u8], expected: &[u8]) -> bool;
+}
+
+/// A source of API-key secret entropy. Non-async and getrandom-free at this layer (the core
+/// stays getrandom-free per ADR-0005) — the adapter supplies the actual RNG.
+pub trait KeyEntropy: Send + Sync {
+    fn new_secret(&self) -> [u8; 32];
+}
+
+/// Persistence port for service accounts (non-human `Principal`s, D16).
+#[async_trait]
+pub trait ServiceAccountRepository: Send + Sync {
+    /// One transaction spanning principal + service_account (mirrors `PrincipalRepository::
+    /// create_user`'s D9 pattern).
+    async fn create(&self, principal: &Principal, sa: &ServiceAccount) -> Result<(), RepositoryError>;
+    /// Returns the `ServiceAccount` alongside its owning `Principal`'s lifecycle status (D16:
+    /// status lives on the `Principal`, so a read of the account also reads the principal row).
+    async fn find(&self, id: &PrincipalId) -> Result<Option<ServiceAccountRecord>, RepositoryError>;
+    /// ORDER BY created_at, id (rule 9). Each entry's `status` is its own principal's status
+    /// (mirrors `find`'s doc) — not the queried owner's, which has no status of its own here.
+    async fn list_by_owner(&self, owner: &TenancyNodeRef, limit: u64, offset: u64) -> Result<Vec<ServiceAccountRecord>, RepositoryError>;
+    /// Sets the lifecycle status on the underlying `Principal` row (D16: status lives on
+    /// `Principal`, not `ServiceAccount`).
+    async fn set_principal_status(&self, id: &PrincipalId, status: PrincipalStatus) -> Result<(), RepositoryError>;
+}
+
+/// Persistence port for API keys. The secret's hash is stored alongside the key metadata but
+/// modeled separately from `ApiKey` (the domain entity never carries hash material).
+#[async_trait]
+pub trait ApiKeyRepository: Send + Sync {
+    async fn issue(&self, key: &ApiKey, key_hash: &[u8]) -> Result<(), RepositoryError>;
+    /// The key plus its stored hash, for the authn adapter to `SecretHasher::verify` against.
+    async fn find_by_id(&self, id: ApiKeyId) -> Result<Option<(ApiKey, Vec<u8>)>, RepositoryError>;
+    async fn revoke(&self, id: ApiKeyId, now: DateTime<Utc>) -> Result<(), RepositoryError>;
+    /// ORDER BY created_at, id (rule 9).
+    async fn list_by_service_account(&self, sa: &PrincipalId, limit: u64, offset: u64) -> Result<Vec<ApiKey>, RepositoryError>;
+    /// All key ids owned by a service account, for archive-evict (revoking every key when its
+    /// service account is archived) — no pagination, the whole set is needed at once.
+    async fn list_ids_by_service_account(&self, sa: &PrincipalId) -> Result<Vec<ApiKeyId>, RepositoryError>;
+    /// Updates `last_used_at` if more than `throttle_secs` has elapsed since the last update,
+    /// to bound write amplification from hot keys.
+    async fn touch_last_used(&self, id: ApiKeyId, now: DateTime<Utc>, throttle_secs: u64) -> Result<(), RepositoryError>;
 }
 
 #[cfg(test)]
@@ -177,6 +236,12 @@ mod tests {
         _: &dyn ExternalIdentityRepository,
         _: &dyn Authenticator,
     ) {
+    }
+
+    #[test]
+    fn new_repos_are_object_safe() {
+        #[allow(dead_code)]
+        fn _assert(_: &dyn ServiceAccountRepository, _: &dyn ApiKeyRepository, _: &dyn SecretHasher, _: &dyn KeyEntropy) {}
     }
 
     #[test]

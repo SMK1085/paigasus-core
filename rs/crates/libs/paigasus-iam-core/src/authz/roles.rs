@@ -47,6 +47,12 @@ const PLATFORM_ADMIN_KEY: &str = "platform_admin";
 /// `ListOrganizations`, `PutPolicy`, `DeletePolicy`, `ListPolicies` — design §3.2, D4).
 /// Grantable at `Organization`; because of the Cedar `in`-hierarchy, a grant here also covers
 /// every team/project under the org.
+///
+/// Includes the seven service-account/API-key management actions (design §3.2 D9): SA
+/// ownership can be any tenancy node (D10), so — mirroring how `AttachMembership`/`GrantRole`
+/// are distributed across every non-Root admin template rather than confined to one level like
+/// `CreateTeam` — `org_admin` can manage SAs/keys owned anywhere in its own subtree via the
+/// same `resource in ?resource` scoping.
 const ORG_ADMIN_ACTIONS: &[Action] = &[
     Action::GetOrganization,
     Action::GetTeam,
@@ -70,6 +76,13 @@ const ORG_ADMIN_ACTIONS: &[Action] = &[
     Action::GrantRole,
     Action::RevokeRole,
     Action::ListRoleGrants,
+    Action::CreateServiceAccount,
+    Action::GetServiceAccount,
+    Action::ListServiceAccounts,
+    Action::ArchiveServiceAccount,
+    Action::IssueApiKey,
+    Action::RevokeApiKey,
+    Action::ListApiKeys,
 ];
 
 /// `org_member`: org/team/project reads only (design §3.2) — no membership rosters, no grant
@@ -77,7 +90,9 @@ const ORG_ADMIN_ACTIONS: &[Action] = &[
 const ORG_MEMBER_ACTIONS: &[Action] = &[Action::GetOrganization, Action::GetTeam, Action::ListTeams, Action::GetProject, Action::ListProjects];
 
 /// `team_admin`: team + project writes/reads, membership, and grant management within the
-/// team subtree (design §3.2).
+/// team subtree (design §3.2). Also carries the seven service-account/API-key management
+/// actions (design §3.2 D9/D10) — see [`ORG_ADMIN_ACTIONS`]'s doc for why they're distributed
+/// like `AttachMembership`/`GrantRole` rather than confined to one level.
 const TEAM_ADMIN_ACTIONS: &[Action] = &[
     Action::GetTeam,
     Action::GetProject,
@@ -95,13 +110,23 @@ const TEAM_ADMIN_ACTIONS: &[Action] = &[
     Action::GrantRole,
     Action::RevokeRole,
     Action::ListRoleGrants,
+    Action::CreateServiceAccount,
+    Action::GetServiceAccount,
+    Action::ListServiceAccounts,
+    Action::ArchiveServiceAccount,
+    Action::IssueApiKey,
+    Action::RevokeApiKey,
+    Action::ListApiKeys,
 ];
 
 /// `team_member`: team/project reads only (design §3.2).
 const TEAM_MEMBER_ACTIONS: &[Action] = &[Action::GetTeam, Action::GetProject, Action::ListProjects];
 
 /// `project_admin`: project writes/reads, membership, and grant management within the project
-/// itself (design §3.2) — `Project` is a leaf node, so no `Create*`/`List*` of children.
+/// itself (design §3.2) — `Project` is a leaf node, so no `Create*`/`List*` of children. Also
+/// carries the seven service-account/API-key management actions (design §3.2 D9/D10) — see
+/// [`ORG_ADMIN_ACTIONS`]'s doc for why they're distributed like `AttachMembership`/`GrantRole`
+/// rather than confined to one level.
 const PROJECT_ADMIN_ACTIONS: &[Action] = &[
     Action::GetProject,
     Action::RenameProject,
@@ -113,6 +138,13 @@ const PROJECT_ADMIN_ACTIONS: &[Action] = &[
     Action::GrantRole,
     Action::RevokeRole,
     Action::ListRoleGrants,
+    Action::CreateServiceAccount,
+    Action::GetServiceAccount,
+    Action::ListServiceAccounts,
+    Action::ArchiveServiceAccount,
+    Action::IssueApiKey,
+    Action::RevokeApiKey,
+    Action::ListApiKeys,
 ];
 
 /// `project_member`: project reads only (design §3.2).

@@ -236,6 +236,18 @@ message RoleGrantRef {
   string role_key = 2;
 }
 
+message IntrospectApiKeyRequest {
+  string token = 1;
+}
+message IntrospectApiKeyResponse {
+  string principal_prn = 1;
+  string status = 2; // principal status
+  string key_id = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  repeated Membership memberships = 5; // reuse tenancy message
+  repeated RoleGrantRef role_grants = 6;
+}
+
 service TenancyService {
   rpc CreateOrganization(CreateOrganizationRequest) returns (CreateOrganizationResponse);
   rpc GetOrganization(GetOrganizationRequest) returns (GetOrganizationResponse);
@@ -264,6 +276,7 @@ service TenancyService {
 
 service AuthnService {
   rpc Introspect(IntrospectRequest) returns (IntrospectResponse);
+  rpc IntrospectApiKey(IntrospectApiKeyRequest) returns (IntrospectApiKeyResponse);
 }
 
 message IsAuthorizedRequest {
@@ -336,4 +349,103 @@ service AuthorizationService {
   rpc GrantRole(GrantRoleRequest) returns (GrantRoleResponse);
   rpc RevokeRole(RevokeRoleRequest) returns (RevokeRoleResponse);
   rpc ListRoleGrants(ListRoleGrantsRequest) returns (ListRoleGrantsResponse);
+}
+
+// ServiceAccount is a machine identity: a principal PRN owned by exactly one
+// tenancy node (org/team/project). It reuses the unified Principal type
+// (M3 D1) — status lives on the principal row, not here — so `status` mirrors
+// IntrospectResponse.status (a free-form principal-status string) rather than
+// a dedicated enum.
+message ServiceAccount {
+  string prn = 1;
+  string owner_prn = 2;
+  string name = 3;
+  string status = 4; // principal status
+  paigasus.common.v1.AuditMetadata audit = 5;
+}
+
+enum ApiKeyStatus {
+  API_KEY_STATUS_UNSPECIFIED = 0;
+  API_KEY_STATUS_ACTIVE = 1;
+  API_KEY_STATUS_REVOKED = 2;
+}
+
+// ApiKey never carries the secret or its hash — only display/lifecycle
+// metadata. The plaintext token is returned exactly once, in
+// IssueApiKeyResponse.token.
+message ApiKey {
+  string id = 1;
+  string service_account_prn = 2;
+  string scope_prn = 3;
+  string prefix = 4;
+  ApiKeyStatus status = 5;
+  google.protobuf.Timestamp expires_at = 6;
+  google.protobuf.Timestamp last_used_at = 7;
+  repeated string scope_actions = 8; // stored, unenforced in v1
+  repeated string scope_roles = 9; // stored, unenforced in v1
+  paigasus.common.v1.AuditMetadata audit = 10;
+}
+
+message CreateServiceAccountRequest {
+  string owner_prn = 1;
+  string name = 2;
+}
+message CreateServiceAccountResponse {
+  ServiceAccount service_account = 1;
+}
+message GetServiceAccountRequest {
+  string prn = 1;
+}
+message GetServiceAccountResponse {
+  ServiceAccount service_account = 1;
+}
+message ListServiceAccountsRequest {
+  string owner_prn = 1;
+  uint32 limit = 2;
+  uint64 offset = 3;
+}
+message ListServiceAccountsResponse {
+  repeated ServiceAccount service_accounts = 1;
+}
+message ArchiveServiceAccountRequest {
+  string prn = 1;
+}
+
+// Archive is a lifecycle op with no meaningful payload (like DetachMembership):
+// an empty response avoids requiring GetServiceAccount authz alongside
+// ArchiveServiceAccount just to populate a body.
+message ArchiveServiceAccountResponse {}
+
+message IssueApiKeyRequest {
+  string service_account_prn = 1;
+  string scope_prn = 2;
+  google.protobuf.Timestamp expires_at = 3; // unset = uses the configured default expiry if one is set, else non-expiring
+  repeated string scope_actions = 4;
+  repeated string scope_roles = 5;
+}
+message IssueApiKeyResponse {
+  ApiKey api_key = 1;
+  string token = 2; // plaintext token, shown once
+}
+message RevokeApiKeyRequest {
+  string id = 1;
+}
+message RevokeApiKeyResponse {}
+message ListApiKeysRequest {
+  string service_account_prn = 1;
+  uint32 limit = 2;
+  uint64 offset = 3;
+}
+message ListApiKeysResponse {
+  repeated ApiKey api_keys = 1;
+}
+
+service ServiceAccountService {
+  rpc CreateServiceAccount(CreateServiceAccountRequest) returns (CreateServiceAccountResponse);
+  rpc GetServiceAccount(GetServiceAccountRequest) returns (GetServiceAccountResponse);
+  rpc ListServiceAccounts(ListServiceAccountsRequest) returns (ListServiceAccountsResponse);
+  rpc ArchiveServiceAccount(ArchiveServiceAccountRequest) returns (ArchiveServiceAccountResponse);
+  rpc IssueApiKey(IssueApiKeyRequest) returns (IssueApiKeyResponse);
+  rpc RevokeApiKey(RevokeApiKeyRequest) returns (RevokeApiKeyResponse);
+  rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse);
 }

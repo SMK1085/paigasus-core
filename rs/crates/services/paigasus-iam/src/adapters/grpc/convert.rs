@@ -6,12 +6,16 @@
 
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
-use paigasus_iam_core::{AuthnError, MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant, RoleGrantRef, Team};
+use paigasus_iam_core::{
+    ApiKey, ApiKeyStatus, AuthnError, Credential, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant, RoleGrantRef,
+    ServiceAccountRecord, Team,
+};
 use paigasus_kernel::Prn;
 use paigasus_proto::paigasus::common::v1::AuditMetadata;
 use paigasus_proto::paigasus::iam::v1::{
-    IntrospectResponse, Membership, NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RoleGrant as ProtoRoleGrant,
-    RoleGrantRef as ProtoRoleGrantRef, Team as ProtoTeam,
+    ApiKey as ProtoApiKey, ApiKeyStatus as ProtoApiKeyStatus, IntrospectApiKeyResponse, IntrospectResponse, IssueApiKeyResponse, Membership, NodeStatus as ProtoNodeStatus,
+    Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RoleGrant as ProtoRoleGrant, RoleGrantRef as ProtoRoleGrantRef, ServiceAccount as ProtoServiceAccount,
+    Team as ProtoTeam,
 };
 use tonic::{Code, Status};
 use uuid::Uuid;
@@ -96,6 +100,17 @@ pub fn ts(dt: DateTime<Utc>) -> prost_types::Timestamp {
         seconds: dt.timestamp(),
         nanos: dt.timestamp_subsec_nanos() as i32,
     }
+}
+
+/// Builds a `chrono::DateTime<Utc>` from a `prost_types::Timestamp` — the inverse of [`ts`],
+/// needed by `IssueApiKeyRequest.expires_at` (SMA-445 Task 21, the first wire request carrying
+/// a caller-supplied, rather than server-produced, timestamp). `None` for an out-of-range
+/// value (a negative `nanos`, or a `seconds`/`nanos` pair `chrono` can't represent) rather than
+/// panicking — callers map that to a client error themselves (mirrors `node_uuid`'s own
+/// "caller decides how to surface a parse failure" posture).
+pub fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
+    let nanos = u32::try_from(t.nanos).ok()?;
+    DateTime::<Utc>::from_timestamp(t.seconds, nanos)
 }
 
 /// Builds `AuditMetadata` from created/modified timestamps. `created_by`/`modified_by` stay
@@ -210,12 +225,102 @@ pub fn to_proto_role_grant(g: &RoleGrant) -> ProtoRoleGrant {
 /// memberships via the shared tenancy `Membership` mapping, and `role_grants` from the
 /// core's structured role-grant refs — always empty until a later M3 task populates it (D4).
 pub fn to_introspect_response(ctx: &PrincipalContext) -> IntrospectResponse {
+    // Token introspection only ever validates a JWT (`AuthenticateToken::introspect` always
+    // resolves via the OIDC authenticator), so `ApiKey` is unreachable here — Task 19 adds a
+    // dedicated api-key introspection path rather than extending this one.
+    let (issuer, subject, expires_at) = match &ctx.principal.credential {
+        Credential::Oidc { issuer, subject, expires_at } => (issuer.as_str().to_string(), subject.clone(), *expires_at),
+        Credential::ApiKey { .. } => {
+            debug_assert!(false, "token introspection resolved an ApiKey credential; only Oidc is reachable here");
+            (String::new(), String::new(), Utc::now())
+        }
+    };
     IntrospectResponse {
         principal_prn: ctx.principal.principal_id.canonical(),
         status: ctx.principal.status.as_str().to_string(),
-        issuer: ctx.principal.issuer.as_str().to_string(),
-        subject: ctx.principal.subject.clone(),
-        expires_at: Some(ts(ctx.principal.expires_at)),
+        issuer,
+        subject,
+        expires_at: Some(ts(expires_at)),
+        memberships: ctx.memberships.iter().map(to_proto_membership).collect(),
+        role_grants: ctx.role_grants.iter().map(to_proto_role_grant_ref).collect(),
+    }
+}
+
+fn to_proto_api_key_status(s: ApiKeyStatus) -> i32 {
+    match s {
+        ApiKeyStatus::Active => ProtoApiKeyStatus::Active as i32,
+        ApiKeyStatus::Revoked => ProtoApiKeyStatus::Revoked as i32,
+    }
+}
+
+/// Projects a service account into its wire message (SMA-445 Task 21). `status` is the
+/// underlying `Principal`'s lifecycle status (D16: it lives there, never on the
+/// `ServiceAccount` row itself — mirrors `http::dto::ServiceAccountDto`'s identical doc),
+/// built from the `ServiceAccountRecord` every read path (`ServiceAccountService::create`/
+/// `get`/`list`) now hands back rather than a bare `ServiceAccount`.
+pub fn to_proto_service_account(record: &ServiceAccountRecord) -> ProtoServiceAccount {
+    let sa = &record.account;
+    ProtoServiceAccount {
+        prn: sa.principal_id.canonical(),
+        owner_prn: sa.owner.canonical(),
+        name: sa.name.clone(),
+        status: record.status.as_str().to_string(),
+        audit: Some(audit(sa.created_at, sa.updated_at)),
+    }
+}
+
+/// Projects an API key into its wire message (SMA-445 Task 21). NEVER carries a secret/hash —
+/// `ApiKey` structurally has neither field (mirrors `http::dto::ApiKeyDto`'s identical doc).
+/// `audit.modified_at` is `revoked_at` when the key has been revoked, else `created_at` — an
+/// API key has no generic `updated_at` of its own (unlike a tenancy node), so revocation is the
+/// only state transition worth surfacing as "modified" (mirrors `to_proto_membership`'s
+/// immutable-record posture, generalized to the one mutation this entity does have).
+pub fn to_proto_api_key(key: &ApiKey) -> ProtoApiKey {
+    ProtoApiKey {
+        id: key.id.uuid().to_string(),
+        service_account_prn: key.service_account_id.canonical(),
+        scope_prn: key.scope.canonical(),
+        prefix: key.prefix.clone(),
+        status: to_proto_api_key_status(key.status),
+        expires_at: key.expires_at.map(ts),
+        last_used_at: key.last_used_at.map(ts),
+        scope_actions: key.scope_actions.iter().map(|a| a.as_wire().to_string()).collect(),
+        scope_roles: key.scope_roles.clone(),
+        audit: Some(audit(key.created_at, key.revoked_at.unwrap_or(key.created_at))),
+    }
+}
+
+/// Projects a freshly minted `NewApiKey` into its wire `IssueApiKeyResponse` (SMA-445 Task 21,
+/// spec §10.1): the plaintext `token` shown exactly once (D2), mirroring
+/// `http::dto::IssueApiKeyResponseDto`'s identical `From` impl.
+pub fn to_proto_issue_api_key_response(new_key: &NewApiKey) -> IssueApiKeyResponse {
+    IssueApiKeyResponse {
+        api_key: Some(to_proto_api_key(&new_key.key)),
+        token: new_key.plaintext.clone(),
+    }
+}
+
+/// Projects a `PrincipalContext` resolved via an API key into the wire
+/// `IntrospectApiKeyResponse` (SMA-445 Task 21, spec §10.1) — the API-key peer of
+/// [`to_introspect_response`]: `key_id` takes the place of `issuer`/`subject` (an
+/// API-key-authenticated principal has neither), mirroring
+/// `http::dto::IntrospectApiKeyResponseDto`'s identical `From` impl.
+pub fn to_introspect_api_key_response(ctx: &PrincipalContext) -> IntrospectApiKeyResponse {
+    // API-key introspection always resolves via `AuthenticateApiKey::introspect`, which only
+    // ever produces a `Credential::ApiKey` — mirrors `to_introspect_response`'s own (opposite)
+    // unreachable-arm debug_assert.
+    let (key_id, expires_at) = match &ctx.principal.credential {
+        Credential::ApiKey { key_id, expires_at } => (key_id.to_string(), *expires_at),
+        Credential::Oidc { .. } => {
+            debug_assert!(false, "api-key introspection resolved an Oidc credential; only ApiKey is reachable here");
+            (String::new(), None)
+        }
+    };
+    IntrospectApiKeyResponse {
+        principal_prn: ctx.principal.principal_id.canonical(),
+        status: ctx.principal.status.as_str().to_string(),
+        key_id,
+        expires_at: expires_at.map(ts),
         memberships: ctx.memberships.iter().map(to_proto_membership).collect(),
         role_grants: ctx.role_grants.iter().map(to_proto_role_grant_ref).collect(),
     }

@@ -38,6 +38,13 @@ pub enum Action {
     GrantRole,
     RevokeRole,
     ListRoleGrants,
+    CreateServiceAccount,
+    GetServiceAccount,
+    ListServiceAccounts,
+    ArchiveServiceAccount,
+    IssueApiKey,
+    RevokeApiKey,
+    ListApiKeys,
 }
 
 impl Action {
@@ -70,6 +77,13 @@ impl Action {
         Action::GrantRole,
         Action::RevokeRole,
         Action::ListRoleGrants,
+        Action::CreateServiceAccount,
+        Action::GetServiceAccount,
+        Action::ListServiceAccounts,
+        Action::ArchiveServiceAccount,
+        Action::IssueApiKey,
+        Action::RevokeApiKey,
+        Action::ListApiKeys,
     ];
 
     /// The exact Cedar action id, verbatim from `SCHEMA_SRC` — this string doubles as
@@ -104,6 +118,13 @@ impl Action {
             Action::GrantRole => "GrantRole",
             Action::RevokeRole => "RevokeRole",
             Action::ListRoleGrants => "ListRoleGrants",
+            Action::CreateServiceAccount => "CreateServiceAccount",
+            Action::GetServiceAccount => "GetServiceAccount",
+            Action::ListServiceAccounts => "ListServiceAccounts",
+            Action::ArchiveServiceAccount => "ArchiveServiceAccount",
+            Action::IssueApiKey => "IssueApiKey",
+            Action::RevokeApiKey => "RevokeApiKey",
+            Action::ListApiKeys => "ListApiKeys",
         }
     }
 
@@ -121,7 +142,7 @@ impl Action {
     }
 
     /// `true` for mutating actions (Create/Rename/Archive/Restore/Attach/Detach/Put/
-    /// Delete/Grant/Revoke); `false` for read-only Get/List actions. Exhaustive over
+    /// Delete/Grant/Revoke/Issue); `false` for read-only Get/List actions. Exhaustive over
     /// every variant so a newly added action must be explicitly classified.
     pub fn is_write(&self) -> bool {
         match self {
@@ -133,7 +154,10 @@ impl Action {
             | Action::ListProjects
             | Action::ListMemberships
             | Action::ListPolicies
-            | Action::ListRoleGrants => false,
+            | Action::ListRoleGrants
+            | Action::GetServiceAccount
+            | Action::ListServiceAccounts
+            | Action::ListApiKeys => false,
             Action::CreateOrganization
             | Action::RenameOrganization
             | Action::ArchiveOrganization
@@ -151,7 +175,11 @@ impl Action {
             | Action::PutPolicy
             | Action::DeletePolicy
             | Action::GrantRole
-            | Action::RevokeRole => true,
+            | Action::RevokeRole
+            | Action::CreateServiceAccount
+            | Action::ArchiveServiceAccount
+            | Action::IssueApiKey
+            | Action::RevokeApiKey => true,
         }
     }
 
@@ -178,6 +206,63 @@ mod tests {
     fn write_classification() {
         assert!(Action::CreateTeam.is_write());
         assert!(!Action::GetTeam.is_write());
+    }
+    #[test]
+    fn issue_api_key_is_a_write() {
+        assert!(Action::IssueApiKey.is_write());
+    }
+    /// `Action::ALL` must contain every enum variant. `ALL` is hand-maintained (no `strum`), so
+    /// this is guarded two ways: the inner `match` is *exhaustive* over the `Action` type
+    /// itself (not just over what's in `ALL`) — rustc statically requires an arm for every
+    /// variant regardless of which values actually reach it at runtime, so adding a variant
+    /// without adding a match arm here is a compile error (`E0004: non-exhaustive patterns`),
+    /// independent of whether `ALL` was updated. The `len()` assertion then catches a variant
+    /// that got a match arm but was never added to `ALL` itself.
+    #[test]
+    fn all_covers_every_variant() {
+        fn assert_in_all(a: Action) {
+            assert!(Action::ALL.contains(&a), "{} is missing from Action::ALL", a.as_wire());
+            match a {
+                Action::GetOrganization
+                | Action::ListOrganizations
+                | Action::GetTeam
+                | Action::ListTeams
+                | Action::GetProject
+                | Action::ListProjects
+                | Action::ListMemberships
+                | Action::CreateOrganization
+                | Action::RenameOrganization
+                | Action::ArchiveOrganization
+                | Action::RestoreOrganization
+                | Action::CreateTeam
+                | Action::RenameTeam
+                | Action::ArchiveTeam
+                | Action::RestoreTeam
+                | Action::CreateProject
+                | Action::RenameProject
+                | Action::ArchiveProject
+                | Action::RestoreProject
+                | Action::AttachMembership
+                | Action::DetachMembership
+                | Action::PutPolicy
+                | Action::DeletePolicy
+                | Action::ListPolicies
+                | Action::GrantRole
+                | Action::RevokeRole
+                | Action::ListRoleGrants
+                | Action::CreateServiceAccount
+                | Action::GetServiceAccount
+                | Action::ListServiceAccounts
+                | Action::ArchiveServiceAccount
+                | Action::IssueApiKey
+                | Action::RevokeApiKey
+                | Action::ListApiKeys => {}
+            }
+        }
+        for a in Action::ALL {
+            assert_in_all(*a);
+        }
+        assert_eq!(Action::ALL.len(), 34, "Action::ALL.len() must be 27 pre-existing + 7 new management actions");
     }
     #[test]
     fn restore_classification() {

@@ -175,7 +175,8 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode};
     use axum::routing::get;
-    use paigasus_iam_core::PrincipalId;
+    use chrono::Utc;
+    use paigasus_iam_core::{Credential, Issuer, PrincipalId};
     use paigasus_kernel::Prn;
     use std::sync::Arc as StdArc;
     use tower::ServiceExt;
@@ -193,8 +194,11 @@ mod tests {
         let prn = Prn::build("iam", "", None, "principal", Uuid::from_u128(n)).unwrap();
         AuthContext {
             principal_id: PrincipalId::from_prn(prn),
-            issuer: paigasus_iam_core::Issuer::parse("https://idp.example.com/").unwrap(),
-            subject: "test-subject".to_string(),
+            credential: Credential::Oidc {
+                issuer: Issuer::parse("https://idp.example.com/").unwrap(),
+                subject: "test-subject".to_string(),
+                expires_at: Utc::now(),
+            },
         }
     }
 

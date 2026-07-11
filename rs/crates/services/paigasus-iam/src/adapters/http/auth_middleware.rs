@@ -2,20 +2,24 @@
 
 //! Bearer-enforcement middleware for the protected `/v1` HTTP surface (spec §7.4, D14).
 //! Extracts `Authorization: Bearer <token>` — the ONLY accepted credential source (no
-//! cookies, no query parameters) — runs it through `AuthnSvc::resolve(.., Enabled)` (which
-//! JIT-provisions an unknown identity, AC 2), and, on success, inserts an [`AuthContext`]
-//! request extension for downstream handlers. Every rejection short-circuits through the
-//! shared `AuthnApiError` funnel (D12): status and body are always 401 `invalid_token`;
-//! only the `WWW-Authenticate` challenge distinguishes a fully-absent `Authorization`
-//! header (bare `Bearer`, RFC 6750 §3.1) from a present-but-rejected credential
-//! (`Bearer error="invalid_token"`). The token itself is never logged (nothing here logs
-//! it, and `AuthnError`'s own contract keeps claim/token material out of its `Display`).
+//! cookies, no query parameters) — then branches on the credential kind (SMA-445 Task 19):
+//! a token starting with the configured `api_key_prefix` (`state.api_key_prefix`, e.g.
+//! `pgs_sk_`) resolves through `state.api_key_auth.resolve`, everything else through
+//! `AuthnSvc::resolve(.., Enabled)` (which JIT-provisions an unknown identity, AC 2). Both
+//! paths yield the same `AuthnPrincipal` shape, so the rest of this middleware treats them
+//! identically — on success, inserts an [`AuthContext`] request extension for downstream
+//! handlers. Every rejection short-circuits through the shared `AuthnApiError` funnel
+//! (D12): status and body are always 401 `invalid_token`; only the `WWW-Authenticate`
+//! challenge distinguishes a fully-absent `Authorization` header (bare `Bearer`, RFC 6750
+//! §3.1) from a present-but-rejected credential (`Bearer error="invalid_token"`). The token
+//! itself is never logged (nothing here logs it, and `AuthnError`'s own contract keeps
+//! claim/token material out of its `Display`).
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use paigasus_iam_core::{AuthnError, TokenDefect};
+use paigasus_iam_core::{AuthnError, Credential, TokenDefect};
 
 use super::AppState;
 use super::authn::AuthnApiError;
@@ -41,16 +45,30 @@ pub async fn require_bearer(State(state): State<AppState>, mut request: Request,
         return response;
     };
 
-    match state.authn.resolve(&token, Provisioning::Enabled).await {
+    // Credential router (SMA-445 Task 19): a token carrying the configured API-key prefix
+    // resolves through the API-key authenticator; everything else is treated as an OIDC
+    // bearer, exactly as before this task.
+    let resolved = if token.starts_with(&state.api_key_prefix) {
+        state.api_key_auth.resolve(&token).await
+    } else {
+        state.authn.resolve(&token, Provisioning::Enabled).await
+    };
+
+    match resolved {
         Ok(principal) => {
             // Cold-start bootstrap-admin seeding (SMA-444 Task 21b, D9/M4): only ever a
             // no-op HashSet lookup for a non-bootstrap identity. Runs on the `Enabled`
             // (JIT-provisioning) path only — never `introspect`'s `Disabled` path (D10).
-            state.bootstrap_seeder.ensure_platform_admin(&principal.principal_id, &principal.issuer, &principal.subject).await;
+            // KEPT INSIDE THE OIDC ARM ONLY (SMA-445 Task 19): an `ApiKey`-credentialed
+            // principal (a service account) has no (issuer, subject) pair to seed against
+            // and must never be JIT-granted platform_admin — a service account is never a
+            // bootstrap admin.
+            if let Credential::Oidc { issuer, subject, .. } = &principal.credential {
+                state.bootstrap_seeder.ensure_platform_admin(&principal.principal_id, issuer, subject).await;
+            }
             request.extensions_mut().insert(AuthContext {
                 principal_id: principal.principal_id,
-                issuer: principal.issuer,
-                subject: principal.subject,
+                credential: principal.credential,
             });
             next.run(request).await
         }

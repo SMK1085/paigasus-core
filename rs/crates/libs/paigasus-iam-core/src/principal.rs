@@ -5,10 +5,11 @@
 use crate::value::PrincipalId;
 use chrono::{DateTime, Utc};
 
-/// Principal subtype. M0 mints only `User`; `ServiceAccount` arrives in a later milestone.
+/// Principal subtype (SMA-445, M4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrincipalKind {
     User,
+    ServiceAccount,
 }
 
 impl PrincipalKind {
@@ -16,6 +17,7 @@ impl PrincipalKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             PrincipalKind::User => "user",
+            PrincipalKind::ServiceAccount => "service_account",
         }
     }
 
@@ -23,15 +25,17 @@ impl PrincipalKind {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "user" => Some(PrincipalKind::User),
+            "service_account" => Some(PrincipalKind::ServiceAccount),
             _ => None,
         }
     }
 }
 
-/// Principal lifecycle status. M0 only ever `Active`.
+/// Principal lifecycle status (SMA-445, M4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrincipalStatus {
     Active,
+    Disabled,
 }
 
 impl PrincipalStatus {
@@ -39,6 +43,7 @@ impl PrincipalStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             PrincipalStatus::Active => "active",
+            PrincipalStatus::Disabled => "disabled",
         }
     }
 
@@ -46,6 +51,7 @@ impl PrincipalStatus {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "active" => Some(PrincipalStatus::Active),
+            "disabled" => Some(PrincipalStatus::Disabled),
             _ => None,
         }
     }
@@ -83,5 +89,17 @@ mod tests {
         assert_eq!(PrincipalKind::parse(PrincipalKind::User.as_str()), Some(PrincipalKind::User));
         assert_eq!(PrincipalStatus::parse(PrincipalStatus::Active.as_str()), Some(PrincipalStatus::Active));
         assert_eq!(PrincipalKind::parse("nope"), None);
+    }
+
+    #[test]
+    fn service_account_kind_roundtrips() {
+        assert_eq!(PrincipalKind::parse("service_account"), Some(PrincipalKind::ServiceAccount));
+        assert_eq!(PrincipalKind::ServiceAccount.as_str(), "service_account");
+    }
+
+    #[test]
+    fn disabled_status_roundtrips() {
+        assert_eq!(PrincipalStatus::parse("disabled"), Some(PrincipalStatus::Disabled));
+        assert_eq!(PrincipalStatus::Disabled.as_str(), "disabled");
     }
 }

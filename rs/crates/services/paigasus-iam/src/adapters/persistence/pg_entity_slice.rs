@@ -122,26 +122,27 @@ impl PgEntitySliceLoader {
         }
     }
 
-    /// The principal entity: `kind = "user"` (M3 mints no other principal kind yet).
-    /// `status` is read from the `principal` table when the row exists (one cheap PK
-    /// lookup) and falls back to `"active"` when it doesn't — a caller only ever reaches
-    /// authz after authenticating a real principal, so a missing row isn't expected in
-    /// practice, but a fallback beats a hard failure on an edge this loader doesn't need
-    /// to police.
+    /// The principal entity: `kind`/`status` are both read from the `principal` table (one
+    /// cheap PK lookup) — `kind` distinguishes a `User` from a `ServiceAccount` principal
+    /// (SMA-445 D1: both resolve as a Cedar `Pgs::Iam::Principal`, just with a different
+    /// `kind` attr). A missing row (deleted/never-provisioned/stale PRN) is surfaced as
+    /// `AuthzError::ResourceNotFound`, the SAME error variant `load_chain`'s `missing` helper
+    /// uses for a missing tenancy node — `CedarAuthorizer::is_authorized` catches it and fails
+    /// CLOSED as a `Deny` (never a 500). This loader must never fabricate a synthetic
+    /// `kind = "user"`/`status = "active"` principal for a row that isn't there: that would
+    /// represent a deleted/nonexistent identity as an ACTIVE Cedar principal — fail-OPEN on
+    /// exactly the check this loader exists to police (CodeRabbit SMA-445 review fix).
     async fn principal_entity(&self, principal_prn: &Prn) -> Result<SliceEntity, AuthzError> {
-        let status = match principal::Entity::find_by_id(principal_prn.resource_id())
+        let model = principal::Entity::find_by_id(principal_prn.resource_id())
             .one(&self.db)
             .await
             .map_err(|e| AuthzError::Backend(Box::new(e)))?
-        {
-            Some(model) => model.status,
-            None => "active".to_string(),
-        };
+            .ok_or_else(|| missing("principal", principal_prn.resource_id()))?;
 
         Ok(SliceEntity {
             uid: uid_pair(principal_prn),
             parents: vec![],
-            attrs: BTreeMap::from([("kind".to_string(), ContextValue::Str("user".to_string())), ("status".to_string(), ContextValue::Str(status))]),
+            attrs: BTreeMap::from([("kind".to_string(), ContextValue::Str(model.kind)), ("status".to_string(), ContextValue::Str(model.status))]),
         })
     }
 }

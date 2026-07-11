@@ -18,6 +18,8 @@ pub enum DomainError {
     InvalidNodePrn(String),
     #[error("invalid issuer: {0}")]
     InvalidIssuer(String),
+    #[error("invalid api key token: {0}")]
+    InvalidApiKeyToken(String),
 }
 
 /// A validated email address. M0 rule: non-empty, exactly one `@`, non-empty local

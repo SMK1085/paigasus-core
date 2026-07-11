@@ -71,7 +71,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use chrono::{DateTime, TimeZone, Utc};
-    use paigasus_iam_core::{ConflictKind, OrganizationId, ProjectId, TeamId};
+    use paigasus_iam_core::{ApiKeyId, ConflictKind, OrganizationId, ProjectId, TeamId};
     use paigasus_kernel::Prn;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -138,6 +138,12 @@ mod tests {
         }
         fn new_external_identity_id(&self) -> Uuid {
             self.0
+        }
+        fn new_service_account_id(&self) -> PrincipalId {
+            PrincipalId::from_prn(Prn::build("iam", "", None, "principal", self.0).unwrap())
+        }
+        fn new_api_key_id(&self) -> ApiKeyId {
+            ApiKeyId::from_uuid(self.0)
         }
     }
 

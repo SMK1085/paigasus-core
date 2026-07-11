@@ -7,7 +7,9 @@
 
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
-use paigasus_iam_core::{MembershipRecord, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant, RoleGrantRef, Team};
+use paigasus_iam_core::{
+    ApiKey, Credential, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant, RoleGrantRef, ServiceAccountRecord, Team,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -235,12 +237,23 @@ pub struct IntrospectResponseDto {
 
 impl From<PrincipalContext> for IntrospectResponseDto {
     fn from(ctx: PrincipalContext) -> Self {
+        let principal = ctx.principal;
+        // Token introspection only ever validates a JWT (`AuthenticateToken::introspect`
+        // always resolves via the OIDC authenticator), so `ApiKey` is unreachable here —
+        // Task 19 adds a dedicated api-key introspection path rather than extending this one.
+        let (issuer, subject, expires_at) = match principal.credential {
+            Credential::Oidc { issuer, subject, expires_at } => (issuer.as_str().to_string(), subject, expires_at),
+            Credential::ApiKey { .. } => {
+                debug_assert!(false, "token introspection resolved an ApiKey credential; only Oidc is reachable here");
+                (String::new(), String::new(), Utc::now())
+            }
+        };
         IntrospectResponseDto {
-            principal_prn: ctx.principal.principal_id.canonical(),
-            status: ctx.principal.status.as_str().to_string(),
-            issuer: ctx.principal.issuer.as_str().to_string(),
-            subject: ctx.principal.subject,
-            expires_at: ctx.principal.expires_at,
+            principal_prn: principal.principal_id.canonical(),
+            status: principal.status.as_str().to_string(),
+            issuer,
+            subject,
+            expires_at,
             memberships: ctx.memberships.into_iter().map(MembershipDto::from).collect(),
             role_grants: ctx.role_grants.into_iter().map(RoleGrantRefDto::from).collect(),
         }
@@ -353,4 +366,167 @@ impl From<RoleGrant> for RoleGrantDto {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoleGrantQuery {
     pub principal_prn: Option<String>,
+}
+
+// --- SMA-445 Task 20: service-account + api-key DTOs ---------------------------------------
+
+/// A `ServiceAccount`-shaped JSON entry (spec §10.2's proto `ServiceAccount` message,
+/// field-for-field): `status` is the underlying `Principal`'s lifecycle status (D16: it lives
+/// there, never on the `ServiceAccount` row itself) — `"active"`/`"disabled"` via
+/// `PrincipalStatus::as_str`, built from the `ServiceAccountRecord` every read path
+/// (`ServiceAccountService::create`/`get`/`list`) now hands back rather than a bare
+/// `ServiceAccount`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceAccountDto {
+    pub prn: String,
+    pub owner_prn: String,
+    pub name: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<ServiceAccountRecord> for ServiceAccountDto {
+    fn from(record: ServiceAccountRecord) -> Self {
+        let sa = record.account;
+        ServiceAccountDto {
+            prn: sa.principal_id.canonical(),
+            owner_prn: sa.owner.canonical(),
+            name: sa.name,
+            status: record.status.as_str().to_string(),
+            created_at: sa.created_at,
+            updated_at: sa.updated_at,
+        }
+    }
+}
+
+/// Body for `POST /v1/service-accounts` (spec §10.2's `CreateServiceAccountRequest`
+/// field-for-field).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateServiceAccountBody {
+    pub owner_prn: String,
+    pub name: String,
+}
+
+/// Query params for `GET /v1/service-accounts`: `owner_prn` is REQUIRED (mirrors
+/// `RoleGrantQuery::principal_prn` — kept `Option` so a missing param funnels through the
+/// `TenancyError::InvalidPrn` `{"error":{code,message}}` envelope instead of axum's default
+/// plain-text query rejection).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServiceAccountQuery {
+    pub owner_prn: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// An `ApiKey`-shaped JSON entry (spec §10.2's proto `ApiKey` message field-for-field) — NEVER
+/// carries a secret or hash: the domain `ApiKey` type structurally has neither field at all
+/// (`application/api_keys.rs`'s module docs), so there is nothing for this projection to leak.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApiKeyDto {
+    pub id: Uuid,
+    pub service_account_prn: String,
+    pub scope_prn: String,
+    pub prefix: String,
+    pub status: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub scope_actions: Vec<String>,
+    pub scope_roles: Vec<String>,
+}
+
+impl From<ApiKey> for ApiKeyDto {
+    fn from(key: ApiKey) -> Self {
+        ApiKeyDto {
+            id: key.id.uuid(),
+            service_account_prn: key.service_account_id.canonical(),
+            scope_prn: key.scope.canonical(),
+            prefix: key.prefix,
+            status: key.status.as_str().to_string(),
+            expires_at: key.expires_at,
+            last_used_at: key.last_used_at,
+            scope_actions: key.scope_actions.iter().map(|a| a.as_wire().to_string()).collect(),
+            scope_roles: key.scope_roles,
+        }
+    }
+}
+
+/// Body for `POST /v1/service-accounts/{sa}/api-keys` (spec §10.2's `IssueApiKeyRequest`,
+/// minus the path-carried `service_account_prn`). `scope_prn` is `Option` only so a missing
+/// value funnels through `TenancyError::InvalidPrn` (mirrors `ServiceAccountQuery::owner_prn`)
+/// rather than axum's default JSON-rejection body — it is semantically REQUIRED, exactly like
+/// the proto's plain (non-`optional`) `string scope_prn` field. `expires_at` unset means
+/// non-expiring (or the configured `default_expiry_days` fallback, `ApiKeyService::issue`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct IssueApiKeyBody {
+    pub scope_prn: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub scope_actions: Vec<String>,
+    #[serde(default)]
+    pub scope_roles: Vec<String>,
+}
+
+/// Response for `POST /v1/service-accounts/{sa}/api-keys` (spec §10.2's `IssueApiKeyResponse`
+/// field-for-field): the plaintext `token` is returned ONLY here, exactly once — never again
+/// re-derivable, and never present on `ApiKeyDto`/any list entry (shown-once, spec D2).
+#[derive(Debug, Clone, Serialize)]
+pub struct IssueApiKeyResponseDto {
+    pub api_key: ApiKeyDto,
+    pub token: String,
+}
+
+impl From<NewApiKey> for IssueApiKeyResponseDto {
+    fn from(new_key: NewApiKey) -> Self {
+        IssueApiKeyResponseDto {
+            api_key: new_key.key.into(),
+            token: new_key.plaintext,
+        }
+    }
+}
+
+/// Body for `POST /v1/authn/api-keys/introspect` (spec §10.2's `IntrospectApiKeyRequest`) —
+/// mirrors `IntrospectBody`; the token IS the credential and must never be logged (mirrors the
+/// module docs on `http/authn.rs`'s `introspect`).
+#[derive(Clone, Deserialize)]
+pub struct IntrospectApiKeyRequestBody {
+    pub token: String,
+}
+
+/// `IntrospectApiKeyResponse`-shaped JSON (spec §10.2's proto message field-for-field):
+/// unlike `IntrospectResponseDto` (OIDC-only: `issuer`/`subject`), an API-key-authenticated
+/// principal has no issuer/subject — `key_id` takes their place, mirroring the proto shape
+/// exactly (`IntrospectApiKeyResponse.key_id`).
+#[derive(Debug, Clone, Serialize)]
+pub struct IntrospectApiKeyResponseDto {
+    pub principal_prn: String,
+    pub status: String,
+    pub key_id: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub memberships: Vec<MembershipDto>,
+    pub role_grants: Vec<RoleGrantRefDto>,
+}
+
+impl From<PrincipalContext> for IntrospectApiKeyResponseDto {
+    fn from(ctx: PrincipalContext) -> Self {
+        let principal = ctx.principal;
+        // API-key introspection always resolves via `AuthenticateApiKey::introspect`, which
+        // only ever produces a `Credential::ApiKey` — mirrors `IntrospectResponseDto`'s own
+        // debug_assert for its (opposite) unreachable arm.
+        let (key_id, expires_at) = match principal.credential {
+            Credential::ApiKey { key_id, expires_at } => (key_id.to_string(), expires_at),
+            Credential::Oidc { .. } => {
+                debug_assert!(false, "api-key introspection resolved an Oidc credential; only ApiKey is reachable here");
+                (String::new(), None)
+            }
+        };
+        IntrospectApiKeyResponseDto {
+            principal_prn: principal.principal_id.canonical(),
+            status: principal.status.as_str().to_string(),
+            key_id,
+            expires_at,
+            memberships: ctx.memberships.into_iter().map(MembershipDto::from).collect(),
+            role_grants: ctx.role_grants.into_iter().map(RoleGrantRefDto::from).collect(),
+        }
+    }
 }

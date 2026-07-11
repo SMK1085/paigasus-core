@@ -2,6 +2,8 @@
 
 //! Application layer — use cases orchestrating the domain + ports.
 
+pub mod api_keys;
+pub mod authenticate_api_key;
 pub mod authenticate_token;
 pub mod authorize;
 pub mod bootstrap;
@@ -16,4 +18,5 @@ pub mod pagination;
 pub mod policies;
 pub mod projects;
 pub mod roles;
+pub mod service_accounts;
 pub mod teams;
