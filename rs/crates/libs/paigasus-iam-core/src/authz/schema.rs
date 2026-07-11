@@ -20,7 +20,9 @@ namespace Pgs::Iam {
          ListMemberships, CreateOrganization, RenameOrganization, ArchiveOrganization,
          RestoreOrganization, CreateTeam, RenameTeam, ArchiveTeam, RestoreTeam, CreateProject,
          RenameProject, ArchiveProject, RestoreProject, AttachMembership, DetachMembership,
-         PutPolicy, DeletePolicy, ListPolicies, GrantRole, RevokeRole, ListRoleGrants
+         PutPolicy, DeletePolicy, ListPolicies, GrantRole, RevokeRole, ListRoleGrants,
+         CreateServiceAccount, GetServiceAccount, ListServiceAccounts, ArchiveServiceAccount,
+         IssueApiKey, RevokeApiKey, ListApiKeys
     appliesTo { principal: [Principal], resource: [Root, Organization, Team, Project] };
 }
 "#;

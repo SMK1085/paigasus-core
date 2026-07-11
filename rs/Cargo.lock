@@ -2314,6 +2314,7 @@ dependencies = [
  "cedar-policy",
  "chrono",
  "figment",
+ "hmac",
  "jsonwebtoken",
  "p256",
  "paigasus-iam-core",
@@ -2329,6 +2330,7 @@ dependencies = [
  "sea-orm-migration",
  "serde",
  "serde_json",
+ "sha2",
  "testcontainers",
  "testcontainers-modules",
  "thiserror",
@@ -2347,10 +2349,14 @@ name = "paigasus-iam-core"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "base64",
  "cedar-policy",
  "chrono",
+ "hmac",
  "paigasus-kernel",
+ "proptest",
  "serde",
+ "sha2",
  "thiserror",
  "uuid",
 ]

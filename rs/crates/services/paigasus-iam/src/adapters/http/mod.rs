@@ -5,6 +5,7 @@
 //! authn introspection endpoint (`/v1/authn/introspect`, SMA-443), and the `/v1/authz`
 //! authorization API (`is-authorized`/policies/role-grants, SMA-444 Task 18).
 
+mod api_keys;
 pub mod auth_middleware;
 pub mod authn;
 mod authz;
@@ -14,6 +15,7 @@ pub mod error;
 mod memberships;
 mod organizations;
 mod projects;
+mod service_accounts;
 mod teams;
 mod users;
 
@@ -29,6 +31,7 @@ use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::adapters::api_keys::{ApiKeyValidationCache, HmacSecretHasher, MemoryApiKeyCache, OsRngKeyEntropy, RedisApiKeyCache};
 use crate::adapters::authz::{CedarAuthorizer, Generations, GenerationsReader, MemoryDecisionCache, PolicySnapshot, RedisDecisionCache, SliceCache, TracingAuditSink};
 use crate::adapters::clock::SystemClock;
 use crate::adapters::id::KernelIdGenerator;
@@ -36,8 +39,11 @@ use crate::adapters::oidc::jwks::{HttpJwksFetcher, InMemoryJwksCache, JwksProvid
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
-    PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgPolicyStore, PgPrincipalRepository, PgProjectRepository, PgRoleGrantStore, PgTeamRepository,
+    PgApiKeyRepository, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgPolicyStore, PgPrincipalRepository, PgProjectRepository,
+    PgRoleGrantStore, PgServiceAccountRepository, PgTeamRepository,
 };
+use crate::application::api_keys::ApiKeyService;
+use crate::application::authenticate_api_key::AuthenticateApiKey;
 use crate::application::authenticate_token::{AuthenticateToken, JitPolicy};
 use crate::application::authorize::Authorize;
 use crate::application::bootstrap;
@@ -48,9 +54,10 @@ use crate::application::organizations::OrganizationService;
 use crate::application::policies::PolicyService;
 use crate::application::projects::ProjectService;
 use crate::application::roles::RoleService;
+use crate::application::service_accounts::ServiceAccountService;
 use crate::application::teams::TeamService;
-use crate::config::{AuthzCacheBackend, IamConfig, JwksCacheBackend};
-use paigasus_iam_core::{AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, PolicyStore, ProjectRepository, RoleGrantStore, TeamRepository};
+use crate::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, JwksCacheBackend};
+use paigasus_iam_core::{ApiKeyRepository, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, PolicyStore, ProjectRepository, RoleGrantStore, TeamRepository};
 
 pub type OrgSvc = OrganizationService<PgOrganizationRepository, KernelIdGenerator, SystemClock>;
 pub type TeamSvc = TeamService<PgTeamRepository, KernelIdGenerator, SystemClock>;
@@ -64,6 +71,19 @@ pub type RoleSvc = RoleService<KernelIdGenerator, SystemClock>;
 /// The cold-start bootstrap-admin seeder (SMA-444 Task 21b), wired over the same `Arc<dyn
 /// RoleGrantStore>` `AppState.role_grant_store` holds — mirrors `RoleSvc`'s DI posture.
 pub type BootstrapAdminSvc = BootstrapAdminSeeder<KernelIdGenerator, SystemClock>;
+
+/// The wired API-key bearer authenticator (SMA-445 Task 19) — consumed by BOTH enforcement
+/// seams (`auth_middleware::require_bearer`, `grpc::authn::AuthEnforce::call`): a presented
+/// bearer token whose prefix matches `AppState.api_key_prefix` routes here instead of to
+/// `AuthnSvc::resolve`. Shares the SAME `Arc<dyn ApiKeyValidationCache>` `api_keys`'s
+/// issue/revoke evicts through (module docs on `application::authenticate_api_key`).
+pub type ApiKeyAuthSvc = AuthenticateApiKey<PgApiKeyRepository, PgPrincipalRepository, HmacSecretHasher, SystemClock, PgMembershipRepository>;
+/// The API-key lifecycle use case (issue/revoke/list, SMA-445 Task 17) — the future
+/// `/v1/service-accounts/*/api-keys` HTTP routes (Task 20) call through this.
+pub type ApiKeySvc = ApiKeyService<PgApiKeyRepository, PgServiceAccountRepository, KernelIdGenerator, SystemClock, HmacSecretHasher, OsRngKeyEntropy>;
+/// The service-account lifecycle use case (create/get/list/archive, SMA-445 Task 16) — the
+/// future `/v1/service-accounts` HTTP routes (Task 20) call through this.
+pub type ServiceAccountSvc = ServiceAccountService<PgServiceAccountRepository, KernelIdGenerator, SystemClock>;
 
 /// The OIDC authenticator over the in-process JWKS cache (the `memory` backend, D2).
 pub type Oidc = OidcAuthenticator<HttpJwksFetcher, InMemoryJwksCache, SystemClock>;
@@ -160,6 +180,27 @@ pub struct AppState {
     /// default, in which case every call is a no-op `HashSet` lookup. Deliberately NOT
     /// consulted by the read-only `introspect` path (D10).
     pub bootstrap_seeder: BootstrapAdminSvc,
+    /// The wired API-key bearer authenticator (SMA-445 Task 19) — the credential-router branch
+    /// in `auth_middleware::require_bearer`/`grpc::authn::AuthEnforce::call` calls
+    /// `api_key_auth.resolve` instead of `authn.resolve` when a presented bearer token starts
+    /// with `api_key_prefix`.
+    pub api_key_auth: ApiKeyAuthSvc,
+    /// The service-account lifecycle use case (SMA-445 Task 16) — no HTTP route calls this yet
+    /// (the `/v1/service-accounts` routes land in Task 20); wired here so that task only has to
+    /// add handlers, not composition-root plumbing.
+    pub service_accounts: ServiceAccountSvc,
+    /// The API-key lifecycle use case (SMA-445 Task 17) — same "wired ahead of its routes"
+    /// posture as `service_accounts` above.
+    pub api_keys: ApiKeySvc,
+    /// The configured API-key bearer prefix (`cfg.api_keys.key_prefix`, e.g. `pgs_sk_`) — both
+    /// enforcement seams need it to decide `api_key_auth.resolve` vs. `authn.resolve` for a
+    /// presented bearer token (SMA-445 Task 19); cached here rather than re-read from `cfg` at
+    /// request time, mirroring `introspect_body_limit`'s identical rationale.
+    pub api_key_prefix: String,
+    /// Route-level body cap for `POST /v1/authn/api-keys/introspect` (SMA-445 Task 20, spec
+    /// H1) — `cfg.api_keys.max_token_bytes` + [`INTROSPECT_BODY_OVERHEAD_BYTES`], mirroring
+    /// `introspect_body_limit`'s identical rationale for the OIDC token-introspect route.
+    pub api_key_introspect_body_limit: usize,
 }
 
 impl AppState {
@@ -206,7 +247,7 @@ impl AppState {
                     .redis_url
                     .as_deref()
                     .ok_or_else(|| AuthnError::Backend("authz.cache.backend = \"redis\" without redis_url (IamConfig::validate must run first)".into()))?;
-                let conn = connect_authz_redis(redis_url).await?;
+                let conn = connect_redis(redis_url).await?;
                 (Generations::Redis(conn.clone()), Some(conn))
             }
         };
@@ -273,6 +314,73 @@ impl AppState {
         // polls, exactly like every other role-grant mutation in this composition root.
         let bootstrap_seeder = BootstrapAdminSeeder::new(&authz_cfg.bootstrap_admins, role_grant_store.clone(), KernelIdGenerator, SystemClock);
 
+        // --- SMA-445 Task 19: API-key auth router + service-account/api-key services -------
+        // `api_key_hasher`/`api_key_cache` are the SAME shared instances `api_key_auth`
+        // verifies/reads through and `api_keys`/`service_accounts` mint/evict through — a
+        // revoke/archive's `cache.evict` must be visible to `api_key_auth.resolve`'s
+        // `cache.get` without a second cache instance to keep in sync (mirrors
+        // `role_grant_store`'s single-shared-`Arc` posture above). `pepper()` surfaces
+        // `ApiKeyConfig`'s own decode/length validation — `IamConfig::validate` already
+        // guarantees this succeeds for a boot-time config that went through it, but `AppState::
+        // new` takes a bare `&IamConfig` (main.rs calls `validate()` separately), so this is a
+        // real fallible step here, not a redundant belt-and-braces check.
+        let api_key_pepper = cfg.api_keys.pepper().map_err(|e| AuthnError::Backend(Box::new(e)))?;
+        let api_key_hasher = HmacSecretHasher::new(api_key_pepper);
+        let api_key_cache: Arc<dyn ApiKeyValidationCache> = match cfg.api_keys.introspect_cache.backend {
+            ApiKeyCacheBackend::Memory => Arc::new(MemoryApiKeyCache::new(cfg.api_keys.introspect_cache.ttl_secs)),
+            ApiKeyCacheBackend::Redis => {
+                // Reuse the SHARED `redis_conn` opened above for `authz.cache.backend =
+                // "redis"` when one exists (the ordinary single-Redis deployment posture)
+                // rather than opening a second, independent connection; only dial a fresh one
+                // when authz's own cache is memory-backed but `api_keys.introspect_cache`
+                // still wants redis. `IamConfig::validate` guarantees `redis_url` is present
+                // whenever this arm needs to open its own connection.
+                let conn = match &redis_conn {
+                    Some(conn) => conn.clone(),
+                    None => {
+                        let redis_url = cfg
+                            .api_keys
+                            .introspect_cache
+                            .redis_url
+                            .as_deref()
+                            .ok_or_else(|| AuthnError::Backend("api_keys.introspect_cache.backend = \"redis\" without redis_url (IamConfig::validate must run first)".into()))?;
+                        connect_redis(redis_url).await?
+                    }
+                };
+                Arc::new(RedisApiKeyCache::from_connection(conn, cfg.api_keys.introspect_cache.ttl_secs))
+            }
+        };
+
+        let api_key_auth = AuthenticateApiKey::new(
+            PgApiKeyRepository::new(db.clone()),
+            PgPrincipalRepository::new(db.clone()),
+            api_key_hasher.clone(),
+            SystemClock,
+            api_key_cache.clone(),
+            PgMembershipRepository::new(db.clone()),
+            cfg.api_keys.clone(),
+        );
+        let service_accounts = ServiceAccountService::new(
+            PgServiceAccountRepository::new(db.clone()),
+            Arc::new(PgApiKeyRepository::new(db.clone())) as Arc<dyn ApiKeyRepository>,
+            api_key_cache.clone(),
+            authorize.clone(),
+            KernelIdGenerator,
+            SystemClock,
+        );
+        let api_keys = ApiKeyService::new(
+            PgApiKeyRepository::new(db.clone()),
+            PgServiceAccountRepository::new(db.clone()),
+            role_grant_store.clone(),
+            authorize.clone(),
+            api_key_hasher,
+            OsRngKeyEntropy,
+            api_key_cache,
+            KernelIdGenerator,
+            SystemClock,
+            cfg.api_keys.clone(),
+        );
+
         let authn_cfg = &cfg.authn;
         if authn_cfg.accept_invalid_tls {
             tracing::warn!("accept_invalid_tls is enabled: TLS certificate verification for IdP discovery/JWKS fetches is DISABLED — test-only configuration, never use in production");
@@ -338,14 +446,21 @@ impl AppState {
             role_grant_store,
             enforce_tenancy: authz_cfg.enforce_tenancy,
             bootstrap_seeder,
+            api_key_auth,
+            service_accounts,
+            api_keys,
+            api_key_prefix: cfg.api_keys.key_prefix.clone(),
+            api_key_introspect_body_limit: cfg.api_keys.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
         })
     }
 }
 
-/// Opens `redis_url` and wraps it in an auto-reconnecting `ConnectionManager` — the shared
-/// connection `AppState::new` hands to the redis-backed `Generations`/`RedisDecisionCache`/
-/// `SliceCache` (SMA-444 Task 21), mirroring `RedisJwksCache::connect`'s connect pattern.
-async fn connect_authz_redis(redis_url: &str) -> Result<ConnectionManager, AuthnError> {
+/// Opens `redis_url` and wraps it in an auto-reconnecting `ConnectionManager` — shared by every
+/// redis-backed cache `AppState::new` wires (the authz `Generations`/`RedisDecisionCache`/
+/// `SliceCache` trio, SMA-444 Task 21; the API-key `RedisApiKeyCache`, SMA-445 Task 19, when it
+/// can't reuse an already-open `redis_conn`), mirroring `RedisJwksCache::connect`'s connect
+/// pattern.
+async fn connect_redis(redis_url: &str) -> Result<ConnectionManager, AuthnError> {
     let client = redis::Client::open(redis_url).map_err(|e| AuthnError::Backend(Box::new(e)))?;
     ConnectionManager::new(client).await.map_err(|e| AuthnError::Backend(Box::new(e)))
 }
@@ -369,13 +484,19 @@ pub fn router(state: AppState) -> Router {
         .merge(memberships::router())
         .merge(users::router())
         .merge(authz::router())
+        .merge(service_accounts::router())
+        .merge(api_keys::router())
         // `route_layer` (not `layer`): the enforcement covers exactly the routes defined
         // above and never the merged-in `/healthz`/`/readyz`/introspect or the 404 fallback.
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware::require_bearer))
         .with_state(state.clone());
     let public = Router::new().route("/readyz", get(readyz)).with_state(state.clone());
-    let authn_api = authn::router(state.introspect_body_limit).with_state(state);
-    health_router().merge(protected).merge(public).merge(authn_api)
+    let authn_api = authn::router(state.introspect_body_limit).with_state(state.clone());
+    // `POST /v1/authn/api-keys/introspect` (SMA-445 Task 20): unauthenticated like `authn_api`
+    // above — merged OUTSIDE `protected`, so the bearer-enforcement `route_layer` never covers
+    // it (spec §10.2, mirrors `authn::router`'s own posture exactly).
+    let api_key_introspect_api = api_keys::introspect_router(state.api_key_introspect_body_limit).with_state(state);
+    health_router().merge(protected).merge(public).merge(authn_api).merge(api_key_introspect_api)
 }
 
 async fn healthz() -> impl IntoResponse {

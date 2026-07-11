@@ -10,9 +10,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
-    AccessRequest, Action, Authorizer, AuthzError, Clock, ConflictKind, Decision, Effect, IdGenerator, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization,
-    OrganizationId, OrganizationRepository, PolicyDocument, PolicyStore, PreconditionKind, PrincipalId, Project, ProjectId, ProjectRepository, RepositoryError, RoleGrant, RoleGrantStore, Slug, Team,
-    TeamId, TeamRepository, TenancyNodeRef,
+    AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, Authorizer, AuthzError, Clock, ConflictKind, Decision, Effect, IdGenerator, KeyEntropy, Membership, MembershipRecord,
+    MembershipRepository, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, PolicyDocument, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project,
+    ProjectId, ProjectRepository, RepositoryError, RoleGrant, RoleGrantStore, SecretHasher, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Team, TeamId, TeamRepository,
+    TenancyNodeRef,
 };
 use paigasus_kernel::Prn;
 use std::collections::{HashMap, HashSet};
@@ -489,6 +490,15 @@ impl IdGenerator for SeqIds {
     fn new_external_identity_id(&self) -> Uuid {
         self.next()
     }
+
+    fn new_service_account_id(&self) -> PrincipalId {
+        let prn = Prn::build("iam", "", None, "principal", self.next()).expect("valid principal prn");
+        PrincipalId::from_prn(prn)
+    }
+
+    fn new_api_key_id(&self) -> ApiKeyId {
+        ApiKeyId::from_uuid(self.next())
+    }
 }
 
 /// Programmable `Authorizer` fake for application-service unit tests (`authorize.rs`,
@@ -593,6 +603,166 @@ impl PolicyStore for InMemoryPolicies {
 
     async fn bump_policy_gen(&self) -> Result<u64, AuthzError> {
         Ok(self.gen_counter.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+}
+
+/// In-memory `ServiceAccountRepository` fake for `service_accounts.rs` unit tests (SMA-445
+/// Task 16), faithful to the port's doc contract: duplicate name PER OWNER ->
+/// `Conflict(ServiceAccountNameTaken)` (D7); `set_principal_status` mirrors D16 (status lives
+/// on the `Principal`, never on `ServiceAccount` itself) via a SEPARATE `statuses` map, keyed
+/// the same way `PgServiceAccountRepository` splits `principal`/`service_account` across two
+/// tables — missing id -> `NotFound`.
+#[derive(Clone, Default)]
+pub struct InMemoryServiceAccounts {
+    pub accounts: Arc<Mutex<HashMap<Uuid, ServiceAccount>>>,
+    pub statuses: Arc<Mutex<HashMap<Uuid, PrincipalStatus>>>,
+}
+
+#[async_trait]
+impl ServiceAccountRepository for InMemoryServiceAccounts {
+    async fn create(&self, principal: &Principal, sa: &ServiceAccount) -> Result<(), RepositoryError> {
+        let mut accounts = self.accounts.lock().unwrap();
+        if accounts.values().any(|existing| existing.owner == sa.owner && existing.name == sa.name) {
+            return Err(RepositoryError::Conflict(ConflictKind::ServiceAccountNameTaken));
+        }
+        accounts.insert(sa.principal_id.uuid(), sa.clone());
+        drop(accounts);
+        self.statuses.lock().unwrap().insert(principal.id.uuid(), principal.status);
+        Ok(())
+    }
+
+    async fn find(&self, id: &PrincipalId) -> Result<Option<ServiceAccountRecord>, RepositoryError> {
+        let Some(account) = self.accounts.lock().unwrap().get(&id.uuid()).cloned() else {
+            return Ok(None);
+        };
+        // Mirrors `PgServiceAccountRepository::find`'s posture: the status comes from the
+        // SEPARATE `statuses` map (D16 — never from `ServiceAccount` itself).
+        let status = self.statuses.lock().unwrap().get(&id.uuid()).copied().unwrap_or(PrincipalStatus::Active);
+        Ok(Some(ServiceAccountRecord { account, status }))
+    }
+
+    async fn list_by_owner(&self, owner: &TenancyNodeRef, limit: u64, offset: u64) -> Result<Vec<ServiceAccountRecord>, RepositoryError> {
+        let accounts = self.accounts.lock().unwrap();
+        let mut items: Vec<ServiceAccount> = accounts.values().filter(|sa| &sa.owner == owner).cloned().collect();
+        drop(accounts);
+        items.sort_by_key(|sa| (sa.created_at, sa.principal_id.uuid()));
+
+        let statuses = self.statuses.lock().unwrap();
+        Ok(items
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(|account| {
+                let status = statuses.get(&account.principal_id.uuid()).copied().unwrap_or(PrincipalStatus::Active);
+                ServiceAccountRecord { account, status }
+            })
+            .collect())
+    }
+
+    async fn set_principal_status(&self, id: &PrincipalId, status: PrincipalStatus) -> Result<(), RepositoryError> {
+        let mut statuses = self.statuses.lock().unwrap();
+        if !statuses.contains_key(&id.uuid()) {
+            return Err(RepositoryError::NotFound);
+        }
+        statuses.insert(id.uuid(), status);
+        Ok(())
+    }
+}
+
+/// The key plus its stored hash, exactly what `ApiKeyRepository::find_by_id` returns — a
+/// named alias so `InMemoryApiKeys`'s backing map doesn't trip clippy's `type_complexity`.
+type StoredKey = (ApiKey, Vec<u8>);
+
+/// In-memory `ApiKeyRepository` fake for `service_accounts.rs`/a future `ApiKeyService`'s
+/// unit tests (SMA-445 Task 16): duplicate `key_hash` -> `Conflict(ApiKeyHashCollision)` (D7),
+/// mirroring `PgApiKeyRepository`; `list_ids_by_service_account` is the one method archive-
+/// evict actually needs, but the full port surface is implemented so the fake stays reusable
+/// for Task 17's own tests without another round of fake-writing.
+#[derive(Clone, Default)]
+pub struct InMemoryApiKeys(pub Arc<Mutex<HashMap<ApiKeyId, StoredKey>>>);
+
+#[async_trait]
+impl ApiKeyRepository for InMemoryApiKeys {
+    async fn issue(&self, key: &ApiKey, key_hash: &[u8]) -> Result<(), RepositoryError> {
+        let mut keys = self.0.lock().unwrap();
+        if keys.values().any(|(_, h)| h.as_slice() == key_hash) {
+            return Err(RepositoryError::Conflict(ConflictKind::ApiKeyHashCollision));
+        }
+        keys.insert(key.id, (key.clone(), key_hash.to_vec()));
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: ApiKeyId) -> Result<Option<(ApiKey, Vec<u8>)>, RepositoryError> {
+        Ok(self.0.lock().unwrap().get(&id).cloned())
+    }
+
+    async fn revoke(&self, id: ApiKeyId, now: DateTime<Utc>) -> Result<(), RepositoryError> {
+        let mut keys = self.0.lock().unwrap();
+        if let Some((key, _)) = keys.get_mut(&id)
+            && key.status != ApiKeyStatus::Revoked
+        {
+            key.status = ApiKeyStatus::Revoked;
+            key.revoked_at = Some(now);
+        }
+        Ok(())
+    }
+
+    async fn list_by_service_account(&self, sa: &PrincipalId, limit: u64, offset: u64) -> Result<Vec<ApiKey>, RepositoryError> {
+        let keys = self.0.lock().unwrap();
+        let mut items: Vec<&ApiKey> = keys.values().map(|(k, _)| k).filter(|k| &k.service_account_id == sa).collect();
+        items.sort_by_key(|k| (k.created_at, k.id.uuid()));
+        Ok(items.into_iter().skip(offset as usize).take(limit as usize).cloned().collect())
+    }
+
+    async fn list_ids_by_service_account(&self, sa: &PrincipalId) -> Result<Vec<ApiKeyId>, RepositoryError> {
+        Ok(self.0.lock().unwrap().values().filter(|(k, _)| &k.service_account_id == sa).map(|(k, _)| k.id).collect())
+    }
+
+    async fn touch_last_used(&self, id: ApiKeyId, now: DateTime<Utc>, throttle_secs: u64) -> Result<(), RepositoryError> {
+        let mut keys = self.0.lock().unwrap();
+        if let Some((key, _)) = keys.get_mut(&id) {
+            let should_update = key.last_used_at.is_none_or(|t| now - t >= chrono::Duration::seconds(throttle_secs as i64));
+            if should_update {
+                key.last_used_at = Some(now);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Deterministic fake `SecretHasher` for `api_keys.rs` unit tests (SMA-445 Task 17): an
+/// identity transform (`hash(secret) == secret`), so a test can assert "the stored hash ==
+/// `hasher.hash(secret)`" without pulling in `adapters::api_keys::HmacSecretHasher`'s real
+/// HMAC — that adapter needs a real `Pepper`, an adapter-layer concern the application layer's
+/// unit tests shouldn't need to construct just to exercise authorization plumbing.
+#[derive(Clone, Copy, Default)]
+pub struct FakeSecretHasher;
+
+impl SecretHasher for FakeSecretHasher {
+    fn hash(&self, secret: &[u8]) -> Vec<u8> {
+        secret.to_vec()
+    }
+
+    fn verify(&self, secret: &[u8], expected: &[u8]) -> bool {
+        secret == expected
+    }
+}
+
+/// Deterministic fake `KeyEntropy` for `api_keys.rs` unit tests: sequential, never-repeating
+/// 32-byte "secrets" (the call counter right-aligned into an otherwise-zero buffer), mirroring
+/// `SeqIds`'s own sequential-not-random posture. Real entropy would make `issue`'s "returns
+/// plaintext once, persists only the hash" assertions harder to pin down deterministically, and
+/// would risk two calls in the same test colliding on `InMemoryApiKeys::issue`'s hash-uniqueness
+/// guard purely by bad luck.
+#[derive(Default)]
+pub struct SeqKeyEntropy(AtomicU64);
+
+impl KeyEntropy for SeqKeyEntropy {
+    fn new_secret(&self) -> [u8; 32] {
+        let n = self.0.fetch_add(1, Ordering::Relaxed);
+        let mut secret = [0u8; 32];
+        secret[24..].copy_from_slice(&n.to_be_bytes());
+        secret
     }
 }
 

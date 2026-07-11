@@ -4,6 +4,7 @@
 
 pub mod entities;
 pub mod migration;
+pub mod pg_api_keys;
 pub mod pg_entity_slice;
 pub mod pg_external_identities;
 pub mod pg_memberships;
@@ -12,9 +13,11 @@ pub mod pg_policies;
 pub mod pg_projects;
 pub mod pg_repository;
 pub mod pg_role_grants;
+pub mod pg_service_accounts;
 pub mod pg_teams;
 
 pub use migration::Migrator;
+pub use pg_api_keys::PgApiKeyRepository;
 pub use pg_entity_slice::PgEntitySliceLoader;
 pub use pg_external_identities::PgExternalIdentityRepository;
 pub use pg_memberships::PgMembershipRepository;
@@ -23,6 +26,7 @@ pub use pg_policies::PgPolicyStore;
 pub use pg_projects::PgProjectRepository;
 pub use pg_repository::PgPrincipalRepository;
 pub use pg_role_grants::PgRoleGrantStore;
+pub use pg_service_accounts::PgServiceAccountRepository;
 pub use pg_teams::PgTeamRepository;
 
 use paigasus_iam_core::{ConflictKind, RepositoryError};
@@ -44,14 +48,19 @@ pub(crate) fn map_err(e: DbErr) -> RepositoryError {
 /// message embeds `DETAIL: Key (email)=(...)` — PII).
 pub(crate) fn conflict_kind(msg: &str) -> ConflictKind {
     const SLUG: [&str; 3] = ["uq_organization_slug", "uq_team_org_slug", "uq_project_team_slug"];
+    const SERVICE_ACCOUNT_NAME: [&str; 3] = ["uq_service_account_org_name", "uq_service_account_team_name", "uq_service_account_project_name"];
     if SLUG.iter().any(|c| msg.contains(c)) {
         ConflictKind::SlugTaken
+    } else if SERVICE_ACCOUNT_NAME.iter().any(|c| msg.contains(c)) {
+        ConflictKind::ServiceAccountNameTaken
     } else if msg.contains("uq_membership_") {
         ConflictKind::DuplicateMembership
     } else if msg.contains("user_email_key") {
         ConflictKind::EmailTaken
     } else if msg.contains("uq_external_identity_issuer_subject") {
         ConflictKind::ExternalIdentityExists
+    } else if msg.contains("uq_api_key_hash") {
+        ConflictKind::ApiKeyHashCollision
     } else {
         ConflictKind::Other // includes uq_*_prn: a UUIDv7 collision is an internal error
     }
@@ -69,9 +78,13 @@ mod tests {
         assert_eq!(conflict_kind("uq_organization_slug"), ConflictKind::SlugTaken);
         assert_eq!(conflict_kind("uq_team_org_slug"), ConflictKind::SlugTaken);
         assert_eq!(conflict_kind("uq_project_team_slug"), ConflictKind::SlugTaken);
+        assert_eq!(conflict_kind("uq_service_account_org_name"), ConflictKind::ServiceAccountNameTaken);
+        assert_eq!(conflict_kind("uq_service_account_team_name"), ConflictKind::ServiceAccountNameTaken);
+        assert_eq!(conflict_kind("uq_service_account_project_name"), ConflictKind::ServiceAccountNameTaken);
         assert_eq!(conflict_kind("uq_membership_principal_node"), ConflictKind::DuplicateMembership);
         assert_eq!(conflict_kind("user_email_key"), ConflictKind::EmailTaken);
         assert_eq!(conflict_kind("uq_external_identity_issuer_subject"), ConflictKind::ExternalIdentityExists);
+        assert_eq!(conflict_kind("uq_api_key_hash"), ConflictKind::ApiKeyHashCollision);
         assert_eq!(conflict_kind("uq_organization_prn"), ConflictKind::Other);
         assert_eq!(conflict_kind("some other constraint"), ConflictKind::Other);
     }

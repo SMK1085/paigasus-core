@@ -16,7 +16,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file paigasus/iam/v1/iam.proto.
  */
 export const file_paigasus_iam_v1_iam: GenFile = /*@__PURE__*/
-  fileDesc("ChlwYWlnYXN1cy9pYW0vdjEvaWFtLnByb3RvEg9wYWlnYXN1cy5pYW0udjEiGgoLU2VydmljZUluZm8SCwoDcHJuGAEgASgJIs0BCgxPcmdhbml6YXRpb24SCwoDcHJuGAEgASgJEgwKBHNsdWcYAiABKAkSDAoEbmFtZRgDIAEoCRIrCgZzdGF0dXMYBCABKA4yGy5wYWlnYXN1cy5pYW0udjEuTm9kZVN0YXR1cxI1ChBlZmZlY3RpdmVfc3RhdHVzGAUgASgOMhsucGFpZ2FzdXMuaWFtLnYxLk5vZGVTdGF0dXMSMAoFYXVkaXQYBiABKAsyIS5wYWlnYXN1cy5jb21tb24udjEuQXVkaXRNZXRhZGF0YSLWAQoEVGVhbRILCgNwcm4YASABKAkSDwoHb3JnX3BybhgCIAEoCRIMCgRzbHVnGAMgASgJEgwKBG5hbWUYBCABKAkSKwoGc3RhdHVzGAUgASgOMhsucGFpZ2FzdXMuaWFtLnYxLk5vZGVTdGF0dXMSNQoQZWZmZWN0aXZlX3N0YXR1cxgGIAEoDjIbLnBhaWdhc3VzLmlhbS52MS5Ob2RlU3RhdHVzEjAKBWF1ZGl0GAcgASgLMiEucGFpZ2FzdXMuY29tbW9uLnYxLkF1ZGl0TWV0YWRhdGEi6wEKB1Byb2plY3QSCwoDcHJuGAEgASgJEhAKCHRlYW1fcHJuGAIgASgJEg8KB29yZ19wcm4YAyABKAkSDAoEc2x1ZxgEIAEoCRIMCgRuYW1lGAUgASgJEisKBnN0YXR1cxgGIAEoDjIbLnBhaWdhc3VzLmlhbS52MS5Ob2RlU3RhdHVzEjUKEGVmZmVjdGl2ZV9zdGF0dXMYByABKA4yGy5wYWlnYXN1cy5pYW0udjEuTm9kZVN0YXR1cxIwCgVhdWRpdBgIIAEoCzIhLnBhaWdhc3VzLmNvbW1vbi52MS5BdWRpdE1ldGFkYXRhInMKCk1lbWJlcnNoaXASCgoCaWQYASABKAkSFQoNcHJpbmNpcGFsX3BybhgCIAEoCRIQCghub2RlX3BybhgDIAEoCRIwCgVhdWRpdBgEIAEoCzIhLnBhaWdhc3VzLmNvbW1vbi52MS5BdWRpdE1ldGFkYXRhIjcKGUNyZWF0ZU9yZ2FuaXphdGlvblJlcXVlc3QSDAoEc2x1ZxgBIAEoCRIMCgRuYW1lGAIgASgJIn4KGkNyZWF0ZU9yZ2FuaXphdGlvblJlc3BvbnNlEjMKDG9yZ2FuaXphdGlvbhgBIAEoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24SKwoMZGVmYXVsdF90ZWFtGAIgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iJQoWR2V0T3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkiTgoXR2V0T3JnYW5pemF0aW9uUmVzcG9uc2USMwoMb3JnYW5pemF0aW9uGAEgASgLMh0ucGFpZ2FzdXMuaWFtLnYxLk9yZ2FuaXphdGlvbiI5ChhMaXN0T3JnYW5pemF0aW9uc1JlcXVlc3QSDQoFbGltaXQYASABKA0SDgoGb2Zmc2V0GAIgASgEIlEKGUxpc3RPcmdhbml6YXRpb25zUmVzcG9uc2USNAoNb3JnYW5pemF0aW9ucxgBIAMoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24icAoZUmVuYW1lT3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkSFQoIbmV3X3NsdWcYAiABKAlIAIgBARIVCghuZXdfbmFtZRgDIAEoCUgBiAEBQgsKCV9uZXdfc2x1Z0ILCglfbmV3X25hbWUiUQoaUmVuYW1lT3JnYW5pemF0aW9uUmVzcG9uc2USMwoMb3JnYW5pemF0aW9uGAEgASgLMh0ucGFpZ2FzdXMuaWFtLnYxLk9yZ2FuaXphdGlvbiIpChpBcmNoaXZlT3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkiUgobQXJjaGl2ZU9yZ2FuaXphdGlvblJlc3BvbnNlEjMKDG9yZ2FuaXphdGlvbhgBIAEoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24iKQoaUmVzdG9yZU9yZ2FuaXphdGlvblJlcXVlc3QSCwoDcHJuGAEgASgJIlIKG1Jlc3RvcmVPcmdhbml6YXRpb25SZXNwb25zZRIzCgxvcmdhbml6YXRpb24YASABKAsyHS5wYWlnYXN1cy5pYW0udjEuT3JnYW5pemF0aW9uIkAKEUNyZWF0ZVRlYW1SZXF1ZXN0Eg8KB29yZ19wcm4YASABKAkSDAoEc2x1ZxgCIAEoCRIMCgRuYW1lGAMgASgJIjkKEkNyZWF0ZVRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iHQoOR2V0VGVhbVJlcXVlc3QSCwoDcHJuGAEgASgJIjYKD0dldFRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iQgoQTGlzdFRlYW1zUmVxdWVzdBIPCgdvcmdfcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCI5ChFMaXN0VGVhbXNSZXNwb25zZRIkCgV0ZWFtcxgBIAMoCzIVLnBhaWdhc3VzLmlhbS52MS5UZWFtImgKEVJlbmFtZVRlYW1SZXF1ZXN0EgsKA3BybhgBIAEoCRIVCghuZXdfc2x1ZxgCIAEoCUgAiAEBEhUKCG5ld19uYW1lGAMgASgJSAGIAQFCCwoJX25ld19zbHVnQgsKCV9uZXdfbmFtZSI5ChJSZW5hbWVUZWFtUmVzcG9uc2USIwoEdGVhbRgBIAEoCzIVLnBhaWdhc3VzLmlhbS52MS5UZWFtIiEKEkFyY2hpdmVUZWFtUmVxdWVzdBILCgNwcm4YASABKAkiOgoTQXJjaGl2ZVRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iIQoSUmVzdG9yZVRlYW1SZXF1ZXN0EgsKA3BybhgBIAEoCSI6ChNSZXN0b3JlVGVhbVJlc3BvbnNlEiMKBHRlYW0YASABKAsyFS5wYWlnYXN1cy5pYW0udjEuVGVhbSJEChRDcmVhdGVQcm9qZWN0UmVxdWVzdBIQCgh0ZWFtX3BybhgBIAEoCRIMCgRzbHVnGAIgASgJEgwKBG5hbWUYAyABKAkiQgoVQ3JlYXRlUHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCIgChFHZXRQcm9qZWN0UmVxdWVzdBILCgNwcm4YASABKAkiPwoSR2V0UHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCJGChNMaXN0UHJvamVjdHNSZXF1ZXN0EhAKCHRlYW1fcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCJCChRMaXN0UHJvamVjdHNSZXNwb25zZRIqCghwcm9qZWN0cxgBIAMoCzIYLnBhaWdhc3VzLmlhbS52MS5Qcm9qZWN0ImsKFFJlbmFtZVByb2plY3RSZXF1ZXN0EgsKA3BybhgBIAEoCRIVCghuZXdfc2x1ZxgCIAEoCUgAiAEBEhUKCG5ld19uYW1lGAMgASgJSAGIAQFCCwoJX25ld19zbHVnQgsKCV9uZXdfbmFtZSJCChVSZW5hbWVQcm9qZWN0UmVzcG9uc2USKQoHcHJvamVjdBgBIAEoCzIYLnBhaWdhc3VzLmlhbS52MS5Qcm9qZWN0IiQKFUFyY2hpdmVQcm9qZWN0UmVxdWVzdBILCgNwcm4YASABKAkiQwoWQXJjaGl2ZVByb2plY3RSZXNwb25zZRIpCgdwcm9qZWN0GAEgASgLMhgucGFpZ2FzdXMuaWFtLnYxLlByb2plY3QiJAoVUmVzdG9yZVByb2plY3RSZXF1ZXN0EgsKA3BybhgBIAEoCSJDChZSZXN0b3JlUHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCJCChdBdHRhY2hNZW1iZXJzaGlwUmVxdWVzdBIVCg1wcmluY2lwYWxfcHJuGAEgASgJEhAKCG5vZGVfcHJuGAIgASgJIksKGEF0dGFjaE1lbWJlcnNoaXBSZXNwb25zZRIvCgptZW1iZXJzaGlwGAEgASgLMhsucGFpZ2FzdXMuaWFtLnYxLk1lbWJlcnNoaXAiJQoXRGV0YWNoTWVtYmVyc2hpcFJlcXVlc3QSCgoCaWQYASABKAkiGgoYRGV0YWNoTWVtYmVyc2hpcFJlc3BvbnNlIm4KFkxpc3RNZW1iZXJzaGlwc1JlcXVlc3QSFwoNcHJpbmNpcGFsX3BybhgBIAEoCUgAEhIKCG5vZGVfcHJuGAIgASgJSAASDQoFbGltaXQYAyABKA0SDgoGb2Zmc2V0GAQgASgEQggKBmZpbHRlciJLChdMaXN0TWVtYmVyc2hpcHNSZXNwb25zZRIwCgttZW1iZXJzaGlwcxgBIAMoCzIbLnBhaWdhc3VzLmlhbS52MS5NZW1iZXJzaGlwIiIKEUludHJvc3BlY3RSZXF1ZXN0Eg0KBXRva2VuGAEgASgJIokCChJJbnRyb3NwZWN0UmVzcG9uc2USFQoNcHJpbmNpcGFsX3BybhgBIAEoCRIOCgZzdGF0dXMYAiABKAkSDgoGaXNzdWVyGAMgASgJEg8KB3N1YmplY3QYBCABKAkSLgoKZXhwaXJlc19hdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASMAoLbWVtYmVyc2hpcHMYBiADKAsyGy5wYWlnYXN1cy5pYW0udjEuTWVtYmVyc2hpcBIyCgtyb2xlX2dyYW50cxgIIAMoCzIdLnBhaWdhc3VzLmlhbS52MS5Sb2xlR3JhbnRSZWZKBAgHEAhSD3JvbGVfZ3JvdXBfcHJucyIzCgxSb2xlR3JhbnRSZWYSEQoJc2NvcGVfcHJuGAEgASgJEhAKCHJvbGVfa2V5GAIgASgJIsYBChNJc0F1dGhvcml6ZWRSZXF1ZXN0EhUKDXByaW5jaXBhbF9wcm4YASABKAkSDgoGYWN0aW9uGAIgASgJEhQKDHJlc291cmNlX3BybhgDIAEoCRJCCgdjb250ZXh0GAQgAygLMjEucGFpZ2FzdXMuaWFtLnYxLklzQXV0aG9yaXplZFJlcXVlc3QuQ29udGV4dEVudHJ5Gi4KDENvbnRleHRFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIlUKFElzQXV0aG9yaXplZFJlc3BvbnNlEg8KB2FsbG93ZWQYASABKAgSHAoUZGV0ZXJtaW5pbmdfcG9saWNpZXMYAiADKAkSDgoGcmVhc29uGAMgASgJIl4KBlBvbGljeRIRCglwb2xpY3lfaWQYASABKAkSDAoEa2luZBgCIAEoCRIOCgZzb3VyY2UYAyABKAkSEwoLZGVzY3JpcHRpb24YBCABKAkSDgoGc3lzdGVtGAUgASgIIjsKEFB1dFBvbGljeVJlcXVlc3QSJwoGcG9saWN5GAEgASgLMhcucGFpZ2FzdXMuaWFtLnYxLlBvbGljeSI8ChFQdXRQb2xpY3lSZXNwb25zZRInCgZwb2xpY3kYASABKAsyFy5wYWlnYXN1cy5pYW0udjEuUG9saWN5IigKE0RlbGV0ZVBvbGljeVJlcXVlc3QSEQoJcG9saWN5X2lkGAEgASgJIhYKFERlbGV0ZVBvbGljeVJlc3BvbnNlIjQKE0xpc3RQb2xpY2llc1JlcXVlc3QSDQoFbGltaXQYASABKA0SDgoGb2Zmc2V0GAIgASgEIkEKFExpc3RQb2xpY2llc1Jlc3BvbnNlEikKCHBvbGljaWVzGAEgAygLMhcucGFpZ2FzdXMuaWFtLnYxLlBvbGljeSJTCglSb2xlR3JhbnQSCgoCaWQYASABKAkSFQoNcHJpbmNpcGFsX3BybhgCIAEoCRIQCghyb2xlX2tleRgDIAEoCRIRCglzY29wZV9wcm4YBCABKAkiTgoQR3JhbnRSb2xlUmVxdWVzdBIVCg1wcmluY2lwYWxfcHJuGAEgASgJEhAKCHJvbGVfa2V5GAIgASgJEhEKCXNjb3BlX3BybhgDIAEoCSI+ChFHcmFudFJvbGVSZXNwb25zZRIpCgVncmFudBgBIAEoCzIaLnBhaWdhc3VzLmlhbS52MS5Sb2xlR3JhbnQiHwoRUmV2b2tlUm9sZVJlcXVlc3QSCgoCaWQYASABKAkiFAoSUmV2b2tlUm9sZVJlc3BvbnNlIk0KFUxpc3RSb2xlR3JhbnRzUmVxdWVzdBIVCg1wcmluY2lwYWxfcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCJEChZMaXN0Um9sZUdyYW50c1Jlc3BvbnNlEioKBmdyYW50cxgBIAMoCzIaLnBhaWdhc3VzLmlhbS52MS5Sb2xlR3JhbnQqWwoKTm9kZVN0YXR1cxIbChdOT0RFX1NUQVRVU19VTlNQRUNJRklFRBAAEhYKEk5PREVfU1RBVFVTX0FDVElWRRABEhgKFE5PREVfU1RBVFVTX0FSQ0hJVkVEEAIymhAKDlRlbmFuY3lTZXJ2aWNlEm0KEkNyZWF0ZU9yZ2FuaXphdGlvbhIqLnBhaWdhc3VzLmlhbS52MS5DcmVhdGVPcmdhbml6YXRpb25SZXF1ZXN0GisucGFpZ2FzdXMuaWFtLnYxLkNyZWF0ZU9yZ2FuaXphdGlvblJlc3BvbnNlEmQKD0dldE9yZ2FuaXphdGlvbhInLnBhaWdhc3VzLmlhbS52MS5HZXRPcmdhbml6YXRpb25SZXF1ZXN0GigucGFpZ2FzdXMuaWFtLnYxLkdldE9yZ2FuaXphdGlvblJlc3BvbnNlEmoKEUxpc3RPcmdhbml6YXRpb25zEikucGFpZ2FzdXMuaWFtLnYxLkxpc3RPcmdhbml6YXRpb25zUmVxdWVzdBoqLnBhaWdhc3VzLmlhbS52MS5MaXN0T3JnYW5pemF0aW9uc1Jlc3BvbnNlEm0KElJlbmFtZU9yZ2FuaXphdGlvbhIqLnBhaWdhc3VzLmlhbS52MS5SZW5hbWVPcmdhbml6YXRpb25SZXF1ZXN0GisucGFpZ2FzdXMuaWFtLnYxLlJlbmFtZU9yZ2FuaXphdGlvblJlc3BvbnNlEnAKE0FyY2hpdmVPcmdhbml6YXRpb24SKy5wYWlnYXN1cy5pYW0udjEuQXJjaGl2ZU9yZ2FuaXphdGlvblJlcXVlc3QaLC5wYWlnYXN1cy5pYW0udjEuQXJjaGl2ZU9yZ2FuaXphdGlvblJlc3BvbnNlEnAKE1Jlc3RvcmVPcmdhbml6YXRpb24SKy5wYWlnYXN1cy5pYW0udjEuUmVzdG9yZU9yZ2FuaXphdGlvblJlcXVlc3QaLC5wYWlnYXN1cy5pYW0udjEuUmVzdG9yZU9yZ2FuaXphdGlvblJlc3BvbnNlElUKCkNyZWF0ZVRlYW0SIi5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlVGVhbVJlcXVlc3QaIy5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlVGVhbVJlc3BvbnNlEkwKB0dldFRlYW0SHy5wYWlnYXN1cy5pYW0udjEuR2V0VGVhbVJlcXVlc3QaIC5wYWlnYXN1cy5pYW0udjEuR2V0VGVhbVJlc3BvbnNlElIKCUxpc3RUZWFtcxIhLnBhaWdhc3VzLmlhbS52MS5MaXN0VGVhbXNSZXF1ZXN0GiIucGFpZ2FzdXMuaWFtLnYxLkxpc3RUZWFtc1Jlc3BvbnNlElUKClJlbmFtZVRlYW0SIi5wYWlnYXN1cy5pYW0udjEuUmVuYW1lVGVhbVJlcXVlc3QaIy5wYWlnYXN1cy5pYW0udjEuUmVuYW1lVGVhbVJlc3BvbnNlElgKC0FyY2hpdmVUZWFtEiMucGFpZ2FzdXMuaWFtLnYxLkFyY2hpdmVUZWFtUmVxdWVzdBokLnBhaWdhc3VzLmlhbS52MS5BcmNoaXZlVGVhbVJlc3BvbnNlElgKC1Jlc3RvcmVUZWFtEiMucGFpZ2FzdXMuaWFtLnYxLlJlc3RvcmVUZWFtUmVxdWVzdBokLnBhaWdhc3VzLmlhbS52MS5SZXN0b3JlVGVhbVJlc3BvbnNlEl4KDUNyZWF0ZVByb2plY3QSJS5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlUHJvamVjdFJlcXVlc3QaJi5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlUHJvamVjdFJlc3BvbnNlElUKCkdldFByb2plY3QSIi5wYWlnYXN1cy5pYW0udjEuR2V0UHJvamVjdFJlcXVlc3QaIy5wYWlnYXN1cy5pYW0udjEuR2V0UHJvamVjdFJlc3BvbnNlElsKDExpc3RQcm9qZWN0cxIkLnBhaWdhc3VzLmlhbS52MS5MaXN0UHJvamVjdHNSZXF1ZXN0GiUucGFpZ2FzdXMuaWFtLnYxLkxpc3RQcm9qZWN0c1Jlc3BvbnNlEl4KDVJlbmFtZVByb2plY3QSJS5wYWlnYXN1cy5pYW0udjEuUmVuYW1lUHJvamVjdFJlcXVlc3QaJi5wYWlnYXN1cy5pYW0udjEuUmVuYW1lUHJvamVjdFJlc3BvbnNlEmEKDkFyY2hpdmVQcm9qZWN0EiYucGFpZ2FzdXMuaWFtLnYxLkFyY2hpdmVQcm9qZWN0UmVxdWVzdBonLnBhaWdhc3VzLmlhbS52MS5BcmNoaXZlUHJvamVjdFJlc3BvbnNlEmEKDlJlc3RvcmVQcm9qZWN0EiYucGFpZ2FzdXMuaWFtLnYxLlJlc3RvcmVQcm9qZWN0UmVxdWVzdBonLnBhaWdhc3VzLmlhbS52MS5SZXN0b3JlUHJvamVjdFJlc3BvbnNlEmcKEEF0dGFjaE1lbWJlcnNoaXASKC5wYWlnYXN1cy5pYW0udjEuQXR0YWNoTWVtYmVyc2hpcFJlcXVlc3QaKS5wYWlnYXN1cy5pYW0udjEuQXR0YWNoTWVtYmVyc2hpcFJlc3BvbnNlEmcKEERldGFjaE1lbWJlcnNoaXASKC5wYWlnYXN1cy5pYW0udjEuRGV0YWNoTWVtYmVyc2hpcFJlcXVlc3QaKS5wYWlnYXN1cy5pYW0udjEuRGV0YWNoTWVtYmVyc2hpcFJlc3BvbnNlEmQKD0xpc3RNZW1iZXJzaGlwcxInLnBhaWdhc3VzLmlhbS52MS5MaXN0TWVtYmVyc2hpcHNSZXF1ZXN0GigucGFpZ2FzdXMuaWFtLnYxLkxpc3RNZW1iZXJzaGlwc1Jlc3BvbnNlMmUKDEF1dGhuU2VydmljZRJVCgpJbnRyb3NwZWN0EiIucGFpZ2FzdXMuaWFtLnYxLkludHJvc3BlY3RSZXF1ZXN0GiMucGFpZ2FzdXMuaWFtLnYxLkludHJvc3BlY3RSZXNwb25zZTKPBQoUQXV0aG9yaXphdGlvblNlcnZpY2USWwoMSXNBdXRob3JpemVkEiQucGFpZ2FzdXMuaWFtLnYxLklzQXV0aG9yaXplZFJlcXVlc3QaJS5wYWlnYXN1cy5pYW0udjEuSXNBdXRob3JpemVkUmVzcG9uc2USUgoJUHV0UG9saWN5EiEucGFpZ2FzdXMuaWFtLnYxLlB1dFBvbGljeVJlcXVlc3QaIi5wYWlnYXN1cy5pYW0udjEuUHV0UG9saWN5UmVzcG9uc2USWwoMRGVsZXRlUG9saWN5EiQucGFpZ2FzdXMuaWFtLnYxLkRlbGV0ZVBvbGljeVJlcXVlc3QaJS5wYWlnYXN1cy5pYW0udjEuRGVsZXRlUG9saWN5UmVzcG9uc2USWwoMTGlzdFBvbGljaWVzEiQucGFpZ2FzdXMuaWFtLnYxLkxpc3RQb2xpY2llc1JlcXVlc3QaJS5wYWlnYXN1cy5pYW0udjEuTGlzdFBvbGljaWVzUmVzcG9uc2USUgoJR3JhbnRSb2xlEiEucGFpZ2FzdXMuaWFtLnYxLkdyYW50Um9sZVJlcXVlc3QaIi5wYWlnYXN1cy5pYW0udjEuR3JhbnRSb2xlUmVzcG9uc2USVQoKUmV2b2tlUm9sZRIiLnBhaWdhc3VzLmlhbS52MS5SZXZva2VSb2xlUmVxdWVzdBojLnBhaWdhc3VzLmlhbS52MS5SZXZva2VSb2xlUmVzcG9uc2USYQoOTGlzdFJvbGVHcmFudHMSJi5wYWlnYXN1cy5pYW0udjEuTGlzdFJvbGVHcmFudHNSZXF1ZXN0GicucGFpZ2FzdXMuaWFtLnYxLkxpc3RSb2xlR3JhbnRzUmVzcG9uc2ViBnByb3RvMw", [file_google_protobuf_timestamp, file_paigasus_common_v1_audit]);
+  fileDesc("ChlwYWlnYXN1cy9pYW0vdjEvaWFtLnByb3RvEg9wYWlnYXN1cy5pYW0udjEiGgoLU2VydmljZUluZm8SCwoDcHJuGAEgASgJIs0BCgxPcmdhbml6YXRpb24SCwoDcHJuGAEgASgJEgwKBHNsdWcYAiABKAkSDAoEbmFtZRgDIAEoCRIrCgZzdGF0dXMYBCABKA4yGy5wYWlnYXN1cy5pYW0udjEuTm9kZVN0YXR1cxI1ChBlZmZlY3RpdmVfc3RhdHVzGAUgASgOMhsucGFpZ2FzdXMuaWFtLnYxLk5vZGVTdGF0dXMSMAoFYXVkaXQYBiABKAsyIS5wYWlnYXN1cy5jb21tb24udjEuQXVkaXRNZXRhZGF0YSLWAQoEVGVhbRILCgNwcm4YASABKAkSDwoHb3JnX3BybhgCIAEoCRIMCgRzbHVnGAMgASgJEgwKBG5hbWUYBCABKAkSKwoGc3RhdHVzGAUgASgOMhsucGFpZ2FzdXMuaWFtLnYxLk5vZGVTdGF0dXMSNQoQZWZmZWN0aXZlX3N0YXR1cxgGIAEoDjIbLnBhaWdhc3VzLmlhbS52MS5Ob2RlU3RhdHVzEjAKBWF1ZGl0GAcgASgLMiEucGFpZ2FzdXMuY29tbW9uLnYxLkF1ZGl0TWV0YWRhdGEi6wEKB1Byb2plY3QSCwoDcHJuGAEgASgJEhAKCHRlYW1fcHJuGAIgASgJEg8KB29yZ19wcm4YAyABKAkSDAoEc2x1ZxgEIAEoCRIMCgRuYW1lGAUgASgJEisKBnN0YXR1cxgGIAEoDjIbLnBhaWdhc3VzLmlhbS52MS5Ob2RlU3RhdHVzEjUKEGVmZmVjdGl2ZV9zdGF0dXMYByABKA4yGy5wYWlnYXN1cy5pYW0udjEuTm9kZVN0YXR1cxIwCgVhdWRpdBgIIAEoCzIhLnBhaWdhc3VzLmNvbW1vbi52MS5BdWRpdE1ldGFkYXRhInMKCk1lbWJlcnNoaXASCgoCaWQYASABKAkSFQoNcHJpbmNpcGFsX3BybhgCIAEoCRIQCghub2RlX3BybhgDIAEoCRIwCgVhdWRpdBgEIAEoCzIhLnBhaWdhc3VzLmNvbW1vbi52MS5BdWRpdE1ldGFkYXRhIjcKGUNyZWF0ZU9yZ2FuaXphdGlvblJlcXVlc3QSDAoEc2x1ZxgBIAEoCRIMCgRuYW1lGAIgASgJIn4KGkNyZWF0ZU9yZ2FuaXphdGlvblJlc3BvbnNlEjMKDG9yZ2FuaXphdGlvbhgBIAEoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24SKwoMZGVmYXVsdF90ZWFtGAIgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iJQoWR2V0T3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkiTgoXR2V0T3JnYW5pemF0aW9uUmVzcG9uc2USMwoMb3JnYW5pemF0aW9uGAEgASgLMh0ucGFpZ2FzdXMuaWFtLnYxLk9yZ2FuaXphdGlvbiI5ChhMaXN0T3JnYW5pemF0aW9uc1JlcXVlc3QSDQoFbGltaXQYASABKA0SDgoGb2Zmc2V0GAIgASgEIlEKGUxpc3RPcmdhbml6YXRpb25zUmVzcG9uc2USNAoNb3JnYW5pemF0aW9ucxgBIAMoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24icAoZUmVuYW1lT3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkSFQoIbmV3X3NsdWcYAiABKAlIAIgBARIVCghuZXdfbmFtZRgDIAEoCUgBiAEBQgsKCV9uZXdfc2x1Z0ILCglfbmV3X25hbWUiUQoaUmVuYW1lT3JnYW5pemF0aW9uUmVzcG9uc2USMwoMb3JnYW5pemF0aW9uGAEgASgLMh0ucGFpZ2FzdXMuaWFtLnYxLk9yZ2FuaXphdGlvbiIpChpBcmNoaXZlT3JnYW5pemF0aW9uUmVxdWVzdBILCgNwcm4YASABKAkiUgobQXJjaGl2ZU9yZ2FuaXphdGlvblJlc3BvbnNlEjMKDG9yZ2FuaXphdGlvbhgBIAEoCzIdLnBhaWdhc3VzLmlhbS52MS5Pcmdhbml6YXRpb24iKQoaUmVzdG9yZU9yZ2FuaXphdGlvblJlcXVlc3QSCwoDcHJuGAEgASgJIlIKG1Jlc3RvcmVPcmdhbml6YXRpb25SZXNwb25zZRIzCgxvcmdhbml6YXRpb24YASABKAsyHS5wYWlnYXN1cy5pYW0udjEuT3JnYW5pemF0aW9uIkAKEUNyZWF0ZVRlYW1SZXF1ZXN0Eg8KB29yZ19wcm4YASABKAkSDAoEc2x1ZxgCIAEoCRIMCgRuYW1lGAMgASgJIjkKEkNyZWF0ZVRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iHQoOR2V0VGVhbVJlcXVlc3QSCwoDcHJuGAEgASgJIjYKD0dldFRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iQgoQTGlzdFRlYW1zUmVxdWVzdBIPCgdvcmdfcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCI5ChFMaXN0VGVhbXNSZXNwb25zZRIkCgV0ZWFtcxgBIAMoCzIVLnBhaWdhc3VzLmlhbS52MS5UZWFtImgKEVJlbmFtZVRlYW1SZXF1ZXN0EgsKA3BybhgBIAEoCRIVCghuZXdfc2x1ZxgCIAEoCUgAiAEBEhUKCG5ld19uYW1lGAMgASgJSAGIAQFCCwoJX25ld19zbHVnQgsKCV9uZXdfbmFtZSI5ChJSZW5hbWVUZWFtUmVzcG9uc2USIwoEdGVhbRgBIAEoCzIVLnBhaWdhc3VzLmlhbS52MS5UZWFtIiEKEkFyY2hpdmVUZWFtUmVxdWVzdBILCgNwcm4YASABKAkiOgoTQXJjaGl2ZVRlYW1SZXNwb25zZRIjCgR0ZWFtGAEgASgLMhUucGFpZ2FzdXMuaWFtLnYxLlRlYW0iIQoSUmVzdG9yZVRlYW1SZXF1ZXN0EgsKA3BybhgBIAEoCSI6ChNSZXN0b3JlVGVhbVJlc3BvbnNlEiMKBHRlYW0YASABKAsyFS5wYWlnYXN1cy5pYW0udjEuVGVhbSJEChRDcmVhdGVQcm9qZWN0UmVxdWVzdBIQCgh0ZWFtX3BybhgBIAEoCRIMCgRzbHVnGAIgASgJEgwKBG5hbWUYAyABKAkiQgoVQ3JlYXRlUHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCIgChFHZXRQcm9qZWN0UmVxdWVzdBILCgNwcm4YASABKAkiPwoSR2V0UHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCJGChNMaXN0UHJvamVjdHNSZXF1ZXN0EhAKCHRlYW1fcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCJCChRMaXN0UHJvamVjdHNSZXNwb25zZRIqCghwcm9qZWN0cxgBIAMoCzIYLnBhaWdhc3VzLmlhbS52MS5Qcm9qZWN0ImsKFFJlbmFtZVByb2plY3RSZXF1ZXN0EgsKA3BybhgBIAEoCRIVCghuZXdfc2x1ZxgCIAEoCUgAiAEBEhUKCG5ld19uYW1lGAMgASgJSAGIAQFCCwoJX25ld19zbHVnQgsKCV9uZXdfbmFtZSJCChVSZW5hbWVQcm9qZWN0UmVzcG9uc2USKQoHcHJvamVjdBgBIAEoCzIYLnBhaWdhc3VzLmlhbS52MS5Qcm9qZWN0IiQKFUFyY2hpdmVQcm9qZWN0UmVxdWVzdBILCgNwcm4YASABKAkiQwoWQXJjaGl2ZVByb2plY3RSZXNwb25zZRIpCgdwcm9qZWN0GAEgASgLMhgucGFpZ2FzdXMuaWFtLnYxLlByb2plY3QiJAoVUmVzdG9yZVByb2plY3RSZXF1ZXN0EgsKA3BybhgBIAEoCSJDChZSZXN0b3JlUHJvamVjdFJlc3BvbnNlEikKB3Byb2plY3QYASABKAsyGC5wYWlnYXN1cy5pYW0udjEuUHJvamVjdCJCChdBdHRhY2hNZW1iZXJzaGlwUmVxdWVzdBIVCg1wcmluY2lwYWxfcHJuGAEgASgJEhAKCG5vZGVfcHJuGAIgASgJIksKGEF0dGFjaE1lbWJlcnNoaXBSZXNwb25zZRIvCgptZW1iZXJzaGlwGAEgASgLMhsucGFpZ2FzdXMuaWFtLnYxLk1lbWJlcnNoaXAiJQoXRGV0YWNoTWVtYmVyc2hpcFJlcXVlc3QSCgoCaWQYASABKAkiGgoYRGV0YWNoTWVtYmVyc2hpcFJlc3BvbnNlIm4KFkxpc3RNZW1iZXJzaGlwc1JlcXVlc3QSFwoNcHJpbmNpcGFsX3BybhgBIAEoCUgAEhIKCG5vZGVfcHJuGAIgASgJSAASDQoFbGltaXQYAyABKA0SDgoGb2Zmc2V0GAQgASgEQggKBmZpbHRlciJLChdMaXN0TWVtYmVyc2hpcHNSZXNwb25zZRIwCgttZW1iZXJzaGlwcxgBIAMoCzIbLnBhaWdhc3VzLmlhbS52MS5NZW1iZXJzaGlwIiIKEUludHJvc3BlY3RSZXF1ZXN0Eg0KBXRva2VuGAEgASgJIokCChJJbnRyb3NwZWN0UmVzcG9uc2USFQoNcHJpbmNpcGFsX3BybhgBIAEoCRIOCgZzdGF0dXMYAiABKAkSDgoGaXNzdWVyGAMgASgJEg8KB3N1YmplY3QYBCABKAkSLgoKZXhwaXJlc19hdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASMAoLbWVtYmVyc2hpcHMYBiADKAsyGy5wYWlnYXN1cy5pYW0udjEuTWVtYmVyc2hpcBIyCgtyb2xlX2dyYW50cxgIIAMoCzIdLnBhaWdhc3VzLmlhbS52MS5Sb2xlR3JhbnRSZWZKBAgHEAhSD3JvbGVfZ3JvdXBfcHJucyIzCgxSb2xlR3JhbnRSZWYSEQoJc2NvcGVfcHJuGAEgASgJEhAKCHJvbGVfa2V5GAIgASgJIigKF0ludHJvc3BlY3RBcGlLZXlSZXF1ZXN0Eg0KBXRva2VuGAEgASgJIucBChhJbnRyb3NwZWN0QXBpS2V5UmVzcG9uc2USFQoNcHJpbmNpcGFsX3BybhgBIAEoCRIOCgZzdGF0dXMYAiABKAkSDgoGa2V5X2lkGAMgASgJEi4KCmV4cGlyZXNfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjAKC21lbWJlcnNoaXBzGAUgAygLMhsucGFpZ2FzdXMuaWFtLnYxLk1lbWJlcnNoaXASMgoLcm9sZV9ncmFudHMYBiADKAsyHS5wYWlnYXN1cy5pYW0udjEuUm9sZUdyYW50UmVmIsYBChNJc0F1dGhvcml6ZWRSZXF1ZXN0EhUKDXByaW5jaXBhbF9wcm4YASABKAkSDgoGYWN0aW9uGAIgASgJEhQKDHJlc291cmNlX3BybhgDIAEoCRJCCgdjb250ZXh0GAQgAygLMjEucGFpZ2FzdXMuaWFtLnYxLklzQXV0aG9yaXplZFJlcXVlc3QuQ29udGV4dEVudHJ5Gi4KDENvbnRleHRFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIlUKFElzQXV0aG9yaXplZFJlc3BvbnNlEg8KB2FsbG93ZWQYASABKAgSHAoUZGV0ZXJtaW5pbmdfcG9saWNpZXMYAiADKAkSDgoGcmVhc29uGAMgASgJIl4KBlBvbGljeRIRCglwb2xpY3lfaWQYASABKAkSDAoEa2luZBgCIAEoCRIOCgZzb3VyY2UYAyABKAkSEwoLZGVzY3JpcHRpb24YBCABKAkSDgoGc3lzdGVtGAUgASgIIjsKEFB1dFBvbGljeVJlcXVlc3QSJwoGcG9saWN5GAEgASgLMhcucGFpZ2FzdXMuaWFtLnYxLlBvbGljeSI8ChFQdXRQb2xpY3lSZXNwb25zZRInCgZwb2xpY3kYASABKAsyFy5wYWlnYXN1cy5pYW0udjEuUG9saWN5IigKE0RlbGV0ZVBvbGljeVJlcXVlc3QSEQoJcG9saWN5X2lkGAEgASgJIhYKFERlbGV0ZVBvbGljeVJlc3BvbnNlIjQKE0xpc3RQb2xpY2llc1JlcXVlc3QSDQoFbGltaXQYASABKA0SDgoGb2Zmc2V0GAIgASgEIkEKFExpc3RQb2xpY2llc1Jlc3BvbnNlEikKCHBvbGljaWVzGAEgAygLMhcucGFpZ2FzdXMuaWFtLnYxLlBvbGljeSJTCglSb2xlR3JhbnQSCgoCaWQYASABKAkSFQoNcHJpbmNpcGFsX3BybhgCIAEoCRIQCghyb2xlX2tleRgDIAEoCRIRCglzY29wZV9wcm4YBCABKAkiTgoQR3JhbnRSb2xlUmVxdWVzdBIVCg1wcmluY2lwYWxfcHJuGAEgASgJEhAKCHJvbGVfa2V5GAIgASgJEhEKCXNjb3BlX3BybhgDIAEoCSI+ChFHcmFudFJvbGVSZXNwb25zZRIpCgVncmFudBgBIAEoCzIaLnBhaWdhc3VzLmlhbS52MS5Sb2xlR3JhbnQiHwoRUmV2b2tlUm9sZVJlcXVlc3QSCgoCaWQYASABKAkiFAoSUmV2b2tlUm9sZVJlc3BvbnNlIk0KFUxpc3RSb2xlR3JhbnRzUmVxdWVzdBIVCg1wcmluY2lwYWxfcHJuGAEgASgJEg0KBWxpbWl0GAIgASgNEg4KBm9mZnNldBgDIAEoBCJEChZMaXN0Um9sZUdyYW50c1Jlc3BvbnNlEioKBmdyYW50cxgBIAMoCzIaLnBhaWdhc3VzLmlhbS52MS5Sb2xlR3JhbnQigAEKDlNlcnZpY2VBY2NvdW50EgsKA3BybhgBIAEoCRIRCglvd25lcl9wcm4YAiABKAkSDAoEbmFtZRgDIAEoCRIOCgZzdGF0dXMYBCABKAkSMAoFYXVkaXQYBSABKAsyIS5wYWlnYXN1cy5jb21tb24udjEuQXVkaXRNZXRhZGF0YSLDAgoGQXBpS2V5EgoKAmlkGAEgASgJEhsKE3NlcnZpY2VfYWNjb3VudF9wcm4YAiABKAkSEQoJc2NvcGVfcHJuGAMgASgJEg4KBnByZWZpeBgEIAEoCRItCgZzdGF0dXMYBSABKA4yHS5wYWlnYXN1cy5pYW0udjEuQXBpS2V5U3RhdHVzEi4KCmV4cGlyZXNfYXQYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjAKDGxhc3RfdXNlZF9hdBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFQoNc2NvcGVfYWN0aW9ucxgIIAMoCRITCgtzY29wZV9yb2xlcxgJIAMoCRIwCgVhdWRpdBgKIAEoCzIhLnBhaWdhc3VzLmNvbW1vbi52MS5BdWRpdE1ldGFkYXRhIj4KG0NyZWF0ZVNlcnZpY2VBY2NvdW50UmVxdWVzdBIRCglvd25lcl9wcm4YASABKAkSDAoEbmFtZRgCIAEoCSJYChxDcmVhdGVTZXJ2aWNlQWNjb3VudFJlc3BvbnNlEjgKD3NlcnZpY2VfYWNjb3VudBgBIAEoCzIfLnBhaWdhc3VzLmlhbS52MS5TZXJ2aWNlQWNjb3VudCInChhHZXRTZXJ2aWNlQWNjb3VudFJlcXVlc3QSCwoDcHJuGAEgASgJIlUKGUdldFNlcnZpY2VBY2NvdW50UmVzcG9uc2USOAoPc2VydmljZV9hY2NvdW50GAEgASgLMh8ucGFpZ2FzdXMuaWFtLnYxLlNlcnZpY2VBY2NvdW50Ik4KGkxpc3RTZXJ2aWNlQWNjb3VudHNSZXF1ZXN0EhEKCW93bmVyX3BybhgBIAEoCRINCgVsaW1pdBgCIAEoDRIOCgZvZmZzZXQYAyABKAQiWAobTGlzdFNlcnZpY2VBY2NvdW50c1Jlc3BvbnNlEjkKEHNlcnZpY2VfYWNjb3VudHMYASADKAsyHy5wYWlnYXN1cy5pYW0udjEuU2VydmljZUFjY291bnQiKwocQXJjaGl2ZVNlcnZpY2VBY2NvdW50UmVxdWVzdBILCgNwcm4YASABKAkiHwodQXJjaGl2ZVNlcnZpY2VBY2NvdW50UmVzcG9uc2UioAEKEklzc3VlQXBpS2V5UmVxdWVzdBIbChNzZXJ2aWNlX2FjY291bnRfcHJuGAEgASgJEhEKCXNjb3BlX3BybhgCIAEoCRIuCgpleHBpcmVzX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIVCg1zY29wZV9hY3Rpb25zGAQgAygJEhMKC3Njb3BlX3JvbGVzGAUgAygJIk4KE0lzc3VlQXBpS2V5UmVzcG9uc2USKAoHYXBpX2tleRgBIAEoCzIXLnBhaWdhc3VzLmlhbS52MS5BcGlLZXkSDQoFdG9rZW4YAiABKAkiIQoTUmV2b2tlQXBpS2V5UmVxdWVzdBIKCgJpZBgBIAEoCSIWChRSZXZva2VBcGlLZXlSZXNwb25zZSJQChJMaXN0QXBpS2V5c1JlcXVlc3QSGwoTc2VydmljZV9hY2NvdW50X3BybhgBIAEoCRINCgVsaW1pdBgCIAEoDRIOCgZvZmZzZXQYAyABKAQiQAoTTGlzdEFwaUtleXNSZXNwb25zZRIpCghhcGlfa2V5cxgBIAMoCzIXLnBhaWdhc3VzLmlhbS52MS5BcGlLZXkqWwoKTm9kZVN0YXR1cxIbChdOT0RFX1NUQVRVU19VTlNQRUNJRklFRBAAEhYKEk5PREVfU1RBVFVTX0FDVElWRRABEhgKFE5PREVfU1RBVFVTX0FSQ0hJVkVEEAIqZQoMQXBpS2V5U3RhdHVzEh4KGkFQSV9LRVlfU1RBVFVTX1VOU1BFQ0lGSUVEEAASGQoVQVBJX0tFWV9TVEFUVVNfQUNUSVZFEAESGgoWQVBJX0tFWV9TVEFUVVNfUkVWT0tFRBACMpoQCg5UZW5hbmN5U2VydmljZRJtChJDcmVhdGVPcmdhbml6YXRpb24SKi5wYWlnYXN1cy5pYW0udjEuQ3JlYXRlT3JnYW5pemF0aW9uUmVxdWVzdBorLnBhaWdhc3VzLmlhbS52MS5DcmVhdGVPcmdhbml6YXRpb25SZXNwb25zZRJkCg9HZXRPcmdhbml6YXRpb24SJy5wYWlnYXN1cy5pYW0udjEuR2V0T3JnYW5pemF0aW9uUmVxdWVzdBooLnBhaWdhc3VzLmlhbS52MS5HZXRPcmdhbml6YXRpb25SZXNwb25zZRJqChFMaXN0T3JnYW5pemF0aW9ucxIpLnBhaWdhc3VzLmlhbS52MS5MaXN0T3JnYW5pemF0aW9uc1JlcXVlc3QaKi5wYWlnYXN1cy5pYW0udjEuTGlzdE9yZ2FuaXphdGlvbnNSZXNwb25zZRJtChJSZW5hbWVPcmdhbml6YXRpb24SKi5wYWlnYXN1cy5pYW0udjEuUmVuYW1lT3JnYW5pemF0aW9uUmVxdWVzdBorLnBhaWdhc3VzLmlhbS52MS5SZW5hbWVPcmdhbml6YXRpb25SZXNwb25zZRJwChNBcmNoaXZlT3JnYW5pemF0aW9uEisucGFpZ2FzdXMuaWFtLnYxLkFyY2hpdmVPcmdhbml6YXRpb25SZXF1ZXN0GiwucGFpZ2FzdXMuaWFtLnYxLkFyY2hpdmVPcmdhbml6YXRpb25SZXNwb25zZRJwChNSZXN0b3JlT3JnYW5pemF0aW9uEisucGFpZ2FzdXMuaWFtLnYxLlJlc3RvcmVPcmdhbml6YXRpb25SZXF1ZXN0GiwucGFpZ2FzdXMuaWFtLnYxLlJlc3RvcmVPcmdhbml6YXRpb25SZXNwb25zZRJVCgpDcmVhdGVUZWFtEiIucGFpZ2FzdXMuaWFtLnYxLkNyZWF0ZVRlYW1SZXF1ZXN0GiMucGFpZ2FzdXMuaWFtLnYxLkNyZWF0ZVRlYW1SZXNwb25zZRJMCgdHZXRUZWFtEh8ucGFpZ2FzdXMuaWFtLnYxLkdldFRlYW1SZXF1ZXN0GiAucGFpZ2FzdXMuaWFtLnYxLkdldFRlYW1SZXNwb25zZRJSCglMaXN0VGVhbXMSIS5wYWlnYXN1cy5pYW0udjEuTGlzdFRlYW1zUmVxdWVzdBoiLnBhaWdhc3VzLmlhbS52MS5MaXN0VGVhbXNSZXNwb25zZRJVCgpSZW5hbWVUZWFtEiIucGFpZ2FzdXMuaWFtLnYxLlJlbmFtZVRlYW1SZXF1ZXN0GiMucGFpZ2FzdXMuaWFtLnYxLlJlbmFtZVRlYW1SZXNwb25zZRJYCgtBcmNoaXZlVGVhbRIjLnBhaWdhc3VzLmlhbS52MS5BcmNoaXZlVGVhbVJlcXVlc3QaJC5wYWlnYXN1cy5pYW0udjEuQXJjaGl2ZVRlYW1SZXNwb25zZRJYCgtSZXN0b3JlVGVhbRIjLnBhaWdhc3VzLmlhbS52MS5SZXN0b3JlVGVhbVJlcXVlc3QaJC5wYWlnYXN1cy5pYW0udjEuUmVzdG9yZVRlYW1SZXNwb25zZRJeCg1DcmVhdGVQcm9qZWN0EiUucGFpZ2FzdXMuaWFtLnYxLkNyZWF0ZVByb2plY3RSZXF1ZXN0GiYucGFpZ2FzdXMuaWFtLnYxLkNyZWF0ZVByb2plY3RSZXNwb25zZRJVCgpHZXRQcm9qZWN0EiIucGFpZ2FzdXMuaWFtLnYxLkdldFByb2plY3RSZXF1ZXN0GiMucGFpZ2FzdXMuaWFtLnYxLkdldFByb2plY3RSZXNwb25zZRJbCgxMaXN0UHJvamVjdHMSJC5wYWlnYXN1cy5pYW0udjEuTGlzdFByb2plY3RzUmVxdWVzdBolLnBhaWdhc3VzLmlhbS52MS5MaXN0UHJvamVjdHNSZXNwb25zZRJeCg1SZW5hbWVQcm9qZWN0EiUucGFpZ2FzdXMuaWFtLnYxLlJlbmFtZVByb2plY3RSZXF1ZXN0GiYucGFpZ2FzdXMuaWFtLnYxLlJlbmFtZVByb2plY3RSZXNwb25zZRJhCg5BcmNoaXZlUHJvamVjdBImLnBhaWdhc3VzLmlhbS52MS5BcmNoaXZlUHJvamVjdFJlcXVlc3QaJy5wYWlnYXN1cy5pYW0udjEuQXJjaGl2ZVByb2plY3RSZXNwb25zZRJhCg5SZXN0b3JlUHJvamVjdBImLnBhaWdhc3VzLmlhbS52MS5SZXN0b3JlUHJvamVjdFJlcXVlc3QaJy5wYWlnYXN1cy5pYW0udjEuUmVzdG9yZVByb2plY3RSZXNwb25zZRJnChBBdHRhY2hNZW1iZXJzaGlwEigucGFpZ2FzdXMuaWFtLnYxLkF0dGFjaE1lbWJlcnNoaXBSZXF1ZXN0GikucGFpZ2FzdXMuaWFtLnYxLkF0dGFjaE1lbWJlcnNoaXBSZXNwb25zZRJnChBEZXRhY2hNZW1iZXJzaGlwEigucGFpZ2FzdXMuaWFtLnYxLkRldGFjaE1lbWJlcnNoaXBSZXF1ZXN0GikucGFpZ2FzdXMuaWFtLnYxLkRldGFjaE1lbWJlcnNoaXBSZXNwb25zZRJkCg9MaXN0TWVtYmVyc2hpcHMSJy5wYWlnYXN1cy5pYW0udjEuTGlzdE1lbWJlcnNoaXBzUmVxdWVzdBooLnBhaWdhc3VzLmlhbS52MS5MaXN0TWVtYmVyc2hpcHNSZXNwb25zZTLOAQoMQXV0aG5TZXJ2aWNlElUKCkludHJvc3BlY3QSIi5wYWlnYXN1cy5pYW0udjEuSW50cm9zcGVjdFJlcXVlc3QaIy5wYWlnYXN1cy5pYW0udjEuSW50cm9zcGVjdFJlc3BvbnNlEmcKEEludHJvc3BlY3RBcGlLZXkSKC5wYWlnYXN1cy5pYW0udjEuSW50cm9zcGVjdEFwaUtleVJlcXVlc3QaKS5wYWlnYXN1cy5pYW0udjEuSW50cm9zcGVjdEFwaUtleVJlc3BvbnNlMo8FChRBdXRob3JpemF0aW9uU2VydmljZRJbCgxJc0F1dGhvcml6ZWQSJC5wYWlnYXN1cy5pYW0udjEuSXNBdXRob3JpemVkUmVxdWVzdBolLnBhaWdhc3VzLmlhbS52MS5Jc0F1dGhvcml6ZWRSZXNwb25zZRJSCglQdXRQb2xpY3kSIS5wYWlnYXN1cy5pYW0udjEuUHV0UG9saWN5UmVxdWVzdBoiLnBhaWdhc3VzLmlhbS52MS5QdXRQb2xpY3lSZXNwb25zZRJbCgxEZWxldGVQb2xpY3kSJC5wYWlnYXN1cy5pYW0udjEuRGVsZXRlUG9saWN5UmVxdWVzdBolLnBhaWdhc3VzLmlhbS52MS5EZWxldGVQb2xpY3lSZXNwb25zZRJbCgxMaXN0UG9saWNpZXMSJC5wYWlnYXN1cy5pYW0udjEuTGlzdFBvbGljaWVzUmVxdWVzdBolLnBhaWdhc3VzLmlhbS52MS5MaXN0UG9saWNpZXNSZXNwb25zZRJSCglHcmFudFJvbGUSIS5wYWlnYXN1cy5pYW0udjEuR3JhbnRSb2xlUmVxdWVzdBoiLnBhaWdhc3VzLmlhbS52MS5HcmFudFJvbGVSZXNwb25zZRJVCgpSZXZva2VSb2xlEiIucGFpZ2FzdXMuaWFtLnYxLlJldm9rZVJvbGVSZXF1ZXN0GiMucGFpZ2FzdXMuaWFtLnYxLlJldm9rZVJvbGVSZXNwb25zZRJhCg5MaXN0Um9sZUdyYW50cxImLnBhaWdhc3VzLmlhbS52MS5MaXN0Um9sZUdyYW50c1JlcXVlc3QaJy5wYWlnYXN1cy5pYW0udjEuTGlzdFJvbGVHcmFudHNSZXNwb25zZTLzBQoVU2VydmljZUFjY291bnRTZXJ2aWNlEnMKFENyZWF0ZVNlcnZpY2VBY2NvdW50EiwucGFpZ2FzdXMuaWFtLnYxLkNyZWF0ZVNlcnZpY2VBY2NvdW50UmVxdWVzdBotLnBhaWdhc3VzLmlhbS52MS5DcmVhdGVTZXJ2aWNlQWNjb3VudFJlc3BvbnNlEmoKEUdldFNlcnZpY2VBY2NvdW50EikucGFpZ2FzdXMuaWFtLnYxLkdldFNlcnZpY2VBY2NvdW50UmVxdWVzdBoqLnBhaWdhc3VzLmlhbS52MS5HZXRTZXJ2aWNlQWNjb3VudFJlc3BvbnNlEnAKE0xpc3RTZXJ2aWNlQWNjb3VudHMSKy5wYWlnYXN1cy5pYW0udjEuTGlzdFNlcnZpY2VBY2NvdW50c1JlcXVlc3QaLC5wYWlnYXN1cy5pYW0udjEuTGlzdFNlcnZpY2VBY2NvdW50c1Jlc3BvbnNlEnYKFUFyY2hpdmVTZXJ2aWNlQWNjb3VudBItLnBhaWdhc3VzLmlhbS52MS5BcmNoaXZlU2VydmljZUFjY291bnRSZXF1ZXN0Gi4ucGFpZ2FzdXMuaWFtLnYxLkFyY2hpdmVTZXJ2aWNlQWNjb3VudFJlc3BvbnNlElgKC0lzc3VlQXBpS2V5EiMucGFpZ2FzdXMuaWFtLnYxLklzc3VlQXBpS2V5UmVxdWVzdBokLnBhaWdhc3VzLmlhbS52MS5Jc3N1ZUFwaUtleVJlc3BvbnNlElsKDFJldm9rZUFwaUtleRIkLnBhaWdhc3VzLmlhbS52MS5SZXZva2VBcGlLZXlSZXF1ZXN0GiUucGFpZ2FzdXMuaWFtLnYxLlJldm9rZUFwaUtleVJlc3BvbnNlElgKC0xpc3RBcGlLZXlzEiMucGFpZ2FzdXMuaWFtLnYxLkxpc3RBcGlLZXlzUmVxdWVzdBokLnBhaWdhc3VzLmlhbS52MS5MaXN0QXBpS2V5c1Jlc3BvbnNlYgZwcm90bzM", [file_google_protobuf_timestamp, file_paigasus_common_v1_audit]);
 
 /**
  * Placeholder so the package generates a concrete type in all three languages.
@@ -1131,6 +1131,69 @@ export const RoleGrantRefSchema: GenMessage<RoleGrantRef> = /*@__PURE__*/
   messageDesc(file_paigasus_iam_v1_iam, 49);
 
 /**
+ * @generated from message paigasus.iam.v1.IntrospectApiKeyRequest
+ */
+export type IntrospectApiKeyRequest = Message<"paigasus.iam.v1.IntrospectApiKeyRequest"> & {
+  /**
+   * @generated from field: string token = 1;
+   */
+  token: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.IntrospectApiKeyRequest.
+ * Use `create(IntrospectApiKeyRequestSchema)` to create a new message.
+ */
+export const IntrospectApiKeyRequestSchema: GenMessage<IntrospectApiKeyRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 50);
+
+/**
+ * @generated from message paigasus.iam.v1.IntrospectApiKeyResponse
+ */
+export type IntrospectApiKeyResponse = Message<"paigasus.iam.v1.IntrospectApiKeyResponse"> & {
+  /**
+   * @generated from field: string principal_prn = 1;
+   */
+  principalPrn: string;
+
+  /**
+   * principal status
+   *
+   * @generated from field: string status = 2;
+   */
+  status: string;
+
+  /**
+   * @generated from field: string key_id = 3;
+   */
+  keyId: string;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp expires_at = 4;
+   */
+  expiresAt?: Timestamp | undefined;
+
+  /**
+   * reuse tenancy message
+   *
+   * @generated from field: repeated paigasus.iam.v1.Membership memberships = 5;
+   */
+  memberships: Membership[];
+
+  /**
+   * @generated from field: repeated paigasus.iam.v1.RoleGrantRef role_grants = 6;
+   */
+  roleGrants: RoleGrantRef[];
+};
+
+/**
+ * Describes the message paigasus.iam.v1.IntrospectApiKeyResponse.
+ * Use `create(IntrospectApiKeyResponseSchema)` to create a new message.
+ */
+export const IntrospectApiKeyResponseSchema: GenMessage<IntrospectApiKeyResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 51);
+
+/**
  * @generated from message paigasus.iam.v1.IsAuthorizedRequest
  */
 export type IsAuthorizedRequest = Message<"paigasus.iam.v1.IsAuthorizedRequest"> & {
@@ -1160,7 +1223,7 @@ export type IsAuthorizedRequest = Message<"paigasus.iam.v1.IsAuthorizedRequest">
  * Use `create(IsAuthorizedRequestSchema)` to create a new message.
  */
 export const IsAuthorizedRequestSchema: GenMessage<IsAuthorizedRequest> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 50);
+  messageDesc(file_paigasus_iam_v1_iam, 52);
 
 /**
  * @generated from message paigasus.iam.v1.IsAuthorizedResponse
@@ -1187,7 +1250,7 @@ export type IsAuthorizedResponse = Message<"paigasus.iam.v1.IsAuthorizedResponse
  * Use `create(IsAuthorizedResponseSchema)` to create a new message.
  */
 export const IsAuthorizedResponseSchema: GenMessage<IsAuthorizedResponse> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 51);
+  messageDesc(file_paigasus_iam_v1_iam, 53);
 
 /**
  * @generated from message paigasus.iam.v1.Policy
@@ -1224,7 +1287,7 @@ export type Policy = Message<"paigasus.iam.v1.Policy"> & {
  * Use `create(PolicySchema)` to create a new message.
  */
 export const PolicySchema: GenMessage<Policy> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 52);
+  messageDesc(file_paigasus_iam_v1_iam, 54);
 
 /**
  * @generated from message paigasus.iam.v1.PutPolicyRequest
@@ -1241,7 +1304,7 @@ export type PutPolicyRequest = Message<"paigasus.iam.v1.PutPolicyRequest"> & {
  * Use `create(PutPolicyRequestSchema)` to create a new message.
  */
 export const PutPolicyRequestSchema: GenMessage<PutPolicyRequest> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 53);
+  messageDesc(file_paigasus_iam_v1_iam, 55);
 
 /**
  * @generated from message paigasus.iam.v1.PutPolicyResponse
@@ -1258,7 +1321,7 @@ export type PutPolicyResponse = Message<"paigasus.iam.v1.PutPolicyResponse"> & {
  * Use `create(PutPolicyResponseSchema)` to create a new message.
  */
 export const PutPolicyResponseSchema: GenMessage<PutPolicyResponse> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 54);
+  messageDesc(file_paigasus_iam_v1_iam, 56);
 
 /**
  * @generated from message paigasus.iam.v1.DeletePolicyRequest
@@ -1275,7 +1338,7 @@ export type DeletePolicyRequest = Message<"paigasus.iam.v1.DeletePolicyRequest">
  * Use `create(DeletePolicyRequestSchema)` to create a new message.
  */
 export const DeletePolicyRequestSchema: GenMessage<DeletePolicyRequest> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 55);
+  messageDesc(file_paigasus_iam_v1_iam, 57);
 
 /**
  * @generated from message paigasus.iam.v1.DeletePolicyResponse
@@ -1288,7 +1351,7 @@ export type DeletePolicyResponse = Message<"paigasus.iam.v1.DeletePolicyResponse
  * Use `create(DeletePolicyResponseSchema)` to create a new message.
  */
 export const DeletePolicyResponseSchema: GenMessage<DeletePolicyResponse> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 56);
+  messageDesc(file_paigasus_iam_v1_iam, 58);
 
 /**
  * @generated from message paigasus.iam.v1.ListPoliciesRequest
@@ -1310,7 +1373,7 @@ export type ListPoliciesRequest = Message<"paigasus.iam.v1.ListPoliciesRequest">
  * Use `create(ListPoliciesRequestSchema)` to create a new message.
  */
 export const ListPoliciesRequestSchema: GenMessage<ListPoliciesRequest> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 57);
+  messageDesc(file_paigasus_iam_v1_iam, 59);
 
 /**
  * @generated from message paigasus.iam.v1.ListPoliciesResponse
@@ -1327,7 +1390,7 @@ export type ListPoliciesResponse = Message<"paigasus.iam.v1.ListPoliciesResponse
  * Use `create(ListPoliciesResponseSchema)` to create a new message.
  */
 export const ListPoliciesResponseSchema: GenMessage<ListPoliciesResponse> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 58);
+  messageDesc(file_paigasus_iam_v1_iam, 60);
 
 /**
  * @generated from message paigasus.iam.v1.RoleGrant
@@ -1359,7 +1422,7 @@ export type RoleGrant = Message<"paigasus.iam.v1.RoleGrant"> & {
  * Use `create(RoleGrantSchema)` to create a new message.
  */
 export const RoleGrantSchema: GenMessage<RoleGrant> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 59);
+  messageDesc(file_paigasus_iam_v1_iam, 61);
 
 /**
  * @generated from message paigasus.iam.v1.GrantRoleRequest
@@ -1386,7 +1449,7 @@ export type GrantRoleRequest = Message<"paigasus.iam.v1.GrantRoleRequest"> & {
  * Use `create(GrantRoleRequestSchema)` to create a new message.
  */
 export const GrantRoleRequestSchema: GenMessage<GrantRoleRequest> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 60);
+  messageDesc(file_paigasus_iam_v1_iam, 62);
 
 /**
  * @generated from message paigasus.iam.v1.GrantRoleResponse
@@ -1403,7 +1466,7 @@ export type GrantRoleResponse = Message<"paigasus.iam.v1.GrantRoleResponse"> & {
  * Use `create(GrantRoleResponseSchema)` to create a new message.
  */
 export const GrantRoleResponseSchema: GenMessage<GrantRoleResponse> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 61);
+  messageDesc(file_paigasus_iam_v1_iam, 63);
 
 /**
  * @generated from message paigasus.iam.v1.RevokeRoleRequest
@@ -1420,7 +1483,7 @@ export type RevokeRoleRequest = Message<"paigasus.iam.v1.RevokeRoleRequest"> & {
  * Use `create(RevokeRoleRequestSchema)` to create a new message.
  */
 export const RevokeRoleRequestSchema: GenMessage<RevokeRoleRequest> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 62);
+  messageDesc(file_paigasus_iam_v1_iam, 64);
 
 /**
  * @generated from message paigasus.iam.v1.RevokeRoleResponse
@@ -1433,7 +1496,7 @@ export type RevokeRoleResponse = Message<"paigasus.iam.v1.RevokeRoleResponse"> &
  * Use `create(RevokeRoleResponseSchema)` to create a new message.
  */
 export const RevokeRoleResponseSchema: GenMessage<RevokeRoleResponse> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 63);
+  messageDesc(file_paigasus_iam_v1_iam, 65);
 
 /**
  * @generated from message paigasus.iam.v1.ListRoleGrantsRequest
@@ -1460,7 +1523,7 @@ export type ListRoleGrantsRequest = Message<"paigasus.iam.v1.ListRoleGrantsReque
  * Use `create(ListRoleGrantsRequestSchema)` to create a new message.
  */
 export const ListRoleGrantsRequestSchema: GenMessage<ListRoleGrantsRequest> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 64);
+  messageDesc(file_paigasus_iam_v1_iam, 66);
 
 /**
  * @generated from message paigasus.iam.v1.ListRoleGrantsResponse
@@ -1477,7 +1540,410 @@ export type ListRoleGrantsResponse = Message<"paigasus.iam.v1.ListRoleGrantsResp
  * Use `create(ListRoleGrantsResponseSchema)` to create a new message.
  */
 export const ListRoleGrantsResponseSchema: GenMessage<ListRoleGrantsResponse> = /*@__PURE__*/
-  messageDesc(file_paigasus_iam_v1_iam, 65);
+  messageDesc(file_paigasus_iam_v1_iam, 67);
+
+/**
+ * ServiceAccount is a machine identity: a principal PRN owned by exactly one
+ * tenancy node (org/team/project). It reuses the unified Principal type
+ * (M3 D1) — status lives on the principal row, not here — so `status` mirrors
+ * IntrospectResponse.status (a free-form principal-status string) rather than
+ * a dedicated enum.
+ *
+ * @generated from message paigasus.iam.v1.ServiceAccount
+ */
+export type ServiceAccount = Message<"paigasus.iam.v1.ServiceAccount"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+
+  /**
+   * @generated from field: string owner_prn = 2;
+   */
+  ownerPrn: string;
+
+  /**
+   * @generated from field: string name = 3;
+   */
+  name: string;
+
+  /**
+   * principal status
+   *
+   * @generated from field: string status = 4;
+   */
+  status: string;
+
+  /**
+   * @generated from field: paigasus.common.v1.AuditMetadata audit = 5;
+   */
+  audit?: AuditMetadata | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ServiceAccount.
+ * Use `create(ServiceAccountSchema)` to create a new message.
+ */
+export const ServiceAccountSchema: GenMessage<ServiceAccount> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 68);
+
+/**
+ * ApiKey never carries the secret or its hash — only display/lifecycle
+ * metadata. The plaintext token is returned exactly once, in
+ * IssueApiKeyResponse.token.
+ *
+ * @generated from message paigasus.iam.v1.ApiKey
+ */
+export type ApiKey = Message<"paigasus.iam.v1.ApiKey"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string service_account_prn = 2;
+   */
+  serviceAccountPrn: string;
+
+  /**
+   * @generated from field: string scope_prn = 3;
+   */
+  scopePrn: string;
+
+  /**
+   * @generated from field: string prefix = 4;
+   */
+  prefix: string;
+
+  /**
+   * @generated from field: paigasus.iam.v1.ApiKeyStatus status = 5;
+   */
+  status: ApiKeyStatus;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp expires_at = 6;
+   */
+  expiresAt?: Timestamp | undefined;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp last_used_at = 7;
+   */
+  lastUsedAt?: Timestamp | undefined;
+
+  /**
+   * stored, unenforced in v1
+   *
+   * @generated from field: repeated string scope_actions = 8;
+   */
+  scopeActions: string[];
+
+  /**
+   * stored, unenforced in v1
+   *
+   * @generated from field: repeated string scope_roles = 9;
+   */
+  scopeRoles: string[];
+
+  /**
+   * @generated from field: paigasus.common.v1.AuditMetadata audit = 10;
+   */
+  audit?: AuditMetadata | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ApiKey.
+ * Use `create(ApiKeySchema)` to create a new message.
+ */
+export const ApiKeySchema: GenMessage<ApiKey> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 69);
+
+/**
+ * @generated from message paigasus.iam.v1.CreateServiceAccountRequest
+ */
+export type CreateServiceAccountRequest = Message<"paigasus.iam.v1.CreateServiceAccountRequest"> & {
+  /**
+   * @generated from field: string owner_prn = 1;
+   */
+  ownerPrn: string;
+
+  /**
+   * @generated from field: string name = 2;
+   */
+  name: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.CreateServiceAccountRequest.
+ * Use `create(CreateServiceAccountRequestSchema)` to create a new message.
+ */
+export const CreateServiceAccountRequestSchema: GenMessage<CreateServiceAccountRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 70);
+
+/**
+ * @generated from message paigasus.iam.v1.CreateServiceAccountResponse
+ */
+export type CreateServiceAccountResponse = Message<"paigasus.iam.v1.CreateServiceAccountResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.ServiceAccount service_account = 1;
+   */
+  serviceAccount?: ServiceAccount | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.CreateServiceAccountResponse.
+ * Use `create(CreateServiceAccountResponseSchema)` to create a new message.
+ */
+export const CreateServiceAccountResponseSchema: GenMessage<CreateServiceAccountResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 71);
+
+/**
+ * @generated from message paigasus.iam.v1.GetServiceAccountRequest
+ */
+export type GetServiceAccountRequest = Message<"paigasus.iam.v1.GetServiceAccountRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.GetServiceAccountRequest.
+ * Use `create(GetServiceAccountRequestSchema)` to create a new message.
+ */
+export const GetServiceAccountRequestSchema: GenMessage<GetServiceAccountRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 72);
+
+/**
+ * @generated from message paigasus.iam.v1.GetServiceAccountResponse
+ */
+export type GetServiceAccountResponse = Message<"paigasus.iam.v1.GetServiceAccountResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.ServiceAccount service_account = 1;
+   */
+  serviceAccount?: ServiceAccount | undefined;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.GetServiceAccountResponse.
+ * Use `create(GetServiceAccountResponseSchema)` to create a new message.
+ */
+export const GetServiceAccountResponseSchema: GenMessage<GetServiceAccountResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 73);
+
+/**
+ * @generated from message paigasus.iam.v1.ListServiceAccountsRequest
+ */
+export type ListServiceAccountsRequest = Message<"paigasus.iam.v1.ListServiceAccountsRequest"> & {
+  /**
+   * @generated from field: string owner_prn = 1;
+   */
+  ownerPrn: string;
+
+  /**
+   * @generated from field: uint32 limit = 2;
+   */
+  limit: number;
+
+  /**
+   * @generated from field: uint64 offset = 3;
+   */
+  offset: bigint;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListServiceAccountsRequest.
+ * Use `create(ListServiceAccountsRequestSchema)` to create a new message.
+ */
+export const ListServiceAccountsRequestSchema: GenMessage<ListServiceAccountsRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 74);
+
+/**
+ * @generated from message paigasus.iam.v1.ListServiceAccountsResponse
+ */
+export type ListServiceAccountsResponse = Message<"paigasus.iam.v1.ListServiceAccountsResponse"> & {
+  /**
+   * @generated from field: repeated paigasus.iam.v1.ServiceAccount service_accounts = 1;
+   */
+  serviceAccounts: ServiceAccount[];
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListServiceAccountsResponse.
+ * Use `create(ListServiceAccountsResponseSchema)` to create a new message.
+ */
+export const ListServiceAccountsResponseSchema: GenMessage<ListServiceAccountsResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 75);
+
+/**
+ * @generated from message paigasus.iam.v1.ArchiveServiceAccountRequest
+ */
+export type ArchiveServiceAccountRequest = Message<"paigasus.iam.v1.ArchiveServiceAccountRequest"> & {
+  /**
+   * @generated from field: string prn = 1;
+   */
+  prn: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ArchiveServiceAccountRequest.
+ * Use `create(ArchiveServiceAccountRequestSchema)` to create a new message.
+ */
+export const ArchiveServiceAccountRequestSchema: GenMessage<ArchiveServiceAccountRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 76);
+
+/**
+ * Archive is a lifecycle op with no meaningful payload (like DetachMembership):
+ * an empty response avoids requiring GetServiceAccount authz alongside
+ * ArchiveServiceAccount just to populate a body.
+ *
+ * @generated from message paigasus.iam.v1.ArchiveServiceAccountResponse
+ */
+export type ArchiveServiceAccountResponse = Message<"paigasus.iam.v1.ArchiveServiceAccountResponse"> & {
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ArchiveServiceAccountResponse.
+ * Use `create(ArchiveServiceAccountResponseSchema)` to create a new message.
+ */
+export const ArchiveServiceAccountResponseSchema: GenMessage<ArchiveServiceAccountResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 77);
+
+/**
+ * @generated from message paigasus.iam.v1.IssueApiKeyRequest
+ */
+export type IssueApiKeyRequest = Message<"paigasus.iam.v1.IssueApiKeyRequest"> & {
+  /**
+   * @generated from field: string service_account_prn = 1;
+   */
+  serviceAccountPrn: string;
+
+  /**
+   * @generated from field: string scope_prn = 2;
+   */
+  scopePrn: string;
+
+  /**
+   * unset = uses the configured default expiry if one is set, else non-expiring
+   *
+   * @generated from field: google.protobuf.Timestamp expires_at = 3;
+   */
+  expiresAt?: Timestamp | undefined;
+
+  /**
+   * @generated from field: repeated string scope_actions = 4;
+   */
+  scopeActions: string[];
+
+  /**
+   * @generated from field: repeated string scope_roles = 5;
+   */
+  scopeRoles: string[];
+};
+
+/**
+ * Describes the message paigasus.iam.v1.IssueApiKeyRequest.
+ * Use `create(IssueApiKeyRequestSchema)` to create a new message.
+ */
+export const IssueApiKeyRequestSchema: GenMessage<IssueApiKeyRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 78);
+
+/**
+ * @generated from message paigasus.iam.v1.IssueApiKeyResponse
+ */
+export type IssueApiKeyResponse = Message<"paigasus.iam.v1.IssueApiKeyResponse"> & {
+  /**
+   * @generated from field: paigasus.iam.v1.ApiKey api_key = 1;
+   */
+  apiKey?: ApiKey | undefined;
+
+  /**
+   * plaintext token, shown once
+   *
+   * @generated from field: string token = 2;
+   */
+  token: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.IssueApiKeyResponse.
+ * Use `create(IssueApiKeyResponseSchema)` to create a new message.
+ */
+export const IssueApiKeyResponseSchema: GenMessage<IssueApiKeyResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 79);
+
+/**
+ * @generated from message paigasus.iam.v1.RevokeApiKeyRequest
+ */
+export type RevokeApiKeyRequest = Message<"paigasus.iam.v1.RevokeApiKeyRequest"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RevokeApiKeyRequest.
+ * Use `create(RevokeApiKeyRequestSchema)` to create a new message.
+ */
+export const RevokeApiKeyRequestSchema: GenMessage<RevokeApiKeyRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 80);
+
+/**
+ * @generated from message paigasus.iam.v1.RevokeApiKeyResponse
+ */
+export type RevokeApiKeyResponse = Message<"paigasus.iam.v1.RevokeApiKeyResponse"> & {
+};
+
+/**
+ * Describes the message paigasus.iam.v1.RevokeApiKeyResponse.
+ * Use `create(RevokeApiKeyResponseSchema)` to create a new message.
+ */
+export const RevokeApiKeyResponseSchema: GenMessage<RevokeApiKeyResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 81);
+
+/**
+ * @generated from message paigasus.iam.v1.ListApiKeysRequest
+ */
+export type ListApiKeysRequest = Message<"paigasus.iam.v1.ListApiKeysRequest"> & {
+  /**
+   * @generated from field: string service_account_prn = 1;
+   */
+  serviceAccountPrn: string;
+
+  /**
+   * @generated from field: uint32 limit = 2;
+   */
+  limit: number;
+
+  /**
+   * @generated from field: uint64 offset = 3;
+   */
+  offset: bigint;
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListApiKeysRequest.
+ * Use `create(ListApiKeysRequestSchema)` to create a new message.
+ */
+export const ListApiKeysRequestSchema: GenMessage<ListApiKeysRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 82);
+
+/**
+ * @generated from message paigasus.iam.v1.ListApiKeysResponse
+ */
+export type ListApiKeysResponse = Message<"paigasus.iam.v1.ListApiKeysResponse"> & {
+  /**
+   * @generated from field: repeated paigasus.iam.v1.ApiKey api_keys = 1;
+   */
+  apiKeys: ApiKey[];
+};
+
+/**
+ * Describes the message paigasus.iam.v1.ListApiKeysResponse.
+ * Use `create(ListApiKeysResponseSchema)` to create a new message.
+ */
+export const ListApiKeysResponseSchema: GenMessage<ListApiKeysResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_iam_v1_iam, 83);
 
 /**
  * @generated from enum paigasus.iam.v1.NodeStatus
@@ -1504,6 +1970,32 @@ export enum NodeStatus {
  */
 export const NodeStatusSchema: GenEnum<NodeStatus> = /*@__PURE__*/
   enumDesc(file_paigasus_iam_v1_iam, 0);
+
+/**
+ * @generated from enum paigasus.iam.v1.ApiKeyStatus
+ */
+export enum ApiKeyStatus {
+  /**
+   * @generated from enum value: API_KEY_STATUS_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: API_KEY_STATUS_ACTIVE = 1;
+   */
+  ACTIVE = 1,
+
+  /**
+   * @generated from enum value: API_KEY_STATUS_REVOKED = 2;
+   */
+  REVOKED = 2,
+}
+
+/**
+ * Describes the enum paigasus.iam.v1.ApiKeyStatus.
+ */
+export const ApiKeyStatusSchema: GenEnum<ApiKeyStatus> = /*@__PURE__*/
+  enumDesc(file_paigasus_iam_v1_iam, 1);
 
 /**
  * @generated from service paigasus.iam.v1.TenancyService
@@ -1695,6 +2187,14 @@ export const AuthnService: GenService<{
     input: typeof IntrospectRequestSchema;
     output: typeof IntrospectResponseSchema;
   },
+  /**
+   * @generated from rpc paigasus.iam.v1.AuthnService.IntrospectApiKey
+   */
+  introspectApiKey: {
+    methodKind: "unary";
+    input: typeof IntrospectApiKeyRequestSchema;
+    output: typeof IntrospectApiKeyResponseSchema;
+  },
 }> = /*@__PURE__*/
   serviceDesc(file_paigasus_iam_v1_iam, 1);
 
@@ -1760,4 +2260,67 @@ export const AuthorizationService: GenService<{
   },
 }> = /*@__PURE__*/
   serviceDesc(file_paigasus_iam_v1_iam, 2);
+
+/**
+ * @generated from service paigasus.iam.v1.ServiceAccountService
+ */
+export const ServiceAccountService: GenService<{
+  /**
+   * @generated from rpc paigasus.iam.v1.ServiceAccountService.CreateServiceAccount
+   */
+  createServiceAccount: {
+    methodKind: "unary";
+    input: typeof CreateServiceAccountRequestSchema;
+    output: typeof CreateServiceAccountResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.ServiceAccountService.GetServiceAccount
+   */
+  getServiceAccount: {
+    methodKind: "unary";
+    input: typeof GetServiceAccountRequestSchema;
+    output: typeof GetServiceAccountResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.ServiceAccountService.ListServiceAccounts
+   */
+  listServiceAccounts: {
+    methodKind: "unary";
+    input: typeof ListServiceAccountsRequestSchema;
+    output: typeof ListServiceAccountsResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.ServiceAccountService.ArchiveServiceAccount
+   */
+  archiveServiceAccount: {
+    methodKind: "unary";
+    input: typeof ArchiveServiceAccountRequestSchema;
+    output: typeof ArchiveServiceAccountResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.ServiceAccountService.IssueApiKey
+   */
+  issueApiKey: {
+    methodKind: "unary";
+    input: typeof IssueApiKeyRequestSchema;
+    output: typeof IssueApiKeyResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.ServiceAccountService.RevokeApiKey
+   */
+  revokeApiKey: {
+    methodKind: "unary";
+    input: typeof RevokeApiKeyRequestSchema;
+    output: typeof RevokeApiKeyResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.iam.v1.ServiceAccountService.ListApiKeys
+   */
+  listApiKeys: {
+    methodKind: "unary";
+    input: typeof ListApiKeysRequestSchema;
+    output: typeof ListApiKeysResponseSchema;
+  },
+}> = /*@__PURE__*/
+  serviceDesc(file_paigasus_iam_v1_iam, 3);
 

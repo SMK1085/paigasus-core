@@ -2,11 +2,13 @@
 
 //! tonic gRPC surface: the well-known `grpc.health.v1.Health` service (via tonic-health), the
 //! IAM `TenancyService` (task-16 brief, SMA-442), the `AuthnService` + bearer-enforcement
-//! layer (SMA-443 Task 12), and the `AuthorizationService` (SMA-444 Task 19).
+//! layer (SMA-443 Task 12), the `AuthorizationService` (SMA-444 Task 19), and the
+//! `ServiceAccountService` (SMA-445 Task 21).
 
 pub mod authn;
 pub mod authz;
 pub mod convert;
+pub mod service_accounts;
 pub mod tenancy;
 
 use std::net::SocketAddr;
@@ -20,7 +22,9 @@ use authn::{AuthLayer, AuthnGrpc};
 use authz::AuthzGrpc;
 use paigasus_proto::paigasus::iam::v1::authn_service_server::AuthnServiceServer;
 use paigasus_proto::paigasus::iam::v1::authorization_service_server::AuthorizationServiceServer;
+use paigasus_proto::paigasus::iam::v1::service_account_service_server::ServiceAccountServiceServer;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_server::TenancyServiceServer;
+use service_accounts::ServiceAccountGrpc;
 use tenancy::TenancyGrpc;
 
 /// Build a health service with the overall server marked SERVING, plus its reporter.
@@ -39,12 +43,13 @@ pub async fn health_service() -> (
 }
 
 /// A tonic `Server` router with the health service, the `TenancyService` (Task 16), the
-/// `AuthnService` (Task 12), and the `AuthorizationService` (SMA-444 Task 19) mounted,
-/// serving a static `SERVING` health status (see `health_service`). The `AuthLayer` wraps the
-/// whole server — health and `AuthnService.Introspect` are `:path`-exempt from bearer
-/// enforcement, every `TenancyService`/`AuthorizationService` RPC is not (spec §7.4, D14).
-/// `main` calls `.serve_with_shutdown`. The reporter is dropped here — dynamic readiness is
-/// deferred to M1.
+/// `AuthnService` (Task 12), the `AuthorizationService` (SMA-444 Task 19), and the
+/// `ServiceAccountService` (SMA-445 Task 21) mounted, serving a static `SERVING` health status
+/// (see `health_service`). The `AuthLayer` wraps the whole server — health and
+/// `AuthnService.Introspect`/`IntrospectApiKey` are `:path`-exempt from bearer enforcement,
+/// every `TenancyService`/`AuthorizationService`/`ServiceAccountService` RPC is not (spec
+/// §7.4, D14). `main` calls `.serve_with_shutdown`. The reporter is dropped here — dynamic
+/// readiness is deferred to M1.
 pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRouter<Stack<AuthLayer, Identity>> {
     let (_reporter, health) = health_service().await;
     Server::builder()
@@ -53,7 +58,8 @@ pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRoute
         .add_service(health)
         .add_service(TenancyServiceServer::new(TenancyGrpc::new(state.clone())))
         .add_service(AuthnServiceServer::new(AuthnGrpc::new(state.clone())))
-        .add_service(AuthorizationServiceServer::new(AuthzGrpc::new(state)))
+        .add_service(AuthorizationServiceServer::new(AuthzGrpc::new(state.clone())))
+        .add_service(ServiceAccountServiceServer::new(ServiceAccountGrpc::new(state)))
 }
 
 /// Serve gRPC on `addr` until `shutdown` resolves. gRPC health is a static `SERVING` for M0

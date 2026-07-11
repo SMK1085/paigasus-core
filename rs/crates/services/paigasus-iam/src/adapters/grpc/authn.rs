@@ -1,24 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The gRPC authn surface (spec §7.3/§7.4, D12/D14): `AuthnGrpc` implements the generated
-//! `AuthnService.Introspect`, and `AuthLayer` is the bearer-enforcement tower layer wrapping
-//! the whole `grpc::router` (health + tenancy + authn) via `Server::builder().layer(..)`.
+//! `AuthnService.Introspect`/`IntrospectApiKey` (the latter since SMA-445 Task 21), and
+//! `AuthLayer` is the bearer-enforcement tower layer wrapping the whole `grpc::router` (health
+//! + tenancy + authn + authz + service-accounts) via `Server::builder().layer(..)`.
 //!
 //! Interceptors in tonic are sync-only, but `resolve` is async (a JWKS fetch may await), so
 //! enforcement is a small tower `Service` rather than an interceptor. The layer wraps ALL
 //! services on the server — including health — so the `:path` exemption check
-//! (`/grpc.health.v1.Health/`, `/paigasus.iam.v1.AuthnService/Introspect`) runs BEFORE any
-//! token extraction. A rejection renders a proper trailers-only gRPC response (HTTP 200,
-//! `content-type: application/grpc`, `grpc-status` + ASCII-safe `grpc-message`) via
-//! `tonic::Status::into_http` — never a bare HTTP 401, which a gRPC client can't interpret.
+//! (`/grpc.health.v1.Health/`, `/paigasus.iam.v1.AuthnService/Introspect`,
+//! `/paigasus.iam.v1.AuthnService/IntrospectApiKey`) runs BEFORE any token extraction. A
+//! rejection renders a proper trailers-only gRPC response (HTTP 200, `content-type:
+//! application/grpc`, `grpc-status` + ASCII-safe `grpc-message`) via `tonic::Status::into_http`
+//! — never a bare HTTP 401, which a gRPC client can't interpret.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use paigasus_iam_core::{AuthnError, TokenDefect};
+use paigasus_iam_core::{AuthnError, Credential, TokenDefect};
 use paigasus_proto::paigasus::iam::v1::authn_service_server::AuthnService;
-use paigasus_proto::paigasus::iam::v1::{IntrospectRequest, IntrospectResponse};
+use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyRequest, IntrospectApiKeyResponse, IntrospectRequest, IntrospectResponse};
 use tonic::body::Body;
 use tonic::codegen::http;
 use tonic::{Request, Response, Status};
@@ -52,6 +54,18 @@ impl AuthnService for AuthnGrpc {
         let token = request.into_inner().token;
         let ctx = self.state.authn.introspect(&token).await.map_err(|e| convert::authn_status(&e))?;
         Ok(Response::new(convert::to_introspect_response(&ctx)))
+    }
+
+    /// `IntrospectApiKey` (spec §10.1, SMA-445 Task 21): API-key introspection, the peer of
+    /// `Introspect` on `AuthnService`. Unauthenticated by design (the credential travels in
+    /// the request body, never a bearer header) — mirrors `introspect` field-for-field, but
+    /// delegates to `AppState.api_key_auth` (the `AuthenticateApiKey` use case, Task 18)
+    /// instead of `AppState.authn`. Never logs the token; errors funnel through the same
+    /// `authn_status` (static messages only).
+    async fn introspect_api_key(&self, request: Request<IntrospectApiKeyRequest>) -> Result<Response<IntrospectApiKeyResponse>, Status> {
+        let token = request.into_inner().token;
+        let ctx = self.state.api_key_auth.introspect(&token).await.map_err(|e| convert::authn_status(&e))?;
+        Ok(Response::new(convert::to_introspect_api_key_response(&ctx)))
     }
 }
 
@@ -89,9 +103,13 @@ pub struct AuthEnforce<S> {
 }
 
 /// Requests whose `:path` bypasses bearer enforcement (spec §7.4): the well-known health
-/// service (all its methods, hence the prefix) and the unauthenticated `Introspect` RPC.
+/// service (all its methods, hence the prefix) and the unauthenticated `Introspect`/
+/// `IntrospectApiKey` RPCs (SMA-445 Task 21 adds the latter — both credential-introspection
+/// RPCs carry their token in the request body, not a bearer header, so neither can require
+/// one). Every `ServiceAccountService` management RPC is deliberately NOT here — proven by
+/// `tests/api_keys_grpc.rs::management_rpcs_not_exempt`.
 fn is_exempt(path: &str) -> bool {
-    path.starts_with("/grpc.health.v1.Health/") || path == "/paigasus.iam.v1.AuthnService/Introspect"
+    path.starts_with("/grpc.health.v1.Health/") || path == "/paigasus.iam.v1.AuthnService/Introspect" || path == "/paigasus.iam.v1.AuthnService/IntrospectApiKey"
 }
 
 impl<S> Service<http::Request<Body>> for AuthEnforce<S>
@@ -123,17 +141,28 @@ where
             let Some(token) = bearer_from_headers(req.headers()) else {
                 return Ok(reject(&AuthnError::InvalidToken(TokenDefect::Malformed)));
             };
-            match state.authn.resolve(&token, Provisioning::Enabled).await {
+            // Credential router (SMA-445 Task 19), mirroring the HTTP `require_bearer`
+            // middleware's identical branch: a token carrying the configured API-key prefix
+            // resolves through the API-key authenticator; everything else is an OIDC bearer.
+            let resolved = if token.starts_with(&state.api_key_prefix) {
+                state.api_key_auth.resolve(&token).await
+            } else {
+                state.authn.resolve(&token, Provisioning::Enabled).await
+            };
+            match resolved {
                 Ok(principal) => {
                     // Cold-start bootstrap-admin seeding (SMA-444 Task 21b, D9/M4): mirrors
                     // the HTTP `require_bearer` middleware's call site exactly — only ever a
-                    // no-op HashSet lookup for a non-bootstrap identity, and never reached
-                    // by the exempt `Introspect` RPC (D10, `is_exempt` above).
-                    state.bootstrap_seeder.ensure_platform_admin(&principal.principal_id, &principal.issuer, &principal.subject).await;
+                    // no-op HashSet lookup for a non-bootstrap identity, and never reached by
+                    // the exempt `Introspect` RPC (D10, `is_exempt` above). KEPT INSIDE THE
+                    // OIDC ARM ONLY (SMA-445 Task 19): a service account has no
+                    // (issuer, subject) pair and must never be JIT-granted platform_admin.
+                    if let Credential::Oidc { issuer, subject, .. } = &principal.credential {
+                        state.bootstrap_seeder.ensure_platform_admin(&principal.principal_id, issuer, subject).await;
+                    }
                     req.extensions_mut().insert(AuthContext {
                         principal_id: principal.principal_id,
-                        issuer: principal.issuer,
-                        subject: principal.subject,
+                        credential: principal.credential,
                     });
                     inner.call(req).await
                 }

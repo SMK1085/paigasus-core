@@ -62,7 +62,11 @@ impl IntoResponse for AuthnApiError {
 /// plain-text rejections (malformed JSON, wrong content-type, oversized body) become the
 /// same `{"error":{code,message}}` shape every other authn response uses. The status is
 /// the rejection's own; messages are static — nothing ever echoes the request body.
-struct EnvelopeJson<T>(T);
+/// `pub(crate)` (rather than private): `adapters::http::api_keys`'s introspect handler
+/// (SMA-445 Task 20) reuses this SAME envelope for `POST /v1/authn/api-keys/introspect`
+/// rather than duplicating the rejection-mapping logic — the two routes share one
+/// unauthenticated-body-limited posture (spec H1).
+pub(crate) struct EnvelopeJson<T>(pub(crate) T);
 
 impl<S, T> FromRequest<S> for EnvelopeJson<T>
 where

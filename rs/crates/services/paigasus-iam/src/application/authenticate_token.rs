@@ -6,8 +6,8 @@
 //! introspect never provisions, D13 hot path resolves only — no membership fetch).
 
 use paigasus_iam_core::{
-    Authenticator, AuthnError, AuthnPrincipal, Clock, ConflictKind, Email, ExternalIdentity, ExternalIdentityRepository, IdGenerator, Issuer, MembershipRepository, Principal, PrincipalContext,
-    PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, ProvisioningDefect, RepositoryError, User, ValidatedClaims,
+    Authenticator, AuthnError, AuthnPrincipal, Clock, ConflictKind, Credential, Email, ExternalIdentity, ExternalIdentityRepository, IdGenerator, Issuer, MembershipRepository, Principal,
+    PrincipalContext, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, ProvisioningDefect, RepositoryError, User, ValidatedClaims,
 };
 use std::collections::HashMap;
 
@@ -132,9 +132,11 @@ where
             principal_id,
             kind: principal.kind,
             status: principal.status,
-            issuer: claims.issuer,
-            subject: claims.subject,
-            expires_at: claims.expires_at,
+            credential: Credential::Oidc {
+                issuer: claims.issuer,
+                subject: claims.subject,
+                expires_at: claims.expires_at,
+            },
         })
     }
 
@@ -462,8 +464,8 @@ mod tests {
         let resolved = uc.resolve("token", Provisioning::Disabled).await.unwrap();
         assert_eq!(resolved.principal_id, pid);
         assert_eq!(resolved.status, PrincipalStatus::Active);
-        assert_eq!(resolved.issuer, issuer);
-        assert_eq!(resolved.subject, "sub-1");
+        assert_eq!(resolved.issuer(), Some(&issuer));
+        assert_eq!(resolved.subject(), Some("sub-1"));
     }
 
     #[tokio::test]

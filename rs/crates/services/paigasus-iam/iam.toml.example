@@ -39,3 +39,25 @@
 # issuer = "https://idp.example.com/realms/acme"
 # audiences = ["paigasus"]
 # jit_provisioning = true             # default shown
+
+# --- API keys & service accounts (M4) ---
+
+# [api_keys]
+#
+# REQUIRED — no valid default (the empty-string default fails `IamConfig::validate`, not
+# figment extraction — an unset pepper loads fine but boots refuse to start). >=32 decoded
+# bytes, standard (padded) base64. NEVER logged/dumped: a redacting newtype, skipped from
+# IamConfig's Serialize and redacted in its Debug (SMA-445 D12).
+# pepper = "<>=32 raw bytes, base64-encoded>"    # or IAM_API_KEYS__PEPPER
+#
+# key_prefix              = "pgs_sk_" # must be non-empty & not collide (case-insensitively)
+#                                      # with "Bearer" — default shown
+# max_token_bytes         = 512       # reject larger bearer tokens before parsing — default shown
+# # default_expiry_days   = 365       # unset by default — non-expiring until revoked
+# last_used_throttle_secs = 60        # min gap between last_used_at writes — default shown
+#
+# [api_keys.introspect_cache]
+# backend  = "memory"                 # "memory" (default, single-replica/dev) | "redis" (HA)
+# # redis_url = "redis://..."         # required iff backend = "redis"
+# ttl_secs = 30                       # default shown — bounds cross-replica/put-after-evict
+#                                      # revocation staleness (spec D5)

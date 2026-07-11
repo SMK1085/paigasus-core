@@ -17,9 +17,11 @@ mod support;
 use paigasus_iam::adapters::authz::Generations;
 use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
-use paigasus_iam::adapters::persistence::{PgEntitySliceLoader, PgOrganizationRepository, PgProjectRepository, PgTeamRepository};
+use paigasus_iam::adapters::persistence::{PgEntitySliceLoader, PgOrganizationRepository, PgProjectRepository, PgServiceAccountRepository, PgTeamRepository};
 use paigasus_iam_core::authz::model::{ContextValue, ROOT_ENTITY, root_prn};
-use paigasus_iam_core::{Clock, EntitySliceLoader, IdGenerator, NodeStatus, Organization, OrganizationRepository, Project, ProjectRepository, Slug, Team, TeamId, TeamRepository};
+use paigasus_iam_core::{
+    Clock, EntitySliceLoader, IdGenerator, NodeStatus, Organization, OrganizationRepository, Project, ProjectRepository, ServiceAccountRepository, Slug, Team, TeamId, TeamRepository,
+};
 use paigasus_kernel::{Prn, mint_uuid7, to_cedar_uid};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use std::collections::BTreeMap;
@@ -240,10 +242,15 @@ async fn authz_slice_root_resource_returns_only_root_and_principal() {
     assert!(slice.entities.iter().any(|e| e.uid == principal_uid));
 }
 
-/// A principal with no `principal` row (never provisioned, or a stale PRN) must not fail
-/// the whole slice — the loader falls back to `"active"` per its doc comment.
+/// A principal with no `principal` row (never provisioned, deleted, or a stale PRN) must
+/// fail the whole slice CLOSED — `load` surfaces `AuthzError::ResourceNotFound`, the same
+/// variant `CedarAuthorizer::is_authorized` catches and turns into a `Deny` (never a 500).
+/// The loader must NEVER fabricate a synthetic `kind = "user"`/`status = "active"` principal
+/// for a missing row — that would represent a deleted/nonexistent identity as an ACTIVE
+/// Cedar principal (CodeRabbit SMA-445 review fix; this test replaces the old
+/// falls-back-to-active-status assertion).
 #[tokio::test]
-async fn authz_slice_principal_without_a_row_falls_back_to_active_status() {
+async fn authz_slice_principal_without_a_row_fails_closed() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
@@ -252,14 +259,8 @@ async fn authz_slice_principal_without_a_row_falls_back_to_active_status() {
     let principal = principal_prn(principal_uuid); // deliberately not seeded
 
     let loader = PgEntitySliceLoader::new(db.clone(), Generations::memory());
-    let slice = loader.load(&root_prn(), &principal).await.unwrap();
-
-    let principal_uid = {
-        let u = to_cedar_uid(&principal);
-        (u.entity_type, u.entity_id)
-    };
-    let entity = find_entity(&slice, &principal_uid);
-    assert_eq!(entity.attrs.get("status"), Some(&ContextValue::Str("active".to_string())));
+    let err = loader.load(&root_prn(), &principal).await.unwrap_err();
+    assert!(matches!(err, paigasus_iam_core::AuthzError::ResourceNotFound(_)), "expected AuthzError::ResourceNotFound, got {err:?}");
 }
 
 /// A resource PRN naming a tenancy node that doesn't exist can't be sliced — `load` must
@@ -376,4 +377,38 @@ async fn authz_slice_entity_gen_delegates_to_shared_generations() {
     assert_eq!(loader.entity_gen().await.unwrap(), 0);
     gens.bump_entity_gen().await.unwrap();
     assert_eq!(loader.entity_gen().await.unwrap(), 1, "loader must observe bumps made through the shared Generations handle");
+}
+
+/// SMA-445 Task 11 — a `ServiceAccount` principal's `principal` row carries `kind =
+/// "service_account"` (D16), and the loaded slice's principal entity must reflect that,
+/// never the `"user"` literal `principal_entity()` used to hardcode. Regression coverage
+/// for real `user` principals staying `kind = "user"` lives in
+/// `authz_slice_full_chain_has_root_org_team_project_and_principal_each_active` above.
+#[tokio::test]
+async fn service_account_principal_slice_has_sa_kind() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+
+    let sa_repo = PgServiceAccountRepository::new(db.clone());
+    let owner = support::seed_org_ref(&db).await;
+    let (p, sa) = support::sample_sa("ci-bot", owner);
+    sa_repo.create(&p, &sa).await.unwrap();
+
+    let loader = PgEntitySliceLoader::new(db.clone(), Generations::memory());
+    let slice = loader.load(&root_prn(), sa.principal_id.prn()).await.unwrap();
+
+    let principal_uid = {
+        let u = to_cedar_uid(sa.principal_id.prn());
+        (u.entity_type, u.entity_id)
+    };
+    let entity = find_entity(&slice, &principal_uid);
+    assert_eq!(
+        entity.attrs,
+        BTreeMap::from([
+            ("kind".to_string(), ContextValue::Str("service_account".to_string())),
+            ("status".to_string(), ContextValue::Str("active".to_string()))
+        ]),
+        "a service_account principal's slice entity must carry kind = \"service_account\", not the hardcoded \"user\""
+    );
 }

@@ -2,6 +2,7 @@
 
 //! Service configuration via figment: built-in defaults < `iam.toml` < `IAM_*` env.
 
+use crate::adapters::api_keys::{Pepper, PepperConfigError};
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::{Figment, error::Error as FigmentError};
 use paigasus_iam_core::Issuer;
@@ -17,6 +18,7 @@ pub struct IamConfig {
     pub log_level: String,
     pub authn: AuthnConfig,
     pub authz: AuthzConfig,
+    pub api_keys: ApiKeyConfig,
 }
 
 /// BYO-IdP OIDC authentication config (spec §6.4). `issuers` is intentionally left
@@ -111,6 +113,104 @@ pub struct BootstrapAdmin {
     pub subject: String,
 }
 
+/// API-key issuance/validation config (SMA-445 Task 15, spec D12/§11) — mirrors `AuthzConfig`'s
+/// shape/style directly above: every field HAS a sensible default (see `ApiKeyDefaults` below)
+/// EXCEPT `pepper`, whose default (the empty string) is deliberately invalid — an operator MUST
+/// configure a real one. Unlike `AuthnConfig.issuers` (which has no default at all and fails to
+/// even extract), an absent/short `pepper` loads fine and is caught by `IamConfig::validate`
+/// instead, because that's where the rest of this block's checks already live (`key_prefix`,
+/// `introspect_cache`, `max_token_bytes`) and figment's defaults layer needs SOME string value
+/// to seed a well-typed field.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ApiKeyConfig {
+    /// The raw, still-`base64`-encoded pepper as configured (`[api_keys] pepper` /
+    /// `IAM_API_KEYS__PEPPER`) — see [`RawPepper`]'s doc for why this isn't the decoded
+    /// `adapters::api_keys::Pepper` directly. `#[serde(skip_serializing)]` so `IamConfig`'s
+    /// derived `Serialize` (used by log/`readyz` config dumps) omits it entirely; `RawPepper`'s
+    /// own hand-rolled `Debug` additionally redacts it for the derived `Debug` path. Call
+    /// [`ApiKeyConfig::pepper`] to decode + validate it into the real key material.
+    #[serde(skip_serializing)]
+    pub pepper: RawPepper,
+    pub key_prefix: String,
+    pub max_token_bytes: usize,
+    /// Unset = non-expiring until revoked (spec §11 example: `default_expiry_days = 365`).
+    pub default_expiry_days: Option<u32>,
+    pub last_used_throttle_secs: u64,
+    pub introspect_cache: ApiKeyCacheConfig,
+}
+
+impl ApiKeyConfig {
+    /// Decodes + validates the configured pepper into the actual key material
+    /// `adapters::api_keys::HmacSecretHasher` is keyed by. Lazy — called at composition time
+    /// (and by [`IamConfig::validate`] below) rather than eagerly at load, because figment's
+    /// `Deserialize` only ever has the raw configured string to work with (see [`RawPepper`]).
+    pub fn pepper(&self) -> Result<Pepper, PepperConfigError> {
+        Pepper::from_config(&self.pepper.0)
+    }
+
+    /// Test/dev-only convenience: an [`ApiKeyConfig::default`] with `pepper` overridden to
+    /// `pepper_b64` (raw, still-base64-encoded, exactly as `[api_keys] pepper` /
+    /// `IAM_API_KEYS__PEPPER` would supply it) — for callers that build an `IamConfig` by hand
+    /// (integration-test support, not through `figment`) and need [`ApiKeyConfig::pepper`] to
+    /// actually succeed. SMA-445 Task 19: `AppState::new` now calls `pepper()` unconditionally,
+    /// and `ApiKeyConfig::default()`'s pepper is deliberately the invalid empty string (see its
+    /// own doc) — mirrors `Default for ApiKeyConfig`'s identical "hand-built test `IamConfig`"
+    /// rationale. `RawPepper`'s inner field is private (redaction, its own doc), so this is the
+    /// sole way for code outside this module to construct one carrying a real value.
+    #[must_use]
+    pub fn with_test_pepper(pepper_b64: impl Into<String>) -> Self {
+        ApiKeyConfig {
+            pepper: RawPepper(pepper_b64.into()),
+            ..ApiKeyConfig::default()
+        }
+    }
+}
+
+/// The raw (still-`base64`-encoded, undecoded) HMAC pepper exactly as figment read it from
+/// `iam.toml`/`IAM_API_KEYS__PEPPER` — a redacting newtype around a `String` (spec D12,
+/// challenge M6). `IamConfig` derives `Debug`/`Serialize` because it's dumped in logs/`readyz`
+/// (`main.rs`), so the configured secret must never round-trip through either: `Debug` is
+/// hand-rolled to print a fixed placeholder (mirrors `adapters::api_keys::Pepper`'s own
+/// redacted `Debug`, which this decodes into via [`ApiKeyConfig::pepper`]), and `Deserialize`
+/// is hand-rolled to delegate straight to `String` so figment can still populate the REAL
+/// value — only the outbound directions (`Debug`, and `Serialize` on the containing
+/// `ApiKeyConfig::pepper` field, via `#[serde(skip_serializing)]`) are redacted.
+/// Deliberately does NOT derive/implement `Serialize` itself: `ApiKeyConfig::pepper` never
+/// serializes this type, so there's nothing to redact-in-place, and not having the impl at all
+/// makes a future accidental removal of `#[serde(skip_serializing)]` a compile error instead of
+/// a silent leak.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RawPepper(String);
+
+impl std::fmt::Debug for RawPepper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RawPepper").field(&"<redacted>").finish()
+    }
+}
+
+impl<'de> Deserialize<'de> for RawPepper {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(RawPepper)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ApiKeyCacheConfig {
+    pub backend: ApiKeyCacheBackend,
+    pub redis_url: Option<String>,
+    pub ttl_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiKeyCacheBackend {
+    Memory,
+    Redis,
+}
+
 // Only the fields that HAVE a default. `database_url` and `authn.issuers` are
 // intentionally absent so a missing value is a hard error at load time.
 #[derive(Serialize)]
@@ -120,6 +220,7 @@ struct Defaults {
     log_level: String,
     authn: AuthnDefaults,
     authz: AuthzDefaults,
+    api_keys: ApiKeyDefaults,
 }
 
 // Mirrors `AuthnConfig` minus `issuers` — deliberately absent, see `AuthnConfig` doc.
@@ -147,6 +248,23 @@ struct AuthzDefaults {
     bootstrap_admins: Vec<BootstrapAdmin>,
 }
 
+// Mirrors `ApiKeyConfig` field-for-field, EXCEPT `pepper`'s TYPE: this struct only ever feeds
+// figment's default LAYER (`Serialized::defaults`), never gets logged/dumped itself, so a
+// plain (unredacted) `String` is fine here — figment still deserializes the eventual merged
+// value into `ApiKeyConfig.pepper: RawPepper` regardless of which layer (default/toml/env)
+// supplied it. The default is the empty string, which is deliberately INVALID
+// (`Pepper::from_config("")` fails with `TooShort`) — see `ApiKeyConfig`'s doc for why that's
+// caught at `validate()` rather than at figment extraction.
+#[derive(Serialize)]
+struct ApiKeyDefaults {
+    pepper: String,
+    key_prefix: String,
+    max_token_bytes: usize,
+    default_expiry_days: Option<u32>,
+    last_used_throttle_secs: u64,
+    introspect_cache: ApiKeyCacheConfig,
+}
+
 impl Default for Defaults {
     fn default() -> Self {
         Defaults {
@@ -155,6 +273,7 @@ impl Default for Defaults {
             log_level: "info".to_string(),
             authn: AuthnDefaults::default(),
             authz: AuthzDefaults::default(),
+            api_keys: ApiKeyDefaults::default(),
         }
     }
 }
@@ -193,6 +312,27 @@ impl Default for AuthzDefaults {
     }
 }
 
+// Defaults mirror the spec §11 example `iam.toml` block (`key_prefix = "pgs_sk_"`,
+// `max_token_bytes = 512`, `last_used_throttle_secs = 60`, `introspect_cache` memory-backed
+// with a 30s TTL — the same short TTL D5 gives as the introspection cache's rationale/default).
+// `pepper` defaults to the empty string (see `ApiKeyDefaults`'s doc).
+impl Default for ApiKeyDefaults {
+    fn default() -> Self {
+        ApiKeyDefaults {
+            pepper: String::new(),
+            key_prefix: "pgs_sk_".to_string(),
+            max_token_bytes: 512,
+            default_expiry_days: None,
+            last_used_throttle_secs: 60,
+            introspect_cache: ApiKeyCacheConfig {
+                backend: ApiKeyCacheBackend::Memory,
+                redis_url: None,
+                ttl_secs: 30,
+            },
+        }
+    }
+}
+
 // `AuthzConfig` gets a `Default` too (unlike `AuthnConfig`, which can't sensibly have one —
 // `issuers` has no default) so callers that build an `IamConfig` by hand (test support, not
 // through `figment`) can write `authz: AuthzConfig::default()` rather than repeat every field.
@@ -212,10 +352,37 @@ impl Default for AuthzConfig {
     }
 }
 
+// `ApiKeyConfig` gets a `Default` too, same rationale as `AuthzConfig` above (hand-built test
+// `IamConfig`s can write `api_keys: ApiKeyConfig::default()`). NOTE: the resulting `pepper` is
+// the empty-string default — fine for tests that never call `validate()`/`pepper()`, but a
+// test that DOES needs to override it explicitly (see `config::tests::valid_pepper_b64`).
+impl Default for ApiKeyConfig {
+    fn default() -> Self {
+        let d = ApiKeyDefaults::default();
+        ApiKeyConfig {
+            pepper: RawPepper(d.pepper),
+            key_prefix: d.key_prefix,
+            max_token_bytes: d.max_token_bytes,
+            default_expiry_days: d.default_expiry_days,
+            last_used_throttle_secs: d.last_used_throttle_secs,
+            introspect_cache: d.introspect_cache,
+        }
+    }
+}
+
 impl IamConfig {
     #[must_use]
     pub fn figment() -> Figment {
-        Figment::from(Serialized::defaults(Defaults::default())).merge(Toml::file("iam.toml")).merge(Env::prefixed("IAM_"))
+        // `.split("__")` maps a DOUBLE-underscore in an `IAM_*` env var to struct nesting, so a
+        // SECRET like the API-key pepper can be injected without a config file:
+        // `IAM_API_KEYS__PEPPER` -> `api_keys.pepper` (and, as a latent bonus, nested authn/authz
+        // env overrides like `IAM_AUTHZ__CACHE__BACKEND` now work too). Splitting on the DOUBLE
+        // underscore is what preserves flat single-underscore fields — `IAM_DATABASE_URL` stays
+        // `database_url`, `IAM_HTTP_ADDR` stays `http_addr` — so no existing env var changes
+        // meaning (the only config env var used anywhere today is `IAM_DATABASE_URL`).
+        Figment::from(Serialized::defaults(Defaults::default()))
+            .merge(Toml::file("iam.toml"))
+            .merge(Env::prefixed("IAM_").split("__"))
     }
 
     // `figment::Error` is a large enum (~208B); allow the size lint narrowly rather than
@@ -238,7 +405,16 @@ impl IamConfig {
     /// often than its own staleness bound expects, letting evaluated-policy freshness
     /// overshoot the TTL the rest of the system assumes it's bounded by), and every
     /// `bootstrap_admins` entry (if any — the list itself is allowed to be empty) has a valid
-    /// `https` issuer and a non-empty subject.
+    /// `https` issuer and a non-empty subject. Mirrors that same posture again for `[api_keys]`
+    /// (SMA-445 Task 15, spec D12/§11): the configured pepper decodes to at least 32 bytes
+    /// (`ApiKeyConfig::pepper`, surfacing `Pepper::from_config`'s own error), `key_prefix` is
+    /// non-empty and doesn't collide (case-insensitively) with the `Bearer` scheme (else it
+    /// would misroute every JWT to the API-key auth path), the introspection cache's `redis`
+    /// backend has `redis_url` configured and its `ttl_secs` is non-zero (same posture as
+    /// `authn.jwks_cache`/`authz.cache` above), and `max_token_bytes` falls within a sane range
+    /// whose floor scales with `key_prefix.len()` — a `max_token_bytes` below the shortest
+    /// token this config can ever emit would make `api_key::parse_token` reject every issued
+    /// key.
     pub fn validate(&self) -> Result<(), String> {
         if self.authn.issuers.is_empty() {
             return Err("authn.issuers must contain at least one issuer".to_string());
@@ -317,6 +493,58 @@ impl IamConfig {
             }
         }
 
+        // --- SMA-445 Task 15: `[api_keys]` config ------------------------------------------
+        // Pepper decodability (>= 32 decoded bytes) is delegated to `Pepper::from_config`
+        // (spec D12) rather than re-implemented here — `ApiKeyConfig::pepper` surfaces that
+        // same error, covering both an unset (empty-string default) and a too-short pepper.
+        if let Err(e) = self.api_keys.pepper() {
+            return Err(format!("api_keys.pepper is invalid: {e}"));
+        }
+
+        // An empty OR `Bearer`-colliding prefix would misroute every JWT to the API-key
+        // resolution path (spec §11 MINOR finding) — checked case-insensitively since the
+        // `Bearer` HTTP auth scheme itself is case-insensitive (RFC 9110 §11.1).
+        if self.api_keys.key_prefix.is_empty() {
+            return Err("api_keys.key_prefix must not be empty (an empty prefix would misroute every JWT to the API-key auth path)".to_string());
+        }
+        if self.api_keys.key_prefix.eq_ignore_ascii_case("bearer") {
+            return Err(format!("api_keys.key_prefix must not collide with the \"Bearer\" scheme (got {:?})", self.api_keys.key_prefix));
+        }
+
+        if self.api_keys.introspect_cache.backend == ApiKeyCacheBackend::Redis && self.api_keys.introspect_cache.redis_url.is_none() {
+            return Err("api_keys.introspect_cache.backend = \"redis\" requires api_keys.introspect_cache.redis_url".to_string());
+        }
+
+        // A zero TTL is broken the same way `authn.jwks_ttl_secs = 0` is above: every put
+        // either fails outright (redis `SET EX 0`) or is immediately-expired (memory).
+        if self.api_keys.introspect_cache.ttl_secs == 0 {
+            return Err("api_keys.introspect_cache.ttl_secs must be at least 1 (0 breaks the introspection cache)".to_string());
+        }
+
+        // A sane range. The FLOOR isn't a fixed constant — `api_key::format_token` emits
+        // `"{key_prefix}{32 hex chars}_{secret_b64url}"`, and the secret is always the fixed
+        // 32-byte `[u8; 32]` `entropy.rs::new_secret` generates, whose base64url-nopad encoding
+        // is a fixed `43` chars (`ceil(32 * 8 / 6)`) — so the SHORTEST token this config can
+        // ever emit is `key_prefix.len() + FIXED_TOKEN_BYTES` bytes long, where
+        // `FIXED_TOKEN_BYTES = 32 (keyid hex) + 1 (separator) + 43 (secret b64url) = 76`. A
+        // `max_token_bytes` below that floor would pass this check but then make
+        // `api_key::parse_token`'s length-cap check (`token.len() > max_bytes`) reject EVERY
+        // key this same config ever issues as `ApiKeyDefect::Malformed` (CodeRabbit SMA-445
+        // review fix) — so the floor must scale with the configured `key_prefix`, not be a
+        // constant. 8192 as the ceiling leaves generous headroom for a longer future prefix
+        // while still rejecting clearly-misconfigured values before they're used to size a
+        // length-cap check on the request hot path.
+        const FIXED_TOKEN_BYTES: usize = 32 + 1 + 43;
+        const MAX_MAX_TOKEN_BYTES: usize = 8192;
+        let min_max_token_bytes = self.api_keys.key_prefix.len() + FIXED_TOKEN_BYTES;
+        if !(min_max_token_bytes..=MAX_MAX_TOKEN_BYTES).contains(&self.api_keys.max_token_bytes) {
+            return Err(format!(
+                "api_keys.max_token_bytes ({}) must be between {min_max_token_bytes} (api_keys.key_prefix.len() [{}] + {FIXED_TOKEN_BYTES}, the shortest token this config can ever emit) and {MAX_MAX_TOKEN_BYTES}",
+                self.api_keys.max_token_bytes,
+                self.api_keys.key_prefix.len()
+            ));
+        }
+
         Ok(())
     }
 }
@@ -364,7 +592,9 @@ mod tests {
     fn authn_defaults_land_with_a_minimal_issuer() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
-            jail.create_file("iam.toml", minimal_issuer_toml())?;
+            // SMA-445: an overall `validate().is_ok()` now also needs a valid `[api_keys]`
+            // pepper — see `authz_defaults_land_with_no_authz_block_at_all`'s identical note.
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert_eq!(cfg.authn.leeway_secs, 60);
             assert_eq!(cfg.authn.http_timeout_secs, 10);
@@ -533,17 +763,26 @@ mod tests {
     fn validate_accepts_redis_backend_with_a_url() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            // SMA-445: an overall `validate().is_ok()` now also needs a valid `[api_keys]`
+            // pepper (see `config::tests::valid_pepper_b64`'s doc) — the `[authn.jwks_cache]`
+            // block under test here is otherwise unaffected.
             jail.create_file(
                 "iam.toml",
-                r#"
-                    [authn.jwks_cache]
-                    backend = "redis"
-                    redis_url = "redis://localhost:6379"
+                &format!(
+                    r#"
+                        [authn.jwks_cache]
+                        backend = "redis"
+                        redis_url = "redis://localhost:6379"
 
-                    [[authn.issuers]]
-                    issuer = "https://idp.example.com/realms/acme"
-                    audiences = ["paigasus"]
-                "#,
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+
+                        [api_keys]
+                        pepper = "{}"
+                    "#,
+                    valid_pepper_b64()
+                ),
             )?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert_eq!(cfg.authn.jwks_cache.backend, JwksCacheBackend::Redis);
@@ -580,7 +819,11 @@ mod tests {
     fn authz_defaults_land_with_no_authz_block_at_all() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
-            jail.create_file("iam.toml", minimal_issuer_toml())?;
+            // SMA-445: an overall `validate().is_ok()` now also needs a valid `[api_keys]`
+            // pepper (`minimal_issuer_toml()` deliberately carries none — see
+            // `config::tests::api_keys_defaults_land_with_no_api_keys_block_at_all`, which
+            // exercises exactly that absence — so it's added here at the call site instead).
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert!(cfg.authz.enforce_tenancy, "enforce_tenancy must default to true");
             assert_eq!(cfg.authz.policy_cache_ttl_secs, 30);
@@ -663,17 +906,25 @@ mod tests {
     fn validate_accepts_refresh_interval_equal_to_policy_cache_ttl() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            // SMA-445: an overall `validate().is_ok()` now also needs a valid `[api_keys]`
+            // pepper — see `authz_defaults_land_with_no_authz_block_at_all`'s identical note.
             jail.create_file(
                 "iam.toml",
-                r#"
-                    [authz]
-                    policy_cache_ttl_secs = 10
-                    refresh_interval_secs = 10
+                &format!(
+                    r#"
+                        [authz]
+                        policy_cache_ttl_secs = 10
+                        refresh_interval_secs = 10
 
-                    [[authn.issuers]]
-                    issuer = "https://idp.example.com/realms/acme"
-                    audiences = ["paigasus"]
-                "#,
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+
+                        [api_keys]
+                        pepper = "{}"
+                    "#,
+                    valid_pepper_b64()
+                ),
             )?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert!(cfg.validate().is_ok(), "expected authz.refresh_interval_secs == authz.policy_cache_ttl_secs to pass validation");
@@ -729,28 +980,36 @@ mod tests {
     fn validate_accepts_a_full_valid_authz_block() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            // SMA-445: an overall `validate().is_ok()` now also needs a valid `[api_keys]`
+            // pepper — see `authz_defaults_land_with_no_authz_block_at_all`'s identical note.
             jail.create_file(
                 "iam.toml",
-                r#"
-                    [authz]
-                    enforce_tenancy = false
-                    policy_cache_ttl_secs = 15
-                    slice_cache_ttl_secs = 45
-                    decision_cache_ttl_secs = 20
-                    refresh_interval_secs = 2
+                &format!(
+                    r#"
+                        [authz]
+                        enforce_tenancy = false
+                        policy_cache_ttl_secs = 15
+                        slice_cache_ttl_secs = 45
+                        decision_cache_ttl_secs = 20
+                        refresh_interval_secs = 2
 
-                    [authz.cache]
-                    backend = "redis"
-                    redis_url = "redis://localhost:6379"
+                        [authz.cache]
+                        backend = "redis"
+                        redis_url = "redis://localhost:6379"
 
-                    [[authz.bootstrap_admins]]
-                    issuer = "https://idp.example.com/realms/acme"
-                    subject = "platform-admin-sub"
+                        [[authz.bootstrap_admins]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        subject = "platform-admin-sub"
 
-                    [[authn.issuers]]
-                    issuer = "https://idp.example.com/realms/acme"
-                    audiences = ["paigasus"]
-                "#,
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+
+                        [api_keys]
+                        pepper = "{}"
+                    "#,
+                    valid_pepper_b64()
+                ),
             )?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert!(!cfg.authz.enforce_tenancy);
@@ -764,6 +1023,365 @@ mod tests {
             assert_eq!(cfg.authz.bootstrap_admins[0].issuer, "https://idp.example.com/realms/acme");
             assert_eq!(cfg.authz.bootstrap_admins[0].subject, "platform-admin-sub");
             assert!(cfg.validate().is_ok(), "expected a fully-populated, valid [authz] block to pass validation");
+            Ok(())
+        });
+    }
+
+    // --- SMA-445 Task 15: `[api_keys]` config ----------------------------------------------
+
+    /// A valid, base64-encoded 32-byte pepper for `[api_keys]` test fixtures — re-derives
+    /// `adapters::api_keys::hasher`'s own test pepper (`[0x5A; 32]`) rather than reaching into
+    /// a sibling module's private test helpers.
+    fn valid_pepper_b64() -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode([0x5Au8; 32])
+    }
+
+    #[test]
+    fn api_keys_defaults_land_with_no_api_keys_block_at_all() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("iam.toml", minimal_issuer_toml())?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert_eq!(cfg.api_keys.key_prefix, "pgs_sk_");
+            assert_eq!(cfg.api_keys.max_token_bytes, 512);
+            assert_eq!(cfg.api_keys.default_expiry_days, None);
+            assert_eq!(cfg.api_keys.last_used_throttle_secs, 60);
+            assert_eq!(cfg.api_keys.introspect_cache.backend, ApiKeyCacheBackend::Memory);
+            assert_eq!(cfg.api_keys.introspect_cache.redis_url, None);
+            assert_eq!(cfg.api_keys.introspect_cache.ttl_secs, 30);
+            // No pepper configured -> the empty-string default, which `validate()` (not
+            // figment extraction) rejects — see `ApiKeyDefaults`'s doc.
+            assert!(cfg.validate().is_err(), "an unset api_keys.pepper must fail validate(), not figment extraction");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rejects_empty_key_prefix() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [api_keys]
+                        pepper = "{}"
+                        key_prefix = ""
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "expected an empty api_keys.key_prefix to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rejects_bearer_key_prefix() {
+        for prefix in ["Bearer", "bearer", "BEARER"] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.create_file(
+                    "iam.toml",
+                    &format!(
+                        r#"
+                            [api_keys]
+                            pepper = "{}"
+                            key_prefix = "{prefix}"
+
+                            [[authn.issuers]]
+                            issuer = "https://idp.example.com/realms/acme"
+                            audiences = ["paigasus"]
+                        "#,
+                        valid_pepper_b64()
+                    ),
+                )?;
+                let cfg: IamConfig = IamConfig::figment().extract()?;
+                assert!(cfg.validate().is_err(), "expected api_keys.key_prefix = {prefix:?} to fail validation (Bearer-colliding)");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn rejects_short_pepper() {
+        figment::Jail::expect_with(|jail| {
+            use base64::Engine;
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            let short_pepper = base64::engine::general_purpose::STANDARD.encode([0x5Au8; 16]); // 16 decoded bytes < the 32 minimum
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [api_keys]
+                        pepper = "{short_pepper}"
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+                    "#
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "expected a <32-byte decoded pepper to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rejects_zero_ttl() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [api_keys]
+                        pepper = "{}"
+
+                        [api_keys.introspect_cache]
+                        ttl_secs = 0
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "expected api_keys.introspect_cache.ttl_secs = 0 to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rejects_redis_backend_without_url() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [api_keys]
+                        pepper = "{}"
+
+                        [api_keys.introspect_cache]
+                        backend = "redis"
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "expected an api_keys redis backend without redis_url to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rejects_max_token_bytes_out_of_range() {
+        for bad in [0usize, 8, 16384] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.create_file(
+                    "iam.toml",
+                    &format!(
+                        r#"
+                            [api_keys]
+                            pepper = "{}"
+                            max_token_bytes = {bad}
+
+                            [[authn.issuers]]
+                            issuer = "https://idp.example.com/realms/acme"
+                            audiences = ["paigasus"]
+                        "#,
+                        valid_pepper_b64()
+                    ),
+                )?;
+                let cfg: IamConfig = IamConfig::figment().extract()?;
+                assert!(cfg.validate().is_err(), "expected api_keys.max_token_bytes = {bad} to fail validation");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn accepts_max_token_bytes_at_the_range_boundaries() {
+        // The inclusive range: both endpoints must PASS (the rejection test above covers
+        // just-outside/way-outside values). Guards against an off-by-one that would flip the
+        // bound to exclusive. The lower bound (83) is the default `key_prefix = "pgs_sk_"`
+        // (7 chars) + the fixed 76-byte token structure (32 hex + 1 separator + 43-char
+        // base64url secret) — the shortest token this default config can ever emit.
+        for ok in [83usize, 8192] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.create_file(
+                    "iam.toml",
+                    &format!(
+                        r#"
+                            [api_keys]
+                            pepper = "{}"
+                            max_token_bytes = {ok}
+
+                            [[authn.issuers]]
+                            issuer = "https://idp.example.com/realms/acme"
+                            audiences = ["paigasus"]
+                        "#,
+                        valid_pepper_b64()
+                    ),
+                )?;
+                let cfg: IamConfig = IamConfig::figment().extract()?;
+                assert_eq!(cfg.api_keys.max_token_bytes, ok);
+                assert!(cfg.validate().is_ok(), "expected api_keys.max_token_bytes = {ok} (a range boundary) to pass validation");
+                Ok(())
+            });
+        }
+    }
+
+    /// CodeRabbit SMA-445 review fix: the `max_token_bytes` floor must scale with the
+    /// configured `key_prefix`, not sit at a fixed constant — a `max_token_bytes` below
+    /// `key_prefix.len() + 76` (32 hex + 1 separator + 43-char base64url secret) passes a
+    /// fixed-floor check but then makes `api_key::parse_token`'s length cap reject EVERY key
+    /// this same config ever issues as `Malformed`. Uses a longer-than-default `key_prefix` to
+    /// prove the floor is derived, not hardcoded to the default `"pgs_sk_"`'s 83.
+    #[test]
+    fn rejects_max_token_bytes_below_the_floor_derived_from_key_prefix_len() {
+        let prefix = "a_much_longer_key_prefix_"; // 25 chars -> floor = 25 + 76 = 101
+        let floor = prefix.len() + 76;
+
+        for (max_token_bytes, should_pass) in [(floor - 1, false), (floor, true)] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.create_file(
+                    "iam.toml",
+                    &format!(
+                        r#"
+                            [api_keys]
+                            pepper = "{}"
+                            key_prefix = "{prefix}"
+                            max_token_bytes = {max_token_bytes}
+
+                            [[authn.issuers]]
+                            issuer = "https://idp.example.com/realms/acme"
+                            audiences = ["paigasus"]
+                        "#,
+                        valid_pepper_b64()
+                    ),
+                )?;
+                let cfg: IamConfig = IamConfig::figment().extract()?;
+                assert_eq!(
+                    cfg.validate().is_ok(),
+                    should_pass,
+                    "expected api_keys.max_token_bytes = {max_token_bytes} (floor = {floor}) validation to {}",
+                    if should_pass { "pass" } else { "fail" }
+                );
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn valid_config_passes() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [api_keys]
+                        pepper = "{}"
+                        key_prefix = "pgs_sk_"
+                        max_token_bytes = 512
+                        default_expiry_days = 365
+                        last_used_throttle_secs = 60
+
+                        [api_keys.introspect_cache]
+                        backend = "redis"
+                        redis_url = "redis://localhost:6379"
+                        ttl_secs = 30
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert_eq!(cfg.api_keys.key_prefix, "pgs_sk_");
+            assert_eq!(cfg.api_keys.max_token_bytes, 512);
+            assert_eq!(cfg.api_keys.default_expiry_days, Some(365));
+            assert_eq!(cfg.api_keys.last_used_throttle_secs, 60);
+            assert_eq!(cfg.api_keys.introspect_cache.backend, ApiKeyCacheBackend::Redis);
+            assert_eq!(cfg.api_keys.introspect_cache.redis_url.as_deref(), Some("redis://localhost:6379"));
+            assert_eq!(cfg.api_keys.introspect_cache.ttl_secs, 30);
+            assert!(cfg.api_keys.pepper().is_ok(), "a valid pepper must decode via ApiKeyConfig::pepper");
+            assert!(cfg.validate().is_ok(), "expected a fully-populated, valid [api_keys] block to pass validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn pepper_is_injectable_via_the_double_underscore_env_var() {
+        // The pepper is a SECRET, so operators must be able to inject it purely via env — no
+        // config file. `IAM_API_KEYS__PEPPER` -> `api_keys.pepper` relies on `figment()`'s
+        // `.split("__")`; this proves it actually lands (and that a flat `IAM_DATABASE_URL`
+        // still works alongside it, i.e. the split didn't break single-underscore fields).
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            let pepper = valid_pepper_b64();
+            jail.set_env("IAM_API_KEYS__PEPPER", &pepper);
+            // No `[api_keys]` in the file at all — the pepper comes purely from the env var.
+            jail.create_file("iam.toml", minimal_issuer_toml())?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert_eq!(cfg.database_url, "postgres://u:p@localhost/db", "the flat IAM_DATABASE_URL env var must still map to database_url");
+            assert_eq!(cfg.api_keys.pepper.0, pepper, "IAM_API_KEYS__PEPPER must populate api_keys.pepper");
+            assert!(cfg.api_keys.pepper().is_ok(), "the env-injected pepper must decode via ApiKeyConfig::pepper");
+            assert!(cfg.validate().is_ok(), "a config whose only pepper source is IAM_API_KEYS__PEPPER must pass validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn pepper_never_appears_in_debug_or_serialized_config() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            let pepper = valid_pepper_b64();
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [api_keys]
+                        pepper = "{pepper}"
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+                    "#
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            // Sanity: the raw pepper string actually round-tripped through figment — otherwise
+            // the "never appears" assertions below would pass vacuously.
+            assert_eq!(cfg.api_keys.pepper.0, pepper);
+
+            let debugged = format!("{cfg:?}");
+            assert!(!debugged.contains(&pepper), "the configured pepper leaked into IamConfig's Debug output: {debugged}");
+            assert!(debugged.contains("redacted"), "expected a redaction marker in IamConfig's Debug output: {debugged}");
+
+            let serialized = serde_json::to_string(&cfg).expect("IamConfig serializes");
+            assert!(!serialized.contains(&pepper), "the configured pepper leaked into IamConfig's serialized form: {serialized}");
+
             Ok(())
         });
     }

@@ -91,6 +91,13 @@ redis = { workspace = true }
 # `(principal, action, resource, context)` serialization into the decision cache's key
 # (SMA-444 Task 14).
 blake3 = { workspace = true }
+# `adapters::api_keys::hasher::HmacSecretHasher` — the `SecretHasher` port's v1 impl,
+# HMAC-SHA-256(pepper, secret) (SMA-445 Task 13). Not workspace-pinned: this crate's own
+# dep, at the same versions `paigasus-iam-core`'s dev-dependencies already resolve in
+# Cargo.lock (hmac 0.12.x, sha2 0.10.x) — see that crate's Cargo.toml for the test-local
+# `TestHasher` this mirrors.
+hmac = "0.12"
+sha2 = "0.10"
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as

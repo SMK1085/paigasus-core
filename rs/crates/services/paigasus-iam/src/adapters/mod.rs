@@ -2,6 +2,7 @@
 
 //! Adapters — concrete implementations of the core's ports.
 
+pub mod api_keys;
 pub mod auth;
 pub mod authz;
 pub mod clock;

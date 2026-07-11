@@ -27,20 +27,24 @@ use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
 use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use chrono::Utc;
 use jsonwebtoken::jwk::{AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters, EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use p256::elliptic_curve::rand_core::OsRng;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::{EncodePrivateKey, LineEnding};
+use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::http::{AppState, router};
+use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::Migrator;
 use paigasus_iam::application::authenticate_token::Provisioning;
-use paigasus_iam::config::{AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig};
-use paigasus_iam_core::{GrantScope, OrganizationId, PrincipalId, RoleGrant, TenancyNodeRef};
+use paigasus_iam::config::{ApiKeyConfig, AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig};
+use paigasus_iam_core::{
+    ApiKey, ApiKeyStatus, Clock, GrantScope, IdGenerator, OrganizationId, Principal, PrincipalId, PrincipalKind, PrincipalStatus, RoleGrant, ServiceAccount, TenancyNodeRef, display_prefix,
+};
 use paigasus_kernel::Prn;
-use sea_orm::{Database, DatabaseConnection};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
 use std::sync::{Arc, RwLock};
@@ -254,7 +258,19 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
                 .collect(),
         },
         authz: AuthzConfig::default(),
+        api_keys: ApiKeyConfig::with_test_pepper(test_api_key_pepper()),
     }
+}
+
+/// A >=32-byte, base64-encoded API-key pepper for test-support `IamConfig`s (SMA-445 Task 19):
+/// `AppState::new` now calls `cfg.api_keys.pepper()` unconditionally, and `ApiKeyConfig::
+/// default()`'s pepper is deliberately invalid (empty) — see `ApiKeyConfig::with_test_pepper`'s
+/// doc. Re-derives `adapters::api_keys::hasher`'s own test pepper (`[0x5A; 32]`, also mirrored
+/// by `config.rs`'s `valid_pepper_b64`) rather than reaching into a sibling module's private
+/// test helpers.
+#[allow(dead_code)]
+fn test_api_key_pepper() -> String {
+    STANDARD.encode([0x5Au8; 32])
 }
 
 /// Builds the real `router(AppState::new(db, &test_config(&idp)))` for
@@ -515,4 +531,81 @@ pub async fn pg_owner_grant(db: &DatabaseConnection, owner: &PrincipalId, grant_
         linked_policy_id: format!("grant:{grant_id}"),
         created_at: Utc::now(),
     }
+}
+
+// --- SMA-445 Task 9: `PgServiceAccountRepository`-driven test helpers ----------------------
+
+/// Seeds a fresh, bare `organization` row via raw SQL (mirrors `authz_bootstrap.rs::seed_org`,
+/// duplicated here rather than shared across test binaries — each `tests/*.rs` file compiles
+/// its own copy of `mod support;`) and returns a `TenancyNodeRef` naming it — the minimal
+/// owner a `service_account` row's `fk_service_account_org` FK needs, without the heavier
+/// `PgOrganizationRepository::create` (which also demands a default team + owner grant, D8).
+/// The slug is derived from the minted uuid, so repeat calls within one test never collide on
+/// `uq_organization_slug`.
+#[allow(dead_code)]
+pub async fn seed_org_ref(db: &DatabaseConnection) -> TenancyNodeRef {
+    let id = KernelIdGenerator.new_organization_id();
+    let uuid = id.uuid();
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        format!(
+            r#"INSERT INTO "organization" (id, prn, slug, name, status, created_at, updated_at)
+               VALUES ('{uuid}', '{prn}', 'org-{slug}', 'Test Org', 'active', now(), now())"#,
+            prn = id.canonical(),
+            slug = uuid.simple(),
+        ),
+        [],
+    ))
+    .await
+    .unwrap();
+    TenancyNodeRef::Organization(id)
+}
+
+/// Builds a fresh `(Principal, ServiceAccount)` pair for `PgServiceAccountRepository::create`
+/// tests — mints via the real `KernelIdGenerator`/`SystemClock` adapters (mirrors
+/// `tenancy_orgs.rs::new_org_and_default_team`'s precedent). `owner` must already exist as a
+/// real row (its owning `organization`/`team`/`project` FK) — callers seed it first, e.g. via
+/// [`seed_org_ref`].
+#[allow(dead_code)]
+pub fn sample_sa(name: &str, owner: TenancyNodeRef) -> (Principal, ServiceAccount) {
+    let ids = KernelIdGenerator;
+    let now = SystemClock.now();
+    let principal_id = ids.new_service_account_id();
+    let principal = Principal::new(principal_id.clone(), PrincipalKind::ServiceAccount, PrincipalStatus::Active, now, now);
+    let sa = ServiceAccount::new(principal_id, owner, name, now).expect("valid service account name");
+    (principal, sa)
+}
+
+// --- SMA-445 Task 10: `PgApiKeyRepository`-driven test helpers ----------------------------
+
+/// Builds a fresh `(ApiKey, Vec<u8>)` pair for `PgApiKeyRepository::issue` tests — mints the
+/// key id via the real `KernelIdGenerator`/`SystemClock` adapters (mirrors `sample_sa`'s
+/// precedent). `scope` must already exist as a real row (its owning `organization`/`team`/
+/// `project` FK, `fk_api_key_scope_*`) — callers seed it first, e.g. via [`seed_org_ref`],
+/// typically reusing the SAME ref passed to the owning service account's `sample_sa`. The
+/// hash stands in for a real `SecretHasher` output (a later task, not yet wired here) —
+/// derived deterministically from the freshly minted key id (blake3, already a
+/// `paigasus-iam` dependency) so distinct calls never collide by accident; a test that wants
+/// to force a collision (`ApiKeyHashCollision`) reuses one call's returned hash bytes
+/// directly on a second `issue`, rather than asking this helper to produce one.
+#[allow(dead_code)]
+pub fn sample_key(sa: &PrincipalId, scope: TenancyNodeRef) -> (ApiKey, Vec<u8>) {
+    let ids = KernelIdGenerator;
+    let now = SystemClock.now();
+    let id = ids.new_api_key_id();
+    let hash = blake3::hash(id.uuid().as_bytes()).as_bytes().to_vec();
+    let key = ApiKey {
+        id,
+        service_account_id: sa.clone(),
+        scope,
+        prefix: display_prefix("pgs_sk_", id),
+        status: ApiKeyStatus::Active,
+        expires_at: None,
+        last_used_at: None,
+        created_at: now,
+        revoked_at: None,
+        scope_actions: Vec::new(),
+        scope_roles: Vec::new(),
+    };
+    (key, hash)
 }
