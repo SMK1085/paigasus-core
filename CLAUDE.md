@@ -45,6 +45,13 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
 - `.github/CODEOWNERS` is Moon-generated — don't hand-edit.
 - `vcs.hooks` is intentionally empty; lefthook will own `.git/hooks` (SMA-371).
+- A fresh `git worktree` starts with **no installed deps** (empty `ts/node_modules`, no
+  `py/.venv`, unfetched cargo) — but lefthook's git hooks are shared across worktrees via the
+  common `.git`, so `commit-msg` runs `commitlint` and **fails the commit** (`commitlint not
+  found`) until deps exist. After `git worktree add`, provision the worktree before committing:
+  `proto install` → `pnpm -C ts install` (installs commitlint + re-syncs hooks via its
+  `prepare` step) → `uv sync` in `py/` → `cargo fetch` in `rs/`. Do **not** bypass the hook with
+  `--no-verify`; install the deps.
 - Never name a source file with a base name that is a **Windows reserved device name**
   (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`) — `PRN.<ext>` etc. are reserved
   too, so git can't check the file out on Windows (`error: invalid path …`). The Linux-only

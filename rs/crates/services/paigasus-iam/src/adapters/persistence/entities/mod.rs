@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod api_key;
+pub mod audit_log;
 pub mod external_identity;
 pub mod membership;
 pub mod organization;

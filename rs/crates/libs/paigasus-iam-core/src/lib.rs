@@ -5,6 +5,7 @@
 //! hexagonal). IDs/PRNs come from `paigasus-kernel`; time/entropy are injected via ports.
 
 pub mod api_key;
+pub mod audit;
 pub mod authn;
 pub mod authz;
 pub mod ports;
@@ -15,13 +16,14 @@ pub mod user;
 pub mod value;
 
 pub use api_key::{ApiKey, ApiKeyDefect, ApiKeyId, ApiKeyStatus, NewApiKey, ParsedToken, display_prefix, format_token, parse_token};
+pub use audit::{AuditEntry, AuditFilter, AuditOutcome};
 pub use authn::{AuthnError, AuthnPrincipal, Credential, ExternalIdentity, Issuer, PrincipalContext, ProvisioningDefect, TokenDefect, ValidatedClaims};
 pub use authz::{
     AccessRequest, Action, AuditSink, Authorizer, AuthzError, Decision, DecisionCache, Effect, EntitySliceLoader, GrantScope, PolicyDocument, PolicyStore, RequestContext, Role, RoleGrant,
     RoleGrantRef, RoleGrantStore,
 };
 pub use ports::{
-    ApiKeyRepository, Authenticator, Clock, ConflictKind, ExternalIdentityRepository, IdGenerator, KeyEntropy, MembershipRecord, MembershipRepository, NodeView, OrganizationRepository,
+    ApiKeyRepository, AuditLog, Authenticator, Clock, ConflictKind, ExternalIdentityRepository, IdGenerator, KeyEntropy, MembershipRecord, MembershipRepository, NodeView, OrganizationRepository,
     PreconditionKind, PrincipalRepository, ProjectRepository, RepositoryError, SecretHasher, ServiceAccountRepository, TeamRepository,
 };
 pub use principal::{Principal, PrincipalKind, PrincipalStatus};

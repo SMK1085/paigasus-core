@@ -8,7 +8,8 @@
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
 use paigasus_iam_core::{
-    ApiKey, Credential, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant, RoleGrantRef, ServiceAccountRecord, Team,
+    ApiKey, AuditEntry, Credential, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant, RoleGrantRef,
+    ServiceAccountRecord, Team,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -529,4 +530,68 @@ impl From<PrincipalContext> for IntrospectApiKeyResponseDto {
             role_grants: ctx.role_grants.into_iter().map(RoleGrantRefDto::from).collect(),
         }
     }
+}
+
+// --- SMA-446 Task A11: `GET /v1/audit` DTOs -------------------------------------------------
+
+/// A domain [`AuditEntry`] projected into its HTTP wire shape (mirrors
+/// `grpc::audit::to_proto_entry`'s field-for-field mapping): unlike the gRPC wire's
+/// `detail_json` (a stringified blob — proto has no native JSON type), `detail` here stays a
+/// real `serde_json::Value` — JSON has no such limitation, so there is no reason to add the
+/// string-encoding indirection on this transport.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditEntryDto {
+    pub id: Uuid,
+    pub occurred_at: DateTime<Utc>,
+    pub actor_prn: Option<String>,
+    pub action: String,
+    pub resource_prn: Option<String>,
+    pub outcome: String,
+    pub determining_policies: Vec<String>,
+    pub detail: serde_json::Value,
+    pub correlation_id: Option<Uuid>,
+}
+
+impl From<AuditEntry> for AuditEntryDto {
+    fn from(e: AuditEntry) -> Self {
+        AuditEntryDto {
+            id: e.id,
+            occurred_at: e.occurred_at,
+            actor_prn: e.actor_prn,
+            action: e.action,
+            resource_prn: e.resource_prn,
+            outcome: e.outcome.as_str().to_string(),
+            determining_policies: e.determining_policies,
+            detail: e.detail,
+            correlation_id: e.correlation_id,
+        }
+    }
+}
+
+/// Response for `GET /v1/audit` (spec-equivalent of the gRPC `ListAuditEntriesResponse`):
+/// `next_cursor` is present only when the page came back FULL (`http::audit::list`'s own doc)
+/// — HTTP's native `Option`/absent-key sentinel standing in for the gRPC wire's empty-string
+/// one.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditListResponseDto {
+    pub entries: Vec<AuditEntryDto>,
+    pub next_cursor: Option<String>,
+}
+
+/// Query params for `GET /v1/audit` (SMA-446 Task A11): every field optional. `from`/`to` are
+/// RFC3339 timestamp strings. Kept as raw `Option<String>` (rather than e.g. `Option<DateTime
+/// <Utc>>`/a typed enum) so a parse failure funnels through `http::audit::to_filter`'s
+/// `TenancyError::InvalidPrn` `{"error":{code,message}}` envelope — mirrors
+/// `RoleGrantQuery`/`ServiceAccountQuery`'s identical "keep it a string, let the handler
+/// validate" posture for their own required fields.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuditQuery {
+    pub actor: Option<String>,
+    pub resource: Option<String>,
+    pub action: Option<String>,
+    pub outcome: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<u64>,
 }

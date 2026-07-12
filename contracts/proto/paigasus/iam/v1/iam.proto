@@ -449,3 +449,41 @@ service ServiceAccountService {
   rpc RevokeApiKey(RevokeApiKeyRequest) returns (RevokeApiKeyResponse);
   rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse);
 }
+
+// AuditEntry is a single row of the append-only audit log (SMA-446): authz
+// denials in Slice A, committed mutations in Slice B. `detail_json` is a
+// JSON-serialized string (not a structured message) since the persistence
+// layer stores detail as serialized TEXT.
+message AuditEntry {
+  string id = 1;
+  google.protobuf.Timestamp occurred_at = 2;
+  string actor_prn = 3;
+  string action = 4;
+  string resource_prn = 5;
+  string outcome = 6;
+  repeated string determining_policies = 7;
+  string detail_json = 8;
+  string correlation_id = 9;
+}
+
+// Optional scalar filters use empty-string/zero sentinels (mirrors the other
+// request messages in this file): an empty string / zero timestamp means
+// "unfiltered" on that field.
+message ListAuditEntriesRequest {
+  string actor_prn = 1;
+  string resource_prn = 2;
+  string action = 3;
+  string outcome = 4;
+  google.protobuf.Timestamp from = 5;
+  google.protobuf.Timestamp to = 6;
+  string cursor = 7;
+  uint32 limit = 8; // limit 0 => server default
+}
+message ListAuditEntriesResponse {
+  repeated AuditEntry entries = 1;
+  string next_cursor = 2;
+}
+
+service AuditService {
+  rpc ListAuditEntries(ListAuditEntriesRequest) returns (ListAuditEntriesResponse);
+}

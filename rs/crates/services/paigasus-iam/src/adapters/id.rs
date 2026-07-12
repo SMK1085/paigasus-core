@@ -59,6 +59,10 @@ impl IdGenerator for KernelIdGenerator {
     fn new_api_key_id(&self) -> ApiKeyId {
         ApiKeyId::from_uuid(self.mint())
     }
+
+    fn new_audit_id(&self) -> Uuid {
+        self.mint()
+    }
 }
 
 #[cfg(test)]

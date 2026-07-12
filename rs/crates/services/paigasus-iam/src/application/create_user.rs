@@ -145,6 +145,9 @@ mod tests {
         fn new_api_key_id(&self) -> ApiKeyId {
             ApiKeyId::from_uuid(self.0)
         }
+        fn new_audit_id(&self) -> Uuid {
+            self.0
+        }
     }
 
     struct FixedClock(DateTime<Utc>);

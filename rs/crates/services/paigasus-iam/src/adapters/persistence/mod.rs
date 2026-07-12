@@ -5,6 +5,7 @@
 pub mod entities;
 pub mod migration;
 pub mod pg_api_keys;
+pub mod pg_audit_log;
 pub mod pg_entity_slice;
 pub mod pg_external_identities;
 pub mod pg_memberships;
@@ -18,6 +19,7 @@ pub mod pg_teams;
 
 pub use migration::Migrator;
 pub use pg_api_keys::PgApiKeyRepository;
+pub use pg_audit_log::PgAuditLog;
 pub use pg_entity_slice::PgEntitySliceLoader;
 pub use pg_external_identities::PgExternalIdentityRepository;
 pub use pg_memberships::PgMembershipRepository;

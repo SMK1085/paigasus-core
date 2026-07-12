@@ -19,6 +19,7 @@ pub struct IamConfig {
     pub authn: AuthnConfig,
     pub authz: AuthzConfig,
     pub api_keys: ApiKeyConfig,
+    pub audit: AuditConfig,
 }
 
 /// BYO-IdP OIDC authentication config (spec §6.4). `issuers` is intentionally left
@@ -211,6 +212,23 @@ pub enum ApiKeyCacheBackend {
     Redis,
 }
 
+/// Persistent denial-audit config (SMA-446 Slice A, Task A12) — the single knob wiring the
+/// bounded, non-blocking denial-audit buffer (`adapters::authz::DenialAuditBuffer`) that
+/// `AppState::new` composes into the `CedarAuthorizer`'s `AuditSink` and drains to Postgres.
+/// Like `[authz]`/`[api_keys]`, every field HAS a sensible default (see `AuditDefaults`), so an
+/// absent `[audit]` block entirely is valid config.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AuditConfig {
+    /// Ring-buffer capacity for denial [`AuditEntry`](paigasus_iam_core::AuditEntry)s awaiting
+    /// out-of-band persistence. When full, the OLDEST queued entry is dropped (favoring
+    /// recency) and `DenialAuditBuffer::dropped()` is bumped — see that type's doc. Validated
+    /// non-zero in [`IamConfig::validate`] (a `0` would make every push immediately evict
+    /// itself); `DenialAuditBuffer::new` additionally clamps to `>= 1` as a belt-and-braces
+    /// defense, but a misconfigured `0` is an operator error caught at boot, not silently
+    /// corrected.
+    pub denial_buffer_capacity: usize,
+}
+
 // Only the fields that HAVE a default. `database_url` and `authn.issuers` are
 // intentionally absent so a missing value is a hard error at load time.
 #[derive(Serialize)]
@@ -221,6 +239,7 @@ struct Defaults {
     authn: AuthnDefaults,
     authz: AuthzDefaults,
     api_keys: ApiKeyDefaults,
+    audit: AuditDefaults,
 }
 
 // Mirrors `AuthnConfig` minus `issuers` — deliberately absent, see `AuthnConfig` doc.
@@ -265,6 +284,14 @@ struct ApiKeyDefaults {
     introspect_cache: ApiKeyCacheConfig,
 }
 
+// Mirrors `AuditConfig` field-for-field. A 4096-entry denial buffer comfortably absorbs a
+// denial burst between drain wakes without back-pressure while staying a modest bounded
+// footprint (each queued entry is a handful of small strings).
+#[derive(Serialize)]
+struct AuditDefaults {
+    denial_buffer_capacity: usize,
+}
+
 impl Default for Defaults {
     fn default() -> Self {
         Defaults {
@@ -274,6 +301,7 @@ impl Default for Defaults {
             authn: AuthnDefaults::default(),
             authz: AuthzDefaults::default(),
             api_keys: ApiKeyDefaults::default(),
+            audit: AuditDefaults::default(),
         }
     }
 }
@@ -333,6 +361,12 @@ impl Default for ApiKeyDefaults {
     }
 }
 
+impl Default for AuditDefaults {
+    fn default() -> Self {
+        AuditDefaults { denial_buffer_capacity: 4096 }
+    }
+}
+
 // `AuthzConfig` gets a `Default` too (unlike `AuthnConfig`, which can't sensibly have one —
 // `issuers` has no default) so callers that build an `IamConfig` by hand (test support, not
 // through `figment`) can write `authz: AuthzConfig::default()` rather than repeat every field.
@@ -366,6 +400,17 @@ impl Default for ApiKeyConfig {
             default_expiry_days: d.default_expiry_days,
             last_used_throttle_secs: d.last_used_throttle_secs,
             introspect_cache: d.introspect_cache,
+        }
+    }
+}
+
+// `AuditConfig` gets a `Default` too, same rationale as `AuthzConfig`/`ApiKeyConfig` above
+// (hand-built test `IamConfig`s can write `audit: AuditConfig::default()`). Delegates to
+// `AuditDefaults` so the two never drift apart.
+impl Default for AuditConfig {
+    fn default() -> Self {
+        AuditConfig {
+            denial_buffer_capacity: AuditDefaults::default().denial_buffer_capacity,
         }
     }
 }
@@ -543,6 +588,16 @@ impl IamConfig {
                 self.api_keys.max_token_bytes,
                 self.api_keys.key_prefix.len()
             ));
+        }
+
+        // --- SMA-446 Task A12: `[audit]` config ------------------------------------------------
+        // A zero capacity is broken the same way a zero TTL is above: `DenialAuditBuffer::push`
+        // would evict the entry it just enqueued on every call, silently discarding every denial
+        // audit past the very first `dropped()` bump. `DenialAuditBuffer::new` clamps to `>= 1`
+        // defensively, but a misconfigured `0` is an operator error caught at boot here, not
+        // silently corrected.
+        if self.audit.denial_buffer_capacity == 0 {
+            return Err("audit.denial_buffer_capacity must be at least 1 (0 makes the denial-audit buffer evict every entry it enqueues)".to_string());
         }
 
         Ok(())
@@ -1382,6 +1437,77 @@ mod tests {
             let serialized = serde_json::to_string(&cfg).expect("IamConfig serializes");
             assert!(!serialized.contains(&pepper), "the configured pepper leaked into IamConfig's serialized form: {serialized}");
 
+            Ok(())
+        });
+    }
+
+    // --- SMA-446 Task A12: `[audit]` config ------------------------------------------------
+
+    #[test]
+    fn audit_defaults_land_with_no_audit_block_at_all() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            // A valid `[api_keys]` pepper is still needed for the overall `validate().is_ok()` —
+            // see `authz_defaults_land_with_no_authz_block_at_all`'s identical note.
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert_eq!(cfg.audit.denial_buffer_capacity, 4096, "denial_buffer_capacity must default to 4096");
+            assert!(cfg.validate().is_ok(), "audit defaults alone should pass validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_a_zero_denial_buffer_capacity() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [audit]
+                        denial_buffer_capacity = 0
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+
+                        [api_keys]
+                        pepper = "{}"
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "expected audit.denial_buffer_capacity = 0 to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_accepts_an_explicit_denial_buffer_capacity() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [audit]
+                        denial_buffer_capacity = 128
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+
+                        [api_keys]
+                        pepper = "{}"
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert_eq!(cfg.audit.denial_buffer_capacity, 128);
+            assert!(cfg.validate().is_ok(), "expected an explicit non-zero denial_buffer_capacity to pass validation");
             Ok(())
         });
     }

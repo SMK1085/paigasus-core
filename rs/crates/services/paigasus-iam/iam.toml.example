@@ -61,3 +61,16 @@
 # # redis_url = "redis://..."         # required iff backend = "redis"
 # ttl_secs = 30                       # default shown — bounds cross-replica/put-after-evict
 #                                      # revocation staleness (spec D5)
+
+# --- Persistent denial audit (M5, SMA-446) ---
+
+# [audit]
+# denial_buffer_capacity = 4096       # bounded, non-blocking ring buffer for authz-denial
+#                                      # audit entries awaiting out-of-band persistence to
+#                                      # Postgres — default shown; must be >= 1. Denial auditing
+#                                      # is best-effort: when full, the OLDEST queued entry is
+#                                      # dropped (favoring recent denials) and a monotonic
+#                                      # `dropped_denial_audits` gauge is emitted. A sustained
+#                                      # increase means the drain isn't keeping up — raise this
+#                                      # capacity or investigate the audit DB. This is a
+#                                      # deliberate tradeoff: no durable spooling.

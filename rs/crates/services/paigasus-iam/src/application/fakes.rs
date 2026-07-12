@@ -499,6 +499,10 @@ impl IdGenerator for SeqIds {
     fn new_api_key_id(&self) -> ApiKeyId {
         ApiKeyId::from_uuid(self.next())
     }
+
+    fn new_audit_id(&self) -> Uuid {
+        self.next()
+    }
 }
 
 /// Programmable `Authorizer` fake for application-service unit tests (`authorize.rs`,

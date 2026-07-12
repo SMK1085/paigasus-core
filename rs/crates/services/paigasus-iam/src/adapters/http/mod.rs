@@ -2,10 +2,12 @@
 
 //! axum HTTP surface: `/healthz` (liveness), `/readyz` (DB-backed readiness), the
 //! `/v1` tenancy API (organizations/teams/projects/memberships/users, ADR-0014), the
-//! authn introspection endpoint (`/v1/authn/introspect`, SMA-443), and the `/v1/authz`
-//! authorization API (`is-authorized`/policies/role-grants, SMA-444 Task 18).
+//! authn introspection endpoint (`/v1/authn/introspect`, SMA-443), the `/v1/authz`
+//! authorization API (`is-authorized`/policies/role-grants, SMA-444 Task 18), and the
+//! `/v1/audit` audit-log read endpoint (SMA-446 Task A11).
 
 mod api_keys;
+mod audit;
 pub mod auth_middleware;
 pub mod authn;
 mod authz;
@@ -26,23 +28,27 @@ use redis::aio::ConnectionManager;
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde_json::json;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::adapters::api_keys::{ApiKeyValidationCache, HmacSecretHasher, MemoryApiKeyCache, OsRngKeyEntropy, RedisApiKeyCache};
-use crate::adapters::authz::{CedarAuthorizer, Generations, GenerationsReader, MemoryDecisionCache, PolicySnapshot, RedisDecisionCache, SliceCache, TracingAuditSink};
+use crate::adapters::authz::{
+    BufferedDenialAuditSink, CedarAuthorizer, DenialAuditBuffer, DenialAuditDrain, FanOutAuditSink, Generations, GenerationsReader, MemoryDecisionCache, PolicySnapshot, RedisDecisionCache,
+    SliceCache, TracingAuditSink,
+};
 use crate::adapters::clock::SystemClock;
 use crate::adapters::id::KernelIdGenerator;
 use crate::adapters::oidc::jwks::{HttpJwksFetcher, InMemoryJwksCache, JwksProvider};
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
-    PgApiKeyRepository, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgPolicyStore, PgPrincipalRepository, PgProjectRepository,
+    PgApiKeyRepository, PgAuditLog, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgPolicyStore, PgPrincipalRepository, PgProjectRepository,
     PgRoleGrantStore, PgServiceAccountRepository, PgTeamRepository,
 };
 use crate::application::api_keys::ApiKeyService;
+use crate::application::audit::AuditQueryService;
 use crate::application::authenticate_api_key::AuthenticateApiKey;
 use crate::application::authenticate_token::{AuthenticateToken, JitPolicy};
 use crate::application::authorize::Authorize;
@@ -57,7 +63,7 @@ use crate::application::roles::RoleService;
 use crate::application::service_accounts::ServiceAccountService;
 use crate::application::teams::TeamService;
 use crate::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, JwksCacheBackend};
-use paigasus_iam_core::{ApiKeyRepository, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, PolicyStore, ProjectRepository, RoleGrantStore, TeamRepository};
+use paigasus_iam_core::{ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, PolicyStore, ProjectRepository, RoleGrantStore, TeamRepository};
 
 pub type OrgSvc = OrganizationService<PgOrganizationRepository, KernelIdGenerator, SystemClock>;
 pub type TeamSvc = TeamService<PgTeamRepository, KernelIdGenerator, SystemClock>;
@@ -201,6 +207,29 @@ pub struct AppState {
     /// H1) — `cfg.api_keys.max_token_bytes` + [`INTROSPECT_BODY_OVERHEAD_BYTES`], mirroring
     /// `introspect_body_limit`'s identical rationale for the OIDC token-introspect route.
     pub api_key_introspect_body_limit: usize,
+    /// The audit-log read-side use case (SMA-446 Task A10) — the gRPC
+    /// `AuditService.ListAuditEntries` (`adapters::grpc::audit`) and the HTTP `GET /v1/audit`
+    /// handler (`adapters::http::audit`, Task A11) both read through this. Wraps the SAME
+    /// `authorize` this state also exposes directly (mirrors `roles`/`policies`'s posture);
+    /// the Root-only restriction on `list` lives in `AuditQueryService` itself, not the Cedar
+    /// schema (see its module doc).
+    pub audit_query: AuditQueryService,
+    /// The persistent audit-log sink (`PgAuditLog`) the denial-audit [`DenialAuditDrain`]
+    /// drains buffered denials into (SMA-446 Task A12) — the SAME `Arc<dyn AuditLog>` handle
+    /// `audit_query` reads through. Exposed via [`AppState::audit_sink`] so `main.rs` (or a
+    /// test harness) can hand it to `drain.run(sink, shutdown)`.
+    audit_log: Arc<dyn AuditLog>,
+    /// The bounded denial-audit ring buffer the wired `BufferedDenialAuditSink` pushes into
+    /// (SMA-446 Task A12) — held here purely so `main.rs` can periodically log its overflow
+    /// counter ([`DenialAuditBuffer::dropped`]); the buffer's producer/consumer ends are
+    /// otherwise owned by the `CedarAuthorizer`'s sink and the drain respectively.
+    denial_buffer: Arc<DenialAuditBuffer>,
+    /// The denial-audit drain, in a take-once slot: `AppState` is `Clone` (every HTTP/gRPC
+    /// worker holds a clone) but [`DenialAuditDrain`] is NOT — it must be spawned exactly once.
+    /// `main.rs` calls [`AppState::take_denial_drain`] to move it out and `servers.spawn`s
+    /// `drain.run(..)` (mirroring `snapshot().spawn_reload`); every later call — and every
+    /// clone whose sibling already took it — gets `None`, so a double-spawn is impossible.
+    denial_drain: Arc<Mutex<Option<DenialAuditDrain>>>,
 }
 
 impl AppState {
@@ -210,6 +239,33 @@ impl AppState {
     #[must_use]
     pub fn snapshot(&self) -> Arc<PolicySnapshot> {
         self.snapshot.clone()
+    }
+
+    /// The persistent audit-log sink (`PgAuditLog`) the denial-audit drain writes buffered
+    /// denials into — `main.rs` passes it to `drain.run(sink, shutdown)` after taking the
+    /// drain with [`Self::take_denial_drain`] (SMA-446 Task A12).
+    #[must_use]
+    pub fn audit_sink(&self) -> Arc<dyn AuditLog> {
+        self.audit_log.clone()
+    }
+
+    /// The bounded denial-audit buffer — exposed so `main.rs` can periodically observe its
+    /// overflow counter ([`DenialAuditBuffer::dropped`]) as a `tracing` gauge (SMA-446 Task
+    /// A12).
+    #[must_use]
+    pub fn denial_buffer(&self) -> Arc<DenialAuditBuffer> {
+        self.denial_buffer.clone()
+    }
+
+    /// Moves the denial-audit drain out of the shared take-once slot — `main.rs` calls this
+    /// exactly once, then `servers.spawn`s `drain.run(self.audit_sink(), shutdown)` (mirroring
+    /// `spawn_reload`). Returns `None` on every subsequent call (and for any `AppState` clone
+    /// whose sibling already took it), so the drain can never be spawned twice (SMA-446 Task
+    /// A12). The lock is a `std::sync::Mutex` held only for the `Option::take` — never across
+    /// an `.await`.
+    #[must_use]
+    pub fn take_denial_drain(&self) -> Option<DenialAuditDrain> {
+        self.denial_drain.lock().expect("denial-drain slot mutex not poisoned").take()
     }
 
     /// Builds every tenancy service from `db` (each wired to its own Postgres repository —
@@ -285,12 +341,29 @@ impl AppState {
             Some(conn) => Arc::new(RedisDecisionCache::from_connection(conn.clone(), authz_cfg.decision_cache_ttl_secs)),
             None => Arc::new(MemoryDecisionCache::new()),
         };
+
+        // SMA-446 Task A12: the persistent denial-audit path. `DenialAuditBuffer::new` builds
+        // the bounded ring buffer + its paired drain together (the buffer can never exist
+        // without something able to drain it). The `CedarAuthorizer`'s `AuditSink` is a
+        // fan-out of the log-only `TracingAuditSink` AND a `BufferedDenialAuditSink` over the
+        // buffer — so every decision is still logged, and every DENIAL is additionally queued
+        // for out-of-band persistence. `denial_drain` is stashed in a take-once slot on the
+        // returned state; `main.rs` spawns it against the `PgAuditLog` sink (`audit_log`,
+        // built below). `denial_buf` is retained on the state purely for overflow-counter
+        // observability.
+        let (denial_buf, denial_drain) = DenialAuditBuffer::new(cfg.audit.denial_buffer_capacity);
+        let buffered_denials = BufferedDenialAuditSink::new(denial_buf.clone(), Arc::new(KernelIdGenerator));
+        let audit_sink: Arc<dyn AuditSink> = Arc::new(FanOutAuditSink::new(vec![
+            Arc::new(TracingAuditSink) as Arc<dyn AuditSink>,
+            Arc::new(buffered_denials) as Arc<dyn AuditSink>,
+        ]));
+
         let authz = Arc::new(CedarAuthorizer::new(
             snapshot.clone(),
             slices,
             decisions,
             Arc::new(gens.clone()) as Arc<dyn GenerationsReader>,
-            Arc::new(TracingAuditSink) as Arc<dyn AuditSink>,
+            audit_sink,
         ));
 
         // Application-layer authz use cases (SMA-444 Task 18): all three share the ONE
@@ -309,6 +382,16 @@ impl AppState {
         let role_projects: Arc<dyn ProjectRepository> = Arc::new(PgProjectRepository::new(db.clone(), gens.clone()));
         let roles = RoleService::new(role_grant_store.clone(), role_orgs, role_teams, role_projects, authorize.clone(), KernelIdGenerator, SystemClock);
         let policies = PolicyService::new(policy_store.clone(), authorize.clone());
+
+        // SMA-446 Task A10/A12: the audit-log read+write handle. `audit_log` is a single shared
+        // `Arc<dyn AuditLog>` (`PgAuditLog` over `db`) that BOTH the read-side `audit_query`
+        // (A10) reads through AND the denial-audit drain (A12, spawned by `main.rs`) writes
+        // buffered denials into — one store instance, not two (mirrors `role_grant_store`'s
+        // single-shared-`Arc` posture). It is stashed on the returned state (`audit_log` field,
+        // reachable via `audit_sink()`) so `main.rs` can hand it to `drain.run(sink, shutdown)`.
+        let audit_log: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()));
+        let audit_query = AuditQueryService::new(audit_log.clone(), authorize.clone());
+
         // Shares the SAME `role_grant_store` handle `roles`/`snapshot` do (Task 21b): a
         // bootstrap-admin seed bumps the identical `policy_gen` counter `CedarAuthorizer`
         // polls, exactly like every other role-grant mutation in this composition root.
@@ -451,6 +534,10 @@ impl AppState {
             api_keys,
             api_key_prefix: cfg.api_keys.key_prefix.clone(),
             api_key_introspect_body_limit: cfg.api_keys.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
+            audit_query,
+            audit_log,
+            denial_buffer: denial_buf,
+            denial_drain: Arc::new(Mutex::new(Some(denial_drain))),
         })
     }
 }
@@ -486,6 +573,7 @@ pub fn router(state: AppState) -> Router {
         .merge(authz::router())
         .merge(service_accounts::router())
         .merge(api_keys::router())
+        .merge(audit::router())
         // `route_layer` (not `layer`): the enforcement covers exactly the routes defined
         // above and never the merged-in `/healthz`/`/readyz`/introspect or the 404 fallback.
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware::require_bearer))
