@@ -39,10 +39,11 @@ use crate::adapters::oidc::jwks::{HttpJwksFetcher, InMemoryJwksCache, JwksProvid
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
-    PgApiKeyRepository, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgPolicyStore, PgPrincipalRepository, PgProjectRepository,
+    PgApiKeyRepository, PgAuditLog, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgPolicyStore, PgPrincipalRepository, PgProjectRepository,
     PgRoleGrantStore, PgServiceAccountRepository, PgTeamRepository,
 };
 use crate::application::api_keys::ApiKeyService;
+use crate::application::audit::AuditQueryService;
 use crate::application::authenticate_api_key::AuthenticateApiKey;
 use crate::application::authenticate_token::{AuthenticateToken, JitPolicy};
 use crate::application::authorize::Authorize;
@@ -57,7 +58,7 @@ use crate::application::roles::RoleService;
 use crate::application::service_accounts::ServiceAccountService;
 use crate::application::teams::TeamService;
 use crate::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, JwksCacheBackend};
-use paigasus_iam_core::{ApiKeyRepository, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, PolicyStore, ProjectRepository, RoleGrantStore, TeamRepository};
+use paigasus_iam_core::{ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, PolicyStore, ProjectRepository, RoleGrantStore, TeamRepository};
 
 pub type OrgSvc = OrganizationService<PgOrganizationRepository, KernelIdGenerator, SystemClock>;
 pub type TeamSvc = TeamService<PgTeamRepository, KernelIdGenerator, SystemClock>;
@@ -201,6 +202,13 @@ pub struct AppState {
     /// H1) — `cfg.api_keys.max_token_bytes` + [`INTROSPECT_BODY_OVERHEAD_BYTES`], mirroring
     /// `introspect_body_limit`'s identical rationale for the OIDC token-introspect route.
     pub api_key_introspect_body_limit: usize,
+    /// The audit-log read-side use case (SMA-446 Task A10) — the gRPC
+    /// `AuditService.ListAuditEntries` (`adapters::grpc::audit`) and the future HTTP
+    /// `/v1/audit-log` handler (Task A11) both read through this. Wraps the SAME `authorize`
+    /// this state also exposes directly (mirrors `roles`/`policies`'s posture); the Root-only
+    /// restriction on `list` lives in `AuditQueryService` itself, not the Cedar schema (see
+    /// its module doc).
+    pub audit_query: AuditQueryService,
 }
 
 impl AppState {
@@ -309,6 +317,15 @@ impl AppState {
         let role_projects: Arc<dyn ProjectRepository> = Arc::new(PgProjectRepository::new(db.clone(), gens.clone()));
         let roles = RoleService::new(role_grant_store.clone(), role_orgs, role_teams, role_projects, authorize.clone(), KernelIdGenerator, SystemClock);
         let policies = PolicyService::new(policy_store.clone(), authorize.clone());
+
+        // SMA-446 Task A10: the audit-log read-side wiring. `audit_log` is kept as its own
+        // `Arc<dyn AuditLog>` handle (rather than folded straight into `audit_query`) so a
+        // later task (A12, the drain sink) CAN share it — it's fine if A12 re-constructs its
+        // own `PgAuditLog` instead (a cheap `DatabaseConnection` clone either way); this just
+        // keeps the option open without over-engineering the sharing now (A10 brief).
+        let audit_log: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()));
+        let audit_query = AuditQueryService::new(audit_log.clone(), authorize.clone());
+
         // Shares the SAME `role_grant_store` handle `roles`/`snapshot` do (Task 21b): a
         // bootstrap-admin seed bumps the identical `policy_gen` counter `CedarAuthorizer`
         // polls, exactly like every other role-grant mutation in this composition root.
@@ -451,6 +468,7 @@ impl AppState {
             api_keys,
             api_key_prefix: cfg.api_keys.key_prefix.clone(),
             api_key_introspect_body_limit: cfg.api_keys.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
+            audit_query,
         })
     }
 }
