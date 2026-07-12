@@ -112,37 +112,43 @@ pub struct RoleService<I, C> {
     clock: C,
 }
 
+/// Named-field constructor params for [`RoleService::new`] (SMA-446 Slice B Task B4) — the
+/// DI-params idiom sibling services (B5–B7) should copy verbatim rather than growing another
+/// long positional-argument constructor: one field per dependency, built with struct syntax at
+/// the call site so each argument is self-labeling and reordering/inserting a field can't
+/// silently swap two same-typed dependencies past the compiler.
+pub struct RoleServiceDeps<I, C> {
+    pub grants: Arc<dyn RoleGrantStore>,
+    pub orgs: Arc<dyn OrganizationRepository>,
+    pub teams: Arc<dyn TeamRepository>,
+    pub projects: Arc<dyn ProjectRepository>,
+    pub authorize: Authorize,
+    pub uow: Arc<dyn UnitOfWork>,
+    pub outbox: Arc<dyn Outbox>,
+    pub audit: Arc<dyn AuditLog>,
+    pub gen_bumper: Arc<dyn PolicyGenBumper>,
+    pub ids: I,
+    pub clock: C,
+}
+
 impl<I, C> RoleService<I, C>
 where
     I: IdGenerator,
     C: Clock,
 {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        grants: Arc<dyn RoleGrantStore>,
-        orgs: Arc<dyn OrganizationRepository>,
-        teams: Arc<dyn TeamRepository>,
-        projects: Arc<dyn ProjectRepository>,
-        authorize: Authorize,
-        uow: Arc<dyn UnitOfWork>,
-        outbox: Arc<dyn Outbox>,
-        audit: Arc<dyn AuditLog>,
-        gen_bumper: Arc<dyn PolicyGenBumper>,
-        ids: I,
-        clock: C,
-    ) -> Self {
+    pub fn new(deps: RoleServiceDeps<I, C>) -> Self {
         Self {
-            grants,
-            orgs,
-            teams,
-            projects,
-            authorize,
-            uow,
-            outbox,
-            audit,
-            gen_bumper,
-            ids,
-            clock,
+            grants: deps.grants,
+            orgs: deps.orgs,
+            teams: deps.teams,
+            projects: deps.projects,
+            authorize: deps.authorize,
+            uow: deps.uow,
+            outbox: deps.outbox,
+            audit: deps.audit,
+            gen_bumper: deps.gen_bumper,
+            ids: deps.ids,
+            clock: deps.clock,
         }
     }
 
@@ -367,19 +373,19 @@ mod tests {
         let outbox = FakeOutbox::default();
         let audit = FakeAuditLog::default();
         let bumper = FakePolicyGenBumper::default();
-        let svc = RoleService::new(
+        let svc = RoleService::new(RoleServiceDeps {
             grants,
-            Arc::new(InMemoryOrgs(store.clone())),
-            Arc::new(InMemoryTeams(store.clone())),
-            Arc::new(InMemoryProjects(store)),
-            Authorize::new(Arc::new(fake)),
-            Arc::new(FakeUnitOfWork),
-            Arc::new(outbox.clone()),
-            Arc::new(audit.clone()),
-            Arc::new(bumper.clone()),
-            SeqIds::default(),
-            FixedClock::default(),
-        );
+            orgs: Arc::new(InMemoryOrgs(store.clone())),
+            teams: Arc::new(InMemoryTeams(store.clone())),
+            projects: Arc::new(InMemoryProjects(store)),
+            authorize: Authorize::new(Arc::new(fake)),
+            uow: Arc::new(FakeUnitOfWork),
+            outbox: Arc::new(outbox.clone()),
+            audit: Arc::new(audit.clone()),
+            gen_bumper: Arc::new(bumper.clone()),
+            ids: SeqIds::default(),
+            clock: FixedClock::default(),
+        });
         ServiceWithFakes { svc, outbox, audit, bumper }
     }
 

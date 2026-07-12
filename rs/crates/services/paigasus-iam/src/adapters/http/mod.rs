@@ -59,7 +59,7 @@ use crate::application::memberships::MembershipService;
 use crate::application::organizations::OrganizationService;
 use crate::application::policies::PolicyService;
 use crate::application::projects::ProjectService;
-use crate::application::roles::RoleService;
+use crate::application::roles::{RoleService, RoleServiceDeps};
 use crate::application::service_accounts::ServiceAccountService;
 use crate::application::teams::TeamService;
 use crate::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, JwksCacheBackend};
@@ -403,19 +403,19 @@ impl AppState {
         let role_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
         let role_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
         let role_gen_bumper: Arc<dyn PolicyGenBumper> = Arc::new(GenerationsPolicyGenBumper::new(gens.clone()));
-        let roles = RoleService::new(
-            role_grant_store.clone(),
-            role_orgs,
-            role_teams,
-            role_projects,
-            authorize.clone(),
-            role_uow,
-            role_outbox,
-            audit_log.clone(),
-            role_gen_bumper,
-            KernelIdGenerator,
-            SystemClock,
-        );
+        let roles = RoleService::new(RoleServiceDeps {
+            grants: role_grant_store.clone(),
+            orgs: role_orgs,
+            teams: role_teams,
+            projects: role_projects,
+            authorize: authorize.clone(),
+            uow: role_uow,
+            outbox: role_outbox,
+            audit: audit_log.clone(),
+            gen_bumper: role_gen_bumper,
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
         let policies = PolicyService::new(policy_store.clone(), authorize.clone());
 
         // SMA-446 Task A10: the read-side audit query service, over the SAME `audit_log`

@@ -28,7 +28,7 @@ use paigasus_iam::adapters::persistence::{
 };
 use paigasus_iam::application::authorize::Authorize;
 use paigasus_iam::application::bootstrap::reconcile_starter;
-use paigasus_iam::application::roles::RoleService;
+use paigasus_iam::application::roles::{RoleService, RoleServiceDeps};
 use paigasus_iam_core::authz::roles::{starter_policies, system_roles};
 use paigasus_iam_core::{
     AccessRequest, Action, AuditLog, AuditSink, Authorizer, DecisionCache, Effect, EntitySliceLoader, GrantScope, OrganizationId, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore,
@@ -176,19 +176,19 @@ async fn seeded_starter_set_plus_a_real_grant_enforces_end_to_end() {
     let role_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
     let role_audit: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()));
     let role_gen_bumper: Arc<dyn PolicyGenBumper> = Arc::new(GenerationsPolicyGenBumper::new(gens.clone()));
-    let role_service = RoleService::new(
-        role_grant_store,
-        role_orgs,
-        role_teams,
-        role_projects,
-        Authorize::new(authz.clone()),
-        role_uow,
-        role_outbox,
-        role_audit,
-        role_gen_bumper,
-        KernelIdGenerator,
-        SystemClock,
-    );
+    let role_service = RoleService::new(RoleServiceDeps {
+        grants: role_grant_store,
+        orgs: role_orgs,
+        teams: role_teams,
+        projects: role_projects,
+        authorize: Authorize::new(authz.clone()),
+        uow: role_uow,
+        outbox: role_outbox,
+        audit: role_audit,
+        gen_bumper: role_gen_bumper,
+        ids: KernelIdGenerator,
+        clock: SystemClock,
+    });
     let bootstrap_actor = bootstrap_principal.prn().clone();
     let member_principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", member_uuid).unwrap());
     let org = OrganizationId::from_uuid(org_uuid);
