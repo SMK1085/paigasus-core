@@ -2,10 +2,12 @@
 
 //! axum HTTP surface: `/healthz` (liveness), `/readyz` (DB-backed readiness), the
 //! `/v1` tenancy API (organizations/teams/projects/memberships/users, ADR-0014), the
-//! authn introspection endpoint (`/v1/authn/introspect`, SMA-443), and the `/v1/authz`
-//! authorization API (`is-authorized`/policies/role-grants, SMA-444 Task 18).
+//! authn introspection endpoint (`/v1/authn/introspect`, SMA-443), the `/v1/authz`
+//! authorization API (`is-authorized`/policies/role-grants, SMA-444 Task 18), and the
+//! `/v1/audit` audit-log read endpoint (SMA-446 Task A11).
 
 mod api_keys;
+mod audit;
 pub mod auth_middleware;
 pub mod authn;
 mod authz;
@@ -203,11 +205,11 @@ pub struct AppState {
     /// `introspect_body_limit`'s identical rationale for the OIDC token-introspect route.
     pub api_key_introspect_body_limit: usize,
     /// The audit-log read-side use case (SMA-446 Task A10) — the gRPC
-    /// `AuditService.ListAuditEntries` (`adapters::grpc::audit`) and the future HTTP
-    /// `/v1/audit-log` handler (Task A11) both read through this. Wraps the SAME `authorize`
-    /// this state also exposes directly (mirrors `roles`/`policies`'s posture); the Root-only
-    /// restriction on `list` lives in `AuditQueryService` itself, not the Cedar schema (see
-    /// its module doc).
+    /// `AuditService.ListAuditEntries` (`adapters::grpc::audit`) and the HTTP `GET /v1/audit`
+    /// handler (`adapters::http::audit`, Task A11) both read through this. Wraps the SAME
+    /// `authorize` this state also exposes directly (mirrors `roles`/`policies`'s posture);
+    /// the Root-only restriction on `list` lives in `AuditQueryService` itself, not the Cedar
+    /// schema (see its module doc).
     pub audit_query: AuditQueryService,
 }
 
@@ -504,6 +506,7 @@ pub fn router(state: AppState) -> Router {
         .merge(authz::router())
         .merge(service_accounts::router())
         .merge(api_keys::router())
+        .merge(audit::router())
         // `route_layer` (not `layer`): the enforcement covers exactly the routes defined
         // above and never the merged-in `/healthz`/`/readyz`/introspect or the 404 fallback.
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware::require_bearer))
