@@ -12,8 +12,8 @@ use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
     AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, Clock, ConflictKind, Decision, DomainEvent, Effect,
     IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper,
-    PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId, ProjectRepository, RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount,
-    ServiceAccountRecord, ServiceAccountRepository, Slug, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
+    PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher,
+    ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
 };
 use paigasus_kernel::Prn;
 use std::any::Any;
@@ -620,6 +620,31 @@ impl PolicyStore for InMemoryPolicies {
         drop(docs);
         self.gen_counter.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    // Txn-scoped twins (SMA-446, Slice B Task B5 — the `PolicyService::put`/`delete`
+    // reference pattern copies `RoleService::grant`/`revoke`'s posture): this fake has no
+    // real backing transaction, so `tx` is ignored and the mutation applies immediately —
+    // mirrors `InMemoryRoleGrants::grant_in`/`revoke_in`. There is no concurrent racer against
+    // a single in-memory `Mutex`-guarded map, so `put_in` never has anything to absorb — it
+    // only ever reports `Inserted`/`Updated`, mirroring `put`'s own insert-or-update posture
+    // (`AbsorbedIdempotent` is exercised by the real-Postgres savepoint tests instead).
+    async fn put_in(&self, _tx: &dyn Transaction, doc: &PolicyDocument) -> Result<PutOutcome, AuthzError> {
+        let mut docs = self.docs.lock().unwrap();
+        if docs.get(&doc.policy_id).is_some_and(|existing| existing.system) {
+            return Err(AuthzError::SystemImmutable(doc.policy_id.clone()));
+        }
+        let outcome = if docs.contains_key(&doc.policy_id) { PutOutcome::Updated } else { PutOutcome::Inserted };
+        docs.insert(doc.policy_id.clone(), doc.clone());
+        Ok(outcome)
+    }
+
+    async fn delete_in(&self, _tx: &dyn Transaction, policy_id: &str) -> Result<bool, AuthzError> {
+        let mut docs = self.docs.lock().unwrap();
+        if docs.get(policy_id).is_some_and(|existing| existing.system) {
+            return Err(AuthzError::SystemImmutable(policy_id.to_string()));
+        }
+        Ok(docs.remove(policy_id).is_some())
     }
 
     async fn policy_gen(&self) -> Result<u64, AuthzError> {

@@ -178,6 +178,22 @@ pub struct PolicyDocument {
     pub updated_at: DateTime<Utc>,
 }
 
+/// The outcome of [`super::ports::PolicyStore::put_in`] (SMA-446, Slice B — Task B5): which
+/// of the three paths a `put` actually took. `Inserted`/`Updated` are genuine writes — the
+/// application layer enqueues an outbox event and an audit entry, then bumps `policy_gen`,
+/// only for these. `AbsorbedIdempotent` is the SAME-content unique-violation race absorption
+/// (`pg_policies.rs` module docs, SMA-444 Task 17 follow-up): the row this call wanted to
+/// create already exists with byte-identical content (another racer's write won), so nothing
+/// new was actually persisted by THIS call — the application layer must emit no event, no
+/// audit entry, and run no post-commit bump for it, mirroring `RoleGrantStore::revoke_in`
+/// returning `false` for an already-gone grant (a true no-op stays a true no-op).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PutOutcome {
+    Inserted,
+    Updated,
+    AbsorbedIdempotent,
+}
+
 /// One entity in an [`EntitySlice`]: its Cedar uid (`(entity_type, entity_id)`), parent
 /// uids (membership-hierarchy edges), and attributes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

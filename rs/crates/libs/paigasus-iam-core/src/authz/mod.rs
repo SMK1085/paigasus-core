@@ -8,5 +8,5 @@ pub mod roles;
 pub mod schema;
 
 pub use action::Action;
-pub use model::{AccessRequest, AuthzError, Decision, Effect, GrantScope, PolicyDocument, RequestContext, Role, RoleGrant, RoleGrantRef};
+pub use model::{AccessRequest, AuthzError, Decision, Effect, GrantScope, PolicyDocument, PutOutcome, RequestContext, Role, RoleGrant, RoleGrantRef};
 pub use ports::{AuditSink, Authorizer, DecisionCache, EntitySliceLoader, PolicyStore, RoleGrantStore};

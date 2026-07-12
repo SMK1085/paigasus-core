@@ -20,7 +20,7 @@ pub use api_key::{ApiKey, ApiKeyDefect, ApiKeyId, ApiKeyStatus, NewApiKey, Parse
 pub use audit::{AuditEntry, AuditFilter, AuditOutcome};
 pub use authn::{AuthnError, AuthnPrincipal, Credential, ExternalIdentity, Issuer, PrincipalContext, ProvisioningDefect, TokenDefect, ValidatedClaims};
 pub use authz::{
-    AccessRequest, Action, AuditSink, Authorizer, AuthzError, Decision, DecisionCache, Effect, EntitySliceLoader, GrantScope, PolicyDocument, PolicyStore, RequestContext, Role, RoleGrant,
+    AccessRequest, Action, AuditSink, Authorizer, AuthzError, Decision, DecisionCache, Effect, EntitySliceLoader, GrantScope, PolicyDocument, PolicyStore, PutOutcome, RequestContext, Role, RoleGrant,
     RoleGrantRef, RoleGrantStore,
 };
 pub use domain_event::{DomainEvent, EventType};

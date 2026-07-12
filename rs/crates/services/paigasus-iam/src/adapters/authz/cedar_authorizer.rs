@@ -221,7 +221,7 @@ mod tests {
     use paigasus_iam_core::authz::model::{ContextValue, EntitySlice, GrantScope, ROOT_ENTITY, SliceEntity};
     use paigasus_iam_core::authz::roles::starter_policies;
     use paigasus_iam_core::tenancy::{OrganizationId, ProjectId, TeamId, TenancyNodeRef};
-    use paigasus_iam_core::{Action, Effect, PolicyDocument, PolicyStore, PrincipalId, RequestContext, RoleGrant, RoleGrantStore, Transaction};
+    use paigasus_iam_core::{Action, Effect, PolicyDocument, PolicyStore, PrincipalId, PutOutcome, RequestContext, RoleGrant, RoleGrantStore, Transaction};
     use paigasus_kernel::{Prn, to_cedar_uid};
     use std::collections::BTreeMap;
     use std::sync::Mutex;
@@ -346,6 +346,14 @@ mod tests {
 
         async fn delete(&self, _policy_id: &str) -> Result<(), AuthzError> {
             unimplemented!("cedar_authorizer tests never write through PolicyStore::delete")
+        }
+
+        async fn put_in(&self, _tx: &dyn Transaction, _doc: &PolicyDocument) -> Result<PutOutcome, AuthzError> {
+            unimplemented!("cedar_authorizer tests never write through PolicyStore::put_in")
+        }
+
+        async fn delete_in(&self, _tx: &dyn Transaction, _policy_id: &str) -> Result<bool, AuthzError> {
+            unimplemented!("cedar_authorizer tests never write through PolicyStore::delete_in")
         }
 
         async fn policy_gen(&self) -> Result<u64, AuthzError> {

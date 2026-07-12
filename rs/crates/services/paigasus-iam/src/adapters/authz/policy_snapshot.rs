@@ -198,7 +198,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use paigasus_iam_core::authz::model::PolicyKind;
-    use paigasus_iam_core::{GrantScope, PolicyDocument, PrincipalId, RoleGrant, Transaction};
+    use paigasus_iam_core::{GrantScope, PolicyDocument, PrincipalId, PutOutcome, RoleGrant, Transaction};
     use paigasus_kernel::Prn;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -283,6 +283,14 @@ mod tests {
 
         async fn delete(&self, _policy_id: &str) -> Result<(), AuthzError> {
             unimplemented!("policy_snapshot tests never write through PolicyStore::delete")
+        }
+
+        async fn put_in(&self, _tx: &dyn Transaction, _doc: &PolicyDocument) -> Result<PutOutcome, AuthzError> {
+            unimplemented!("policy_snapshot tests never write through PolicyStore::put_in")
+        }
+
+        async fn delete_in(&self, _tx: &dyn Transaction, _policy_id: &str) -> Result<bool, AuthzError> {
+            unimplemented!("policy_snapshot tests never write through PolicyStore::delete_in")
         }
 
         async fn policy_gen(&self) -> Result<u64, AuthzError> {

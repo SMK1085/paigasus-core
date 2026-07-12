@@ -57,7 +57,7 @@ use crate::application::bootstrap_admin::BootstrapAdminSeeder;
 use crate::application::create_user::CreateUser;
 use crate::application::memberships::MembershipService;
 use crate::application::organizations::OrganizationService;
-use crate::application::policies::PolicyService;
+use crate::application::policies::{PolicyService, PolicyServiceDeps};
 use crate::application::projects::ProjectService;
 use crate::application::roles::{RoleService, RoleServiceDeps};
 use crate::application::service_accounts::ServiceAccountService;
@@ -77,6 +77,11 @@ pub type UserSvc = CreateUser<PgPrincipalRepository, KernelIdGenerator, SystemCl
 /// RoleGrantStore>` `AppState.role_grant_store` holds — mirrors every other `*Svc` alias's
 /// `KernelIdGenerator`/`SystemClock` DI posture.
 pub type RoleSvc = RoleService<KernelIdGenerator, SystemClock>;
+/// The policy/template CRUD use case (SMA-444 Task 17; SMA-446 Slice B Task B5 — `put`/
+/// `delete` now drive the same UoW reference pattern `RoleSvc` does), wired over the same
+/// `Arc<dyn PolicyStore>` `AppState`'s `PolicySnapshot` reads from — mirrors `RoleSvc`'s DI
+/// posture.
+pub type PolicySvc = PolicyService<KernelIdGenerator, SystemClock>;
 /// The cold-start bootstrap-admin seeder (SMA-444 Task 21b), wired over the same `Arc<dyn
 /// RoleGrantStore>` `AppState.role_grant_store` holds — mirrors `RoleSvc`'s DI posture.
 pub type BootstrapAdminSvc = BootstrapAdminSeeder<KernelIdGenerator, SystemClock>;
@@ -157,7 +162,7 @@ pub struct AppState {
     pub roles: RoleSvc,
     /// Policy/template CRUD use case — the `/v1/authz/policies` HTTP routes call through
     /// this.
-    pub policies: PolicyService,
+    pub policies: PolicySvc,
     /// The same `Authorize` wrapper `roles`/`policies` embed internally, exposed directly for
     /// the `POST /v1/authz/is-authorized` handler: it needs `Authorize::check` for the
     /// self/admin exposure rule's authorization side-check AND `Authorize::decide` for the
@@ -416,7 +421,25 @@ impl AppState {
             ids: KernelIdGenerator,
             clock: SystemClock,
         });
-        let policies = PolicyService::new(policy_store.clone(), authorize.clone());
+        // SMA-446 Task B5 (copies Task B4's `roles` wiring immediately above): `policies`
+        // drives its put/delete mutation + outbox event + audit entry through its OWN
+        // `SeaOrmUnitOfWork` transaction (`policy_uow` — a fresh instance is fine, `db.clone()`
+        // is a cheap `Arc`-backed pool handle, mirrors `role_uow`), then an awaited,
+        // best-effort `GenerationsPolicyGenBumper` post-commit bump over the SAME `gens`
+        // handle every other authz mutation in this composition root bumps.
+        let policy_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+        let policy_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let policy_gen_bumper: Arc<dyn PolicyGenBumper> = Arc::new(GenerationsPolicyGenBumper::new(gens.clone()));
+        let policies = PolicyService::new(PolicyServiceDeps {
+            policies: policy_store.clone(),
+            authorize: authorize.clone(),
+            uow: policy_uow,
+            outbox: policy_outbox,
+            audit: audit_log.clone(),
+            gen_bumper: policy_gen_bumper,
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
 
         // SMA-446 Task A10: the read-side audit query service, over the SAME `audit_log`
         // handle built above.
