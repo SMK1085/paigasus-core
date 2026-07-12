@@ -3,10 +3,14 @@
 //! Postgres-backed `AuditLog` (SeaORM). `record_out_of_band` is a single autocommit insert
 //! (no txn — the port doc contract: the audit write happens after the triggering
 //! transaction already committed, or after a denial, so it is never part of that
-//! transaction's atomicity). `query` builds a keyset-paginated read: `ORDER BY id DESC`
-//! (UUIDv7 ids, so this doubles as occurred-at-descending) with `WHERE id < cursor` for the
-//! next page, an equality filter per present `AuditFilter` field, and `LIMIT
-//! filter.capped_limit()`.
+//! transaction's atomicity). `record` (SMA-446, Slice B) is its in-txn twin: it recovers the
+//! caller's SeaORM transaction via `uow::recover_txn` (B3) and inserts the SAME
+//! `entry_to_model`-built row on it, so the audit row only becomes visible if the caller's own
+//! transaction commits — used when the audit write must be atomic with the mutation it
+//! describes (and typically the same mutation's `Outbox::enqueue`, `pg_outbox.rs`). `query`
+//! builds a keyset-paginated read: `ORDER BY id DESC` (UUIDv7 ids, so this doubles as
+//! occurred-at-descending) with `WHERE id < cursor` for the next page, an equality filter per
+//! present `AuditFilter` field, and `LIMIT filter.capped_limit()`.
 //!
 //! `determining_policies`/`detail` are TEXT columns (m0006, no native `text[]`/`jsonb` —
 //! mirrors `entities::audit_log`'s doc and `pg_api_keys.rs::roles_to_column`'s precedent):
@@ -19,8 +23,9 @@
 
 use super::entities::audit_log;
 use super::map_err;
+use super::uow::recover_txn;
 use async_trait::async_trait;
-use paigasus_iam_core::{AuditEntry, AuditFilter, AuditLog, AuditOutcome, RepositoryError};
+use paigasus_iam_core::{AuditEntry, AuditFilter, AuditLog, AuditOutcome, RepositoryError, Transaction};
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
 // `Clone` lets the composition root hold a sink handle inside a `#[derive(Clone)]` service
@@ -107,6 +112,12 @@ fn model_to_entry(m: audit_log::Model) -> Result<AuditEntry, RepositoryError> {
 impl AuditLog for PgAuditLog {
     async fn record_out_of_band(&self, e: &AuditEntry) -> Result<(), RepositoryError> {
         entry_to_model(e).insert(&self.db).await.map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn record(&self, tx: &dyn Transaction, e: &AuditEntry) -> Result<(), RepositoryError> {
+        let txn = recover_txn(tx)?;
+        entry_to_model(e).insert(txn).await.map_err(map_err)?;
         Ok(())
     }
 

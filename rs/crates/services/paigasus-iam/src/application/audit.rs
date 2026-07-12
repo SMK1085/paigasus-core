@@ -45,7 +45,7 @@ mod tests {
     use crate::application::fakes::FakeAuthorizer;
     use async_trait::async_trait;
     use chrono::Utc;
-    use paigasus_iam_core::{AuditOutcome, RepositoryError};
+    use paigasus_iam_core::{AuditOutcome, RepositoryError, Transaction};
     use std::sync::Mutex;
     use uuid::Uuid;
 
@@ -80,9 +80,10 @@ mod tests {
         }
     }
 
-    /// In-memory `AuditLog` fake for this unit test only: `record_out_of_band` pushes,
-    /// `query` returns every stored row (a simple return-all — filtering is `PgAuditLog`'s
-    /// job, exercised by its own Docker integration tests).
+    /// In-memory `AuditLog` fake for this unit test only: `record_out_of_band`/`record` both
+    /// push (this fake has no notion of transactional atomicity — that's `PgAuditLog::record`'s
+    /// job, exercised by its own Docker integration test, `tests/outbox_uow_pg.rs`), `query`
+    /// returns every stored row (a simple return-all — filtering is `PgAuditLog`'s job too).
     #[derive(Default)]
     struct FakeAuditLog {
         rows: Mutex<Vec<AuditEntry>>,
@@ -91,6 +92,11 @@ mod tests {
     #[async_trait]
     impl AuditLog for FakeAuditLog {
         async fn record_out_of_band(&self, e: &AuditEntry) -> Result<(), RepositoryError> {
+            self.rows.lock().unwrap().push(e.clone());
+            Ok(())
+        }
+
+        async fn record(&self, _tx: &dyn Transaction, e: &AuditEntry) -> Result<(), RepositoryError> {
             self.rows.lock().unwrap().push(e.clone());
             Ok(())
         }

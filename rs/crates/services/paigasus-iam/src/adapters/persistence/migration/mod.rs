@@ -8,6 +8,7 @@ mod m0003_create_external_identity;
 mod m0004_create_authz;
 mod m0005_create_service_accounts_and_api_keys;
 mod m0006_create_audit_log;
+mod m0007_create_event_outbox;
 
 pub struct Migrator;
 
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0004_create_authz::Migration),
             Box::new(m0005_create_service_accounts_and_api_keys::Migration),
             Box::new(m0006_create_audit_log::Migration),
+            Box::new(m0007_create_event_outbox::Migration),
         ]
     }
 }

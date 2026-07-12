@@ -240,6 +240,13 @@ pub trait ApiKeyRepository: Send + Sync {
 #[async_trait]
 pub trait AuditLog: Send + Sync {
     async fn record_out_of_band(&self, e: &AuditEntry) -> Result<(), RepositoryError>;
+    /// In-txn twin of [`AuditLog::record_out_of_band`] (Slice B): writes `e` on the caller's
+    /// own `tx` (an opaque [`Transaction`], recovered by the adapter via its concrete
+    /// downcast), so the audit row shares that transaction's atomicity — it becomes visible
+    /// only if `tx` itself commits. Used when the audit entry must land alongside the
+    /// mutation it describes (and typically that same mutation's [`Outbox::enqueue`]), unlike
+    /// `record_out_of_band`'s deliberately-detached, always-durable write.
+    async fn record(&self, tx: &dyn Transaction, e: &AuditEntry) -> Result<(), RepositoryError>;
     /// Results are newest-first by `id` (UUIDv7, so creation-time-ordered); keyset paging via
     /// [`AuditFilter::cursor`] also pages on that same `id`. `occurred_at` is assigned
     /// independently at entry-construction time and does not affect ordering or paging.
@@ -258,8 +265,15 @@ pub trait UnitOfWork: Send + Sync {
 /// A single in-flight database transaction. The port itself is backend-agnostic (ADR-0005);
 /// adapters recover their concrete transaction type via `as_any().downcast_ref` — the entry
 /// point later `Pg*` adapters use to run txn-scoped writes against the same connection.
+///
+/// `Sync` (not just `Send`, SMA-446 Slice B): [`Outbox::enqueue`]/[`AuditLog::record`] take
+/// `&dyn Transaction` as an argument, and `#[async_trait]`'s default expansion requires the
+/// resulting future to be `Send` — which requires the captured `&dyn Transaction` itself to be
+/// `Send`, which in turn requires `dyn Transaction: Sync`. Without this bound, `PgOutbox`/
+/// `PgAuditLog`'s txn-scoped methods fail to compile with "future cannot be sent between
+/// threads safely".
 #[async_trait]
-pub trait Transaction: Send {
+pub trait Transaction: Send + Sync {
     async fn commit(self: Box<Self>) -> Result<(), RepositoryError>;
     /// Opens a nested transaction (a Postgres `SAVEPOINT` in the concrete adapter) so a
     /// conflict-absorbing mutation can roll back just the savepoint without aborting the
