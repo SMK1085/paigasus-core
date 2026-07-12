@@ -3,8 +3,10 @@
 //! paigasus-iam composition root: load config, init logging, connect + migrate the DB,
 //! serve HTTP + gRPC health on two ports, and shut down gracefully on SIGINT/SIGTERM.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use paigasus_iam::adapters::events::{OutboxRelay, TracingEventPublisher};
 use paigasus_iam::adapters::http::{AppState, serve_http};
 use paigasus_iam::adapters::{grpc, persistence::Migrator};
 use paigasus_iam::config::IamConfig;
@@ -34,7 +36,12 @@ async fn main() -> anyhow::Result<()> {
     // share one `AppState` (Task 16, SMA-442; authn wiring SMA-443). Fails fast when the
     // Redis JWKS cache is configured but unreachable; JWKS themselves are fetched lazily
     // on first use, so startup stays independent of IdP availability (spec §6.4).
-    let state = AppState::new(db, &config).await?;
+    //
+    // `db` itself (the original handle, not this clone) is kept alive below to build the
+    // outbox relay (SMA-446 Slice B, Task B9) directly off the same connection pool — the
+    // relay is wired straight in `main.rs` rather than through `AppState`, so `AppState::new`'s
+    // signature stays unchanged.
+    let state = AppState::new(db.clone(), &config).await?;
 
     let request_timeout = Duration::from_secs(30);
     let (tx, rx) = tokio::sync::watch::channel(());
@@ -141,6 +148,39 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         });
+    }
+    {
+        // The outbox relay (SMA-446 Slice B, Task B9): drains `event_outbox` rows — written by
+        // `PgOutbox::enqueue` inside each triggering mutation's own transaction (Task B2) — into
+        // calls on an injected `EventPublisher`, on the same shutdown-watch as every other task
+        // above. Built directly off the `db` handle kept alive above (not through `AppState`) so
+        // `AppState::new`'s signature stays unchanged; `TracingEventPublisher` (Task B8) is a
+        // placeholder sink ahead of a real message-bus publisher (a later slice).
+        //
+        // `max_attempts` is `u32` in config (a natural "count" type for an operator to read/
+        // write) but `i32` in `OutboxRelay::new` (mirroring the `event_outbox.attempts` Postgres
+        // column) — `try_from` + clamp to `i32::MAX` rather than a wrapping `as` cast, since a
+        // wrapped negative `max_attempts` would park every row on its very first failed publish
+        // (`attempts >= max_attempts` true immediately), the opposite of the configured intent.
+        if config.outbox.relay_enabled {
+            let mut rx = rx.clone();
+            let relay = OutboxRelay::new(
+                db,
+                Duration::from_secs(config.outbox.poll_interval_secs),
+                config.outbox.batch_size,
+                i32::try_from(config.outbox.max_attempts).unwrap_or(i32::MAX),
+            );
+            servers.spawn(async move {
+                relay
+                    .run(Arc::new(TracingEventPublisher), async move {
+                        let _ = rx.changed().await;
+                    })
+                    .await;
+                Ok(())
+            });
+        } else {
+            tracing::warn!("outbox relay disabled — event_outbox rows will accrue undrained");
+        }
     }
 
     tracing::info!(%config.http_addr, %config.grpc_addr, "paigasus-iam started");

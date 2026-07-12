@@ -30,7 +30,7 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::persistence::entities::user;
-use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig};
+use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, OutboxConfig};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -224,6 +224,7 @@ fn keycloak_config(issuer: &str) -> IamConfig {
         // `support::test_api_key_pepper`'s identical fixed test pepper.
         api_keys: ApiKeyConfig::with_test_pepper(STANDARD.encode([0x5Au8; 32])),
         audit: AuditConfig::default(),
+        outbox: OutboxConfig::default(),
     }
 }
 

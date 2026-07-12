@@ -74,3 +74,17 @@
 #                                      # increase means the drain isn't keeping up — raise this
 #                                      # capacity or investigate the audit DB. This is a
 #                                      # deliberate tradeoff: no durable spooling.
+
+# --- Transactional outbox relay (M5, SMA-446) ---
+
+# [outbox]
+# relay_enabled       = true          # default shown. `false` boots without spawning the
+#                                      # relay — `event_outbox` rows still accrue (written
+#                                      # inside each triggering mutation's own transaction
+#                                      # unconditionally), they just go undrained until an
+#                                      # operator re-enables this and restarts.
+# poll_interval_secs  = 5             # sleep between drain ticks — default shown; must be >= 1
+# batch_size          = 100           # rows locked (`FOR UPDATE SKIP LOCKED`) + processed per
+#                                      # tick — default shown; must be >= 1
+# max_attempts        = 5             # publish failures before a row is parked (excluded from
+#                                      # future ticks) — default shown; must be >= 1
