@@ -681,6 +681,20 @@ impl ServiceAccountRepository for InMemoryServiceAccounts {
         Ok(())
     }
 
+    // Txn-scoped twin (SMA-446, Slice B Task B7 — the `ServiceAccountService::create`
+    // reference pattern): this fake has no real backing transaction, so `tx` is ignored and
+    // the mutation applies immediately — mirrors `InMemoryRoleGrants::grant`/`grant_in`.
+    async fn create_in(&self, _tx: &dyn Transaction, principal: &Principal, sa: &ServiceAccount) -> Result<(), RepositoryError> {
+        let mut accounts = self.accounts.lock().unwrap();
+        if accounts.values().any(|existing| existing.owner == sa.owner && existing.name == sa.name) {
+            return Err(RepositoryError::Conflict(ConflictKind::ServiceAccountNameTaken));
+        }
+        accounts.insert(sa.principal_id.uuid(), sa.clone());
+        drop(accounts);
+        self.statuses.lock().unwrap().insert(principal.id.uuid(), principal.status);
+        Ok(())
+    }
+
     async fn find(&self, id: &PrincipalId) -> Result<Option<ServiceAccountRecord>, RepositoryError> {
         let Some(account) = self.accounts.lock().unwrap().get(&id.uuid()).cloned() else {
             return Ok(None);
@@ -710,6 +724,18 @@ impl ServiceAccountRepository for InMemoryServiceAccounts {
     }
 
     async fn set_principal_status(&self, id: &PrincipalId, status: PrincipalStatus) -> Result<(), RepositoryError> {
+        let mut statuses = self.statuses.lock().unwrap();
+        if !statuses.contains_key(&id.uuid()) {
+            return Err(RepositoryError::NotFound);
+        }
+        statuses.insert(id.uuid(), status);
+        Ok(())
+    }
+
+    // Txn-scoped twin (SMA-446, Slice B Task B7 — the `ServiceAccountService::archive`
+    // reference pattern): `tx` is ignored, mirroring `create_in`/`InMemoryRoleGrants::
+    // revoke_in` above.
+    async fn set_principal_status_in(&self, _tx: &dyn Transaction, id: &PrincipalId, status: PrincipalStatus) -> Result<(), RepositoryError> {
         let mut statuses = self.statuses.lock().unwrap();
         if !statuses.contains_key(&id.uuid()) {
             return Err(RepositoryError::NotFound);

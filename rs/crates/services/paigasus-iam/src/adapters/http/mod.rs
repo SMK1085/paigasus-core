@@ -54,13 +54,13 @@ use crate::application::authenticate_token::{AuthenticateToken, JitPolicy};
 use crate::application::authorize::Authorize;
 use crate::application::bootstrap;
 use crate::application::bootstrap_admin::BootstrapAdminSeeder;
-use crate::application::create_user::CreateUser;
+use crate::application::create_user::{CreateUser, CreateUserDeps};
 use crate::application::memberships::MembershipService;
 use crate::application::organizations::OrganizationService;
 use crate::application::policies::{PolicyService, PolicyServiceDeps};
 use crate::application::projects::ProjectService;
 use crate::application::roles::{RoleService, RoleServiceDeps};
-use crate::application::service_accounts::ServiceAccountService;
+use crate::application::service_accounts::{ServiceAccountService, ServiceAccountServiceDeps};
 use crate::application::teams::TeamService;
 use crate::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, JwksCacheBackend};
 use paigasus_iam_core::{
@@ -325,7 +325,20 @@ impl AppState {
             SystemClock,
         );
         let memberships = MembershipService::new(PgMembershipRepository::new(db.clone()), KernelIdGenerator, SystemClock);
-        let users = CreateUser::new(PgPrincipalRepository::new(db.clone()), KernelIdGenerator, SystemClock);
+        // SMA-446 Task B7 (copies Task B4-B6's `roles`/`policies`/`api_keys` wiring below):
+        // `users` drives its principal+user insert + outbox event through its OWN
+        // `SeaOrmUnitOfWork` transaction (`user_uow` — a fresh instance is fine, `db.clone()` is
+        // a cheap `Arc`-backed pool handle). OUTBOX-ONLY: no audit entry, no generation bump —
+        // principal creation is not in the AC audit set.
+        let user_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+        let user_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let users = CreateUser::new(CreateUserDeps {
+            repo: PgPrincipalRepository::new(db.clone()),
+            uow: user_uow,
+            outbox: user_outbox,
+            id_gen: KernelIdGenerator,
+            clock: SystemClock,
+        });
 
         let policy_store: Arc<dyn PolicyStore> = Arc::new(PgPolicyStore::new(db.clone(), gens.clone()));
         let role_grant_store: Arc<dyn RoleGrantStore> = Arc::new(PgRoleGrantStore::new(db.clone(), gens.clone()));
@@ -496,14 +509,24 @@ impl AppState {
             PgMembershipRepository::new(db.clone()),
             cfg.api_keys.clone(),
         );
-        let service_accounts = ServiceAccountService::new(
-            PgServiceAccountRepository::new(db.clone()),
-            Arc::new(PgApiKeyRepository::new(db.clone())) as Arc<dyn ApiKeyRepository>,
-            api_key_cache.clone(),
-            authorize.clone(),
-            KernelIdGenerator,
-            SystemClock,
-        );
+        // SMA-446 Task B7 (copies Task B4-B6's UoW-wiring pattern above): `service_accounts`
+        // drives its create/archive mutation + outbox event through its OWN `SeaOrmUnitOfWork`
+        // transaction (`service_account_uow` — a fresh instance is fine, `db.clone()` is a
+        // cheap `Arc`-backed pool handle). OUTBOX-ONLY, like `users` above: no audit entry, no
+        // generation bump. `archive`'s post-commit cache-evict runs over the SAME
+        // `api_key_cache` handle `api_key_auth`/`api_keys` read/evict through.
+        let service_account_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+        let service_account_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let service_accounts = ServiceAccountService::new(ServiceAccountServiceDeps {
+            repo: PgServiceAccountRepository::new(db.clone()),
+            keys: Arc::new(PgApiKeyRepository::new(db.clone())) as Arc<dyn ApiKeyRepository>,
+            cache: api_key_cache.clone(),
+            authorize: authorize.clone(),
+            uow: service_account_uow,
+            outbox: service_account_outbox,
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
         // SMA-446 Task B6 (copies Task B4/B5's `roles`/`policies` wiring above): `api_keys`
         // drives its issue/revoke mutation + outbox event + audit entry through its OWN
         // `SeaOrmUnitOfWork` transaction (`api_key_uow` — a fresh instance is fine, `db.clone()`

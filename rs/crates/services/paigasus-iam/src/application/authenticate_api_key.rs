@@ -319,6 +319,9 @@ mod tests {
         async fn create_user(&self, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
             unimplemented!("AuthenticateApiKey never calls create_user")
         }
+        async fn create_user_in(&self, _tx: &dyn paigasus_iam_core::Transaction, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
+            unimplemented!("AuthenticateApiKey never calls create_user_in")
+        }
         async fn find_user(&self, _id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError> {
             unimplemented!("AuthenticateApiKey never calls find_user")
         }
@@ -364,6 +367,9 @@ mod tests {
     #[async_trait]
     impl PrincipalRepository for PanicIfCalledPrincipals {
         async fn create_user(&self, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
+            panic!("PrincipalRepository must not be called")
+        }
+        async fn create_user_in(&self, _tx: &dyn paigasus_iam_core::Transaction, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
             panic!("PrincipalRepository must not be called")
         }
         async fn find_user(&self, _id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError> {

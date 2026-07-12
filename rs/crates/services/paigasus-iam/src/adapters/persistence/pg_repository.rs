@@ -1,12 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Postgres-backed `PrincipalRepository` (SeaORM). Maps domain <-> entity models and
-//! backend errors into the core's `RepositoryError`.
+//! backend errors into the core's `RepositoryError`. `create_user` (SMA-446, Slice B Task B7)
+//! is a thin one-shot-`UnitOfWork` wrapper around [`PrincipalRepository::create_user_in`] —
+//! the exact reference pattern `PgRoleGrantStore::grant`/`grant_in` establish (B4): open a
+//! `SeaOrmTransaction`, drive the two-insert write on it via `create_user_in`, commit. Kept for
+//! callers that don't (yet) drive their own `UnitOfWork` (the `tests/roundtrip.rs`/
+//! `tests/authn_identities.rs` integration tests call `create_user` directly); `create_user_in`
+//! is the txn-scoped primitive `CreateUser::execute` (the reference pattern) actually drives —
+//! it persists exactly the caller-built `Principal`/`User` pair on the caller's own
+//! transaction, never opening or committing anything itself.
 
 use super::entities::{principal, user};
 use super::map_err;
+use super::uow::{SeaOrmTransaction, recover_txn};
 use async_trait::async_trait;
-use paigasus_iam_core::{Email, Principal, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, RepositoryError, User};
+use paigasus_iam_core::{Email, Principal, PrincipalId, PrincipalKind, PrincipalRepository, PrincipalStatus, RepositoryError, Transaction, User};
 use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 
@@ -38,10 +47,20 @@ fn map_principal_row(pm: principal::Model) -> Result<Principal, RepositoryError>
 #[async_trait]
 impl PrincipalRepository for PgPrincipalRepository {
     async fn create_user(&self, p: &Principal, u: &User) -> Result<(), RepositoryError> {
+        // Thin one-shot-`UnitOfWork` wrapper (module docs), mirroring `PgRoleGrantStore::
+        // grant`/`grant_in`: open a `SeaOrmTransaction`, insert via `create_user_in`, commit.
+        let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
         // Both inserts must commit-or-rollback together: a lone `principal` row left behind
         // by a failed `user` insert (e.g. duplicate email) would orphan permanently and turn
         // a caller's retry into a spurious `Conflict` on the principal insert.
-        let txn = self.db.begin().await.map_err(map_err)?;
+        self.create_user_in(&*tx, p, u).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn create_user_in(&self, tx: &dyn Transaction, p: &Principal, u: &User) -> Result<(), RepositoryError> {
+        let txn = recover_txn(tx)?;
 
         let principal = principal::ActiveModel {
             id: Set(p.id.uuid()),
@@ -51,7 +70,7 @@ impl PrincipalRepository for PgPrincipalRepository {
             created_at: Set(p.created_at),
             updated_at: Set(p.updated_at),
         };
-        principal.insert(&txn).await.map_err(map_err)?;
+        principal.insert(txn).await.map_err(map_err)?;
 
         let user = user::ActiveModel {
             principal_id: Set(u.principal_id.uuid()),
@@ -62,9 +81,8 @@ impl PrincipalRepository for PgPrincipalRepository {
             created_at: Set(u.created_at),
             updated_at: Set(u.updated_at),
         };
-        user.insert(&txn).await.map_err(map_err)?;
+        user.insert(txn).await.map_err(map_err)?;
 
-        txn.commit().await.map_err(map_err)?;
         Ok(())
     }
 

@@ -8,6 +8,15 @@
 //! `set_principal_status` updates the LIFECYCLE status on the `principal` row, not
 //! `service_account` — the table has no `status` column of its own (D16).
 //!
+//! **SMA-446, Slice B Task B7:** `create`/`set_principal_status` are now thin one-shot-
+//! `UnitOfWork` wrappers around [`ServiceAccountRepository::create_in`]/[`ServiceAccountRepository::
+//! set_principal_status_in`] — the exact reference pattern `PgRoleGrantStore::grant`/`grant_in`
+//! establish (B4): open a `SeaOrmTransaction`, drive the write on it, commit. Kept for callers
+//! that don't (yet) drive their own `UnitOfWork` (`tests/service_accounts.rs`'s Docker
+//! integration coverage calls both directly); `create_in`/`set_principal_status_in` are the
+//! txn-scoped primitives `ServiceAccountService::create`/`archive` (the reference pattern)
+//! actually drive.
+//!
 //! **`find`/`list_by_owner` also read the principal's status** (CodeRabbit finding on the
 //! SMA-445 PR: the read paths need to answer "is this SA active or disabled" without a second,
 //! out-of-band caller-side query). Both use `find_also_related` (a single LEFT JOIN against
@@ -16,8 +25,11 @@
 
 use super::entities::{principal, project, service_account, team};
 use super::map_err;
+use super::uow::{SeaOrmTransaction, recover_txn};
 use async_trait::async_trait;
-use paigasus_iam_core::{OrganizationId, Principal, PrincipalId, PrincipalStatus, ProjectId, RepositoryError, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, TeamId, TenancyNodeRef};
+use paigasus_iam_core::{
+    OrganizationId, Principal, PrincipalId, PrincipalStatus, ProjectId, RepositoryError, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, TeamId, TenancyNodeRef, Transaction,
+};
 use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait};
 use uuid::Uuid;
@@ -143,7 +155,17 @@ fn principal_status(sa_id: Uuid, principal: Option<principal::Model>) -> Result<
 #[async_trait]
 impl ServiceAccountRepository for PgServiceAccountRepository {
     async fn create(&self, principal: &Principal, sa: &ServiceAccount) -> Result<(), RepositoryError> {
+        // Thin one-shot-`UnitOfWork` wrapper (module docs), mirroring `PgRoleGrantStore::
+        // grant`/`grant_in`: open a `SeaOrmTransaction`, insert via `create_in`, commit.
         let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        self.create_in(&*tx, principal, sa).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn create_in(&self, tx: &dyn Transaction, principal: &Principal, sa: &ServiceAccount) -> Result<(), RepositoryError> {
+        let txn = recover_txn(tx)?;
 
         let principal_model = principal::ActiveModel {
             id: Set(principal.id.uuid()),
@@ -153,11 +175,10 @@ impl ServiceAccountRepository for PgServiceAccountRepository {
             created_at: Set(principal.created_at),
             updated_at: Set(principal.updated_at),
         };
-        principal_model.insert(&txn).await.map_err(map_err)?;
+        principal_model.insert(txn).await.map_err(map_err)?;
 
-        sa_to_model(sa).insert(&txn).await.map_err(map_err)?;
+        sa_to_model(sa).insert(txn).await.map_err(map_err)?;
 
-        txn.commit().await.map_err(map_err)?;
         Ok(())
     }
 
@@ -215,12 +236,22 @@ impl ServiceAccountRepository for PgServiceAccountRepository {
     }
 
     async fn set_principal_status(&self, id: &PrincipalId, status: PrincipalStatus) -> Result<(), RepositoryError> {
-        let Some(model) = principal::Entity::find_by_id(id.uuid()).one(&self.db).await.map_err(map_err)? else {
+        // Thin one-shot-`UnitOfWork` wrapper (module docs), mirroring `create` above.
+        let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        self.set_principal_status_in(&*tx, id, status).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn set_principal_status_in(&self, tx: &dyn Transaction, id: &PrincipalId, status: PrincipalStatus) -> Result<(), RepositoryError> {
+        let txn = recover_txn(tx)?;
+        let Some(model) = principal::Entity::find_by_id(id.uuid()).one(txn).await.map_err(map_err)? else {
             return Err(RepositoryError::NotFound);
         };
         let mut active = model.into_active_model();
         active.status = Set(status.as_str().to_string());
-        active.update(&self.db).await.map_err(map_err)?;
+        active.update(txn).await.map_err(map_err)?;
         Ok(())
     }
 }

@@ -73,6 +73,14 @@ pub struct MembershipRecord {
 #[async_trait]
 pub trait PrincipalRepository: Send + Sync {
     async fn create_user(&self, principal: &Principal, user: &User) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`PrincipalRepository::create_user`] (SMA-446, Slice B Task B7 —
+    /// the `CreateUser::execute` reference pattern, copying `RoleGrantStore::grant_in`'s
+    /// posture): inserts the principal + user row pair on the caller's own `tx`. A
+    /// duplicate-email unique-violation surfaces here exactly like `create_user`'s own
+    /// (`Conflict(ConflictKind::EmailTaken)`) — the caller's UoW then rolls the whole
+    /// transaction back without ever reaching `Outbox::enqueue`, so no `iam.principal.created`
+    /// event is emitted for a create that never actually committed.
+    async fn create_user_in(&self, tx: &dyn Transaction, principal: &Principal, user: &User) -> Result<(), RepositoryError>;
     async fn find_user(&self, id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError>;
     async fn find_principal(&self, id: &PrincipalId) -> Result<Option<Principal>, RepositoryError>;
 }
@@ -205,6 +213,14 @@ pub trait ServiceAccountRepository: Send + Sync {
     /// One transaction spanning principal + service_account (mirrors `PrincipalRepository::
     /// create_user`'s D9 pattern).
     async fn create(&self, principal: &Principal, sa: &ServiceAccount) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`ServiceAccountRepository::create`] (SMA-446, Slice B Task B7 —
+    /// the `ServiceAccountService::create` reference pattern, copying `RoleGrantStore::
+    /// grant_in`'s posture): inserts the principal + service_account row pair on the caller's
+    /// own `tx`. A duplicate-name-per-owner unique-violation surfaces here exactly like
+    /// `create`'s own (`Conflict(ConflictKind::ServiceAccountNameTaken)`) — the caller's UoW
+    /// then rolls the whole transaction back without ever reaching `Outbox::enqueue`, so no
+    /// `iam.principal.created` event is emitted for a create that never actually committed.
+    async fn create_in(&self, tx: &dyn Transaction, principal: &Principal, sa: &ServiceAccount) -> Result<(), RepositoryError>;
     /// Returns the `ServiceAccount` alongside its owning `Principal`'s lifecycle status (D16:
     /// status lives on the `Principal`, so a read of the account also reads the principal row).
     async fn find(&self, id: &PrincipalId) -> Result<Option<ServiceAccountRecord>, RepositoryError>;
@@ -214,6 +230,11 @@ pub trait ServiceAccountRepository: Send + Sync {
     /// Sets the lifecycle status on the underlying `Principal` row (D16: status lives on
     /// `Principal`, not `ServiceAccount`).
     async fn set_principal_status(&self, id: &PrincipalId, status: PrincipalStatus) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`ServiceAccountRepository::set_principal_status`] (SMA-446, Slice B
+    /// Task B7 — the `ServiceAccountService::archive` reference pattern): flips `id`'s
+    /// principal status on the caller's own `tx`. `NotFound` if the principal row doesn't
+    /// exist, mirroring `set_principal_status`'s own contract.
+    async fn set_principal_status_in(&self, tx: &dyn Transaction, id: &PrincipalId, status: PrincipalStatus) -> Result<(), RepositoryError>;
 }
 
 /// Persistence port for API keys. The secret's hash is stored alongside the key metadata but
