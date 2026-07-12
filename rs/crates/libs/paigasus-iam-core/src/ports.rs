@@ -4,6 +4,7 @@
 //! use cases depend on abstractions, not on SeaORM/axum (ADR-0005).
 
 use crate::api_key::{ApiKey, ApiKeyId};
+use crate::audit::{AuditEntry, AuditFilter};
 use crate::authn::{AuthnError, ExternalIdentity, Issuer, ValidatedClaims};
 use crate::authz::model::RoleGrant;
 use crate::principal::{Principal, PrincipalStatus};
@@ -156,6 +157,10 @@ pub trait IdGenerator: Send + Sync {
     fn new_service_account_id(&self) -> PrincipalId;
     /// A bare UUIDv7 (API keys are not tenancy/authz resources, so no PRN wrapper).
     fn new_api_key_id(&self) -> ApiKeyId;
+    /// A bare, ordered UUIDv7 (audit entries are not tenancy/authz resources, so no PRN
+    /// wrapper) — the ordering backs newest-first / id-descending keyset paging in
+    /// [`AuditLog::query`].
+    fn new_audit_id(&self) -> Uuid;
 }
 
 /// A source of the current time, truncated to microseconds so values round-trip through
@@ -221,6 +226,17 @@ pub trait ApiKeyRepository: Send + Sync {
     async fn touch_last_used(&self, id: ApiKeyId, now: DateTime<Utc>, throttle_secs: u64) -> Result<(), RepositoryError>;
 }
 
+/// Persistence port for the append-only audit log (SMA-446). `record_out_of_band` is called
+/// after the triggering transaction commits (or after a denial), never inside it — the audit
+/// log is not part of the domain transaction's atomicity guarantee.
+#[async_trait]
+pub trait AuditLog: Send + Sync {
+    async fn record_out_of_band(&self, e: &AuditEntry) -> Result<(), RepositoryError>;
+    /// Results are newest-first (`id`-descending, UUIDv7 so this is also occurred-at-descending)
+    /// for keyset paging via [`AuditFilter::cursor`].
+    async fn query(&self, f: &AuditFilter) -> Result<Vec<AuditEntry>, RepositoryError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,4 +265,8 @@ mod tests {
         let e: RepositoryError = Box::<dyn std::error::Error + Send + Sync>::from("boom").into();
         assert!(matches!(e, RepositoryError::Backend(_)));
     }
+
+    // Compile-time proof the audit port is object-safe (injected as a trait object).
+    #[allow(dead_code)]
+    fn audit_log_is_object_safe(_: &dyn AuditLog) {}
 }

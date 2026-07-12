@@ -23,7 +23,7 @@ pub use authz::{
     RoleGrantRef, RoleGrantStore,
 };
 pub use ports::{
-    ApiKeyRepository, Authenticator, Clock, ConflictKind, ExternalIdentityRepository, IdGenerator, KeyEntropy, MembershipRecord, MembershipRepository, NodeView, OrganizationRepository,
+    ApiKeyRepository, AuditLog, Authenticator, Clock, ConflictKind, ExternalIdentityRepository, IdGenerator, KeyEntropy, MembershipRecord, MembershipRepository, NodeView, OrganizationRepository,
     PreconditionKind, PrincipalRepository, ProjectRepository, RepositoryError, SecretHasher, ServiceAccountRepository, TeamRepository,
 };
 pub use principal::{Principal, PrincipalKind, PrincipalStatus};
