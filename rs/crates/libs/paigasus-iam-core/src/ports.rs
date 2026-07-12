@@ -309,6 +309,20 @@ pub trait EventPublisher: Send + Sync {
     async fn publish(&self, ev: &DomainEvent) -> Result<(), PublishError>;
 }
 
+/// A use case's injected, best-effort, POST-COMMIT side effect that bumps the authz
+/// `policy_gen` counter (SMA-446, Slice B — the `RoleService::grant`/`revoke` reference
+/// pattern B5–B7 copy). Kept as a port (rather than a direct `Generations` dependency) so the
+/// application layer never imports the adapter-layer `crate::adapters::authz::Generations`
+/// type (ADR-0005). Implementations swallow/log their own errors and return nothing — the
+/// triggering mutation has already committed by the time `bump` runs, so a bump failure (e.g.
+/// Redis unreachable) must never surface as a use-case error; the decision cache instead
+/// self-heals on its next TTL expiry (mirrors the pre-Slice-B `PgRoleGrantStore::
+/// bump_policy_gen_best_effort` this port's adapter impl is lifted from).
+#[async_trait]
+pub trait PolicyGenBumper: Send + Sync {
+    async fn bump(&self);
+}
+
 /// Errors an [`EventPublisher`] can report, source-preserving like [`RepositoryError`] — the
 /// core never assumes a specific transport.
 #[derive(Debug, thiserror::Error)]
@@ -350,10 +364,10 @@ mod tests {
     #[allow(dead_code)]
     fn audit_log_is_object_safe(_: &dyn AuditLog) {}
 
-    // Compile-time proof the new UoW/outbox/event-publisher ports are object-safe (SMA-446,
-    // Slice B).
+    // Compile-time proof the new UoW/outbox/event-publisher/gen-bumper ports are object-safe
+    // (SMA-446, Slice B).
     #[allow(dead_code)]
-    fn unit_of_work_ports_are_object_safe(_: &dyn UnitOfWork, _: &dyn Outbox, _: &dyn EventPublisher) {}
+    fn unit_of_work_ports_are_object_safe(_: &dyn UnitOfWork, _: &dyn Outbox, _: &dyn EventPublisher, _: &dyn PolicyGenBumper) {}
 
     // `Transaction`/`Savepoint` are only ever held as `Box<dyn ...>` (their `commit`/
     // `rollback` methods consume `self: Box<Self>`), so prove object-safety via that receiver

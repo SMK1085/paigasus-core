@@ -221,7 +221,7 @@ mod tests {
     use paigasus_iam_core::authz::model::{ContextValue, EntitySlice, GrantScope, ROOT_ENTITY, SliceEntity};
     use paigasus_iam_core::authz::roles::starter_policies;
     use paigasus_iam_core::tenancy::{OrganizationId, ProjectId, TeamId, TenancyNodeRef};
-    use paigasus_iam_core::{Action, Effect, PolicyDocument, PolicyStore, PrincipalId, RequestContext, RoleGrant, RoleGrantStore};
+    use paigasus_iam_core::{Action, Effect, PolicyDocument, PolicyStore, PrincipalId, RequestContext, RoleGrant, RoleGrantStore, Transaction};
     use paigasus_kernel::{Prn, to_cedar_uid};
     use std::collections::BTreeMap;
     use std::sync::Mutex;
@@ -378,6 +378,21 @@ mod tests {
         async fn revoke(&self, id: Uuid) -> Result<(), AuthzError> {
             self.grants.lock().unwrap().retain(|g| g.id != id);
             Ok(())
+        }
+
+        // Txn-scoped twins (SMA-446, Slice B): this fake has no real backing transaction, so
+        // `tx` is ignored and the mutation applies immediately — mirrors `grant`/`revoke`
+        // above, which never used a `Transaction` either.
+        async fn grant_in(&self, _tx: &dyn Transaction, g: &RoleGrant) -> Result<(), AuthzError> {
+            self.grants.lock().unwrap().push(g.clone());
+            Ok(())
+        }
+
+        async fn revoke_in(&self, _tx: &dyn Transaction, id: Uuid) -> Result<bool, AuthzError> {
+            let mut grants = self.grants.lock().unwrap();
+            let before = grants.len();
+            grants.retain(|g| g.id != id);
+            Ok(grants.len() != before)
         }
 
         async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError> {

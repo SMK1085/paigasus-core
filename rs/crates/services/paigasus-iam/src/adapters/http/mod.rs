@@ -35,8 +35,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::adapters::api_keys::{ApiKeyValidationCache, HmacSecretHasher, MemoryApiKeyCache, OsRngKeyEntropy, RedisApiKeyCache};
 use crate::adapters::authz::{
-    BufferedDenialAuditSink, CedarAuthorizer, DenialAuditBuffer, DenialAuditDrain, FanOutAuditSink, Generations, GenerationsReader, MemoryDecisionCache, PolicySnapshot, RedisDecisionCache,
-    SliceCache, TracingAuditSink,
+    BufferedDenialAuditSink, CedarAuthorizer, DenialAuditBuffer, DenialAuditDrain, FanOutAuditSink, Generations, GenerationsPolicyGenBumper, GenerationsReader, MemoryDecisionCache, PolicySnapshot,
+    RedisDecisionCache, SliceCache, TracingAuditSink,
 };
 use crate::adapters::clock::SystemClock;
 use crate::adapters::id::KernelIdGenerator;
@@ -44,8 +44,8 @@ use crate::adapters::oidc::jwks::{HttpJwksFetcher, InMemoryJwksCache, JwksProvid
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
-    PgApiKeyRepository, PgAuditLog, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgPolicyStore, PgPrincipalRepository, PgProjectRepository,
-    PgRoleGrantStore, PgServiceAccountRepository, PgTeamRepository,
+    PgApiKeyRepository, PgAuditLog, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgPrincipalRepository,
+    PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgTeamRepository, SeaOrmUnitOfWork,
 };
 use crate::application::api_keys::ApiKeyService;
 use crate::application::audit::AuditQueryService;
@@ -63,7 +63,10 @@ use crate::application::roles::RoleService;
 use crate::application::service_accounts::ServiceAccountService;
 use crate::application::teams::TeamService;
 use crate::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, JwksCacheBackend};
-use paigasus_iam_core::{ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, PolicyStore, ProjectRepository, RoleGrantStore, TeamRepository};
+use paigasus_iam_core::{
+    ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore, TeamRepository,
+    UnitOfWork,
+};
 
 pub type OrgSvc = OrganizationService<PgOrganizationRepository, KernelIdGenerator, SystemClock>;
 pub type TeamSvc = TeamService<PgTeamRepository, KernelIdGenerator, SystemClock>;
@@ -372,6 +375,17 @@ impl AppState {
         // — so a grant/policy change made through these use cases bumps the same `gens`
         // counter `authz`'s `PolicySnapshot::reload_if_stale` polls (AC1).
         let authorize = Authorize::new(authz.clone() as Arc<dyn Authorizer>);
+
+        // SMA-446 Task A10/A12 (built here, ahead of `roles`, since Task B4's `RoleService`
+        // below needs it too): the audit-log read+write handle. `audit_log` is a single shared
+        // `Arc<dyn AuditLog>` (`PgAuditLog` over `db`) that the read-side `audit_query` (A10)
+        // reads through, the denial-audit drain (A12, spawned by `main.rs`) writes buffered
+        // denials into, AND `RoleService`'s in-txn `AuditLog::record` writes through (B4) — one
+        // store instance, not several (mirrors `role_grant_store`'s single-shared-`Arc`
+        // posture). It is stashed on the returned state (`audit_log` field, reachable via
+        // `audit_sink()`) so `main.rs` can hand it to `drain.run(sink, shutdown)`.
+        let audit_log: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()));
+
         // SMA-444 cross-tenant-escalation fix (FIX 2): `RoleService::resolve_scope`'s own
         // DB-lookup defense needs read access to the tenancy repos, independent of
         // `orgs`/`teams`/`projects` above (those are wrapped in `OrganizationService`/etc.,
@@ -380,16 +394,32 @@ impl AppState {
         let role_orgs: Arc<dyn OrganizationRepository> = Arc::new(PgOrganizationRepository::new(db.clone(), gens.clone()));
         let role_teams: Arc<dyn TeamRepository> = Arc::new(PgTeamRepository::new(db.clone(), gens.clone()));
         let role_projects: Arc<dyn ProjectRepository> = Arc::new(PgProjectRepository::new(db.clone(), gens.clone()));
-        let roles = RoleService::new(role_grant_store.clone(), role_orgs, role_teams, role_projects, authorize.clone(), KernelIdGenerator, SystemClock);
+        // SMA-446 Task B4 (the UoW reference pattern B5-B7 copy): `roles` drives its
+        // grant/revoke mutation + outbox event + audit entry through ONE `SeaOrmUnitOfWork`
+        // transaction (`role_uow`), then an awaited, best-effort `GenerationsPolicyGenBumper`
+        // post-commit bump (`role_gen_bumper`) over the SAME `gens` handle every other authz
+        // mutation in this composition root bumps — `RoleService` itself never imports
+        // `Generations` directly (ADR-0005), only through the `PolicyGenBumper` port.
+        let role_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+        let role_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let role_gen_bumper: Arc<dyn PolicyGenBumper> = Arc::new(GenerationsPolicyGenBumper::new(gens.clone()));
+        let roles = RoleService::new(
+            role_grant_store.clone(),
+            role_orgs,
+            role_teams,
+            role_projects,
+            authorize.clone(),
+            role_uow,
+            role_outbox,
+            audit_log.clone(),
+            role_gen_bumper,
+            KernelIdGenerator,
+            SystemClock,
+        );
         let policies = PolicyService::new(policy_store.clone(), authorize.clone());
 
-        // SMA-446 Task A10/A12: the audit-log read+write handle. `audit_log` is a single shared
-        // `Arc<dyn AuditLog>` (`PgAuditLog` over `db`) that BOTH the read-side `audit_query`
-        // (A10) reads through AND the denial-audit drain (A12, spawned by `main.rs`) writes
-        // buffered denials into — one store instance, not two (mirrors `role_grant_store`'s
-        // single-shared-`Arc` posture). It is stashed on the returned state (`audit_log` field,
-        // reachable via `audit_sink()`) so `main.rs` can hand it to `drain.run(sink, shutdown)`.
-        let audit_log: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()));
+        // SMA-446 Task A10: the read-side audit query service, over the SAME `audit_log`
+        // handle built above.
         let audit_query = AuditQueryService::new(audit_log.clone(), authorize.clone());
 
         // Shares the SAME `role_grant_store` handle `roles`/`snapshot` do (Task 21b): a
