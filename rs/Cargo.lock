@@ -2356,6 +2356,7 @@ dependencies = [
  "paigasus-kernel",
  "proptest",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror",
  "uuid",

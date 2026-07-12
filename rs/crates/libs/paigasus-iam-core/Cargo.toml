@@ -22,6 +22,8 @@ base64 = { workspace = true }
 # entity-slice caches (`adapters::authz::{decision_cache,entity_cache}`, SMA-444 Task 14)
 # can round-trip them as cache payloads without a bespoke wire format.
 serde = { workspace = true }
+# `audit::AuditEntry.detail` carries free-form event context as opaque JSON (SMA-446, Task A1).
+serde_json = { workspace = true }
 
 # `tests/api_key_props.rs` — property-based coverage of the api-key token codec plus a
 # test-local `SecretHasher` (SMA-445 Task 6, AC-1 "constant-time validation").
