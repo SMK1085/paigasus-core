@@ -8,6 +8,7 @@ pub mod api_key;
 pub mod audit;
 pub mod authn;
 pub mod authz;
+pub mod domain_event;
 pub mod ports;
 pub mod principal;
 pub mod service_account;
@@ -22,9 +23,11 @@ pub use authz::{
     AccessRequest, Action, AuditSink, Authorizer, AuthzError, Decision, DecisionCache, Effect, EntitySliceLoader, GrantScope, PolicyDocument, PolicyStore, RequestContext, Role, RoleGrant,
     RoleGrantRef, RoleGrantStore,
 };
+pub use domain_event::{DomainEvent, EventType};
 pub use ports::{
-    ApiKeyRepository, AuditLog, Authenticator, Clock, ConflictKind, ExternalIdentityRepository, IdGenerator, KeyEntropy, MembershipRecord, MembershipRepository, NodeView, OrganizationRepository,
-    PreconditionKind, PrincipalRepository, ProjectRepository, RepositoryError, SecretHasher, ServiceAccountRepository, TeamRepository,
+    ApiKeyRepository, AuditLog, Authenticator, Clock, ConflictKind, EventPublisher, ExternalIdentityRepository, IdGenerator, KeyEntropy, MembershipRecord, MembershipRepository, NodeView,
+    OrganizationRepository, Outbox, PreconditionKind, PrincipalRepository, ProjectRepository, PublishError, RepositoryError, Savepoint, SecretHasher, ServiceAccountRepository, TeamRepository,
+    Transaction, UnitOfWork,
 };
 pub use principal::{Principal, PrincipalKind, PrincipalStatus};
 pub use service_account::{ServiceAccount, ServiceAccountRecord};

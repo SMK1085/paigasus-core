@@ -63,6 +63,14 @@ impl IdGenerator for KernelIdGenerator {
     fn new_audit_id(&self) -> Uuid {
         self.mint()
     }
+
+    fn new_event_id(&self) -> Uuid {
+        self.mint()
+    }
+
+    fn new_correlation_id(&self) -> Uuid {
+        self.mint()
+    }
 }
 
 #[cfg(test)]

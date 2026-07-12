@@ -7,6 +7,7 @@ use crate::api_key::{ApiKey, ApiKeyId};
 use crate::audit::{AuditEntry, AuditFilter};
 use crate::authn::{AuthnError, ExternalIdentity, Issuer, ValidatedClaims};
 use crate::authz::model::RoleGrant;
+use crate::domain_event::DomainEvent;
 use crate::principal::{Principal, PrincipalStatus};
 use crate::service_account::{ServiceAccount, ServiceAccountRecord};
 use crate::tenancy::{Membership, NodeStatus, Organization, OrganizationId, Project, ProjectId, Slug, Team, TeamId, TenancyNodeRef};
@@ -161,6 +162,13 @@ pub trait IdGenerator: Send + Sync {
     /// wrapper) — the ordering backs newest-first / id-descending keyset paging in
     /// [`AuditLog::query`].
     fn new_audit_id(&self) -> Uuid;
+    /// A bare UUIDv7 identifying an outbox row (SMA-446, Slice B) — mints the same shape as
+    /// [`IdGenerator::new_audit_id`], no PRN wrapper (domain events are not tenancy/authz
+    /// resources).
+    fn new_event_id(&self) -> Uuid;
+    /// A bare UUIDv7 correlating a [`DomainEvent`] with the audit-log entry (and any other
+    /// artifacts) produced by the same mutation (SMA-446, Slice B).
+    fn new_correlation_id(&self) -> Uuid;
 }
 
 /// A source of the current time, truncated to microseconds so values round-trip through
@@ -238,6 +246,63 @@ pub trait AuditLog: Send + Sync {
     async fn query(&self, f: &AuditFilter) -> Result<Vec<AuditEntry>, RepositoryError>;
 }
 
+/// Opens one atomic unit of work backed by a single database transaction (SMA-446, Slice B).
+/// The application layer uses this to `begin` a [`Transaction`], drive one or more txn-scoped
+/// mutations plus [`Outbox::enqueue`]/`AuditLog` writes through it, then commit — so the
+/// aggregate mutation, its outbox row, and its audit row become visible atomically.
+#[async_trait]
+pub trait UnitOfWork: Send + Sync {
+    async fn begin(&self) -> Result<Box<dyn Transaction>, RepositoryError>;
+}
+
+/// A single in-flight database transaction. The port itself is backend-agnostic (ADR-0005);
+/// adapters recover their concrete transaction type via `as_any().downcast_ref` — the entry
+/// point later `Pg*` adapters use to run txn-scoped writes against the same connection.
+#[async_trait]
+pub trait Transaction: Send {
+    async fn commit(self: Box<Self>) -> Result<(), RepositoryError>;
+    /// Opens a nested transaction (a Postgres `SAVEPOINT` in the concrete adapter) so a
+    /// conflict-absorbing mutation can roll back just the savepoint without aborting the
+    /// outer transaction.
+    async fn savepoint(&mut self) -> Result<Box<dyn Savepoint<'_>>, RepositoryError>;
+    /// Downcast entry point for adapters (mirrors [`Transaction`]'s own doc).
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// A nested transaction opened via [`Transaction::savepoint`], borrowing its parent
+/// transaction for `'a`.
+#[async_trait]
+pub trait Savepoint<'a>: Send {
+    async fn commit(self: Box<Self>) -> Result<(), RepositoryError>;
+    async fn rollback(self: Box<Self>) -> Result<(), RepositoryError>;
+    /// Downcast entry point for adapters (mirrors [`Transaction::as_any`]).
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// Persistence port for the transactional outbox (SMA-446, Slice B): writes a [`DomainEvent`]
+/// row in the same transaction as the mutation that produced it, so the event only becomes
+/// visible if that mutation itself commits.
+#[async_trait]
+pub trait Outbox: Send + Sync {
+    async fn enqueue(&self, tx: &dyn Transaction, ev: &DomainEvent) -> Result<(), RepositoryError>;
+}
+
+/// Publishes a relayed [`DomainEvent`] to an external sink (e.g. a message bus). Not part of
+/// the domain transaction — invoked by the outbox relay after the event has already
+/// committed, so failures here are retried out-of-band rather than rolling anything back.
+#[async_trait]
+pub trait EventPublisher: Send + Sync {
+    async fn publish(&self, ev: &DomainEvent) -> Result<(), PublishError>;
+}
+
+/// Errors an [`EventPublisher`] can report, source-preserving like [`RepositoryError`] — the
+/// core never assumes a specific transport.
+#[derive(Debug, thiserror::Error)]
+pub enum PublishError {
+    #[error("backend error")]
+    Backend(#[from] Box<dyn std::error::Error + Send + Sync>),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,4 +335,21 @@ mod tests {
     // Compile-time proof the audit port is object-safe (injected as a trait object).
     #[allow(dead_code)]
     fn audit_log_is_object_safe(_: &dyn AuditLog) {}
+
+    // Compile-time proof the new UoW/outbox/event-publisher ports are object-safe (SMA-446,
+    // Slice B).
+    #[allow(dead_code)]
+    fn unit_of_work_ports_are_object_safe(_: &dyn UnitOfWork, _: &dyn Outbox, _: &dyn EventPublisher) {}
+
+    // `Transaction`/`Savepoint` are only ever held as `Box<dyn ...>` (their `commit`/
+    // `rollback` methods consume `self: Box<Self>`), so prove object-safety via that receiver
+    // rather than `&dyn`.
+    #[allow(dead_code)]
+    fn transaction_and_savepoint_are_object_safe(_: Box<dyn Transaction>, _: Box<dyn Savepoint<'_>>) {}
+
+    #[test]
+    fn publish_error_wraps_a_source_error() {
+        let e: PublishError = Box::<dyn std::error::Error + Send + Sync>::from("boom").into();
+        assert!(matches!(e, PublishError::Backend(_)));
+    }
 }

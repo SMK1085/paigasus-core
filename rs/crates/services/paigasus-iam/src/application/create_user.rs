@@ -148,6 +148,12 @@ mod tests {
         fn new_audit_id(&self) -> Uuid {
             self.0
         }
+        fn new_event_id(&self) -> Uuid {
+            self.0
+        }
+        fn new_correlation_id(&self) -> Uuid {
+            self.0
+        }
     }
 
     struct FixedClock(DateTime<Utc>);

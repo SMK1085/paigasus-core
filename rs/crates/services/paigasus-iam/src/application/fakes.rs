@@ -503,6 +503,14 @@ impl IdGenerator for SeqIds {
     fn new_audit_id(&self) -> Uuid {
         self.next()
     }
+
+    fn new_event_id(&self) -> Uuid {
+        self.next()
+    }
+
+    fn new_correlation_id(&self) -> Uuid {
+        self.next()
+    }
 }
 
 /// Programmable `Authorizer` fake for application-service unit tests (`authorize.rs`,
