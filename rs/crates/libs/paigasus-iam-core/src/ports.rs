@@ -252,6 +252,10 @@ pub trait ApiKeyRepository: Send + Sync {
     async fn issue_in(&self, tx: &dyn Transaction, key: &ApiKey, key_hash: &[u8]) -> Result<(), RepositoryError>;
     /// The key plus its stored hash, for the authn adapter to `SecretHasher::verify` against.
     async fn find_by_id(&self, id: ApiKeyId) -> Result<Option<(ApiKey, Vec<u8>)>, RepositoryError>;
+    /// A thin one-shot-`UnitOfWork` wrapper over [`ApiKeyRepository::revoke_in`] (SMA-446,
+    /// Slice B Task B6). Idempotent: revoking an id that doesn't exist (or is already revoked)
+    /// is a no-op success — `Ok(())`, never `NotFound` — mirroring `revoke_in`'s own `false`
+    /// return for that same case.
     async fn revoke(&self, id: ApiKeyId, now: DateTime<Utc>) -> Result<(), RepositoryError>;
     /// Txn-scoped twin of [`ApiKeyRepository::revoke`]: flips `id`'s status to `Revoked` on
     /// the caller's own `tx`, returning whether THIS call actually performed the transition.

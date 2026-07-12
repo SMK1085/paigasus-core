@@ -180,3 +180,75 @@ impl OutboxRelay {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! `row_to_domain_event` unit tests (SMA-446 Slice B Task B8, review finding, Fix 3): the
+    //! three malformed-row error branches its own doc comment enumerates — an unrecognized
+    //! `event_type` wire string, invalid `payload` JSON, and an out-of-range `schema_version`
+    //! — each return `Err`, plus a well-formed row maps to the exact `DomainEvent` its fields
+    //! describe. No DB needed: `event_outbox::Model` is hand-built, never persisted.
+    use super::*;
+    use uuid::Uuid;
+
+    /// A well-formed `event_outbox::Model` — every malformed-row test below starts from this
+    /// and corrupts exactly the one field its case is about.
+    fn base_model() -> event_outbox::Model {
+        event_outbox::Model {
+            id: Uuid::from_u128(1),
+            occurred_at: Utc::now(),
+            event_type: EventType::PrincipalCreated.as_wire().to_string(),
+            schema_version: 1,
+            aggregate_prn: "prn:pgs:iam:::principal/00000000-0000-0000-0000-0000000000aa".to_string(),
+            actor_prn: Some("prn:pgs:iam:::principal/00000000-0000-0000-0000-0000000000bb".to_string()),
+            payload: serde_json::json!({"kind": "user"}).to_string(),
+            correlation_id: Some(Uuid::from_u128(2)),
+            published_at: None,
+            attempts: 0,
+            parked: false,
+        }
+    }
+
+    #[test]
+    fn rejects_unrecognized_event_type() {
+        let mut row = base_model();
+        row.event_type = "iam.nope.happened".to_string();
+        let err = row_to_domain_event(&row).unwrap_err();
+        assert!(err.contains("unrecognized event_type"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_invalid_payload_json() {
+        let mut row = base_model();
+        row.payload = "{not valid json".to_string();
+        let err = row_to_domain_event(&row).unwrap_err();
+        assert!(err.contains("invalid payload json"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_out_of_range_schema_version() {
+        let mut negative = base_model();
+        negative.schema_version = -1;
+        let err = row_to_domain_event(&negative).unwrap_err();
+        assert!(err.contains("schema_version"), "unexpected error: {err}");
+
+        let mut too_large = base_model();
+        too_large.schema_version = i32::from(u16::MAX) + 1;
+        let err = row_to_domain_event(&too_large).unwrap_err();
+        assert!(err.contains("schema_version"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn maps_a_well_formed_row_to_the_matching_domain_event() {
+        let row = base_model();
+        let ev = row_to_domain_event(&row).unwrap();
+        assert_eq!(ev.id, row.id);
+        assert_eq!(ev.event_type, EventType::PrincipalCreated);
+        assert_eq!(ev.schema_version, 1);
+        assert_eq!(ev.aggregate_prn, row.aggregate_prn);
+        assert_eq!(ev.actor_prn, row.actor_prn);
+        assert_eq!(ev.occurred_at, row.occurred_at);
+        assert_eq!(ev.payload, serde_json::json!({"kind": "user"}));
+        assert_eq!(ev.correlation_id, row.correlation_id);
+    }
+}
