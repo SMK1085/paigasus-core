@@ -14,7 +14,7 @@ pub mod entity_cache;
 pub mod generation;
 pub mod policy_snapshot;
 
-pub use audit::TracingAuditSink;
+pub use audit::{FanOutAuditSink, TracingAuditSink};
 pub use cedar_authorizer::{CedarAuthorizer, GenerationsReader};
 pub use decision_cache::{MemoryDecisionCache, RedisDecisionCache, decision_key};
 pub use denial_audit::{BufferedDenialAuditSink, DenialAuditBuffer, DenialAuditDrain};

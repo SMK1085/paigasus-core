@@ -86,6 +86,56 @@ async fn main() -> anyhow::Result<()> {
         });
         servers.spawn(async move { handle.await.map_err(anyhow::Error::from) });
     }
+    {
+        // The persistent denial-audit drain (SMA-446 Slice A): `AppState::new` built the
+        // bounded buffer + drain pair and wired the buffer's `AuditSink` into `CedarAuthorizer`;
+        // here we spawn the drain that persists buffered denials to Postgres out of band, on the
+        // same shutdown-watch as the HTTP/gRPC server tasks (mirroring the reload block above).
+        // `take_denial_drain` hands the drain out exactly once — this is the sole caller — so a
+        // double-spawn is impossible; a `None` would mean it was already taken (a wiring
+        // defect), logged rather than silently ignored. `drain.run` returns `()`, so the spawned
+        // task maps to `Ok(())` to match the `JoinSet<anyhow::Result<()>>` the servers share.
+        let mut rx = rx.clone();
+        match state.take_denial_drain() {
+            Some(drain) => {
+                let sink = state.audit_sink();
+                servers.spawn(async move {
+                    drain
+                        .run(sink, async move {
+                            let _ = rx.changed().await;
+                        })
+                        .await;
+                    Ok(())
+                });
+            }
+            None => tracing::error!("denial-audit drain was already taken before startup could spawn it — buffered denials will NOT be persisted"),
+        }
+    }
+    {
+        // Overflow observability (SMA-446 Slice A): the denial buffer drops its OLDEST queued
+        // entry when full (favoring recency) and bumps a monotonic counter. Emit that counter
+        // periodically as a `tracing` gauge so a sustained denial burst outpacing the drain is
+        // visible (a persistent-metrics backend is a later slice). Exits on the same
+        // shutdown-watch as every other task.
+        let mut rx = rx.clone();
+        let buffer = state.denial_buffer();
+        servers.spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(60));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        let dropped = buffer.dropped();
+                        if dropped > 0 {
+                            tracing::warn!(dropped_denial_audits = dropped, "denial-audit buffer has dropped entries on overflow (drain is not keeping up)");
+                        }
+                    }
+                    _ = rx.changed() => break,
+                }
+            }
+            Ok(())
+        });
+    }
 
     tracing::info!(%config.http_addr, %config.grpc_addr, "paigasus-iam started");
 
