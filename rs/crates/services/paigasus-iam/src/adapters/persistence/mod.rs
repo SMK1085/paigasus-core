@@ -16,6 +16,7 @@ pub mod pg_repository;
 pub mod pg_role_grants;
 pub mod pg_service_accounts;
 pub mod pg_teams;
+pub mod uow;
 
 pub use migration::Migrator;
 pub use pg_api_keys::PgApiKeyRepository;
@@ -30,6 +31,7 @@ pub use pg_repository::PgPrincipalRepository;
 pub use pg_role_grants::PgRoleGrantStore;
 pub use pg_service_accounts::PgServiceAccountRepository;
 pub use pg_teams::PgTeamRepository;
+pub use uow::{SeaOrmSavepoint, SeaOrmTransaction, SeaOrmUnitOfWork};
 
 use paigasus_iam_core::{ConflictKind, RepositoryError};
 use sea_orm::{DbErr, SqlErr};
