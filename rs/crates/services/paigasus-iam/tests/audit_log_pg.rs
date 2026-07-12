@@ -14,9 +14,11 @@ mod support;
 
 use chrono::Utc;
 use paigasus_iam::adapters::id::KernelIdGenerator;
+use paigasus_iam::adapters::persistence::PgAuditLog;
 use paigasus_iam::adapters::persistence::entities::audit_log;
-use paigasus_iam_core::IdGenerator;
+use paigasus_iam_core::{AuditEntry, AuditFilter, AuditLog, AuditOutcome, IdGenerator};
 use sea_orm::{ActiveModelTrait, EntityTrait, PaginatorTrait, Set};
+use uuid::Uuid;
 
 #[tokio::test]
 async fn migration_creates_audit_log_table_and_accepts_a_row() {
@@ -43,4 +45,72 @@ async fn migration_creates_audit_log_table_and_accepts_a_row() {
 
     let after = audit_log::Entity::find().count(&db).await.unwrap();
     assert_eq!(after, 1, "the inserted row must be counted");
+}
+
+/// A denial `AuditEntry` for `actor` at `id`, all sharing the same denied `GetProject`
+/// shape — the only axis under test is `id`/`actor_prn`.
+fn denial(id: Uuid, actor: &str) -> AuditEntry {
+    AuditEntry {
+        id,
+        occurred_at: Utc::now(),
+        actor_prn: Some(actor.to_string()),
+        action: "GetProject".to_string(),
+        resource_prn: None,
+        outcome: AuditOutcome::Denied,
+        determining_policies: vec!["policy-forbid-1".to_string()],
+        detail: serde_json::json!({"reason": "no matching allow"}),
+        correlation_id: None,
+    }
+}
+
+#[tokio::test]
+async fn record_out_of_band_then_query_filters_and_paginates() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let sink = PgAuditLog::new(db.clone());
+
+    // Ascending `Uuid::from_u128` ids (byte-big-endian, so larger u128 = larger uuid) so
+    // `ORDER BY id DESC` is deterministic: id=1 and id=2 belong to actor "a", id=3 to "b".
+    for (id, actor) in [(Uuid::from_u128(1), "a"), (Uuid::from_u128(2), "a"), (Uuid::from_u128(3), "b")] {
+        sink.record_out_of_band(&denial(id, actor)).await.expect("record_out_of_band must succeed");
+    }
+
+    // Round-trip check on one row: TEXT-column (de)serialization of `determining_policies`/
+    // `detail` must survive the write+read, not just the filter/outcome fields.
+    let base_filter = AuditFilter {
+        actor_prn: Some("a".to_string()),
+        resource_prn: None,
+        action: None,
+        outcome: Some(AuditOutcome::Denied),
+        from: None,
+        to: None,
+        cursor: None,
+        limit: 10,
+    };
+    let rows = sink.query(&base_filter).await.expect("query must succeed");
+    assert_eq!(rows.len(), 2, "only actor a's 2 denials must match, newest-first");
+    assert_eq!(rows[0].id, Uuid::from_u128(2), "id DESC: the higher id comes first");
+    assert_eq!(rows[1].id, Uuid::from_u128(1));
+    assert_eq!(rows[0].determining_policies, vec!["policy-forbid-1".to_string()]);
+    assert_eq!(rows[0].detail, serde_json::json!({"reason": "no matching allow"}));
+    assert_eq!(rows[0].outcome, AuditOutcome::Denied);
+
+    // Keyset pagination: limit=1 returns only the newest match; passing that row's id as the
+    // next `cursor` returns the next-newest, not the same row again.
+    let page1 = sink.query(&AuditFilter { limit: 1, ..base_filter.clone() }).await.expect("page1 query must succeed");
+    assert_eq!(page1.len(), 1);
+    assert_eq!(page1[0].id, Uuid::from_u128(2));
+
+    let page2 = sink
+        .query(&AuditFilter {
+            limit: 1,
+            cursor: Some(page1[0].id),
+            ..base_filter.clone()
+        })
+        .await
+        .expect("page2 query must succeed");
+    assert_eq!(page2.len(), 1);
+    assert_eq!(page2[0].id, Uuid::from_u128(1));
+
+    // Actor b's denial must never surface under the actor=a filter.
+    assert!(rows.iter().all(|e| e.actor_prn.as_deref() == Some("a")));
 }
