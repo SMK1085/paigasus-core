@@ -47,7 +47,7 @@ use crate::adapters::persistence::{
     PgApiKeyRepository, PgAuditLog, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgPrincipalRepository,
     PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgTeamRepository, SeaOrmUnitOfWork,
 };
-use crate::application::api_keys::ApiKeyService;
+use crate::application::api_keys::{ApiKeyService, ApiKeyServiceDeps};
 use crate::application::audit::AuditQueryService;
 use crate::application::authenticate_api_key::AuthenticateApiKey;
 use crate::application::authenticate_token::{AuthenticateToken, JitPolicy};
@@ -504,18 +504,31 @@ impl AppState {
             KernelIdGenerator,
             SystemClock,
         );
-        let api_keys = ApiKeyService::new(
-            PgApiKeyRepository::new(db.clone()),
-            PgServiceAccountRepository::new(db.clone()),
-            role_grant_store.clone(),
-            authorize.clone(),
-            api_key_hasher,
-            OsRngKeyEntropy,
-            api_key_cache,
-            KernelIdGenerator,
-            SystemClock,
-            cfg.api_keys.clone(),
-        );
+        // SMA-446 Task B6 (copies Task B4/B5's `roles`/`policies` wiring above): `api_keys`
+        // drives its issue/revoke mutation + outbox event + audit entry through its OWN
+        // `SeaOrmUnitOfWork` transaction (`api_key_uow` — a fresh instance is fine, `db.clone()`
+        // is a cheap `Arc`-backed pool handle, mirrors `role_uow`/`policy_uow`). Unlike
+        // `roles`/`policies`, there is NO post-commit generation bump here — API-key
+        // issue/revoke never touch `policy_gen`/`entity_gen` (`ApiKeyServiceDeps`'s own doc);
+        // the post-commit step this service DOES run (`revoke`'s cache-evict) is over the SAME
+        // `api_key_cache` handle `api_key_auth` reads through, already threaded below.
+        let api_key_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+        let api_key_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let api_keys = ApiKeyService::new(ApiKeyServiceDeps {
+            keys: PgApiKeyRepository::new(db.clone()),
+            service_accounts: PgServiceAccountRepository::new(db.clone()),
+            grants: role_grant_store.clone(),
+            authorize: authorize.clone(),
+            hasher: api_key_hasher,
+            entropy: OsRngKeyEntropy,
+            cache: api_key_cache,
+            uow: api_key_uow,
+            outbox: api_key_outbox,
+            audit: audit_log.clone(),
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+            config: cfg.api_keys.clone(),
+        });
 
         let authn_cfg = &cfg.authn;
         if authn_cfg.accept_invalid_tls {

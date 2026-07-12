@@ -742,6 +742,18 @@ impl ApiKeyRepository for InMemoryApiKeys {
         Ok(())
     }
 
+    // Txn-scoped twin (SMA-446, Slice B Task B6 — the `ApiKeyService::issue` reference
+    // pattern): this fake has no real backing transaction, so `tx` is ignored and the
+    // mutation applies immediately — mirrors `InMemoryRoleGrants::grant`/`grant_in`.
+    async fn issue_in(&self, _tx: &dyn Transaction, key: &ApiKey, key_hash: &[u8]) -> Result<(), RepositoryError> {
+        let mut keys = self.0.lock().unwrap();
+        if keys.values().any(|(_, h)| h.as_slice() == key_hash) {
+            return Err(RepositoryError::Conflict(ConflictKind::ApiKeyHashCollision));
+        }
+        keys.insert(key.id, (key.clone(), key_hash.to_vec()));
+        Ok(())
+    }
+
     async fn find_by_id(&self, id: ApiKeyId) -> Result<Option<(ApiKey, Vec<u8>)>, RepositoryError> {
         Ok(self.0.lock().unwrap().get(&id).cloned())
     }
@@ -755,6 +767,23 @@ impl ApiKeyRepository for InMemoryApiKeys {
             key.revoked_at = Some(now);
         }
         Ok(())
+    }
+
+    // Txn-scoped twin, mirroring `issue_in` above: `tx` is ignored, the mutation applies
+    // immediately, and the returned bool reports whether THIS call actually performed the
+    // Active -> Revoked transition (`false` for an idempotent no-op — already revoked, or the
+    // id was never issued at all).
+    async fn revoke_in(&self, _tx: &dyn Transaction, id: ApiKeyId, now: DateTime<Utc>) -> Result<bool, RepositoryError> {
+        let mut keys = self.0.lock().unwrap();
+        let Some((key, _)) = keys.get_mut(&id) else {
+            return Ok(false);
+        };
+        if key.status == ApiKeyStatus::Revoked {
+            return Ok(false);
+        }
+        key.status = ApiKeyStatus::Revoked;
+        key.revoked_at = Some(now);
+        Ok(true)
     }
 
     async fn list_by_service_account(&self, sa: &PrincipalId, limit: u64, offset: u64) -> Result<Vec<ApiKey>, RepositoryError> {

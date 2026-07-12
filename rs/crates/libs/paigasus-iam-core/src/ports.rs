@@ -221,9 +221,27 @@ pub trait ServiceAccountRepository: Send + Sync {
 #[async_trait]
 pub trait ApiKeyRepository: Send + Sync {
     async fn issue(&self, key: &ApiKey, key_hash: &[u8]) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`ApiKeyRepository::issue`] (SMA-446, Slice B Task B6 — the
+    /// `ApiKeyService::issue` reference pattern, copying `RoleGrantStore::grant_in`'s
+    /// posture): inserts the row on the caller's own `tx`. Unlike `RoleGrantStore`/
+    /// `PolicyStore`'s `_in` twins, there is no generation counter to skip bumping here —
+    /// API-key issue/revoke never touch `policy_gen`/`entity_gen` at all (the caller's own
+    /// post-commit side effect is the [`crate::adapters::api_keys::ApiKeyValidationCache`]
+    /// evict on revoke, not a `PolicyGenBumper` bump).
+    async fn issue_in(&self, tx: &dyn Transaction, key: &ApiKey, key_hash: &[u8]) -> Result<(), RepositoryError>;
     /// The key plus its stored hash, for the authn adapter to `SecretHasher::verify` against.
     async fn find_by_id(&self, id: ApiKeyId) -> Result<Option<(ApiKey, Vec<u8>)>, RepositoryError>;
     async fn revoke(&self, id: ApiKeyId, now: DateTime<Utc>) -> Result<(), RepositoryError>;
+    /// Txn-scoped twin of [`ApiKeyRepository::revoke`]: flips `id`'s status to `Revoked` on
+    /// the caller's own `tx`, returning whether THIS call actually performed the transition.
+    /// `false` is an idempotent no-op — the row was already revoked, or never existed at all
+    /// (a benign TOCTOU race; the caller already resolved the key via `find_by_id` before
+    /// opening this transaction) — mirroring `RoleGrantStore::revoke_in`/`PolicyStore::
+    /// delete_in`'s posture: the caller only enqueues/records when this is `true`. The
+    /// caller's post-commit cache-evict (SECURITY-CRITICAL, spec §9/D5) runs unconditionally
+    /// after every successful commit regardless of this bool — even a no-op revoke call must
+    /// still clear any stale cached validation for `id`.
+    async fn revoke_in(&self, tx: &dyn Transaction, id: ApiKeyId, now: DateTime<Utc>) -> Result<bool, RepositoryError>;
     /// ORDER BY created_at, id (rule 9).
     async fn list_by_service_account(&self, sa: &PrincipalId, limit: u64, offset: u64) -> Result<Vec<ApiKey>, RepositoryError>;
     /// All key ids owned by a service account, for archive-evict (revoking every key when its
