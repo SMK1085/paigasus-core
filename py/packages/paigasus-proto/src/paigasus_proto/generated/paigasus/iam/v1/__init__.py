@@ -16,6 +16,8 @@ __all__ = (
     "ArchiveTeamResponse",
     "AttachMembershipRequest",
     "AttachMembershipResponse",
+    "AuditEntry",
+    "AuditServiceStub",
     "AuthnServiceStub",
     "AuthorizationServiceStub",
     "CreateOrganizationRequest",
@@ -50,6 +52,8 @@ __all__ = (
     "IssueApiKeyResponse",
     "ListApiKeysRequest",
     "ListApiKeysResponse",
+    "ListAuditEntriesRequest",
+    "ListAuditEntriesResponse",
     "ListMembershipsRequest",
     "ListMembershipsResponse",
     "ListOrganizationsRequest",
@@ -331,6 +335,44 @@ class AttachMembershipResponse(betterproto2.Message):
 default_message_pool.register_message(
     "paigasus.iam.v1", "AttachMembershipResponse", AttachMembershipResponse
 )
+
+
+@dataclass(eq=False, repr=False)
+class AuditEntry(betterproto2.Message):
+    """
+    AuditEntry is a single row of the append-only audit log (SMA-446): authz
+    denials in Slice A, committed mutations in Slice B. `detail_json` is a
+    JSON-serialized string (not a structured message) since the persistence
+    layer stores detail as serialized TEXT.
+    """
+
+    id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    occurred_at: "datetime.datetime | None" = betterproto2.field(
+        2,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    actor_prn: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    action: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    resource_prn: "str" = betterproto2.field(5, betterproto2.TYPE_STRING)
+
+    outcome: "str" = betterproto2.field(6, betterproto2.TYPE_STRING)
+
+    determining_policies: "list[str]" = betterproto2.field(
+        7, betterproto2.TYPE_STRING, repeated=True
+    )
+
+    detail_json: "str" = betterproto2.field(8, betterproto2.TYPE_STRING)
+
+    correlation_id: "str" = betterproto2.field(9, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message("paigasus.iam.v1", "AuditEntry", AuditEntry)
 
 
 @dataclass(eq=False, repr=False)
@@ -798,6 +840,63 @@ class ListApiKeysResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "ListApiKeysResponse", ListApiKeysResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListAuditEntriesRequest(betterproto2.Message):
+    """
+    Optional scalar filters use empty-string/zero sentinels (mirrors the other
+    request messages in this file): an empty string / zero timestamp means
+    "unfiltered" on that field.
+    """
+
+    actor_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    resource_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    action: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    outcome: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    from_: "datetime.datetime | None" = betterproto2.field(
+        5,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    to: "datetime.datetime | None" = betterproto2.field(
+        6,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    cursor: "str" = betterproto2.field(7, betterproto2.TYPE_STRING)
+
+    limit: "int" = betterproto2.field(8, betterproto2.TYPE_UINT32)
+    """
+    limit 0 => server default
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListAuditEntriesRequest", ListAuditEntriesRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListAuditEntriesResponse(betterproto2.Message):
+    entries: "list[AuditEntry]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+    next_cursor: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListAuditEntriesResponse", ListAuditEntriesResponse
 )
 
 
@@ -1400,6 +1499,26 @@ class Team(betterproto2.Message):
 
 
 default_message_pool.register_message("paigasus.iam.v1", "Team", Team)
+
+
+class AuditServiceStub(betterproto2_grpclib.ServiceStub):
+    async def list_audit_entries(
+        self,
+        message: "ListAuditEntriesRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListAuditEntriesResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuditService/ListAuditEntries",
+            message,
+            ListAuditEntriesResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
 
 
 class AuthnServiceStub(betterproto2_grpclib.ServiceStub):
