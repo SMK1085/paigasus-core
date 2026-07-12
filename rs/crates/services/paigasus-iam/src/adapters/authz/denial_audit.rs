@@ -41,6 +41,10 @@ impl DenialAuditBuffer {
     /// so a buffer can never exist without something able to drain it.
     #[must_use]
     pub fn new(capacity: usize) -> (Arc<Self>, DenialAuditDrain) {
+        // Defend against a misconfigured `capacity: 0`, which would otherwise make every
+        // `push` immediately evict the entry it just enqueued (silently discarding all
+        // denial audits without ever counting them past the very first `dropped()` bump).
+        let capacity = capacity.max(1);
         let buf = Arc::new(DenialAuditBuffer {
             queue: Mutex::new(VecDeque::with_capacity(capacity)),
             capacity,
@@ -100,9 +104,11 @@ pub struct DenialAuditDrain {
 impl DenialAuditDrain {
     /// Runs until `shutdown` resolves. Each wake drains the buffer and persists every entry
     /// found; a persistence error is logged (`tracing::warn!`) and swallowed — fail-open, so
-    /// a `sink` outage never crashes the drain task or blocks producers. Entries queued
-    /// after the final drain (i.e. between the last wake and `shutdown` resolving) are left
-    /// unpersisted, same as any other bounded, best-effort audit path.
+    /// a `sink` outage never crashes the drain task or blocks producers. On `shutdown`, the
+    /// loop breaks *without* draining (there may be no pending notification to wake it if the
+    /// last push landed after the final regular wake), so a final `drain_all` + persist pass
+    /// runs once more before `run` returns — otherwise entries buffered right at shutdown
+    /// would be silently lost (not even reflected in [`DenialAuditBuffer::dropped`]).
     pub async fn run(self, sink: Arc<dyn AuditLog>, shutdown: impl Future<Output = ()>) {
         tokio::pin!(shutdown);
         loop {
@@ -110,14 +116,25 @@ impl DenialAuditDrain {
                 () = self.buf.notify.notified() => {}
                 () = &mut shutdown => break,
             }
-            for entry in self.buf.drain_all() {
-                if let Err(e) = sink.record_out_of_band(&entry).await {
-                    tracing::warn!(
-                        error = %e,
-                        action = %entry.action,
-                        "failed to persist denial audit entry; dropping it (fail-open)"
-                    );
-                }
+            Self::drain_into(&self.buf, &sink).await;
+        }
+        // Final drain: same fail-open, per-entry error handling as every regular wake, so a
+        // graceful shutdown never drops a denial that was already buffered.
+        Self::drain_into(&self.buf, &sink).await;
+    }
+
+    /// Drains everything currently queued and persists each entry via
+    /// [`AuditLog::record_out_of_band`], logging and swallowing per-entry failures
+    /// (fail-open). Shared by the regular wake loop and the final shutdown drain in
+    /// [`Self::run`] so both paths behave identically.
+    async fn drain_into(buf: &DenialAuditBuffer, sink: &Arc<dyn AuditLog>) {
+        for entry in buf.drain_all() {
+            if let Err(e) = sink.record_out_of_band(&entry).await {
+                tracing::warn!(
+                    error = %e,
+                    action = %entry.action,
+                    "failed to persist denial audit entry; dropping it (fail-open)"
+                );
             }
         }
     }
@@ -208,5 +225,46 @@ mod tests {
         sink.record(&event(Effect::Allow)).await;
         sink.record(&event(Effect::Deny)).await;
         assert_eq!(buf.len_for_test(), 1);
+    }
+
+    /// Test-only [`AuditLog`] fake that captures every persisted entry (in call order) instead
+    /// of writing anywhere, so a test can assert on exactly what `DenialAuditDrain::run`
+    /// persisted.
+    #[derive(Default)]
+    struct CapturingAuditLog {
+        recorded: Mutex<Vec<AuditEntry>>,
+    }
+
+    #[async_trait]
+    impl AuditLog for CapturingAuditLog {
+        async fn record_out_of_band(&self, e: &AuditEntry) -> Result<(), paigasus_iam_core::RepositoryError> {
+            self.recorded.lock().unwrap().push(e.clone());
+            Ok(())
+        }
+
+        async fn query(&self, _f: &paigasus_iam_core::AuditFilter) -> Result<Vec<AuditEntry>, paigasus_iam_core::RepositoryError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn run_drains_buffer_on_shutdown_before_returning() {
+        let (buf, drain) = DenialAuditBuffer::new(8);
+        buf.push(entry("a"));
+        buf.push(entry("b"));
+
+        // `push` calls `Notify::notify_one`, which stores a single wake permit even though
+        // nothing is waiting yet. Consume it here so `run`'s very first `select!` has no
+        // pending notification and only `shutdown` is ready — otherwise the notify branch
+        // could win that race non-deterministically, drain the buffer through the "normal"
+        // wake path, and mask whether the shutdown path drains on its own.
+        buf.notify.notified().await;
+
+        let sink = Arc::new(CapturingAuditLog::default());
+        let handle = tokio::spawn(drain.run(sink.clone(), std::future::ready(())));
+        handle.await.expect("drain task must not panic");
+
+        let recorded = sink.recorded.lock().unwrap();
+        assert_eq!(recorded.iter().map(|e| e.action.as_str()).collect::<Vec<_>>(), ["a", "b"]);
     }
 }
