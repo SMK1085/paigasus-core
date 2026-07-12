@@ -232,8 +232,9 @@ pub trait ApiKeyRepository: Send + Sync {
 #[async_trait]
 pub trait AuditLog: Send + Sync {
     async fn record_out_of_band(&self, e: &AuditEntry) -> Result<(), RepositoryError>;
-    /// Results are newest-first (`id`-descending, UUIDv7 so this is also occurred-at-descending)
-    /// for keyset paging via [`AuditFilter::cursor`].
+    /// Results are newest-first by `id` (UUIDv7, so creation-time-ordered); keyset paging via
+    /// [`AuditFilter::cursor`] also pages on that same `id`. `occurred_at` is assigned
+    /// independently at entry-construction time and does not affect ordering or paging.
     async fn query(&self, f: &AuditFilter) -> Result<Vec<AuditEntry>, RepositoryError>;
 }
 

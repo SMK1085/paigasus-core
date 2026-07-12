@@ -24,7 +24,16 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::Notify;
+
+/// Ceiling on a single [`AuditLog::record_out_of_band`] call inside [`DenialAuditDrain::
+/// drain_into`]. A hung Postgres call must never park the drain forever: the same
+/// `drain_into` call also runs as [`DenialAuditDrain::run`]'s final shutdown flush, and an
+/// unbounded hang there would stall graceful shutdown (the server `JoinSet` in `main.rs`
+/// never completing). A timeout is treated the same as any other persistence failure here —
+/// logged and swallowed (fail-open).
+const AUDIT_PERSIST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A bounded ring buffer of denial [`AuditEntry`]s awaiting persistence. Cheap to construct
 /// (`capacity` items pre-reserved); shared between the [`AuditSink`] producer and the
@@ -125,16 +134,28 @@ impl DenialAuditDrain {
 
     /// Drains everything currently queued and persists each entry via
     /// [`AuditLog::record_out_of_band`], logging and swallowing per-entry failures
-    /// (fail-open). Shared by the regular wake loop and the final shutdown drain in
-    /// [`Self::run`] so both paths behave identically.
+    /// (fail-open) — including a call that doesn't return within [`AUDIT_PERSIST_TIMEOUT`],
+    /// so a hung backend can never park the drain (see that const's doc). Shared by the
+    /// regular wake loop and the final shutdown drain in [`Self::run`] so both paths behave
+    /// identically.
     async fn drain_into(buf: &DenialAuditBuffer, sink: &Arc<dyn AuditLog>) {
         for entry in buf.drain_all() {
-            if let Err(e) = sink.record_out_of_band(&entry).await {
-                tracing::warn!(
-                    error = %e,
-                    action = %entry.action,
-                    "failed to persist denial audit entry; dropping it (fail-open)"
-                );
+            match tokio::time::timeout(AUDIT_PERSIST_TIMEOUT, sink.record_out_of_band(&entry)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        error = %e,
+                        action = %entry.action,
+                        "failed to persist denial audit entry; dropping it (fail-open)"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        timeout_secs = AUDIT_PERSIST_TIMEOUT.as_secs(),
+                        action = %entry.action,
+                        "timed out persisting denial audit entry; dropping it (fail-open)"
+                    );
+                }
             }
         }
     }
@@ -266,5 +287,40 @@ mod tests {
 
         let recorded = sink.recorded.lock().unwrap();
         assert_eq!(recorded.iter().map(|e| e.action.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+    }
+
+    /// Test-only [`AuditLog`] fake whose `record_out_of_band` never returns — simulates a
+    /// hung Postgres call, to verify [`DenialAuditDrain::drain_into`]'s [`AUDIT_PERSIST_TIMEOUT`]
+    /// fires instead of parking the drain forever.
+    struct HangingAuditLog;
+
+    #[async_trait]
+    impl AuditLog for HangingAuditLog {
+        async fn record_out_of_band(&self, _e: &AuditEntry) -> Result<(), paigasus_iam_core::RepositoryError> {
+            std::future::pending().await
+        }
+
+        async fn query(&self, _f: &paigasus_iam_core::AuditFilter) -> Result<Vec<AuditEntry>, paigasus_iam_core::RepositoryError> {
+            Ok(vec![])
+        }
+    }
+
+    // `start_paused = true` freezes the clock and auto-advances it once every other task is
+    // idle — so this exercises the real `AUDIT_PERSIST_TIMEOUT` (5s) deterministically and
+    // fast, instead of either a flaky short-timeout stand-in or an actually-slow real sleep.
+    #[tokio::test(start_paused = true)]
+    async fn drain_into_times_out_a_hung_persist_call_instead_of_hanging() {
+        let (buf, _drain) = DenialAuditBuffer::new(8);
+        buf.push(entry("a"));
+        let sink: Arc<dyn AuditLog> = Arc::new(HangingAuditLog);
+
+        // Without the timeout this await would never return (`HangingAuditLog` never
+        // resolves) and the test would hang until the harness's own timeout killed it.
+        DenialAuditDrain::drain_into(&buf, &sink).await;
+
+        // The entry was still drained out of the queue even though persisting it never
+        // succeeded — the timeout path drops it and moves on, same as any other
+        // persistence failure (fail-open).
+        assert_eq!(buf.len_for_test(), 0);
     }
 }

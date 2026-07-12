@@ -67,6 +67,10 @@
 # [audit]
 # denial_buffer_capacity = 4096       # bounded, non-blocking ring buffer for authz-denial
 #                                      # audit entries awaiting out-of-band persistence to
-#                                      # Postgres — default shown; must be >= 1. When full the
-#                                      # OLDEST queued entry is dropped (favoring recency) and
-#                                      # an overflow counter is bumped.
+#                                      # Postgres — default shown; must be >= 1. Denial auditing
+#                                      # is best-effort: when full, the OLDEST queued entry is
+#                                      # dropped (favoring recent denials) and a monotonic
+#                                      # `dropped_denial_audits` gauge is emitted. A sustained
+#                                      # increase means the drain isn't keeping up — raise this
+#                                      # capacity or investigate the audit DB. This is a
+#                                      # deliberate tradeoff: no durable spooling.

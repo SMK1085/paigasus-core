@@ -122,13 +122,19 @@ async fn main() -> anyhow::Result<()> {
         servers.spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(60));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // `dropped()` is a monotonic cumulative counter, so a bare `> 0` check would warn
+            // on every tick forever after a single historical drop. Track the last-observed
+            // value instead and only warn when it has moved since the previous tick.
+            let mut last_dropped = 0u64;
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
                         let dropped = buffer.dropped();
-                        if dropped > 0 {
-                            tracing::warn!(dropped_denial_audits = dropped, "denial-audit buffer has dropped entries on overflow (drain is not keeping up)");
+                        if dropped > last_dropped {
+                            let new_drops = dropped - last_dropped;
+                            tracing::warn!(dropped_denial_audits = dropped, new_drops, "denial-audit buffer has dropped entries on overflow (drain is not keeping up)");
                         }
+                        last_dropped = dropped;
                     }
                     _ = rx.changed() => break,
                 }
