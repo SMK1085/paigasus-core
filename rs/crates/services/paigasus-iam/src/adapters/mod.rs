@@ -6,6 +6,7 @@ pub mod api_keys;
 pub mod auth;
 pub mod authz;
 pub mod clock;
+pub mod events;
 pub mod grpc;
 pub mod http;
 pub mod id;
