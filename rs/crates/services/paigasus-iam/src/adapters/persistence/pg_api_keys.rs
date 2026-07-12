@@ -1,17 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Postgres-backed `ApiKeyRepository` (SeaORM). `issue` is a single insert (the domain
-//! `ApiKey` never carries hash material — `key_hash: &[u8]` is a separate argument, stored as
-//! lowercase hex in the `key_hash TEXT UNIQUE` column: deterministic, comparable, and
-//! symmetric with `find_by_id`'s decode back to `Vec<u8>`; a duplicate hash surfaces as
-//! `Conflict(ApiKeyHashCollision)` via `mod.rs`'s `conflict_kind`, D7). `revoke` mirrors
-//! `pg_organizations.rs::set_status`'s idempotent posture: an already-revoked key is a no-op
-//! success (status/`revoked_at` left untouched), never re-stamping `revoked_at` to a later
-//! `now`. `touch_last_used` is a single guarded `UPDATE … WHERE id = $1 AND (last_used_at IS
-//! NULL OR last_used_at < $3)` (raw SQL, mirrors `pg_memberships.rs`'s precedent) rather than
-//! a fetch-then-update: the throttle exists specifically to bound write amplification from
-//! concurrent hot-key touches, so the guard must be atomic in the database, not a
-//! read-then-write race in the adapter.
+//! Postgres-backed `ApiKeyRepository` (SeaORM). `issue`/`revoke` (SMA-446, Slice B Task B6)
+//! are thin one-shot-`UnitOfWork` wrappers around [`ApiKeyRepository::issue_in`]/
+//! [`ApiKeyRepository::revoke_in`] — the exact reference pattern `PgRoleGrantStore::grant`/
+//! `revoke` establish over `grant_in`/`revoke_in` (B4), except there is no generation counter
+//! to bump afterward (module docs on the port trait): open a `SeaOrmTransaction`, drive the
+//! write on it, commit. `issue_in` is a single insert (the domain `ApiKey` never carries hash
+//! material — `key_hash: &[u8]` is a separate argument, stored as lowercase hex in the
+//! `key_hash TEXT UNIQUE` column: deterministic, comparable, and symmetric with `find_by_id`'s
+//! decode back to `Vec<u8>`; a duplicate hash surfaces as `Conflict(ApiKeyHashCollision)` via
+//! `mod.rs`'s `conflict_kind`, D7). `revoke_in` mirrors `pg_organizations.rs::set_status`'s
+//! idempotent posture: an already-revoked key (or one that no longer exists — a benign TOCTOU
+//! race, the caller already resolved it via `find_by_id` before opening its transaction) is a
+//! no-op returning `false` (status/`revoked_at` left untouched, never re-stamping `revoked_at`
+//! to a later `now`); only a genuine Active -> Revoked transition returns `true`. Deliberately
+//! never touches the [`crate::adapters::api_keys::ApiKeyValidationCache`] itself — the
+//! caller's own awaited, POST-COMMIT responsibility (`application::api_keys::ApiKeyService::
+//! revoke`), SECURITY-CRITICAL (spec §9/D5): a stale cached key must stop authenticating the
+//! moment the revoke actually commits, never before (a rolled-back revoke must not evict) and
+//! never skipped (even a `false`/no-op `revoke_in` outcome still gets a post-commit evict
+//! attempt from the caller, in case an earlier revoke's own evict failed). `touch_last_used`
+//! is a single guarded `UPDATE … WHERE id = $1 AND (last_used_at IS NULL OR last_used_at <
+//! $3)` (raw SQL, mirrors `pg_memberships.rs`'s precedent) rather than a fetch-then-update:
+//! the throttle exists specifically to bound write amplification from concurrent hot-key
+//! touches, so the guard must be atomic in the database, not a read-then-write race in the
+//! adapter.
 //!
 //! `scope: TenancyNodeRef` maps to the (at most one non-null) `scope_org_id`/`scope_team_id`/
 //! `scope_project_id` columns exactly like `pg_service_accounts.rs`'s owner-column mapping
@@ -22,9 +35,10 @@
 
 use super::entities::{api_key, project, team};
 use super::map_err;
+use super::uow::{SeaOrmTransaction, recover_txn};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use paigasus_iam_core::{Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, OrganizationId, PrincipalId, ProjectId, RepositoryError, TeamId, TenancyNodeRef};
+use paigasus_iam_core::{Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, OrganizationId, PrincipalId, ProjectId, RepositoryError, TeamId, TenancyNodeRef, Transaction};
 use paigasus_kernel::Prn;
 use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait};
 use uuid::Uuid;
@@ -237,9 +251,21 @@ const TOUCH_LAST_USED_SQL: &str = r#"UPDATE "api_key" SET last_used_at = $2 WHER
 #[async_trait]
 impl ApiKeyRepository for PgApiKeyRepository {
     async fn issue(&self, key: &ApiKey, key_hash: &[u8]) -> Result<(), RepositoryError> {
+        // Thin one-shot-`UnitOfWork` wrapper (SMA-446 Slice B Task B6), mirroring
+        // `PgRoleGrantStore::grant`/`PgPolicyStore::put`: open a `SeaOrmTransaction`, drive
+        // the insert via `issue_in`, commit.
+        let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        self.issue_in(&*tx, key, key_hash).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn issue_in(&self, tx: &dyn Transaction, key: &ApiKey, key_hash: &[u8]) -> Result<(), RepositoryError> {
         // A `uq_api_key_hash` violation surfaces here as `Conflict(ApiKeyHashCollision)`
         // (mod.rs's `conflict_kind`) — never silently swallowed, and no row is written.
-        key_to_model(key, key_hash).insert(&self.db).await.map_err(map_err)?;
+        let txn = recover_txn(tx)?;
+        key_to_model(key, key_hash).insert(txn).await.map_err(map_err)?;
         Ok(())
     }
 
@@ -253,33 +279,46 @@ impl ApiKeyRepository for PgApiKeyRepository {
     }
 
     async fn revoke(&self, id: ApiKeyId, now: DateTime<Utc>) -> Result<(), RepositoryError> {
-        // Wrap the read-then-write in one transaction with a `FOR UPDATE` row lock, mirroring
-        // `pg_organizations.rs::set_status`'s txn+lock idiom EXACTLY: a plain `find_by_id` +
-        // separate `.update()` races — two concurrent revokes could both read an `Active` row
-        // and the later commit would re-stamp `revoked_at`. `lock_exclusive` serializes them so
-        // the first revoke wins and any later contender reads the already-revoked row here.
+        // Thin one-shot-`UnitOfWork` wrapper, mirroring `issue` above: the `revoke_in` bool
+        // (did this call actually flip Active -> Revoked) is not this method's concern —
+        // `revoke` is a bare success/failure signal, unchanged from its pre-Slice-B contract,
+        // and it's idempotent either way.
         let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        self.revoke_in(&*tx, id, now).await?;
+        tx.commit().await?;
+        Ok(())
+    }
 
-        let Some(model) = api_key::Entity::find_by_id(id.uuid()).lock_exclusive().one(&txn).await.map_err(map_err)? else {
-            return Err(RepositoryError::NotFound);
+    async fn revoke_in(&self, tx: &dyn Transaction, id: ApiKeyId, now: DateTime<Utc>) -> Result<bool, RepositoryError> {
+        // `FOR UPDATE` row lock, mirroring `pg_organizations.rs::set_status`'s txn+lock idiom
+        // EXACTLY: a plain `find_by_id` + separate `.update()` races — two concurrent revokes
+        // could both read an `Active` row and the later commit would re-stamp `revoked_at`.
+        // `lock_exclusive` serializes them so the first revoke wins and any later contender
+        // reads the already-revoked row here.
+        let txn = recover_txn(tx)?;
+
+        let Some(model) = api_key::Entity::find_by_id(id.uuid()).lock_exclusive().one(txn).await.map_err(map_err)? else {
+            // Idempotent no-op (SMA-446 Slice B Task B6, port docs): nothing to revoke — the
+            // caller (`ApiKeyService::revoke`) already resolved the key via `find_by_id`
+            // before opening this transaction, so this only fires on a genuine TOCTOU race
+            // (e.g. a concurrent revoke of the same id winning first).
+            return Ok(false);
         };
 
         if model.status == ApiKeyStatus::Revoked.as_str() {
-            // Idempotent: revoking an already-revoked key is a no-op success — `revoked_at`
-            // stays pinned to whenever it was FIRST set, never re-stamped to this call's `now`
-            // (the lock above guarantees a concurrent first-revoke has already committed by the
+            // Idempotent: revoking an already-revoked key is a no-op — `revoked_at` stays
+            // pinned to whenever it was FIRST set, never re-stamped to this call's `now` (the
+            // lock above guarantees a concurrent first-revoke has already committed by the
             // time a contender observes this branch).
-            txn.commit().await.map_err(map_err)?;
-            return Ok(());
+            return Ok(false);
         }
 
         let mut active = model.into_active_model();
         active.status = Set(ApiKeyStatus::Revoked.as_str().to_string());
         active.revoked_at = Set(Some(now));
-        active.update(&txn).await.map_err(map_err)?;
-
-        txn.commit().await.map_err(map_err)?;
-        Ok(())
+        active.update(txn).await.map_err(map_err)?;
+        Ok(true)
     }
 
     async fn list_by_service_account(&self, sa: &PrincipalId, limit: u64, offset: u64) -> Result<Vec<ApiKey>, RepositoryError> {

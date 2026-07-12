@@ -201,6 +201,7 @@ mod tests {
     use super::*;
     use crate::application::fakes::SeqIds;
     use chrono::Utc;
+    use paigasus_iam_core::Transaction;
     use uuid::Uuid;
 
     fn entry(action: &str) -> AuditEntry {
@@ -263,6 +264,11 @@ mod tests {
             Ok(())
         }
 
+        async fn record(&self, _tx: &dyn Transaction, e: &AuditEntry) -> Result<(), paigasus_iam_core::RepositoryError> {
+            self.recorded.lock().unwrap().push(e.clone());
+            Ok(())
+        }
+
         async fn query(&self, _f: &paigasus_iam_core::AuditFilter) -> Result<Vec<AuditEntry>, paigasus_iam_core::RepositoryError> {
             Ok(vec![])
         }
@@ -297,6 +303,10 @@ mod tests {
     #[async_trait]
     impl AuditLog for HangingAuditLog {
         async fn record_out_of_band(&self, _e: &AuditEntry) -> Result<(), paigasus_iam_core::RepositoryError> {
+            std::future::pending().await
+        }
+
+        async fn record(&self, _tx: &dyn Transaction, _e: &AuditEntry) -> Result<(), paigasus_iam_core::RepositoryError> {
             std::future::pending().await
         }
 

@@ -17,10 +17,14 @@ mod support;
 
 use chrono::{DateTime, SubsecRound, Utc};
 use paigasus_iam::adapters::authz::Generations;
-use paigasus_iam::adapters::persistence::PgRoleGrantStore;
-use paigasus_iam::adapters::persistence::entities::{policy, role, role_grant};
+use paigasus_iam::adapters::id::KernelIdGenerator;
+use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox, policy, role, role_grant};
+use paigasus_iam::adapters::persistence::{PgAuditLog, PgOutbox, PgRoleGrantStore, SeaOrmUnitOfWork};
 use paigasus_iam_core::authz::model::root_prn;
-use paigasus_iam_core::{AuthzError, GrantScope, OrganizationId, PrincipalId, ProjectId, RoleGrant, RoleGrantStore, TeamId, TenancyNodeRef};
+use paigasus_iam_core::{
+    AuditEntry, AuditLog, AuditOutcome, AuthzError, DomainEvent, EventType, GrantScope, IdGenerator, OrganizationId, Outbox, PrincipalId, ProjectId, RoleGrant, RoleGrantStore, TeamId, TenancyNodeRef,
+    UnitOfWork,
+};
 use paigasus_kernel::{Prn, mint_uuid7};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Set, Statement};
 use uuid::Uuid;
@@ -367,4 +371,157 @@ async fn authz_role_grant_project_scoped_round_trips() {
     let listed = store.list_by_principal(&principal).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0], grant, "list_by_principal must reconstruct the exact RoleGrant, including its project-scoped GrantScope");
+}
+
+/// SMA-446 Task B4 — the UoW reference pattern's atomicity proof at the store level:
+/// `PgRoleGrantStore::grant_in` + `PgOutbox::enqueue` + `PgAuditLog::record`, driven through
+/// the SAME `SeaOrmUnitOfWork` transaction and committed together, land as three durable
+/// rows — `role_grant`/`event_outbox`/`audit_log` — sharing the ONE correlation id
+/// `RoleService` mints per mutation (mirrors `tests/outbox_uow_pg.rs`'s own commit-atomicity
+/// scenario, but through the real role-grant store instead of a raw SeaORM insert).
+/// `grant_in` itself must NOT bump `policy_gen` — that is the caller's (`RoleService`'s) own
+/// awaited, post-commit responsibility (`pg_role_grants.rs` module docs), never the store's.
+#[tokio::test]
+async fn grant_in_enqueue_and_record_commit_atomically_sharing_correlation_id() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    let principal_uuid = mint_uuid7(1_700_000_000_007, [8u8; 10]);
+    let org_uuid = Uuid::from_u128(8);
+    seed_principal_and_org(&db, principal_uuid, org_uuid).await;
+    seed_role(&db, "org_admin", now).await;
+
+    let principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", principal_uuid).unwrap());
+    let org = OrganizationId::from_uuid(org_uuid);
+    let grant_id = Uuid::from_u128(200);
+    let grant = make_grant(grant_id, &principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(org.clone())), now);
+
+    let gens = Generations::memory();
+    let store = PgRoleGrantStore::new(db.clone(), gens.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    let outbox = PgOutbox::new();
+    let audit = PgAuditLog::new(db.clone());
+
+    let corr = KernelIdGenerator.new_correlation_id();
+    let event = DomainEvent {
+        id: KernelIdGenerator.new_event_id(),
+        event_type: EventType::RoleGranted,
+        schema_version: 1,
+        aggregate_prn: principal.canonical(),
+        actor_prn: None,
+        occurred_at: now,
+        payload: serde_json::json!({"grant_id": grant_id, "role_key": "org_admin"}),
+        correlation_id: Some(corr),
+    };
+    let entry = AuditEntry {
+        id: KernelIdGenerator.new_audit_id(),
+        occurred_at: now,
+        actor_prn: None,
+        action: "GrantRole".to_string(),
+        resource_prn: Some(org.canonical()),
+        outcome: AuditOutcome::Committed,
+        determining_policies: Vec::new(),
+        detail: serde_json::json!({}),
+        correlation_id: Some(corr),
+    };
+
+    let before = gens.policy_gen().await.unwrap();
+    let tx = uow.begin().await.unwrap();
+    store.grant_in(&*tx, &grant).await.unwrap();
+    outbox.enqueue(&*tx, &event).await.unwrap();
+    audit.record(&*tx, &entry).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(
+        role_grant::Entity::find_by_id(grant_id).one(&db).await.unwrap().is_some(),
+        "the committed role_grant row must be visible"
+    );
+    let outbox_row = event_outbox::Entity::find_by_id(event.id).one(&db).await.unwrap().expect("outbox row present");
+    let audit_row = audit_log::Entity::find_by_id(entry.id).one(&db).await.unwrap().expect("audit row present");
+    assert_eq!(outbox_row.correlation_id, Some(corr));
+    assert_eq!(audit_row.correlation_id, Some(corr));
+    assert_eq!(
+        outbox_row.correlation_id, audit_row.correlation_id,
+        "the outbox event and the audit entry must share one correlation id"
+    );
+
+    assert_eq!(
+        gens.policy_gen().await.unwrap(),
+        before,
+        "grant_in must never bump policy_gen itself — that is the caller's own post-commit responsibility"
+    );
+}
+
+/// Guard D2 (SMA-446 Task B4): a store error mid-txn — here, `grant_in` hitting
+/// `uq_role_grant_principal_role_scope` on a duplicate grant — rolls the WHOLE unit of work
+/// back: an outbox event and an audit entry enqueued/recorded earlier on the SAME
+/// transaction must never become visible either, and `policy_gen` must not move (nothing in
+/// this transaction ever committed).
+#[tokio::test]
+async fn a_store_error_mid_txn_leaves_no_outbox_or_audit_rows_and_no_gen_bump() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    let principal_uuid = mint_uuid7(1_700_000_000_008, [9u8; 10]);
+    let org_uuid = Uuid::from_u128(9);
+    seed_principal_and_org(&db, principal_uuid, org_uuid).await;
+    seed_role(&db, "org_admin", now).await;
+
+    let principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", principal_uuid).unwrap());
+    let org = OrganizationId::from_uuid(org_uuid);
+    let gens = Generations::memory();
+    let store = PgRoleGrantStore::new(db.clone(), gens.clone());
+
+    // Seed a first, successfully committed grant out of band — its (principal, role, scope)
+    // is what the in-txn attempt below will collide with.
+    let first = make_grant(Uuid::from_u128(201), &principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(org.clone())), now);
+    store.grant(&first).await.unwrap();
+    let before = gens.policy_gen().await.unwrap();
+
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    let outbox = PgOutbox::new();
+    let audit = PgAuditLog::new(db.clone());
+    let corr = KernelIdGenerator.new_correlation_id();
+    let event = DomainEvent {
+        id: KernelIdGenerator.new_event_id(),
+        event_type: EventType::RoleGranted,
+        schema_version: 1,
+        aggregate_prn: principal.canonical(),
+        actor_prn: None,
+        occurred_at: now,
+        payload: serde_json::json!({}),
+        correlation_id: Some(corr),
+    };
+    let entry = AuditEntry {
+        id: KernelIdGenerator.new_audit_id(),
+        occurred_at: now,
+        actor_prn: None,
+        action: "GrantRole".to_string(),
+        resource_prn: Some(org.canonical()),
+        outcome: AuditOutcome::Committed,
+        determining_policies: Vec::new(),
+        detail: serde_json::json!({}),
+        correlation_id: Some(corr),
+    };
+
+    let tx = uow.begin().await.unwrap();
+    outbox.enqueue(&*tx, &event).await.unwrap();
+    audit.record(&*tx, &entry).await.unwrap();
+
+    // Same (principal, role, scope) as `first` — `uq_role_grant_principal_role_scope` rejects
+    // it; the txn is now aborted at the DB level and must be dropped, never committed.
+    let dup = make_grant(Uuid::from_u128(202), &principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(org)), now);
+    let err = store.grant_in(&*tx, &dup).await.unwrap_err();
+    assert!(matches!(err, AuthzError::Backend(_)), "expected AuthzError::Backend for a unique-constraint violation, got {err:?}");
+    drop(tx); // no commit -> rollback
+
+    assert!(
+        event_outbox::Entity::find_by_id(event.id).one(&db).await.unwrap().is_none(),
+        "the rolled-back outbox row must never become visible"
+    );
+    assert!(
+        audit_log::Entity::find_by_id(entry.id).one(&db).await.unwrap().is_none(),
+        "the rolled-back audit row must never become visible"
+    );
+    assert_eq!(gens.policy_gen().await.unwrap(), before, "a rolled-back mid-txn failure must not bump policy_gen");
 }

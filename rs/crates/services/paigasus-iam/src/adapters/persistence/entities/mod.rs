@@ -2,6 +2,7 @@
 
 pub mod api_key;
 pub mod audit_log;
+pub mod event_outbox;
 pub mod external_identity;
 pub mod membership;
 pub mod organization;

@@ -12,7 +12,8 @@
 //!   cross-replica, survives restarts. Mirrors `adapters::oidc::redis_cache::RedisJwksCache`'s
 //!   connect/clone-per-call pattern.
 
-use paigasus_iam_core::AuthzError;
+use async_trait::async_trait;
+use paigasus_iam_core::{AuthzError, PolicyGenBumper};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client};
 use std::sync::Arc;
@@ -108,6 +109,37 @@ fn redis_err(e: redis::RedisError) -> AuthzError {
     AuthzError::Backend(Box::new(e))
 }
 
+/// The [`PolicyGenBumper`] port's implementation over a shared [`Generations`] handle
+/// (SMA-446, Slice B): `application::roles::RoleService`'s injected, awaited, post-commit
+/// side effect (the `grant`/`revoke` reference pattern B5–B7 copy). `bump` logs and swallows
+/// its own error — lifted verbatim from the pre-Slice-B `PgRoleGrantStore::
+/// bump_policy_gen_best_effort` (spec §7/D11): the triggering mutation has already
+/// committed by the time this runs, so a Redis-down bump must never fail it; the decision
+/// cache instead self-heals on its next TTL expiry. Keeping this adapter-side (rather than a
+/// direct `Generations` field on `RoleService`) is what lets the application layer depend
+/// only on the `PolicyGenBumper` port, never on `crate::adapters::authz::Generations`
+/// (ADR-0005).
+#[derive(Clone)]
+pub struct GenerationsPolicyGenBumper {
+    gens: Generations,
+}
+
+impl GenerationsPolicyGenBumper {
+    #[must_use]
+    pub fn new(gens: Generations) -> Self {
+        GenerationsPolicyGenBumper { gens }
+    }
+}
+
+#[async_trait]
+impl PolicyGenBumper for GenerationsPolicyGenBumper {
+    async fn bump(&self) {
+        if let Err(err) = self.gens.bump_policy_gen().await {
+            tracing::warn!(error = %err, "GenerationsPolicyGenBumper: policy_gen bump failed after a committed write — authz caches may serve stale data until TTL");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +174,20 @@ mod tests {
 
         assert_eq!(gens.bump_entity_gen().await.unwrap(), 1);
         assert_eq!(gens.policy_gen().await.unwrap(), 2, "entity_gen bump must not affect policy_gen");
+    }
+
+    #[tokio::test]
+    async fn policy_gen_bumper_bumps_the_shared_generations_handle() {
+        let gens = Generations::memory();
+        let bumper = GenerationsPolicyGenBumper::new(gens.clone());
+
+        bumper.bump().await;
+        bumper.bump().await;
+
+        assert_eq!(
+            gens.policy_gen().await.unwrap(),
+            2,
+            "PolicyGenBumper::bump must drive the same counter RoleService reads through Generations"
+        );
     }
 }

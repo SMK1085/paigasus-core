@@ -20,6 +20,7 @@ pub struct IamConfig {
     pub authz: AuthzConfig,
     pub api_keys: ApiKeyConfig,
     pub audit: AuditConfig,
+    pub outbox: OutboxConfig,
 }
 
 /// BYO-IdP OIDC authentication config (spec §6.4). `issuers` is intentionally left
@@ -229,6 +230,34 @@ pub struct AuditConfig {
     pub denial_buffer_capacity: usize,
 }
 
+/// Outbox-relay config (SMA-446 Slice B, Task B9) — the knobs for
+/// [`OutboxRelay`](crate::adapters::events::OutboxRelay), the background drain that turns
+/// committed `event_outbox` rows (written by `PgOutbox::enqueue`, B2) into calls on the
+/// injected `EventPublisher`. Like `[audit]`, every field HAS a sensible default (see
+/// `OutboxDefaults`), so an absent `[outbox]` block entirely is valid config. Unlike `[audit]`,
+/// this block ALSO carries an enable/disable toggle (`relay_enabled`): the relay is wired
+/// directly in `main.rs` off a cloned `db` handle (not through `AppState`), so disabling it is a
+/// pure boot-time no-spawn rather than a runtime knob on an already-composed service — see
+/// `main.rs` for the `warn!` it emits instead when disabled (rows still accrue, undrained).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OutboxConfig {
+    /// When `false`, `main.rs` does not spawn the relay at all — `event_outbox` rows still
+    /// accrue (written inside each triggering mutation's own transaction, unconditionally),
+    /// they are just never drained until an operator re-enables this and restarts. Defaults to
+    /// `true`: the relay is the intended steady-state behavior.
+    pub relay_enabled: bool,
+    /// How long the relay sleeps between drain ticks. Validated non-zero in
+    /// [`IamConfig::validate`] (a zero interval would busy-loop the poll).
+    pub poll_interval_secs: u64,
+    /// Max rows locked (`FOR UPDATE SKIP LOCKED`) and processed per tick. Validated non-zero in
+    /// [`IamConfig::validate`] (a zero batch size would make every tick drain nothing forever).
+    pub batch_size: u64,
+    /// Attempts (publish failures) before a row is parked (`parked = true`, excluded from
+    /// future ticks). Validated non-zero in [`IamConfig::validate`] (a zero limit would park
+    /// every row on its very first failed attempt, before ever getting a retry).
+    pub max_attempts: u32,
+}
+
 // Only the fields that HAVE a default. `database_url` and `authn.issuers` are
 // intentionally absent so a missing value is a hard error at load time.
 #[derive(Serialize)]
@@ -240,6 +269,7 @@ struct Defaults {
     authz: AuthzDefaults,
     api_keys: ApiKeyDefaults,
     audit: AuditDefaults,
+    outbox: OutboxDefaults,
 }
 
 // Mirrors `AuthnConfig` minus `issuers` — deliberately absent, see `AuthnConfig` doc.
@@ -292,6 +322,19 @@ struct AuditDefaults {
     denial_buffer_capacity: usize,
 }
 
+// Mirrors `OutboxConfig` field-for-field. `poll_interval_secs = 5` / `batch_size = 100` /
+// `max_attempts = 5` are the spec-example steady-state values (frequent enough to keep
+// `event_outbox` drained close to real time, generous enough to absorb a burst without an
+// oversized single transaction); `relay_enabled = true` because the relay is the intended
+// steady-state behavior (see `OutboxConfig`'s doc for the disabled path).
+#[derive(Serialize)]
+struct OutboxDefaults {
+    relay_enabled: bool,
+    poll_interval_secs: u64,
+    batch_size: u64,
+    max_attempts: u32,
+}
+
 impl Default for Defaults {
     fn default() -> Self {
         Defaults {
@@ -302,6 +345,7 @@ impl Default for Defaults {
             authz: AuthzDefaults::default(),
             api_keys: ApiKeyDefaults::default(),
             audit: AuditDefaults::default(),
+            outbox: OutboxDefaults::default(),
         }
     }
 }
@@ -367,6 +411,17 @@ impl Default for AuditDefaults {
     }
 }
 
+impl Default for OutboxDefaults {
+    fn default() -> Self {
+        OutboxDefaults {
+            relay_enabled: true,
+            poll_interval_secs: 5,
+            batch_size: 100,
+            max_attempts: 5,
+        }
+    }
+}
+
 // `AuthzConfig` gets a `Default` too (unlike `AuthnConfig`, which can't sensibly have one —
 // `issuers` has no default) so callers that build an `IamConfig` by hand (test support, not
 // through `figment`) can write `authz: AuthzConfig::default()` rather than repeat every field.
@@ -411,6 +466,21 @@ impl Default for AuditConfig {
     fn default() -> Self {
         AuditConfig {
             denial_buffer_capacity: AuditDefaults::default().denial_buffer_capacity,
+        }
+    }
+}
+
+// `OutboxConfig` gets a `Default` too, same rationale as `AuditConfig` above (hand-built test
+// `IamConfig`s can write `outbox: OutboxConfig::default()`). Delegates to `OutboxDefaults` so
+// the two never drift apart.
+impl Default for OutboxConfig {
+    fn default() -> Self {
+        let d = OutboxDefaults::default();
+        OutboxConfig {
+            relay_enabled: d.relay_enabled,
+            poll_interval_secs: d.poll_interval_secs,
+            batch_size: d.batch_size,
+            max_attempts: d.max_attempts,
         }
     }
 }
@@ -598,6 +668,22 @@ impl IamConfig {
         // silently corrected.
         if self.audit.denial_buffer_capacity == 0 {
             return Err("audit.denial_buffer_capacity must be at least 1 (0 makes the denial-audit buffer evict every entry it enqueues)".to_string());
+        }
+
+        // --- SMA-446 Task B9: `[outbox]` config ------------------------------------------------
+        // Each of these three is a divisor of the relay loop's own behavior, the same posture as
+        // the `authz`/`authn`/`api_keys` `*_secs` checks above: a zero `poll_interval_secs` would
+        // busy-loop the poll, a zero `batch_size` would make every tick drain nothing forever, and
+        // a zero `max_attempts` would park every row on its very first failed publish, before it
+        // ever gets a retry.
+        if self.outbox.poll_interval_secs == 0 {
+            return Err("outbox.poll_interval_secs must be at least 1 (0 would busy-loop the relay's poll)".to_string());
+        }
+        if self.outbox.batch_size == 0 {
+            return Err("outbox.batch_size must be at least 1 (0 would make every relay tick drain nothing)".to_string());
+        }
+        if self.outbox.max_attempts == 0 {
+            return Err("outbox.max_attempts must be at least 1 (0 would park every outbox row on its first failed publish attempt)".to_string());
         }
 
         Ok(())
@@ -1508,6 +1594,140 @@ mod tests {
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert_eq!(cfg.audit.denial_buffer_capacity, 128);
             assert!(cfg.validate().is_ok(), "expected an explicit non-zero denial_buffer_capacity to pass validation");
+            Ok(())
+        });
+    }
+
+    // --- SMA-446 Task B9: `[outbox]` config -------------------------------------------------
+
+    #[test]
+    fn outbox_defaults_land_with_no_outbox_block_at_all() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            // A valid `[api_keys]` pepper is still needed for the overall `validate().is_ok()` —
+            // see `authz_defaults_land_with_no_authz_block_at_all`'s identical note.
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.outbox.relay_enabled, "relay_enabled must default to true");
+            assert_eq!(cfg.outbox.poll_interval_secs, 5);
+            assert_eq!(cfg.outbox.batch_size, 100);
+            assert_eq!(cfg.outbox.max_attempts, 5);
+            assert!(cfg.validate().is_ok(), "outbox defaults alone should pass validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_a_zero_outbox_poll_interval() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [outbox]
+                        poll_interval_secs = 0
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+
+                        [api_keys]
+                        pepper = "{}"
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "expected outbox.poll_interval_secs = 0 to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_a_zero_outbox_batch_size() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [outbox]
+                        batch_size = 0
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+
+                        [api_keys]
+                        pepper = "{}"
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "expected outbox.batch_size = 0 to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_a_zero_outbox_max_attempts() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [outbox]
+                        max_attempts = 0
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+
+                        [api_keys]
+                        pepper = "{}"
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "expected outbox.max_attempts = 0 to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_accepts_an_explicit_outbox_block_including_relay_disabled() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [outbox]
+                        relay_enabled = false
+                        poll_interval_secs = 10
+                        batch_size = 250
+                        max_attempts = 8
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+
+                        [api_keys]
+                        pepper = "{}"
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(!cfg.outbox.relay_enabled, "relay_enabled = false must be honored (not just a default)");
+            assert_eq!(cfg.outbox.poll_interval_secs, 10);
+            assert_eq!(cfg.outbox.batch_size, 250);
+            assert_eq!(cfg.outbox.max_attempts, 8);
+            assert!(cfg.validate().is_ok(), "expected a fully-populated, valid [outbox] block (relay disabled) to pass validation");
             Ok(())
         });
     }

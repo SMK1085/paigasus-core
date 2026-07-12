@@ -38,13 +38,35 @@
 //! reads `principal.status` (brief), and (2) a disabled SA is already blocked twice over
 //! without it — this archive's own cache-evict step below, plus Task 18's authentication-time
 //! `PrincipalStatus` check.
+//!
+//! **SMA-446 Slice B Task B7 — the Unit-of-Work reference pattern, OUTBOX-ONLY (copied from
+//! `RoleService::grant`/`revoke`, `application::roles`'s module docs, minus the audit/gen-bump
+//! halves — principal creation/archive are NOT in the AC audit set, mirrors `application::
+//! create_user`'s own B7 posture):** `create` drives the principal+SA insert and its
+//! `iam.principal.created` `DomainEvent` through ONE `UnitOfWork`-scoped transaction
+//! (`repo.create_in`, `outbox.enqueue`, `tx.commit()`); `archive` drives `set_principal_status_in`
+//! plus its `iam.principal.archived` event through another. Neither writes an `AuditEntry` or
+//! bumps a generation counter (`ServiceAccountServiceDeps` has no `audit`/`gen_bumper` field). A
+//! duplicate-name-per-owner unique-violation inside `create_in` (or any other mid-txn failure)
+//! rolls the whole unit of work back before `Outbox::enqueue` is ever reached, so a rejected
+//! create emits nothing — the existing `Conflict(ServiceAccountNameTaken)` ->
+//! `ServiceAccountNameConflict` mapping is unchanged.
+//!
+//! **`archive`'s cache-evict moves POST-COMMIT (SECURITY-CRITICAL, unchanged intent, module
+//! docs above):** the evict loop (`keys.list_ids_by_service_account` -> `cache.evict` per id)
+//! now runs AFTER `tx.commit()` — still AWAITED, so it's guaranteed to have happened by the time
+//! `archive` returns — rather than immediately after the (previously untransacted)
+//! `set_principal_status` call. This mirrors `ApiKeyService::revoke`'s own B6 move: an evict for
+//! a disable that never actually committed (rolled back mid-txn) must never fire, and a disable
+//! that DID commit must always evict, unconditionally, once it has.
 
 use crate::adapters::api_keys::ApiKeyValidationCache;
 use crate::application::authorize::Authorize;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
 use paigasus_iam_core::{
-    Action, ApiKeyRepository, Clock, IdGenerator, Principal, PrincipalId, PrincipalKind, PrincipalStatus, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, TenancyNodeRef,
+    Action, ApiKeyRepository, Clock, DomainEvent, EventType, IdGenerator, Outbox, Principal, PrincipalId, PrincipalKind, PrincipalStatus, ServiceAccount, ServiceAccountRecord,
+    ServiceAccountRepository, TenancyNodeRef, UnitOfWork,
 };
 use paigasus_kernel::Prn;
 use std::sync::Arc;
@@ -61,15 +83,35 @@ fn owner_resource_prn(owner: &TenancyNodeRef) -> Prn {
 }
 
 /// Service-account lifecycle use cases. `keys`/`cache` are shared `Arc<dyn ...>` handles
-/// (module docs); `repo`/`ids`/`clock` stay generic-DI.
+/// (module docs); `uow`/`outbox` are SMA-446 Slice B Task B7's Unit-of-Work reference pattern
+/// (module docs): `create`/`archive` drive their mutation + outbox event through `uow`
+/// atomically. `repo`/`ids`/`clock` stay generic-DI.
 #[derive(Clone)]
 pub struct ServiceAccountService<R, I, C> {
     repo: R,
     keys: Arc<dyn ApiKeyRepository>,
     cache: Arc<dyn ApiKeyValidationCache>,
     authorize: Authorize,
+    uow: Arc<dyn UnitOfWork>,
+    outbox: Arc<dyn Outbox>,
     ids: I,
     clock: C,
+}
+
+/// Named-field constructor params for [`ServiceAccountService::new`] (SMA-446 Slice B Task
+/// B7) — copies `application::roles::RoleServiceDeps`'s DI-params idiom (module docs there):
+/// one field per dependency, built with struct syntax at the call site so each argument is
+/// self-labeling. Deliberately has NO `audit`/`gen_bumper` field — module docs: principal
+/// creation/archive are OUTBOX-ONLY, not in the AC audit set.
+pub struct ServiceAccountServiceDeps<R, I, C> {
+    pub repo: R,
+    pub keys: Arc<dyn ApiKeyRepository>,
+    pub cache: Arc<dyn ApiKeyValidationCache>,
+    pub authorize: Authorize,
+    pub uow: Arc<dyn UnitOfWork>,
+    pub outbox: Arc<dyn Outbox>,
+    pub ids: I,
+    pub clock: C,
 }
 
 impl<R, I, C> ServiceAccountService<R, I, C>
@@ -78,14 +120,16 @@ where
     I: IdGenerator,
     C: Clock,
 {
-    pub fn new(repo: R, keys: Arc<dyn ApiKeyRepository>, cache: Arc<dyn ApiKeyValidationCache>, authorize: Authorize, ids: I, clock: C) -> Self {
+    pub fn new(deps: ServiceAccountServiceDeps<R, I, C>) -> Self {
         Self {
-            repo,
-            keys,
-            cache,
-            authorize,
-            ids,
-            clock,
+            repo: deps.repo,
+            keys: deps.keys,
+            cache: deps.cache,
+            authorize: deps.authorize,
+            uow: deps.uow,
+            outbox: deps.outbox,
+            ids: deps.ids,
+            clock: deps.clock,
         }
     }
 
@@ -96,7 +140,10 @@ where
     /// isn't allowed to create here shouldn't learn whether their proposed name would even be
     /// valid. The returned record's `status` is `Active` WITHOUT a re-query — a freshly created
     /// SA's principal is minted `Active` right above, so there's nothing a follow-up read could
-    /// tell us that we don't already know.
+    /// tell us that we don't already know. SMA-446 Slice B Task B7 (module docs — OUTBOX-ONLY):
+    /// the principal+SA insert and its `iam.principal.created` event share ONE UoW transaction;
+    /// a duplicate-name-per-owner unique-violation inside `create_in` rolls the whole unit of
+    /// work back before the event is ever enqueued.
     pub async fn create(&self, actor: &Prn, owner: TenancyNodeRef, name: &str) -> Result<ServiceAccountRecord, TenancyError> {
         self.authorize.check(actor, Action::CreateServiceAccount, &owner_resource_prn(&owner)).await?;
 
@@ -104,7 +151,23 @@ where
         let now = self.clock.now();
         let principal = Principal::new(id.clone(), PrincipalKind::ServiceAccount, PrincipalStatus::Active, now, now);
         let sa = ServiceAccount::new(id, owner, name, now)?;
-        self.repo.create(&principal, &sa).await?;
+
+        let event = DomainEvent {
+            id: self.ids.new_event_id(),
+            event_type: EventType::PrincipalCreated,
+            schema_version: 1,
+            aggregate_prn: sa.principal_id.canonical(),
+            actor_prn: Some(actor.canonical()),
+            occurred_at: now,
+            payload: serde_json::json!({"principal_id": sa.principal_id.uuid(), "kind": "service_account", "name": sa.name}),
+            correlation_id: Some(self.ids.new_correlation_id()),
+        };
+
+        let tx = self.uow.begin().await?;
+        self.repo.create_in(&*tx, &principal, &sa).await?;
+        self.outbox.enqueue(&*tx, &event).await?;
+        tx.commit().await?;
+
         Ok(ServiceAccountRecord {
             account: sa,
             status: PrincipalStatus::Active,
@@ -131,16 +194,37 @@ where
     /// Archives (disables) a service account: `NotFound` if it doesn't exist; authorizes
     /// `Action::ArchiveServiceAccount` AT its OWNER node (found via the lookup above, since the
     /// caller only supplies the SA's own id); disables the underlying `Principal` (D16: status
-    /// lives there, not on `ServiceAccount`); then evicts every one of the SA's cached API-key
-    /// validations (`keys.list_ids_by_service_account` -> `cache.evict` per id) — the
-    /// SECURITY-CRITICAL step (module docs): without it, a disabled SA's already-cached keys
-    /// would keep authenticating until their cache entries expire on their own.
+    /// lives there, not on `ServiceAccount`) and its `iam.principal.archived` event atomically
+    /// (SMA-446 Slice B Task B7, module docs — OUTBOX-ONLY); then, POST-COMMIT and AWAITED,
+    /// evicts every one of the SA's cached API-key validations (`keys.list_ids_by_service_account`
+    /// -> `cache.evict` per id) — the SECURITY-CRITICAL step (module docs): without it, a
+    /// disabled SA's already-cached keys would keep authenticating until their cache entries
+    /// expire on their own. The evict is only ever reached once `tx.commit()` above has actually
+    /// succeeded — a rolled-back mid-txn failure must never evict a cache entry for a disable
+    /// that never actually happened.
     pub async fn archive(&self, actor: &Prn, id: &PrincipalId) -> Result<(), TenancyError> {
         let record = self.repo.find(id).await?.ok_or(TenancyError::NotFound)?;
         self.authorize.check(actor, Action::ArchiveServiceAccount, &owner_resource_prn(&record.account.owner)).await?;
 
-        self.repo.set_principal_status(id, PrincipalStatus::Disabled).await?;
+        let now = self.clock.now();
+        let event = DomainEvent {
+            id: self.ids.new_event_id(),
+            event_type: EventType::PrincipalArchived,
+            schema_version: 1,
+            aggregate_prn: id.canonical(),
+            actor_prn: Some(actor.canonical()),
+            occurred_at: now,
+            payload: serde_json::json!({"principal_id": id.uuid(), "kind": "service_account"}),
+            correlation_id: Some(self.ids.new_correlation_id()),
+        };
 
+        let tx = self.uow.begin().await?;
+        self.repo.set_principal_status_in(&*tx, id, PrincipalStatus::Disabled).await?;
+        self.outbox.enqueue(&*tx, &event).await?;
+        tx.commit().await?;
+
+        // POST-COMMIT, AWAITED (module docs, SECURITY-CRITICAL): only reachable once the
+        // transaction above has actually committed — never for a rolled-back archive.
         let key_ids = self.keys.list_ids_by_service_account(id).await?;
         for key_id in key_ids {
             self.cache.evict(key_id).await;
@@ -153,9 +237,10 @@ where
 mod tests {
     use super::*;
     use crate::adapters::api_keys::{CachedValidation, MemoryApiKeyCache};
-    use crate::application::fakes::{FakeAuthorizer, FixedClock, InMemoryApiKeys, InMemoryServiceAccounts, SeqIds};
+    use crate::application::fakes::{FakeAuthorizer, FakeOutbox, FakeUnitOfWork, FixedClock, InMemoryApiKeys, InMemoryServiceAccounts, SeqIds};
+    use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use paigasus_iam_core::{ApiKey, ApiKeyId, ApiKeyStatus, OrganizationId};
+    use paigasus_iam_core::{ApiKey, ApiKeyId, ApiKeyStatus, OrganizationId, RepositoryError, Transaction};
     use uuid::Uuid;
 
     fn actor_prn(n: u128) -> Prn {
@@ -168,6 +253,37 @@ mod tests {
 
     fn missing_id(n: u128) -> PrincipalId {
         PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(n)).unwrap())
+    }
+
+    /// Bundles a `ServiceAccountService` together with the SMA-446 Slice B Task B7 fakes it was
+    /// built over, so a test can assert on exactly what — and how many — events `create`/
+    /// `archive` emitted (mirrors `application::roles::tests::ServiceWithFakes`).
+    struct ServiceWithFakes {
+        svc: ServiceAccountService<InMemoryServiceAccounts, SeqIds, FixedClock>,
+        repo: InMemoryServiceAccounts,
+        keys: Arc<InMemoryApiKeys>,
+        cache: Arc<MemoryApiKeyCache>,
+        outbox: FakeOutbox,
+    }
+
+    /// Builds a service over fresh, empty backing stores (including a fresh, unshared
+    /// `FakeUnitOfWork`/`FakeOutbox`, SMA-446 Slice B Task B7).
+    fn new_service_with_fakes(fake: FakeAuthorizer) -> ServiceWithFakes {
+        let repo = InMemoryServiceAccounts::default();
+        let keys = Arc::new(InMemoryApiKeys::default());
+        let cache = Arc::new(MemoryApiKeyCache::new(30));
+        let outbox = FakeOutbox::default();
+        let svc = ServiceAccountService::new(ServiceAccountServiceDeps {
+            repo: repo.clone(),
+            keys: keys.clone(),
+            cache: cache.clone(),
+            authorize: Authorize::new(Arc::new(fake)),
+            uow: Arc::new(FakeUnitOfWork),
+            outbox: Arc::new(outbox.clone()),
+            ids: SeqIds::default(),
+            clock: FixedClock::default(),
+        });
+        ServiceWithFakes { svc, repo, keys, cache, outbox }
     }
 
     /// Builds a service over fresh, empty backing stores. Returns the `InMemoryServiceAccounts`
@@ -186,11 +302,40 @@ mod tests {
         Arc<InMemoryApiKeys>,
         Arc<MemoryApiKeyCache>,
     ) {
-        let repo = InMemoryServiceAccounts::default();
-        let keys = Arc::new(InMemoryApiKeys::default());
-        let cache = Arc::new(MemoryApiKeyCache::new(30));
-        let svc = ServiceAccountService::new(repo.clone(), keys.clone(), cache.clone(), Authorize::new(Arc::new(fake)), SeqIds::default(), FixedClock::default());
+        let ServiceWithFakes { svc, repo, keys, cache, .. } = new_service_with_fakes(fake);
         (svc, repo, keys, cache)
+    }
+
+    /// A `ServiceAccountRepository` whose `set_principal_status_in` always fails — simulates a
+    /// store error mid-txn (mirrors `application::api_keys::tests::FailingRevokeApiKeys`):
+    /// `ServiceAccountService::archive` must roll back before ever touching the outbox, and —
+    /// the SECURITY-CRITICAL part this task adds — must NEVER evict the SA's cached key
+    /// validations for an archive that never actually committed. `create`/`find`/etc. all
+    /// delegate to a real backing `InMemoryServiceAccounts` so a test can seed/read normally;
+    /// only `set_principal_status_in` is overridden.
+    #[derive(Clone, Default)]
+    struct FailingArchiveServiceAccounts(InMemoryServiceAccounts);
+
+    #[async_trait]
+    impl ServiceAccountRepository for FailingArchiveServiceAccounts {
+        async fn create(&self, principal: &Principal, sa: &ServiceAccount) -> Result<(), RepositoryError> {
+            self.0.create(principal, sa).await
+        }
+        async fn create_in(&self, tx: &dyn Transaction, principal: &Principal, sa: &ServiceAccount) -> Result<(), RepositoryError> {
+            self.0.create_in(tx, principal, sa).await
+        }
+        async fn find(&self, id: &PrincipalId) -> Result<Option<ServiceAccountRecord>, RepositoryError> {
+            self.0.find(id).await
+        }
+        async fn list_by_owner(&self, owner: &TenancyNodeRef, limit: u64, offset: u64) -> Result<Vec<ServiceAccountRecord>, RepositoryError> {
+            self.0.list_by_owner(owner, limit, offset).await
+        }
+        async fn set_principal_status(&self, id: &PrincipalId, status: PrincipalStatus) -> Result<(), RepositoryError> {
+            self.0.set_principal_status(id, status).await
+        }
+        async fn set_principal_status_in(&self, _tx: &dyn Transaction, _id: &PrincipalId, _status: PrincipalStatus) -> Result<(), RepositoryError> {
+            Err(RepositoryError::Backend(Box::new(std::io::Error::other("simulated mid-txn store failure"))))
+        }
     }
 
     #[tokio::test]
@@ -229,12 +374,42 @@ mod tests {
         let owner = owner_org(3);
         let fake = FakeAuthorizer::default();
         fake.allow(Action::CreateServiceAccount, &owner_resource_prn(&owner));
-        let (svc, ..) = new_service(fake);
+        let ServiceWithFakes { svc, outbox, .. } = new_service_with_fakes(fake);
         let actor = actor_prn(1);
 
         svc.create(&actor, owner.clone(), "dup").await.unwrap();
+        assert_eq!(outbox.0.lock().unwrap().len(), 1, "sanity: the first create enqueued its own event");
+
         let err = svc.create(&actor, owner, "dup").await.unwrap_err();
         assert_eq!(err, TenancyError::ServiceAccountNameConflict, "must surface as a 409 Conflict, not Internal");
+
+        // SMA-446 Slice B Task B7: the rolled-back second create must not enqueue a second
+        // event — the unique-violation inside `create_in` rolls the whole unit of work back
+        // before `Outbox::enqueue` is ever reached.
+        assert_eq!(outbox.0.lock().unwrap().len(), 1, "a rejected duplicate-name create must not enqueue an event");
+    }
+
+    /// SMA-446 Slice B Task B7 — the UoW reference pattern's core contract for `create`:
+    /// enqueues exactly one `iam.principal.created` `DomainEvent`, with a payload carrying
+    /// `principal_id`/`kind`/`name`.
+    #[tokio::test]
+    async fn create_emits_one_principal_created_event() {
+        let owner = owner_org(20);
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::CreateServiceAccount, &owner_resource_prn(&owner));
+        let ServiceWithFakes { svc, outbox, .. } = new_service_with_fakes(fake);
+        let actor = actor_prn(1);
+
+        let sa = svc.create(&actor, owner, "ci-bot").await.unwrap();
+
+        let events = outbox.0.lock().unwrap();
+        assert_eq!(events.len(), 1, "create must enqueue exactly one domain event");
+        assert_eq!(events[0].event_type, EventType::PrincipalCreated);
+        assert_eq!(events[0].aggregate_prn, sa.account.principal_id.canonical());
+        assert_eq!(events[0].actor_prn, Some(actor.canonical()));
+        assert_eq!(events[0].payload["principal_id"], serde_json::json!(sa.account.principal_id.uuid()));
+        assert_eq!(events[0].payload["kind"], serde_json::json!("service_account"));
+        assert_eq!(events[0].payload["name"], serde_json::json!("ci-bot"));
     }
 
     #[tokio::test]
@@ -243,7 +418,7 @@ mod tests {
         let fake = FakeAuthorizer::default();
         fake.allow(Action::CreateServiceAccount, &owner_resource_prn(&owner));
         fake.allow(Action::ArchiveServiceAccount, &owner_resource_prn(&owner));
-        let (svc, repo, keys, cache) = new_service(fake);
+        let ServiceWithFakes { svc, repo, keys, cache, outbox } = new_service_with_fakes(fake);
         let actor = actor_prn(1);
 
         let sa = svc.create(&actor, owner.clone(), "ci-bot").await.unwrap();
@@ -290,6 +465,77 @@ mod tests {
         // The read path itself agrees: `find`'s returned `status` reflects the archive too.
         let after = repo.find(&sa.account.principal_id).await.unwrap().expect("row present");
         assert_eq!(after.status, PrincipalStatus::Disabled);
+
+        // SMA-446 Slice B Task B7: `archive` enqueued its own `iam.principal.archived` event
+        // (index 1 — index 0 is `create`'s own `iam.principal.created`).
+        let events = outbox.0.lock().unwrap();
+        assert_eq!(events.len(), 2, "create + archive must each enqueue exactly one event");
+        assert_eq!(events[1].event_type, EventType::PrincipalArchived);
+        assert_eq!(events[1].aggregate_prn, sa.account.principal_id.canonical());
+        assert_eq!(events[1].actor_prn, Some(actor.canonical()));
+        assert_eq!(events[1].payload["principal_id"], serde_json::json!(sa.account.principal_id.uuid()));
+    }
+
+    /// SMA-446 Slice B Task B7, SECURITY-CRITICAL: an archive whose mutation rolls back
+    /// mid-txn (here, `set_principal_status_in` failing, guard D2's analogue) must NEVER evict
+    /// the SA's cached key validations — mirrors `application::api_keys::tests::
+    /// revoke_never_evicts_cache_when_the_mutation_rolls_back`.
+    #[tokio::test]
+    async fn archive_never_evicts_the_cache_when_the_mutation_rolls_back() {
+        let owner = owner_org(7);
+        let fake = FakeAuthorizer::default();
+        fake.allow(Action::CreateServiceAccount, &owner_resource_prn(&owner));
+        fake.allow(Action::ArchiveServiceAccount, &owner_resource_prn(&owner));
+
+        let failing_repo = FailingArchiveServiceAccounts::default();
+        let keys = Arc::new(InMemoryApiKeys::default());
+        let cache = Arc::new(MemoryApiKeyCache::new(30));
+        let svc = ServiceAccountService::new(ServiceAccountServiceDeps {
+            repo: failing_repo,
+            keys: keys.clone(),
+            cache: cache.clone(),
+            authorize: Authorize::new(Arc::new(fake)),
+            uow: Arc::new(FakeUnitOfWork),
+            outbox: Arc::new(FakeOutbox::default()),
+            ids: SeqIds::default(),
+            clock: FixedClock::default(),
+        });
+        let actor = actor_prn(1);
+
+        let sa = svc.create(&actor, owner.clone(), "ci-bot").await.unwrap();
+
+        let key_id = ApiKeyId::from_uuid(Uuid::from_u128(700));
+        let key = ApiKey {
+            id: key_id,
+            service_account_id: sa.account.principal_id.clone(),
+            scope: owner,
+            prefix: "pgs_sk_test".to_string(),
+            status: ApiKeyStatus::Active,
+            expires_at: None,
+            last_used_at: None,
+            created_at: Utc.timestamp_opt(0, 0).unwrap(),
+            revoked_at: None,
+            scope_actions: Vec::new(),
+            scope_roles: Vec::new(),
+        };
+        keys.issue(&key, b"hash").await.unwrap();
+        cache
+            .put(
+                key_id,
+                &CachedValidation {
+                    principal_id: sa.account.principal_id.clone(),
+                    sa_status: PrincipalStatus::Active,
+                    expires_at: None,
+                    key_hash: b"hash".to_vec(),
+                },
+            )
+            .await;
+        assert!(cache.get(key_id).await.is_some(), "sanity: the cache entry exists before the failed archive");
+
+        let err = svc.archive(&actor, &sa.account.principal_id).await.unwrap_err();
+        assert_eq!(err, TenancyError::Internal, "a Backend error from a mid-txn store failure maps to Internal");
+
+        assert!(cache.get(key_id).await.is_some(), "a rolled-back archive must NOT evict the cache — SECURITY-CRITICAL");
     }
 
     #[tokio::test]

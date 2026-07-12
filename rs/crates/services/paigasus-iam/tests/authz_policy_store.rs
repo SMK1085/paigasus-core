@@ -5,6 +5,15 @@
 //! `put`/`delete` succeeds and bumps `policy_gen`; an invalid Cedar source fails schema
 //! validation before ever touching the database; `list_all` returns every persisted row.
 //!
+//! SMA-446 Slice B Task B5 additionally covers `put_in`/`delete_in` directly (the txn-scoped
+//! primitives `PolicyService::put`/`delete` actually drive): the SAME same-content-absorbs /
+//! different-content-`Conflict` semantics as `put`'s own race tests above, but through a
+//! caller-owned `SeaOrmUnitOfWork` transaction and a SAVEPOINT rather than a fresh connection
+//! — proving the outer UoW txn survives both a savepoint rollback (absorb) and a savepoint
+//! rollback plus `Conflict` (different content); and `put_in`/`Outbox::enqueue`/
+//! `AuditLog::record` commit atomically sharing one correlation id, mirroring
+//! `tests/authz_role_grants.rs`'s own B4 atomicity proof.
+//!
 //! Runs against an ephemeral Postgres in Docker. In CI (`CI` env set) a missing Docker
 //! daemon is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note —
 //! same gating pattern as `tests/roundtrip.rs`.
@@ -13,11 +22,12 @@ mod support;
 
 use chrono::{DateTime, SubsecRound, Utc};
 use paigasus_iam::adapters::authz::Generations;
-use paigasus_iam::adapters::persistence::PgPolicyStore;
-use paigasus_iam::adapters::persistence::entities::policy;
-use paigasus_iam_core::authz::model::PolicyKind;
-use paigasus_iam_core::{AuthzError, PolicyDocument, PolicyStore};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, Set, TransactionTrait};
+use paigasus_iam::adapters::id::KernelIdGenerator;
+use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox, policy};
+use paigasus_iam::adapters::persistence::{PgAuditLog, PgOutbox, PgPolicyStore, SeaOrmUnitOfWork};
+use paigasus_iam_core::authz::model::{PolicyKind, root_prn};
+use paigasus_iam_core::{AuditEntry, AuditLog, AuditOutcome, AuthzError, DomainEvent, EventType, IdGenerator, Outbox, PolicyDocument, PolicyStore, PutOutcome, UnitOfWork};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 
 /// A well-formed, schema-valid static policy document (mirrors `authz::schema`'s own
 /// "well-formed" test fixture).
@@ -319,4 +329,246 @@ async fn list_all_returns_every_inserted_row() {
     let ids: Vec<_> = all.iter().map(|d| d.policy_id.as_str()).collect();
     assert!(ids.contains(&"system-listed"), "seeded system row missing from list_all: {ids:?}");
     assert!(ids.contains(&"static-listed"), "put row missing from list_all: {ids:?}");
+}
+
+/// SMA-446 Slice B Task B5 — the crux, at the store level: a same-content unique-violation
+/// race, replayed through `put_in` on a caller-owned UoW transaction, must absorb into
+/// `PutOutcome::AbsorbedIdempotent` via a SAVEPOINT rather than aborting the whole `tx` —
+/// proven by writing something else on the SAME outer `tx` afterward and committing
+/// successfully (savepoint isolation, not "this transaction is now aborted"). Manufactures
+/// the race deterministically, exactly like
+/// `concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_conflict` below, but
+/// with IDENTICAL content this time (the cold-boot `reconcile_starter` race, SMA-444 Task 17
+/// follow-up): a plain pre-`commit`-then-`put_in` sequence would just take the ordinary
+/// UPDATE path (`existing = Some`) and never touch the savepoint-INSERT branch this test
+/// targets, so racer A's INSERT must still be uncommitted when racer B's `put_in` runs its
+/// own existence check.
+#[tokio::test]
+async fn put_in_absorbs_a_same_content_savepoint_conflict_and_the_outer_txn_stays_usable() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+    let doc = valid_static_doc("savepoint-absorb", false, now);
+
+    // Racer A: insert directly (bypassing `PgPolicyStore`) and hold the transaction open
+    // uncommitted — so racer B's existence check still sees no row (MVCC visibility) and
+    // itself attempts an INSERT, which Postgres blocks on A's uncommitted row.
+    let txn_a = db.begin().await.unwrap();
+    policy::ActiveModel {
+        policy_id: Set(doc.policy_id.clone()),
+        kind: Set("static".to_string()),
+        source: Set(doc.source.clone()),
+        description: Set(Some(doc.description.clone())),
+        system: Set(doc.system),
+        created_at: Set(doc.created_at),
+        updated_at: Set(doc.updated_at),
+    }
+    .insert(&txn_a)
+    .await
+    .unwrap();
+
+    // Racer B: `put_in` on a caller-owned UoW transaction, spawned to run concurrently, with
+    // the SAME content as A.
+    let gens = Generations::memory();
+    let store = PgPolicyStore::new(db.clone(), gens);
+    let store_b = store.clone();
+    let doc_b = doc.clone();
+    let uow_b = SeaOrmUnitOfWork::new(db.clone());
+    let put_b = tokio::spawn(async move {
+        let tx = uow_b.begin().await.expect("begin");
+        let outcome = store_b.put_in(&*tx, &doc_b).await;
+        (tx, outcome)
+    });
+
+    // Give racer B's task time to actually reach (and block inside) its own savepoint INSERT
+    // before A commits — comfortably longer than a local Postgres round-trip even under load.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    txn_a.commit().await.unwrap();
+
+    let (tx_b, outcome_b) = put_b.await.unwrap();
+    let outcome = outcome_b.unwrap();
+    assert!(matches!(outcome, PutOutcome::AbsorbedIdempotent), "expected AbsorbedIdempotent, got {outcome:?}");
+
+    // The outer UoW txn must still be usable after the savepoint rollback — write something
+    // else on it and commit successfully.
+    let sibling = valid_static_doc("savepoint-absorb-sibling", false, now);
+    let sibling_outcome = store.put_in(&*tx_b, &sibling).await.unwrap();
+    assert!(matches!(sibling_outcome, PutOutcome::Inserted), "expected Inserted, got {sibling_outcome:?}");
+    tx_b.commit().await.expect("outer txn must still be able to commit after the savepoint rollback");
+
+    let all = store.list_all().await.unwrap();
+    assert!(all.iter().any(|d| d.policy_id == "savepoint-absorb-sibling"), "the outer txn's later write must have committed");
+    assert_eq!(
+        all.iter().filter(|d| d.policy_id == "savepoint-absorb").count(),
+        1,
+        "the absorbed put must not have created a duplicate row"
+    );
+}
+
+/// SMA-446 Slice B Task B5's other half of the crux: a DIFFERENT-content race through
+/// `put_in` must still surface `AuthzError::Conflict` (never a silent absorb), and — same as
+/// the same-content case above — the caller's outer UoW `tx` must remain usable afterward,
+/// proving the savepoint rollback isolated the failed INSERT without aborting `tx` at the
+/// Postgres level. Manufactures the race deterministically exactly like
+/// `concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_conflict` above:
+/// holds racer A's INSERT open uncommitted (so racer B's existence check sees no row and
+/// itself attempts an INSERT, which Postgres blocks on A's uncommitted row) inside racer B's
+/// own savepoint, then commits A once B's `put_in` is in flight, forcing B's blocked INSERT
+/// to resolve into a genuine unique-constraint violation.
+#[tokio::test]
+async fn put_in_surfaces_a_different_content_savepoint_conflict_and_the_outer_txn_stays_usable() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    let mut doc_a = valid_static_doc("savepoint-conflict", false, now);
+    doc_a.description = "racer A's document".to_string();
+    let mut doc_b = valid_static_doc("savepoint-conflict", false, now);
+    doc_b.source = r#"permit(principal, action == Pgs::Iam::Action::"CreateOrganization", resource);"#.to_string();
+    doc_b.description = "racer B's document".to_string();
+
+    // Racer A: insert directly (bypassing `PgPolicyStore`, mirroring `seed_system_policy`'s
+    // established direct-entity pattern) and hold the transaction open uncommitted.
+    let txn_a = db.begin().await.unwrap();
+    policy::ActiveModel {
+        policy_id: Set(doc_a.policy_id.clone()),
+        kind: Set("static".to_string()),
+        source: Set(doc_a.source.clone()),
+        description: Set(Some(doc_a.description.clone())),
+        system: Set(doc_a.system),
+        created_at: Set(doc_a.created_at),
+        updated_at: Set(doc_a.updated_at),
+    }
+    .insert(&txn_a)
+    .await
+    .unwrap();
+
+    // Racer B: `put_in` on a caller-owned UoW transaction, spawned to run concurrently.
+    let gens = Generations::memory();
+    let store = PgPolicyStore::new(db.clone(), gens);
+    let store_b = store.clone();
+    let uow_b = SeaOrmUnitOfWork::new(db.clone());
+    let put_b = tokio::spawn(async move {
+        let tx = uow_b.begin().await.expect("begin");
+        let outcome = store_b.put_in(&*tx, &doc_b).await;
+        (tx, outcome)
+    });
+
+    // Give racer B's task time to actually reach (and block inside) its own savepoint INSERT
+    // before A commits — comfortably longer than a local Postgres round-trip even under load.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    txn_a.commit().await.unwrap();
+
+    let (tx_b, outcome_b) = put_b.await.unwrap();
+    assert!(
+        matches!(&outcome_b, Err(AuthzError::Conflict(id)) if id == "savepoint-conflict"),
+        "the losing racer must see AuthzError::Conflict via the savepoint path, not a silent absorb: {outcome_b:?}"
+    );
+
+    // Savepoint isolation: B's outer UoW txn must still be usable after the savepoint
+    // rollback — write something else on it and commit successfully.
+    let sibling = valid_static_doc("savepoint-conflict-sibling", false, now);
+    let sibling_outcome = store.put_in(&*tx_b, &sibling).await.unwrap();
+    assert!(matches!(sibling_outcome, PutOutcome::Inserted), "expected Inserted, got {sibling_outcome:?}");
+    tx_b.commit().await.expect("outer txn must still be able to commit after the conflicting savepoint rollback");
+
+    let all = store.list_all().await.unwrap();
+    assert!(
+        all.iter().any(|d| d.policy_id == "savepoint-conflict-sibling"),
+        "the outer txn's later write must have committed after the conflict"
+    );
+    let matches: Vec<_> = all.iter().filter(|d| d.policy_id == "savepoint-conflict").collect();
+    assert_eq!(matches.len(), 1, "exactly one row must exist for the conflicted id: {matches:?}");
+    assert_eq!(matches[0].description, "racer A's document", "the stored row must be racer A's — the transaction that committed");
+}
+
+/// A rejected `put_in` on an existing system row must never even open a savepoint — proven
+/// by writing something else on the same outer `tx` afterward and committing successfully
+/// (the rejection is a pure read-then-reject, no write of ours ever touched `tx`).
+#[tokio::test]
+async fn put_in_on_an_existing_system_policy_is_rejected_before_any_write() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+    seed_system_policy(&db, "system-policy-put-in", now).await;
+
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    let tx = uow.begin().await.expect("begin");
+    let edit_attempt = valid_static_doc("system-policy-put-in", true, now);
+
+    let err = store.put_in(&*tx, &edit_attempt).await.unwrap_err();
+    assert!(matches!(&err, AuthzError::SystemImmutable(id) if id == "system-policy-put-in"), "expected SystemImmutable, got {err:?}");
+
+    let sibling = valid_static_doc("system-policy-put-in-sibling", false, now);
+    let outcome = store.put_in(&*tx, &sibling).await.unwrap();
+    assert!(matches!(outcome, PutOutcome::Inserted), "expected Inserted, got {outcome:?}");
+    tx.commit().await.expect("outer txn must still be usable after the rejected system-row edit");
+}
+
+/// SMA-446 Task B5 — the UoW reference pattern's atomicity proof at the store level (mirrors
+/// `tests/authz_role_grants.rs::grant_in_enqueue_and_record_commit_atomically_sharing_correlation_id`):
+/// `PgPolicyStore::put_in` + `PgOutbox::enqueue` + `PgAuditLog::record`, driven through the
+/// SAME `SeaOrmUnitOfWork` transaction and committed together, land as three durable rows —
+/// `policy`/`event_outbox`/`audit_log` — sharing the ONE correlation id `PolicyService`
+/// mints per mutation. `put_in` itself must NOT bump `policy_gen` — that is the caller's
+/// (`PolicyService`'s) own awaited, post-commit responsibility, never the store's.
+#[tokio::test]
+async fn put_in_enqueue_and_record_commit_atomically_sharing_correlation_id() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    let gens = Generations::memory();
+    let store = PgPolicyStore::new(db.clone(), gens.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    let outbox = PgOutbox::new();
+    let audit = PgAuditLog::new(db.clone());
+
+    let doc = valid_static_doc("atomic-put", false, now);
+    let corr = KernelIdGenerator.new_correlation_id();
+    let event = DomainEvent {
+        id: KernelIdGenerator.new_event_id(),
+        event_type: EventType::PolicyPut,
+        schema_version: 1,
+        aggregate_prn: format!("policy/{}", doc.policy_id),
+        actor_prn: None,
+        occurred_at: now,
+        payload: serde_json::json!({"policy_id": doc.policy_id, "kind": "static"}),
+        correlation_id: Some(corr),
+    };
+    let entry = AuditEntry {
+        id: KernelIdGenerator.new_audit_id(),
+        occurred_at: now,
+        actor_prn: None,
+        action: "PutPolicy".to_string(),
+        resource_prn: Some(root_prn().canonical()),
+        outcome: AuditOutcome::Committed,
+        determining_policies: Vec::new(),
+        detail: serde_json::json!({"policy_id": doc.policy_id}),
+        correlation_id: Some(corr),
+    };
+
+    let before = gens.policy_gen().await.unwrap();
+    let tx = uow.begin().await.unwrap();
+    let outcome = store.put_in(&*tx, &doc).await.unwrap();
+    assert!(matches!(outcome, PutOutcome::Inserted), "expected Inserted, got {outcome:?}");
+    outbox.enqueue(&*tx, &event).await.unwrap();
+    audit.record(&*tx, &entry).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(
+        policy::Entity::find_by_id(doc.policy_id.clone()).one(&db).await.unwrap().is_some(),
+        "the committed policy row must be visible"
+    );
+    let outbox_row = event_outbox::Entity::find_by_id(event.id).one(&db).await.unwrap().expect("outbox row present");
+    let audit_row = audit_log::Entity::find_by_id(entry.id).one(&db).await.unwrap().expect("audit row present");
+    assert_eq!(outbox_row.correlation_id, Some(corr));
+    assert_eq!(audit_row.correlation_id, Some(corr));
+    assert_eq!(
+        outbox_row.correlation_id, audit_row.correlation_id,
+        "the outbox event and the audit entry must share one correlation id"
+    );
+
+    assert_eq!(
+        gens.policy_gen().await.unwrap(),
+        before,
+        "put_in must never bump policy_gen itself — that is the caller's own post-commit responsibility"
+    );
 }

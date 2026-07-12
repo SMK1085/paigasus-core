@@ -19,18 +19,20 @@
 mod support;
 
 use chrono::{SubsecRound, Utc};
-use paigasus_iam::adapters::authz::{CedarAuthorizer, Generations, GenerationsReader, MemoryDecisionCache, PolicySnapshot, TracingAuditSink};
+use paigasus_iam::adapters::authz::{CedarAuthorizer, Generations, GenerationsPolicyGenBumper, GenerationsReader, MemoryDecisionCache, PolicySnapshot, TracingAuditSink};
 use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::entities::role;
-use paigasus_iam::adapters::persistence::{PgEntitySliceLoader, PgOrganizationRepository, PgPolicyStore, PgProjectRepository, PgRoleGrantStore, PgTeamRepository};
+use paigasus_iam::adapters::persistence::{
+    PgAuditLog, PgEntitySliceLoader, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgProjectRepository, PgRoleGrantStore, PgTeamRepository, SeaOrmUnitOfWork,
+};
 use paigasus_iam::application::authorize::Authorize;
 use paigasus_iam::application::bootstrap::reconcile_starter;
-use paigasus_iam::application::roles::RoleService;
+use paigasus_iam::application::roles::{RoleService, RoleServiceDeps};
 use paigasus_iam_core::authz::roles::{starter_policies, system_roles};
 use paigasus_iam_core::{
-    AccessRequest, Action, AuditSink, Authorizer, DecisionCache, Effect, EntitySliceLoader, GrantScope, OrganizationId, OrganizationRepository, PolicyStore, PrincipalId, ProjectRepository,
-    RequestContext, RoleGrant, RoleGrantStore, TeamRepository,
+    AccessRequest, Action, AuditLog, AuditSink, Authorizer, DecisionCache, Effect, EntitySliceLoader, GrantScope, OrganizationId, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore,
+    PrincipalId, ProjectRepository, RequestContext, RoleGrant, RoleGrantStore, TeamRepository, UnitOfWork,
 };
 use paigasus_kernel::{Prn, mint_uuid7};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Statement};
@@ -166,7 +168,27 @@ async fn seeded_starter_set_plus_a_real_grant_enforces_end_to_end() {
     let role_orgs: Arc<dyn OrganizationRepository> = Arc::new(PgOrganizationRepository::new(db.clone(), gens.clone()));
     let role_teams: Arc<dyn TeamRepository> = Arc::new(PgTeamRepository::new(db.clone(), gens.clone()));
     let role_projects: Arc<dyn ProjectRepository> = Arc::new(PgProjectRepository::new(db.clone(), gens.clone()));
-    let role_service = RoleService::new(role_grant_store, role_orgs, role_teams, role_projects, Authorize::new(authz.clone()), KernelIdGenerator, SystemClock);
+    // SMA-446 Task B4: the same UoW reference-pattern wiring `AppState::new` uses — a real
+    // `SeaOrmUnitOfWork`/`PgOutbox`/`PgAuditLog` over `db`, and a `GenerationsPolicyGenBumper`
+    // over the SAME `gens` handle this test's `CedarAuthorizer` reads through (so the grant
+    // below's post-commit bump is the one `is_authorized`'s pre-decision reload observes).
+    let role_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+    let role_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+    let role_audit: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()));
+    let role_gen_bumper: Arc<dyn PolicyGenBumper> = Arc::new(GenerationsPolicyGenBumper::new(gens.clone()));
+    let role_service = RoleService::new(RoleServiceDeps {
+        grants: role_grant_store,
+        orgs: role_orgs,
+        teams: role_teams,
+        projects: role_projects,
+        authorize: Authorize::new(authz.clone()),
+        uow: role_uow,
+        outbox: role_outbox,
+        audit: role_audit,
+        gen_bumper: role_gen_bumper,
+        ids: KernelIdGenerator,
+        clock: SystemClock,
+    });
     let bootstrap_actor = bootstrap_principal.prn().clone();
     let member_principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", member_uuid).unwrap());
     let org = OrganizationId::from_uuid(org_uuid);

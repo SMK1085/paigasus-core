@@ -4,7 +4,8 @@
 //! abstractions, not on the eventual Postgres/cache/audit adapters (ADR-0005). Later M3
 //! tasks provide the service-crate implementations.
 
-use super::model::{AccessRequest, AuthzDecisionEvent, AuthzError, Decision, EntitySlice, PolicyDocument, RoleGrant};
+use super::model::{AccessRequest, AuthzDecisionEvent, AuthzError, Decision, EntitySlice, PolicyDocument, PutOutcome, RoleGrant};
+use crate::ports::Transaction;
 use crate::value::PrincipalId;
 use async_trait::async_trait;
 use paigasus_kernel::Prn;
@@ -27,6 +28,23 @@ pub trait PolicyStore: Send + Sync {
     async fn put(&self, doc: &PolicyDocument) -> Result<(), AuthzError>;
     /// Rejects system-owned documents.
     async fn delete(&self, policy_id: &str) -> Result<(), AuthzError>;
+    /// Txn-scoped twin of [`PolicyStore::put`] (SMA-446, Slice B Task B5 — the
+    /// `PolicyService::put` reference pattern, copying `RoleGrantStore::grant_in`'s posture):
+    /// validates and writes `doc` on the caller's own `tx`. A same-content unique-violation
+    /// race absorbs into [`PutOutcome::AbsorbedIdempotent`] via an internal SAVEPOINT (only
+    /// the savepoint rolls back, never the caller's outer `tx`) rather than the pre-Slice-B
+    /// posture of aborting the whole transaction and re-reading on a fresh connection; a
+    /// different-content race still surfaces as `AuthzError::Conflict`. Deliberately never
+    /// bumps the policy generation counter itself — the caller bumps it once, post-commit,
+    /// via `PolicyGenBumper`, and only when the outcome is `Inserted`/`Updated` (never for
+    /// `AbsorbedIdempotent` — the winning writer already bumped it for this row).
+    async fn put_in(&self, tx: &dyn Transaction, doc: &PolicyDocument) -> Result<PutOutcome, AuthzError>;
+    /// Txn-scoped twin of [`PolicyStore::delete`]: deletes `policy_id` on the caller's own
+    /// `tx`, returning whether a row actually existed to delete — mirrors
+    /// [`RoleGrantStore::revoke_in`]'s idempotent-DELETE posture (the caller only
+    /// enqueues/records/bumps when this is `true`). Deliberately never bumps the generation
+    /// counter itself, same reasoning as [`PolicyStore::put_in`].
+    async fn delete_in(&self, tx: &dyn Transaction, policy_id: &str) -> Result<bool, AuthzError>;
     async fn policy_gen(&self) -> Result<u64, AuthzError>;
     async fn bump_policy_gen(&self) -> Result<u64, AuthzError>;
 }
@@ -37,6 +55,18 @@ pub trait RoleGrantStore: Send + Sync {
     /// Inserts the grant row and bumps the policy generation counter.
     async fn grant(&self, g: &RoleGrant) -> Result<(), AuthzError>;
     async fn revoke(&self, id: Uuid) -> Result<(), AuthzError>;
+    /// Txn-scoped twin of [`RoleGrantStore::grant`] (SMA-446, Slice B — the
+    /// `RoleService::grant` reference pattern): inserts the row on the caller's own `tx`,
+    /// deliberately WITHOUT bumping the policy generation counter — the caller bumps it
+    /// itself, once, as an awaited POST-COMMIT step via `PolicyGenBumper`, mirroring
+    /// `Outbox::enqueue`/`AuditLog::record`'s in-txn posture.
+    async fn grant_in(&self, tx: &dyn Transaction, g: &RoleGrant) -> Result<(), AuthzError>;
+    /// Txn-scoped twin of [`RoleGrantStore::revoke`]: deletes the row on the caller's own
+    /// `tx`, returning whether a row actually existed to delete — the caller only
+    /// enqueues/records/bumps when this is `true`; `false` is an idempotent no-op (mirrors
+    /// `revoke`'s own idempotent-DELETE posture). Deliberately never bumps the generation
+    /// counter itself, same reasoning as [`RoleGrantStore::grant_in`].
+    async fn revoke_in(&self, tx: &dyn Transaction, id: Uuid) -> Result<bool, AuthzError>;
     async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError>;
     async fn list_by_principal(&self, p: &PrincipalId) -> Result<Vec<RoleGrant>, AuthzError>;
     /// Looks up a single grant by id — `None` if it was never granted or has since been

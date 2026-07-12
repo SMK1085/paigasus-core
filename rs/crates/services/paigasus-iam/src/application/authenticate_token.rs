@@ -214,7 +214,7 @@ mod tests {
     use crate::application::fakes::{FixedClock, SeqIds};
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use paigasus_iam_core::{Membership, MembershipRecord, TenancyNodeRef, TokenDefect};
+    use paigasus_iam_core::{Membership, MembershipRecord, TenancyNodeRef, TokenDefect, Transaction};
     use paigasus_kernel::Prn;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -263,6 +263,13 @@ mod tests {
         async fn create_user(&self, principal: &Principal, user: &User) -> Result<(), RepositoryError> {
             self.0.principals.lock().unwrap().insert(principal.id.uuid(), (principal.clone(), user.clone()));
             Ok(())
+        }
+        // Txn-scoped twin (SMA-446, Slice B Task B7 — the `CreateUser::execute` reference
+        // pattern): `AuthenticateToken` never calls `create_user`/`create_user_in` itself (it
+        // provisions via `ExternalIdentityRepository::provision`, D9), but the fake must still
+        // implement the full port surface — `tx` is ignored, mirroring `create_user` above.
+        async fn create_user_in(&self, _tx: &dyn Transaction, principal: &Principal, user: &User) -> Result<(), RepositoryError> {
+            self.create_user(principal, user).await
         }
         async fn find_user(&self, id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError> {
             Ok(self.0.principals.lock().unwrap().get(&id.uuid()).cloned())
@@ -421,6 +428,9 @@ mod tests {
     #[async_trait]
     impl PrincipalRepository for PanicIfCalledPrincipals {
         async fn create_user(&self, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
+            panic!("PrincipalRepository must not be called once authenticate() has failed")
+        }
+        async fn create_user_in(&self, _tx: &dyn Transaction, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
             panic!("PrincipalRepository must not be called once authenticate() has failed")
         }
         async fn find_user(&self, _id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError> {

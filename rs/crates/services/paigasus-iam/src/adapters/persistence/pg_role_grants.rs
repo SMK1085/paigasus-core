@@ -1,23 +1,34 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Postgres-backed `RoleGrantStore` (SeaORM). `grant` persists exactly the caller-built
-//! `RoleGrant` — including its `linked_policy_id` (the Cedar template-linked policy itself
-//! is materialized from grant rows at snapshot-compile time, Task 12, so this store never
-//! touches `policy`/`role` rows) — then best-effort bumps `policy_gen` via the shared
-//! `Generations` handle (spec §7/D11: "bumped on any policy CRUD or role grant/revoke"),
-//! logged and swallowed on error, mirroring `pg_organizations.rs::bump_entity_gen`: the
-//! write already committed, so a Redis-down bump failure must never fail it, it just means
-//! the decision cache self-heals on its next TTL expiry instead of immediately. `revoke`
-//! mirrors `PgPolicyStore::delete`'s idempotent-DELETE posture: a missing id is a no-op
-//! success (no `AuthzError::NotFound` variant exists — see `authz::model::AuthzError`) and
-//! only a row that actually existed bumps the generation.
+//! Postgres-backed `RoleGrantStore` (SeaORM). `grant`/`revoke` are thin one-shot-`UnitOfWork`
+//! wrappers around [`RoleGrantStore::grant_in`]/[`RoleGrantStore::revoke_in`] (SMA-446, Slice
+//! B): they open their own `SeaOrmTransaction`, run the txn-scoped insert/delete on it,
+//! commit, then best-effort bump `policy_gen` via the shared `Generations` handle (spec
+//! §7/D11: "bumped on any policy CRUD or role grant/revoke") — kept for callers that don't
+//! (yet) drive their own `UnitOfWork` (`BootstrapAdminSeeder`, the `authz_role_grants.rs`/
+//! `authz_bootstrap.rs` integration tests). `grant_in`/`revoke_in` are the txn-scoped
+//! primitives `RoleService::grant`/`revoke` (the reference pattern) actually drive: they
+//! persist exactly the caller-built `RoleGrant` — including its `linked_policy_id` (the
+//! Cedar template-linked policy itself is materialized from grant rows at snapshot-compile
+//! time, Task 12, so this store never touches `policy`/`role` rows) — on the caller's own
+//! transaction, and deliberately never bump `policy_gen` themselves; the bump is the
+//! caller's own awaited, post-commit responsibility (`application::roles::RoleService` via
+//! `PolicyGenBumper`). The generation bump itself is logged and swallowed on error,
+//! mirroring `pg_organizations.rs::bump_entity_gen`: the write already committed, so a
+//! Redis-down bump failure must never fail it, it just means the decision cache self-heals
+//! on its next TTL expiry instead of immediately. `revoke`/`revoke_in` mirror
+//! `PgPolicyStore::delete`'s idempotent-DELETE posture: a missing id is a no-op success (no
+//! `AuthzError::NotFound` variant exists — see `authz::model::AuthzError`) and only a row
+//! that actually existed bumps the generation (`revoke`) or is reported back to the caller
+//! (`revoke_in`'s `bool`).
 
 use super::entities::role_grant;
+use super::uow::{SeaOrmTransaction, recover_txn};
 use crate::adapters::authz::Generations;
 use async_trait::async_trait;
-use paigasus_iam_core::{AuthzError, GrantScope, PrincipalId, RoleGrant, RoleGrantStore, TenancyNodeRef};
+use paigasus_iam_core::{AuthzError, GrantScope, PrincipalId, RepositoryError, RoleGrant, RoleGrantStore, TenancyNodeRef, Transaction};
 use paigasus_kernel::Prn;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set, TransactionTrait};
 use uuid::Uuid;
 
 // `Clone` lets the composition root hold a store handle inside a `#[derive(Clone)]` service
@@ -119,27 +130,58 @@ fn model_to_grant(m: role_grant::Model) -> Result<RoleGrant, AuthzError> {
     })
 }
 
+/// Maps a [`recover_txn`] failure (an opaque `&dyn Transaction` that isn't a
+/// `SeaOrmTransaction` — never happens in production, only a misbuilt fake could trigger it)
+/// into `AuthzError::Backend`, mirroring [`map_err`]'s posture for row-level failures.
+fn map_txn_err(e: RepositoryError) -> AuthzError {
+    AuthzError::Backend(Box::new(e))
+}
+
 #[async_trait]
 impl RoleGrantStore for PgRoleGrantStore {
     async fn grant(&self, g: &RoleGrant) -> Result<(), AuthzError> {
+        // A thin one-shot-`UnitOfWork` wrapper (module docs): open a `SeaOrmTransaction`,
+        // insert via `grant_in`, commit, then bump — the exact behavior this method had
+        // before Slice B, just re-expressed over the txn-scoped primitive so the insert
+        // logic lives in exactly one place.
+        let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
         // A `uq_role_grant_principal_role_scope` (duplicate principal+role+scope) or
         // `uq_role_grant_linked_policy` (duplicate linked_policy_id) violation surfaces here
         // as `AuthzError::Backend` wrapping the SeaORM/Postgres error — never silently
-        // swallowed, and no row is written.
-        grant_to_model(g).insert(&self.db).await.map_err(map_err)?;
+        // swallowed; dropping `tx` without committing rolls the failed insert back, and no
+        // row is written.
+        self.grant_in(&*tx, g).await?;
+        tx.commit().await.map_err(map_txn_err)?;
         self.bump_policy_gen_best_effort().await;
         Ok(())
     }
 
     async fn revoke(&self, id: Uuid) -> Result<(), AuthzError> {
-        let result = role_grant::Entity::delete_by_id(id).exec(&self.db).await.map_err(map_err)?;
+        // Thin one-shot-`UnitOfWork` wrapper, mirroring `grant`'s above.
+        let txn = self.db.begin().await.map_err(map_err)?;
+        let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
+        let existed = self.revoke_in(&*tx, id).await?;
+        tx.commit().await.map_err(map_txn_err)?;
         // Idempotent: revoking an id that was never granted (or already revoked) is a no-op
         // success, mirroring `PgPolicyStore::delete`'s posture (no `NotFound` variant exists
         // on `AuthzError`) — and only a row that actually existed bumps the generation.
-        if result.rows_affected > 0 {
+        if existed {
             self.bump_policy_gen_best_effort().await;
         }
         Ok(())
+    }
+
+    async fn grant_in(&self, tx: &dyn Transaction, g: &RoleGrant) -> Result<(), AuthzError> {
+        let txn = recover_txn(tx).map_err(map_txn_err)?;
+        grant_to_model(g).insert(txn).await.map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn revoke_in(&self, tx: &dyn Transaction, id: Uuid) -> Result<bool, AuthzError> {
+        let txn = recover_txn(tx).map_err(map_txn_err)?;
+        let result = role_grant::Entity::delete_by_id(id).exec(txn).await.map_err(map_err)?;
+        Ok(result.rows_affected > 0)
     }
 
     async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError> {

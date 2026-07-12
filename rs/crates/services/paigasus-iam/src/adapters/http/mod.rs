@@ -35,8 +35,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::adapters::api_keys::{ApiKeyValidationCache, HmacSecretHasher, MemoryApiKeyCache, OsRngKeyEntropy, RedisApiKeyCache};
 use crate::adapters::authz::{
-    BufferedDenialAuditSink, CedarAuthorizer, DenialAuditBuffer, DenialAuditDrain, FanOutAuditSink, Generations, GenerationsReader, MemoryDecisionCache, PolicySnapshot, RedisDecisionCache,
-    SliceCache, TracingAuditSink,
+    BufferedDenialAuditSink, CedarAuthorizer, DenialAuditBuffer, DenialAuditDrain, FanOutAuditSink, Generations, GenerationsPolicyGenBumper, GenerationsReader, MemoryDecisionCache, PolicySnapshot,
+    RedisDecisionCache, SliceCache, TracingAuditSink,
 };
 use crate::adapters::clock::SystemClock;
 use crate::adapters::id::KernelIdGenerator;
@@ -44,26 +44,29 @@ use crate::adapters::oidc::jwks::{HttpJwksFetcher, InMemoryJwksCache, JwksProvid
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
-    PgApiKeyRepository, PgAuditLog, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgPolicyStore, PgPrincipalRepository, PgProjectRepository,
-    PgRoleGrantStore, PgServiceAccountRepository, PgTeamRepository,
+    PgApiKeyRepository, PgAuditLog, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgPrincipalRepository,
+    PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgTeamRepository, SeaOrmUnitOfWork,
 };
-use crate::application::api_keys::ApiKeyService;
+use crate::application::api_keys::{ApiKeyService, ApiKeyServiceDeps};
 use crate::application::audit::AuditQueryService;
 use crate::application::authenticate_api_key::AuthenticateApiKey;
 use crate::application::authenticate_token::{AuthenticateToken, JitPolicy};
 use crate::application::authorize::Authorize;
 use crate::application::bootstrap;
 use crate::application::bootstrap_admin::BootstrapAdminSeeder;
-use crate::application::create_user::CreateUser;
+use crate::application::create_user::{CreateUser, CreateUserDeps};
 use crate::application::memberships::MembershipService;
 use crate::application::organizations::OrganizationService;
-use crate::application::policies::PolicyService;
+use crate::application::policies::{PolicyService, PolicyServiceDeps};
 use crate::application::projects::ProjectService;
-use crate::application::roles::RoleService;
-use crate::application::service_accounts::ServiceAccountService;
+use crate::application::roles::{RoleService, RoleServiceDeps};
+use crate::application::service_accounts::{ServiceAccountService, ServiceAccountServiceDeps};
 use crate::application::teams::TeamService;
 use crate::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, JwksCacheBackend};
-use paigasus_iam_core::{ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, PolicyStore, ProjectRepository, RoleGrantStore, TeamRepository};
+use paigasus_iam_core::{
+    ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore, TeamRepository,
+    UnitOfWork,
+};
 
 pub type OrgSvc = OrganizationService<PgOrganizationRepository, KernelIdGenerator, SystemClock>;
 pub type TeamSvc = TeamService<PgTeamRepository, KernelIdGenerator, SystemClock>;
@@ -74,6 +77,11 @@ pub type UserSvc = CreateUser<PgPrincipalRepository, KernelIdGenerator, SystemCl
 /// RoleGrantStore>` `AppState.role_grant_store` holds — mirrors every other `*Svc` alias's
 /// `KernelIdGenerator`/`SystemClock` DI posture.
 pub type RoleSvc = RoleService<KernelIdGenerator, SystemClock>;
+/// The policy/template CRUD use case (SMA-444 Task 17; SMA-446 Slice B Task B5 — `put`/
+/// `delete` now drive the same UoW reference pattern `RoleSvc` does), wired over the same
+/// `Arc<dyn PolicyStore>` `AppState`'s `PolicySnapshot` reads from — mirrors `RoleSvc`'s DI
+/// posture.
+pub type PolicySvc = PolicyService<KernelIdGenerator, SystemClock>;
 /// The cold-start bootstrap-admin seeder (SMA-444 Task 21b), wired over the same `Arc<dyn
 /// RoleGrantStore>` `AppState.role_grant_store` holds — mirrors `RoleSvc`'s DI posture.
 pub type BootstrapAdminSvc = BootstrapAdminSeeder<KernelIdGenerator, SystemClock>;
@@ -154,7 +162,7 @@ pub struct AppState {
     pub roles: RoleSvc,
     /// Policy/template CRUD use case — the `/v1/authz/policies` HTTP routes call through
     /// this.
-    pub policies: PolicyService,
+    pub policies: PolicySvc,
     /// The same `Authorize` wrapper `roles`/`policies` embed internally, exposed directly for
     /// the `POST /v1/authz/is-authorized` handler: it needs `Authorize::check` for the
     /// self/admin exposure rule's authorization side-check AND `Authorize::decide` for the
@@ -317,7 +325,20 @@ impl AppState {
             SystemClock,
         );
         let memberships = MembershipService::new(PgMembershipRepository::new(db.clone()), KernelIdGenerator, SystemClock);
-        let users = CreateUser::new(PgPrincipalRepository::new(db.clone()), KernelIdGenerator, SystemClock);
+        // SMA-446 Task B7 (copies Task B4-B6's `roles`/`policies`/`api_keys` wiring below):
+        // `users` drives its principal+user insert + outbox event through its OWN
+        // `SeaOrmUnitOfWork` transaction (`user_uow` — a fresh instance is fine, `db.clone()` is
+        // a cheap `Arc`-backed pool handle). OUTBOX-ONLY: no audit entry, no generation bump —
+        // principal creation is not in the AC audit set.
+        let user_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+        let user_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let users = CreateUser::new(CreateUserDeps {
+            repo: PgPrincipalRepository::new(db.clone()),
+            uow: user_uow,
+            outbox: user_outbox,
+            id_gen: KernelIdGenerator,
+            clock: SystemClock,
+        });
 
         let policy_store: Arc<dyn PolicyStore> = Arc::new(PgPolicyStore::new(db.clone(), gens.clone()));
         let role_grant_store: Arc<dyn RoleGrantStore> = Arc::new(PgRoleGrantStore::new(db.clone(), gens.clone()));
@@ -372,6 +393,17 @@ impl AppState {
         // — so a grant/policy change made through these use cases bumps the same `gens`
         // counter `authz`'s `PolicySnapshot::reload_if_stale` polls (AC1).
         let authorize = Authorize::new(authz.clone() as Arc<dyn Authorizer>);
+
+        // SMA-446 Task A10/A12 (built here, ahead of `roles`, since Task B4's `RoleService`
+        // below needs it too): the audit-log read+write handle. `audit_log` is a single shared
+        // `Arc<dyn AuditLog>` (`PgAuditLog` over `db`) that the read-side `audit_query` (A10)
+        // reads through, the denial-audit drain (A12, spawned by `main.rs`) writes buffered
+        // denials into, AND `RoleService`'s in-txn `AuditLog::record` writes through (B4) — one
+        // store instance, not several (mirrors `role_grant_store`'s single-shared-`Arc`
+        // posture). It is stashed on the returned state (`audit_log` field, reachable via
+        // `audit_sink()`) so `main.rs` can hand it to `drain.run(sink, shutdown)`.
+        let audit_log: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()));
+
         // SMA-444 cross-tenant-escalation fix (FIX 2): `RoleService::resolve_scope`'s own
         // DB-lookup defense needs read access to the tenancy repos, independent of
         // `orgs`/`teams`/`projects` above (those are wrapped in `OrganizationService`/etc.,
@@ -380,16 +412,50 @@ impl AppState {
         let role_orgs: Arc<dyn OrganizationRepository> = Arc::new(PgOrganizationRepository::new(db.clone(), gens.clone()));
         let role_teams: Arc<dyn TeamRepository> = Arc::new(PgTeamRepository::new(db.clone(), gens.clone()));
         let role_projects: Arc<dyn ProjectRepository> = Arc::new(PgProjectRepository::new(db.clone(), gens.clone()));
-        let roles = RoleService::new(role_grant_store.clone(), role_orgs, role_teams, role_projects, authorize.clone(), KernelIdGenerator, SystemClock);
-        let policies = PolicyService::new(policy_store.clone(), authorize.clone());
+        // SMA-446 Task B4 (the UoW reference pattern B5-B7 copy): `roles` drives its
+        // grant/revoke mutation + outbox event + audit entry through ONE `SeaOrmUnitOfWork`
+        // transaction (`role_uow`), then an awaited, best-effort `GenerationsPolicyGenBumper`
+        // post-commit bump (`role_gen_bumper`) over the SAME `gens` handle every other authz
+        // mutation in this composition root bumps — `RoleService` itself never imports
+        // `Generations` directly (ADR-0005), only through the `PolicyGenBumper` port.
+        let role_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+        let role_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let role_gen_bumper: Arc<dyn PolicyGenBumper> = Arc::new(GenerationsPolicyGenBumper::new(gens.clone()));
+        let roles = RoleService::new(RoleServiceDeps {
+            grants: role_grant_store.clone(),
+            orgs: role_orgs,
+            teams: role_teams,
+            projects: role_projects,
+            authorize: authorize.clone(),
+            uow: role_uow,
+            outbox: role_outbox,
+            audit: audit_log.clone(),
+            gen_bumper: role_gen_bumper,
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
+        // SMA-446 Task B5 (copies Task B4's `roles` wiring immediately above): `policies`
+        // drives its put/delete mutation + outbox event + audit entry through its OWN
+        // `SeaOrmUnitOfWork` transaction (`policy_uow` — a fresh instance is fine, `db.clone()`
+        // is a cheap `Arc`-backed pool handle, mirrors `role_uow`), then an awaited,
+        // best-effort `GenerationsPolicyGenBumper` post-commit bump over the SAME `gens`
+        // handle every other authz mutation in this composition root bumps.
+        let policy_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+        let policy_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let policy_gen_bumper: Arc<dyn PolicyGenBumper> = Arc::new(GenerationsPolicyGenBumper::new(gens.clone()));
+        let policies = PolicyService::new(PolicyServiceDeps {
+            policies: policy_store.clone(),
+            authorize: authorize.clone(),
+            uow: policy_uow,
+            outbox: policy_outbox,
+            audit: audit_log.clone(),
+            gen_bumper: policy_gen_bumper,
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
 
-        // SMA-446 Task A10/A12: the audit-log read+write handle. `audit_log` is a single shared
-        // `Arc<dyn AuditLog>` (`PgAuditLog` over `db`) that BOTH the read-side `audit_query`
-        // (A10) reads through AND the denial-audit drain (A12, spawned by `main.rs`) writes
-        // buffered denials into — one store instance, not two (mirrors `role_grant_store`'s
-        // single-shared-`Arc` posture). It is stashed on the returned state (`audit_log` field,
-        // reachable via `audit_sink()`) so `main.rs` can hand it to `drain.run(sink, shutdown)`.
-        let audit_log: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()));
+        // SMA-446 Task A10: the read-side audit query service, over the SAME `audit_log`
+        // handle built above.
         let audit_query = AuditQueryService::new(audit_log.clone(), authorize.clone());
 
         // Shares the SAME `role_grant_store` handle `roles`/`snapshot` do (Task 21b): a
@@ -443,26 +509,49 @@ impl AppState {
             PgMembershipRepository::new(db.clone()),
             cfg.api_keys.clone(),
         );
-        let service_accounts = ServiceAccountService::new(
-            PgServiceAccountRepository::new(db.clone()),
-            Arc::new(PgApiKeyRepository::new(db.clone())) as Arc<dyn ApiKeyRepository>,
-            api_key_cache.clone(),
-            authorize.clone(),
-            KernelIdGenerator,
-            SystemClock,
-        );
-        let api_keys = ApiKeyService::new(
-            PgApiKeyRepository::new(db.clone()),
-            PgServiceAccountRepository::new(db.clone()),
-            role_grant_store.clone(),
-            authorize.clone(),
-            api_key_hasher,
-            OsRngKeyEntropy,
-            api_key_cache,
-            KernelIdGenerator,
-            SystemClock,
-            cfg.api_keys.clone(),
-        );
+        // SMA-446 Task B7 (copies Task B4-B6's UoW-wiring pattern above): `service_accounts`
+        // drives its create/archive mutation + outbox event through its OWN `SeaOrmUnitOfWork`
+        // transaction (`service_account_uow` — a fresh instance is fine, `db.clone()` is a
+        // cheap `Arc`-backed pool handle). OUTBOX-ONLY, like `users` above: no audit entry, no
+        // generation bump. `archive`'s post-commit cache-evict runs over the SAME
+        // `api_key_cache` handle `api_key_auth`/`api_keys` read/evict through.
+        let service_account_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+        let service_account_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let service_accounts = ServiceAccountService::new(ServiceAccountServiceDeps {
+            repo: PgServiceAccountRepository::new(db.clone()),
+            keys: Arc::new(PgApiKeyRepository::new(db.clone())) as Arc<dyn ApiKeyRepository>,
+            cache: api_key_cache.clone(),
+            authorize: authorize.clone(),
+            uow: service_account_uow,
+            outbox: service_account_outbox,
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
+        // SMA-446 Task B6 (copies Task B4/B5's `roles`/`policies` wiring above): `api_keys`
+        // drives its issue/revoke mutation + outbox event + audit entry through its OWN
+        // `SeaOrmUnitOfWork` transaction (`api_key_uow` — a fresh instance is fine, `db.clone()`
+        // is a cheap `Arc`-backed pool handle, mirrors `role_uow`/`policy_uow`). Unlike
+        // `roles`/`policies`, there is NO post-commit generation bump here — API-key
+        // issue/revoke never touch `policy_gen`/`entity_gen` (`ApiKeyServiceDeps`'s own doc);
+        // the post-commit step this service DOES run (`revoke`'s cache-evict) is over the SAME
+        // `api_key_cache` handle `api_key_auth` reads through, already threaded below.
+        let api_key_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+        let api_key_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let api_keys = ApiKeyService::new(ApiKeyServiceDeps {
+            keys: PgApiKeyRepository::new(db.clone()),
+            service_accounts: PgServiceAccountRepository::new(db.clone()),
+            grants: role_grant_store.clone(),
+            authorize: authorize.clone(),
+            hasher: api_key_hasher,
+            entropy: OsRngKeyEntropy,
+            cache: api_key_cache,
+            uow: api_key_uow,
+            outbox: api_key_outbox,
+            audit: audit_log.clone(),
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+            config: cfg.api_keys.clone(),
+        });
 
         let authn_cfg = &cfg.authn;
         if authn_cfg.accept_invalid_tls {

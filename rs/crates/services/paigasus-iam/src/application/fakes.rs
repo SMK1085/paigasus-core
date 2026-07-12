@@ -10,12 +10,13 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
-    AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, Authorizer, AuthzError, Clock, ConflictKind, Decision, Effect, IdGenerator, KeyEntropy, Membership, MembershipRecord,
-    MembershipRepository, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, PolicyDocument, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project,
-    ProjectId, ProjectRepository, RepositoryError, RoleGrant, RoleGrantStore, SecretHasher, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Team, TeamId, TeamRepository,
-    TenancyNodeRef,
+    AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, Clock, ConflictKind, Decision, DomainEvent, Effect,
+    IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper,
+    PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher,
+    ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
 };
 use paigasus_kernel::Prn;
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -503,6 +504,14 @@ impl IdGenerator for SeqIds {
     fn new_audit_id(&self) -> Uuid {
         self.next()
     }
+
+    fn new_event_id(&self) -> Uuid {
+        self.next()
+    }
+
+    fn new_correlation_id(&self) -> Uuid {
+        self.next()
+    }
 }
 
 /// Programmable `Authorizer` fake for application-service unit tests (`authorize.rs`,
@@ -549,6 +558,18 @@ impl RoleGrantStore for InMemoryRoleGrants {
     async fn revoke(&self, id: Uuid) -> Result<(), AuthzError> {
         self.0.lock().unwrap().remove(&id);
         Ok(())
+    }
+
+    // Txn-scoped twins (SMA-446, Slice B — the `RoleService::grant`/`revoke` reference
+    // pattern B5-B7 copy): this fake has no real backing transaction, so `tx` is ignored and
+    // the mutation applies immediately — mirrors `grant`/`revoke` above.
+    async fn grant_in(&self, _tx: &dyn Transaction, g: &RoleGrant) -> Result<(), AuthzError> {
+        self.0.lock().unwrap().insert(g.id, g.clone());
+        Ok(())
+    }
+
+    async fn revoke_in(&self, _tx: &dyn Transaction, id: Uuid) -> Result<bool, AuthzError> {
+        Ok(self.0.lock().unwrap().remove(&id).is_some())
     }
 
     async fn list_all(&self) -> Result<Vec<RoleGrant>, AuthzError> {
@@ -601,6 +622,31 @@ impl PolicyStore for InMemoryPolicies {
         Ok(())
     }
 
+    // Txn-scoped twins (SMA-446, Slice B Task B5 — the `PolicyService::put`/`delete`
+    // reference pattern copies `RoleService::grant`/`revoke`'s posture): this fake has no
+    // real backing transaction, so `tx` is ignored and the mutation applies immediately —
+    // mirrors `InMemoryRoleGrants::grant_in`/`revoke_in`. There is no concurrent racer against
+    // a single in-memory `Mutex`-guarded map, so `put_in` never has anything to absorb — it
+    // only ever reports `Inserted`/`Updated`, mirroring `put`'s own insert-or-update posture
+    // (`AbsorbedIdempotent` is exercised by the real-Postgres savepoint tests instead).
+    async fn put_in(&self, _tx: &dyn Transaction, doc: &PolicyDocument) -> Result<PutOutcome, AuthzError> {
+        let mut docs = self.docs.lock().unwrap();
+        if docs.get(&doc.policy_id).is_some_and(|existing| existing.system) {
+            return Err(AuthzError::SystemImmutable(doc.policy_id.clone()));
+        }
+        let outcome = if docs.contains_key(&doc.policy_id) { PutOutcome::Updated } else { PutOutcome::Inserted };
+        docs.insert(doc.policy_id.clone(), doc.clone());
+        Ok(outcome)
+    }
+
+    async fn delete_in(&self, _tx: &dyn Transaction, policy_id: &str) -> Result<bool, AuthzError> {
+        let mut docs = self.docs.lock().unwrap();
+        if docs.get(policy_id).is_some_and(|existing| existing.system) {
+            return Err(AuthzError::SystemImmutable(policy_id.to_string()));
+        }
+        Ok(docs.remove(policy_id).is_some())
+    }
+
     async fn policy_gen(&self) -> Result<u64, AuthzError> {
         Ok(self.gen_counter.load(Ordering::SeqCst))
     }
@@ -625,6 +671,20 @@ pub struct InMemoryServiceAccounts {
 #[async_trait]
 impl ServiceAccountRepository for InMemoryServiceAccounts {
     async fn create(&self, principal: &Principal, sa: &ServiceAccount) -> Result<(), RepositoryError> {
+        let mut accounts = self.accounts.lock().unwrap();
+        if accounts.values().any(|existing| existing.owner == sa.owner && existing.name == sa.name) {
+            return Err(RepositoryError::Conflict(ConflictKind::ServiceAccountNameTaken));
+        }
+        accounts.insert(sa.principal_id.uuid(), sa.clone());
+        drop(accounts);
+        self.statuses.lock().unwrap().insert(principal.id.uuid(), principal.status);
+        Ok(())
+    }
+
+    // Txn-scoped twin (SMA-446, Slice B Task B7 — the `ServiceAccountService::create`
+    // reference pattern): this fake has no real backing transaction, so `tx` is ignored and
+    // the mutation applies immediately — mirrors `InMemoryRoleGrants::grant`/`grant_in`.
+    async fn create_in(&self, _tx: &dyn Transaction, principal: &Principal, sa: &ServiceAccount) -> Result<(), RepositoryError> {
         let mut accounts = self.accounts.lock().unwrap();
         if accounts.values().any(|existing| existing.owner == sa.owner && existing.name == sa.name) {
             return Err(RepositoryError::Conflict(ConflictKind::ServiceAccountNameTaken));
@@ -671,6 +731,18 @@ impl ServiceAccountRepository for InMemoryServiceAccounts {
         statuses.insert(id.uuid(), status);
         Ok(())
     }
+
+    // Txn-scoped twin (SMA-446, Slice B Task B7 — the `ServiceAccountService::archive`
+    // reference pattern): `tx` is ignored, mirroring `create_in`/`InMemoryRoleGrants::
+    // revoke_in` above.
+    async fn set_principal_status_in(&self, _tx: &dyn Transaction, id: &PrincipalId, status: PrincipalStatus) -> Result<(), RepositoryError> {
+        let mut statuses = self.statuses.lock().unwrap();
+        if !statuses.contains_key(&id.uuid()) {
+            return Err(RepositoryError::NotFound);
+        }
+        statuses.insert(id.uuid(), status);
+        Ok(())
+    }
 }
 
 /// The key plus its stored hash, exactly what `ApiKeyRepository::find_by_id` returns — a
@@ -696,6 +768,18 @@ impl ApiKeyRepository for InMemoryApiKeys {
         Ok(())
     }
 
+    // Txn-scoped twin (SMA-446, Slice B Task B6 — the `ApiKeyService::issue` reference
+    // pattern): this fake has no real backing transaction, so `tx` is ignored and the
+    // mutation applies immediately — mirrors `InMemoryRoleGrants::grant`/`grant_in`.
+    async fn issue_in(&self, _tx: &dyn Transaction, key: &ApiKey, key_hash: &[u8]) -> Result<(), RepositoryError> {
+        let mut keys = self.0.lock().unwrap();
+        if keys.values().any(|(_, h)| h.as_slice() == key_hash) {
+            return Err(RepositoryError::Conflict(ConflictKind::ApiKeyHashCollision));
+        }
+        keys.insert(key.id, (key.clone(), key_hash.to_vec()));
+        Ok(())
+    }
+
     async fn find_by_id(&self, id: ApiKeyId) -> Result<Option<(ApiKey, Vec<u8>)>, RepositoryError> {
         Ok(self.0.lock().unwrap().get(&id).cloned())
     }
@@ -709,6 +793,23 @@ impl ApiKeyRepository for InMemoryApiKeys {
             key.revoked_at = Some(now);
         }
         Ok(())
+    }
+
+    // Txn-scoped twin, mirroring `issue_in` above: `tx` is ignored, the mutation applies
+    // immediately, and the returned bool reports whether THIS call actually performed the
+    // Active -> Revoked transition (`false` for an idempotent no-op — already revoked, or the
+    // id was never issued at all).
+    async fn revoke_in(&self, _tx: &dyn Transaction, id: ApiKeyId, now: DateTime<Utc>) -> Result<bool, RepositoryError> {
+        let mut keys = self.0.lock().unwrap();
+        let Some((key, _)) = keys.get_mut(&id) else {
+            return Ok(false);
+        };
+        if key.status == ApiKeyStatus::Revoked {
+            return Ok(false);
+        }
+        key.status = ApiKeyStatus::Revoked;
+        key.revoked_at = Some(now);
+        Ok(true)
     }
 
     async fn list_by_service_account(&self, sa: &PrincipalId, limit: u64, offset: u64) -> Result<Vec<ApiKey>, RepositoryError> {
@@ -767,6 +868,104 @@ impl KeyEntropy for SeqKeyEntropy {
         let mut secret = [0u8; 32];
         secret[24..].copy_from_slice(&n.to_be_bytes());
         secret
+    }
+}
+
+/// The no-op `Transaction` [`FakeUnitOfWork::begin`] hands out: `commit` always succeeds,
+/// `savepoint` is never reached by any current caller (`RoleService`'s reference pattern
+/// never opens one), and `as_any` downcasts to itself, mirroring `SeaOrmTransaction`'s own
+/// `as_any` contract.
+struct NoopTransaction;
+
+#[async_trait]
+impl Transaction for NoopTransaction {
+    async fn commit(self: Box<Self>) -> Result<(), RepositoryError> {
+        Ok(())
+    }
+
+    async fn savepoint(&mut self) -> Result<Box<dyn Savepoint<'_>>, RepositoryError> {
+        unimplemented!("application-layer unit tests never open a savepoint")
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// In-memory `UnitOfWork` fake for application-service unit tests (SMA-446 Slice B — the
+/// `RoleService::grant`/`revoke` reference pattern B5-B7 copy): `begin` always succeeds with
+/// a [`NoopTransaction`]. There is no real backing store for these fakes to make atomic
+/// (`InMemoryRoleGrants::grant_in`/`revoke_in`, [`FakeOutbox::enqueue`], [`FakeAuditLog::
+/// record`] all ignore the `&dyn Transaction` they're handed and mutate their own state
+/// immediately) — what these unit tests actually exercise is the SERVICE's control flow
+/// (does it call the right ports, in the right order, only once every prior step
+/// succeeded); real cross-table commit/rollback atomicity is proven by the Postgres
+/// integration tests instead.
+#[derive(Clone, Copy, Default)]
+pub struct FakeUnitOfWork;
+
+#[async_trait]
+impl UnitOfWork for FakeUnitOfWork {
+    async fn begin(&self) -> Result<Box<dyn Transaction>, RepositoryError> {
+        Ok(Box::new(NoopTransaction))
+    }
+}
+
+/// In-memory `Outbox` fake for `roles.rs` (and later B5-B7) unit tests: records every
+/// enqueued event (ignoring `tx`, see [`FakeUnitOfWork`]'s doc) so a test can assert exactly
+/// what — and how many — events a use case emitted.
+#[derive(Clone, Default)]
+pub struct FakeOutbox(pub Arc<Mutex<Vec<DomainEvent>>>);
+
+#[async_trait]
+impl Outbox for FakeOutbox {
+    async fn enqueue(&self, _tx: &dyn Transaction, ev: &DomainEvent) -> Result<(), RepositoryError> {
+        self.0.lock().unwrap().push(ev.clone());
+        Ok(())
+    }
+}
+
+/// In-memory `AuditLog` fake for `roles.rs` (and later B5-B7) unit tests: `record` records
+/// every in-txn call (ignoring `tx`, see [`FakeUnitOfWork`]'s doc) so a test can assert what
+/// was written. `record_out_of_band`/`query` are unused by every current caller of this fake
+/// and panic if reached — a future caller that needs them should extend this fake rather than
+/// silently no-op (mirrors this module's other `InMemory*` fakes' "implement exactly what's
+/// exercised" posture).
+#[derive(Clone, Default)]
+pub struct FakeAuditLog(pub Arc<Mutex<Vec<AuditEntry>>>);
+
+#[async_trait]
+impl AuditLog for FakeAuditLog {
+    async fn record_out_of_band(&self, _e: &AuditEntry) -> Result<(), RepositoryError> {
+        unimplemented!("application-layer unit tests never call record_out_of_band")
+    }
+
+    async fn record(&self, _tx: &dyn Transaction, e: &AuditEntry) -> Result<(), RepositoryError> {
+        self.0.lock().unwrap().push(e.clone());
+        Ok(())
+    }
+
+    async fn query(&self, _f: &AuditFilter) -> Result<Vec<AuditEntry>, RepositoryError> {
+        unimplemented!("application-layer unit tests never call query")
+    }
+}
+
+/// Counting `PolicyGenBumper` fake for `roles.rs` (and later B5-B7) unit tests: `bump`
+/// increments an atomic counter so a test can assert it was — or, for a rolled-back
+/// mutation, was NOT — called, and exactly how many times.
+#[derive(Clone, Default)]
+pub struct FakePolicyGenBumper(pub Arc<AtomicU64>);
+
+impl FakePolicyGenBumper {
+    pub fn calls(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl PolicyGenBumper for FakePolicyGenBumper {
+    async fn bump(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
     }
 }
 

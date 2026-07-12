@@ -319,6 +319,9 @@ mod tests {
         async fn create_user(&self, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
             unimplemented!("AuthenticateApiKey never calls create_user")
         }
+        async fn create_user_in(&self, _tx: &dyn paigasus_iam_core::Transaction, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
+            unimplemented!("AuthenticateApiKey never calls create_user_in")
+        }
         async fn find_user(&self, _id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError> {
             unimplemented!("AuthenticateApiKey never calls find_user")
         }
@@ -336,10 +339,16 @@ mod tests {
         async fn issue(&self, _key: &ApiKey, _key_hash: &[u8]) -> Result<(), RepositoryError> {
             panic!("ApiKeyRepository must not be called")
         }
+        async fn issue_in(&self, _tx: &dyn paigasus_iam_core::Transaction, _key: &ApiKey, _key_hash: &[u8]) -> Result<(), RepositoryError> {
+            panic!("ApiKeyRepository must not be called")
+        }
         async fn find_by_id(&self, _id: ApiKeyId) -> Result<Option<(ApiKey, Vec<u8>)>, RepositoryError> {
             panic!("ApiKeyRepository::find_by_id must not be called on a cache hit")
         }
         async fn revoke(&self, _id: ApiKeyId, _now: chrono::DateTime<Utc>) -> Result<(), RepositoryError> {
+            panic!("ApiKeyRepository must not be called")
+        }
+        async fn revoke_in(&self, _tx: &dyn paigasus_iam_core::Transaction, _id: ApiKeyId, _now: chrono::DateTime<Utc>) -> Result<bool, RepositoryError> {
             panic!("ApiKeyRepository must not be called")
         }
         async fn list_by_service_account(&self, _sa: &PrincipalId, _limit: u64, _offset: u64) -> Result<Vec<ApiKey>, RepositoryError> {
@@ -358,6 +367,9 @@ mod tests {
     #[async_trait]
     impl PrincipalRepository for PanicIfCalledPrincipals {
         async fn create_user(&self, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
+            panic!("PrincipalRepository must not be called")
+        }
+        async fn create_user_in(&self, _tx: &dyn paigasus_iam_core::Transaction, _principal: &Principal, _user: &User) -> Result<(), RepositoryError> {
             panic!("PrincipalRepository must not be called")
         }
         async fn find_user(&self, _id: &PrincipalId) -> Result<Option<(Principal, User)>, RepositoryError> {
