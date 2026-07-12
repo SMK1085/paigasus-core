@@ -28,9 +28,12 @@
 //!    cache is bypassed entirely for this call — no key, no `get`, no `put` — and evaluation
 //!    proceeds unconditionally (D11/D12's fail-open property: an accelerator outage costs
 //!    latency, never correctness). If it succeeds and the key is already cached, that cached
-//!    [`Decision`] is returned immediately WITHOUT touching the audit sink again — the
-//!    original miss that populated the cache already recorded the one audit event for this
-//!    exact question.
+//!    [`Decision`] is returned immediately. Hits re-audit **denials only** (full trail,
+//!    D3/D8): a cached `Deny` still gets one fresh audit event per call, because a denial's
+//!    audit trail must never have a gap, cached or not. A cached `Allow`, however, is
+//!    returned WITHOUT touching the audit sink again — the original miss that populated the
+//!    cache already recorded the one audit event for this exact question, and auditing an
+//!    `Allow` again here would just double-record it.
 //! 4. On a miss (or a bypassed cache), the authoritative path: load the [`EntitySlice`] for
 //!    `(resource, principal)` and decide via [`PolicyEngine::decide`] against the SAME
 //!    compiled snapshot read in step 2 (never a second `snapshot.current()` read). An
@@ -157,8 +160,23 @@ impl Authorizer for CedarAuthorizer {
         if let Some(key) = &cache_key
             && let Some(cached) = self.decisions.get(key).await
         {
-            // A cache hit was already audited on the miss that populated it — auditing again
-            // here would double-record the same decision.
+            // Hits re-audit denials only (full trail, D3/D8): a cached `Deny` still gets a
+            // fresh audit event on every call, even though the decision itself is served
+            // from cache — a denial's audit trail must never have a gap. A cached `Allow` is
+            // NOT re-audited here: the original miss that populated the cache already
+            // recorded the one audit event for this exact question, and auditing it again
+            // would just double-record the same decision.
+            if cached.effect == Effect::Deny {
+                let event = AuthzDecisionEvent {
+                    principal_prn: req.principal.canonical(),
+                    action: req.action.as_wire().to_string(),
+                    resource_prn: req.resource.canonical(),
+                    effect: cached.effect,
+                    determining_policies: cached.determining_policies.clone(),
+                    at: chrono::Utc::now(),
+                };
+                self.audit.record(&event).await;
+            }
             return Ok(cached);
         }
 
@@ -577,8 +595,14 @@ mod tests {
         assert_eq!(audit.events.lock().unwrap().len(), 2, "two distinct decisions were computed, both audited");
     }
 
+    /// A cache hit still skips the (expensive) slice load — that part of the original
+    /// short-circuit claim holds regardless of effect. What changed (SMA-446, D3/D8): this
+    /// fixture's request is a default-deny (no grant), so the cache-hit `Deny` is now
+    /// RE-audited for the full trail rather than silently skipped — see
+    /// `cache_hit_deny_is_re_audited_but_cache_hit_allow_is_not` below for the direct
+    /// deny-vs-allow contrast.
     #[tokio::test]
-    async fn cache_hit_short_circuits_the_slice_load_and_does_not_double_audit() {
+    async fn cache_hit_short_circuits_the_slice_load_but_re_audits_a_cached_deny() {
         let fx = fixture();
         let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
         let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![]));
@@ -600,8 +624,79 @@ mod tests {
         let second = authorizer.is_authorized(&req).await.expect("second call succeeds");
 
         assert_eq!(first, second);
+        assert_eq!(first.effect, Effect::Deny, "no grant yet — the fixture principal is denied by default");
         assert_eq!(slices.calls.load(Ordering::SeqCst), 1, "a cache hit must not re-invoke the slice loader");
-        assert_eq!(audit.events.lock().unwrap().len(), 1, "a cache hit must not double-audit");
+        assert_eq!(
+            audit.events.lock().unwrap().len(),
+            2,
+            "a cache-hit Deny must be re-audited for the full trail (D3/D8), even though the slice load was skipped"
+        );
+    }
+
+    /// Direct contrast of the two cache-hit audit branches (SMA-446, D3/D8): a cache-hit
+    /// `Deny` is re-audited every single call (a denial's audit trail must never have a gap),
+    /// while a cache-hit `Allow` is NOT — the original miss already recorded it, and auditing
+    /// it again on every subsequent hit would just double-record the same decision. Both
+    /// halves also assert the slice loader ran exactly once, proving the second call in each
+    /// pair was a genuine cache hit and not a re-evaluation.
+    #[tokio::test]
+    async fn cache_hit_deny_is_re_audited_but_cache_hit_allow_is_not() {
+        // --- Deny path: default-deny, no grant seeded. ---
+        let fx = fixture();
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("snapshot builds"));
+        let slices = Arc::new(FixtureSliceLoader::new(fx.slice.clone()));
+        let audit = Arc::new(CapturingAuditSink::default());
+
+        let authorizer = CedarAuthorizer::new(
+            snapshot,
+            slices.clone() as Arc<dyn EntitySliceLoader>,
+            Arc::new(MemoryDecisionCache::new()) as Arc<dyn DecisionCache>,
+            Arc::new(Generations::memory()) as Arc<dyn GenerationsReader>,
+            audit.clone() as Arc<dyn AuditSink>,
+        );
+
+        let req = base_request(&fx, Action::GetProject);
+
+        let first = authorizer.is_authorized(&req).await.expect("first (miss) call succeeds");
+        assert_eq!(first.effect, Effect::Deny);
+        let second = authorizer.is_authorized(&req).await.expect("second (hit) call succeeds");
+        assert_eq!(second, first);
+
+        assert_eq!(slices.calls.load(Ordering::SeqCst), 1, "the second call was a real cache hit — the slice loader ran only once");
+        assert_eq!(audit.events.lock().unwrap().len(), 2, "miss + re-audited hit: the cache-hit Deny must be re-audited for the full trail");
+
+        // --- Allow path: seed an org_admin grant so the decision is Allow from the start. ---
+        let fx = fixture();
+        let grant_id = u(500);
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![org_admin_grant(grant_id, &fx.principal, &fx.org)]));
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("snapshot builds"));
+        let slices = Arc::new(FixtureSliceLoader::new(fx.slice.clone()));
+        let audit = Arc::new(CapturingAuditSink::default());
+
+        let authorizer = CedarAuthorizer::new(
+            snapshot,
+            slices.clone() as Arc<dyn EntitySliceLoader>,
+            Arc::new(MemoryDecisionCache::new()) as Arc<dyn DecisionCache>,
+            Arc::new(Generations::memory()) as Arc<dyn GenerationsReader>,
+            audit.clone() as Arc<dyn AuditSink>,
+        );
+
+        let req = base_request(&fx, Action::CreateProject);
+
+        let first = authorizer.is_authorized(&req).await.expect("first (miss) call succeeds");
+        assert_eq!(first.effect, Effect::Allow);
+        let second = authorizer.is_authorized(&req).await.expect("second (hit) call succeeds");
+        assert_eq!(second, first);
+
+        assert_eq!(slices.calls.load(Ordering::SeqCst), 1, "the second call was a real cache hit — the slice loader ran only once");
+        assert_eq!(
+            audit.events.lock().unwrap().len(),
+            1,
+            "a cache-hit Allow must NOT be re-audited — the original miss already recorded it"
+        );
     }
 
     /// D11/D12 fail-open: when the generation counters can't be read at all (a
@@ -686,7 +781,10 @@ mod tests {
              even though this fake's policy_gen() drifts on every call — proving the key is \
              never derived from a live policy_gen() read"
         );
-        assert_eq!(audit.events.lock().unwrap().len(), 1, "a cache hit must not double-audit");
+        // This request is a default-deny (no grant), so the cache-hit second call re-audits
+        // (SMA-446, D3/D8) — this assertion is about the audit COUNT tracking the effect, not
+        // about the cache-key stability this test otherwise exercises.
+        assert_eq!(audit.events.lock().unwrap().len(), 2, "a cache-hit Deny is re-audited for the full trail, even at a stable cache key");
     }
 
     #[tokio::test]
