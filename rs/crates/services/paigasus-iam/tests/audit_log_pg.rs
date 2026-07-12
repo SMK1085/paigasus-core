@@ -114,3 +114,54 @@ async fn record_out_of_band_then_query_filters_and_paginates() {
     // Actor b's denial must never surface under the actor=a filter.
     assert!(rows.iter().all(|e| e.actor_prn.as_deref() == Some("a")));
 }
+
+/// `query`'s `from`/`to` `occurred_at` filters (both `gte`/`lte`, i.e. inclusive on both
+/// ends) must select only the in-range rows, not silently ignore the bounds.
+#[tokio::test]
+async fn query_filters_by_occurred_at_from_and_to() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let sink = PgAuditLog::new(db.clone());
+
+    let base = Utc::now();
+    let t0 = base - chrono::Duration::hours(2); // before the range
+    let t1 = base - chrono::Duration::hours(1); // range start (`from`)
+    let t2 = base; // inside the range
+    let t3 = base + chrono::Duration::hours(1); // range end (`to`)
+    let t4 = base + chrono::Duration::hours(2); // after the range
+
+    for (id, occurred_at) in [
+        (Uuid::from_u128(200), t0),
+        (Uuid::from_u128(201), t1),
+        (Uuid::from_u128(202), t2),
+        (Uuid::from_u128(203), t3),
+        (Uuid::from_u128(204), t4),
+    ] {
+        let entry = AuditEntry {
+            occurred_at,
+            ..denial(id, "range-actor")
+        };
+        sink.record_out_of_band(&entry).await.expect("record_out_of_band must succeed");
+    }
+
+    let rows = sink
+        .query(&AuditFilter {
+            actor_prn: Some("range-actor".to_string()),
+            resource_prn: None,
+            action: None,
+            outcome: Some(AuditOutcome::Denied),
+            from: Some(t1),
+            to: Some(t3),
+            cursor: None,
+            limit: 10,
+        })
+        .await
+        .expect("range query must succeed");
+
+    let mut ids: Vec<Uuid> = rows.iter().map(|e| e.id).collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![Uuid::from_u128(201), Uuid::from_u128(202), Uuid::from_u128(203)],
+        "only rows with occurred_at in [from, to] must be returned, both bounds inclusive"
+    );
+}

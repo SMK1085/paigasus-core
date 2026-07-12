@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+
 //! Audit-log value types (SMA-446): the append-only record of security-relevant events
 //! (authz denials in Slice A; committed mutations in Slice B). Pure/kernel-friendly — ids and
 //! timestamps are injected by the caller (no `getrandom`, no ambient clock).

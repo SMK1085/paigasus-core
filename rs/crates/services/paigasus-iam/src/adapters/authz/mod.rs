@@ -4,7 +4,7 @@
 //! counters (Task 10), the compiled-policy snapshot (Task 13), the generation-keyed
 //! decision + entity-slice caches (Task 14), and the `CedarAuthorizer` + `TracingAuditSink`
 //! composition wiring all of these together into the `Authorizer`/`AuditSink` ports (Task
-//! 15). Wiring `CedarAuthorizer` into `AppState`/`main.rs` is a separate follow-up task.
+//! 15). `CedarAuthorizer` is wired into `AppState`/`main.rs` (SMA-446 Slice A).
 
 pub mod audit;
 pub mod cedar_authorizer;

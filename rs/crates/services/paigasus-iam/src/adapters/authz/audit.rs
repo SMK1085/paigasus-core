@@ -3,8 +3,9 @@
 //! `TracingAuditSink`: the default [`AuditSink`] (ADR-0013, spec §7) — emits one structured
 //! `tracing` event per [`AuthzDecisionEvent`], `info` for `Allow` and `warn` for `Deny` (so a
 //! log pipeline can alert on denies without a separate field-value filter). This is a
-//! log-only sink; M5 plugs in a persistent one (e.g. writing to a `authz_audit_log` table)
-//! behind the same [`AuditSink`] port, so no caller needs to change when that lands.
+//! log-only sink; M5 composes a [`FanOutAuditSink`] of this sink plus
+//! [`BufferedDenialAuditSink`](super::denial_audit::BufferedDenialAuditSink) behind the same
+//! [`AuditSink`] port, so no caller needs to change.
 //!
 //! **No sensitive material:** [`AuthzDecisionEvent`] carries only PRNs, the action name, the
 //! effect, and the determining-policy ids — never a bearer token, claim, or other secret —

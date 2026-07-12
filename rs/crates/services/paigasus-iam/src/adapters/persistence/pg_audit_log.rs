@@ -80,10 +80,12 @@ fn detail_from_column(raw: &str) -> Result<serde_json::Value, RepositoryError> {
     serde_json::from_str(raw).map_err(backend_err)
 }
 
-/// Reconstructs the domain `AuditEntry` from a stored row. A stored `outcome` outside
-/// `{committed, denied}` is a data-integrity break (the `ck_audit_log_outcome` CHECK should
-/// prevent it) — surfaced as `Backend`, never a silent default, mirroring
-/// `pg_repository.rs::map_principal_row`'s posture for a bad enum.
+/// Reconstructs the domain `AuditEntry` from a stored row. `outcome` is a plain unconstrained
+/// TEXT column (m0006 has no CHECK constraint on it) — this parse is the safety net: the
+/// adapter only ever writes `AuditOutcome::as_str()` values, so a stored `outcome` outside
+/// `{committed, denied}` would mean external tampering or corruption. Surfaced as `Backend`,
+/// never a silent default, mirroring `pg_repository.rs::map_principal_row`'s posture for a bad
+/// enum.
 fn model_to_entry(m: audit_log::Model) -> Result<AuditEntry, RepositoryError> {
     let outcome = AuditOutcome::parse(&m.outcome).ok_or_else(|| backend_err(format!("bad audit outcome: {}", m.outcome)))?;
     let determining_policies = policies_from_column(m.determining_policies.as_deref())?;

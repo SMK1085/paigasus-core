@@ -3,9 +3,8 @@
 //! `CedarAuthorizer`: the `Authorizer` port's implementation (ADR-0013, spec §7) — composes
 //! the compiled-policy snapshot (Task 13), the entity-slice loader/cache (Task 12/14), the
 //! generation-keyed decision cache (Task 14), and an [`AuditSink`] into the one component
-//! `is_authorized` callers reach for. AppState wiring (`main.rs`/`adapters::http::AppState`)
-//! is a separate follow-up task — this module only builds and unit-tests the authorizer
-//! itself.
+//! `is_authorized` callers reach for. It is wired into `AppState`/`main.rs` (SMA-446 Slice
+//! A); this module builds and unit-tests the authorizer itself.
 //!
 //! **`is_authorized` flow (spec D11/D12, AC1):**
 //! 1. Best-effort synchronous [`PolicySnapshot::reload_if_stale`] — a grant made moments ago
