@@ -45,6 +45,7 @@ pub enum Action {
     IssueApiKey,
     RevokeApiKey,
     ListApiKeys,
+    ListAuditLog,
 }
 
 impl Action {
@@ -84,6 +85,7 @@ impl Action {
         Action::IssueApiKey,
         Action::RevokeApiKey,
         Action::ListApiKeys,
+        Action::ListAuditLog,
     ];
 
     /// The exact Cedar action id, verbatim from `SCHEMA_SRC` — this string doubles as
@@ -125,6 +127,7 @@ impl Action {
             Action::IssueApiKey => "IssueApiKey",
             Action::RevokeApiKey => "RevokeApiKey",
             Action::ListApiKeys => "ListApiKeys",
+            Action::ListAuditLog => "ListAuditLog",
         }
     }
 
@@ -157,7 +160,8 @@ impl Action {
             | Action::ListRoleGrants
             | Action::GetServiceAccount
             | Action::ListServiceAccounts
-            | Action::ListApiKeys => false,
+            | Action::ListApiKeys
+            | Action::ListAuditLog => false,
             Action::CreateOrganization
             | Action::RenameOrganization
             | Action::ArchiveOrganization
@@ -256,13 +260,19 @@ mod tests {
                 | Action::ArchiveServiceAccount
                 | Action::IssueApiKey
                 | Action::RevokeApiKey
-                | Action::ListApiKeys => {}
+                | Action::ListApiKeys
+                | Action::ListAuditLog => {}
             }
         }
         for a in Action::ALL {
             assert_in_all(*a);
         }
-        assert_eq!(Action::ALL.len(), 34, "Action::ALL.len() must be 27 pre-existing + 7 new management actions");
+        assert_eq!(Action::ALL.len(), 35, "27 pre-existing + 7 M4 + 1 audit");
+    }
+    #[test]
+    fn list_audit_log_is_a_read_action() {
+        assert!(!Action::ListAuditLog.is_write());
+        assert_eq!(Action::parse("ListAuditLog"), Some(Action::ListAuditLog));
     }
     #[test]
     fn restore_classification() {
