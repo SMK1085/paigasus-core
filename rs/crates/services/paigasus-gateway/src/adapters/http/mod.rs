@@ -84,12 +84,14 @@ async fn healthz() -> impl IntoResponse {
 /// `IntrospectApiKey` with the deliberately-invalid [`READYZ_PROBE_TOKEN`]: a REACHABLE IAM parses
 /// and rejects it, returning an application-level `Status` (e.g. `Unauthenticated`); an UNREACHABLE
 /// IAM fails at the transport ([`IamError::Connect`], or an `Rpc` `Status` of
-/// `Unavailable`/`DeadlineExceeded`). The probe is a plain parse-reject — cheap and NOT audited (it
-/// authenticates nothing). A dedicated IAM gRPC health RPC is the documented follow-up.
+/// `Unavailable`/`DeadlineExceeded`/`Internal`). The probe is a plain parse-reject — cheap and NOT
+/// audited (it authenticates nothing). A dedicated IAM gRPC health RPC is the documented follow-up.
 ///
-/// Classification: transport-ish outcomes (`Connect` / `Unavailable` / `DeadlineExceeded`) → NOT
-/// ready (`503`); ANY other outcome (an application-level `Status` such as `Unauthenticated`, or
-/// even an `Ok`) proves IAM answered → ready (`200`).
+/// Classification: transport/backend outcomes (`Connect` / `Unavailable` / `DeadlineExceeded` /
+/// `Internal`) → NOT ready (`503`) — kept consistent with `auth::introspect_error`'s request-path
+/// mapping so the probe reports not-ready during the same IAM failures that break real requests;
+/// ANY other outcome (an application-level `Status` such as `Unauthenticated`, or even an `Ok`)
+/// proves IAM answered → ready (`200`).
 ///
 /// ## Upstream — config-presence only for M0 (a live probe is a follow-up)
 /// `upstream.openai.{base_url,api_key}` are validated non-empty at boot by
@@ -98,10 +100,14 @@ async fn healthz() -> impl IntoResponse {
 /// follow-up; deliberately NOT added here.
 async fn readyz(State(state): State<AppState>) -> Response {
     match state.iam.introspect_api_key(READYZ_PROBE_TOKEN).await {
-        // Transport-level failures → IAM unreachable → not ready.
+        // Transport/backend failures → IAM unreachable or unhealthy → not ready. `Internal` is
+        // included so this stays consistent with `auth::introspect_error`, which maps `Internal` to
+        // `IamUnavailable` (503) on the request path: a persistent `Internal` from IAM would
+        // otherwise make `/readyz` report ready while every real chat request fails 503 — exactly
+        // the outage the probe exists to catch.
         Err(IamError::Connect(_)) => iam_not_ready(),
-        Err(IamError::Rpc(status)) if matches!(status.code(), tonic::Code::Unavailable | tonic::Code::DeadlineExceeded) => iam_not_ready(),
-        // Any application-level `Status` (e.g. `Unauthenticated`) or an `Ok` proves IAM answered.
+        Err(IamError::Rpc(status)) if matches!(status.code(), tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Internal) => iam_not_ready(),
+        // Any other application-level `Status` (e.g. `Unauthenticated`) or an `Ok` proves IAM answered.
         Err(IamError::Rpc(_)) | Ok(_) => (StatusCode::OK, Json(json!({ "status": "ready" }))).into_response(),
     }
 }
@@ -143,13 +149,15 @@ mod tests {
 
     /// The introspect outcome a [`ProbeIam`] returns for the `/readyz` sentinel probe — either a
     /// REACHABLE IAM (it answered: an `Ok`, or an application-level `Unauthenticated`) or an
-    /// UNREACHABLE one (a transport-level `Unavailable`/`DeadlineExceeded` `Rpc`, or `Connect`).
+    /// UNREACHABLE/UNHEALTHY one (a transport/backend `Unavailable`/`DeadlineExceeded`/`Internal`
+    /// `Rpc`, or `Connect`).
     #[derive(Clone, Copy)]
     enum Probe {
         ReachableOk,
         ReachableUnauthenticated,
         UnreachableUnavailable,
         UnreachableDeadline,
+        UnreachableInternal,
         UnreachableConnect,
     }
 
@@ -165,6 +173,7 @@ mod tests {
                 Probe::ReachableUnauthenticated => Err(IamError::Rpc(Status::unauthenticated("invalid key"))),
                 Probe::UnreachableUnavailable => Err(IamError::Rpc(Status::unavailable("iam is down"))),
                 Probe::UnreachableDeadline => Err(IamError::Rpc(Status::deadline_exceeded("iam timed out"))),
+                Probe::UnreachableInternal => Err(IamError::Rpc(Status::internal("iam internal error"))),
                 Probe::UnreachableConnect => Err(IamError::Connect("channel build failed".to_string())),
             }
         }
@@ -226,8 +235,9 @@ mod tests {
 
     #[tokio::test]
     async fn readyz_is_503_when_iam_is_unreachable() {
-        // A transport-level outcome (Connect, or an Unavailable/DeadlineExceeded Rpc) → not ready.
-        for probe in [Probe::UnreachableUnavailable, Probe::UnreachableDeadline, Probe::UnreachableConnect] {
+        // A transport/backend outcome (Connect, or an Unavailable/DeadlineExceeded/Internal Rpc) →
+        // not ready. `Internal` is included to match `introspect_error`'s request-path mapping.
+        for probe in [Probe::UnreachableUnavailable, Probe::UnreachableDeadline, Probe::UnreachableInternal, Probe::UnreachableConnect] {
             let app = router(state_with_iam(Arc::new(ProbeIam(probe))));
             assert_eq!(get_status(app, "/readyz").await, StatusCode::SERVICE_UNAVAILABLE, "unreachable IAM must be not-ready");
         }

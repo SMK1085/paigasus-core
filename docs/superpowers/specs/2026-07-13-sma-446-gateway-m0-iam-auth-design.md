@@ -160,8 +160,12 @@ key):
 - **Error envelope:** exact OpenAI shape `{"error":{"message","type","param","code"}}` for all
   gateway-originated errors (401/403/500/502/503/504), so SDK error handling works.
 - **M0 guardrails (real-credential proxy):** `tower_http`/`DefaultBodyLimit` **max request body**;
-  **split timeouts** — connect + first-byte (short) vs overall-stream (long, so a legit long stream
-  isn't killed by one `request_timeout`); optional `max_tokens` clamp. **M0 deployment constraint
+  **split timeouts** — connect + first-byte (short, non-stream only) vs a between-bytes
+  **stream-idle** timeout (`stream_idle_timeout_secs`) on the stream path, which bounds a *stalled*
+  stream without killing a legitimately long *active* one. (Idle-timeout semantics, not an overall
+  wall-clock cap: an actively-producing stream runs until the upstream ends it — acceptable for M0
+  behind the D6 spend cap; an explicit overall-stream cap is a documented follow-up.) Optional
+  `max_tokens` clamp. **M0 deployment constraint
   (D6):** rate limiting + cost budgets are M3/M4, so M0 is for **internal / non-production** use or
   behind a **hard OpenAI account-level spend cap** — stated in the RUNBOOK/config docs; a single
   over-granted key otherwise means unbounded spend.

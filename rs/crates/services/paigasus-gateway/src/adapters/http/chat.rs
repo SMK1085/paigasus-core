@@ -103,7 +103,10 @@ pub async fn chat_completions(State(state): State<AppState>, caller: Option<Exte
     };
 
     // One structured line per request — model/stream/status/latency/principal ONLY. NEVER the
-    // prompt, messages, body, or the OpenAI key.
+    // prompt, messages, body, or the OpenAI key. `principal`/`key_id` are the caller's
+    // service-account PRN + non-secret API-key id: internal *service-account* identifiers (not
+    // end-user PII, and not the key secret), retained deliberately for request attribution/audit —
+    // the "never PII" bar is about prompt/message content, not the SA the call was made as.
     tracing::info!(
         model = %model,
         stream = stream,
