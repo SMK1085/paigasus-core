@@ -18,6 +18,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
+use crate::adapters::openai::OpenAiError;
+
 /// The OpenAI-compatible error envelope: a single `error` object. `#[derive(Serialize)]` only —
 /// the gateway never deserializes its own error bodies.
 #[derive(Debug, Serialize)]
@@ -55,6 +57,26 @@ pub enum GatewayError {
     /// An unexpected internal fault (e.g. our self-query hit IAM's cross-principal exposure gate,
     /// which should be impossible) → 500. `message` stays generic; details are logged, not echoed.
     Internal,
+    // ---- egress (OpenAI-upstream) cases (G7) -------------------------------------------------
+    /// The request body was not valid JSON — the gateway could not parse `model`/`stream` → 400.
+    BadRequestBody,
+    /// The OpenAI upstream could not be reached (connect/transport/build failure) → 502.
+    UpstreamUnavailable,
+    /// The OpenAI upstream did not respond within a configured timeout → 504.
+    UpstreamTimeout,
+}
+
+/// Map an [`OpenAiError`] (egress send/connect/timeout/build failure) to its client-facing
+/// [`GatewayError`]: a fired timeout is a `504`; every other transport/connect/build failure is a
+/// `502` (upstream unreachable/misbuilt). A non-2xx upstream is NOT an `OpenAiError` (G6 returns it
+/// as a `ChatResponse::Full` for verbatim passthrough), so it never reaches this mapping.
+impl From<OpenAiError> for GatewayError {
+    fn from(err: OpenAiError) -> Self {
+        match err {
+            OpenAiError::Timeout(_) => GatewayError::UpstreamTimeout,
+            OpenAiError::Connect(_) | OpenAiError::Transport(_) | OpenAiError::Build(_) => GatewayError::UpstreamUnavailable,
+        }
+    }
 }
 
 impl GatewayError {
@@ -84,6 +106,14 @@ impl GatewayError {
                 "The authorization service is temporarily unavailable.",
             ),
             GatewayError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "api_error", None, "Internal error."),
+            GatewayError::BadRequestBody => (StatusCode::BAD_REQUEST, "invalid_request_error", Some("invalid_request_body"), "The request body is not valid JSON."),
+            GatewayError::UpstreamUnavailable => (
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                Some("upstream_unavailable"),
+                "The upstream model provider is temporarily unavailable.",
+            ),
+            GatewayError::UpstreamTimeout => (StatusCode::GATEWAY_TIMEOUT, "api_error", Some("upstream_timeout"), "The upstream model provider timed out."),
         }
     }
 }
@@ -121,6 +151,30 @@ mod tests {
         assert_eq!(GatewayError::MissingScope.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(GatewayError::IamUnavailable.into_response().status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(GatewayError::Internal.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(GatewayError::BadRequestBody.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(GatewayError::UpstreamUnavailable.into_response().status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(GatewayError::UpstreamTimeout.into_response().status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn openai_error_maps_timeout_to_504_and_the_rest_to_502() {
+        // A real `reqwest::Error` has no public constructor; wrap a genuine one (fresh per variant,
+        // since `reqwest::Error` is not `Clone`) and assert the mapping. The request-time
+        // classification INTO these variants is G6's concern.
+        assert_eq!(GatewayError::from(OpenAiError::Timeout(dead_port_error().await)), GatewayError::UpstreamTimeout);
+        assert_eq!(GatewayError::from(OpenAiError::Connect(dead_port_error().await)), GatewayError::UpstreamUnavailable);
+        assert_eq!(GatewayError::from(OpenAiError::Transport(dead_port_error().await)), GatewayError::UpstreamUnavailable);
+        assert_eq!(GatewayError::from(OpenAiError::Build(dead_port_error().await)), GatewayError::UpstreamUnavailable);
+    }
+
+    /// Produce a genuine `reqwest::Error` (no public constructor) by dialing an unroutable port.
+    async fn dead_port_error() -> reqwest::Error {
+        reqwest::Client::new()
+            .get("http://127.0.0.1:1")
+            .timeout(std::time::Duration::from_millis(50))
+            .send()
+            .await
+            .expect_err("connection to a dead port fails")
     }
 
     #[tokio::test]
