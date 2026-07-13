@@ -46,6 +46,7 @@ pub enum Action {
     RevokeApiKey,
     ListApiKeys,
     ListAuditLog,
+    InvokeModel,
 }
 
 impl Action {
@@ -86,6 +87,7 @@ impl Action {
         Action::RevokeApiKey,
         Action::ListApiKeys,
         Action::ListAuditLog,
+        Action::InvokeModel,
     ];
 
     /// The exact Cedar action id, verbatim from `SCHEMA_SRC` — this string doubles as
@@ -128,6 +130,7 @@ impl Action {
             Action::RevokeApiKey => "RevokeApiKey",
             Action::ListApiKeys => "ListApiKeys",
             Action::ListAuditLog => "ListAuditLog",
+            Action::InvokeModel => "InvokeModel",
         }
     }
 
@@ -183,7 +186,8 @@ impl Action {
             | Action::CreateServiceAccount
             | Action::ArchiveServiceAccount
             | Action::IssueApiKey
-            | Action::RevokeApiKey => true,
+            | Action::RevokeApiKey
+            | Action::InvokeModel => true,
         }
     }
 
@@ -261,13 +265,14 @@ mod tests {
                 | Action::IssueApiKey
                 | Action::RevokeApiKey
                 | Action::ListApiKeys
-                | Action::ListAuditLog => {}
+                | Action::ListAuditLog
+                | Action::InvokeModel => {}
             }
         }
         for a in Action::ALL {
             assert_in_all(*a);
         }
-        assert_eq!(Action::ALL.len(), 35, "27 pre-existing + 7 M4 + 1 audit");
+        assert_eq!(Action::ALL.len(), 36, "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model");
     }
     #[test]
     fn list_audit_log_is_a_read_action() {

@@ -22,7 +22,7 @@ namespace Pgs::Iam {
          RenameProject, ArchiveProject, RestoreProject, AttachMembership, DetachMembership,
          PutPolicy, DeletePolicy, ListPolicies, GrantRole, RevokeRole, ListRoleGrants,
          CreateServiceAccount, GetServiceAccount, ListServiceAccounts, ArchiveServiceAccount,
-         IssueApiKey, RevokeApiKey, ListApiKeys, ListAuditLog
+         IssueApiKey, RevokeApiKey, ListApiKeys, ListAuditLog, InvokeModel
     appliesTo { principal: [Principal], resource: [Root, Organization, Team, Project] };
 }
 "#;
