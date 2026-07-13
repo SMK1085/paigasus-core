@@ -304,16 +304,18 @@ pub fn to_proto_issue_api_key_response(new_key: &NewApiKey) -> IssueApiKeyRespon
 /// `IntrospectApiKeyResponse` (SMA-445 Task 21, spec §10.1) — the API-key peer of
 /// [`to_introspect_response`]: `key_id` takes the place of `issuer`/`subject` (an
 /// API-key-authenticated principal has neither), mirroring
-/// `http::dto::IntrospectApiKeyResponseDto`'s identical `From` impl.
+/// `http::dto::IntrospectApiKeyResponseDto`'s identical `From` impl. `scope_prn` (SMA-446)
+/// carries the key's tenancy scope straight off the credential — a cache HIT supplies it with
+/// NO extra DB read (D11), so the gateway can authorize `InvokeModel` against it.
 pub fn to_introspect_api_key_response(ctx: &PrincipalContext) -> IntrospectApiKeyResponse {
     // API-key introspection always resolves via `AuthenticateApiKey::introspect`, which only
     // ever produces a `Credential::ApiKey` — mirrors `to_introspect_response`'s own (opposite)
     // unreachable-arm debug_assert.
-    let (key_id, expires_at) = match &ctx.principal.credential {
-        Credential::ApiKey { key_id, expires_at } => (key_id.to_string(), *expires_at),
+    let (key_id, expires_at, scope_prn) = match &ctx.principal.credential {
+        Credential::ApiKey { key_id, expires_at, scope_prn } => (key_id.to_string(), *expires_at, scope_prn.clone()),
         Credential::Oidc { .. } => {
             debug_assert!(false, "api-key introspection resolved an Oidc credential; only ApiKey is reachable here");
-            (String::new(), None)
+            (String::new(), None, String::new())
         }
     };
     IntrospectApiKeyResponse {
@@ -323,6 +325,7 @@ pub fn to_introspect_api_key_response(ctx: &PrincipalContext) -> IntrospectApiKe
         expires_at: expires_at.map(ts),
         memberships: ctx.memberships.iter().map(to_proto_membership).collect(),
         role_grants: ctx.role_grants.iter().map(to_proto_role_grant_ref).collect(),
+        scope_prn,
     }
 }
 
@@ -343,5 +346,34 @@ mod tests {
     fn not_found_maps_to_grpc_not_found() {
         let status = status_to_grpc(TenancyError::NotFound);
         assert_eq!(status.code(), Code::NotFound);
+    }
+
+    /// SMA-446: `to_introspect_api_key_response` surfaces the credential's `scope_prn` on the
+    /// wire (D11 — the gateway authorizes `InvokeModel` against it). Deterministic, no PG/Redis:
+    /// builds a `PrincipalContext` carrying a known scope and asserts the mapper echoes it —
+    /// with `dto.rs`'s twin test, this guarantees the gRPC/HTTP wire shapes agree.
+    #[test]
+    fn introspect_api_key_response_carries_scope_prn() {
+        use paigasus_iam_core::{ApiKeyId, AuthnPrincipal, PrincipalId, PrincipalKind, PrincipalStatus};
+
+        let scope_prn = "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-000000000042".to_string();
+        let principal_id = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(42)).unwrap());
+        let ctx = PrincipalContext {
+            principal: AuthnPrincipal {
+                principal_id,
+                kind: PrincipalKind::ServiceAccount,
+                status: PrincipalStatus::Active,
+                credential: Credential::ApiKey {
+                    key_id: ApiKeyId::from_uuid(Uuid::from_u128(7)),
+                    expires_at: None,
+                    scope_prn: scope_prn.clone(),
+                },
+            },
+            memberships: Vec::new(),
+            role_grants: Vec::new(),
+        };
+
+        let resp = to_introspect_api_key_response(&ctx);
+        assert_eq!(resp.scope_prn, scope_prn, "the gRPC introspect response must carry the key's scope_prn (SMA-446, D11)");
     }
 }

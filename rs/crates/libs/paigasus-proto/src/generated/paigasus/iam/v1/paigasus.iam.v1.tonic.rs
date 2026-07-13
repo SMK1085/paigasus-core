@@ -208,7 +208,6 @@ pub mod tenancy_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        ///
         pub async fn archive_organization(
             &mut self,
             request: impl tonic::IntoRequest<super::ArchiveOrganizationRequest>,
@@ -694,7 +693,6 @@ pub mod tenancy_service_server {
             tonic::Response<super::RenameOrganizationResponse>,
             tonic::Status,
         >;
-        ///
         async fn archive_organization(
             &self,
             request: tonic::Request<super::ArchiveOrganizationRequest>,

@@ -1,0 +1,46 @@
+# paigasus-gateway config. Copy to gateway.toml or supply via GATEWAY_* env vars.
+# Precedence: built-in defaults < gateway.toml < GATEWAY_* environment.
+#
+# M0 NOTE: this is the walking-skeleton config (SMA-446 M0). There is no rate-limit or spend
+# budget on the OpenAI upstream yet (D6) — only deploy this behind a hard OpenAI spend cap,
+# or keep it internal/non-production, until a later milestone adds one.
+
+# http_addr = "0.0.0.0:8088"          # axum HTTP (chat + health) — default shown
+# log_level = "info"                  # RUST_LOG-style filter — default shown
+
+# --- Egress timeouts/limits (D6) ---
+
+# connect_timeout_secs     = 10       # TCP+TLS connect to the OpenAI upstream — default shown
+# first_byte_timeout_secs  = 30       # time to the first response byte — default shown
+# stream_idle_timeout_secs = 300      # max gap between streamed chunks — default shown
+# max_request_bytes        = 1048576  # reject larger request bodies before parsing (1 MiB) —
+#                                      # default shown
+
+# --- IAM gRPC client (G4 dials this for auth/introspection) ---
+
+# [iam]
+# grpc_addr = "https://127.0.0.1:9090"   # default shown
+
+# [iam.tls]
+# TLS is the DEFAULT and REQUIRED transport to paigasus-iam: the introspect call carries raw
+# caller-presented API keys, so this link must be encrypted unless you explicitly opt out
+# below AND grpc_addr is a loopback host (D8). Default shown (system trust store, no mTLS):
+# mode                = "tls"           # "tls" (default) | "loopback_insecure"
+# # ca_cert_path      = "/path/to/ca.pem"       # unset = system trust store only
+# # client_cert_path  = "/path/to/client.pem"   # mTLS — set together with client_key_path
+# # client_key_path   = "/path/to/client-key.pem"
+#
+# ONLY valid when grpc_addr resolves to a loopback host (127.0.0.0/8, localhost, ::1) — e.g.
+# a local dev IAM instance on the same machine with no TLS cert provisioned:
+# [iam.tls]
+# mode = "loopback_insecure"
+
+# --- OpenAI upstream (G6 forwards chat-completions requests here) ---
+
+# [upstream.openai]
+# base_url = "https://api.openai.com"    # default shown
+#
+# REQUIRED — no valid default (the empty-string default fails `GatewayConfig::validate`, not
+# figment extraction — an unset key loads fine but boot refuses to start). NEVER put this in
+# gateway.toml; source it from the environment so it never lands in a config file or VCS:
+# GATEWAY_UPSTREAM__OPENAI__API_KEY=sk-...

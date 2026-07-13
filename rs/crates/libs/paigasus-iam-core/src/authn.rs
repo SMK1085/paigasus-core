@@ -72,8 +72,19 @@ pub struct ValidatedClaims {
 /// `subject`/`issuer` that never meaningfully applied to an `ApiKey`-authenticated request.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Credential {
-    Oidc { issuer: Issuer, subject: String, expires_at: DateTime<Utc> },
-    ApiKey { key_id: ApiKeyId, expires_at: Option<DateTime<Utc>> },
+    Oidc {
+        issuer: Issuer,
+        subject: String,
+        expires_at: DateTime<Utc>,
+    },
+    ApiKey {
+        key_id: ApiKeyId,
+        expires_at: Option<DateTime<Utc>>,
+        /// The PRN of the key's tenancy scope node — authz scopes the key's actions to this
+        /// subtree. Carried through introspection so the gateway can authorize against it; a
+        /// non-secret string (safe to serialize/log), unlike the key's secret/hash.
+        scope_prn: String,
+    },
 }
 
 /// A principal resolved from a validated credential: the local identity plus the
@@ -199,6 +210,7 @@ mod tests {
             credential: Credential::ApiKey {
                 key_id: ApiKeyId::from_uuid(Uuid::from_u128(1)),
                 expires_at: None,
+                scope_prn: "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-000000000500".to_string(),
             },
         };
         assert!(p.issuer().is_none());

@@ -448,6 +448,7 @@ mod tests {
                     sa_status: PrincipalStatus::Active,
                     expires_at: None,
                     key_hash: b"hash".to_vec(),
+                    scope_prn: key.scope.canonical(),
                 },
             )
             .await;
@@ -527,6 +528,7 @@ mod tests {
                     sa_status: PrincipalStatus::Active,
                     expires_at: None,
                     key_hash: b"hash".to_vec(),
+                    scope_prn: key.scope.canonical(),
                 },
             )
             .await;

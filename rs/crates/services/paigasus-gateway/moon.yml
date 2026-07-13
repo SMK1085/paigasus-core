@@ -7,6 +7,7 @@ language: 'rust'
 dependsOn:
   - 'paigasus-proto-rs'
   - 'paigasus-kernel-rs'
+  - 'paigasus-logging-rs'
 
 tasks:
   build:

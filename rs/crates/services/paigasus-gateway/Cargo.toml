@@ -7,5 +7,72 @@ rust-version.workspace = true
 authors.workspace = true
 publish = false
 
+[lib]
+name = "paigasus_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "paigasus-gateway"
+path = "src/main.rs"
+
+[dependencies]
+paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0" }
+# `adapters::http` — axum liveness/readiness routes; serde_json builds the JSON bodies.
+axum = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal"] }
+figment = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+# `adapters::iam::client::IamError` derives `thiserror::Error` (the outbound IAM adapter's
+# error type; G5's auth middleware maps its `Rpc(tonic::Status)` variant to HTTP), mirroring
+# iam's `application::error` thiserror pattern.
+thiserror = { workspace = true }
+# `adapters::iam::client` — the outbound IAM gRPC adapter. `tonic` provides the `Channel`,
+# `Request`, `metadata::MetadataValue`, and `transport::{ClientTlsConfig, Certificate,
+# Identity}` used to dial IAM. TLS features: `tls-ring` selects the RING rustls CryptoProvider
+# (this workspace is ring-only — NEVER `tls-aws-lc`, which links a second provider and panics
+# rustls 0.23 at first TLS use); `tls-native-roots` supplies the platform trust store for the
+# system-trust (no custom-CA) path. Cargo unions features workspace-wide, so both stay
+# ring-backed and `aws-lc-rs` remains absent from Cargo.lock.
+tonic = { workspace = true, features = ["tls-ring", "tls-native-roots"] }
+# `adapters::iam::client` names the generated `paigasus.iam.v1` gRPC clients + request/response
+# messages (`AuthnServiceClient`, `AuthorizationServiceClient`, `IntrospectApiKeyRequest`, …).
+paigasus-proto = { workspace = true }
+# `adapters::iam::client::Iam` is `#[async_trait]` — the port is consumed as `dyn Iam`
+# (G5 injects a fake in unit tests, G7 the real `IamClient`), which native AFIT can't yet do
+# object-safely.
+async-trait = { workspace = true }
+# `config::OpenAiConfig::api_key` — redacts the OpenAI key out of `Debug`/`Serialize`
+# (`GatewayConfig` derives both for log/`readyz` dumps, mirroring iam's `RawPepper` posture).
+# NOT a workspace-pinned dep yet (root Cargo.toml carries no `secrecy` entry) — this crate is
+# its first consumer; see the task report for the new-dep note (G9 may add a deny.toml note).
+secrecy = { version = "0.10", features = ["serde"] }
+# `adapters::openai::client::OpenAiClient` — the outbound OpenAI egress adapter (G6). The
+# workspace pins reqwest WITHOUT `stream`; `features = ["stream"]` adds `Response::bytes_stream()`
+# for the UNBUFFERED streaming path (cargo unions features workspace-wide, so this just enables
+# `stream` build-wide). The TLS feature is UNTOUCHED — the workspace baseline `rustls-tls`
+# already resolves to the RING provider here (Cargo.lock has `ring`, no `aws-lc-rs`); a second
+# provider would panic rustls 0.23 at first TLS use (see gateway-iam-integration-facts.md).
+reqwest = { workspace = true, features = ["stream"] }
+# `bytes::Bytes` is the request/response body currency at the egress boundary — the caller's
+# ORIGINAL raw request bytes flow upstream verbatim, and the non-stream response comes back as
+# `Bytes` (byte-lossless passthrough; the DTO is parsed only to read `model`/`stream`).
+bytes = { workspace = true }
+# `futures::stream::BoxStream` names the boxed UNBUFFERED chunk stream `chat_completion` returns
+# on the stream path, and `StreamExt::boxed` erases `Response::bytes_stream()`'s opaque type into
+# it so it can live in the `ChatResponse` enum.
+futures = { workspace = true }
+
+# figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
+# the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as a
+# dev-dependency — it's unified into test builds only, never the shipped binary.
+[dev-dependencies]
+figment = { workspace = true, features = ["test"] }
+# `src/adapters/http/mod.rs`'s health unit tests and `tests/chat_proxy.rs`'s integration tests
+# both drive the router via `ServiceExt::oneshot` (no real listener).
+tower = { workspace = true, features = ["util"] }
+
 [lints]
 workspace = true

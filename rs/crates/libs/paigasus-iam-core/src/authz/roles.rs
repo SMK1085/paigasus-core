@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Starter Cedar policy set + the seven system roles (ADR-0013, design §3.2): the base
+//! Starter Cedar policy set + the eight system roles (ADR-0013, design §3.2): the base
 //! `forbid-archived-writes` static policy, one policy template per system role, and the
 //! `Role` catalog those templates back.
 //!
@@ -150,7 +150,11 @@ const PROJECT_ADMIN_ACTIONS: &[Action] = &[
 /// `project_member`: project reads only (design §3.2).
 const PROJECT_MEMBER_ACTIONS: &[Action] = &[Action::GetProject];
 
-/// The seven system roles (design §3.2), each `system = true` and immutable via the policy/role
+/// `gateway_user`: only [InvokeModel] on its scope subtree (SMA-446, D10 — a dedicated role so
+/// a spend-capable action never dilutes the read-only `*_member` roles).
+const GATEWAY_USER_ACTIONS: &[Action] = &[Action::InvokeModel];
+
+/// The eight system roles (design §3.2), each `system = true` and immutable via the policy/role
 /// CRUD API. Every `template_id` equals the role's own `key` (see module docs).
 #[must_use]
 pub fn system_roles() -> Vec<Role> {
@@ -202,6 +206,13 @@ pub fn system_roles() -> Vec<Role> {
             template_id: "project_member".to_string(),
             scope_kinds: vec![NodeKind::Project],
             description: "Read a single project.".to_string(),
+            system: true,
+        },
+        Role {
+            key: "gateway_user".to_string(),
+            template_id: "gateway_user".to_string(),
+            scope_kinds: vec![NodeKind::Organization, NodeKind::Team, NodeKind::Project],
+            description: "Invoke models within a scope subtree (org/team/project).".to_string(),
             system: true,
         },
     ]
@@ -259,7 +270,7 @@ fn forbid_archived_writes_source() -> String {
 /// explicitly.
 ///
 /// # Panics
-/// If `key` doesn't name one of the seven roles this module defines. Every call site in this
+/// If `key` doesn't name one of the eight roles this module defines. Every call site in this
 /// module passes a key from [`system_roles`]'s own output, so this can never actually happen.
 fn template_source(key: &str) -> String {
     if key == PLATFORM_ADMIN_KEY {
@@ -272,6 +283,7 @@ fn template_source(key: &str) -> String {
         "team_member" => TEAM_MEMBER_ACTIONS,
         "project_admin" => PROJECT_ADMIN_ACTIONS,
         "project_member" => PROJECT_MEMBER_ACTIONS,
+        "gateway_user" => GATEWAY_USER_ACTIONS,
         other => panic!("template_source: unknown system role key {other:?}"),
     };
     format!("permit(principal == ?principal, action in [{}], resource in ?resource);", action_refs(actions))
@@ -566,6 +578,29 @@ mod tests {
                 grants: vec![grant(18, &uni.principal, "project_member", GrantScope::Node(TenancyNodeRef::Project(uni.project_in_o.clone())))],
                 action: Action::RenameProject,
                 resource: uni.project_in_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            // -- gateway_user coverage (SMA-446): a dedicated role for InvokeModel, granted at
+            // the Organization scope so it covers every team/project under it.
+            Case {
+                name: "gateway_user allows InvokeModel on a project under its granted org",
+                grants: vec![grant(21, &uni.principal, "gateway_user", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::InvokeModel,
+                resource: uni.project_in_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "gateway_user denies InvokeModel on a project under a different org",
+                grants: vec![grant(22, &uni.principal, "gateway_user", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::InvokeModel,
+                resource: uni.project_in_other.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "forbid-archived-writes denies InvokeModel on an archived project even for gateway_user",
+                grants: vec![grant(23, &uni.principal, "gateway_user", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::InvokeModel,
+                resource: uni.archived_project_in_o.prn().clone(),
                 expect: Effect::Deny,
             },
         ];

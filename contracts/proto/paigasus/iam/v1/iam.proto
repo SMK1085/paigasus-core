@@ -246,6 +246,7 @@ message IntrospectApiKeyResponse {
   google.protobuf.Timestamp expires_at = 4;
   repeated Membership memberships = 5; // reuse tenancy message
   repeated RoleGrantRef role_grants = 6;
+  string scope_prn = 7; // PRN of the key's tenancy scope node (gateway authorizes against it)
 }
 
 service TenancyService {
