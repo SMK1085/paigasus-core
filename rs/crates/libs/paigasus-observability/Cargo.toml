@@ -19,6 +19,15 @@ tracing.workspace = true
 [dev-dependencies]
 tower.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
+# serde_json: already a transitive dep (axum/tonic/tracing-subscriber pull it in) — pulled in
+# explicitly here for the drift test (tests/drift.rs, Task B4), which parses the committed
+# Grafana dashboard JSON.
+serde_json.workspace = true
+# serde_norway: the maintained fork of the now-unmaintained serde_yaml, used ONLY by the drift
+# test (tests/drift.rs, Task B4) to parse the committed Prometheus alert-rule YAML. Not a
+# workspace dep (no other crate needs YAML) — pinned here; MIT OR Apache-2.0, both already
+# allow-listed in rs/deny.toml.
+serde_norway = "0.9.42"
 
 [lints]
 workspace = true
