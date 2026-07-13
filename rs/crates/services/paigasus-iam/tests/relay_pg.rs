@@ -202,3 +202,49 @@ async fn skip_locked_leaves_a_row_held_by_another_transaction_untouched() {
     let a_final = event_outbox::Entity::find_by_id(row_a).one(&db).await.unwrap().unwrap();
     assert!(a_final.published_at.is_some());
 }
+
+/// SMA-446 Unit 5 (Task A11): `tick()` on a non-empty batch emits the drained/published/
+/// failures/parked counters plus the oldest-unpublished-age gauge, alongside the existing
+/// `tracing::info!`.
+#[tokio::test]
+async fn tick_with_a_non_empty_batch_emits_relay_metrics() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+
+    let id = Uuid::from_u128(7);
+    seed_row(&db, id, Utc::now() - chrono::Duration::seconds(5)).await;
+
+    let handle = paigasus_observability::init("test-iam-relay-tick-metrics");
+    let relay = OutboxRelay::new(db.clone(), Duration::from_secs(60), 10, 5);
+    let publisher = Arc::new(CountingPublisher::default());
+    let report = relay.tick(publisher.as_ref()).await.expect("tick succeeds");
+    assert_eq!(report.drained, 1);
+
+    let out = handle.render();
+    assert!(out.contains("iam_outbox_relay_drained_total"), "missing drained counter:\n{out}");
+    assert!(out.contains("iam_outbox_relay_published_total"), "missing published counter:\n{out}");
+    assert!(out.contains("iam_outbox_relay_publish_failures_total"), "missing publish_failures counter:\n{out}");
+    assert!(out.contains("iam_outbox_relay_parked_total"), "missing parked counter:\n{out}");
+    assert!(out.contains("iam_outbox_oldest_unpublished_age_seconds"), "missing oldest-unpublished-age gauge:\n{out}");
+}
+
+/// SMA-446 Unit 5 (Task A11): driving the poll loop (`run`) for one tick emits
+/// `iam_outbox_relay_ticks_total{result="ok"}` — `ticks_total` is a `run()`-loop counter (one
+/// increment per poll interval), not a `tick()`-level one, so this drives a real (short) loop
+/// iteration rather than calling `tick()` directly.
+#[tokio::test]
+async fn run_loop_emits_ticks_total_with_ok_result_label() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+
+    seed_row(&db, Uuid::from_u128(8), Utc::now()).await;
+
+    let handle = paigasus_observability::init("test-iam-relay-run-metrics");
+    let relay = OutboxRelay::new(db.clone(), Duration::from_millis(10), 10, 5);
+    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+
+    // Let the loop run long enough for at least one poll interval to elapse, then shut it down.
+    relay.run(publisher, tokio::time::sleep(Duration::from_millis(300))).await;
+
+    let out = handle.render();
+    assert!(out.contains("iam_outbox_relay_ticks_total"), "missing ticks_total counter:\n{out}");
+    assert!(out.contains(r#"result="ok""#), "expected a result=\"ok\" labeled series:\n{out}");
+}
