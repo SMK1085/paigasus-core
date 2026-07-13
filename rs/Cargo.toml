@@ -105,6 +105,11 @@ paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.0.0" }
 # In-tree path dep: paigasus-iam's gRPC adapter binds the generated `paigasus.iam.v1` types
 # (Task 16) — same in-tree-freshness rationale as paigasus-kernel above.
 paigasus-proto = { path = "crates/libs/paigasus-proto", version = "0.0.0" }
+# In-tree path dep: the shared observability lib (metrics recorder, `/metrics` router, axum
+# request-metrics layer, metric-name registry — SMA-446 Unit 1). Service crates instrument
+# their hot paths through it (Unit 2 — `paigasus-gateway` is the first consumer); same
+# in-tree-freshness rationale as paigasus-kernel/paigasus-proto above.
+paigasus-observability = { path = "crates/libs/paigasus-observability", version = "0.0.0" }
 # sea-orm — async ORM for service persistence adapters (paigasus-iam's AppState/readyz ping,
 # later the Postgres repository). `runtime-tokio-rustls` keeps the TLS posture on rustls/ring
 # (see reqwest above) instead of native-tls/openssl; `sqlx-postgres` is the only backend we run.

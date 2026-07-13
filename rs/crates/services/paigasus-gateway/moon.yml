@@ -8,6 +8,7 @@ dependsOn:
   - 'paigasus-proto-rs'
   - 'paigasus-kernel-rs'
   - 'paigasus-logging-rs'
+  - 'paigasus-observability-rs'
 
 tasks:
   build:

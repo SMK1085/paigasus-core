@@ -20,6 +20,12 @@ async fn main() -> anyhow::Result<()> {
     config.validate().map_err(anyhow::Error::msg)?;
     paigasus_logging::init("paigasus-gateway", &config.log_level);
 
+    // Metrics (SMA-446 Unit 2): install the global Prometheus recorder only when `[metrics]` is
+    // enabled — `!enabled` means no recorder is installed AND `/metrics` is never mounted below
+    // (a `None` handle short-circuits both wiring blocks). `config.validate()` already rejected
+    // `metrics.addr == http_addr` above.
+    let metrics_handle = config.metrics.enabled.then(|| paigasus_observability::init("paigasus-gateway"));
+
     // Outbound clients. IAM connects lazily (a dead IAM does not block startup); the OpenAI client
     // is built with the three split timeout budgets. Neither construction logs the key.
     let iam = IamClient::connect(&config.iam).await?;
@@ -37,6 +43,30 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = router(state);
+    // Same-port `/metrics`: merged onto the main router only when enabled AND no separate
+    // `metrics.addr` is configured. `metrics.enabled = false`, or a separate `addr`, leaves `app`
+    // untouched — in the `addr` case `/metrics` is served on its own listener below instead.
+    let app = match (&metrics_handle, config.metrics.addr) {
+        (Some(handle), None) => app.merge(paigasus_observability::metrics_router(handle.clone())),
+        _ => app,
+    };
+
+    // Separate metrics listener, only when both enabled AND `metrics.addr` is configured — the
+    // RECOMMENDED posture for a public gateway (keeps `/metrics` off the public HTTP port).
+    // `shutdown_signal()` has no captured state, so calling it a second time here is safe: tokio
+    // supports multiple independent listeners for the same signal, each notified on delivery — no
+    // broadcast channel is needed to share graceful shutdown between the two `axum::serve` tasks.
+    if let (Some(handle), Some(metrics_addr)) = (metrics_handle.clone(), config.metrics.addr) {
+        let metrics_app = paigasus_observability::metrics_router(handle);
+        let metrics_listener = tokio::net::TcpListener::bind(metrics_addr).await?;
+        tracing::info!(%metrics_addr, "paigasus-gateway metrics listener started");
+        tokio::spawn(async move {
+            if let Err(err) = axum::serve(metrics_listener, metrics_app).with_graceful_shutdown(shutdown_signal()).await {
+                tracing::error!(%err, "paigasus-gateway metrics listener exited");
+            }
+        });
+    }
+
     let listener = tokio::net::TcpListener::bind(config.http_addr).await?;
     tracing::info!(%config.http_addr, "paigasus-gateway started");
     axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;

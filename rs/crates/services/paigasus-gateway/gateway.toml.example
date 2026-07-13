@@ -44,3 +44,13 @@
 # figment extraction — an unset key loads fine but boot refuses to start). NEVER put this in
 # gateway.toml; source it from the environment so it never lands in a config file or VCS:
 # GATEWAY_UPSTREAM__OPENAI__API_KEY=sk-...
+
+# --- Metrics (SMA-446 Unit 2: Prometheus `GET /metrics`) ---
+
+# [metrics]
+# enabled = true                # default shown; false skips installing the recorder entirely —
+#                                # no /metrics route, no metrics-facade recorder in this process
+# addr = "127.0.0.1:9091"       # optional separate internal listener; RECOMMENDED for a public
+#                                # gateway so /metrics never shares a port with public traffic.
+#                                # unset (default) merges /metrics onto http_addr instead. MUST
+#                                # differ from http_addr (rejected by GatewayConfig::validate).
