@@ -155,37 +155,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     {
-        // Overflow observability (SMA-446 Slice A): the denial buffer drops its OLDEST queued
-        // entry when full (favoring recency) and bumps a monotonic counter. Emit that counter
-        // periodically as a `tracing` gauge so a sustained denial burst outpacing the drain is
-        // visible (a persistent-metrics backend is a later slice). Exits on the same
-        // shutdown-watch as every other task.
-        let mut rx = rx.clone();
-        let buffer = state.denial_buffer();
-        servers.spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(60));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            // `dropped()` is a monotonic cumulative counter, so a bare `> 0` check would warn
-            // on every tick forever after a single historical drop. Track the last-observed
-            // value instead and only warn when it has moved since the previous tick.
-            let mut last_dropped = 0u64;
-            loop {
-                tokio::select! {
-                    _ = ticker.tick() => {
-                        let dropped = buffer.dropped();
-                        if dropped > last_dropped {
-                            let new_drops = dropped - last_dropped;
-                            tracing::warn!(dropped_denial_audits = dropped, new_drops, "denial-audit buffer has dropped entries on overflow (drain is not keeping up)");
-                        }
-                        last_dropped = dropped;
-                    }
-                    _ = rx.changed() => break,
-                }
-            }
-            Ok(())
-        });
-    }
-    {
         // The outbox relay (SMA-446 Slice B, Task B9): drains `event_outbox` rows — written by
         // `PgOutbox::enqueue` inside each triggering mutation's own transaction (Task B2) — into
         // calls on an injected `EventPublisher`, on the same shutdown-watch as every other task

@@ -813,6 +813,7 @@ mod tests {
     /// identical calls, since neither `get` nor `put` can safely run without a key.
     #[tokio::test]
     async fn fail_open_on_a_generations_read_error_still_decides_and_never_caches() {
+        let handle = paigasus_observability::init("test-cedar-authorizer-fail-open-bypass");
         let fx = fixture();
         let grant_id = u(300);
         let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
@@ -848,6 +849,14 @@ mod tests {
             "the cache must never be consulted when the generations read failed — every call re-evaluates"
         );
         assert_eq!(audit.events.lock().unwrap().len(), 2, "both (uncached) decisions are audited");
+
+        // SMA-446 Task A9: both calls above took the fail-open bypass branch (`cache_key`
+        // returned `None` because `FailingGenerations::entity_gen` always errors) — each must
+        // record `iam_authz_decisions_total{decision="allow",cache="bypass"}`, distinct from a
+        // genuine `cache="miss"` (a key was minted but nothing was cached under it yet).
+        let out = handle.render();
+        assert!(out.contains(r#"cache="bypass""#), "expected a cache=\"bypass\" label when the generations read fails:\n{out}");
+        assert!(out.contains(r#"decision="allow""#), "expected a decision=\"allow\" label on the bypassed compute path:\n{out}");
     }
 
     /// Regression test for the cache-key generation-drift bug this fix closes: the

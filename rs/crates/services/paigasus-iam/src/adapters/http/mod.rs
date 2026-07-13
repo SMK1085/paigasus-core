@@ -227,11 +227,6 @@ pub struct AppState {
     /// `audit_query` reads through. Exposed via [`AppState::audit_sink`] so `main.rs` (or a
     /// test harness) can hand it to `drain.run(sink, shutdown)`.
     audit_log: Arc<dyn AuditLog>,
-    /// The bounded denial-audit ring buffer the wired `BufferedDenialAuditSink` pushes into
-    /// (SMA-446 Task A12) — held here purely so `main.rs` can periodically log its overflow
-    /// counter ([`DenialAuditBuffer::dropped`]); the buffer's producer/consumer ends are
-    /// otherwise owned by the `CedarAuthorizer`'s sink and the drain respectively.
-    denial_buffer: Arc<DenialAuditBuffer>,
     /// The denial-audit drain, in a take-once slot: `AppState` is `Clone` (every HTTP/gRPC
     /// worker holds a clone) but [`DenialAuditDrain`] is NOT — it must be spawned exactly once.
     /// `main.rs` calls [`AppState::take_denial_drain`] to move it out and `servers.spawn`s
@@ -255,14 +250,6 @@ impl AppState {
     #[must_use]
     pub fn audit_sink(&self) -> Arc<dyn AuditLog> {
         self.audit_log.clone()
-    }
-
-    /// The bounded denial-audit buffer — exposed so `main.rs` can periodically observe its
-    /// overflow counter ([`DenialAuditBuffer::dropped`]) as a `tracing` gauge (SMA-446 Task
-    /// A12).
-    #[must_use]
-    pub fn denial_buffer(&self) -> Arc<DenialAuditBuffer> {
-        self.denial_buffer.clone()
     }
 
     /// Moves the denial-audit drain out of the shared take-once slot — `main.rs` calls this
@@ -369,11 +356,14 @@ impl AppState {
         // fan-out of the log-only `TracingAuditSink` AND a `BufferedDenialAuditSink` over the
         // buffer — so every decision is still logged, and every DENIAL is additionally queued
         // for out-of-band persistence. `denial_drain` is stashed in a take-once slot on the
-        // returned state; `main.rs` spawns it against the `PgAuditLog` sink (`audit_log`,
-        // built below). `denial_buf` is retained on the state purely for overflow-counter
-        // observability.
+        // returned state; `main.rs` spawns it against the `PgAuditLog` sink (`audit_log`, built
+        // below). The buffer itself is NOT retained on `AppState` (SMA-446 Task A10 removed the
+        // `main.rs` overflow-observability ticker that was its only reader — overflow is now
+        // observable via the real `iam_denial_audits_dropped_total` metric emitted at the push
+        // site, `adapters::authz::denial_audit::DenialAuditBuffer::push`), so `denial_buf` moves
+        // straight into `BufferedDenialAuditSink` rather than being cloned first.
         let (denial_buf, denial_drain) = DenialAuditBuffer::new(cfg.audit.denial_buffer_capacity);
-        let buffered_denials = BufferedDenialAuditSink::new(denial_buf.clone(), Arc::new(KernelIdGenerator));
+        let buffered_denials = BufferedDenialAuditSink::new(denial_buf, Arc::new(KernelIdGenerator));
         let audit_sink: Arc<dyn AuditSink> = Arc::new(FanOutAuditSink::new(vec![
             Arc::new(TracingAuditSink) as Arc<dyn AuditSink>,
             Arc::new(buffered_denials) as Arc<dyn AuditSink>,
@@ -625,7 +615,6 @@ impl AppState {
             api_key_introspect_body_limit: cfg.api_keys.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
             audit_query,
             audit_log,
-            denial_buffer: denial_buf,
             denial_drain: Arc::new(Mutex::new(Some(denial_drain))),
         })
     }
