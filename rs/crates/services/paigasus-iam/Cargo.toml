@@ -21,9 +21,9 @@ paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0" }
 # paigasus-observability — the shared `/metrics` + request-metrics-layer + metric-name-registry
 # lib (SMA-446 Unit 1), wired here exactly as `paigasus-gateway` did in Unit 2:
 # `adapters::http::app_routes` applies `http_metrics_layer("iam")`, and `main.rs` mounts
-# `metrics_router` (Unit 3). `metrics` is its facade crate — not yet called directly from this
-# crate's own code (that lands with the later per-handler instrumentation tasks in this same
-# slice: gRPC, authz decisions, audit records, the outbox relay), hence the machete ignore below.
+# `metrics_router` (Unit 3). `metrics` is its facade crate, called directly via `counter!`
+# from this crate's own instrumentation (`adapters::authz::cedar_authorizer`/`denial_audit`,
+# `adapters::persistence::pg_audit_log`, SMA-446 Unit 4).
 paigasus-observability = { workspace = true }
 metrics = { workspace = true }
 paigasus-kernel = { workspace = true }
@@ -147,11 +147,3 @@ metrics-exporter-prometheus = { workspace = true }
 
 [lints]
 workspace = true
-
-# `metrics` is consumed only by the per-handler instrumentation tasks landing later in this same
-# slice (gRPC handlers, authz decisions, audit records, the outbox relay) — not yet by this
-# commit's `/metrics` + `http_metrics_layer` wiring, which calls into it solely through
-# `paigasus-observability`. Prune this once those tasks land (mirrors the node/wasm/py bindings'
-# identical "consumed only later / via macros" cargo-machete false-positive pattern).
-[package.metadata.cargo-machete]
-ignored = ["metrics"]
