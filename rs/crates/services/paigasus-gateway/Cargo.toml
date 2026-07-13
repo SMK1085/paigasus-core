@@ -25,12 +25,25 @@ figment = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-# Not yet consumed by G3 itself (config::validate/main.rs follow iam's `Result<(), String>` +
-# `anyhow::Error::msg` posture) — pre-declared per the task brief for G4/G5's error types
-# (IAM client + auth middleware errors, mirroring iam's `application::error` thiserror
-# pattern). See `[package.metadata.cargo-machete]` below; prune the allowlist entry once a
-# later task's error enum actually derives `thiserror::Error`.
+# `adapters::iam::client::IamError` derives `thiserror::Error` (the outbound IAM adapter's
+# error type; G5's auth middleware maps its `Rpc(tonic::Status)` variant to HTTP), mirroring
+# iam's `application::error` thiserror pattern.
 thiserror = { workspace = true }
+# `adapters::iam::client` — the outbound IAM gRPC adapter. `tonic` provides the `Channel`,
+# `Request`, `metadata::MetadataValue`, and `transport::{ClientTlsConfig, Certificate,
+# Identity}` used to dial IAM. TLS features: `tls-ring` selects the RING rustls CryptoProvider
+# (this workspace is ring-only — NEVER `tls-aws-lc`, which links a second provider and panics
+# rustls 0.23 at first TLS use); `tls-native-roots` supplies the platform trust store for the
+# system-trust (no custom-CA) path. Cargo unions features workspace-wide, so both stay
+# ring-backed and `aws-lc-rs` remains absent from Cargo.lock.
+tonic = { workspace = true, features = ["tls-ring", "tls-native-roots"] }
+# `adapters::iam::client` names the generated `paigasus.iam.v1` gRPC clients + request/response
+# messages (`AuthnServiceClient`, `AuthorizationServiceClient`, `IntrospectApiKeyRequest`, …).
+paigasus-proto = { workspace = true }
+# `adapters::iam::client::Iam` is `#[async_trait]` — the port is consumed as `dyn Iam`
+# (G5 injects a fake in unit tests, G7 the real `IamClient`), which native AFIT can't yet do
+# object-safely.
+async-trait = { workspace = true }
 # `config::OpenAiConfig::api_key` — redacts the OpenAI key out of `Debug`/`Serialize`
 # (`GatewayConfig` derives both for log/`readyz` dumps, mirroring iam's `RawPepper` posture).
 # NOT a workspace-pinned dep yet (root Cargo.toml carries no `secrecy` entry) — this crate is
@@ -47,8 +60,3 @@ tower = { workspace = true, features = ["util"] }
 
 [lints]
 workspace = true
-
-[package.metadata.cargo-machete]
-# `thiserror` — see the dependency comment above; not yet consumed, temporary allowlist per
-# CLAUDE.md's "dep consumed only by a later commit" convention (SMA-446 G3).
-ignored = ["thiserror"]
