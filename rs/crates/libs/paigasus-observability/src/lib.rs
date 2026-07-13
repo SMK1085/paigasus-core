@@ -4,6 +4,10 @@
 //! recorder, a `GET /metrics` router, an axum request-metrics layer, a gRPC handler helper, and
 //! the canonical metric-name registry. Mirrors `paigasus-logging`'s role for tracing.
 
+pub mod http;
+
+pub use http::http_metrics_layer;
+
 use std::sync::OnceLock;
 
 use axum::{Router, http::header, response::IntoResponse, routing::get};
@@ -64,9 +68,9 @@ mod tests {
         let handle = init("test-svc");
         counter!("obs_test_router_counter").increment(1);
         let app = metrics_router(handle);
-        let resp = app.oneshot(http::Request::builder().uri("/metrics").body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        let resp = app.oneshot(axum::http::Request::builder().uri("/metrics").body(axum::body::Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), 200);
-        assert_eq!(resp.headers()[http::header::CONTENT_TYPE], "text/plain; version=0.0.4");
+        assert_eq!(resp.headers()[axum::http::header::CONTENT_TYPE], "text/plain; version=0.0.4");
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("obs_test_router_counter"));
     }

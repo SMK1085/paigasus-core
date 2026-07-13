@@ -2544,7 +2544,6 @@ name = "paigasus-observability"
 version = "0.0.0"
 dependencies = [
  "axum",
- "http",
  "metrics",
  "metrics-exporter-prometheus",
  "tokio",

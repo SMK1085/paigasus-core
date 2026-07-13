@@ -144,10 +144,6 @@ blake3 = "1"
 # `metrics` 0.24 (facade) + `metrics-exporter-prometheus` 0.18 (their compatible pairing).
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
-# http — request/response types (axum re-exports http 1.x). Consumed only by
-# `paigasus-observability`'s dev tests today, which build `http::Request`s to drive the metrics
-# router / request-metrics layer through `tower::ServiceExt::oneshot`.
-http = "1"
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
 # via the Moon `lint` task's `-D warnings`.
