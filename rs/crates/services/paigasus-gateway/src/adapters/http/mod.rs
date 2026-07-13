@@ -2,13 +2,16 @@
 
 //! axum HTTP surface: `/healthz` (liveness, no dependency checks) and `/readyz` (a
 //! placeholder here — G8 makes it check IAM + upstream reachability); plus the auth middleware
-//! ([`auth`]) that fronts every protected route and the OpenAI-compatible error envelope
-//! ([`error`]) it renders failures through.
+//! ([`auth`]) that fronts every protected route, the OpenAI-compatible error envelope
+//! ([`error`]) it renders failures through, and the inbound chat-completion request DTO
+//! ([`dto`]) G7 parses to read `model`/`stream`.
 
 pub mod auth;
+pub mod dto;
 pub mod error;
 
 pub use auth::require_iam_auth;
+pub use dto::ChatCompletionRequest;
 pub use error::GatewayError;
 
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};

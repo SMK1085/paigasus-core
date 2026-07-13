@@ -49,6 +49,21 @@ async-trait = { workspace = true }
 # NOT a workspace-pinned dep yet (root Cargo.toml carries no `secrecy` entry) — this crate is
 # its first consumer; see the task report for the new-dep note (G9 may add a deny.toml note).
 secrecy = { version = "0.10", features = ["serde"] }
+# `adapters::openai::client::OpenAiClient` — the outbound OpenAI egress adapter (G6). The
+# workspace pins reqwest WITHOUT `stream`; `features = ["stream"]` adds `Response::bytes_stream()`
+# for the UNBUFFERED streaming path (cargo unions features workspace-wide, so this just enables
+# `stream` build-wide). The TLS feature is UNTOUCHED — the workspace baseline `rustls-tls`
+# already resolves to the RING provider here (Cargo.lock has `ring`, no `aws-lc-rs`); a second
+# provider would panic rustls 0.23 at first TLS use (see gateway-iam-integration-facts.md).
+reqwest = { workspace = true, features = ["stream"] }
+# `bytes::Bytes` is the request/response body currency at the egress boundary — the caller's
+# ORIGINAL raw request bytes flow upstream verbatim, and the non-stream response comes back as
+# `Bytes` (byte-lossless passthrough; the DTO is parsed only to read `model`/`stream`).
+bytes = { workspace = true }
+# `futures::stream::BoxStream` names the boxed UNBUFFERED chunk stream `chat_completion` returns
+# on the stream path, and `StreamExt::boxed` erases `Response::bytes_stream()`'s opaque type into
+# it so it can live in the `ChatResponse` enum.
+futures = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as a
