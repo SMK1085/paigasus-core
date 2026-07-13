@@ -78,9 +78,6 @@ figment = { workspace = true, features = ["test"] }
 # `src/adapters/http/mod.rs`'s health unit tests and `tests/chat_proxy.rs`'s integration tests
 # both drive the router via `ServiceExt::oneshot` (no real listener).
 tower = { workspace = true, features = ["util"] }
-# `tests/metrics.rs` names `PrometheusHandle` directly to call `.render()` and assert on the
-# exposition text — `paigasus-observability` doesn't re-export the type.
-metrics-exporter-prometheus = { workspace = true }
 
 [lints]
 workspace = true

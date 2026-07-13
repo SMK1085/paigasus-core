@@ -327,6 +327,24 @@ mod tests {
         FakeIam::new(IntrospectOutcome::Ok(active_response()), AuthzOutcome::Ok(true))
     }
 
+    // ---- `iam_result` bounded-label mapping --------------------------------------------------
+
+    #[test]
+    fn iam_result_maps_errors_to_bounded_labels() {
+        let cases: &[(IamError, &str)] = &[
+            (IamError::Connect("boom".to_owned()), "unavailable"),
+            (IamError::Rpc(tonic::Status::new(Code::Unavailable, "")), "unavailable"),
+            (IamError::Rpc(tonic::Status::new(Code::DeadlineExceeded, "")), "unavailable"),
+            (IamError::Rpc(tonic::Status::new(Code::Unauthenticated, "")), "denied"),
+            (IamError::Rpc(tonic::Status::new(Code::PermissionDenied, "")), "error"),
+            (IamError::Rpc(tonic::Status::new(Code::Internal, "")), "error"),
+            (IamError::Rpc(tonic::Status::new(Code::NotFound, "")), "error"),
+        ];
+        for (err, want) in cases {
+            assert_eq!(iam_result(err), *want, "iam_result({err:?}) should map to {want:?}");
+        }
+    }
+
     // ---- bearer extraction / missing-credential rows ----------------------------------------
 
     #[tokio::test]

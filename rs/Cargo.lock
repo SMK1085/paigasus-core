@@ -2430,7 +2430,6 @@ dependencies = [
  "figment",
  "futures",
  "metrics",
- "metrics-exporter-prometheus",
  "paigasus-logging",
  "paigasus-observability",
  "paigasus-proto",
