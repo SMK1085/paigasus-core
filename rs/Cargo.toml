@@ -137,6 +137,17 @@ cedar-policy = "4"
 # Only consumed by `paigasus-iam`; no wasm/binding exposure (SMA-448's getrandom-free posture
 # is unaffected — blake3's default features carry no OS-entropy dependency).
 blake3 = "1"
+# metrics / metrics-exporter-prometheus — the `metrics` facade + Prometheus exporter that back
+# `paigasus-observability` (SMA-446). The exporter is `default-features = false`: we install the
+# global recorder in-process and render the exposition through our own axum `GET /metrics` route,
+# so the bundled hyper `http-listener` / `push-gateway` transports are dead weight. Versions track
+# `metrics` 0.24 (facade) + `metrics-exporter-prometheus` 0.18 (their compatible pairing).
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+# http — request/response types (axum re-exports http 1.x). Consumed only by
+# `paigasus-observability`'s dev tests today, which build `http::Request`s to drive the metrics
+# router / request-metrics layer through `tower::ServiceExt::oneshot`.
+http = "1"
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
 # via the Moon `lint` task's `-D warnings`.
