@@ -679,6 +679,11 @@ class IntrospectApiKeyResponse(betterproto2.Message):
         6, betterproto2.TYPE_MESSAGE, repeated=True
     )
 
+    scope_prn: "str" = betterproto2.field(7, betterproto2.TYPE_STRING)
+    """
+    PRN of the key's tenancy scope node (gateway authorizes against it)
+    """
+
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "IntrospectApiKeyResponse", IntrospectApiKeyResponse

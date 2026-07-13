@@ -123,6 +123,11 @@ async fn grpc_issue_and_introspect_parity() {
     assert!(!ctx.key_id.is_empty(), "{ctx:?}");
     assert!(ctx.memberships.is_empty());
     assert!(ctx.role_grants.is_empty());
+    // SMA-446: introspection surfaces the key's tenancy `scope_prn` — the scope the key was
+    // issued for (`owner`), matching the issued `ApiKey.scope_prn` (D11 — the gateway authorizes
+    // `InvokeModel` against it).
+    assert_eq!(ctx.scope_prn, owner.canonical(), "introspect must echo the issued key's scope_prn: {ctx:?}");
+    assert_eq!(ctx.scope_prn, api_key.scope_prn, "introspect scope_prn must match the issued ApiKey's scope_prn");
 
     server.abort();
 }

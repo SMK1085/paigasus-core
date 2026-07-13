@@ -53,20 +53,25 @@ fn cache_key(key_id: ApiKeyId) -> String {
 
 /// Enough of a validated API key to rebuild an `AuthnPrincipal`, re-check expiry, AND
 /// re-verify the presented secret on a cache hit (spec §9). Carries the resolved principal id,
-/// the service account's current status, the key's own expiry, and `key_hash` — the SAME
-/// peppered HMAC-SHA-256 tag stored in Postgres (`ApiKeyRepository::find_by_id`'s second
-/// return), NOT the plaintext secret and NOT a new secret. Caching the stored hash is what lets
-/// `AuthenticateApiKey`'s hit path skip the two DB round-trips (`find_by_id` + `find_principal`)
-/// while STILL constant-time-verifying the presented secret against it on EVERY hit — a hit
-/// keyed by `key_id` alone (a non-secret token segment) must never authenticate on the `key_id`
-/// without also proving possession of the secret. A Redis leak of the hash can't validate keys
-/// without the operator's pepper (which never leaves the process), so the hash is safe to cache.
+/// the service account's current status, the key's own expiry, the key's tenancy `scope_prn`,
+/// and `key_hash` — the SAME peppered HMAC-SHA-256 tag stored in Postgres
+/// (`ApiKeyRepository::find_by_id`'s second return), NOT the plaintext secret and NOT a new
+/// secret. Caching the stored hash is what lets `AuthenticateApiKey`'s hit path skip the two DB
+/// round-trips (`find_by_id` + `find_principal`) while STILL constant-time-verifying the
+/// presented secret against it on EVERY hit — a hit keyed by `key_id` alone (a non-secret token
+/// segment) must never authenticate on the `key_id` without also proving possession of the
+/// secret. A Redis leak of the hash can't validate keys without the operator's pepper (which
+/// never leaves the process), so the hash is safe to cache. `scope_prn` (the key's
+/// `TenancyNodeRef::canonical` PRN, a non-secret string) rides along for the SAME reason: so
+/// introspection can surface the scope on a cache HIT with NO extra DB read (D11) — the gateway
+/// authorizes an `InvokeModel` against it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachedValidation {
     pub principal_id: PrincipalId,
     pub sa_status: PrincipalStatus,
     pub expires_at: Option<DateTime<Utc>>,
     pub key_hash: Vec<u8>,
+    pub scope_prn: String,
 }
 
 /// The Redis wire payload for [`CachedValidation`]. `PrincipalId`/`PrincipalStatus` are pure
@@ -82,6 +87,7 @@ struct WireValidation {
     sa_status: String,
     expires_at: Option<DateTime<Utc>>,
     key_hash: String,
+    scope_prn: String,
 }
 
 impl From<&CachedValidation> for WireValidation {
@@ -91,6 +97,7 @@ impl From<&CachedValidation> for WireValidation {
             sa_status: v.sa_status.as_str().to_string(),
             expires_at: v.expires_at,
             key_hash: STANDARD.encode(&v.key_hash),
+            scope_prn: v.scope_prn.clone(),
         }
     }
 }
@@ -107,6 +114,7 @@ impl TryFrom<WireValidation> for CachedValidation {
             sa_status,
             expires_at: w.expires_at,
             key_hash,
+            scope_prn: w.scope_prn,
         })
     }
 }
@@ -302,6 +310,7 @@ mod tests {
             sa_status: PrincipalStatus::Active,
             expires_at: None,
             key_hash: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            scope_prn: "prn:pgs:iam:::organization/00000000-0000-0000-0000-000000000064".to_string(),
         }
     }
 
@@ -325,6 +334,7 @@ mod tests {
             sa_status: PrincipalStatus::Disabled,
             expires_at: Some(Utc::now()),
             key_hash: vec![1, 2, 3, 4, 5],
+            scope_prn: "prn:pgs:iam:::organization/00000000-0000-0000-0000-0000000000c8".to_string(),
         };
         c.put(id, &v).await;
         assert_eq!(c.get(id).await, Some(v));
@@ -352,11 +362,16 @@ mod tests {
             sa_status: PrincipalStatus::Active,
             expires_at: Some(Utc::now()),
             key_hash: vec![0x00, 0xFF, 0x10, 0x20, 0x30],
+            scope_prn: "prn:pgs:iam:::organization/00000000-0000-0000-0000-0000000000ff".to_string(),
         };
         let bytes = serde_json::to_vec(&WireValidation::from(&v)).unwrap();
         let wire: WireValidation = serde_json::from_slice(&bytes).unwrap();
         let round_tripped = CachedValidation::try_from(wire).unwrap();
         assert_eq!(round_tripped, v, "the stored key_hash must survive the base64 wire round-trip byte-for-byte");
+        assert_eq!(
+            round_tripped.scope_prn, v.scope_prn,
+            "the key's tenancy scope_prn must survive the JSON wire round-trip (D11: a cache hit returns it with no DB read)"
+        );
     }
 
     /// D5's fail-open contract, exercised without any live Redis (a lazily-connecting

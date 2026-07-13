@@ -49,6 +49,7 @@ fn sample_validation() -> CachedValidation {
         sa_status: PrincipalStatus::Active,
         expires_at: Some(Utc::now()),
         key_hash: vec![0xAB, 0xCD, 0xEF, 0x01, 0x23],
+        scope_prn: "prn:pgs:iam:::organization/00000000-0000-0000-0000-000000000001".to_string(),
     }
 }
 

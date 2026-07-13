@@ -159,6 +159,9 @@ where
             credential: Credential::ApiKey {
                 key_id,
                 expires_at: cached.expires_at,
+                // D11, the load-bearing line: the key's tenancy scope comes straight from the
+                // cached validation, so a HIT surfaces `scope_prn` for introspection with NO DB read.
+                scope_prn: cached.scope_prn.clone(),
             },
         })
     }
@@ -215,8 +218,13 @@ where
             return Err(AuthnError::PrincipalInactive);
         }
 
-        // Cache the stored hash alongside so the hit path can re-verify the secret without a DB
-        // read (`stored_hash` is unused after this — move it in).
+        // The key's tenancy scope PRN (`TenancyNodeRef::canonical`, mirroring `ApiKeyDto`'s own
+        // `scope_prn`) — computed once and threaded into BOTH the cached validation and the
+        // returned credential, so a later cache HIT can return it without re-reading the DB (D11).
+        let scope_prn = api_key.scope.canonical();
+
+        // Cache the stored hash (and scope) alongside so the hit path can re-verify the secret and
+        // surface the scope without a DB read (`stored_hash` is unused after this — move it in).
         self.cache
             .put(
                 key_id,
@@ -225,6 +233,7 @@ where
                     sa_status: sa_principal.status,
                     expires_at: api_key.expires_at,
                     key_hash: stored_hash,
+                    scope_prn: scope_prn.clone(),
                 },
             )
             .await;
@@ -240,6 +249,7 @@ where
             credential: Credential::ApiKey {
                 key_id,
                 expires_at: api_key.expires_at,
+                scope_prn,
             },
         })
     }
@@ -475,7 +485,7 @@ mod tests {
         assert_eq!(resolved.principal_id, sa_id);
         assert_eq!(resolved.kind, PrincipalKind::ServiceAccount);
         assert_eq!(resolved.status, PrincipalStatus::Active);
-        assert!(matches!(resolved.credential, Credential::ApiKey { key_id: k, expires_at: None } if k == id));
+        assert!(matches!(resolved.credential, Credential::ApiKey { key_id: k, expires_at: None, .. } if k == id));
     }
 
     #[tokio::test]
@@ -598,6 +608,7 @@ mod tests {
                     sa_status: PrincipalStatus::Active,
                     expires_at: None,
                     key_hash: FakeSecretHasher.hash(&secret),
+                    scope_prn: scope().canonical(),
                 },
             )
             .await;
@@ -616,6 +627,53 @@ mod tests {
         let resolved = svc.resolve(&token).await.unwrap();
         assert_eq!(resolved.principal_id, sa_id);
         assert_eq!(resolved.kind, PrincipalKind::ServiceAccount);
+    }
+
+    /// THE D11 guard (SMA-446): a cache HIT must return the key's `scope_prn` straight from the
+    /// cached validation, with NO DB read. Seeds a `CachedValidation` carrying a known scope,
+    /// resolves with `PanicIfCalledApiKeys`/`PanicIfCalledPrincipals` (which panic on ANY DB
+    /// call), and asserts the resolved `Credential::ApiKey.scope_prn` equals the cached value —
+    /// proving the scope came from the cache, not a `find_by_id`/`find_principal` round-trip (so
+    /// the gateway can authorize `InvokeModel` against it without a per-request DB hit).
+    #[tokio::test]
+    async fn cache_hit_returns_scope_prn_without_a_db_read() {
+        let id = key_id(71);
+        let sa_id = principal_id(71);
+        let secret = [7u8; 32];
+        let expected_scope = scope().canonical();
+        let cache = Arc::new(MemoryApiKeyCache::new(30));
+        cache
+            .put(
+                id,
+                &CachedValidation {
+                    principal_id: sa_id.clone(),
+                    sa_status: PrincipalStatus::Active,
+                    expires_at: None,
+                    key_hash: FakeSecretHasher.hash(&secret),
+                    scope_prn: expected_scope.clone(),
+                },
+            )
+            .await;
+
+        let svc = AuthenticateApiKey::new(
+            PanicIfCalledApiKeys,
+            PanicIfCalledPrincipals,
+            FakeSecretHasher,
+            FixedClock::default(),
+            cache as Arc<dyn ApiKeyValidationCache>,
+            InMemoryMemberships::default(),
+            ApiKeyConfig::default(),
+        );
+
+        let token = format_token("pgs_sk_", id, &secret);
+        let resolved = svc.resolve(&token).await.unwrap();
+        assert_eq!(resolved.principal_id, sa_id);
+        match resolved.credential {
+            Credential::ApiKey { scope_prn, .. } => {
+                assert_eq!(scope_prn, expected_scope, "a cache hit must return the cached scope_prn with no DB read (D11)");
+            }
+            other => panic!("expected an ApiKey credential, got {other:?}"),
+        }
     }
 
     /// THE regression test for the auth-bypass this fix closes: a token with a VALID (cached)
@@ -637,6 +695,7 @@ mod tests {
                     sa_status: PrincipalStatus::Active,
                     expires_at: None,
                     key_hash: FakeSecretHasher.hash(&correct),
+                    scope_prn: scope().canonical(),
                 },
             )
             .await;
@@ -675,6 +734,7 @@ mod tests {
                     sa_status: PrincipalStatus::Active,
                     expires_at: Some(epoch() - Duration::seconds(1)),
                     key_hash: FakeSecretHasher.hash(&secret),
+                    scope_prn: scope().canonical(),
                 },
             )
             .await;
@@ -710,6 +770,7 @@ mod tests {
                     sa_status: PrincipalStatus::Disabled,
                     expires_at: None,
                     key_hash: FakeSecretHasher.hash(&secret),
+                    scope_prn: scope().canonical(),
                 },
             )
             .await;

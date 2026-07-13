@@ -113,10 +113,15 @@ async fn valid_key_resolves_to_sa_principal() {
     assert_eq!(resolved.principal_id, sa.principal_id);
     assert_eq!(resolved.kind, paigasus_iam_core::PrincipalKind::ServiceAccount);
     assert_eq!(resolved.status, PrincipalStatus::Active);
-    assert!(matches!(
-        resolved.credential,
-        paigasus_iam_core::Credential::ApiKey { key_id, expires_at: None } if key_id == key.id
-    ));
+    match resolved.credential {
+        paigasus_iam_core::Credential::ApiKey { key_id, expires_at: None, scope_prn } => {
+            assert_eq!(key_id, key.id);
+            // SMA-446: the resolved credential carries the key's tenancy scope PRN — exactly the
+            // scope the key was issued for (`owner`, == `key.scope`).
+            assert_eq!(scope_prn, key.scope.canonical(), "resolved credential must carry the key's scope_prn");
+        }
+        other => panic!("expected an ApiKey credential with no expiry, got {other:?}"),
+    }
 }
 
 /// AC — a revoked key is denied, `InvalidToken`.

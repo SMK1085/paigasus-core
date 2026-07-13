@@ -693,6 +693,7 @@ mod tests {
                     sa_status: PrincipalStatus::Active,
                     expires_at: None,
                     key_hash: b"hash".to_vec(),
+                    scope_prn: owner_org(1).canonical(),
                 },
             )
             .await;
@@ -783,6 +784,7 @@ mod tests {
                     sa_status: PrincipalStatus::Active,
                     expires_at: None,
                     key_hash: b"hash".to_vec(),
+                    scope_prn: owner_org(1).canonical(),
                 },
             )
             .await;
@@ -846,6 +848,7 @@ mod tests {
                     sa_status: PrincipalStatus::Active,
                     expires_at: None,
                     key_hash: b"hash".to_vec(),
+                    scope_prn: owner_org(1).canonical(),
                 },
             )
             .await;

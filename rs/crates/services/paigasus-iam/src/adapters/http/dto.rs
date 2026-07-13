@@ -497,7 +497,9 @@ pub struct IntrospectApiKeyRequestBody {
 /// `IntrospectApiKeyResponse`-shaped JSON (spec §10.2's proto message field-for-field):
 /// unlike `IntrospectResponseDto` (OIDC-only: `issuer`/`subject`), an API-key-authenticated
 /// principal has no issuer/subject — `key_id` takes their place, mirroring the proto shape
-/// exactly (`IntrospectApiKeyResponse.key_id`).
+/// exactly (`IntrospectApiKeyResponse.key_id`). `scope_prn` (SMA-446) carries the key's tenancy
+/// scope for the gateway to authorize against — threaded off the credential, so a cache HIT
+/// supplies it with NO extra DB read (D11).
 #[derive(Debug, Clone, Serialize)]
 pub struct IntrospectApiKeyResponseDto {
     pub principal_prn: String,
@@ -506,6 +508,7 @@ pub struct IntrospectApiKeyResponseDto {
     pub expires_at: Option<DateTime<Utc>>,
     pub memberships: Vec<MembershipDto>,
     pub role_grants: Vec<RoleGrantRefDto>,
+    pub scope_prn: String,
 }
 
 impl From<PrincipalContext> for IntrospectApiKeyResponseDto {
@@ -514,11 +517,11 @@ impl From<PrincipalContext> for IntrospectApiKeyResponseDto {
         // API-key introspection always resolves via `AuthenticateApiKey::introspect`, which
         // only ever produces a `Credential::ApiKey` — mirrors `IntrospectResponseDto`'s own
         // debug_assert for its (opposite) unreachable arm.
-        let (key_id, expires_at) = match principal.credential {
-            Credential::ApiKey { key_id, expires_at } => (key_id.to_string(), expires_at),
+        let (key_id, expires_at, scope_prn) = match principal.credential {
+            Credential::ApiKey { key_id, expires_at, scope_prn } => (key_id.to_string(), expires_at, scope_prn),
             Credential::Oidc { .. } => {
                 debug_assert!(false, "api-key introspection resolved an Oidc credential; only ApiKey is reachable here");
-                (String::new(), None)
+                (String::new(), None, String::new())
             }
         };
         IntrospectApiKeyResponseDto {
@@ -528,6 +531,7 @@ impl From<PrincipalContext> for IntrospectApiKeyResponseDto {
             expires_at,
             memberships: ctx.memberships.into_iter().map(MembershipDto::from).collect(),
             role_grants: ctx.role_grants.into_iter().map(RoleGrantRefDto::from).collect(),
+            scope_prn,
         }
     }
 }
@@ -594,4 +598,38 @@ pub struct AuditQuery {
     pub to: Option<String>,
     pub cursor: Option<String>,
     pub limit: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paigasus_iam_core::{ApiKeyId, AuthnPrincipal, PrincipalId, PrincipalKind, PrincipalStatus};
+    use paigasus_kernel::Prn;
+
+    /// SMA-446: the HTTP `IntrospectApiKeyResponseDto` surfaces the credential's `scope_prn`
+    /// (D11), and — paired with `convert.rs`'s twin gRPC test — deterministically guarantees the
+    /// two wire shapes agree without PG/Redis. Builds a `PrincipalContext` carrying a known scope
+    /// and asserts the `From` projection echoes it.
+    #[test]
+    fn introspect_api_key_dto_carries_scope_prn() {
+        let scope_prn = "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-000000000042".to_string();
+        let principal_id = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(42)).unwrap());
+        let ctx = PrincipalContext {
+            principal: AuthnPrincipal {
+                principal_id,
+                kind: PrincipalKind::ServiceAccount,
+                status: PrincipalStatus::Active,
+                credential: Credential::ApiKey {
+                    key_id: ApiKeyId::from_uuid(Uuid::from_u128(7)),
+                    expires_at: None,
+                    scope_prn: scope_prn.clone(),
+                },
+            },
+            memberships: Vec::new(),
+            role_grants: Vec::new(),
+        };
+
+        let dto = IntrospectApiKeyResponseDto::from(ctx);
+        assert_eq!(dto.scope_prn, scope_prn, "the HTTP introspect DTO must carry the key's scope_prn (SMA-446, D11)");
+    }
 }
