@@ -156,21 +156,33 @@ impl Default for OpenAiDefaults {
     }
 }
 
-/// True when `grpc_addr`'s host is a loopback address (`127.0.0.0/8`, `localhost`, `::1`).
-/// Deliberately a small hand-rolled parser rather than pulling in a `url` crate dependency
-/// for a single boot-time check: `grpc_addr` is `scheme://host[:port]`, optionally with a
-/// trailing path; strip the scheme, strip any path, then split the host from an optional
-/// port (bracketed for IPv6 literals).
+/// True when `grpc_addr`'s host is a loopback address (`127.0.0.0/8`, `localhost`, or an IPv6
+/// loopback such as `::1`). Deliberately a small hand-rolled parser rather than pulling in a
+/// `url` crate dependency for a single boot-time check: `grpc_addr` is `scheme://host[:port]`,
+/// optionally with a trailing path; strip the scheme, strip any path, then split the host from
+/// an optional port (bracketed for IPv6 literals).
+///
+/// The host is then classified by parsing it as a real IP and asking
+/// [`Ipv4Addr::is_loopback`]/[`Ipv6Addr::is_loopback`] — NOT a string prefix match. A prefix
+/// match like `host.starts_with("127.")` is trivially bypassable: `127.evil.com` and
+/// `127.0.0.1.attacker.com` both pass it yet are DNS-resolvable to arbitrary addresses, which
+/// would let an operator disable TLS on a link that then carries raw API keys off-loopback
+/// (D8). `localhost` is matched by EXACT equality for the same reason (`localhost.evil.com`
+/// must NOT match).
 fn is_loopback_host(grpc_addr: &str) -> bool {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
     let after_scheme = grpc_addr.split("://").last().unwrap_or(grpc_addr);
     let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
     let host = if let Some(rest) = host_port.strip_prefix('[') {
-        // IPv6 literal, e.g. "[::1]:9090" or "[::1]".
+        // IPv6 literal, e.g. "[::1]:9090" or "[::1]" -> "::1" (brackets stripped so the
+        // `Ipv6Addr` parse below succeeds).
         rest.split(']').next().unwrap_or(rest)
     } else {
         host_port.rsplit_once(':').map_or(host_port, |(h, _)| h)
     };
-    host == "localhost" || host == "::1" || host.starts_with("127.")
+
+    host == "localhost" || host.parse::<Ipv4Addr>().map(|ip| ip.is_loopback()).unwrap_or(false) || host.parse::<Ipv6Addr>().map(|ip| ip.is_loopback()).unwrap_or(false)
 }
 
 impl GatewayConfig {
@@ -241,6 +253,34 @@ mod tests {
             [upstream.openai]
             api_key = "sk-test-key"
         "#
+    }
+
+    // --- `is_loopback_host` direct unit tests (D8 hardening) ---------------------------------
+    // A prefix match like `starts_with("127.")` is trivially bypassable by a crafted,
+    // DNS-resolvable hostname; these lock in the IP-parse-based classification.
+
+    #[test]
+    fn is_loopback_host_rejects_crafted_hostnames() {
+        // `127.evil.com` / `127.0.0.1.attacker...` defeat a naive `starts_with("127.")`;
+        // `localhost.evil.com` defeats a naive `starts_with("localhost")` — all are ordinary
+        // DNS names resolvable to arbitrary addresses, so none is loopback.
+        assert!(!is_loopback_host("https://127.evil.com:9090"));
+        assert!(!is_loopback_host("https://127.0.0.1.attacker.example.com:9090"));
+        assert!(!is_loopback_host("https://localhost.evil.com:9090"));
+        assert!(!is_loopback_host("https://iam.internal.example.com:9090"));
+    }
+
+    #[test]
+    fn is_loopback_host_accepts_real_loopback_addresses() {
+        assert!(is_loopback_host("http://127.0.0.1:9090"));
+        // Any address in 127.0.0.0/8 is loopback (that's what `Ipv4Addr::is_loopback` gives).
+        assert!(is_loopback_host("http://127.0.0.5:9090"));
+        assert!(is_loopback_host("http://localhost:9090"));
+        // IPv6 loopback literal — bracket stripping must yield `::1` (not `[::1]`) so the
+        // `Ipv6Addr` parse succeeds.
+        assert!(is_loopback_host("http://[::1]:9090"));
+        // A bare host with no scheme and no port still classifies correctly.
+        assert!(is_loopback_host("127.0.0.1"));
     }
 
     #[test]
