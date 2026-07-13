@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! axum HTTP surface: `/healthz` (liveness, no dependency checks) and `/readyz` (a
-//! placeholder here — G8 makes it check IAM + upstream reachability) stay public; the protected
-//! `/v1/chat/completions` proxy ([`chat`]) is fronted by the auth middleware ([`auth`]) plus a
-//! request-body size limit and renders failures through the OpenAI-compatible error envelope
-//! ([`error`]). The inbound chat-completion request DTO ([`dto`]) is parsed only to read
-//! `model`/`stream`.
+//! axum HTTP surface: `/healthz` (liveness, no dependency checks) and `/readyz` (a real
+//! readiness probe — IAM reachability via a sentinel introspect; the upstream is validated by
+//! config-presence at boot) stay public; the protected `/v1/chat/completions` proxy ([`chat`]) is
+//! fronted by the auth middleware ([`auth`]) plus a request-body size limit and renders failures
+//! through the OpenAI-compatible error envelope ([`error`]). The inbound chat-completion request
+//! DTO ([`dto`]) is parsed only to read `model`/`stream`.
 
 pub mod auth;
 pub mod chat;
@@ -18,12 +18,19 @@ pub use error::GatewayError;
 
 use std::sync::Arc;
 
-use axum::extract::DefaultBodyLimit;
-use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get, routing::post};
+use axum::extract::{DefaultBodyLimit, State};
+use axum::response::{IntoResponse, Response};
+use axum::{Json, Router, http::StatusCode, routing::get, routing::post};
 use serde_json::json;
 
-use crate::adapters::iam::Iam;
+use crate::adapters::iam::{Iam, IamError};
 use crate::adapters::openai::OpenAiClient;
+
+/// Deliberately-INVALID sentinel token for the `/readyz` IAM-reachability probe. It has no
+/// `pgs_sk_` prefix, so a REACHABLE IAM parses and rejects it (an application-level `Status`, e.g.
+/// `Unauthenticated`) while an UNREACHABLE IAM fails at the transport. It authenticates nothing —
+/// the introspect is a cheap, unaudited parse-reject, never a real credential.
+const READYZ_PROBE_TOKEN: &str = "readyz-probe";
 
 /// Shared handler state: the IAM port (an `Arc<dyn Iam>` so tests inject a fake and the binary
 /// injects the real `IamClient`), the OpenAI egress client, and the inbound body-size cap. `Clone`
@@ -40,82 +47,159 @@ pub struct AppState {
 
 /// The gateway's HTTP surface. `/healthz` + `/readyz` are public (no auth, no body limit); the
 /// `/v1/chat/completions` proxy is protected by the G5 auth middleware and a
-/// [`DefaultBodyLimit`] cap. Both are applied via [`Router::route_layer`], which runs the layers
-/// ONLY for the matched protected route — so the health probes stay outside auth AND the body
-/// limit, and an unmatched path still 404s without first being challenged for a credential.
+/// [`DefaultBodyLimit`] cap. The auth + body-limit are applied via [`Router::route_layer`], which
+/// runs the layers ONLY for the matched protected route — so the health probes stay outside auth
+/// AND the body limit, and an unmatched path still 404s without first being challenged for a
+/// credential.
+///
+/// The shared [`AppState`] is applied ONCE, at the end, over the whole tree so both the stateful
+/// `readyz` (it probes IAM) and the protected chat handler read the same state. `healthz` takes no
+/// state — a stateless handler is still valid inside a stateful router.
 pub fn router(state: AppState) -> Router {
-    // The auth middleware's state is the IAM port alone (`Arc<dyn Iam>`), independent of the
-    // handler's `AppState` — so this clone is just the port, not the whole state.
+    // The auth middleware's state is the IAM port alone (`Arc<dyn Iam>`), captured here BEFORE the
+    // final `with_state`, and independent of the handler's `AppState` — so this clone is just the
+    // port, not the whole state.
     let auth = axum::middleware::from_fn_with_state(state.iam.clone(), require_iam_auth);
     // The body-size limit: an over-limit body fails the handler's `Bytes` extractor with `413`.
     // Note (M0): auth runs BEFORE the 413 (the limit is enforced at body extraction, after the
     // middleware) — acceptable here since auth reads only headers, never the body.
     let body_limit = DefaultBodyLimit::max(state.max_request_bytes);
 
-    let protected = Router::new()
-        .route("/v1/chat/completions", post(chat::chat_completions))
-        .route_layer(auth)
-        .route_layer(body_limit)
-        .with_state(state);
+    let protected = Router::new().route("/v1/chat/completions", post(chat::chat_completions)).route_layer(auth).route_layer(body_limit);
 
-    Router::new().route("/healthz", get(healthz)).route("/readyz", get(readyz)).merge(protected)
+    Router::new().route("/healthz", get(healthz)).route("/readyz", get(readyz)).merge(protected).with_state(state)
 }
 
 async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({ "status": "ok" })))
 }
 
-/// Placeholder readiness check — always reports ready. TODO(G8): check IAM gRPC
-/// reachability and OpenAI upstream reachability before reporting `200`.
-async fn readyz() -> impl IntoResponse {
-    (StatusCode::OK, Json(json!({ "status": "ok" })))
+/// Readiness probe: `200 {"status":"ready"}` only when the gateway can actually serve. For M0 the
+/// meaningful hard dependency is IAM (every request introspects + authorizes against it), so
+/// readiness turns on IAM reachability; a transient upstream blip must NOT flap readiness, so the
+/// OpenAI upstream is checked by config-presence only (see below), never a per-poll network probe.
+///
+/// ## IAM reachability via a sentinel introspect (a dedicated gRPC health RPC is a follow-up)
+/// The M0 [`Iam`] port exposes no health RPC, so reachability is inferred from a cheap sentinel
+/// `IntrospectApiKey` with the deliberately-invalid [`READYZ_PROBE_TOKEN`]: a REACHABLE IAM parses
+/// and rejects it, returning an application-level `Status` (e.g. `Unauthenticated`); an UNREACHABLE
+/// IAM fails at the transport ([`IamError::Connect`], or an `Rpc` `Status` of
+/// `Unavailable`/`DeadlineExceeded`). The probe is a plain parse-reject — cheap and NOT audited (it
+/// authenticates nothing). A dedicated IAM gRPC health RPC is the documented follow-up.
+///
+/// Classification: transport-ish outcomes (`Connect` / `Unavailable` / `DeadlineExceeded`) → NOT
+/// ready (`503`); ANY other outcome (an application-level `Status` such as `Unauthenticated`, or
+/// even an `Ok`) proves IAM answered → ready (`200`).
+///
+/// ## Upstream — config-presence only for M0 (a live probe is a follow-up)
+/// `upstream.openai.{base_url,api_key}` are validated non-empty at boot by
+/// `GatewayConfig::validate`, so there is nothing further to check here without a live network
+/// probe on every poll (flaky + rate-costly). A live upstream-reachability probe is a documented
+/// follow-up; deliberately NOT added here.
+async fn readyz(State(state): State<AppState>) -> Response {
+    match state.iam.introspect_api_key(READYZ_PROBE_TOKEN).await {
+        // Transport-level failures → IAM unreachable → not ready.
+        Err(IamError::Connect(_)) => iam_not_ready(),
+        Err(IamError::Rpc(status)) if matches!(status.code(), tonic::Code::Unavailable | tonic::Code::DeadlineExceeded) => iam_not_ready(),
+        // Any application-level `Status` (e.g. `Unauthenticated`) or an `Ok` proves IAM answered.
+        Err(IamError::Rpc(_)) | Ok(_) => (StatusCode::OK, Json(json!({ "status": "ready" }))).into_response(),
+    }
+}
+
+/// The `503` readiness response when the IAM dependency is unreachable. Static, dependency-scoped,
+/// and carries no upstream detail.
+fn iam_not_ready() -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "status": "not_ready", "dependency": "iam" }))).into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::iam::IamError;
     use crate::config::OpenAiConfig;
     use axum::body::Body;
     use axum::http::Request;
     use paigasus_proto::paigasus::iam::v1::IntrospectApiKeyResponse;
     use secrecy::SecretString;
     use std::time::Duration;
+    use tonic::Status;
     use tower::ServiceExt; // for `oneshot`
 
-    /// A never-invoked `Iam` for the health-route tests (they hit only the public, unauthenticated
-    /// routes, so these methods are unreachable — the full auth-path table lives in G5's `auth.rs`
-    /// unit tests and G7's `tests/chat_proxy.rs`).
+    /// A never-invoked `Iam` for the routes that must NOT touch IAM (`/healthz`, and the unauth
+    /// `/v1/chat/completions` row that 401s before any IAM call). Its methods panic, so a test
+    /// using it that DID reach IAM would fail loudly — which is exactly how `/healthz` proves it
+    /// has no IAM dependency. The full auth-path table lives in G5's `auth.rs` unit tests and G7's
+    /// `tests/chat_proxy.rs`.
     struct UnusedIam;
 
     #[async_trait::async_trait]
     impl Iam for UnusedIam {
         async fn introspect_api_key(&self, _token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
-            unreachable!("health routes never call IAM")
+            unreachable!("this route must never call IAM")
         }
         async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
-            unreachable!("health routes never call IAM")
+            unreachable!("this route must never call IAM")
         }
     }
 
-    /// A test `AppState` whose OpenAI client points nowhere in particular (it is never called by the
-    /// health routes) and whose IAM port is the never-invoked fake.
-    fn test_state() -> AppState {
+    /// The introspect outcome a [`ProbeIam`] returns for the `/readyz` sentinel probe — either a
+    /// REACHABLE IAM (it answered: an `Ok`, or an application-level `Unauthenticated`) or an
+    /// UNREACHABLE one (a transport-level `Unavailable`/`DeadlineExceeded` `Rpc`, or `Connect`).
+    #[derive(Clone, Copy)]
+    enum Probe {
+        ReachableOk,
+        ReachableUnauthenticated,
+        UnreachableUnavailable,
+        UnreachableDeadline,
+        UnreachableConnect,
+    }
+
+    /// A configurable `Iam` for the readiness tests: `introspect_api_key` yields the selected
+    /// [`Probe`] outcome so `/readyz`'s reachable/unreachable classification is exercised.
+    struct ProbeIam(Probe);
+
+    #[async_trait::async_trait]
+    impl Iam for ProbeIam {
+        async fn introspect_api_key(&self, _token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
+            match self.0 {
+                Probe::ReachableOk => Ok(IntrospectApiKeyResponse::default()),
+                Probe::ReachableUnauthenticated => Err(IamError::Rpc(Status::unauthenticated("invalid key"))),
+                Probe::UnreachableUnavailable => Err(IamError::Rpc(Status::unavailable("iam is down"))),
+                Probe::UnreachableDeadline => Err(IamError::Rpc(Status::deadline_exceeded("iam timed out"))),
+                Probe::UnreachableConnect => Err(IamError::Connect("channel build failed".to_string())),
+            }
+        }
+        async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+            unreachable!("the readiness probe never authorizes")
+        }
+    }
+
+    /// An OpenAI client that points nowhere in particular — the health/readiness routes never call
+    /// the upstream, so it is only there to satisfy [`AppState`].
+    fn unused_openai() -> OpenAiClient {
         let cfg = OpenAiConfig {
             base_url: "http://127.0.0.1:1".to_string(),
             api_key: SecretString::from("sk-unused".to_string()),
         };
-        let openai = OpenAiClient::new(&cfg, Duration::from_secs(1), Duration::from_secs(1), Duration::from_secs(1)).expect("client builds");
+        OpenAiClient::new(&cfg, Duration::from_secs(1), Duration::from_secs(1), Duration::from_secs(1)).expect("client builds")
+    }
+
+    /// A test `AppState` over the given IAM port (the OpenAI client is never called by these routes).
+    fn state_with_iam(iam: Arc<dyn Iam>) -> AppState {
         AppState {
-            iam: Arc::new(UnusedIam),
-            openai: Arc::new(openai),
+            iam,
+            openai: Arc::new(unused_openai()),
             max_request_bytes: 1_048_576,
         }
     }
 
+    async fn get_status(app: Router, uri: &str) -> StatusCode {
+        app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap().status()
+    }
+
     #[tokio::test]
-    async fn healthz_returns_200_with_status_ok_body() {
-        let app = router(test_state());
+    async fn healthz_returns_200_with_status_ok_body_and_no_iam_dependency() {
+        // `UnusedIam` panics if called — so a 200 here also proves `/healthz` never touches IAM.
+        let app = router(state_with_iam(Arc::new(UnusedIam)));
         let resp = app.oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
@@ -124,17 +208,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readyz_returns_200_placeholder() {
-        let app = router(test_state());
-        let resp = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+    async fn healthz_stays_200_even_when_iam_is_unreachable() {
+        // Liveness must not flap on a dependency outage: `/healthz` is 200 regardless of IAM.
+        let app = router(state_with_iam(Arc::new(ProbeIam(Probe::UnreachableUnavailable))));
+        assert_eq!(get_status(app, "/healthz").await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn readyz_is_200_when_iam_is_reachable() {
+        // Both a reachable-Ok and a reachable-but-rejecting (`Unauthenticated`) IAM prove IAM
+        // answered → ready.
+        for probe in [Probe::ReachableOk, Probe::ReachableUnauthenticated] {
+            let app = router(state_with_iam(Arc::new(ProbeIam(probe))));
+            assert_eq!(get_status(app, "/readyz").await, StatusCode::OK, "reachable IAM must be ready");
+        }
+    }
+
+    #[tokio::test]
+    async fn readyz_is_503_when_iam_is_unreachable() {
+        // A transport-level outcome (Connect, or an Unavailable/DeadlineExceeded Rpc) → not ready.
+        for probe in [Probe::UnreachableUnavailable, Probe::UnreachableDeadline, Probe::UnreachableConnect] {
+            let app = router(state_with_iam(Arc::new(ProbeIam(probe))));
+            assert_eq!(get_status(app, "/readyz").await, StatusCode::SERVICE_UNAVAILABLE, "unreachable IAM must be not-ready");
+        }
     }
 
     #[tokio::test]
     async fn chat_route_requires_auth_missing_bearer_is_401() {
         // The protected route is behind the auth middleware; with no bearer it 401s before any
-        // IAM/upstream call (proves the layer is wired, without needing a live upstream).
-        let app = router(test_state());
+        // IAM/upstream call (proves the layer is wired, without needing a live upstream). `UnusedIam`
+        // panics if reached, so the 401 also proves no IAM call happens on the missing-bearer path.
+        let app = router(state_with_iam(Arc::new(UnusedIam)));
         let req = Request::builder().method("POST").uri("/v1/chat/completions").body(Body::from("{}")).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

@@ -20,12 +20,14 @@
 mod support;
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use bytes::Bytes;
+use futures::StreamExt; // for `bytes_stream().next()`
 use secrecy::SecretString;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tonic::Status;
@@ -349,4 +351,76 @@ async fn spawn_truncated_sse_server() -> String {
         }
     });
     format!("http://{addr}")
+}
+
+// ---- client-abort cancel-on-drop (G8) ---------------------------------------------------------
+
+/// Client disconnect mid-stream CANCELS the upstream request — proven end-to-end. A REAL
+/// `reqwest::Client` starts a `stream:true` request through the gateway (bound on a real TCP
+/// port), reads the first SSE frame (so the stream is live and the gateway↔upstream connection is
+/// established + holding), then DROPS the response. The drop must propagate: axum drops the
+/// gateway's response body → the `unfold` holding the reqwest stream drops → reqwest cancels the
+/// upstream request → the mock's body future drops → its Drop guard flips the cancel flag.
+///
+/// ## Determinism (no fixed sleep)
+/// The mock holds the stream open on `Poll::Pending` FOREVER after one frame, so the flag can flip
+/// ONLY as a consequence of the drop — never on its own. We first assert the flag is still false
+/// (nothing has been dropped), then, AFTER the drop, poll it inside a 2 s `tokio::time::timeout`
+/// around a 10 ms retry loop: the test FAILS (rather than hangs) if cancellation never propagates,
+/// and passes as soon as it does (typically within a few ms). The bound is a generous ceiling, not
+/// a timed guess. A regression that detached the stream onto its own task (breaking cancel-on-drop)
+/// would leave the flag false and fail this test at the 2 s bound.
+#[tokio::test]
+async fn client_abort_cancels_upstream_request() {
+    let (mock, cancelled) = MockOpenAi::spawn_abortable_stream().await;
+    let app = app_for(FakeIam::allowed(), mock.base_url.clone(), ONE_MIB);
+
+    // Bind the gateway on a real ephemeral port and serve it in the background — a real socket is
+    // required so reqwest's client disconnect actually reaches axum (unlike `oneshot`).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind gateway port");
+    let gw_addr = listener.local_addr().expect("gateway addr");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    // A REAL reqwest client starts the stream with a valid bearer.
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{gw_addr}/v1/chat/completions"))
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {CALLER_KEY}"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(STREAM_BODY)
+        .send()
+        .await
+        .expect("gateway responds to the streaming request");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let mut stream = resp.bytes_stream();
+    // Read the FIRST frame — proves the stream started and the upstream is connected + holding.
+    let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("the first chunk must arrive within 2s")
+        .expect("the stream yields a first chunk")
+        .expect("the first chunk is not a transport error");
+    assert!(first.starts_with(b"data: "), "the first SSE frame is forwarded from the upstream: {first:?}");
+
+    // Sanity: nothing has been dropped yet, so the upstream must still be live.
+    assert!(!cancelled.load(Ordering::SeqCst), "the upstream must still be live before the client disconnects");
+
+    // Client disconnect: dropping the stream drops the reqwest response and closes the connection.
+    drop(stream);
+
+    // The drop must propagate all the way to the upstream. Poll the flag, bounded — FAIL (not
+    // hang) if cancel-on-drop never propagates.
+    let propagated = tokio::time::timeout(Duration::from_secs(2), async {
+        while !cancelled.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(propagated.is_ok(), "client-abort must cancel the upstream request within 2s (cancel-on-drop propagated end-to-end)");
+    assert!(cancelled.load(Ordering::SeqCst), "the mock's Drop guard flipped the cancel flag");
+
+    server.abort();
+    drop(mock);
 }

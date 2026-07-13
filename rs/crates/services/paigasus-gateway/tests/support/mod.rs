@@ -11,6 +11,7 @@
 // dead-code lint rather than sprinkle `#[allow]` on each item.
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -44,6 +45,20 @@ enum MockResponse {
     /// Stream: return `200 text/event-stream`, emitting each element as a `data: <event>\n\n`
     /// frame IN ORDER, streamed (never buffered into one blob server-side).
     Sse { events: Vec<String> },
+    /// Stream: emit ONE `data:` frame, then hold the connection open FOREVER, carrying a
+    /// [`CancelGuard`] that flips `cancelled` when the response body future is dropped — i.e. when
+    /// the upstream request is cancelled on client disconnect. The client-abort proof (G8).
+    AbortableStream { cancelled: Arc<AtomicBool> },
+}
+
+/// A Drop guard carried inside the abortable-stream response body: dropping it (which hyper does
+/// when the body future is dropped on client/upstream disconnect) flips the shared cancel flag.
+struct CancelGuard(Arc<AtomicBool>);
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 struct MockState {
@@ -75,6 +90,16 @@ impl MockOpenAi {
     /// Start a mock that streams the given events IN ORDER as SSE `data:` frames (the stream path).
     pub async fn spawn_sse(events: Vec<String>) -> Self {
         Self::spawn(MockResponse::Sse { events }).await
+    }
+
+    /// Start a mock whose stream yields ONE `data:` frame then holds the connection open forever,
+    /// carrying a Drop guard that flips the returned `Arc<AtomicBool>` when the response body
+    /// future is dropped. Use it to prove client-abort → cancel-on-drop propagates end-to-end: the
+    /// flag can flip ONLY as a consequence of the upstream request being cancelled.
+    pub async fn spawn_abortable_stream() -> (Self, Arc<AtomicBool>) {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mock = Self::spawn(MockResponse::AbortableStream { cancelled: Arc::clone(&cancelled) }).await;
+        (mock, cancelled)
     }
 
     async fn spawn(response: MockResponse) -> Self {
@@ -114,6 +139,30 @@ async fn handle(State(state): State<Arc<MockState>>, headers: HeaderMap, body: B
             // side exercises real incremental delivery.
             let frames = events.clone();
             let stream = futures::stream::iter(frames.into_iter().map(|e| Ok::<Bytes, std::convert::Infallible>(Bytes::from(format!("data: {e}\n\n")))));
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                .body(Body::from_stream(stream))
+                .expect("build sse response")
+        }
+        MockResponse::AbortableStream { cancelled } => {
+            // A Drop guard that flips the cancel flag when the response body future is dropped.
+            let guard = CancelGuard(Arc::clone(cancelled));
+            let mut sent_first = false;
+            // Yield ONE frame, then hold the connection open forever (`Poll::Pending`). The `move`
+            // closure captures + OWNS `guard` (the `let _hold = &guard;` reference is load-bearing:
+            // a `move` closure only captures what it uses), so `guard` drops exactly when this
+            // stream — and hence the body future — is dropped on client/upstream disconnect,
+            // flipping the flag. `Poll::Pending` with no waker registered is fine: the stream is
+            // only ever advanced by the drop, never re-polled to completion.
+            let stream = futures::stream::poll_fn(move |_cx| {
+                if !sent_first {
+                    sent_first = true;
+                    return std::task::Poll::Ready(Some(Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"data: hold\n\n"))));
+                }
+                let _hold = &guard;
+                std::task::Poll::Pending
+            });
             Response::builder()
                 .status(StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
