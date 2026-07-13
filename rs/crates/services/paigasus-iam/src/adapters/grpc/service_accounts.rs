@@ -28,8 +28,11 @@
 //! `DELETE`'s 204 semantics exactly — an RPC named after one action requires exactly that one
 //! action's authority.
 
+use std::time::Instant;
+
 use paigasus_iam_core::{Action, ApiKeyId, PrincipalId, TenancyNodeRef};
 use paigasus_kernel::Prn;
+use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1::service_account_service_server::ServiceAccountService;
 use paigasus_proto::paigasus::iam::v1::{
     ArchiveServiceAccountRequest, ArchiveServiceAccountResponse, CreateServiceAccountRequest, CreateServiceAccountResponse, GetServiceAccountRequest, GetServiceAccountResponse, IssueApiKeyRequest,
@@ -90,94 +93,136 @@ fn service_account_id(raw: &str) -> Result<PrincipalId, TenancyError> {
 #[tonic::async_trait]
 impl ServiceAccountService for ServiceAccountGrpc {
     async fn create_service_account(&self, request: Request<CreateServiceAccountRequest>) -> Result<Response<CreateServiceAccountResponse>, Status> {
-        let actor = actor_context(&request)?.principal_id.prn().clone();
-        let req = request.into_inner();
-        let owner = parse_node_prn(&req.owner_prn).map_err(convert::status_to_grpc)?;
-        let sa = self.state.service_accounts.create(&actor, owner, &req.name).await.map_err(convert::status_to_grpc)?;
-        Ok(Response::new(CreateServiceAccountResponse {
-            service_account: Some(convert::to_proto_service_account(&sa)),
-        }))
+        let started = Instant::now();
+        let result: Result<Response<CreateServiceAccountResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let req = request.into_inner();
+            let owner = parse_node_prn(&req.owner_prn).map_err(convert::status_to_grpc)?;
+            let sa = self.state.service_accounts.create(&actor, owner, &req.name).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(CreateServiceAccountResponse {
+                service_account: Some(convert::to_proto_service_account(&sa)),
+            }))
+        }
+        .await;
+        record_grpc("ServiceAccount", "CreateServiceAccount", started, &result);
+        result
     }
 
     async fn get_service_account(&self, request: Request<GetServiceAccountRequest>) -> Result<Response<GetServiceAccountResponse>, Status> {
-        let actor = actor_context(&request)?.principal_id.prn().clone();
-        let id = service_account_id(&request.get_ref().prn).map_err(convert::status_to_grpc)?;
-        let sa = self.state.service_accounts.get(&actor, &id).await.map_err(convert::status_to_grpc)?;
-        Ok(Response::new(GetServiceAccountResponse {
-            service_account: Some(convert::to_proto_service_account(&sa)),
-        }))
+        let started = Instant::now();
+        let result: Result<Response<GetServiceAccountResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let id = service_account_id(&request.get_ref().prn).map_err(convert::status_to_grpc)?;
+            let sa = self.state.service_accounts.get(&actor, &id).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(GetServiceAccountResponse {
+                service_account: Some(convert::to_proto_service_account(&sa)),
+            }))
+        }
+        .await;
+        record_grpc("ServiceAccount", "GetServiceAccount", started, &result);
+        result
     }
 
     async fn list_service_accounts(&self, request: Request<ListServiceAccountsRequest>) -> Result<Response<ListServiceAccountsResponse>, Status> {
-        let actor = actor_context(&request)?.principal_id.prn().clone();
-        let req = request.into_inner();
-        let owner = parse_node_prn(&req.owner_prn).map_err(convert::status_to_grpc)?;
-        let page = convert::to_page(req.limit, req.offset).map_err(convert::status_to_grpc)?;
-        let accounts = self.state.service_accounts.list(&actor, &owner, page).await.map_err(convert::status_to_grpc)?;
-        Ok(Response::new(ListServiceAccountsResponse {
-            service_accounts: accounts.iter().map(convert::to_proto_service_account).collect(),
-        }))
+        let started = Instant::now();
+        let result: Result<Response<ListServiceAccountsResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let req = request.into_inner();
+            let owner = parse_node_prn(&req.owner_prn).map_err(convert::status_to_grpc)?;
+            let page = convert::to_page(req.limit, req.offset).map_err(convert::status_to_grpc)?;
+            let accounts = self.state.service_accounts.list(&actor, &owner, page).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(ListServiceAccountsResponse {
+                service_accounts: accounts.iter().map(convert::to_proto_service_account).collect(),
+            }))
+        }
+        .await;
+        record_grpc("ServiceAccount", "ListServiceAccounts", started, &result);
+        result
     }
 
     async fn archive_service_account(&self, request: Request<ArchiveServiceAccountRequest>) -> Result<Response<ArchiveServiceAccountResponse>, Status> {
-        let actor = actor_context(&request)?.principal_id.prn().clone();
-        let id = service_account_id(&request.get_ref().prn).map_err(convert::status_to_grpc)?;
-        // Archive is a lifecycle op with an EMPTY response (module docs) — `ServiceAccountService
-        // ::archive` authorizes ONLY `ArchiveServiceAccount`, matching the HTTP `DELETE`'s 204
-        // semantics exactly (no `GetServiceAccount` double-authz just to populate a body).
-        self.state.service_accounts.archive(&actor, &id).await.map_err(convert::status_to_grpc)?;
-        Ok(Response::new(ArchiveServiceAccountResponse {}))
+        let started = Instant::now();
+        let result: Result<Response<ArchiveServiceAccountResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let id = service_account_id(&request.get_ref().prn).map_err(convert::status_to_grpc)?;
+            // Archive is a lifecycle op with an EMPTY response (module docs) — `ServiceAccountService
+            // ::archive` authorizes ONLY `ArchiveServiceAccount`, matching the HTTP `DELETE`'s 204
+            // semantics exactly (no `GetServiceAccount` double-authz just to populate a body).
+            self.state.service_accounts.archive(&actor, &id).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(ArchiveServiceAccountResponse {}))
+        }
+        .await;
+        record_grpc("ServiceAccount", "ArchiveServiceAccount", started, &result);
+        result
     }
 
     async fn issue_api_key(&self, request: Request<IssueApiKeyRequest>) -> Result<Response<IssueApiKeyResponse>, Status> {
-        let actor = actor_context(&request)?.principal_id.prn().clone();
-        let req = request.into_inner();
-        let sa_id = service_account_id(&req.service_account_prn).map_err(convert::status_to_grpc)?;
-        let scope = parse_node_prn(&req.scope_prn).map_err(convert::status_to_grpc)?;
-        // `expires_at` unset means non-expiring (or the configured `default_expiry_days`
-        // fallback, `ApiKeyService::issue`) — mirrors `IssueApiKeyBody::expires_at`'s HTTP
-        // counterpart. A present-but-out-of-range timestamp is `InvalidPrn`-as-sentinel
-        // (mirrors `DetachMembershipRequest`'s "not a uuid" posture): there is no dedicated
-        // error code for "not a valid timestamp" either.
-        let expires_at = req
-            .expires_at
-            .map(|t| convert::from_ts(t).ok_or_else(|| TenancyError::InvalidPrn("expires_at out of range".to_string())))
-            .transpose()
-            .map_err(convert::status_to_grpc)?;
-        let scope_actions = req
-            .scope_actions
-            .iter()
-            .map(|a| Action::parse(a).ok_or_else(|| TenancyError::InvalidAction(a.clone())))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(convert::status_to_grpc)?;
-        let new_key = self
-            .state
-            .api_keys
-            .issue(&actor, &sa_id, scope, expires_at, scope_actions, req.scope_roles)
-            .await
-            .map_err(convert::status_to_grpc)?;
-        Ok(Response::new(convert::to_proto_issue_api_key_response(&new_key)))
+        let started = Instant::now();
+        let result: Result<Response<IssueApiKeyResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let req = request.into_inner();
+            let sa_id = service_account_id(&req.service_account_prn).map_err(convert::status_to_grpc)?;
+            let scope = parse_node_prn(&req.scope_prn).map_err(convert::status_to_grpc)?;
+            // `expires_at` unset means non-expiring (or the configured `default_expiry_days`
+            // fallback, `ApiKeyService::issue`) — mirrors `IssueApiKeyBody::expires_at`'s HTTP
+            // counterpart. A present-but-out-of-range timestamp is `InvalidPrn`-as-sentinel
+            // (mirrors `DetachMembershipRequest`'s "not a uuid" posture): there is no dedicated
+            // error code for "not a valid timestamp" either.
+            let expires_at = req
+                .expires_at
+                .map(|t| convert::from_ts(t).ok_or_else(|| TenancyError::InvalidPrn("expires_at out of range".to_string())))
+                .transpose()
+                .map_err(convert::status_to_grpc)?;
+            let scope_actions = req
+                .scope_actions
+                .iter()
+                .map(|a| Action::parse(a).ok_or_else(|| TenancyError::InvalidAction(a.clone())))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(convert::status_to_grpc)?;
+            let new_key = self
+                .state
+                .api_keys
+                .issue(&actor, &sa_id, scope, expires_at, scope_actions, req.scope_roles)
+                .await
+                .map_err(convert::status_to_grpc)?;
+            Ok(Response::new(convert::to_proto_issue_api_key_response(&new_key)))
+        }
+        .await;
+        record_grpc("ServiceAccount", "IssueApiKey", started, &result);
+        result
     }
 
     async fn revoke_api_key(&self, request: Request<RevokeApiKeyRequest>) -> Result<Response<RevokeApiKeyResponse>, Status> {
-        let actor = actor_context(&request)?.principal_id.prn().clone();
-        let req = request.into_inner();
-        // `id` is a plain uuid (an api key's own id), not a PRN — mirrors
-        // `TenancyGrpc::detach_membership`/`AuthzGrpc::revoke_role`'s identical posture for a
-        // non-PRN-shaped wire id: there is no dedicated error code for "not a uuid".
-        let id = Uuid::parse_str(&req.id).map_err(|_| convert::status_to_grpc(TenancyError::InvalidPrn("api key id must be a uuid".to_string())))?;
-        self.state.api_keys.revoke(&actor, ApiKeyId::from_uuid(id)).await.map_err(convert::status_to_grpc)?;
-        Ok(Response::new(RevokeApiKeyResponse {}))
+        let started = Instant::now();
+        let result: Result<Response<RevokeApiKeyResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let req = request.into_inner();
+            // `id` is a plain uuid (an api key's own id), not a PRN — mirrors
+            // `TenancyGrpc::detach_membership`/`AuthzGrpc::revoke_role`'s identical posture for a
+            // non-PRN-shaped wire id: there is no dedicated error code for "not a uuid".
+            let id = Uuid::parse_str(&req.id).map_err(|_| convert::status_to_grpc(TenancyError::InvalidPrn("api key id must be a uuid".to_string())))?;
+            self.state.api_keys.revoke(&actor, ApiKeyId::from_uuid(id)).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(RevokeApiKeyResponse {}))
+        }
+        .await;
+        record_grpc("ServiceAccount", "RevokeApiKey", started, &result);
+        result
     }
 
     async fn list_api_keys(&self, request: Request<ListApiKeysRequest>) -> Result<Response<ListApiKeysResponse>, Status> {
-        let actor = actor_context(&request)?.principal_id.prn().clone();
-        let req = request.into_inner();
-        let sa_id = service_account_id(&req.service_account_prn).map_err(convert::status_to_grpc)?;
-        let page = convert::to_page(req.limit, req.offset).map_err(convert::status_to_grpc)?;
-        let keys = self.state.api_keys.list(&actor, &sa_id, page).await.map_err(convert::status_to_grpc)?;
-        Ok(Response::new(ListApiKeysResponse {
-            api_keys: keys.iter().map(convert::to_proto_api_key).collect(),
-        }))
+        let started = Instant::now();
+        let result: Result<Response<ListApiKeysResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let req = request.into_inner();
+            let sa_id = service_account_id(&req.service_account_prn).map_err(convert::status_to_grpc)?;
+            let page = convert::to_page(req.limit, req.offset).map_err(convert::status_to_grpc)?;
+            let keys = self.state.api_keys.list(&actor, &sa_id, page).await.map_err(convert::status_to_grpc)?;
+            Ok(Response::new(ListApiKeysResponse {
+                api_keys: keys.iter().map(convert::to_proto_api_key).collect(),
+            }))
+        }
+        .await;
+        record_grpc("ServiceAccount", "ListApiKeys", started, &result);
+        result
     }
 }
