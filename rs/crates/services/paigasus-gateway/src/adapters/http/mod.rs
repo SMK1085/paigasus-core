@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! axum HTTP surface: `/healthz` (liveness, no dependency checks) and `/readyz` (a
-//! placeholder here — G8 makes it check IAM + upstream reachability).
+//! placeholder here — G8 makes it check IAM + upstream reachability); plus the auth middleware
+//! ([`auth`]) that fronts every protected route and the OpenAI-compatible error envelope
+//! ([`error`]) it renders failures through.
+
+pub mod auth;
+pub mod error;
+
+pub use auth::require_iam_auth;
+pub use error::GatewayError;
 
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
 use serde_json::json;
