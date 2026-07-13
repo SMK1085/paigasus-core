@@ -21,6 +21,7 @@ pub struct IamConfig {
     pub api_keys: ApiKeyConfig,
     pub audit: AuditConfig,
     pub outbox: OutboxConfig,
+    pub metrics: MetricsConfig,
 }
 
 /// BYO-IdP OIDC authentication config (spec §6.4). `issuers` is intentionally left
@@ -258,6 +259,27 @@ pub struct OutboxConfig {
     pub max_attempts: u32,
 }
 
+/// `GET /metrics` (SMA-446 Unit 3, mirrors `paigasus-gateway::config::MetricsConfig` field-for-
+/// field): whether the Prometheus recorder is installed at all, and where the route is served.
+/// `addr: None` (the default) merges `/metrics` onto `http_addr` (the same port as the
+/// tenancy/authn/authz HTTP surface); `Some(addr)` serves it on its OWN listener instead —
+/// keeping operational metrics off a port that also serves application traffic. `enabled =
+/// false` skips installing the recorder entirely (no route, no global `metrics`-facade
+/// recorder in this process). Unlike the gateway's `MetricsConfig`, this derives
+/// `PartialEq`/`Eq` — `IamConfig` itself derives both (no `SecretString`-carrying field blocks
+/// it, unlike `GatewayConfig`), so every nested config type must too.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MetricsConfig {
+    pub enabled: bool,
+    pub addr: Option<SocketAddr>,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        MetricsConfig { enabled: true, addr: None }
+    }
+}
+
 // Only the fields that HAVE a default. `database_url` and `authn.issuers` are
 // intentionally absent so a missing value is a hard error at load time.
 #[derive(Serialize)]
@@ -270,6 +292,7 @@ struct Defaults {
     api_keys: ApiKeyDefaults,
     audit: AuditDefaults,
     outbox: OutboxDefaults,
+    metrics: MetricsConfig,
 }
 
 // Mirrors `AuthnConfig` minus `issuers` — deliberately absent, see `AuthnConfig` doc.
@@ -346,6 +369,7 @@ impl Default for Defaults {
             api_keys: ApiKeyDefaults::default(),
             audit: AuditDefaults::default(),
             outbox: OutboxDefaults::default(),
+            metrics: MetricsConfig::default(),
         }
     }
 }
@@ -684,6 +708,17 @@ impl IamConfig {
         }
         if self.outbox.max_attempts == 0 {
             return Err("outbox.max_attempts must be at least 1 (0 would park every outbox row on its first failed publish attempt)".to_string());
+        }
+
+        // --- SMA-446 Unit 3: `[metrics]` config ------------------------------------------------
+        // Mirrors `GatewayConfig::validate`'s identical check: a separate metrics listener must
+        // not collide with the main HTTP port (`enabled = true` with `addr = None` merges
+        // `/metrics` onto `http_addr` instead — that's the intended same-port case, not a
+        // collision).
+        if let Some(addr) = self.metrics.addr
+            && addr == self.http_addr
+        {
+            return Err("metrics.addr must not equal http_addr".to_string());
         }
 
         Ok(())
@@ -1728,6 +1763,34 @@ mod tests {
             assert_eq!(cfg.outbox.batch_size, 250);
             assert_eq!(cfg.outbox.max_attempts, 8);
             assert!(cfg.validate().is_ok(), "expected a fully-populated, valid [outbox] block (relay disabled) to pass validation");
+            Ok(())
+        });
+    }
+
+    // --- SMA-446 Unit 3: `[metrics]` config -------------------------------------------------
+
+    #[test]
+    fn metrics_defaults_land_with_no_metrics_block_at_all() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.metrics.enabled, "metrics.enabled must default to true");
+            assert_eq!(cfg.metrics.addr, None, "metrics.addr must default to unset (same-port merge)");
+            assert!(cfg.validate().is_ok(), "metrics defaults alone should pass validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn metrics_addr_must_differ_from_http_addr() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
+            let mut cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_ok(), "sanity: the base config must validate before the collision is introduced");
+            cfg.metrics.addr = Some(cfg.http_addr); // collision
+            assert!(cfg.validate().is_err(), "metrics.addr == http_addr is a config error");
             Ok(())
         });
     }

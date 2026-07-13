@@ -28,6 +28,13 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("no authz.bootstrap_admins configured — a fresh deployment has no platform administrator and cannot create organizations or grant roles");
     }
 
+    // Metrics (SMA-446 Unit 3, mirrors `paigasus-gateway::main`'s identical Unit 2 wiring):
+    // install the global Prometheus recorder only when `[metrics]` is enabled — `!enabled`
+    // means no recorder is installed AND `/metrics` is never mounted below (a `None` handle
+    // short-circuits both wiring blocks further down). `config.validate()` above already
+    // rejected `metrics.addr == http_addr`.
+    let metrics_handle = config.metrics.enabled.then(|| paigasus_observability::init("paigasus-iam"));
+
     let db = Database::connect(&config.database_url).await?;
     Migrator::up(&db, None).await?;
     // Built once and cloned into each server task below (a cheap handle-clone: every
@@ -46,18 +53,47 @@ async fn main() -> anyhow::Result<()> {
     let request_timeout = Duration::from_secs(30);
     let (tx, rx) = tokio::sync::watch::channel(());
 
+    // Same-port `/metrics` (SMA-446 Unit 3): built here, threaded into `serve_http` below, only
+    // when enabled AND no separate `metrics.addr` is configured — `metrics.enabled = false`, or a
+    // separate `addr`, leaves this `None` (in the `addr` case `/metrics` is served on its own
+    // listener, spawned separately below instead).
+    let http_metrics_router = match (&metrics_handle, config.metrics.addr) {
+        (Some(handle), None) => Some(paigasus_observability::metrics_router(handle.clone())),
+        _ => None,
+    };
+
     let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
     {
         let mut rx = rx.clone();
         let state = state.clone();
         let addr = config.http_addr;
         servers.spawn(async move {
-            serve_http(addr, state, request_timeout, async move {
+            serve_http(addr, state, request_timeout, http_metrics_router, async move {
                 let _ = rx.changed().await;
             })
             .await
             .map_err(anyhow::Error::from)
         });
+    }
+    {
+        // Separate metrics listener (SMA-446 Unit 3), only when both enabled AND `metrics.addr`
+        // is configured — keeps `/metrics` off the port that also serves the tenancy/authn/authz
+        // HTTP API. On the SAME shutdown-watch every other task in this `JoinSet` uses, so it
+        // stops gracefully alongside the HTTP/gRPC servers rather than lingering past them.
+        if let (Some(handle), Some(metrics_addr)) = (metrics_handle.clone(), config.metrics.addr) {
+            let mut rx = rx.clone();
+            let metrics_app = paigasus_observability::metrics_router(handle);
+            servers.spawn(async move {
+                let listener = tokio::net::TcpListener::bind(metrics_addr).await?;
+                tracing::info!(%metrics_addr, "paigasus-iam metrics listener started");
+                axum::serve(listener, metrics_app)
+                    .with_graceful_shutdown(async move {
+                        let _ = rx.changed().await;
+                    })
+                    .await
+                    .map_err(anyhow::Error::from)
+            });
+        }
     }
     {
         let mut rx = rx.clone();
