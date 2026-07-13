@@ -127,3 +127,15 @@ tasks:
       - 'rs/crates/libs/paigasus-kernel/src/**/*'
       - 'rs/crates/bindings/paigasus-wasm/Cargo.toml'
       - 'rs/crates/bindings/paigasus-wasm/src/**/*'
+
+  promtool:
+    description: 'promtool validates the Prometheus scrape config + alert rules + rule unit tests under ops/observability/prometheus/ (SMA-446).'
+    script: |
+      promtool check config ops/observability/prometheus/prometheus.yml
+      promtool check rules ops/observability/prometheus/rules/*.rules.yml
+      promtool test rules ops/observability/prometheus/rules/tests/*.test.yml
+    toolchain: 'system'
+    inputs:
+      - 'ops/observability/prometheus/**/*'
+      - '.prototools'
+      - '.proto/plugins/promtool.toml'

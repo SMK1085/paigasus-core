@@ -1,0 +1,45 @@
+# Vendored proto TOML plugin for promtool (SMA-446).
+#
+# Resolves official prometheus/prometheus GitHub release tarballs. Same vendoring rationale as
+# cargo-deny/wasm-pack: a static schema over official release assets — nothing upstream to
+# maintain. promtool validates ops/observability/prometheus/{prometheus.yml,rules/*.rules.yml}
+# and runs the promtool-test-rules fixtures under rules/tests/.
+#
+# Prometheus ships one archive per (GOOS, GOARCH), using Go's arch names (amd64/arm64)
+# UNIFORMLY across darwin/linux/windows — unlike buf/lefthook, Linux does NOT need a
+# Rust-triple-style aarch64 identity override here, so a single global [install.arch] remap
+# covers all three platforms.
+#
+# The promtool binary nests one directory deep (prometheus-{version}.{os}-{arch}/promtool), so
+# exe-path is required on every platform (like cargo-deny/wasm-pack). All platforms share one
+# combined sha256sums.txt release asset (like buf/lefthook), not a per-asset checksum file.
+# Tags are "v"-prefixed (v3.13.1); asset filenames embed the bare version (no "v").
+
+name = "promtool"
+type = "cli"
+
+[platform.linux]
+download-file = "prometheus-{version}.linux-{arch}.tar.gz"
+checksum-file = "sha256sums.txt"
+exe-path = "prometheus-{version}.linux-{arch}/promtool"
+
+[platform.macos]
+download-file = "prometheus-{version}.darwin-{arch}.tar.gz"
+checksum-file = "sha256sums.txt"
+exe-path = "prometheus-{version}.darwin-{arch}/promtool"
+
+[platform.windows]
+download-file = "prometheus-{version}.windows-{arch}.tar.gz"
+checksum-file = "sha256sums.txt"
+exe-path = "prometheus-{version}.windows-{arch}/promtool.exe"
+
+[install]
+download-url = "https://github.com/prometheus/prometheus/releases/download/v{version}/{download_file}"
+checksum-url = "https://github.com/prometheus/prometheus/releases/download/v{version}/{checksum_file}"
+
+[install.arch]
+x86_64 = "amd64"
+aarch64 = "arm64"
+
+[resolve]
+git-url = "https://github.com/prometheus/prometheus"

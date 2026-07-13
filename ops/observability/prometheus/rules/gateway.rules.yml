@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+groups:
+  - name: gateway
+    rules:
+      - alert: GatewayHighErrorRate
+        expr: sum(rate(gateway_http_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels: { severity: critical }
+        annotations: { summary: "Gateway HTTP 5xx ratio > 5%" }
+      - alert: GatewayIamDependencyUnavailable
+        expr: rate(gateway_iam_calls_total{result="unavailable"}[5m]) > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: "Gateway is seeing its IAM dependency calls fail as unavailable" }
+      - alert: GatewayUpstreamErrors
+        expr: sum(rate(gateway_upstream_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_upstream_requests_total[5m])) > 0.05
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "Gateway upstream HTTP 5xx ratio > 5%" }
+  - name: targets
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations: { summary: "Scrape target {{ $labels.job }}/{{ $labels.instance }} is down" }

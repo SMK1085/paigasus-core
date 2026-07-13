@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: Apache-2.0
+rule_files: [../iam.rules.yml]
+evaluation_interval: 1m
+tests:
+  # IamDenialAuditDrops: rate(...[5m]) > 0, for: 0m — fires as soon as the counter moves.
+  - interval: 1m
+    input_series:
+      - series: 'iam_denial_audits_dropped_total'
+        values: '0 1 2 3 4 5'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: IamDenialAuditDrops
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: IamDenialAuditDrops
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "IAM denial-audit entries are being dropped (drain not keeping up)" }
+
+  # IamOutboxBacklogAgeHigh: gauge > 300 for: 5m.
+  - interval: 1m
+    input_series:
+      - series: 'iam_outbox_oldest_unpublished_age_seconds'
+        values: '400+0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: IamOutboxBacklogAgeHigh
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: IamOutboxBacklogAgeHigh
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "IAM outbox oldest unpublished event age > 5m" }
+
+  # IamOutboxEventsParked: increase(...[15m]) > 0, for: 0m — fires as soon as one event parks.
+  - interval: 1m
+    input_series:
+      - series: 'iam_outbox_relay_parked_total'
+        values: '0 0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: IamOutboxEventsParked
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: IamOutboxEventsParked
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "IAM outbox parked a poison event" }
+
+  # IamOutboxRelayStalled: rate(...[10m]) == 0, for: 10m — the ticks counter is flat (not ticking).
+  - interval: 1m
+    input_series:
+      - series: 'iam_outbox_relay_ticks_total'
+        values: '5+0x11'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: IamOutboxRelayStalled
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: IamOutboxRelayStalled
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations: { summary: "IAM outbox relay is not ticking (stalled but process alive)" }
+
+  # IamHighErrorRate: sum(rate(5xx)) / sum(rate(total)) > 0.05, for: 10m.
+  # Both classes grow at the same rate, so the 5xx ratio holds steady at 50%.
+  - interval: 1m
+    input_series:
+      - series: 'iam_http_requests_total{status_class="5xx"}'
+        values: '0+1x11'
+      - series: 'iam_http_requests_total{status_class="2xx"}'
+        values: '0+1x11'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: IamHighErrorRate
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: IamHighErrorRate
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations: { summary: "IAM HTTP 5xx ratio > 5%" }
+
+  # IamGrpcHighErrorRate: sum(rate(non-ok)) / sum(rate(total)) > 0.05, for: 10m.
+  - interval: 1m
+    input_series:
+      - series: 'iam_grpc_requests_total{grpc_status="permission_denied"}'
+        values: '0+1x11'
+      - series: 'iam_grpc_requests_total{grpc_status="ok"}'
+        values: '0+1x11'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: IamGrpcHighErrorRate
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: IamGrpcHighErrorRate
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations: { summary: "IAM gRPC non-OK ratio > 5%" }
