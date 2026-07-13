@@ -70,7 +70,8 @@ futures = { workspace = true }
 # dev-dependency — it's unified into test builds only, never the shipped binary.
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
-# `tests/health.rs` drives the health router via `ServiceExt::oneshot` (no real listener).
+# `src/adapters/http/mod.rs`'s health unit tests and `tests/chat_proxy.rs`'s integration tests
+# both drive the router via `ServiceExt::oneshot` (no real listener).
 tower = { workspace = true, features = ["util"] }
 
 [lints]

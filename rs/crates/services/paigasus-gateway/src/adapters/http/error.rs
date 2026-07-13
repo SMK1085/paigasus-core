@@ -55,7 +55,9 @@ pub enum GatewayError {
     /// IAM was unreachable or returned a transport/backend error → 503 (retryable).
     IamUnavailable,
     /// An unexpected internal fault (e.g. our self-query hit IAM's cross-principal exposure gate,
-    /// which should be impossible) → 500. `message` stays generic; details are logged, not echoed.
+    /// which should be impossible) → 500. The reachable auth-path 500s (`MissingScope`, an
+    /// unexpected authz error mapped to this case) are logged at the middleware with non-secret
+    /// context (`principal_prn`, `key_id`); the response body stays generic.
     Internal,
     // ---- egress (OpenAI-upstream) cases (G7) -------------------------------------------------
     /// The request body was not valid JSON — the gateway could not parse `model`/`stream` → 400.

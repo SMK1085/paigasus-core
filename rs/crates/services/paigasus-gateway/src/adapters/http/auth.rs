@@ -65,7 +65,13 @@ pub async fn require_iam_auth(State(iam): State<Arc<dyn Iam>>, mut req: Request,
     }
     if resp.scope_prn.is_empty() {
         // A missing scope is a plumbing bug (introspect should always return one), surfaced as a
-        // distinct 500 diagnostic rather than a silent deny.
+        // distinct 500 diagnostic rather than a silent deny. Log so it's visible in prod — the
+        // response body stays generic (see `GatewayError::Internal`'s doc).
+        tracing::error!(
+            principal_prn = %resp.principal_prn,
+            key_id = %resp.key_id,
+            "introspect returned an empty scope_prn — IAM plumbing bug (SMA-446 D11)"
+        );
         return GatewayError::MissingScope.into_response();
     }
     let principal_prn = resp.principal_prn;
@@ -78,7 +84,20 @@ pub async fn require_iam_auth(State(iam): State<Arc<dyn Iam>>, mut req: Request,
     match iam.is_authorized_self(&key, &principal_prn, INVOKE_MODEL_ACTION, &scope_prn).await {
         Ok(true) => {}
         Ok(false) => return GatewayError::AuthzDenied.into_response(),
-        Err(err) => return authz_error(err).into_response(),
+        Err(err) => {
+            let mapped = authz_error(err);
+            if mapped == GatewayError::Internal {
+                // A `PermissionDenied` here means IAM's exposure gate denied a self-query, which
+                // should be impossible — log it, since this is the single most important thing to
+                // see (a broken D9 self-query). The response body stays generic.
+                tracing::error!(
+                    principal_prn = %principal_prn,
+                    key_id = %key_id,
+                    "self-query IsAuthorized returned an unexpected error mapped to 500 — possible broken self-query (SMA-446 D9)"
+                );
+            }
+            return mapped.into_response();
+        }
     }
 
     // 4. Attach the resolved caller identity and proceed to the handler.

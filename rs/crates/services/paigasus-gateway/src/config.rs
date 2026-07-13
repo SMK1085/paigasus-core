@@ -46,8 +46,8 @@ pub struct IamClientConfig {
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum IamTlsConfig {
     Tls {
-        /// Custom CA bundle to trust, in addition to (G4 decides: instead of, or alongside)
-        /// the system trust store. `None` = system trust store only.
+        /// Custom CA bundle to trust. The client PINS to this CA alone — it REPLACES the
+        /// system trust store, not adds to it. `None` = system trust store only.
         #[serde(default)]
         ca_cert_path: Option<String>,
         /// mTLS client certificate. Must be set together with `client_key_path` or not at
