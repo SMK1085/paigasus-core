@@ -13,14 +13,14 @@ pub fn record_grpc<T>(service: &'static str, method: &'static str, started: Inst
         Err(status) => grpc_code_name(status.code()),
     };
     counter!(
-        "iam_grpc_requests_total",
+        crate::names::IAM_GRPC_REQUESTS_TOTAL,
         "service" => service,
         "method" => method,
         "grpc_status" => grpc_status
     )
     .increment(1);
     histogram!(
-        "iam_grpc_request_duration_seconds",
+        crate::names::IAM_GRPC_REQUEST_DURATION_SECONDS,
         "service" => service,
         "method" => method
     )
@@ -65,6 +65,7 @@ mod tests {
         record_grpc("Authorization", "IsAuthorized", Instant::now(), &err);
         let out = handle.render();
         assert!(out.contains("iam_grpc_requests_total"));
+        assert!(out.contains("iam_grpc_request_duration_seconds"));
         assert!(out.contains("service=\"Authorization\""));
         assert!(out.contains("method=\"IsAuthorized\""));
         assert!(out.contains("grpc_status=\"ok\""));

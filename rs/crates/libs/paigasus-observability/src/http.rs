@@ -12,6 +12,35 @@ use metrics::{counter, gauge, histogram};
 /// return type below `clippy::type_complexity`'s threshold.
 type BoxFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>>;
 
+/// RAII guard that decrements an in-flight gauge on drop — including during a panic unwind — so a
+/// handler (or inner layer) that panics can never leak the gauge permanently.
+struct InflightGuard(metrics::Gauge);
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.decrement(1.0);
+    }
+}
+
+/// Maps an HTTP method to a bounded label value. HTTP permits arbitrary extension methods, so
+/// anything outside the standard verb set collapses to `"OTHER"` to keep the label's cardinality
+/// bounded.
+fn method_label(method: &axum::http::Method) -> &'static str {
+    use axum::http::Method;
+    match *method {
+        Method::GET => "GET",
+        Method::HEAD => "HEAD",
+        Method::POST => "POST",
+        Method::PUT => "PUT",
+        Method::PATCH => "PATCH",
+        Method::DELETE => "DELETE",
+        Method::OPTIONS => "OPTIONS",
+        Method::TRACE => "TRACE",
+        Method::CONNECT => "CONNECT",
+        _ => "OTHER",
+    }
+}
+
 /// axum middleware recording request count (by route/method/status_class), duration, and an
 /// in-flight gauge. `route` is the MatchedPath template (bounded); an unmatched request collapses
 /// to `<unmatched>`. `prefix` is the service metric prefix (e.g. `"gateway"`, `"iam"`).
@@ -21,12 +50,12 @@ pub fn http_metrics_layer(prefix: &'static str) -> middleware::FromFnLayer<impl 
     middleware::from_fn(move |req: Request, next: Next| {
         Box::pin(async move {
             let route = req.extensions().get::<MatchedPath>().map(|m| m.as_str().to_owned()).unwrap_or_else(|| "<unmatched>".to_owned());
-            let method = req.method().as_str().to_owned();
+            let method = method_label(req.method()).to_owned();
             let inflight = gauge!(format!("{prefix}_http_inflight_requests"));
             inflight.increment(1.0);
+            let _inflight_guard = InflightGuard(inflight);
             let started = Instant::now();
             let resp = next.run(req).await;
-            inflight.decrement(1.0);
             let elapsed = started.elapsed().as_secs_f64();
             let status_class = format!("{}xx", resp.status().as_u16() / 100);
             counter!(
@@ -72,5 +101,33 @@ mod tests {
         assert!(out.contains("route=\"/v1/thing/{id}\""), "uses the MatchedPath template, not /v1/thing/42");
         assert!(out.contains("status_class=\"2xx\""));
         assert!(out.contains("gwtest_http_request_duration_seconds"));
+    }
+
+    async fn boom_handler() -> &'static str {
+        panic!("boom")
+    }
+
+    #[tokio::test]
+    async fn inflight_gauge_is_decremented_even_when_the_handler_panics() {
+        let handle = init("test-svc");
+        let app: Router = Router::new()
+            .route("/boom", get(boom_handler))
+            .layer(http_metrics_layer("panictest"))
+            .merge(metrics_router(handle.clone()));
+        let req = axum::http::Request::builder().uri("/boom").body(axum::body::Body::empty()).unwrap();
+        // Run through a spawned task so the handler's panic surfaces as a `JoinError` instead of
+        // unwinding this test — axum does not catch handler panics on its own (that's what
+        // `tower_http::catch_panic::CatchPanicLayer` is for), so this exercises the same unwind
+        // path a real panicking handler would take in production.
+        let join = tokio::spawn(app.oneshot(req));
+        let result = join.await;
+        assert!(result.is_err(), "expected the handler panic to propagate as a task panic");
+
+        let out = handle.render();
+        assert!(out.contains("panictest_http_inflight_requests"), "gauge emitted:\n{out}");
+        // The InflightGuard's Drop impl must have run during the unwind, so increment(1.0) is
+        // exactly offset by decrement(1.0) — the gauge must not be left stuck above zero.
+        let stuck_positive = out.lines().any(|l| l.starts_with("panictest_http_inflight_requests") && !l.trim_end().ends_with(" 0"));
+        assert!(!stuck_positive, "inflight gauge leaked after a panicking handler:\n{out}");
     }
 }
