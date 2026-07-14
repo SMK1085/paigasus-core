@@ -17,8 +17,10 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use paigasus_iam_core::{AuthnError, Credential, TokenDefect};
+use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1::authn_service_server::AuthnService;
 use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyRequest, IntrospectApiKeyResponse, IntrospectRequest, IntrospectResponse};
 use tonic::body::Body;
@@ -51,9 +53,15 @@ impl AuthnService for AuthnGrpc {
     /// side effect. The token IS the credential (in the request body, never the metadata):
     /// nothing here logs it, and errors funnel through `authn_status` (static messages only).
     async fn introspect(&self, request: Request<IntrospectRequest>) -> Result<Response<IntrospectResponse>, Status> {
-        let token = request.into_inner().token;
-        let ctx = self.state.authn.introspect(&token).await.map_err(|e| convert::authn_status(&e))?;
-        Ok(Response::new(convert::to_introspect_response(&ctx)))
+        let started = Instant::now();
+        let result: Result<Response<IntrospectResponse>, Status> = async {
+            let token = request.into_inner().token;
+            let ctx = self.state.authn.introspect(&token).await.map_err(|e| convert::authn_status(&e))?;
+            Ok(Response::new(convert::to_introspect_response(&ctx)))
+        }
+        .await;
+        record_grpc("Authentication", "Introspect", started, &result);
+        result
     }
 
     /// `IntrospectApiKey` (spec §10.1, SMA-445 Task 21): API-key introspection, the peer of
@@ -63,9 +71,15 @@ impl AuthnService for AuthnGrpc {
     /// instead of `AppState.authn`. Never logs the token; errors funnel through the same
     /// `authn_status` (static messages only).
     async fn introspect_api_key(&self, request: Request<IntrospectApiKeyRequest>) -> Result<Response<IntrospectApiKeyResponse>, Status> {
-        let token = request.into_inner().token;
-        let ctx = self.state.api_key_auth.introspect(&token).await.map_err(|e| convert::authn_status(&e))?;
-        Ok(Response::new(convert::to_introspect_api_key_response(&ctx)))
+        let started = Instant::now();
+        let result: Result<Response<IntrospectApiKeyResponse>, Status> = async {
+            let token = request.into_inner().token;
+            let ctx = self.state.api_key_auth.introspect(&token).await.map_err(|e| convert::authn_status(&e))?;
+            Ok(Response::new(convert::to_introspect_api_key_response(&ctx)))
+        }
+        .await;
+        record_grpc("Authentication", "IntrospectApiKey", started, &result);
+        result
     }
 }
 

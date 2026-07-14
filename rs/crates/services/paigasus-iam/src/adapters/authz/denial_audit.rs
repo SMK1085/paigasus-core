@@ -18,8 +18,10 @@
 //! safe to log, so `detail` is left an empty object rather than carrying anything sensitive.
 
 use async_trait::async_trait;
+use metrics::counter;
 use paigasus_iam_core::authz::model::AuthzDecisionEvent;
 use paigasus_iam_core::{AuditEntry, AuditLog, AuditOutcome, AuditSink, Effect, IdGenerator};
+use paigasus_observability::names;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,9 +75,15 @@ impl DenialAuditBuffer {
             if q.len() >= self.capacity {
                 q.pop_front();
                 self.dropped.fetch_add(1, Ordering::Relaxed);
+                // SMA-446 Task A10: promotes the `dropped()` in-process counter (still read by
+                // tests) to a real Prometheus metric. No `tracing::warn!` here on purpose — an
+                // overflow burst would otherwise log-spam once per dropped entry; the counter
+                // is the observable signal now (dashboards/alerts, Slice B).
+                counter!(names::IAM_DENIAL_AUDITS_DROPPED_TOTAL).increment(1);
             }
             q.push_back(entry);
         }
+        counter!(names::IAM_DENIAL_AUDITS_ENQUEUED_TOTAL).increment(1);
         self.notify.notify_one();
     }
 
@@ -238,6 +246,24 @@ mod tests {
         assert_eq!(buf.dropped(), 1);
         let drained = buf.drain_for_test(); // test-only helper returning Vec
         assert_eq!(drained.iter().map(|e| e.action.as_str()).collect::<Vec<_>>(), ["b", "c"]);
+    }
+
+    /// SMA-446 Task A10: promotes the `dropped()` in-process counter to a real
+    /// `iam_denial_audits_dropped_total` metric, plus a new `iam_denial_audits_enqueued_total`
+    /// counter bumped on every push (not just overflow). Capacity 2, four pushes: the first two
+    /// fill the buffer, the last two each evict the oldest entry (>= 2 drops).
+    #[tokio::test]
+    async fn push_emits_dropped_and_enqueued_counters_on_overflow() {
+        let handle = paigasus_observability::init("test-denial-audit-buffer");
+        let (buf, _drain) = DenialAuditBuffer::new(2);
+        for i in 0..4 {
+            buf.push(entry(&format!("action-{i}")));
+        }
+        assert!(buf.dropped() >= 1, "capacity-2 buffer given 4 pushes must drop at least one entry");
+
+        let out = handle.render();
+        assert!(out.contains("iam_denial_audits_dropped_total"), "expected the overflow drop counter to be recorded:\n{out}");
+        assert!(out.contains("iam_denial_audits_enqueued_total"), "expected the enqueue counter to be recorded:\n{out}");
     }
 
     #[tokio::test]

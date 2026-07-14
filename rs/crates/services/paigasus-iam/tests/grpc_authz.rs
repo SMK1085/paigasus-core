@@ -96,6 +96,46 @@ async fn is_authorized_self_query_over_grpc_returns_a_default_deny_decision_for_
     server.abort();
 }
 
+/// SMA-446 Unit 5 (Task A11): a completed `IsAuthorized` call records
+/// `iam_grpc_requests_total{service="Authorization",method="IsAuthorized",grpc_status="ok"}`
+/// via `paigasus_observability::record_grpc`.
+#[tokio::test]
+async fn is_authorized_over_grpc_records_iam_grpc_requests_total() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let token = idp.bearer("grpc-authz-metrics", Some("grpc-authz-metrics@example.com"), "paigasus", 3600);
+    let principal_prn = support::provision(&state, &token).await;
+    let (addr, server) = spawn_server(state).await;
+    let ch = channel(addr).await;
+
+    let handle = paigasus_observability::init("test-iam-grpc-authz-metrics");
+
+    let mut authz = AuthorizationServiceClient::new(ch);
+    authz
+        .is_authorized(authed(
+            IsAuthorizedRequest {
+                principal_prn: principal_prn.clone(),
+                action: "ListOrganizations".to_string(),
+                resource_prn: root_prn().canonical(),
+                context: Default::default(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+
+    let out = handle.render();
+    assert!(out.contains("iam_grpc_requests_total"), "expected iam_grpc_requests_total in:\n{out}");
+    assert!(out.contains(r#"service="Authorization""#), "expected service=\"Authorization\" label in:\n{out}");
+    assert!(out.contains(r#"method="IsAuthorized""#), "expected method=\"IsAuthorized\" label in:\n{out}");
+    assert!(out.contains("iam_grpc_request_duration_seconds"), "expected the duration histogram in:\n{out}");
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn is_authorized_non_self_query_by_an_unauthorized_actor_over_grpc_is_permission_denied_with_nothing_leaked() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {

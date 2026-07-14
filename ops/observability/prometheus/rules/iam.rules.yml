@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+groups:
+  - name: iam
+    rules:
+      - alert: IamDenialAuditDrops
+        expr: rate(iam_denial_audits_dropped_total[5m]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "IAM denial-audit entries are being dropped (drain not keeping up)" }
+      - alert: IamOutboxBacklogAgeHigh
+        expr: iam_outbox_oldest_unpublished_age_seconds > 300
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "IAM outbox oldest unpublished event age > 5m" }
+      - alert: IamOutboxEventsParked
+        expr: increase(iam_outbox_relay_parked_total[15m]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "IAM outbox parked a poison event" }
+      - alert: IamOutboxRelayStalled
+        expr: rate(iam_outbox_relay_ticks_total[10m]) == 0
+        for: 10m
+        labels: { severity: critical }
+        annotations: { summary: "IAM outbox relay is not ticking (stalled but process alive)" }
+      - alert: IamHighErrorRate
+        expr: sum(rate(iam_http_requests_total{status_class="5xx"}[5m])) / sum(rate(iam_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels: { severity: critical }
+        annotations: { summary: "IAM HTTP 5xx ratio > 5%" }
+      - alert: IamGrpcHighErrorRate
+        expr: sum(rate(iam_grpc_requests_total{grpc_status!="ok"}[5m])) / sum(rate(iam_grpc_requests_total[5m])) > 0.05
+        for: 10m
+        labels: { severity: critical }
+        annotations: { summary: "IAM gRPC non-OK ratio > 5%" }

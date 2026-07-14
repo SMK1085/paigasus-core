@@ -13,7 +13,10 @@
 //! always resolves the caller and inserts an [`AuthContext`] into the request's extensions
 //! before this service ever runs (mirrors `grpc::authz`'s identical module doc).
 
+use std::time::Instant;
+
 use paigasus_iam_core::{AuditEntry, AuditFilter, AuditOutcome};
+use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1::audit_service_server::AuditService;
 use paigasus_proto::paigasus::iam::v1::{AuditEntry as ProtoAuditEntry, ListAuditEntriesRequest, ListAuditEntriesResponse};
 use tonic::{Request, Response, Status};
@@ -124,20 +127,26 @@ impl AuditService for AuditGrpc {
     /// follow), else empty — the standard keyset-pagination "under-full page proves there is no
     /// next page" convention (mirrors `PgAuditLog::query`'s own keyset-paging doc).
     async fn list_audit_entries(&self, request: Request<ListAuditEntriesRequest>) -> Result<Response<ListAuditEntriesResponse>, Status> {
-        let actor = actor_context(&request)?.principal_id.prn().clone();
-        let req = request.into_inner();
-        let filter = to_filter(req).map_err(convert::status_to_grpc)?;
-        let limit = filter.capped_limit();
-        let entries = self.state.audit_query.list(&actor, filter).await.map_err(convert::status_to_grpc)?;
-        let next_cursor = if entries.len() as u64 == limit {
-            entries.last().map_or_else(String::new, |e| e.id.to_string())
-        } else {
-            String::new()
-        };
-        Ok(Response::new(ListAuditEntriesResponse {
-            entries: entries.iter().map(to_proto_entry).collect(),
-            next_cursor,
-        }))
+        let started = Instant::now();
+        let result: Result<Response<ListAuditEntriesResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let req = request.into_inner();
+            let filter = to_filter(req).map_err(convert::status_to_grpc)?;
+            let limit = filter.capped_limit();
+            let entries = self.state.audit_query.list(&actor, filter).await.map_err(convert::status_to_grpc)?;
+            let next_cursor = if entries.len() as u64 == limit {
+                entries.last().map_or_else(String::new, |e| e.id.to_string())
+            } else {
+                String::new()
+            };
+            Ok(Response::new(ListAuditEntriesResponse {
+                entries: entries.iter().map(to_proto_entry).collect(),
+                next_cursor,
+            }))
+        }
+        .await;
+        record_grpc("Audit", "ListAuditEntries", started, &result);
+        result
     }
 }
 

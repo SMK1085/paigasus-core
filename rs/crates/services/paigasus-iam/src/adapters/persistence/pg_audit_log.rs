@@ -25,7 +25,9 @@ use super::entities::audit_log;
 use super::map_err;
 use super::uow::recover_txn;
 use async_trait::async_trait;
+use metrics::counter;
 use paigasus_iam_core::{AuditEntry, AuditFilter, AuditLog, AuditOutcome, RepositoryError, Transaction};
+use paigasus_observability::names;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
 // `Clone` lets the composition root hold a sink handle inside a `#[derive(Clone)]` service
@@ -108,17 +110,41 @@ fn model_to_entry(m: audit_log::Model) -> Result<AuditEntry, RepositoryError> {
     })
 }
 
+/// `iam_audit_records_total` counts non-erroring inserts, not committed rows (spec §5.2): a
+/// [`record`](AuditLog::record) call on the caller's own in-flight transaction still bumps
+/// `result="ok"` here even if that transaction is later rolled back — this counter is
+/// instrumentation for the INSERT itself succeeding, not a durability/visibility promise.
+fn record_metric(e: &AuditEntry, result: &'static str) {
+    counter!(names::IAM_AUDIT_RECORDS_TOTAL, "outcome" => e.outcome.as_str(), "result" => result).increment(1);
+}
+
 #[async_trait]
 impl AuditLog for PgAuditLog {
     async fn record_out_of_band(&self, e: &AuditEntry) -> Result<(), RepositoryError> {
-        entry_to_model(e).insert(&self.db).await.map_err(map_err)?;
-        Ok(())
+        match entry_to_model(e).insert(&self.db).await {
+            Ok(_) => {
+                record_metric(e, "ok");
+                Ok(())
+            }
+            Err(err) => {
+                record_metric(e, "error");
+                Err(map_err(err))
+            }
+        }
     }
 
     async fn record(&self, tx: &dyn Transaction, e: &AuditEntry) -> Result<(), RepositoryError> {
         let txn = recover_txn(tx)?;
-        entry_to_model(e).insert(txn).await.map_err(map_err)?;
-        Ok(())
+        match entry_to_model(e).insert(txn).await {
+            Ok(_) => {
+                record_metric(e, "ok");
+                Ok(())
+            }
+            Err(err) => {
+                record_metric(e, "error");
+                Err(map_err(err))
+            }
+        }
     }
 
     async fn query(&self, f: &AuditFilter) -> Result<Vec<AuditEntry>, RepositoryError> {

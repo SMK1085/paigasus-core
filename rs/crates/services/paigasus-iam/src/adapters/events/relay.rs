@@ -29,7 +29,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use metrics::{counter, gauge};
 use paigasus_iam_core::{DomainEvent, EventPublisher, EventType};
+use paigasus_observability::names;
 use sea_orm::sea_query::{LockBehavior, LockType};
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait};
 
@@ -154,6 +156,16 @@ impl OutboxRelay {
             "outbox relay tick"
         );
 
+        // SMA-446 Unit 5 (Task A11): per-tick relay counters/gauge, alongside the log line
+        // above. `parked_total` is a COUNTER of newly-parked-this-tick rows (not a gauge —
+        // the currently-parked-row-count is a derivable Prometheus query, `sum(increase(...))`,
+        // not a separate series here).
+        counter!(names::IAM_OUTBOX_RELAY_DRAINED_TOTAL).increment(report.drained);
+        counter!(names::IAM_OUTBOX_RELAY_PUBLISH_FAILURES_TOTAL).increment(report.failures);
+        counter!(names::IAM_OUTBOX_RELAY_PUBLISHED_TOTAL).increment(report.drained.saturating_sub(report.failures));
+        counter!(names::IAM_OUTBOX_RELAY_PARKED_TOTAL).increment(report.parked);
+        gauge!(names::IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS).set(report.oldest_unpublished_age_secs.unwrap_or(0) as f64);
+
         Ok(report)
     }
 
@@ -171,8 +183,14 @@ impl OutboxRelay {
         loop {
             tokio::select! {
                 () = tokio::time::sleep(self.poll_interval) => {
-                    if let Err(err) = self.tick(publisher.as_ref()).await {
-                        tracing::warn!(error = %err, "outbox relay tick failed; retrying next interval");
+                    match self.tick(publisher.as_ref()).await {
+                        Ok(_) => {
+                            counter!(names::IAM_OUTBOX_RELAY_TICKS_TOTAL, "result" => "ok").increment(1);
+                        }
+                        Err(err) => {
+                            counter!(names::IAM_OUTBOX_RELAY_TICKS_TOTAL, "result" => "error").increment(1);
+                            tracing::warn!(error = %err, "outbox relay tick failed; retrying next interval");
+                        }
                     }
                 }
                 () = &mut shutdown => break,

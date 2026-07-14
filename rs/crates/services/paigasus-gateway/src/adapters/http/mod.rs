@@ -55,6 +55,11 @@ pub struct AppState {
 /// The shared [`AppState`] is applied ONCE, at the end, over the whole tree so both the stateful
 /// `readyz` (it probes IAM) and the protected chat handler read the same state. `healthz` takes no
 /// state — a stateless handler is still valid inside a stateful router.
+///
+/// [`paigasus_observability::http_metrics_layer`] is applied over the whole tree (health routes
+/// included — they get a bounded `route` label, which is acceptable). `/metrics` itself is
+/// deliberately NOT part of this router: it is merged in by `main` (or served on its own
+/// listener) AFTER this function returns, so a scrape never inflates its own request metrics.
 pub fn router(state: AppState) -> Router {
     // The auth middleware's state is the IAM port alone (`Arc<dyn Iam>`), captured here BEFORE the
     // final `with_state`, and independent of the handler's `AppState` — so this clone is just the
@@ -67,7 +72,12 @@ pub fn router(state: AppState) -> Router {
 
     let protected = Router::new().route("/v1/chat/completions", post(chat::chat_completions)).route_layer(auth).route_layer(body_limit);
 
-    Router::new().route("/healthz", get(healthz)).route("/readyz", get(readyz)).merge(protected).with_state(state)
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .merge(protected)
+        .layer(paigasus_observability::http_metrics_layer("gateway"))
+        .with_state(state)
 }
 
 async fn healthz() -> impl IntoResponse {

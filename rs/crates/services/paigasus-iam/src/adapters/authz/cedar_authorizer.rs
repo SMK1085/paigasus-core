@@ -60,10 +60,22 @@ use super::decision_cache::decision_key;
 use super::generation::Generations;
 use super::policy_snapshot::PolicySnapshot;
 use async_trait::async_trait;
+use metrics::counter;
 use paigasus_iam_core::authz::engine::PolicyEngine;
 use paigasus_iam_core::authz::model::AuthzDecisionEvent;
 use paigasus_iam_core::{AccessRequest, AuditSink, Authorizer, AuthzError, Decision, DecisionCache, Effect, EntitySliceLoader};
+use paigasus_observability::names;
 use std::sync::Arc;
+
+/// Maps a [`Decision`]'s [`Effect`] to the `iam_authz_decisions_total` `decision` label
+/// (SMA-446 Task A9) — bounded-cardinality by construction (`"allow"`/`"deny"`, never the
+/// free-form `determining_policies` diagnostic text).
+fn effect_label(decision: &Decision) -> &'static str {
+    match decision.effect {
+        Effect::Allow => "allow",
+        Effect::Deny => "deny",
+    }
+}
 
 /// The `determining_policies` marker for the fail-closed `Deny` `is_authorized` returns when
 /// the entity-slice loader reports the request's resource doesn't exist (SMA-444 review fix)
@@ -159,6 +171,10 @@ impl Authorizer for CedarAuthorizer {
         if let Some(key) = &cache_key
             && let Some(cached) = self.decisions.get(key).await
         {
+            // SMA-446 Task A9: record every cache-hit decision-return site, regardless of
+            // effect (the audit re-recording below is deny-only; this counter is not).
+            counter!(names::IAM_AUTHZ_DECISIONS_TOTAL, "decision" => effect_label(&cached), "cache" => "hit").increment(1);
+
             // Hits re-audit denials only (full trail, D3/D8): a cached `Deny` still gets a
             // fresh audit event on every call, even though the decision itself is served
             // from cache — a denial's audit trail must never have a gap. A cached `Allow` is
@@ -204,6 +220,13 @@ impl Authorizer for CedarAuthorizer {
             at: chrono::Utc::now(),
         };
         self.audit.record(&event).await;
+
+        // SMA-446 Task A9: record the compute-path decision-return site. `cache_key` (step 3)
+        // distinguishes a genuine cache miss (a key was minted but `decisions.get` found
+        // nothing cached under it) from a fail-open bypass (`Self::cache_key` returned `None`
+        // because the entity-generation read failed) — see that method's doc.
+        let cache_label = if cache_key.is_some() { "miss" } else { "bypass" };
+        counter!(names::IAM_AUTHZ_DECISIONS_TOTAL, "decision" => effect_label(&decision), "cache" => cache_label).increment(1);
 
         // Step 6: best-effort populate the cache (only if step 3 minted a key).
         if let Some(key) = cache_key {
@@ -544,6 +567,69 @@ mod tests {
         }
     }
 
+    /// SMA-446 Task A9: the compute path (a cache miss — no cached decision existed for the
+    /// minted key) must record `iam_authz_decisions_total{decision="deny",cache="miss"}` for
+    /// this fixture's default-deny request.
+    #[tokio::test]
+    async fn is_authorized_records_iam_authz_decisions_total_on_compute_path_miss() {
+        let handle = paigasus_observability::init("test-cedar-authorizer-compute-miss");
+        let fx = fixture();
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("snapshot builds"));
+        let slices = Arc::new(FixtureSliceLoader::new(fx.slice.clone()));
+        let audit = Arc::new(CapturingAuditSink::default());
+
+        let authorizer = CedarAuthorizer::new(
+            snapshot,
+            slices as Arc<dyn EntitySliceLoader>,
+            Arc::new(MemoryDecisionCache::new()) as Arc<dyn DecisionCache>,
+            Arc::new(Generations::memory()) as Arc<dyn GenerationsReader>,
+            audit.clone() as Arc<dyn AuditSink>,
+        );
+
+        let req = base_request(&fx, Action::GetProject);
+        let decision = authorizer.is_authorized(&req).await.expect("decision succeeds");
+        assert_eq!(decision.effect, Effect::Deny);
+
+        let out = handle.render();
+        assert!(out.contains("iam_authz_decisions_total"), "expected the compute path to record iam_authz_decisions_total:\n{out}");
+        assert!(out.contains(r#"decision="deny""#), "expected a decision=\"deny\" label:\n{out}");
+        assert!(out.contains(r#"cache="miss""#), "expected a cache=\"miss\" label on the compute path:\n{out}");
+    }
+
+    /// SMA-446 Task A9: a cache-hit deny (the second call against an unchanged snapshot) must
+    /// record `iam_authz_decisions_total{decision="deny",cache="hit"}` — distinct from the
+    /// compute-path `cache="miss"` the first call recorded.
+    #[tokio::test]
+    async fn is_authorized_records_iam_authz_decisions_total_on_cache_hit() {
+        let handle = paigasus_observability::init("test-cedar-authorizer-cache-hit");
+        let fx = fixture();
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("snapshot builds"));
+        let slices = Arc::new(FixtureSliceLoader::new(fx.slice.clone()));
+        let audit = Arc::new(CapturingAuditSink::default());
+
+        let authorizer = CedarAuthorizer::new(
+            snapshot,
+            slices as Arc<dyn EntitySliceLoader>,
+            Arc::new(MemoryDecisionCache::new()) as Arc<dyn DecisionCache>,
+            Arc::new(Generations::memory()) as Arc<dyn GenerationsReader>,
+            audit.clone() as Arc<dyn AuditSink>,
+        );
+
+        let req = base_request(&fx, Action::GetProject);
+        let first = authorizer.is_authorized(&req).await.expect("first (miss) call succeeds");
+        assert_eq!(first.effect, Effect::Deny);
+        let second = authorizer.is_authorized(&req).await.expect("second (hit) call succeeds");
+        assert_eq!(second.effect, Effect::Deny);
+
+        let out = handle.render();
+        assert!(out.contains(r#"cache="hit""#), "expected a cache=\"hit\" label on the cache-hit path:\n{out}");
+        assert!(out.contains(r#"decision="deny""#), "expected a decision=\"deny\" label on the cache-hit deny:\n{out}");
+    }
+
     #[tokio::test]
     async fn default_deny_records_exactly_one_audit_event() {
         let fx = fixture();
@@ -727,6 +813,7 @@ mod tests {
     /// identical calls, since neither `get` nor `put` can safely run without a key.
     #[tokio::test]
     async fn fail_open_on_a_generations_read_error_still_decides_and_never_caches() {
+        let handle = paigasus_observability::init("test-cedar-authorizer-fail-open-bypass");
         let fx = fixture();
         let grant_id = u(300);
         let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
@@ -762,6 +849,14 @@ mod tests {
             "the cache must never be consulted when the generations read failed — every call re-evaluates"
         );
         assert_eq!(audit.events.lock().unwrap().len(), 2, "both (uncached) decisions are audited");
+
+        // SMA-446 Task A9: both calls above took the fail-open bypass branch (`cache_key`
+        // returned `None` because `FailingGenerations::entity_gen` always errors) — each must
+        // record `iam_authz_decisions_total{decision="allow",cache="bypass"}`, distinct from a
+        // genuine `cache="miss"` (a key was minted but nothing was cached under it yet).
+        let out = handle.render();
+        assert!(out.contains(r#"cache="bypass""#), "expected a cache=\"bypass\" label when the generations read fails:\n{out}");
+        assert!(out.contains(r#"decision="allow""#), "expected a decision=\"allow\" label on the bypassed compute path:\n{out}");
     }
 
     /// Regression test for the cache-key generation-drift bug this fix closes: the

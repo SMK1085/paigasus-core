@@ -88,3 +88,13 @@
 #                                      # tick — default shown; must be >= 1
 # max_attempts        = 5             # publish failures before a row is parked (excluded from
 #                                      # future ticks) — default shown; must be >= 1
+
+# --- Metrics (SMA-446 Unit 3: Prometheus `GET /metrics`) ---
+
+# [metrics]
+# enabled = true                # default shown; false skips installing the recorder entirely —
+#                                # no /metrics route, no metrics-facade recorder in this process
+# addr = "127.0.0.1:9091"       # optional separate internal listener, so /metrics never shares
+#                                # a port with the tenancy/authn/authz HTTP API. unset (default)
+#                                # merges /metrics onto http_addr instead. MUST differ from
+#                                # http_addr (rejected by IamConfig::validate).

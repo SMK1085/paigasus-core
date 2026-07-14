@@ -227,11 +227,6 @@ pub struct AppState {
     /// `audit_query` reads through. Exposed via [`AppState::audit_sink`] so `main.rs` (or a
     /// test harness) can hand it to `drain.run(sink, shutdown)`.
     audit_log: Arc<dyn AuditLog>,
-    /// The bounded denial-audit ring buffer the wired `BufferedDenialAuditSink` pushes into
-    /// (SMA-446 Task A12) — held here purely so `main.rs` can periodically log its overflow
-    /// counter ([`DenialAuditBuffer::dropped`]); the buffer's producer/consumer ends are
-    /// otherwise owned by the `CedarAuthorizer`'s sink and the drain respectively.
-    denial_buffer: Arc<DenialAuditBuffer>,
     /// The denial-audit drain, in a take-once slot: `AppState` is `Clone` (every HTTP/gRPC
     /// worker holds a clone) but [`DenialAuditDrain`] is NOT — it must be spawned exactly once.
     /// `main.rs` calls [`AppState::take_denial_drain`] to move it out and `servers.spawn`s
@@ -255,14 +250,6 @@ impl AppState {
     #[must_use]
     pub fn audit_sink(&self) -> Arc<dyn AuditLog> {
         self.audit_log.clone()
-    }
-
-    /// The bounded denial-audit buffer — exposed so `main.rs` can periodically observe its
-    /// overflow counter ([`DenialAuditBuffer::dropped`]) as a `tracing` gauge (SMA-446 Task
-    /// A12).
-    #[must_use]
-    pub fn denial_buffer(&self) -> Arc<DenialAuditBuffer> {
-        self.denial_buffer.clone()
     }
 
     /// Moves the denial-audit drain out of the shared take-once slot — `main.rs` calls this
@@ -369,11 +356,14 @@ impl AppState {
         // fan-out of the log-only `TracingAuditSink` AND a `BufferedDenialAuditSink` over the
         // buffer — so every decision is still logged, and every DENIAL is additionally queued
         // for out-of-band persistence. `denial_drain` is stashed in a take-once slot on the
-        // returned state; `main.rs` spawns it against the `PgAuditLog` sink (`audit_log`,
-        // built below). `denial_buf` is retained on the state purely for overflow-counter
-        // observability.
+        // returned state; `main.rs` spawns it against the `PgAuditLog` sink (`audit_log`, built
+        // below). The buffer itself is NOT retained on `AppState` (SMA-446 Task A10 removed the
+        // `main.rs` overflow-observability ticker that was its only reader — overflow is now
+        // observable via the real `iam_denial_audits_dropped_total` metric emitted at the push
+        // site, `adapters::authz::denial_audit::DenialAuditBuffer::push`), so `denial_buf` moves
+        // straight into `BufferedDenialAuditSink` rather than being cloned first.
         let (denial_buf, denial_drain) = DenialAuditBuffer::new(cfg.audit.denial_buffer_capacity);
-        let buffered_denials = BufferedDenialAuditSink::new(denial_buf.clone(), Arc::new(KernelIdGenerator));
+        let buffered_denials = BufferedDenialAuditSink::new(denial_buf, Arc::new(KernelIdGenerator));
         let audit_sink: Arc<dyn AuditSink> = Arc::new(FanOutAuditSink::new(vec![
             Arc::new(TracingAuditSink) as Arc<dyn AuditSink>,
             Arc::new(buffered_denials) as Arc<dyn AuditSink>,
@@ -625,7 +615,6 @@ impl AppState {
             api_key_introspect_body_limit: cfg.api_keys.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
             audit_query,
             audit_log,
-            denial_buffer: denial_buf,
             denial_drain: Arc::new(Mutex::new(Some(denial_drain))),
         })
     }
@@ -646,13 +635,31 @@ pub fn health_router() -> Router {
     Router::new().route("/healthz", get(healthz))
 }
 
-/// Full HTTP surface: liveness + DB-backed readiness + the `/v1` tenancy API + authn
-/// introspection. The tenancy routes (organizations/teams/projects/memberships/users) sit
-/// on their own sub-router carrying the bearer-enforcement `route_layer` (D14 — attached
-/// HERE, inside `router()`, not in `serve_http`, so the `oneshot` test harness exercises
-/// it). `/healthz`, `/readyz`, and `POST /v1/authn/introspect` are merged OUTSIDE that
-/// layer and stay unauthenticated (spec §7.4).
-pub fn router(state: AppState) -> Router {
+/// DB-backed readiness alone, on its own `Router<AppState>`-turned-`Router` (mirrors
+/// [`health_router`]'s standalone posture) — split out of the old inline `router()` body so
+/// [`router`] and [`serve_http`] can each merge it in at the top level, OUTSIDE both
+/// [`app_routes`]'s `http_metrics_layer` and (in `serve_http`) `TraceLayer`/`TimeoutLayer`
+/// (SMA-446 Unit 3): a 15s Prometheus scrape hitting `/metrics`, or a liveness/readiness
+/// poller hitting `/healthz`/`/readyz`, must not spam a request-span trace log every tick nor
+/// inflate the RED (rate/errors/duration) metrics with health-check traffic.
+fn readyz_router(state: AppState) -> Router {
+    Router::new().route("/readyz", get(readyz)).with_state(state)
+}
+
+/// The `/v1` tenancy API + authn/api-key introspection — every route EXCEPT `/healthz`/
+/// `/readyz` (see [`readyz_router`]/[`health_router`], deliberately excluded). The tenancy
+/// routes (organizations/teams/projects/memberships/users) sit on their own sub-router
+/// carrying the bearer-enforcement `route_layer` (D14 — attached HERE, inside `app_routes`,
+/// not in `serve_http`, so the `oneshot` test harness exercises it); `POST
+/// /v1/authn/introspect` and `POST /v1/authn/api-keys/introspect` are merged OUTSIDE that
+/// layer and stay unauthenticated (spec §7.4). [`paigasus_observability::http_metrics_layer`]
+/// is applied LAST, over this entire (merged) subtree — so every app route, matched or not,
+/// including a 401 from the bearer-enforcement middleware, is recorded — but NEITHER
+/// `/healthz` NOR `/readyz` NOR `/metrics` is, since none of them are part of this `Router`
+/// instance (SMA-446 Unit 3, mirrors the gateway's identical `http_metrics_layer` placement,
+/// `paigasus-gateway::adapters::http::router`, minus the health-route inclusion that router
+/// deliberately keeps and this one deliberately excludes).
+fn app_routes(state: AppState) -> Router {
     let protected = Router::new()
         .merge(organizations::router())
         .merge(teams::router())
@@ -667,13 +674,25 @@ pub fn router(state: AppState) -> Router {
         // above and never the merged-in `/healthz`/`/readyz`/introspect or the 404 fallback.
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware::require_bearer))
         .with_state(state.clone());
-    let public = Router::new().route("/readyz", get(readyz)).with_state(state.clone());
     let authn_api = authn::router(state.introspect_body_limit).with_state(state.clone());
     // `POST /v1/authn/api-keys/introspect` (SMA-445 Task 20): unauthenticated like `authn_api`
     // above — merged OUTSIDE `protected`, so the bearer-enforcement `route_layer` never covers
     // it (spec §10.2, mirrors `authn::router`'s own posture exactly).
     let api_key_introspect_api = api_keys::introspect_router(state.api_key_introspect_body_limit).with_state(state);
-    health_router().merge(protected).merge(public).merge(authn_api).merge(api_key_introspect_api)
+    Router::new()
+        .merge(protected)
+        .merge(authn_api)
+        .merge(api_key_introspect_api)
+        .layer(paigasus_observability::http_metrics_layer("iam"))
+}
+
+/// Full HTTP surface for the `oneshot`-based test harness: liveness + DB-backed readiness
+/// (outside any layer) merged with [`app_routes`] (the `http_metrics_layer`-wrapped tenancy/
+/// authn API). Deliberately carries no `TraceLayer`/`TimeoutLayer` and no `/metrics` route —
+/// those are [`serve_http`]-only concerns (production wiring), unchanged from before this
+/// crate had any of them.
+pub fn router(state: AppState) -> Router {
+    health_router().merge(readyz_router(state.clone())).merge(app_routes(state))
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -691,13 +710,32 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-/// Serve the HTTP surface on `addr` until `shutdown` resolves.
-pub async fn serve_http(addr: SocketAddr, state: AppState, request_timeout: Duration, shutdown: impl std::future::Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
+/// Serve the HTTP surface on `addr` until `shutdown` resolves. `TraceLayer`/`TimeoutLayer`
+/// wrap ONLY [`app_routes`] (SMA-446 Unit 3) — `/healthz`/`/readyz` (via [`health_router`]/
+/// [`readyz_router`]) and, when `metrics_router` is `Some` (the same-port merge case,
+/// `[metrics] enabled = true` with `addr` unset — `main.rs` decides which), `/metrics` itself
+/// are merged in AFTER, at the top level, so a 15s Prometheus scrape or a liveness/readiness
+/// poll never emits a request-span trace log, nor counts toward the request-metrics layer's
+/// own RED metrics, every tick. When `main.rs` instead configures a separate `metrics.addr`,
+/// it serves [`metrics_router`](paigasus_observability::metrics_router) on its own listener
+/// rather than passing one here — this parameter is `None` in that case (and whenever
+/// `[metrics] enabled = false`).
+pub async fn serve_http(
+    addr: SocketAddr,
+    state: AppState,
+    request_timeout: Duration,
+    metrics_router: Option<Router>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
     // `TimeoutLayer::new` is deprecated since tower-http 0.6.7 in favor of
     // `with_status_code`; `REQUEST_TIMEOUT` (408) reproduces `new`'s prior default.
-    let app = router(state)
+    let traced = app_routes(state.clone())
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, request_timeout));
+    let mut app = health_router().merge(readyz_router(state)).merge(traced);
+    if let Some(metrics_router) = metrics_router {
+        app = app.merge(metrics_router);
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await
 }

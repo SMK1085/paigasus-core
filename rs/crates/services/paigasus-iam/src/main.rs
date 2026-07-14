@@ -10,6 +10,7 @@ use paigasus_iam::adapters::events::{OutboxRelay, TracingEventPublisher};
 use paigasus_iam::adapters::http::{AppState, serve_http};
 use paigasus_iam::adapters::{grpc, persistence::Migrator};
 use paigasus_iam::config::IamConfig;
+use paigasus_observability::names;
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use tokio::task::JoinSet;
@@ -26,6 +27,20 @@ async fn main() -> anyhow::Result<()> {
     // operator path can still seed one directly. Task 21b wires the actual JIT seed.
     if config.authz.bootstrap_admins.is_empty() {
         tracing::warn!("no authz.bootstrap_admins configured — a fresh deployment has no platform administrator and cannot create organizations or grant roles");
+    }
+
+    // Metrics (SMA-446 Unit 3, mirrors `paigasus-gateway::main`'s identical Unit 2 wiring):
+    // install the global Prometheus recorder only when `[metrics]` is enabled — `!enabled`
+    // means no recorder is installed AND `/metrics` is never mounted below (a `None` handle
+    // short-circuits both wiring blocks further down). `config.validate()` above already
+    // rejected `metrics.addr == http_addr`.
+    let metrics_handle = config.metrics.enabled.then(|| paigasus_observability::init("paigasus-iam"));
+    // Register `# HELP`/`# TYPE` exposition text for every family this service emits (spec
+    // §4.1) — only when a recorder was actually installed above; describing metrics nobody will
+    // ever scrape is pointless, and `describe_*!` against no installed recorder is a silent
+    // no-op anyway.
+    if metrics_handle.is_some() {
+        describe_iam_metrics();
     }
 
     let db = Database::connect(&config.database_url).await?;
@@ -46,18 +61,47 @@ async fn main() -> anyhow::Result<()> {
     let request_timeout = Duration::from_secs(30);
     let (tx, rx) = tokio::sync::watch::channel(());
 
+    // Same-port `/metrics` (SMA-446 Unit 3): built here, threaded into `serve_http` below, only
+    // when enabled AND no separate `metrics.addr` is configured — `metrics.enabled = false`, or a
+    // separate `addr`, leaves this `None` (in the `addr` case `/metrics` is served on its own
+    // listener, spawned separately below instead).
+    let http_metrics_router = match (&metrics_handle, config.metrics.addr) {
+        (Some(handle), None) => Some(paigasus_observability::metrics_router(handle.clone())),
+        _ => None,
+    };
+
     let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
     {
         let mut rx = rx.clone();
         let state = state.clone();
         let addr = config.http_addr;
         servers.spawn(async move {
-            serve_http(addr, state, request_timeout, async move {
+            serve_http(addr, state, request_timeout, http_metrics_router, async move {
                 let _ = rx.changed().await;
             })
             .await
             .map_err(anyhow::Error::from)
         });
+    }
+    {
+        // Separate metrics listener (SMA-446 Unit 3), only when both enabled AND `metrics.addr`
+        // is configured — keeps `/metrics` off the port that also serves the tenancy/authn/authz
+        // HTTP API. On the SAME shutdown-watch every other task in this `JoinSet` uses, so it
+        // stops gracefully alongside the HTTP/gRPC servers rather than lingering past them.
+        if let (Some(handle), Some(metrics_addr)) = (metrics_handle.clone(), config.metrics.addr) {
+            let mut rx = rx.clone();
+            let metrics_app = paigasus_observability::metrics_router(handle);
+            servers.spawn(async move {
+                let listener = tokio::net::TcpListener::bind(metrics_addr).await?;
+                tracing::info!(%metrics_addr, "paigasus-iam metrics listener started");
+                axum::serve(listener, metrics_app)
+                    .with_graceful_shutdown(async move {
+                        let _ = rx.changed().await;
+                    })
+                    .await
+                    .map_err(anyhow::Error::from)
+            });
+        }
     }
     {
         let mut rx = rx.clone();
@@ -70,6 +114,30 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(anyhow::Error::from)
         });
+    }
+    {
+        // Periodic Prometheus upkeep (CodeRabbit round-1 fix, mirrors
+        // `paigasus-gateway::main`'s identical fix): `PrometheusBuilder::install_recorder()`
+        // (unlike `install()`) does NOT spawn the maintenance task
+        // `PrometheusHandle::run_upkeep()` needs to periodically drain/decay histograms —
+        // without calling it ourselves, memory grows unbounded over the life of the process.
+        // `paigasus_observability::init()` itself stays runtime-agnostic (it's also called from
+        // plain `#[test]` code with no Tokio runtime), so the spawn lives here instead, into the
+        // same `JoinSet` on the same shutdown-watch as every other server task, only when
+        // metrics are enabled.
+        if let Some(handle) = metrics_handle.clone() {
+            let mut rx = rx.clone();
+            servers.spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => handle.run_upkeep(),
+                        _ = rx.changed() => break,
+                    }
+                }
+                Ok(())
+            });
+        }
     }
     {
         // The policy-snapshot background reload (SMA-444 Task 15, spec §7/D11 AC3): bounds
@@ -117,37 +185,6 @@ async fn main() -> anyhow::Result<()> {
             }
             None => tracing::error!("denial-audit drain was already taken before startup could spawn it — buffered denials will NOT be persisted"),
         }
-    }
-    {
-        // Overflow observability (SMA-446 Slice A): the denial buffer drops its OLDEST queued
-        // entry when full (favoring recency) and bumps a monotonic counter. Emit that counter
-        // periodically as a `tracing` gauge so a sustained denial burst outpacing the drain is
-        // visible (a persistent-metrics backend is a later slice). Exits on the same
-        // shutdown-watch as every other task.
-        let mut rx = rx.clone();
-        let buffer = state.denial_buffer();
-        servers.spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(60));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            // `dropped()` is a monotonic cumulative counter, so a bare `> 0` check would warn
-            // on every tick forever after a single historical drop. Track the last-observed
-            // value instead and only warn when it has moved since the previous tick.
-            let mut last_dropped = 0u64;
-            loop {
-                tokio::select! {
-                    _ = ticker.tick() => {
-                        let dropped = buffer.dropped();
-                        if dropped > last_dropped {
-                            let new_drops = dropped - last_dropped;
-                            tracing::warn!(dropped_denial_audits = dropped, new_drops, "denial-audit buffer has dropped entries on overflow (drain is not keeping up)");
-                        }
-                        last_dropped = dropped;
-                    }
-                    _ = rx.changed() => break,
-                }
-            }
-            Ok(())
-        });
     }
     {
         // The outbox relay (SMA-446 Slice B, Task B9): drains `event_outbox` rows — written by
@@ -224,6 +261,58 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     result
+}
+
+/// Registers `# HELP`/`# TYPE` exposition text for the 15 metric families `paigasus-iam` emits
+/// directly (spec §4.1), via the `names::` consts so this can't drift from `names::ALL`, plus
+/// the 2 gRPC families via `paigasus_observability::describe_grpc()`. Mirrors the meanings
+/// documented in `docs/ops/RUNBOOK-observability.md` §2.1/§2.2.
+fn describe_iam_metrics() {
+    use metrics::{describe_counter, describe_gauge, describe_histogram};
+
+    describe_counter!(
+        names::IAM_HTTP_REQUESTS_TOTAL,
+        "HTTP requests handled by IAM's HTTP router, labeled by route, method, and status_class."
+    );
+    describe_histogram!(names::IAM_HTTP_REQUEST_DURATION_SECONDS, "IAM HTTP request latency in seconds (full request-response cycle).");
+    describe_gauge!(names::IAM_HTTP_INFLIGHT_REQUESTS, "Requests currently being handled on IAM's HTTP router.");
+
+    paigasus_observability::describe_grpc();
+
+    describe_counter!(
+        names::IAM_AUTHZ_DECISIONS_TOTAL,
+        "Every CedarAuthorizer::is_authorized outcome, labeled by decision (allow/deny) and cache (hit/miss/bypass)."
+    );
+    describe_counter!(
+        names::IAM_AUDIT_RECORDS_TOTAL,
+        "Every audit-log insert attempt (mutation or denial), labeled by outcome (committed/denied) and result."
+    );
+    describe_counter!(
+        names::IAM_DENIAL_AUDITS_DROPPED_TOTAL,
+        "Denial-audit rows dropped because the bounded in-memory buffer was full — non-zero means gaps in the denial audit trail."
+    );
+    describe_counter!(
+        names::IAM_DENIAL_AUDITS_ENQUEUED_TOTAL,
+        "Denial-audit rows enqueued onto the bounded in-memory buffer, whether or not the enqueue also dropped an older row."
+    );
+    describe_counter!(
+        names::IAM_OUTBOX_RELAY_TICKS_TOTAL,
+        "Outbox relay poll-loop iterations, labeled by result (ok/error) — the relay's liveness signal."
+    );
+    describe_counter!(
+        names::IAM_OUTBOX_RELAY_DRAINED_TOTAL,
+        "Outbox rows locked and processed (published + failed, including newly-parked) in a relay tick."
+    );
+    describe_counter!(names::IAM_OUTBOX_RELAY_PUBLISHED_TOTAL, "Outbox rows successfully published in a relay tick.");
+    describe_counter!(names::IAM_OUTBOX_RELAY_PUBLISH_FAILURES_TOTAL, "Outbox rows whose EventPublisher::publish call failed in a relay tick.");
+    describe_counter!(
+        names::IAM_OUTBOX_RELAY_PARKED_TOTAL,
+        "Outbox rows newly parked (poison — exceeded [outbox].max_attempts) in a relay tick."
+    );
+    describe_gauge!(
+        names::IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS,
+        "Age in seconds of the oldest unpublished-and-unparked outbox row seen in the most recent non-empty relay tick's batch."
+    );
 }
 
 async fn shutdown_signal() {

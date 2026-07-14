@@ -24,6 +24,7 @@ pub struct GatewayConfig {
     pub iam: IamClientConfig,
     pub upstream: UpstreamConfig,
     pub log_level: String,
+    pub metrics: MetricsConfig,
 }
 
 /// The IAM gRPC client endpoint G4 dials (`Introspect`/authorization calls). `tls` governs
@@ -100,6 +101,26 @@ pub struct OpenAiConfig {
     pub api_key: SecretString,
 }
 
+/// `GET /metrics` (SMA-446 Unit 2): whether the Prometheus recorder is installed at all, and
+/// where the route is served. `addr: None` (the default) merges `/metrics` onto `http_addr` (the
+/// same port as the chat/health routes); `Some(addr)` serves it on its OWN listener instead — the
+/// RECOMMENDED posture for a public gateway, so operational metrics never share a port with
+/// public traffic. `enabled = false` skips installing the recorder entirely (no route, no global
+/// `metrics`-facade recorder in this process). No `PartialEq`/`Eq` derive — mirrors the file's
+/// existing sub-configs (`IamClientConfig` is the only one that derives them, for its own
+/// equality-based tests).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MetricsConfig {
+    pub enabled: bool,
+    pub addr: Option<SocketAddr>,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        MetricsConfig { enabled: true, addr: None }
+    }
+}
+
 // Only the fields that HAVE a default — every `GatewayConfig` field has one (unlike iam's
 // `database_url`/`authn.issuers`, nothing here is a hard-required, default-less value).
 #[derive(Serialize)]
@@ -112,6 +133,7 @@ struct Defaults {
     iam: IamClientConfig,
     upstream: UpstreamDefaults,
     log_level: String,
+    metrics: MetricsConfig,
 }
 
 #[derive(Serialize, Default)]
@@ -143,6 +165,7 @@ impl Default for Defaults {
             iam: IamClientConfig::default(),
             upstream: UpstreamDefaults::default(),
             log_level: "info".to_string(),
+            metrics: MetricsConfig::default(),
         }
     }
 }
@@ -234,6 +257,15 @@ impl GatewayConfig {
                 "iam.tls = \"loopback_insecure\" requires iam.grpc_addr to be a loopback host (127.0.0.0/8, localhost, or ::1) — the introspect link otherwise carries raw API keys in the clear (D8); got {:?}",
                 self.iam.grpc_addr
             ));
+        }
+
+        // A same-PORT check, not exact-address-equality: an unequal-but-same-port pair (e.g.
+        // `0.0.0.0:8088` metrics vs `127.0.0.1:8088` http) passes exact equality yet both
+        // listeners still try to claim the same port and fail at bind time with `AddrInUse`.
+        if let Some(addr) = self.metrics.addr
+            && addr.port() == self.http_addr.port()
+        {
+            return Err("metrics.addr must use a different port than http_addr".to_string());
         }
 
         Ok(())
@@ -437,6 +469,45 @@ mod tests {
             )?;
             let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
             assert!(cfg.validate().is_ok(), "expected loopback_insecure with localhost to pass validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn metrics_addr_must_differ_from_http_addr() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            let mut cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            cfg.metrics.enabled = true;
+            cfg.metrics.addr = Some(cfg.http_addr); // exact collision
+            assert!(cfg.validate().is_err(), "metrics.addr == http_addr is a config error");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn metrics_addr_same_port_different_host_as_http_addr_is_rejected() {
+        figment::Jail::expect_with(|jail| {
+            // A wildcard-vs-loopback pair on the SAME port is NOT caught by exact-address
+            // equality but both listeners still fail at bind with `AddrInUse` — validate() must
+            // reject this too, not just an exact-address match.
+            jail.create_file("gateway.toml", &format!("http_addr = \"127.0.0.1:8088\"\n{}", valid_toml()))?;
+            let mut cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            cfg.metrics.enabled = true;
+            cfg.metrics.addr = Some("0.0.0.0:8088".parse().expect("valid addr"));
+            assert!(cfg.validate().is_err(), "metrics.addr and http_addr sharing a port on different hosts is a config error");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn metrics_addr_distinct_port_from_http_addr_is_ok() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            let mut cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            cfg.metrics.enabled = true;
+            cfg.metrics.addr = Some("0.0.0.0:9999".parse().expect("valid addr"));
+            assert!(cfg.validate().is_ok(), "metrics.addr on a distinct port from http_addr should validate");
             Ok(())
         });
     }

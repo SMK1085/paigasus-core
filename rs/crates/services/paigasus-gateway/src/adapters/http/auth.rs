@@ -25,11 +25,14 @@
 //! [`authz_error`].
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use metrics::{counter, histogram};
+use paigasus_observability::names;
 use tonic::Code;
 
 use super::error::GatewayError;
@@ -53,10 +56,19 @@ pub async fn require_iam_auth(State(iam): State<Arc<dyn Iam>>, mut req: Request,
     };
 
     // 2. Introspect the caller-presented key. An error Status maps per `introspect_error`; a
-    //    success carrying a non-active principal or an empty scope is rejected here.
+    //    success carrying a non-active principal or an empty scope is rejected here. The IAM-call
+    //    metric records the RPC's own outcome (ok/denied/unavailable/error) — NOT the later
+    //    active-status/scope validation below, which is a separate, non-metric decision.
+    let introspect_started = Instant::now();
     let resp = match iam.introspect_api_key(&key).await {
-        Ok(resp) => resp,
-        Err(err) => return introspect_error(err).into_response(),
+        Ok(resp) => {
+            record_iam_call("introspect", "ok", introspect_started);
+            resp
+        }
+        Err(err) => {
+            record_iam_call("introspect", iam_result(&err), introspect_started);
+            return introspect_error(err).into_response();
+        }
     };
     if resp.status != "active" {
         // Belt-and-braces: IAM returns an error Status for a bad key, but a success-with-
@@ -81,10 +93,15 @@ pub async fn require_iam_auth(State(iam): State<Arc<dyn Iam>>, mut req: Request,
     // 3. Self-query authorization (D9): the caller's OWN key as the bearer AND the caller's OWN SA
     //    PRN (from step 2) as the queried principal, resource = the introspected scope. Never a
     //    different principal — that is exactly what makes this a self-query.
+    let authz_started = Instant::now();
     match iam.is_authorized_self(&key, &principal_prn, INVOKE_MODEL_ACTION, &scope_prn).await {
-        Ok(true) => {}
-        Ok(false) => return GatewayError::AuthzDenied.into_response(),
+        Ok(true) => record_iam_call("authorize", "ok", authz_started),
+        Ok(false) => {
+            record_iam_call("authorize", "denied", authz_started);
+            return GatewayError::AuthzDenied.into_response();
+        }
         Err(err) => {
+            record_iam_call("authorize", iam_result(&err), authz_started);
             let mapped = authz_error(err);
             if mapped == GatewayError::Internal {
                 // A `PermissionDenied` here means IAM's exposure gate denied a self-query, which
@@ -103,6 +120,29 @@ pub async fn require_iam_auth(State(iam): State<Arc<dyn Iam>>, mut req: Request,
     // 4. Attach the resolved caller identity and proceed to the handler.
     req.extensions_mut().insert(CallerContext { principal_prn, scope_prn, key_id });
     next.run(req).await
+}
+
+/// Record an outbound IAM call's outcome for `gateway_iam_calls_total`/`_duration_seconds`.
+/// `operation` is `"introspect"` or `"authorize"`; `result` is the bounded label
+/// [`iam_result`]/the call sites above produce (`"ok"`/`"denied"`/`"unavailable"`/`"error"`) —
+/// never a raw gRPC status string (bounded-cardinality labels only, see the global constraints).
+fn record_iam_call(operation: &'static str, result: &'static str, started: Instant) {
+    counter!(names::GATEWAY_IAM_CALLS_TOTAL, "operation" => operation, "result" => result).increment(1);
+    histogram!(names::GATEWAY_IAM_CALL_DURATION_SECONDS, "operation" => operation).record(started.elapsed().as_secs_f64());
+}
+
+/// Map an [`IamError`] to a bounded `result` label for [`record_iam_call`] — never the raw gRPC
+/// status/message text. `Unauthenticated` is the one code that maps to `"denied"` here (a
+/// rejected credential); every other application-level `Status` (including `PermissionDenied`,
+/// which has case-specific meaning per call site — see [`introspect_error`]/[`authz_error`])
+/// collapses to `"error"`, distinct from the transport/backend `"unavailable"` bucket.
+fn iam_result(err: &IamError) -> &'static str {
+    match err {
+        IamError::Connect(_) => "unavailable",
+        IamError::Rpc(status) if matches!(status.code(), Code::Unavailable | Code::DeadlineExceeded) => "unavailable",
+        IamError::Rpc(status) if status.code() == Code::Unauthenticated => "denied",
+        IamError::Rpc(_) => "error",
+    }
 }
 
 /// Extract a bearer credential from an `Authorization` header, independent of the iam crate.
@@ -285,6 +325,24 @@ mod tests {
     /// interesting variable is elsewhere (e.g. the bearer parse, which runs before IAM).
     fn happy_fake() -> FakeIam {
         FakeIam::new(IntrospectOutcome::Ok(active_response()), AuthzOutcome::Ok(true))
+    }
+
+    // ---- `iam_result` bounded-label mapping --------------------------------------------------
+
+    #[test]
+    fn iam_result_maps_errors_to_bounded_labels() {
+        let cases: &[(IamError, &str)] = &[
+            (IamError::Connect("boom".to_owned()), "unavailable"),
+            (IamError::Rpc(tonic::Status::new(Code::Unavailable, "")), "unavailable"),
+            (IamError::Rpc(tonic::Status::new(Code::DeadlineExceeded, "")), "unavailable"),
+            (IamError::Rpc(tonic::Status::new(Code::Unauthenticated, "")), "denied"),
+            (IamError::Rpc(tonic::Status::new(Code::PermissionDenied, "")), "error"),
+            (IamError::Rpc(tonic::Status::new(Code::Internal, "")), "error"),
+            (IamError::Rpc(tonic::Status::new(Code::NotFound, "")), "error"),
+        ];
+        for (err, want) in cases {
+            assert_eq!(iam_result(err), *want, "iam_result({err:?}) should map to {want:?}");
+        }
     }
 
     // ---- bearer extraction / missing-credential rows ----------------------------------------

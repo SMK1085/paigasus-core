@@ -105,6 +105,11 @@ paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.0.0" }
 # In-tree path dep: paigasus-iam's gRPC adapter binds the generated `paigasus.iam.v1` types
 # (Task 16) — same in-tree-freshness rationale as paigasus-kernel above.
 paigasus-proto = { path = "crates/libs/paigasus-proto", version = "0.0.0" }
+# In-tree path dep: the shared observability lib (metrics recorder, `/metrics` router, axum
+# request-metrics layer, metric-name registry — SMA-446 Unit 1). Service crates instrument
+# their hot paths through it (Unit 2 — `paigasus-gateway` is the first consumer); same
+# in-tree-freshness rationale as paigasus-kernel/paigasus-proto above.
+paigasus-observability = { path = "crates/libs/paigasus-observability", version = "0.0.0" }
 # sea-orm — async ORM for service persistence adapters (paigasus-iam's AppState/readyz ping,
 # later the Postgres repository). `runtime-tokio-rustls` keeps the TLS posture on rustls/ring
 # (see reqwest above) instead of native-tls/openssl; `sqlx-postgres` is the only backend we run.
@@ -137,6 +142,13 @@ cedar-policy = "4"
 # Only consumed by `paigasus-iam`; no wasm/binding exposure (SMA-448's getrandom-free posture
 # is unaffected — blake3's default features carry no OS-entropy dependency).
 blake3 = "1"
+# metrics / metrics-exporter-prometheus — the `metrics` facade + Prometheus exporter that back
+# `paigasus-observability` (SMA-446). The exporter is `default-features = false`: we install the
+# global recorder in-process and render the exposition through our own axum `GET /metrics` route,
+# so the bundled hyper `http-listener` / `push-gateway` transports are dead weight. Versions track
+# `metrics` 0.24 (facade) + `metrics-exporter-prometheus` 0.18 (their compatible pairing).
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
 # via the Moon `lint` task's `-D warnings`.

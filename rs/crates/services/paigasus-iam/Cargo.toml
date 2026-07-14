@@ -18,6 +18,14 @@ path = "src/main.rs"
 [dependencies]
 paigasus-iam-core = { path = "../../libs/paigasus-iam-core", version = "0.0.0" }
 paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0" }
+# paigasus-observability — the shared `/metrics` + request-metrics-layer + metric-name-registry
+# lib (SMA-446 Unit 1), wired here exactly as `paigasus-gateway` did in Unit 2:
+# `adapters::http::app_routes` applies `http_metrics_layer("iam")`, and `main.rs` mounts
+# `metrics_router` (Unit 3). `metrics` is its facade crate, called directly via `counter!`
+# from this crate's own instrumentation (`adapters::authz::cedar_authorizer`/`denial_audit`,
+# `adapters::persistence::pg_audit_log`, SMA-446 Unit 4).
+paigasus-observability = { workspace = true }
+metrics = { workspace = true }
 paigasus-kernel = { workspace = true }
 # `adapters::authz::policy_snapshot` names `cedar_policy::PolicyId` directly to detect
 # (and `tracing::warn!` on) a role grant whose template `PolicyEngine::compile` silently

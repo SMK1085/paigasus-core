@@ -70,7 +70,7 @@ jobs:
           # then don't exist → "pnpm: command not found"). Reinstall fresh each run.
           cache: false
 
-      - name: Install pinned CLIs from .prototools (buf, lefthook, cargo-deny, cargo-machete, cargo-nextest)
+      - name: Install pinned CLIs from .prototools (buf, lefthook, cargo-deny, cargo-machete, cargo-nextest, promtool)
         run: proto install
 
       # Caches that don't need a resolved tool path go before `moon setup` (which is
@@ -181,7 +181,7 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          T=(:build :test :lint :fmt :deny :machete :typecheck :breaking :affected-smoke :parity-corpus-drift :wasm-getrandom-free :release-parity :release-parity-py :release-parity-ts)
+          T=(:build :test :lint :fmt :deny :machete :typecheck :breaking :affected-smoke :parity-corpus-drift :wasm-getrandom-free :promtool :release-parity :release-parity-py :release-parity-ts)
           if [ "$EVENT" = "pull_request" ]; then
             moon ci "${T[@]}" --base origin/main --include-relations
           elif [ -n "${BEFORE:-}" ] && ! printf '%s' "$BEFORE" | grep -qE '^0+$'; then

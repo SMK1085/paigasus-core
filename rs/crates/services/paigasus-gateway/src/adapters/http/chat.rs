@@ -33,9 +33,12 @@ use std::time::Instant;
 use axum::Extension;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt};
+use metrics::{counter, histogram};
+use paigasus_observability::names;
 
 use super::AppState;
 use super::error::GatewayError;
@@ -79,11 +82,20 @@ pub async fn chat_completions(State(state): State<AppState>, caller: Option<Exte
 
     let (response, status) = match result {
         Ok(ChatResponse::Full { status, body }) => {
+            // Non-stream: the upstream head AND body have both landed, so this is a genuine
+            // full-request latency, not just TTFB (see the NOTE on the stream arm below).
+            record_upstream_call(status, started);
             // Forward the upstream status + body VERBATIM, including a non-2xx OpenAI error envelope.
             let resp = (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
             (resp, status)
         }
         Ok(ChatResponse::Stream { status, stream }) => {
+            // NOTE: for `stream:true` this records TTFB (time-to-first-byte / response head), NOT
+            // stream completion — the call is considered "done" for metrics purposes the moment
+            // the upstream response head arrives. A mid-stream SSE failure (handled below by the
+            // terminal-error adapter, once the 200 head is already committed) is NOT re-counted
+            // here — it has no separate HTTP status to attribute.
+            record_upstream_call(status, started);
             let resp = if status.is_success() {
                 // Success stream: SSE passthrough with the mid-stream terminal-error adapter.
                 (status, [(header::CONTENT_TYPE, "text/event-stream")], Body::from_stream(terminal_sse_error_stream(stream))).into_response()
@@ -95,9 +107,13 @@ pub async fn chat_completions(State(state): State<AppState>, caller: Option<Exte
             (resp, status)
         }
         Err(err) => {
-            // Connect/transport/build → 502; timeout → 504 (see `GatewayError::from`).
+            // Connect/transport/build → 502; timeout → 504 (see `GatewayError::from`). No upstream
+            // HTTP status exists in this case at all, so record under the MAPPED gateway status
+            // instead (still a `status_class` derived from an HTTP status, per the global
+            // constraints — never a free-form error string).
             let resp = GatewayError::from(err).into_response();
             let status = resp.status();
+            record_upstream_call(status, started);
             (resp, status)
         }
     };
@@ -118,6 +134,18 @@ pub async fn chat_completions(State(state): State<AppState>, caller: Option<Exte
     );
 
     response
+}
+
+/// Record `gateway_upstream_requests_total{status_class}` + `gateway_upstream_request_duration_seconds`
+/// for one call to [`OpenAiClient::chat_completion`]. `status` is either the upstream's OWN status
+/// (a completed response, full or streamed) or, on a transport/connect/timeout failure, the
+/// GATEWAY status the error was mapped to (502/504 — see `GatewayError::from<OpenAiError>`), since
+/// no upstream status exists in that case. See the call sites above for the TTFB-vs-stream-vs-full
+/// timing note.
+fn record_upstream_call(status: StatusCode, started: Instant) {
+    let status_class = format!("{}xx", status.as_u16() / 100);
+    counter!(names::GATEWAY_UPSTREAM_REQUESTS_TOTAL, "status_class" => status_class).increment(1);
+    histogram!(names::GATEWAY_UPSTREAM_REQUEST_DURATION_SECONDS).record(started.elapsed().as_secs_f64());
 }
 
 /// The small state machine [`terminal_sse_error_stream`] unfolds over: still forwarding upstream
