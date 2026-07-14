@@ -31,8 +31,11 @@ pub const IAM_OUTBOX_RELAY_PUBLISH_FAILURES_TOTAL: &str = "iam_outbox_relay_publ
 pub const IAM_OUTBOX_RELAY_PARKED_TOTAL: &str = "iam_outbox_relay_parked_total";
 pub const IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS: &str = "iam_outbox_oldest_unpublished_age_seconds";
 
-/// Every metric family this workspace emits — the drift test asserts dashboards/alerts reference
-/// only these (after suffix-normalisation) plus the built-ins/tokens below.
+/// Every metric family this workspace emits — the drift test (`tests/drift.rs`) extracts every
+/// `iam_`/`gateway_`-prefixed identifier from the committed dashboard/rule `expr`s, strips a
+/// trailing `_bucket`/`_sum`/`_count` histogram/summary suffix, and asserts each one is in `ALL`.
+/// Label keys, PromQL function/keyword tokens, and template vars never match the prefix filter,
+/// so they need no separate allowlist.
 pub const ALL: &[&str] = &[
     GATEWAY_HTTP_REQUESTS_TOTAL,
     GATEWAY_HTTP_REQUEST_DURATION_SECONDS,
@@ -56,40 +59,6 @@ pub const ALL: &[&str] = &[
     IAM_OUTBOX_RELAY_PUBLISH_FAILURES_TOTAL,
     IAM_OUTBOX_RELAY_PARKED_TOTAL,
     IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS,
-];
-
-/// Prometheus built-in series that dashboards/alerts may reference without them being in `ALL`.
-pub const PROM_BUILTINS: &[&str] = &["up", "scrape_duration_seconds", "scrape_samples_scraped"];
-
-/// PromQL function/keyword tokens the drift test must not mistake for metric names.
-pub const PROMQL_TOKENS: &[&str] = &[
-    "rate",
-    "irate",
-    "increase",
-    "sum",
-    "avg",
-    "min",
-    "max",
-    "count",
-    "by",
-    "without",
-    "on",
-    "group_left",
-    "group_right",
-    "histogram_quantile",
-    "clamp_min",
-    "clamp_max",
-    "vector",
-    "le",
-    "job",
-    "instance",
-    "and",
-    "or",
-    "unless",
-    "offset",
-    "bool",
-    "delta",
-    "idelta",
 ];
 
 #[cfg(test)]

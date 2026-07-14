@@ -565,12 +565,14 @@ prevents Prometheus cardinality blow-ups / OOM.
    label).
 3. Reference the metric from a Grafana dashboard panel and/or an alert rule as needed.
 4. Run the drift test (`paigasus-observability`'s `tests/drift.rs`, part of the normal CI gate) —
-   it parses the committed dashboard JSON and rule YAML `expr` fields, strips histogram/summary
-   suffixes (`_bucket`/`_sum`/`_count`), and asserts every referenced metric identifier is either
-   in `names::ALL`, a Prometheus built-in (`names::PROM_BUILTINS`), or a PromQL
-   function/keyword token (`names::PROMQL_TOKENS`). **A metric emitted by code but never added to
-   `names::ALL` — or referenced in a dashboard/rule but never in `names::ALL` — fails this test.**
-   This is what keeps the ops artifacts from silently rotting relative to the code.
+   it extracts every `iam_`/`gateway_`-prefixed identifier from the committed dashboard JSON and
+   rule YAML `expr` fields (a prefix-anchored scan, so label keys like `status_class`, PromQL
+   function/keyword tokens like `rate`/`sum`/`by`, and template vars like `$__rate_interval`
+   never match and need no separate allowlist), strips a trailing histogram/summary suffix
+   (`_bucket`/`_sum`/`_count`), and asserts every remaining identifier is in `names::ALL`.
+   **A metric emitted by code but never added to `names::ALL` — or referenced in a dashboard/rule
+   but never in `names::ALL` — fails this test.** This is what keeps the ops artifacts from
+   silently rotting relative to the code.
 5. Run `promtool check config`, `promtool check rules`, and `promtool test rules` (also part of
    CI) to validate the PromQL/YAML itself and confirm any new alert actually fires against a
    synthetic series.

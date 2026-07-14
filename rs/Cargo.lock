@@ -2460,7 +2460,6 @@ dependencies = [
  "hmac",
  "jsonwebtoken",
  "metrics",
- "metrics-exporter-prometheus",
  "p256",
  "paigasus-iam-core",
  "paigasus-kernel",

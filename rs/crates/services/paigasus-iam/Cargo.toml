@@ -140,10 +140,6 @@ axum-server = { version = "0.7", default-features = false, features = ["tls-rust
 # fast-forwards past `AUDIT_PERSIST_TIMEOUT` instead of a real multi-second sleep (feature-only
 # addition: `tokio` is already a normal dependency above, unified with this for test builds).
 tokio = { workspace = true, features = ["test-util"] }
-# `tests/metrics.rs` names `PrometheusHandle` directly to call `.render()` and assert on the
-# exposition text — `paigasus-observability` doesn't re-export the type (mirrors
-# `paigasus-gateway`'s identical dev-dependency, SMA-446 Unit 2).
-metrics-exporter-prometheus = { workspace = true }
 
 [lints]
 workspace = true

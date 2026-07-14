@@ -3,7 +3,23 @@
 
 use std::time::Instant;
 
-use metrics::{counter, histogram};
+use metrics::{counter, describe_counter, describe_histogram, histogram};
+
+/// Registers `# HELP`/`# TYPE` exposition text for the two IAM gRPC families (spec §4.1). Callers
+/// (currently only `paigasus-iam`) invoke this once, after `crate::init` has installed the global
+/// recorder — a `describe_*!` call before a recorder is installed is a harmless no-op (the
+/// `metrics` facade only forwards it once a recorder exists), so this has no ordering requirement
+/// beyond "after `init`, when metrics are enabled."
+pub fn describe_grpc() {
+    describe_counter!(
+        crate::names::IAM_GRPC_REQUESTS_TOTAL,
+        "Completed tonic gRPC handler calls, labeled by service, method, and grpc_status."
+    );
+    describe_histogram!(
+        crate::names::IAM_GRPC_REQUEST_DURATION_SECONDS,
+        "gRPC handler latency in seconds, recorded at the same handler-boundary call site as the request counter."
+    );
+}
 
 /// Record a completed tonic handler call. `service`/`method` are compile-time literals (never
 /// `:path`-derived — bounded cardinality); `grpc_status` is `"ok"` or the canonical code name.
@@ -70,5 +86,20 @@ mod tests {
         assert!(out.contains("method=\"IsAuthorized\""));
         assert!(out.contains("grpc_status=\"ok\""));
         assert!(out.contains("grpc_status=\"permission_denied\""));
+    }
+
+    #[test]
+    fn describe_grpc_registers_help_text_rendered_in_the_exposition() {
+        let handle = init("test-svc");
+        describe_grpc();
+        let ok: Result<(), tonic::Status> = Ok(());
+        record_grpc("Authorization", "IsAuthorized", Instant::now(), &ok);
+        let out = handle.render();
+        assert!(out.contains("# HELP iam_grpc_requests_total"), "expected HELP line for iam_grpc_requests_total:\n{out}");
+        assert!(out.contains("# TYPE iam_grpc_requests_total counter"), "expected TYPE line for iam_grpc_requests_total:\n{out}");
+        assert!(
+            out.contains("# HELP iam_grpc_request_duration_seconds"),
+            "expected HELP line for iam_grpc_request_duration_seconds:\n{out}"
+        );
     }
 }

@@ -10,6 +10,7 @@ use paigasus_iam::adapters::events::{OutboxRelay, TracingEventPublisher};
 use paigasus_iam::adapters::http::{AppState, serve_http};
 use paigasus_iam::adapters::{grpc, persistence::Migrator};
 use paigasus_iam::config::IamConfig;
+use paigasus_observability::names;
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use tokio::task::JoinSet;
@@ -34,6 +35,13 @@ async fn main() -> anyhow::Result<()> {
     // short-circuits both wiring blocks further down). `config.validate()` above already
     // rejected `metrics.addr == http_addr`.
     let metrics_handle = config.metrics.enabled.then(|| paigasus_observability::init("paigasus-iam"));
+    // Register `# HELP`/`# TYPE` exposition text for every family this service emits (spec
+    // §4.1) — only when a recorder was actually installed above; describing metrics nobody will
+    // ever scrape is pointless, and `describe_*!` against no installed recorder is a silent
+    // no-op anyway.
+    if metrics_handle.is_some() {
+        describe_iam_metrics();
+    }
 
     let db = Database::connect(&config.database_url).await?;
     Migrator::up(&db, None).await?;
@@ -229,6 +237,58 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     result
+}
+
+/// Registers `# HELP`/`# TYPE` exposition text for the 15 metric families `paigasus-iam` emits
+/// directly (spec §4.1), via the `names::` consts so this can't drift from `names::ALL`, plus
+/// the 2 gRPC families via `paigasus_observability::describe_grpc()`. Mirrors the meanings
+/// documented in `docs/ops/RUNBOOK-observability.md` §2.1/§2.2.
+fn describe_iam_metrics() {
+    use metrics::{describe_counter, describe_gauge, describe_histogram};
+
+    describe_counter!(
+        names::IAM_HTTP_REQUESTS_TOTAL,
+        "HTTP requests handled by IAM's HTTP router, labeled by route, method, and status_class."
+    );
+    describe_histogram!(names::IAM_HTTP_REQUEST_DURATION_SECONDS, "IAM HTTP request latency in seconds (full request-response cycle).");
+    describe_gauge!(names::IAM_HTTP_INFLIGHT_REQUESTS, "Requests currently being handled on IAM's HTTP router.");
+
+    paigasus_observability::describe_grpc();
+
+    describe_counter!(
+        names::IAM_AUTHZ_DECISIONS_TOTAL,
+        "Every CedarAuthorizer::is_authorized outcome, labeled by decision (allow/deny) and cache (hit/miss/bypass)."
+    );
+    describe_counter!(
+        names::IAM_AUDIT_RECORDS_TOTAL,
+        "Every audit-log insert attempt (mutation or denial), labeled by outcome (committed/denied) and result."
+    );
+    describe_counter!(
+        names::IAM_DENIAL_AUDITS_DROPPED_TOTAL,
+        "Denial-audit rows dropped because the bounded in-memory buffer was full — non-zero means gaps in the denial audit trail."
+    );
+    describe_counter!(
+        names::IAM_DENIAL_AUDITS_ENQUEUED_TOTAL,
+        "Denial-audit rows enqueued onto the bounded in-memory buffer, whether or not the enqueue also dropped an older row."
+    );
+    describe_counter!(
+        names::IAM_OUTBOX_RELAY_TICKS_TOTAL,
+        "Outbox relay poll-loop iterations, labeled by result (ok/error) — the relay's liveness signal."
+    );
+    describe_counter!(
+        names::IAM_OUTBOX_RELAY_DRAINED_TOTAL,
+        "Outbox rows locked and processed (published + failed, including newly-parked) in a relay tick."
+    );
+    describe_counter!(names::IAM_OUTBOX_RELAY_PUBLISHED_TOTAL, "Outbox rows successfully published in a relay tick.");
+    describe_counter!(names::IAM_OUTBOX_RELAY_PUBLISH_FAILURES_TOTAL, "Outbox rows whose EventPublisher::publish call failed in a relay tick.");
+    describe_counter!(
+        names::IAM_OUTBOX_RELAY_PARKED_TOTAL,
+        "Outbox rows newly parked (poison — exceeded [outbox].max_attempts) in a relay tick."
+    );
+    describe_gauge!(
+        names::IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS,
+        "Age in seconds of the oldest unpublished-and-unparked outbox row seen in the most recent non-empty relay tick's batch."
+    );
 }
 
 async fn shutdown_signal() {

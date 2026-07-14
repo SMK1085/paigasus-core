@@ -8,7 +8,7 @@ pub mod grpc;
 pub mod http;
 pub mod names;
 
-pub use grpc::record_grpc;
+pub use grpc::{describe_grpc, record_grpc};
 pub use http::http_metrics_layer;
 
 use std::sync::OnceLock;

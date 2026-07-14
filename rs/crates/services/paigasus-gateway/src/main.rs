@@ -13,6 +13,7 @@ use paigasus_gateway::adapters::http::{AppState, router};
 use paigasus_gateway::adapters::iam::IamClient;
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::GatewayConfig;
+use paigasus_observability::names;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,6 +26,13 @@ async fn main() -> anyhow::Result<()> {
     // (a `None` handle short-circuits both wiring blocks). `config.validate()` already rejected
     // `metrics.addr == http_addr` above.
     let metrics_handle = config.metrics.enabled.then(|| paigasus_observability::init("paigasus-gateway"));
+    // Register `# HELP`/`# TYPE` exposition text for every family this service emits (spec
+    // §4.1) — only when a recorder was actually installed above; describing metrics nobody will
+    // ever scrape is pointless, and `describe_*!` against no installed recorder is a silent
+    // no-op anyway.
+    if metrics_handle.is_some() {
+        describe_gateway_metrics();
+    }
 
     // Outbound clients. IAM connects lazily (a dead IAM does not block startup); the OpenAI client
     // is built with the three split timeout budgets. Neither construction logs the key.
@@ -72,6 +80,36 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;
 
     Ok(())
+}
+
+/// Registers `# HELP`/`# TYPE` exposition text for the 7 metric families `paigasus-gateway`
+/// emits (spec §4.1), via the `names::` consts so this can't drift from `names::ALL`. Mirrors
+/// the meanings documented in `docs/ops/RUNBOOK-observability.md` §2.3.
+fn describe_gateway_metrics() {
+    use metrics::{describe_counter, describe_gauge, describe_histogram};
+
+    describe_counter!(
+        names::GATEWAY_HTTP_REQUESTS_TOTAL,
+        "HTTP requests handled by the gateway's HTTP router, labeled by route, method, and status_class."
+    );
+    describe_histogram!(
+        names::GATEWAY_HTTP_REQUEST_DURATION_SECONDS,
+        "Gateway HTTP request latency in seconds (time-to-first-byte for streaming chat completions, not full stream duration)."
+    );
+    describe_gauge!(names::GATEWAY_HTTP_INFLIGHT_REQUESTS, "Requests currently being handled on the gateway HTTP router.");
+    describe_counter!(
+        names::GATEWAY_IAM_CALLS_TOTAL,
+        "Calls the gateway's auth middleware makes to IAM (introspect/authorize), labeled by operation and result."
+    );
+    describe_histogram!(names::GATEWAY_IAM_CALL_DURATION_SECONDS, "Latency of gateway-to-IAM calls in seconds.");
+    describe_counter!(
+        names::GATEWAY_UPSTREAM_REQUESTS_TOTAL,
+        "OpenAI upstream calls made by the gateway, labeled by status_class (time-to-first-byte only for streaming responses)."
+    );
+    describe_histogram!(
+        names::GATEWAY_UPSTREAM_REQUEST_DURATION_SECONDS,
+        "OpenAI upstream call latency in seconds (time-to-first-byte only for streaming responses)."
+    );
 }
 
 async fn shutdown_signal() {
