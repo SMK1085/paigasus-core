@@ -47,11 +47,22 @@ fn method_label(method: &axum::http::Method) -> &'static str {
 ///
 /// Attach downstream with `router.layer(http_metrics_layer("gateway"))`.
 pub fn http_metrics_layer(prefix: &'static str) -> middleware::FromFnLayer<impl Fn(Request, Next) -> BoxFuture + Clone, (), (Request,)> {
+    // The three metric NAMES are fixed once `prefix` is chosen at layer-construction time — build
+    // them here, once, rather than re-running `format!` on every single request (the hot path).
+    // The closure below is `Fn` (invoked once per request), so each invocation still needs its own
+    // owned `String`s to move into the `async move` block; cloning three small strings per request
+    // is far cheaper than the `format!` machinery (allocation + fmt machinery) it replaces.
+    let inflight_name = format!("{prefix}_http_inflight_requests");
+    let requests_total_name = format!("{prefix}_http_requests_total");
+    let duration_name = format!("{prefix}_http_request_duration_seconds");
     middleware::from_fn(move |req: Request, next: Next| {
+        let inflight_name = inflight_name.clone();
+        let requests_total_name = requests_total_name.clone();
+        let duration_name = duration_name.clone();
         Box::pin(async move {
             let route = req.extensions().get::<MatchedPath>().map(|m| m.as_str().to_owned()).unwrap_or_else(|| "<unmatched>".to_owned());
             let method = method_label(req.method()).to_owned();
-            let inflight = gauge!(format!("{prefix}_http_inflight_requests"));
+            let inflight = gauge!(inflight_name);
             inflight.increment(1.0);
             let _inflight_guard = InflightGuard(inflight);
             let started = Instant::now();
@@ -59,14 +70,14 @@ pub fn http_metrics_layer(prefix: &'static str) -> middleware::FromFnLayer<impl 
             let elapsed = started.elapsed().as_secs_f64();
             let status_class = format!("{}xx", resp.status().as_u16() / 100);
             counter!(
-                format!("{prefix}_http_requests_total"),
+                requests_total_name,
                 "route" => route.clone(),
                 "method" => method.clone(),
                 "status_class" => status_class
             )
             .increment(1);
             histogram!(
-                format!("{prefix}_http_request_duration_seconds"),
+                duration_name,
                 "route" => route,
                 "method" => method
             )

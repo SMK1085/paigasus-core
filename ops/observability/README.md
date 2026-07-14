@@ -31,16 +31,12 @@ Gateway services during development. Not for production use.
 - `docker-compose.yml` — Prometheus + Grafana services.
 - `prometheus/prometheus.yml` — scrape config for the `iam` and `gateway`
   jobs, plus alert-rule loading.
-- `prometheus/rules/` — alerting/recording rules (`*.rules.yml`).
+- `prometheus/rules/` — alerting/recording rules (`*.rules.yml`), with
+  `promtool`-driven unit tests under `prometheus/rules/tests/`.
 - `grafana/provisioning/` — Grafana datasource + dashboard-provider config.
-- `grafana/dashboards/` — provisioned dashboard JSON.
-
-The `prometheus/rules/`, `grafana/provisioning/`, and `grafana/dashboards/`
-directories are placeholders in this unit (Task B1) and are populated by
-later units (rules, then Grafana provisioning/dashboards).
+- `grafana/dashboards/` — provisioned dashboard JSON for both services.
 
 ## Runbook
 
 For alert response and troubleshooting, see
-[`docs/ops/RUNBOOK-observability.md`](../../docs/ops/RUNBOOK-observability.md)
-(added in a later unit).
+[`docs/ops/RUNBOOK-observability.md`](../../docs/ops/RUNBOOK-observability.md).

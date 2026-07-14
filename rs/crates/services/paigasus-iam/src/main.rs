@@ -116,6 +116,30 @@ async fn main() -> anyhow::Result<()> {
         });
     }
     {
+        // Periodic Prometheus upkeep (CodeRabbit round-1 fix, mirrors
+        // `paigasus-gateway::main`'s identical fix): `PrometheusBuilder::install_recorder()`
+        // (unlike `install()`) does NOT spawn the maintenance task
+        // `PrometheusHandle::run_upkeep()` needs to periodically drain/decay histograms —
+        // without calling it ourselves, memory grows unbounded over the life of the process.
+        // `paigasus_observability::init()` itself stays runtime-agnostic (it's also called from
+        // plain `#[test]` code with no Tokio runtime), so the spawn lives here instead, into the
+        // same `JoinSet` on the same shutdown-watch as every other server task, only when
+        // metrics are enabled.
+        if let Some(handle) = metrics_handle.clone() {
+            let mut rx = rx.clone();
+            servers.spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => handle.run_upkeep(),
+                        _ = rx.changed() => break,
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+    {
         // The policy-snapshot background reload (SMA-444 Task 15, spec §7/D11 AC3): bounds
         // staleness even when `policy_gen` never visibly advances on this replica.
         // `CedarAuthorizer::is_authorized` (`AppState::authz`) additionally reloads

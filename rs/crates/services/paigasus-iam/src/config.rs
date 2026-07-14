@@ -714,11 +714,18 @@ impl IamConfig {
         // Mirrors `GatewayConfig::validate`'s identical check: a separate metrics listener must
         // not collide with the main HTTP port (`enabled = true` with `addr = None` merges
         // `/metrics` onto `http_addr` instead — that's the intended same-port case, not a
-        // collision).
-        if let Some(addr) = self.metrics.addr
-            && addr == self.http_addr
-        {
-            return Err("metrics.addr must not equal http_addr".to_string());
+        // collision). A same-PORT check, not exact-address-equality: an unequal-but-same-port
+        // pair (e.g. `0.0.0.0:8080` metrics vs `127.0.0.1:8080` http) passes exact equality yet
+        // both listeners still try to claim the same port and fail at bind time with
+        // `AddrInUse`. IAM also has a gRPC listener (`grpc_addr`), so metrics must differ from
+        // BOTH.
+        if let Some(addr) = self.metrics.addr {
+            if addr.port() == self.http_addr.port() {
+                return Err("metrics.addr must use a different port than http_addr".to_string());
+            }
+            if addr.port() == self.grpc_addr.port() {
+                return Err("metrics.addr must use a different port than grpc_addr".to_string());
+            }
         }
 
         Ok(())
@@ -1789,8 +1796,52 @@ mod tests {
             jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
             let mut cfg: IamConfig = IamConfig::figment().extract()?;
             assert!(cfg.validate().is_ok(), "sanity: the base config must validate before the collision is introduced");
-            cfg.metrics.addr = Some(cfg.http_addr); // collision
+            cfg.metrics.addr = Some(cfg.http_addr); // exact collision
             assert!(cfg.validate().is_err(), "metrics.addr == http_addr is a config error");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn metrics_addr_same_port_different_host_as_http_addr_is_rejected() {
+        figment::Jail::expect_with(|jail| {
+            // A wildcard-vs-loopback pair on the SAME port is NOT caught by exact-address
+            // equality but both listeners still fail at bind with `AddrInUse` — validate() must
+            // reject this too, not just an exact-address match.
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!("http_addr = \"127.0.0.1:8080\"\n{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()),
+            )?;
+            let mut cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_ok(), "sanity: the base config must validate before the collision is introduced");
+            cfg.metrics.addr = Some("0.0.0.0:8080".parse().expect("valid addr"));
+            assert!(cfg.validate().is_err(), "metrics.addr and http_addr sharing a port on different hosts is a config error");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn metrics_addr_same_port_as_grpc_addr_is_rejected() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
+            let mut cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_ok(), "sanity: the base config must validate before the collision is introduced");
+            cfg.metrics.addr = Some(cfg.grpc_addr); // collision with grpc_addr, not http_addr
+            assert!(cfg.validate().is_err(), "metrics.addr == grpc_addr is a config error");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn metrics_addr_distinct_ports_from_http_and_grpc_is_ok() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
+            let mut cfg: IamConfig = IamConfig::figment().extract()?;
+            cfg.metrics.addr = Some("0.0.0.0:9999".parse().expect("valid addr"));
+            assert!(cfg.validate().is_ok(), "metrics.addr on a distinct port from both http_addr and grpc_addr should validate");
             Ok(())
         });
     }

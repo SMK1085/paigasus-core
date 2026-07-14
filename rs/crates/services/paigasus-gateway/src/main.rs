@@ -34,6 +34,29 @@ async fn main() -> anyhow::Result<()> {
         describe_gateway_metrics();
     }
 
+    // Periodic Prometheus upkeep (CodeRabbit round-1 fix): `PrometheusBuilder::install_recorder()`
+    // (unlike `install()`) does NOT spawn the maintenance task `PrometheusHandle::run_upkeep()`
+    // needs to periodically drain/decay histograms — without calling it ourselves, memory grows
+    // unbounded over the life of the process. `init()` itself stays runtime-agnostic (it's also
+    // called from plain `#[test]` code with no Tokio runtime), so the spawn lives here instead,
+    // only once an async runtime + a real handle both exist. Cloned off `metrics_handle` (the
+    // original is still needed below for `metrics_router`); races the same shutdown signal the
+    // main server uses so this task stops cleanly rather than lingering after the servers below
+    // have shut down.
+    if let Some(handle) = metrics_handle.clone() {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            let shutdown = shutdown_signal();
+            tokio::pin!(shutdown);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => handle.run_upkeep(),
+                    () = &mut shutdown => break,
+                }
+            }
+        });
+    }
+
     // Outbound clients. IAM connects lazily (a dead IAM does not block startup); the OpenAI client
     // is built with the three split timeout budgets. Neither construction logs the key.
     let iam = IamClient::connect(&config.iam).await?;

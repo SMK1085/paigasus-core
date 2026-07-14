@@ -259,10 +259,13 @@ impl GatewayConfig {
             ));
         }
 
+        // A same-PORT check, not exact-address-equality: an unequal-but-same-port pair (e.g.
+        // `0.0.0.0:8088` metrics vs `127.0.0.1:8088` http) passes exact equality yet both
+        // listeners still try to claim the same port and fail at bind time with `AddrInUse`.
         if let Some(addr) = self.metrics.addr
-            && addr == self.http_addr
+            && addr.port() == self.http_addr.port()
         {
-            return Err("metrics.addr must not equal http_addr".to_string());
+            return Err("metrics.addr must use a different port than http_addr".to_string());
         }
 
         Ok(())
@@ -476,8 +479,35 @@ mod tests {
             jail.create_file("gateway.toml", valid_toml())?;
             let mut cfg: GatewayConfig = GatewayConfig::figment().extract()?;
             cfg.metrics.enabled = true;
-            cfg.metrics.addr = Some(cfg.http_addr); // collision
+            cfg.metrics.addr = Some(cfg.http_addr); // exact collision
             assert!(cfg.validate().is_err(), "metrics.addr == http_addr is a config error");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn metrics_addr_same_port_different_host_as_http_addr_is_rejected() {
+        figment::Jail::expect_with(|jail| {
+            // A wildcard-vs-loopback pair on the SAME port is NOT caught by exact-address
+            // equality but both listeners still fail at bind with `AddrInUse` — validate() must
+            // reject this too, not just an exact-address match.
+            jail.create_file("gateway.toml", &format!("http_addr = \"127.0.0.1:8088\"\n{}", valid_toml()))?;
+            let mut cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            cfg.metrics.enabled = true;
+            cfg.metrics.addr = Some("0.0.0.0:8088".parse().expect("valid addr"));
+            assert!(cfg.validate().is_err(), "metrics.addr and http_addr sharing a port on different hosts is a config error");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn metrics_addr_distinct_port_from_http_addr_is_ok() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            let mut cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            cfg.metrics.enabled = true;
+            cfg.metrics.addr = Some("0.0.0.0:9999".parse().expect("valid addr"));
+            assert!(cfg.validate().is_ok(), "metrics.addr on a distinct port from http_addr should validate");
             Ok(())
         });
     }
