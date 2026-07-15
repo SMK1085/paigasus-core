@@ -7,11 +7,15 @@
 
 mod support;
 
-use chrono::{TimeZone, Utc};
+use chrono::{Datelike, TimeZone, Utc};
 use paigasus_iam::adapters::persistence::Migrator;
 use paigasus_iam::adapters::persistence::entities::audit_log;
-use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait, PaginatorTrait, Set, Statement};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, DatabaseConnection, EntityTrait, PaginatorTrait, Set, Statement};
 use sea_orm_migration::MigratorTrait;
+use testcontainers_modules::postgres::Postgres;
+use testcontainers_modules::testcontainers::ContainerAsync;
+use testcontainers_modules::testcontainers::ImageExt;
+use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use uuid::Uuid;
 
 /// `true` iff `audit_log` is a partitioned table (has a row in `pg_partitioned_table`).
@@ -21,6 +25,43 @@ async fn audit_log_is_partitioned(db: &impl ConnectionTrait) -> bool {
         "SELECT 1 FROM pg_partitioned_table WHERE partrelid = 'audit_log'::regclass".to_string(),
     );
     db.query_one(stmt).await.unwrap().is_some()
+}
+
+/// The physical partition leaf a row with `id` ACTUALLY landed in, via `tableoid`. This is the
+/// only way to catch a reversed `FOR VALUES IN` clause or a wrong month boundary: `find_by_id`/
+/// `count` transparently scan every leaf and would pass even if a row silently landed in the
+/// wrong partition (the gap this closes — SMA-467 Task 1 review finding).
+async fn physical_leaf(db: &impl ConnectionTrait, id: Uuid) -> String {
+    let stmt = Statement::from_sql_and_values(sea_orm::DatabaseBackend::Postgres, "SELECT tableoid::regclass::text AS leaf FROM audit_log WHERE id = $1", [id.into()]);
+    db.query_one(stmt)
+        .await
+        .unwrap()
+        .expect("row must exist to read its physical leaf")
+        .try_get::<String>("", "leaf")
+        .unwrap()
+}
+
+/// Starts a raw, ephemeral Postgres container WITHOUT running any migrations — mirrors
+/// `support::start_migrated_postgres` (same image/tag/CI-gating posture) but stops short of
+/// `Migrator::up(&db, None)` so the caller can drive `Migrator::up` step by step. Needed to seed
+/// the plain, pre-m0008 `audit_log` shape (m0001..m0007) with historical rows BEFORE m0008 ever
+/// runs — `support::start_migrated_postgres` always runs every migration up front, so it can
+/// never observe `existing_month_span`'s non-empty (pre-existing-data) branch.
+async fn start_raw_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseConnection)> {
+    let node = match Postgres::default().with_tag("16-alpine").start().await {
+        Ok(n) => n,
+        Err(e) => {
+            if std::env::var_os("CI").is_some() {
+                panic!("Docker is required for this test in CI: {e}");
+            }
+            eprintln!("skipping historical-copy test: Docker unavailable ({e})");
+            return None;
+        }
+    };
+    let port = node.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let db = Database::connect(&url).await.unwrap();
+    Some((node, db))
 }
 
 fn row(id: Uuid, outcome: &str, occurred_at: chrono::DateTime<Utc>) -> audit_log::ActiveModel {
@@ -46,11 +87,37 @@ async fn migration_makes_audit_log_partitioned_and_routes_rows() {
     // committed + denied in the current month, a far-future denied (→ RANGE default), and a
     // stray outcome (→ LIST default `audit_log_other`) — none may fail to insert (the G1 guarantee).
     let now = Utc::now();
+    let (year, month) = (now.year(), now.month());
     let far_future = Utc.with_ymd_and_hms(2999, 1, 1, 0, 0, 0).unwrap();
     row(Uuid::from_u128(1), "committed", now).insert(&db).await.expect("committed insert routes");
     row(Uuid::from_u128(2), "denied", now).insert(&db).await.expect("denied insert routes");
     row(Uuid::from_u128(3), "denied", far_future).insert(&db).await.expect("far-future denied → RANGE default");
     row(Uuid::from_u128(4), "quarantined", now).insert(&db).await.expect("stray outcome → LIST default, must not fail");
+
+    // Physical-routing assertions (SMA-467 Task 1 review finding): `find_by_id`/`count` scan
+    // every leaf transparently, so they can't catch a reversed `FOR VALUES IN` clause or a wrong
+    // month boundary — only reading back `tableoid` proves a row landed in the leaf it should
+    // have, not merely SOME leaf.
+    assert_eq!(
+        physical_leaf(&db, Uuid::from_u128(1)).await,
+        format!("audit_log_committed_{year:04}_{month:02}"),
+        "committed row must physically land in its month's committed leaf"
+    );
+    assert_eq!(
+        physical_leaf(&db, Uuid::from_u128(2)).await,
+        format!("audit_log_denied_{year:04}_{month:02}"),
+        "denied row must physically land in its month's denied leaf (not the committed leaf — catches a reversed LIST clause)"
+    );
+    assert_eq!(
+        physical_leaf(&db, Uuid::from_u128(3)).await,
+        "audit_log_denied_default",
+        "far-future denied row (no monthly leaf pre-created) must land in the denied RANGE default"
+    );
+    assert_eq!(
+        physical_leaf(&db, Uuid::from_u128(4)).await,
+        "audit_log_other",
+        "a stray outcome must land in the LIST default `audit_log_other`"
+    );
 
     // find_by_id resolves against the partitioned parent (id is not a partition key).
     let found = audit_log::Entity::find_by_id(Uuid::from_u128(3)).one(&db).await.unwrap();
@@ -58,11 +125,15 @@ async fn migration_makes_audit_log_partitioned_and_routes_rows() {
     assert_eq!(found.unwrap().outcome, "denied");
 }
 
-/// Seeds a PLAIN `audit_log` (pre-m0008 shape), then runs m0008's up SQL logic implicitly via a
-/// fresh migrate is not possible here (migrate already ran) — instead assert the through-migration
-/// invariants: rows inserted across MULTIPLE months + a gap month all round-trip and route to the
-/// right monthly leaf. (The swap's copy path is exercised by any env that had rows before m0008;
-/// here we prove multi-month routing + retrieval end-to-end.)
+/// `start_migrated_postgres` runs m0008 against an EMPTY `audit_log`, so `existing_month_span`
+/// pre-creates leaves only for the container's current month (+1 ahead) — these rows are dated
+/// months earlier (relative to the real clock) and therefore have no pre-created monthly leaf.
+/// This asserts they land in the denied RANGE default (not silently dropped, and not misrouted
+/// into some other leaf) and are still retrievable from there — the multi-month + gap-month +
+/// month-end-boundary insert path doesn't ERROR even with no matching leaf. Actual per-month
+/// monthly-leaf routing for pre-existing historical data is proven separately by
+/// `historical_rows_seeded_before_m0008_survive_the_swap_and_route_to_their_leaf`, which seeds
+/// rows before m0008 runs so `existing_month_span`'s non-empty branch spans them.
 #[tokio::test]
 async fn rows_across_multiple_and_gap_months_route_and_read_back() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
@@ -77,9 +148,12 @@ async fn rows_across_multiple_and_gap_months_route_and_read_back() {
         row(Uuid::from_u128(100 + i as u128), "denied", *ts).insert(&db).await.expect("multi-month denied insert routes");
     }
     for (i, _) in months.iter().enumerate() {
-        assert!(
-            audit_log::Entity::find_by_id(Uuid::from_u128(100 + i as u128)).one(&db).await.unwrap().is_some(),
-            "row {i} must be retrievable after routing to its monthly leaf"
+        let id = Uuid::from_u128(100 + i as u128);
+        assert!(audit_log::Entity::find_by_id(id).one(&db).await.unwrap().is_some(), "row {i} must be retrievable after routing");
+        assert_eq!(
+            physical_leaf(&db, id).await,
+            "audit_log_denied_default",
+            "row {i} predates this test's (empty-table-bootstrap) pre-created leaves, so it must land in the denied RANGE default, not be silently misrouted"
         );
     }
 }
@@ -144,5 +218,93 @@ async fn down_migration_restores_the_plain_m0006_shape_and_preserves_rows() {
         "ix_audit_log_outcome",
     ] {
         assert!(names.contains(&expected.to_string()), "index {expected} must exist after down, got {names:?}");
+    }
+}
+
+/// Exercises `existing_month_span`'s non-empty branch (previously untested — SMA-467 Task 1
+/// review finding gap #2): seeds the PLAIN, pre-m0008 `audit_log` (m0001..m0007) with historical
+/// rows spanning MULTIPLE distinct months (with a gap month) BEFORE m0008 ever runs, then applies
+/// m0008 and asserts every seeded row (a) survived the copy/swap and (b) physically landed in its
+/// own month's leaf — not the RANGE default — via `tableoid`.
+///
+/// A single `Migrator::up(&db, None)` (as `support::start_migrated_postgres` uses) always runs
+/// m0008 against an empty table, so it can never observe this branch: `existing_month_span` reads
+/// `min`/`max(occurred_at)` from `audit_log` at the moment m0008 runs, and an empty table always
+/// collapses that span to just the current month. Driving `Migrator::up` in two steps — first
+/// `Some(7)` (m0001..m0007, the plain m0006 shape), then a raw seed, then `Some(1)` (m0008) —
+/// lets `existing_month_span` see the seeded historical span and pre-create leaves for it.
+#[tokio::test]
+async fn historical_rows_seeded_before_m0008_survive_the_swap_and_route_to_their_leaf() {
+    let Some((_pg, db)) = start_raw_postgres().await else { return };
+
+    // Apply m0001..m0007 only — the plain, pre-partition `audit_log` shape (m0006).
+    Migrator::up(&db, Some(7)).await.expect("m0001..m0007 must apply");
+    assert!(!audit_log_is_partitioned(&db).await, "audit_log must still be the plain m0006 table before m0008 runs");
+
+    // Seed historical rows across multiple distinct months (with a gap month) directly into the
+    // plain table via raw INSERT — mirrors real pre-existing audit data written before m0008
+    // ever ran. `id`/`occurred_at`/`action`/`outcome` are the plain table's only NOT NULL columns.
+    struct Seed {
+        id: Uuid,
+        outcome: &'static str,
+        occurred_at: chrono::DateTime<Utc>,
+        expected_leaf: &'static str,
+    }
+    let seeds = [
+        Seed {
+            id: Uuid::from_u128(9_001),
+            outcome: "committed",
+            occurred_at: Utc.with_ymd_and_hms(2026, 1, 10, 8, 0, 0).unwrap(),
+            expected_leaf: "audit_log_committed_2026_01",
+        },
+        Seed {
+            id: Uuid::from_u128(9_002),
+            outcome: "denied",
+            occurred_at: Utc.with_ymd_and_hms(2026, 1, 20, 9, 0, 0).unwrap(),
+            expected_leaf: "audit_log_denied_2026_01",
+        },
+        // gap: no February row
+        Seed {
+            id: Uuid::from_u128(9_003),
+            outcome: "denied",
+            occurred_at: Utc.with_ymd_and_hms(2026, 3, 5, 10, 0, 0).unwrap(),
+            expected_leaf: "audit_log_denied_2026_03",
+        },
+        Seed {
+            id: Uuid::from_u128(9_004),
+            outcome: "committed",
+            occurred_at: Utc.with_ymd_and_hms(2026, 3, 28, 11, 0, 0).unwrap(),
+            expected_leaf: "audit_log_committed_2026_03",
+        },
+    ];
+    for seed in &seeds {
+        let stmt = Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            "INSERT INTO audit_log (id, occurred_at, action, outcome) VALUES ($1, $2, 'GetProject', $3)",
+            [seed.id.into(), seed.occurred_at.into(), seed.outcome.into()],
+        );
+        db.execute(stmt).await.expect("raw historical insert into the plain (pre-m0008) audit_log");
+    }
+
+    // Now apply m0008: the swap must copy every pre-existing row into the new partitioned tree,
+    // and `existing_month_span` must pre-create leaves covering their months (Jan/Mar 2026).
+    Migrator::up(&db, Some(1)).await.expect("m0008 must apply over pre-existing historical rows");
+    assert!(audit_log_is_partitioned(&db).await, "audit_log must be partitioned after m0008");
+
+    let after = audit_log::Entity::find().count(&db).await.unwrap();
+    assert_eq!(after, seeds.len() as u64, "every historical row seeded before m0008 must survive the copy/swap");
+
+    for seed in &seeds {
+        assert!(
+            audit_log::Entity::find_by_id(seed.id).one(&db).await.unwrap().is_some(),
+            "historical row {} must be retrievable after the swap",
+            seed.id
+        );
+        assert_eq!(
+            physical_leaf(&db, seed.id).await,
+            seed.expected_leaf,
+            "historical row {} must physically route to its own month's leaf, not the RANGE default",
+            seed.id
+        );
     }
 }
