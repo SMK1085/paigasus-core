@@ -74,6 +74,30 @@
 #                                      # increase means the drain isn't keeping up — raise this
 #                                      # capacity or investigate the audit DB. This is a
 #                                      # deliberate tradeoff: no durable spooling.
+#
+# --- Audit-log query window (SMA-467) ---
+# query_default_window_days = 90      # lookback applied when an audit `query` supplies neither
+#                                      # `from` nor `to`, so the read prunes to recent partitions
+#                                      # instead of scanning every leaf — default shown; must be >= 1
+# query_max_window_days     = 366     # hard cap on any `from`/`to` span; an over-wide range is
+#                                      # clamped to this — default shown; must be >= 1
+
+# --- Audit-log partition maintenance + outcome-aware retention (SMA-467) ---
+
+# [audit.retention]
+# enabled            = true    # default shown. false = don't run the maintenance task at all
+#                                # (no create-ahead, no pruning). To pause only DELETIONS while
+#                                # keeping create-ahead healthy, leave this true and set the two
+#                                # *_months below to 0 instead.
+# interval_secs       = 86400   # seconds between maintenance ticks (create-ahead + prune) —
+#                                # default shown (daily); must be >= 1
+# ahead_months        = 1       # months of leaf partitions to pre-create ahead of time —
+#                                # default shown; must be within 1..=24
+# denied_months       = 3       # drop denied monthly partitions older than this — default
+#                                # shown; 0 = never drop denied
+# committed_months    = 0       # drop committed monthly partitions older than this — default
+#                                # shown (never); a non-zero value auto-deletes compliance rows,
+#                                # opt-in only
 
 # --- Transactional outbox relay (M5, SMA-446) ---
 
