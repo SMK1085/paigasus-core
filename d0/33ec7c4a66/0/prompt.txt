@@ -1,0 +1,47 @@
+<task-notification>
+<task-id>adaebd6e0d6e6da34</task-id>
+<tool-use-id>toolu_01LChcfAbX1eeXaH8Vyj8XSE</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/adaebd6e0d6e6da34.output</output-file>
+<status>completed</status>
+<summary>Agent "Review U8: alert rules + promtool" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Spec Compliance
+
+✅ **Metric names** — every metric referenced in `ops/observability/prometheus/rules/{iam,gateway}.rules.yml` and their `tests/*.test.yml` fixtures is a verbatim const value from `rs/crates/libs/paigasus-observability/src/names.rs::ALL` (`iam_denial_audits_dropped_total`, `iam_outbox_oldest_unpublished_age_seconds`, `iam_outbox_relay_parked_total`, `iam_outbox_relay_ticks_total`, `iam_http_requests_total`, `iam_grpc_requests_total`, `gateway_http_requests_total`, `gateway_iam_calls_total`, `gateway_upstream_requests_total`) plus builtin `up`. No typos, nothing outside the registry.
+
+✅ **Label selectors match real instrumentation** — traced each to the emitting code: `status_class` (`rs/crates/libs/paigasus-observability/src/http.rs:60-66`, values `"Nxx"`), `grpc_status` (`rs/crates/libs/paigasus-observability/src/grpc.rs:9-19`, `"ok"` or code name, e.g. `"permission_denied"`), `result` on `gateway_iam_calls_total` (`rs/crates/services/paigasus-gateway/src/adapters/http/auth.rs:126-131,139-146`, bounded to `"ok"/"denied"/"unavailable"/"error"` — `"unavailable"` used in `GatewayIamDependencyUnavailable` is a real value). All selectors are real, not invented.
+
+✅ **`IamOutboxEventsParked`** — `increase(iam_outbox_relay_parked_total[15m]) &gt; 0` (`ops/observability/prometheus/rules/iam.rules.yml:24-28`), counter+`increase`, not a gauge `&gt;0`. Matches constraint exactly.
+
+✅ **`IamOutboxRelayStalled`** — `rate(iam_outbox_relay_ticks_total[10m]) == 0` (`iam.rules.yml:29-33`). Matches exactly.
+
+✅ **`IamHighErrorRate`/`GatewayHighErrorRate`/`GatewayUpstreamErrors`** — HTTP 5xx ratio via `sum(rate({status_class="5xx"}))/sum(rate(total))`. **`IamGrpcHighErrorRate`** — non-`ok` `grpc_status` ratio. All well-formed, correct label semantics.
+
+✅ **Test coverage** — 6 IAM alerts (`iam.rules.yml`) + 4 gateway alerts (`gateway.rules.yml`, incl. `TargetDown`) = 10 alerts; `iam.test.yml` + `gateway.test.yml` = 10 test blocks, one per alert, each with a negative (`for:` not yet elapsed) and positive (fires) case. 1:1 coverage, no gaps.
+
+✅ **promtool proto-pin** — `.proto/plugins/promtool.toml` follows the established vendored-plugin pattern (cf. `cargo-deny.toml`/`buf.toml`); `.prototools` has both the version pin (`promtool = "3.13.1"`, alphabetically placed) and the `[plugins]` `file://` line. Version matches `ops/observability/docker-compose.yml:4` (`prom/prometheus:v3.13.1`).
+
+✅ **CI gate wiring** — `moon.yml:131-141` defines `promtool` task (script running all 3 promtool commands, `toolchain: system`, scoped inputs); `.github/workflows/ci.yml:58` adds `:promtool` to the `T=(...)` array actually passed to `moon ci`/`moon run` in both PR and push paths.
+
+✅ **Independently re-verified**, not just taking the report's word: ran `promtool check config`, `promtool check rules ops/observability/prometheus/rules/*.rules.yml`, and `promtool test rules ops/observability/prometheus/rules/tests/*.test.yml` myself — all `SUCCESS` (4 rules in gateway.rules.yml, 6 in iam.rules.yml, both test files pass). Also ran `moon run repo:promtool` directly — green end-to-end.
+
+## Strengths
+
+- Every metric/label claim was checked against actual Rust emission sites, not just the registry file — genuinely traced `status_class`, `grpc_status`, and `result` label values back to source.
+- Test fixtures correctly required `exp_annotations` (a real promtool gotcha: an omitted `exp_annotations` on a firing case asserts *empty* annotations, not "don't care") — documented and handled.
+- Ratio-alert fixtures use a robust ~50% split (well clear of the 5% threshold) rather than a borderline value, avoiding flakiness from `rate()` extrapolation edge effects.
+- Judgment calls (`GatewayIamDependencyUnavailable` `for: 5m`, `GatewayUpstreamErrors` severity `warning`, `TargetDown` co-located rather than a third file) are explicitly flagged in the report rather than silently made.
+
+## Issues
+
+None Critical or Important found.
+
+**Minor:**
+- `ops/observability/prometheus/rules/gateway.rules.yml:12-19` — `TargetDown` lives in a second `targets:` group inside `gateway.rules.yml` rather than a separate shared rules file. The brief called it "shared" but named no file, so this is a defensible reading (and the CI glob covers it regardless), but it's slightly gateway-coupled given `TargetDown` also applies to the IAM scrape target. Not a functional problem — flagging only because a future unit adding a third scraped service would make this placement feel more arbitrary.
+- No "alert clears" fixture case (each alert has fire + not-yet-fire, no resolve-after-firing case). Explicitly acknowledged in the report as matching the brief's own example bar — acceptable, not a gap against what was asked.
+
+## Assessment
+
+**Task quality: Approved.** All global constraints (registry-only metric names, counter-vs-gauge semantics on the outbox-parked alert, stalled-relay `rate(...)==0`, 5xx/grpc-ratio formulas) are met exactly, every alert has a firing test fixture, the promtool proto-pin is structurally sound and functionally verified (both by the implementer and independently by me), and the CI gate is correctly wired into the `moon ci` target list. No fixes required.</result>
+<usage><subagent_tokens>67249</subagent_tokens><tool_uses>21</tool_uses><duration_ms>147150</duration_ms></usage>
+</task-notification>
