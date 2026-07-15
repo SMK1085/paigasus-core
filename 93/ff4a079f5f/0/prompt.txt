@@ -1,0 +1,16 @@
+<task-notification>
+<task-id>a3b7c708340c9c4d5</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/a3b7c708340c9c4d5.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement U10: name-drift test" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+Commit: `02dcd946a2c497e0d9fc4e173a2a2c0cfd79b12c` — "test(rs): add dashboard/alert metric-name drift guard (SMA-446)"
+Test result: `cargo test -p paigasus-observability --test drift` → 1 passed (also full crate: 6 unit + 1 integration + 0 doc, all green); `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` both clean.
+YAML crate: `serde_norway = "0.9.42"` (dev-dep only, maintained serde_yaml fork, MIT OR Apache-2.0, both already allow-listed in deny.toml; not previously a transitive dep).
+RED-check: appended `expr: rate(iam_bogus_total[5m])` to `iam.rules.yml`; test failed with `dashboards/rules reference unknown metrics ...: ops/observability/prometheus/rules/iam.rules.yml: iam_bogus_total`; reverted via `git checkout --`, diff-verified byte-identical, re-ran green.
+Concerns: brief's path-depth snippet (`/../../..`) is off by one level for this crate's actual nesting — used `/../../../..` (verified against filesystem); full repo-wide `moon ci` gate list not run (out of this unit's scope per brief).
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-observability/.superpowers/sdd/u10-report.md`</result>
+<usage><subagent_tokens>84201</subagent_tokens><tool_uses>45</tool_uses><duration_ms>262914</duration_ms></usage>
+</task-notification>
