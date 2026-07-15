@@ -1,0 +1,22 @@
+<task-notification>
+<task-id>a29922277c25f39a9</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/a29922277c25f39a9.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement G2: scope_prn cache plumbing" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Task G2 complete.
+
+**Status:** DONE — all 5 brief steps implemented, committed, signed.
+
+**Commit:** `98048fd` — `feat(rs): surface api-key scope_prn on introspect via the cache (SMA-446)` (SSH-signed, good signature; commitlint passed). 15 files: proto + regenerated rust/py/ts bindings + core `Credential::ApiKey` + cache/service plumbing + both introspect mappers + tests.
+
+**Tests:** all green — core 67, `api_key`-filtered run 0 failures across 46 binaries; my 3 new unit tests pass (D11 `cache_hit_returns_scope_prn_without_a_db_read` + gRPC/HTTP parity twins); real-PG `api_keys_grpc` 3, `api_key_auth` 13, real-Redis `api_key_cache_redis` 5. Clippy clean, fmt clean.
+
+**Codegen:** verified deterministic — clean-HEAD regen produced zero diff (bindings are canonical for the pinned toolchain), so CI will byte-match. The big `paigasus.iam.v1.rs` diff is 3348 FILE_DESCRIPTOR_SET byte-shifts + the 3-line `scope_prn` field (expected); the tonic.rs 2-line change is a benign detached-comment reattachment from the proto line-shift.
+
+**Concerns:** I did not run the aggregate repo-level gate graph (`:deny :machete :affected-smoke :parity-corpus-drift` etc.) — only per-crate build/test/clippy/fmt plus a manual codegen-determinism check. No new deps were added and drift is verified clean, so no gate impact is expected, but the full `moon ci … --base origin/main --include-relations` has not been executed.
+
+**Report:** `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/.superpowers/sdd/task-G2-report.md`</result>
+<usage><subagent_tokens>216167</subagent_tokens><tool_uses>79</tool_uses><duration_ms>1374368</duration_ms></usage>
+</task-notification>
