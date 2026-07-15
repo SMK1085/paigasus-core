@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bhyptwy7i</task-id>
+<tool-use-id>toolu_01JQ1BuYPwadoNG9HpNpaaEU</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/bhyptwy7i.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll prebuild re-run to completion" completed (exit code 0)</summary>
+</task-notification>
