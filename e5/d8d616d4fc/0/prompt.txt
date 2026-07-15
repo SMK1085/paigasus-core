@@ -1,0 +1,27 @@
+<task-notification>
+<task-id>a446d5a56113c989b</task-id>
+<tool-use-id>toolu_016rqwkgJDWSvqRgjrETS2vW</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/a446d5a56113c989b.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement G6: OpenAI streaming egress" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Task G6 complete. Commit is SSH-signed (`G` = good signature) and the working tree is clean.
+
+**Status: DONE**
+
+**Commit:** `bea37b7c7af891af093180dbff648937498697ae` — `feat(rs): add gateway OpenAI dto + streaming egress client (SMA-446)` (signed, commitlint passed)
+
+**Tests:** `cargo test -p paigasus-gateway` → 48 unit + 6 egress integration, 0 failed. Covers DTO parse/round-trip/stream-default, non-stream verbatim, non-2xx verbatim passthrough, ordered unbuffered SSE, header hygiene (real key injected, no caller headers/cookie), secret hygiene (key absent from Debug). clippy `--all-targets -D warnings` clean; fmt clean.
+
+**New deps (for G9):**
+- `reqwest = { workspace = true, features = ["stream"] }` — crate's first reqwest use; adds `stream` for `bytes_stream()`, TLS untouched (stays ring). **`grep -c aws-lc-rs rs/Cargo.lock` = 0**; `ring` present.
+- `bytes` + `futures` (both `{ workspace = true }`, consumed in `src/` → no machete ignore needed).
+- New transitive lock entry `wasm-streams 0.4.2` (reqwest `stream`, wasm-only), `MIT OR Apache-2.0` — already in `deny.toml` allow list, no exception needed. Ran `cargo deny check licenses bans` → **ok**.
+
+**Key design notes:** `ChatResponse` enum (`Full{status,body}` / `Stream{status,stream}`), `OpenAiByteStream = BoxStream&lt;'static, Result&lt;Bytes, reqwest::Error&gt;&gt;`; `OpenAiError = Build/Connect/Timeout/Transport`; non-2xx is NOT an error (returned as `Full` for verbatim forwarding). Timeouts split: `connect_timeout`+`read_timeout(idle)` on the client, per-request `.timeout(first_byte)` only on the non-stream path, no global timeout. Used `read_timeout` (available in reqwest 0.12.28) as the between-bytes idle bound. Constructor is `OpenAiClient::new(&amp;OpenAiConfig, connect, first_byte, stream_idle)`. Minor deviation from brief: `pub mod dto;` + `pub use dto::ChatCompletionRequest;` (brief said `mod dto;`) so G7's handler can reach the DTO — mirrors existing http/mod.rs re-export style.
+
+**Report:** `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/.superpowers/sdd/task-G6-report.md`
+
+**Concern:** none blocking. `.superpowers/` is gitignored so the report isn't committed (by design). The reusable mock at `tests/support/mod.rs` is ready for G7; G8 still owes the client-abort/cancel-on-drop proof.</result>
+<usage><subagent_tokens>129807</subagent_tokens><tool_uses>48</tool_uses><duration_ms>742310</duration_ms></usage>
+</task-notification>
