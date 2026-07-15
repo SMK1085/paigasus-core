@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bj2kex0dd</task-id>
+<tool-use-id>toolu_01751efZ8BZGEvEdTJA8Bme3</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/9afe8601-e408-4606-98ac-68165a84a054/tasks/bj2kex0dd.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll PR #75 moon ci after force-push" completed (exit code 0)</summary>
+</task-notification>
