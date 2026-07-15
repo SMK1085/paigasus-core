@@ -1,0 +1,10 @@
+<task-notification>
+<task-id>aab212eec1fd6cadc</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/aab212eec1fd6cadc.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement U11: RUNBOOK" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE. Commit: 51efcf0 "docs(rs): add observability RUNBOOK (SMA-446)". RUNBOOK sections: 6 top-level (Overview, Metric catalog, Run local stack, Alerts→runbook entries [10 dedicated alert subsections + 3 posture subsections], Cardinality &amp; privacy, Future). Name cross-check: all 22 `names.rs` metric consts and all 10 alert names+exprs from `iam.rules.yml`/`gateway.rules.yml` verified verbatim via scripted diff — exact match, no invented names. Concerns: corrected the brief's "DROP/detach old partitions" claim — `audit_log` is currently a plain non-partitioned table (migration confirmed), so documented interim batched-DELETE retention instead; manual outbox-replay SQL is newly authored (no existing tool) and clearly caveated as interim. Markdown formatter: none covers `docs/` (`ts:fmt`'s prettier is scoped to `ts/` tree only) — skipped per DoD, table/fence structure verified manually instead. Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-observability/.superpowers/sdd/u11-report.md`.</result>
+<usage><subagent_tokens>151897</subagent_tokens><tool_uses>64</tool_uses><duration_ms>482397</duration_ms></usage>
+</task-notification>
