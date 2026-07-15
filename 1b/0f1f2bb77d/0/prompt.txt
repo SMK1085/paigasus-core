@@ -1,0 +1,53 @@
+<task-notification>
+<task-id>a135f29a1e731fed6</task-id>
+<tool-use-id>toolu_01SKiRt4ZgeZVJfhiRCKvv2Y</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/a135f29a1e731fed6.output</output-file>
+<status>completed</status>
+<summary>Agent "Review G4 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything needed. All key facts verified against tonic 0.14.6 source and the config module. Here is the review.
+
+---
+
+## Verdict: Approved
+
+Task G4 faithfully implements the outbound IAM adapter. The D9 self-query builder, `IamError` shape, ring-only TLS, `dyn`-safety, and file hygiene all check out. The three adjudicated deviations are all sound. One genuine test-fragility observation (documented by the implementer) is the only thing worth a follow-up; it does not block.
+
+## Spec Compliance
+
+- ✅ **Self-query builder (D9 — security crux)** — `self_authorize_request` (`client.rs:266-276`) sets metadata key `authorization` to exactly `Bearer &lt;caller_key&gt;` (line 273-274), and the body's `principal_prn`/`action`/`resource_prn` to the args verbatim with `context: Default::default()` (empty). The unit test `self_authorize_request_sets_bearer_and_body` (`client.rs:354-370`) asserts both the metadata value (`== "Bearer {caller_key}"`) and every body field. `principal_prn` and `caller_key` are independent args threaded straight from the signature — G4 never derives one from the other, so nothing here can make a caller-controlled value become a different principal than the bearer resolves to. The "never a substituted principal" invariant is correctly delegated to G5's call site and documented in-code (`client.rs:201-207`, module doc `client.rs:150-156`).
+- ✅ **Introspect bearer-exempt** — `introspect_request` (`client.rs:253-255`) attaches no metadata; test `introspect_request_has_no_authorization_metadata` (`client.rs:372-379`) asserts `.get("authorization").is_none()`.
+- ✅ **`IamError::Rpc` preserves `tonic::Status`** — `Rpc(#[from] tonic::Status)` (`client.rs:186`); the two RPC methods use `?` so the `Status` converts whole (no string flattening). Test `rpc_error_preserves_status_code` (`client.rs:421-433`) confirms `.code()` survives. `Connect(String)` is boot-time-only (G5 maps → 503). No information loss.
+- ✅ **TLS ring-only, aws-lc-free** — `tonic = { features = ["tls-ring", "tls-native-roots"] }`. Verified in tonic-0.14.6 `Cargo.toml`: `tls-ring → tokio-rustls/ring`; `tls-native-roots → dep:rustls-native-certs` (+`channel`); only `tls-aws-lc` pulls `tokio-rustls/aws-lc-rs`. Neither selected feature touches aws-lc; `grep -c aws-lc-rs` = 0 (independently reconfirmed). Lock delta is only `rustls-native-certs`/`tokio-rustls` edges on `tonic`.
+- ✅ **mTLS both-or-neither, before I/O** — `build_tls_config` (`client.rs:315-346`) matches the cert/key pair first; the `(Some,_,None)|(None,Some)` arm returns `IamError::Connect` before any `std::fs::read`. Test `connect_fails_for_mtls_with_only_client_cert` (`client.rs:405-419`) uses a nonexistent path and still gets `Connect`, proving the check precedes file I/O.
+- ✅ **`connect_lazy`** — `build_channel` (`client.rs:283-301`) returns `endpoint.connect_lazy()`; IAM-down-at-boot does not block startup (first RPC → `Status::Unavailable`).
+- ✅ **Trait `dyn`-safe** — `Iam: Send + Sync` under `#[async_trait]` (`client.rs:194-208`); no generics/`Self`-returns/associated types → `Arc&lt;dyn Iam&gt;` holds for G5.
+- ✅ **File hygiene** — `client.rs` and `mod.rs` both open SPDX + blank + `//!`. Commit `eff621c` subject is lowercase, 80 chars, correct trailer.
+- ✅ **machete allowlist pruned** — the `[package.metadata.cargo-machete] ignored = ["thiserror"]` block is deleted; `thiserror` is now genuinely consumed by `IamError`.
+- ⚠️ **`connect` default-TLS test** — passes in this repo's CI but couples to the host trust store (see Minor 1).
+
+## Adjudicated deviations (all sound)
+
+- **(a) added `tls-native-roots`** — JUSTIFIED. `ClientTlsConfig::with_native_roots()` is feature-gated behind `tls-native-roots` (tonic-0.14.6 `channel/tls.rs:101-102`), so the no-custom-CA path at `client.rs:338` would not compile without it; and `ClientTlsConfig::new()` starts with zero roots in 0.14. The feature pulls only `rustls-native-certs`, keeping the build aws-lc-free (closure verified). Correct and idiomatic.
+- **(b) omitted `prost`** — JUSTIFIED. The gateway references the generated messages via `paigasus_proto::…`, never a `prost::` path, so a direct `prost` dep would red machete. `prost` still arrives transitively through `paigasus-proto`. Correct.
+- **(c) `ca_cert_path` pins to that CA alone** — SOUND. The G3 config doc explicitly deferred this to G4; pinning (vs. augmenting public roots) is the stronger posture for a private-CA internal link carrying raw keys, and it is documented at the point of use (`client.rs:305-309`).
+
+## Strengths
+
+- Request construction extracted into `introspect_request` / `self_authorize_request` free fns, making the D9 wiring (metadata + body) provable without a live server — exactly what the brief asked.
+- Excellent, accurate in-code documentation of the eager-TLS / lazy-connect split and the self-query invariant boundary.
+- `IamError` split (`Connect` boot-time vs `Rpc` preserving `Status`) is precisely the shape G5's status→HTTP mapping needs.
+
+## Issues
+
+**Minor 1 — `connect_succeeds_for_default_tls_system_trust` couples to the host trust store** (`client.rs:392-403`). I traced the eager path: `build_channel` → `endpoint.tls_config()` (tonic `channel/endpoint.rs:377-382`) eagerly calls `into_tls_connector`, and for `with_native_roots` the connector build (`channel/service/tls.rs:87-94`) does `if certs.is_empty() { return Err(NativeCertsNotFound) }`. So `IamClient::connect(&amp;default_cfg).await` returns `Err` in any env with no system trust store (minimal/distroless/scratch runner without `ca-certificates`), failing this `assert …is_ok()`. It is green in this repo's CI (which ships ca-certificates), and the brief did mandate a system-trust connect test, so this is not a blocker — but it is a real latent trap, not fully avoidable while asserting `is_ok()` on the native-roots path. Mitigation for a follow-up: test the system-trust branch against a bundled test-CA PEM (`ca_cert_path`), or `tls-webpki-roots` compiled-in roots, so the assertion doesn't depend on ambient host state. (Production behavior — fail-fast at boot when system-trust TLS is configured but no trust store exists — is correct and should stay.)
+
+**Minor 2 — stale G3 config doc after G4's pinning decision** (`config.rs:49-50`). The `ca_cert_path` field doc still reads "to trust, in addition to (G4 decides: instead of, or alongside) the system trust store." G4 has now decided "instead of" (pins). Not in G4's diff and documented correctly at the use site, but a one-line update there would prevent an operator from assuming custom CA augments system roots. Low priority.
+
+No Critical or Important issues. No correctness or security defects found.
+
+## Assessment
+
+**Task quality: Approved.** The security crux (D9 self-query builder + introspect bearer-exemption) is implemented and unit-proven exactly to spec; `Rpc` preserves `Status` for G5; TLS is verifiably ring-only and aws-lc-free; the trait is `dyn`-safe; hygiene and the machete-allowlist cleanup are correct. All three flagged deviations are well-reasoned and hold up under source inspection. The single substantive observation (Minor 1) is a test-environment coupling the implementer already disclosed — worth a follow-up hardening, not a merge blocker.</result>
+<usage><subagent_tokens>75419</subagent_tokens><tool_uses>20</tool_uses><duration_ms>315680</duration_ms></usage>
+</task-notification>
