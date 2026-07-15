@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b5a9l2s8c</task-id>
+<tool-use-id>toolu_01UaNfPLkv6ukPFGsiJNNq73</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/6c9d3b43-69b7-4125-88cf-e1da3886418a/tasks/b5a9l2s8c.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for main runs after #70 merge, then check alert 5 state" completed (exit code 0)</summary>
+</task-notification>
