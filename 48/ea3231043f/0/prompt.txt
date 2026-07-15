@@ -1,0 +1,20 @@
+<task-notification>
+<task-id>a50b208daa358b4c5</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/a50b208daa358b4c5.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement Task 8: wasm binding" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE — staged &amp; verified.
+
+Files staged: `rs/crates/bindings/paigasus-wasm/src/lib.rs` (only file; tree otherwise clean, no commit made).
+
+Build/lint: `cargo build`, `cargo clippy -D warnings`, `cargo fmt --check`, `cargo machete rs` all pass clean for `paigasus-wasm` on `wasm32-unknown-unknown`; getrandom-free confirmed (`cargo tree -i getrandom` finds no match → invariant holds).
+
+js_names (11, verified identical to napi Task 7): prnCanonicalize, prnErrorKind, prnBuild, prnService, prnRegion, prnOrg, prnResourceType, prnResourceId, mintUuid7, prnCedarEntityType, prnCedarEntityId.
+
+Concerns: none — code matches brief verbatim modulo two cosmetic `cargo fmt` reflows (import alphabetization, one line wrap at 200-col limit).
+
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-448-kernel-prn/.superpowers/sdd/task-8-report.md`</result>
+<usage><subagent_tokens>53633</subagent_tokens><tool_uses>19</tool_uses><duration_ms>170842</duration_ms></usage>
+</task-notification>
