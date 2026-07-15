@@ -1,0 +1,50 @@
+<task-notification>
+<task-id>a9aec1995162c8111</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/a9aec1995162c8111.output</output-file>
+<status>completed</status>
+<summary>Agent "Review U5: IAM relay + gRPC metrics" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result># Spec Compliance Verdict: ✅ Approved
+
+I read the full diff (not just a sample — the file was small enough to review in its entirety across two reads) and cross-checked it against `rs/crates/libs/paigasus-observability/src/{names.rs,grpc.rs}`, the relay module, and `contracts/proto/paigasus/iam/v1/iam.proto`.
+
+## Spec Compliance
+
+- ✅ **SPDX headers** — all 8 touched files (`relay.rs`, `audit.rs`, `authn.rs`, `authz.rs`, `service_accounts.rs`, `tenancy.rs`, `tests/grpc_authz.rs`, `tests/relay_pg.rs`) retain `// SPDX-License-Identifier: Apache-2.0` as line 1. No new files were added.
+- ✅ **Names via registry** — `relay.rs:34,163-167` uses `paigasus_observability::names::IAM_OUTBOX_RELAY_{DRAINED,PUBLISHED,PUBLISH_FAILURES,PARKED}_TOTAL`, `IAM_OUTBOX_RELAY_TICKS_TOTAL` (`relay.rs:188,191`), `IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS` (`relay.rs:167`). All six consts pre-exist in `names.rs:27-32` and are in `names::ALL`. The gRPC side reuses the pre-existing `record_grpc` helper (`grpc.rs:10-28`), which itself references `IAM_GRPC_REQUESTS_TOTAL`/`IAM_GRPC_REQUEST_DURATION_SECONDS` — no hardcoded metric-name strings anywhere in the diff.
+- ✅ **`iam_outbox_relay_parked_total` is a counter** — `relay.rs:166`: `counter!(names::IAM_OUTBOX_RELAY_PARKED_TOTAL).increment(report.parked)`, incrementing by the per-tick newly-parked delta, not a gauge of a live count.
+- ✅ **`published = drained.saturating_sub(failures)`** — `relay.rs:165`, exact match to spec, and correctly composes with `TickReport`'s existing invariant (`drained` = published + failed rows for the tick).
+- ✅ **Oldest-age `None → 0`** — `relay.rs:167`: `.unwrap_or(0) as f64`.
+- ✅ **`result ∈ {ok, error}` is the only relay label** — `relay.rs:188,191`, the sole labeled emission on the relay side; the five per-tick emissions are unlabeled.
+- ✅ **gRPC `service`/`method` static literals, never `:path`-derived** — verified every one of the 38 call sites; all pass compile-time `&amp;str` literals. Cross-checked against `iam.proto`'s `service`/`rpc` declarations (`contracts/proto/paigasus/iam/v1/iam.proto:252-489`) — every RPC method name matches exactly, and the shortened service names (`Tenancy`/`Authentication`/`Authorization`/`ServiceAccount`/`Audit`) match the brief's explicit instruction (u5-brief.md:44), not the literal proto service identifiers.
+- ✅ **`record_grpc(service, method, started, &amp;result)`** — signature and call order match `grpc.rs:10` exactly at all 38 sites.
+- ✅ **No behavior change** — relay: same transaction/locking/bookkeeping logic, metrics are pure side effects placed after the pre-existing `tracing::info!` and before `Ok(report)`; `run()`'s `if let Err` was mechanically converted to an equivalent `match` with identical `tracing::warn!` on the error arm. gRPC: every handler's original body is moved verbatim into a `let result: Result&lt;...&gt; = async { &lt;original body&gt; }.await;` block — no reordering, no dropped `?`/`return`, no altered error mapping.
+- ✅ **Exactly-once recording on every gRPC return path** — 38 `async fn`s across the 5 files, 38 `record_grpc(` call sites (`authn.rs`:2, `audit.rs`:1, `authz.rs`:7, `service_accounts.rs`:7, `tenancy.rs`:21 — confirmed by both `grep -c` and manual line-by-line reading), 1:1. Because the wrapper is an `async {}` block (not a bare `{}`), internal `?` and mid-body `return Err(...)` (e.g. `tenancy.rs` Rename/Archive/Restore's `PrnMismatch` checks, `list_memberships`'s `None =&gt; return Err(...)`) resolve to the block's own output rather than escaping the outer `async fn` — so they still flow through `record_grpc` before the function returns. This is the correct fix for the failure mode the brief warns about ("If any handler still `?`-returns BEFORE `record_grpc`...").
+- ✅ **Health service** — correctly left uninstrumented; confirmed via `grpc/mod.rs:40-43` that it's wired through `tonic_health::server::health_reporter()`, a third-party canned `SERVING`-status implementation with no application code in this crate to wrap. Matches the brief's explicit "skipping is fine" allowance.
+- ✅ **Count matches claim** — 38 total (Authentication 2, Authorization 7, Tenancy 21, ServiceAccount 7, Audit 1), independently verified by `grep -c 'record_grpc('` per file and by counting `async fn` handler definitions per file — both give identical per-file numbers.
+- ✅ **Tests assert real render output** — both new relay tests (`tests/relay_pg.rs:1786-1827`) and the new gRPC test (`tests/grpc_authz.rs:1720-1755`) call `handle.render()` and assert on the actual exposition-format substrings (metric names + label pairs), not on internal state.
+- ⚠️ **Minor test-quality notes** (flagged below, not spec violations).
+
+## Strengths
+
+- The `async { &lt;original body&gt; }.await` wrapper is the right technique for this problem and is applied with zero drift from the original logic — I diffed every hunk and found no incidental behavior changes, only mechanical re-indentation.
+- `report.drained.saturating_sub(report.failures)` correctly derives `published` without adding new state to `TickReport` or touching the transactional-outbox logic at all.
+- Tests assert on rendered Prometheus text rather than mocking `metrics`, catching real registration bugs (name typos, missing labels).
+- Good faith-restoring detail in the report: the transient Redis test flake in the full-suite run is unrelated to this unit (correctly identified as pre-existing contention, not caused by this diff).
+
+## Issues
+
+**Minor** — `rs/crates/services/paigasus-iam/tests/relay_pg.rs:1811-1827` (`run_loop_emits_ticks_total_with_ok_result_label`): relies on a real wall-clock race (10ms poll interval vs. 300ms shutdown window) rather than a deterministic clock. The margin is generous (~30x) so it's unlikely to flake locally, but under a loaded/throttled CI runner (already a known pattern in this repo per the noted Redis testcontainer flake in the same run) a delayed first tick is a plausible flake source. Not blocking — the implementer already disclosed this as a known follow-up.
+
+**Minor** — no `run()` error-path (`result="error"`) test exists for the relay. The brief's DoD (u5-brief.md Step 5) only requires an `ok`-path assertion, so this isn't a spec gap, but it does mean the `Err(err) =&gt; { counter!(..., "result" =&gt; "error") ... }` branch (`relay.rs:190-193`) is currently unexercised by any test. Worth a follow-up ticket, not a blocker for this unit.
+
+No Critical or Important issues found.
+
+## Assessment
+
+**Task quality: Approved.**
+
+All binding constraints (SPDX, registry-only names, parked-as-counter, saturating published, oldest-age fallback, static gRPC labels, exactly-once recording, no behavior change) are satisfied and independently verified against source (not just the report's claims). The two Minor items are pre-disclosed, non-blocking test-coverage/robustness notes rather than spec or correctness defects.</result>
+<usage><subagent_tokens>110001</subagent_tokens><tool_uses>16</tool_uses><duration_ms>216685</duration_ms></usage>
+</task-notification>
