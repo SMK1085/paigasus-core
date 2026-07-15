@@ -1,0 +1,30 @@
+<task-notification>
+<task-id>a9211799d07bc8b97</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/a9211799d07bc8b97.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement G4: gateway IAM clients" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Task G4 complete.
+
+**Status: DONE** — committed on `feature/sma-446-gateway-m0-iam-auth`, signature good.
+
+**Commit:** `eff621c` — `feat(rs): add gateway IAM gRPC clients (introspect + self-query authz) (SMA-446)`
+
+**Tests:** 21 passed / 0 failed (6 new iam-client tests: self-authorize metadata+body proof, introspect-no-bearer, loopback-insecure connect, default-TLS system-trust connect, mTLS-missing-key→Connect, Rpc-preserves-Status). clippy `-D warnings` clean, fmt clean, machete clean.
+
+**What landed:** `src/adapters/iam/{mod.rs,client.rs}` — `IamError` (`Connect` + `Rpc(#[from] tonic::Status)`, Status preserved for G5), the `#[async_trait] Iam` port (`dyn`-safe seam for G5 fake / G7 wiring), and `IamClient` over one `connect_lazy` Channel. Bearer semantics per D9: introspect is bearer-EXEMPT; `is_authorized_self` sets `authorization: Bearer &lt;caller_key&gt;` + caller's own SA PRN as principal. Request builders extracted as free fns for server-free unit tests.
+
+**New deps/features (for G9):**
+- `tonic = { workspace = true, features = ["tls-ring", "tls-native-roots"] }`. `tls-ring` = RING provider (never `tls-aws-lc`). **Design fork:** added `tls-native-roots` beyond the brief's `tls-ring` — tonic 0.14's `ClientTlsConfig::new()` has no roots and builds the connector eagerly, so the "None = system trust store" path needs it; it pulls only `rustls-native-certs`, no `aws-lc-rs`.
+- `paigasus-proto`, `async-trait` added; `thiserror` now consumed and its cargo-machete allowlist block removed.
+- **Did NOT add `prost`** (brief listed it) — unused here, would red machete.
+- `grep -c aws-lc-rs rs/Cargo.lock` = **0**; Cargo.lock change is only a `rustls-native-certs` edge on `tonic` (package already present via reqwest).
+
+**TLS decision noted:** custom `ca_cert_path` pins to that CA alone (private-CA posture); mTLS is both-or-neither (checked before file I/O).
+
+**Concern:** the `default_tls_system_trust` connect test exercises eager native-root loading — passes on dev/CI with a system trust store; would fail in a trust-store-less environment (acceptable, CI has ca-certificates).
+
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/.superpowers/sdd/task-G4-report.md` (`.superpowers/` is gitignored, so not committed).</result>
+<usage><subagent_tokens>123702</subagent_tokens><tool_uses>47</tool_uses><duration_ms>765011</duration_ms></usage>
+</task-notification>
