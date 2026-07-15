@@ -1,0 +1,52 @@
+<task-notification>
+<task-id>adf81f519803fc076</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/adf81f519803fc076.output</output-file>
+<status>completed</status>
+<summary>Agent "Final whole-branch review" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I've completed a thorough integration-level review of the whole branch. I read the full diff, the design spec (rev 2), and ran targeted read-only checks (gRPC coverage, hyper-duplication, machete on IAM, whitelist-const usage). Here is my verdict.
+
+---
+
+# Final Whole-Branch Review — SMA-446 sub-project 3 (observability)
+
+## Strengths
+
+- **Cardinality &amp; privacy discipline is airtight (the highest-risk area).** I verified every emission site in both services: no `model`, PRN, key-id, principal, raw path, or free-form error text ever reaches a label. `status_class` collapses to `Nxx`, `method_label` collapses unknown verbs to `OTHER`, and gRPC `service`/`method` are **compile-time literals at all 38 handlers** (never `:path`-derived). The `iam_result`/`effect_label`/cache-label mappings are all closed enums. This fully honors D8 and the gateway privacy bar.
+- **Faithful decision-log adherence.** D11 (`record_grpc` at each handler boundary, status from the `Result`, not a trailer layer), D12 (`iam_outbox_relay_parked_total` a counter, ticks the liveness signal, oldest-age `None`→0), D13 (`OnceLock`-cached handle, second `init` returns a working clone — with a dedicated test), D4 (optional `[metrics].addr` separate listener + `addr != http_addr` validation in both services), D5 (60s ticker **and** the now-dead `denial_buffer()`/field removed, no drop-site warn). `metrics-exporter-prometheus` is `default-features = false` and I confirmed the resolved tree adds **no second `hyper`** (single `hyper 1.10.1`, single `hyper-util`) — the §4.1/§10 pre-merge check passes.
+- **Genuinely observe-only.** The gRPC handlers were refactored into `async { … }.await` + `record_grpc(…, &amp;result)`; `?` still early-returns inside the block, so Result propagation and error mapping are byte-for-byte preserved. `pg_audit_log`, `denial_audit`, `relay`, and `cedar_authorizer` all bump counters *alongside* unchanged logic (relay counters come from the already-computed `TickReport`; no new queries). No proto/migration/domain changes.
+- **The registry is a real single source of truth.** All 22 declared names are emitted; no emitted name is undeclared (I traced each). Complete gRPC coverage (38/38 handlers, 1:1). Dashboards + rules pass both the drift test and `promtool check/test rules` (every alert has a synthetic-series unit test).
+- **Strong, honest test + ops coverage:** panic-safe inflight-gauge test, MatchedPath route-label test, authz miss/hit/bypass, denial drop/enqueue, relay tick metrics over real Postgres, health-exclusion, enabled/disabled 404. The RUNBOOK is excellent and candidly documents the audit-partitioning gap with an interim procedure.
+
+## Issues
+
+No **Critical** or **Important** issues. All findings are **Minor** / cosmetic.
+
+**Minor**
+
+- **M-A — spec §4.1 `describe_*!` help text not implemented.** `rs/crates/libs/paigasus-observability/src/lib.rs:29` (`init`) sets buckets + installs the recorder but emits no `describe_counter!/gauge!/histogram!`, so the exposition carries no `# HELP` lines. Why it matters: operators reading raw `/metrics` lose the inline descriptions the spec called for. Mitigated by the RUNBOOK catalog. Fix: add `describe_*!` calls in `init` (or accept as follow-up).
+- **M-B — dead whitelist consts + inaccurate RUNBOOK.** `names.rs:62`/`:65` define `PROM_BUILTINS` and `PROMQL_TOKENS`, but `tests/drift.rs` uses a prefix-anchored (`^(iam|gateway)_…`) extractor and references **neither** (confirmed by grep). Yet RUNBOOK §5 step 4 states the test asserts membership in `names::PROM_BUILTINS`/`names::PROMQL_TOKENS`. Why it matters: the doc describes a mechanism the test doesn't use; the consts are vestigial (public, so no dead-code warning). Fix: delete the two consts and correct RUNBOOK §5, or actually use them.
+- **M-C — IAM carries an unused `metrics-exporter-prometheus` dev-dep with a false comment.** `rs/crates/services/paigasus-iam/Cargo.toml:143` claims "`tests/metrics.rs` names `PrometheusHandle` directly," but grep finds **zero** references to `metrics_exporter_prometheus`/`PrometheusHandle` anywhere in IAM — `.render()` is callable on `init()`'s inferred return without the direct dep (exactly why commit `78a6d05` pruned gateway's identical dep). The pruning commit missed IAM's. `:machete` does not flag it (I ran `cargo-machete rs/crates/services/paigasus-iam` → clean), so it is not a gate failure. Fix: drop the dev-dep + comment.
+- **M-D — minor cross-service shutdown inconsistency.** IAM's separate metrics listener spawns into the shared `JoinSet` on the common watch channel (`main.rs`), while the gateway uses a detached `tokio::spawn` + a second `shutdown_signal()` (`paigasus-gateway/src/main.rs:3546`). Functionally both serve `/metrics` with graceful shutdown, but the gateway's detached task can be dropped abruptly at process exit (harmless for a scrape endpoint). Consider aligning on the IAM pattern.
+
+## Triage of the 5 accumulated findings
+
+1. **IAM 404-fallback uncounted vs gateway `&lt;unmatched&gt;` — FOLLOW-UP.** Confirmed real: IAM's layer lives inside `app_routes`, so the top-level 404 falls outside it; the gateway's `.layer()` wraps the whole tree incl. fallback. It's a bounded, cosmetic completeness gap (no cardinality/privacy risk), and the spec mandates no 404 counting. Not a blocker.
+2. **Relay `ticks_total{result="error"}` branch untested — FOLLOW-UP.** The error arm is trivial (one counter bump + the pre-existing `warn!`), and deterministically triggering a tick error needs a fault-injecting publisher/DB. Low risk; worth a small fault-injection test later.
+3. **`ticks_total` test wall-clock race (10ms poll vs 300ms, ~30×) — FOLLOW-UP.** The 300ms window also absorbs real Postgres I/O, so the margin is pragmatic rather than generous, but a single tokio timer firing within 30× is very unlikely to flake. Acceptable; could be hardened later.
+4. **`TargetDown` in `gateway.rules.yml` not a shared file — FOLLOW-UP.** Functionally correct today — both rule files load via `rules/*.rules.yml`, both test files exercise it, and `up==0` is target-agnostic. Pure organization; the only latent risk is that deleting gateway rules would silently drop IAM's `TargetDown`. Move to a shared `common.rules.yml` when convenient.
+5. **`audit_log` non-partitioned; RUNBOOK documents interim batched-DELETE — FOLLOW-UP (out of this cycle).** Not a defect of this branch — it's a gap in an earlier merged slice that this cycle only *documents*, and it's already tracked in spec §13 / RUNBOOK §6. The RUNBOOK is commendably honest about it. No action for this PR; keep the existing follow-up.
+
+None of the five is more severe than Minor.
+
+## Recommendations
+
+- Bundle M-A/M-B/M-C into a single small cleanup commit if you want the branch tidy before merge, or defer all as follow-ups — none block.
+- The `format!("{prefix}_http_…")` emission in `http.rs` bypasses the `names::` consts for the 6 HTTP families (they're pinned only by integration-test substrings, not the emitter). Not a defect, but if you ever want the "single source of truth" claim to be literal, thread the const names into the layer.
+
+## Assessment
+
+**Ready to merge? Yes.** The implementation is high-quality, faithful to the rev-2 spec and its D1–D13 decisions, strictly observe-only with no behavior regression, and the whole `moon ci` gate is green. Every finding is Minor/cosmetic (missing `# HELP` text, two dead consts + a doc mismatch, one unused dev-dep the sibling prune missed, small shutdown/404 inconsistencies) — all safe to land as post-merge follow-ups rather than blockers.</result>
+<usage><subagent_tokens>211097</subagent_tokens><tool_uses>14</tool_uses><duration_ms>476030</duration_ms></usage>
+</task-notification>
