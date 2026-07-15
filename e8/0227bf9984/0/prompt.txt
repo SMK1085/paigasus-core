@@ -1,0 +1,5 @@
+<task-notification>
+<task-id>b9j7et2yw</task-id>
+<summary>Monitor event: "In-progress moon ci run for re-signed head bd25f53"</summary>
+<event>watching run 28818079211</event>
+</task-notification>
