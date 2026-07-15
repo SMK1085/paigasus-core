@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bnv29i5gg</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0e0343f0-a7dd-4eef-a939-365b2593cae7/tasks/bnv29i5gg.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for CI run on ec88f7f to complete" completed (exit code 0)</summary>
+</task-notification>
