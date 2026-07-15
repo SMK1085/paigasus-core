@@ -1,0 +1,10 @@
+<task-notification>
+<task-id>ac1847fb227f5736d</task-id>
+<tool-use-id>toolu_01PdJRpNM1dzT8GG6Ldp5AvS</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/6c9d3b43-69b7-4125-88cf-e1da3886418a/tasks/ac1847fb227f5736d.output</output-file>
+<status>completed</status>
+<summary>Agent "Final whole-branch review" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Confirmed on all three points. The incremental diff (2 files, 8+/4−; 462d089 empty as noted) contains exactly the two fixes: (1) `convert.rs:29-32` — the `ErrorClass::Internal` arm now emits `tracing::error!(error = %e, code = e.code(), "internal error handling gRPC request")` before returning `Code::Internal`, exactly mirroring the HTTP path's log shape in `http/error.rs:28`, while the client-visible line `Status::new(code, format!("{}: {}", e.code(), e))` is byte-identical to before — and since `TenancyError::Internal`'s Display is the static "internal server error", the wire message remains detail-free (D7 intact); (2) `tenancy.rs:64` — the dead `format!` embedding `req.id` is replaced by a static `"membership id must be a uuid"` payload, which is behavior-neutral because `InvalidPrn`'s Display (`"invalid resource prn"`) never surfaces its payload, so the client still gets the same `InvalidArgument` / `invalid-prn: invalid resource prn` response, and the comment is updated accordingly. Nothing else was touched, and the fix evidence (grpc_tenancy 2/2, clippy/fmt clean) is consistent with a change this narrow. **My "Ready to merge: Yes" stands** — both findings are resolved as recommended, with no new risk introduced.</result>
+<usage><subagent_tokens>218247</subagent_tokens><tool_uses>1</tool_uses><duration_ms>25535</duration_ms></usage>
+</task-notification>
