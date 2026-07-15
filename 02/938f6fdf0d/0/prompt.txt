@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b70zidsyq</task-id>
+<tool-use-id>toolu_013ZiQAx3jnCC7KtbQEW781p</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/8d0af0b1-c97c-4315-abcd-33fb892c7f6d/tasks/b70zidsyq.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll moon ci on ec76d95" completed (exit code 0)</summary>
+</task-notification>
