@@ -1,0 +1,40 @@
+<task-notification>
+<task-id>aec66ed71fac111ae</task-id>
+<tool-use-id>toolu_01WinZacCDxyMtXXPW4oTy5x</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/aec66ed71fac111ae.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 11 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Now I have everything needed. Here is the review.
+
+### Spec Compliance
+- ✅ (with one Important concurrency finding logged below)
+
+Verified directly against the diff and cross-checked outside it: composition order is `paigasus_logging::init` (main.rs:16) → `IamConfig::load()?` (main.rs:18) → `Database::connect` (main.rs:19) → `Migrator::up` (main.rs:20) → spawn `serve_http`/`grpc::serve` (main.rs:25-44), exactly matching `logging→config→connect→migrate→serve`. `main` returns `anyhow::Result&lt;()&gt;` and every fallible startup step (`load`, `connect`, `Migrator::up`) uses `?` — no `unwrap`/`expect` on the startup path (main.rs:18-20). `database_url` has no figment default (config.rs:14), so a missing value produces a typed `FigmentError` propagated via `?`, not a panic. SPDX header is the exact first line of `main.rs`. Two ports (8080/9090) come from `config.rs`'s existing `Defaults`, untouched by this diff. `axum::serve(...).with_graceful_shutdown(...)` (http.rs) and tonic's `serve_with_shutdown` (verified in the pre-existing, unmodified `adapters/grpc.rs:31`, called with the same `shutdown` future shape as `serve_http`) are both used as required. Commit is a single, correctly scoped `feat(rs): … (SMA-441)` subject; commit body/footer content isn't visible in the diff package, so hygiene there is ⚠️ unverifiable from what was provided.
+
+### Strengths
+- **`TimeoutLayer::with_status_code` equivalence is verified, not just claimed.** I read the vendored tower-http 0.6.11 source (`~/.cargo/registry/src/.../tower-http-0.6.11/src/timeout/service.rs:28-31`): `TimeoutLayer::new(timeout)` is literally `#[deprecated] { Self::with_status_code(StatusCode::REQUEST_TIMEOUT, timeout) }`. The implementer's substitution is byte-for-byte behavior-identical, and correctly sidesteps `-D warnings` denying the deprecation lint. Well-judged deviation.
+- **`readyz` fix is correct and safe.** `Err(_)` → `Err(e)` (http.rs:36-38) properly binds the error, logs it server-side via `tracing::warn!(error = %e, ...)`, and leaves the client-visible 503 body unchanged (still the generic `{"status":"unready"}`). The bound error here is a post-connect query/ping failure (the DSN is only ever touched at `Database::connect` in `main.rs:19`, outside this code path), so no credential/DSN leak risk in practice.
+- **`watch` channel fan-out is correctly wired.** A `tokio::sync::watch::channel(())` (main.rs:23) is used (not a oneshot, which couldn't fan out), and each server task gets its **own** cloned receiver (main.rs:26, main.rs:37) rather than sharing one `rx`. `tx.send(())` (main.rs:49) is a single call reaching both `rx.changed()` awaits independently — this is the textbook-correct pattern for fanning one shutdown signal to N consumers.
+- **No borrow-after-move risk.** `IamConfig::http_addr`/`grpc_addr` are `SocketAddr` (config.rs:11-12), which is `Copy`; the spawned `async move` blocks copy these fields out (main.rs:29, main.rs:39), so `config` is never partially moved and the later `tracing::info!(%config.http_addr, %config.grpc_addr, ...)` (main.rs:46) is sound.
+- Order and structure match the brief's Step 2 pseudocode almost verbatim (only the justified `TimeoutLayer` change and the `readyz` fold-in diverge), keeping the diff's blast radius tight and auditable.
+
+### Issues
+
+#### Critical (Must Fix)
+None found.
+
+#### Important (Should Fix)
+1. **Early exit of one server before the shutdown signal is neither surfaced nor propagated to its sibling — a real gap, not just an M0 tradeoff.** In `main.rs:47-51`, `shutdown_signal().await` is awaited unconditionally, with no race against the `http`/`grpc` `JoinHandle`s. If either spawned task fails immediately (e.g., `TcpListener::bind` fails because the port is taken, or `serve_with_shutdown` panics) *before* an operator sends SIGINT/SIGTERM, that failure sits inert in its `JoinHandle` — `main` keeps blocking on `shutdown_signal()` indefinitely, the still-alive server is **never told to shut down** (since `tx.send(())` on main.rs:49 only fires after the signal), and the process does **not** exit non-zero on its own. This contradicts the letter of "bind failures propagate (non-zero exit)" for the two server-bind calls specifically (DB connect/migrate do propagate correctly, since those are inline, not spawned). Practical impact for M0: a broken deploy stays "up" (one dead surface, one alive) until something external kills it — potentially a while, depending on liveness-probe cadence.
+   - Note: this is exactly the structure the brief's Step 2 prescribes verbatim — the implementer faithfully followed the given design rather than introducing this independently. Given M0's "walking skeleton" scope, the manually-verified boot-smoke SIGINT path, and clippy/tests being unaffected, I judge this **acceptable to ship for this task** but real enough to warrant a fast-follow: race `shutdown_signal()` against `&amp;mut http`/`&amp;mut grpc` (e.g., pin them and `tokio::select!` over three branches — signal, http done, grpc done), treating any early task completion as a trigger to `tx.send(())` and to surface that task's error immediately rather than waiting for `try_join!` at the tail.
+
+#### Minor (Nice to Have)
+1. ⚠️ Commit body/footer text is not included in the diff package (only the subject line is shown), so `SMA-441` subject-only placement and the "no bare `#NNN`" footer rule could not be independently verified here.
+2. ⚠️ Green `clippy --all-targets -D warnings` / `cargo nextest` / `cargo machete` / `cargo deny` / manual boot-smoke results are report claims; per the read-only review mandate these were not independently re-executed. Nothing in the diff contradicts them, and the one factual claim I could check outside the diff (`TimeoutLayer` equivalence) held up exactly as described, which raises confidence in the rest.
+3. The `[package.metadata.cargo-machete] ignored` allowlist (Cargo.toml) still lists `anyhow`, `tracing`, `paigasus-logging` as "ignored," even though `main.rs` now genuinely consumes all three — harmless today (machete already passes) but stale, and the report correctly defers pruning it to Task 12. Just confirm that follow-up actually happens.
+
+### Assessment
+**Task quality:** Approved
+**Reasoning:** Spec-mandated wiring (order, `anyhow` propagation, watch-based fan-out with per-task receiver clones, two-port serve, SPDX, `try_join!`) is implemented correctly and matches the brief; the one deviation (`TimeoutLayer::with_status_code`) is independently verified byte-identical to the deprecated call it replaces. The single Important concurrency gap — an early single-server failure isn't raced against the shutdown signal — is inherited directly from the brief's own prescribed structure and is reasonable to accept for an M0 walking skeleton, but should be tracked as a near-term fast-follow rather than silently forgotten.</result>
+<usage><subagent_tokens>74543</subagent_tokens><tool_uses>13</tool_uses><duration_ms>316892</duration_ms></usage>
+</task-notification>
