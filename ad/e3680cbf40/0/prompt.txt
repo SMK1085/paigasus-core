@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bx8111g1y</task-id>
+<tool-use-id>toolu_01CShSXA2wVKjSQ4GwPvkk4m</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/20bb16cc-c5e0-4bef-8ce0-f635287e1a29/tasks/bx8111g1y.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll until moon ci and CodeRabbit re-review settle" completed (exit code 0)</summary>
+</task-notification>
