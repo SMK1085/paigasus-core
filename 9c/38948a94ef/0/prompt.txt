@@ -1,0 +1,44 @@
+<task-notification>
+<task-id>a6500aa800fb3d11a</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/a6500aa800fb3d11a.output</output-file>
+<status>completed</status>
+<summary>Agent "Final whole-branch review" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have now reviewed all hand-written code, the generated surface, the corpora, the replay tests in all four languages, and the config/CI wiring. Here is my whole-branch assessment.
+
+---
+
+### Strengths
+
+- **The three FFI shims are genuinely semantically identical** — I read all of `py-bindings/src/lib.rs`, `node-bindings/src/lib.rs`, and `paigasus-wasm/src/lib.rs` side by side. Same 12-function set, identical `parse_rand_hex` validation (`len==20 &amp;&amp; [0-9a-f]`), identical `unix_ms as u64` cast, identical `None`/empty → `""` marshalling via `unwrap_or_default()`, and identical error tokens (`e.kind()` for PRN, the mint-only `"bad-rand-hex"`). This is the highest-risk area and it is clean.
+- **Corpus ↔ replay field names align exactly** across Rust serde (`unix_ms`/`rand_hex`/`expected_uuid`, `input`/`error_kind`/`canonical`, `prn`/`entity_type`/`entity_id`), Python `TypedDict`, and TS `interface`. The `canonical: Option&lt;String&gt;` → JSON `null` is handled correctly: Python declares `canonical: str` but only reads it when `error_kind == ""`, and TS types it `string | null`.
+- **Empty-corpus-fails-RED is real, not vacuous.** Python adds a dedicated `test_corpora_present_and_non_empty()` (defends against pytest's silent skip on an empty `parametrize`), each TS file has an explicit `it('corpus is present and non-empty')`, and Rust `replay.rs` asserts `!committed.is_empty()`. The Rust replay also pins `committed == build_*_corpus()`, and the `parity-corpus-drift` gate `git diff --exit-code`s a fresh regen — so the committed vectors are provably the current kernel's output.
+- **All 11 `PrnError` variants have ≥1 corpus case**, verified against `prn_canonical.json` (empty, too-long, bad-scheme, bad-partition, wrong-field-count, bad-service, bad-region, bad-org, bad-resource-path, bad-resource-type, bad-resource-id).
+- **getrandom-free invariant is solid end-to-end**: workspace `uuid` pin is `{ version = "1" }` (no features), the kernel is the sole `uuid` consumer (grep confirms no `new_v4`/serde usage anywhere), mint is `Uuid::from_bytes` from injected bytes, and the dedicated `wasm-getrandom-free` Moon task is wired into the `moon ci` target array in `ci.yml`.
+- **napi↔wasm type-parity guard** (`binding-parity.types.ts`) enumerates all 12 functions. The camelCase param names in napi's `.d.ts` (`unixMs`, `resourceType`) vs snake_case in wasm's (`unix_ms`, `resource_type`) do **not** break the `Exact&lt;&gt;` guard — TS function-type identity ignores parameter names — so this is a non-issue.
+- k-sortability proptest is correct: the 48-bit timestamp occupies the most-significant bytes `[0..6]`, so `ms_a &lt; ms_b` dominates the lexicographic byte comparison regardless of the random tail.
+
+### Issues
+
+#### Critical (Must Fix)
+None.
+
+#### Important (Should Fix)
+- **Six of the twelve FFI functions have zero runtime behavioral coverage in Python/Node/wasm.** `prn_build`, `prn_service`, `prn_region`, `prn_org`, `prn_resource_type`, `prn_resource_id` are exposed on all three shims but are exercised by **no** parity corpus and **no** replay test — the three corpora only cover `canonicalize`/`error_kind`, `mint_uuid7`, and the two `cedar` accessors. Their only guards are the compile-time `Exact&lt;&gt;` type-parity check (which catches *signature* drift, not *behavioral* drift) and the Rust kernel proptest (which tests `paigasus_kernel::Prn`, not the shim wrappers). In particular the spec §5 marshalling contract — `prn_org`/`prn_region` map `None`/empty → `""`, and `prn_build` maps `""` org → `None` not `BadOrg` — is asserted nowhere at runtime in any of the three bound languages. This is spec-consistent (spec §6 deliberately defines only three corpora) and the risk is low because I confirmed the three shims are line-for-line identical, but for a whole-branch view it is the one place where a future single-shim edit to an accessor could silently diverge in behavior without failing CI. Closing it is cheap: a small `prn_fields.json` corpus (input → service/region/org/type/id, plus a couple of `prn_build` round-trips including the empty-org case) replayed in all three languages. Files: `rs/crates/bindings/*/src/lib.rs`, `rs/crates/libs/paigasus-kernel-parity/src/lib.rs`, `py/.../tests/test_parity.py`, `ts/.../tests/*.test.ts`.
+
+#### Minor (Nice to Have)
+- **`wasm-getrandom-free` gate can go false-green if `cargo tree` fails for a non-getrandom reason.** `moon.yml:111` runs `if cargo tree ... -i getrandom &gt;/dev/null 2&gt;&amp;1; then ... exit 1; fi`. The check treats *any* non-zero exit as "getrandom absent" — but `cargo tree -i &lt;pkg&gt;` also exits non-zero when the package name is mistyped, the manifest is broken, or graph resolution fails, in which case the guard passes green while actually verifying nothing (and it swallows stderr). Harden by asserting the graph resolves first, e.g. `cargo tree -p paigasus-wasm --target wasm32-unknown-unknown -e no-dev | grep -q getrandom &amp;&amp; { echo "..."; exit 1; }` with `set -o pipefail`, so a broken tree command fails loudly instead of silently disarming a security-relevant invariant. (Note: the spec §8/§2.6 also called for the gate to include a `cargo build --target wasm32-unknown-unknown`; that buildability is instead covered by the main `:build` graph, which is acceptable, but the gate itself is tree-only.)
+- **Python `mint()` uses `/` where spec §5 specifies `//`.** `py/.../__init__.py:23` computes `time.time_ns() / 1_000_000` (true division → fractional float) vs the spec's `time.time_ns() // 1_000_000`. Behaviorally identical after the shim's `f64 → u64` truncation, so not a bug — noting only for spec-text fidelity.
+- Dead-but-harmless `.map_err(...)` on the `u8::from_str_radix` call in every `parse_rand_hex` (the bytes are already validated as `[0-9a-f]`, so it can't fail). Not worth changing; clippy is green.
+
+### Recommendations
+- The extensive `moon.yml`/`vitest.config.ts` inline comments documenting the freshness/race/toolchain traps (touch-before-build, per-task wasm scratch dirs, `browser` condition aliasing) are excellent institutional memory — keep this style.
+- Consider the `prn_fields` corpus above as a follow-up rather than a blocker; it would make the "single oracle, all bindings agree" story cover 100% of the surface instead of ~50%.
+
+### Assessment
+**Ready to merge?** Yes (with the accessor-coverage gap tracked as a fast follow-up).
+
+**Reasoning:** No correctness defects — the four-language surface is behaviorally consistent, the getrandom-free invariant is enforced, corpora/replays are coherent with real non-empty guards, and every spec §9 AC is satisfied by code on the branch. The only substantive finding is that half the FFI functions rely on compile-time (not runtime) parity, which is spec-consistent and low-risk given the shims are verifiably identical.</result>
+<usage><subagent_tokens>139479</subagent_tokens><tool_uses>40</tool_uses><duration_ms>331500</duration_ms></usage>
+</task-notification>
