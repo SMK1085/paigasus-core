@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use paigasus_iam::adapters::events::{OutboxRelay, TracingEventPublisher};
+use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::{AppState, serve_http};
-use paigasus_iam::adapters::{grpc, persistence::Migrator};
+use paigasus_iam::adapters::persistence::{Migrator, PgPartitionMaintainer, RetentionPolicy};
 use paigasus_iam::config::IamConfig;
 use paigasus_observability::names;
 use sea_orm::Database;
@@ -57,6 +58,10 @@ async fn main() -> anyhow::Result<()> {
     // relay is wired straight in `main.rs` rather than through `AppState`, so `AppState::new`'s
     // signature stays unchanged.
     let state = AppState::new(db.clone(), &config).await?;
+
+    // Kept for the partition-maintenance task (SMA-467), spawned below; cloned before the outbox
+    // relay block consumes the original `db` handle.
+    let db_for_maintenance = db.clone();
 
     let request_timeout = Duration::from_secs(30);
     let (tx, rx) = tokio::sync::watch::channel(());
@@ -219,6 +224,48 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("outbox relay disabled — event_outbox rows will accrue undrained");
         }
     }
+    {
+        // Audit-log partition maintenance (SMA-467): create month partitions ahead and drop
+        // aged-out denied (and, if configured, committed) leaves — mirrors the outbox relay's
+        // spawn + shutdown-watch. Gated by `[audit.retention].enabled`; a startup run creates the
+        // current + ahead months before the loop (non-fatal on error — the migration + the
+        // DEFAULT partitions already backstop writes).
+        if config.audit.retention.enabled {
+            let policy = RetentionPolicy {
+                ahead_months: config.audit.retention.ahead_months,
+                denied_months: config.audit.retention.denied_months,
+                committed_months: config.audit.retention.committed_months,
+            };
+            if config.audit.retention.committed_months > 0 {
+                tracing::warn!(
+                    committed_months = config.audit.retention.committed_months,
+                    "audit.retention.committed_months > 0 — committed (compliance) audit partitions will be auto-dropped at this age"
+                );
+            }
+            let maintainer = PgPartitionMaintainer::new(db_for_maintenance);
+            let startup = maintainer.clone();
+            let startup_policy = policy;
+            // Awaited startup run (non-fatal).
+            let report = startup.tick(chrono::Utc::now(), startup_policy).await;
+            if report.errored {
+                tracing::warn!("initial audit partition maintenance tick reported an error — continuing (DEFAULT partitions backstop writes)");
+            }
+            let interval = std::time::Duration::from_secs(config.audit.retention.interval_secs);
+            let mut rx = rx.clone();
+            servers.spawn(async move {
+                maintainer
+                    .run(policy, interval, async move {
+                        let _ = rx.changed().await;
+                    })
+                    .await;
+                Ok(())
+            });
+        } else {
+            tracing::warn!(
+                "audit.retention.enabled = false — no partition create-ahead or pruning will run; the DEFAULT partitions will fill over time and can block create-ahead until manually reattached (see RUNBOOK)"
+            );
+        }
+    }
 
     tracing::info!(%config.http_addr, %config.grpc_addr, "paigasus-iam started");
 
@@ -263,10 +310,11 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 15 metric families `paigasus-iam` emits
-/// directly (spec §4.1), via the `names::` consts so this can't drift from `names::ALL`, plus
-/// the 2 gRPC families via `paigasus_observability::describe_grpc()`. Mirrors the meanings
-/// documented in `docs/ops/RUNBOOK-observability.md` §2.1/§2.2.
+/// Registers `# HELP`/`# TYPE` exposition text for the 17 metric families `paigasus-iam` emits
+/// directly (spec §4.1; includes the SMA-467 audit partition-maintenance families), via the
+/// `names::` consts so this can't drift from `names::ALL`, plus the 2 gRPC families via
+/// `paigasus_observability::describe_grpc()`. Mirrors the meanings documented in
+/// `docs/ops/RUNBOOK-observability.md` §2.1/§2.2.
 fn describe_iam_metrics() {
     use metrics::{describe_counter, describe_gauge, describe_histogram};
 
@@ -312,6 +360,20 @@ fn describe_iam_metrics() {
     describe_gauge!(
         names::IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS,
         "Age in seconds of the oldest unpublished-and-unparked outbox row seen in the most recent non-empty relay tick's batch."
+    );
+
+    describe_counter!(
+        names::IAM_AUDIT_PARTITION_MAINTENANCE_TICKS_TOTAL,
+        "Audit partition-maintenance ticks (create-ahead + prune); label result=ok|error."
+    );
+    describe_counter!(names::IAM_AUDIT_PARTITIONS_CREATED_TOTAL, "Audit monthly leaf partitions created by create-ahead.");
+    describe_counter!(
+        names::IAM_AUDIT_PARTITIONS_DROPPED_TOTAL,
+        "Audit monthly leaf partitions dropped by retention; label outcome=denied|committed."
+    );
+    describe_gauge!(
+        names::IAM_AUDIT_DEFAULT_PARTITION_ROWS,
+        "Rows currently in the audit DEFAULT partitions — should be 0; nonzero means create-ahead fell behind."
     );
 }
 
