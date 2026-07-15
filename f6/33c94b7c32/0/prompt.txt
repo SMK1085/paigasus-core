@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b0jatdawx</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/8d0af0b1-c97c-4315-abcd-33fb892c7f6d/tasks/b0jatdawx.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll moon ci gate to conclusion on new HEAD" completed (exit code 0)</summary>
+</task-notification>
