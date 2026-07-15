@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b059u6yh3</task-id>
+<tool-use-id>toolu_011d5ySGkbGj1g2ePApoa1x5</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0e0343f0-a7dd-4eef-a939-365b2593cae7/tasks/b059u6yh3.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll CI run 27713245914 to completion" completed (exit code 0)</summary>
+</task-notification>
