@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bynvh5u08</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0e0343f0-a7dd-4eef-a939-365b2593cae7/tasks/bynvh5u08.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for CodeRabbit round-2 review to complete" completed (exit code 0)</summary>
+</task-notification>
