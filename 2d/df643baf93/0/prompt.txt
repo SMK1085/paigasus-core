@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bns3vc5tz</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/bns3vc5tz.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll for CodeRabbit round 2 re-review" completed (exit code 0)</summary>
+</task-notification>
