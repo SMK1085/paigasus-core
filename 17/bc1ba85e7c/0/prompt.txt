@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bhi35j5b0</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/bhi35j5b0.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll prebuild dispatch run to completion" completed (exit code 0)</summary>
+</task-notification>
