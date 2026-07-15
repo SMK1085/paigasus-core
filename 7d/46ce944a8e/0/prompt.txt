@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b07why1n5</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/7b80b7cf-03e2-4929-ae5f-f654f6934eb6/tasks/b07why1n5.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for CI + CodeRabbit to settle on afed6f6" completed (exit code 0)</summary>
+</task-notification>
