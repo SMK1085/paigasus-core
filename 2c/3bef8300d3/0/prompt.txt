@@ -1,0 +1,45 @@
+<task-notification>
+<task-id>a409f898b12b6a79a</task-id>
+<tool-use-id>toolu_01MQwvATBsVRVvvyK3Xr3LPM</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/a409f898b12b6a79a.output</output-file>
+<status>completed</status>
+<summary>Agent "Review G2 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Review complete. All focus areas verified against the actual source (not just the diff). The working tree is clean and HEAD matches the reviewed commit `98048fd`.
+
+---
+
+# Task G2 Review — Approved
+
+**Verdict: Task quality — Approved.** The D11 guarantee, wire round-trip, miss-path sourcing, and mapper parity are all correctly implemented and genuinely (non-tautologically) tested. No critical or important issues.
+
+## Spec Compliance
+
+- ✅ **D11 cache-HIT returns `scope_prn` with NO DB read.** `resolve_cached` (`authenticate_api_key.rs:143-167`) reads `scope_prn: cached.scope_prn.clone()` (line 164) straight from the cached value; its only side calls are `hasher.verify`, `clock.now()`, and `cache.evict` (expiry only) — no repository access. The guard test `cache_hit_returns_scope_prn_without_a_db_read` (`authenticate_api_key.rs:645-680`) wires `PanicIfCalledApiKeys`/`PanicIfCalledPrincipals`, whose `find_by_id`/`find_principal` bodies `panic!` (lines 356, 389). It genuinely proves no DB read, and asserts the resolved `scope_prn` equals the seeded `scope().canonical()` — not just "a value came back."
+- ✅ **Miss path sources one value into both sinks.** `resolve_uncached` computes `let scope_prn = api_key.scope.canonical();` once (`authenticate_api_key.rs:227`), `.clone()`s it into the `CachedValidation` put (line 240) and moves the same binding into the returned `Credential::ApiKey` (line 251). Cache entry and credential carry the identical value.
+- ✅ **`WireValidation` round-trips `scope_prn`.** Field added with no serde attribute (`cache.rs:250`); both `From`/`TryFrom` thread it (lines 260, 277). The JSON unit test asserts survival explicitly (`cache.rs:349-352`), and the real-Redis `api_key_cache_put_then_get_round_trips` asserts full-value equality `got == v` (`api_key_cache_redis.rs:68`), covering `scope_prn` through the actual backend via derived `PartialEq`.
+- ✅ **Both mappers emit the real value and agree.** gRPC `to_introspect_api_key_response` destructures `Credential::ApiKey { key_id, expires_at, scope_prn }` and sets `scope_prn` on the response (`convert.rs:315, 404`); HTTP `IntrospectApiKeyResponseDto` adds the field and threads it in `From&lt;PrincipalContext&gt;` (`dto.rs:482, 494, 508`). Both reachable arms extract the real credential value; only the genuinely-unreachable Oidc arm (guarded by `debug_assert!(false, …)`) yields `String::new()`. Twin deterministic tests assert each mapper echoes a known scope, and the real-PG `api_keys_grpc.rs:129-130` asserts three-way equality `ctx.scope_prn == owner.canonical() == api_key.scope_prn` across the full issue→DB→introspect stack.
+- ✅ **Additive proto.** `string scope_prn = 7;` appended as the last field of `IntrospectApiKeyResponse` (fields 1-6 unchanged); py (`field(7, …)`) and ts (`scopePrn`, `field: string scope_prn = 7`) bindings regenerated consistently. `:breaking` stays clean.
+- ✅ **Pure data plumbing, non-secret handling.** No authn/authz behavior change; `scope_actions`/`scope_roles` remain unenforced. `scope_prn` carries no serde redaction and is documented as a non-secret PRN (distinct from `key_hash`) at `authn.rs:108-110` and `cache.rs`.
+- ✅ **All prior construction/pattern sites updated coherently.** All 16 `CachedValidation` literals and all 5 `Credential::ApiKey` constructions carry the field; pattern sites either destructure it or use `..` (OIDC-mapper arms at `convert.rs:233`, `dto.rs:247`; helper arms at `authn.rs:107/117/127`). The `api_key_auth.rs` matcher was upgraded from `matches!(…)` to a full `match` that additionally asserts `scope_prn == key.scope.canonical()` (strictly stronger). Eviction/revoke/archive seed tests use real scopes (`key.scope.canonical()` / `owner_org(1).canonical()`) where the value is not asserted — no bogus/empty scope seeded where a real one is load-bearing.
+- ✅ Commit `98048fd`, subject `feat(rs): surface api-key scope_prn on introspect via the cache (SMA-446)` — conventional, lowercase, ≤100 chars; tree clean, HEAD == reviewed head.
+
+## Strengths
+
+- The D11 guard is the right kind of test: `PanicIfCalled*` repos make "no DB read" a hard failure, not an inference.
+- The gRPC end-to-end test ties the introspect `scope_prn` back to both the issue-time `ApiKey.scope_prn` and `owner.canonical()`, catching any drift between the issue path and the miss/cache path.
+- Doc comments on `CachedValidation`, both mappers, and the `Credential::ApiKey` field explain the D11 rationale and the non-secret nature of `scope_prn` in-place.
+
+## Issues
+
+**Minor**
+- `convert.rs:426-453` / `dto.rs:541-562`: the two parity tests each assert their mapper's output against a shared literal constant, so "gRPC and HTTP agree" is transitive (both `==` the same known value) rather than a single test directly comparing the two mappers' outputs. This is exactly what the brief prescribed and is adequate; a direct cross-mapper comparison would be marginally stronger. No action required.
+
+**Non-issue noted for completeness**
+- The Oidc arm of each mapper returns `String::new()` for `scope_prn` in release builds (debug-asserted unreachable). This is consistent with the pre-existing `key_id`/`expires_at` handling in the same match and the arm is genuinely unreachable (API-key introspection only ever produces `Credential::ApiKey`). Correct as written.
+
+## Assessment
+
+Task quality: **Approved.** Every global constraint and focus item is satisfied and backed by tests that prove behavior rather than mere compilation. The one caveat the implementer self-reported — that the aggregate repo-level gate (`:deny :machete :affected-smoke :parity-corpus-drift` etc.) was not run locally — is out of scope for this task-level review and is covered by CI; no new deps were added and codegen determinism was verified.</result>
+<usage><subagent_tokens>85270</subagent_tokens><tool_uses>28</tool_uses><duration_ms>282738</duration_ms></usage>
+</task-notification>
