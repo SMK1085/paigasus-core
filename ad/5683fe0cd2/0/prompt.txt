@@ -1,0 +1,20 @@
+<task-notification>
+<task-id>acfc52cfb43e1f9dd</task-id>
+<tool-use-id>toolu_01EUtTX1XEJsSvec5PBR9CXT</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/acfc52cfb43e1f9dd.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement U8: alert rules + promtool" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE. Commit: `12ad38c` "feat(ci): add prometheus alert rules + promtool gate (SMA-446)" on `feature/sma-446-observability-dashboards-runbook`.
+
+promtool validation (post-commit): `check config` SUCCESS, `check rules` SUCCESS (6 iam + 4 gateway rules), `test rules` SUCCESS, SUCCESS (10/10 alerts covered, fire + not-yet-fire cases).
+
+CI gate: Moon task **`repo:promtool`** on the root `repo` project (moon.yml), added to the `moon ci` target array in `.github/workflows/ci.yml`; verified `moon run repo:promtool` green and `repo:affected-smoke` still passes.
+
+Proto-pin: WORKED, no fallback needed. Added `.proto/plugins/promtool.toml` (modeled on cargo-deny.toml's nested exe-path, buf/lefthook's arch-remap style since Prometheus uses Go GOOS/GOARCH naming uniformly). Pinned `promtool = "3.13.1"` in `.prototools` (matches the `prom/prometheus:v3.13.1` compose image). `proto install promtool` + `promtool --version` resolve cleanly via `$HOME/.proto/shims`.
+
+Concerns: `GatewayIamDependencyUnavailable` (`for: 5m`) and `GatewayUpstreamErrors` severity (`warning`) were judgment calls not pinned by the brief; `TargetDown` placed in its own `targets` group inside `gateway.rules.yml` rather than a third file.
+
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-observability/.superpowers/sdd/u8-report.md`</result>
+<usage><subagent_tokens>109186</subagent_tokens><tool_uses>64</tool_uses><duration_ms>509715</duration_ms></usage>
+</task-notification>
