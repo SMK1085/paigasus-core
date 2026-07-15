@@ -1,0 +1,1 @@
+also should we remove the git worktree or keep it for the new session?
