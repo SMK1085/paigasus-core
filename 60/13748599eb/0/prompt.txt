@@ -1,0 +1,82 @@
+<task-notification>
+<task-id>ad142ff6af99997a1</task-id>
+<tool-use-id>toolu_011gUJi5YYH97q9y9MwaPbX9</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/ad142ff6af99997a1.output</output-file>
+<status>completed</status>
+<summary>Agent "Challenge SMA-448 PRN spec" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I've read the spec and the relevant codebase. Findings below, ranked most-severe first. Spec section citations refer to the design doc.
+
+---
+
+## VERDICT: NEEDS-WORK
+The PRN/grammar design is coherent and the parity-harness fit is mostly right, but two issues will break the build or the bindings as written (the wasm `getrandom`-free invariant is violated by the *already-pinned* `uuid` `v4` feature, not `v7`; and the `unix_ms` FFI type forces a JS `BigInt` that breaks the prescribed `Date.now()` wrappers), plus a Cedar return-shape that contradicts the spec's own "strings only" FFI rule.
+
+---
+
+### [BLOCKER] §2.1 / §4 "uuid crate features" — the getrandom-free invariant is already violated by `v4`, not `v7`
+The spec's whole §4 mitigation targets the `v7` feature, but the workspace pin is `uuid = { version = "1", features = ["v4", "serde"] }` (`rs/Cargo.toml:28`). `v4` enables uuid's `rng` → `getrandom`. The kernel is the *first real consumer* of `uuid`, so the moment it does `uuid.workspace = true` it inherits `v4`, and the `wasm32-unknown-unknown` build of `paigasus-wasm → paigasus-kernel` will pull `getrandom` — which on that target does not compile without a JS backend cfg. So this likely *fails the wasm build outright*, not merely "pulls a dep." The spec never mentions `v4`.
+- Note: the workspace table's own comment (`rs/Cargo.toml:13-15`) says features are a "MINIMAL baseline… crates ADD the features they need" — `v4` in the baseline already violates that rule.
+- **Fix:** Remove `v4` from the workspace `uuid` baseline (nothing consumes it yet). Kernel depends on `uuid` with no rng feature (parse/`from_bytes`/Display are all in default). Mint via hand-assembled 16 bytes + `Uuid::from_bytes` (needs no feature) — make this MANDATORY, not the conditional "if v7 would pull getrandom" hand-wave in §4. Add a CI step that builds the wasm crate for `wasm32-unknown-unknown` and greps the dep graph for `getrandom` (the spec defers this to "during implementation" — pin it as a gate).
+
+### [BLOCKER] §4 / §5 — `unix_ms` as `u64` at the FFI boundary maps to JS `BigInt` and breaks the prescribed `Date.now()` wrappers
+The kernel mint is `mint_uuid7(unix_ms: u64, …)` (§4) and the FFI mirrors it (§5). napi-rs maps `u64` → `BigInt`, and wasm-bindgen maps both `i64` and `u64` → `BigInt`. But §5's "ambient minting" wrappers pass `Date.now()` (a JS `number`) and the `uuid7.json` corpus stores `unix_ms` as a JSON number — both would throw a type error against a `BigInt` parameter. This is the exact hazard the codebase already documented for `sum` (forcing `i32`; see the node binding comment "an `i64` return can surface as a `BigInt` where `5n !== 5`").
+- **Fix:** Pin the **FFI** `unix_ms` as `f64` (JS `number`), cast `f64 → u64` in each shim. All valid 48-bit ms values (≤ 2^48−1 ≈ year 10889) are &lt; 2^53 and thus exact in `f64`, so no precision loss. This also keeps the corpus replay clean (`mint_uuid7(case.unix_ms, …)` with a plain number). The kernel stays `u64`. State this explicitly so all three shims agree.
+
+### [MAJOR] §5 / §4 `cedar.rs` — `prn_to_cedar` returns a structured object, contradicting §5's "strings only" contract and breaking the wasm path + type-parity guard
+§5's header says "plain functions over strings — no `Prn` object crosses the FFI boundary," yet `prn_to_cedar(s) → { entity_type, entity_id }` returns an object. Concretely: napi emits a `#[napi(object)]` interface, but wasm-bindgen cannot return an arbitrary struct as a JS object without `serde-wasm-bindgen` (a new dep — re-opening the getrandom-style feature audit) or hand-written getters; the cleanest wasm return is typed `any`. That makes the `binding-parity.types.ts` guard (`NapiApi['x'] extends WasmApi['x']`) **vacuously pass** because `any` is bidirectionally assignable — false confidence, defeating the guard's purpose.
+- **Fix:** Replace with two string accessors `prn_cedar_entity_type(s)` / `prn_cedar_entity_id(s)` (or a single JSON-string return parsed in the wrappers). Keep the structured `CedarUid` only in the Rust kernel API. Then extend `binding-parity.types.ts` to cover the new string-returning fns.
+
+### [MAJOR] §3 / §4 `cedar.rs` — resource-type grammar `^[a-z][a-z0-9-]*$` permits trailing/double hyphens, making the PascalCase mapping non-injective
+The grammar accepts `api--key`, `api-` and `service--account`. PascalCasing by splitting on `-` yields empty segments: `api--key` and `api-key` both → `ApiKey` (collision), `api-` → `Api`. Two distinct, valid PRNs would map to the same Cedar entity type — an authorization-relevant ambiguity. The spec's examples only show clean kebab.
+- **Fix:** Tighten `service` and `resource-type` to `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` (no leading/trailing/double hyphen), or explicitly define empty-segment handling. Add corpus cases for `a--b`, `a-`, single-segment, and multi-dash (`oauth2-client`) in `prn_cedar.json`.
+
+### [MAJOR] §3 — case-normalization contract is self-contradictory
+The canonical-form bullets say "lowercase ASCII throughout," implying input is lowercased, but then "Parsing accepts mixed-case **UUIDs** and lowercases them" scopes normalization to UUID fields only — and the field regexes (`^[a-z]…`) accept only lowercase. So `PRN:PGS:IAM:::…` or `…:IAM:::…` would be *rejected* (BadScheme/BadService), not canonicalized. Two engineers will reasonably build "lowercase-then-validate" vs "validate-strict-reject." This changes which inputs are valid.
+- **Fix:** State explicitly: scheme/partition/service/region/resource-type are matched case-sensitively (lowercase-only) and uppercase is rejected; only UUID fields are case-normalized. Add corpus cases: `PRN:…` (reject), `…:IAM:…` (reject), mixed-case UUID (accept+lowercase).
+
+### [MAJOR] §4 / §5 — FFI `mint_uuid7` has no error contract for malformed `rand_hex`
+The kernel `mint_uuid7(u64, [u8;10]) -&gt; Uuid` is infallible, but the FFI takes `rand_hex: String` which can be wrong length (≠ 20 hex chars), odd-length, or non-hex. The spec never says what happens — Result? throw? which error-kind token? — and `rand_hex` vs passing raw bytes (`&amp;[u8]`/`Buffer`/`Uint8Array`) is chosen without justification.
+- **Fix:** Define FFI `mint_uuid7` as fallible: validate `rand_hex` is exactly 20 lowercase hex chars, else throw/raise with a stable token (e.g. `bad-rand-hex`). Decide and document hex-vs-bytes (hex is fine for JSON corpus stability, but say so). The Python wrapper must `os.urandom(10).hex()`; the JS wrapper must hex-encode `getRandomValues(new Uint8Array(10))` — spell that out in §5.
+
+### [MINOR] §4 `uuid7.rs` — behavior for `unix_ms ≥ 2^48` and the rand-bit mapping are unspecified
+(1) `unix_ms` is `u64` but only 48 bits are used; the spec doesn't say whether values ≥ 2^48 are masked or silently overflow into the version nibble — and the proptest "embedded 48-bit timestamp equals the input ms" would fail without a masking rule. (2) 10 bytes (80 bits) is the correct *minimum* for the 74 random bits, but the spec says "remaining 74 bits from rand" without pinning **which 6 input bits are discarded** (high nibble of `rand[0]` and high 2 bits of `rand[2]` if you lay `rand` into bytes[6..16] then overwrite version/variant). Single-oracle means no cross-language drift, but it's needed for reproducibility/audit and a "rand round-trips" proptest.
+- **Fix:** Specify `ms &amp; 0xFFFF_FFFF_FFFF` (mask low 48 bits) and the exact byte layout / which 6 bits are dropped.
+
+### [MINOR] §6 — corpus byte-stability gaps for the new corpora
+(1) §6 says `canonical` is "`null`/absent" for invalid cases — `null` vs absent are different bytes; the drift guard's `git diff` requires one fixed choice (recommend always-`null`, i.e. no `skip_serializing_if`). (2) The existing `serialize`, `corpus_path`, `load_corpus` are monomorphic to `Case` and `vectors/sum.json` (`paigasus-kernel-parity/src/lib.rs`); the spec's "serialize stays one-object-per-line" implies reuse but the fns must be generified per corpus type. (3) Each new corpus needs its own `committed_corpus_matches_a_fresh_generation`-style guard (currently only `replay.rs` has it for sum) and its own non-empty guard, in Rust + py + ts.
+- **Fix:** Call out the generification and per-corpus guards explicitly; pin `canonical: null`.
+
+### [MINOR] §7 — the error-kind token vocabulary is a cross-language contract but is only given by example
+§7 lists `"bad-scheme"`, `"wrong-field-count"`, `"bad-resource-id"` as examples and says the rest is "enumerated in the corpus." Since these tokens are the parity comparison key (and IAM/wrapper messages embed them), the full `PrnError` variant → token table belongs in the spec to prevent bikeshedding/churn during implementation, even though single-oracle guarantees cross-binding equality.
+- **Fix:** Add the complete variant→token table to §7.
+
+### [MINOR] §3 — malformed-path and adjacent-empty-field error disambiguation
+For `type/a/b` (two slashes), `/id` (empty type), `type/` (empty id), `prn:pgs:iam::::extra` (7 fields) — the spec lists variants (`MissingResourcePath`, `BadResourceType`, `MissingResourceId`, `WrongFieldCount`) but not which fires for which input, and "split into exactly 6 on `:`; 7th → WrongFieldCount" is implied, not stated. Region regex `^[a-z0-9-]+$` is also looser than service/type (permits leading digit/dash) — confirm that's intentional forward-compat.
+- **Fix:** Enumerate one corpus case per malformed shape with its expected token; state the split rule.
+
+### [MINOR] §3 — no maximum input length for `parse`
+No upper bound on the PRN string. A multi-MB input with a giant `service`/`resource-type` segment forces a full linear regex scan. ARNs cap ~2048 chars for exactly this reason, and an unbounded identifier is also a storage/index concern downstream.
+- **Fix:** Add a max length (e.g. ≤ 512 bytes) with a typed error/kind token; add a corpus reject case.
+
+### [MINOR] §5 — empty/None marshalling at the FFI not specified
+`prn_org(s)` / `prn_region(s)` must map None/empty → `""` (vs throwing), and FFI `prn_build(…, org, …)` must map `""` org → `None` (vs BadOrg). The Rust API uses `Option&lt;Uuid&gt;`/`String`; the string FFI needs an explicit rule.
+- **Fix:** State `"" ⇔ None/empty` for org/region in both directions; add a `prn_build` corpus/smoke case with empty org.
+
+### [QUESTION] §4 `cedar.rs` — is `entity_id` the bare `resource_id` UUID (per ADR-0013), losing org/type context, and is the 3-segment namespace `Pgs::&lt;Service&gt;::&lt;Type&gt;` with a constant `Pgs` partition the intended Cedar shape? Confirm future partitions won't need to vary the `Pgs` root, and that Cedar entities keyed by bare UUID (org via `parents`) is the accepted model.
+
+### [QUESTION] §4 — does `Prn` derive `Serialize`/`Deserialize`? If not, the kernel's `uuid` dep needs no `serde` feature either (the corpus structs use `String`), which further shrinks the kernel's `uuid` feature set and supports the BLOCKER-1 fix. Confirm the kernel's exact `uuid` feature set (ideally: none).
+
+### [QUESTION] §8 — the "type-parity guard extended" line: the current guard only checks `sum`. Will it be extended to every new string-returning FFI fn (`prn_canonicalize`, `prn_error_kind`, `prn_build`, the five accessors, `mint_uuid7`, the cedar accessors)? Enumerate which signatures the guard pins, so a future drift in any one of them fails `tsc`.
+
+---
+
+Relevant files for the implementer:
+- Spec: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-448-kernel-prn/docs/superpowers/specs/2026-06-30-sma-448-kernel-prn-design.md`
+- Workspace `uuid` pin to fix: `/Users/smaschek/dev/paigasus/paigasus-core/rs/Cargo.toml:28` (and the baseline-features comment at lines 13-15)
+- napi `i32`/BigInt precedent: `/Users/smaschek/dev/paigasus/paigasus-core/rs/crates/bindings/paigasus-node-bindings/src/lib.rs:10-18`
+- wasm getrandom-free crate (consumes kernel): `/Users/smaschek/dev/paigasus/paigasus-core/rs/crates/bindings/paigasus-wasm/Cargo.toml`
+- Type-parity guard to extend: `/Users/smaschek/dev/paigasus/paigasus-core/ts/packages/paigasus-kernel/src/binding-parity.types.ts`
+- Parity harness to generify: `/Users/smaschek/dev/paigasus/paigasus-core/rs/crates/libs/paigasus-kernel-parity/src/lib.rs` and `tests/replay.rs`</result>
+<usage><subagent_tokens>33044</subagent_tokens><tool_uses>21</tool_uses><duration_ms>373631</duration_ms></usage>
+</task-notification>
