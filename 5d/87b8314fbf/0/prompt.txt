@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b4t5fls4h</task-id>
+<tool-use-id>toolu_011mE9MAyECfJTTanTqMh9p6</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/8d0af0b1-c97c-4315-abcd-33fb892c7f6d/tasks/b4t5fls4h.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll CR re-review + moon ci on 785e7d6" completed (exit code 0)</summary>
+</task-notification>
