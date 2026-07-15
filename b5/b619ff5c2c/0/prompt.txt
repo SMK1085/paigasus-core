@@ -1,0 +1,16 @@
+<task-notification>
+<task-id>a56523f0224e263e9</task-id>
+<tool-use-id>toolu_011TJk866D68oURyCsWTYa6g</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/9afe8601-e408-4606-98ac-68165a84a054/tasks/a56523f0224e263e9.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement Task 10: AppState + introspect" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>**Status: COMPLETE** (after coordinator's Option-2 decision on the escalated TLS blocker)
+
+- **Commit:** `80e8615` — `feat(rs): wire authn into app state and add http introspect (SMA-443)` on `feature/sma-443-m2-authentication-byo-idp-oidc` (signed, commitlint green)
+- **Tests:** RED captured (E0560 + 40× E0061 + async-signature errors), then 123/123 `cargo nextest -p paigasus-iam` GREEN; clippy `-D warnings` + fmt clean; `repo:deny`/`repo:machete` ok; full `moon ci` gate graph (32 tasks) exit 0. Happy-path introspect exercises the **real HTTPS discovery+JWKS fetch** against the mock IdP.
+- **Delivered:** `AuthnApiError` funnel (spec §6.3 exact), `POST /v1/authn/introspect` (D10 read-only), `WiredAuthenticator`/`AuthnSvc`/`AppState::new(db, &amp;cfg) -&gt; Result` (async), `accept_invalid_tls` config + fetcher knob, HTTPS MockIdp + `test_config` + token-aware `send`, sweep of http_tenancy/http_memberships/grpc_tenancy (others verified untouched-safe).
+- **Concerns:** (1) `WiredAuthenticator` variants hold `Arc&lt;Oidc&gt;`/`Arc&lt;OidcRedis&gt;` — required for `AppState: Clone` + shared JWKS single-flight state; only deviation from the brief's sketch, documented. (2) Task 11's rotation test needs the MockIdp JWKS made mutable. (3) rcgen/axum-server must keep `default-features = false` or `aws-lc-rs` enters as a second rustls provider. (4) Pre-existing stale `RUSTSEC-2025-0111` ignore in `rs/deny.toml` (warning only).
+- **Report:** `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-443-m2-authentication-byo-idp-oidc/.superpowers/sdd/task-10-report.md`</result>
+<usage><subagent_tokens>237670</subagent_tokens><tool_uses>56</tool_uses><duration_ms>1480911</duration_ms></usage>
+</task-notification>
