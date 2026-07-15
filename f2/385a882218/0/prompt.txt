@@ -1,0 +1,18 @@
+Post-merge cleanup for the PR: **PR 76 (SMK1085/paigasus-core), branch feature/sma-443-m2-authentication-byo-idp-oidc — currently inside the worktree at /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-443-m2-authentication-byo-idp-oidc**
+(If no PR is given, use the PR for the current branch.)
+
+Follow the **"Post-merge cleanup"** section of the `feature-factory:feature-pipeline`
+skill:
+
+1. **Confirm the PR is merged** with
+   `gh pr view PR 76 (SMK1085/paigasus-core), branch feature/sma-443-m2-authentication-byo-idp-oidc — currently inside the worktree at /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-443-m2-authentication-byo-idp-oidc --json state,mergedAt,baseRefName,headRefName`. If it is not
+   merged, **stop and tell me** - change nothing.
+   - Current status: ## feature/sma-443-m2-authentication-byo-idp-oidc...origin/feature/sma-443-m2-authentication-byo-idp-oidc
+2. Check out the PR's base branch and `git pull` so local base has the merged work.
+3. If the work used a git worktree, remove it (`git worktree remove` + `git worktree
+   prune`).
+4. Delete the merged local branch with `git branch -d`. Only fall back to `-D` because
+   Step 1 already confirmed the merge (e.g. after a squash/rebase merge).
+5. `git fetch --prune` to drop stale remote-tracking refs.
+6. Report what was cleaned up. **Never delete a branch whose PR isn't confirmed
+   merged** - "any local branches" means the merged ones, not unmerged work.
