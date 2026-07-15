@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bww11zd34</task-id>
+<tool-use-id>toolu_01Ab72sTvfp2Nk7Hd8f2CByN</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/bww11zd34.output</output-file>
+<status>completed</status>
+<summary>Background command "Run full moon ci gate suite (background)" completed (exit code 0)</summary>
+</task-notification>
