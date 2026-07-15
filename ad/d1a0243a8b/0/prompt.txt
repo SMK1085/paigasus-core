@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bgrg3vzbk</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/6c9d3b43-69b7-4125-88cf-e1da3886418a/tasks/bgrg3vzbk.output</output-file>
+<status>completed</status>
+<summary>Background command "Watch PR checks re-conclude after force-push" completed (exit code 0)</summary>
+</task-notification>
