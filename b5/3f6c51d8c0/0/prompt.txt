@@ -1,0 +1,1 @@
+Look at all dependabot PRs, merge them if they are green to main. If one fails, determine the root cause and fix it. Do this until all are merged. Always make sure to monitor GH actions on main after each merge
