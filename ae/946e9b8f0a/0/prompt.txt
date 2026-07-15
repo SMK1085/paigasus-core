@@ -1,0 +1,37 @@
+<task-notification>
+<task-id>a29f12b7fdcbcef28</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/a29f12b7fdcbcef28.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 3 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>### Spec Compliance
+- ✅
+
+### Strengths
+- All four required files present (`Cargo.toml`, `moon.yml`, `src/lib.rs`, `src/value.rs`); both `.rs` files' first line is exactly `// SPDX-License-Identifier: Apache-2.0` (`rs/crates/libs/paigasus-iam-core/src/lib.rs:1`, `rs/crates/libs/paigasus-iam-core/src/value.rs:1`).
+- `Cargo.toml` (`rs/crates/libs/paigasus-iam-core/Cargo.toml:1-18`) uses full workspace inheritance (`edition/license/rust-version/authors.workspace`), `publish = false`, `[lints] workspace = true` — verified against root `rs/Cargo.toml`, which already declares `chrono`, `async-trait`, `thiserror`, `uuid`, and the `paigasus-kernel` path dep in `[workspace.dependencies]`, so the new crate's `{ workspace = true }` refs resolve cleanly (consistent with the report's passing build/test/lint/fmt run).
+- `moon.yml` (`rs/crates/libs/paigasus-iam-core/moon.yml:1-14`) matches the required id (`paigasus-iam-core-rs`), `layer: 'library'` (not `type:`), `dependsOn: ['paigasus-kernel-rs']`, and `build`/`test` tasks with `deps: ['^:build']`.
+- `Email::parse` (`rs/crates/libs/paigasus-iam-core/src/value.rs:15-27`) implements exactly the M0 rule (trim → non-empty → single `@` via `split_once` → non-empty local/domain, reject `@` in domain-remainder). Traced every required case by hand: `""`, `"  "` → empty after trim; `"nope"`, `"a b"` → no `@`, `split_once` returns `None`; `"@b.com"` → empty local; `"a@"` → empty domain; `"a@@b"` → domain `"@b"` contains `@`. All correctly rejected; `"  a@b.com "` → trimmed to `"a@b.com"`, correctly accepted. The test at `value.rs:56-60` exercises all 7 reject cases in one table-driven test plus a dedicated accept-and-trim assertion (`value.rs:50-53`) — genuine coverage, not superficial.
+- `PrincipalId` (`value.rs:29-49`) is a single-field tuple struct wrapping `Prn` only — no separately stored UUID. `.uuid()` returns `self.0.resource_id()` (`value.rs:36-38`), `.canonical()` returns `self.0.canonical()` (`value.rs:44-46`), `.prn()` returns `&amp;Prn` (`value.rs:40-42`). The test at `value.rs:63-69` builds a `Prn` from a known UUID and asserts `id.uuid()` round-trips to that same UUID and `id.canonical()` matches the expected PRN string — this actually proves derivation, not duplication, because the struct definition itself precludes a second stored field.
+- `DomainError::InvalidEmail(String)` present with `thiserror::Error` derive and a sensible `#[error(...)]` message.
+- Commit message (`8c61e13 feat(rs): add paigasus-iam-core value objects Email + PrincipalId (SMA-441)`) is a single-line conventional commit, scope `rs`, `SMA-441` in the subject only, no body/footer to trip commitlint.
+- `rs/Cargo.lock` diff is additive-only and fully attributable to `chrono`'s transitive closure (`iana-time-zone`, `android_system_properties`, `windows-core`/`-implement`/`-interface`/`-result`/`-strings`, `cc`, `shlex`, `find-msvc-tools`, `core-foundation-sys`) plus the new `paigasus-iam-core` package block itself — nothing unexplained.
+
+### Issues
+
+#### Critical (Must Fix)
+None.
+
+#### Important (Should Fix)
+None.
+
+#### Minor (Nice to Have)
+- `DomainError` derives `Debug, Clone, PartialEq, Eq, thiserror::Error` (`value.rs:8`) vs. the brief's stated `#[derive(Debug, thiserror::Error)]`. Harmless and arguably useful (equality-comparable errors), but it's a small, unrequested surface-area addition worth a one-line mention in the PR description if this crate's public API is meant to be reviewed trait-by-trait later.
+- `chrono` and `async-trait` are declared in `Cargo.toml` but not imported/used anywhere in this task's code (⚠️ cross-task — brief confirms these are picked up by Task 4's entities/ports on the same branch; repo-level `cargo-machete` doesn't run until Task 12 by which point both are consumed).
+
+### Assessment
+**Task quality:** Approved
+**Reasoning:** The diff is a verbatim, verified implementation of the brief — `Email::parse` correctly implements and tests the exact M0 rule against every listed case, `PrincipalId` derives its UUID from the wrapped `Prn` with no duplicate storage, and all Cargo/Moon/SPDX/commit constraints are met with no critical or important defects.</result>
+<usage><subagent_tokens>53237</subagent_tokens><tool_uses>6</tool_uses><duration_ms>102634</duration_ms></usage>
+</task-notification>
