@@ -1,0 +1,4 @@
+Look at the dependabot PRs and the security vulnerabilities. 
+Make sure that you merge all dependabot PRs to main one after the other. 
+Check if they close all security vulnerabilities, if not, drive a small PR to close them yourself. 
+Note that you are allowed to merge to main for this, but make sure to check all GH actions on main after each merge. If any failures occur, fix them first before moving on.
