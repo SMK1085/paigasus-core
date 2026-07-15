@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "fb8a19fa2635",
+  "strategy": "import",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/fb/8a19fa2635/0/metadata.json",
+      "transcript": "/fb/8a19fa2635/0/full.jsonl",
+      "compact_transcript": "/fb/8a19fa2635/0/transcript.jsonl",
+      "content_hash": "/fb/8a19fa2635/0/content_hash.txt",
+      "prompt": "/fb/8a19fa2635/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2643,
+    "cache_creation_tokens": 84855,
+    "cache_read_tokens": 3902222,
+    "output_tokens": 68452,
+    "api_call_count": 24
+  },
+  "imported": true
+}
