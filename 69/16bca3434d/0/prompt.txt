@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>brokadkbl</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/8d0af0b1-c97c-4315-abcd-33fb892c7f6d/tasks/brokadkbl.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll until CodeRabbit review completes" completed (exit code 0)</summary>
+</task-notification>
