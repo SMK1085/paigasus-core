@@ -1,0 +1,1 @@
+Pick up SMA-446 — start the last remaining piece: Prometheus dashboards + RUNBOOK (sub-project #3). Fresh worktree off main, run it through the feature pipeline.
