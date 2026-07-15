@@ -1,0 +1,20 @@
+<task-notification>
+<task-id>a85fb6b379b0a77b1</task-id>
+<tool-use-id>toolu_01GizAyZiBFUqiqt1qwGqCPk</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/a85fb6b379b0a77b1.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement Task 9: ts package + replays" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Exactly the 13 task files are staged; the 6 regenerated glue files (pre-existing staleness from Tasks 7/8) are correctly left unstaged per instructions. Everything is verified and the report is written.
+
+Status: DONE
+
+Files staged (13, `ts/packages/paigasus-kernel/`): moon.yml, src/{index.ts,wasm.ts,binding-parity.types.ts,mint-util.ts(new)}, tests/{corpus.ts,uuid7,prn,cedar}.test.ts(new)/.wasm.test.ts(new), vitest.config.ts
+
+Build/test/fmt/lint: build PASS (tsc + parity guard clean), test PASS (8 files, 240/240 tests, count-verified against corpora), ts:fmt PASS (after reformatting 3 of my own changed files with `prettier --write`), ts:lint PASS clean.
+
+Concerns: (1) Prettier reflowed the brief's multi-line import/export lists in `index.ts`/`wasm.ts`/`corpus.ts` to single lines — cosmetic only, re-verified green after. (2) Pre-existing, out-of-scope: committed napi/wasm glue (`index.d.ts`/`index.js`, `paigasus_wasm*`) was stale from Tasks 7/8 (Rust source had full surface, committed glue only had `sum`); running the build regenerated 6 glue files locally — left unstaged per instructions, flagged for a possible Task 7/8 follow-up.
+
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-448-kernel-prn/.superpowers/sdd/task-9-report.md`</result>
+<usage><subagent_tokens>92575</subagent_tokens><tool_uses>51</tool_uses><duration_ms>432234</duration_ms></usage>
+</task-notification>
