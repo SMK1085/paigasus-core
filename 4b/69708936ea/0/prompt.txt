@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bz5oj4m65</task-id>
+<tool-use-id>toolu_01WwiakZQsLHPSQWVistK5kZ</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/9afe8601-e408-4606-98ac-68165a84a054/tasks/bz5oj4m65.output</output-file>
+<status>completed</status>
+<summary>Background command "Monitor main CI+prebuild for merge commit of PR #75" completed (exit code 0)</summary>
+</task-notification>
