@@ -1,0 +1,15 @@
+<task-notification>
+<task-id>ac8cc0f9acb6dddfc</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/ac8cc0f9acb6dddfc.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement Task 11: main composition root" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+Commit: `f615c48` — feat(rs): wire paigasus-iam composition root + graceful shutdown (SMA-441)
+Summary: build/lint/fmt/test all green (10/10 nextest incl. Docker roundtrip tests); `cargo machete` clean; `cargo deny` clean (advisories/bans/licenses/sources ok).
+Boot-smoke: PASS — real Postgres container, migrations applied, `/healthz`→`{"status":"ok"}`, `/readyz`→`{"status":"ready"}`, SIGINT produced clean graceful shutdown.
+Concerns: one justified deviation from the brief — `TimeoutLayer::new` is deprecated in the resolved tower-http 0.6.11, so used `TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, …)` (identical behavior, avoids clippy `-D deprecated` failure). Service's cargo-machete `ignored` allowlist (`anyhow`/`paigasus-logging`/`tracing` etc.) left untouched per brief — worth pruning in Task 12.
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-441-m0-walking-skeleton-paigasus-iam-scaffold/.superpowers/sdd/task-11-report.md`</result>
+<usage><subagent_tokens>85657</subagent_tokens><tool_uses>52</tool_uses><duration_ms>490570</duration_ms></usage>
+</task-notification>
