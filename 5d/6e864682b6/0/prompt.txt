@@ -1,0 +1,22 @@
+<task-notification>
+<task-id>a8e529ea587e17837</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/a8e529ea587e17837.output</output-file>
+<status>completed</status>
+<summary>Agent "Fix final-review touch-ups" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Working tree is clean, no unrelated pending changes.
+
+Status: DONE — all three review touch-ups applied on branch `feature/sma-446-gateway-m0-iam-auth`.
+
+Commit: `8c55c1776a8992164771e85727b50b20b630914e` — `fix(rs): log gateway auth-path 500s + correct iam ca-cert/dev-dep docs (SMA-446)` (SSH-signed, verified).
+
+Test result: `cargo test -p paigasus-gateway` — 72/72 passed (54 lib + 12 chat_proxy + 6 openai_egress), status codes unchanged.
+
+Build/clippy/fmt all clean: `cargo build -p paigasus-gateway`, `cargo clippy -p paigasus-gateway --all-targets -- -D warnings`, `cargo fmt -p paigasus-gateway -- --check`.
+
+Files touched: `rs/crates/services/paigasus-gateway/src/adapters/http/auth.rs`, `.../src/adapters/http/error.rs`, `.../src/config.rs`, `.../Cargo.toml`.
+
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/.superpowers/sdd/task-G9-report.md` (gitignored, matching prior task reports — not committed, just written to disk).</result>
+<usage><subagent_tokens>85421</subagent_tokens><tool_uses>35</tool_uses><duration_ms>177920</duration_ms></usage>
+</task-notification>
