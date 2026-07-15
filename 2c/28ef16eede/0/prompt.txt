@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bs2f37j92</task-id>
+<tool-use-id>toolu_01AJaoXhhPwU41orTZ9QvJrj</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/7b80b7cf-03e2-4929-ae5f-f654f6934eb6/tasks/bs2f37j92.output</output-file>
+<status>completed</status>
+<summary>Background command "Watch CodeRabbit until its restarted review completes" completed (exit code 0)</summary>
+</task-notification>
