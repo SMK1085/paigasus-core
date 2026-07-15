@@ -1,0 +1,52 @@
+<task-notification>
+<task-id>a09d40098cdb46c99</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/a09d40098cdb46c99.output</output-file>
+<status>completed</status>
+<summary>Agent "Review G7 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Everything checks out. I have all the confirmations needed — read-only preserved (tree clean, HEAD unchanged at `0049d94`).
+
+---
+
+## Verdict: Approved
+
+The G7 integration crux is implemented faithfully to the brief. Egress hygiene, streaming semantics, layering, and status mapping are all correct and test-backed. Findings are Minor/informational only.
+
+## Spec Compliance
+
+- ✅ **Egress hygiene** — handler passes ONLY `body: Bytes` to `chat_completion(body, stream)` (`src/adapters/http/chat.rs:98`); no path forwards inbound headers. The G6 client builds fresh headers from its own key (`src/adapters/openai/client.rs:169-172`), and `CallerContext` is read from extensions for logging only, never re-derived from raw headers. The egress test asserts exact-match `recorded.header("authorization") == "Bearer &lt;REAL_KEY&gt;"`, `assert_ne!` the caller bearer, and cookie absent (`tests/chat_proxy.rs:890-897`).
+- ✅ **Streaming** — success path returns `Body::from_stream(terminal_sse_error_stream(stream))` with `text/event-stream` (`chat.rs:107-109`); `terminal_sse_error_stream` unfolds `{Streaming, Done}`, forwards each chunk per-item unbuffered, and on the FIRST inner `Err` yields exactly one terminal `data:{"error":…"code":"upstream_error"}` event then ends (`chat.rs:154-168`). Returned DIRECTLY — no `tokio::spawn` — so reqwest cancel-on-drop survives. Non-2xx `Stream` uses the returned `status` + `application/json` + RAW stream, NOT forced to SSE (`chat.rs:110-114`).
+- ✅ **Body limit / layering** — `DefaultBodyLimit::max(state.max_request_bytes)` + auth applied via `route_layer` on the protected sub-router, merged with public `/healthz`+`/readyz` (`src/adapters/http/mod.rs:413-428`). Health probes stay outside auth AND the limit; unmatched paths 404 without a credential challenge (`route_layer` semantics). 413 confirmed (`tests/chat_proxy.rs:789-797`), health-reachable + chat-401 unit tests present.
+- ✅ **Status mapping** — `From&lt;OpenAiError&gt;`: Timeout→UpstreamTimeout(504), Connect|Transport|Build→UpstreamUnavailable(502), exhaustive over G6's 4 variants (`error.rs:260-267`); BadRequestBody→400 (`error.rs:288`). All three status assertions + the mapping unit-tested (`error.rs:317-331`).
+- ✅ **Verbatim passthrough** — `ChatResponse::Full` forwarded status+body unchanged incl. non-2xx (`chat.rs:101-104`); 429-envelope passthrough test at `tests/chat_proxy.rs:818-829`.
+- ✅ **Logging** — one `tracing::info!` with model/stream/status/latency_ms/principal/key_id; no prompt/body/messages/key (`chat.rs:127-135`). `model` is the (non-secret) model id, explicitly permitted by the brief.
+- ✅ **main.rs wiring** — builds `IamClient::connect` + `OpenAiClient::new` (three split timeouts), assembles `AppState`, `router(state)`, graceful shutdown intact, no key logged (`main.rs:548-562`).
+- ✅ **Conventions** — SPDX + `//!` on both new files; commit `0049d94` subject lowercase ≤100 chars with the required trailer; no `--no-verify`; `aws-lc-rs`=0 (reconfirmed); tree clean.
+
+## Strengths
+
+- The `Option&lt;Extension&lt;CallerContext&gt;&gt;` defensive extractor surfaces the (unreachable) missing-context case as a 500 through the OpenAI envelope rather than axum's default (`chat.rs:82-86`).
+- The premature-EOF truncated-TCP upstream (`tests/chat_proxy.rs:908-930`) is a genuine mid-stream reqwest failure (chunked head + two frames, socket closed before the `0\r\n\r\n` terminator), not a synthetic hook — and it asserts status stayed 200, the pre-error frames arrived in order, AND the terminal event is the last frame (`:864-866`). This is the strongest part of the review and it holds up.
+- The clean-stream test asserts byte-exact equality with NO spurious terminal event (`tests/chat_proxy.rs:844-845`), pinning the `None =&gt; None` clean-end arm.
+- Auth-fail / denied / 413 / 400 rows each also assert `mock.recorded().is_none()` — proving the upstream is never touched on rejection.
+- `From&lt;OpenAiError&gt;` has no wildcard arm, so a future OpenAiError variant fails to compile until its mapping is reconsidered.
+
+## Issues
+
+**Minor**
+
+1. `tests/chat_proxy.rs:833-846` — the ordered-stream test asserts frame ORDER and content but collects via `to_bytes`, so true incremental/unbuffered delivery is not directly observed here. The unbuffered property is structural (per-item `unfold`) and is indirectly evidenced by the mid-stream test (pre-error frames forwarded before the appended terminal event); G8 owns streaming/abort. Not blocking.
+2. `src/adapters/http/chat.rs:89-92` + `error.rs:288` — `GatewayError::BadRequestBody` ("The request body is not valid JSON.") also fires for well-formed JSON missing a required field (e.g. no `model`, since `model`/`messages` aren't `#[serde(default)]`). Status 400 is still correct and the message is static/caller-safe; only the wording is slightly imprecise for that sub-case. The brief chose this message deliberately.
+3. Informational — no end-to-end 502/504 row in `tests/chat_proxy.rs`; the `OpenAiError`→status mapping is unit-proven in `error.rs:322-331` and the brief's Step-5 table did not require the e2e variant.
+
+## Adjudication of decisions (a)–(d)
+
+- **(a) Fake `Iam` vs mock gRPC IAM server — acceptable.** The brief (Step 5) explicitly directs a fake `impl Iam`; the wire self-query + D9 metadata are unit-proven in G4/G5. This is per-spec, keeps the handler-integration tests hermetic, and still drives the REAL middleware→handler→egress path. Not a deviation.
+- **(b) Premature-EOF upstream — valid.** A truncated chunked response yields a real reqwest error in the body stream, which is exactly the mid-stream failure the adapter must handle; arguably more faithful than extending the shared mock (left untouched per the brief).
+- **(c) Auth before 413 — acceptable for M0 and documented** (`mod.rs:417-419`); auth reads only headers, never the body.
+- **(d) `Result&lt;Bytes, Infallible&gt;` outgoing item — correct;** the outgoing stream never errors (mid-stream failure becomes a data event), so `Body::from_stream` never aborts the body.
+
+**Task quality: Approved** — no fixes required. The Minor items are optional follow-ups, not merge blockers.</result>
+<usage><subagent_tokens>80296</subagent_tokens><tool_uses>16</tool_uses><duration_ms>264406</duration_ms></usage>
+</task-notification>
