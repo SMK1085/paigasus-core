@@ -1,0 +1,1 @@
+Full review at @docs/superpowers/specs/2026-06-20-sma-436-py-typecheck-vacuous-pass-design-review.md
