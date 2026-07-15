@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>buzu4xybl</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/8d0af0b1-c97c-4315-abcd-33fb892c7f6d/tasks/buzu4xybl.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll moon ci + CodeRabbit on ff826e8" completed (exit code 0)</summary>
+</task-notification>
