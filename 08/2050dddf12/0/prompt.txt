@@ -1,0 +1,76 @@
+<task-notification>
+<task-id>a5abb53772312523b</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/a5abb53772312523b.output</output-file>
+<status>completed</status>
+<summary>Agent "Final whole-branch review" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have completed a thorough cross-cutting pass. All six load-bearing invariants verified end-to-end, including the cross-service seam (IAM `authn_status` → gateway status mapping). Here is my final whole-branch review.
+
+---
+
+# FINAL whole-branch review — SMA-446 (#2) AI Gateway M0 + IAM auth
+
+**Branch:** `feature/sma-446-gateway-m0-iam-auth` @ `7369426` (base `4adc639`). Read-only; tree untouched.
+
+## Verdict up front
+The branch is coherent and the security invariants hold end-to-end. I found **no Critical or Important correctness bugs** in the cross-cutting pass. Everything below is Minor. The whole-branch view actually strengthens confidence in the two hardest pieces (the D9 self-query and the D11 cache path), because the seams line up.
+
+## Strengths
+
+- **The D9 self-query is structurally uncrossable, not just tested.** In `adapters/http/auth.rs:71-85` both the queried `principal_prn` and the bearer `key` come from the *same inbound request* (the introspect response + the inbound `Authorization`), and `adapters/iam/client.rs:124-134` builds the `IsAuthorized` request faithfully from those args with no principal substitution. There is no code path that lets a caller name a principal other than the one their own key resolves to. The unit test (`auth.rs:388-404`) records and asserts the exact 4-tuple.
+- **The introspect-vs-authz `PermissionDenied` divergence is correct across the service boundary.** I traced it through IAM: `grpc/convert.rs::authn_status` maps `PrincipalInactive → PermissionDenied` and `InvalidToken → Unauthenticated`; the gateway's `introspect_error` (auth.rs:109-120) maps `PermissionDenied → 401` while `authz_error` (auth.rs:126-137) maps `PermissionDenied → 500`. Invariant #5 holds exactly, and both mappings are exhaustive.
+- **Credential hygiene is enforced by the type, not by discipline.** The chat handler (`chat.rs:78`) hands the egress client only `body: Bytes` — it is *impossible* to forward a caller header because the client never receives them (`openai/client.rs:165-172` builds a fresh request with only `Authorization`/`Content-Type`/`Accept`). Proven at two levels (`openai_egress.rs:108`, `chat_proxy.rs:296`, incl. cookie + exact-match bearer). OpenAI key is `SecretString`, redacted in `Debug` and `#[serde(skip_serializing)]` (config.rs:99), locked by tests.
+- **D11 cache path is proven no-DB-read.** `cache_hit_returns_scope_prn_without_a_db_read` (authenticate_api_key.rs:638) uses `PanicIfCalled*` repos, and both introspect mappers (`grpc/convert.rs:314`, `http/dto.rs:520`) extract `scope_prn` from the identical `Credential::ApiKey` match, so miss/hit/gRPC/HTTP are consistent by construction. `WireValidation` round-trips it through Redis JSON (cache.rs:359).
+- **Streaming + cancel-on-drop is genuinely proven.** The handler returns the adapted stream directly (chat.rs:134-148, `unfold` owning the inner stream), and `client_abort_cancels_upstream_request` (chat_proxy.rs:373) drives a real socket + a `Drop`-guard mock to prove propagation with a bounded fail-not-hang. TLS is ring-only: `aws-lc` absent from `rs/Cargo.lock`, `ring` present; the Cargo.toml comments (lines 34-38, 52-57) document *why*.
+- **`gateway_user` did not dilute anything (D10).** `GATEWAY_USER_ACTIONS = &amp;[InvokeModel]` (roles.rs:155); I read every `*_ADMIN_ACTIONS`/`*_MEMBER_ACTIONS` const — none contains `InvokeModel`. `is_write=true` (action.rs:190) flows into the derived `forbid-archived-writes`, and the archived-deny is table-tested for `gateway_user` (roles.rs:599).
+
+## Issues
+
+### Critical
+None.
+
+### Important
+None.
+
+### Minor
+
+1. **Silent 500s on the auth path — observability gap (highest-weight Minor).** `error.rs:58` documents `GatewayError::Internal` as "*details are logged, not echoed*", but the auth middleware does **no** logging — the only request log is in the chat handler (`chat.rs:107`), which never runs on a middleware short-circuit. So an authz `PermissionDenied → 500` (a *broken D9 self-query* — precisely the thing you must be able to see in prod) or `MissingScope → 500` (a plumbing bug) produces **no log line at all**. `file: adapters/http/auth.rs:69,81` + `adapters/http/error.rs:58`. Fix: add a `tracing::error!`/`warn!` on the `MissingScope` and `authz PermissionDenied→Internal` arms (no token/scope values), or at minimum soften the doc comment. Non-blocking for internal M0, but I'd do the one-liner now.
+
+2. **`ca_cert_path` doc contradicts behavior (security-adjacent).** `config.rs:49-50` says the custom CA is trusted "*in addition to … the system trust store*", but `iam/client.rs:191-197` **pins to that CA alone** (`with_native_roots` only on the `None` branch). An operator reading the config doc could wrongly assume public roots still validate. `file: config.rs:49-50`. Fix: one-line doc correction to "trust *only* this CA (replaces the system trust store)". Cheap; I'd fix before merge.
+
+3. **`BadRequestBody` message imprecise.** Valid JSON missing a required `model`/`messages` field also yields "The request body is not valid JSON" (`error.rs:109`, `chat.rs:69`; the DTO fields aren't `#[serde(default)]`). Status 400 is correct; only the message is off for that sub-case. Acceptable as-is.
+
+4. **Spec-shorthand vs implementation on "upstream 5xx".** The impl forwards an upstream **HTTP** 5xx *verbatim* (chat.rs:81-84, `ChatResponse::Full` with upstream status), reserving `502/504` for transport-level connect/timeout/build failures (`error.rs:73-80`). This is the *more faithful* proxy semantic and matches spec §5 ("return upstream status verbatim") and the 429-passthrough test — but it diverges from a literal reading of D12/§7 "upstream-5xx→502". Not a bug; worth a one-line spec note so the two spec statements don't read as contradictory. No e2e 502/504 row exists (unit-proven only) — optional follow-up.
+
+5. **Auth runs before the 413 for authenticated callers.** `mod.rs:64-68` (documented at :63-65): a valid caller sending an oversized body incurs *two* IAM round-trips before the body-limit rejects it. Unauthenticated callers still 401 at the header stage before the body is read, so exposure is limited to valid callers. Acceptable for M0/non-prod (D6); a follow-up could pre-check `Content-Length`.
+
+6. **Stale Cargo.toml comment.** `Cargo.toml:73` references `tests/health.rs`, which doesn't exist (tests are `chat_proxy.rs`/`openai_egress.rs`). Trivial.
+
+## Minor-findings triage (from `progress.md`)
+
+| Ledger item | Verdict |
+|---|---|
+| G2 scope_prn parity asserted transitively | **acceptable-as-is** — both mappers read the same `Credential::ApiKey` field via identical matches; divergence is structurally near-impossible. |
+| G4 `default_tls_system_trust` couples to host trust store | **acceptable-as-is / fold-into-follow-up** — prod fail-fast is correct; CI ships `ca-certificates`. Follow-up: bundled test-CA. |
+| G4 `ca_cert_path` doc "in addition to" vs pins-to-CA-alone | **fix-before-merge (preferred)** — see Minor #2; one line, security-adjacent. |
+| G5 error.rs "details are logged" but no mw logging | **fix-before-merge or immediate follow-up** — see Minor #1; the silent auth-path 500 is the one I'd act on. |
+| G7 `BadRequestBody` message imprecise | **acceptable-as-is / fold-into-follow-up** — see Minor #3. |
+| G2 parity transitive (dup) | acceptable-as-is. |
+| G8 2s wall-clock abort bound | **acceptable-as-is** — loud fail, not a hang. |
+| G6 vacuous cookie-absence assertion | **acceptable-as-is** — load-bearing proof is the exact-match `authorization` assertion. |
+| G8 holding stream `Poll::Pending` no waker | **acceptable-as-is** — test-only, dropped never re-polled. |
+| G7 ordered-stream via `to_bytes` | **acceptable-as-is** — order proven; incremental delivery evidenced by the unbuffered egress + mid-stream tests. |
+| G7 no e2e 502/504 row | **fold-into-follow-up** — unit-proven; see Minor #4. |
+
+New cross-cutting items found: Minor #1 (elevated from the G5 note — the gap is real and spans the mw), #2, #4, #6. No new Critical/Important.
+
+## Recommendations
+1. Add `tracing` on the two auth-path 500 arms (`MissingScope`, `authz PermissionDenied→Internal`) — a broken self-query must not fail silently. (Minor #1)
+2. Correct the `ca_cert_path` doc to say it replaces, not augments, the system trust store. (Minor #2)
+3. Optional: refine the `BadRequestBody` message; add one e2e `502`/`504` row; drop the stale `tests/health.rs` comment; add a spec footnote reconciling §5 verbatim-passthrough with D12's "5xx→502" shorthand.
+
+## Assessment: Ready to merge? **Yes.**
+Every load-bearing invariant (self-query authz, whole-path credential hygiene, `InvokeModel` archived-deny + undiluted roles, the `scope_prn` no-DB-read cache, the full status-code contract including the 401-vs-500 `PermissionDenied` split, and unbuffered/cancel-on-drop streaming on ring-only TLS) holds end-to-end across the task seams, with strong tests and green gates. All findings are Minor; I'd land the two one-line touch-ups (auth-500 tracing + the `ca_cert_path` doc) either in this PR or as an immediate follow-up, but neither blocks merge.</result>
+<usage><subagent_tokens>200153</subagent_tokens><tool_uses>43</tool_uses><duration_ms>407767</duration_ms></usage>
+</task-notification>
