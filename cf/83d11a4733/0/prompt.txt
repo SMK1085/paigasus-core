@@ -1,0 +1,1 @@
+watch the main CI run to completion
