@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bndkzt1ss</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0e0343f0-a7dd-4eef-a939-365b2593cae7/tasks/bndkzt1ss.output</output-file>
+<status>completed</status>
+<summary>Background command "Watch PR CI checks to completion" completed (exit code 0)</summary>
+</task-notification>
