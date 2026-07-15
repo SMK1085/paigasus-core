@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bo9o1mf85</task-id>
+<tool-use-id>toolu_017erUiNprQ7inrePayDgrcn</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0e0343f0-a7dd-4eef-a939-365b2593cae7/tasks/bo9o1mf85.output</output-file>
+<status>failed</status>
+<summary>Background command "Poll until the new CI run completes" failed with exit code 1</summary>
+</task-notification>
