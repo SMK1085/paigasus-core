@@ -1,0 +1,17 @@
+<task-notification>
+<task-id>ad7b8789110711943</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/ad7b8789110711943.output</output-file>
+<status>completed</status>
+<summary>Agent "Fix: make log_level config effective" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Commit is signed and clean. Final report written to the specified path.
+
+Status: DONE
+Commit: c7c3da7407f3ecf540897570068380cf047658de — "fix(rs): honor paigasus-iam log_level config as the default tracing filter (SMA-441)"
+Summary: paigasus-logging tests 3/3 green, paigasus-iam tests 10/10 green (incl. live-Postgres roundtrip), lint/fmt clean, cargo machete clean
+Boot-smoke: performed and succeeded — `IAM_LOG_LEVEL=debug` produced DEBUG-level `tower_http::trace` request/response logs (previously suppressed at hardcoded `info`), `/healthz` returned 200
+Concerns: none
+Report path: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-441-m0-walking-skeleton-paigasus-iam-scaffold/.superpowers/sdd/final-fix-report.md`</result>
+<usage><subagent_tokens>55929</subagent_tokens><tool_uses>22</tool_uses><duration_ms>210246</duration_ms></usage>
+</task-notification>
