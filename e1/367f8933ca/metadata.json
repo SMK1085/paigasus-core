@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "e1367f8933ca",
+  "strategy": "import",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/e1/367f8933ca/0/metadata.json",
+      "transcript": "/e1/367f8933ca/0/full.jsonl",
+      "compact_transcript": "/e1/367f8933ca/0/transcript.jsonl",
+      "content_hash": "/e1/367f8933ca/0/content_hash.txt",
+      "prompt": "/e1/367f8933ca/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 6,
+    "cache_creation_tokens": 2780,
+    "cache_read_tokens": 852068,
+    "output_tokens": 2358,
+    "api_call_count": 3
+  },
+  "imported": true
+}

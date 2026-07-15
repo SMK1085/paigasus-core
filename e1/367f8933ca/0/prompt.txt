@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b7hhi6tom</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0e0343f0-a7dd-4eef-a939-365b2593cae7/tasks/b7hhi6tom.output</output-file>
+<status>completed</status>
+<summary>Background command "Watch checks to completion after spec push (round 2)" completed (exit code 0)</summary>
+</task-notification>
