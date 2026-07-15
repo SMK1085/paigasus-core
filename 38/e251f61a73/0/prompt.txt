@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b0fja5rmj</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/9afe8601-e408-4606-98ac-68165a84a054/tasks/b0fja5rmj.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll CI re-run + CodeRabbit re-review after round-1 fixes" completed (exit code 0)</summary>
+</task-notification>
