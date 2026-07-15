@@ -1,0 +1,22 @@
+<task-notification>
+<task-id>ab2c55426c1fa35eb</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/ab2c55426c1fa35eb.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement G3: gateway scaffold + config" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Task G3 complete and committed with a valid SSH signature.
+
+**Status:** DONE
+**Commit:** `2804e453b3f92a0257cd994bb25ec7737d134585` — `feat(rs): scaffold paigasus-gateway service + config (SMA-446)`
+**Tests:** 13/13 unit tests pass (`cargo test -p paigasus-gateway`); build/clippy/fmt all clean; also ran `cargo machete` and a live binary smoke test (booted, `/healthz`+`/readyz` returned `{"status":"ok"}`, API key never appeared in logs) for extra confidence.
+
+**New deps:**
+- `secrecy = { version = "0.10", features = ["serde"] }` — NOT previously in root `rs/Cargo.toml` workspace deps; pinned directly in the gateway crate per brief fallback. MIT/Apache-2.0; G9 should sanity-check `rs/deny.toml` and consider promoting to a workspace pin.
+- `thiserror` unused by G3's actual scope (no error enum yet) — added a temporary `[package.metadata.cargo-machete] ignored = ["thiserror"]` allowlist per CLAUDE.md convention; prune when G4/G5 adds a real error type.
+
+**Design choice:** `iam.tls` implemented as an internally-tagged enum (`Tls{...} | LoopbackInsecure`) rather than a bool+paths struct — makes invalid combinations unrepresentable; `validate()` enforces D8 (loopback-only insecure opt-out).
+
+Report path: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/.superpowers/sdd/task-G3-report.md`</result>
+<usage><subagent_tokens>160279</subagent_tokens><tool_uses>68</tool_uses><duration_ms>603560</duration_ms></usage>
+</task-notification>
