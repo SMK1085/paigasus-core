@@ -1,0 +1,53 @@
+<task-notification>
+<task-id>a473a6b0b30666688</task-id>
+<tool-use-id>toolu_015NLqAoyRjNrLyekRGrN4Wo</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/a473a6b0b30666688.output</output-file>
+<status>completed</status>
+<summary>Agent "Review G6 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result># Task G6 Review — OpenAI DTO + streaming egress client
+
+**Verdict: Approved.** The implementation matches the brief on every load-bearing point (header hygiene, secret hygiene, unbuffered streaming + cancel-on-drop, split timeouts, non-2xx passthrough, lossless DTO). Verified in-tree against HEAD `bea37b7` (== review head). No blocking or important issues found.
+
+## Spec Compliance
+
+- ✅ **Header hygiene** — `chat_completion(&amp;self, body: Bytes, stream: bool)` is the only public entry (client.rs:160); it structurally cannot receive caller headers. Upstream request is built FRESH via `self.http.post(url)` with exactly three curated headers — `AUTHORIZATION`, `CONTENT_TYPE`, `ACCEPT` (client.rs:169–171). No header copying anywhere.
+- ✅ **Header-hygiene test** — `injects_the_real_key_and_never_forwards_caller_headers` (openai_egress.rs:119–130) asserts upstream `authorization == "Bearer &lt;REAL_KEY&gt;"` (exact match ⇒ nothing else replaced/appended it), `content-type`/`accept` correct, `cookie` absent, and body forwarded verbatim. Mock records real headers+body (support/mod.rs:846–851).
+- ✅ **Secret hygiene** — key held as `SecretString`; `expose_secret()` called ONLY at the `Authorization`-build instant (client.rs:169). `Debug` derived on `OpenAiClient` (client.rs:122); config side adds a second guard (`#[serde(skip_serializing)]` on `api_key`, config.rs:99). Two tests use a real key value and assert absence in `{:?}` (client.rs `debug_never_leaks_the_api_key`; openai_egress.rs:154).
+- ✅ **Unbuffered streaming + cancel-on-drop** — stream path returns `response.bytes_stream().boxed()` (client.rs:189), no `.collect()`/line-buffering. `bytes_stream()` consumes `response` by value; the boxed stream is the sole owner (status is read as a `Copy` `StatusCode` beforehand, nothing else retains the response), so drop-cancels-request is preserved. Structure does not prevent cancellation (G8 proves the abort).
+- ✅ **Split timeouts** — client builder sets `.connect_timeout(connect_timeout)` + `.read_timeout(stream_idle_timeout)` (client.rs:140–141); no global `.timeout()`; per-request `.timeout(first_byte_timeout)` applied ONLY on the `!stream` branch (client.rs:177). `read_timeout` (reqwest 0.12.28) is correctly the between-bytes idle bound. Matches D6/§5 exactly.
+- ✅ **Non-2xx passthrough** — non-stream returns `Full { status, body }` for any status; only `send`/`bytes` failures become `OpenAiError` via `from_request` (client.rs:105, `is_timeout`→`Timeout`, `is_connect`→`Connect`, else `Transport`; build error is a distinct `Build`). Test `non_2xx_upstream_is_returned_verbatim_not_an_error` covers a 429 envelope.
+- ✅ **DTO round-trip** — `ChatCompletionRequest { model, #[serde(default)] stream, messages, #[serde(flatten)] extra }`; three tests cover unknown-field capture, lossless re-serialize, and `stream` default-false.
+- ✅ **rustls provider / deps** — reqwest gains only `stream` (TLS untouched: workspace pin is `rustls-tls`+`json`, Cargo.toml:68). Reconfirmed in-tree: `aws-lc-rs` count = **0**, `ring` = 1. New lock entry `wasm-streams 0.4.2` is wasm-only, `MIT OR Apache-2.0`. `bytes`/`futures` both consumed in `src/`.
+- ✅ **Hygiene** — SPDX + `//!` on all five new files. Commit `bea37b7` subject conventional, lowercase-after-scope, 68 chars, trailer present, body carries no `#NNN` footer trap.
+
+## Strengths
+
+- The security-critical invariant (caller headers cannot leak) is enforced by the type of the public API, not just discipline — the client is handed only `body: Bytes`. Strongest possible form.
+- Manual `Debug` for `ChatResponse` prints `body_len`/discriminant only (client.rs), avoiding any accidental body/stream render; `OpenAiError::from_request` is deliberately *not* a `From` impl so a client-*build* error can't be misclassified as transport (client.rs:105 doc).
+- Mock (`support/mod.rs`) is genuinely reusable by G7: ephemeral `127.0.0.1:0`, records headers+body, serves both canned JSON and frame-by-frame SSE via `Body::from_stream` (real incremental delivery, no artificial buffering), aborts on drop.
+
+## Issues
+
+**Critical:** none. **Important:** none.
+
+**Minor**
+
+- openai_egress.rs:128 — the `cookie` absence assertion is somewhat vacuous: reqwest never adds a cookie and the API accepts no caller headers, so nothing could have set one. It's harmless and matches the brief's "send a body only" wording; the load-bearing proof is the exact-match `authorization` assertion (:119–120). No change needed.
+- Stream path with a non-2xx upstream returns `Stream { status: 4xx, stream }` rather than `Full` (client.rs:181–190). This is still verbatim passthrough (G7 forwards the error status + the JSON error body as a stream), so it's correct, just slightly less convenient than the `Full` shape for a stream-request error. Out of scope for G6; flagging only for G7's awareness.
+
+## Deviation adjudication
+
+- `pub mod dto;` + `pub use dto::ChatCompletionRequest;` (http/mod.rs) vs brief's `mod dto;` — **accepted.** It widens visibility so G7's handler can name the DTO, mirrors the existing `pub use` style in the same file, and has no downside. Disclosed in the report.
+
+## Assessment
+
+**Task quality: Approved.** Spec-complete, security invariants enforced structurally, tests exercise the real key and the ordered unbuffered stream, and the shared mock is ready for G7. Only two cosmetic minors, neither warranting a change.
+
+Key files:
+- `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/rs/crates/services/paigasus-gateway/src/adapters/openai/client.rs`
+- `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/rs/crates/services/paigasus-gateway/src/adapters/http/dto.rs`
+- `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/rs/crates/services/paigasus-gateway/tests/openai_egress.rs`
+- `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/rs/crates/services/paigasus-gateway/tests/support/mod.rs`</result>
+<usage><subagent_tokens>71035</subagent_tokens><tool_uses>14</tool_uses><duration_ms>192017</duration_ms></usage>
+</task-notification>
