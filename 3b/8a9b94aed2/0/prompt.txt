@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bzzq022pk</task-id>
+<tool-use-id>toolu_019TyPsLui3noNrZ3SWqjS1s</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/9afe8601-e408-4606-98ac-68165a84a054/tasks/bzzq022pk.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll until CodeRabbit finishes reviewing PR 77" completed (exit code 0)</summary>
+</task-notification>
