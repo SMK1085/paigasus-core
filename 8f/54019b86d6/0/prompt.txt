@@ -1,0 +1,42 @@
+<task-notification>
+<task-id>a433ba88654551d6e</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/a433ba88654551d6e.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 4 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>### Spec Compliance
+- ✅
+
+### Strengths
+- SPDX header is byte-exact as the first line in all three new files: `rs/crates/libs/paigasus-iam-core/src/principal.rs:1`, `ports.rs:1`, `user.rs:1` (diff lines 99, 40, 192).
+- `#[async_trait]` is applied only to `PrincipalRepository` (`ports.rs:62`); `IdGenerator` (`ports.rs:69`) and `Clock` (`ports.rs:75`) are plain sync traits as required — no stray async annotations.
+- `RepositoryError::Backend` is `Box&lt;dyn std::error::Error + Send + Sync&gt;` behind `#[from]` + `#[error(transparent)]` (`ports.rs:54-59`) — genuinely source-preserving, not stringified; `Conflict(String)` present for unique-violation mapping.
+- `PrincipalKind`/`PrincipalStatus` each have exactly one M0 variant with symmetric `.as_str()`/`.parse()` (`principal.rs:29-71`), no `#[non_exhaustive]`.
+- `Principal`/`User` both carry `chrono::DateTime&lt;Utc&gt;` `created_at`/`updated_at`; `User::new` has 7 positional args with `#[allow(clippy::too_many_arguments)]` (`user.rs:211-213`) — `Principal::new` (5 args) correctly omits the allow since it's under clippy's default threshold.
+- `lib.rs` re-exports match the brief exactly, alphabetical mod order preserved (`lib.rs:25-32`).
+- Object-safety test (`ports.rs:84-85`) is a legitimate compile-time guarantee: `PrincipalRepository`'s `Send + Sync` supertraits plus `async_trait`'s default `Send`-boxed-future desugaring make `dyn PrincipalRepository` genuinely object-safe; this only compiles if that holds.
+- Kind/status round-trip test (`principal.rs:180-184`) asserts real behavior (both success and failure paths of `.parse()`), not a tautology.
+
+### Issues
+
+#### Critical (Must Fix)
+None.
+
+#### Important (Should Fix)
+None.
+
+#### Minor (Nice to Have)
+- `repository_error_wraps_a_source_error` (`ports.rs:87-91`) only asserts the `Backend(_)` variant matches via `matches!`; it doesn't additionally assert `e.to_string() == "boom"` or otherwise touch the `#[error(transparent)]` Display/source delegation. The type signature (`Box&lt;dyn Error + Send + Sync&gt;`) already guarantees source-preservation at compile time, so this is a completeness nit, not a real gap.
+- No dedicated unit test for `User::new` field assignment — mirrors the brief exactly (brief's Step 2 has no test block), so not a deviation, just an opportunity.
+
+### Verification notes
+- Verified the "cargo fmt reflow" claim in the report is accurate and not a semantic change: `rs/rustfmt.toml` sets `max_width = 200` (SMA-359, for cross-stack parity with py/ts), so `Principal::new` (141 cols), `User::new` (191 cols), and `PrincipalRepository::find_user` (102 cols) legitimately fit on one line under this repo's actual rustfmt config — this is not the brief's assumed 100-col wrapping, and the field/param lists are unchanged, confirming no semantic drift.
+- Confirmed (⚠️ read outside diff, single focused check) that `rs/crates/libs/paigasus-iam-core/Cargo.toml` already declares `chrono`, `thiserror`, `async-trait` and `[lints] workspace = true` from Task 3 — this task's new code compiles against dependencies that were already present, nothing missing.
+- Confirmed workspace lint config (`rs/Cargo.toml:86-90`): `warnings = "deny"`, `clippy::all = "warn"` — combined with the CLI's `-D warnings`, this would fail on `User::new`'s 7-arg constructor without the `#[allow(clippy::too_many_arguments)]`, which is correctly present.
+
+### Assessment
+**Task quality:** Approved
+**Reasoning:** Implementation matches the brief verbatim in structure and semantics (only whitespace differs, correctly explained by the repo's 200-col rustfmt policy); all specified traits/types/re-exports are present with the right `async_trait` scoping and source-preserving error design, and the included tests exercise real behavior rather than being vacuous.</result>
+<usage><subagent_tokens>53417</subagent_tokens><tool_uses>10</tool_uses><duration_ms>165840</duration_ms></usage>
+</task-notification>
