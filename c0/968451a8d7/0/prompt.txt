@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>be2yx0ee9</task-id>
+<tool-use-id>toolu_01W1tdJGB2d2h98zM8zQPHhv</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/8d0af0b1-c97c-4315-abcd-33fb892c7f6d/tasks/be2yx0ee9.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll until CodeRabbit review completes on PR 81" completed (exit code 0)</summary>
+</task-notification>
