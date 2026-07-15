@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b13zs30xf</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/b13zs30xf.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll until CodeRabbit + moon ci both terminal" completed (exit code 0)</summary>
+</task-notification>
