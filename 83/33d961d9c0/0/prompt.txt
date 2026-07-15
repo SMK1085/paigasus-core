@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bp32fxluh</task-id>
+<tool-use-id>toolu_016q4qt4TyCKMozsyz2iu2HG</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/bp32fxluh.output</output-file>
+<status>completed</status>
+<summary>Background command "Run full CI-parity affected graph" completed (exit code 0)</summary>
+</task-notification>
