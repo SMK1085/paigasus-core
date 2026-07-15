@@ -1,0 +1,47 @@
+<task-notification>
+<task-id>a5b4053ae9383e2ae</task-id>
+<tool-use-id>toolu_01USuttewvBYRsdYJ8ekhw1p</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/a5b4053ae9383e2ae.output</output-file>
+<status>completed</status>
+<summary>Agent "Review U2: gateway metrics" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Clean. Now compiling the final review.
+
+---
+
+## Spec Compliance
+
+✅ **Config** — `MetricsConfig { enabled: bool, addr: Option&lt;SocketAddr&gt; }` with `enabled=true, addr=None` defaults (`rs/crates/services/paigasus-gateway/src/config.rs:112-122`); `validate()` rejects `addr == http_addr` (`config.rs:262-266`), tested (`config.rs:474-483`). Env-override path exists structurally via the pre-existing generic `Env::prefixed("GATEWAY_").split("__")` figment layer (`config.rs:220`) — not separately unit-tested for `metrics.*` but the mechanism is untouched/generic, consistent with every other sub-config.
+
+✅ **`/metrics` wiring** — enabled+`None` → same-port merge (`main.rs:49-52`); enabled+`Some` → separate listener, `tokio::spawn` (actually *better* than the brief's baseline: it's wired to the real `shutdown_signal()`, not a bare unguarded spawn) (`main.rs:59-68`); disabled → `metrics_handle` is `None`, `init` is never called, and no merge/listener code path runs (`main.rs:27,49-52,59`). Verified with an isolated build (see below) and by reading `metrics_route_is_404_when_metrics_disabled` (`tests/metrics.rs:102-109`), which structurally mirrors the disabled branch.
+
+✅ **HTTP layer placement** — `http_metrics_layer("gateway")` wraps the whole router (health + protected route), applied *after* `.merge(protected)` but the route mounts `/metrics` itself only in `main.rs`, outside `router()`, so scrapes never inflate `gateway_http_requests_total` (`adapters/http/mod.rs:73-80`). Confirmed by construction that auth failures ARE still counted: the outer `.layer()` wraps `route_layer(auth)` (added earlier, to `protected`), so a 401 from `require_iam_auth` still passes back up through the outer layer's `next.run(req).await`, gets timed and status-classed.
+
+✅ **IAM-call metrics in `auth.rs`, upstream metrics in `chat.rs`** — `record_iam_call`/`iam_result` at `auth.rs:287-308`, wrapping both `introspect_api_key` (`auth.rs:223-235`) and `is_authorized_self` (`auth.rs:256-266`); `record_upstream_call` at `chat.rs:422-426`, called at all three `chat_completion` outcomes (`chat.rs:364,375,394`). Both use `paigasus_observability::names::*` consts, never hardcoded strings.
+
+✅ **Bounded-cardinality labels / privacy** — scanned every label emission site; only `operation ∈ {introspect, authorize}`, `result ∈ {ok, denied, unavailable, error}` (both `&amp;'static str`), and `status_class` (`{N}xx` derived from an `http::StatusCode`, never free text). No `model`, PRN, key-id, principal, path, or error-message text ever reaches a metric label. Pre-existing `tracing::info!`/`tracing::error!` lines that do log `principal`/`key_id` are untouched context, out of this diff's scope, and are logs not metric labels (not covered by the "never log/label" privacy bar's metric-label half; the log fields are non-secret SA identifiers, consistent with the existing code's own documented rationale).
+
+✅ **`result` mapping question** — `PermissionDenied → "error"` for both `introspect` and `authorize` exactly matches the brief's given `iam_result` code (`auth.rs:301-308`). It's a defensible bounded mapping (never leaks status text) even though it diverges from the HTTP-status mapping (`introspect_error`/`authz_error` treat `PermissionDenied` case-specifically) — correctly flagged by the implementer as intentional, not a bug.
+
+✅ **Tests exercise real render output** — all 4 `tests/metrics.rs` tests assert on `handle.render()` substrings, not mocks.
+
+## Strengths
+
+- Separate-listener shutdown wiring reuses the real `shutdown_signal()` rather than the brief's "plain spawn is acceptable" floor, closing the leaked-task risk the review brief explicitly called out as a non-blocking Minor.
+- `/metrics` is deliberately kept outside `http_metrics_layer`'s scope (mounted post-`router()`), correctly avoiding self-scrape inflation on both the merged and the separate-listener path.
+- Comments throughout `auth.rs`/`chat.rs`/`config.rs` are precise about *why*, matching the file's existing documentation density.
+- `iam_result`/`record_iam_call` never touch raw gRPC status text — confirmed by direct reading, not just self-report.
+
+## Issues
+
+**Minor** — `rs/crates/services/paigasus-gateway/Cargo.toml:81-83` (dev-dependency `metrics-exporter-prometheus`). The stated rationale ("`tests/metrics.rs` names `PrometheusHandle` directly to call `.render()`") is factually wrong — grepped the whole crate tree and `tests/metrics.rs` never names `PrometheusHandle` anywhere; every `handle` binding is untyped (`let handle = paigasus_observability::init(...)`). `PrometheusHandle::render()` is an *inherent* method (verified in the vendored source, `metrics-exporter-prometheus-0.18.3/src/recorder.rs:413`), so Rust resolves it via type inference without requiring the defining crate to be a direct dependency. Verified empirically: built an isolated worktree at this commit, removed the dev-dependency line, and `cargo test -p paigasus-gateway --test metrics` compiled and passed all 4 tests unchanged. `cargo machete` doesn't flag it (apparent tool limitation, not evidence it's needed). Not a functional defect — harmless bloat plus an inaccurate code comment — but worth pruning before merge; leaving it invites the same false pattern to be copied into a future service crate.
+
+**Minor** — `rs/crates/services/paigasus-gateway/src/adapters/http/auth.rs` — the `iam_result` mapping (the one item this review's brief specifically flagged as a named risk) has no direct or indirect test asserting its label output. The pre-existing decision-table tests (`introspect_unavailable_returns_503`, `introspect_connect_failure_returns_503`, `authz_permission_denied_returns_500`, `authz_unauthenticated_returns_401`, etc., `auth.rs:355-431`) already exercise every `IamError` variant through `require_iam_auth` — which now calls `record_iam_call`/`iam_result` on every one of those paths — but none of them installs a recorder or renders `/metrics` to check the resulting `result` label. Only the all-`"ok"` happy path is asserted (`tests/metrics.rs:126-159`). A regression that silently mis-mapped, say, `Unavailable → "error"` instead of `"unavailable"` would pass every existing test. Cheap fix: either a small `#[test] fn iam_result_maps_...()` table directly on the private fn, or extend a couple of the existing `auth.rs` decision-table cases to also call `paigasus_observability::init(...)` and assert the rendered label.
+
+**Minor** — no evidence in the implementer's report (or expected from this task-scoped review) that the repo-level gates (`moon ci :deny :machete :affected-smoke ... --base origin/main --include-relations`) were run, despite this unit adding new workspace dependencies (`paigasus-observability`, `metrics`, `metrics-exporter-prometheus`) and a `moon.yml` `dependsOn` edit — CLAUDE.md mandates this before such changes are pushed. Not a defect in the diff itself; flagging so it isn't skipped before this branch is opened as a PR / merged.
+
+## Assessment
+
+Task quality: **Approved** — no Critical or Important issues found; the three Minor items (a redundant test dependency with an inaccurate justifying comment, a real-but-cheap-to-close test-coverage gap on the exact mapping this review was asked to scrutinize, and a reminder to run the full moon gate graph before push) are all polish-level and don't block. The config/wiring/instrumentation logic itself is correct by direct reading and by targeted empirical verification (isolated dependency-removal build), matches the metric-name registry and bounded-label/privacy constraints exactly, and the auth-failures-still-counted risk was confirmed correct by tracing the actual layer-nesting order in `router()`.</result>
+<usage><subagent_tokens>145817</subagent_tokens><tool_uses>35</tool_uses><duration_ms>508935</duration_ms></usage>
+</task-notification>
