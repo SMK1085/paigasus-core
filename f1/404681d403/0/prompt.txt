@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>byvandnia</task-id>
+<tool-use-id>toolu_01DqWvTmme5r921FWwmFf55B</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0e0343f0-a7dd-4eef-a939-365b2593cae7/tasks/byvandnia.output</output-file>
+<status>completed</status>
+<summary>Background command "Watch prebuild run to completion (background)" completed (exit code 0)</summary>
+</task-notification>
