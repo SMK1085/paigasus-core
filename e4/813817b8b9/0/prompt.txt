@@ -1,0 +1,54 @@
+<task-notification>
+<task-id>ac6aecfab146626af</task-id>
+<tool-use-id>toolu_01G17dSeruyQosKX4EF81sHy</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/ac6aecfab146626af.output</output-file>
+<status>completed</status>
+<summary>Agent "Review G5 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Review complete. All focus items verified against source. Final report below.
+
+---
+
+## Verdict: Approved — no fixes required
+
+Security-critical auth middleware is correct, spec-faithful, and well-tested. The self-query invariant is airtight, the two IAM-error mappings diverge exactly as required, and no token/IAM text can leak. The implementer's one deviation is justified. No Critical or Important issues.
+
+## Spec Compliance
+
+- ✅ **Self-query wiring (D9):** `auth.rs:96` calls `is_authorized_self(&amp;key, &amp;principal_prn, INVOKE_MODEL_ACTION, &amp;scope_prn)`. `principal_prn`/`scope_prn` come *only* from the introspect response (`auth.rs:89-90`); `key` is the request's own bearer (`auth.rs:69,75`). The request body is never read. A header/body value cannot substitute the principal — cross-principal query is unreachable from this path. Trait arg order matches (`client.rs:65`).
+- ✅ **Self-query test is a strong assertion:** `self_query_uses_caller_key_and_introspected_principal` (`auth.rs:407-422`) asserts all four recorded args: `caller_key==CALLER_KEY` (request bearer), `principal_prn==CALLER_SA` (introspected SA), `action==INVOKE_MODEL_ACTION`, `resource_prn==CALLER_SCOPE`. Not a weaker check.
+- ✅ **Two mappings diverge on `PermissionDenied`:** `introspect_error` → `InvalidCredential`/401 (`auth.rs:133`); `authz_error` → `Internal`/500 (`auth.rs:149`). Both cover every `tonic::Code` (explicit arms + `_`), both map `Connect`→503, `Unauthenticated`→401, `Unavailable`/`DeadlineExceeded`/`Internal`→503.
+- ✅ **Introspect success checks + ordering:** `status != "active"`→401 (`auth.rs:79`) runs *before* `scope_prn.is_empty()`→500 (`auth.rs:84`), both *before* authz (`auth.rs:96`). Matches the binding order.
+- ✅ **No leak of IAM/token text:** all six messages in `error.rs:508-531` are static; both 500s render `"Internal error."`. The `IamError` (which wraps `tonic::Status` message + the token-bearing path) is consumed by the two mappers and reduced to an enum variant — the `Status` is never rendered. No `tracing`/`log`/`println` anywhere in `auth.rs` (verified), so no log-side leak either.
+- ✅ **Ordering / short-circuit:** bearer→introspect→status→scope→authz→attach→`next.run`. Every failure returns `into_response()` early; `next.run(req)` is reached only after `Ok(true)` (`auth.rs:104`).
+- ✅ **Envelope shape exact:** `ErrorEnvelope{ error: ErrorBody{ message, r#type, param: Option&lt;String&gt;=None, code: Option&lt;String&gt; } }` → `{"error":{"message","type","param":null,"code"}}`. Status map per variant is binding-correct: MissingBearer 401, InvalidCredential 401, AuthzDenied 403, MissingScope 500, IamUnavailable 503, Internal 500 (`error.rs:508-531`; `each_case_maps_to_its_bound_status` test).
+- ✅ **CallerContext only on authorized path:** inserted at `auth.rs:103`, after `Ok(true)`; fields sourced from the trusted introspect response. `happy_path_reaches_handler_with_caller_context` proves the probe handler observes it.
+- ✅ **Bearer extraction independent of iam crate:** `bearer()` (`auth.rs:111-122`) uses only `axum::http` + std; first-space split, ASCII-case-insensitive `Bearer`, trim, non-empty. Absent/non-UTF-8/wrong-scheme/empty→`None`→`MissingBearer` (401). "Bearer   " (test) → empty after trim → 401.
+- ✅ **Files/wiring:** SPDX + `//!` on both new files; `mod.rs` adds `pub mod auth; pub mod error; pub use auth::require_iam_auth; pub use error::GatewayError;`. Modules reachable (`lib.rs` → `adapters` → `http`/`iam`; `domain`). Proto `IntrospectApiKeyResponse` has exactly the fields the test constructs (`scope_prn` = tag 7).
+- ✅ **Commit:** subject 70 chars, lowercase after scope, correct trailer, clean single-footer body (no `#NNN` trap), only the 3 intended files.
+
+### Adjudication of the declared deviation
+The transport codes are written as an explicit `Unavailable | DeadlineExceeded | Internal` arm **plus** a separate `_` arm (both → `IamUnavailable`), instead of the brief's `… | _`. **Justified and correct.** A wildcard inside an or-pattern trips clippy's `wildcard_in_or_patterns` (a `complexity` lint in `clippy::all`, which the workspace denies with `-D warnings`), so the brief's literal form wouldn't compile clean. The two-arm form is idiomatic, documents the expected retryable codes, and is exhaustive. `match_same_arms` (which would flag the identical bodies) is `pedantic`, not in `clippy::all`, so it does not fire — consistent with the reported clean clippy run.
+
+## Strengths
+- Introspected-only sourcing of `principal_prn`/`scope_prn` makes cross-principal query structurally impossible, not merely tested-against.
+- Decision-table tests cover every row of both mappings, including `Connect`→503 on both calls (beyond the brief's explicit rows).
+- Enum left open (`GatewayError`) with clear doc contract for G6/G7 egress extension; `#[derive(Clone, Copy)]` keeps it cheap.
+- Doc comments accurately encode *why* the two mappings diverge — good for the next maintainer touching the security path.
+
+## Issues
+
+**Minor**
+- `error.rs:499-501` — the `Internal` variant doc says "details are logged, not echoed", but the middleware performs no logging at all. For a security-critical auth path, emitting zero telemetry on auth failures/500s is an observability gap (denials are IAM-audited server-side per the facts doc, and the brief doesn't mandate gateway logging, so this is not a spec miss — but the doc slightly overstates current behavior). Consider adding `tracing` on the 500 paths in a later task and softening the comment.
+- `auth.rs:104` (forward-looking, **not a G5 defect**) — the inbound `Authorization: Bearer &lt;caller-key&gt;` header is left on `req` when handed to `next.run`. Fine within the gateway's trust boundary (the intended channel is `CallerContext`), but G7 must ensure it does **not** forward inbound headers verbatim to the OpenAI upstream, or the caller's Paigasus key would egress. Worth a one-line note in the G7 brief.
+
+## Assessment
+**Task quality: Approved.** Spec-complete, security invariant proven by a precise test, mappings correct and exhaustive, no static/log leak, envelope exact, context attached only when authorized. The single deviation is a correct clippy accommodation. The two Minor notes are non-blocking (one doc nit, one forward-looking hand-off for G7).
+
+Reviewed files (absolute):
+- `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/rs/crates/services/paigasus-gateway/src/adapters/http/auth.rs`
+- `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/rs/crates/services/paigasus-gateway/src/adapters/http/error.rs`
+- `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/rs/crates/services/paigasus-gateway/src/adapters/http/mod.rs`
+- Cross-checked against `.../src/adapters/iam/client.rs`, `.../src/domain.rs`, and the generated `IntrospectApiKeyResponse`.</result>
+<usage><subagent_tokens>76464</subagent_tokens><tool_uses>16</tool_uses><duration_ms>211438</duration_ms></usage>
+</task-notification>
