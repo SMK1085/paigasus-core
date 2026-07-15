@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bvvl4jy8x</task-id>
+<tool-use-id>toolu_015ujXEeLHL1GvSDsVUaEEA1</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/8d0af0b1-c97c-4315-abcd-33fb892c7f6d/tasks/bvvl4jy8x.output</output-file>
+<status>failed</status>
+<summary>Background command "Poll moon ci re-run to conclusion" failed with exit code 1</summary>
+</task-notification>
