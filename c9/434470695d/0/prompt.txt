@@ -1,0 +1,32 @@
+<task-notification>
+<task-id>a736e67dcb2f96363</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/a736e67dcb2f96363.output</output-file>
+<status>completed</status>
+<summary>Agent "Re-review final fix" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All three findings verified directly against the diff and independently confirmed. Full verdict below.
+
+## Verdict: Approved
+
+## Spec Compliance
+1. ✅ `prn_fields` parity corpus — kernel-derived, byte-stable, replayed in Rust/Python/TS(napi+wasm), asserts all 5 accessors + `prnBuild(...) === prn` round-trip.
+2. ✅ `wasm-getrandom-free` gate hardened — `cargo tree` failure now `exit 2` (loud, distinct message), getrandom-found is `exit 1`, absent is a clean pass. `toolchain: 'system'`/`inputs:` untouched.
+3. ✅ Python `mint()` now uses `//` (floor int division), still compatible with `mint_uuid7(unix_ms: float, ...)`.
+
+## Strengths
+- `build_prn_fields_corpus()` (`rs/crates/libs/paigasus-kernel-parity/src/lib.rs:265-287`) computes every field straight from `paigasus_kernel::Prn::parse(...)` accessors — verified against `rs/crates/libs/paigasus-kernel/src/prn.rs:165-181` (`service()`, `region()`, `org()`, `resource_type()`, `resource_id()`); kernel remains the single oracle, not hand-copied literals.
+- `org: ""` for the `organization`/`user` PRNs and a real UUID for `team`/`project`/`service-account`/`api-key` — matches the FFI `prn_org` contract (`rs/crates/bindings/paigasus-py-bindings/src/lib.rs:71-74`, mirrored in node/wasm bindings) exactly.
+- `prn_build`'s round-trip genuinely exercises empty-org marshalling: the FFI impl builds `prn:pgs:{service}:{region}:{org}:{resource_type}/{resource_id}` and reparses — with `org=""` this reproduces the `prn:pgs:iam:::organization/...` empty-tenant-slot form byte-for-byte, so `PRN_FIELDS_CASES` genuinely round-trips the None-marshalling path, not just a happy path.
+- Independently reran `cargo test -p paigasus-kernel-parity --test replay prn_fields_corpus_present_and_fresh` → `1 passed`, confirming committed == freshly generated.
+- Independently traced/ran the hardened gate: a broken `cargo tree` invocation (bogus `--target`) correctly hits the loud `exit 2` path; `moon run repo:wasm-getrandom-free` passes (cached, exit 0) for the genuine getrandom-absent case. `if`-without-`else` bash semantics correctly yield exit 0 when getrandom is absent (no false-negative risk).
+- `git diff --name-only e1a350a..a14696e` confirms only the 11 reported files changed — no touch to any of the 4 pre-existing `vectors/*.json`, no binding `src/lib.rs`/generated glue diff. Matches "no regression" claim.
+- Vitest `include` placement double-checked on disk: `prn-fields.test.ts` → `node` project, `prn-fields.wasm.test.ts` → `browser` project — correct project/binding pairing, not swapped.
+- Python `mint_uuid7` stub (`py/.venv/.../paigasus_py_bindings/__init__.pyi:11`) declares `unix_ms: float`; PyO3's f64 extraction accepts a Python `int` via `__float__`, and PEP 484 treats `int` as an `float` subtype — the `//` change is behaviorally and type-check safe, consistent with the report.
+
+## Issues
+None found — Critical/Important/Minor: none.
+
+## Task quality: Approved</result>
+<usage><subagent_tokens>74894</subagent_tokens><tool_uses>22</tool_uses><duration_ms>165295</duration_ms></usage>
+</task-notification>
