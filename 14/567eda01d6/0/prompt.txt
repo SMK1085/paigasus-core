@@ -1,0 +1,50 @@
+<task-notification>
+<task-id>af8d3a515c082e008</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/af8d3a515c082e008.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 10 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>### Spec Compliance
+- ✅
+
+**Verified:**
+- Schema: `principal`(PK `id: Uuid`) + `user`(PK `principal_id: Uuid`, FK → `principal.id`, `ON DELETE CASCADE`) — 1:1 shared-PK pattern, correctly implemented in `rs/crates/services/paigasus-iam/src/adapters/persistence/migration/m0001_create_principal_and_user.rs:22,44-48` (FK) and mirrored in the entities (`entities/principal.rs:9`, `entities/user.rs:9`).
+- Text-backed enums: `kind`/`status` are `.text()` columns (migration.rs:24-25), mapped via `PrincipalKind::as_str()`/`parse()` and `PrincipalStatus::as_str()`/`parse()` — confirmed lossless (single-variant enums today, exhaustive match both ways, `paigasus-iam-core/src/principal.rs:16-29,38-51`).
+- `TIMESTAMPTZ`: `.timestamp_with_time_zone()` on all four timestamp columns (migration.rs:26-27,40-41).
+- Domain↔entity mapping lives entirely in `pg_repository.rs`; core types (`Principal`, `User`, `PrincipalKind`, `PrincipalStatus`, `PrincipalId`, `Email` in `rs/crates/libs/paigasus-iam-core/src/{principal,user,value}.rs`) carry only `Debug/Clone/PartialEq/Eq(/Hash)` — no `sea_orm` import or derive anywhere in that crate (independently verified via grep + Cargo.toml deps).
+- Error mapping: `map_err` in `pg_repository.rs:15-20` matches `DbErr::sql_err()` → `SqlErr::UniqueConstraintViolation` → `Conflict(String)`, else `Backend(Box&lt;dyn Error+Send+Sync&gt;)` — exact match to `RepositoryError`'s two variants (`ports.rs:14-20`).
+- Docker gate (`tests/roundtrip.rs:19-27`): correctly panics when `CI` is set and Docker unreachable, skips (returns) only when `CI` is unset — matches the exact required logic, not inverted.
+- SPDX headers: confirmed exact first line on all 8 new files.
+- `pub mod persistence;` registered in `src/adapters/mod.rs:9`.
+- Commit: `feat(rs): … (SMA-441)`, no bare `#NNN` in body, single contiguous footer, `SMA-441` only in subject.
+- `cargo deny check` (advisories/bans/licenses/sources all "ok"), `cargo machete` clean, `cargo fmt --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` clean — all reran independently, all green.
+- `cargo tree -i tokio-tar` independently confirms it reaches `paigasus-iam` only via `[dev-dependencies]` edges (testcontainers/testcontainers-modules), never shipped.
+- `RUSTSEC-2025-0111` justification independently verified accurate: the advisory's `affected.functions` are exactly `tokio_tar::Archive::new`/`ArchiveBuilder::new` (confirmed by reading the vendored advisory file), and `testcontainers-0.24.0/src/core/copy.rs` (only file in the crate referencing `tokio_tar`) calls exclusively `tokio_tar::Builder::new`/`Header::new_gnu` — the writer path — never `Archive`/`ArchiveBuilder`. The ignore is a single ID with an accurate, narrowly-reasoned comment (`rs/deny.toml:8-16`).
+- Ring/OpenSSL exception correctly omitted: `licenses ok` from `cargo deny check` with no ring exception present confirms ring's declared license is already covered by the existing `allow` list.
+- `rs/Cargo.lock` diff is a plausible dependency-graph expansion (new transitive crates for bollard/testcontainers/sea-orm-migration/sea-schema, plus routine version-split entries like `bitflags`/`indexmap`) — no signs of hand-editing.
+
+### Strengths
+- Clean hexagonal separation: SeaORM `DeriveEntityModel` lives only on `entities::{principal,user}::Model`; `pg_repository.rs` is the sole place that translates strings back into `PrincipalKind`/`PrincipalStatus`/`Email`/`PrincipalId`, exactly as the constraint requires.
+- `find_user`'s early-return-on-`None` pattern (`let Some(x) = ... else { return Ok(None) }`) is idiomatic and correctly composes across the two lookups.
+- The round-trip test genuinely proves the AC end-to-end: real migration via `Migrator::up`, real `create_user`/`find_user` calls, full `assert_eq!` on both structs, µs-truncated timestamps (`trunc_subsecs(6)`) so equality is exact rather than approximate.
+- The `deny.toml` advisory-ignore reasoning shows real due diligence (reading testcontainers' actual source, not just trusting the brief), and the report is transparent that this is a judgment call worth a second look.
+- Correctly and independently overrode the brief's suggested (unnecessary) ring/OpenSSL exception rather than blindly applying it.
+
+### Issues
+
+#### Critical (Must Fix)
+None.
+
+#### Important (Should Fix)
+- **`create_user` is not atomic — a failed second insert leaves an orphaned `principal` row.** `pg_repository.rs` (`create_user`, ~lines 22-33) does `principal.insert(&amp;self.db).await?` followed by a separate `user.insert(&amp;self.db).await?` with no `self.db.begin()`/`db.transaction(...)` wrapper. If the `user` insert fails (e.g. duplicate email, unrelated DB hiccup), the `principal` row is already committed with no corresponding `user` row. Consequences: (1) a permanently orphaned `principal` row with no cleanup path; (2) a caller retry with the *same* `Principal`/`User` pair will now get a spurious `Conflict` on the `principal` insert (duplicate `id`/`prn`) even though the logical create never succeeded — the retry can't distinguish "already created" from "partially created." `find_user` itself still behaves correctly in this state (returns `Ok(None)` because the `user` row is missing), so it doesn't lie to callers, but the leaked row and the broken-retry semantics are a genuine data-layer correctness gap in what's flagged as the most correctness-sensitive task so far. Fix: wrap both inserts in a single `DatabaseConnection::transaction` (or `db.begin()`/`commit()`). This is not mentioned anywhere in the implementer's report as a known/accepted limitation, which is itself a gap — a reviewer or future maintainer has no signal this exists.
+
+#### Minor (Nice to Have)
+- No test exercises the `Conflict` error-mapping path (`SqlErr::UniqueConstraintViolation → RepositoryError::Conflict`) — only the happy-path round trip runs against real Postgres. The mapping logic is correct by inspection, but it's unverified by execution.
+- `migration::down()` (drop `user` then `principal`) is correct by inspection but is never exercised by any test — only `up()` runs in `roundtrip.rs`.
+
+### Assessment
+**Task quality:** Approved
+**Reasoning:** Spec compliance is fully verified (schema, mapping, error handling, Docker gate, hexagonal purity, deny/machete/clippy/fmt all independently reran and green) and the round-trip test genuinely proves AC #2. The one real code-quality gap — non-atomic two-insert `create_user` risking an orphaned `principal` row on partial failure — is a legitimate finding worth fixing but doesn't invalidate this task's stated AC or spec compliance for the M0 walking skeleton; it should be tracked and fixed (a straightforward transaction wrap) before this repository is relied on beyond the skeleton.</result>
+<usage><subagent_tokens>106892</subagent_tokens><tool_uses>28</tool_uses><duration_ms>716538</duration_ms></usage>
+</task-notification>
