@@ -1,0 +1,43 @@
+<task-notification>
+<task-id>a49bbfe37194f48b2</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/6c9d3b43-69b7-4125-88cf-e1da3886418a/tasks/a49bbfe37194f48b2.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 11 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Fix evidence verified: "## Fix round 1" section exists in the report with the test command and a `5 tests run: 5 passed` tail, plus fmt/clippy clean. Now the updated verdict.
+
+### Spec Compliance
+✅
+
+Verified against the incremental diff (`review-49be939..568e227.diff`, one commit, one file: `rs/crates/services/paigasus-iam/tests/tenancy_nodes.rs`, +67/-0):
+
+- **Rename rejected for BOTH team and project while only the ORG is archived** — ✅. `seed_chain` produces all-Active nodes (confirmed in round 1: `Team::new`/`Project::new` always start `Active`, `tenancy.rs:218-227, 241-254`). The test archives only the org (diff line 42), leaves team/project own flags untouched, then asserts team rename → `Precondition(NodeArchived)` (lines 47-51) and project rename → `Precondition(NodeArchived)` (lines 54-58). This is exactly the effective-status-vs-own-status guard scenario the controller flagged.
+- **Post-restore partial renames** — ✅ with one small asymmetry. Team slug-only rename asserts the slug updated, name preserved, and `updated_at &gt; team.created_at` (lines 69-71) — and since the team row is never otherwise written in this test (only the *org* was archived/restored), pre-rename `updated_at == created_at`, so the assertion genuinely proves advancement. Project name-only rename asserts name updated and slug preserved (lines 76-77), but has **no `updated_at` assertion** (see Minor).
+- **`list_by_org` ordering/content** — ✅ covered: `len == 2` (default + renamed team) and ascending `created_at` asserted (lines 81-84). The two rows have distinct µs timestamps in practice (separate DB round-trips), so a descending return would fail the `&lt;=` assertion.
+- **`list_by_team` effective status** — ✅: the renamed project is found via `list_by_team`, with `name == "Project Renamed"` (proving the rename round-trips through the list path) and `effective_status == Active` asserted (lines 87-91).
+- **No production code changed** — ✅ confirmed: the diff's file list and hunks touch only `tests/tenancy_nodes.rs`.
+
+### Strengths
+- The guard scenario is tested in its strongest form: both child levels rejected purely via the ancestor fold, with own flags provably Active — precisely the case that distinguishes an effective-status guard from an own-status guard.
+- The team `updated_at` assertion is subtly sound (pre-rename `updated_at == created_at` holds because no earlier write touched the team row), not an accidental pass.
+- Partial-rename complements are tested in both directions (slug-only on team, name-only on project), giving coverage of both `Option` arms of the shared rename code across the two repos.
+
+### Issues
+
+#### Critical (Must Fix)
+None.
+
+#### Important (Should Fix)
+None — the round-1 Important finding is fully addressed.
+
+#### Minor (Nice to Have)
+- Project rename lacks an `updated_at`-advanced assertion (diff lines 75-78); only the team side proves it. The code path is the identical `active.updated_at = Set(now)` line in a structurally identical `rename`, so risk is negligible, but symmetry would cost one line.
+- `list_by_org` assertions are shallow: `&lt;=` on `created_at` tolerates ties in either order, the `id` tiebreak isn't exercised, and content is checked by count only (no slug check confirming "default" + "team-renamed" are the two rows). Mitigated by `tenancy_orgs.rs::list_orders_by_created_at_then_id` fully proving the same `ORDER BY created_at, id` pattern.
+- List paths are only asserted in the all-Active state; the archived-ancestor fold through `list_by_org`/`list_by_team` is never exercised (the fold goes through the same `team_view`/`project_view` helpers the matrix test proves via `find`, so this is cosmetic).
+
+### Assessment
+**Task quality:** Approved
+**Reasoning:** The new `rename_guards_and_lists_round_trip` test closes the round-1 gap exactly as requested — effective-status rename rejection for both team and project under an archived-org-only state, partial renames with field preservation, and list coverage — with no production code touched and 5/5 passing evidence in the report. Remaining items are polish-level assertion tightening only.</result>
+<usage><subagent_tokens>99854</subagent_tokens><tool_uses>3</tool_uses><duration_ms>77140</duration_ms></usage>
+</task-notification>
