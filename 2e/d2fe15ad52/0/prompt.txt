@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>ba3x3w2yb</task-id>
+<tool-use-id>toolu_0191iyLX9Xqdx9SVnM4UVhCn</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/7b80b7cf-03e2-4929-ae5f-f654f6934eb6/tasks/ba3x3w2yb.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for the moon ci rerun to complete" completed (exit code 0)</summary>
+</task-notification>
