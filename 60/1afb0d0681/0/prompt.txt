@@ -1,0 +1,17 @@
+<task-notification>
+<task-id>a8f6bcb345d0bc46f</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/a8f6bcb345d0bc46f.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement U9: Grafana dashboards" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+Commit: `e32bc2ba4e08b8ec1e65c7aa34bbcf2faa6933a3` — "feat(ci): add grafana dashboards + provisioning (SMA-446)"
+Dashboards: `iam.json` (uid `paigasus-iam`, 14 panels), `gateway.json` (uid `paigasus-gateway`, 7 panels)
+Validation: IAM_JSON_OK, GATEWAY_JSON_OK, both provisioning YAMLs parsed via `yaml.safe_load` — all pass
+Datasource UID: fixed `prometheus` (set explicitly in provisioning), referenced by both dashboards, no `${DS_*}` template var
+Metric check: every `expr` metric family (base + `_bucket`) is in `names::ALL`; no stray names/labels
+Concerns: no manual Grafana verification (deferred to RUNBOOK per brief Step 5, stack not stood up per instructions); actual Unit 10 drift-test parsing regex unverified against my expr placement (kept flat, no nested panels, to be safe)
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-observability/.superpowers/sdd/u9-report.md`</result>
+<usage><subagent_tokens>64517</subagent_tokens><tool_uses>19</tool_uses><duration_ms>175499</duration_ms></usage>
+</task-notification>
