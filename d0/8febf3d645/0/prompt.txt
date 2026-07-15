@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b0hwz2z3w</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/b0hwz2z3w.output</output-file>
+<status>completed</status>
+<summary>Background command "Re-run full gate graph on branch tip" completed (exit code 0)</summary>
+</task-notification>
