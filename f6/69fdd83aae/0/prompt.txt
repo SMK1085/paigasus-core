@@ -1,0 +1,49 @@
+<task-notification>
+<task-id>a720dbc34d6f4aaaf</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/a720dbc34d6f4aaaf.output</output-file>
+<status>completed</status>
+<summary>Agent "Final whole-branch review (opus)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have completed a thorough whole-branch review. Here is my verdict.
+
+---
+
+## Merge Verdict
+
+**READY TO MERGE** — no blockers. This is a clean, disciplined M0 skeleton that meets all three ACs, holds hexagonal integrity, and in two places is materially *better* than its own plan. The one concrete new finding (`log_level` config is inert) is a minor fast-follow, not a merge blocker.
+
+## Strengths
+
+- **Two improvements over the plan, both correctness-positive.**
+  - `main.rs:26-91` replaced the plan's `try_join!` with a `JoinSet` + `tokio::select!` fail-fast: the first server task to end (or panic) triggers `tx.send(())` graceful shutdown of the other and surfaces a non-zero exit. This is exactly what makes the "non-zero exit on port-bind failure" boot-smoke behavior real, and it drains cleanly on SIGINT/SIGTERM.
+  - `pg_repository.rs:32-61` wraps the two inserts in a `TransactionTrait` begin/commit (the plan had two bare inserts). This closes an orphaned-`principal` bug on duplicate-email, and it's backed by a real rollback test (`roundtrip.rs:65-93`) that asserts `find_user` returns `None` after the failed second insert. Genuinely good.
+- **Hexagonal integrity is intact.** `paigasus-iam-core` depends only on kernel/uuid/chrono/thiserror/async-trait — no sea-orm/axum/tonic (verified in Cargo.toml + `grep`). SeaORM derives live only on the entity `Model`s (`entities/{principal,user}.rs`); the core↔entity mapping is confined to `pg_repository.rs`; ports live in `core/ports.rs`. No leak.
+- **Deny waivers are narrow and honest** (`deny.toml:9-18`, `35-41`). `webpki-roots` CDLA-Permissive-2.0 is a single-crate license exception for a *permissive data* license (fine to ship); `RUSTSEC-2025-0111` is a single advisory-ID ignore with an accurate, specific justification (tokio-tar reached only via the `testcontainers` dev-dep, writer-only path, reader unreached, no upstream fix). Neither masks a shipped code-execution risk. Note the plan predicted a `ring`/OpenSSL exception would be needed — it wasn't; the committed `deny.toml` reflects the *actual* green resolution, which is the right call.
+- **No secret leakage.** `main.rs:51` logs only `http_addr`/`grpc_addr`, never `database_url`; health responses are fixed literals (`{"status":"ok"|"ready"|"unready"}`).
+- **Hygiene is clean.** SPDX header on every `.rs` + the proto; no `dbg!`/`println!`/`todo!`/`TODO` in production code; all commits Conventional with `SMA-441`; Moon `-rs` ids + `layer:` correct. The final commit (`960a43b`) properly *pruned* the temporary `[package.metadata.cargo-machete]` allowlist once every dep had a real consumer, and extended the affected-graph guard to include `paigasus-iam-core-rs`/`paigasus-iam-rs` on a kernel edit.
+- **C12/C13 honored:** the iam service has no `paigasus-proto` Cargo/Moon dep; `iam.proto` declares no `service`, and only `paigasus.iam.v1.rs` (prost, no `.tonic.rs`) is generated + `include!`d.
+
+## Blocking issues (Critical / Important)
+
+None.
+
+## Non-blocking (Minor / fast-follow)
+
+1. **`log_level` config key is inert (new finding).** `IamConfig.log_level` (`config.rs:15`) is loaded, defaulted, and unit-tested, and `iam.toml.example:6` documents it as a "RUST_LOG-style filter" — but nothing consumes it. `main.rs:17` calls `paigasus_logging::init("paigasus-iam")` (service name only), and `paigasus-logging` derives its filter purely from `RUST_LOG` via `env_filter()`. Setting `IAM_LOG_LEVEL=debug` or `log_level` in `iam.toml` changes nothing. Compounded by ordering: `init` runs *before* `IamConfig::load()`, so wiring it needs a reorder. **Fast-follow:** either load config first and pass `log_level` into an `init(service, filter)`, or drop the field and document `RUST_LOG` as the sole control. Doesn't block — logging works via `RUST_LOG`.
+2. **The gRPC integration test doesn't exercise the functions `main` actually calls.** `tests/grpc_health.rs` re-implements the server wiring inline and keeps the reporter alive; it validates `grpc::health_service()` but not `grpc::serve`/`grpc::router` (which drop the reporter). Not a bug — for unary `Health/Check` the last-set `SERVING` persists after the reporter drops — and the manual boot-smoke covered the real binary. Fast-follow: point the test at `grpc::serve`.
+3. **`grpc::serve` drops the `HealthReporter`** (`grpc.rs:25`) → no post-boot status flip. Fine for M0 (health is statically `SERVING`); revisit when `/readyz`-style gRPC readiness lands.
+4. **`readyz` 503 path and `migration::down()` are only manually/never tested.** Both acceptable for M0 (503 needs an unreachable DB; `down()` isn't on the boot path and drops child-before-parent correctly). Fast-follow at most.
+5. **`CreateUser` / `KernelIdGenerator` / `SystemClock` carry file-scoped `#![allow(dead_code)]` and aren't wired to any endpoint.** Intentional M1 pattern-setting per spec; acceptable. The module-scope allow is slightly broad but documented at each site.
+6. **`impl PrincipalRepository for &amp;InMemoryPrincipalRepository`** (`create_user.rs:93-101`) forwarding boilerplate — test-only, harmless.
+7. **Server-side `readyz` warn log** (`http.rs:37`) logs the `DbErr`; on a pooled `SELECT 1` this is a query error (no DSN), so low risk — worth a glance if connection-level errors ever surface there.
+
+## AC verification
+
+- **AC #1 — service boots; HTTP + gRPC health pass: MET.** HTTP `/healthz` → 200 via `tests/health.rs` (oneshot); gRPC `grpc.health.v1.Health/Check` → `SERVING` via `tests/grpc_health.rs` (real client on an ephemeral port); boot path is `main.rs:15-92`, and the manual boot-smoke confirmed real 200s, clean SIGINT, and non-zero exit on bind failure.
+- **AC #2 — one Principal/User row round-trips through Postgres: MET.** `tests/roundtrip.rs:42-61` migrates → `create_user` → `find_user` → full `assert_eq!` against real Postgres (testcontainers), hard-failing in CI if Docker is absent; the µs-truncating `SystemClock`/`trunc_subsecs(6)` makes the `TIMESTAMPTZ` equality bit-exact, and the transactional-rollback test (`:65-93`) adds atomicity coverage.
+- **AC #3 — `moon ci :build`/`:test` green: MET.** Per the prompt the full CI-parity graph is green at tip `960a43b`; the three new Moon projects wire `^:build`/`dependsOn` correctly and the machete allowlist was pruned to zero without reddening `:machete`.
+
+Key handwritten files reviewed: `rs/crates/services/paigasus-iam/src/{main.rs,config.rs,lib.rs}`, `adapters/{http.rs,grpc.rs,id.rs,clock.rs}`, `adapters/persistence/{pg_repository.rs,migration/m0001_create_principal_and_user.rs,entities/*}`, `application/create_user.rs`, `tests/{roundtrip.rs,grpc_health.rs,health.rs}`, `rs/crates/libs/paigasus-iam-core/src/*`, `rs/crates/libs/paigasus-logging/src/lib.rs`, `contracts/proto/paigasus/iam/v1/iam.proto`, `rs/crates/libs/paigasus-proto/src/lib.rs`, `rs/{Cargo.toml,deny.toml}`, and `ci/affected-graph/run.sh`.</result>
+<usage><subagent_tokens>132434</subagent_tokens><tool_uses>39</tool_uses><duration_ms>355069</duration_ms></usage>
+</task-notification>
