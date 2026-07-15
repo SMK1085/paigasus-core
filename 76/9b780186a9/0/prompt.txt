@@ -1,0 +1,14 @@
+<task-notification>
+<task-id>a511aa808f324680c</task-id>
+<tool-use-id>toolu_01KppijK7QTTAM5SDytdE97p</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/a511aa808f324680c.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement Task 2: iam.proto codegen" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+Commit: 8017022 feat(contracts): scaffold paigasus.iam.v1 proto + wire codegen (SMA-441)
+Build/test: `contracts:fmt`/`contracts:lint` pass, `contracts:generate` regenerated rs/py/ts with no errors, confirmed only `paigasus.iam.v1.rs` (no `.tonic.rs`) for the serviceless package, `paigasus-proto-rs:build`+`:lint` pass clean, drift gate clean post-commit.
+Concerns: none — matched the brief exactly, no hand-editing needed, no Cargo.lock change.
+Report: /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-441-m0-walking-skeleton-paigasus-iam-scaffold/.superpowers/sdd/task-2-report.md</result>
+<usage><subagent_tokens>60143</subagent_tokens><tool_uses>22</tool_uses><duration_ms>160549</duration_ms></usage>
+</task-notification>
