@@ -1,0 +1,37 @@
+<task-notification>
+<task-id>a397be4f5c67929b1</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/a397be4f5c67929b1.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 8 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>### Spec Compliance
+- ✅
+
+### Strengths
+- `health_router()` (`rs/crates/services/paigasus-iam/src/adapters/http.rs:12-13`) is genuinely stateless — only `/healthz`, no `AppState` involved — and `tests/health.rs:9-14` drives it directly via `ServiceExt::oneshot`, so the smoke test truly needs no DB. `router(state)` (`http.rs:16-18`) merges in `/readyz` via `.with_state(state)`, matching the brief's split exactly.
+- `readyz` (`http.rs:20-25`) is sound: `Ok(_) =&gt; 200`, `Err(_) =&gt; 503`, no `unwrap`/`expect`/panic path, and no error detail (e.g. DSN, driver message) is echoed back to the client — no secret-leak risk in the handler.
+- `AppState` (`http.rs:8-10`) derives `Clone` cleanly — `sea_orm::DatabaseConnection` is itself `Clone` (Arc-backed pool handle), so this isn't a footgun.
+- Correction #1 (no `tower-http`) is honored: grepped the full diff, `tower-http` appears nowhere; `[dependencies]` gained only `axum`, `serde_json`, `sea-orm`, and `[dev-dependencies]` gained `tower` (`rs/crates/services/paigasus-iam/Cargo.toml:16-24, 31-32`).
+- Lib/bin split matches the brief precisely: `[lib] name = "paigasus_iam" path = "src/lib.rs"` / `[[bin]] name = "paigasus-iam" path = "src/main.rs"` (`Cargo.toml:9-15`); `src/lib.rs` exposes `adapters`/`application`/`config`; `src/main.rs` drops the inline `mod` decls, uses `paigasus_iam::config`, and stays the same one-line stub (`main.rs:5-10`).
+- All three new `.rs` files (`http.rs`, `lib.rs`, `tests/health.rs`) open with the exact required SPDX line.
+- Named check — `rs/deny.toml` diff (`deny.toml:26-32`) touches **only** the `exceptions` array (`[] → [{ name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] }]`). The main `allow` license list, `confidence-threshold`, `bans.multiple-versions = "warn"`, `bans.wildcards = "deny"`, and `[sources]` (`unknown-registry`/`unknown-git` = "deny") are all unchanged context lines — no loosening anywhere else. The exception is crate-scoped (`name = "webpki-roots"`) and license-scoped (only adds `CDLA-Permissive-2.0` to that one crate), not a blanket policy change.
+
+### Issues
+
+#### Critical (Must Fix)
+None.
+
+#### Important (Should Fix)
+None — the one candidate finding below turned out to be a non-issue on inspection (see Minor).
+
+#### Minor (Nice to Have)
+- **Report/diff mismatch on commit status.** `task-8-report.md` states the commit is "BLOCKED (1Password vault locked)" and that no commit object was created, instructing the user to run `git commit` manually. But the diff under review is anchored at `2592118 feat(rs): add axum health/readyz surface + lib target (SMA-441)` — i.e. the commit clearly exists. The report is stale/inaccurate on this point; harmless to the code itself, but worth noting so a reviewer doesn't get confused about whether the branch is actually committed.
+- **`readyz` swallows the DB error silently** (`http.rs:22-24`, `Err(_) =&gt; ...`) — no `tracing::warn!`/`error!` on the failed ping. Functionally correct (503 is returned, no crash, no secret leak), but an operator has no server-side breadcrumb for *why* readiness failed. Not required by the brief; flagging as a follow-up nicety, likely picked up when Task 11 wires real logging.
+- Investigated an apparent anomaly in `rs/Cargo.lock`: `sqlx-mysql`/`sqlx-sqlite` (and their `rsa`/`libsqlite3-sys`/`whoami` etc. sub-trees) appear as active dependencies even though `sea-orm`'s feature list only requests `sqlx-postgres` (`rs/Cargo.toml:2768-2770`, comment: "sqlx-postgres is the only backend we run"). This traced back to `rs/deny.toml:2` (`[graph] all-features = true`, pre-existing/untouched by this diff) — that setting deliberately makes `cargo deny`'s underlying `cargo metadata` resolve (and thus lock) the union of all optional features across the workspace, so the extra backends land in `Cargo.lock` without actually being compiled into the `paigasus-iam` binary. Not a defect introduced by this task, just worth knowing why the lockfile looks broader than the stated intent.
+
+### Assessment
+**Task quality:** Approved
+**Reasoning:** Every binding constraint (health/readyz behavior, lib/bin split, `tower-http` omission, minimal correctly-scoped `deny.toml` exception, SPDX headers, sound non-panicking `readyz` error handling, `Clone`-safe `AppState`) is verified directly against the diff; the only findings are a stale status line in the implementer's report and two genuine-but-non-blocking niceties (readyz logging, an already-explained Cargo.lock breadth artifact).</result>
+<usage><subagent_tokens>100936</subagent_tokens><tool_uses>12</tool_uses><duration_ms>335962</duration_ms></usage>
+</task-notification>
