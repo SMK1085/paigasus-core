@@ -762,6 +762,27 @@ impl IamConfig {
             return Err("audit.query_default_window_days and audit.query_max_window_days must be at least 1".to_string());
         }
 
+        // Both windows feed `to - chrono::Duration::days(window)` on the audit-query hot
+        // path (`pg_audit_log.rs`) — an absurdly large value PANICS there (out-of-range
+        // `DateTime`), not merely returns an error. Cap both at 36_600 days (~100 years),
+        // comfortably beyond any legitimate retention/query need, and reject at boot instead
+        // of on the first oversized query. Also require the default lookback to not exceed
+        // the max clamp: a `query_default_window_days` wider than `query_max_window_days`
+        // is incoherent (the "default" would always get clamped down to the max, making the
+        // configured default value meaningless).
+        const MAX_QUERY_WINDOW_DAYS: u32 = 36_600;
+        if self.audit.query_default_window_days > MAX_QUERY_WINDOW_DAYS || self.audit.query_max_window_days > MAX_QUERY_WINDOW_DAYS {
+            return Err(format!(
+                "audit.query_default_window_days and audit.query_max_window_days must be at most {MAX_QUERY_WINDOW_DAYS} (~100 years; larger values overflow the `to - Duration::days(window)` computation on the audit-query hot path)"
+            ));
+        }
+        if self.audit.query_default_window_days > self.audit.query_max_window_days {
+            return Err(format!(
+                "audit.query_default_window_days ({}) must be <= audit.query_max_window_days ({}): a default lookback wider than the max clamp is incoherent",
+                self.audit.query_default_window_days, self.audit.query_max_window_days
+            ));
+        }
+
         // --- SMA-446 Task B9: `[outbox]` config ------------------------------------------------
         // Each of these three is a divisor of the relay loop's own behavior, the same posture as
         // the `authz`/`authn`/`api_keys` `*_secs` checks above: a zero `poll_interval_secs` would
@@ -1756,6 +1777,38 @@ mod tests {
                 Ok(())
             });
         }
+    }
+
+    #[test]
+    fn validate_rejects_a_query_max_window_days_over_the_cap() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!("{}\n[api_keys]\npepper = \"{}\"\n[audit]\nquery_max_window_days = 36601", minimal_issuer_toml(), valid_pepper_b64()),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "query_max_window_days = 36601 must fail validation (over the ~100y cap)");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_a_query_default_window_wider_than_the_max() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    "{}\n[api_keys]\npepper = \"{}\"\n[audit]\nquery_default_window_days = 400\nquery_max_window_days = 100",
+                    minimal_issuer_toml(),
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "query_default_window_days (400) > query_max_window_days (100) must fail validation");
+            Ok(())
+        });
     }
 
     // --- SMA-446 Task B9: `[outbox]` config -------------------------------------------------

@@ -14,6 +14,7 @@
 //! in-txn). `prune` is attempted independently of `ensure_partitions_ahead`, so a create-ahead
 //! failure (e.g. a polluted default) can't wedge retention.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration;
 
@@ -80,8 +81,9 @@ impl PgPartitionMaintainer {
         }
 
         // Refresh the default-partition-rows gauge (the "create-ahead fell behind" signal).
-        if let Ok(rows) = self.default_partition_rows().await {
-            gauge!(names::IAM_AUDIT_DEFAULT_PARTITION_ROWS).set(rows as f64);
+        match self.default_partition_rows().await {
+            Ok(rows) => gauge!(names::IAM_AUDIT_DEFAULT_PARTITION_ROWS).set(rows as f64),
+            Err(e) => tracing::warn!(error = %e, "audit default-partition-rows gauge query failed"),
         }
 
         counter!(names::IAM_AUDIT_PARTITION_MAINTENANCE_TICKS_TOTAL, "result" => if report.errored { "error" } else { "ok" }).increment(1);
@@ -100,14 +102,30 @@ impl PgPartitionMaintainer {
 
     /// `CREATE TABLE IF NOT EXISTS` a monthly leaf for both outcome subtrees for each month in
     /// `[now, now + ahead_months]`. Each CREATE is its own locked, lock_timeout'd transaction.
+    ///
+    /// `created` only counts leaves that did NOT already exist. The existing leaves for each
+    /// subtree are fetched ONCE up front (`child_leaves`) rather than re-derived from the CREATE's
+    /// own outcome, because `CREATE TABLE IF NOT EXISTS` succeeds silently whether or not it
+    /// actually created anything — counting every successful CREATE (the previous behavior) made
+    /// `iam_audit_partitions_created_total` climb by `(ahead_months+1)*2` on EVERY tick forever,
+    /// even once every target leaf already existed. The `IF NOT EXISTS` CREATE is still issued
+    /// (kept for safety against a concurrent create race), just no longer unconditionally counted.
     async fn ensure_partitions_ahead(&self, now: DateTime<Utc>, ahead_months: u32) -> Result<u64, DbErr> {
         let mut created = 0;
+        let mut existing: [(&str, HashSet<String>); 2] = [
+            ("committed", self.child_leaves("committed").await?.into_iter().collect()),
+            ("denied", self.child_leaves("denied").await?.into_iter().collect()),
+        ];
         let mut ym = (now.year(), now.month());
         for _ in 0..=ahead_months {
-            for sub in ["committed", "denied"] {
-                let ddl = month_leaf_ddl(sub, ym.0, ym.1);
-                self.run_ddl(&ddl).await?;
-                created += 1;
+            for (sub, leaves) in &mut existing {
+                let leaf_name = format!("audit_log_{sub}_{:04}_{:02}", ym.0, ym.1);
+                if !leaves.contains(&leaf_name) {
+                    let ddl = month_leaf_ddl(sub, ym.0, ym.1);
+                    self.run_ddl(&ddl).await?;
+                    leaves.insert(leaf_name);
+                    created += 1;
+                }
             }
             ym = add_one_month(ym);
         }

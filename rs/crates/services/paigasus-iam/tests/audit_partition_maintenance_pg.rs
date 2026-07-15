@@ -27,7 +27,12 @@ async fn ensure_ahead_is_idempotent_and_creates_leaves() {
     };
 
     m.tick(now, policy).await;
-    m.tick(now, policy).await; // second run must not error (IF NOT EXISTS)
+    // Second run must not error (IF NOT EXISTS) AND must report zero NEW creations — every
+    // target leaf already exists from the first tick, so `created` must accurately reflect
+    // that (SMA-467 final-review fix: it used to unconditionally count every CREATE, even a
+    // no-op against an already-existing leaf).
+    let report = m.tick(now, policy).await;
+    assert_eq!(report.created, 0, "second tick must create nothing new (all leaves already exist)");
 
     for sub in ["committed", "denied"] {
         for ym in ["2026_07", "2026_08", "2026_09"] {

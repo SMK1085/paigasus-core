@@ -53,6 +53,7 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
         db.execute_unprepared("SET LOCAL TimeZone = 'UTC';").await?;
+        db.execute_unprepared("SET LOCAL lock_timeout = '5s';").await?;
         db.execute_unprepared(&format!("SELECT pg_advisory_xact_lock({AUDIT_PARTITION_LOCK_KEY});")).await?;
 
         // Idempotency guard: if a concurrent replica already swapped, do nothing.
@@ -122,6 +123,7 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
         db.execute_unprepared("SET LOCAL TimeZone = 'UTC';").await?;
+        db.execute_unprepared("SET LOCAL lock_timeout = '5s';").await?;
         db.execute_unprepared(&format!("SELECT pg_advisory_xact_lock({AUDIT_PARTITION_LOCK_KEY});")).await?;
 
         if !is_partitioned(db).await? {

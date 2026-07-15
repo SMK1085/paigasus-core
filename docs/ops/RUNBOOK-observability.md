@@ -647,6 +647,7 @@ and its follow-on month throughout):
 
 ```sql
 BEGIN;
+SET LOCAL lock_timeout = '5s'; -- back off rather than stall live inserts, same as the automated path.
 SELECT pg_advisory_xact_lock(5580467); -- AUDIT_PARTITION_LOCK_KEY (m0008_partition_audit_log.rs) —
                                         -- serializes against a concurrent maintenance tick/migration.
 
