@@ -1,0 +1,34 @@
+<task-notification>
+<task-id>a94625ca29c3e6620</task-id>
+<tool-use-id>toolu_01UQAte27tJ885HpRhALAv1N</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/a94625ca29c3e6620.output</output-file>
+<status>completed</status>
+<summary>Agent "Review U4: IAM authz/audit/denial metrics" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All four metric emission sites confirmed to use the `names::` registry constants exclusively — no hardcoded metric-name strings anywhere in the diff. All the named risks check out. I have enough to write the final report.
+
+## Spec Compliance
+
+- ✅ **Metric names via registry, not hardcoded** — all 4 emission sites (`cedar_authorizer.rs:176,229`, `denial_audit.rs:82,86`, `pg_audit_log.rs:118`) use `names::IAM_AUTHZ_DECISIONS_TOTAL` / `names::IAM_AUDIT_RECORDS_TOTAL` / `names::IAM_DENIAL_AUDITS_DROPPED_TOTAL` / `names::IAM_DENIAL_AUDITS_ENQUEUED_TOTAL` from `paigasus_observability::names` (`rs/crates/libs/paigasus-observability/src/names.rs:22-25`). Grep across the crate confirms zero hardcoded metric-name string literals.
+- ✅ **Authz hot-path correctness** — `cedar_authorizer.rs:154-237` (`is_authorized`) has exactly two decision-returning exit points: the cache-hit `return Ok(cached)` at line 195 (counter at line 176, `cache="hit"`) and the final `Ok(decision)` at line 236 (counter at line 229, `cache_label = if cache_key.is_some() {"miss"} else {"bypass"}`). The `if let Some(key) = &amp;cache_key &amp;&amp; let Some(cached) = ...` guard means the two counter sites are mutually exclusive and jointly exhaustive across all `(cache_key Some/None) × (decisions.get hit/miss)` combinations — no double-count, no missed path. The early `Err(err) =&gt; return Err(err)` (line 210) returns no `Decision`, correctly uncounted (brief scopes the counter to decision-return sites). `effect_label` is applied to `cached`/`decision` after they're finalized, so the label always matches the actually-returned decision. The counter calls are pure side effects interleaved between pre-existing statements — no control-flow, caching, or auditing behavior was touched (verified by reading the whole function; `cargo check -p paigasus-iam --all-targets` compiles clean, confirming no accidental type/logic breakage).
+- ✅ **Audit counter semantics** — `pg_audit_log.rs:114-120,161-179` (`record_metric` + `record`/`record_out_of_band`): both now `match` the `insert(...).await` result, calling `record_metric(e, "ok")` on `Ok` and `record_metric(e, "error")` on `Err` before the pre-existing `map_err`/`?` propagation — behavior otherwise unchanged. `outcome` label comes from `e.outcome.as_str()`, backed by `AuditOutcome::{Committed,Denied}` → `"committed"`/`"denied"` (`rs/crates/libs/paigasus-iam-core/src/audit.rs:10-19`), a closed enum. The required "counts non-erroring inserts, not committed rows" comment is present at `pg_audit_log.rs:113-116`.
+- ✅ **Denial buffer counters** — `denial_audit.rs:72-88`: `IAM_DENIAL_AUDITS_DROPPED_TOTAL` increments once, only inside the overflow `if` (after the existing `dropped.fetch_add`); `IAM_DENIAL_AUDITS_ENQUEUED_TOTAL` increments once per `push` call, unconditionally, outside the lock. No new `tracing::warn!` at the drop site — verified by reading the full function body.
+- ✅ **Ticker removal / dead code** — `main.rs`'s 60s ticker block (was lines 121-151ish) is fully removed with no orphaned braces/vars; `Duration` import still legitimately used elsewhere (`main.rs:53,125-126,174`). `AppState::denial_buffer()` and its backing `denial_buffer` field are fully gone (`http/mod.rs`); grep across `src/` + `tests/` confirms zero remaining references. `DenialAuditBuffer::dropped()` is retained and is read only by two tests (`denial_audit.rs:246,262`) — matches the report's claim exactly. `cargo check -p paigasus-iam --all-targets` (run fresh, not reusing the implementer's run) compiles clean with zero warnings under the workspace's `warnings = "deny"` lint config, confirming no dead-code fallout from the removal.
+- ✅ **Bounded-cardinality labels** — `decision`∈{allow,deny} (`effect_label`, cedar_authorizer.rs:92-97), `cache`∈{hit,miss,bypass} (string literals at the three sites), `outcome`∈{committed,denied} (`AuditOutcome::as_str`), `result`∈{ok,error} (`record_metric` call sites) — all closed, no free-form text ever passed as a label.
+- ✅ **SPDX headers** present on all 5 touched Rust files (verified via `head -1`).
+
+## Strengths
+
+- The compute-path counter placement elegantly reuses one code site for both "miss" and "bypass" via `cache_key.is_some()`, rather than literally duplicating a counter call at two textual locations as the brief's line numbers implied — this is more correct than a literal reading, since it can't drift out of sync if the two branches are ever merged/refactored again.
+- `IAM_DENIAL_AUDITS_ENQUEUED_TOTAL` is deliberately placed outside the mutex critical section, preserving the module's existing "never hold the lock longer than necessary" discipline.
+- The strengthened `fail_open_on_a_generations_read_error_still_decides_and_never_caches` test gives real `cache="bypass"` coverage instead of relying on code-reading alone.
+
+## Issues
+
+None found — Critical, Important, or Minor.
+
+## Assessment
+
+**Task quality: Approved.** All spec requirements (Tasks A9 + A10) are met; the named risks around double-counting, control-flow safety, comment/label correctness, and dead-code cleanup all check out against the actual code (not just the report's narrative). Fresh `cargo check -p paigasus-iam --all-targets` independently confirms a clean, warning-free build.</result>
+<usage><subagent_tokens>76469</subagent_tokens><tool_uses>15</tool_uses><duration_ms>113558</duration_ms></usage>
+</task-notification>
