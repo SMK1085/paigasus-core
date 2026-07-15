@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b2wl2auiv</task-id>
+<tool-use-id>toolu_014hrLz1yaykKy7sgDPFsGuu</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/b2wl2auiv.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll for CodeRabbit round-2 re-review completion" completed (exit code 0)</summary>
+</task-notification>
