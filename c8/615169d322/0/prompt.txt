@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bnlnxt1wc</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/9afe8601-e408-4606-98ac-68165a84a054/tasks/bnlnxt1wc.output</output-file>
+<status>completed</status>
+<summary>Background command "Monitor main CI+prebuild for merge commit of PR #72" completed (exit code 0)</summary>
+</task-notification>
