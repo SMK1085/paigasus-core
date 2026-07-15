@@ -1,0 +1,14 @@
+<task-notification>
+<task-id>a545c261ba51de41f</task-id>
+<tool-use-id>toolu_01VvqLRf1R2RwfaQHabGs1Uz</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/a545c261ba51de41f.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement U2: gateway metrics" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+Commits: `1009e48` feat(rs): expose gateway /metrics + http request metrics (SMA-446); `1b9f458` feat(rs): instrument gateway iam + upstream calls (SMA-446)
+Tests: 77/77 gateway tests green (55 unit + 22 integration); full workspace `cargo nextest run --workspace` 666/666 passed; fmt + clippy (crate and workspace) clean.
+Concerns: separate-metrics-listener path only indirectly covered (no dual-real-socket integration test, per brief's "plain spawn acceptable for M0"); `iam_result` intentionally maps `PermissionDenied` to `"error"` for both introspect/authorize even though HTTP status handling diverges — matches brief's literal spec, flagged for visibility.
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-observability/.superpowers/sdd/u2-report.md`</result>
+<usage><subagent_tokens>204497</subagent_tokens><tool_uses>78</tool_uses><duration_ms>837469</duration_ms></usage>
+</task-notification>
