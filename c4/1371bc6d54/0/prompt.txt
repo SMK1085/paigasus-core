@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b9j7et2yw</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/9afe8601-e408-4606-98ac-68165a84a054/tasks/b9j7et2yw.output</output-file>
+<status>completed</status>
+<summary>Monitor "In-progress moon ci run for re-signed head bd25f53" stream ended</summary>
+</task-notification>
