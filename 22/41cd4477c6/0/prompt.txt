@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bgwj2a4uc</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0e0343f0-a7dd-4eef-a939-365b2593cae7/tasks/bgwj2a4uc.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll for CodeRabbit round-2 review completion (background)" completed (exit code 0)</summary>
+</task-notification>
