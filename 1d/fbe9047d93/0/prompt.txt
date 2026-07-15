@@ -1,0 +1,15 @@
+<task-notification>
+<task-id>ab246633ed775924d</task-id>
+<tool-use-id>toolu_01WUxdNcYxaHBN1a4VB4LUDL</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/ab246633ed775924d.output</output-file>
+<status>completed</status>
+<summary>Agent "Fix Task 11: race shutdown vs early server exit" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+SHA: c9ff23e674bb787f1ab4563c54e84af94981eeff — "feat(rs): wire paigasus-iam composition root + graceful shutdown (SMA-441)"
+Summary: build/test/lint/fmt all green (10/10 nextest); cargo machete clean; cargo deny clean (advisories/bans/licenses/sources ok)
+Boot-smoke: SIGINT path clean (started, healthz/readyz 200, SIGINT → "shutdown signal received" → clean exit, no hang); early-failure path verified — occupied port 8080, binary logged "a server task failed: Address already in use (os error 48)" and exited with code 1 (non-zero) instead of hanging
+Concerns: none blocking; fix is main.rs-only per requirements, no unwrap/expect on fallible paths
+Report: /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-441-m0-walking-skeleton-paigasus-iam-scaffold/.superpowers/sdd/task-11-report.md ("## Fix wave" section appended)</result>
+<usage><subagent_tokens>60048</subagent_tokens><tool_uses>23</tool_uses><duration_ms>179102</duration_ms></usage>
+</task-notification>
