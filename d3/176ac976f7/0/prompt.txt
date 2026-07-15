@@ -1,0 +1,1 @@
+full review at @docs/superpowers/specs/2026-06-16-sma-429-affected-graph-completeness-guard-design-review.md
