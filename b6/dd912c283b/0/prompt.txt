@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bbho0uxfd</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/bbho0uxfd.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll until CodeRabbit review completes" completed (exit code 0)</summary>
+</task-notification>
