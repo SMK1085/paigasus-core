@@ -1,0 +1,60 @@
+<task-notification>
+<task-id>ac44f001154ca280e</task-id>
+<tool-use-id>toolu_017ssNJqcoRxhprGcfRZb75o</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/ac44f001154ca280e.output</output-file>
+<status>completed</status>
+<summary>Agent "Review U1: observability crate" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result># Review: Unit 1 — `paigasus-observability` crate (Tasks A1–A5, SMA-446)
+
+## Spec Compliance
+
+- ✅ SPDX header on every Rust source file — `grpc.rs:1`, `http.rs:1`, `lib.rs:1`, `names.rs:1`, plus `Cargo.toml:1` (extra, harmless).
+- ✅ Edition 2024 / rust-version 1.95 — `rs/crates/libs/paigasus-observability/Cargo.toml:6-7` inherit `edition.workspace = true` / `rust-version.workspace = true`; confirmed `rs/Cargo.toml` workspace.package sets `edition = "2024"`, `rust-version = "1.95"` (unchanged by this diff, verified by reading the file directly).
+- ✅ Moon project id / layer — `rs/crates/libs/paigasus-observability/moon.yml:3-4` (`id: 'paigasus-observability-rs'`, `layer: 'library'`), matches sibling `paigasus-logging/moon.yml` exactly.
+- ✅ `[lints] workspace = true` — `Cargo.toml:24`, inherits workspace `warnings = "deny"`; no unused/dead-code observed (`PROM_BUILTINS`/`PROMQL_TOKENS`/`ALL` are `pub`, exempting them from `dead_code`).
+- ✅ `metrics-exporter-prometheus` `default-features = false` — `rs/Cargo.toml:525`; corroborated by the `Cargo.lock` diff, which adds no hyper-http-listener/push-gateway transitive crates.
+- ✅ `init` idempotency via `OnceLock` — `lib.rs:763,769-781`; `get_or_init`'s closure (which alone calls `install_recorder()`) only runs once, so a second `init()` call never re-installs and always clones the cached handle. Proven by a real render-output test at `lib.rs:800-807` (second handle renders a metric recorded before/after the second call).
+- ✅ gRPC `service`/`method` static, no `:path` derivation — `grpc.rs:590` types both as `&amp;'static str`; `grpc_code_name` (`grpc.rs:610-631`) exhaustively maps every `tonic::Code` variant to a bounded canonical name.
+- ⚠️ Metric naming / "const in `names`" — `names.rs:833-859` correctly declares every family as a `pub const` snake_case string with a passing uniqueness/snake_case test (`names.rs:925-932`), and `ALL`/`PROM_BUILTINS`/`PROMQL_TOKENS` are all `pub` (`names.rs:863,889,892`). But `grpc.rs:595` and `grpc.rs:602` **re-type the metric names as literal strings instead of referencing `names::IAM_GRPC_REQUESTS_TOTAL` / `names::IAM_GRPC_REQUEST_DURATION_SECONDS`**, so the registry isn't actually the source of truth for the one call site that could trivially use it (details below).
+- ⚠️ Bounded-cardinality labels — `route` is correctly the `MatchedPath` template with an `&lt;unmatched&gt;` fallback (`http.rs:682`), verified by test (`http.rs:731`: asserts `route="/v1/thing/{id}"`, not `/v1/thing/42`); `status_class` is bounded to `{0-9}xx` (`http.rs:690`). `method` (`http.rs:683`) is the raw request method string with no allowlist — see Minor finding.
+- ❌→fixed-but-unverified: **inflight gauge is not decremented if the wrapped handler panics** — `http.rs:687-688` (see Important finding below), which is exactly the case the review brief flagged as a named risk to check.
+
+## Strengths
+
+- All 5 tests assert on actual `PrometheusHandle::render()` text output (real behavior), not mocks — `lib.rs:800-820`, `http.rs:717-734`, `grpc.rs:640-652`, `names.rs:925-932`.
+- Clean resolution of the `http` module vs. extern `http`-crate name collision: the crate drops the `http` dependency entirely and uses `axum::http::{Request, header}` everywhere (`lib.rs:757`, `http.rs:726`, `lib.rs:815,817`), verified no bare `http::` path remains anywhere in the diff.
+- `clippy::type_complexity` resolved by factoring a `BoxFuture` type alias (`http.rs:672`) rather than an `#[allow]`.
+- Dependency hygiene: `tower`/`tokio` correctly scoped to `[dev-dependencies]` only (`Cargo.toml:23-24`) since they're test-only; every `[dependencies]` entry (`metrics`, `metrics-exporter-prometheus`, `axum`, `tonic`, `tracing`) is actually used in non-test code — good posture for the later `:machete` gate.
+- Correctly relies on the existing `members = ["crates/*/*"]` glob in `rs/Cargo.toml` rather than hand-editing the members list — verified the glob matches `crates/libs/paigasus-observability`.
+- Crate scaffolding mirrors `paigasus-logging` (workspace-inherited package fields, `[lints] workspace = true`) rather than the brief's spelled-out literals — more robust to workspace-level version drift than what the brief specified.
+- Report is candid about deviations (module-name collision fix, tower-dev-only, package-field style) and about the `grpc.rs` hardcoding, even if it undersells the drift risk (see below).
+
+## Issues
+
+**Important — inflight gauge leaks on a panicking handler** (`rs/crates/libs/paigasus-observability/src/http.rs:684-690`)
+```rust
+let inflight = gauge!(format!("{prefix}_http_inflight_requests"));
+inflight.increment(1.0);
+let started = Instant::now();
+let resp = next.run(req).await;   // &lt;- if this panics, unwind skips the next line
+inflight.decrement(1.0);
+```
+If the downstream handler (or an inner layer) panics, `next.run(req).await` unwinds past `inflight.decrement(1.0)` — Rust does not execute subsequent statements during unwinding unless run via a `Drop` impl. The gauge is then permanently off by one per panic, with no bound and no recovery short of process restart — directly the failure mode the review brief named as a focus point. No test exercises a panicking handler. Fix: wrap the gauge handle in an RAII guard so the decrement runs on drop (including during unwind), e.g. a small `struct InflightGuard(metrics::Gauge)` with `impl Drop { fn drop(&amp;mut self) { self.0.decrement(1.0); } }`, held across `next.run(req).await`.
+
+**Important — `record_grpc` duplicates metric-name literals instead of using the `names` registry** (`rs/crates/libs/paigasus-observability/src/grpc.rs:595,602` vs. `rs/crates/libs/paigasus-observability/src/names.rs:846-847`)
+`grpc.rs` hardcodes `"iam_grpc_requests_total"` / `"iam_grpc_request_duration_seconds"` rather than referencing `crate::names::IAM_GRPC_REQUESTS_TOTAL` / `crate::names::IAM_GRPC_REQUEST_DURATION_SECONDS`, even though this call site is not parameterized (unlike `http.rs`, which legitimately must build names dynamically from `prefix`) and could trivially use the consts. This defeats the stated purpose of the registry ("single source of truth… AND the dashboard/alert name-drift test"): a future rename in `names.rs` silently diverges from what `grpc.rs` actually emits, with nothing (compiler or test) to catch it. The implementer's report notes the hardcoding as a "concern for later units" (re: gateway prefix support) but doesn't address the drift risk itself. Fix: `counter!(crate::names::IAM_GRPC_REQUESTS_TOTAL, ...)` / `histogram!(crate::names::IAM_GRPC_REQUEST_DURATION_SECONDS, ...)`.
+
+**Minor — `method` label sourced from the raw HTTP method, no allowlist** (`rs/crates/libs/paigasus-observability/src/http.rs:683`)
+`req.method().as_str().to_owned()` is unbounded in principle — HTTP's method token grammar permits arbitrary extension methods, so a client hitting this layer directly (e.g. at a gateway edge, before any router-level method restriction) could mint new label values per request. Low likelihood/impact in practice (most requests never reach the handler with a non-standard verb), but worth a bounded fallback (match against the known verb set, else `"OTHER"`) if this layer is ever mounted ahead of request validation.
+
+**Minor — `record_grpc`'s duration histogram isn't asserted by its test** (`rs/crates/libs/paigasus-observability/src/grpc.rs:640-652`)
+The test only asserts on `iam_grpc_requests_total`/`service`/`method`/`grpc_status`; it never checks `out.contains("iam_grpc_request_duration_seconds")`. This exactly matches the brief's provided test code (not an implementer deviation), and the twin-line histogram call is low-risk, but it means the histogram side of the "record real behavior" claim is unverified here (contrast with `http.rs`'s test, which does check its duration histogram at `http.rs:733`).
+
+## Assessment
+
+**Task quality: Needs fixes.**
+
+Core mechanics are sound and well-tested: idempotent `init` via `OnceLock` is correctly implemented and proven by a real second-call render test, the `http`/extern-crate collision is cleanly resolved, `record_grpc` uses genuinely static/bounded labels, and the `names` registry itself passes a real uniqueness/snake_case test. However, two Important findings are both real, both directly touch the brief's named focus points, and both are cheap to fix: the inflight gauge's un-guarded decrement leaks on handler panics, and `record_grpc` bypasses the very registry this task exists to establish as the source of truth. Recommend fixing both (RAII guard for the gauge; reference the `names` consts in `grpc.rs`) before merging this unit.</result>
+<usage><subagent_tokens>82549</subagent_tokens><tool_uses>11</tool_uses><duration_ms>310749</duration_ms></usage>
+</task-notification>
