@@ -1,0 +1,28 @@
+<task-notification>
+<task-id>ad2ebe17ccbc99ca5</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/ad2ebe17ccbc99ca5.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement G5: gateway auth middleware" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Task G5 complete.
+
+**Status:** DONE
+
+**Commit:** `a13a231` — `feat(rs): add gateway IAM auth middleware (self-query authz) (SMA-446)` (SSH-signed, verified `G`; commitlint passed)
+
+**Tests:** 25 new (43 total in crate), all pass. Full decision table over a recording `FakeIam` via axum `oneshot` — every introspect/authz row asserts its exact HTTP status, the happy path proves the inner handler sees the attached `CallerContext`, the self-query test asserts the recorded authz args are exactly `(caller's own key, introspected SA, "InvokeModel", scope)`, and an error body asserts the OpenAI envelope shape. clippy `--all-targets -D warnings` and fmt both clean.
+
+**What shipped:**
+- `error.rs`: OpenAI envelope + `GatewayError` (6 auth cases, left open for G6/G7) + `IntoResponse` with the binding status map.
+- `auth.rs`: `require_iam_auth` middleware (`from_fn_with_state(Arc&lt;dyn Iam&gt;)`), local `bearer()` extractor, and the TWO divergent IAM-error helpers — `introspect_error` (PermissionDenied→401) vs `authz_error` (PermissionDenied→500); transport/Connect→503 on both.
+- `mod.rs`: registered both modules + `pub use require_iam_auth, GatewayError` for G7.
+
+**Concerns / notes:**
+- No new deps for G9 — middleware uses only `axum`; `tower` stays a dev-dep; `async-trait` already present.
+- One deliberate deviation: transport codes are an explicit arm + a separate `_` arm (both →503) rather than the brief's `… | _` single arm, to avoid clippy `wildcard_in_or_patterns` (in `clippy::all`, which the workspace denies). Behavior is identical.
+- The worktree was already the cwd and already provisioned (commitlint present); branch confirmed `feature/sma-446-gateway-m0-iam-auth`.
+
+**Report:** `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/.superpowers/sdd/task-G5-report.md`</result>
+<usage><subagent_tokens>101779</subagent_tokens><tool_uses>34</tool_uses><duration_ms>469625</duration_ms></usage>
+</task-notification>
