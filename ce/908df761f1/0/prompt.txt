@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b7hvtyd72</task-id>
+<tool-use-id>toolu_019UJZo1iMhgymLHd51dffuQ</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/6c9d3b43-69b7-4125-88cf-e1da3886418a/tasks/b7hvtyd72.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for main workflow runs after #63 merge" completed (exit code 0)</summary>
+</task-notification>
