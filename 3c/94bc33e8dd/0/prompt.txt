@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bkgr4js08</task-id>
+<tool-use-id>toolu_01JztAoQmKKqhcvpNpPc53Ji</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/0e0343f0-a7dd-4eef-a939-365b2593cae7/tasks/bkgr4js08.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for CI run on c242297 to complete" completed (exit code 0)</summary>
+</task-notification>
