@@ -1,0 +1,14 @@
+<task-notification>
+<task-id>afa0e220818d46552</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/afa0e220818d46552.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement Task 6: py package + replays" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE = staged &amp; verified
+Files staged: py/packages/paigasus-kernel/{moon.yml, src/paigasus_kernel/__init__.py, tests/test_parity.py}
+Tests: `moon run paigasus-kernel-py:test` → 117 passed (1 integrity + 67 sum + 20 uuid7 + 22 prn_canonical + 7 prn_cedar); `moon run py:typecheck` → 0 errors, 0 warnings (basedpyright, whole py/ tree)
+Concerns: had to rework the brief's bare `dict` typing in test_parity.py into four `TypedDict`s (SumCase/Uuid7Case/PrnCanonicalCase/PrnCedarCase) + explicit casts — bare `dict` fails this repo's `typeCheckingMode = "all"` basedpyright config (37 errors), which conflicts with the brief's own Step-4 "basedpyright clean" bar. No assertions/paths/logic changed, purely typing. Flagging in case downstream expects byte-identical code to the brief.
+Report: /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-448-kernel-prn/.superpowers/sdd/task-6-report.md</result>
+<usage><subagent_tokens>74063</subagent_tokens><tool_uses>34</tool_uses><duration_ms>646812</duration_ms></usage>
+</task-notification>
