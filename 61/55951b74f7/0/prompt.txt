@@ -1,0 +1,38 @@
+<task-notification>
+<task-id>abd4df5cc23109437</task-id>
+<tool-use-id>toolu_01JQ85ZGK1KXJShXUGaJvCLM</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/abd4df5cc23109437.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 9 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>### Spec Compliance
+- ✅
+
+### Strengths
+- `""` (overall) service is explicitly set `Serving` via `reporter.set_service_status("", ServingStatus::Serving).await;` (`rs/crates/services/paigasus-iam/src/adapters/grpc.rs:19`), and the test asserts the wire value directly (`tests/grpc_health.rs:33`, `assert_eq!(resp.status, ServingStatus::Serving as i32)`), not merely `is_ok()`.
+- The test is a genuine end-to-end check: real `TcpListener::bind("127.0.0.1:0")` (`tests/grpc_health.rs:12`), real tonic `Server` spawned over `TcpListenerStream` (`:18-25`), and a real `tonic::transport::Endpoint`→`Channel`→`HealthClient` dial (`:30-31`) that performs an actual HTTP/2 round trip — not an in-process `oneshot`/mock.
+- No race: `TcpListener::bind(...).await` (`:12`) completes the OS-level `bind()+listen()` before the server task is even spawned (`:18`) and before the client dials (`:30`); TCP connections queue in the kernel accept backlog regardless of whether the spawned task has started polling `accept()`, so this is inherently race-free without a sleep. Constraint against fixed ports / sleeps is met.
+- Server task is explicitly cleaned up via `server.abort()` (`:35`), not left dangling; combined with `#[tokio::test]`'s per-test runtime, no task leaks across tests.
+- SPDX header is line 1 verbatim in both new files (`grpc.rs:1`, `tests/grpc_health.rs:1`).
+- `pub mod grpc;` registered alphabetically in `src/adapters/mod.rs:5`.
+- Deps correctly placed: `tonic`/`tonic-health` in `paigasus-iam/Cargo.toml` `[dependencies]`; `tokio-stream` (feature `net`) in `[dev-dependencies]`; both pinned in `rs/Cargo.toml` workspace deps with rationale comments, consistent with the file's existing style.
+- **Verified the reported API deviation independently** (docs.rs for `tonic-health` 0.14.6, `pb::health_client::HealthClient`): the only associated functions are `new`, `with_origin`, `with_interceptor` — **no `connect`**. This corroborates the implementer's claim. The replacement (`Endpoint::new(...).connect().await` → `HealthClient::new(channel)`, `tests/grpc_health.rs:30-31`) is exactly what a generated `connect()` convenience method would do internally, so it is a faithful, behavior-preserving substitution, not a downgrade — the test still dials a real socket and gets a real `Channel`.
+- Checked the repo's `rs/rustfmt.toml` (`max_width = 200`, bumped in SMA-359): the 171-char `serve` signature (`grpc.rs:30`) is within budget, so the report's "clean `cargo fmt --check`" claim is plausible and not contradicted by the diff — resolved what looked like a potential single-line-fn-signature formatting red flag.
+
+### Issues
+
+#### Critical (Must Fix)
+None.
+
+#### Important (Should Fix)
+None.
+
+#### Minor (Nice to Have)
+- `router()`/`serve()` bind and immediately drop the `HealthReporter` (`grpc.rs:25-26`, `serve` at `:30-32`), so once wired into `main` (Task 11) there is no remaining handle to flip service status later (e.g., mark `NotServing` during graceful shutdown/drain). This is copied verbatim from the brief's own design and is out of scope for Task 9, but worth flagging now so Task 11 doesn't silently inherit a dead end — if readiness needs to change post-boot, `router`/`serve`'s signatures will need to return or accept the reporter.
+- The test inherits the brief's liberal `.unwrap()` usage (`tests/grpc_health.rs:12,13,24,30,31,32`) rather than `expect("...")` with context; a failure mid-chain (e.g., connect refused) gives a generic `unwrap` panic instead of a descriptive message. Matches the brief exactly, so not a deviation — just an easy readability upgrade if revisited later.
+
+### Assessment
+**Task quality:** Approved
+**Reasoning:** All spec constraints are met (SERVING set + asserted via a real client, correct dep placement, SPDX headers, module registration), the test is race-free and properly cleaned up, and the one claimed API deviation (`HealthClient::connect` absent in tonic-health 0.14.6) was independently confirmed against docs.rs and is a faithful, equivalent substitution rather than a regression.</result>
+<usage><subagent_tokens>58886</subagent_tokens><tool_uses>10</tool_uses><duration_ms>263579</duration_ms></usage>
+</task-notification>
