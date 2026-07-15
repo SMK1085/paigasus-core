@@ -1,0 +1,5 @@
+<task-notification>
+<task-id>bcl8d242u</task-id>
+<summary>Monitor event: "moon ci check on PR 77 after close/reopen re-trigger"</summary>
+<event>moon ci CANCELLED, mergeState=BLOCKED</event>
+</task-notification>
