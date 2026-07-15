@@ -6,6 +6,13 @@
 //! `scope_roles`, m0005): `determining_policies` is a JSON-encoded `Vec<String>` when set,
 //! `detail` is a JSON string (`"{}"` for denials with no extra detail) — never native
 //! Postgres `text[]`/`jsonb` (Slice A convention, avoids a new SeaORM column feature).
+//!
+//! **DB vs entity primary key (SMA-467):** the physical table is partitioned
+//! `LIST(outcome)→RANGE(occurred_at)`, so its Postgres PK is the composite `(id, occurred_at,
+//! outcome)` (a partitioned table's PK must include every partition-key column). This entity
+//! keeps `id` as its sole `primary_key`: `id` is a per-entry UUIDv7 (the logical identity), the
+//! adapter only inserts (routing) and filters, and `Entity::find_by_id(id)` still resolves a row
+//! from the correct leaf. The composite PK is a partitioning requirement, not a logical key.
 
 use sea_orm::entity::prelude::*;
 
