@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>boabm6euo</task-id>
+<tool-use-id>toolu_01S8yjQiYjqffwi4wNoyanYL</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/6c9d3b43-69b7-4125-88cf-e1da3886418a/tasks/boabm6euo.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll until CodeRabbit re-review and moon ci conclude on new head" completed (exit code 0)</summary>
+</task-notification>
