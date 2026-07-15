@@ -1,0 +1,16 @@
+<task-notification>
+<task-id>a4cbd0a6cb9bcca56</task-id>
+<tool-use-id>toolu_019BGBfdHN6dRH9EFcMf9hhx</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/a4cbd0a6cb9bcca56.output</output-file>
+<status>completed</status>
+<summary>Agent "U6: Slice A gates + gateway cleanups" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+Commits: `78a6d05` chore(rs): prune gateway metrics dev-dep + test iam_result mapping (SMA-446); `e696794` fix(rs): bump spin off a yanked crates.io release (SMA-446)
+Full-gate result: GREEN (21 tasks completed, 0 failed, `moon ci :build :test :lint :fmt :deny :machete :typecheck :breaking :affected-smoke :parity-corpus-drift :wasm-getrandom-free --base origin/main --include-relations`)
+Waivers added: none in `deny.toml`/machete — metrics/metrics-exporter-prometheus pass license+bans cleanly and machete found no unused deps. `:deny` did fail once on `spin 0.9.8` (yanked upstream); confirmed via a disposable `origin/main` worktree that this is pre-existing/unrelated to Slice A, fixed with a plain `cargo update -p spin` (0.9.8→0.9.9, non-yanked, semver-compatible) — cargo-deny's own suggested remedy, not a policy exception.
+Hyper check: single `hyper 1.10.1` / `hyper-util 0.1.20` in the tree — `default-features = false` on the exporter correctly avoided a duplicate.
+Concerns: commit `e696794` fixes a pre-existing `main`-wide `cargo-deny` regression outside strict A12 scope (main itself would currently fail `:deny` the same way until this or an equivalent fix lands there) — flagging for controller awareness, not blocking.
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-observability/.superpowers/sdd/u6-report.md`</result>
+<usage><subagent_tokens>115376</subagent_tokens><tool_uses>46</tool_uses><duration_ms>540175</duration_ms></usage>
+</task-notification>
