@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bhqxoz9ip</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/bhqxoz9ip.output</output-file>
+<status>completed</status>
+<summary>Background command "Final CI-parity confirmation at branch tip" completed (exit code 0)</summary>
+</task-notification>
