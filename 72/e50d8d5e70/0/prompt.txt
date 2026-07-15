@@ -1,0 +1,1 @@
+Full review at @docs/superpowers/specs/2026-06-17-sma-430-ffi-freshness-py-design-review.md
