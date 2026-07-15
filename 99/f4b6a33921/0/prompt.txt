@@ -1,0 +1,33 @@
+<task-notification>
+<task-id>a9d11eaa0796b5712</task-id>
+<tool-use-id>toolu_01UaCGoJiCzRYN2vov2C3Hh4</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/a9d11eaa0796b5712.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement G7: chat proxy handler + wiring" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Signed (`G` = good signature), committed cleanly. Task G7 complete.
+
+**Status:** DONE — gateway now proxies `POST /v1/chat/completions` end-to-end.
+
+**Commit:** `0049d94` — `feat(rs): add gateway chat-completions proxy handler + streaming (SMA-446)` (SSH-signed, commitlint passed).
+
+**Tests:** 69 pass (52 lib + 11 `tests/chat_proxy.rs` + 6 existing egress), 0 fail; clippy `-D warnings` clean; fmt clean; `aws-lc-rs` count still 0.
+
+**What landed:**
+- `error.rs`: `BadRequestBody`/400, `UpstreamUnavailable`/502, `UpstreamTimeout`/504 + `From&lt;OpenAiError&gt;` (Timeout→504, Connect|Transport|Build→502).
+- `chat.rs` (new): handler with `Bytes` extractor (413 via `DefaultBodyLimit`), COPY-parse for model/stream only, egress-hygiene (raw body only, never caller headers), verbatim Full passthrough incl. non-2xx, stream path using the returned status (SSE for success + `unfold` mid-stream terminal SSE error returned directly for cancel-on-drop; JSON passthrough for non-2xx stream), structured per-request log (no prompt/body/key).
+- `mod.rs`: `AppState { Arc&lt;dyn Iam&gt;, Arc&lt;OpenAiClient&gt;, usize }`, `router(state)` with `route_layer` auth + body-limit keeping `/healthz`+`/readyz` public; health unit tests updated + a new auth-wiring test.
+- `main.rs`: real `IamClient::connect` + `OpenAiClient::new` (three split timeouts) → `AppState` → `router`.
+
+**New deps:** none — all deps were already present from G3–G6, so no Cargo.toml/deny/machete change.
+
+**Key decisions (for G9/final review):**
+- Deliberate fake `Iam` in `tests/chat_proxy.rs` (not a mock tonic IAM server) — real IamClient wire + D9 self-query already unit-proven in G4/G5; keeps handler-integration tests fast/hermetic. Real middleware + real handler + real OpenAiClient still exercised against `MockOpenAi`.
+- Mid-stream error test uses an inline raw truncated-chunked TCP upstream (premature EOF → reqwest error) rather than touching the shared `MockOpenAi`.
+- M0: auth runs before the 413 (limit enforced at body extraction) — documented in `router()`.
+- Stream item type `Result&lt;Bytes, Infallible&gt;` so the outgoing body never errors.
+- (f) client-abort is G8 — stream returned directly (no detached task) so the abort survives.
+
+Report written to `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/.superpowers/sdd/task-G7-report.md`.</result>
+<usage><subagent_tokens>163956</subagent_tokens><tool_uses>49</tool_uses><duration_ms>890028</duration_ms></usage>
+</task-notification>
