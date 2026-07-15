@@ -1,0 +1,22 @@
+<task-notification>
+<task-id>a7ace4433d238d34b</task-id>
+<tool-use-id>toolu_01BdNeoxgqNoLMDfkPLx7vNt</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a1370eb2-b826-4c0e-b11a-8d89b199652a/tasks/a7ace4433d238d34b.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement G8: readyz + abort proof" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Task G8 complete and committed.
+
+Status: DONE. Commit `7369426` — feat(rs): add gateway readiness probe + stream cancel-on-abort (SMA-446). SSH-signed (G, verified).
+
+Tests: gateway lib 54 passed (incl. readyz 200/503 + healthz-no-IAM), chat_proxy 12 passed (incl. `client_abort_cancels_upstream_request`), openai_egress 6 passed; abort test stress-run 5/5, ~10ms each. build/clippy(`-D warnings`)/fmt all clean; `grep -c aws-lc-rs Cargo.lock` = 0.
+
+New deps: none — `reqwest` was already a normal `[dependencies]` entry with `features=["stream"]` (available to integration tests), so no `[dev-dependencies]` change and no Cargo.toml/lock churn. For G9: nothing to prune, no deny/machete waiver introduced.
+
+Determinism (abort test): the mock holds on `Poll::Pending` forever after one frame, so the flag can flip only from the drop. The test reads the first chunk (upstream connected), asserts the flag is still false, drops the response, then polls the flag inside a 2s `tokio::time::timeout` around a 10ms retry loop — fails (not hangs) if cancel-on-drop never propagates. Used `poll_fn` (guard owned by the never-ready closure) instead of a guard-across-`await` unfold to avoid any async-drop liveness subtlety.
+
+Concerns: none. Only 3 source files changed. `/readyz` upstream check is config-presence only for M0 (per brief); a live upstream probe and a dedicated IAM gRPC health RPC are documented follow-ups in the code.
+
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-gw/.superpowers/sdd/task-G8-report.md`</result>
+<usage><subagent_tokens>135696</subagent_tokens><tool_uses>41</tool_uses><duration_ms>684392</duration_ms></usage>
+</task-notification>
