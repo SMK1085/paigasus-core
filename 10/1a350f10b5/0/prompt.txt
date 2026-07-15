@@ -1,0 +1,183 @@
+<task-notification>
+<task-id>a6be1d96a8581c229</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/a6be1d96a8581c229.output</output-file>
+<status>completed</status>
+<summary>Agent "Survey IAM + gateway observability surface" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have completed a thorough reconnaissance. Here is the structured map.
+
+---
+
+# Observability / HTTP-server survey — `paigasus-gateway` + `paigasus-iam`
+
+## Top-line findings (for planning)
+
+- **Zero metrics infrastructure exists.** No `prometheus`, `metrics`, `metrics-exporter-prometheus`, `opentelemetry`, `axum-prometheus`, or any exporter appears anywhere in `rs/Cargo.lock` (the grep returned nothing). The only OTel reference in the whole repo is a transitive `@opentelemetry/api` in `ts/pnpm-lock.yaml` (unrelated TS side) and a one-line mention in an older IAM design doc.
+- **No `/metrics` endpoint anywhere** (`grep route("/metrics")` → nothing). You'll be adding the first one.
+- **No deployment/ops surface exists at all**: no `docker-compose`, no k8s/helm/charts, no `grafana/` or `prometheus/` dirs, no `Dockerfile`, no RUNBOOK. `docs/` contains only superpowers specs/plans/reviews (no ops docs). You are creating the RUNBOOK + dashboards from scratch with no in-repo style precedent.
+- **Current observability = structured JSON `tracing` only**, via the shared `paigasus-logging` crate. Both services already emit per-request / per-tick structured logs and one "gauge-as-a-log" pattern (`dropped_denial_audits`). The natural instrumentation approach is `metrics` + `metrics-exporter-prometheus` (or `axum-prometheus`) added as new workspace deps — note the design doc's §8 warns new workspace deps trigger `deny.toml` / `machete` gate review.
+
+---
+
+## 1. `paigasus-gateway` service crate
+
+**Location:** `rs/crates/services/paigasus-gateway/`
+
+**Structure** — hexagonal but deliberately flattened for M0 (no separate `-core` lib yet; see design doc §3):
+- `src/main.rs` — composition root
+- `src/lib.rs:10-12` — exposes `adapters`, `config`, `domain`
+- `src/domain.rs` — `CallerContext { principal_prn, scope_prn, key_id }`
+- `src/config.rs` — `GatewayConfig`
+- `src/adapters/http/{mod,auth,chat,dto,error}.rs` — the axum surface
+- `src/adapters/iam/client.rs` — outbound tonic IAM client (port `Iam`)
+- `src/adapters/openai/client.rs` — outbound reqwest OpenAI egress client
+
+**HTTP framework:** axum 0.8 (`axum = { workspace = true }`), workspace-pinned at `rs/Cargo.toml:17`. No `tower-http` in the gateway's deps — **the gateway has no `TraceLayer` today** (unlike IAM).
+
+**Router construction** — `rs/crates/services/paigasus-gateway/src/adapters/http/mod.rs:58-71`:
+- Public (no auth, no body limit): `GET /healthz` (`mod.rs:73`), `GET /readyz` (`mod.rs:101`)
+- Protected: `POST /v1/chat/completions` (`chat::chat_completions`), behind `route_layer(auth)` + `route_layer(body_limit)` (`mod.rs:68`)
+- `with_state(state)` applied once over the whole tree (`mod.rs:70`)
+
+**App state** — `AppState` at `mod.rs:38-46`: `iam: Arc&lt;dyn Iam&gt;`, `openai: Arc&lt;OpenAiClient&gt;`, `max_request_bytes: usize`. `Clone` (all `Arc`/`Copy`). This is the struct to thread a metrics handle/registry into.
+
+**Bootstrap wiring** — `src/main.rs:17-45`: load+validate config → `paigasus_logging::init("paigasus-gateway", &amp;config.log_level)` (`main.rs:21`) → build `IamClient` + `OpenAiClient` → assemble `AppState` → `router(state)` → `axum::serve(listener, app).with_graceful_shutdown(...)`. Single HTTP port, no gRPC server, no DB, no background tasks.
+
+**Config struct** — `GatewayConfig` at `src/config.rs:17-27`: `http_addr: SocketAddr` (default `0.0.0.0:8088`, `config.rs:138`), timeouts, `max_request_bytes`, `iam: IamClientConfig`, `upstream: UpstreamConfig`, `log_level: String`. Figment layering: defaults &lt; `gateway.toml` &lt; `GATEWAY_*` env (`config.rs:194-198`). Example file: `gateway.toml.example`.
+
+**Request-path instrumentation today** — one `tracing::info!` per proxied request at `chat.rs:110-118` with fields `model`, `stream`, `status`, `latency_ms` (already computed via `Instant::now()` at `chat.rs:76`), `principal`, `key_id`. This is the exact spot to add request-count / latency-histogram / status-class metrics. Auth failures log `tracing::error!` at `auth.rs:70` and `auth.rs:93`.
+
+**Outbound clients (for dependency metrics):** `Iam` trait + `IamError { Connect, Rpc(tonic::Status) }` at `adapters/iam/client.rs:37,53,95`; `OpenAiClient::chat_completion` + `OpenAiError` at `adapters/openai/client.rs:85,160`.
+
+---
+
+## 2. `paigasus-iam` service crate
+
+**Location:** `rs/crates/services/paigasus-iam/`
+
+**Structure** — full hexagonal:
+- `src/main.rs` — composition root (HTTP + gRPC + 3 background tasks)
+- `src/config.rs` — `IamConfig`
+- `src/application/` — use cases (authorize, authenticate_*, roles, policies, audit, api_keys, etc.)
+- `src/adapters/http/` — axum surface (`mod.rs` + per-aggregate routers)
+- `src/adapters/grpc/` — tonic surface
+- `src/adapters/authz/` — Cedar authorizer, caches, `denial_audit.rs`
+- `src/adapters/events/` — `relay.rs` (outbox relay) + `tracing_publisher.rs`
+- `src/adapters/persistence/` — SeaORM Postgres repos + migrations
+
+**Exposes BOTH an HTTP server AND a gRPC server** (two ports), plus background tasks. Not a library/gRPC-only service.
+
+**HTTP surface** — `serve_http` at `adapters/http/mod.rs:695-703`; router at `mod.rs:655-677`. **IAM already has `TraceLayer::new_for_http()` and `TimeoutLayer`** applied in `serve_http` (`mod.rs:698-700`) — uses `tower-http` (deps at gateway lacks). Endpoints: `/healthz` (`mod.rs:679`), `/readyz` (DB-ping readiness, `mod.rs:683`), plus `/v1` tenancy/authn/authz/audit routers. `AppState` is large — `mod.rs:138-241` (this is where an IAM metrics handle would live if you instrument HTTP).
+
+**gRPC surface** — `adapters/grpc/mod.rs:56-73`: health + Tenancy/Authn/Authorization/ServiceAccount/Audit services. gRPC health is a static `SERVING` for M0.
+
+**The relay (transactional outbox relay)** — `src/adapters/events/relay.rs`:
+- `OutboxRelay` struct (`relay.rs:80-97`); spawned from `main.rs:165-183` only when `config.outbox.relay_enabled`.
+- **Per-tick telemetry** = `TickReport { drained, failures, parked, oldest_unpublished_age_secs }` at `relay.rs:40-51`. It is **both returned AND logged** via `tracing::info!(... "outbox relay tick")` at `relay.rs:149-155`. This is the ideal hook for relay gauges/counters (drained-total, failures-total, parked-total, oldest-age gauge). Per-row failures/parks also log at `relay.rs:138,140`; tick-level errors at `relay.rs:175`.
+
+**The `dropped_denial_audits` gauge today** — this is the reference "metric-as-a-log" pattern to model on:
+- Backing counter: `DenialAuditBuffer.dropped: AtomicU64` in `src/adapters/authz/denial_audit.rs:44`, bumped on overflow (drop-oldest) at `denial_audit.rs:75`, read via `dropped()` at `denial_audit.rs:84`.
+- Emission: a dedicated 60-second ticker task in **`main.rs:121-151`** reads `buffer.dropped()` and, only when it increased since last tick, emits `tracing::warn!(dropped_denial_audits = dropped, new_drops, ...)` at `main.rs:142`. The buffer is reachable from `AppState::denial_buffer()` (`http/mod.rs:264`).
+- This is explicitly a placeholder: the comment at `main.rs:124-125` says "Emit that counter periodically as a `tracing` gauge ... (a persistent-metrics backend is a later slice)." **That "later slice" is your task.**
+
+**Other existing atomics/counters** (context, mostly authz cache-invalidation, not request metrics): `Generations` policy_gen/entity_gen `AtomicU64` counters in `src/adapters/authz/generation.rs:33-34`; these are correctness counters, not observability metrics.
+
+**IAM config for the relay/audit** — `src/config.rs`: `AuditConfig.denial_buffer_capacity` (`config.rs:230`, default 4096 at `config.rs:410`); `OutboxConfig { relay_enabled, poll_interval_secs, batch_size, max_attempts }` (`config.rs:243-258`, defaults 5s/100/5 at `config.rs:417-420`). Ports: `http_addr` default `0.0.0.0:8080`, `grpc_addr` default `0.0.0.0:9090` (`config.rs:341-342`).
+
+---
+
+## 3. Existing instrumentation to build on — `paigasus-logging`
+
+**Location:** `rs/crates/libs/paigasus-logging/` (single file `src/lib.rs`, 64 lines).
+
+**What it provides** — `src/lib.rs`:
+- `init(service, default_level)` (`lib.rs:22-28`): installs a **global JSON `tracing-subscriber`** honoring `RUST_LOG` (falls back to the service's config `log_level`), with `.json().with_current_span(true).with_span_list(true)`. Idempotent (`try_init`, second call is a no-op).
+- `env_filter(default_directive)` (`lib.rs:15-17`): pure `EnvFilter` builder.
+- Deps (`Cargo.toml`): only `tracing` + `tracing-subscriber` (features `env-filter`, `json` — pinned at `rs/Cargo.toml:25-26`).
+
+Both services call `paigasus_logging::init(...)` first thing in `main` (gateway `main.rs:21`, IAM `main.rs:21`). Any metrics-exporter/recorder init would be a sibling call added here or in each `main`.
+
+**`tracing` usage in the request path:**
+- Gateway: per-request `info!` at `chat.rs:110`; auth-failure `error!` at `auth.rs:70,93`; startup `info!` at `main.rs:41`.
+- IAM: `TraceLayer::new_for_http()` gives automatic request/response spans (`http/mod.rs:699`); `readyz` warn at `http/mod.rs:688`; relay tick `info!` at `relay.rs:149`; denial-drain warns at `denial_audit.rs:146,153`; `TracingEventPublisher` emits `info!` per relayed event at `events/tracing_publisher.rs:27`; overflow warn at `main.rs:142`; various startup/shutdown logs `main.rs:186-206`.
+
+---
+
+## 4. Prometheus / OTel dependencies
+
+- **`rs/Cargo.lock`**: no `prometheus`, `metrics`, `metrics-exporter-prometheus`, `opentelemetry`, `axum-prometheus`, `grafana` (grep returned nothing).
+- **Workspace `rs/Cargo.toml`** relevant pins: `axum = "0.8"` (`:17`), `tower = "0.5"` (`:18`), `tower-http = "0.6"` features `["trace","timeout"]` (`:21`), `tracing = "0.1"` (`:25`), `tracing-subscriber` features `["env-filter","json"]` (`:26`). No metrics crates.
+- **Direct vs transitive:** only `tracing`/`tracing-subscriber` are the observability direct deps (gateway + IAM both depend on `paigasus-logging`; IAM additionally on `tower-http`; gateway does **not** carry `tower-http` — you'd add it if you want a gateway `TraceLayer`).
+- **Any `/metrics` endpoint:** none (as expected).
+
+---
+
+## 5. The merged gateway M0 design doc — observability content
+
+**File:** `docs/superpowers/specs/2026-07-13-sma-446-gateway-m0-iam-auth-design.md`
+
+**On observability/metrics — deliberately thin (M0):**
+- The only "observability" goal is **G1** (`:32`): "structured JSON logs (never prompt/PII)". No metrics goal.
+- **Metrics/dashboards are explicitly deferred to gateway M5**: §11 follow-ups (`:243`) — "M5 caching + gateway dashboards/RUNBOOK." So the metrics+dashboards+RUNBOOK task you're doing is effectively pulling M5's observability forward.
+- **RUNBOOK is referenced** as the home for the M0 deployment constraint: §5/D6 (`:168-171`, `:224`) — M0 must be internal/non-prod or behind a hard OpenAI account-level spend cap (no rate-limit/budget until M3/M4); "stated in the RUNBOOK/config docs." That's the one concrete RUNBOOK requirement already written down.
+- Logging privacy bar (load-bearing for metric label design): never log/label prompt/messages/body/keys; `principal`/`key_id`/`model` are OK (§1 G1, and `chat.rs:106-109` comment). **Do not put `model` as an unbounded metric label without cardinality thought** — it's caller-supplied.
+
+**The gateway request path (for what to instrument):**
+1. Body-size limit layer (`DefaultBodyLimit`, `http/mod.rs:66`) → over-limit = **413**.
+2. **Authn** — `require_iam_auth` middleware (`auth.rs:49`): bearer extract → `Iam::introspect_api_key` (§4.2/D12). Failure mapping (`introspect_error`, `auth.rs:128`): unreachable→**503**, `Unauthenticated`/inactive→**401**, empty scope→**500**.
+3. **Authz (self-query, D9)** — `Iam::is_authorized_self(caller_key, introspected_SA, "InvokeModel", scope_prn)` (`auth.rs:84`). Mapping (`authz_error`, `auth.rs:145`): deny→**403**, `PermissionDenied`→**500** (self-query bug), unreachable→**503**.
+4. **Proxy** — strip caller headers, inject real key, forward to OpenAI `/v1/chat/completions` (`chat.rs:78`); non-stream returns status+JSON; **SSE stream** passthrough unbuffered with a mid-stream terminal-error adapter (`chat.rs:86-96`, `terminal_sse_error_stream` `chat.rs:137`). Upstream connect/transport→**502**, timeout→**504** (`chat.rs:98-101`).
+5. One structured log line (`chat.rs:110`).
+
+Natural gateway metric set: request counter by route/status-class, request-duration histogram (latency already measured), IAM-introspect/authz call counters+latency by outcome, upstream-call counter+latency by status, in-flight streams gauge, 413/401/403/502/503/504 counters.
+
+---
+
+## 6. Config / deployment conventions
+
+- **No `docker-compose`, no k8s/helm/charts, no `Dockerfile`, no `grafana/`, no `prometheus/` config anywhere** in the repo (searches returned nothing outside `ts/node_modules`).
+- **No existing runbooks or ops docs.** `docs/` is entirely `docs/superpowers/{plans,specs,reviews}/*.md` plus `docs/dev-setup.md`. There is no `docs/ops/` or `docs/runbooks/` to match — you set the precedent. (`docs/dev-setup.md` is the only non-spec doc, worth reading for tone.)
+- CI lives in `.github/workflows/ci.yml` + `prebuild.yml` and `ci/affected-graph/`, `ci/release-parity/`. No deploy pipeline.
+- Config convention is **figment** (defaults &lt; `&lt;service&gt;.toml` &lt; `&lt;PREFIX&gt;_*` env with `__` nesting): gateway `config.rs:194-198` (`GATEWAY_*`), IAM analogous (`IAM_*`). Example files: `gateway.toml.example`, `iam.toml.example`. A `metrics_addr` / `metrics_enabled` config field would follow this same pattern (add to `Defaults` + the struct + the example).
+
+---
+
+## 7. Moon project setup
+
+**Gateway** — `rs/crates/services/paigasus-gateway/moon.yml`:
+- `id: paigasus-gateway-rs`, `layer: application`, `language: rust`
+- `dependsOn: [paigasus-proto-rs, paigasus-kernel-rs, paigasus-logging-rs]`
+- tasks: `build` (deps `^:build`), `test` (deps `^:build`)
+
+**IAM** — `rs/crates/services/paigasus-iam/moon.yml`:
+- `id: paigasus-iam-rs`, `layer: application`, `language: rust`
+- `dependsOn: [paigasus-iam-core-rs, paigasus-logging-rs, paigasus-kernel-rs, paigasus-proto-rs]`
+- tasks: `build`, `test` (both dep `^:build`)
+
+**Logging** — `rs/crates/libs/paigasus-logging/moon.yml`: `id: paigasus-logging-rs`, `layer: library`, `language: rust` (no explicit tasks; inherits workspace tasks from root `moon.yml`).
+
+Both service crates use the `-rs` id suffix convention. If you add a shared metrics helper to `paigasus-logging` (or a new `paigasus-metrics` lib), remember the `dependsOn` graph and the design doc's §8 note that new workspace deps need `deny.toml`/`machete` gate review.
+
+---
+
+## Quick reference — the files you'll most likely touch
+
+| Concern | File:line |
+|---|---|
+| Gateway router (add `/metrics`, TraceLayer) | `rs/crates/services/paigasus-gateway/src/adapters/http/mod.rs:58` |
+| Gateway AppState (metrics handle) | `.../paigasus-gateway/src/adapters/http/mod.rs:38` |
+| Gateway request-path metric hook | `.../paigasus-gateway/src/adapters/http/chat.rs:76,110` |
+| Gateway bootstrap / logging init | `.../paigasus-gateway/src/main.rs:21,33,39` |
+| Gateway config | `.../paigasus-gateway/src/config.rs:17` |
+| IAM router / serve_http (already has TraceLayer) | `.../paigasus-iam/src/adapters/http/mod.rs:655,695` |
+| IAM AppState | `.../paigasus-iam/src/adapters/http/mod.rs:138` |
+| IAM `dropped_denial_audits` gauge task | `.../paigasus-iam/src/main.rs:121-151` |
+| IAM overflow counter backing | `.../paigasus-iam/src/adapters/authz/denial_audit.rs:44,75,84` |
+| IAM relay tick telemetry | `.../paigasus-iam/src/adapters/events/relay.rs:40-51,149` |
+| IAM config (audit/outbox) | `.../paigasus-iam/src/config.rs:222-258` |
+| Shared logging init | `rs/crates/libs/paigasus-logging/src/lib.rs:22` |
+| Workspace deps (add metrics crates here) | `rs/Cargo.toml:17-26` |
+| Design doc (observability = M5 follow-up; RUNBOOK/D6) | `docs/superpowers/specs/2026-07-13-sma-446-gateway-m0-iam-auth-design.md:32,168,243` |</result>
+<usage><subagent_tokens>127495</subagent_tokens><tool_uses>26</tool_uses><duration_ms>188270</duration_ms></usage>
+</task-notification>
