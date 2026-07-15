@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bh7qm2gq4</task-id>
+<tool-use-id>toolu_01P4CVVa2JceRNNANZn46KA5</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/9afe8601-e408-4606-98ac-68165a84a054/tasks/bh7qm2gq4.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll moon ci re-run to completion" completed (exit code 0)</summary>
+</task-notification>
