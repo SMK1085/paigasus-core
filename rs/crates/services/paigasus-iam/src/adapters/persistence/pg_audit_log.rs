@@ -162,16 +162,22 @@ impl AuditLog for PgAuditLog {
     async fn query(&self, f: &AuditFilter) -> Result<Vec<AuditEntry>, RepositoryError> {
         let mut q = audit_log::Entity::find();
 
-        // SMA-467 §3.6: bound an otherwise-unfiltered scan. `from`/`to` from the filter win; when
-        // BOTH are absent apply the default lookback; clamp any span to max_days.
+        // SMA-467 §3.6: bound an otherwise-unfiltered scan. `from`/`to` from the filter win; the
+        // default lookback applies ONLY when BOTH are absent; clamp any span to max_days.
         let (eff_from, eff_to) = match self.query_window {
             None => (f.from, f.to),
-            Some((default_days, max_days)) => {
-                let to = f.to.unwrap_or_else(Utc::now);
-                let from = f.from.unwrap_or_else(|| to - chrono::Duration::days(i64::from(default_days)));
-                let max_from = to - chrono::Duration::days(i64::from(max_days));
-                (Some(from.max(max_from)), Some(to))
-            }
+            Some((default_days, max_days)) => match (f.from, f.to) {
+                (None, None) => {
+                    let to = Utc::now();
+                    (Some(to - chrono::Duration::days(i64::from(default_days))), Some(to))
+                }
+                (None, Some(to)) => (Some(to - chrono::Duration::days(i64::from(max_days))), Some(to)),
+                (Some(from), None) => {
+                    let to = Utc::now();
+                    (Some(from.max(to - chrono::Duration::days(i64::from(max_days)))), Some(to))
+                }
+                (Some(from), Some(to)) => (Some(from.max(to - chrono::Duration::days(i64::from(max_days)))), Some(to)),
+            },
         };
 
         if let Some(actor_prn) = &f.actor_prn {

@@ -145,6 +145,20 @@ impl MigrationTrait for Migration {
              );",
         )
         .await?;
+        // The composite partitioned PK this rolls back FROM is `(id, occurred_at, outcome)` — a
+        // partitioned table's unique constraint MUST include the partition key(s), so `id`-alone
+        // uniqueness can never be a table constraint on `audit_log` while it's partitioned. That
+        // means this plain `SELECT` (no `DISTINCT`, no dedup) is only data-preserving for `id` if
+        // `id` is ALREADY globally unique across every row the system wrote — which it is: `id` is
+        // an application-minted UUIDv7 (never server-generated, never reused), so every row this
+        // system produces already satisfies single-column `id` uniqueness in practice, even though
+        // the partitioned schema couldn't enforce it as a constraint. Restoring a plain
+        // `PRIMARY KEY (id)` is therefore safe for any state the application produces. A
+        // manually-introduced duplicate-`id` row (e.g. hand-crafted via raw SQL, bypassing the
+        // application's id minting) is out of scope for this rollback and would (correctly) fail
+        // the subsequent `PRIMARY KEY (id)` — do NOT paper over that with `DISTINCT`/
+        // `ON CONFLICT DO NOTHING` here, since either would silently drop a row instead of
+        // surfacing the underlying data problem.
         db.execute_unprepared(&format!("INSERT INTO audit_log_plain ({cols}) SELECT {cols} FROM audit_log;", cols = Self::COLS))
             .await?;
         db.execute_unprepared("DROP TABLE audit_log;").await?; // cascades the whole tree

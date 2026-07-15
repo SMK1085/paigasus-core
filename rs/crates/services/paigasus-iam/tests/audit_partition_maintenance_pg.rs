@@ -30,7 +30,10 @@ async fn ensure_ahead_is_idempotent_and_creates_leaves() {
     // Second run must not error (IF NOT EXISTS) AND must report zero NEW creations — every
     // target leaf already exists from the first tick, so `created` must accurately reflect
     // that (SMA-467 final-review fix: it used to unconditionally count every CREATE, even a
-    // no-op against an already-existing leaf).
+    // no-op against an already-existing leaf). The existence check now happens atomically
+    // INSIDE the same advisory-locked transaction as the CREATE (CodeRabbit round 1: the prior
+    // pre-fetch-then-create was racy across replicas), so this single-process assertion still
+    // holds — it's just now proven race-free rather than merely correct in the no-race case.
     let report = m.tick(now, policy).await;
     assert_eq!(report.created, 0, "second tick must create nothing new (all leaves already exist)");
 

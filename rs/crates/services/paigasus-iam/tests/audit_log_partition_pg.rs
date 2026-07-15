@@ -162,17 +162,50 @@ async fn rows_across_multiple_and_gap_months_route_and_read_back() {
 /// a boundary-adjacent row must still route to the correct UTC month. With UTC-pinned bounds this
 /// passes; with bare date literals the boundary would shift and this would land the row in an
 /// adjacent leaf (or the default).
+///
+/// Strengthened (SMA-467 CodeRabbit round 1): a prior version set the session TZ AFTER
+/// `support::start_migrated_postgres()` had already run m0008 (under the default, UTC session),
+/// so it never actually exercised the migration's own leaf-boundary DDL under a non-UTC session —
+/// it only proved the row was readable afterward, which ANY leaf (including the RANGE default)
+/// would satisfy. This now uses the same stepped-migration harness as
+/// `historical_rows_seeded_before_m0008_survive_the_swap_and_route_to_their_leaf`: seed the
+/// boundary row into the PLAIN pre-m0008 table, set a non-UTC session TZ, THEN run m0008 — so
+/// both `existing_month_span`'s bounds query and the leaf-creating/copy DDL run while the session
+/// TZ is non-UTC — and assert the PHYSICAL leaf, not just readability.
 #[tokio::test]
 async fn routing_is_correct_under_a_non_utc_session_timezone() {
-    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
-    db.execute_unprepared("SET TimeZone = 'America/New_York';").await.unwrap();
-    use chrono::TimeZone;
-    // 2026-07-01 02:00:00 UTC — in New York (UTC-4 in July) this is still 2026-06-30 22:00 local;
-    // a session-TZ-cast boundary would misfile it. UTC-pinned bounds file it in the July leaf.
+    let Some((_pg, db)) = start_raw_postgres().await else { return };
+
+    // Plain, pre-partition `audit_log` shape (m0001..m0007).
+    Migrator::up(&db, Some(7)).await.expect("m0001..m0007 must apply");
+
+    // Seed the boundary-adjacent row directly into the plain table BEFORE m0008 runs (mirrors
+    // pre-existing historical data, and drives `existing_month_span`'s leaf pre-creation off this
+    // row's actual month rather than the container's wall-clock "current month"). 2026-07-01
+    // 02:00:00 UTC is 2026-06-30 22:00 local in New York (UTC-4 in July): a session-TZ-cast
+    // boundary would misfile it into June's leaf (or the RANGE default); UTC-pinned bounds must
+    // file it in the July leaf.
+    let id = Uuid::from_u128(200);
     let ts = Utc.with_ymd_and_hms(2026, 7, 1, 2, 0, 0).unwrap();
-    row(Uuid::from_u128(200), "denied", ts).insert(&db).await.expect("boundary insert must route, not fail");
-    let found = audit_log::Entity::find_by_id(Uuid::from_u128(200)).one(&db).await.unwrap();
-    assert!(found.is_some(), "boundary row must be retrievable under a non-UTC session TZ");
+    let stmt = Statement::from_sql_and_values(
+        sea_orm::DatabaseBackend::Postgres,
+        "INSERT INTO audit_log (id, occurred_at, action, outcome) VALUES ($1, $2, 'GetProject', $3)",
+        [id.into(), ts.into(), "denied".into()],
+    );
+    db.execute(stmt).await.expect("raw historical insert into the plain (pre-m0008) audit_log");
+
+    // Apply m0008 — the leaf-creating + copy/swap migration — UNDER a non-UTC session. This is
+    // the actual regression surface: both `existing_month_span`'s bounds query and the leaf DDL's
+    // `FOR VALUES FROM/TO` literals must resolve in UTC, not the session TZ.
+    db.execute_unprepared("SET TimeZone = 'America/New_York';").await.unwrap();
+    Migrator::up(&db, None).await.expect("m0008 must apply correctly under a non-UTC session TZ");
+
+    assert!(audit_log_is_partitioned(&db).await, "audit_log must be partitioned after m0008");
+    assert_eq!(
+        physical_leaf(&db, id).await,
+        "audit_log_denied_2026_07",
+        "boundary row must physically land in the correct UTC month's leaf under a non-UTC session, not be misfiled by a session-TZ-cast boundary"
+    );
 }
 
 /// m0008's `down` must restore the EXACT `m0006` plain-table shape (single-col PK on `id`, five

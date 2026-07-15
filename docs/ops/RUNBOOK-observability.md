@@ -553,7 +553,7 @@ invalidation is somehow delayed.
 (occurred_at)` monthly. Full design rationale:
 `docs/superpowers/specs/2026-07-15-sma-467-audit-log-partitioning-design.md`.
 
-```
+```text
 audit_log                         PARTITION BY LIST (outcome)
 ├─ audit_log_committed            PARTITION BY RANGE (occurred_at)
 │   ├─ audit_log_committed_2026_07   FROM ('2026-07-01 00:00:00+00') TO ('2026-08-01 00:00:00+00')
@@ -618,8 +618,16 @@ ahead of schedule), the same DDL is safe to run by hand — it's the identical s
 itself runs:
 
 ```sql
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SELECT pg_advisory_xact_lock(5580467); -- AUDIT_PARTITION_LOCK_KEY — same key the maintenance task uses
 DROP TABLE IF EXISTS audit_log_denied_2026_04;
+COMMIT;
 ```
+
+Wrapping the manual DROP in the same `lock_timeout` + advisory-lock guardrails the automated task
+uses avoids waiting indefinitely on a live-insert lock and avoids racing a concurrent maintenance
+tick (which takes the same advisory-lock key before its own DDL).
 
 Confirm the target is actually a monthly leaf (never a `_default`) and is genuinely outside the
 range you want to keep before running this — there is no undo.
