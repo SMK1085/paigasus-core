@@ -1,0 +1,33 @@
+<task-notification>
+<task-id>a75a4fd1e60f6ffcb</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/a75a4fd1e60f6ffcb.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 6 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Confirmed: `os.urandom(10).hex()` produces exactly 20 lowercase hex chars, matching `parse_rand_hex`'s 20-char requirement. Verification complete.
+
+## Verdict: Approved
+
+**Spec Compliance: ✅**
+
+All five brief requirements plus the global constraints are satisfied:
+
+1. `__init__.py` (`py/packages/paigasus-kernel/src/paigasus_kernel/__init__.py`) re-exports all 12 `paigasus_py_bindings` functions (matches the 12 defined in `paigasus_py_bindings.pyi`) and defines `mint() -&gt; str` exactly as `mint_uuid7(time.time_ns() / 1_000_000, os.urandom(10).hex())`. `__all__` lists all 13 names. SPDX header present.
+2. `test_parity.py` loads all four corpora from `rs/crates/libs/paigasus-kernel-parity/vectors/` via `Path(__file__).resolve().parents[4]` — verified this correctly resolves to repo root (tests→paigasus-kernel→packages→py→root).
+3. Integrity guard (`test_corpora_present_and_non_empty`) asserts `len(cases) &gt; 0` per corpus — non-vacuous, will fail RED on a broken path.
+4. Replay assertions are real, not weakened by the TypedDict rework: `test_sum_matches_corpus` compares `sum_as_string(...) == str(expected)`; `test_mint_uuid7_matches_corpus` compares against `expected_uuid`; `test_prn_canonical_matches_corpus` asserts `prn_error_kind == error_kind` always, plus `prn_canonicalize == canonical` when valid (`error_kind == ""`); `test_prn_cedar_matches_corpus` asserts both `entity_type` and `entity_id`. Verified against actual corpus content: `prn_canonical.json` has 22 cases (15 error, 7 valid), so the conditional branch is genuinely exercised both ways, not just always-true.
+5. `moon.yml`'s `test` task input widened from the single `sum.json` line to `vectors/**/*`, verified in the live file.
+
+**On the TypedDict deviation:** sound and assertion-preserving. It's a pure typing-layer change — four `TypedDict`s modeled directly off the real corpus JSON shapes (verified `mint_uuid7(unix_ms: float, ...)` in the `.pyi` stub accepts the JSON's raw `int` values for `unix_ms` under Python's int→float subtyping), a `_read() -&gt; object` + `cast(...)` per corpus replacing the brief's `_load(name) -&gt; list[dict]`, and a rename `_load`→`_read`/`CASES`→`SUM_CASES` etc. Test bodies, assertions, corpus paths, and parametrize IDs are byte-for-byte the same logic as the brief. The one minor imprecision — `PrnCanonicalCase.canonical: str` vs. the corpus's actual `str | None` (None on error rows) — is harmless because the code only reads `case["canonical"]` inside the `error_kind == ""` guard, and it's forced via `cast`, so it doesn't cause a false pass/fail or basedpyright complaint.
+
+**Strengths**
+- Independently reproduced corpus counts (67 sum + 20 uuid7 + 22 prn_canonical + 7 prn_cedar + 1 integrity = 117) matching the report's claimed pytest total.
+- `prn_canonical` corpus genuinely contains both valid and invalid rows, so the conditional assertion path is meaningfully tested, not trivially satisfied.
+- `mint()`'s `os.urandom(10).hex()` (20 hex chars) matches the Rust binding's `parse_rand_hex` 20-char requirement (`rs/crates/bindings/paigasus-py-bindings/src/lib.rs:28`), confirmed by direct read.
+
+**Issues:** None (Critical/Important/Minor) — no defects found.
+
+Task quality: **Approved**</result>
+<usage><subagent_tokens>54050</subagent_tokens><tool_uses>15</tool_uses><duration_ms>91578</duration_ms></usage>
+</task-notification>
