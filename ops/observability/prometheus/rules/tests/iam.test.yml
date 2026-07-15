@@ -62,6 +62,22 @@ tests:
           - exp_labels: { severity: critical }
             exp_annotations: { summary: "IAM outbox relay is not ticking (stalled but process alive)" }
 
+  # IamAuditPartitionMaintenanceStalled: rate(...[1h]) == 0, for: 2h — the ticks counter is flat
+  # (maintenance task not ticking).
+  - interval: 1m
+    input_series:
+      - series: 'iam_audit_partition_maintenance_ticks_total'
+        values: '5+0x121'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: IamAuditPartitionMaintenanceStalled
+        exp_alerts: []
+      - eval_time: 2h1m
+        alertname: IamAuditPartitionMaintenanceStalled
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "IAM audit partition-maintenance task is not ticking", description: "No audit partition-maintenance ticks in the last hour. Denied partitions won't be pruned (slow index/table bloat) and, after ahead_months, new-month create-ahead stops. NOTE: if audit.retention.enabled=false this is expected — silence it. See RUNBOOK §4." }
+
   # IamHighErrorRate: sum(rate(5xx)) / sum(rate(total)) > 0.05, for: 10m.
   # Both classes grow at the same rate, so the 5xx ratio holds steady at 50%.
   - interval: 1m

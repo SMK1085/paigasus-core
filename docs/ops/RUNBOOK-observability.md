@@ -102,6 +102,10 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_outbox_relay_publish_failures_total` | counter | — | Rows whose `EventPublisher::publish` call failed in a tick (a subset of `drained`, superset of `parked`). |
 | `iam_outbox_relay_parked_total` | counter | — | Rows that hit `[outbox].max_attempts` and were **parked** (poison) in a tick — a **counter of newly-parked rows this tick**, deliberately not a gauge (a gauge summed per-tick would read `0` on every tick that parks nothing new, hiding a growing parked backlog behind a flat-looking panel). See §4 "Outbox parked events". |
 | `iam_outbox_oldest_unpublished_age_seconds` | gauge | — | Age (seconds) of the oldest unpublished-and-unparked row seen in the most recent non-empty tick's batch (`None` → reported as `0`). Freshness is bounded by `[outbox].poll_interval_secs`. **Freezes at its last value if the relay task wedges while the process stays alive** — it is a backlog-lag signal, not a liveness signal (see §4). |
+| `iam_audit_partition_maintenance_ticks_total` | counter | `result` | One per audit partition-maintenance tick (create-ahead + prune). `result` ∈ `ok`/`error`. Liveness signal — see §4 "Audit partition maintenance stalled". |
+| `iam_audit_partitions_created_total` | counter | — | Monthly leaf partitions created by create-ahead. |
+| `iam_audit_partitions_dropped_total` | counter | `outcome` | Monthly leaf partitions dropped by retention. `outcome` ∈ `denied`/`committed`. |
+| `iam_audit_default_partition_rows` | gauge | — | Rows currently in the audit `DEFAULT` partitions. **Should be 0**; nonzero ⇒ create-ahead fell behind (freezes when the task is stalled/disabled — the ticks counter is the primary liveness signal). |
 
 ### 2.3 `paigasus-gateway` — IAM dependency, OpenAI upstream
 
@@ -186,6 +190,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamOutboxBacklogAgeHigh` | `iam_outbox_oldest_unpublished_age_seconds > 300` | warning |
 | `IamOutboxEventsParked` | `increase(iam_outbox_relay_parked_total[15m]) > 0` | warning |
 | `IamOutboxRelayStalled` | `rate(iam_outbox_relay_ticks_total[10m]) == 0` | critical |
+| `IamAuditPartitionMaintenanceStalled` | `rate(iam_audit_partition_maintenance_ticks_total[1h]) == 0` for 2h | warning |
 | `IamHighErrorRate` | `sum(rate(iam_http_requests_total{status_class="5xx"}[5m])) / sum(rate(iam_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `IamGrpcHighErrorRate` | `sum(rate(iam_grpc_requests_total{grpc_status!="ok"}[5m])) / sum(rate(iam_grpc_requests_total[5m])) > 0.05` for 10m | critical |
 | `GatewayHighErrorRate` | `sum(rate(gateway_http_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_http_requests_total[5m])) > 0.05` for 10m | critical |
@@ -361,6 +366,54 @@ config first).
   etc.) may let the existing relay task recover without a restart — check whether ticks resume
   before restarting the service.
 
+### `IamAuditPartitionMaintenanceStalled` — audit partition maintenance is not ticking (warning)
+
+**Meaning.** `rate(iam_audit_partition_maintenance_ticks_total[1h]) == 0` for 2 hours — the audit
+partition-maintenance task (`PgPartitionMaintainer`, SMA-467) has stopped incrementing its tick
+counter even though the IAM process is up. Each tick does two independent units of work — see
+"Audit retention & partitioning" below for the full design — so a stall here means **neither**
+create-ahead nor pruning is happening. Unlike `IamOutboxRelayStalled`, this is `warning` rather
+than `critical`: a stalled maintenance task never fails or blocks a live audit insert (the
+`*_default` partitions backstop writes indefinitely), so the immediate blast radius is slow
+index/table bloat and a stuck create-ahead horizon, not an outage.
+
+**NOTE — `audit.retention.enabled = false` fires this alert forever, by design.** When
+`[audit.retention].enabled = false`, IAM does not spawn the maintenance task at all, so ticks never
+happen and this alert fires and stays firing for as long as the config stays that way. If disabling
+retention is an intentional, durable choice for an environment, **silence this alert** for that
+environment instead of treating it as an ongoing incident — check `[audit.retention].enabled` in
+the running config as the very first troubleshooting step, before assuming a live regression.
+
+**Likely causes:** `audit.retention.enabled = false` (check this first); the maintenance task
+panicked/exited without bringing down the process; the task is stuck on a long-running or
+lock-contended DDL statement despite the per-op `lock_timeout` back-off (Postgres itself may be
+unhealthy); or the shutdown-watch fired unexpectedly and the loop exited but the process didn't
+restart.
+
+**Confirm:**
+1. Check `[audit.retention].enabled` in the running config first — `false` fully explains this
+   alert and is not an incident.
+2. Verify the IAM process is actually up (`up{job="iam"} == 1`) — if it's down instead, this is
+   really a `TargetDown` situation.
+3. Check `iam_audit_default_partition_rows` — nonzero or climbing corroborates that create-ahead
+   has fallen behind for real. Note this gauge only refreshes on a *successful* tick, so once the
+   task is fully stalled the gauge **freezes rather than climbs** — a flat gauge does not by itself
+   rule out a stall; the tick counter (this alert) is the primary signal, the gauge is secondary.
+4. IAM logs for a panic, an unhandled error in the maintenance loop, or the task's own `warn`s
+   (`audit partition create-ahead failed`, `audit partition prune failed`) around the time ticks
+   stopped.
+
+**Remediation:**
+- If disabled intentionally, silence the alert for that environment rather than acting on it.
+- If the task has genuinely wedged, a **process restart** of `paigasus-iam` is the fastest
+  recovery — the task re-spawns on boot, runs an awaited startup tick immediately, then resumes its
+  normal interval.
+- If a Postgres-side lock/hang caused the stall, resolving that may let the existing task recover
+  without a restart — check whether ticks resume before restarting the service.
+- If a `*_default` partition has accumulated rows while the task was down, restarting the task
+  alone does **not** move those rows back into a proper monthly leaf — see "Audit retention &
+  partitioning" below for the manual reattach procedure.
+
 ### `IamGrpcHighErrorRate` — elevated non-OK gRPC status ratio (critical)
 
 **Meaning.** More than 5% of IAM's gRPC responses (over a 5m window, sustained for 10m) carried a
@@ -495,39 +548,132 @@ invalidation is somehow delayed.
 
 ### Audit retention & partitioning
 
-The M5 audit/outbox design (§4/D14) specifies `audit_log`'s **target** architecture as
-**monthly range partitions on `occurred_at`**, with **outcome-aware retention** (denial rows
-retained for a shorter window than mutation rows), enforced by a scheduled `DROP`/detach of old
-partitions.
+`audit_log` is a **two-level partitioned table** (migration `m0008_partition_audit_log`, SMA-467):
+`PARTITION BY LIST (outcome)` at the top, with each outcome subtree further `PARTITION BY RANGE
+(occurred_at)` monthly. Full design rationale:
+`docs/superpowers/specs/2026-07-15-sma-467-audit-log-partitioning-design.md`.
 
-**Current implementation status:** as of this RUNBOOK, `audit_log` (migration
-`m0006_create_audit_log`) ships as a **plain, non-partitioned table** — every query predicate
-already includes `occurred_at`/`id` so the schema and query shape stay partition-compatible from
-day one, but the monthly-partition migration and the scheduled retention job are **not yet
-implemented** (tracked as a follow-up, §6). Until that lands:
+```
+audit_log                         PARTITION BY LIST (outcome)
+├─ audit_log_committed            PARTITION BY RANGE (occurred_at)
+│   ├─ audit_log_committed_2026_07   FROM ('2026-07-01 00:00:00+00') TO ('2026-08-01 00:00:00+00')
+│   ├─ audit_log_committed_2026_08   …
+│   └─ audit_log_committed_default    DEFAULT   ← RANGE write-safety backstop
+├─ audit_log_denied               PARTITION BY RANGE (occurred_at)
+│   ├─ audit_log_denied_2026_07      FROM (…) TO (…)
+│   ├─ audit_log_denied_2026_08      …
+│   └─ audit_log_denied_default       DEFAULT   ← RANGE write-safety backstop
+└─ audit_log_other                DEFAULT (plain leaf)   ← LIST catch-all for a stray `outcome`
+```
 
-- There is **no partition to `DROP`/detach** — don't look for one.
-- If retention needs to be enforced manually in the interim (e.g. disk pressure, compliance
-  deadline), the equivalent operation on the current plain table is a **bounded, batched
-  `DELETE`** filtered by `occurred_at` and `outcome`, run during a low-traffic window (an
-  unbounded `DELETE` on a large append-only table can be I/O-heavy and hold locks longer than
-  desired):
-  ```sql
-  -- example: prune denial rows older than 90 days, in batches, to bound lock/IO impact
-  DELETE FROM audit_log
-  WHERE id IN (
-    SELECT id FROM audit_log
-    WHERE outcome = 'denied' AND occurred_at < now() - interval '90 days'
-    LIMIT 10000
-  );
-  -- repeat until it deletes 0 rows
-  ```
-  Mutation rows (`outcome = 'committed'`) are compliance-retained and should use a materially
-  longer window than denial rows, consistent with the "outcome-aware retention" design intent —
-  confirm the actual retention windows with whoever owns compliance requirements before running
-  this against a production database; this RUNBOOK does not prescribe specific day counts.
-- Once the monthly-partition migration ships, this section should be updated to describe the
-  actual `DROP TABLE audit_log_YYYY_MM` / partition-detach procedure instead.
+Retention drops whole aged-out **denied** month leaves; **committed** (compliance) leaves are kept
+indefinitely by default — the outcome-aware asymmetry the original M5 design called for. All
+partition bounds are fully-qualified UTC `TIMESTAMPTZ` literals (never bare dates), so leaf
+boundaries can't drift with a session's `TimeZone` GUC.
+
+**The maintenance task (`PgPartitionMaintainer`).** An in-app background task — no `pg_cron`/
+`pg_partman` extension dependency — mirrors the outbox relay's shape: an awaited startup tick, then
+a `tokio::select!` loop between an interval sleep and the shutdown-watch. Each tick does two
+independent units of work (a create-ahead failure never blocks pruning, or vice versa):
+1. **create-ahead** (`ensure_partitions_ahead`) — `CREATE TABLE IF NOT EXISTS` the monthly leaf
+   (both outcome subtrees) for every month from now through `ahead_months` ahead.
+2. **prune** — enumerates each subtree's actual child leaves from the Postgres catalog
+   (`pg_inherits`) and `DROP TABLE IF EXISTS` any whose parsed `YYYY_MM` is older than the
+   configured cutoff (never touches a `*_default`).
+
+Every DDL statement runs in its own short transaction that takes
+`pg_advisory_xact_lock(AUDIT_PARTITION_LOCK_KEY)` (the same lock key the `m0008` migration itself
+uses, so a maintenance tick and a migration swap can never race) plus a bounded `SET LOCAL
+lock_timeout = '5s'` — a CREATE/DROP that would block behind a live-insert lock on the parent
+**backs off** (errors, logged, retried next tick) instead of queueing and stalling audit writes.
+
+**Config — `[audit.retention]`** (in `iam.toml` / `IAM_AUDIT__RETENTION__*`; every field has a
+default, so an absent block is valid config):
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `true` | `false` → the maintenance task is **not spawned at all** — no create-ahead, no pruning. See the recovery-trap caveat below before using this to "pause" retention. |
+| `interval_secs` | `86400` (daily) | seconds between ticks; validated `> 0`. |
+| `ahead_months` | `1` | months of leaf partitions to pre-create ahead of time; validated `1..=24`. |
+| `denied_months` | `3` | drop denied monthly leaves older than this; `0` = never drop denied. |
+| `committed_months` | `0` | drop committed monthly leaves older than this; `0` = never auto-drop committed (default — a non-zero value auto-deletes compliance rows and logs a startup `warn` stating the effective window). |
+
+**`enabled = false` is a full off-switch, not a "pause deletes" mode — a recovery trap if used that
+way.** Disabling stops create-ahead *and* pruning together. After `ahead_months` of real time
+elapses, every new audit row for an uncovered month lands in the RANGE `*_default` instead of a
+proper leaf, and a **polluted default then blocks create-ahead from ever creating that month's leaf
+again — even after `enabled` is flipped back to `true`** (Postgres refuses to create/attach a range
+partition whose bounds overlap rows already sitting in the default; see the manual reattach
+procedure below). IAM logs a startup `warn` stating this consequence whenever `enabled = false`. **To
+pause only deletions while keeping create-ahead healthy** (the usual intent when someone reaches
+for "pause retention"), leave `enabled = true` and set `denied_months = 0` **and**
+`committed_months = 0` instead — the task keeps running and creating leaves, it just drops nothing.
+
+**Dropping a partition.** In steady state this is fully automatic — `prune` runs every tick and
+issues `DROP TABLE IF EXISTS audit_log_denied_YYYY_MM;` (or `audit_log_committed_YYYY_MM;` if
+`committed_months > 0`) for any leaf whose month is older than the configured cutoff. Both
+`iam_audit_partitions_dropped_total{outcome="denied"|"committed"}` and IAM's per-tick `info` log
+record what was dropped. To drop a specific month **ad hoc** (e.g. an emergency disk-pressure prune
+ahead of schedule), the same DDL is safe to run by hand — it's the identical statement the task
+itself runs:
+
+```sql
+DROP TABLE IF EXISTS audit_log_denied_2026_04;
+```
+
+Confirm the target is actually a monthly leaf (never a `_default`) and is genuinely outside the
+range you want to keep before running this — there is no undo.
+
+**The `*_default` partitions and `audit_log_other`.** `audit_log_committed_default` /
+`audit_log_denied_default` (the RANGE defaults) and `audit_log_other` (the top-level LIST default,
+catching any `outcome` other than `committed`/`denied`) exist purely as a write-safety backstop —
+**no committed-audit insert may ever fail for lack of a partition**, since that insert runs inside
+the triggering mutation's own transaction and a hard failure there rolls back the mutation itself.
+In steady state (`ahead_months ≥ 1`, task ticking normally) **all three should stay permanently
+empty** — `iam_audit_default_partition_rows` (§2.2) is the metric that verifies this, refreshed once
+per successful tick. **Known blind spot:** this gauge freezes (doesn't climb) once the task is
+stalled or disabled — exactly when a default is most likely to be actively filling — so
+`iam_audit_partition_maintenance_ticks_total` (the `IamAuditPartitionMaintenanceStalled` alert
+above) is the primary "is this even running" signal, and the gauge is the secondary "has it already
+fallen behind" signal. Treat a nonzero gauge as urgent: it means live audit rows are currently
+landing outside any proper monthly leaf.
+
+**Manual reattach for a non-empty default.** Auto-remediation is a deliberate non-goal for v1 —
+recovering a polluted default is a manual, rare, off-peak operation. Postgres refuses to create or
+attach a new leaf whose bounds would overlap rows still sitting in a default, so the rows must be
+moved out of the default *before* the proper leaf can exist. Example for a RANGE default holding
+rows for July 2026 that never got its own leaf in time (substitute the actual affected year/month
+and its follow-on month throughout):
+
+```sql
+BEGIN;
+SELECT pg_advisory_xact_lock(5580467); -- AUDIT_PARTITION_LOCK_KEY (m0008_partition_audit_log.rs) —
+                                        -- serializes against a concurrent maintenance tick/migration.
+
+-- 1. Build the leaf as a standalone table (same shape as the partitioned parent).
+CREATE TABLE audit_log_denied_2026_07 (LIKE audit_log_denied INCLUDING ALL);
+
+-- 2. Move the qualifying rows out of the default and into it.
+WITH moved AS (
+  DELETE FROM audit_log_denied_default
+  WHERE occurred_at >= TIMESTAMPTZ '2026-07-01 00:00:00+00'
+    AND occurred_at <  TIMESTAMPTZ '2026-08-01 00:00:00+00'
+  RETURNING *
+)
+INSERT INTO audit_log_denied_2026_07 SELECT * FROM moved;
+
+-- 3. Attach it as a proper leaf — now safe, since the default no longer holds any row in range.
+ALTER TABLE audit_log_denied ATTACH PARTITION audit_log_denied_2026_07
+  FOR VALUES FROM (TIMESTAMPTZ '2026-07-01 00:00:00+00')
+  TO (TIMESTAMPTZ '2026-08-01 00:00:00+00');
+COMMIT;
+```
+
+Swap `denied` for `committed` for the committed subtree. A non-empty `audit_log_other` (the LIST
+default) is a different, rarer signal — it means a row was written with an `outcome` other than
+`committed`/`denied`, which the domain never does deliberately; treat that as a data-integrity bug
+to investigate (a writer bypassing `AuditOutcome`), not a create-ahead timing issue, and do not
+attempt an automatic reattach without first understanding how the stray value got there.
 
 ---
 
@@ -595,8 +741,11 @@ Not implemented in this cycle; tracked as explicit follow-ups:
   not *where it pages*; routing is deployment-specific and not yet configured anywhere.
 - **Outbox pruning + a full dead-letter-queue subsystem** for parked events (today: manual SQL
   per §4's `IamOutboxEventsParked` entry; no scheduled sweep, no separate DLQ table/UI).
-- **Monthly `audit_log` partitioning + a scheduled outcome-aware retention job** (today: a plain
-  table with manual, ad hoc `DELETE`-based pruning if needed — see §4's retention section).
+- **`DETACH … CONCURRENTLY` partition drops** (PG14+) instead of a `lock_timeout`'d
+  `DROP TABLE IF EXISTS`, and **auto-remediating a non-empty `DEFAULT` partition** (moving leaked
+  rows into a freshly created leaf automatically instead of the manual §4 reattach procedure) —
+  both explicit SMA-467 non-goals for v1, which favored simplicity + observability over auto-repair
+  machinery.
 - **Gateway M5** observability: provider-routing, cost/budget, and response-cache metrics, and a
   corresponding dashboard extension — those surfaces (multi-provider routing, caching, budgets)
   don't exist yet; this cycle scoped gateway metrics to the M0 auth+proxy surface only.

@@ -22,6 +22,11 @@ groups:
         for: 10m
         labels: { severity: critical }
         annotations: { summary: "IAM outbox relay is not ticking (stalled but process alive)" }
+      - alert: IamAuditPartitionMaintenanceStalled
+        expr: rate(iam_audit_partition_maintenance_ticks_total[1h]) == 0
+        for: 2h
+        labels: { severity: warning }
+        annotations: { summary: "IAM audit partition-maintenance task is not ticking", description: "No audit partition-maintenance ticks in the last hour. Denied partitions won't be pruned (slow index/table bloat) and, after ahead_months, new-month create-ahead stops. NOTE: if audit.retention.enabled=false this is expected — silence it. See RUNBOOK §4." }
       - alert: IamHighErrorRate
         expr: sum(rate(iam_http_requests_total{status_class="5xx"}[5m])) / sum(rate(iam_http_requests_total[5m])) > 0.05
         for: 10m
