@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b080slkcs</task-id>
+<tool-use-id>toolu_01HEg2YQZCooXh4ErsQJ2ZVc</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/4c9a77ab-a734-4097-96ae-366db35d708d/tasks/b080slkcs.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for CodeRabbit review to finish" completed (exit code 0)</summary>
+</task-notification>
