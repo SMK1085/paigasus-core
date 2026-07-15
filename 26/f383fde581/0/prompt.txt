@@ -1,0 +1,22 @@
+<task-notification>
+<task-id>a660e201d730874b9</task-id>
+<tool-use-id>toolu_0181VQmW3d8RZWNJkcoUcrfd</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/a660e201d730874b9.output</output-file>
+<status>completed</status>
+<summary>Agent "CodeRabbit round 1 fixes" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+Commit: `175198eb3730ab25a0b991173e01acc54d86d126` — "fix(rs): address coderabbit round 1 — metrics upkeep, port validation, hot allocs (SMA-446)" (pushed to origin)
+Build/test: all green — build, observability (8 tests), gateway (80 tests), iam config (54 tests incl. 4 new), iam metrics (4 tests), `cargo fmt --check`, `cargo clippy -D warnings` all clean
+
+1. Upkeep: added `tokio::spawn` upkeep loops (5s interval, racing shutdown) in gateway `main.rs` (own `select!`) and IAM `main.rs` (into the shared `servers` JoinSet); `init()` untouched.
+2. Port validation: both configs' `validate()` now compare `.port()` not full address equality; IAM also checks against `grpc_addr`; added 3 new tests per config.
+3. Hot path: `http_metrics_layer` now builds the 3 metric-name `String`s once at layer construction, cloned per request instead of `format!`'d per request.
+4. Gateway metrics listener: already had `.with_graceful_shutdown` + `tracing::error!` in this branch — verified, no change needed.
+5. README: removed "placeholder"/"later unit" language for rules/provisioning/dashboards/RUNBOOK, since all exist in this cohort.
+
+Concerns: first commit attempt was rejected by commitlint (`header-max-length`, em-dash subject was 104 chars) — recommitted with a shortened 91-char subject, no `--no-verify` used. No new tests added specifically for Fix 1/Fix 4 (not requested; `run_upkeep()` effects aren't cheaply observable in a fast test).
+
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-observability/.superpowers/sdd/cr-round1-report.md`</result>
+<usage><subagent_tokens>145366</subagent_tokens><tool_uses>41</tool_uses><duration_ms>409155</duration_ms></usage>
+</task-notification>
