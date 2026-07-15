@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bientp3lm</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/9afe8601-e408-4606-98ac-68165a84a054/tasks/bientp3lm.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll new moon ci run to completion" completed (exit code 0)</summary>
+</task-notification>
