@@ -1,0 +1,16 @@
+<task-notification>
+<task-id>ac30297162daecee7</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/ac30297162daecee7.output</output-file>
+<status>completed</status>
+<summary>Agent "CodeRabbit round 1 fixes" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE = staged &amp; verified
+Files staged: docs spec .md, prn.rs, prn_props.rs, py/node/wasm bindings src/lib.rs, parity src/lib.rs, vectors/prn_canonical.json (8 files, nothing else, not committed)
+Tests: kernel 9 passed / parity 7 passed / py 124 passed / ts 256 passed (10 files) — 0 failures anywhere
+Drift-clean: confirmed (parity regen + `git diff --exit-code` on vectors/ = exit 0, both direct and via `moon run repo:parity-corpus-drift`)
+Glue-unchanged: confirmed — `git status` shows zero diff in `index.d.ts`/`paigasus_wasm*` after every rebuild
+Concerns: caught and fixed a subtle issue where updating the `mint_uuid7` doc comment in node/wasm shims cascaded into generated glue (napi/wasm-bindgen re-emit Rust doc comments verbatim); reverted those two doc comments to keep glue byte-identical. Spec's top `Status:` banner left untouched (out of explicit scope) — flagged in report for controller's awareness.
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-448-kernel-prn/.superpowers/sdd/cr-round1-report.md`</result>
+<usage><subagent_tokens>118429</subagent_tokens><tool_uses>74</tool_uses><duration_ms>500469</duration_ms></usage>
+</task-notification>
