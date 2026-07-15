@@ -1,0 +1,35 @@
+<task-notification>
+<task-id>ae119f1088cb1c00b</task-id>
+<tool-use-id>toolu_01MwXn4fou17LLygLmWmjzp4</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/6c9d3b43-69b7-4125-88cf-e1da3886418a/tasks/ae119f1088cb1c00b.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 9 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Verified the incremental diff character-by-character.
+
+**Fix verification:**
+- Constraint loop (via `pg_constraint`) now has 14 names: the original 9 plus `fk_team_org`, `fk_membership_principal`, `fk_membership_org`, `fk_membership_team`, `fk_membership_project` — all spelled exactly per the required set (`tenancy_schema.rs` diff lines 26–30).
+- Index loop (via `pg_indexes`) now has 10 names: the 3 partial uniques plus `ix_team_org`, `ix_project_team`, `ix_project_org`, `ix_membership_principal`, `ix_membership_org`, `ix_membership_team`, `ix_membership_project` — all exact (diff lines 46–52).
+- Together that is all 24 load-bearing names (14 + 10; the "21" in the fix request undercounts — the full required set is 24, and all 24 are now asserted). Catalog choice is correct for each kind: FKs/uniques/CHECK live in `pg_constraint`; plain and partial-unique indexes live in `pg_indexes` (the non-unique `ix_*` created via `create_index` would not appear in `pg_constraint`, so the split is right, not incidental).
+- Nothing else changed: single file, single commit (`aeda582`), only the two arrays extended.
+- Fix evidence in `task-9-report.md` ("Fix round 1", lines 149–177): re-ran `cargo nextest run -p paigasus-iam --test tenancy_schema` → 2/2 pass after recompiling the changed test binary, plus clean `fmt --check` and `clippy -D warnings`. The re-run covers exactly the changed code.
+
+### Spec Compliance
+✅ — the schema test now asserts every load-bearing constraint and index name; all spellings match the required set exactly; no unrelated changes.
+
+### Issues
+
+#### Critical (Must Fix)
+None.
+
+#### Important (Should Fix)
+None — the sole Important finding from round 1 is fully resolved.
+
+#### Minor (Nice to Have)
+Carried over from round 1, both unchanged and non-blocking: (1) the seven repetitive `create_index` calls in `m0002_create_tenancy.rs` could share a helper; (2) `now()` vs literal timestamps in the CHECK test seed.
+
+### Assessment
+**Task quality:** Approved
+**Reasoning:** The incremental fix adds exactly the 12 previously untested names (5 FK constraints, 7 secondary indexes) with character-exact spelling and correct catalog queries, changing nothing else; the reported re-run (2/2 pass + fmt/clippy clean) covers the change. All load-bearing D7 names are now regression-guarded.</result>
+<usage><subagent_tokens>50641</subagent_tokens><tool_uses>2</tool_uses><duration_ms>40259</duration_ms></usage>
+</task-notification>
