@@ -1,0 +1,28 @@
+<task-notification>
+<task-id>af45d67af709d57cd</task-id>
+<tool-use-id>toolu_0124vbYY9wktAgqXtiRAyBgp</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/af45d67af709d57cd.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement U1: observability crate" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+
+Commits (branch `feature/sma-446-observability-dashboards-runbook`):
+- `85f82f0` feat(rs): scaffold paigasus-observability crate (SMA-446)
+- `28cb508` feat(rs): add observability recorder init + /metrics router (SMA-446)
+- `9b7bb6e` feat(rs): add shared http request-metrics layer (SMA-446)
+- `914be29` feat(rs): add record_grpc handler-boundary helper (SMA-446)
+- `9a69b37` feat(rs): add canonical metric-name registry (SMA-446)
+
+Tests: 5 passed, 0 failed (+0 doctests); build/fmt --check/clippy `-D warnings` all clean; full `cargo build --workspace` still green.
+
+http_metrics_layer call form (layer-returning, preferred — not the fallback): `router.layer(paigasus_observability::http_metrics_layer("gateway"))`, returning `middleware::FromFnLayer&lt;impl Fn(Request, Next) -&gt; BoxFuture + Clone, (), (Request,)&gt;`.
+
+Concerns:
+- Pinned `metrics-exporter-prometheus` 0.18 (latest; brief said 0.16) — no builder API drift, custom buckets applied.
+- Naming the module `http` shadows the extern `http` crate crate-wide; fixed by using `axum::http::` in tests and dropping the `http` dep. `tower` made dev-only.
+- Repo gates (`:deny`/`:machete`/`:affected-smoke`) out of this unit's DoD — the new deps may need `rs/deny.toml` license exceptions when the full graph runs.
+
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-446-observability/.superpowers/sdd/u1-report.md`</result>
+<usage><subagent_tokens>113988</subagent_tokens><tool_uses>60</tool_uses><duration_ms>790134</duration_ms></usage>
+</task-notification>
