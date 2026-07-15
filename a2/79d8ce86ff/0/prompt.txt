@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b2fbe28av</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/b2fbe28av.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll for CodeRabbit re-review (round 2) completion" completed (exit code 0)</summary>
+</task-notification>
