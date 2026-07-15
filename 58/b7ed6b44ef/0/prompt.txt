@@ -1,0 +1,18 @@
+<task-notification>
+<task-id>a0d7b35e478b82767</task-id>
+<tool-use-id>toolu_01FETERcSoXJd9m64KS9czNd</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/a0d7b35e478b82767.output</output-file>
+<status>completed</status>
+<summary>Agent "Fix: prn_fields corpus + 2 minors" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Working tree is clean except the 11 staged files, exactly as required. Nothing committed.
+
+Status: DONE
+Files staged: moon.yml, py/packages/paigasus-kernel/{src/paigasus_kernel/__init__.py,tests/test_parity.py}, rs/crates/libs/paigasus-kernel-parity/{src/lib.rs,src/bin/gen-parity-vectors.rs,tests/replay.rs,vectors/prn_fields.json}, ts/packages/paigasus-kernel/{tests/corpus.ts,tests/prn-fields.test.ts,tests/prn-fields.wasm.test.ts,vitest.config.ts}
+Tests: Rust 7/7 (parity crate: 2 lib + 5 replay incl. new prn_fields) | Python 123/123 (+6 new) | TS 254/254 across 10 files (+14 new, 2 new files)
+Gate: repo:parity-corpus-drift PASS (byte-stable, 4 old vectors unchanged); repo:wasm-getrandom-free PASS with hardened script (manually verified it fails loud/exit 2 on a broken `cargo tree` invocation, and correctly passes on genuine getrandom absence)
+Glue-unchanged: confirmed — no diff in generated napi/wasm glue or Cargo.lock; only the 11 intended files changed
+Concerns: none; cargo fmt auto-rewrapped a couple of `use` lines to the repo's 200-col style (cosmetic only, `cargo fmt --check` clean)
+Report: /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/feature+sma-448-kernel-prn/.superpowers/sdd/fix-final-report.md</result>
+<usage><subagent_tokens>94997</subagent_tokens><tool_uses>67</tool_uses><duration_ms>404638</duration_ms></usage>
+</task-notification>
