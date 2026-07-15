@@ -1,0 +1,28 @@
+<task-notification>
+<task-id>a355fda51f502e44e</task-id>
+<tool-use-id>toolu_011Ey74YLYTvDAokKQ5CYATk</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/8d0af0b1-c97c-4315-abcd-33fb892c7f6d/tasks/a355fda51f502e44e.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement Task 8 (m0005 migration)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Fix applied and committed.
+
+STATUS: DONE
+
+Test command + output:
+```
+cd rs &amp;&amp; cargo nextest run -p paigasus-iam --test service_accounts
+    Starting 4 tests across 1 binary
+        PASS service_account_check_rejects_non_single_owner_rows
+        PASS api_key_check_rejects_non_single_scope_rows
+        PASS m0005_creates_tables
+        PASS service_accounts_schema_has_named_constraints_and_indexes
+     Summary [1.256s] 4 tests run: 4 passed, 0 skipped
+```
+All 4 pass against a real Postgres testcontainer; the schema test now also asserts `fk_api_key_scope_org`/`_team`/`_project` exist. `cargo build`, `cargo clippy --all-targets -D warnings`, and `cargo fmt --check` all clean.
+
+Commit SHA: `ab456e4` (signed/verified)
+
+What changed: added the three scope FKs on `api_key.scope_org_id`/`_team`/`_project` → organization/team/project `ON DELETE CASCADE`, named `fk_api_key_scope_org`/`_team`/`_project`, mirroring `fk_role_grant_org`/`_team`/`_project` in m0004 exactly; removed the miscited "D15" from the migration module doc and replaced it with a plain description of the FKs; updated the schema test to verify the new FK names and corrected the two-scope-insert comment (CHECK fires before the FK trigger). Nothing else touched.</result>
+<usage><subagent_tokens>119226</subagent_tokens><tool_uses>13</tool_uses><duration_ms>168509</duration_ms></usage>
+</task-notification>
