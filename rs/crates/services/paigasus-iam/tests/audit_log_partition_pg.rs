@@ -10,7 +10,7 @@ mod support;
 use chrono::{Datelike, TimeZone, Utc};
 use paigasus_iam::adapters::persistence::Migrator;
 use paigasus_iam::adapters::persistence::entities::audit_log;
-use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, DatabaseConnection, EntityTrait, PaginatorTrait, Set, Statement};
+use sea_orm::{ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait, PaginatorTrait, Set, Statement};
 use sea_orm_migration::MigratorTrait;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ContainerAsync;
@@ -60,7 +60,14 @@ async fn start_raw_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseConne
     };
     let port = node.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let db = Database::connect(&url).await.unwrap();
+    // Pin the pool to a SINGLE connection so per-session state — notably a `SET TimeZone` issued
+    // by `routing_is_correct_under_a_non_utc_session_timezone` — is guaranteed to apply to the
+    // same physical connection that the subsequent `Migrator::up` runs on (a default multi-conn
+    // pool could migrate on a different, still-UTC session, making that regression test
+    // non-deterministic — CodeRabbit SMA-467 round 2).
+    let mut opts = ConnectOptions::new(url);
+    opts.max_connections(1).min_connections(1);
+    let db = Database::connect(opts).await.unwrap();
     Some((node, db))
 }
 
