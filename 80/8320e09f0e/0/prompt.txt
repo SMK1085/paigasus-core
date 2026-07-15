@@ -1,0 +1,36 @@
+<task-notification>
+<task-id>a057b74bff66029bf</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/249bb786-e538-4e96-af1d-6a6ecfafed6a/tasks/a057b74bff66029bf.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 6 (spec + quality)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>### Spec Compliance
+- ✅
+
+### Strengths
+- `CreateUser::execute` in `rs/crates/services/paigasus-iam/src/application/create_user.rs:140-150` matches the brief's parse→mint→stamp→build→persist→return-`PrincipalId` flow exactly, and `CreateUserError` (lines 116-122) has exactly the two variants the constraints specify, with `Repository` using `#[from] RepositoryError` for clean `?`-propagation (no swallowed errors — the only intentionally-discarded error is `DomainError` in `Email::parse(..).map_err(|_| ...)` at line 141, verbatim from the brief, and it's re-encoded losslessly since `InvalidEmail(String)` carries the same raw input).
+- `mod.rs` (`.../application/mod.rs:1-5`) and `main.rs:4` (`mod application;` above `mod config;`) match the brief verbatim.
+- Fakes are correctly `#[cfg(test)]`-only (`create_user.rs:153`) — no fake type or dependency leaks into the production binary. Verified against `rs/crates/libs/paigasus-iam-core/src/ports.rs:24-27`: the `PrincipalRepository` trait signature matches the fake's impl exactly, and there is genuinely no blanket `impl&lt;T: PrincipalRepository&gt; PrincipalRepository for &amp;T` in core, so the implementer's claim that the brief's inline comment is wrong checks out.
+- Both `#[tokio::test]`s genuinely verify behavior, not just construction: `create_user_persists_and_round_trips_through_the_port` (lines 211-233) calls `execute`, then independently calls `repo.find_user(&amp;id)` through the same port trait to confirm the write actually landed (asserting `kind`, `status`, and `email` read back from storage — not just the returned id). `create_user_rejects_a_bad_email` (lines 235-249) asserts the specific `CreateUserError::InvalidEmail(_)` variant via `matches!`, not just `is_err()`.
+- The `thiserror` addition (`Cargo.toml:66`) is correctly a `[dependencies]` entry (used in non-test `CreateUserError`), while `chrono`/`uuid`/`async-trait` (lines 76-78) are correctly `[dev-dependencies]` — confirmed all three are used only inside `#[cfg(test)] mod tests` (chrono's `TimeZone` trait is actually exercised via `.timestamp_opt`, not an unused import). `cargo machete` clean per the report, and no dependency is redundantly re-added to the `ignored` allowlist that didn't need it.
+- Commit message (`git log -1 831d444`) is Conventional-Commits-compliant, scope `feat(rs):`, `SMA-441` only in the subject, no bare `#NNN` in the body.
+- Long lines (e.g. the single-line `use` at `create_user.rs:105`) are legitimate under this workspace's `rustfmt.toml` (`max_width = 200`), not a fmt-gate risk as might first appear.
+
+### Issues
+
+#### Critical (Must Fix)
+None.
+
+#### Important (Should Fix)
+None. Both flagged deviations (the `&amp;InMemoryPrincipalRepository` impl and `#![allow(dead_code)]`) are legitimate, narrowly-scoped, test-confined fixes for real gaps in the brief, not defects in this task's own code.
+
+#### Minor (Nice to Have)
+- `#![allow(dead_code)]` at `create_user.rs:103` is file-scoped (inner attribute covering the whole module), whereas the Task 5 precedent it cites (`config.rs:47`) scopes the identical allow to just the one dead function (`IamConfig::load`). Since every production item in this file (`NewUser`, `CreateUserError`, `CreateUser`, `new`, `execute`) is currently unreachable from `main`, the broader scope isn't dishonest — but it is blunter than necessary and would silently mask any future genuinely-dead helper added to this same file before Task 11 wires things up. Scoping the allow onto the `impl` block (or per-item) would track the precedent more tightly.
+- The two nearly-identical `impl PrincipalRepository for InMemoryPrincipalRepository` / `for &amp;InMemoryPrincipalRepository` blocks (`create_user.rs:168-181` and `187-195`) are boilerplate-y forwarding. An alternative (e.g. wrapping the fake in `Arc` and adding a blanket `impl&lt;T: PrincipalRepository&gt; PrincipalRepository for Arc&lt;T&gt;` — a one-time, reusable core-level fix) would avoid this per-fake duplication, but that's out of this task's file list; the implementer correctly deferred it and flagged it as a follow-up in the report rather than scope-creeping into `paigasus-iam-core`.
+
+### Assessment
+**Task quality:** Approved
+**Reasoning:** Spec is met exactly (use case shape, error shape, module registration, test-only fakes), both tests genuinely exercise round-trip persistence and specific error-variant behavior, and all three flagged deviations (dev-deps, `#[allow(dead_code)]`, the `&amp;T` test impl) are necessary, minimal, well-contained fixes for real gaps in the brief rather than scope or design problems introduced by the implementer.</result>
+<usage><subagent_tokens>63022</subagent_tokens><tool_uses>13</tool_uses><duration_ms>202501</duration_ms></usage>
+</task-notification>
