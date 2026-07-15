@@ -1,0 +1,19 @@
+<task-notification>
+<task-id>a108ac35d91f8351e</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/a108ac35d91f8351e.output</output-file>
+<status>completed</status>
+<summary>Agent "Fix U1 review findings" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Report appended.
+
+Status: DONE
+Commit: `9525098` — fix(rs): guard inflight gauge + use name registry in record_grpc (SMA-446)
+Tests: `cargo test -p paigasus-observability` → 6 passed, 0 failed (added a panic-path test)
+fmt/clippy: both clean, no warnings
+
+Panic test included: `boom_handler` panics inside a route; driven via `tokio::spawn` + `JoinError` (axum doesn't catch handler panics natively), then asserts the gauge line shows no stuck nonzero value, proving the RAII guard's `Drop` fires during unwind.
+
+No concerns — no public API signatures changed, no downstream call sites affected.</result>
+<usage><subagent_tokens>62236</subagent_tokens><tool_uses>27</tool_uses><duration_ms>164740</duration_ms></usage>
+</task-notification>
