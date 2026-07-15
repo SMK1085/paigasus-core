@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b0y410ti6</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/7b80b7cf-03e2-4929-ae5f-f654f6934eb6/tasks/b0y410ti6.output</output-file>
+<status>completed</status>
+<summary>Background command "Background-wait for Round-2 CodeRabbit + moon ci on ee188dd" completed (exit code 0)</summary>
+</task-notification>
