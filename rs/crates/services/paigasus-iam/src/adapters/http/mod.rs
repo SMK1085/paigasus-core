@@ -392,7 +392,7 @@ impl AppState {
         // store instance, not several (mirrors `role_grant_store`'s single-shared-`Arc`
         // posture). It is stashed on the returned state (`audit_log` field, reachable via
         // `audit_sink()`) so `main.rs` can hand it to `drain.run(sink, shutdown)`.
-        let audit_log: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()));
+        let audit_log: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()).with_query_window(cfg.audit.query_default_window_days, cfg.audit.query_max_window_days));
 
         // SMA-444 cross-tenant-escalation fix (FIX 2): `RoleService::resolve_scope`'s own
         // DB-lookup defense needs read access to the tenancy repos, independent of

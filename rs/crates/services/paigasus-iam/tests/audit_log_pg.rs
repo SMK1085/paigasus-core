@@ -165,3 +165,36 @@ async fn query_filters_by_occurred_at_from_and_to() {
         "only rows with occurred_at in [from, to] must be returned, both bounds inclusive"
     );
 }
+
+/// With a query window configured, a filter supplying NEITHER `from` nor `to` only returns rows
+/// inside the default lookback — older rows are pruned out (SMA-467 §3.6).
+#[tokio::test]
+async fn query_applies_default_lookback_window() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let sink = PgAuditLog::new(db.clone()).with_query_window(30, 366); // 30-day default lookback
+
+    let recent = Utc::now() - chrono::Duration::days(1);
+    let old = Utc::now() - chrono::Duration::days(120);
+    for (id, ts) in [(Uuid::from_u128(900), recent), (Uuid::from_u128(901), old)] {
+        let e = AuditEntry {
+            occurred_at: ts,
+            ..denial(id, "win-actor")
+        };
+        sink.record_out_of_band(&e).await.unwrap();
+    }
+    let rows = sink
+        .query(&AuditFilter {
+            actor_prn: Some("win-actor".to_string()),
+            resource_prn: None,
+            action: None,
+            outcome: Some(AuditOutcome::Denied),
+            from: None,
+            to: None,
+            cursor: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "only the row inside the 30-day default window must return");
+    assert_eq!(rows[0].id, Uuid::from_u128(900));
+}
