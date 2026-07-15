@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b41nygc0b</task-id>
+<tool-use-id>toolu_01KmuS6ms6uQyA5mTxYmWYEr</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/20bb16cc-c5e0-4bef-8ce0-f635287e1a29/tasks/b41nygc0b.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll round 2 settle and recount actionable threads" completed (exit code 0)</summary>
+</task-notification>
