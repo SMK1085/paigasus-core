@@ -25,6 +25,7 @@ use super::entities::audit_log;
 use super::map_err;
 use super::uow::recover_txn;
 use async_trait::async_trait;
+use chrono::Utc;
 use metrics::counter;
 use paigasus_iam_core::{AuditEntry, AuditFilter, AuditLog, AuditOutcome, RepositoryError, Transaction};
 use paigasus_observability::names;
@@ -36,12 +37,23 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Qu
 #[derive(Clone)]
 pub struct PgAuditLog {
     db: DatabaseConnection,
+    /// `Some((default_days, max_days))` enables SMA-467 §3.6 window bounding; `None` = unbounded
+    /// (the default from `new`, keeping every existing test's `new(db)` call unchanged).
+    query_window: Option<(u32, u32)>,
 }
 
 impl PgAuditLog {
     #[must_use]
     pub fn new(db: DatabaseConnection) -> Self {
-        PgAuditLog { db }
+        PgAuditLog { db, query_window: None }
+    }
+
+    /// Enable the default-lookback + max-span window on `query` (SMA-467 §3.6). Chained at the
+    /// composition root; tests that don't care leave it off via `new`.
+    #[must_use]
+    pub fn with_query_window(mut self, default_days: u32, max_days: u32) -> Self {
+        self.query_window = Some((default_days, max_days));
+        self
     }
 }
 
@@ -149,6 +161,25 @@ impl AuditLog for PgAuditLog {
 
     async fn query(&self, f: &AuditFilter) -> Result<Vec<AuditEntry>, RepositoryError> {
         let mut q = audit_log::Entity::find();
+
+        // SMA-467 §3.6: bound an otherwise-unfiltered scan. `from`/`to` from the filter win; the
+        // default lookback applies ONLY when BOTH are absent; clamp any span to max_days.
+        let (eff_from, eff_to) = match self.query_window {
+            None => (f.from, f.to),
+            Some((default_days, max_days)) => match (f.from, f.to) {
+                (None, None) => {
+                    let to = Utc::now();
+                    (Some(to - chrono::Duration::days(i64::from(default_days))), Some(to))
+                }
+                (None, Some(to)) => (Some(to - chrono::Duration::days(i64::from(max_days))), Some(to)),
+                (Some(from), None) => {
+                    let to = Utc::now();
+                    (Some(from.max(to - chrono::Duration::days(i64::from(max_days)))), Some(to))
+                }
+                (Some(from), Some(to)) => (Some(from.max(to - chrono::Duration::days(i64::from(max_days)))), Some(to)),
+            },
+        };
+
         if let Some(actor_prn) = &f.actor_prn {
             q = q.filter(audit_log::Column::ActorPrn.eq(actor_prn.clone()));
         }
@@ -161,10 +192,10 @@ impl AuditLog for PgAuditLog {
         if let Some(outcome) = f.outcome {
             q = q.filter(audit_log::Column::Outcome.eq(outcome.as_str()));
         }
-        if let Some(from) = f.from {
+        if let Some(from) = eff_from {
             q = q.filter(audit_log::Column::OccurredAt.gte(from));
         }
-        if let Some(to) = f.to {
+        if let Some(to) = eff_to {
             q = q.filter(audit_log::Column::OccurredAt.lte(to));
         }
         // Keyset paging (port doc contract): the next page is every row strictly older

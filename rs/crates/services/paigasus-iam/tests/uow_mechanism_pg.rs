@@ -103,18 +103,33 @@ async fn savepoint_rollback_isolates_a_failed_write_from_the_outer_txn() {
     let mut tx = uow.begin().await.expect("begin");
 
     // Insert A on the outer transaction.
-    {
+    let a_row = {
         let outer = recover_txn(&*tx).expect("downcast outer txn");
-        insert_row(outer, a).await.expect("insert row A on outer txn");
-    }
+        insert_row(outer, a).await.expect("insert row A on outer txn")
+    };
 
-    // Open a savepoint and force a unique violation inside it (duplicate PK == A). The failed
+    // Open a savepoint and force a unique violation inside it: since m0008 (SMA-467), `audit_log`'s
+    // PK is the composite `(id, occurred_at, outcome)`, so a "duplicate PK" must repeat all three
+    // columns, not just `id` — reuse A's exact `occurred_at`/`outcome` rather than calling
+    // `insert_row` (which would stamp a fresh `occurred_at` and no longer collide). The failed
     // statement aborts the savepoint's subtransaction, not the outer one.
     let sp = tx.savepoint().await.expect("open savepoint");
     {
         let inner = recover_savepoint_txn(&*sp).expect("downcast savepoint txn");
-        let dup = insert_row(inner, a).await;
-        assert!(dup.is_err(), "a duplicate primary key inside the savepoint must fail");
+        let dup = audit_log::ActiveModel {
+            id: Set(a_row.id),
+            occurred_at: Set(a_row.occurred_at),
+            actor_prn: Set(None),
+            action: Set("UowSpike".to_string()),
+            resource_prn: Set(None),
+            outcome: Set(a_row.outcome.clone()),
+            determining_policies: Set(None),
+            detail: Set("{}".to_string()),
+            correlation_id: Set(None),
+        }
+        .insert(inner)
+        .await;
+        assert!(dup.is_err(), "a duplicate (id, occurred_at, outcome) inside the savepoint must fail");
     }
     sp.rollback().await.expect("roll the savepoint back"); // ROLLBACK TO SAVEPOINT; frees the &mut tx borrow
 

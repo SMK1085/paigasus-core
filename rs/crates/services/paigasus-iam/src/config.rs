@@ -229,6 +229,46 @@ pub struct AuditConfig {
     /// defense, but a misconfigured `0` is an operator error caught at boot, not silently
     /// corrected.
     pub denial_buffer_capacity: usize,
+    /// Partition-maintenance + outcome-aware retention (SMA-467). Absent block → all defaults.
+    #[serde(default)]
+    pub retention: RetentionConfig,
+    /// When an audit `query` supplies neither `from` nor `to`, apply this lookback so the read
+    /// prunes to recent partitions instead of MergeAppend-scanning every leaf (SMA-467 §3.6).
+    pub query_default_window_days: u32,
+    /// Hard cap on any `from`/`to` span; an over-wide range is clamped to this.
+    pub query_max_window_days: u32,
+}
+
+/// `[audit.retention]` (SMA-467) — the in-app partition-maintenance task's knobs. Like the rest of
+/// `[audit]`, every field has a default so an absent block is valid config.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RetentionConfig {
+    /// `false` → the maintenance task is NOT spawned at all (no create-ahead, no pruning). To pause
+    /// only DELETIONS while keeping create-ahead healthy, leave this `true` and set the two
+    /// `*_months` to 0 — see `main.rs`'s startup `warn` for the disabled path's default-pollution
+    /// consequence.
+    pub enabled: bool,
+    /// Seconds between maintenance ticks (create-ahead + prune). Validated non-zero.
+    pub interval_secs: u64,
+    /// How many months ahead to pre-create leaf partitions. Validated `1..=24`.
+    pub ahead_months: u32,
+    /// Drop denied monthly leaves older than this. `0` = never drop denied.
+    pub denied_months: u32,
+    /// Drop committed monthly leaves older than this. `0` = never auto-drop committed (default;
+    /// a non-zero value auto-deletes compliance rows and triggers a startup `warn`).
+    pub committed_months: u32,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        RetentionConfig {
+            enabled: true,
+            interval_secs: 86_400,
+            ahead_months: 1,
+            denied_months: 3,
+            committed_months: 0,
+        }
+    }
 }
 
 /// Outbox-relay config (SMA-446 Slice B, Task B9) — the knobs for
@@ -339,10 +379,15 @@ struct ApiKeyDefaults {
 
 // Mirrors `AuditConfig` field-for-field. A 4096-entry denial buffer comfortably absorbs a
 // denial burst between drain wakes without back-pressure while staying a modest bounded
-// footprint (each queued entry is a handful of small strings).
+// footprint (each queued entry is a handful of small strings). The SMA-467 `retention`/
+// query-window defaults mirror the spec's steady-state values (see `RetentionConfig::default`
+// and this struct's own `Default` below for the rationale of each).
 #[derive(Serialize)]
 struct AuditDefaults {
     denial_buffer_capacity: usize,
+    retention: RetentionConfig,
+    query_default_window_days: u32,
+    query_max_window_days: u32,
 }
 
 // Mirrors `OutboxConfig` field-for-field. `poll_interval_secs = 5` / `batch_size = 100` /
@@ -431,7 +476,12 @@ impl Default for ApiKeyDefaults {
 
 impl Default for AuditDefaults {
     fn default() -> Self {
-        AuditDefaults { denial_buffer_capacity: 4096 }
+        AuditDefaults {
+            denial_buffer_capacity: 4096,
+            retention: RetentionConfig::default(),
+            query_default_window_days: 90,
+            query_max_window_days: 366,
+        }
     }
 }
 
@@ -488,8 +538,12 @@ impl Default for ApiKeyConfig {
 // `AuditDefaults` so the two never drift apart.
 impl Default for AuditConfig {
     fn default() -> Self {
+        let d = AuditDefaults::default();
         AuditConfig {
-            denial_buffer_capacity: AuditDefaults::default().denial_buffer_capacity,
+            denial_buffer_capacity: d.denial_buffer_capacity,
+            retention: d.retention,
+            query_default_window_days: d.query_default_window_days,
+            query_max_window_days: d.query_max_window_days,
         }
     }
 }
@@ -692,6 +746,41 @@ impl IamConfig {
         // silently corrected.
         if self.audit.denial_buffer_capacity == 0 {
             return Err("audit.denial_buffer_capacity must be at least 1 (0 makes the denial-audit buffer evict every entry it enqueues)".to_string());
+        }
+
+        // --- SMA-467: `[audit.retention]` config ------------------------------------------------
+        // The tick interval divides the maintenance loop's cadence (zero would busy-loop), and
+        // ahead_months is capped — each ahead month is a parent-locking CREATE, so a
+        // fat-fingered large value would hammer the parent every tick.
+        if self.audit.retention.interval_secs == 0 {
+            return Err("audit.retention.interval_secs must be at least 1 (0 would busy-loop the maintenance task)".to_string());
+        }
+        if !(1..=24).contains(&self.audit.retention.ahead_months) {
+            return Err(format!("audit.retention.ahead_months ({}) must be between 1 and 24", self.audit.retention.ahead_months));
+        }
+        if self.audit.query_default_window_days == 0 || self.audit.query_max_window_days == 0 {
+            return Err("audit.query_default_window_days and audit.query_max_window_days must be at least 1".to_string());
+        }
+
+        // Both windows feed `to - chrono::Duration::days(window)` on the audit-query hot
+        // path (`pg_audit_log.rs`) — an absurdly large value PANICS there (out-of-range
+        // `DateTime`), not merely returns an error. Cap both at 36_600 days (~100 years),
+        // comfortably beyond any legitimate retention/query need, and reject at boot instead
+        // of on the first oversized query. Also require the default lookback to not exceed
+        // the max clamp: a `query_default_window_days` wider than `query_max_window_days`
+        // is incoherent (the "default" would always get clamped down to the max, making the
+        // configured default value meaningless).
+        const MAX_QUERY_WINDOW_DAYS: u32 = 36_600;
+        if self.audit.query_default_window_days > MAX_QUERY_WINDOW_DAYS || self.audit.query_max_window_days > MAX_QUERY_WINDOW_DAYS {
+            return Err(format!(
+                "audit.query_default_window_days and audit.query_max_window_days must be at most {MAX_QUERY_WINDOW_DAYS} (~100 years; larger values overflow the `to - Duration::days(window)` computation on the audit-query hot path)"
+            ));
+        }
+        if self.audit.query_default_window_days > self.audit.query_max_window_days {
+            return Err(format!(
+                "audit.query_default_window_days ({}) must be <= audit.query_max_window_days ({}): a default lookback wider than the max clamp is incoherent",
+                self.audit.query_default_window_days, self.audit.query_max_window_days
+            ));
         }
 
         // --- SMA-446 Task B9: `[outbox]` config ------------------------------------------------
@@ -1636,6 +1725,88 @@ mod tests {
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert_eq!(cfg.audit.denial_buffer_capacity, 128);
             assert!(cfg.validate().is_ok(), "expected an explicit non-zero denial_buffer_capacity to pass validation");
+            Ok(())
+        });
+    }
+
+    // --- SMA-467: `[audit.retention]` + query-window config --------------------------------
+
+    #[test]
+    fn retention_defaults_land_with_no_block() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.audit.retention.enabled);
+            assert_eq!(cfg.audit.retention.interval_secs, 86_400);
+            assert_eq!(cfg.audit.retention.ahead_months, 1);
+            assert_eq!(cfg.audit.retention.denied_months, 3);
+            assert_eq!(cfg.audit.retention.committed_months, 0);
+            assert_eq!(cfg.audit.query_default_window_days, 90);
+            assert_eq!(cfg.audit.query_max_window_days, 366);
+            assert!(cfg.validate().is_ok(), "retention defaults must validate");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_zero_retention_interval() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!("{}\n[api_keys]\npepper = \"{}\"\n[audit.retention]\ninterval_secs = 0", minimal_issuer_toml(), valid_pepper_b64()),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "interval_secs = 0 must fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_ahead_months() {
+        for bad in ["ahead_months = 0", "ahead_months = 25"] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.create_file(
+                    "iam.toml",
+                    &format!("{}\n[api_keys]\npepper = \"{}\"\n[audit.retention]\n{bad}", minimal_issuer_toml(), valid_pepper_b64()),
+                )?;
+                let cfg: IamConfig = IamConfig::figment().extract()?;
+                assert!(cfg.validate().is_err(), "{bad} must fail validation");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn validate_rejects_a_query_max_window_days_over_the_cap() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!("{}\n[api_keys]\npepper = \"{}\"\n[audit]\nquery_max_window_days = 36601", minimal_issuer_toml(), valid_pepper_b64()),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "query_max_window_days = 36601 must fail validation (over the ~100y cap)");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_a_query_default_window_wider_than_the_max() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    "{}\n[api_keys]\npepper = \"{}\"\n[audit]\nquery_default_window_days = 400\nquery_max_window_days = 100",
+                    minimal_issuer_toml(),
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "query_default_window_days (400) > query_max_window_days (100) must fail validation");
             Ok(())
         });
     }

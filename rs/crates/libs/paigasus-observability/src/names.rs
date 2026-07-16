@@ -30,6 +30,11 @@ pub const IAM_OUTBOX_RELAY_PUBLISHED_TOTAL: &str = "iam_outbox_relay_published_t
 pub const IAM_OUTBOX_RELAY_PUBLISH_FAILURES_TOTAL: &str = "iam_outbox_relay_publish_failures_total";
 pub const IAM_OUTBOX_RELAY_PARKED_TOTAL: &str = "iam_outbox_relay_parked_total";
 pub const IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS: &str = "iam_outbox_oldest_unpublished_age_seconds";
+// IAM audit partition maintenance
+pub const IAM_AUDIT_PARTITION_MAINTENANCE_TICKS_TOTAL: &str = "iam_audit_partition_maintenance_ticks_total";
+pub const IAM_AUDIT_PARTITIONS_CREATED_TOTAL: &str = "iam_audit_partitions_created_total";
+pub const IAM_AUDIT_PARTITIONS_DROPPED_TOTAL: &str = "iam_audit_partitions_dropped_total";
+pub const IAM_AUDIT_DEFAULT_PARTITION_ROWS: &str = "iam_audit_default_partition_rows";
 
 /// Every metric family this workspace emits — the drift test (`tests/drift.rs`) extracts every
 /// `iam_`/`gateway_`-prefixed identifier from the committed dashboard/rule `expr`s, strips a
@@ -59,6 +64,10 @@ pub const ALL: &[&str] = &[
     IAM_OUTBOX_RELAY_PUBLISH_FAILURES_TOTAL,
     IAM_OUTBOX_RELAY_PARKED_TOTAL,
     IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS,
+    IAM_AUDIT_PARTITION_MAINTENANCE_TICKS_TOTAL,
+    IAM_AUDIT_PARTITIONS_CREATED_TOTAL,
+    IAM_AUDIT_PARTITIONS_DROPPED_TOTAL,
+    IAM_AUDIT_DEFAULT_PARTITION_ROWS,
 ];
 
 #[cfg(test)]
