@@ -13,7 +13,9 @@ use paigasus_gateway::adapters::http::{AppState, router};
 use paigasus_gateway::adapters::iam::IamClient;
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::GatewayConfig;
+use paigasus_gateway::runtime;
 use paigasus_observability::names;
+use tokio::task::JoinSet;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,29 +34,6 @@ async fn main() -> anyhow::Result<()> {
     // no-op anyway.
     if metrics_handle.is_some() {
         describe_gateway_metrics();
-    }
-
-    // Periodic Prometheus upkeep (CodeRabbit round-1 fix): `PrometheusBuilder::install_recorder()`
-    // (unlike `install()`) does NOT spawn the maintenance task `PrometheusHandle::run_upkeep()`
-    // needs to periodically drain/decay histograms — without calling it ourselves, memory grows
-    // unbounded over the life of the process. `init()` itself stays runtime-agnostic (it's also
-    // called from plain `#[test]` code with no Tokio runtime), so the spawn lives here instead,
-    // only once an async runtime + a real handle both exist. Cloned off `metrics_handle` (the
-    // original is still needed below for `metrics_router`); races the same shutdown signal the
-    // main server uses so this task stops cleanly rather than lingering after the servers below
-    // have shut down.
-    if let Some(handle) = metrics_handle.clone() {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
-            let shutdown = shutdown_signal();
-            tokio::pin!(shutdown);
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => handle.run_upkeep(),
-                    () = &mut shutdown => break,
-                }
-            }
-        });
     }
 
     // Outbound clients. IAM connects lazily (a dead IAM does not block startup); the OpenAI client
@@ -82,27 +61,75 @@ async fn main() -> anyhow::Result<()> {
         _ => app,
     };
 
-    // Separate metrics listener, only when both enabled AND `metrics.addr` is configured — the
-    // RECOMMENDED posture for a public gateway (keeps `/metrics` off the public HTTP port).
-    // `shutdown_signal()` has no captured state, so calling it a second time here is safe: tokio
-    // supports multiple independent listeners for the same signal, each notified on delivery — no
-    // broadcast channel is needed to share graceful shutdown between the two `axum::serve` tasks.
-    if let (Some(handle), Some(metrics_addr)) = (metrics_handle.clone(), config.metrics.addr) {
-        let metrics_app = paigasus_observability::metrics_router(handle);
-        let metrics_listener = tokio::net::TcpListener::bind(metrics_addr).await?;
-        tracing::info!(%metrics_addr, "paigasus-gateway metrics listener started");
-        tokio::spawn(async move {
-            if let Err(err) = axum::serve(metrics_listener, metrics_app).with_graceful_shutdown(shutdown_signal()).await {
-                tracing::error!(%err, "paigasus-gateway metrics listener exited");
-            }
+    // All long-lived tasks share one graceful-shutdown `watch` and one `JoinSet`, so a failure in
+    // any of them (metrics listener, upkeep) propagates via `runtime::supervise` instead of being
+    // silently swallowed by a detached task that only logs before dying (SMA-463). Mirrors
+    // `paigasus-iam`'s composition root. Every task takes an `rx.clone()` made BEFORE `supervise`
+    // sends, so its first `changed().await` waits rather than firing immediately.
+    let (tx, rx) = tokio::sync::watch::channel(());
+    let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
+
+    // Main HTTP server. The listener is bound up-front so a bind failure aborts startup fast (a
+    // gateway that can't bind its public port should fail immediately), then moved into the task.
+    let http_listener = tokio::net::TcpListener::bind(config.http_addr).await?;
+    {
+        let mut rx = rx.clone();
+        servers.spawn(async move {
+            axum::serve(http_listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = rx.changed().await;
+                })
+                .await
+                .map_err(anyhow::Error::from)
         });
     }
 
-    let listener = tokio::net::TcpListener::bind(config.http_addr).await?;
-    tracing::info!(%config.http_addr, "paigasus-gateway started");
-    axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;
+    // Separate metrics listener, only when both enabled AND `metrics.addr` is configured — the
+    // RECOMMENDED posture for a public gateway (keeps `/metrics` off the public HTTP port). Binds
+    // INSIDE the task so a bind OR serve failure surfaces as a task error the `JoinSet` observes
+    // (SMA-463), rather than a detached task that only logged before dying. On the same
+    // shutdown-watch as every other task.
+    if let (Some(handle), Some(metrics_addr)) = (metrics_handle.clone(), config.metrics.addr) {
+        let mut rx = rx.clone();
+        let metrics_app = paigasus_observability::metrics_router(handle);
+        servers.spawn(async move {
+            let listener = tokio::net::TcpListener::bind(metrics_addr).await?;
+            tracing::info!(%metrics_addr, "paigasus-gateway metrics listener started");
+            axum::serve(listener, metrics_app)
+                .with_graceful_shutdown(async move {
+                    let _ = rx.changed().await;
+                })
+                .await
+                .map_err(anyhow::Error::from)
+        });
+    }
 
-    Ok(())
+    // Periodic Prometheus upkeep (CodeRabbit round-1 fix): `PrometheusBuilder::install_recorder()`
+    // (unlike `install()`) does NOT spawn the maintenance task `PrometheusHandle::run_upkeep()`
+    // needs to periodically drain/decay histograms — without calling it ourselves, memory grows
+    // unbounded over the life of the process. `init()` itself stays runtime-agnostic (it's also
+    // called from plain `#[test]` code with no Tokio runtime), so the spawn lives here. Now on the
+    // shared `JoinSet` + shutdown-watch (SMA-463) rather than a detached task, so a panic here is
+    // observed rather than silently lost.
+    if let Some(handle) = metrics_handle.clone() {
+        let mut rx = rx.clone();
+        servers.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => handle.run_upkeep(),
+                    _ = rx.changed() => break,
+                }
+            }
+            Ok(())
+        });
+    }
+
+    tracing::info!(%config.http_addr, "paigasus-gateway started");
+
+    // Supervise: stop on the first of a shutdown signal or any task ending, broadcast graceful
+    // shutdown to the rest, and surface the first error (SMA-463).
+    runtime::supervise(servers, shutdown_signal(), tx).await
 }
 
 /// Registers `# HELP`/`# TYPE` exposition text for the 7 metric families `paigasus-gateway`
