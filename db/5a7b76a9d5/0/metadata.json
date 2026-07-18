@@ -138,6 +138,37 @@
         "label": "Skill: superpowers:executing-plans",
         "default_collapsed": true
       }
+    },
+    {
+      "id": "claude-skill-toolu_01Pno38Sog5XLTwMD5ToscP9",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "feature-factory:coderabbit-loop"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "2664a2caa65e",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 304,
+        "end": 305,
+        "entry_ids": [
+          "c80cabe7-5000-405d-8577-44d159c3282f"
+        ],
+        "tool_use_id": "toolu_01Pno38Sog5XLTwMD5ToscP9"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01Pno38Sog5XLTwMD5ToscP9"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: feature-factory:coderabbit-loop",
+        "default_collapsed": true
+      }
     }
   ],
   "session_metrics": {
