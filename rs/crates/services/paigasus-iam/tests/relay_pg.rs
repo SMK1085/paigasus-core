@@ -227,24 +227,62 @@ async fn tick_with_a_non_empty_batch_emits_relay_metrics() {
     assert!(out.contains("iam_outbox_oldest_unpublished_age_seconds"), "missing oldest-unpublished-age gauge:\n{out}");
 }
 
-/// SMA-446 Unit 5 (Task A11): driving the poll loop (`run`) for one tick emits
-/// `iam_outbox_relay_ticks_total{result="ok"}` — `ticks_total` is a `run()`-loop counter (one
-/// increment per poll interval), not a `tick()`-level one, so this drives a real (short) loop
-/// iteration rather than calling `tick()` directly.
+/// SMA-465 (replaces the old wall-clock-racing run-loop test): `tick_and_record` on a healthy,
+/// non-empty tick emits `iam_outbox_relay_ticks_total{result="ok"}`. Driven directly — no poll
+/// loop, no timers — so there is no wall-clock race; one row is seeded so it is a real successful
+/// drain, not an empty no-op.
 #[tokio::test]
-async fn run_loop_emits_ticks_total_with_ok_result_label() {
+async fn tick_and_record_emits_ticks_total_with_ok_result() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
 
     seed_row(&db, Uuid::from_u128(8), Utc::now()).await;
 
-    let handle = paigasus_observability::init("test-iam-relay-run-metrics");
-    let relay = OutboxRelay::new(db.clone(), Duration::from_millis(10), 10, 5);
-    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+    let handle = paigasus_observability::init("test-iam-relay-tick-ok");
+    let relay = OutboxRelay::new(db.clone(), Duration::from_secs(60), 10, 5);
+    let publisher = CountingPublisher::default();
 
-    // Let the loop run long enough for at least one poll interval to elapse, then shut it down.
-    relay.run(publisher, tokio::time::sleep(Duration::from_millis(300))).await;
+    relay.tick_and_record(&publisher).await;
 
     let out = handle.render();
-    assert!(out.contains("iam_outbox_relay_ticks_total"), "missing ticks_total counter:\n{out}");
-    assert!(out.contains(r#"result="ok""#), "expected a result=\"ok\" labeled series:\n{out}");
+    assert!(
+        out.lines().any(|l| l.contains("iam_outbox_relay_ticks_total") && l.contains(r#"result="ok""#)),
+        "expected an iam_outbox_relay_ticks_total series labeled result=\"ok\":\n{out}"
+    );
+    assert!(!out.contains(r#"result="error""#), "a healthy tick must not emit a result=\"error\" series:\n{out}");
+}
+
+/// SMA-465: the run-loop tick-error branch emits `iam_outbox_relay_ticks_total{result="error"}`.
+/// `tick()` only returns `Err(DbErr)` on a DB-level fault (per-row publish failures are folded
+/// into attempts/parked bookkeeping, never surfacing here), so we fault the DB deterministically
+/// with `DatabaseConnection::Disconnected` — whose `begin()` returns `Err` synchronously — rather
+/// than a failing publisher. No Docker, no pool, no seeded row.
+#[tokio::test]
+async fn tick_and_record_emits_ticks_total_with_error_result_on_db_fault() {
+    let handle = paigasus_observability::init("test-iam-relay-tick-error");
+    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(60), 10, 5);
+    let publisher = CountingPublisher::default();
+
+    relay.tick_and_record(&publisher).await;
+
+    let out = handle.render();
+    assert!(
+        out.lines().any(|l| l.contains("iam_outbox_relay_ticks_total") && l.contains(r#"result="error""#)),
+        "expected an iam_outbox_relay_ticks_total series labeled result=\"error\":\n{out}"
+    );
+    assert!(!out.contains(r#"result="ok""#), "a faulted tick must not emit a result=\"ok\" series:\n{out}");
+}
+
+/// SMA-465: `run` terminates when its shutdown future resolves. A pre-resolved shutdown
+/// (`std::future::ready(())`) makes the `select!` shutdown arm win deterministically before the
+/// poll `sleep` is ever ready, so no tick fires and the connection is never used (`Disconnected`
+/// is fine). Guards against a broken/removed `shutdown => break` arm (which would loop forever);
+/// the `timeout` turns such a regression into a fast, explicit failure instead of a hang.
+#[tokio::test]
+async fn run_terminates_on_shutdown() {
+    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(60), 10, 5);
+    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+
+    tokio::time::timeout(Duration::from_secs(5), relay.run(publisher, std::future::ready(())))
+        .await
+        .expect("run must return promptly once its shutdown future resolves");
 }
