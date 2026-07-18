@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bxtbszp1j</task-id>
+<tool-use-id>toolu_014nKsdSeFW3U6r6ov4FKcFL</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/bxtbszp1j.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll for CodeRabbit round-2 review" completed (exit code 0)</summary>
+</task-notification>
