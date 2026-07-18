@@ -1,0 +1,7 @@
+<bash-stdout>[38;2;56;56;56m╭──────────────────[m[38;2;56;56;56m─────────────────╮[m
+[38;2;56;56;56m│[m lefthook  v2.1.8  hook:  [1mpre-push[m [38;2;56;56;56m│[m
+[38;2;56;56;56m╰──────────────────[m[38;2;56;56;56m─────────────────╯[m
+│  branch-name (skip) no matching push files
+[38;2;56;56;56m  ────────────────────────────────────[m
+summary: (done in 0.04 seconds)
+Everything up-to-date</bash-stdout><bash-stderr></bash-stderr>
