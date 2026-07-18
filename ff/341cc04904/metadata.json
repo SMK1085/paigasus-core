@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "ff341cc04904",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-465-iam-harden-outbox-relay-observability-tests-error-path",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/superpowers/specs/2026-07-18-sma-465-harden-relay-observability-tests-design.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ff/341cc04904/0/metadata.json",
+      "transcript": "/ff/341cc04904/0/full.jsonl",
+      "compact_transcript": "/ff/341cc04904/0/transcript.jsonl",
+      "content_hash": "/ff/341cc04904/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 24923,
+    "cache_read_tokens": 682539,
+    "output_tokens": 18027,
+    "api_call_count": 6
+  }
+}

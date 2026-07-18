@@ -1,0 +1,96 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "ff341cc04904",
+  "session_id": "6a3de807-f913-46a7-969c-4552d8ceddba",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-18T10:38:49.600538Z",
+  "branch": "feature/sma-465-iam-harden-outbox-relay-observability-tests-error-path",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/superpowers/specs/2026-07-18-sma-465-harden-relay-observability-tests-design.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8[1m]",
+  "turn_id": "81c277555732",
+  "checkpoint_transcript_start": 131,
+  "transcript_lines_at_start": 131,
+  "compact_transcript_start": 31,
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 24923,
+    "cache_read_tokens": 682539,
+    "output_tokens": 18027,
+    "api_call_count": 6
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "prompt-skill-claude-code-feature-factory:feature-pipeline-2026-07-18T10:16:54.035434Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "feature-factory:feature-pipeline"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "bcb5cd18af28",
+      "timestamp": "2026-07-18T10:16:54.035434Z",
+      "native": {
+        "command": "/feature-factory:feature-pipeline"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/feature-factory:feature-pipeline",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_013qnogNtxBKwvzJKyYP6Fez",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:brainstorming"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "81c277555732",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 61,
+        "end": 62,
+        "entry_ids": [
+          "b18b80fa-c6b5-40e3-aeba-ce95bcd4f007"
+        ],
+        "tool_use_id": "toolu_013qnogNtxBKwvzJKyYP6Fez"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_013qnogNtxBKwvzJKyYP6Fez"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:brainstorming",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-18T10:38:49.577594Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 30,
+    "human_modified": 38,
+    "human_removed": 0,
+    "total_committed": 30,
+    "total_lines_changed": 68,
+    "agent_percentage": 0,
+    "metric_version": 2
+  }
+}
