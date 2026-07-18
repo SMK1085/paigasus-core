@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bodyjejby</task-id>
+<tool-use-id>toolu_01Su4nRqR3uUKLJ1QbqBg62u</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/bodyjejby.output</output-file>
+<status>completed</status>
+<summary>Background command "Re-poll to see if marker clears or threads appear" completed (exit code 0)</summary>
+</task-notification>
