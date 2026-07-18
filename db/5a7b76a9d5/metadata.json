@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "db5a7b76a9d5",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-465-iam-harden-outbox-relay-observability-tests-error-path",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "rs/crates/services/paigasus-iam/tests/relay_pg.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/db/5a7b76a9d5/0/metadata.json",
+      "transcript": "/db/5a7b76a9d5/0/full.jsonl",
+      "compact_transcript": "/db/5a7b76a9d5/0/transcript.jsonl",
+      "content_hash": "/db/5a7b76a9d5/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 12168,
+    "cache_read_tokens": 831271,
+    "output_tokens": 5740,
+    "api_call_count": 5
+  }
+}
