@@ -169,6 +169,25 @@ impl OutboxRelay {
         Ok(report)
     }
 
+    /// Runs one drain [`Self::tick`] and records its outcome on the `ticks_total{result}`
+    /// run-loop counter (`result="ok"` on success; `result="error"` plus a `tracing::warn!`
+    /// on a DB-level tick error). This is the exact body [`Self::run`] executes per poll
+    /// interval, factored out so `run`'s only remaining logic is the `select!` shutdown loop.
+    /// Intended for `run` and tests only — production callers should use [`Self::run`]; it is
+    /// `pub` for the same reason [`Self::tick`] is: to let tests assert the ok/error tick
+    /// counters deterministically without racing the poll loop (SMA-465).
+    pub async fn tick_and_record(&self, publisher: &dyn EventPublisher) {
+        match self.tick(publisher).await {
+            Ok(_) => {
+                counter!(names::IAM_OUTBOX_RELAY_TICKS_TOTAL, "result" => "ok").increment(1);
+            }
+            Err(err) => {
+                counter!(names::IAM_OUTBOX_RELAY_TICKS_TOTAL, "result" => "error").increment(1);
+                tracing::warn!(error = %err, "outbox relay tick failed; retrying next interval");
+            }
+        }
+    }
+
     /// Runs the relay loop until `shutdown` resolves: sleep `poll_interval`, tick, repeat —
     /// mirrors `PolicySnapshot::spawn_reload`'s `tokio::select!` shutdown-watch exactly (sleep
     /// races shutdown first, so the very first tick runs after one poll interval, not
@@ -183,15 +202,7 @@ impl OutboxRelay {
         loop {
             tokio::select! {
                 () = tokio::time::sleep(self.poll_interval) => {
-                    match self.tick(publisher.as_ref()).await {
-                        Ok(_) => {
-                            counter!(names::IAM_OUTBOX_RELAY_TICKS_TOTAL, "result" => "ok").increment(1);
-                        }
-                        Err(err) => {
-                            counter!(names::IAM_OUTBOX_RELAY_TICKS_TOTAL, "result" => "error").increment(1);
-                            tracing::warn!(error = %err, "outbox relay tick failed; retrying next interval");
-                        }
-                    }
+                    self.tick_and_record(publisher.as_ref()).await;
                 }
                 () = &mut shutdown => break,
             }
