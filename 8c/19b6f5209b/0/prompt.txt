@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b09l79wyk</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/b09l79wyk.output</output-file>
+<status>completed</status>
+<summary>Background command "Confirmation watch for stable convergence" completed (exit code 0)</summary>
+</task-notification>
