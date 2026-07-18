@@ -53,12 +53,38 @@ Refactor the composition root to IAM's shape:
   signal):
   1. **Main HTTP server** — the `TcpListener` is bound up-front in `main()` (preserves
      fail-fast on the main port and the existing "started" log), then moved into the
-     spawn: `axum::serve(listener, app).with_graceful_shutdown(rx.changed())`.
+     spawn. Each task takes its own `let mut rx = rx.clone();` and uses the wrapped
+     future — `axum::serve(listener, app).with_graceful_shutdown(async move { let _ =
+     rx.changed().await; })` — because `rx.changed()` yields `Result<(), RecvError>`
+     and borrows `rx` mutably, so it can't be passed directly (mirrors IAM
+     `main.rs:84-86`).
   2. **Metrics listener** — only when metrics enabled **and** `metrics.addr` is set.
      Binds **inside** the task, so a bind *or* serve failure becomes a surfaced task
-     error. This is the crux of the fix.
+     error. This is the crux of the fix. Keep the in-task
+     `tracing::info!(%metrics_addr, "paigasus-gateway metrics listener started")` log
+     (mirrors IAM `main.rs:101`); the old
+     `"paigasus-gateway metrics listener exited"` error line is intentionally
+     superseded by supervise's generic "a server task failed" + the non-zero-exit
+     restart signal.
   3. **Upkeep loop** — only when metrics enabled. `select!` on interval-tick vs
      `rx.changed()`.
+
+  **Invariant:** every `rx.clone()` is made *before* `tx.send(())` (which only happens
+  inside `supervise`). A `watch::Receiver` cloned before the first send has version
+  equal to the shared version, so its first `changed().await` *waits* rather than
+  resolving immediately — the design relies on this (verified against IAM, which boots
+  correctly on the same property).
+
+### Build change (required)
+
+`runtime::supervise` and the spawned tasks use `tokio::sync::watch`, but
+`paigasus-gateway/Cargo.toml` currently declares `tokio` features
+`["rt-multi-thread", "macros", "net", "signal"]` — no `sync`, and no `time` (already
+used undeclared by `tokio::time::interval` in the upkeep loop; compiles today only via
+cross-crate feature unification, which Moon's per-crate `cargo build` does not
+guarantee). Add **`"time"` and `"sync"`** so the feature set matches IAM's and the
+`rs/Cargo.toml` documented services posture. Verify with `cargo build -p
+paigasus-gateway` (single-crate), not only `--workspace`.
 - `main()` ends by calling the new helper:
   `runtime::supervise(servers, shutdown_signal(), tx).await`.
 
@@ -90,15 +116,33 @@ Behavior mirrors IAM's `main.rs` supervision block:
 Dependency-free (only `JoinSet` / `watch` / `anyhow` / `Future`), so it unit-tests
 without any IAM/OpenAI/config wiring.
 
+**Documented caller invariant:** callers must pass either a non-empty `servers` set or
+a `shutdown` future that resolves — an empty `JoinSet` with a `pending()` shutdown would
+disable both `select!` arms and wait forever. The gateway always spawns the main HTTP
+task, so it never hits this; the note guards the `pub` helper against future callers.
+
 ## Behavior preserved / changed
 
-- **Preserved:** SIGINT/SIGTERM still triggers graceful shutdown of all tasks (now via
-  the watch broadcast). Main-port bind failure still aborts startup fast with a
-  top-level error. Same-port `/metrics` behavior unchanged. `/healthz` and `/readyz`
-  semantics unchanged.
+- **Preserved (must survive the rewrite):**
+  - The Prometheus **recorder install** (`config.metrics.enabled.then(|| ...init...)`)
+    and the **`describe_gateway_metrics()`** call — these register the `# HELP`/`# TYPE`
+    exposition and must not be dropped when the `metrics_handle` block is rewritten (no
+    existing test covers them — the metrics tests build the router directly, never
+    `main`).
+  - The **same-port `/metrics` merge** (`app.merge(metrics_router(...))` when
+    `metrics.addr` is *not* set) — unchanged; it rides the main HTTP task.
+  - **SIGINT/SIGTERM** still triggers graceful shutdown of all tasks (now via the watch
+    broadcast). Main-**port** bind failure still aborts startup fast with a top-level
+    error. `/healthz` and `/readyz` semantics unchanged.
 - **Changed:** a metrics-listener or upkeep failure now **propagates** — graceful
   shutdown of the remaining servers, `main` returns `Err`, non-zero process exit,
   orchestrator restarts. No more silent loss of the endpoint.
+- **Minor behavioral nuance (accepted):** a *metrics-port* bind failure previously
+  aborted via `?` before the main server served anything; now the main listener is
+  bound and spawned first, so a metrics bind failure surfaces as a task error that
+  briefly lets the main server serve before supervise tears everything down. This
+  tiny serve-then-shutdown window is acceptable (the endpoint is being torn down and
+  restarted regardless).
 
 ## Testing
 
@@ -112,6 +156,12 @@ without any IAM/OpenAI/config wiring.
    ready immediately → `tx` broadcast → all tasks end `Ok` → aggregated result `Ok`.
 3. **(bonus) `early_clean_return_warns_not_errors`** — a task returns `Ok(())` before
    shutdown → warn branch, aggregated result still `Ok`.
+4. **`error_surfaced_even_when_shutdown_wins_the_select`** — a task returns `Err`
+   immediately **and** `shutdown` is ready (`std::future::ready(())`). Whichever arm
+   `select!` picks, the aggregated result must still be that `Err` (proves the drain
+   loop, not just the select branch, is what surfaces the error). Deterministic
+   regardless of `select!` fairness — this locks in the subtle "drain catches it"
+   guarantee against future refactors.
 
 Plus: the existing 80 gateway tests stay green; `cargo build` / `clippy -D warnings` /
 `fmt --check` clean; and the full `moon ci` gate graph runs before pushing
@@ -121,7 +171,14 @@ Plus: the existing 80 gateway tests stay green; `cargo build` / `clippy -D warni
 ## Scope / non-goals
 
 - **In scope:** `src/main.rs` (the `metrics_handle` / `config.metrics.addr` block +
-  server wiring), new `src/runtime.rs`, `src/lib.rs` (`pub mod runtime;`). SPDX header
-  on the new file.
-- **Out of scope:** no restart-with-backoff loop; no readiness-flag state; no config
-  changes; no change to `/healthz` / `/readyz` semantics; no changes to IAM.
+  server wiring), new `src/runtime.rs`, `src/lib.rs` (`pub mod runtime;`),
+  `Cargo.toml` (add tokio `"time"`/`"sync"` features — see Build change above). SPDX
+  header on the new file.
+- **Out of scope:** no restart-with-backoff loop; no readiness-flag state; no
+  **runtime** config changes (`gateway.toml` / `GatewayConfig` untouched — the only
+  manifest change is the tokio features above); no change to `/healthz` / `/readyz`
+  semantics; no changes to IAM.
+- **Acknowledged pre-existing (not addressed here):** the shutdown drain has no
+  timeout — a long-lived streaming `/v1/chat/completions` response under axum graceful
+  shutdown can delay process exit. This matches IAM's behavior and predates this change;
+  bounding it is not part of SMA-463.
