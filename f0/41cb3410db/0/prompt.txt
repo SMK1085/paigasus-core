@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b956n8bu9</task-id>
+<tool-use-id>toolu_01BHRhv2ihDbp2tHedoZWRg4</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/b956n8bu9.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll until CodeRabbit review completes, then fetch threads" completed (exit code 0)</summary>
+</task-notification>
