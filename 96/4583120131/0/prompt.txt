@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b3llupp93</task-id>
+<tool-use-id>toolu_016fi2wopiZn7u7rVaJTqpKD</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/28961f22-e9d9-4444-a087-dc5dec2c9cd9/tasks/b3llupp93.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll for CodeRabbit round-3 review completion" completed (exit code 0)</summary>
+</task-notification>
