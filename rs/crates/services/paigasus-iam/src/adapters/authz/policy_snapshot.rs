@@ -538,6 +538,15 @@ mod tests {
     /// sequence rather than the generation — a load that STARTED earlier must never overwrite
     /// one that started later, even if it reaches the write lock last. This replaces the old
     /// `install_if_newer_rejects_an_older_gen_arriving_after_a_newer_one_is_installed`.
+    ///
+    /// Deliberately does NOT bump `policy_gen` between the two loads — both `older` and
+    /// `newer` observe the SAME generation (0), the swallowed-bump scenario SMA-470 is about.
+    /// This is the case where the two orderings diverge: a gen-based guard sees `newer.r#gen
+    /// == older.r#gen == 0`, so `newer.r#gen > 0` is false and it would reject the newer load
+    /// outright, never installing the grant at all — the guard fails silently rather than
+    /// merely picking the wrong winner. The seq-based guard installs `newer` correctly (`3 >
+    /// 1`) and then correctly rejects `older` arriving second (`2 > 3` is false), which is
+    /// what this test proves.
     #[tokio::test]
     async fn install_if_fresher_rejects_an_older_load_arriving_after_a_newer_one() {
         let policies_store = Arc::new(FakePolicyStore::new(vec![org_admin_template()]));
@@ -547,18 +556,20 @@ mod tests {
 
         let snapshot = PolicySnapshot::new(policies, grants).await.expect("build succeeds");
 
-        // The "older" load starts first and so claims the lower seq.
+        // The "older" load starts first and so claims the lower seq — still at gen 0, no
+        // grant yet.
         let (older, older_seq) = PolicySnapshot::load_and_compile(policies_store.as_ref(), grants_store.as_ref(), &snapshot.load_seq)
             .await
             .expect("compiles");
 
-        // A grant lands, then the "newer" load starts and claims the higher seq.
+        // A grant lands, but its `policy_gen` bump is LOST (Redis down) — the "newer" load
+        // starts after it and claims the higher seq, still observing gen 0.
         let grant_id = Uuid::from_u128(900);
         grants_store.grant(&role_grant(grant_id, "org_admin")).await.unwrap();
-        policies_store.bump_policy_gen().await.unwrap();
         let (newer, newer_seq) = PolicySnapshot::load_and_compile(policies_store.as_ref(), grants_store.as_ref(), &snapshot.load_seq)
             .await
             .expect("compiles");
+        assert_eq!(newer.r#gen, older.r#gen, "both loads must observe the same generation — this is the case seq-ordering exists for");
         assert!(newer_seq > older_seq);
 
         // The newer load wins the race to the write lock.
