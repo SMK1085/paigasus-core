@@ -181,7 +181,11 @@ pub fn link_grant(pset: &mut PolicySet, template_id: &str, grant: &RoleGrant) ->
 /// Canonical, order-independent blake3 digest of the inputs a [`CompiledPolicies`] was built
 /// from (SMA-470 D4). Both slices are hashed through SORTED, length-prefixed field encodings
 /// so the digest is independent of `list_all`'s row order and cannot be forged by a field
-/// value that happens to contain the delimiter.
+/// value that happens to contain the delimiter: every field is individually length-prefixed
+/// (not joined into a delimited string first), so there is no shared separator for an
+/// attacker-controlled `policy_id`/`role_key` to smuggle and shift field boundaries with —
+/// decoding is unambiguous about where each field starts and ends regardless of its
+/// contents.
 ///
 /// `created_at` is deliberately excluded from both encodings: it never affects the compiled
 /// policy set, so including it would mint a fresh decision-cache key space for a semantically
@@ -194,21 +198,32 @@ fn content_hash(policies: &[PolicyDocument], grants: &[RoleGrant]) -> String {
         hasher.update(value.as_bytes());
     }
 
-    let mut doc_rows: Vec<String> = policies
+    // Each row is a fixed-arity array of its OWN fields (never pre-joined into a delimited
+    // string), so `Vec<[String; N]>::sort_unstable` gives the canonical field-by-field
+    // lexicographic order and hashing loops over `field()` per element below.
+    let mut doc_rows: Vec<[String; 3]> = policies
         .iter()
         .map(|d| {
             let kind = match d.kind {
                 PolicyKind::Static => "static",
                 PolicyKind::Template => "template",
             };
-            format!("{}\u{1f}{}\u{1f}{}", d.policy_id, kind, d.source)
+            [d.policy_id.clone(), kind.to_string(), d.source.clone()]
         })
         .collect();
     doc_rows.sort_unstable();
 
-    let mut grant_rows: Vec<String> = grants
+    let mut grant_rows: Vec<[String; 5]> = grants
         .iter()
-        .map(|g| format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", g.id, g.principal.uuid(), g.role_key, g.scope.canonical_prn(), g.linked_policy_id))
+        .map(|g| {
+            [
+                g.id.to_string(),
+                g.principal.uuid().to_string(),
+                g.role_key.clone(),
+                g.scope.canonical_prn(),
+                g.linked_policy_id.clone(),
+            ]
+        })
         .collect();
     grant_rows.sort_unstable();
 
@@ -216,12 +231,16 @@ fn content_hash(policies: &[PolicyDocument], grants: &[RoleGrant]) -> String {
     field(&mut hasher, "policies");
     hasher.update(&(doc_rows.len() as u64).to_le_bytes());
     for row in &doc_rows {
-        field(&mut hasher, row);
+        for f in row {
+            field(&mut hasher, f);
+        }
     }
     field(&mut hasher, "grants");
     hasher.update(&(grant_rows.len() as u64).to_le_bytes());
     for row in &grant_rows {
-        field(&mut hasher, row);
+        for f in row {
+            field(&mut hasher, f);
+        }
     }
     hasher.finalize().to_hex().to_string()
 }
@@ -540,6 +559,46 @@ mod tests {
         let edited = PolicyEngine::compile(&[edited_doc], &[]).expect("compiles");
 
         assert_ne!(original.content_hash, edited.content_hash);
+    }
+
+    /// SMA-470: two DIFFERENT documents must never hash alike just because a field value
+    /// contains the row delimiter. `policy_id` and `role_key` are arbitrary caller-chosen
+    /// strings with no charset validation, so an unescaped join would let an attacker craft a
+    /// policy edit that does NOT rotate the decision-cache key — silently serving stale
+    /// authorization decisions. Every field is length-prefixed independently, so the encoding
+    /// is unambiguous about where each field ends.
+    ///
+    /// Exercises `content_hash` directly rather than through `PolicyEngine::compile`: the
+    /// crafted field values below aren't valid Cedar template source, so both sides would
+    /// fail to parse — and `AuthzError` has no `PartialEq`, so `Result<String, AuthzError>`
+    /// doesn't either, meaning `assert_ne!` on the `compile(..).map(..)` results wouldn't even
+    /// compile, let alone exercise the encoding this test pins.
+    ///
+    /// `kind` is pinned to [`PolicyKind::Static`] (overriding `hash_fixture_template`'s
+    /// `Template`), not incidentally: the pre-fix row format was
+    /// `policy_id + DELIM + kind + DELIM + source`, so the crafted values below only
+    /// reproduce the collision (identical row bytes despite different documents) when the
+    /// embedded `"static"` literal lines up with the actual `kind` field's row position —
+    /// i.e. when `kind == "static"`. Verified empirically against the pre-fix encoding: with
+    /// `kind = "static"` the two rows are byte-identical; with `kind = "template"` they are
+    /// not, which would make this test pass even against the bug it's meant to catch.
+    #[test]
+    fn content_hash_is_unambiguous_across_field_boundaries() {
+        let mut shifted_into_source = hash_fixture_template();
+        shifted_into_source.kind = PolicyKind::Static;
+        shifted_into_source.policy_id = "a".to_string();
+        shifted_into_source.source = "b\u{1f}static\u{1f}c".to_string();
+
+        let mut shifted_into_id = hash_fixture_template();
+        shifted_into_id.kind = PolicyKind::Static;
+        shifted_into_id.policy_id = "a\u{1f}static\u{1f}b".to_string();
+        shifted_into_id.source = "c".to_string();
+
+        assert_ne!(
+            content_hash(&[shifted_into_source], &[]),
+            content_hash(&[shifted_into_id], &[]),
+            "a delimiter inside a field value must not forge another document's digest"
+        );
     }
 
     fn hash_fixture_template() -> PolicyDocument {
