@@ -558,6 +558,28 @@ mod tests {
         assert_ne!(with_grant.content_hash, without.content_hash);
     }
 
+    /// SMA-470: two grants that differ ONLY in their principal must hash differently — the
+    /// principal is what a grant grants, so two otherwise-identical grants to different people
+    /// sharing a decision-cache key would serve one principal's ALLOW to another. The
+    /// revocation test above discriminates on grant COUNT (the row-count length prefix), so it
+    /// would not catch the principal dropping out of the hash; this pins it directly.
+    #[test]
+    fn content_hash_changes_when_only_the_grant_principal_changes() {
+        let docs = vec![hash_fixture_template()];
+
+        let mut to_alice = hash_fixture_grant(Uuid::from_u128(1));
+        to_alice.principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(41)).expect("static test prn parts are valid"));
+
+        let mut to_bob = hash_fixture_grant(Uuid::from_u128(1));
+        to_bob.principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(42)).expect("static test prn parts are valid"));
+
+        assert_ne!(
+            PolicyEngine::compile(&docs, &[to_alice]).expect("compiles").content_hash,
+            PolicyEngine::compile(&docs, &[to_bob]).expect("compiles").content_hash,
+            "a grant to a different principal must mint a different decision-cache key space"
+        );
+    }
+
     /// SMA-470 D4: editing a policy's Cedar source must change the hash even though the
     /// policy id is unchanged.
     #[test]

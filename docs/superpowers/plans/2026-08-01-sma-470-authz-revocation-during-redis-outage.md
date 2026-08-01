@@ -1455,9 +1455,11 @@ sleeps `poll` **before** checking the TTL. `IamConfig::validate` caps NEITHER ke
 `refresh_interval_secs` *greater* than `policy_cache_ttl_secs`; equal is permitted), so there is no
 "permitted maximum" to quote: 31s is the bound at the defaults, and the 60s figure is simply
 2 × the *default* TTL, reached when an operator raises the poll interval to equal it (design §7a
-amendment B). Plus reload duration — **assuming Postgres is reachable**. A persistently failing load or a malformed policy row aborts every reload and keeps
-the last-known-good snapshot indefinitely; that is what `IamPolicySnapshotReloadsStalled` and
-`iam_authz_policy_snapshot_reloads_total{outcome="failed"}` exist to surface.
+amendment B). That figure also has to add the reload's own duration on top, and the whole bound
+**assumes Postgres is reachable** throughout. A persistently failing load or a malformed policy row
+aborts every reload and keeps the last-known-good snapshot indefinitely; that is what
+`IamPolicySnapshotReloadsStalled` and `iam_authz_policy_snapshot_reloads_total{outcome="failed"}`
+exist to surface.
 
 The decision cache does **not** add to that bound: its key is derived from a content hash of the
 compiled policy set (SMA-470), so a reload that picks up a revoke moves every affected request to
