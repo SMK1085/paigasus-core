@@ -358,9 +358,10 @@ pub trait EventPublisher: Send + Sync {
 /// application layer never imports the adapter-layer `crate::adapters::authz::Generations`
 /// type (ADR-0005). Implementations swallow/log their own errors and return nothing — the
 /// triggering mutation has already committed by the time `bump` runs, so a bump failure (e.g.
-/// Redis unreachable) must never surface as a use-case error; the decision cache instead
-/// self-heals on its next TTL expiry (mirrors the pre-Slice-B `PgRoleGrantStore::
-/// bump_policy_gen_best_effort` this port's adapter impl is lifted from).
+/// Redis unreachable) must never surface as a use-case error; the change instead lands on the
+/// policy snapshot's TTL backstop, whose reload rotates the decision cache's content-hash key
+/// component with it — not on any expiry of the decision cache's own (mirrors the pre-Slice-B
+/// `PgRoleGrantStore::bump_policy_gen_best_effort` this port's adapter impl is lifted from).
 #[async_trait]
 pub trait PolicyGenBumper: Send + Sync {
     async fn bump(&self);

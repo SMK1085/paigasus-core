@@ -611,9 +611,14 @@ async fn redis_cache_backend_fails_open_when_redis_becomes_unavailable_mid_fligh
 ///
 /// Driven through the REAL `spawn_reload` loop at the CONFIGURED
 /// `authz.policy_cache_ttl_secs`/`refresh_interval_secs` (1s/1s, wired exactly as `main.rs`
-/// wires them), not a hand-rolled fast interval, so this measures the documented staleness
-/// bound rather than mere liveness. The acceptance harness never calls `IamConfig::validate`,
-/// so honouring its bounds (both non-zero, refresh <= ttl) is this test's own responsibility.
+/// wires them), not a hand-rolled fast interval, so the mechanism under test is the shipped one
+/// rather than a test-only fast path. What this asserts is CONVERGENCE, not a numeric bound: the
+/// install budget below is deliberately an order of magnitude wider than `ttl + poll`, because
+/// with Redis stopped the loop's own cadence stretches by whole reconnect-retry cycles (RUNBOOK
+/// "Revocation freshness is TTL-bounded"). Pinning the real bound here would only buy flakiness
+/// on a slow CI runner; the bound itself is a documented property, not this test's claim. The
+/// acceptance harness never calls `IamConfig::validate`, so honouring its bounds (both non-zero,
+/// refresh <= ttl) is this test's own responsibility.
 #[tokio::test]
 async fn sma470_revoke_during_a_redis_outage_denies_once_the_snapshot_ttl_backstop_reloads() {
     let Some((_pg_node, db)) = support::start_migrated_postgres().await else {
@@ -702,8 +707,10 @@ async fn sma470_revoke_during_a_redis_outage_denies_once_the_snapshot_ttl_backst
     // measured; the same cost `adapters::api_keys::cache`'s unreachable-backend test already
     // pays). Polling over HTTP would spend minutes proving nothing extra — the decision itself
     // is still asserted over the real HTTP surface, once, below. The budget is deliberately far
-    // wider than the `ttl + poll` bound it is checking: a regression must fail on the mechanism,
-    // never on a slow CI runner.
+    // wider than `ttl + poll`, and is NOT an assertion of that bound: it only has to be wide
+    // enough that a failure means the backstop never converges at all — a regression must fail on
+    // the mechanism, never on a slow CI runner (or on the retry cycles the outage adds to the
+    // loop's cadence).
     let install_budget = Duration::from_secs(30);
     let started = std::time::Instant::now();
     let mut installed = false;
@@ -728,9 +735,10 @@ async fn sma470_revoke_during_a_redis_outage_denies_once_the_snapshot_ttl_backst
 
     assert!(
         installed,
-        "the policy snapshot never installed a recompile in {install_budget:?} (ttl = {}s, poll = {}s): a revoke committed \
-         during a Redis outage can only be picked up by the TTL backstop, which must install its recompile even though \
-         `policy_gen` never moved (SMA-470 D-B) — last decision: {decision}",
+        "the policy snapshot never converged: no recompile installed within the {install_budget:?} liveness budget \
+         (ttl = {}s, poll = {}s — the budget is a generous convergence check, not the documented `ttl + poll` bound). \
+         A revoke committed during a Redis outage can only be picked up by the TTL backstop, which must install its \
+         recompile even though `policy_gen` never moved (SMA-470 D-B) — last decision: {decision}",
         cfg.authz.policy_cache_ttl_secs, cfg.authz.refresh_interval_secs
     );
     assert_eq!(status, StatusCode::OK, "a Redis outage must never fail the request (D11/D12 fail-open): {decision}");

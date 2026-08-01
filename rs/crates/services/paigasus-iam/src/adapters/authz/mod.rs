@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Authorization cache/adapter composition (ADR-0013, spec §7): the two generation
-//! counters (Task 10), the compiled-policy snapshot (Task 13), the generation-keyed
-//! decision + entity-slice caches (Task 14), and the `CedarAuthorizer` + `TracingAuditSink`
+//! counters (Task 10), the compiled-policy snapshot (Task 13), the content-keyed decision
+//! cache and the generation-keyed entity-slice cache (Task 14 — the decision cache's policy
+//! component is the compiled set's `content_hash`, not `policy_gen`, since SMA-470 D4; the
+//! slice cache is still keyed on `entity_gen`), and the `CedarAuthorizer` + `TracingAuditSink`
 //! composition wiring all of these together into the `Authorizer`/`AuditSink` ports (Task
 //! 15). `CedarAuthorizer` is wired into `AppState`/`main.rs` (SMA-446 Slice A).
 

@@ -114,8 +114,12 @@ fn redis_err(e: redis::RedisError) -> AuthzError {
 /// side effect (the `grant`/`revoke` reference pattern B5–B7 copy). `bump` logs and swallows
 /// its own error — lifted verbatim from the pre-Slice-B `PgRoleGrantStore::
 /// bump_policy_gen_best_effort` (spec §7/D11): the triggering mutation has already
-/// committed by the time this runs, so a Redis-down bump must never fail it; the decision
-/// cache instead self-heals on its next TTL expiry. Keeping this adapter-side (rather than a
+/// committed by the time this runs, so a Redis-down bump must never fail it; the change
+/// instead lands on the policy snapshot's TTL backstop (`policy_cache_ttl_secs +
+/// refresh_interval_secs`), whose reload rotates the decision cache's `content_hash` key
+/// component with it (SMA-470 D4) — the decision cache never has to expire anything of its own
+/// (and on the `memory` backend it cannot: `MemoryDecisionCache` has no TTL). Keeping this
+/// adapter-side (rather than a
 /// direct `Generations` field on `RoleService`) is what lets the application layer depend
 /// only on the `PolicyGenBumper` port, never on `crate::adapters::authz::Generations`
 /// (ADR-0005).
@@ -135,7 +139,7 @@ impl GenerationsPolicyGenBumper {
 impl PolicyGenBumper for GenerationsPolicyGenBumper {
     async fn bump(&self) {
         if let Err(err) = self.gens.bump_policy_gen().await {
-            tracing::warn!(error = %err, "GenerationsPolicyGenBumper: policy_gen bump failed after a committed write — authz caches may serve stale data until TTL");
+            tracing::warn!(error = %err, "GenerationsPolicyGenBumper: policy_gen bump failed after a committed write — authz decisions may be stale until the policy snapshot's TTL backstop reloads");
         }
     }
 }

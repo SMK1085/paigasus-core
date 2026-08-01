@@ -1209,9 +1209,16 @@ Expected: PASS.
 
 In `ops/observability/prometheus/rules/iam.rules.yml`, after the `IamOutboxRelayStalled` rule:
 
+The `or vector(0)` is load-bearing, not decoration (design §7a amendment D): `increase()`/`sum()`
+over a series that has NEVER been emitted return an EMPTY vector, and `empty == 0` is also empty —
+so the naked `sum(increase(...)) == 0` goes SILENT exactly when the backstop is dead and
+`outcome="installed"` never fired at all. `or vector(0)` supplies a 0-valued fallback only when the
+left side has no series, so the comparison always has something to evaluate. Do not "simplify" it
+back; the promtool fixtures fail if you do.
+
 ```yaml
       - alert: IamPolicySnapshotReloadsStalled
-        expr: sum(increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[15m])) == 0
+        expr: (sum(increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[15m])) or vector(0)) == 0
         for: 15m
         labels: { severity: critical }
         annotations: { summary: "IAM policy snapshot has not installed a reload (revocations may not take effect)", description: "No policy-snapshot reload has been INSTALLED in 15 minutes. The snapshot's TTL backstop (authz.policy_cache_ttl_secs, default 30s) should install one every TTL regardless of generation movement, so silence here means role revocations are not taking effect on this fleet. Check for outcome=\"failed\" (Postgres unreachable, or a malformed policy row aborting every compile) and outcome=\"rejected\". See RUNBOOK section 4." }
@@ -1443,9 +1450,12 @@ The guarantee is the policy snapshot's **unconditional TTL backstop**: every
 `authz.policy_cache_ttl_secs` (default `30`), checked once per `authz.refresh_interval_secs`
 (default `1`), the snapshot recompiles from Postgres and installs the result regardless of whether
 the generation counter moved. Worst-case revocation latency is therefore
-**`policy_cache_ttl_secs + refresh_interval_secs`** (60s at the config's permitted maximum, where
-`refresh_interval_secs == policy_cache_ttl_secs`), plus reload duration — **assuming Postgres is
-reachable**. A persistently failing load or a malformed policy row aborts every reload and keeps
+**`policy_cache_ttl_secs + refresh_interval_secs`** — a genuine *sum*, because `spawn_reload`
+sleeps `poll` **before** checking the TTL. `IamConfig::validate` caps NEITHER key (it only rejects
+`refresh_interval_secs` *greater* than `policy_cache_ttl_secs`; equal is permitted), so there is no
+"permitted maximum" to quote: 31s is the bound at the defaults, and the 60s figure is simply
+2 × the *default* TTL, reached when an operator raises the poll interval to equal it (design §7a
+amendment B). Plus reload duration — **assuming Postgres is reachable**. A persistently failing load or a malformed policy row aborts every reload and keeps
 the last-known-good snapshot indefinitely; that is what `IamPolicySnapshotReloadsStalled` and
 `iam_authz_policy_snapshot_reloads_total{outcome="failed"}` exist to surface.
 

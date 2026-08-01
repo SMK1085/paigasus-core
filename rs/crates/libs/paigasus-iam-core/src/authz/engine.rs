@@ -187,10 +187,14 @@ pub fn link_grant(pset: &mut PolicySet, template_id: &str, grant: &RoleGrant) ->
 /// decoding is unambiguous about where each field starts and ends regardless of its
 /// contents.
 ///
-/// `created_at` is deliberately excluded from both encodings: it never affects the compiled
-/// policy set, so including it would mint a fresh decision-cache key space for a semantically
-/// identical policy set (and make the digest non-reproducible across replicas that re-read
-/// rows with differing timestamp precision).
+/// The encodings are deliberately NOT exhaustive over their input structs — they carry exactly
+/// the fields [`PolicyEngine::compile`] consumes, and nothing else. Excluded on purpose:
+/// `created_at`/`updated_at` (a [`RoleGrant`]'s and a [`PolicyDocument`]'s timestamps) and a
+/// [`PolicyDocument`]'s `description`/`system`. None of the four reaches Cedar, so folding them
+/// in would mint a fresh decision-cache key space for a semantically identical policy set — and,
+/// for the timestamps, make the digest non-reproducible across replicas that re-read rows at
+/// differing precision. Anything that DOES change how a document or grant compiles must be added
+/// here.
 fn content_hash(policies: &[PolicyDocument], grants: &[RoleGrant]) -> String {
     fn field(hasher: &mut blake3::Hasher, value: &str) {
         // Length-prefix every field so ("ab", "c") and ("a", "bc") cannot collide.
@@ -218,7 +222,13 @@ fn content_hash(policies: &[PolicyDocument], grants: &[RoleGrant]) -> String {
         .map(|g| {
             [
                 g.id.to_string(),
-                g.principal.uuid().to_string(),
+                // The FULL principal PRN, matching what `link_grant` actually binds `?principal`
+                // to (`to_cedar_uid(grant.principal.prn())`) — not the bare uuid. Hashing the
+                // uuid alone is only non-lossy while every `PrincipalId` reaching here has a PRN
+                // the store synthesized deterministically from that uuid; the moment one does not,
+                // two grants that compile to DIFFERENT Cedar policies would hash identically and
+                // share a decision-cache key. Hash what compiles.
+                g.principal.canonical(),
                 g.role_key.clone(),
                 g.scope.canonical_prn(),
                 g.linked_policy_id.clone(),

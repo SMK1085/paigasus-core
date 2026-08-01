@@ -670,7 +670,13 @@ result **regardless of whether the generation counter moved**. Worst-case revoca
 therefore **`policy_cache_ttl_secs + refresh_interval_secs`** — **31 s at the defaults** — plus
 the reload's own duration, which during a Redis outage is itself seconds rather than
 milliseconds (the reload's `policy_gen` read pays the retry budget above before failing open).
-`IamConfig::validate` only rejects `refresh_interval_secs` **greater** than
+**During a Redis outage, budget nearer ~55 s than ~31 s**: until the first backstop install flips
+the generation stamp to provisional, every poll tick ALSO runs `reload_if_stale`, whose own
+`policy_gen` read burns a full reconnect cycle (~6–12 s) before erroring — so the loop's cadence
+stretches by roughly one retry cycle on top of the reload's own, making the honest worst case
+`ttl + poll + 2 × retry cycle`. That extra term disappears once the stamp goes provisional
+(`reload_if_stale` then returns immediately) and disappears entirely once SMA-473 bounds the retry
+budget. `IamConfig::validate` only rejects `refresh_interval_secs` **greater** than
 `policy_cache_ttl_secs`; **equal is permitted**, so the worst case is a genuine *sum* and an
 operator who raises the poll interval to its permitted maximum doubles the bound to
 `2 × policy_cache_ttl_secs` (60 s at the default TTL). Neither setting has an upper cap, so
@@ -690,7 +696,8 @@ rather than observed), request-driven reloads are **suppressed entirely** — co
 stamp against a live read would report permanent staleness and trigger a recompile per decision.
 During a Redis outage the TTL backstop is therefore the *only* refresh path, and a revoke
 committed during the outage becomes visible on its own replica in up to
-`policy_cache_ttl_secs + refresh_interval_secs` (~31 s at defaults), not immediately. The
+`policy_cache_ttl_secs + refresh_interval_secs` (~31 s at defaults) plus the reload's own retry
+cost — see the outage budget under the bound above — not immediately. The
 transition is logged once per state change: `policy_gen unreadable — serving a Postgres-compiled
 snapshot on a provisional generation stamp` on the way in, `policy_gen readable again` on the way
 out.

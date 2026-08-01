@@ -2,7 +2,9 @@
 
 //! `CedarAuthorizer`: the `Authorizer` port's implementation (ADR-0013, spec §7) — composes
 //! the compiled-policy snapshot (Task 13), the entity-slice loader/cache (Task 12/14), the
-//! generation-keyed decision cache (Task 14), and an [`AuditSink`] into the one component
+//! content-keyed decision cache (Task 14, re-keyed onto the compiled set's `content_hash` by
+//! SMA-470 D4 — see step 2 below for why keying it on `r#gen` was unsound), and an
+//! [`AuditSink`] into the one component
 //! `is_authorized` callers reach for. It is wired into `AppState`/`main.rs` (SMA-446 Slice
 //! A); this module builds and unit-tests the authorizer itself.
 //!

@@ -13,8 +13,10 @@
 //! `put`/`delete` best-effort bump `policy_gen` via the shared `Generations` handle (spec
 //! §7/D11: "bumped on any policy CRUD or role grant/revoke") — logged and swallowed on
 //! error, mirroring `pg_organizations.rs::bump_entity_gen`: the write already committed, so
-//! a Redis-down bump failure must never fail it, it just means the decision cache self-heals
-//! on its next TTL expiry instead of immediately.
+//! a Redis-down bump failure must never fail it, it just means the change lands on the policy
+//! snapshot's TTL backstop (`policy_cache_ttl_secs + refresh_interval_secs`) instead of
+//! immediately — the decision cache follows for free, since its key's policy component is the
+//! compiled set's `content_hash` (SMA-470 D4), which rotates the moment that reload installs.
 //!
 //! `put_in`'s INSERT branch handles a unique-constraint violation via a SAVEPOINT (SMA-446
 //! Slice B Task B5 — preserving the pre-Slice-B "abort whole txn, re-read on a fresh
@@ -62,13 +64,18 @@ impl PgPolicyStore {
     /// Best-effort `policy_gen` bump (spec §7/D11): logged and swallowed on error — mirrors
     /// `pg_organizations.rs::bump_entity_gen`/`bump_policy_gen` exactly: `put`/`delete`'s
     /// mutation already committed, so a Redis-down bump failure must never fail an
-    /// already-successful write; it just means the decision cache self-heals on its next TTL
-    /// expiry instead of immediately (D11: a swallowed bump degrades to TTL-bounded
-    /// staleness). Distinct from the public `PolicyStore::bump_policy_gen` trait method
-    /// (which forces a bump and propagates a failure to the caller by design).
+    /// already-successful write; it just means the change lands on the policy snapshot's TTL
+    /// backstop — `policy_cache_ttl_secs + refresh_interval_secs`, NOT the decision cache's own
+    /// TTL — instead of immediately (D11: a swallowed bump degrades to backstop-bounded
+    /// staleness). The decision cache needs no expiry of its own to follow: its key's policy
+    /// component is the compiled set's `content_hash` (SMA-470 D4), so that reload rotates the
+    /// key space for it — which is also why the claim has to be phrased this way, since
+    /// `MemoryDecisionCache` has no TTL at all. Distinct from the public
+    /// `PolicyStore::bump_policy_gen` trait method (which forces a bump and propagates a
+    /// failure to the caller by design).
     async fn bump_policy_gen_best_effort(&self) {
         if let Err(err) = self.gens.bump_policy_gen().await {
-            tracing::warn!(error = %err, "pg_policies: policy_gen bump failed after a committed write — authz caches may serve stale data until TTL");
+            tracing::warn!(error = %err, "pg_policies: policy_gen bump failed after a committed write — authz decisions may be stale until the policy snapshot's TTL backstop reloads");
         }
     }
 }

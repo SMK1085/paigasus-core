@@ -226,6 +226,11 @@ mod tests {
         }
     }
 
+    /// Only `decision_key`'s own determinism. The CROSS-REPLICA property this underpins — that
+    /// two replicas which compiled the same policy set derive the same `policy_content` string in
+    /// the first place, and so share one key space — lives where that string is produced, not
+    /// here: `authz::engine`'s `content_hash_is_stable_for_identical_inputs` and
+    /// `content_hash_ignores_input_ordering` (paigasus-iam-core).
     #[test]
     fn decision_key_is_stable_for_identical_inputs() {
         let req = base_request();
@@ -239,15 +244,6 @@ mod tests {
     fn decision_key_changes_when_policy_content_changes() {
         let req = base_request();
         assert_ne!(decision_key("content-a", 2, &req), decision_key("content-b", 2, &req));
-    }
-
-    /// SMA-470 D4: identical content on two replicas yields an identical key, so the Redis
-    /// decision cache stays SHARED across the fleet — the property a process-local counter
-    /// could never provide.
-    #[test]
-    fn decision_key_is_stable_across_replicas_for_identical_content() {
-        let req = base_request();
-        assert_eq!(decision_key("content-a", 2, &req), decision_key("content-a", 2, &req));
     }
 
     #[test]
