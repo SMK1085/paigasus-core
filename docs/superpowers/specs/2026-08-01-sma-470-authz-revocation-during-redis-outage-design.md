@@ -194,11 +194,23 @@ outage, on top of the existing reload-failure warn.
 The no-lost-update property is unaffected for a *trusted* stamp: it is still read before the
 `list_all` calls, so it can only undercount the store's true generation.
 
-A **provisional** stamp carries no such property — it can be stale in **either** direction. If
-the last trusted generation was `7` and Redis then resets, the carried-over `7` *exceeds* the
-store's current `0`. That is exactly why `stamp_trusted` gates §3.4's suppression: while the
-stamp is provisional it must not drive a freshness comparison at all, and only the TTL backstop
-refreshes the snapshot.
+Two qualifications, because "trusted" is weaker than it sounds:
+
+- The undercount property holds only under an assumption the code cannot verify — that the
+  counter is **monotonic between the read and the `list_all` calls**. Redis can be reset or
+  evicted inside that window, in which case a *successfully read* stamp of `7` accompanies
+  policy data compiled at generation `0`. A trusted stamp is therefore evidence that the read
+  succeeded, not proof that the value is a lower bound. `reload_if_stale`'s inequality test
+  still recovers this on the next call (`0 != 7`), which is why the design tolerates it rather
+  than trying to make the read atomic with the load.
+- A **provisional** stamp carries no property at all — it can be stale in **either** direction.
+  If the last trusted generation was `7` and Redis then resets, the carried-over `7` exceeds the
+  store's current `0`. That is why `stamp_trusted` gates §3.4's suppression: while the stamp is
+  provisional it must not drive a freshness comparison, and only the TTL backstop refreshes.
+
+The distinction that matters operationally: a **reset after a successful read** self-heals on the
+next inequality check; a **read failure** suppresses request-driven reloads entirely and hands
+the job to the backstop.
 
 ### 3.4 Recover from a generation reset, without a recompile storm
 
@@ -357,9 +369,12 @@ deploy is the *old* replicas' unbounded staleness, not the new bound.
   replica lag to the published bound.
 - `entity_gen`-driven staleness (§3.5) is unchanged by this work. It is a Redis-backend
   concern only — the `memory` backend's in-process counters cannot fail to be read.
-- Non-monotonic `policy_gen` reads from a Sentinel failover or a read replica would drive
-  repeated reloads; §3.4's single-flight bounds the cost, but reads should come from one
-  authority.
+- **Non-monotonic but *successful* `policy_gen` reads drive a recompile per request.** A Sentinel
+  failover or a replica read that alternates 7→8→7 keeps `stamp_trusted` true and the inequality
+  true, so §3.4 guard 2 never engages and each request takes the single-flight gate in turn and
+  runs a full `list_all` + Cedar compile. Single-flight caps concurrency at one; it does not cap
+  the rate. Reads must come from one authority. Closing this properly needs an unstable-source
+  cooldown (out of scope here — see AC6 and SMA-473).
 
 ## 7. Changed decisions vs. the pre-review draft
 
@@ -385,8 +400,13 @@ sections are left as the dated decision record, and this section is what actuall
 Task 7 acceptance test measured it: with Redis stopped, **every authz decision takes ~20–30
 seconds**. `connect_redis` calls `ConnectionManager::new` with no config override, and while
 redis-rs 1.3 *does* bound each attempt (`response_timeout` 500ms, `connection_timeout` 1s), the
-**retry budget** is not bounded — 6 retries, exponential backoff from 100ms, no `max_delay`, plus
-jitter — and a decision performs several counter reads.
+**retry budget is finite but undeadlined and large**: 6 retries with jittered exponential backoff
+from 100ms and no `max_delay`, summing to roughly **6.3–12.6s per reconnect cycle**, and a
+decision performs several counter reads. ("Unbounded" would be wrong — the retry *count* is
+capped at 6 by `ConnectionManagerConfig::default()`. What is missing is an overall deadline on a
+read, and the fact that the bound is a library default we never pinned means a dependency upgrade
+can silently move it. SMA-473 should set `ConnectionManagerConfig` explicitly rather than
+inheriting it.)
 
 D1's reasoning (fail-closed would convert a latency degradation into a total outage) holds only
 while the degradation is small. At 20–30s per decision most callers time out anyway, so the real
@@ -456,7 +476,14 @@ covers the adjacent client-config work and should absorb it or spawn it.
    unit test.
 5. The decision-cache key is derived from compiled-policy content, not `r#gen` (D4), proven
    by a key-stability/key-change test pair.
-6. A flapping generation read cannot drive a policy recompile per decision (§3.4).
+6. A generation read that **fails** cannot drive a policy recompile per decision: the resulting
+   provisional stamp suppresses request-driven reloads entirely (§3.4 guard 2).
+   This does **not** extend to reads that keep *succeeding* with oscillating values (a Sentinel
+   failover or a replica read returning 7→8→7). There `stamp_trusted` stays true and the
+   inequality stays true, so each request can take the gate in turn and compile — single-flight
+   caps the concurrency at one, not the rate. Bounding that needs an unstable-source cooldown,
+   which is out of scope here; it is named as a residual risk in §6 and belongs with SMA-473's
+   client work. The guard shipped here covers the read-error case only.
 7. The RUNBOOK states the real bound (qualified on Postgres being reachable *and* current),
    the separate `entity_gen` bound **and that it is Redis-backend-only**, the
    `maxmemory-policy` mandate, and records D1.
