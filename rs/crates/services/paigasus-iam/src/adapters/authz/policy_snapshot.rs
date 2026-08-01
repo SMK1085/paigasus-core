@@ -11,7 +11,7 @@
 //! Postgres + Cedar-compile work a reload already does.
 //!
 //! **Reload triggers** (D11 / AC1 / AC3): [`PolicySnapshot::reload_if_stale`] recompiles
-//! when the store's `policy_gen` has advanced past the currently-compiled `r#gen`;
+//! when the store's `policy_gen` DIFFERS from the currently-compiled `r#gen`;
 //! [`PolicySnapshot::spawn_reload`] polls that on an interval AND forces an unconditional
 //! reload once `ttl` has elapsed since the last successful (re)load, bounding staleness even
 //! if the generation counter never visibly moves to this replica (e.g. the `memory` backend
@@ -26,6 +26,24 @@
 //! list reads, the stamped gen still undercounts the store's true current gen, so the NEXT
 //! `reload_if_stale` still sees itself as stale and reloads again — the concurrent change is
 //! delayed by at most one extra reload, never silently dropped.
+//!
+//! **The generation counter is advisory, never load-bearing** (SMA-470 D-A/D-C). It lives in
+//! Redis; the policies and grants themselves live in Postgres. So an unreadable `policy_gen`
+//! must not stop a reload: [`PolicySnapshot::load_and_compile`] degrades a failed read to a
+//! PROVISIONAL stamp — the caller's last-known generation, carried over — and compiles from
+//! Postgres regardless. And because a counter that went BACKWARDS means Redis was reset
+//! (`Generations::read` maps a missing key to `0`), `reload_if_stale` reloads on inequality
+//! rather than on advance; requiring an advance is what let a `FLUSHALL` freeze the snapshot
+//! until process restart.
+//!
+//! **Two guards keep that from becoming a recompile-per-decision storm.** A provisional stamp
+//! was never observed, so comparing it against a live counter read would report permanent
+//! staleness — every decision would trigger a full recompile. `reload_if_stale` therefore
+//! suppresses request-driven reloads entirely while `SnapshotState::stamp_trusted` is false
+//! and leaves refreshing to the TTL backstop, which is unconditional and so always converges
+//! (in at most `ttl + poll`). Independently, a single-flight `reload_gate` caps concurrent
+//! reloads at one — closing a herd that predates SMA-470, where every in-flight request
+//! observing the same bump ran its own full `list_all` + Cedar compile.
 //!
 //! **Never poisons on a transient error:** every reload path (a manual call, or one iteration
 //! of `spawn_reload`'s loop) only swaps in a new compiled snapshot on `Ok` from
@@ -59,6 +77,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -75,6 +94,11 @@ struct SnapshotState {
     /// — and requiring it to strictly advance is what made the TTL backstop unable to install
     /// a same-generation recompile (defect D-B).
     installed_seq: u64,
+    /// `false` when the installed `compiled.r#gen` is a PROVISIONAL stamp — the counter was
+    /// unreadable at load time, so the value was carried over rather than observed. The
+    /// compiled policy set itself is still fresh (it came from Postgres); only the stamp is
+    /// a guess, so it must not be compared against a live counter read (SMA-470 §3.4).
+    stamp_trusted: bool,
 }
 
 /// The authoritative compiled Cedar policy set, cached in-process and kept fresh via
@@ -90,6 +114,21 @@ pub struct PolicySnapshot {
     /// Postgres read (see [`Self::load_and_compile`]) so it orders loads by when they read
     /// their data — which is the property the monotonic-write guard actually needs.
     load_seq: AtomicU64,
+    /// Single-flight gate: at most one reload runs at a time. [`Self::reload_if_stale`]
+    /// `try_lock`s and gives up immediately if a reload is already in flight, deciding against
+    /// the current snapshot instead. Without this, every in-flight request observing the same
+    /// staleness runs its own full recompile (a pre-existing herd, SMA-470 §3.4 guard 1).
+    ///
+    /// [`Self::reload_now`] deliberately takes the SAME gate with a blocking `lock` rather
+    /// than a `try_lock`: it is the TTL backstop, the only thing that can refresh a
+    /// provisional stamp, so it must never be skipped merely because a request-driven reload
+    /// happened to be in flight. `tokio::sync::Mutex` is FIFO-fair and `reload_if_stale` never
+    /// queues on it, so the backstop waits for at most one in-flight reload.
+    ///
+    /// Both callers hold the gate across `load_and_compile` AND `install_if_fresher`, so
+    /// in-process loads claim their `load_seq` and install in the same order — the
+    /// monotonic-write guard is left as a defence for the direct (test/`new`) call paths.
+    reload_gate: AsyncMutex<()>,
 }
 
 impl PolicySnapshot {
@@ -100,7 +139,10 @@ impl PolicySnapshot {
     /// uses — no throwaway empty compile, no double install.
     pub async fn new(policies: Arc<dyn PolicyStore>, grants: Arc<dyn RoleGrantStore>) -> Result<Self, AuthzError> {
         let load_seq = AtomicU64::new(0);
-        let (compiled, seq) = Self::load_and_compile(policies.as_ref(), grants.as_ref(), &load_seq).await?;
+        // `fallback_gen = 0`: nothing is installed yet, so there is no last-known generation
+        // to carry over. Booting with an unreadable counter therefore stamps 0 provisionally
+        // — which is exactly right, because 0 is also what a never-written counter reads as.
+        let (compiled, seq, trusted) = Self::load_and_compile(policies.as_ref(), grants.as_ref(), &load_seq, 0).await?;
         Ok(Self {
             policies,
             grants,
@@ -108,8 +150,10 @@ impl PolicySnapshot {
                 compiled: Arc::new(compiled),
                 loaded_at: Instant::now(),
                 installed_seq: seq,
+                stamp_trusted: trusted,
             }),
             load_seq,
+            reload_gate: AsyncMutex::new(()),
         })
     }
 
@@ -124,23 +168,69 @@ impl PolicySnapshot {
         self.state.read().await.compiled.clone()
     }
 
-    /// Reloads iff the store's `policy_gen` has advanced past the currently-compiled
-    /// `r#gen`; otherwise a cheap no-op (one `policy_gen` read, no recompile, no swap).
+    /// Reloads iff the store's `policy_gen` differs from the currently-compiled `r#gen`;
+    /// otherwise a cheap no-op (one `policy_gen` read, no recompile, no swap).
+    ///
+    /// **Inequality, not advance** (SMA-470 D-C): a counter that went BACKWARDS means Redis
+    /// was reset (`Generations::read` maps a missing key to 0), so the installed stamp is
+    /// meaningless and re-stamping is correct. It settles after one reload, because the new
+    /// stamp then equals the store's value.
+    ///
+    /// Two guards keep that from becoming a recompile-per-decision storm: a provisional stamp
+    /// (the counter was unreadable at the last load) suppresses request-driven reloads
+    /// entirely, and the single-flight gate caps concurrent reloads at one.
+    ///
+    /// Still returns `Err` when `policy_gen()` itself errors — every caller
+    /// (`CedarAuthorizer::is_authorized`, [`Self::spawn_reload`]) logs and swallows it, so a
+    /// Redis outage degrades a decision to "evaluated against the last-known-good snapshot",
+    /// never to a failure (fail-open, D1).
     pub async fn reload_if_stale(&self) -> Result<(), AuthzError> {
-        let current_gen = self.state.read().await.compiled.r#gen;
-        let store_gen = self.policies.policy_gen().await?;
-        if store_gen <= current_gen {
+        // Scoped so the read guard is released BEFORE `install_if_fresher` takes the write
+        // guard below — `tokio::sync::RwLock` is not reentrant, and a writer queued in between
+        // would deadlock a read-then-write held across the same task.
+        let (current_gen, trusted) = {
+            let state = self.state.read().await;
+            (state.compiled.r#gen, state.stamp_trusted)
+        };
+        if !trusted {
+            // The installed stamp is a carried-over guess; comparing it to a live read would
+            // report permanent staleness. The TTL backstop owns refreshing until the counter
+            // is readable again.
             return Ok(());
         }
-        self.reload_now().await
+        let store_gen = self.policies.policy_gen().await?;
+        if store_gen == current_gen {
+            return Ok(());
+        }
+        // Give up immediately if a reload is already in flight rather than queueing behind it:
+        // this call's decision is served from the current snapshot either way.
+        let Ok(_guard) = self.reload_gate.try_lock() else {
+            return Ok(());
+        };
+        let (compiled, seq, stamp_trusted) = Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq, current_gen).await?;
+        self.install_if_fresher(compiled, seq, stamp_trusted).await;
+        Ok(())
     }
 
-    /// Unconditionally reloads and swaps in the new compiled snapshot. Not exposed directly
-    /// — [`Self::reload_if_stale`] gates it on gen advance; [`Self::spawn_reload`]'s TTL
-    /// branch calls it unconditionally as the max-staleness backstop (AC3).
+    /// Unconditionally reloads and swaps in the new compiled snapshot. Not exposed directly —
+    /// [`Self::spawn_reload`]'s TTL branch calls it as the max-staleness backstop (AC3), and it
+    /// is the ONLY path that can refresh a provisional generation stamp back to authoritative.
+    ///
+    /// Takes the single-flight gate with a BLOCKING `lock`, unlike [`Self::reload_if_stale`]'s
+    /// `try_lock`: skipping the backstop because some request-driven reload happened to be
+    /// mid-flight would leave the snapshot suppressed for another whole `ttl`
+    /// (see [`Self::reload_gate`]).
+    ///
+    /// [`Self::reload_if_stale`] deliberately does NOT delegate here — it inlines the same
+    /// load-and-install because it already holds `reload_gate`, and `tokio::sync::Mutex` is not
+    /// reentrant, so calling this from under the gate would deadlock the reload path outright.
     async fn reload_now(&self) -> Result<(), AuthzError> {
-        let (compiled, seq) = Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq).await?;
-        self.install_if_fresher(compiled, seq).await;
+        let _guard = self.reload_gate.lock().await;
+        // The read guard is a statement-scoped temporary — dropped at the `;`, well before
+        // `install_if_fresher` takes the write lock.
+        let fallback_gen = self.state.read().await.compiled.r#gen;
+        let (compiled, seq, trusted) = Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq, fallback_gen).await?;
+        self.install_if_fresher(compiled, seq, trusted).await;
         Ok(())
     }
 
@@ -150,9 +240,20 @@ impl PolicySnapshot {
     ///
     /// `loaded_at` moves only on an actual install, so a losing no-op reload can never mask
     /// this replica's true staleness from [`Self::spawn_reload`]'s TTL backstop.
-    async fn install_if_fresher(&self, compiled: CompiledPolicies, seq: u64) {
+    ///
+    /// `trusted` records whether this load actually OBSERVED its generation or carried one
+    /// over (SMA-470 §3.4). This is also the only place that sees the old and the new flag
+    /// together, so it owns the operator-visible transition logging — exactly one line per
+    /// state change, rather than one per reload attempt.
+    async fn install_if_fresher(&self, compiled: CompiledPolicies, seq: u64, trusted: bool) {
         let mut state = self.state.write().await;
         if seq > state.installed_seq {
+            match (state.stamp_trusted, trusted) {
+                (true, false) => tracing::warn!("policy_snapshot: policy_gen unreadable — serving a Postgres-compiled snapshot on a provisional generation stamp (fail-open, SMA-470)"),
+                (false, true) => tracing::info!("policy_snapshot: policy_gen readable again — the generation stamp is authoritative"),
+                _ => {}
+            }
+            state.stamp_trusted = trusted;
             state.compiled = Arc::new(compiled);
             state.loaded_at = Instant::now();
             state.installed_seq = seq;
@@ -173,9 +274,27 @@ impl PolicySnapshot {
     /// (SMA-470 D-B). Claiming it any earlier would put the `policy_gen` read — the step
     /// that stalls during exactly the Redis outage this guards against — between the token
     /// and the data it labels.
-    async fn load_and_compile(policies: &dyn PolicyStore, grants: &dyn RoleGrantStore, load_seq: &AtomicU64) -> Result<(CompiledPolicies, u64), AuthzError> {
+    ///
+    /// **A failed `policy_gen` read never fails the load** (SMA-470 D-A). The counter lives in
+    /// Redis; the policy set lives in Postgres. Propagating the error meant a Redis outage
+    /// froze the snapshot for as long as Redis was down — including the TTL backstop, so a
+    /// revoke committed during the outage was never picked up. Instead the load falls back to
+    /// `fallback_gen` (the caller's last-known generation) and reports `trusted = false`, so
+    /// the caller knows the stamp it installs is a carry-over rather than an observation.
+    ///
+    /// The per-attempt line is `debug!`, not `warn!`: at the default `refresh_interval_secs`
+    /// of 1 this runs once a second per replica for the whole outage. The one-per-transition
+    /// `warn!`/`info!` lives in [`Self::install_if_fresher`], the only place that sees both
+    /// the old and the new flag.
+    async fn load_and_compile(policies: &dyn PolicyStore, grants: &dyn RoleGrantStore, load_seq: &AtomicU64, fallback_gen: u64) -> Result<(CompiledPolicies, u64, bool), AuthzError> {
         let seq = load_seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let observed_gen = policies.policy_gen().await?;
+        let (observed_gen, trusted) = match policies.policy_gen().await {
+            Ok(g) => (g, true),
+            Err(err) => {
+                tracing::debug!(error = %err, "policy_snapshot: policy_gen unreadable — compiling from Postgres anyway and stamping the last-known generation (fail-open, SMA-470)");
+                (fallback_gen, false)
+            }
+        };
         let docs = policies.list_all().await?;
         let all_grants = grants.list_all().await?;
 
@@ -195,7 +314,7 @@ impl PolicySnapshot {
             );
         }
 
-        Ok((compiled, seq))
+        Ok((compiled, seq, trusted))
     }
 
     /// Spawns the background reload loop: every `poll` interval, reload if `policy_gen`
@@ -333,6 +452,72 @@ mod tests {
 
         async fn bump_policy_gen(&self) -> Result<u64, AuthzError> {
             Ok(self.gen_counter.fetch_add(1, Ordering::SeqCst) + 1)
+        }
+    }
+
+    /// A `PolicyStore` fake whose `policy_gen()` returns `Ok(first)` for the first `ok_calls`
+    /// calls and errors afterwards — simulating a Redis-backed counter that was readable at
+    /// construction and then went away. Erroring from the very first call would make
+    /// "stamped the last-known gen" and "stamped 0" indistinguishable.
+    ///
+    /// `heal` re-arms it with a NEW value, which is how the flapping case (`policy_gen`
+    /// readable again, reporting a generation that differs from the provisional stamp) is
+    /// reached — see `a_provisional_stamp_suppresses_reloads_even_once_the_counter_returns`.
+    struct FlakyGenPolicyStore {
+        docs: Mutex<Vec<PolicyDocument>>,
+        first: AtomicU64,
+        ok_calls: AtomicU64,
+    }
+
+    impl FlakyGenPolicyStore {
+        fn new(docs: Vec<PolicyDocument>, first: u64, ok_calls: u64) -> Self {
+            Self {
+                docs: Mutex::new(docs),
+                first: AtomicU64::new(first),
+                ok_calls: AtomicU64::new(ok_calls),
+            }
+        }
+
+        /// Redis comes back, reporting `value` for the next `ok_calls` reads.
+        fn heal(&self, value: u64, ok_calls: u64) {
+            self.first.store(value, Ordering::SeqCst);
+            self.ok_calls.store(ok_calls, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl PolicyStore for FlakyGenPolicyStore {
+        async fn list_all(&self) -> Result<Vec<PolicyDocument>, AuthzError> {
+            Ok(self.docs.lock().unwrap().clone())
+        }
+
+        async fn put(&self, _doc: &PolicyDocument) -> Result<(), AuthzError> {
+            unimplemented!("never written in these tests")
+        }
+
+        async fn delete(&self, _policy_id: &str) -> Result<(), AuthzError> {
+            unimplemented!("never written in these tests")
+        }
+
+        async fn put_in(&self, _tx: &dyn Transaction, _doc: &PolicyDocument) -> Result<PutOutcome, AuthzError> {
+            unimplemented!("never written in these tests")
+        }
+
+        async fn delete_in(&self, _tx: &dyn Transaction, _policy_id: &str) -> Result<bool, AuthzError> {
+            unimplemented!("never written in these tests")
+        }
+
+        async fn policy_gen(&self) -> Result<u64, AuthzError> {
+            if self.ok_calls.load(Ordering::SeqCst) > 0 {
+                self.ok_calls.fetch_sub(1, Ordering::SeqCst);
+                Ok(self.first.load(Ordering::SeqCst))
+            } else {
+                Err(AuthzError::Backend("simulated generations-redis outage".into()))
+            }
+        }
+
+        async fn bump_policy_gen(&self) -> Result<u64, AuthzError> {
+            Err(AuthzError::Backend("simulated generations-redis outage".into()))
         }
     }
 
@@ -558,7 +743,7 @@ mod tests {
 
         // The "older" load starts first and so claims the lower seq — still at gen 0, no
         // grant yet.
-        let (older, older_seq) = PolicySnapshot::load_and_compile(policies_store.as_ref(), grants_store.as_ref(), &snapshot.load_seq)
+        let (older, older_seq, older_trusted) = PolicySnapshot::load_and_compile(policies_store.as_ref(), grants_store.as_ref(), &snapshot.load_seq, 0)
             .await
             .expect("compiles");
 
@@ -566,19 +751,19 @@ mod tests {
         // starts after it and claims the higher seq, still observing gen 0.
         let grant_id = Uuid::from_u128(900);
         grants_store.grant(&role_grant(grant_id, "org_admin")).await.unwrap();
-        let (newer, newer_seq) = PolicySnapshot::load_and_compile(policies_store.as_ref(), grants_store.as_ref(), &snapshot.load_seq)
+        let (newer, newer_seq, newer_trusted) = PolicySnapshot::load_and_compile(policies_store.as_ref(), grants_store.as_ref(), &snapshot.load_seq, 0)
             .await
             .expect("compiles");
         assert_eq!(newer.r#gen, older.r#gen, "both loads must observe the same generation — this is the case seq-ordering exists for");
         assert!(newer_seq > older_seq);
 
         // The newer load wins the race to the write lock.
-        snapshot.install_if_fresher(newer, newer_seq).await;
+        snapshot.install_if_fresher(newer, newer_seq, newer_trusted).await;
         let installed = snapshot.current().await;
         assert!(installed.policy_set.policy(&grant_policy_id(grant_id)).is_some());
 
         // The older load arrives second — the guard must reject it rather than regress.
-        snapshot.install_if_fresher(older, older_seq).await;
+        snapshot.install_if_fresher(older, older_seq, older_trusted).await;
         let after = snapshot.current().await;
 
         assert!(
@@ -586,5 +771,150 @@ mod tests {
             "an older-seq load must never overwrite a newer installed one"
         );
         assert!(Arc::ptr_eq(&installed, &after), "the rejected install must leave the installed Arc untouched");
+    }
+
+    /// SMA-470 D-A: a Redis outage must not stop the snapshot reloading. Policies and grants
+    /// live in POSTGRES; only the generation stamp comes from Redis, so an unreadable counter
+    /// must degrade to a provisional stamp, never to a failed reload.
+    #[tokio::test]
+    async fn reload_survives_an_unreadable_policy_gen() {
+        // One successful read (consumed by `new()`), then the counter goes away.
+        let policies_store = Arc::new(FlakyGenPolicyStore::new(vec![org_admin_template()], 5, 1));
+        let grants_store = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let policies: Arc<dyn PolicyStore> = policies_store.clone();
+        let grants: Arc<dyn RoleGrantStore> = grants_store.clone();
+
+        let snapshot = PolicySnapshot::new(policies, grants).await.expect("build succeeds");
+        assert_eq!(snapshot.current().await.r#gen, 5);
+
+        // A grant lands while Redis is down — its bump is swallowed.
+        let grant_id = Uuid::from_u128(710);
+        grants_store.grant(&role_grant(grant_id, "org_admin")).await.unwrap();
+
+        // The TTL backstop still installs fresh Postgres data.
+        snapshot.reload_now().await.expect("a Redis outage must not fail the reload");
+
+        let after = snapshot.current().await;
+        assert!(
+            after.policy_set.policy(&grant_policy_id(grant_id)).is_some(),
+            "must compile fresh Postgres data with the counter unreadable"
+        );
+        assert_eq!(after.r#gen, 5, "must stamp the LAST-KNOWN gen, not 0");
+    }
+
+    /// SMA-470 D-C: after a Redis data loss the counter reads back 0 (`Generations::read` maps
+    /// a missing key to 0). `reload_if_stale` must treat any INEQUALITY as staleness — a
+    /// regression means the counter was reset and our stamp is meaningless. Before this fix
+    /// `0 <= N` short-circuited and the backstop's `0 > N` install was rejected, freezing the
+    /// snapshot until process restart.
+    #[tokio::test]
+    async fn gen_regression_after_a_redis_flush_still_reloads() {
+        let policies_store = Arc::new(FakePolicyStore::new(vec![org_admin_template()]));
+        let grants_store = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let policies: Arc<dyn PolicyStore> = policies_store.clone();
+        let grants: Arc<dyn RoleGrantStore> = grants_store.clone();
+
+        for _ in 0..3 {
+            policies_store.bump_policy_gen().await.unwrap();
+        }
+        let snapshot = PolicySnapshot::new(policies, grants).await.expect("build succeeds");
+        assert_eq!(snapshot.current().await.r#gen, 3);
+
+        // Redis is flushed: the counter restarts from 0, then a later grant bumps it to 1.
+        policies_store.gen_counter.store(0, Ordering::SeqCst);
+        let grant_id = Uuid::from_u128(800);
+        grants_store.grant(&role_grant(grant_id, "org_admin")).await.unwrap();
+        policies_store.bump_policy_gen().await.unwrap();
+
+        snapshot.reload_if_stale().await.expect("reload succeeds");
+
+        let after = snapshot.current().await;
+        assert!(after.policy_set.policy(&grant_policy_id(grant_id)).is_some(), "a reset counter must not freeze the snapshot");
+        assert_eq!(after.r#gen, 1, "the snapshot re-stamps to the store's post-reset value");
+
+        // And it settles: equal gens are a cheap no-op, not a reload loop.
+        let installed = snapshot.current().await;
+        snapshot.reload_if_stale().await.expect("second call succeeds");
+        assert!(Arc::ptr_eq(&installed, &snapshot.current().await), "equal gens must not reload");
+    }
+
+    /// SMA-470 §3.4 guard 2: while the stamp is PROVISIONAL (the counter was unreadable at the
+    /// last load), request-driven reloads are suppressed and refreshing is left to the TTL
+    /// backstop. Without this, a flapping Redis — `reload_if_stale`'s read succeeding with N
+    /// while `load_and_compile`'s read fails and stamps M != N — yields permanent inequality,
+    /// i.e. a full policy recompile on EVERY authorization decision, indefinitely.
+    #[tokio::test]
+    async fn a_provisional_stamp_suppresses_request_driven_reloads() {
+        // `new()` consumes one Ok(5); `reload_now` below then fails its gen read and stamps
+        // provisionally; the next `policy_gen()` (from `reload_if_stale`) also errors.
+        let policies_store = Arc::new(FlakyGenPolicyStore::new(vec![org_admin_template()], 5, 1));
+        let grants_store = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let policies: Arc<dyn PolicyStore> = policies_store.clone();
+        let grants: Arc<dyn RoleGrantStore> = grants_store.clone();
+
+        let snapshot = PolicySnapshot::new(policies, grants).await.expect("build succeeds");
+        snapshot.reload_now().await.expect("backstop reload succeeds with a provisional stamp");
+        assert!(!snapshot.state.read().await.stamp_trusted, "the stamp is provisional after an unreadable gen read");
+
+        let installed = snapshot.current().await;
+        snapshot.reload_if_stale().await.expect("must not error");
+        assert!(
+            Arc::ptr_eq(&installed, &snapshot.current().await),
+            "a provisional stamp must suppress request-driven reloads — the backstop owns refreshing"
+        );
+    }
+
+    /// The FLAPPING half of §3.4 guard 2, and the reason suppressing is safe.
+    ///
+    /// `a_provisional_stamp_suppresses_request_driven_reloads` above only ever sees a
+    /// permanently-down counter, so it would also pass against an implementation that merely
+    /// swallowed `reload_if_stale`'s `policy_gen` error. The scenario the guard actually
+    /// exists for is Redis coming BACK with a value that differs from the provisional stamp:
+    /// there, an unguarded `reload_if_stale` sees genuine inequality and recompiles the whole
+    /// policy set on every single decision.
+    ///
+    /// Phase 2 is the safety argument for suppressing at all: the TTL backstop is
+    /// unconditional and takes the reload gate with a blocking `lock`, so it always runs, and
+    /// the first backstop pass that observes a readable counter re-trusts the stamp and hands
+    /// request-driven reloads back. A provisional stamp is therefore bounded by one `ttl`, not
+    /// permanent.
+    #[tokio::test]
+    async fn a_flapping_counter_is_suppressed_until_the_backstop_re_trusts_the_stamp() {
+        let policies_store = Arc::new(FlakyGenPolicyStore::new(vec![org_admin_template()], 5, 1));
+        let grants_store = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let policies: Arc<dyn PolicyStore> = policies_store.clone();
+        let grants: Arc<dyn RoleGrantStore> = grants_store.clone();
+
+        // gen 5, trusted → the counter goes away → the backstop stamps 5 provisionally.
+        let snapshot = PolicySnapshot::new(policies, grants).await.expect("build succeeds");
+        snapshot.reload_now().await.expect("backstop reload succeeds with a provisional stamp");
+        assert!(!snapshot.state.read().await.stamp_trusted);
+
+        // Phase 1 — Redis is back, reporting 9. That differs from the provisional 5, so an
+        // unguarded `reload_if_stale` would recompile here (and on every later decision).
+        policies_store.heal(9, 100);
+        let grant_id = Uuid::from_u128(720);
+        grants_store.grant(&role_grant(grant_id, "org_admin")).await.unwrap();
+
+        let installed = snapshot.current().await;
+        snapshot.reload_if_stale().await.expect("must not error");
+        assert!(
+            Arc::ptr_eq(&installed, &snapshot.current().await),
+            "a readable-but-differing counter must not reload while the stamp is provisional — that is the recompile-per-decision storm"
+        );
+
+        // Phase 2 — the backstop runs, observes the counter, and re-trusts the stamp.
+        snapshot.reload_now().await.expect("the backstop always runs");
+        let after = snapshot.current().await;
+        assert!(snapshot.state.read().await.stamp_trusted, "an observed gen must restore the stamp to authoritative");
+        assert_eq!(after.r#gen, 9, "the backstop re-stamps to the counter's live value");
+        assert!(
+            after.policy_set.policy(&grant_policy_id(grant_id)).is_some(),
+            "and installs the Postgres data written during the outage"
+        );
+
+        // Request-driven reloads are live again, and settled: equal gens are a no-op.
+        snapshot.reload_if_stale().await.expect("reload_if_stale is live again");
+        assert!(Arc::ptr_eq(&after, &snapshot.current().await), "a re-trusted stamp equal to the store's gen must not reload");
     }
 }
