@@ -276,7 +276,7 @@ Replaces `install_if_newer`'s `r#gen`-comparison with a process-local sequence n
 - Produces:
   - `PolicySnapshot { policies, grants, state: RwLock<SnapshotState>, load_seq: AtomicU64 }`
   - `SnapshotState { compiled: Arc<CompiledPolicies>, loaded_at: Instant, installed_seq: u64 }`
-  - `async fn load_and_compile(&self, fallback_gen: u64) -> Result<(CompiledPolicies, u64), AuthzError>` — now a **method** (it needs `self.load_seq`), returning `(compiled, seq)`.
+  - `async fn load_and_compile(policies: &dyn PolicyStore, grants: &dyn RoleGrantStore, load_seq: &AtomicU64) -> Result<(CompiledPolicies, u64), AuthzError>` — stays an **associated fn** (so `new()` can call it before `Self` exists) but takes the sequence source, returning `(compiled, seq)`.
   - `async fn install_if_fresher(&self, compiled: CompiledPolicies, seq: u64)` — replaces `install_if_newer`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -412,23 +412,23 @@ pub struct PolicySnapshot {
 }
 ```
 
-`new()` initializes both:
+`new()` builds the sequence source first, so the initial load claims seq `1` through the same
+path every later reload uses — no throwaway empty compile, no double install:
 
 ```rust
     pub async fn new(policies: Arc<dyn PolicyStore>, grants: Arc<dyn RoleGrantStore>) -> Result<Self, AuthzError> {
-        let snapshot = Self {
+        let load_seq = AtomicU64::new(0);
+        let (compiled, seq) = Self::load_and_compile(policies.as_ref(), grants.as_ref(), &load_seq).await?;
+        Ok(Self {
             policies,
             grants,
             state: RwLock::new(SnapshotState {
-                compiled: Arc::new(PolicyEngine::compile(&[], &[])?),
+                compiled: Arc::new(compiled),
                 loaded_at: Instant::now(),
-                installed_seq: 0,
+                installed_seq: seq,
             }),
-            load_seq: AtomicU64::new(0),
-        };
-        let (compiled, seq) = snapshot.load_and_compile(0).await?;
-        snapshot.install_if_fresher(compiled, seq).await;
-        Ok(snapshot)
+            load_seq,
+        })
     }
 ```
 
@@ -457,8 +457,7 @@ Rewrite `reload_now` and `load_and_compile` (`load_and_compile` becomes a method
 
 ```rust
     async fn reload_now(&self) -> Result<(), AuthzError> {
-        let fallback_gen = self.state.read().await.compiled.r#gen;
-        let (compiled, seq) = self.load_and_compile(fallback_gen).await?;
+        let (compiled, seq) = Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq).await?;
         self.install_if_fresher(compiled, seq).await;
         Ok(())
     }
@@ -467,15 +466,15 @@ Rewrite `reload_now` and `load_and_compile` (`load_and_compile` becomes a method
 In `load_and_compile`, claim the seq immediately before the first store read and return it. Keep the rest of the body (the `skipped_role_keys` warn) exactly as it is:
 
 ```rust
-    async fn load_and_compile(&self, fallback_gen: u64) -> Result<(CompiledPolicies, u64), AuthzError> {
+    async fn load_and_compile(policies: &dyn PolicyStore, grants: &dyn RoleGrantStore, load_seq: &AtomicU64) -> Result<(CompiledPolicies, u64), AuthzError> {
         // Claim the ordering token immediately before the first store read, so it orders loads
         // by when they read their data. Claiming it earlier would put the `policy_gen` read —
         // the step that stalls during exactly the Redis outage this guards against — between
         // the token and the data it labels.
-        let seq = self.load_seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let observed_gen = self.policies.policy_gen().await?;
-        let docs = self.policies.list_all().await?;
-        let all_grants = self.grants.list_all().await?;
+        let seq = load_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let observed_gen = policies.policy_gen().await?;
+        let docs = policies.list_all().await?;
+        let all_grants = grants.list_all().await?;
 
         let mut compiled = PolicyEngine::compile(&docs, &all_grants)?;
         compiled.r#gen = observed_gen;
@@ -493,12 +492,13 @@ In `load_and_compile`, claim the seq immediately before the first store read and
             );
         }
 
-        let _ = fallback_gen; // wired in Task 3
         Ok((compiled, seq))
     }
 ```
 
-Update the two remaining `load_and_compile` call sites inside the test module (the mid-load-bump test) to the new method form and tuple return.
+Update the `load_and_compile` call sites inside the test module (the mid-load-bump test) to the
+new signature and tuple return. In the new tests above, `snapshot.load_and_compile(0)` becomes
+`PolicySnapshot::load_and_compile(policies.as_ref(), grants.as_ref(), &snapshot.load_seq)`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -721,35 +721,41 @@ pub struct PolicySnapshot {
 
 Initialize the two new fields in `new()` (`stamp_trusted: true`, `reload_gate: AsyncMutex::new(())`).
 
-`load_and_compile` now returns the trust flag too — change its signature to
-`Result<(CompiledPolicies, u64, bool), AuthzError>` and replace the `policy_gen` read:
+`load_and_compile` gains a `fallback_gen` parameter and returns the trust flag — new signature
+`load_and_compile(policies: &dyn PolicyStore, grants: &dyn RoleGrantStore, load_seq: &AtomicU64, fallback_gen: u64) -> Result<(CompiledPolicies, u64, bool), AuthzError>`.
+Replace the `policy_gen` read:
 
 ```rust
-        let seq = self.load_seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let (observed_gen, trusted) = match self.policies.policy_gen().await {
+        let seq = load_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let (observed_gen, trusted) = match policies.policy_gen().await {
             Ok(g) => (g, true),
             Err(err) => {
-                // Log on TRANSITION only: at `refresh_interval_secs = 1` a per-attempt warn is
-                // >= 1 line/second/replica for the whole outage.
-                if self.state.read().await.stamp_trusted {
-                    tracing::warn!(error = %err, "policy_snapshot: policy_gen unreadable — compiling from Postgres anyway and stamping the last-known generation (fail-open, SMA-470)");
-                }
+                tracing::debug!(error = %err, "policy_snapshot: policy_gen unreadable — compiling from Postgres anyway and stamping the last-known generation (fail-open, SMA-470)");
                 (fallback_gen, false)
             }
         };
 ```
 
-and return `Ok((compiled, seq, trusted))`. Drop the `let _ = fallback_gen;` line from Task 2.
+and return `Ok((compiled, seq, trusted))`. `new()` passes `0` for `fallback_gen` (nothing is
+installed yet) and stores the returned `trusted` in `SnapshotState`.
 
-`install_if_fresher` takes and stores the flag — `async fn install_if_fresher(&self, compiled: CompiledPolicies, seq: u64, trusted: bool)`, setting `state.stamp_trusted = trusted;` inside the install branch. Log the recovery transition there too:
+**Transition logging lives in `install_if_fresher`,** which is the only place that can see both
+the old and new flag. This keeps the per-attempt line at `debug` (above) and emits exactly one
+`warn`/`info` per state change — at `refresh_interval_secs = 1`, a per-attempt `warn` would be
+≥1 line/second/replica for the whole outage.
+
+`install_if_fresher` takes and stores the flag —
+`async fn install_if_fresher(&self, compiled: CompiledPolicies, seq: u64, trusted: bool)`. Inside
+the install branch, before assigning:
 
 ```rust
-            if trusted && !state.stamp_trusted {
-                tracing::info!("policy_snapshot: policy_gen readable again — stamp is authoritative");
+            match (state.stamp_trusted, trusted) {
+                (true, false) => tracing::warn!("policy_snapshot: policy_gen unreadable — serving a Postgres-compiled snapshot on a provisional generation stamp (fail-open, SMA-470)"),
+                (false, true) => tracing::info!("policy_snapshot: policy_gen readable again — the generation stamp is authoritative"),
+                _ => {}
             }
+            state.stamp_trusted = trusted;
 ```
-
-placed *before* the `state.stamp_trusted = trusted;` assignment.
 
 `reload_now` becomes single-flight-aware but always reloads (the backstop must never be skipped):
 
@@ -757,7 +763,7 @@ placed *before* the `state.stamp_trusted = trusted;` assignment.
     async fn reload_now(&self) -> Result<(), AuthzError> {
         let _guard = self.reload_gate.lock().await;
         let fallback_gen = self.state.read().await.compiled.r#gen;
-        let (compiled, seq, trusted) = self.load_and_compile(fallback_gen).await?;
+        let (compiled, seq, trusted) = Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq, fallback_gen).await?;
         self.install_if_fresher(compiled, seq, trusted).await;
         Ok(())
     }
@@ -797,14 +803,13 @@ placed *before* the `state.stamp_trusted = trusted;` assignment.
         let Ok(_guard) = self.reload_gate.try_lock() else {
             return Ok(());
         };
-        let fallback_gen = current_gen;
-        let (compiled, seq, stamp_trusted) = self.load_and_compile(fallback_gen).await?;
+        let (compiled, seq, stamp_trusted) = Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq, current_gen).await?;
         self.install_if_fresher(compiled, seq, stamp_trusted).await;
         Ok(())
     }
 ```
 
-Update the `new()` and test call sites for the new 3-tuple.
+Update `new()` and every test call site for the new 4-argument / 3-tuple form.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1523,11 +1528,13 @@ Skip this step if the gates were green with no changes.
 | §8 follow-up issues | filed post-merge, not a code task |
 
 **Type consistency:** `content_hash: String` (Task 1) is consumed as `&compiled.content_hash` →
-`decision_key(policy_content: &str, ...)` (Task 4). `load_and_compile` returns
-`(CompiledPolicies, u64)` in Task 2 and widens to `(CompiledPolicies, u64, bool)` in Task 3 —
-Task 3 Step 3 explicitly updates every call site. `install_if_fresher` likewise gains its third
-parameter in Task 3. `reload_now_for_test` is `#[cfg(test)] pub(crate)`, matching its
-cross-module test consumer in Task 4.
+`decision_key(policy_content: &str, ...)` (Task 4). `load_and_compile` stays an associated fn
+throughout: `(policies, grants, &load_seq) -> (CompiledPolicies, u64)` in Task 2, widening to
+`(policies, grants, &load_seq, fallback_gen) -> (CompiledPolicies, u64, bool)` in Task 3 — Task 3
+Step 3 explicitly updates every call site. `install_if_fresher` likewise gains its third parameter
+in Task 3. Task 2 introduces no parameter it does not use, so each task compiles clean on its own.
+`reload_now_for_test` is `#[cfg(test)] pub(crate)`, matching its cross-module test consumer in
+Task 4.
 
 **Known gaps deliberately left:** the `entity_gen` counter has the identical missing-key→`0`
 defect and is scoped out (documented in Task 8's RUNBOOK text, filed as a follow-up); booting
