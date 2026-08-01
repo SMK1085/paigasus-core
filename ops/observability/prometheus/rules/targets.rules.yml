@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+groups:
+  - name: targets
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations: { summary: "Scrape target {{ $labels.job }}/{{ $labels.instance }} is down" }
