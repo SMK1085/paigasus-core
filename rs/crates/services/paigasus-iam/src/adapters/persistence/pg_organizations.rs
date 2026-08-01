@@ -54,7 +54,7 @@ impl PgOrganizationRepository {
     /// committed; a cache-invalidation hiccup must never be reported as a failed create).
     async fn bump_policy_gen(&self) {
         if let Err(err) = self.gens.bump_policy_gen().await {
-            tracing::warn!(error = %err, "pg_organizations: policy_gen bump failed after a committed write — authz caches may serve stale data until TTL");
+            tracing::warn!(error = %err, "pg_organizations: policy_gen bump failed after a committed write — authz decisions may be stale until the policy snapshot's TTL backstop reloads");
         }
     }
 }

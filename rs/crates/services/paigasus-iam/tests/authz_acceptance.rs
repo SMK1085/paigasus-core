@@ -39,6 +39,11 @@
 //! container mid-flight and asserts a request still gets a real (default-deny) decision —
 //! never a hung or errored request — evaluated against the last-known-good in-memory snapshot
 //! plus a live Postgres entity-slice load.
+//!
+//! **SMA-470 revocation during a Redis outage**: the last case in this file covers what the
+//! two above do not — every fail-open assertion here is about a READ taken while Redis is
+//! down, never about an INVALIDATION issued while it is. See that test's own doc comment for
+//! the mechanism.
 
 mod support;
 
@@ -580,4 +585,178 @@ async fn redis_cache_backend_fails_open_when_redis_becomes_unavailable_mid_fligh
     assert_eq!(status, StatusCode::OK, "{down}: a Redis outage must never fail the request (D11/D12 fail-open)");
     assert_eq!(down["allowed"], false, "{down}");
     assert_eq!(down["determining_policies"], json!([DEFAULT_DENY_MARKER]));
+}
+
+// --- SMA-470: revocation during a Redis outage ------------------------------------------------
+
+/// The case SMA-470 was filed for, and the gap in everything above: the fail-open tests all
+/// cover a READ taken while Redis is down, never an INVALIDATION issued while it is.
+///
+/// A role grant is made and proven to take effect. Redis then goes away, so (a) the
+/// post-commit `policy_gen` bump `RoleService::revoke` issues is SWALLOWED
+/// (`GenerationsPolicyGenBumper::bump` logs and returns — the revoke must still succeed, D1
+/// fail-open) and (b) every request-driven `PolicySnapshot::reload_if_stale` errors on its own
+/// `policy_gen` read, and once the first backstop load carries a PROVISIONAL stamp forward,
+/// request-driven reloads are suppressed outright. The revoke itself still commits to
+/// Postgres. So the ONLY mechanism that can flip the decision back to DENY is the snapshot's
+/// unconditional TTL backstop (`spawn_reload`'s `ttl_elapsed` branch) recompiling from
+/// Postgres and INSTALLING the result at an unchanged generation.
+///
+/// That last word is the whole defect (D-B): `install_if_fresher` used to order installs on
+/// `compiled.r#gen`, so a same-generation recompile — which is every recompile during an
+/// outage, since the counter cannot be read, let alone advance — was rejected forever. The
+/// revoked grant stayed ALLOWed for as long as Redis was down. Installs are now ordered on
+/// `load_seq`, a process-local per-load counter, so the backstop converges regardless of what
+/// the generation counter does.
+///
+/// Driven through the REAL `spawn_reload` loop at the CONFIGURED
+/// `authz.policy_cache_ttl_secs`/`refresh_interval_secs` (1s/1s, wired exactly as `main.rs`
+/// wires them), not a hand-rolled fast interval, so the mechanism under test is the shipped one
+/// rather than a test-only fast path. What this asserts is CONVERGENCE, not a numeric bound: the
+/// install budget below is deliberately an order of magnitude wider than `ttl + poll`, because
+/// with Redis stopped the loop's own cadence stretches by whole reconnect-retry cycles (RUNBOOK
+/// "Revocation freshness is TTL-bounded"). Pinning the real bound here would only buy flakiness
+/// on a slow CI runner; the bound itself is a documented property, not this test's claim. The
+/// acceptance harness never calls `IamConfig::validate`, so honouring its bounds (both non-zero,
+/// refresh <= ttl) is this test's own responsibility.
+#[tokio::test]
+async fn sma470_revoke_during_a_redis_outage_denies_once_the_snapshot_ttl_backstop_reloads() {
+    let Some((_pg_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let Some((redis_node, redis_url)) = start_redis().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+
+    let mut cfg = support::test_config(&idp);
+    cfg.authz.cache = AuthzCacheConfig {
+        backend: AuthzCacheBackend::Redis,
+        redis_url: Some(redis_url),
+    };
+    cfg.authz.policy_cache_ttl_secs = 1;
+    cfg.authz.refresh_interval_secs = 1;
+
+    let (app, state) = app_with_config(db, &cfg).await;
+
+    let admin_token = idp.bearer("sma470-admin", Some("sma470-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &admin_token).await;
+
+    let principal_token = idp.bearer("sma470-principal", Some("sma470-principal@example.com"), "paigasus", 3600);
+    let principal_prn = provision(&state, &principal_token).await;
+
+    let (status, org_body) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "sma470-org", "name": "SMA470 Org"})), Some(admin_token.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED, "{org_body}");
+    let org_prn = org_body["organization"]["prn"].as_str().expect("organization.prn").to_string();
+
+    // Every `is-authorized` below is P asking about P (a SELF-query), so `decide_gated`'s
+    // self/admin exposure rule never redacts the answer.
+    let decision_body = json!({"principal_prn": principal_prn, "action": "GetOrganization", "resource_prn": org_prn});
+
+    // Before the grant: default-deny — so the ALLOW below is genuinely the grant's doing, not a
+    // pre-existing permission that a revoke could never have taken away.
+    let (status, before) = send(&app, "POST", "/v1/authz/is-authorized", Some(decision_body.clone()), Some(principal_token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    assert_eq!(before["allowed"], false, "{before}");
+
+    let (status, granted) = send(
+        &app,
+        "POST",
+        "/v1/authz/role-grants",
+        Some(json!({"principal_prn": principal_prn, "role_key": "org_admin", "scope_prn": org_prn})),
+        Some(admin_token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{granted}");
+    let grant_id = granted["id"].as_str().expect("id").to_string();
+
+    // The grant takes effect while Redis is up (AC1's synchronous `reload_if_stale`), which is
+    // also what leaves the snapshot holding an AUTHORITATIVE generation stamp going into the
+    // outage — the starting state the defect needs.
+    let (status, allowed) = send(&app, "POST", "/v1/authz/is-authorized", Some(decision_body.clone()), Some(principal_token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{allowed}");
+    assert_eq!(allowed["allowed"], true, "the grant must take effect before the outage: {allowed}");
+    assert_eq!(allowed["determining_policies"], json!([format!("grant:{grant_id}")]), "{allowed}");
+
+    // The compiled set the outage starts from. `content_hash` is a pure function of the
+    // documents + grants compiled (SMA-470 D4), so "the backstop installed a recompile that
+    // saw the revoke" is exactly "this string changed" — with no dependency on `r#gen`, the
+    // counter the outage makes unreadable.
+    let hash_before_revoke = state.snapshot().current().await.content_hash.clone();
+
+    // Redis goes away. From here `policy_gen`/`entity_gen` both error: the decision cache is
+    // bypassed rather than consulted under a partial key, and the revoke's bump is swallowed.
+    redis_node.stop_with_timeout(Some(0)).await.expect("stop redis container");
+
+    let (status, revoked) = send(&app, "DELETE", &format!("/v1/authz/role-grants/{grant_id}"), None, Some(admin_token.as_str())).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "a revoke must still commit with Redis down (fail-open): {revoked}");
+
+    // Only the TTL backstop can recover the decision now. Spawn the real loop with the real
+    // config values, exactly as `main.rs` wires them.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let reload = state
+        .snapshot()
+        .spawn_reload(Duration::from_secs(cfg.authz.policy_cache_ttl_secs), Duration::from_secs(cfg.authz.refresh_interval_secs), async move {
+            let _ = shutdown_rx.await;
+        });
+
+    // Wait for the backstop to INSTALL a recompile — the single step D-B made impossible. The
+    // wait watches the in-process snapshot rather than polling `/v1/authz/is-authorized`,
+    // because with Redis gone every HTTP probe costs `ConnectionManager`'s full reconnect-retry
+    // budget on each of the several counter reads a decision takes (~20-30s per request,
+    // measured; the same cost `adapters::api_keys::cache`'s unreachable-backend test already
+    // pays). Polling over HTTP would spend minutes proving nothing extra — the decision itself
+    // is still asserted over the real HTTP surface, once, below. The budget is deliberately far
+    // wider than `ttl + poll`, and is NOT an assertion of that bound: it only has to be wide
+    // enough that a failure means the backstop never converges at all — a regression must fail on
+    // the mechanism, never on a slow CI runner (or on the retry cycles the outage adds to the
+    // loop's cadence).
+    //
+    // 90s, not the `ttl + poll` order of magnitude, because a SINGLE failed `policy_gen` read
+    // costs the full reconnect-retry budget (~20-30s, amendment A / SMA-473) and the backstop
+    // pays that before its Postgres `list_all`s and Cedar compile even start — so one unlucky
+    // loop iteration can eat most of a 30s budget on a runner slower than a dev laptop. The
+    // budget is a failure DEADLINE only: the loop below breaks the moment the recompile is
+    // observed, so widening it costs nothing on the happy path and only buys headroom against
+    // flakiness.
+    let install_budget = Duration::from_secs(90);
+    let started = std::time::Instant::now();
+    let mut installed = false;
+    while started.elapsed() < install_budget {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if state.snapshot().current().await.content_hash != hash_before_revoke {
+            installed = true;
+            break;
+        }
+    }
+    let install_took = started.elapsed();
+
+    // The property that actually matters, over the real API: the revoked grant no longer
+    // ALLOWs, and the request still succeeds despite Redis being gone.
+    let (status, decision) = send(&app, "POST", "/v1/authz/is-authorized", Some(decision_body), Some(principal_token.as_str())).await;
+
+    // Own the loop's lifetime: real shutdown signal, joined before this test returns, so it can
+    // never outlive the testcontainers below. Asserted only afterwards — a panic before the
+    // join would abandon the task over a torn-down Postgres.
+    let _ = shutdown_tx.send(());
+    reload.await.expect("the reload loop exits cleanly");
+
+    assert!(
+        installed,
+        "the policy snapshot never converged: no recompile installed within the {install_budget:?} liveness budget \
+         (ttl = {}s, poll = {}s — the budget is a generous convergence check, not the documented `ttl + poll` bound). \
+         A revoke committed during a Redis outage can only be picked up by the TTL backstop, which must install its \
+         recompile even though `policy_gen` never moved (SMA-470 D-B) — last decision: {decision}",
+        cfg.authz.policy_cache_ttl_secs, cfg.authz.refresh_interval_secs
+    );
+    assert_eq!(status, StatusCode::OK, "a Redis outage must never fail the request (D11/D12 fail-open): {decision}");
+    assert_eq!(
+        decision["allowed"], false,
+        "a grant revoked during a Redis outage must stop ALLOWing (backstop installed after {install_took:?}): {decision}"
+    );
+    assert_eq!(
+        decision["determining_policies"],
+        json!([DEFAULT_DENY_MARKER]),
+        "the revoked grant must be gone from the compiled set entirely: {decision}"
+    );
 }

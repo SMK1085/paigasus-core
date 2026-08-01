@@ -127,7 +127,7 @@ async fn authz_cache_decision_put_then_get_round_trips() {
         return;
     };
     let cache = RedisDecisionCache::connect(&url, 3600).await.expect("connect to redis");
-    let key = decision_key(1, 2, &sample_request());
+    let key = decision_key("content-a", 2, &sample_request());
     let decision = sample_decision();
 
     cache.put(&key, &decision).await;
@@ -143,7 +143,7 @@ async fn authz_cache_decision_get_of_missing_key_is_none() {
     };
     let cache = RedisDecisionCache::connect(&url, 3600).await.expect("connect to redis");
 
-    let got = cache.get(&decision_key(1, 2, &sample_request())).await;
+    let got = cache.get(&decision_key("content-a", 2, &sample_request())).await;
 
     assert!(got.is_none());
 }
@@ -157,7 +157,7 @@ async fn authz_cache_decision_stopped_container_fails_open() {
         return;
     };
     let cache = RedisDecisionCache::connect(&url, 3600).await.expect("connect to redis");
-    let key = decision_key(1, 2, &sample_request());
+    let key = decision_key("content-a", 2, &sample_request());
 
     node.stop_with_timeout(Some(0)).await.expect("stop redis container");
 
@@ -233,7 +233,7 @@ async fn authz_cache_slice_stopped_container_falls_through_to_inner_loader() {
 #[tokio::test]
 async fn authz_cache_memory_decision_cache_is_available_in_this_crate() {
     let cache = MemoryDecisionCache::new();
-    let key = decision_key(1, 2, &sample_request());
+    let key = decision_key("content-a", 2, &sample_request());
     assert!(cache.get(&key).await.is_none());
     cache.put(&key, &sample_decision()).await;
     assert_eq!(cache.get(&key).await, Some(sample_decision()));
