@@ -3,8 +3,10 @@
 //! alert rules is a registered family (after suffix-normalisation) — so ops artifacts can't
 //! reference a metric we don't emit. `promtool` covers PromQL *validity*; this covers *name
 //! drift*. The dashboard and rules files are discovered by globbing their directories (not
-//! hardcoded), matching every other consumer of those directories: `prometheus.yml`, the
-//! `repo:promtool` gate, the compose bind-mounts and Grafana's dashboard provisioner.
+//! hardcoded), and each glob's recursion matches that directory's real consumer: the dashboards
+//! glob walks subdirectories because Grafana's file provisioner does too, while the rules glob
+//! stays flat because Prometheus's `rule_files` glob and the `repo:promtool` gate are both
+//! non-recursive.
 //!
 //! Extraction is prefix-anchored rather than a blanket identifier scan: a PromQL `expr` mixes
 //! metric names with label keys (`status_class`, `grpc_status`, `decision`, ...), function names
@@ -42,31 +44,52 @@ fn metric_idents(expr: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every entry in `dir_rel` whose FILE NAME ends with `suffix`, as `(repo_relative, absolute)`
+/// Every entry under `dir_rel` whose file name ends with `suffix`, as `(repo_relative, absolute)`
 /// pairs sorted for a deterministic panic order. Reads use the absolute path; failure messages use
 /// the repo-relative one, so output stays clean (`root` is an unnormalized `../../../..` chain).
 ///
-/// Globbing rather than hardcoding is deliberate: `prometheus.yml`, the `repo:promtool` gate, the
-/// compose bind-mounts and Grafana's dashboard provisioner all glob these directories, so a
-/// hardcoded list here let a new rules file or dashboard ship unchecked (SMA-466).
+/// `recursive` picks whether subdirectories are walked, so each call site can match what its real
+/// consumer actually loads: Prometheus's `rule_files: .../*.rules.yml` glob and the
+/// `repo:promtool` gate are both non-recursive (flat), while Grafana's dashboard file provisioner
+/// walks the whole `path` tree — `foldersFromFilesStructure` only controls folder *mapping*, not
+/// *discovery* — so a nested dashboard is live in Grafana and must be recursed into, or this guard
+/// would read zero of it and go green (SMA-466).
 ///
-/// Fail-closed by construction: an unreadable directory or entry panics naming the path rather
-/// than being swallowed into an empty list, which would make this whole test pass vacuously.
-/// Callers additionally assert a known-good sentinel file is present.
-fn files_in(root: &str, dir_rel: &str, suffix: &str) -> Vec<(String, String)> {
+/// Fail-closed by construction: an unreadable directory or entry — including a non-UTF-8 file
+/// name, or a `read_dir`/`file_type` I/O error — panics naming the path rather than being
+/// swallowed into an empty list, which would make this whole test pass vacuously. A directory
+/// whose own name happens to end with `suffix` is never treated as a matching file
+/// (`file_type().is_dir()` is checked first). Callers additionally assert a known-good sentinel
+/// file is present.
+fn files_in(root: &str, dir_rel: &str, suffix: &str, recursive: bool) -> Vec<(String, String)> {
     let dir_abs = format!("{root}/{dir_rel}");
-    let mut out: Vec<(String, String)> = std::fs::read_dir(&dir_abs)
-        .unwrap_or_else(|e| panic!("read_dir {dir_rel}: {e}"))
-        .map(|entry| entry.unwrap_or_else(|e| panic!("read_dir entry in {dir_rel}: {e}")))
-        .filter_map(|entry| {
-            // NB: `Path::ends_with` matches whole path COMPONENTS, so `path.ends_with(".rules.yml")`
-            // compiles and is false for every file. Match the file name as a &str instead.
-            let name = entry.file_name().to_str()?.to_owned();
-            name.ends_with(suffix).then(|| (format!("{dir_rel}/{name}"), format!("{dir_abs}/{name}")))
-        })
-        .collect();
+    let mut out = Vec::new();
+    walk_dir(&dir_abs, dir_rel, suffix, recursive, &mut out);
     out.sort();
     out
+}
+
+/// Recursion helper for [`files_in`]; see its doc comment for the fail-closed contract.
+fn walk_dir(dir_abs: &str, dir_rel: &str, suffix: &str, recursive: bool, out: &mut Vec<(String, String)>) {
+    for entry in std::fs::read_dir(dir_abs).unwrap_or_else(|e| panic!("read_dir {dir_rel}: {e}")) {
+        let entry = entry.unwrap_or_else(|e| panic!("read_dir entry in {dir_rel}: {e}"));
+        // NB: `Path::ends_with` matches whole path COMPONENTS, so `path.ends_with(".rules.yml")`
+        // compiles and is false for every file. Match the file name as a &str instead — as an
+        // owned `String` via `into_string`, not `Path::to_str`, which would silently drop a
+        // non-UTF-8 name from the list instead of failing closed.
+        let name = entry.file_name().into_string().unwrap_or_else(|n| panic!("non-UTF-8 file name in {dir_rel}: {n:?}"));
+        let file_type = entry.file_type().unwrap_or_else(|e| panic!("file_type {dir_rel}/{name}: {e}"));
+        let child_rel = format!("{dir_rel}/{name}");
+        if file_type.is_dir() {
+            if recursive {
+                walk_dir(&format!("{dir_abs}/{name}"), &child_rel, suffix, recursive, out);
+            }
+            continue;
+        }
+        if name.ends_with(suffix) {
+            out.push((child_rel, format!("{dir_abs}/{name}")));
+        }
+    }
 }
 
 /// Walk a Grafana dashboard JSON doc and collect every `targets[].expr` string, recursing into
@@ -117,15 +140,17 @@ fn dashboards_and_rules_reference_only_known_metrics() {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../..");
     let mut unknown: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
-    let dashboards = files_in(root, "ops/observability/grafana/dashboards", ".json");
+    // recursive: Grafana's dashboard file provisioner walks the whole `path` tree, so a nested
+    // dashboard is live in Grafana and must be visible to this guard too.
+    let dashboards = files_in(root, "ops/observability/grafana/dashboards", ".json", true);
     assert!(
         dashboards.iter().any(|(rel, _)| rel.ends_with("/iam.json")),
         "dashboard glob found {} file(s) but not the known-good iam.json — wrong directory?\n{dashboards:#?}",
         dashboards.len()
     );
     for (path, full) in &dashboards {
-        let text = std::fs::read_to_string(full).unwrap_or_else(|e| panic!("read {full}: {e}"));
-        let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {full}: {e}"));
+        let text = std::fs::read_to_string(full).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"));
         for expr in collect_exprs_from_dashboard(&json) {
             for id in metric_idents(&expr) {
                 if !is_known(&id) {
@@ -135,15 +160,17 @@ fn dashboards_and_rules_reference_only_known_metrics() {
         }
     }
 
-    let rule_files = files_in(root, "ops/observability/prometheus/rules", ".rules.yml");
+    // recursive: false — Prometheus's `rule_files: .../*.rules.yml` glob and the `repo:promtool`
+    // gate are both non-recursive, so a flat read matches what actually gets loaded.
+    let rule_files = files_in(root, "ops/observability/prometheus/rules", ".rules.yml", false);
     assert!(
         rule_files.iter().any(|(rel, _)| rel.ends_with("/iam.rules.yml")),
         "rules glob found {} file(s) but not the known-good iam.rules.yml — wrong directory?\n{rule_files:#?}",
         rule_files.len()
     );
     for (path, full) in &rule_files {
-        let text = std::fs::read_to_string(full).unwrap_or_else(|e| panic!("read {full}: {e}"));
-        let doc: serde_norway::Value = serde_norway::from_str(&text).unwrap_or_else(|e| panic!("parse {full}: {e}"));
+        let text = std::fs::read_to_string(full).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let doc: serde_norway::Value = serde_norway::from_str(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"));
         for expr in collect_exprs_from_rules(&doc) {
             for id in metric_idents(&expr) {
                 if !is_known(&id) {
