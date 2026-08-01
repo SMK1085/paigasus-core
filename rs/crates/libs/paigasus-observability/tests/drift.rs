@@ -2,7 +2,9 @@
 //! Asserts every metric family referenced in the committed Grafana dashboards + Prometheus
 //! alert rules is a registered family (after suffix-normalisation) — so ops artifacts can't
 //! reference a metric we don't emit. `promtool` covers PromQL *validity*; this covers *name
-//! drift*.
+//! drift*. The dashboard and rules files are discovered by globbing their directories (not
+//! hardcoded), matching every other consumer of those directories: `prometheus.yml`, the
+//! `repo:promtool` gate, the compose bind-mounts and Grafana's dashboard provisioner.
 //!
 //! Extraction is prefix-anchored rather than a blanket identifier scan: a PromQL `expr` mixes
 //! metric names with label keys (`status_class`, `grpc_status`, `decision`, ...), function names
@@ -38,6 +40,33 @@ fn metric_idents(expr: &str) -> Vec<String> {
         .filter(|token| !token.is_empty() && (token.starts_with("iam_") || token.starts_with("gateway_")))
         .map(str::to_owned)
         .collect()
+}
+
+/// Every entry in `dir_rel` whose FILE NAME ends with `suffix`, as `(repo_relative, absolute)`
+/// pairs sorted for a deterministic panic order. Reads use the absolute path; failure messages use
+/// the repo-relative one, so output stays clean (`root` is an unnormalized `../../../..` chain).
+///
+/// Globbing rather than hardcoding is deliberate: `prometheus.yml`, the `repo:promtool` gate, the
+/// compose bind-mounts and Grafana's dashboard provisioner all glob these directories, so a
+/// hardcoded list here let a new rules file or dashboard ship unchecked (SMA-466).
+///
+/// Fail-closed by construction: an unreadable directory or entry panics naming the path rather
+/// than being swallowed into an empty list, which would make this whole test pass vacuously.
+/// Callers additionally assert a known-good sentinel file is present.
+fn files_in(root: &str, dir_rel: &str, suffix: &str) -> Vec<(String, String)> {
+    let dir_abs = format!("{root}/{dir_rel}");
+    let mut out: Vec<(String, String)> = std::fs::read_dir(&dir_abs)
+        .unwrap_or_else(|e| panic!("read_dir {dir_rel}: {e}"))
+        .map(|entry| entry.unwrap_or_else(|e| panic!("read_dir entry in {dir_rel}: {e}")))
+        .filter_map(|entry| {
+            // NB: `Path::ends_with` matches whole path COMPONENTS, so `path.ends_with(".rules.yml")`
+            // compiles and is false for every file. Match the file name as a &str instead.
+            let name = entry.file_name().to_str()?.to_owned();
+            name.ends_with(suffix).then(|| (format!("{dir_rel}/{name}"), format!("{dir_abs}/{name}")))
+        })
+        .collect();
+    out.sort();
+    out
 }
 
 /// Walk a Grafana dashboard JSON doc and collect every `targets[].expr` string, recursing into
@@ -88,10 +117,14 @@ fn dashboards_and_rules_reference_only_known_metrics() {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../..");
     let mut unknown: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
-    let dashboards = ["ops/observability/grafana/dashboards/iam.json", "ops/observability/grafana/dashboards/gateway.json"];
-    for path in dashboards {
-        let full = format!("{root}/{path}");
-        let text = std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("read {full}: {e}"));
+    let dashboards = files_in(root, "ops/observability/grafana/dashboards", ".json");
+    assert!(
+        dashboards.iter().any(|(rel, _)| rel.ends_with("/iam.json")),
+        "dashboard glob found {} file(s) but not the known-good iam.json — wrong directory?\n{dashboards:#?}",
+        dashboards.len()
+    );
+    for (path, full) in &dashboards {
+        let text = std::fs::read_to_string(full).unwrap_or_else(|e| panic!("read {full}: {e}"));
         let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {full}: {e}"));
         for expr in collect_exprs_from_dashboard(&json) {
             for id in metric_idents(&expr) {
@@ -102,10 +135,14 @@ fn dashboards_and_rules_reference_only_known_metrics() {
         }
     }
 
-    let rule_files = ["ops/observability/prometheus/rules/iam.rules.yml", "ops/observability/prometheus/rules/gateway.rules.yml"];
-    for path in rule_files {
-        let full = format!("{root}/{path}");
-        let text = std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("read {full}: {e}"));
+    let rule_files = files_in(root, "ops/observability/prometheus/rules", ".rules.yml");
+    assert!(
+        rule_files.iter().any(|(rel, _)| rel.ends_with("/iam.rules.yml")),
+        "rules glob found {} file(s) but not the known-good iam.rules.yml — wrong directory?\n{rule_files:#?}",
+        rule_files.len()
+    );
+    for (path, full) in &rule_files {
+        let text = std::fs::read_to_string(full).unwrap_or_else(|e| panic!("read {full}: {e}"));
         let doc: serde_norway::Value = serde_norway::from_str(&text).unwrap_or_else(|e| panic!("parse {full}: {e}"));
         for expr in collect_exprs_from_rules(&doc) {
             for id in metric_idents(&expr) {
