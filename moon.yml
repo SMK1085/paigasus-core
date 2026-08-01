@@ -104,6 +104,20 @@ tasks:
       - 'rs/crates/libs/paigasus-kernel-parity/Cargo.toml'
       - 'rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
 
+  observability-drift:
+    description: 'Assert the committed Grafana dashboards + Prometheus rules reference only registered metric families (SMA-466).'
+    # Duplicates paigasus-observability-rs:test ON PURPOSE. `ops/` has no moon.yml, so it belongs to
+    # the root `repo` project, while the crate's `test` inputs are project-relative — an ops-only
+    # change never makes the crate affected, so without this task the drift guard would not run on
+    # exactly the PRs that introduce drift. Same shape as parity-corpus-drift above.
+    script: '( cd rs && cargo nextest run --no-tests=pass -p paigasus-observability --test drift )'
+    toolchain: 'system'
+    # Narrow inputs — `repo` owns the whole tree, so without these the guard would run on every change.
+    inputs:
+      - 'ops/observability/prometheus/rules/**/*'
+      - 'ops/observability/grafana/dashboards/**/*'
+      - 'rs/crates/libs/paigasus-observability/**/*'
+
   wasm-getrandom-free:
     description: 'Assert the wasm binding pulls no `getrandom` — the kernel mints UUIDv7 from injected bytes, so wasm32-unknown-unknown stays buildable (SMA-448).'
     # Resolve the FULL dependency tree first (fail LOUD if `cargo tree` itself errors — a broken

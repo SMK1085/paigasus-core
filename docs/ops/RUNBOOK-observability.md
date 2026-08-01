@@ -105,7 +105,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_audit_partition_maintenance_ticks_total` | counter | `result` | One per audit partition-maintenance tick (create-ahead + prune). `result` ∈ `ok`/`error`. Liveness signal — see §4 "Audit partition maintenance stalled". |
 | `iam_audit_partitions_created_total` | counter | — | Monthly leaf partitions created by create-ahead. |
 | `iam_audit_partitions_dropped_total` | counter | `outcome` | Monthly leaf partitions dropped by retention. `outcome` ∈ `denied`/`committed`. |
-| `iam_audit_default_partition_rows` | gauge | — | Rows currently in the audit `DEFAULT` partitions. **Should be 0**; nonzero ⇒ create-ahead fell behind (freezes when the task is stalled/disabled — the ticks counter is the primary liveness signal). |
+| `iam_audit_default_partition_rows` | gauge | — | Rows currently in the audit `DEFAULT` partitions. **Should be 0**; nonzero ⇒ create-ahead fell behind (freezes when the task is stalled while retention stays enabled — the ticks counter is the primary liveness signal there; when retention is **disabled** neither metric exists at all, see §4 "Audit partition maintenance stalled"). |
 
 ### 2.3 `paigasus-gateway` — IAM dependency, OpenAI upstream
 
@@ -178,9 +178,10 @@ Two dashboards are provisioned automatically (`grafana/dashboards/{iam,gateway}.
 
 ## 4. Alerts → runbook entries
 
-Alert rules live in `ops/observability/prometheus/rules/{iam,gateway}.rules.yml` and are unit
-tested against synthetic series via `promtool test rules`
-(`ops/observability/prometheus/rules/tests/{iam,gateway}.test.yml`) as part of CI. Thresholds
+Alert rules live in `ops/observability/prometheus/rules/*.rules.yml` — one file per service plus
+`targets.rules.yml` for cross-service scrape-target health — and each is unit tested against
+synthetic series via `promtool test rules` using the paired `rules/tests/*.test.yml` as part of
+CI. Thresholds
 below are **starting points** — tune `for:` durations and numeric thresholds per environment
 (traffic volume, SLOs) once real data is available.
 
@@ -190,7 +191,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamOutboxBacklogAgeHigh` | `iam_outbox_oldest_unpublished_age_seconds > 300` | warning |
 | `IamOutboxEventsParked` | `increase(iam_outbox_relay_parked_total[15m]) > 0` | warning |
 | `IamOutboxRelayStalled` | `rate(iam_outbox_relay_ticks_total[10m]) == 0` | critical |
-| `IamAuditPartitionMaintenanceStalled` | `rate(iam_audit_partition_maintenance_ticks_total[1h]) == 0` for 2h | warning |
+| `IamAuditPartitionMaintenanceStalled` | `sum without (result) (increase(iam_audit_partition_maintenance_ticks_total[2d])) == 0` for 1h | warning |
 | `IamHighErrorRate` | `sum(rate(iam_http_requests_total{status_class="5xx"}[5m])) / sum(rate(iam_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `IamGrpcHighErrorRate` | `sum(rate(iam_grpc_requests_total{grpc_status!="ok"}[5m])) / sum(rate(iam_grpc_requests_total[5m])) > 0.05` for 10m | critical |
 | `GatewayHighErrorRate` | `sum(rate(gateway_http_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_http_requests_total[5m])) > 0.05` for 10m | critical |
@@ -368,31 +369,38 @@ config first).
 
 ### `IamAuditPartitionMaintenanceStalled` — audit partition maintenance is not ticking (warning)
 
-**Meaning.** `rate(iam_audit_partition_maintenance_ticks_total[1h]) == 0` for 2 hours — the audit
-partition-maintenance task (`PgPartitionMaintainer`, SMA-467) has stopped incrementing its tick
-counter even though the IAM process is up. Each tick does two independent units of work — see
+**Meaning.** `sum without (result) (increase(iam_audit_partition_maintenance_ticks_total[2d])) == 0`
+for 1 hour — no successful **or failed** tick in ~2 days from the audit partition-maintenance task
+(`PgPartitionMaintainer`, SMA-467), even though the IAM process is up. Each tick does two independent units of work — see
 "Audit retention & partitioning" below for the full design — so a stall here means **neither**
 create-ahead nor pruning is happening. Unlike `IamOutboxRelayStalled`, this is `warning` rather
 than `critical`: a stalled maintenance task never fails or blocks a live audit insert (the
 `*_default` partitions backstop writes indefinitely), so the immediate blast radius is slow
 index/table bloat and a stuck create-ahead horizon, not an outage.
 
-**NOTE — `audit.retention.enabled = false` fires this alert forever, by design.** When
-`[audit.retention].enabled = false`, IAM does not spawn the maintenance task at all, so ticks never
-happen and this alert fires and stays firing for as long as the config stays that way. If disabling
-retention is an intentional, durable choice for an environment, **silence this alert** for that
-environment instead of treating it as an ongoing incident — check `[audit.retention].enabled` in
-the running config as the very first troubleshooting step, before assuming a live regression.
+**NOTE — `audit.retention.enabled = false` makes this alert go SILENT, not fire.** When
+`[audit.retention].enabled = false`, IAM does not spawn the maintenance task at all
+(`main.rs`), so `iam_audit_partition_maintenance_ticks_total` is never incremented and the
+series does not exist. `increase()` over an absent series returns empty, so the alert has
+nothing to evaluate and stays silent for as long as the config stays that way. **Disabling
+retention is therefore unalerted** — nothing will tell you that create-ahead and pruning have
+stopped, and there is **no metric-based fallback signal either**: `iam_audit_default_partition_rows`
+is only set inside the same gated task (`pg_partition_maintainer.rs`), so it is equally absent from
+`/metrics` when retention is disabled. The only signal is a one-time startup log line —
+`audit.retention.enabled = false — no partition create-ahead or pruning will run; the DEFAULT
+partitions will fill over time and can block create-ahead until manually reattached (see RUNBOOK)`
+(`main.rs:264`). If you rely on retention being on, assert `[audit.retention].enabled` at deploy
+time rather than expecting this alert — or any metric — to catch it.
 
-**Likely causes:** `audit.retention.enabled = false` (check this first); the maintenance task
+**Likely causes:** the maintenance task
 panicked/exited without bringing down the process; the task is stuck on a long-running or
 lock-contended DDL statement despite the per-op `lock_timeout` back-off (Postgres itself may be
 unhealthy); or the shutdown-watch fired unexpectedly and the loop exited but the process didn't
 restart.
 
 **Confirm:**
-1. Check `[audit.retention].enabled` in the running config first — `false` fully explains this
-   alert and is not an incident.
+1. Confirm `[audit.retention].enabled` is true — if it is false this alert cannot be firing at all, so
+   you are looking at the wrong alert.
 2. Verify the IAM process is actually up (`up{job="iam"} == 1`) — if it's down instead, this is
    really a `TargetDown` situation.
 3. Check `iam_audit_default_partition_rows` — nonzero or climbing corroborates that create-ahead
@@ -404,7 +412,6 @@ restart.
    stopped.
 
 **Remediation:**
-- If disabled intentionally, silence the alert for that environment rather than acting on it.
 - If the task has genuinely wedged, a **process restart** of `paigasus-iam` is the fastest
   recovery — the task re-spawns on boot, runs an awaited startup tick immediately, then resumes its
   normal interval.
@@ -640,11 +647,14 @@ the triggering mutation's own transaction and a hard failure there rolls back th
 In steady state (`ahead_months ≥ 1`, task ticking normally) **all three should stay permanently
 empty** — `iam_audit_default_partition_rows` (§2.2) is the metric that verifies this, refreshed once
 per successful tick. **Known blind spot:** this gauge freezes (doesn't climb) once the task is
-stalled or disabled — exactly when a default is most likely to be actively filling — so
-`iam_audit_partition_maintenance_ticks_total` (the `IamAuditPartitionMaintenanceStalled` alert
-above) is the primary "is this even running" signal, and the gauge is the secondary "has it already
-fallen behind" signal. Treat a nonzero gauge as urgent: it means live audit rows are currently
-landing outside any proper monthly leaf.
+stalled while retention stays enabled — exactly when a default is most likely to be actively
+filling — so `iam_audit_partition_maintenance_ticks_total` (the `IamAuditPartitionMaintenanceStalled`
+alert above) is the primary "is this even running" signal in that case, and the gauge is the
+secondary "has it already fallen behind" signal. When retention is **disabled**, the gauge is not
+frozen but **absent** — it is set from the same gated task and is never set in the first place — so
+neither metric is a signal there; see the `IamAuditPartitionMaintenanceStalled` NOTE above. Treat a
+nonzero gauge as urgent: it means live audit rows are currently landing outside any proper monthly
+leaf.
 
 **Manual reattach for a non-empty default.** Auto-remediation is a deliberate non-goal for v1 —
 recovering a polluted default is a manual, rare, off-peak operation. Postgres refuses to create or

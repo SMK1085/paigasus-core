@@ -51,18 +51,3 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning }
             exp_annotations: { summary: "Gateway upstream HTTP 5xx ratio > 5%" }
-
-  # TargetDown: up == 0, for: 2m — shared alert, exercised here with a gateway-shaped target.
-  - interval: 1m
-    input_series:
-      - series: 'up{job="gateway", instance="localhost:8088"}'
-        values: '0+0x4'
-    alert_rule_test:
-      - eval_time: 1m
-        alertname: TargetDown
-        exp_alerts: []
-      - eval_time: 2m
-        alertname: TargetDown
-        exp_alerts:
-          - exp_labels: { severity: critical, job: gateway, instance: "localhost:8088" }
-            exp_annotations: { summary: "Scrape target gateway/localhost:8088 is down" }

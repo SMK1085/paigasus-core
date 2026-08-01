@@ -17,10 +17,3 @@ groups:
         for: 10m
         labels: { severity: warning }
         annotations: { summary: "Gateway upstream HTTP 5xx ratio > 5%" }
-  - name: targets
-    rules:
-      - alert: TargetDown
-        expr: up == 0
-        for: 2m
-        labels: { severity: critical }
-        annotations: { summary: "Scrape target {{ $labels.job }}/{{ $labels.instance }} is down" }

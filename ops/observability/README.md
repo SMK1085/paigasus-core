@@ -32,7 +32,12 @@ Gateway services during development. Not for production use.
 - `prometheus/prometheus.yml` — scrape config for the `iam` and `gateway`
   jobs, plus alert-rule loading.
 - `prometheus/rules/` — alerting/recording rules (`*.rules.yml`), with
-  `promtool`-driven unit tests under `prometheus/rules/tests/`.
+  `promtool`-driven unit tests under `prometheus/rules/tests/`. **One file per
+  service** (`iam`, `gateway`); an alert that applies across services gets its own
+  scope-named file (`targets.rules.yml` for scrape-target health) rather than
+  living in one service's file or in a `common`/`misc` catch-all. Every file is
+  picked up by a glob — `prometheus.yml`, the `repo:promtool` gate and the
+  compose bind-mount all glob this directory — so adding one needs no config change.
 - `grafana/provisioning/` — Grafana datasource + dashboard-provider config.
 - `grafana/dashboards/` — provisioned dashboard JSON for both services.
 

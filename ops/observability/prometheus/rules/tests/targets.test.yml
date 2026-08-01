@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# rule_files globs the whole rules dir on purpose (unlike iam/gateway.test.yml, which each load
+# only their own file): TargetDown is shared, so asserting EXACTLY two alerts below also proves no
+# other rules file defines a duplicate TargetDown that would double-fire (SMA-466 D5).
+rule_files: ['../*.rules.yml']
+evaluation_interval: 1m
+tests:
+  # TargetDown: up == 0, for: 2m — service-agnostic, so both real jobs are exercised. The third
+  # series stays UP on purpose: without it both inputs sit at 0 and a broken expr (`up >= 0`,
+  # `up != 1`) would still produce exactly the two expected alerts and pass.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="iam", instance="host.docker.internal:8080"}'
+        values: '0+0x4'
+      - series: 'up{job="gateway", instance="host.docker.internal:8088"}'
+        values: '0+0x4'
+      - series: 'up{job="iam", instance="host.docker.internal:9999"}'
+        values: '1+0x4'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: TargetDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels: { severity: critical, job: iam, instance: "host.docker.internal:8080" }
+            exp_annotations: { summary: "Scrape target iam/host.docker.internal:8080 is down" }
+          - exp_labels: { severity: critical, job: gateway, instance: "host.docker.internal:8088" }
+            exp_annotations: { summary: "Scrape target gateway/host.docker.internal:8088 is down" }

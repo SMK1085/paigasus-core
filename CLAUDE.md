@@ -63,6 +63,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (`:deny`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing new
   crates/deps/proto, run the full graph like CI does: `moon ci :build :test :lint :fmt :deny
   :machete :typecheck :breaking :affected-smoke :parity-corpus-drift :wasm-getrandom-free
+  :promtool :observability-drift :release-parity :release-parity-py :release-parity-ts
   --base origin/main --include-relations`.
 - A new crate that `dependsOn` `paigasus-kernel-rs` reds `:affected-smoke` until it's added to
   the `kernel->bindings` expected set in `ci/affected-graph/run.sh` (strict-equality guard,
