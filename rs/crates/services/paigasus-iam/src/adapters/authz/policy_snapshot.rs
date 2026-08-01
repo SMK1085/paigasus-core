@@ -234,6 +234,13 @@ impl PolicySnapshot {
         Ok(())
     }
 
+    /// Test-only access to the TTL backstop's unconditional reload, so sibling modules'
+    /// tests (`cedar_authorizer`) can drive it without making `reload_now` public.
+    #[cfg(test)]
+    pub(crate) async fn reload_now_for_test(&self) -> Result<(), AuthzError> {
+        self.reload_now().await
+    }
+
     /// Installs `compiled` under the write lock iff `seq` is fresher than the installed load's
     /// — the monotonic-write guard. If it isn't (this load lost a race against one that
     /// started later), `compiled` is dropped and `state` is left completely untouched.

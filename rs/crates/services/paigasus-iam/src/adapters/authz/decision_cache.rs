@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generation-keyed [`DecisionCache`] (spec §7/D12): caches a previously-computed
-//! [`Decision`] under a key that folds in the policy/entity generations (Task 10) AND the
-//! full request (principal/action/resource/context), so a cached decision can only ever be
-//! served back for the exact same question asked against the exact same policy/entity
-//! state — any change to any of those six inputs (policy_gen, entity_gen, principal,
-//! action, resource, context) mints a different key, never a stale hit.
+//! Content-keyed [`DecisionCache`] (spec §7/D12; SMA-470 D4): caches a previously-computed
+//! [`Decision`] under a key that folds in the compiled policy set's content hash, the entity
+//! generation (Task 10), AND the full request (principal/action/resource/context), so a
+//! cached decision can only ever be served back for the exact same question asked against
+//! the exact same policy/entity state — any change to any of those six inputs
+//! (policy_content, entity_gen, principal, action, resource, context) mints a different key,
+//! never a stale hit. The policy component is deliberately the compiled set's content hash
+//! rather than the `policy_gen` counter: that counter is Redis-sourced and can move
+//! NON-monotonically (a swallowed bump, a reset-to-0 key), which would let a key space that
+//! was live before a revoke be re-entered and replay a pre-revoke `Allow`. See
+//! [`decision_key`]'s doc for the full rationale.
 //!
 //! Two implementations: [`MemoryDecisionCache`] (single-replica, process lifetime only —
 //! same posture as `Generations::memory`) and [`RedisDecisionCache`] (cross-replica,
@@ -24,27 +29,36 @@ use redis::{AsyncCommands, Client};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// Redis/in-proc key prefix (spec §7): `iam:authz:dec:<policy_gen>:<entity_gen>:<hash>`.
+/// Redis/in-proc key prefix (spec §7): `iam:authz:dec:<policy_content>:<entity_gen>:<hash>`.
 const KEY_PREFIX: &str = "iam:authz:dec:";
 
-/// The cache key for one [`AccessRequest`] decided against a given `policy_gen`/
-/// `entity_gen` pair: `iam:authz:dec:<policy_gen>:<entity_gen>:<blake3 hex digest>`. The
-/// digest is over a canonical (deterministic) serialization of `(principal.canonical(),
+/// The cache key for one [`AccessRequest`] decided against a given compiled-policy content
+/// hash and `entity_gen`: `iam:authz:dec:<policy_content>:<entity_gen>:<blake3 hex digest>`.
+///
+/// The policy component is [`CompiledPolicies::content_hash`], NOT the `policy_gen` counter
+/// (SMA-470 D4). The counter is Redis-sourced: it can stall behind a swallowed bump, reset to
+/// 0 when Redis loses its data, and therefore move NON-monotonically — which would let a key
+/// space that was live earlier be re-entered, replaying a pre-revoke `Allow` from before the
+/// change. A content hash cannot: it is a pure function of the compiled policy set, identical
+/// across replicas that compiled the same set (so the cache stays shared fleet-wide) and
+/// always different when the set differs.
+///
+/// The digest is over a canonical (deterministic) serialization of `(principal.canonical(),
 /// action.as_wire(), resource.canonical(), context)` — a `serde_json` encoding of that
 /// tuple, which is deterministic here because [`RequestContext`] wraps a `BTreeMap` (always
 /// iterated in sorted key order, never hashmap-random order).
 ///
-/// The key changes if ANY of the six inputs changes: `policy_gen`/`entity_gen` are folded
-/// in verbatim (not hashed) so a generation bump always mints a disjoint key space, and the
-/// request's four fields all feed the digest.
+/// The key changes if ANY of the six inputs changes: `policy_content`/`entity_gen` are
+/// folded in verbatim (not hashed) so a content or generation change always mints a disjoint
+/// key space, and the request's four fields all feed the digest.
 #[must_use]
-pub fn decision_key(policy_gen: u64, entity_gen: u64, req: &AccessRequest) -> String {
+pub fn decision_key(policy_content: &str, entity_gen: u64, req: &AccessRequest) -> String {
     let canonical = (req.principal.canonical(), req.action.as_wire(), req.resource.canonical(), &req.context);
     // `RequestContext` derives `Serialize` and every field feeding this tuple does too —
     // encoding a value built entirely from those cannot fail.
     let bytes = serde_json::to_vec(&canonical).expect("decision_key's canonical tuple is always serializable");
     let digest = blake3::hash(&bytes);
-    format!("{KEY_PREFIX}{policy_gen}:{entity_gen}:{}", digest.to_hex())
+    format!("{KEY_PREFIX}{policy_content}:{entity_gen}:{}", digest.to_hex())
 }
 
 /// In-process `DecisionCache`: a plain `Mutex<HashMap<..>>` — single-replica, process
@@ -202,57 +216,69 @@ mod tests {
     #[test]
     fn decision_key_is_stable_for_identical_inputs() {
         let req = base_request();
-        assert_eq!(decision_key(1, 2, &req), decision_key(1, 2, &req));
+        assert_eq!(decision_key("content-a", 2, &req), decision_key("content-a", 2, &req));
     }
 
+    /// SMA-470 D4: the key's policy component is the compiled set's content hash, so any
+    /// policy/grant change mints a disjoint key space — even when the generation counter did
+    /// not move (a swallowed bump, a reset counter).
     #[test]
-    fn decision_key_changes_when_policy_gen_changes() {
+    fn decision_key_changes_when_policy_content_changes() {
         let req = base_request();
-        assert_ne!(decision_key(1, 2, &req), decision_key(9, 2, &req));
+        assert_ne!(decision_key("content-a", 2, &req), decision_key("content-b", 2, &req));
+    }
+
+    /// SMA-470 D4: identical content on two replicas yields an identical key, so the Redis
+    /// decision cache stays SHARED across the fleet — the property a process-local counter
+    /// could never provide.
+    #[test]
+    fn decision_key_is_stable_across_replicas_for_identical_content() {
+        let req = base_request();
+        assert_eq!(decision_key("content-a", 2, &req), decision_key("content-a", 2, &req));
     }
 
     #[test]
     fn decision_key_changes_when_entity_gen_changes() {
         let req = base_request();
-        assert_ne!(decision_key(1, 2, &req), decision_key(1, 9, &req));
+        assert_ne!(decision_key("content-a", 2, &req), decision_key("content-a", 9, &req));
     }
 
     #[test]
     fn decision_key_changes_when_principal_changes() {
         let mut other = base_request();
         other.principal = prn("principal", 99);
-        assert_ne!(decision_key(1, 2, &base_request()), decision_key(1, 2, &other));
+        assert_ne!(decision_key("content-a", 2, &base_request()), decision_key("content-a", 2, &other));
     }
 
     #[test]
     fn decision_key_changes_when_action_changes() {
         let mut other = base_request();
         other.action = Action::ListProjects;
-        assert_ne!(decision_key(1, 2, &base_request()), decision_key(1, 2, &other));
+        assert_ne!(decision_key("content-a", 2, &base_request()), decision_key("content-a", 2, &other));
     }
 
     #[test]
     fn decision_key_changes_when_resource_changes() {
         let mut other = base_request();
         other.resource = prn("project", 99);
-        assert_ne!(decision_key(1, 2, &base_request()), decision_key(1, 2, &other));
+        assert_ne!(decision_key("content-a", 2, &base_request()), decision_key("content-a", 2, &other));
     }
 
     #[test]
     fn decision_key_changes_when_context_changes() {
         let mut other = base_request();
         other.context.0.insert("ip".to_string(), ContextValue::Str("10.0.0.1".to_string()));
-        assert_ne!(decision_key(1, 2, &base_request()), decision_key(1, 2, &other));
+        assert_ne!(decision_key("content-a", 2, &base_request()), decision_key("content-a", 2, &other));
 
         let mut different_value = base_request();
         different_value.context.0.insert("ip".to_string(), ContextValue::Str("10.0.0.2".to_string()));
-        assert_ne!(decision_key(1, 2, &other), decision_key(1, 2, &different_value));
+        assert_ne!(decision_key("content-a", 2, &other), decision_key("content-a", 2, &different_value));
     }
 
     #[tokio::test]
     async fn memory_cache_get_put_round_trips() {
         let cache = MemoryDecisionCache::new();
-        let key = decision_key(1, 2, &base_request());
+        let key = decision_key("content-a", 2, &base_request());
         let decision = sample_decision();
 
         assert!(cache.get(&key).await.is_none(), "nothing cached yet");
