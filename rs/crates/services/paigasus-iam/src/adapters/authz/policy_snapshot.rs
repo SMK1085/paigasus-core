@@ -33,20 +33,31 @@
 //! known-good snapshot keeps serving decisions.
 //!
 //! **Monotonic-write guard:** [`PolicySnapshot::reload_now`] does not swap in a freshly
-//! compiled set unconditionally — [`PolicySnapshot::install_if_newer`] installs it only if
-//! its `r#gen` is strictly newer than what's already live. Two reloads can race for the
-//! write lock and finish out of gen order (the one that observed an OLDER `policy_gen` can
-//! acquire the lock AFTER one that observed a newer gen, e.g. if it was already mid-compile
-//! when the second reload started and read a fresher gen); an unconditional swap would then
-//! regress the in-memory snapshot to a stale policy set — transiently un-revoking a revoked
-//! grant, say — until the next reload self-heals it. That self-heal window is small but
-//! security-adjacent, so the swap itself is guarded rather than relied upon to self-correct.
+//! compiled set unconditionally — [`PolicySnapshot::install_if_fresher`] installs it only if
+//! it comes from a load that started strictly later than the one currently installed (SMA-470
+//! D-B). Two reloads can race for the write lock and finish out of start order (the one that
+//! started EARLIER can acquire the lock AFTER one that started later, e.g. if it was already
+//! mid-compile when the second reload started); an unconditional swap would then regress the
+//! in-memory snapshot to a stale policy set — transiently un-revoking a revoked grant, say —
+//! until the next reload self-heals it. That self-heal window is small but security-adjacent,
+//! so the swap itself is guarded rather than relied upon to self-correct.
+//!
+//! That guard used to compare `CompiledPolicies::r#gen` directly, but `r#gen` is a
+//! Redis-sourced counter that can stall, reset, or fail to advance across a reload — exactly
+//! the SMA-470 scenario, where a revoke's `policy_gen` bump is lost during a Redis outage.
+//! Requiring `r#gen` to strictly advance meant [`PolicySnapshot::spawn_reload`]'s TTL
+//! backstop — the mechanism this module docs above describe as bounding staleness even with
+//! no visible gen movement — could recompile at the SAME gen forever and never install the
+//! result, so the swallowed revoke was never picked up. The guard now orders installs on
+//! `load_seq`, a process-local counter claimed once per load regardless of what `policy_gen`
+//! reports, so a same-gen recompile can still install.
 
 use cedar_policy::PolicyId;
 use paigasus_iam_core::authz::engine::{CompiledPolicies, PolicyEngine};
 use paigasus_iam_core::{AuthzError, PolicyStore, RoleGrantStore};
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -58,6 +69,12 @@ use tokio::task::JoinHandle;
 struct SnapshotState {
     compiled: Arc<CompiledPolicies>,
     loaded_at: Instant,
+    /// The `load_seq` of the load whose result is currently installed (SMA-470). The
+    /// monotonic-write guard compares THIS, not `compiled.r#gen`: the generation is a
+    /// Redis-sourced counter that can stall, reset, or repeat, so it cannot order two loads
+    /// — and requiring it to strictly advance is what made the TTL backstop unable to install
+    /// a same-generation recompile (defect D-B).
+    installed_seq: u64,
 }
 
 /// The authoritative compiled Cedar policy set, cached in-process and kept fresh via
@@ -69,21 +86,30 @@ pub struct PolicySnapshot {
     policies: Arc<dyn PolicyStore>,
     grants: Arc<dyn RoleGrantStore>,
     state: RwLock<SnapshotState>,
+    /// Hands out a strictly increasing token per load. Claimed immediately BEFORE the first
+    /// Postgres read (see [`Self::load_and_compile`]) so it orders loads by when they read
+    /// their data — which is the property the monotonic-write guard actually needs.
+    load_seq: AtomicU64,
 }
 
 impl PolicySnapshot {
     /// Loads every policy/template + role grant, compiles them, and stamps the result with
     /// the `policy_gen` observed at the START of this load (see the module docs' "no
-    /// lost update" note).
+    /// lost update" note). Builds the `load_seq` counter first so this initial load claims
+    /// seq `1` through the exact same [`Self::load_and_compile`] path every later reload
+    /// uses — no throwaway empty compile, no double install.
     pub async fn new(policies: Arc<dyn PolicyStore>, grants: Arc<dyn RoleGrantStore>) -> Result<Self, AuthzError> {
-        let compiled = Self::load_and_compile(policies.as_ref(), grants.as_ref()).await?;
+        let load_seq = AtomicU64::new(0);
+        let (compiled, seq) = Self::load_and_compile(policies.as_ref(), grants.as_ref(), &load_seq).await?;
         Ok(Self {
             policies,
             grants,
             state: RwLock::new(SnapshotState {
                 compiled: Arc::new(compiled),
                 loaded_at: Instant::now(),
+                installed_seq: seq,
             }),
+            load_seq,
         })
     }
 
@@ -113,25 +139,25 @@ impl PolicySnapshot {
     /// — [`Self::reload_if_stale`] gates it on gen advance; [`Self::spawn_reload`]'s TTL
     /// branch calls it unconditionally as the max-staleness backstop (AC3).
     async fn reload_now(&self) -> Result<(), AuthzError> {
-        let compiled = Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref()).await?;
-        self.install_if_newer(compiled).await;
+        let (compiled, seq) = Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq).await?;
+        self.install_if_fresher(compiled, seq).await;
         Ok(())
     }
 
-    /// Installs `compiled` under the write lock iff its `r#gen` is strictly newer than
-    /// what's already installed — the monotonic-write guard from the module docs. If it
-    /// isn't (this reload lost a race against one that already installed the same or a
-    /// newer generation), `compiled` is dropped and `state` is left completely untouched.
+    /// Installs `compiled` under the write lock iff `seq` is fresher than the installed load's
+    /// — the monotonic-write guard. If it isn't (this load lost a race against one that
+    /// started later), `compiled` is dropped and `state` is left completely untouched.
     ///
-    /// That deliberately includes `loaded_at`: we only refresh the TTL clock when the
-    /// snapshot actually advances, never on a discarded stale result. Doing otherwise
-    /// would let a losing, no-op reload mask this replica's true staleness from
-    /// [`Self::spawn_reload`]'s TTL backstop — the opposite of what that backstop is for.
-    async fn install_if_newer(&self, compiled: CompiledPolicies) {
+    /// `loaded_at` moves only on an actual install, so a losing no-op reload can never mask
+    /// this replica's true staleness from [`Self::spawn_reload`]'s TTL backstop.
+    async fn install_if_fresher(&self, compiled: CompiledPolicies, seq: u64) {
         let mut state = self.state.write().await;
-        if compiled.r#gen > state.compiled.r#gen {
+        if seq > state.installed_seq {
             state.compiled = Arc::new(compiled);
             state.loaded_at = Instant::now();
+            state.installed_seq = seq;
+        } else {
+            tracing::debug!(rejected_seq = seq, installed_seq = state.installed_seq, "policy_snapshot: discarding an out-of-order reload");
         }
     }
 
@@ -140,7 +166,15 @@ impl PolicySnapshot {
     /// silently skips a grant whose role template is absent (fail-safe: the grant
     /// contributes no permission) — this logs a `tracing::warn!` naming any such grants so
     /// an operator can tell a "dead" grant apart from one that's merely unused.
-    async fn load_and_compile(policies: &dyn PolicyStore, grants: &dyn RoleGrantStore) -> Result<CompiledPolicies, AuthzError> {
+    ///
+    /// Claims `load_seq`'s next token immediately before the first store read, so it orders
+    /// loads by when they read their data — which is the property the monotonic-write guard
+    /// in [`Self::install_if_fresher`] needs, and the generation counter cannot provide
+    /// (SMA-470 D-B). Claiming it any earlier would put the `policy_gen` read — the step
+    /// that stalls during exactly the Redis outage this guards against — between the token
+    /// and the data it labels.
+    async fn load_and_compile(policies: &dyn PolicyStore, grants: &dyn RoleGrantStore, load_seq: &AtomicU64) -> Result<(CompiledPolicies, u64), AuthzError> {
+        let seq = load_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let observed_gen = policies.policy_gen().await?;
         let docs = policies.list_all().await?;
         let all_grants = grants.list_all().await?;
@@ -161,7 +195,7 @@ impl PolicySnapshot {
             );
         }
 
-        Ok(compiled)
+        Ok((compiled, seq))
     }
 
     /// Spawns the background reload loop: every `poll` interval, reload if `policy_gen`
@@ -454,47 +488,92 @@ mod tests {
         assert!(!Arc::ptr_eq(&first_reload, &second_reload));
     }
 
-    /// Proves the monotonic-write guard from the module docs: an older-gen compiled set
-    /// must never overwrite a newer one already installed, even if the older reload's
-    /// writer is the one that reaches the write lock LAST.
-    ///
-    /// Two real, concurrently-launched `reload_now`s racing for the write lock in that
-    /// exact order is timing-dependent to pin deterministically; instead this drives the
-    /// guard at the swap boundary directly (mirroring the mid-load-bump test's technique
-    /// of arming a deterministic race window rather than depending on scheduler luck):
-    /// compile two genuinely distinct `CompiledPolicies` — an "older" one from gen 1, a
-    /// "newer" one from gen 2 — via the same private `load_and_compile` every real reload
-    /// uses, then feed them to `install_if_newer` in the exact order a losing race would
-    /// produce (newer installs first, older arrives and attempts to install second).
+    /// SMA-470 D-B: the TTL backstop (`spawn_reload`'s `ttl_elapsed` branch calls
+    /// `reload_now` unconditionally) must actually INSTALL a recompile when the generation
+    /// counter has not moved — the exact case the module docs say the backstop exists for.
+    /// Before this fix `install_if_newer` required a strictly greater gen, so the backstop
+    /// recompiled and discarded on every poll, forever, and a grant/revoke whose bump was
+    /// swallowed was never picked up.
     #[tokio::test]
-    async fn install_if_newer_rejects_an_older_gen_arriving_after_a_newer_one_is_installed() {
+    async fn ttl_backstop_installs_a_same_gen_recompile() {
         let policies_store = Arc::new(FakePolicyStore::new(vec![org_admin_template()]));
         let grants_store = Arc::new(FakeRoleGrantStore::new(vec![]));
         let policies: Arc<dyn PolicyStore> = policies_store.clone();
         let grants: Arc<dyn RoleGrantStore> = grants_store.clone();
 
-        let snapshot = PolicySnapshot::new(policies.clone(), grants.clone()).await.expect("build succeeds");
+        let snapshot = PolicySnapshot::new(policies, grants).await.expect("build succeeds");
         assert_eq!(snapshot.current().await.r#gen, 0);
 
+        // A grant lands in Postgres but its `policy_gen` bump is LOST (Redis down) — SMA-470's
+        // scenario, in the grant direction so the effect is easy to observe.
+        let grant_id = Uuid::from_u128(700);
+        grants_store.grant(&role_grant(grant_id, "org_admin")).await.unwrap();
+
+        snapshot.reload_now().await.expect("reload_now succeeds");
+
+        let after = snapshot.current().await;
+        assert!(
+            after.policy_set.policy(&grant_policy_id(grant_id)).is_some(),
+            "the TTL backstop must install a same-gen recompile — otherwise a swallowed bump is never recovered"
+        );
+    }
+
+    /// SMA-470: the backstop must also reset the TTL clock when it installs, so
+    /// `spawn_reload` stops re-entering the `ttl_elapsed` branch on every poll.
+    #[tokio::test]
+    async fn a_same_gen_backstop_install_resets_the_ttl_clock() {
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(vec![org_admin_template()]));
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![]));
+
+        let snapshot = PolicySnapshot::new(policies, grants).await.expect("build succeeds");
+        let before = snapshot.state.read().await.loaded_at;
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        snapshot.reload_now().await.expect("reload_now succeeds");
+
+        assert!(snapshot.state.read().await.loaded_at > before, "an installed recompile must refresh loaded_at");
+    }
+
+    /// SMA-470: the monotonic-write guard's intent is preserved, now expressed over the load
+    /// sequence rather than the generation — a load that STARTED earlier must never overwrite
+    /// one that started later, even if it reaches the write lock last. This replaces the old
+    /// `install_if_newer_rejects_an_older_gen_arriving_after_a_newer_one_is_installed`.
+    #[tokio::test]
+    async fn install_if_fresher_rejects_an_older_load_arriving_after_a_newer_one() {
+        let policies_store = Arc::new(FakePolicyStore::new(vec![org_admin_template()]));
+        let grants_store = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let policies: Arc<dyn PolicyStore> = policies_store.clone();
+        let grants: Arc<dyn RoleGrantStore> = grants_store.clone();
+
+        let snapshot = PolicySnapshot::new(policies, grants).await.expect("build succeeds");
+
+        // The "older" load starts first and so claims the lower seq.
+        let (older, older_seq) = PolicySnapshot::load_and_compile(policies_store.as_ref(), grants_store.as_ref(), &snapshot.load_seq)
+            .await
+            .expect("compiles");
+
+        // A grant lands, then the "newer" load starts and claims the higher seq.
+        let grant_id = Uuid::from_u128(900);
+        grants_store.grant(&role_grant(grant_id, "org_admin")).await.unwrap();
         policies_store.bump_policy_gen().await.unwrap();
-        let older = PolicySnapshot::load_and_compile(policies.as_ref(), grants.as_ref()).await.expect("compiles at gen 1");
-        assert_eq!(older.r#gen, 1);
+        let (newer, newer_seq) = PolicySnapshot::load_and_compile(policies_store.as_ref(), grants_store.as_ref(), &snapshot.load_seq)
+            .await
+            .expect("compiles");
+        assert!(newer_seq > older_seq);
 
-        policies_store.bump_policy_gen().await.unwrap();
-        let newer = PolicySnapshot::load_and_compile(policies.as_ref(), grants.as_ref()).await.expect("compiles at gen 2");
-        assert_eq!(newer.r#gen, 2);
+        // The newer load wins the race to the write lock.
+        snapshot.install_if_fresher(newer, newer_seq).await;
+        let installed = snapshot.current().await;
+        assert!(installed.policy_set.policy(&grant_policy_id(grant_id)).is_some());
 
-        // The reload that observed the NEWER gen wins the race to the write lock first.
-        snapshot.install_if_newer(newer).await;
-        assert_eq!(snapshot.current().await.r#gen, 2);
-        let installed_at_gen_2 = snapshot.current().await;
-
-        // The reload that observed the OLDER gen arrives second — the guard must reject
-        // it rather than regress the installed snapshot.
-        snapshot.install_if_newer(older).await;
+        // The older load arrives second — the guard must reject it rather than regress.
+        snapshot.install_if_fresher(older, older_seq).await;
         let after = snapshot.current().await;
 
-        assert_eq!(after.r#gen, 2, "an older-gen compiled set must never overwrite a newer installed one");
-        assert!(Arc::ptr_eq(&installed_at_gen_2, &after), "the rejected older-gen install must leave the installed Arc untouched");
+        assert!(
+            after.policy_set.policy(&grant_policy_id(grant_id)).is_some(),
+            "an older-seq load must never overwrite a newer installed one"
+        );
+        assert!(Arc::ptr_eq(&installed, &after), "the rejected install must leave the installed Arc untouched");
     }
 }
