@@ -92,7 +92,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 |---|---|---|---|
 | `iam_grpc_requests_total` | counter | `service`, `method`, `grpc_status` | One increment per completed tonic handler call. `service`/`method` are compile-time string literals (e.g. `service="Authorization"`, `method="IsAuthorized"`) — never derived from the request path, so cardinality is bounded to the known RPC set (Tenancy / Authentication / Authorization / ServiceAccount / Audit). `grpc_status` is `"ok"` or the canonical tonic status-code name (`permission_denied`, `unavailable`, `invalid_argument`, …). |
 | `iam_grpc_request_duration_seconds` | histogram | `service`, `method` | gRPC handler latency, recorded at the same handler-boundary call site as the counter above. |
-| `iam_authz_decisions_total` | counter | `decision`, `cache` | Every `CedarAuthorizer::is_authorized` outcome. `decision` ∈ `allow`/`deny`. `cache` ∈ `hit` (served from the generation-keyed decision cache — deny hits are still re-audited, allow hits are not), `miss` (computed fresh), or `bypass` (the Redis-backed entity-generation counter was unreadable, so the cache was skipped entirely and the decision was computed directly against the last-known-good policy snapshot — see §4 "Authz availability"). The highest-value operational signal in the catalog: allow/deny volume and cache effectiveness. |
+| `iam_authz_decisions_total` | counter | `decision`, `cache` | Every `CedarAuthorizer::is_authorized` outcome. `decision` ∈ `allow`/`deny`. `cache` ∈ `hit` (served from the decision cache, keyed on the compiled policy set's **content hash** plus the entity generation — deny hits are still re-audited, allow hits are not), `miss` (computed fresh), or `bypass` (the Redis-backed entity-generation counter was unreadable, so the cache was skipped entirely and the decision was computed directly against the last-known-good policy snapshot — see §4 "Authz availability"). The highest-value operational signal in the catalog: allow/deny volume and cache effectiveness. |
 | `iam_authz_policy_snapshot_reloads_total` | counter | `outcome` | Every `PolicySnapshot` reload attempt. `outcome` ∈ `installed` (a fresher compiled set replaced the live one), `rejected` (an out-of-order reload lost its race and was discarded — benign in isolation), `failed` (the load or Cedar compile errored; the last-known-good snapshot keeps serving). `installed` must stay non-zero: the TTL backstop installs one every `authz.policy_cache_ttl_secs` regardless of generation movement, and silence means revocations are not taking effect (SMA-470). |
 | `iam_audit_records_total` | counter | `outcome`, `result` | Every `PgAuditLog::record`/`record_out_of_band` call. `outcome` ∈ `committed` (mutation audit rows) / `denied` (denial audit rows). `result` is `"ok"` for an INSERT that did not error. **Caveat:** this counts insert-attempts-not-erroring, not durably-committed rows — an in-transaction `record` call on a mutation's UoW bumps `result="ok"` before that transaction's outer `commit()`, so a rare downstream rollback leaves the row invisible even though the counter already incremented. This only diverges on the mutation-error path, which is itself visible elsewhere as a `result="error"`/5xx signal, so it doesn't mislead in steady state. |
 | `iam_denial_audits_dropped_total` | counter | — | Bumped at `DenialAuditBuffer::push`'s drop-oldest site when the bounded denial-audit buffer is full. **Non-zero means the audit trail for denials has gaps** — see §4 "Denial-audit drops". |
@@ -437,7 +437,8 @@ or the `spawn_reload` background task itself panicked/exited without bringing do
   boot).
 
 See "Authz availability posture" below for the full design this alert protects (fail-open on
-Redis outage, generation-keyed invalidation, and the TTL backstop).
+Redis outage and what it really costs, content-keyed decision invalidation, and the TTL
+backstop that is the actual revocation guarantee).
 
 ### `IamAuditPartitionMaintenanceStalled` — audit partition maintenance is not ticking (warning)
 
@@ -605,30 +606,115 @@ further hardening step, not yet implemented (§6).
 ### Authz availability posture (applies to `IamGrpcHighErrorRate`, authz-related denial patterns)
 
 **Fail-open on Redis outage, never fail-closed.** `CedarAuthorizer::is_authorized` reads a
-Redis-backed entity-generation counter to build its decision-cache key. If that read errors (the
-Redis-backed cache accelerator is unreachable), the decision cache is **bypassed entirely** for
-that call — no key is built, no lookup, no cache population — and the decision is computed
-**directly** against the last-known-good, in-memory-cached policy snapshot. This costs **latency
-only** (an extra entity-slice load + policy evaluation instead of a cache hit); it never
-compromises correctness, and it's directly observable as `iam_authz_decisions_total{cache="bypass"}`.
-A fail-**closed** posture (denying everything during a Redis outage) was considered and explicitly
-deferred to a separate authz-hardening effort — the current, intentional posture favors
-availability.
+Redis-backed entity-generation counter (`GenerationsReader::entity_gen`) to build its
+decision-cache key. If that read errors, the decision cache is **bypassed entirely** for that
+call — no key is built, no lookup, no cache population — and the decision is computed
+**directly** against the in-memory compiled policy snapshot, which is compiled from
+**Postgres**. Correctness is never compromised: the authoritative policy set never lives in
+Redis. The bypass is directly observable as `iam_authz_decisions_total{cache="bypass"}`.
 
-**Revocation freshness is generation-keyed, with a TTL backstop.** A role grant/revoke bumps the
-policy/entity generation counter **synchronously, before the mutation's use-case returns**
-(the AC1 guarantee) — this changes the decision-cache key immediately, so a subsequent
-authorization decision is never served a stale cached `Allow` from before the revoke; it simply
-misses the (now differently-keyed) cache and recomputes. As a backstop against any delay in that
-generation-bump propagating (e.g. degraded Redis connectivity that doesn't outright error but
-lags), cached decisions also expire on a plain TTL — `authz.decision_cache_ttl_secs` (default
-`30` seconds) — bounding the worst-case staleness window even if the generation-based
-invalidation is somehow delayed. Underneath that decision-cache TTL sits a second, independent
-TTL: `PolicySnapshot`'s own backstop (`authz.policy_cache_ttl_secs`, also default `30` seconds)
-unconditionally reloads and installs a fresh compiled policy set every TTL regardless of whether
-the Redis-backed generation counter visibly moved (SMA-470) — this is what makes a revoke take
-effect even through a Redis outage, and `iam_authz_policy_snapshot_reloads_total{outcome="installed"}`
-is its liveness signal (`IamPolicySnapshotReloadsStalled` above).
+**A fail-closed posture is not offered — by decision, not by omission** (SMA-470 D1). Because
+Redis is a pure accelerator here, denying every request during its outage would convert a
+degradation into a total authorization outage. The contract is bounded-staleness fail-open, and
+the bound below is what makes that defensible. There is no config knob to opt into fail-closed,
+and adding one is explicitly out of scope.
+
+**Fail-open is NOT free: budget ~20–30 s per authz decision while Redis is down.** Read this
+before deciding how to treat a Redis outage — the word "fail-open" understates it badly.
+`connect_redis` (`adapters/http/mod.rs:628`) builds the shared `ConnectionManager` with
+`ConnectionManager::new(client)` — **stock settings, no bounded `connection_timeout` or
+`response_timeout`**. redis-rs 1.3's defaults are 6 reconnect retries with exponential backoff
+from 100 ms (`100+200+400+800+1600+3200`), so **each counter read that hits a dead backend burns
+a full ~6.3 s retry cycle before it fails open**, and a single request performs several such
+reads (`policy_gen`, `entity_gen`, the slice cache's own `entity_gen`, plus a post-commit bump on
+a mutation). Measured on a real stopped-Redis container (SMA-470 acceptance test):
+
+| request | measured | retry cycles |
+|---|---|---|
+| `POST /v1/authz/is-authorized` | **19–28 s** | 3–4 |
+| `DELETE /v1/authz/role-grants/{id}` (revoke) | **28.4 s** | 4 |
+
+At those latencies most callers time out first, so operationally a Redis outage is much closer to
+an **authz outage** than to a degradation — even though every decision that does return is
+correct. Page on "Redis is down"; do not treat it as a background degradation. Expect the
+symptom to arrive as `IamGrpcHighErrorRate` / `IamHighErrorRate` / client-side timeouts rather
+than as a clean `cache="bypass"` signal. **The mitigation is to bound the client timeouts** (a short
+`connection_timeout`/`response_timeout`, and ideally a short-circuit once the backend is
+known-down) — **this is not yet done**; it is pre-existing and tracked as a follow-up. Until it
+lands there is no config-only workaround, and the only lever is to restore Redis or to run
+`authz.cache.backend = "memory"` (single-replica only).
+
+**Revocation freshness is TTL-bounded; the generation bump is best-effort.** A grant/revoke bumps
+`policy_gen` **after** its Postgres transaction has committed, via an awaited but
+**best-effort** `GenerationsPolicyGenBumper::bump` that **logs and swallows** its own error. With
+Redis unavailable the revoke therefore commits while its invalidation signal is silently lost —
+the bump is an accelerator, never the guarantee.
+
+The guarantee is the policy snapshot's **unconditional TTL backstop**: once
+`authz.policy_cache_ttl_secs` (default `30`) has elapsed since the last install, the next
+`authz.refresh_interval_secs` poll tick (default `1`) recompiles from Postgres and installs the
+result **regardless of whether the generation counter moved**. Worst-case revocation latency is
+therefore **`policy_cache_ttl_secs + refresh_interval_secs`** — **31 s at the defaults** — plus
+the reload's own duration, which during a Redis outage is itself seconds rather than
+milliseconds (the reload's `policy_gen` read pays the retry budget above before failing open).
+`IamConfig::validate` only rejects `refresh_interval_secs` **greater** than
+`policy_cache_ttl_secs`; **equal is permitted**, so the worst case is a genuine *sum* and an
+operator who raises the poll interval to its permitted maximum doubles the bound to
+`2 × policy_cache_ttl_secs` (60 s at the default TTL). Neither setting has an upper cap, so
+raising `policy_cache_ttl_secs` scales the bound linearly.
+
+All of that assumes **Postgres is reachable**. A persistently failing load — or a malformed
+policy row that aborts Cedar compilation — aborts every reload and keeps the last-known-good
+snapshot **indefinitely**, with no bound at all. That is what
+`IamPolicySnapshotReloadsStalled` and `iam_authz_policy_snapshot_reloads_total{outcome="failed"}`
+exist to surface.
+
+**Same-replica revocation immediacy is degraded during an outage.** Normally
+`CedarAuthorizer::is_authorized` calls `PolicySnapshot::reload_if_stale` synchronously, so a
+revoke is visible on its own replica on the very next decision. While the generation stamp is
+**provisional** (the counter was unreadable at the last load, so the stamp was carried over
+rather than observed), request-driven reloads are **suppressed entirely** — comparing a guessed
+stamp against a live read would report permanent staleness and trigger a recompile per decision.
+During a Redis outage the TTL backstop is therefore the *only* refresh path, and a revoke
+committed during the outage becomes visible on its own replica in up to
+`policy_cache_ttl_secs + refresh_interval_secs` (~31 s at defaults), not immediately. The
+transition is logged once per state change: `policy_gen unreadable — serving a Postgres-compiled
+snapshot on a provisional generation stamp` on the way in, `policy_gen readable again` on the way
+out.
+
+**The decision cache does not add to that bound.** Its key's policy component is a **content
+hash** of the compiled policy set (SMA-470), not the `policy_gen` counter, so a reload that picks
+up a revoke moves every affected request into a disjoint key space immediately — no cached
+pre-revoke `Allow` can be re-entered even if the counter stalls or resets to `0`. Note that
+decision-cache **`Allow` hits are not re-audited** (cached `Deny`s are, on every call), so any
+staleness window is also an **audit gap**: `audit_log` will show no entry for the allowed calls
+served from cache during it.
+
+**The content hash covers *stored* inputs only.** It is computed over the policy/template
+documents and the role-grant rows — not over the Cedar `schema()` or the `Action`→Cedar-UID
+mapping, which are **compile-time constants**. A release that changes evaluation semantics
+without touching any stored policy or grant therefore produces the *same* hash on old and new
+replicas, and during a rolling deploy both share decision-cache keys. This is not a regression
+(the `policy_gen` counter it replaced was equally content-independent), but for a
+semantics-changing deploy either flush `iam:authz:dec:*` or accept up to
+`authz.decision_cache_ttl_secs` of mixed-semantics cache hits.
+
+**This bound covers policy and role-grant revocation only.** Access changes driven by *tenancy*
+state — an organization archived, a membership removed — flow through `entity_gen` and the
+entity-slice cache instead. With `authz.cache.backend = "redis"` those are bounded by
+`authz.slice_cache_ttl_secs` (default `60`) plus `authz.decision_cache_ttl_secs` (default `30`)
+— **90 s at the defaults**, roughly three times the policy-path bound. Both caches exist only on the
+Redis backend; the `memory` backend has no slice cache at all and its in-process counters can
+never fail to be read.
+
+**Redis `maxmemory-policy` must be `volatile-*`, never `allkeys-*`.** `iam:authz:policy_gen` and
+`iam:authz:entity_gen` are written with a bare `INCR` and **carry no TTL**, so under
+`allkeys-lru`/`allkeys-lfu`/`allkeys-random` they are ordinary eviction candidates.
+`Generations::read` maps a missing key to `0`, so evicting one **silently rewinds** that counter.
+The snapshot does recover (`reload_if_stale` reloads on generation *inequality*, not on advance,
+precisely so a `FLUSHALL` can't freeze it until restart), but an `allkeys-*` policy turns a
+routine memory-pressure event into an authz-freshness event for no benefit. Verify with
+`CONFIG GET maxmemory-policy`.
 
 ### Audit retention & partitioning
 
@@ -847,3 +933,11 @@ Not implemented in this cycle; tracked as explicit follow-ups:
   don't exist yet; this cycle scoped gateway metrics to the M0 auth+proxy surface only.
 - **A combined IAM introspect-and-authorize RPC**, which would also reduce the gateway's
   per-request round-trip count and the surface area of `GatewayIamDependencyUnavailable`.
+- **Bounded Redis client timeouts** (a short `connection_timeout`/`response_timeout` on
+  `connect_redis`'s `ConnectionManager`, plus a short-circuit once the backend is known-down).
+  This is the named mitigation for the ~20–30 s per-decision cost that §4 "Authz availability
+  posture" documents; until it lands, a Redis outage degrades authz availability far more than
+  the word "fail-open" implies. Pre-existing, not introduced by SMA-470.
+- **Postgres-backed generation counters**, so a grant/revoke and its invalidation bump commit in
+  one transaction. That removes §4's revocation-staleness window entirely rather than bounding
+  it, and removes the `maxmemory-policy` mandate; it needs an ADR and a migration (SMA-470 D3).

@@ -19,6 +19,15 @@
 //! calls `reload_if_stale` synchronously before deciding, so a grant is visible on the same
 //! replica immediately (AC1) rather than waiting out the poll interval.
 //!
+//! **That same-replica immediacy is conditional.** It holds only while the installed
+//! generation stamp is authoritative. Once the stamp is PROVISIONAL (the counter was
+//! unreadable at the last load — a Redis outage), `reload_if_stale` suppresses request-driven
+//! reloads entirely (see the two guards below), so the TTL backstop becomes the ONLY refresh
+//! path: a revoke committed during the outage becomes visible on its own replica in up to
+//! `ttl + poll` (`authz.policy_cache_ttl_secs + authz.refresh_interval_secs`, ~31s at the
+//! defaults), not on the very next decision. `IamConfig::validate` permits
+//! `refresh_interval_secs == policy_cache_ttl_secs`, so that worst case is a genuine SUM.
+//!
 //! **No-lost-update gen stamping:** [`PolicySnapshot::load_and_compile`] reads `policy_gen`
 //! *before* `list_all`-ing policies/grants, and stamps the freshly compiled
 //! `CompiledPolicies::r#gen` with that pre-load value — never a value read after the load

@@ -138,7 +138,12 @@ redis = { version = "1", default-features = false, features = [
 cedar-policy = "4"
 # blake3 — decision-cache key hashing (`paigasus-iam`'s `adapters::authz::decision_cache`,
 # SMA-444 Task 14): a canonical `(principal, action, resource, context)` serialization is
-# blake3-hashed into the Redis/in-proc key `iam:authz:dec:<policy_gen>:<entity_gen>:<hash>`.
+# blake3-hashed into the Redis/in-proc key
+# `iam:authz:dec:<policy_content>:<entity_gen>:<hash>`. blake3 also computes the
+# `<policy_content>` component itself — `CompiledPolicies::content_hash`, a hash of the stored
+# policy documents + role grants, which replaced the Redis-sourced `policy_gen` counter in that
+# key (SMA-470 D4: a counter that can stall or reset to 0 lets a pre-revoke key space be
+# re-entered; a content hash cannot).
 # Only consumed by `paigasus-iam`; no wasm/binding exposure (SMA-448's getrandom-free posture
 # is unaffected — blake3's default features carry no OS-entropy dependency).
 blake3 = "1"

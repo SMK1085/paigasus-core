@@ -7,7 +7,8 @@
 //!
 //! `payload` is a TEXT column (m0007, mirrors `audit_log.detail`, m0006): the domain event's
 //! `serde_json::Value` written via its plain `to_string()` — infallible, `Value` always
-//! serializes. `event_type` is the [`EventType::as_wire`] stable wire string, not the enum's
+//! serializes. `event_type` is the [`EventType::as_wire`](paigasus_iam_core::EventType::as_wire)
+//! stable wire string, not the enum's
 //! Rust name (renaming a variant must not change what's stored). `schema_version` narrows
 //! `u16` -> `i32` (the entity's SeaORM column type, mirrors Postgres `integer`) — always
 //! lossless, `u16::MAX` fits `i32`.

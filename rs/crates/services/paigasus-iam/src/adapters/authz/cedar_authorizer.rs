@@ -31,14 +31,21 @@
 //!    the decision-cache key. If it errors (the Redis-backed counter is unreachable), the
 //!    cache is bypassed entirely for this call — no key, no `get`, no `put` — and evaluation
 //!    proceeds unconditionally (D11/D12's fail-open property: an accelerator outage costs
-//!    latency, never correctness). If it succeeds and the key is already cached, that cached
+//!    latency, never correctness). Do not read "costs latency" as "costs little": the shared
+//!    `ConnectionManager` (`adapters::http::connect_redis`) is built with redis-rs's stock
+//!    retry settings and no bounded timeout, so against a dead backend EACH counter read burns
+//!    a ~6.3 s reconnect budget before failing open — a measured 19–28 s per decision (SMA-470
+//!    acceptance test). Correctness is preserved; availability, in practice, largely is not.
+//!    Bounding those timeouts is a tracked follow-up. If the read succeeds and the key is
+//!    already cached, that cached
 //!    [`Decision`] is returned immediately. Hits re-audit **denials only** (full trail,
 //!    D3/D8): a cached `Deny` still gets one fresh audit event per call, because a denial's
 //!    audit trail must never have a gap, cached or not. A cached `Allow`, however, is
 //!    returned WITHOUT touching the audit sink again — the original miss that populated the
 //!    cache already recorded the one audit event for this exact question, and auditing an
 //!    `Allow` again here would just double-record it.
-//! 4. On a miss (or a bypassed cache), the authoritative path: load the [`EntitySlice`] for
+//! 4. On a miss (or a bypassed cache), the authoritative path: load the
+//!    [`EntitySlice`](paigasus_iam_core::authz::model::EntitySlice) for
 //!    `(resource, principal)` and decide via [`PolicyEngine::decide`] against the SAME
 //!    compiled snapshot read in step 2 (never a second `snapshot.current()` read). An
 //!    `AuthzError::ResourceNotFound` slice-load error — the request names a tenancy node that

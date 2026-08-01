@@ -35,7 +35,9 @@ const KEY_PREFIX: &str = "iam:authz:dec:";
 /// The cache key for one [`AccessRequest`] decided against a given compiled-policy content
 /// hash and `entity_gen`: `iam:authz:dec:<policy_content>:<entity_gen>:<blake3 hex digest>`.
 ///
-/// The policy component is [`CompiledPolicies::content_hash`], NOT the `policy_gen` counter
+/// The policy component is
+/// [`CompiledPolicies::content_hash`](paigasus_iam_core::authz::engine::CompiledPolicies::content_hash),
+/// NOT the `policy_gen` counter
 /// (SMA-470 D4). The counter is Redis-sourced: it can stall behind a swallowed bump, reset to
 /// 0 when Redis loses its data, and therefore move NON-monotonically — which would let a key
 /// space that was live earlier be re-entered, replaying a pre-revoke `Allow` from before the
@@ -43,10 +45,21 @@ const KEY_PREFIX: &str = "iam:authz:dec:";
 /// across replicas that compiled the same set (so the cache stays shared fleet-wide) and
 /// always different when the set differs.
 ///
+/// **Scope caveat:** that content hash covers the STORED inputs — the policy/template
+/// documents and the role-grant rows — and nothing else. The Cedar `schema()` and the
+/// `Action`-to-Cedar-UID mapping are compile-time constants outside it, so a release that
+/// changes evaluation semantics WITHOUT touching a stored policy or grant hashes identically
+/// on old and new replicas, and the two share decision-cache keys across a rolling deploy.
+/// Not a regression (the `policy_gen` counter this replaced was equally content-independent),
+/// but a semantics-changing deploy should flush `iam:authz:dec:*` or accept up to
+/// `authz.decision_cache_ttl_secs` of mixed-semantics hits — see the RUNBOOK's "Authz
+/// availability posture".
+///
 /// The digest is over a canonical (deterministic) serialization of `(principal.canonical(),
 /// action.as_wire(), resource.canonical(), context)` — a `serde_json` encoding of that
-/// tuple, which is deterministic here because [`RequestContext`] wraps a `BTreeMap` (always
-/// iterated in sorted key order, never hashmap-random order).
+/// tuple, which is deterministic here because
+/// [`RequestContext`](paigasus_iam_core::authz::model::RequestContext) wraps a `BTreeMap`
+/// (always iterated in sorted key order, never hashmap-random order).
 ///
 /// The key changes if ANY of the six inputs changes: `policy_content`/`entity_gen` are
 /// folded in verbatim (not hashed) so a content or generation change always mints a disjoint
