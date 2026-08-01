@@ -197,9 +197,10 @@ verified against the code:
    materialize a series.)
 
 Defect 3 is the operationally dangerous one: it promises an operator a signal that can never
-arrive. Disabling retention is in fact **unalerted** — the RUNBOOK should say so plainly, and
-point at the existing `iam_audit_default_partition_rows` gauge as the indirect signal that
-create-ahead has stopped.
+arrive. Disabling retention is in fact **unalerted** — the RUNBOOK should say so plainly. There is
+no metric-based fallback either: `iam_audit_default_partition_rows` is set from the same
+retention-gated task (`pg_partition_maintainer.rs:87`), so it is equally absent when retention is
+disabled — the only signal is the one-time startup log line at `main.rs:264`.
 
 ## Change inventory
 

@@ -105,7 +105,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_audit_partition_maintenance_ticks_total` | counter | `result` | One per audit partition-maintenance tick (create-ahead + prune). `result` ∈ `ok`/`error`. Liveness signal — see §4 "Audit partition maintenance stalled". |
 | `iam_audit_partitions_created_total` | counter | — | Monthly leaf partitions created by create-ahead. |
 | `iam_audit_partitions_dropped_total` | counter | `outcome` | Monthly leaf partitions dropped by retention. `outcome` ∈ `denied`/`committed`. |
-| `iam_audit_default_partition_rows` | gauge | — | Rows currently in the audit `DEFAULT` partitions. **Should be 0**; nonzero ⇒ create-ahead fell behind (freezes when the task is stalled/disabled — the ticks counter is the primary liveness signal). |
+| `iam_audit_default_partition_rows` | gauge | — | Rows currently in the audit `DEFAULT` partitions. **Should be 0**; nonzero ⇒ create-ahead fell behind (freezes when the task is stalled while retention stays enabled — the ticks counter is the primary liveness signal there; when retention is **disabled** neither metric exists at all, see §4 "Audit partition maintenance stalled"). |
 
 ### 2.3 `paigasus-gateway` — IAM dependency, OpenAI upstream
 
@@ -384,9 +384,13 @@ index/table bloat and a stuck create-ahead horizon, not an outage.
 series does not exist. `increase()` over an absent series returns empty, so the alert has
 nothing to evaluate and stays silent for as long as the config stays that way. **Disabling
 retention is therefore unalerted** — nothing will tell you that create-ahead and pruning have
-stopped. Track `iam_audit_default_partition_rows` instead: it is the indirect signal that
-create-ahead has stopped keeping up. If you rely on retention being on, assert
-`[audit.retention].enabled` at deploy time rather than expecting this alert to catch it.
+stopped, and there is **no metric-based fallback signal either**: `iam_audit_default_partition_rows`
+is only set inside the same gated task (`pg_partition_maintainer.rs`), so it is equally absent from
+`/metrics` when retention is disabled. The only signal is a one-time startup log line —
+`audit.retention.enabled = false — no partition create-ahead or pruning will run; the DEFAULT
+partitions will fill over time and can block create-ahead until manually reattached (see RUNBOOK)`
+(`main.rs:264`). If you rely on retention being on, assert `[audit.retention].enabled` at deploy
+time rather than expecting this alert — or any metric — to catch it.
 
 **Likely causes:** the maintenance task
 panicked/exited without bringing down the process; the task is stuck on a long-running or
@@ -643,11 +647,14 @@ the triggering mutation's own transaction and a hard failure there rolls back th
 In steady state (`ahead_months ≥ 1`, task ticking normally) **all three should stay permanently
 empty** — `iam_audit_default_partition_rows` (§2.2) is the metric that verifies this, refreshed once
 per successful tick. **Known blind spot:** this gauge freezes (doesn't climb) once the task is
-stalled or disabled — exactly when a default is most likely to be actively filling — so
-`iam_audit_partition_maintenance_ticks_total` (the `IamAuditPartitionMaintenanceStalled` alert
-above) is the primary "is this even running" signal, and the gauge is the secondary "has it already
-fallen behind" signal. Treat a nonzero gauge as urgent: it means live audit rows are currently
-landing outside any proper monthly leaf.
+stalled while retention stays enabled — exactly when a default is most likely to be actively
+filling — so `iam_audit_partition_maintenance_ticks_total` (the `IamAuditPartitionMaintenanceStalled`
+alert above) is the primary "is this even running" signal in that case, and the gauge is the
+secondary "has it already fallen behind" signal. When retention is **disabled**, the gauge is not
+frozen but **absent** — it is set from the same gated task and is never set in the first place — so
+neither metric is a signal there; see the `IamAuditPartitionMaintenanceStalled` NOTE above. Treat a
+nonzero gauge as urgent: it means live audit rows are currently landing outside any proper monthly
+leaf.
 
 **Manual reattach for a non-empty default.** Auto-remediation is a deliberate non-goal for v1 —
 recovering a polluted default is a manual, rare, off-peak operation. Postgres refuses to create or
