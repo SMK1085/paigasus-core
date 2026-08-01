@@ -12,7 +12,8 @@
 
 ## Global Constraints
 
-- Every source file opens with `// SPDX-License-Identifier: Apache-2.0`.
+- Every source file opens with an SPDX header — `// SPDX-License-Identifier: Apache-2.0` for
+  Rust/TS/JS/proto, `# SPDX-License-Identifier: Apache-2.0` for Python and YAML.
 - Rust crates use **edition 2024 + rust-version 1.95**.
 - Conventional commits with a workspace scope: `feat(rs): …`, `fix(rs): …`, `test(rs): …`, `docs(rs): …`.
 - Commit subject must **start lowercase** and be **≤100 chars**. Never put a bare `#NNN` in the commit body — write "owner/repo PR NNN". Keep one contiguous footer block.
@@ -238,7 +239,10 @@ fn content_hash(policies: &[PolicyDocument], grants: &[RoleGrant]) -> String {
         .map(|g| {
             [
                 g.id.to_string(),
-                g.principal.uuid().to_string(),
+                // The FULL principal PRN, not the bare uuid: `link_grant` binds `?principal` to
+                // `to_cedar_uid(grant.principal.prn())`, so hashing the uuid alone would let two
+                // grants that compile to DIFFERENT Cedar policies share a decision-cache key.
+                g.principal.canonical(),
                 g.role_key.clone(),
                 g.scope.canonical_prn(),
                 g.linked_policy_id.clone(),
@@ -383,14 +387,20 @@ Add to the `#[cfg(test)] mod tests` block in `policy_snapshot.rs`:
 
         let snapshot = PolicySnapshot::new(policies, grants).await.expect("build succeeds");
 
-        // The "older" load starts first and so claims the lower seq.
-        let (older, older_seq) = snapshot.load_and_compile(0).await.expect("compiles");
+        // The "older" load starts first and so claims the lower seq. `load_and_compile` is an
+        // ASSOCIATED fn (it predates `Self`, so `new()` can call it) — pass the stores and the
+        // seq source explicitly; there is no `self.load_and_compile(..)` receiver form.
+        let (older, older_seq) = PolicySnapshot::load_and_compile(policies_store.as_ref(), grants_store.as_ref(), &snapshot.load_seq)
+            .await
+            .expect("compiles");
 
         // A grant lands, then the "newer" load starts and claims the higher seq.
         let grant_id = Uuid::from_u128(900);
         grants_store.grant(&role_grant(grant_id, "org_admin")).await.unwrap();
         policies_store.bump_policy_gen().await.unwrap();
-        let (newer, newer_seq) = snapshot.load_and_compile(0).await.expect("compiles");
+        let (newer, newer_seq) = PolicySnapshot::load_and_compile(policies_store.as_ref(), grants_store.as_ref(), &snapshot.load_seq)
+            .await
+            .expect("compiles");
         assert!(newer_seq > older_seq);
 
         // The newer load wins the race to the write lock.
@@ -419,7 +429,7 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd rs && cargo test -p paigasus-iam --lib policy_snapshot
 ```
 
-Expected: FAIL to compile — `no method named install_if_fresher`, and `load_and_compile` takes the wrong arguments.
+Expected: FAIL to compile — `no method named install_if_fresher`, and `load_and_compile` takes the wrong number of arguments (it has no `load_seq` parameter yet).
 
 - [ ] **Step 3: Implement the sequence-number guard**
 
@@ -493,7 +503,9 @@ Replace `install_if_newer` with:
     }
 ```
 
-Rewrite `reload_now` and `load_and_compile` (`load_and_compile` becomes a method so it can claim the seq):
+Rewrite `reload_now` and `load_and_compile`. `load_and_compile` **stays an associated fn** — `new()`
+calls it before `Self` exists — so it takes the `load_seq` source as an explicit `&AtomicU64`
+parameter rather than reaching for `self`:
 
 ```rust
     async fn reload_now(&self) -> Result<(), AuthzError> {
@@ -503,16 +515,21 @@ Rewrite `reload_now` and `load_and_compile` (`load_and_compile` becomes a method
     }
 ```
 
-In `load_and_compile`, claim the seq immediately before the first store read and return it. Keep the rest of the body (the `skipped_role_keys` warn) exactly as it is:
+In `load_and_compile`, claim the seq immediately before the first **Postgres** read — i.e. *after*
+the `policy_gen()` call, not at the top of the fn — and return it. Keep the rest of the body (the
+`skipped_role_keys` warn) exactly as it is:
 
 ```rust
     async fn load_and_compile(policies: &dyn PolicyStore, grants: &dyn RoleGrantStore, load_seq: &AtomicU64) -> Result<(CompiledPolicies, u64), AuthzError> {
-        // Claim the ordering token immediately before the first store read, so it orders loads
-        // by when they read their data. Claiming it earlier would put the `policy_gen` read —
-        // the step that stalls during exactly the Redis outage this guards against — between
-        // the token and the data it labels.
-        let seq = load_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let observed_gen = policies.policy_gen().await?;
+        // Claim the ordering token here — after the Redis-backed `policy_gen` read, immediately
+        // before the first Postgres read — so it orders loads by when they read their data.
+        // Claiming it at the top of the fn would put the `policy_gen` read, the step that stalls
+        // for whole seconds during exactly the Redis outage this guards against, between the
+        // token and the data it labels: a load could hold a LOW seq while it waits and then read
+        // NEWER Postgres data than a load holding a higher one, and `install_if_fresher` would
+        // discard the fresher policy set as out of order.
+        let seq = load_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let docs = policies.list_all().await?;
         let all_grants = grants.list_all().await?;
 
@@ -537,8 +554,9 @@ In `load_and_compile`, claim the seq immediately before the first store read and
 ```
 
 Update the `load_and_compile` call sites inside the test module (the mid-load-bump test) to the
-new signature and tuple return. In the new tests above, `snapshot.load_and_compile(0)` becomes
-`PolicySnapshot::load_and_compile(policies.as_ref(), grants.as_ref(), &snapshot.load_seq)`.
+new signature and tuple return — they were already
+`PolicySnapshot::load_and_compile(policies.as_ref(), grants.as_ref())` and just gain the
+`&snapshot.load_seq` argument.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -567,7 +585,7 @@ Makes the snapshot reload from Postgres even when Redis is down (D-A), recover f
 - Test: same file
 
 **Interfaces:**
-- Consumes: `load_and_compile(&self, fallback_gen) -> Result<(CompiledPolicies, u64), AuthzError>` and `install_if_fresher` from Task 2.
+- Consumes: the associated fn `PolicySnapshot::load_and_compile(policies, grants, load_seq) -> Result<(CompiledPolicies, u64), AuthzError>` and `install_if_fresher` from Task 2.
 - Produces:
   - `SnapshotState.stamp_trusted: bool`
   - `PolicySnapshot.reload_gate: tokio::sync::Mutex<()>`
@@ -766,7 +784,6 @@ Initialize the two new fields in `new()` (`stamp_trusted: true`, `reload_gate: A
 Replace the `policy_gen` read:
 
 ```rust
-        let seq = load_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let (observed_gen, trusted) = match policies.policy_gen().await {
             Ok(g) => (g, true),
             Err(err) => {
@@ -774,6 +791,10 @@ Replace the `policy_gen` read:
                 (fallback_gen, false)
             }
         };
+        // The seq claim from Task 2 stays exactly where it is: BELOW this match, immediately
+        // above the first `list_all`. It must not migrate to the top of the fn — that would put
+        // the stalling `policy_gen` read between the token and the Postgres data it labels.
+        let seq = load_seq.fetch_add(1, Ordering::SeqCst) + 1;
 ```
 
 and return `Ok((compiled, seq, trusted))`. `new()` passes `0` for `fallback_gen` (nothing is
@@ -843,6 +864,19 @@ the install branch, before assigning:
         let Ok(_guard) = self.reload_gate.try_lock() else {
             return Ok(());
         };
+        // TOCTOU re-check. The `policy_gen()` read above is a Redis round-trip and the gate was
+        // NOT held across it; while Redis flaps it stalls for seconds, and a concurrent
+        // `reload_now` (the backstop takes this same gate with a blocking `lock`) can install
+        // inside that window. Without re-reading, a stamp that has just gone provisional is
+        // ignored and every request stalled in `policy_gen` recompiles the whole policy set —
+        // the exact per-decision storm the `!trusted` guard exists to prevent.
+        let (current_gen, trusted) = {
+            let state = self.state.read().await;
+            (state.compiled.r#gen, state.stamp_trusted)
+        };
+        if !trusted || store_gen == current_gen {
+            return Ok(());
+        }
         let (compiled, seq, stamp_trusted) = Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq, current_gen).await?;
         self.install_if_fresher(compiled, seq, stamp_trusted).await;
         Ok(())
@@ -964,7 +998,10 @@ In `cedar_authorizer.rs`'s test module add:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cd rs && cargo test -p paigasus-iam --lib "decision_key|revoked_grant_stops"
+# `cargo test`'s filter is a SUBSTRING, not a regex — "a|b" matches nothing at all and exits 0
+# with "0 tests run", which reads exactly like a pass. Run the two filters separately.
+cd rs && cargo test -p paigasus-iam --lib decision_key
+cd rs && cargo test -p paigasus-iam --lib revoked_grant_stops
 ```
 
 Expected: FAIL to compile — `decision_key` expects `u64` for its first parameter.
@@ -1069,6 +1106,13 @@ git commit -m "fix(rs): key the authz decision cache on policy content, not gene
         let grant_id = Uuid::from_u128(950);
         grants_store.grant(&role_grant(grant_id, "org_admin")).await.unwrap();
 
+        // Yield FIRST, so the spawned loop reaches its `sleep(poll)` and registers the timer.
+        // Under a paused clock a timer created AFTER an `advance` is scheduled relative to the
+        // already-advanced now, so advancing before the loop has registered its sleep fires
+        // nothing at all and the test passes/fails for the wrong reason.
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
         // Advance past the TTL so the loop takes its unconditional-reload branch.
         tokio::time::advance(Duration::from_secs(31)).await;
         // Yield enough times for the woken task to run its reload to completion.
@@ -1086,6 +1130,21 @@ git commit -m "fix(rs): key the authz decision cache on policy content, not gene
         handle.await.expect("the reload loop exits cleanly on shutdown");
     }
 ```
+
+**The paused clock cannot drive the TTL check itself** (found while implementing; the shipped test
+does this). `SnapshotState::loaded_at` is a `std::time::Instant`, and `tokio::time`'s pause/advance
+is virtual — it mocks `tokio::time::Instant`, never std's. Advancing past `ttl` therefore leaves
+`loaded_at.elapsed()` at a few microseconds and the loop takes its `reload_if_stale` branch
+instead. Back-date `loaded_at` explicitly before ticking the loop:
+
+```rust
+        {
+            let mut state = snapshot.state.write().await;
+            state.loaded_at = state.loaded_at.checked_sub(ttl).expect("the process monotonic clock is older than the test's ttl");
+        }
+```
+
+The clock still stays paused, so the poll tick is fired on demand rather than waited out.
 
 - [ ] **Step 2: Run it to verify it fails against the pre-fix behavior**
 
@@ -1185,7 +1244,7 @@ In `install_if_fresher`, increment in both branches:
 In `reload_now`, count a failed load (bounded cardinality — the error text is never a label):
 
 ```rust
-        let (compiled, seq, trusted) = match self.load_and_compile(fallback_gen).await {
+        let (compiled, seq, trusted) = match Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq, fallback_gen).await {
             Ok(v) => v,
             Err(err) => {
                 counter!(names::IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL, "outcome" => "failed").increment(1);
@@ -1209,20 +1268,36 @@ Expected: PASS.
 
 In `ops/observability/prometheus/rules/iam.rules.yml`, after the `IamOutboxRelayStalled` rule:
 
-The `or vector(0)` is load-bearing, not decoration (design §7a amendment D): `increase()`/`sum()`
-over a series that has NEVER been emitted return an EMPTY vector, and `empty == 0` is also empty —
-so the naked `sum(increase(...)) == 0` goes SILENT exactly when the backstop is dead and
-`outcome="installed"` never fired at all. `or vector(0)` supplies a 0-valued fallback only when the
-left side has no series, so the comparison always has something to evaluate. Do not "simplify" it
-back; the promtool fixtures fail if you do.
+Every piece of this expression is load-bearing (design §7a amendment D); do not "simplify" any of
+it back — a promtool fixture fails for each.
+
+- **`or (up{job="iam"} == 1) * 0`** — `increase()`/`sum()` over a series that has NEVER been
+  emitted return an EMPTY vector, and `empty == 0` is also empty, so a naked
+  `sum(increase(...)) == 0` goes SILENT exactly when the backstop is dead and
+  `outcome="installed"` never fired at all. The `or` supplies the missing zero. It is derived from
+  `up` rather than a bare `vector(0)` for two reasons: `* 0` drops `__name__` and leaves a 0-valued
+  series carrying exactly `{job, instance}`, which matches the left side's label set so `or`
+  composes per target; and `== 1` excludes DOWN targets, which are `TargetDown`'s alert — an
+  unlabelled `vector(0)` fires for those too and double-pages one fault.
+- **`sum by (job, instance)`** — a bare `sum()` drops the target labels, so one healthy replica's
+  installs keep the fleet total non-zero while another replica sits wedged, serving revoked grants.
+- **`[10m]` with `for: 5m`** — 15 minutes of total detection, which is what the annotation
+  promises. `increase(...[15m])` cannot reach zero until 15m after the last install, so pairing it
+  with `for: 15m` pages ~30 minutes late.
 
 ```yaml
       - alert: IamPolicySnapshotReloadsStalled
-        expr: (sum(increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[15m])) or vector(0)) == 0
-        for: 15m
+        expr: (sum by (job, instance) (increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[10m])) or (up{job="iam"} == 1) * 0) == 0
+        for: 5m
         labels: { severity: critical }
-        annotations: { summary: "IAM policy snapshot has not installed a reload (revocations may not take effect)", description: "No policy-snapshot reload has been INSTALLED in 15 minutes. The snapshot's TTL backstop (authz.policy_cache_ttl_secs, default 30s) should install one every TTL regardless of generation movement, so silence here means role revocations are not taking effect on this fleet. Check for outcome=\"failed\" (Postgres unreachable, or a malformed policy row aborting every compile) and outcome=\"rejected\". See RUNBOOK section 4." }
+        annotations: { summary: "IAM policy snapshot has not installed a reload (revocations may not take effect)", description: "No policy-snapshot reload has been INSTALLED in 15 minutes on {{ $labels.job }}/{{ $labels.instance }}. The snapshot's TTL backstop (authz.policy_cache_ttl_secs, default 30s) should install one every TTL regardless of generation movement, so silence here means role revocations are not taking effect on this replica. Check for outcome=\"failed\" (Postgres unreachable, or a malformed policy row aborting every compile) and outcome=\"rejected\". See RUNBOOK section 4." }
 ```
+
+The promtool fixtures in `ops/observability/prometheus/rules/tests/iam.test.yml` must cover the
+absent-series case, a **flat** series (installs happened, then stopped), a **masked replica** (two
+instances, one installing and one flat — exactly one alert, naming the flat instance), and a
+**down** target (must NOT fire this alert). Every fixture needs an `up{job="iam", instance=...}`
+series, because that is what the `or` branch keys off.
 
 - [ ] **Step 7: Add the dashboard panel**
 
@@ -1393,7 +1468,37 @@ async fn revoke_during_a_redis_outage_denies_once_the_snapshot_backstop_reloads(
 }
 ```
 
-Adjust the grant request body and the `role_key`/`scope` shape to whatever `create_role_grant` actually accepts — read `adapters/http/authz.rs:47,129` and the existing `authz_role_grants.rs` integration test for the exact DTO before writing this, and use `StatusCode::OK` instead of `CREATED`/`NO_CONTENT` if that is what the handlers return.
+Adjust the grant request body and the `role_key`/`scope` shape to whatever `create_role_grant` actually accepts — read `adapters/http/authz.rs:47,129` and the existing `authz_role_grants.rs` integration test for the exact DTO before writing this, and use `StatusCode::OK` instead of `CREATED`/`NO_CONTENT` if that is what the handlers return. Also mirror `start_migrated_postgres`'s real tuple order (`(node, db)`).
+
+**Do NOT poll over HTTP** (found while implementing; the shipped test does not). With Redis
+stopped, every `is-authorized` request pays the client's full reconnect-retry budget on each of the
+several counter reads a decision performs — **~20–30 s per request**, so the sketch's
+`for _ in 0..40 { sleep(250ms); … }` is not a 10-second loop, it is a quarter-hour of proving
+nothing extra. Watch the **in-process** snapshot instead and assert the decision over HTTP exactly
+once, at the end:
+
+```rust
+    // `content_hash` is a pure function of the compiled documents + grants (Task 4), so "the
+    // backstop installed a recompile that saw the revoke" is exactly "this string changed" —
+    // with no dependency on `r#gen`, the counter the outage makes unreadable.
+    let hash_before_revoke = state.snapshot().current().await.content_hash.clone();
+    // ... stop Redis, revoke, spawn_reload ...
+    let install_budget = Duration::from_secs(90);
+    let started = std::time::Instant::now();
+    let mut installed = false;
+    while started.elapsed() < install_budget {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if state.snapshot().current().await.content_hash != hash_before_revoke {
+            installed = true;
+            break;
+        }
+    }
+```
+
+The budget is a failure **deadline**, not an assertion of the documented bound — the loop exits the
+moment it observes the recompile, so widening it costs nothing on the happy path. 90 s rather than
+`ttl + poll`-ish because a single failed `policy_gen` read eats ~20–30 s of it before the Postgres
+loads and Cedar compile even start, and CI runners are slower than a dev laptop.
 
 - [ ] **Step 2: Run it**
 
@@ -1432,13 +1537,19 @@ Keep the heading. Replace the body from `**Fail-open on Redis outage, never fail
 Redis-backed entity-generation counter to build its decision-cache key. If that read errors, the
 decision cache is **bypassed entirely** for that call — no key, no lookup, no population — and the
 decision is computed **directly** against the in-memory policy snapshot, which is compiled from
-**Postgres**. This costs **latency only**, and is observable as
-`iam_authz_decisions_total{cache="bypass"}`.
+**Postgres**. Availability is preserved — every decision still returns — and the bypass is
+observable as `iam_authz_decisions_total{cache="bypass"}`. It is **not free**: a decision performs
+several counter reads, and with Redis unreachable each pays the client's unbounded reconnect-retry
+budget, so **an outage costs roughly 20–30 seconds per decision** (measured on the SMA-470
+acceptance test; tracked as **SMA-473**, bound the retry budget). Do not describe this as "latency
+only" — at that magnitude most callers time out.
 
 A fail-**closed** posture (denying everything during a Redis outage) is **not offered, by
 decision** (SMA-470). Redis is a pure accelerator here — the authoritative policy set never lives
-in it — so denying during its outage would convert a latency degradation into a total outage. The
-contract is bounded-staleness fail-open, and the bound below is what makes that defensible.
+in it — so denying during its outage would convert a latency degradation into a total outage. That
+reasoning holds only while the degradation stays small, which is what makes SMA-473 the right
+response rather than a reversal of the decision. The contract is bounded-staleness fail-open, and
+the bound below is what makes that defensible.
 
 **Revocation freshness is TTL-bounded, and the generation bump is best-effort.** A grant/revoke
 bumps `policy_gen` **after** its Postgres transaction commits, and that bump is **logged and
@@ -1469,7 +1580,9 @@ a fresh key space immediately. Note that decision-cache **`Allow` hits are not r
 **This bound covers role-grant and policy revocation only.** Access changes driven by *tenancy*
 state — an organization archived, a membership removed — flow through `entity_gen` and the
 entity/slice cache instead, and remain bounded by `authz.slice_cache_ttl_secs` (default `60`) plus
-`authz.decision_cache_ttl_secs` (default `30`).
+`authz.decision_cache_ttl_secs` (default `30`). **That `entity_gen` bound is Redis-backend-only**
+(design §7a amendment B): on `authz.cache.backend = memory` there is no decision-cache TTL and no
+slice cache is wired at all, so neither TTL applies and the numbers above must not be quoted for it.
 
 **Redis `maxmemory-policy` must be `volatile-*`, never `allkeys-*`.** `iam:authz:policy_gen` and
 `iam:authz:entity_gen` are written without a TTL, so under `allkeys-lru`/`allkeys-random` they are

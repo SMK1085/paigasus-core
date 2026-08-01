@@ -192,7 +192,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamOutboxBacklogAgeHigh` | `iam_outbox_oldest_unpublished_age_seconds > 300` | warning |
 | `IamOutboxEventsParked` | `increase(iam_outbox_relay_parked_total[15m]) > 0` | warning |
 | `IamOutboxRelayStalled` | `rate(iam_outbox_relay_ticks_total[10m]) == 0` | critical |
-| `IamPolicySnapshotReloadsStalled` | `(sum(increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[15m])) or vector(0)) == 0` for 15m | critical |
+| `IamPolicySnapshotReloadsStalled` | `(sum by (job, instance) (increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[10m])) or (up{job="iam"} == 1) * 0) == 0` for 5m | critical |
 | `IamAuditPartitionMaintenanceStalled` | `sum without (result) (increase(iam_audit_partition_maintenance_ticks_total[2d])) == 0` for 1h | warning |
 | `IamHighErrorRate` | `sum(rate(iam_http_requests_total{status_class="5xx"}[5m])) / sum(rate(iam_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `IamGrpcHighErrorRate` | `sum(rate(iam_grpc_requests_total{grpc_status!="ok"}[5m])) / sum(rate(iam_grpc_requests_total[5m])) > 0.05` for 10m | critical |
@@ -371,9 +371,10 @@ config first).
 
 ### `IamPolicySnapshotReloadsStalled` — the policy snapshot has not installed a reload (critical)
 
-**Meaning.** `(sum(increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[15m])) or
-vector(0)) == 0` for 15 minutes — no `PolicySnapshot` reload has been **installed** anywhere on
-this fleet in 15 minutes, even though the IAM process is up. This is the telemetry SMA-470 added
+**Meaning.** `(sum by (job, instance) (increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[10m]))
+or (up{job="iam"} == 1) * 0) == 0` for 5m — 15 minutes of total detection (a 10m window that has to
+reach zero, plus a 5m debounce) with no `PolicySnapshot` reload **installed** on the target named
+in the alert's labels, even though that target is still being scraped. This is the telemetry SMA-470 added
 specifically because nothing else in this catalog would have caught the defect it fixed: the
 snapshot's TTL backstop (`spawn_reload`'s `ttl_elapsed` branch, `authz.policy_cache_ttl_secs`,
 default 30s) is supposed to force an unconditional reload-and-install every TTL **regardless of
@@ -386,16 +387,31 @@ outage is never picked up, with **no other symptom**: decisions keep flowing, la
 normal, and `iam_authz_decisions_total{cache="bypass"}` (the one adjacent existing metric) only
 reflects the decision-cache's own bypass behavior, not backstop health.
 
-**The `or vector(0)` guard.** A naive `sum(increase(...{outcome="installed"}[15m])) == 0` goes
-silent in exactly the worst case: if `outcome="installed"` has **never** been emitted at all — the
-totally-broken-backstop scenario this alert exists to catch, or simply a replica that just booted
-— that label combination has no time series in Prometheus yet, and `increase()`/`sum()` over a
+**Why the expression looks like that.** A naive `sum(increase(...{outcome="installed"}[15m])) == 0`
+is wrong in three separate ways, and each part of the shipped expression answers one of them.
+
+*The absent-series trap.* If `outcome="installed"` has **never** been emitted at all — the
+totally-broken-backstop scenario this alert exists to catch, or simply a replica that just booted —
+that label combination has no time series in Prometheus yet, and `increase()`/`sum()` over a
 nonexistent series return an **empty** vector, not a 0-valued one; comparing empty `== 0` is also
-empty, so the rule would evaluate to nothing and never fire. `or vector(0)` supplies a 0-valued
-fallback only when the left side has no series, so the comparison always has something to
-evaluate. This does not introduce false positives against normal boot: a healthy replica installs
-well within the 15m `for` window (the default TTL is 30s), so the alert only fires when installs
-are genuinely and persistently absent.
+empty, so the rule would evaluate to nothing and never fire. The `or` branch supplies the missing
+zero so the comparison always has something to evaluate.
+
+*The masked-replica trap.* A bare `sum()` drops `job` and `instance`, so one healthy replica's
+installs keep the fleet-wide total non-zero while another replica's backstop is wedged — and a
+wedged replica is still serving revoked grants. `sum by (job, instance)` makes the alert per
+target, which is also why the fallback is `(up{job="iam"} == 1) * 0` rather than `vector(0)`: the
+`* 0` drops `__name__` and leaves a 0-valued series carrying exactly `{job, instance}` for every
+**live** iam target, matching the left side's label set so `or` composes them per target. A target
+that is **down** is deliberately excluded — `TargetDown` already pages for it, and an unlabelled
+`vector(0)` fallback would page twice for one fault.
+
+*The detection-time trap.* `increase(...[15m])` cannot reach zero until 15 minutes after the last
+install, so pairing it with `for: 15m` pages roughly 30 minutes late — twice what this section
+claims. `[10m]` + `for: 5m` is 15 minutes total while keeping a 5m debounce against a scrape gap or
+a rolling restart. There is no false-positive risk against normal boot: the backstop installs every
+`authz.policy_cache_ttl_secs + authz.refresh_interval_secs` (~31s at the defaults), so 10 minutes
+of silence is already ~19 missed cycles.
 
 **Likely causes:** the monotonic-write guard (`install_if_fresher`'s `load_seq` ordering) has
 regressed to requiring the Redis-sourced generation to strictly advance, so a same-generation

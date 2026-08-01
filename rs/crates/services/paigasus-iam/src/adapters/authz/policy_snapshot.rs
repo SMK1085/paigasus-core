@@ -189,7 +189,10 @@ impl PolicySnapshot {
     ///
     /// Two guards keep that from becoming a recompile-per-decision storm: a provisional stamp
     /// (the counter was unreadable at the last load) suppresses request-driven reloads
-    /// entirely, and the single-flight gate caps concurrent reloads at one.
+    /// entirely, and the single-flight gate caps concurrent reloads at one. Both are evaluated
+    /// TWICE — once cheaply up front, once again after the gate is held — because the
+    /// `policy_gen` read between them is a Redis round-trip the gate does not cover; see the
+    /// inline TOCTOU note.
     ///
     /// Still returns `Err` when `policy_gen()` itself errors — every caller
     /// (`CedarAuthorizer::is_authorized`, [`Self::spawn_reload`]) logs and swallows it, so a
@@ -218,6 +221,22 @@ impl PolicySnapshot {
         let Ok(_guard) = self.reload_gate.try_lock() else {
             return Ok(());
         };
+        // TOCTOU re-check — deliberate, do not "simplify" it away. The `policy_gen()` read above
+        // is a Redis round-trip, and the gate was NOT held across it; while Redis is flapping it
+        // can stall for seconds. A concurrent `reload_now` (the TTL backstop takes this same gate
+        // with a blocking `lock`) can install inside that window, so the `(current_gen, trusted)`
+        // pair this call decided on may already be several loads stale. Re-reading under the gate
+        // is what actually makes the two guards above hold: without it, a stamp that has JUST
+        // gone provisional is ignored and every request stalled in `policy_gen` goes on to
+        // recompile the whole policy set — precisely the per-decision storm §3.4 guard 2 exists
+        // to prevent. It also keeps `fallback_gen` below equal to what is really installed.
+        let (current_gen, trusted) = {
+            let state = self.state.read().await;
+            (state.compiled.r#gen, state.stamp_trusted)
+        };
+        if !trusted || store_gen == current_gen {
+            return Ok(());
+        }
         let (compiled, seq, stamp_trusted) = match Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq, current_gen).await {
             Ok(v) => v,
             Err(err) => {
@@ -333,7 +352,6 @@ impl PolicySnapshot {
     /// `warn!`/`info!` lives in [`Self::install_if_fresher`], the only place that sees both
     /// the old and the new flag.
     async fn load_and_compile(policies: &dyn PolicyStore, grants: &dyn RoleGrantStore, load_seq: &AtomicU64, fallback_gen: u64) -> Result<(CompiledPolicies, u64, bool), AuthzError> {
-        let seq = load_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let (observed_gen, trusted) = match policies.policy_gen().await {
             Ok(g) => (g, true),
             Err(err) => {
@@ -341,6 +359,13 @@ impl PolicySnapshot {
                 (fallback_gen, false)
             }
         };
+        // Claimed HERE — after the Redis-backed `policy_gen` read, immediately before the first
+        // Postgres read — and NOT at the top of this function. `policy_gen()` stalls for whole
+        // seconds during exactly the outage this guard exists for, so claiming the token first
+        // would let a load hold a LOW seq while it waits and then read NEWER Postgres data than a
+        // load that claimed a higher one. `install_if_fresher` would then discard the fresher
+        // policy set as "out of order" — the inversion, not a mere delay.
+        let seq = load_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let docs = policies.list_all().await?;
         let all_grants = grants.list_all().await?;
 

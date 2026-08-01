@@ -63,49 +63,126 @@ tests:
             exp_annotations: { summary: "IAM outbox relay is not ticking (stalled but process alive)" }
 
   # IamPolicySnapshotReloadsStalled: healthy fleet — every backstop cycle installs, so
-  # sum(increase(...{outcome="installed"}[15m])) stays well above 0 and the alert never fires.
+  # sum by (job, instance) (increase(...{outcome="installed"}[10m])) stays well above 0 and the
+  # alert never fires. The `up` series is what the expr's `or` fallback keys off; a live target
+  # whose left-hand series exists must be answered by the LEFT side, never by the 0-valued
+  # fallback, so this doubles as the control for the `or` composing correctly.
   - interval: 1m
     input_series:
-      - series: 'iam_authz_policy_snapshot_reloads_total{outcome="installed"}'
-        values: '0+1x20'
+      - series: 'iam_authz_policy_snapshot_reloads_total{outcome="installed", job="iam", instance="host.docker.internal:8080"}'
+        values: '0+1x25'
+      - series: 'up{job="iam", instance="host.docker.internal:8080"}'
+        values: '1x25'
     alert_rule_test:
-      - eval_time: 15m
+      - eval_time: 20m
         alertname: IamPolicySnapshotReloadsStalled
         exp_alerts: []
 
   # IamPolicySnapshotReloadsStalled: total backstop failure — every reload errors, so
   # outcome="installed" never exists as a series at all (only outcome="failed" does). This is the
-  # control case for the `or vector(0)` guard in the expr: without it, `sum(increase(<absent
-  # series>[15m]))` itself evaluates to an empty vector and `empty == 0` is ALSO empty, so a naive
-  # expr would silently never fire — exactly the "goes quiet when things are worst" trap SMA-470
-  # cares about. `outcome="failed"` moving proves the metric family is alive and scraped; it is
-  # `installed` specifically that must be caught as effectively zero.
+  # control case for the `or` fallback in the expr: without it, `sum by (job, instance)
+  # (increase(<absent series>[10m]))` itself evaluates to an empty vector and `empty == 0` is ALSO
+  # empty, so a naive expr would silently never fire — exactly the "goes quiet when things are
+  # worst" trap SMA-470 cares about. `outcome="failed"` moving proves the metric family is alive
+  # and scraped; it is `installed` specifically that must be caught as effectively zero. Fires at
+  # `for: 5m` because the condition holds from the first evaluation.
   - interval: 1m
     input_series:
-      - series: 'iam_authz_policy_snapshot_reloads_total{outcome="failed"}'
-        values: '0+1x20'
+      - series: 'iam_authz_policy_snapshot_reloads_total{outcome="failed", job="iam", instance="host.docker.internal:8080"}'
+        values: '0+1x25'
+      - series: 'up{job="iam", instance="host.docker.internal:8080"}'
+        values: '1x25'
     alert_rule_test:
-      - eval_time: 14m
+      - eval_time: 4m
         alertname: IamPolicySnapshotReloadsStalled
         exp_alerts: []
-      - eval_time: 15m
+      - eval_time: 5m
         alertname: IamPolicySnapshotReloadsStalled
         exp_alerts:
-          - exp_labels: { severity: critical }
-            exp_annotations: { summary: "IAM policy snapshot has not installed a reload (revocations may not take effect)", description: "No policy-snapshot reload has been INSTALLED in 15 minutes. The snapshot's TTL backstop (authz.policy_cache_ttl_secs, default 30s) should install one every TTL regardless of generation movement, so silence here means role revocations are not taking effect on this fleet. Check for outcome=\"failed\" (Postgres unreachable, or a malformed policy row aborting every compile) and outcome=\"rejected\". See RUNBOOK section 4." }
+          - exp_labels: { severity: critical, job: iam, instance: "host.docker.internal:8080" }
+            exp_annotations: { summary: "IAM policy snapshot has not installed a reload (revocations may not take effect)", description: "No policy-snapshot reload has been INSTALLED in 15 minutes on iam/host.docker.internal:8080. The snapshot's TTL backstop (authz.policy_cache_ttl_secs, default 30s) should install one every TTL regardless of generation movement, so silence here means role revocations are not taking effect on this replica. Check for outcome=\"failed\" (Postgres unreachable, or a malformed policy row aborting every compile) and outcome=\"rejected\". See RUNBOOK section 4." }
 
   # IamPolicySnapshotReloadsStalled: the metric family has NEVER been emitted at all (e.g. a
   # replica that crashed before its first reload, or a build that dropped the counter call
-  # entirely). No input_series at all for this family — the same `or vector(0)` guard must still
-  # produce a firing alert rather than silently evaluating nothing.
+  # entirely). Only `up` exists — the same `or` fallback must still produce a firing alert,
+  # labelled with the target, rather than silently evaluating nothing.
   - interval: 1m
-    input_series: []
+    input_series:
+      - series: 'up{job="iam", instance="host.docker.internal:8080"}'
+        values: '1x25'
     alert_rule_test:
-      - eval_time: 15m
+      - eval_time: 5m
         alertname: IamPolicySnapshotReloadsStalled
         exp_alerts:
-          - exp_labels: { severity: critical }
-            exp_annotations: { summary: "IAM policy snapshot has not installed a reload (revocations may not take effect)", description: "No policy-snapshot reload has been INSTALLED in 15 minutes. The snapshot's TTL backstop (authz.policy_cache_ttl_secs, default 30s) should install one every TTL regardless of generation movement, so silence here means role revocations are not taking effect on this fleet. Check for outcome=\"failed\" (Postgres unreachable, or a malformed policy row aborting every compile) and outcome=\"rejected\". See RUNBOOK section 4." }
+          - exp_labels: { severity: critical, job: iam, instance: "host.docker.internal:8080" }
+            exp_annotations: { summary: "IAM policy snapshot has not installed a reload (revocations may not take effect)", description: "No policy-snapshot reload has been INSTALLED in 15 minutes on iam/host.docker.internal:8080. The snapshot's TTL backstop (authz.policy_cache_ttl_secs, default 30s) should install one every TTL regardless of generation movement, so silence here means role revocations are not taking effect on this replica. Check for outcome=\"failed\" (Postgres unreachable, or a malformed policy row aborting every compile) and outcome=\"rejected\". See RUNBOOK section 4." }
+
+  # IamPolicySnapshotReloadsStalled: the series EXISTS and then goes FLAT — the wedged-backstop
+  # shape an absent-series test can never reach (a process that installed happily, then stopped:
+  # every later load erroring, or `install_if_fresher` rejecting every recompile, the SMA-470 D-B
+  # defect itself). Installs stop after t=5m, so `increase(...[10m])` first hits 0 at t=15m and
+  # the `for: 5m` hold pages at t=20m — the 15 minutes of total detection the annotation promises.
+  - interval: 1m
+    input_series:
+      - series: 'iam_authz_policy_snapshot_reloads_total{outcome="installed", job="iam", instance="host.docker.internal:8080"}'
+        values: '0+1x5 6x30'
+      - series: 'up{job="iam", instance="host.docker.internal:8080"}'
+        values: '1x36'
+    alert_rule_test:
+      # Still installing: the trailing window straddles the last increment, so not even pending.
+      - eval_time: 14m
+        alertname: IamPolicySnapshotReloadsStalled
+        exp_alerts: []
+      # Flat for a full 10m window, but the 5m debounce has not elapsed — pending, not firing.
+      - eval_time: 19m
+        alertname: IamPolicySnapshotReloadsStalled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: IamPolicySnapshotReloadsStalled
+        exp_alerts:
+          - exp_labels: { severity: critical, job: iam, instance: "host.docker.internal:8080" }
+            exp_annotations: { summary: "IAM policy snapshot has not installed a reload (revocations may not take effect)", description: "No policy-snapshot reload has been INSTALLED in 15 minutes on iam/host.docker.internal:8080. The snapshot's TTL backstop (authz.policy_cache_ttl_secs, default 30s) should install one every TTL regardless of generation movement, so silence here means role revocations are not taking effect on this replica. Check for outcome=\"failed\" (Postgres unreachable, or a malformed policy row aborting every compile) and outcome=\"rejected\". See RUNBOOK section 4." }
+
+  # IamPolicySnapshotReloadsStalled: a MASKED replica — the reason the expr aggregates
+  # `by (job, instance)` instead of taking a bare fleet-wide `sum()`. One instance keeps
+  # installing, the other wedges. Under `sum()` the healthy instance's increase keeps the total
+  # non-zero and the alert stays silent forever while a live replica serves revoked grants.
+  # Exactly one alert must fire, and it must name the WEDGED instance.
+  - interval: 1m
+    input_series:
+      - series: 'iam_authz_policy_snapshot_reloads_total{outcome="installed", job="iam", instance="host.docker.internal:8080"}'
+        values: '0+1x36'
+      - series: 'iam_authz_policy_snapshot_reloads_total{outcome="installed", job="iam", instance="host.docker.internal:8081"}'
+        values: '0+1x5 6x30'
+      - series: 'up{job="iam", instance="host.docker.internal:8080"}'
+        values: '1x36'
+      - series: 'up{job="iam", instance="host.docker.internal:8081"}'
+        values: '1x36'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: IamPolicySnapshotReloadsStalled
+        exp_alerts:
+          - exp_labels: { severity: critical, job: iam, instance: "host.docker.internal:8081" }
+            exp_annotations: { summary: "IAM policy snapshot has not installed a reload (revocations may not take effect)", description: "No policy-snapshot reload has been INSTALLED in 15 minutes on iam/host.docker.internal:8081. The snapshot's TTL backstop (authz.policy_cache_ttl_secs, default 30s) should install one every TTL regardless of generation movement, so silence here means role revocations are not taking effect on this replica. Check for outcome=\"failed\" (Postgres unreachable, or a malformed policy row aborting every compile) and outcome=\"rejected\". See RUNBOOK section 4." }
+
+  # IamPolicySnapshotReloadsStalled: a DOWN target must NOT fire this alert — `TargetDown`
+  # (targets.rules.yml) already pages for it, and an unlabelled `vector(0)` fallback would page
+  # twice for one fault. The `up{job="iam"} == 1` filter is what excludes it. The second, healthy
+  # target is the control: without it a broken expr that simply never fires would pass this case
+  # vacuously, and it also proves the `or` does not manufacture a zero for a target whose
+  # left-hand series is present and non-zero.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="iam", instance="host.docker.internal:8080"}'
+        values: '0x25'
+      - series: 'up{job="iam", instance="host.docker.internal:8081"}'
+        values: '1x25'
+      - series: 'iam_authz_policy_snapshot_reloads_total{outcome="installed", job="iam", instance="host.docker.internal:8081"}'
+        values: '0+1x25'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: IamPolicySnapshotReloadsStalled
+        exp_alerts: []
 
   # IamAuditPartitionMaintenanceStalled: sum without(result) increase(...[2d]) == 0, for: 1h.
   # The maintenance task ticks ~once/day: the series steps up at t=24h and again at t=48h

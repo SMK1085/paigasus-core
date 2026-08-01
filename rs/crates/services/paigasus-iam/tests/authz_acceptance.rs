@@ -711,7 +711,15 @@ async fn sma470_revoke_during_a_redis_outage_denies_once_the_snapshot_ttl_backst
     // enough that a failure means the backstop never converges at all — a regression must fail on
     // the mechanism, never on a slow CI runner (or on the retry cycles the outage adds to the
     // loop's cadence).
-    let install_budget = Duration::from_secs(30);
+    //
+    // 90s, not the `ttl + poll` order of magnitude, because a SINGLE failed `policy_gen` read
+    // costs the full reconnect-retry budget (~20-30s, amendment A / SMA-473) and the backstop
+    // pays that before its Postgres `list_all`s and Cedar compile even start — so one unlucky
+    // loop iteration can eat most of a 30s budget on a runner slower than a dev laptop. The
+    // budget is a failure DEADLINE only: the loop below breaks the moment the recompile is
+    // observed, so widening it costs nothing on the happy path and only buys headroom against
+    // flakiness.
+    let install_budget = Duration::from_secs(90);
     let started = std::time::Instant::now();
     let mut installed = false;
     while started.elapsed() < install_budget {

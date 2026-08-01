@@ -217,16 +217,24 @@ alone — which, after §3.2/§3.3, works.
 
 ### 3.5 Resulting guarantees
 
+Every bound below is **time until the decision actually denies**, so it includes the reload
+itself, not just the wait before one is triggered — see the paragraph after the table.
+
 | Scenario | Before | After |
 |---|---|---|
-| Revoke, Redis down | unbounded (D-A) | ≤ `policy_cache_ttl_secs + refresh_interval_secs` |
-| Revoke, gen bump lost, Redis back | unbounded — the backstop installs nothing (D-B), so the snapshot only advances if an *unrelated* later write bumps the gen | ≤ `policy_cache_ttl_secs + refresh_interval_secs`, sooner if any later bump lands |
-| Revoke, Redis flushed / gen key evicted | frozen until process restart (D-C) | ≤ `policy_cache_ttl_secs + refresh_interval_secs` |
+| Revoke, Redis down | unbounded (D-A) | ≤ `policy_cache_ttl_secs + refresh_interval_secs + reload duration` |
+| Revoke, gen bump lost, Redis back | unbounded — the backstop installs nothing (D-B), so the snapshot only advances if an *unrelated* later write bumps the gen | ≤ `policy_cache_ttl_secs + refresh_interval_secs + reload duration`, sooner if any later bump lands |
+| Revoke, Redis flushed / gen key evicted | frozen until process restart (D-C) | ≤ `policy_cache_ttl_secs + refresh_interval_secs + reload duration` |
 
-**The bound includes the poll interval.** The backstop is only *checked* once per `poll`
-(`policy_snapshot.rs:181-183`), and `IamConfig::validate` permits
+**The bound includes the poll interval, and the reload.** The backstop is only *checked* once
+per `poll` (`policy_snapshot.rs:181-183`), and `IamConfig::validate` permits
 `refresh_interval_secs == policy_cache_ttl_secs` (`config.rs:669-674`), so a legal config
-gives 30 + 30 = **60s**, not 30s. Plus reload duration (two `list_all`s + a Cedar compile).
+gives 30 + 30 = **60s** of waiting, not 30s. The decision does not flip until the triggered
+reload finishes and installs, so the published number is that 60s **plus reload duration** —
+two `list_all`s and a Cedar compile, and during a Redis outage the `policy_gen` read that
+precedes them costs its whole reconnect-retry budget (~20–30s, §7a amendment A / SMA-473).
+Publishing the wait alone would understate the guarantee by exactly the part an operator waits
+through.
 
 **The bound is conditional on Postgres being reachable.** §3.3 removes the Redis error path,
 but a `list_all` or `PolicyEngine::compile` error still aborts the install and leaves
@@ -296,8 +304,8 @@ Rewrite `docs/ops/RUNBOOK-observability.md` §4 "Authz availability posture" (`:
   separate authz-hardening effort". D1 decides it is **not offered**; the text must say so.
 - `:546-554` must state that the bump is **best-effort and swallowed** when Redis is
   unavailable; that the real guarantee is the snapshot's Postgres-backed TTL backstop; the
-  bound as `policy_cache_ttl_secs + refresh_interval_secs`, qualified as "assuming Postgres
-  is reachable"; and the separate, longer `entity_gen` bound (§3.5).
+  bound as `policy_cache_ttl_secs + refresh_interval_secs + reload duration` (§3.5), qualified
+  as "assuming Postgres is reachable"; and the separate, longer `entity_gen` bound (§3.5).
 - Note that decision-cache **ALLOW hits are not re-audited**, so a staleness window is also
   an audit gap.
 - Add a `maxmemory-policy` mandate: `iam:authz:policy_gen`/`entity_gen` carry no TTL and are
@@ -359,10 +367,11 @@ premise rather than undermining it. Filed as **SMA-473** (High) and documented i
 **B — the staleness bound's arithmetic was stated wrong.** §3.5 says 60s is the bound "at the
 config's permitted maximum, where `refresh_interval_secs == policy_cache_ttl_secs`".
 `IamConfig::validate` places no upper cap on either key, so there is no "permitted maximum"; 60s
-is simply 2 × the *default* `policy_cache_ttl_secs`. The bound is
+is simply 2 × the *default* `policy_cache_ttl_secs`. The *waiting* term is
 `policy_cache_ttl_secs + refresh_interval_secs` because `spawn_reload` sleeps `poll` *before*
-checking the TTL. Also: the `entity_gen` bound in §3.5 is Redis-backend-only — `MemoryDecisionCache`
-has no TTL and no slice cache is wired on the memory backend.
+checking the TTL; §3.5 publishes that plus the reload's own duration, since the decision does not
+flip until the reload installs. Also: the `entity_gen` bound in §3.5 is Redis-backend-only —
+`MemoryDecisionCache` has no TTL and no slice cache is wired on the memory backend.
 
 **C — §3.1's content-hash sketch was not collision-resistant.** As drafted it length-prefixed each
 *row* but joined the fields within a row with a bare delimiter, so
@@ -371,11 +380,19 @@ produced an identical digest — reachable, since `policy_id`/`role_key` are arb
 strings with no charset validation. The shipped encoding length-prefixes every field
 independently and sorts field arrays rather than joined strings.
 
-**D — the D5 alert expression as drafted would have gone silent exactly when it mattered.**
-`sum(increase(...{outcome="installed"}[15m])) == 0` yields an empty vector when the series is
-absent, so it never fires on a replica whose backstop has never installed anything. Shipped as
-`(sum(increase(...)) or vector(0)) == 0`; both the implementer and reviewer proved the naive form
-broken by reverting it and watching the promtool fixtures fail.
+**D — the D5 alert expression as drafted would have gone silent exactly when it mattered, and the
+first correction was still wrong twice over.** `sum(increase(...{outcome="installed"}[15m])) == 0`
+yields an empty vector when the series is absent, so it never fires on a replica whose backstop has
+never installed anything. The first fix, `(sum(increase(...)) or vector(0)) == 0` for 15m, closed
+that but left two defects: a bare `sum()` drops `job`/`instance`, so one healthy replica masks a
+wedged one (and the unlabelled `vector(0)` also fires when IAM is entirely down, double-paging with
+`TargetDown`); and `increase(...[15m])` cannot reach zero until 15m after the last install, so
+`for: 15m` pages ~30 minutes late against an annotation promising 15. Shipped as
+`(sum by (job, instance) (increase(...[10m])) or (up{job="iam"} == 1) * 0) == 0` for 5m — the `* 0`
+yields a 0-valued series carrying `{job, instance}` for every LIVE target, matching the left side's
+label set so `or` composes per target, and 10m + 5m is 15 minutes of detection. Each of the three
+defects is pinned by a promtool fixture (flat series, masked replica, target down), all of which
+were proven to fail against the previous expression before the fix landed.
 
 ## 8. Out of scope / follow-ups
 
@@ -396,8 +413,12 @@ covers the adjacent client-config work and should absorb it or spawn it.
 ## 9. Acceptance criteria
 
 1. A revoke issued while Redis is down stops being ALLOWed within
-   `policy_cache_ttl_secs + refresh_interval_secs`, proven by an acceptance test against real
-   Postgres and a stopped Redis container, driven at the configured interval.
+   `policy_cache_ttl_secs + refresh_interval_secs + reload duration` — the same
+   time-until-authorization-denies bound §3.5 publishes, reload included — proven by an
+   acceptance test against real Postgres and a stopped Redis container, driven at the
+   configured interval. The test asserts *convergence*, not the numeric bound: with Redis
+   stopped the reload duration is dominated by the client's unbounded retry budget (§7a
+   amendment A), which is not a property worth pinning on a CI runner.
 2. The TTL backstop installs a recompile when the generation counter has not moved (D-B),
    with both a direct unit test and a Docker-free `start_paused` test of the real loop.
 3. A generation reset to `0` no longer freezes the snapshot (D-C), with a unit test.
