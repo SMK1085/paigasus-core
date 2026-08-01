@@ -177,6 +177,30 @@ rules file makes promtool **FAIL**. `iam.test.yml` and `gateway.test.yml` keep t
 single-file `rule_files` — only the shared fixture needs the whole-directory view, and a
 comment in `targets.test.yml` records why the asymmetry is deliberate.
 
+### D6 — Correct the stale `IamAuditPartitionMaintenanceStalled` docs *(new in rev 2, approved at the gate)*
+
+Adjacent to the D-inventory RUNBOOK edit, and approved for inclusion despite being unrelated to
+`TargetDown` (pre-existing SMA-467 drift). Three defects in one alert's documentation, all
+verified against the code:
+
+1. **`RUNBOOK:193`** (alert table) — documents
+   `rate(iam_audit_partition_maintenance_ticks_total[1h]) == 0` for 2h. The rule
+   (`iam.rules.yml:26-28`) is `sum without (result) (increase(...[2d])) == 0` for **1h**.
+2. **`RUNBOOK:371`** (prose section) — repeats the same stale expr and "for 2 hours".
+3. **`RUNBOOK:380-382`** — states that `audit.retention.enabled = false` "fires this alert
+   forever, by design … this alert fires and stays firing". **This is inverted.** The rule's own
+   annotation says the opposite ("the series is absent and this alert stays silent — expected"),
+   and the annotation is right: `main.rs:233` gates the `PgPartitionMaintainer` spawn on
+   `config.audit.retention.enabled`, so with retention off `counter!` is never called and the
+   series never exists. `increase()` over an absent series yields empty, so the alert cannot
+   fire. (`describe_counter!` at `main.rs:366` attaches HELP/TYPE metadata only — it does not
+   materialize a series.)
+
+Defect 3 is the operationally dangerous one: it promises an operator a signal that can never
+arrive. Disabling retention is in fact **unalerted** — the RUNBOOK should say so plainly, and
+point at the existing `iam_audit_default_partition_rows` gauge as the indirect signal that
+create-ahead has stopped.
+
 ## Change inventory
 
 | File | Change |
@@ -189,7 +213,7 @@ comment in `targets.test.yml` records why the asymmetry is deliberate.
 | `moon.yml` | **new** `repo:observability-drift` task (D4) |
 | `.github/workflows/ci.yml` | line 184 — add `:observability-drift` to the target array (D4) |
 | `ops/observability/README.md` | Layout section — record the rules-file naming convention (D1) |
-| `docs/ops/RUNBOOK-observability.md` | lines 181–183 — replace the `{iam,gateway}` enumeration with a glob-shaped description |
+| `docs/ops/RUNBOOK-observability.md` | lines 181–183 — replace the `{iam,gateway}` enumeration with a glob-shaped description; plus the D6 partition-alert corrections |
 
 ### New rule file
 
@@ -303,9 +327,5 @@ runs only prometheus + grafana, and `RUNBOOK:748-750` records routing as unimple
 - **Leaving `drift.rs` alone and spinning it out.** Rejected: the fix is small and the gap is
   the identical bug class to the one this issue closes; splitting them would ship a PR that
   fixes the symptom while stepping over its twin.
-- **Fixing `RUNBOOK:193`** — it documents `IamAuditPartitionMaintenanceStalled` as
-  `rate(iam_audit_partition_maintenance_ticks_total[1h]) == 0` for 2h, but
-  `iam.rules.yml:26-28` is `sum without (result) (increase(...[2d])) == 0` for `1h`. Confirmed
-  stale (pre-existing SMA-467 drift), and three lines from an edit this PR makes — but it is
-  unrelated to `TargetDown`. Flagged for a call at the approval gate rather than folded in
-  silently.
+- ~~**Fixing `RUNBOOK:193`**~~ — flagged at the approval gate and **accepted into scope**; see
+  D6, which also covers the two further defects found in the same section.
