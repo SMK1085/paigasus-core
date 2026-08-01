@@ -24,6 +24,10 @@ base64 = { workspace = true }
 serde = { workspace = true }
 # `audit::AuditEntry.detail` carries free-form event context as opaque JSON (SMA-446, Task A1).
 serde_json = { workspace = true }
+# `authz::engine::PolicyEngine::compile` — blake3-hashes the canonical encoding of the
+# compiled documents + grants into `CompiledPolicies::content_hash`, which keys the
+# decision cache (SMA-470). Already a workspace dep via `paigasus-iam`.
+blake3 = { workspace = true }
 
 # `tests/api_key_props.rs` — property-based coverage of the api-key token codec plus a
 # test-local `SecretHasher` (SMA-445 Task 6, AC-1 "constant-time validation").

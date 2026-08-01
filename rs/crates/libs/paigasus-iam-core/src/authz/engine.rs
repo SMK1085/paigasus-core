@@ -43,6 +43,13 @@ pub struct CompiledPolicies {
     pub policy_set: PolicySet,
     /// `r#gen` — `gen` is a reserved keyword as of the 2024 edition.
     pub r#gen: u64,
+    /// A blake3 hex digest over a canonical encoding of the documents + grants this was
+    /// compiled from (SMA-470 D4). Unlike [`Self::r#gen`] — which is a Redis-sourced counter
+    /// that can stall, reset to 0, or miss a swallowed bump — this is a pure function of the
+    /// compiled content, so it is identical across replicas that compiled the same policy set
+    /// and always changes when the policy set does. It is the decision cache key's policy
+    /// component; `r#gen` is only the reload-freshness comparator.
+    pub content_hash: String,
 }
 
 /// Namespace for the pure Cedar engine operations. Never constructed — every method is
@@ -85,7 +92,11 @@ impl PolicyEngine {
             }
         }
 
-        Ok(CompiledPolicies { policy_set, r#gen: 0 })
+        Ok(CompiledPolicies {
+            policy_set,
+            r#gen: 0,
+            content_hash: content_hash(policies, grants),
+        })
     }
 
     /// Decide one [`AccessRequest`] against `policies`, given the [`EntitySlice`] needed
@@ -165,6 +176,54 @@ pub fn link_grant(pset: &mut PolicySet, template_id: &str, grant: &RoleGrant) ->
     let new_id = PolicyId::new(format!("grant:{}", grant.id));
 
     pset.link(PolicyId::new(template_id), new_id, vals).map_err(|e| AuthzError::TemplateLink(e.to_string()))
+}
+
+/// Canonical, order-independent blake3 digest of the inputs a [`CompiledPolicies`] was built
+/// from (SMA-470 D4). Both slices are hashed through SORTED, length-prefixed field encodings
+/// so the digest is independent of `list_all`'s row order and cannot be forged by a field
+/// value that happens to contain the delimiter.
+///
+/// `created_at` is deliberately excluded from both encodings: it never affects the compiled
+/// policy set, so including it would mint a fresh decision-cache key space for a semantically
+/// identical policy set (and make the digest non-reproducible across replicas that re-read
+/// rows with differing timestamp precision).
+fn content_hash(policies: &[PolicyDocument], grants: &[RoleGrant]) -> String {
+    fn field(hasher: &mut blake3::Hasher, value: &str) {
+        // Length-prefix every field so ("ab", "c") and ("a", "bc") cannot collide.
+        hasher.update(&(value.len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+
+    let mut doc_rows: Vec<String> = policies
+        .iter()
+        .map(|d| {
+            let kind = match d.kind {
+                PolicyKind::Static => "static",
+                PolicyKind::Template => "template",
+            };
+            format!("{}\u{1f}{}\u{1f}{}", d.policy_id, kind, d.source)
+        })
+        .collect();
+    doc_rows.sort_unstable();
+
+    let mut grant_rows: Vec<String> = grants
+        .iter()
+        .map(|g| format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", g.id, g.principal.uuid(), g.role_key, g.scope.canonical_prn(), g.linked_policy_id))
+        .collect();
+    grant_rows.sort_unstable();
+
+    let mut hasher = blake3::Hasher::new();
+    field(&mut hasher, "policies");
+    hasher.update(&(doc_rows.len() as u64).to_le_bytes());
+    for row in &doc_rows {
+        field(&mut hasher, row);
+    }
+    field(&mut hasher, "grants");
+    hasher.update(&(grant_rows.len() as u64).to_le_bytes());
+    for row in &grant_rows {
+        field(&mut hasher, row);
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 /// Every fallible step of turning an [`EntitySlice`] + [`AccessRequest`] into a Cedar
@@ -428,5 +487,82 @@ mod tests {
 
         assert_eq!(decision.effect, Effect::Deny);
         assert_eq!(decision.determining_policies, vec!["forbid-archived".to_string()]);
+    }
+
+    /// SMA-470 D4: the content hash must be a pure function of the compiled inputs, so two
+    /// replicas compiling the same policy set produce the same decision-cache key space.
+    #[test]
+    fn content_hash_is_stable_for_identical_inputs() {
+        let docs = vec![hash_fixture_template()];
+        let grants = vec![hash_fixture_grant(Uuid::from_u128(1))];
+
+        let a = PolicyEngine::compile(&docs, &grants).expect("compiles");
+        let b = PolicyEngine::compile(&docs, &grants).expect("compiles");
+
+        assert_eq!(a.content_hash, b.content_hash);
+        assert_eq!(a.content_hash.len(), 64, "blake3 hex digest is 64 chars");
+        assert!(a.content_hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// SMA-470 D4: input ORDER must not change the hash — `list_all` gives no ordering
+    /// guarantee, and two replicas reading the same rows in different orders must still
+    /// share a cache key space.
+    #[test]
+    fn content_hash_ignores_input_ordering() {
+        let g1 = hash_fixture_grant(Uuid::from_u128(1));
+        let g2 = hash_fixture_grant(Uuid::from_u128(2));
+
+        let forward = PolicyEngine::compile(&[hash_fixture_template()], &[g1.clone(), g2.clone()]).expect("compiles");
+        let reverse = PolicyEngine::compile(&[hash_fixture_template()], &[g2, g1]).expect("compiles");
+
+        assert_eq!(forward.content_hash, reverse.content_hash);
+    }
+
+    /// SMA-470 D4: revoking a grant MUST change the hash — this is what moves the decision
+    /// cache to a fresh key space and makes a lost `policy_gen` bump irrelevant to the cache.
+    #[test]
+    fn content_hash_changes_when_a_grant_is_revoked() {
+        let docs = vec![hash_fixture_template()];
+        let with_grant = PolicyEngine::compile(&docs, &[hash_fixture_grant(Uuid::from_u128(1))]).expect("compiles");
+        let without = PolicyEngine::compile(&docs, &[]).expect("compiles");
+
+        assert_ne!(with_grant.content_hash, without.content_hash);
+    }
+
+    /// SMA-470 D4: editing a policy's Cedar source must change the hash even though the
+    /// policy id is unchanged.
+    #[test]
+    fn content_hash_changes_when_a_policy_source_changes() {
+        let original = PolicyEngine::compile(&[hash_fixture_template()], &[]).expect("compiles");
+
+        let mut edited_doc = hash_fixture_template();
+        edited_doc.source = r#"permit(principal == ?principal, action, resource in ?resource) when { true };"#.to_string();
+        let edited = PolicyEngine::compile(&[edited_doc], &[]).expect("compiles");
+
+        assert_ne!(original.content_hash, edited.content_hash);
+    }
+
+    fn hash_fixture_template() -> PolicyDocument {
+        let now = chrono::Utc::now();
+        PolicyDocument {
+            policy_id: "org_admin".to_string(),
+            kind: PolicyKind::Template,
+            source: r#"permit(principal == ?principal, action, resource in ?resource);"#.to_string(),
+            description: "test fixture".to_string(),
+            system: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn hash_fixture_grant(id: Uuid) -> RoleGrant {
+        RoleGrant {
+            id,
+            principal: PrincipalId::from_prn(Prn::build("iam", "", None, "principal", Uuid::from_u128(9)).expect("static test prn parts are valid")),
+            role_key: "org_admin".to_string(),
+            scope: GrantScope::Root,
+            linked_policy_id: format!("grant:{id}"),
+            created_at: chrono::Utc::now(),
+        }
     }
 }
