@@ -337,13 +337,61 @@ deploy is the *old* replicas' unbounded staleness, not the new bound.
   `policy_cache_ttl_secs + refresh_interval_secs`, and is now qualified on Postgres
   reachability and scoped to role-grant/policy revocation.
 
+## 7a. Post-implementation amendments
+
+Written after the branch was built. Implementation disproved four claims made above; the design
+sections are left as the dated decision record, and this section is what actually holds.
+
+**A — "fail-open costs latency only" is wrong, and it is the most consequential correction.**
+§3.1 and D1 both lean on the idea that a Redis outage costs latency but not availability. The
+Task 7 acceptance test measured it: with Redis stopped, **every authz decision takes ~20–30
+seconds**. `connect_redis` calls `ConnectionManager::new` with no config override, and while
+redis-rs 1.3 *does* bound each attempt (`response_timeout` 500ms, `connection_timeout` 1s), the
+**retry budget** is not bounded — 6 retries, exponential backoff from 100ms, no `max_delay`, plus
+jitter — and a decision performs several counter reads.
+
+D1's reasoning (fail-closed would convert a latency degradation into a total outage) holds only
+while the degradation is small. At 20–30s per decision most callers time out anyway, so the real
+gap between fail-open and fail-closed during an outage is far narrower than D1 assumed. **This
+does not reverse D1** — the correct response is to bound the retry budget, which restores D1's
+premise rather than undermining it. Filed as **SMA-473** (High) and documented in the RUNBOOK.
+
+**B — the staleness bound's arithmetic was stated wrong.** §3.5 says 60s is the bound "at the
+config's permitted maximum, where `refresh_interval_secs == policy_cache_ttl_secs`".
+`IamConfig::validate` places no upper cap on either key, so there is no "permitted maximum"; 60s
+is simply 2 × the *default* `policy_cache_ttl_secs`. The bound is
+`policy_cache_ttl_secs + refresh_interval_secs` because `spawn_reload` sleeps `poll` *before*
+checking the TTL. Also: the `entity_gen` bound in §3.5 is Redis-backend-only — `MemoryDecisionCache`
+has no TTL and no slice cache is wired on the memory backend.
+
+**C — §3.1's content-hash sketch was not collision-resistant.** As drafted it length-prefixed each
+*row* but joined the fields within a row with a bare delimiter, so
+`(policy_id="a", source="b\x1fstatic\x1fc")` and `(policy_id="a\x1fstatic\x1fb", source="c")`
+produced an identical digest — reachable, since `policy_id`/`role_key` are arbitrary caller-chosen
+strings with no charset validation. The shipped encoding length-prefixes every field
+independently and sorts field arrays rather than joined strings.
+
+**D — the D5 alert expression as drafted would have gone silent exactly when it mattered.**
+`sum(increase(...{outcome="installed"}[15m])) == 0` yields an empty vector when the series is
+absent, so it never fires on a replica whose backstop has never installed anything. Shipped as
+`(sum(increase(...)) or vector(0)) == 0`; both the implementer and reviewer proved the naive form
+broken by reverting it and watching the promtool fixtures fail.
+
 ## 8. Out of scope / follow-ups
 
 - Fail-closed authz, in any form (D1).
-- Postgres-backed generation counters (D3) — file a follow-up; needs an ADR and a migration.
-- `entity_gen`'s identical missing-key→`0` defect (§3.5) — file a follow-up.
-- Lazy/retrying Redis connect so the fleet can boot Redis-down (D6) — file a follow-up.
 - The entity/slice and decision cache fail-open *read* paths: already correct and tested.
+
+Follow-ups filed:
+
+| Issue | What |
+|---|---|
+| **SMA-473** (High) | Bound the Redis client retry budget — amendment A above; an outage costs ~20–30s per decision |
+| **SMA-474** | `entity_gen` has the identical missing-key→`0` reset defect (§3.5) |
+| **SMA-475** | Postgres-backed generation counters (D3) — eliminate the window rather than bound it; needs an ADR + migration |
+
+Still unfiled and deliberately so: lazy/retrying Redis connect for Redis-down boot (D6) — SMA-473
+covers the adjacent client-config work and should absorb it or spawn it.
 
 ## 9. Acceptance criteria
 
