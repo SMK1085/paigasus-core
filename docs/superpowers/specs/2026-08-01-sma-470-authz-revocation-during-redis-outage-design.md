@@ -191,8 +191,14 @@ The warn fires **on transition** (trusted → provisional and back), not per att
 `refresh_interval_secs = 1` a per-attempt warn is ≥1 line/second/replica for the whole
 outage, on top of the existing reload-failure warn.
 
-The no-lost-update property is unaffected: the stamp is still read before the `list_all`
-calls, and a provisional stamp only ever undercounts.
+The no-lost-update property is unaffected for a *trusted* stamp: it is still read before the
+`list_all` calls, so it can only undercount the store's true generation.
+
+A **provisional** stamp carries no such property — it can be stale in **either** direction. If
+the last trusted generation was `7` and Redis then resets, the carried-over `7` *exceeds* the
+store's current `0`. That is exactly why `stamp_trusted` gates §3.4's suppression: while the
+stamp is provisional it must not drive a freshness comparison at all, and only the TTL backstop
+refreshes the snapshot.
 
 ### 3.4 Recover from a generation reset, without a recompile storm
 
@@ -236,16 +242,34 @@ precedes them costs its whole reconnect-retry budget (~20–30s, §7a amendment 
 Publishing the wait alone would understate the guarantee by exactly the part an operator waits
 through.
 
-**The bound is conditional on Postgres being reachable.** §3.3 removes the Redis error path,
-but a `list_all` or `PolicyEngine::compile` error still aborts the install and leaves
-`loaded_at` untouched. A single malformed policy row therefore reproduces unbounded staleness
-behind one `warn!` — a named residual risk (§6), and the reason D5's telemetry matters.
+**The bound is conditional on Postgres being reachable *and current*.** §3.3 removes the Redis
+error path, but a `list_all` or `PolicyEngine::compile` error still aborts the install and
+leaves `loaded_at` untouched. A single malformed policy row therefore reproduces unbounded
+staleness behind one `warn!` — a named residual risk (§6), and the reason D5's telemetry
+matters.
 
-**Role-grant/policy revocation only.** `entity_gen` has the identical missing-key→`0` defect
-(`generation.rs:82-90`) and an identically swallowed bump, with no §3.4 equivalent. Access
-changes driven by *tenancy* state (org archive, membership removal) remain bounded by
-`slice_cache_ttl_secs` (60s) + `decision_cache_ttl_secs` (30s). §5 must state the two
-separately rather than publishing one number; §8 tracks closing it.
+"Current" is load-bearing and not enforced today: both stores read through
+`config.database_url` with no primary-read or causal-consistency requirement. Point that URL at
+a lagging replica and a reload can return **pre-revocation** rows, install them, and refresh
+`loaded_at` — so the snapshot looks freshly loaded while serving stale policy, and the bound
+silently does not hold. Deployments relying on this bound must read from the primary (or add
+replica lag to the published number). Named as a residual risk in §6.
+
+**Role-grant/policy revocation only, and Redis-backend only.** `entity_gen` has the identical
+missing-key→`0` defect (`generation.rs:82-90`) and an identically swallowed bump, with no §3.4
+equivalent. Access changes driven by *tenancy* state (org archive, membership removal) remain
+bounded by `slice_cache_ttl_secs` (60s) + `decision_cache_ttl_secs` (30s) — **on the Redis
+backend only**.
+
+On `authz.cache.backend = memory` the picture differs, and is better rather than worse: both
+counters are in-process `AtomicU64`s that cannot fail to be read, and no slice cache is wired at
+all, so a tenancy change bumps `entity_gen`, rotates the decision-cache key, and takes effect
+immediately — there is no TTL-bounded window to publish. That backend's real caveats lie
+elsewhere: `MemoryDecisionCache` has no eviction (unbounded growth over process lifetime), and
+its counters are per-process, so it is single-replica only.
+
+§5 must state these separately rather than publishing one number; §8 tracks closing the
+Redis-backend gap.
 
 ## 4. Tests
 
@@ -326,7 +350,13 @@ deploy is the *old* replicas' unbounded staleness, not the new bound.
 **Residual risks.**
 - A persistently failing Postgres read or a malformed policy row keeps the last-good snapshot
   forever behind a single `warn!`. D5's telemetry is what surfaces it.
-- `entity_gen`-driven staleness (§3.5) is unchanged by this work.
+- **A lagging Postgres endpoint silently voids the bound.** Nothing requires
+  `config.database_url` to point at the primary, so a reload can install pre-revocation rows
+  and refresh `loaded_at` — the snapshot then reports itself fresh while serving stale policy,
+  and D5's telemetry shows `outcome="installed"` throughout. Read from the primary, or add
+  replica lag to the published bound.
+- `entity_gen`-driven staleness (§3.5) is unchanged by this work. It is a Redis-backend
+  concern only — the `memory` backend's in-process counters cannot fail to be read.
 - Non-monotonic `policy_gen` reads from a Sentinel failover or a read replica would drive
   repeated reloads; §3.4's single-flight bounds the cost, but reads should come from one
   authority.
@@ -427,7 +457,8 @@ covers the adjacent client-config work and should absorb it or spawn it.
 5. The decision-cache key is derived from compiled-policy content, not `r#gen` (D4), proven
    by a key-stability/key-change test pair.
 6. A flapping generation read cannot drive a policy recompile per decision (§3.4).
-7. The RUNBOOK states the real bound, the separate `entity_gen` bound, the
+7. The RUNBOOK states the real bound (qualified on Postgres being reachable *and* current),
+   the separate `entity_gen` bound **and that it is Redis-backend-only**, the
    `maxmemory-policy` mandate, and records D1.
 8. `moon ci :build :test :lint :fmt :deny :machete :typecheck :breaking :affected-smoke
    :parity-corpus-drift :wasm-getrandom-free :promtool :observability-drift :release-parity

@@ -704,6 +704,14 @@ snapshot **indefinitely**, with no bound at all. That is what
 `IamPolicySnapshotReloadsStalled` and `iam_authz_policy_snapshot_reloads_total{outcome="failed"}`
 exist to surface.
 
+It also assumes Postgres is **current**, which nothing enforces: `config.database_url` carries no
+primary-read or causal-consistency requirement. Point it at a lagging replica and a reload can
+read **pre-revocation** rows, install them, and refresh its TTL clock — the snapshot then reports
+itself freshly loaded, `iam_authz_policy_snapshot_reloads_total{outcome="installed"}` keeps
+incrementing, and `IamPolicySnapshotReloadsStalled` stays quiet, all while serving stale policy.
+**No signal in this catalog detects that**; it is the one way the bound can be silently void with
+everything green. Point IAM at the primary, or add replica lag to every number above.
+
 **Same-replica revocation immediacy is degraded during an outage.** Normally
 `CedarAuthorizer::is_authorized` calls `PolicySnapshot::reload_if_stale` synchronously, so a
 revoke is visible on its own replica on the very next decision. While the generation stamp is
