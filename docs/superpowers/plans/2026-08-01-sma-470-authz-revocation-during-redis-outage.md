@@ -109,6 +109,31 @@ Append to the `#[cfg(test)] mod tests` block in `rs/crates/libs/paigasus-iam-cor
         assert_ne!(original.content_hash, edited.content_hash);
     }
 
+    /// SMA-470: two DIFFERENT documents must never hash alike just because a field value
+    /// contains the row delimiter. `policy_id` and `role_key` are arbitrary caller-chosen
+    /// strings with no charset validation, so an unescaped join would let an attacker craft a
+    /// policy edit that does NOT rotate the decision-cache key — silently serving stale
+    /// authorization decisions. Every field is length-prefixed independently, so the encoding
+    /// is unambiguous about where each field ends.
+    #[test]
+    fn content_hash_is_unambiguous_across_field_boundaries() {
+        let mut shifted_into_source = hash_fixture_template();
+        shifted_into_source.policy_id = "a".to_string();
+        shifted_into_source.source = "b\u{1f}static\u{1f}c".to_string();
+
+        let mut shifted_into_id = hash_fixture_template();
+        shifted_into_id.policy_id = "a\u{1f}static\u{1f}b".to_string();
+        shifted_into_id.source = "c".to_string();
+
+        // If `compile` rejects these sources at Cedar-parse time both sides are `Err` and the
+        // assertion is vacuous — call the private `content_hash` directly in that case.
+        assert_ne!(
+            content_hash(&[shifted_into_source], &[]),
+            content_hash(&[shifted_into_id], &[]),
+            "a delimiter inside a field value must not forge another document's digest"
+        );
+    }
+
     fn hash_fixture_template() -> PolicyDocument {
         let now = chrono::Utc::now();
         PolicyDocument {
@@ -169,9 +194,10 @@ Add the hashing helper below `PolicyEngine::compile`:
 
 ```rust
 /// Canonical, order-independent blake3 digest of the inputs a [`CompiledPolicies`] was built
-/// from (SMA-470 D4). Both slices are hashed through SORTED, length-prefixed field encodings
-/// so the digest is independent of `list_all`'s row order and cannot be forged by a field
-/// value that happens to contain the delimiter.
+/// from (SMA-470 D4). Both slices are hashed as SORTED rows of INDIVIDUALLY length-prefixed
+/// fields, so the digest is independent of `list_all`'s row order and unambiguous about where
+/// each field ends — a value containing any byte sequence, delimiter-like or not, cannot forge
+/// another input's digest.
 ///
 /// `created_at` is deliberately excluded from both encodings: it never affects the compiled
 /// policy set, so including it would mint a fresh decision-cache key space for a semantically
@@ -179,34 +205,44 @@ Add the hashing helper below `PolicyEngine::compile`:
 /// rows with differing timestamp precision).
 fn content_hash(policies: &[PolicyDocument], grants: &[RoleGrant]) -> String {
     fn field(hasher: &mut blake3::Hasher, value: &str) {
-        // Length-prefix every field so ("ab", "c") and ("a", "bc") cannot collide.
+        // Length-prefix every field so ("ab", "c") and ("a", "bc") cannot collide. This must be
+        // applied per FIELD, never to a pre-joined row — see the row construction below.
         hasher.update(&(value.len() as u64).to_le_bytes());
         hasher.update(value.as_bytes());
     }
 
-    let mut doc_rows: Vec<String> = policies
+    // Rows are arrays of raw fields, NEVER pre-joined strings: every field is length-prefixed
+    // INDIVIDUALLY when hashed below. Pre-joining with a delimiter and length-prefixing only the
+    // joined row would leave the field boundaries ambiguous — `(policy_id = "a", source =
+    // "b<DEL>static<DEL>c")` and `(policy_id = "a<DEL>static<DEL>b", source = "c")` would encode
+    // identically, letting a crafted policy edit fail to rotate the decision-cache key.
+    // `policy_id`/`role_key` are arbitrary caller-chosen strings with no charset validation, so
+    // that is reachable input, not a hypothetical.
+    //
+    // Sorting arrays of `String` sorts lexicographically field-by-field, which is the canonical
+    // order we want and needs no joined key.
+    let mut doc_rows: Vec<[String; 3]> = policies
         .iter()
         .map(|d| {
             let kind = match d.kind {
                 PolicyKind::Static => "static",
                 PolicyKind::Template => "template",
             };
-            format!("{}\u{1f}{}\u{1f}{}", d.policy_id, kind, d.source)
+            [d.policy_id.clone(), kind.to_string(), d.source.clone()]
         })
         .collect();
     doc_rows.sort_unstable();
 
-    let mut grant_rows: Vec<String> = grants
+    let mut grant_rows: Vec<[String; 5]> = grants
         .iter()
         .map(|g| {
-            format!(
-                "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-                g.id,
-                g.principal.uuid(),
-                g.role_key,
+            [
+                g.id.to_string(),
+                g.principal.uuid().to_string(),
+                g.role_key.clone(),
                 g.scope.canonical_prn(),
-                g.linked_policy_id
-            )
+                g.linked_policy_id.clone(),
+            ]
         })
         .collect();
     grant_rows.sort_unstable();
@@ -215,12 +251,16 @@ fn content_hash(policies: &[PolicyDocument], grants: &[RoleGrant]) -> String {
     field(&mut hasher, "policies");
     hasher.update(&(doc_rows.len() as u64).to_le_bytes());
     for row in &doc_rows {
-        field(&mut hasher, row);
+        for value in row {
+            field(&mut hasher, value);
+        }
     }
     field(&mut hasher, "grants");
     hasher.update(&(grant_rows.len() as u64).to_le_bytes());
     for row in &grant_rows {
-        field(&mut hasher, row);
+        for value in row {
+            field(&mut hasher, value);
+        }
     }
     hasher.finalize().to_hex().to_string()
 }
