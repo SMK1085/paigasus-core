@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "45b60f40a9f8",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-466-observability-move-targetdown-alert-to-a-shared-prometheus",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/45/b60f40a9f8/0/metadata.json",
+      "transcript": "/45/b60f40a9f8/0/full.jsonl",
+      "compact_transcript": "/45/b60f40a9f8/0/transcript.jsonl",
+      "content_hash": "/45/b60f40a9f8/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 230,
+    "cache_creation_tokens": 224534,
+    "cache_read_tokens": 11019684,
+    "output_tokens": 85907,
+    "api_call_count": 88
+  }
+}
