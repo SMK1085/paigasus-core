@@ -245,6 +245,23 @@
           "legendFormat": "{{result}}"
         }
       ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Policy snapshot reloads",
+      "description": "iam_authz_policy_snapshot_reloads_total by outcome — 'installed' must stay non-zero (SMA-470)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(iam_authz_policy_snapshot_reloads_total[$__rate_interval])) by (outcome)",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
     }
   ]
 }

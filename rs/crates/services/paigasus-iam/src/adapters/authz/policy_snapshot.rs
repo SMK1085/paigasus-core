@@ -71,8 +71,10 @@
 //! reports, so a same-gen recompile can still install.
 
 use cedar_policy::PolicyId;
+use metrics::counter;
 use paigasus_iam_core::authz::engine::{CompiledPolicies, PolicyEngine};
 use paigasus_iam_core::{AuthzError, PolicyStore, RoleGrantStore};
+use paigasus_observability::names;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -207,7 +209,16 @@ impl PolicySnapshot {
         let Ok(_guard) = self.reload_gate.try_lock() else {
             return Ok(());
         };
-        let (compiled, seq, stamp_trusted) = Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq, current_gen).await?;
+        let (compiled, seq, stamp_trusted) = match Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq, current_gen).await {
+            Ok(v) => v,
+            Err(err) => {
+                // Bounded cardinality: the error itself is never a label (SMA-470) — only the
+                // fact that this attempt failed. `install_if_fresher` never runs on this path,
+                // so it can't count `failed` on this caller's behalf.
+                counter!(names::IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL, "outcome" => "failed").increment(1);
+                return Err(err);
+            }
+        };
         self.install_if_fresher(compiled, seq, stamp_trusted).await;
         Ok(())
     }
@@ -229,7 +240,16 @@ impl PolicySnapshot {
         // The read guard is a statement-scoped temporary — dropped at the `;`, well before
         // `install_if_fresher` takes the write lock.
         let fallback_gen = self.state.read().await.compiled.r#gen;
-        let (compiled, seq, trusted) = Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq, fallback_gen).await?;
+        let (compiled, seq, trusted) = match Self::load_and_compile(self.policies.as_ref(), self.grants.as_ref(), &self.load_seq, fallback_gen).await {
+            Ok(v) => v,
+            Err(err) => {
+                // This is the TTL backstop's own load — a failure here is the scenario the
+                // `IamPolicySnapshotReloadsStalled` alert exists to catch (bounded label, never
+                // the error text; see the sibling comment in `reload_if_stale`).
+                counter!(names::IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL, "outcome" => "failed").increment(1);
+                return Err(err);
+            }
+        };
         self.install_if_fresher(compiled, seq, trusted).await;
         Ok(())
     }
@@ -252,6 +272,14 @@ impl PolicySnapshot {
     /// over (SMA-470 §3.4). This is also the only place that sees the old and the new flag
     /// together, so it owns the operator-visible transition logging — exactly one line per
     /// state change, rather than one per reload attempt.
+    ///
+    /// Also owns the `outcome="installed"`/`"rejected"` halves of
+    /// `iam_authz_policy_snapshot_reloads_total` (SMA-470 D5) — the third outcome, `"failed"`,
+    /// is counted by the two callers themselves, since a load that errors never reaches this
+    /// method at all. `installed` is the metric an operator should watch: the TTL backstop
+    /// installs one every `authz.policy_cache_ttl_secs` regardless of generation movement, so a
+    /// regression of THAT guarantee shows up as `installed` going quiet while the process stays
+    /// up — the exact defect this task's alert exists to catch.
     async fn install_if_fresher(&self, compiled: CompiledPolicies, seq: u64, trusted: bool) {
         let mut state = self.state.write().await;
         if seq > state.installed_seq {
@@ -264,8 +292,10 @@ impl PolicySnapshot {
             state.compiled = Arc::new(compiled);
             state.loaded_at = Instant::now();
             state.installed_seq = seq;
+            counter!(names::IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL, "outcome" => "installed").increment(1);
         } else {
             tracing::debug!(rejected_seq = seq, installed_seq = state.installed_seq, "policy_snapshot: discarding an out-of-order reload");
+            counter!(names::IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL, "outcome" => "rejected").increment(1);
         }
     }
 
@@ -624,6 +654,22 @@ mod tests {
         async fn find(&self, id: Uuid) -> Result<Option<RoleGrant>, AuthzError> {
             Ok(self.grants.lock().unwrap().iter().find(|g| g.id == id).cloned())
         }
+    }
+
+    /// SMA-470 D5: every reload outcome is counted, so a regression of the TTL backstop
+    /// (which would show as reloads that never reach `outcome="installed"`) is visible.
+    #[tokio::test]
+    async fn reload_records_the_snapshot_reload_counter() {
+        let handle = paigasus_observability::init("test-policy-snapshot-reload-metric");
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(vec![org_admin_template()]));
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![]));
+
+        let snapshot = PolicySnapshot::new(policies, grants).await.expect("build succeeds");
+        snapshot.reload_now().await.expect("reload succeeds");
+
+        let out = handle.render();
+        assert!(out.contains("iam_authz_policy_snapshot_reloads_total"), "expected the reload counter:\n{out}");
+        assert!(out.contains(r#"outcome="installed""#), "expected an outcome=\"installed\" label:\n{out}");
     }
 
     #[tokio::test]

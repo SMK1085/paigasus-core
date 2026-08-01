@@ -20,6 +20,7 @@ pub const IAM_GRPC_REQUESTS_TOTAL: &str = "iam_grpc_requests_total";
 pub const IAM_GRPC_REQUEST_DURATION_SECONDS: &str = "iam_grpc_request_duration_seconds";
 // IAM authz / audit
 pub const IAM_AUTHZ_DECISIONS_TOTAL: &str = "iam_authz_decisions_total";
+pub const IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL: &str = "iam_authz_policy_snapshot_reloads_total";
 pub const IAM_AUDIT_RECORDS_TOTAL: &str = "iam_audit_records_total";
 pub const IAM_DENIAL_AUDITS_DROPPED_TOTAL: &str = "iam_denial_audits_dropped_total";
 pub const IAM_DENIAL_AUDITS_ENQUEUED_TOTAL: &str = "iam_denial_audits_enqueued_total";
@@ -55,6 +56,7 @@ pub const ALL: &[&str] = &[
     IAM_GRPC_REQUESTS_TOTAL,
     IAM_GRPC_REQUEST_DURATION_SECONDS,
     IAM_AUTHZ_DECISIONS_TOTAL,
+    IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL,
     IAM_AUDIT_RECORDS_TOTAL,
     IAM_DENIAL_AUDITS_DROPPED_TOTAL,
     IAM_DENIAL_AUDITS_ENQUEUED_TOTAL,

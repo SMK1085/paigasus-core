@@ -93,6 +93,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_grpc_requests_total` | counter | `service`, `method`, `grpc_status` | One increment per completed tonic handler call. `service`/`method` are compile-time string literals (e.g. `service="Authorization"`, `method="IsAuthorized"`) — never derived from the request path, so cardinality is bounded to the known RPC set (Tenancy / Authentication / Authorization / ServiceAccount / Audit). `grpc_status` is `"ok"` or the canonical tonic status-code name (`permission_denied`, `unavailable`, `invalid_argument`, …). |
 | `iam_grpc_request_duration_seconds` | histogram | `service`, `method` | gRPC handler latency, recorded at the same handler-boundary call site as the counter above. |
 | `iam_authz_decisions_total` | counter | `decision`, `cache` | Every `CedarAuthorizer::is_authorized` outcome. `decision` ∈ `allow`/`deny`. `cache` ∈ `hit` (served from the generation-keyed decision cache — deny hits are still re-audited, allow hits are not), `miss` (computed fresh), or `bypass` (the Redis-backed entity-generation counter was unreadable, so the cache was skipped entirely and the decision was computed directly against the last-known-good policy snapshot — see §4 "Authz availability"). The highest-value operational signal in the catalog: allow/deny volume and cache effectiveness. |
+| `iam_authz_policy_snapshot_reloads_total` | counter | `outcome` | Every `PolicySnapshot` reload attempt. `outcome` ∈ `installed` (a fresher compiled set replaced the live one), `rejected` (an out-of-order reload lost its race and was discarded — benign in isolation), `failed` (the load or Cedar compile errored; the last-known-good snapshot keeps serving). `installed` must stay non-zero: the TTL backstop installs one every `authz.policy_cache_ttl_secs` regardless of generation movement, and silence means revocations are not taking effect (SMA-470). |
 | `iam_audit_records_total` | counter | `outcome`, `result` | Every `PgAuditLog::record`/`record_out_of_band` call. `outcome` ∈ `committed` (mutation audit rows) / `denied` (denial audit rows). `result` is `"ok"` for an INSERT that did not error. **Caveat:** this counts insert-attempts-not-erroring, not durably-committed rows — an in-transaction `record` call on a mutation's UoW bumps `result="ok"` before that transaction's outer `commit()`, so a rare downstream rollback leaves the row invisible even though the counter already incremented. This only diverges on the mutation-error path, which is itself visible elsewhere as a `result="error"`/5xx signal, so it doesn't mislead in steady state. |
 | `iam_denial_audits_dropped_total` | counter | — | Bumped at `DenialAuditBuffer::push`'s drop-oldest site when the bounded denial-audit buffer is full. **Non-zero means the audit trail for denials has gaps** — see §4 "Denial-audit drops". |
 | `iam_denial_audits_enqueued_total` | counter | — | Bumped on every `DenialAuditBuffer::push`, whether or not it also drops. Compare against the dropped counter to gauge loss ratio during a denial burst. |
@@ -191,6 +192,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamOutboxBacklogAgeHigh` | `iam_outbox_oldest_unpublished_age_seconds > 300` | warning |
 | `IamOutboxEventsParked` | `increase(iam_outbox_relay_parked_total[15m]) > 0` | warning |
 | `IamOutboxRelayStalled` | `rate(iam_outbox_relay_ticks_total[10m]) == 0` | critical |
+| `IamPolicySnapshotReloadsStalled` | `(sum(increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[15m])) or vector(0)) == 0` for 15m | critical |
 | `IamAuditPartitionMaintenanceStalled` | `sum without (result) (increase(iam_audit_partition_maintenance_ticks_total[2d])) == 0` for 1h | warning |
 | `IamHighErrorRate` | `sum(rate(iam_http_requests_total{status_class="5xx"}[5m])) / sum(rate(iam_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `IamGrpcHighErrorRate` | `sum(rate(iam_grpc_requests_total{grpc_status!="ok"}[5m])) / sum(rate(iam_grpc_requests_total[5m])) > 0.05` for 10m | critical |
@@ -366,6 +368,76 @@ config first).
 - If a Postgres-side lock/hang caused the stall, resolving that (killing a blocking session,
   etc.) may let the existing relay task recover without a restart — check whether ticks resume
   before restarting the service.
+
+### `IamPolicySnapshotReloadsStalled` — the policy snapshot has not installed a reload (critical)
+
+**Meaning.** `(sum(increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[15m])) or
+vector(0)) == 0` for 15 minutes — no `PolicySnapshot` reload has been **installed** anywhere on
+this fleet in 15 minutes, even though the IAM process is up. This is the telemetry SMA-470 added
+specifically because nothing else in this catalog would have caught the defect it fixed: the
+snapshot's TTL backstop (`spawn_reload`'s `ttl_elapsed` branch, `authz.policy_cache_ttl_secs`,
+default 30s) is supposed to force an unconditional reload-and-install every TTL **regardless of
+whether the Redis-backed `policy_gen` counter visibly moved** — that is precisely the mechanism
+that makes a role revocation take effect even during a Redis outage (see "Authz availability
+posture" below). If that mechanism regresses — silently reverting to requiring `r#gen` to
+strictly advance before installing, say — reloads keep recompiling and discarding forever
+(`outcome="rejected"` climbing, `outcome="installed"` flat), and a revoke committed during a Redis
+outage is never picked up, with **no other symptom**: decisions keep flowing, latency looks
+normal, and `iam_authz_decisions_total{cache="bypass"}` (the one adjacent existing metric) only
+reflects the decision-cache's own bypass behavior, not backstop health.
+
+**The `or vector(0)` guard.** A naive `sum(increase(...{outcome="installed"}[15m])) == 0` goes
+silent in exactly the worst case: if `outcome="installed"` has **never** been emitted at all — the
+totally-broken-backstop scenario this alert exists to catch, or simply a replica that just booted
+— that label combination has no time series in Prometheus yet, and `increase()`/`sum()` over a
+nonexistent series return an **empty** vector, not a 0-valued one; comparing empty `== 0` is also
+empty, so the rule would evaluate to nothing and never fire. `or vector(0)` supplies a 0-valued
+fallback only when the left side has no series, so the comparison always has something to
+evaluate. This does not introduce false positives against normal boot: a healthy replica installs
+well within the 15m `for` window (the default TTL is 30s), so the alert only fires when installs
+are genuinely and persistently absent.
+
+**Likely causes:** the monotonic-write guard (`install_if_fresher`'s `load_seq` ordering) has
+regressed to requiring the Redis-sourced generation to strictly advance, so a same-generation
+backstop recompile is rejected every time (`outcome="rejected"` climbing while `installed` stays
+flat); every `load_and_compile` call is erroring (`outcome="failed"` climbing) — most likely
+Postgres is unreachable (policies/grants live there, not in Redis, so this is NOT the Redis
+fail-open case) or a malformed policy/template row is aborting Cedar compilation on every attempt;
+or the `spawn_reload` background task itself panicked/exited without bringing down the process
+(mirrors `IamOutboxRelayStalled`'s and `IamAuditPartitionMaintenanceStalled`'s failure shape).
+
+**Confirm:**
+1. Break down by `outcome` — `sum by (outcome) (rate(iam_authz_policy_snapshot_reloads_total[15m]))`
+   — to see whether reloads are happening at all and, if so, which outcome dominates.
+2. If `failed` is climbing: check IAM logs for `policy_snapshot: reload failed; keeping the
+   last-good snapshot` (the `spawn_reload` loop's own `warn!`), and confirm Postgres connectivity
+   (the load reads `PolicyStore::list_all`/`RoleGrantStore::list_all` — a Redis outage alone must
+   **not** cause this given SMA-470's fail-open design, so a `failed` outcome during a Redis
+   outage points at Postgres specifically, or a genuinely malformed policy row rather than the
+   generation counter).
+3. If `rejected` dominates and `installed` is flat: this points at the monotonic-write guard
+   itself regressing — check `install_if_fresher`'s `seq > state.installed_seq` comparison hasn't
+   been reverted to compare `CompiledPolicies::r#gen` instead (the SMA-470 D-B defect this task's
+   test suite guards against).
+4. Verify the IAM process is actually up (`up{job="iam"} == 1`) — if it's down instead, this is
+   really a `TargetDown` situation.
+
+**Remediation:**
+- `failed` dominant, Postgres-side: restore Postgres connectivity/health; the last-known-good
+  snapshot keeps serving decisions throughout (never poisoned by a transient load error), so this
+  is not an outage of authorization itself, only of revocation freshness.
+- `failed` dominant, malformed-row-side: find and fix/remove the offending policy/template row
+  (Cedar compile errors typically name the policy id); until fixed, every reload attempt keeps
+  failing and no grant/revoke made after the row was introduced takes effect.
+- `rejected` dominant with `installed` flat: this is a code regression of the monotonic-write
+  guard, not an operational condition — no config change or restart fixes it; revert/patch the
+  guard and redeploy.
+- A process restart clears a wedged `spawn_reload` task the same way it clears a wedged outbox
+  relay or partition-maintenance task (the snapshot rebuilds fresh via `PolicySnapshot::new` on
+  boot).
+
+See "Authz availability posture" below for the full design this alert protects (fail-open on
+Redis outage, generation-keyed invalidation, and the TTL backstop).
 
 ### `IamAuditPartitionMaintenanceStalled` — audit partition maintenance is not ticking (warning)
 
@@ -551,7 +623,12 @@ misses the (now differently-keyed) cache and recomputes. As a backstop against a
 generation-bump propagating (e.g. degraded Redis connectivity that doesn't outright error but
 lags), cached decisions also expire on a plain TTL — `authz.decision_cache_ttl_secs` (default
 `30` seconds) — bounding the worst-case staleness window even if the generation-based
-invalidation is somehow delayed.
+invalidation is somehow delayed. Underneath that decision-cache TTL sits a second, independent
+TTL: `PolicySnapshot`'s own backstop (`authz.policy_cache_ttl_secs`, also default `30` seconds)
+unconditionally reloads and installs a fresh compiled policy set every TTL regardless of whether
+the Redis-backed generation counter visibly moved (SMA-470) — this is what makes a revoke take
+effect even through a Redis outage, and `iam_authz_policy_snapshot_reloads_total{outcome="installed"}`
+is its liveness signal (`IamPolicySnapshotReloadsStalled` above).
 
 ### Audit retention & partitioning
 
