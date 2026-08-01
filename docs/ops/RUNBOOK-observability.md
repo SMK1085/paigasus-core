@@ -653,7 +653,7 @@ than as a clean `cache="bypass"` signal. **The mitigation is to cap the reconnec
 `set_max_delay`, and ideally a circuit breaker that stops attempting Redis at all once the
 backend is known-down. Do **not** reach for `connection_timeout`/`response_timeout`: they are
 already bounded (1 s / 500 ms above) and are not what costs the time. **None of this is shipped
-yet** — it is pre-existing and tracked as a follow-up. Until it lands there is no config-only
+yet** — it is pre-existing and tracked as **SMA-473**. Until it lands there is no config-only
 workaround, and the only levers are to restore Redis or to run `authz.cache.backend = "memory"`
 (single-replica only).
 
@@ -952,7 +952,8 @@ Not implemented in this cycle; tracked as explicit follow-ups:
   ~20–30 s per-decision cost that §4 "Authz availability posture" documents. Note the knob is the
   retry schedule, **not** `connection_timeout`/`response_timeout` — those are already bounded by
   redis-rs's defaults (1 s / 500 ms). Until it lands, a Redis outage degrades authz availability
-  far more than the word "fail-open" implies. Pre-existing, not introduced by SMA-470.
+  far more than the word "fail-open" implies. Tracked as **SMA-473**; pre-existing, not
+  introduced by SMA-470.
 - **Postgres-backed generation counters**, so a grant/revoke and its invalidation bump commit in
   one transaction. That removes §4's revocation-staleness window entirely rather than bounding
   it, and removes the `maxmemory-policy` mandate; it needs an ADR and a migration (SMA-470 D3).
