@@ -400,7 +400,8 @@ sections are left as the dated decision record, and this section is what actuall
 Task 7 acceptance test measured it: with Redis stopped, **every authz decision takes ~20–30
 seconds**. `connect_redis` calls `ConnectionManager::new` with no config override, and while
 redis-rs 1.3 *does* bound each attempt (`response_timeout` 500ms, `connection_timeout` 1s), the
-**retry budget is finite but undeadlined and large**: 6 retries with jittered exponential backoff
+**retry budget is finite, large, and without an explicit overall read deadline**: 6 retries with
+jittered exponential backoff
 from 100ms and no `max_delay`, summing to roughly **6.3–12.6s per reconnect cycle**, and a
 decision performs several counter reads. ("Unbounded" would be wrong — the retry *count* is
 capped at 6 by `ConnectionManagerConfig::default()`. What is missing is an overall deadline on a
@@ -467,7 +468,8 @@ covers the adjacent client-config work and should absorb it or spawn it.
    time-until-authorization-denies bound §3.5 publishes, reload included — proven by an
    acceptance test against real Postgres and a stopped Redis container, driven at the
    configured interval. The test asserts *convergence*, not the numeric bound: with Redis
-   stopped the reload duration is dominated by the client's unbounded retry budget (§7a
+   stopped the reload duration is dominated by the client's retry budget — finite, large, and
+   without an explicit overall read deadline (§7a
    amendment A), which is not a property worth pinning on a CI runner.
 2. The TTL backstop installs a recompile when the generation counter has not moved (D-B),
    with both a direct unit test and a Docker-free `start_paused` test of the real loop.
