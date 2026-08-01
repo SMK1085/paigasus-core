@@ -361,7 +361,8 @@ mod tests {
     use paigasus_iam_core::{GrantScope, PolicyDocument, PrincipalId, PutOutcome, RoleGrant, Transaction};
     use paigasus_kernel::Prn;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use tokio::sync::Notify;
     use uuid::Uuid;
 
     fn principal_prn(n: u128) -> Prn {
@@ -403,11 +404,16 @@ mod tests {
     /// In-memory `PolicyStore` fake: a `Mutex<Vec<PolicyDocument>>` + an `AtomicU64`
     /// `policy_gen`. `bump_on_next_list` lets a test simulate a concurrent writer's bump
     /// landing exactly inside another caller's `load_and_compile` (see
-    /// `reload_captures_gen_before_load_so_a_mid_load_bump_is_not_lost` below).
+    /// `reload_captures_gen_before_load_so_a_mid_load_bump_is_not_lost` below);
+    /// `park_next_list` lets a test freeze a load mid-flight, holding whatever locks its
+    /// caller took (see `the_backstop_waits_out_an_in_flight_request_driven_reload`).
     struct FakePolicyStore {
         docs: Mutex<Vec<PolicyDocument>>,
         gen_counter: AtomicU64,
         bump_during_list: AtomicU64,
+        park_armed: AtomicBool,
+        list_parked: Notify,
+        list_released: Notify,
     }
 
     impl FakePolicyStore {
@@ -416,6 +422,9 @@ mod tests {
                 docs: Mutex::new(docs),
                 gen_counter: AtomicU64::new(0),
                 bump_during_list: AtomicU64::new(0),
+                park_armed: AtomicBool::new(false),
+                list_parked: Notify::new(),
+                list_released: Notify::new(),
             }
         }
 
@@ -424,6 +433,32 @@ mod tests {
         /// between a caller's `policy_gen()` read and its `list_all()` read.
         fn bump_on_next_list(&self, amount: u64) {
             self.bump_during_list.store(amount, Ordering::SeqCst);
+        }
+
+        /// Arms a one-shot park: the NEXT `list_all()` call announces itself (see
+        /// [`Self::await_parked_list`]) and then blocks until [`Self::release_parked_list`],
+        /// simulating a slow Postgres read. Its caller stays inside `load_and_compile` for
+        /// as long as the test likes — and so keeps holding `PolicySnapshot::reload_gate`.
+        fn park_next_list(&self) {
+            self.park_armed.store(true, Ordering::SeqCst);
+        }
+
+        /// Resolves once the armed `list_all()` has actually parked. `Notify::notify_one`
+        /// stores a permit when nobody is waiting yet, so this is order-independent — the
+        /// park can happen before or after this call.
+        async fn await_parked_list(&self) {
+            self.list_parked.notified().await;
+        }
+
+        fn release_parked_list(&self) {
+            self.list_released.notify_one();
+        }
+
+        /// Appends a policy document, simulating a write landing in Postgres. A `list_all()`
+        /// currently parked will NOT see it — it snapshots `docs` before parking — which is
+        /// what makes an earlier load's compiled result distinguishable from a later one's.
+        fn add_doc(&self, doc: PolicyDocument) {
+            self.docs.lock().unwrap().push(doc);
         }
     }
 
@@ -434,7 +469,15 @@ mod tests {
             if pending > 0 {
                 self.gen_counter.fetch_add(pending, Ordering::SeqCst);
             }
-            Ok(self.docs.lock().unwrap().clone())
+            // Snapshot the documents BEFORE parking (and drop the guard at the `;` — it must
+            // not be held across the await below): this load's view of Postgres is the one it
+            // had when it started, so a write landing while it is parked stays invisible to it.
+            let docs = self.docs.lock().unwrap().clone();
+            if self.park_armed.swap(false, Ordering::SeqCst) {
+                self.list_parked.notify_one();
+                self.list_released.notified().await;
+            }
+            Ok(docs)
         }
 
         async fn put(&self, _doc: &PolicyDocument) -> Result<(), AuthzError> {
@@ -469,7 +512,7 @@ mod tests {
     ///
     /// `heal` re-arms it with a NEW value, which is how the flapping case (`policy_gen`
     /// readable again, reporting a generation that differs from the provisional stamp) is
-    /// reached — see `a_provisional_stamp_suppresses_reloads_even_once_the_counter_returns`.
+    /// reached — see `a_flapping_counter_is_suppressed_until_the_backstop_re_trusts_the_stamp`.
     struct FlakyGenPolicyStore {
         docs: Mutex<Vec<PolicyDocument>>,
         first: AtomicU64,
@@ -923,5 +966,192 @@ mod tests {
         // Request-driven reloads are live again, and settled: equal gens are a no-op.
         snapshot.reload_if_stale().await.expect("reload_if_stale is live again");
         assert!(Arc::ptr_eq(&after, &snapshot.current().await), "a re-trusted stamp equal to the store's gen must not reload");
+    }
+
+    /// Lets the just-spawned reload loop run up to its first `sleep(poll)`, then drives one
+    /// poll tick and gives the woken loop enough scheduler turns to run a whole reload
+    /// (`load_and_compile` + `install_if_fresher`) to completion.
+    ///
+    /// The pre-advance yields are not cosmetic: under a paused clock a timer created AFTER an
+    /// `advance` is scheduled relative to the already-advanced now, so advancing before the
+    /// loop has registered its sleep would silently fire nothing.
+    async fn tick_reload_loop(poll: Duration) {
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(poll).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// SMA-470 D-B, through the REAL `spawn_reload` loop — no Docker, no wall-clock sleeps.
+    /// Pins the TTL backstop end to end: once `ttl` has elapsed with the generation counter
+    /// never moving, the loop must install a fresh recompile. `spawn_reload` had no test at
+    /// all, which is how D-B survived — a backstop that recompiled on every poll and then
+    /// discarded the result forever, so a grant/revoke whose bump was swallowed by a Redis
+    /// outage was never picked up.
+    ///
+    /// **The paused clock cannot drive the TTL check itself.** `SnapshotState::loaded_at` is a
+    /// `std::time::Instant`, and `tokio::time`'s pause/advance is virtual — it mocks
+    /// `tokio::time::Instant`, never std's. Advancing past `ttl` therefore leaves
+    /// `loaded_at.elapsed()` at a few microseconds and the loop takes its `reload_if_stale`
+    /// branch instead (measured: the assertion below fails that way). Back-dating `loaded_at`
+    /// puts the loop in exactly the state a genuinely `ttl`-old snapshot is in, at zero
+    /// wall-clock cost; the clock stays paused so the poll tick is fired on demand rather than
+    /// waited out.
+    #[tokio::test(start_paused = true)]
+    async fn spawn_reload_backstop_installs_a_recompile_when_the_gen_never_moves() {
+        let ttl = Duration::from_secs(30);
+        let poll = Duration::from_secs(1);
+
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(vec![org_admin_template()]));
+        let grants_store = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let grants: Arc<dyn RoleGrantStore> = grants_store.clone();
+
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("build succeeds"));
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = snapshot.clone().spawn_reload(ttl, poll, async move {
+            let _ = rx.await;
+        });
+
+        // A grant lands in Postgres with its `policy_gen` bump swallowed — nothing about the
+        // counter changes, so the poll's staleness check can never see it and the TTL backstop
+        // is the only mechanism that can recover it.
+        let grant_id = Uuid::from_u128(950);
+        grants_store.grant(&role_grant(grant_id, "org_admin")).await.unwrap();
+
+        // Age the installed snapshot past `ttl` (see the doc comment: `advance` cannot).
+        {
+            let mut state = snapshot.state.write().await;
+            state.loaded_at = state.loaded_at.checked_sub(ttl).expect("the process monotonic clock is older than the test's ttl");
+        }
+        tick_reload_loop(poll).await;
+
+        let after = snapshot.current().await;
+        assert!(
+            after.policy_set.policy(&grant_policy_id(grant_id)).is_some(),
+            "the backstop loop must install a recompile once the TTL elapses, even with no gen movement"
+        );
+        assert_eq!(after.r#gen, 0, "and it must install at the SAME generation — nothing ever bumped the counter");
+
+        // Own the task's lifetime — never leave it running past the test.
+        let _ = tx.send(());
+        handle.await.expect("the reload loop exits cleanly on shutdown");
+    }
+
+    /// The other half of that branch, and what gives the test above its meaning: BEFORE `ttl`
+    /// elapses the loop must take the cheap `reload_if_stale` path, which is a no-op while the
+    /// generation is unchanged. Without this,
+    /// `spawn_reload_backstop_installs_a_recompile_when_the_gen_never_moves` would pass just as
+    /// happily against a loop that ignored `ttl` and recompiled the entire policy set on EVERY
+    /// poll tick — once a second per replica at the default `refresh_interval_secs`.
+    #[tokio::test(start_paused = true)]
+    async fn spawn_reload_does_not_recompile_before_the_ttl_elapses() {
+        let poll = Duration::from_secs(1);
+
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(vec![org_admin_template()]));
+        let grants_store = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let grants: Arc<dyn RoleGrantStore> = grants_store.clone();
+
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("build succeeds"));
+        let before = snapshot.current().await;
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        // A `ttl` far beyond anything this test ticks through: `loaded_at` is real-time and the
+        // whole test runs in microseconds, so the backstop branch is unreachable here.
+        let handle = snapshot.clone().spawn_reload(Duration::from_secs(3600), poll, async move {
+            let _ = rx.await;
+        });
+
+        let grant_id = Uuid::from_u128(960);
+        grants_store.grant(&role_grant(grant_id, "org_admin")).await.unwrap();
+
+        for _ in 0..3 {
+            tick_reload_loop(poll).await;
+        }
+
+        let after = snapshot.current().await;
+        assert!(Arc::ptr_eq(&before, &after), "an unexpired TTL plus an unmoved generation must not swap the snapshot");
+        assert!(
+            after.policy_set.policy(&grant_policy_id(grant_id)).is_none(),
+            "the loop must not reload unconditionally on every poll — staleness is what it polls for, `ttl` is only the backstop"
+        );
+
+        let _ = tx.send(());
+        handle.await.expect("the reload loop exits cleanly on shutdown");
+    }
+
+    /// SMA-470 §3.4 guard 1, the ASYMMETRY between the two callers of `reload_gate`:
+    /// `reload_if_stale` takes it with `try_lock` and gives up immediately (its decision is
+    /// served from the current snapshot either way), but `reload_now` — the TTL backstop —
+    /// takes it with a BLOCKING `lock` and must never be skipped.
+    ///
+    /// That distinction is load-bearing and was untested: flipping `reload_now` to a
+    /// `try_lock` passes every other test in this module while reintroducing a genuinely stuck
+    /// backstop. Under sustained request-driven reloads the backstop is starved indefinitely —
+    /// and it is the ONLY path that can refresh a provisional generation stamp or recover a
+    /// bump swallowed during a Redis outage, i.e. exactly the mechanism the rest of SMA-470
+    /// relies on for bounded staleness.
+    ///
+    /// The two loads have to be distinguishable, so the parked `list_all` snapshots its
+    /// documents before blocking: the request-driven reload holding the gate compiles the
+    /// PRE-write policy set, and only a backstop that actually waited out the gate can install
+    /// the document written while that reload was parked.
+    ///
+    /// Runs on the default current-thread runtime deliberately, and with no clock involved: the
+    /// handoff is deterministic only because a spawned task runs to its first pending await
+    /// before this one is polled again — which a multi-thread runtime would not guarantee.
+    #[tokio::test]
+    async fn the_backstop_waits_out_an_in_flight_request_driven_reload() {
+        let policies_store = Arc::new(FakePolicyStore::new(vec![org_admin_template()]));
+        let grants_store = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let policies: Arc<dyn PolicyStore> = policies_store.clone();
+        let grants: Arc<dyn RoleGrantStore> = grants_store.clone();
+
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("build succeeds"));
+
+        // Arm the park, then move the counter so a request-driven reload really does take the
+        // gate rather than short-circuiting on an equal generation.
+        policies_store.park_next_list();
+        policies_store.bump_policy_gen().await.unwrap();
+
+        let requester = tokio::spawn({
+            let snapshot = snapshot.clone();
+            async move { snapshot.reload_if_stale().await }
+        });
+        // Returning from here means that reload is parked inside `list_all` — holding the gate,
+        // unable to progress until this test says so.
+        policies_store.await_parked_list().await;
+
+        // The write the backstop has to pick up. It lands after the in-flight load already
+        // snapshotted its documents, so that load cannot possibly install it.
+        let late_policy_id = "written-during-the-in-flight-reload";
+        policies_store.add_doc(policy_doc(late_policy_id, PolicyKind::Static, r#"permit(principal, action, resource);"#));
+
+        let backstop_entered = Arc::new(Notify::new());
+        let backstop = tokio::spawn({
+            let snapshot = snapshot.clone();
+            let entered = backstop_entered.clone();
+            async move {
+                entered.notify_one();
+                snapshot.reload_now().await
+            }
+        });
+        // Resuming here means the backstop task has run up to its first pending await — the
+        // gate acquisition — so it is genuinely contending for it rather than merely not having
+        // started yet. (With a `try_lock` it instead ran straight to completion here, having
+        // skipped its reload entirely; the assertion below is what catches that.)
+        backstop_entered.notified().await;
+
+        policies_store.release_parked_list();
+        requester.await.expect("the requester task joins").expect("reload_if_stale succeeds");
+        backstop.await.expect("the backstop task joins").expect("reload_now succeeds");
+
+        assert!(
+            snapshot.current().await.policy_set.policy(&PolicyId::new(late_policy_id)).is_some(),
+            "the TTL backstop must WAIT for the single-flight gate, not skip its reload — a `try_lock` here starves the only path that refreshes a provisional stamp"
+        );
     }
 }
