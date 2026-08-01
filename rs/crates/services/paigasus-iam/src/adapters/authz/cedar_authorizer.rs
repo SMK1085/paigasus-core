@@ -32,11 +32,16 @@
 //!    cache is bypassed entirely for this call — no key, no `get`, no `put` — and evaluation
 //!    proceeds unconditionally (D11/D12's fail-open property: an accelerator outage costs
 //!    latency, never correctness). Do not read "costs latency" as "costs little": the shared
-//!    `ConnectionManager` (`adapters::http::connect_redis`) is built with redis-rs's stock
-//!    retry settings and no bounded timeout, so against a dead backend EACH counter read burns
-//!    a ~6.3 s reconnect budget before failing open — a measured 19–28 s per decision (SMA-470
-//!    acceptance test). Correctness is preserved; availability, in practice, largely is not.
-//!    Bounding those timeouts is a tracked follow-up. If the read succeeds and the key is
+//!    `ConnectionManager` (`adapters::http::connect_redis`) is built with a stock
+//!    `ConnectionManagerConfig::default()`, so against a dead backend EACH counter read burns a
+//!    full reconnect-retry budget before failing open — a measured 19–28 s per decision (SMA-470
+//!    acceptance test). The cost is the RETRY SCHEDULE, not the per-attempt timeouts: redis-rs
+//!    1.3.0 already defaults `connection_timeout` to 1 s and `response_timeout` to 500 ms, but
+//!    also defaults to 6 retries over `100+200+400+800+1600+3200 ms` with `max_delay` unset and
+//!    `backon` jitter adding `rand(0, delay)` per step — ~6.3 s per cycle as a floor, ~9.5 s
+//!    expected. Capping `number_of_retries`/`max_delay` (or a circuit breaker) is the fix and is
+//!    a tracked follow-up; tightening the timeouts would not help. Correctness is preserved;
+//!    availability, in practice, largely is not. If the read succeeds and the key is
 //!    already cached, that cached
 //!    [`Decision`] is returned immediately. Hits re-audit **denials only** (full trail,
 //!    D3/D8): a cached `Deny` still gets one fresh audit event per call, because a denial's

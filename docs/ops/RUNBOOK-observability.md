@@ -621,13 +621,23 @@ and adding one is explicitly out of scope.
 
 **Fail-open is NOT free: budget ~20–30 s per authz decision while Redis is down.** Read this
 before deciding how to treat a Redis outage — the word "fail-open" understates it badly.
-`connect_redis` (`adapters/http/mod.rs:628`) builds the shared `ConnectionManager` with
-`ConnectionManager::new(client)` — **stock settings, no bounded `connection_timeout` or
-`response_timeout`**. redis-rs 1.3's defaults are 6 reconnect retries with exponential backoff
-from 100 ms (`100+200+400+800+1600+3200`), so **each counter read that hits a dead backend burns
-a full ~6.3 s retry cycle before it fails open**, and a single request performs several such
-reads (`policy_gen`, `entity_gen`, the slice cache's own `entity_gen`, plus a post-commit bump on
-a mutation). Measured on a real stopped-Redis container (SMA-470 acceptance test):
+`connect_redis` (`adapters/http/mod.rs`) builds the shared `ConnectionManager` with
+`ConnectionManager::new(client)`, i.e. a stock `ConnectionManagerConfig::default()`.
+
+**The problem is the retry schedule, not the per-attempt timeouts** — a distinction that matters
+because it determines which knob to reach for. In pinned redis-rs 1.3.0 the per-attempt timeouts
+**are already bounded by default**: `connection_timeout` = **1 s** and `response_timeout` =
+**500 ms** (`client.rs`'s `DEFAULT_CONNECTION_TIMEOUT`/`DEFAULT_RESPONSE_TIMEOUT`), both applied
+to every attempt by `new_lazy_with_config`. Tightening those will not move the latency. What is
+**not** bounded is the reconnect **retry count and backoff schedule**: the default config sets
+`number_of_retries = 6`, `min_delay = 100 ms`, `exponent_base = 2.0` and leaves `max_delay`
+unset (so no per-step cap is applied beyond `backon`'s own inert 60 s default, which this
+schedule never reaches), meaning a dead backend is retried on a
+`100+200+400+800+1600+3200 ms` schedule — **~6.3 s per reconnect cycle as a floor**. The real delay is higher: redis-rs always enables `backon`'s
+jitter, which *adds* `rand(0, delay)` to each step (`delay × 1.0–2.0`), so a cycle runs ~6.3–12.6 s
+with an expected ~9.5 s. A single request performs several such reads (`policy_gen`, `entity_gen`,
+the slice cache's own `entity_gen`, plus a post-commit bump on a mutation). Measured on a real
+stopped-Redis container (SMA-470 acceptance test):
 
 | request | measured | retry cycles |
 |---|---|---|
@@ -638,11 +648,14 @@ At those latencies most callers time out first, so operationally a Redis outage 
 an **authz outage** than to a degradation — even though every decision that does return is
 correct. Page on "Redis is down"; do not treat it as a background degradation. Expect the
 symptom to arrive as `IamGrpcHighErrorRate` / `IamHighErrorRate` / client-side timeouts rather
-than as a clean `cache="bypass"` signal. **The mitigation is to bound the client timeouts** (a short
-`connection_timeout`/`response_timeout`, and ideally a short-circuit once the backend is
-known-down) — **this is not yet done**; it is pre-existing and tracked as a follow-up. Until it
-lands there is no config-only workaround, and the only lever is to restore Redis or to run
-`authz.cache.backend = "memory"` (single-replica only).
+than as a clean `cache="bypass"` signal. **The mitigation is to cap the reconnect retries** —
+`ConnectionManagerConfig::set_number_of_retries` (from 6 down to 1–2) and
+`set_max_delay`, and ideally a circuit breaker that stops attempting Redis at all once the
+backend is known-down. Do **not** reach for `connection_timeout`/`response_timeout`: they are
+already bounded (1 s / 500 ms above) and are not what costs the time. **None of this is shipped
+yet** — it is pre-existing and tracked as a follow-up. Until it lands there is no config-only
+workaround, and the only levers are to restore Redis or to run `authz.cache.backend = "memory"`
+(single-replica only).
 
 **Revocation freshness is TTL-bounded; the generation bump is best-effort.** A grant/revoke bumps
 `policy_gen` **after** its Postgres transaction has committed, via an awaited but
@@ -933,11 +946,13 @@ Not implemented in this cycle; tracked as explicit follow-ups:
   don't exist yet; this cycle scoped gateway metrics to the M0 auth+proxy surface only.
 - **A combined IAM introspect-and-authorize RPC**, which would also reduce the gateway's
   per-request round-trip count and the surface area of `GatewayIamDependencyUnavailable`.
-- **Bounded Redis client timeouts** (a short `connection_timeout`/`response_timeout` on
-  `connect_redis`'s `ConnectionManager`, plus a short-circuit once the backend is known-down).
-  This is the named mitigation for the ~20–30 s per-decision cost that §4 "Authz availability
-  posture" documents; until it lands, a Redis outage degrades authz availability far more than
-  the word "fail-open" implies. Pre-existing, not introduced by SMA-470.
+- **A capped Redis reconnect-retry schedule** (`ConnectionManagerConfig::set_number_of_retries` /
+  `set_max_delay` on `connect_redis`'s `ConnectionManager`, plus a circuit breaker that stops
+  attempting Redis once the backend is known-down). This is the named mitigation for the
+  ~20–30 s per-decision cost that §4 "Authz availability posture" documents. Note the knob is the
+  retry schedule, **not** `connection_timeout`/`response_timeout` — those are already bounded by
+  redis-rs's defaults (1 s / 500 ms). Until it lands, a Redis outage degrades authz availability
+  far more than the word "fail-open" implies. Pre-existing, not introduced by SMA-470.
 - **Postgres-backed generation counters**, so a grant/revoke and its invalidation bump commit in
   one transaction. That removes §4's revocation-staleness window entirely rather than bounding
   it, and removes the `maxmemory-policy` mandate; it needs an ADR and a migration (SMA-470 D3).
