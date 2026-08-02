@@ -1120,6 +1120,22 @@ default) is a different, rarer signal — it means a row was written with an `ou
 to investigate (a writer bypassing `AuditOutcome`), not a create-ahead timing issue, and do not
 attempt an automatic reattach without first understanding how the stray value got there.
 
+**Retrieving the bootstrap `platform_admin` grant's audit row (SMA-468).** This row is not
+findable the obvious way, so a quick `AuditFilter` guess comes back empty even when the row
+exists. It is written as `action="GrantRole"` with `resource_prn` set to the Root PRN and
+`actor_prn` **null** — null because operator configuration, not a principal, authorized the
+grant. `AuditFilter` has no way to filter for a null `actor_prn` and no filter on `detail` at
+all, so the grantee has to be recognized after the fact: it's in `detail.principal_prn`, and
+`detail.source = "bootstrap_admins"` is what distinguishes this row from an operator-issued
+`GrantRole`. The sharper trap is the lookback window — `PgAuditLog::query` applies a default
+window whenever both `from` and `to` are absent, and `audit.query_default_window_days` defaults
+to 90, so an unfiltered query against a database more than 90 days old silently returns nothing.
+**Always pass an explicit `from`** at or before the deployment date when querying for this row
+(`action=GrantRole` + `resource_prn=<root prn>`). And because the seed is idempotent and never
+re-runs, this row is a one-shot artifact: if `audit.retention.committed_months` is ever set to a
+nonzero value, the row is eventually pruned like any other committed leaf and is **not
+reproducible** once gone.
+
 ---
 
 ## 5. Cardinality & privacy
