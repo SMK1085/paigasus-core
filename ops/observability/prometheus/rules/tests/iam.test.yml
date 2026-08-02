@@ -246,10 +246,18 @@ tests:
 
   # IamAuthzRedisCacheBypassed (SMA-473): sum(rate(...{cache="bypass"}[5m])) > 0, for: 10m.
   #
-  # The `cache="hit"` series is the CONTROL — it climbs across the whole window, so a rule
-  # that dropped its `cache="bypass"` selector, or used `>= 0` instead of `> 0`, would fire
-  # during the control window below and fail this test. An all-firing fixture could not tell
-  # those apart (the SMA-466 lesson).
+  # The real discriminator is `eval_time: 12m`, not `5m`. `for: 10m` guarantees nothing can be
+  # ACTIVE at 5m regardless of what the expression says, so `5m` alone (or `5m` + `20m` with
+  # `12m` omitted) passes even against a rule that dropped its `cache="bypass"` selector or used
+  # `>= 0` instead of `> 0` — those mutants both pass the SUCCESS/exp_alerts:[] check at 5m too.
+  # Under the correct rule, the genuine bypass signal (starting at t=6m) has only been true ~6m
+  # by t=12m and is still PENDING. Under either mutant, the `cache="hit"` series (or the flat
+  # `>= 0`-satisfying zero segment) has been true since ~t=1m, so `for: 10m` has already elapsed
+  # by t=12m and it fires early — which is what `exp_alerts: []` at 12m catches. The `cache="hit"`
+  # series is what makes that 12m assertion discriminate: without it climbing throughout, a
+  # selector-dropped mutant would have no early-true signal to fire on. `eval_time: 5m` is kept
+  # as a plain sanity check that a healthy window stays quiet, not as the mutation catcher
+  # (SMA-466 lesson: don't let a fixture's comment claim a discriminating power it doesn't have).
   - interval: 1m
     input_series:
       - series: 'iam_authz_decisions_total{cache="bypass",decision="allow"}'
@@ -257,11 +265,12 @@ tests:
       - series: 'iam_authz_decisions_total{cache="hit",decision="allow"}'
         values: '0+5x23'
     alert_rule_test:
-      # Control: only the `hit` series is moving — a healthy Redis must never page.
+      # Sanity check: only the `hit` series is moving in this window — quiet, not proof.
       - eval_time: 5m
         alertname: IamAuthzRedisCacheBypassed
         exp_alerts: []
-      # Bypass starts at 6m, but `for: 10m` must hold it back well past that.
+      # The discriminator: bypass has been true only ~6m (since t=6m), still pending under the
+      # correct rule; a selector-dropped or `>= 0` mutant would already be firing here.
       - eval_time: 12m
         alertname: IamAuthzRedisCacheBypassed
         exp_alerts: []
@@ -269,4 +278,4 @@ tests:
         alertname: IamAuthzRedisCacheBypassed
         exp_alerts:
           - exp_labels: { severity: critical }
-            exp_annotations: { summary: "IAM authz is bypassing the Redis decision cache (Redis unhealthy)" }
+            exp_annotations: { summary: "IAM authz is bypassing the Redis decision cache (Redis unhealthy)", description: "IAM authz decisions are bypassing the Redis decision cache. While this fires: the decision cache is gone (decisions still evaluate correctly, just slower), cross-replica API-key revocation stops being global, and (if jwks_cache.backend=\"redis\") every authenticated request 503s. NOTE: this alert only has a signal under authz.cache.backend=\"redis\" — on the default authz.cache.backend=\"memory\" the cache=\"bypass\" series never exists, sum() over an empty vector is empty, and this alert stays SILENT rather than firing. See RUNBOOK's \"Authz availability posture\"." }

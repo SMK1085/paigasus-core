@@ -92,4 +92,4 @@ groups:
         expr: sum(rate(iam_authz_decisions_total{cache="bypass"}[5m])) > 0
         for: 10m
         labels: { severity: critical }
-        annotations: { summary: "IAM authz is bypassing the Redis decision cache (Redis unhealthy)" }
+        annotations: { summary: "IAM authz is bypassing the Redis decision cache (Redis unhealthy)", description: "IAM authz decisions are bypassing the Redis decision cache. While this fires: the decision cache is gone (decisions still evaluate correctly, just slower), cross-replica API-key revocation stops being global, and (if jwks_cache.backend=\"redis\") every authenticated request 503s. NOTE: this alert only has a signal under authz.cache.backend=\"redis\" — on the default authz.cache.backend=\"memory\" the cache=\"bypass\" series never exists, sum() over an empty vector is empty, and this alert stays SILENT rather than firing. See RUNBOOK's \"Authz availability posture\"." }
