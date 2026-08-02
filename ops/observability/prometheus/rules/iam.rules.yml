@@ -69,3 +69,37 @@ groups:
         for: 10m
         labels: { severity: critical }
         annotations: { summary: "IAM gRPC non-OK ratio > 5%" }
+      - alert: IamAuthzRedisCacheBypassed
+        # SMA-473. `cache="bypass"` is emitted ONLY when the entity-generation counter read
+        # errors (`cedar_authorizer.rs` step 3), which under `authz.cache.backend = "memory"`
+        # cannot happen — so a sustained nonzero rate means the Redis backend is unhealthy,
+        # with no healthy-state false positives.
+        #
+        # This alert exists BECAUSE SMA-473 made the outage quiet. Before it, a Redis outage
+        # announced itself as 19-28s authz latency that tripped client-side timeouts ONLY —
+        # neither error-rate rule caught it, because each records INSIDE its own timeout
+        # boundary. NOT IamHighErrorRate: `serve_http` applies its `TimeoutLayer` OUTSIDE
+        # `app_routes`, which is where `http_metrics_layer` lives, so a timed-out HTTP request
+        # short-circuits before the metrics layer records it (`iam_http_requests_total` never
+        # counts it) — and it short-circuits with 408, i.e. `status_class="4xx"`, which that
+        # rule's 5xx filter excludes anyway. NOT IamGrpcHighErrorRate either: `record_grpc` is
+        # called from inside each RPC body, but tonic's `GrpcTimeout` wraps the routed service
+        # from outside and, on expiry, drops the inner future before the handler ever reaches
+        # it — so a timed-out gRPC call never counts either. So the pre-SMA-473 signal was
+        # narrower than it looked, which strengthens the case for this rule. Bounding the retry
+        # budget removed what was left; without this rule a total Redis outage produces correct,
+        # fast decisions and NO page — while the decision cache is gone, cross-replica API-key
+        # revocation stops being global, and (under `authn.jwks_cache.backend = "redis"`) every
+        # token-authenticated request 503s (API-key auth fails open onto Postgres).
+        #
+        # `sum(...)` so the alert is one series, not one per `decision` label — and so the
+        # result carries no labels beyond `severity`.
+        #
+        # `for: 10m`, not 0m: a routine Redis failover briefly bypasses too, and that must
+        # not page. NOTE the `memory`-backend trap — the series does not exist there, `sum()`
+        # over an empty vector is empty, and this alert is SILENT rather than firing. See the
+        # RUNBOOK's "Authz availability posture".
+        expr: sum(rate(iam_authz_decisions_total{cache="bypass"}[5m])) > 0
+        for: 10m
+        labels: { severity: critical }
+        annotations: { summary: "IAM authz is bypassing the Redis decision cache (Redis unhealthy)", description: "IAM authz decisions are bypassing the Redis decision cache. While this fires: the decision cache is gone (decisions still evaluate correctly, just slower), cross-replica API-key revocation stops being global, and (if authn.jwks_cache.backend=\"redis\") every token-authenticated request 503s (API-key auth fails open onto Postgres). NOTE: this alert only has a signal under authz.cache.backend=\"redis\" — on the default authz.cache.backend=\"memory\" the cache=\"bypass\" series never exists, sum() over an empty vector is empty, and this alert stays SILENT rather than firing. See RUNBOOK's \"Authz availability posture\"." }

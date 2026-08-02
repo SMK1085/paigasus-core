@@ -24,8 +24,8 @@
 
 use async_trait::async_trait;
 use paigasus_iam_core::{AccessRequest, AuthzError, Decision, DecisionCache};
+use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
-use redis::{AsyncCommands, Client};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -124,8 +124,7 @@ impl RedisDecisionCache {
     /// entry disappearing after `ttl_secs` (or on eviction) never surfaces as anything
     /// other than a subsequent miss.
     pub async fn connect(redis_url: &str, ttl_secs: u64) -> Result<Self, AuthzError> {
-        let client = Client::open(redis_url).map_err(redis_connect_err)?;
-        let conn = ConnectionManager::new(client).await.map_err(redis_connect_err)?;
+        let conn = crate::adapters::redis_conn::connect(redis_url).await.map_err(redis_connect_err)?;
         Ok(Self { conn, ttl_secs })
     }
 

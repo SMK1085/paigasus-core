@@ -33,17 +33,18 @@
 //!    the decision-cache key. If it errors (the Redis-backed counter is unreachable), the
 //!    cache is bypassed entirely for this call — no key, no `get`, no `put` — and evaluation
 //!    proceeds unconditionally (D11/D12's fail-open property: an accelerator outage costs
-//!    latency, never correctness). Do not read "costs latency" as "costs little": the shared
-//!    `ConnectionManager` (`adapters::http::connect_redis`) is built with a stock
-//!    `ConnectionManagerConfig::default()`, so against a dead backend EACH counter read burns a
-//!    full reconnect-retry budget before failing open — a measured 19–28 s per decision (SMA-470
-//!    acceptance test). The cost is the RETRY SCHEDULE, not the per-attempt timeouts: redis-rs
-//!    1.3.0 already defaults `connection_timeout` to 1 s and `response_timeout` to 500 ms, but
-//!    also defaults to 6 retries over `100+200+400+800+1600+3200 ms` with `max_delay` unset and
-//!    `backon` jitter adding `rand(0, delay)` per step — ~6.3 s per cycle as a floor, ~9.5 s
-//!    expected. Capping `number_of_retries`/`max_delay` (or a circuit breaker) is the fix and is
-//!    a tracked follow-up; tightening the timeouts would not help. Correctness is preserved;
-//!    availability, in practice, largely is not. If the read succeeds and the key is
+//!    latency, never correctness). That latency is BOUNDED, but only because it was
+//!    deliberately bounded: the shared `ConnectionManager` (`adapters::redis_conn`) caps the
+//!    reconnect retry budget at ONE retry (SMA-473), so a counter read against a dead backend
+//!    fails in ~100-200 ms. A decision makes 2-3 such reads — 3 while the policy-snapshot
+//!    stamp is still trusted, 2 once it goes provisional and `reload_if_stale` stops reading
+//!    `policy_gen` — so a full Redis outage costs ~0.2-0.6 s per decision. With redis-rs's
+//!    stock `ConnectionManagerConfig::default()` (6 retries, `100+200+400+800+1600+3200 ms`,
+//!    jittered to ~6.3-12.6 s per cycle, and a `ConnectionManager` burns a FULL cycle per
+//!    failed command) the same decision cost a measured 19-28 s. Note the cost was the RETRY
+//!    SCHEDULE, never the per-attempt timeouts — redis-rs already defaults
+//!    `connection_timeout` to 1 s and `response_timeout` to 500 ms, and both are deliberately
+//!    left alone. If the read succeeds and the key is
 //!    already cached, that cached
 //!    [`Decision`] is returned immediately. Hits re-audit **denials only** (full trail,
 //!    D3/D8): a cached `Deny` still gets one fresh audit event per call, because a denial's
