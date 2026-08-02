@@ -702,23 +702,24 @@ async fn sma470_revoke_during_a_redis_outage_denies_once_the_snapshot_ttl_backst
 
     // Wait for the backstop to INSTALL a recompile — the single step D-B made impossible. The
     // wait watches the in-process snapshot rather than polling `/v1/authz/is-authorized`,
-    // because with Redis gone every HTTP probe costs `ConnectionManager`'s full reconnect-retry
-    // budget on each of the several counter reads a decision takes (~20-30s per request,
-    // measured; the same cost `adapters::api_keys::cache`'s unreachable-backend test already
-    // pays). Polling over HTTP would spend minutes proving nothing extra — the decision itself
-    // is still asserted over the real HTTP surface, once, below. The budget is deliberately far
-    // wider than `ttl + poll`, and is NOT an assertion of that bound: it only has to be wide
-    // enough that a failure means the backstop never converges at all — a regression must fail on
-    // the mechanism, never on a slow CI runner (or on the retry cycles the outage adds to the
-    // loop's cadence).
+    // because the snapshot's `content_hash` IS the property under test ("a recompile that saw
+    // the revoke was installed"), while an HTTP probe only lets it be inferred from a decision
+    // — and the decision itself is still asserted over the real HTTP surface, once, below.
+    // With Redis gone each probe would also pay `ConnectionManager`'s reconnect-retry budget
+    // on every counter read a decision takes; that is now bounded (SMA-473 caps it at ONE
+    // retry, ~100-200ms per failed read, ~0.2-0.6s per decision — the same cap that took
+    // `adapters::api_keys::cache`'s unreachable-backend test from 28.4s to 0.47s), so it is no
+    // longer the reason for watching in-process, merely no longer an argument against it.
     //
-    // 90s, not the `ttl + poll` order of magnitude, because a SINGLE failed `policy_gen` read
-    // costs the full reconnect-retry budget (~20-30s, amendment A / SMA-473) and the backstop
-    // pays that before its Postgres `list_all`s and Cedar compile even start — so one unlucky
-    // loop iteration can eat most of a 30s budget on a runner slower than a dev laptop. The
-    // budget is a failure DEADLINE only: the loop below breaks the moment the recompile is
-    // observed, so widening it costs nothing on the happy path and only buys headroom against
-    // flakiness.
+    // 90s stays deliberately, even though the honest expectation is now `ttl + poll` — ~2s with
+    // this test's `policy_cache_ttl_secs = 1` / `refresh_interval_secs = 1` — plus the reload's
+    // own duration, rather than that plus tens of seconds of retry cycles. The budget is a
+    // failure DEADLINE against a slow runner (testcontainers, the Postgres `list_all`s and the
+    // Cedar compile the backstop pays before installing), NOT an assertion of the `ttl + poll`
+    // bound: it only has to be wide enough that a failure means the backstop never converges at
+    // all, so a regression fails on the mechanism, never on a slow CI runner. The loop below
+    // breaks the moment the recompile is observed, so the extra headroom costs nothing on the
+    // happy path.
     let install_budget = Duration::from_secs(90);
     let started = std::time::Instant::now();
     let mut installed = false;
