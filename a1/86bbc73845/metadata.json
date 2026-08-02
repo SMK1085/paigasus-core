@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "a186bbc73845",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-473-iam-bound-redis-retry-budget",
+  "checkpoints_count": 2,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/a1/86bbc73845/0/metadata.json",
+      "transcript": "/a1/86bbc73845/0/full.jsonl",
+      "compact_transcript": "/a1/86bbc73845/0/transcript.jsonl",
+      "content_hash": "/a1/86bbc73845/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1750,
+    "cache_creation_tokens": 442409,
+    "cache_read_tokens": 17999535,
+    "output_tokens": 133990,
+    "api_call_count": 100
+  }
+}
