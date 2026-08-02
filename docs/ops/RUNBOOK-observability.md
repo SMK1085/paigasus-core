@@ -107,7 +107,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_audit_partitions_created_total` | counter | — | Monthly leaf partitions created by create-ahead. |
 | `iam_audit_partitions_dropped_total` | counter | `outcome` | Monthly leaf partitions dropped by retention. `outcome` ∈ `denied`/`committed`. |
 | `iam_audit_default_partition_rows` | gauge | — | Rows currently in the audit `DEFAULT` partitions. **Should be 0**; nonzero ⇒ create-ahead fell behind (freezes when the task is stalled while retention stays enabled — the ticks counter is the primary liveness signal there; when retention is **disabled** neither metric exists at all, see §4 "Audit partition maintenance stalled"). |
-| `iam_bootstrap_admin_seed_failures_total` | counter | `stage` | Swallowed `BootstrapAdminSeeder` seed failures (SMA-468 D6). `stage` ∈ `list` (the `list_by_principal` existence check errored) / `txn` (the `begin`/`grant_in`/`enqueue`/`record`/`commit` sequence errored). Deliberately has **no alert** (D6) — this is the only place an operator can see it, so check it directly. **A persistent nonzero value means the configured bootstrap admin is never seeded (lockout)** — the seed is idempotent-by-existence, so once the grant row exists this stops incrementing for that identity, and a row that never commits is never revisited. **A low, one-off nonzero value is benign**: two concurrent first authentications by the same bootstrap identity can both pass the existence check and both attempt `grant_in`; the loser violates the unique grant constraint and rolls back under `stage="txn"` while the winner's grant commits — net state is correct and self-correcting. |
+| `iam_bootstrap_admin_seed_failures_total` | counter | `stage` | Swallowed `BootstrapAdminSeeder` seed failures (SMA-468 D6). `stage` ∈ `list` (the `list_by_principal` existence check errored) / `txn` (the `begin`/`grant_in`/`enqueue`/`record`/`commit` sequence errored). Deliberately has **no alert** (D6) — watch the "Bootstrap-admin seed failures" panel on the IAM dashboard, or query `/metrics` directly. **Read it as a rate, not a level.** It is monotonic, so a single historical failure leaves it nonzero forever, including long after the identity was successfully seeded on a later attempt — an absolute nonzero value proves nothing on its own. What indicates an ongoing lockout is a counter that is **still climbing** (`increase(iam_bootstrap_admin_seed_failures_total[15m]) > 0`, sustained): the seed is idempotent-by-existence, so once the grant row commits this stops incrementing for that identity, and a seed that never commits is retried on every subsequent authentication. Confirm by looking for the grant row itself before concluding lockout. **A low, one-off increase is benign**: two concurrent first authentications by the same bootstrap identity can both pass the existence check and both attempt `grant_in`; the loser violates the unique grant constraint and rolls back under `stage="txn"` while the winner's grant commits — net state is correct and self-correcting. |
 
 ### 2.3 `paigasus-gateway` — IAM dependency, OpenAI upstream
 
@@ -1133,9 +1133,12 @@ window whenever both `from` and `to` are absent, and `audit.query_default_window
 to 90, so an unfiltered query against a database more than 90 days old silently returns nothing.
 **Always pass an explicit `from`** at or before the deployment date when querying for this row
 (`action=GrantRole` + `resource_prn=prn:pgs:iam:::root/00000000-0000-0000-0000-000000000000`,
-the literal value of `root_prn()`, `paigasus-iam-core/src/authz/model.rs`). And because the seed is idempotent and never
-re-runs, this row is a one-shot artifact: if `audit.retention.committed_months` is ever set to a
-nonzero value, the row is eventually pruned like any other committed leaf and is **not
+the literal value of `root_prn()`, `paigasus-iam-core/src/authz/model.rs`). This row is also a **one-shot artifact**, which is easy to
+misread: `ensure_platform_admin` itself runs on *every* authenticated HTTP or gRPC request from
+a configured identity, and a failed listing or transaction is retried on the next one. What does
+not repeat is the *write* — once the grant row exists the existence check short-circuits, so no
+second audit row is ever produced. Consequently, if `audit.retention.committed_months` is ever
+set to a nonzero value, the row is eventually pruned like any other committed leaf and is **not
 reproducible** once gone.
 
 ---
