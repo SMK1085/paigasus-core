@@ -155,9 +155,15 @@ tasks:
     #     `ConnectionManager::new(self.clone())` (`redis-1.3.0/src/client.rs:453`), i.e. it
     #     restores the stock 6-retry config without ever naming a gated symbol. This term is
     #     here for the accidental/copy-paste bypass, which is exactly what that API is.
-    # `ConnectionManager::new_lazy_with_config(...)` is deliberately NOT gated: two
-    # `#[cfg(test)]` sites legitimately call it, and they are safe precisely because the
-    # rule above means the only config they can obtain is `connection_manager_config()`.
+    # `ConnectionManager::new_lazy_with_config(...)` is gated DIFFERENTLY, by the second check
+    # below, because a flat ban would be wrong: two `#[cfg(test)]` sites legitimately call it
+    # (an eager constructor would dial out, which is the whole point of those tests). Rather
+    # than exempt them by path — an allowlist, which would destroy this gate's strict-equality
+    # property — every call outside `redis_conn.rs` must NAME `connection_manager_config()` on
+    # the same line. That keeps the retry budget correct wherever it is used. The residual it
+    # deliberately does not catch: a *production* lazy call would still be un-eager and so skip
+    # `AppState::new`'s fail-fast-at-boot (SMA-473 D10) — a narrower concern than the retry
+    # budget, and one no grep can distinguish from a `#[cfg(test)]` call.
     #
     # SCOPE is `src/` AND `tests/` (AC1 says "production and test"): a Docker-gated
     # integration test is just as able to construct a stock manager as production code.
@@ -194,6 +200,15 @@ tasks:
         echo "redis connection config built outside adapters/redis_conn.rs (SMA-473 — use redis_conn::connect / connection_manager_config):" >&2
         printf '%s\n' "$offenders" >&2
         exit 1
+      fi
+      lazy="$(grep -rnE 'ConnectionManager::new_lazy_with_config' src tests | grep -vE ':[0-9]+:[[:space:]]*//' | grep -vE 'adapters/redis_conn\.rs:' || true)"
+      if [ -n "$lazy" ]; then
+        untuned="$(printf '%s\n' "$lazy" | grep -v 'connection_manager_config' || true)"
+        if [ -n "$untuned" ]; then
+          echo "ConnectionManager::new_lazy_with_config called without redis_conn::connection_manager_config() (SMA-473 — a stock config restores the 6-retry budget):" >&2
+          printf '%s\n' "$untuned" >&2
+          exit 1
+        fi
       fi
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.

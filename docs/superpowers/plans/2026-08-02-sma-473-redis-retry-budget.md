@@ -513,12 +513,28 @@ In `moon.yml`, insert after the `wasm-getrandom-free` task block (before `promto
     # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
     inputs:
       - 'rs/crates/services/paigasus-iam/src/**/*'
+      - 'rs/crates/services/paigasus-iam/tests/**/*'
 ```
+
+**This block is a sketch; `moon.yml` is the source of truth.** Review hardened it in
+three ways after this plan was written, and the shipped gate differs accordingly —
+read `moon.yml` rather than copying from here:
+
+1. **Scope is `src tests`, not `src`** (AC1 says "production and test"): a Docker-gated
+   integration test can construct a stock manager just as easily as production code.
+2. **`.get_connection_manager` is a fourth alternation term.**
+   `redis::Client::get_connection_manager()` internally does
+   `ConnectionManager::new(self.clone())` (`redis-1.3.0/src/client.rs:453`), restoring the
+   stock 6-retry config without ever naming a gated symbol — and it is the *first*
+   `ConnectionManager` example in redis-rs's own docs, i.e. the likeliest accidental bypass.
+3. **`new_lazy_with_config` gets its own second check.** A flat ban would be wrong (two
+   `#[cfg(test)]` sites legitimately need a non-dialing constructor), and a path allowlist
+   would destroy the strict-equality property — so instead every call outside
+   `redis_conn.rs` must name `connection_manager_config()` on the same line.
 
 **Note on the probe in Step 3 below:** it must name something the gate actually
 catches. `ConnectionManager::new` without a paren is *not* gated (that is the bare
-path, and `new_lazy_with_config` must stay legal outside the helper) — use
-`ConnectionManagerConfig::new()` in the probe instead.
+path) — use `ConnectionManagerConfig::new()` in the probe instead.
 
 - [ ] **Step 2: Verify the gate passes on the current (correct) tree**
 

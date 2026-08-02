@@ -600,8 +600,11 @@ the one that *will* also trip `IamHighErrorRate`/`IamGrpcHighErrorRate`. (Each c
    points at intermittent connectivity or a failover in progress.
 3. Check IAM logs for `cedar_authorizer: entity generation counter unreadable` and, if a Redis
    JWKS cache is configured, `redis jwks cache error`.
-4. Reach Redis directly from the IAM host (`redis-cli -u <authz.cache.redis_url> PING`) to
-   separate "Redis is down" from "IAM cannot reach a healthy Redis".
+4. Reach Redis directly from the IAM host to separate "Redis is down" from "IAM cannot reach a
+   healthy Redis". Do **not** paste `authz.cache.redis_url` into `redis-cli -u` — that URL
+   carries the password, and a `-u` argument lands in shell history and in every `ps` listing
+   on the box. Pass the secret out of band and only the non-secret parts on the command line:
+   `REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli -h <host> -p <port> PING`.
 5. **Check Postgres connection-pool headroom** — this is the failure mode SMA-473 newly
    enables. Every bypassed decision pays a raw entity-slice load against Postgres, and the old
    19–28 s retry stall was also an accidental ~50× throttle on how fast those loads could be
@@ -739,10 +742,11 @@ redis-rs defaults (SMA-473 D1).
 **The cost was the retry schedule, not the per-attempt timeouts** — kept here because it is why
 the fix looks the way it does, and because the timeouts remain the wrong knob to reach for. In
 pinned redis-rs 1.3.0 the per-attempt timeouts **were already bounded by default**:
-`connection_timeout` = **1 s** and `response_timeout` = **500 ms** (`client.rs`'s
-`DEFAULT_CONNECTION_TIMEOUT`/`DEFAULT_RESPONSE_TIMEOUT`), both applied to every connect attempt
-by whichever `ConnectionManager` constructor is used — production's eager `new_with_config` and
-the tests' lazy `new_lazy_with_config` alike, since the timeouts live in the shared
+`connection_timeout` = **1 s**, which bounds establishing a connection, and `response_timeout` =
+**500 ms**, which bounds waiting for a command's response (`client.rs`'s
+`DEFAULT_CONNECTION_TIMEOUT`/`DEFAULT_RESPONSE_TIMEOUT`). Both apply under whichever
+`ConnectionManager` constructor is used — production's eager `new_with_config` and the tests'
+lazy `new_lazy_with_config` alike, since the timeouts live in the shared
 `ConnectionManagerConfig` and not in the constructor. (`connection_timeout` wraps the *whole*
 connect, DNS resolution included — `client.rs:505-510` puts
 `get_multiplexed_async_connection_inner` inside `rt.timeout(…)` and the resolver runs inside
@@ -871,7 +875,13 @@ The default backend is `memory`, which
 has no such coupling — if you run the Redis one, treat Redis as a hard availability dependency of
 authentication itself and size its redundancy accordingly.
 
-**`RedisApiKeyCache` shares the same connection and sits on the hottest path.** The gateway's
+**`RedisApiKeyCache` usually shares the same connection, and sits on the hottest path.** It
+reuses the `redis_conn` handle **only when `authz.cache.backend = "redis"`**; with the authz
+cache on `memory` it dials its own `ConnectionManager` from
+`api_keys.introspect_cache.redis_url` (`adapters/http/mod.rs`), which may be a different Redis
+and in any case keeps its own independent connection and reconnect state. So a single Redis
+outage need not hit both paths, and in the split configuration each fails on its own schedule.
+The gateway's
 `IntrospectApiKey`/`IsAuthorized` pair is the busiest gRPC traffic in normal operation (see
 `IamGrpcHighErrorRate` above), and every API-key-authenticated request reads this cache: a miss
 costs a `get` **and** a `put`, while `RevokeApiKey`/`ArchiveServiceAccount` add an `evict`. Unlike
@@ -1187,8 +1197,9 @@ Not implemented in this cycle; tracked as explicit follow-ups:
 - **A combined IAM introspect-and-authorize RPC**, which would also reduce the gateway's
   per-request round-trip count and the surface area of `GatewayIamDependencyUnavailable`.
 - **A Redis circuit breaker** that stops attempting the backend at all once it is known-down. The
-  retry-schedule half of this — `number_of_retries = 1` on the one `ConnectionManager` this
-  service builds — **shipped with SMA-473** and is what bounds a Redis outage to ~0.2–0.6 s per
+  retry-schedule half of this — `number_of_retries = 1` on every `ConnectionManager` built
+  through `adapters::redis_conn::connect`, which since SMA-473 is all of them — **shipped with
+  SMA-473** and is what bounds a Redis outage to ~0.2–0.6 s per
   authz decision, ~0.3–0.8 s per authz-mutating request, and up to ~1.2 s for a gated
   cross-principal decision (§4 "Authz availability posture"). A breaker was deliberately left out of that
   change (SMA-473 D7) because the cap alone fixes the common shape: a **stopped or refused**
