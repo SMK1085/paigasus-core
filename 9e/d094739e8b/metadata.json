@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "9ed094739e8b",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-468-audit-bootstrap-admin-grant",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/ops/RUNBOOK-observability.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9e/d094739e8b/0/metadata.json",
+      "transcript": "/9e/d094739e8b/0/full.jsonl",
+      "compact_transcript": "/9e/d094739e8b/0/transcript.jsonl",
+      "content_hash": "/9e/d094739e8b/0/content_hash.txt",
+      "prompt": "/9e/d094739e8b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2121,
+    "cache_creation_tokens": 2138424,
+    "cache_read_tokens": 108969846,
+    "output_tokens": 337610,
+    "api_call_count": 295
+  }
+}
