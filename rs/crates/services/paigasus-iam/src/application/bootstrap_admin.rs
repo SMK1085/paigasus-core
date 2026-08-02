@@ -17,6 +17,7 @@
 //! out.
 
 use paigasus_iam_core::authz::model::GrantScope;
+use paigasus_iam_core::{AuditLog, Outbox, PolicyGenBumper, UnitOfWork};
 use paigasus_iam_core::{Clock, IdGenerator, Issuer, PrincipalId, RoleGrant, RoleGrantStore};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -42,8 +43,36 @@ pub struct BootstrapAdminSeeder<I, C> {
     /// set itself.
     admins: Arc<HashSet<(Issuer, String)>>,
     grants: Arc<dyn RoleGrantStore>,
+    #[expect(dead_code, reason = "Task 3 (SMA-468) uses these in the transactional write path")]
+    uow: Arc<dyn UnitOfWork>,
+    #[expect(dead_code, reason = "Task 3 (SMA-468) uses these in the transactional write path")]
+    outbox: Arc<dyn Outbox>,
+    #[expect(dead_code, reason = "Task 3 (SMA-468) uses these in the transactional write path")]
+    audit: Arc<dyn AuditLog>,
+    #[expect(dead_code, reason = "Task 3 (SMA-468) uses these in the transactional write path")]
+    gen_bumper: Arc<dyn PolicyGenBumper>,
     ids: I,
     clock: C,
+}
+
+/// Named-field constructor input, mirroring `RoleServiceDeps` (`application/roles.rs:120`)
+/// and for the same reason: with eight dependencies — four of them `Arc<dyn …>` — positional
+/// arguments let a reordering silently swap two same-typed values past the compiler.
+pub struct BootstrapAdminSeederDeps<I, C> {
+    pub admins_config: Vec<BootstrapAdmin>,
+    pub grants: Arc<dyn RoleGrantStore>,
+    /// SMA-468: the seed's grant, audit row and outbox event commit in ONE transaction, so
+    /// the seeder owns a `UnitOfWork` rather than leaning on `RoleGrantStore::grant`'s
+    /// internal one-shot wrapper.
+    pub uow: Arc<dyn UnitOfWork>,
+    pub outbox: Arc<dyn Outbox>,
+    pub audit: Arc<dyn AuditLog>,
+    /// SMA-468 D5: `grant_in` does NOT bump `policy_gen` (only the `grant` wrapper does), so
+    /// the seeder must bump post-commit itself or a freshly seeded admin is denied until the
+    /// snapshot's TTL backstop.
+    pub gen_bumper: Arc<dyn PolicyGenBumper>,
+    pub ids: I,
+    pub clock: C,
 }
 
 impl<I, C> BootstrapAdminSeeder<I, C>
@@ -56,8 +85,9 @@ where
     /// skipped, or a hand-built config in a test) rather than an operator error — skip the
     /// entry with a loud warning instead of panicking the composition root over it.
     #[must_use]
-    pub fn new(configured: &[BootstrapAdmin], grants: Arc<dyn RoleGrantStore>, ids: I, clock: C) -> Self {
-        let admins = configured
+    pub fn new(deps: BootstrapAdminSeederDeps<I, C>) -> Self {
+        let admins = deps
+            .admins_config
             .iter()
             .filter_map(|admin| match Issuer::parse(&admin.issuer) {
                 Ok(issuer) => Some((issuer, admin.subject.clone())),
@@ -73,9 +103,13 @@ where
             .collect();
         Self {
             admins: Arc::new(admins),
-            grants,
-            ids,
-            clock,
+            grants: deps.grants,
+            uow: deps.uow,
+            outbox: deps.outbox,
+            audit: deps.audit,
+            gen_bumper: deps.gen_bumper,
+            ids: deps.ids,
+            clock: deps.clock,
         }
     }
 
@@ -129,6 +163,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::fakes::{FakeAuditLog, FakeOutbox, FakePolicyGenBumper, FakeUnitOfWork};
     use crate::application::fakes::{FixedClock, InMemoryRoleGrants, SeqIds};
     use paigasus_kernel::Prn;
     use uuid::Uuid;
@@ -145,29 +180,63 @@ mod tests {
     /// RoleGrant>>>` field) — named here so `seeder`'s return type stays readable.
     type GrantsBacking = Arc<std::sync::Mutex<std::collections::HashMap<Uuid, RoleGrant>>>;
 
-    fn seeder(configured: &[BootstrapAdmin]) -> (BootstrapAdminSeeder<SeqIds, FixedClock>, GrantsBacking) {
+    /// Everything a test needs to assert on: the seeder plus the backing stores of every
+    /// fake it writes through.
+    struct Harness {
+        seeder: BootstrapAdminSeeder<SeqIds, FixedClock>,
+        grants: GrantsBacking,
+        #[expect(dead_code, reason = "Task 3 (SMA-468) tests assert on these")]
+        events: Arc<std::sync::Mutex<Vec<paigasus_iam_core::DomainEvent>>>,
+        #[expect(dead_code, reason = "Task 3 (SMA-468) tests assert on these")]
+        entries: Arc<std::sync::Mutex<Vec<paigasus_iam_core::AuditEntry>>>,
+        #[expect(dead_code, reason = "Task 3 (SMA-468) tests assert on these")]
+        bumps: FakePolicyGenBumper,
+    }
+
+    fn seeder(configured: &[BootstrapAdmin]) -> Harness {
         let grants = InMemoryRoleGrants::default();
-        let backing = grants.0.clone();
-        (BootstrapAdminSeeder::new(configured, Arc::new(grants), SeqIds::default(), FixedClock::default()), backing)
+        let grants_backing = grants.0.clone();
+        let outbox = FakeOutbox::default();
+        let events = outbox.0.clone();
+        let audit = FakeAuditLog::default();
+        let entries = audit.0.clone();
+        let bumps = FakePolicyGenBumper::default();
+        let seeder = BootstrapAdminSeeder::new(BootstrapAdminSeederDeps {
+            admins_config: configured.to_vec(),
+            grants: Arc::new(grants),
+            uow: Arc::new(FakeUnitOfWork),
+            outbox: Arc::new(outbox),
+            audit: Arc::new(audit),
+            gen_bumper: Arc::new(bumps.clone()),
+            ids: SeqIds::default(),
+            clock: FixedClock::default(),
+        });
+        Harness {
+            seeder,
+            grants: grants_backing,
+            events,
+            entries,
+            bumps,
+        }
     }
 
     #[tokio::test]
     async fn non_configured_identity_never_touches_the_store() {
-        let (seeder, backing) = seeder(&[]);
-        seeder.ensure_platform_admin(&principal(1), &issuer("https://idp.example.com"), "sub-1").await;
-        assert!(backing.lock().unwrap().is_empty(), "a non-bootstrap identity must not get a grant");
+        let h = seeder(&[]);
+        h.seeder.ensure_platform_admin(&principal(1), &issuer("https://idp.example.com"), "sub-1").await;
+        assert!(h.grants.lock().unwrap().is_empty(), "a non-bootstrap identity must not get a grant");
     }
 
     #[tokio::test]
     async fn configured_identity_gets_a_platform_admin_root_grant() {
-        let (seeder, backing) = seeder(&[BootstrapAdmin {
+        let h = seeder(&[BootstrapAdmin {
             issuer: "https://idp.example.com".to_string(),
             subject: "sub-admin".to_string(),
         }]);
         let p = principal(1);
-        seeder.ensure_platform_admin(&p, &issuer("https://idp.example.com"), "sub-admin").await;
+        h.seeder.ensure_platform_admin(&p, &issuer("https://idp.example.com"), "sub-admin").await;
 
-        let grants = backing.lock().unwrap();
+        let grants = h.grants.lock().unwrap();
         assert_eq!(grants.len(), 1);
         let grant = grants.values().next().unwrap();
         assert_eq!(grant.principal, p);
@@ -178,23 +247,23 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_authentication_does_not_create_a_duplicate_grant() {
-        let (seeder, backing) = seeder(&[BootstrapAdmin {
+        let h = seeder(&[BootstrapAdmin {
             issuer: "https://idp.example.com".to_string(),
             subject: "sub-admin".to_string(),
         }]);
         let p = principal(1);
         let iss = issuer("https://idp.example.com");
-        seeder.ensure_platform_admin(&p, &iss, "sub-admin").await;
-        seeder.ensure_platform_admin(&p, &iss, "sub-admin").await;
+        h.seeder.ensure_platform_admin(&p, &iss, "sub-admin").await;
+        h.seeder.ensure_platform_admin(&p, &iss, "sub-admin").await;
 
-        assert_eq!(backing.lock().unwrap().len(), 1, "idempotent: a second authentication must not duplicate the grant");
+        assert_eq!(h.grants.lock().unwrap().len(), 1, "idempotent: a second authentication must not duplicate the grant");
     }
 
     #[tokio::test]
     async fn an_existing_platform_admin_grant_is_left_untouched() {
         // Even if the grant was seeded some other way (e.g. an operator-run `psql` seed
         // ahead of Task 21b landing), `ensure_platform_admin` must not insert a second one.
-        let (seeder, backing) = seeder(&[BootstrapAdmin {
+        let h = seeder(&[BootstrapAdmin {
             issuer: "https://idp.example.com".to_string(),
             subject: "sub-admin".to_string(),
         }]);
@@ -207,33 +276,33 @@ mod tests {
             linked_policy_id: "grant:pre-existing".to_string(),
             created_at: chrono::Utc::now(),
         };
-        backing.lock().unwrap().insert(pre_existing.id, pre_existing.clone());
+        h.grants.lock().unwrap().insert(pre_existing.id, pre_existing.clone());
 
-        seeder.ensure_platform_admin(&p, &issuer("https://idp.example.com"), "sub-admin").await;
+        h.seeder.ensure_platform_admin(&p, &issuer("https://idp.example.com"), "sub-admin").await;
 
-        let grants = backing.lock().unwrap();
+        let grants = h.grants.lock().unwrap();
         assert_eq!(grants.len(), 1);
         assert_eq!(grants.get(&pre_existing.id), Some(&pre_existing));
     }
 
     #[tokio::test]
     async fn a_matching_issuer_with_a_different_subject_is_not_seeded() {
-        let (seeder, backing) = seeder(&[BootstrapAdmin {
+        let h = seeder(&[BootstrapAdmin {
             issuer: "https://idp.example.com".to_string(),
             subject: "sub-admin".to_string(),
         }]);
-        seeder.ensure_platform_admin(&principal(1), &issuer("https://idp.example.com"), "sub-other").await;
-        assert!(backing.lock().unwrap().is_empty());
+        h.seeder.ensure_platform_admin(&principal(1), &issuer("https://idp.example.com"), "sub-other").await;
+        assert!(h.grants.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn a_matching_subject_with_a_different_issuer_is_not_seeded() {
-        let (seeder, backing) = seeder(&[BootstrapAdmin {
+        let h = seeder(&[BootstrapAdmin {
             issuer: "https://idp.example.com".to_string(),
             subject: "sub-admin".to_string(),
         }]);
-        seeder.ensure_platform_admin(&principal(1), &issuer("https://other-idp.example.com"), "sub-admin").await;
-        assert!(backing.lock().unwrap().is_empty());
+        h.seeder.ensure_platform_admin(&principal(1), &issuer("https://other-idp.example.com"), "sub-admin").await;
+        assert!(h.grants.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -241,10 +310,10 @@ mod tests {
         // `IamConfig::validate` rejects this at boot in production; this proves the fallback
         // (skip + warn) doesn't panic when it's reached anyway (e.g. a hand-built config in a
         // test that bypasses `validate`).
-        let (seeder, _backing) = seeder(&[BootstrapAdmin {
+        let h = seeder(&[BootstrapAdmin {
             issuer: "not-a-valid-issuer".to_string(),
             subject: "sub-admin".to_string(),
         }]);
-        assert!(seeder.admins.is_empty());
+        assert!(h.seeder.admins.is_empty());
     }
 }
