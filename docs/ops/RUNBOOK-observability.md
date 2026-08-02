@@ -826,7 +826,11 @@ it even before the cap. `serve_http` applies `TimeoutLayer` *outside* `app_route
 `http_metrics_layer` lives *inside* `app_routes`, so a timed-out HTTP request short-circuits
 before the metrics layer records anything — `iam_http_requests_total` never counts it — and the
 status it short-circuits with is `408`, i.e. `status_class="4xx"`, which the rule's `5xx` filter
-excludes twice over. The pre-cap authz signal was the gRPC rule plus client timeouts, full stop.
+excludes twice over. Neither error-rate rule carried it, for the same structural reason:
+`record_grpc` runs inside each RPC body, but tonic's `GrpcTimeout` wraps the routed service —
+user layers included — from outside and, on expiry, drops the inner future before the handler
+ever reaches it, so a timed-out gRPC call never reaches `record_grpc` either. The pre-cap authz
+signal was client-side timeouts only, full stop.
 The signal now is **`IamAuthzRedisCacheBypassed`**
 (`sum(rate(iam_authz_decisions_total{cache="bypass"}[5m])) > 0` for 10m, critical), whose catalog
 entry above carries the confirm/remediate steps and the `authz.cache.backend = "memory"` silence
@@ -844,7 +848,10 @@ With `authn.jwks_cache.backend = "redis"`, `RedisJwksCache::get` maps **any** Re
 cache on **every** token validation. So every **token**-authenticated request (the OIDC bearer
 path — API-key authentication is the next paragraph, and fails open) `503`s for the duration of
 the outage, and *that* is what moves
-`IamHighErrorRate`/`IamGrpcHighErrorRate`. SMA-473 makes the failure **fast** (~0.1–0.2 s instead
+`IamHighErrorRate`. Not `IamGrpcHighErrorRate`: gRPC bearer enforcement is `AuthEnforce`, a tower
+layer that short-circuits via `reject()` (`adapters::grpc::authn::AuthEnforce::call`) without
+ever calling the inner service, so a JWKS-driven `Unavailable` never reaches `record_grpc` there
+either. SMA-473 makes the failure **fast** (~0.1–0.2 s instead
 of ~6–12 s); it does not, and should not, make it succeed.
 
 **Expect brief authentication 503s where you used to see nothing at all.** SMA-473 changed how
