@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "06eba9813c85",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-468-audit-bootstrap-admin-grant",
+  "checkpoints_count": 2,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/06/eba9813c85/0/metadata.json",
+      "transcript": "/06/eba9813c85/0/full.jsonl",
+      "compact_transcript": "/06/eba9813c85/0/transcript.jsonl",
+      "content_hash": "/06/eba9813c85/0/content_hash.txt",
+      "prompt": "/06/eba9813c85/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2111,
+    "cache_creation_tokens": 2129441,
+    "cache_read_tokens": 105575027,
+    "output_tokens": 331953,
+    "api_call_count": 290
+  }
+}
