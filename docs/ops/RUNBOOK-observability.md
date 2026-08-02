@@ -539,15 +539,23 @@ client that should be investigated/revoked.
 ### `IamAuthzRedisCacheBypassed` — authz is bypassing the Redis decision cache (critical)
 
 **Meaning.** `sum(rate(iam_authz_decisions_total{cache="bypass"}[5m])) > 0` sustained for 10m —
-authz has been computing decisions with the decision cache **bypassed entirely** for ten
-straight minutes. That label is emitted on exactly one condition (`cedar_authorizer.rs` step 3):
-the Redis-backed entity-generation counter read **errored**, so no cache key could be built. Ten
-minutes of it means the Redis backend is unhealthy, not that a single failover blipped. Decisions
-throughout remain **correct** — they are computed against the in-memory snapshot compiled from
-**Postgres**, which is the authoritative policy set (see "Authz availability posture" below) —
-and, since SMA-473 capped the reconnect retry budget, **fast** (~0.2–0.8 s per decision, up to
-~1.2 s for a cross-principal query, rather than the old 19–28 s). This alert exists precisely
-*because* those two facts mean nothing else
+authz has been computing decisions with the decision cache **bypassed entirely**. That label is
+emitted on exactly one condition (`cedar_authorizer.rs` step 3): the Redis-backed
+entity-generation counter read **errored**, so no cache key could be built.
+
+**Mind the arithmetic before you reason about duration.** `for: 10m` on a `rate(…[5m])`
+expression does *not* mean ten straight minutes of bypassing. `rate()` keeps returning `> 0` for
+a full 5m after the **last** bypass sample falls inside its window, so a bypass window of only
+**~5 minutes** already satisfies `for: 10m`. Read a firing alert as "the Redis backend has been
+unhealthy for at least ~5 minutes", not ten. That is still far longer than a single failover
+blip, which is all the `for:` clause is there to filter — the 10m value is deliberate and stays.
+
+Decisions throughout remain **correct** — they are computed against the in-memory snapshot
+compiled from **Postgres**, which is the authoritative policy set (see "Authz availability
+posture" below) — and, since SMA-473 capped the reconnect retry budget, **fast**: ~0.2–0.6 s per
+decision and ~0.3–0.8 s per authz-mutating request, up to ~1.2 s for a gated cross-principal
+decision, against ~19–28 s, ~28 s and ~38–57 s respectively before the cap. This alert exists
+precisely *because* those two facts mean nothing else
 will tell you: correct, prompt answers produce no error-rate signal and no client timeouts.
 
 **NOTE — `authz.cache.backend = "memory"` makes this alert go SILENT, not fire.** On the memory
@@ -594,6 +602,15 @@ the one that *will* also trip `IamHighErrorRate`/`IamGrpcHighErrorRate`. (Each c
    JWKS cache is configured, `redis jwks cache error`.
 4. Reach Redis directly from the IAM host (`redis-cli -u <authz.cache.redis_url> PING`) to
    separate "Redis is down" from "IAM cannot reach a healthy Redis".
+5. **Check Postgres connection-pool headroom** — this is the failure mode SMA-473 newly
+   enables. Every bypassed decision pays a raw entity-slice load against Postgres, and the old
+   19–28 s retry stall was also an accidental ~50× throttle on how fast those loads could be
+   issued. With the cap in place there is no throttle: during an outage the *uncached* decision
+   rate hitting Postgres is your **full** request rate. Nothing here is silent — pool saturation
+   surfaces as 5xx and trips `IamHighErrorRate` — but if this alert and `IamHighErrorRate` are
+   firing together, suspect the pool before you suspect a second, independent fault. Watch pool
+   acquire waits/timeouts and Postgres `pg_stat_activity` counts, and size or shed accordingly
+   until Redis is back.
 
 **Remediation:** restore Redis — that is the only fix. There is **no config-only workaround**:
 `authz.cache.backend = "memory"` removes the dependency but is **single-replica only** (its caches
@@ -704,8 +721,9 @@ degradation into a total authorization outage. The contract is bounded-staleness
 the bound below is what makes that defensible. There is no config knob to opt into fail-closed,
 and adding one is explicitly out of scope.
 
-**Fail-open is bounded, not free: budget ~0.2–0.8 s per authz decision while Redis is down — up
-to ~1.2 s for a cross-principal query (the table below).** That bound exists only because it was
+**Fail-open is bounded, not free: while Redis is down, budget ~0.2–0.6 s per authz decision,
+~0.3–0.8 s per authz-mutating request, and up to ~1.2 s for a gated cross-principal decision
+(the table below).** That bound exists only because it was
 deliberately imposed. `adapters::redis_conn::connect` is the
 **single** place this service constructs the shared `ConnectionManager` (enforced by the
 `repo:redis-connect-single-site` CI gate), and it caps the reconnect budget at
@@ -722,8 +740,14 @@ redis-rs defaults (SMA-473 D1).
 the fix looks the way it does, and because the timeouts remain the wrong knob to reach for. In
 pinned redis-rs 1.3.0 the per-attempt timeouts **were already bounded by default**:
 `connection_timeout` = **1 s** and `response_timeout` = **500 ms** (`client.rs`'s
-`DEFAULT_CONNECTION_TIMEOUT`/`DEFAULT_RESPONSE_TIMEOUT`), both applied to every attempt by
-`new_lazy_with_config`. Tightening those would not have moved the latency. What was **not**
+`DEFAULT_CONNECTION_TIMEOUT`/`DEFAULT_RESPONSE_TIMEOUT`), both applied to every connect attempt
+by whichever `ConnectionManager` constructor is used — production's eager `new_with_config` and
+the tests' lazy `new_lazy_with_config` alike, since the timeouts live in the shared
+`ConnectionManagerConfig` and not in the constructor. (`connection_timeout` wraps the *whole*
+connect, DNS resolution included — `client.rs:505-510` puts
+`get_multiplexed_async_connection_inner` inside `rt.timeout(…)` and the resolver runs inside
+that — so a hung resolver is bounded the same way a blackholed socket is.) Tightening those
+would not have moved the latency. What was **not**
 bounded was the reconnect **retry count and backoff schedule**: the default config sets
 `number_of_retries = 6`, `min_delay = 100 ms`, `exponent_base = 2.0` and leaves `max_delay`
 unset (so no per-step cap is applied beyond `backon`'s own inert 60 s default, which this
@@ -765,8 +789,11 @@ the TCP connect **fails immediately** — the process is stopped or the port ref
 (`ECONNREFUSED`). If the backend instead swallows SYNs (a `DROP` firewall rule, a partitioned
 network, a wedged host), no attempt errors early and each one runs to `connection_timeout`
 instead, so one capped cycle costs **~2.1 s** per failed command (two 1 s attempts plus the
-~100–200 ms delay between them) rather than ~100–200 ms. That 2.1 s is **calculated, not
-measured** — unlike the table above, nothing has ever been run against a blackholed backend here,
+~100–200 ms delay between them) rather than ~100–200 ms. The same 1 s bound covers a **hung DNS
+resolver**, not just a dropped SYN: `connection_timeout` wraps the entire connect including
+address resolution (`redis-1.3.0/src/client.rs:505-510`). That 2.1 s is **calculated, not
+measured** — unlike the stopped/refused shape above, which has been exercised end-to-end, nothing
+has ever been run against a blackholed backend here,
 so treat multiplying the "cycles" column by it as the *shape* of the residual rather than a figure
 to size a client timeout on. Bounding it further needs a **circuit breaker** that stops attempting Redis once the
 backend is known-down, which is deliberately **not** shipped (SMA-473 D7; see §6) — capping the
@@ -780,10 +807,27 @@ that only fails on first use. What changed is the tolerance window: ~6–12 s of
 costs one crash-restart. Depend on the orchestrator's restart policy or a readiness/ordering
 constraint for that, not on the connect budget (SMA-473 D10).
 
+**Verify that your orchestrator actually applies restart backoff — do not assume it.** D10's
+reasoning rests on restart backoff dominating the recovery time either way, and the cadence it
+cites (10 s → 20 s → 40 s …) is **Kubernetes `CrashLoopBackOff`** specifically. This repo ships
+**no deployment manifest for IAM**, so nothing here supplies it. Under a supervisor with a fixed
+short restart delay — `Restart=always` with a small `RestartSec`, `docker run --restart=always`,
+a shell loop — there is no backoff, and during a Redis outage IAM now crash-loops **far faster**
+than it did before the cap (~200 ms per attempt instead of ~6–12 s). Either run under something
+with exponential backoff, or add a readiness/ordering constraint so IAM does not start before
+Redis is accepting connections.
+
 **How a Redis outage announces itself now.** Correct *and* fast is exactly what makes the outage
-quiet, so the old expectation is inverted: `IamGrpcHighErrorRate` / `IamHighErrorRate` and
-client-side timeouts will **not** fire on the authz path, because every decision still returns the
-right answer in a fraction of a second. The signal is **`IamAuthzRedisCacheBypassed`**
+quiet, so the old expectation is inverted: `IamGrpcHighErrorRate` and client-side timeouts will
+**not** fire on the authz path, because every decision still returns the right answer in a
+fraction of a second. Note the old signal was weaker than it looked, which strengthens the case
+for the new alert rather than weakening it: `IamHighErrorRate` **never** carried the HTTP half of
+it even before the cap. `serve_http` applies `TimeoutLayer` *outside* `app_routes`, and
+`http_metrics_layer` lives *inside* `app_routes`, so a timed-out HTTP request short-circuits
+before the metrics layer records anything — `iam_http_requests_total` never counts it — and the
+status it short-circuits with is `408`, i.e. `status_class="4xx"`, which the rule's `5xx` filter
+excludes twice over. The pre-cap authz signal was the gRPC rule plus client timeouts, full stop.
+The signal now is **`IamAuthzRedisCacheBypassed`**
 (`sum(rate(iam_authz_decisions_total{cache="bypass"}[5m])) > 0` for 10m, critical), whose catalog
 entry above carries the confirm/remediate steps and the `authz.cache.backend = "memory"` silence
 trap. Still page on it rather than treating it as a background degradation: the blast radius (no
@@ -801,7 +845,22 @@ cache on **every** token validation. So every **token**-authenticated request (t
 path — API-key authentication is the next paragraph, and fails open) `503`s for the duration of
 the outage, and *that* is what moves
 `IamHighErrorRate`/`IamGrpcHighErrorRate`. SMA-473 makes the failure **fast** (~0.1–0.2 s instead
-of ~6–12 s); it does not, and should not, make it succeed. The default backend is `memory`, which
+of ~6–12 s); it does not, and should not, make it succeed.
+
+**Expect brief authentication 503s where you used to see nothing at all.** SMA-473 changed how
+*often* this path fails, not only how fast — a consequence worth predicting rather than
+discovering at 3am. The old 6-retry schedule made the shared connection future take ~6.3–12.6 s
+to resolve, which meant any Redis interruption **shorter than that was absorbed**: the command
+succeeded, just slowly, and authentication never noticed. The capped budget absorbs only one
+~100–200 ms retry. So a routine event like a **2 s primary failover**, previously invisible here,
+now `503`s every OIDC-bearer request for those ~2 s — and **no alert fires**, because
+`IamAuthzRedisCacheBypassed`, `IamHighErrorRate` and `IamGrpcHighErrorRate` are all `for: 10m`
+and this is over in seconds. That is the accepted trade (SMA-473 D6): the alternative is a
+multi-second stall on *every* authenticated request during a real, unbounded outage. If users
+report sporadic 503-then-fine authentication, correlate against Redis failover/restart events
+before hunting for an IAM bug.
+
+The default backend is `memory`, which
 has no such coupling — if you run the Redis one, treat Redis as a hard availability dependency of
 authentication itself and size its redundancy accordingly.
 
@@ -1122,8 +1181,9 @@ Not implemented in this cycle; tracked as explicit follow-ups:
   per-request round-trip count and the surface area of `GatewayIamDependencyUnavailable`.
 - **A Redis circuit breaker** that stops attempting the backend at all once it is known-down. The
   retry-schedule half of this — `number_of_retries = 1` on the one `ConnectionManager` this
-  service builds — **shipped with SMA-473** and is what bounds a Redis outage to ~0.2–0.8 s per
-  authz decision, up to ~1.2 s cross-principal (§4 "Authz availability posture"). A breaker was deliberately left out of that
+  service builds — **shipped with SMA-473** and is what bounds a Redis outage to ~0.2–0.6 s per
+  authz decision, ~0.3–0.8 s per authz-mutating request, and up to ~1.2 s for a gated
+  cross-principal decision (§4 "Authz availability posture"). A breaker was deliberately left out of that
   change (SMA-473 D7) because the cap alone fixes the common shape: a **stopped or refused**
   Redis, where each attempt errors immediately. It remains the outstanding mitigation for a
   **blackholed** Redis (SYN dropped rather than refused), where no attempt errors early and

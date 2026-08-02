@@ -149,25 +149,41 @@ tasks:
     #     helper owns. Allowed only in redis_conn.rs.
     #   - the `ConnectionManagerConfig` TYPE — naming it is how you would build an untuned
     #     config. Allowed only in redis_conn.rs.
+    #   - `.get_connection_manager` — the `redis::Client` convenience constructors
+    #     (`get_connection_manager`, `_with_config`, `_lazy`). The plain one is the FIRST
+    #     `ConnectionManager` example in redis-rs's own docs and internally does
+    #     `ConnectionManager::new(self.clone())` (`redis-1.3.0/src/client.rs:453`), i.e. it
+    #     restores the stock 6-retry config without ever naming a gated symbol. This term is
+    #     here for the accidental/copy-paste bypass, which is exactly what that API is.
     # `ConnectionManager::new_lazy_with_config(...)` is deliberately NOT gated: two
     # `#[cfg(test)]` sites legitimately call it, and they are safe precisely because the
     # rule above means the only config they can obtain is `connection_manager_config()`.
     #
-    # Comment lines are excluded so prose may still name the API.
+    # SCOPE is `src/` AND `tests/` (AC1 says "production and test"): a Docker-gated
+    # integration test is just as able to construct a stock manager as production code.
+    #
+    # Comment lines are excluded so prose may still name the API — several `tests/*.rs`
+    # module docs do.
     #
     # Two portability notes, both learned the hard way:
     #   - Do NOT anchor paths on `^\./`. GNU grep (CI, Linux) emits the `./` prefix; ugrep
     #     (some dev shells) strips it. An `^\./` anchor silently matches nothing on one of
-    #     them, which would make this gate pass while guarding nothing.
+    #     them, which would make this gate pass while guarding nothing. Passing `src tests`
+    #     explicitly (rather than `.`) sidesteps that divergence entirely — every hit is
+    #     prefixed `src/` or `tests/` on both implementations — but the patterns below still
+    #     stay unanchored so a future switch back to `.` cannot silently break them.
     #   - The comment filter anchors on `:[0-9]+:[[:space:]]*//` so it tests the CONTENT,
     #     not any `://` that happens to appear inside a redis URL on a code line.
     #
-    # The control (`expected` must be non-empty) matters: without it, a rename of
-    # redis_conn.rs — or a typo in the pattern — would make BOTH greps empty and the gate
-    # would pass while guarding nothing.
+    # The control (`expected` must be non-empty) matters, but not for a rename: renaming
+    # redis_conn.rs leaves its constructions in `hits` under a path the `expected` filter no
+    # longer matches, so the control trips first and exits 2 (and the offenders branch would
+    # have caught it anyway). What the control is really for is the case where `hits` itself
+    # goes empty — a typo in the pattern, or redis-rs renaming the API upstream — because
+    # then BOTH greps are empty and, without it, the gate would pass while guarding nothing.
     script: |
-      cd rs/crates/services/paigasus-iam/src
-      hits="$(grep -rnE 'ConnectionManager::new\(|ConnectionManager::new_with_config\(|ConnectionManagerConfig' . | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      cd rs/crates/services/paigasus-iam
+      hits="$(grep -rnE 'ConnectionManager::new\(|ConnectionManager::new_with_config\(|ConnectionManagerConfig|\.get_connection_manager' src tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
       expected="$(printf '%s\n' "$hits" | grep -E 'adapters/redis_conn\.rs:' || true)"
       offenders="$(printf '%s\n' "$hits" | grep -vE 'adapters/redis_conn\.rs:' || true)"
       if [ -z "$expected" ]; then
@@ -183,6 +199,7 @@ tasks:
     # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
     inputs:
       - 'rs/crates/services/paigasus-iam/src/**/*'
+      - 'rs/crates/services/paigasus-iam/tests/**/*'
 
   promtool:
     description: 'promtool validates the Prometheus scrape config + alert rules + rule unit tests under ops/observability/prometheus/ (SMA-446).'

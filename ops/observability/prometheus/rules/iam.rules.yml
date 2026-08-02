@@ -76,11 +76,17 @@ groups:
         # with no healthy-state false positives.
         #
         # This alert exists BECAUSE SMA-473 made the outage quiet. Before it, a Redis outage
-        # announced itself as ~20-30s authz latency that tripped IamHighErrorRate and client
-        # timeouts. Bounding the retry budget removed that signal; without this rule a total
-        # Redis outage produces correct, fast decisions and NO page — while the decision cache
-        # is gone, cross-replica API-key revocation stops being global, and (under
-        # `jwks_cache.backend = "redis"`) every authenticated request 503s.
+        # announced itself as 19-28s authz latency that tripped IamGrpcHighErrorRate and
+        # client-side timeouts. NOT IamHighErrorRate: `serve_http` applies its `TimeoutLayer`
+        # OUTSIDE `app_routes`, which is where `http_metrics_layer` lives, so a timed-out HTTP
+        # request short-circuits before the metrics layer records it (`iam_http_requests_total`
+        # never counts it) — and it short-circuits with 408, i.e. `status_class="4xx"`, which
+        # that rule's 5xx filter excludes anyway. So the pre-SMA-473 signal was narrower than it
+        # looked, which strengthens the case for this rule. Bounding the retry budget removed
+        # what was left; without this rule a total Redis outage produces correct, fast decisions
+        # and NO page — while the decision cache is gone, cross-replica API-key revocation stops
+        # being global, and (under `jwks_cache.backend = "redis"`) every authenticated request
+        # 503s.
         #
         # `sum(...)` so the alert is one series, not one per `decision` label — and so the
         # result carries no labels beyond `severity`.

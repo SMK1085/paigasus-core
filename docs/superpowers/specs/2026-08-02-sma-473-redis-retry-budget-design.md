@@ -168,9 +168,37 @@ reasons, in order of weight:
    `entity_cache.rs:67`, `generation.rs:60`) connect *after* testcontainers reports the
    container ready, so they never needed a 6-retry budget; nobody chose it for them.
 
-**D6 — Cover the JWKS path.** Same defect, same one-line fix through the same helper. This
-changes **only how fast** the JWKS path fails; the D15 fail-closed posture is untouched and
-stays correct.
+**D6 — Cover the JWKS path, accepting that it now fails *more often* as well as faster.** Same
+defect, same one-line fix through the same helper. An earlier draft said this changes "only how
+fast" the JWKS path fails and that the fail-closed posture is therefore untouched. **That was
+false**, and the difference matters precisely because this is the one *fail-closed* path in the
+blast radius.
+
+The retry schedule is not only latency, it is also **absorption**. Every command loads and awaits
+the `ConnectionManager`'s shared connection future (§1.1), so while a connection is being
+re-established the first command waits out the *whole* `backon` schedule. A Redis interruption
+**shorter than that schedule was therefore absorbed** — the command SUCCEEDED, just slowly.
+Pre-fix that absorption window was ~6.3–12.6 s. Post-fix it is one 100–200 ms retry.
+
+On the authz path, losing it is a cache bypass: fail-open, correct, cheap, and already in §6's
+residual list. On `authn.jwks_cache.backend = "redis"` the **identical event** is a **503 on
+every token-authenticated request**, because `RedisJwksCache::get`'s error is `?`-propagated
+straight out of `JwksProvider::cache_state` (`adapters/oidc/jwks.rs:249`) before any refetch is
+attempted.
+
+Concretely: a routine **2 s Redis primary failover**. Before, authentication was unaffected — the
+schedule swallowed it whole. After, every OIDC-bearer request `503`s for those 2 s, and
+**neither** alert fires: `IamAuthzRedisCacheBypassed` and `IamHighErrorRate` /
+`IamGrpcHighErrorRate` are all `for: 10m`.
+
+**This trade is accepted, not overlooked.** The alternative buys invisibility for sub-10-second
+blips at the price of a ~6–12 s stall on every authenticated request during a *real* outage — an
+outage is unbounded in duration where a blip is bounded and self-healing, so that is the worse
+deal, and it is also the shape D9's alert exists to make legible. What is owed instead is
+documentation, so the new failure is *predictable*: §5 adds an operator-facing note that short
+Redis blips which used to be invisible now surface as brief authentication 503s below both
+alerts' `for:` windows. D15's fail-closed posture itself is untouched and stays correct — what
+changes is how often it is reached.
 
 **D7 — No circuit breaker.** With the retry budget capped, the measured shape is already
 under target. A breaker (open → half-open probe → closed, plus state, metrics and its own
@@ -181,6 +209,15 @@ tests) would only pay for itself in the blackholed shape D1 puts out of scope. F
 unbypassable: no call site can construct a `ConnectionManager` without it. It returns a bare
 `redis::RedisResult` so each caller keeps its own — and deliberately different — error
 mapping verbatim.
+
+*Consequence, accepted rather than overlooked:* one shared `connection_manager_config()` means
+one budget for **all** paths, so the fail-**closed** JWKS path cannot be given a larger connect
+budget than the fail-**open** authz path even though D6 shows it has more to lose from a short
+blip. Per-path budgets would mean a second config constant, a `connect` variant to select it,
+and a CI gate that can tell a legitimate second budget from a restored stock one — real cost for
+a difference of a few hundred milliseconds. The lever that would actually matter here is the
+JWKS path's fail-closed posture itself (D15), which §7 keeps out of scope on purpose. If that
+posture is ever revisited, revisit this alongside it.
 
 **D9 — Ship an alert for the outage this fix makes quiet.** *(New; the single most important
 change from the adversarial review.)* Today an operator learns Redis is down because latency
@@ -211,6 +248,15 @@ practical delta is small: the process already crashes on a Redis-down boot today
 backoff, whose cadence (10 s → 20 s → 40 s …) dominates the dial either way. The real change
 is that a Redis start-up window **shorter than ~10 s** used to be absorbed silently and will
 now cost one crash-restart.
+
+*Caveat on that reasoning:* the 10 s → 20 s → 40 s cadence is Kubernetes `CrashLoopBackOff`
+specifically, and this repo ships **no deployment manifest for IAM**, so nothing here
+guarantees it. Under a supervisor with a fixed short restart delay (`Restart=always` +
+`RestartSec=1`, a bare `docker run --restart=always`, a shell `while` loop) there is no
+backoff to dominate the dial, and IAM will crash-loop far faster during a Redis outage than
+it did before. The mitigation is a deployment property, not a code one — the RUNBOOK's
+boot paragraph tells the operator to verify their orchestrator actually applies backoff
+rather than to assume it.
 
 This is a genuine behavior change and §6 records it. An earlier draft's claim of "no
 behavior changes anywhere" was false and is deleted.
@@ -355,11 +401,32 @@ outside a Tokio runtime). Builds a lazily-connecting manager from the **producti
 
 ### 4.3 CI — no bypassing call site
 
-A repo-level grep gate (precedent: `wasm-getrandom-free`) asserting `ConnectionManager::new`
-/ `new_with_config` / `new_lazy_with_config` appear **only** in `adapters/redis_conn.rs`.
-D5's zero-exception scope is what makes this strict-equality rather than an allowlist. This
-is the only thing that catches a *new* call site added later; §4.1 only catches a changed
-constant.
+A repo-level grep gate, `repo:redis-connect-single-site` (precedent: `wasm-getrandom-free`),
+scanning the crate's `src/` **and** `tests/` (AC1 says "production and test") and asserting that
+four terms appear **only** in `adapters/redis_conn.rs`:
+
+- `ConnectionManager::new(` and `ConnectionManager::new_with_config(` — the eager constructors
+  the helper owns;
+- the `ConnectionManagerConfig` **type**, since naming it is how you would build an untuned
+  config;
+- `.get_connection_manager` — the `redis::Client` convenience constructors
+  (`get_connection_manager` / `_with_config` / `_lazy`). The plain one is the *first*
+  `ConnectionManager` example in redis-rs's own docs and is literally
+  `ConnectionManager::new(self.clone())` (`redis-1.3.0/src/client.rs:453`), so it restores the
+  stock 6-retry config without naming any of the other three terms.
+
+`new_lazy_with_config` is **deliberately exempt**, which is the one place the gate is narrower
+than "every `ConnectionManager::new*`": two `#[cfg(test)]` sites legitimately call it (§3.2), and
+they are safe precisely because the `ConnectionManagerConfig` term above means the only config
+they can obtain is `connection_manager_config()`. Comment lines are filtered out so prose — in
+particular several `tests/*.rs` module docs — may still name the API. A non-empty `expected`
+control guards against the pattern silently matching nothing.
+
+D5's zero-exception scope on the *eager* constructors is what makes this strict-equality rather
+than an allowlist. Deliberate aliasing (`use ConnectionManager as X`) is out of scope — a grep
+gate cannot chase it, and the gate exists for the accidental bypass, which is exactly what
+`Client::get_connection_manager` is. This is the only thing that catches a *new* call site added
+later; §4.1 only catches a changed constant.
 
 ### 4.4 Existing suites
 
@@ -394,7 +461,9 @@ The prose is dense and interlinked; several paragraphs change arithmetic once th
 6. **Add** the missing JWKS note (§1.2): under `authn.jwks_cache.backend = "redis"` a Redis
    outage is a **fail-closed authentication** outage — every authenticated request 503s —
    not merely an authz slowdown. Add the API-key path (`RedisApiKeyCache`, 2 cycles per miss,
-   the hottest gRPC path) alongside it.
+   the hottest gRPC path) alongside it. Add the D6 consequence in the same paragraph: short
+   Redis blips that the old retry schedule absorbed invisibly now surface as brief
+   authentication 503s, below the `for: 10m` window of every alert that could report them.
 7. Record the blackholed-Redis residual (D1) and the boot-tolerance change (D10) so the new
    numbers are not read as universal.
 8. New alert entry for `IamAuthzRedisCacheBypassed` in the alert catalog: meaning, the
@@ -425,17 +494,33 @@ latencies.
 - *Blackholed Redis is still slow* (D1). ~2.1 s per failed command because
   `connection_timeout` then dominates. Documented, not fixed. Follow-up levers in order of
   cost: lower `connection_timeout` (~250 ms is generous for a LAN Redis), then a circuit
-  breaker (D7). **Unverified:** whether `connection_timeout` also wraps DNS resolution — a
-  production `redis://redis:6379` hostname resolves before the TCP connect, and this design
-  has not established which side of the timeout that falls on.
+  breaker (D7). **Verified — `connection_timeout` does wrap DNS resolution.**
+  `get_multiplexed_async_connection_inner_with_timeout` puts the *entire*
+  `get_multiplexed_async_connection_inner` future inside `rt.timeout(connection_timeout, …)`
+  (`redis-1.3.0/src/client.rs:505-510`), and address resolution happens inside that future —
+  `create_multiplexed_async_connection_inner` picks the `dns_resolver` and calls
+  `get_simple_async_connection` (`client.rs:549-553`) before any socket exists. So a hung
+  resolver is bounded by the same 1 s per attempt as a blackholed socket, and the ~2.1 s
+  per-failed-command figure above holds for that shape too.
 - *Boot tolerance drops ~50×* (D10). A Redis start-up window under ~10 s that used to be
   absorbed silently now costs one crash-restart. Container restart backoff dominates
   recovery either way.
-- *Less absorption of a slow failover.* A failover needing more than one connect attempt now
-  surfaces as a cache bypass. This is the designed fail-open behavior — correctness is
-  unaffected — but it will make `iam_authz_decisions_total{cache="bypass"}` briefly noisier
-  during a failover, which is also what D9's alert watches. The rule's `for:` duration must be
-  long enough not to page on a routine failover.
+- *Less absorption of a slow failover — on **both** the fail-open and the fail-closed path*
+  (D6). The old ~6.3–12.6 s schedule silently swallowed any Redis interruption shorter than
+  itself; the new budget absorbs only ~100–200 ms, so a failover needing more than one connect
+  attempt now surfaces to the caller.
+  - *Fail-open half (authz).* It surfaces as a cache bypass. This is the designed behavior —
+    correctness is unaffected — but it will make `iam_authz_decisions_total{cache="bypass"}`
+    briefly noisier during a failover, which is also what D9's alert watches. The rule's `for:`
+    duration must be long enough not to page on a routine failover.
+  - *Fail-closed half (JWKS).* Under `authn.jwks_cache.backend = "redis"` the same interruption
+    is a **503 on every token-authenticated request** for its duration, where before it was
+    invisible. A routine 2 s primary failover is the worked example: previously absorbed, now a
+    2 s authentication brownout — and one that fires **no** alert, since
+    `IamAuthzRedisCacheBypassed` and the two error-rate rules are all `for: 10m`. Accepted per
+    D6; the RUNBOOK's JWKS paragraph names it so an operator can predict it instead of
+    discovering it. The `for: 10m` windows are deliberately not shortened to catch it —
+    paging on every routine failover is a worse outcome than a bounded, self-healing brownout.
 - *No background reconnect while idle.* With RESP2 (the default here — no `push_sender` is
   configured) there is no background reconnect loop; a reconnect is spawned only when a
   command observes an I/O error. Under idle traffic the manager does not reconnect at all.
@@ -465,7 +550,12 @@ latencies.
 3. A unit test asserts the exact config values **and** that the deliberately-untouched fields
    are still at redis-rs defaults; a second `#[tokio::test]` proves a command against an
    unreachable Redis errors within 2 s with an `is_io_error()` control.
-4. A CI grep gate fails if `ConnectionManager::new*` appears outside `adapters/redis_conn.rs`.
+4. A CI grep gate over the crate's `src/` **and** `tests/` fails if the eager constructors
+   (`ConnectionManager::new(`, `::new_with_config(`), the `ConnectionManagerConfig` type, or
+   `Client::get_connection_manager*` appear outside `adapters/redis_conn.rs`.
+   `new_lazy_with_config` is deliberately exempt (two `#[cfg(test)]` sites), and stays safe
+   because the config term means the only config it can be handed is
+   `connection_manager_config()`.
 5. `IamAuthzRedisCacheBypassed` ships in `iam.rules.yml` with a promtool fixture that
    includes a non-firing control series, plus a RUNBOOK alert entry noting the
    `memory`-backend silence.

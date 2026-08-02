@@ -623,8 +623,9 @@ impl AppState {
 /// Opens `redis_url` and wraps it in an auto-reconnecting `ConnectionManager` — shared by every
 /// redis-backed cache `AppState::new` wires (the authz `Generations`/`RedisDecisionCache`/
 /// `SliceCache` trio, SMA-444 Task 21; the API-key `RedisApiKeyCache`, SMA-445 Task 19, when it
-/// can't reuse an already-open `redis_conn`), mirroring `RedisJwksCache::connect`'s connect
-/// pattern.
+/// can't reuse the already-open `redis_conn` LOCAL BINDING in `AppState::new` — not to be
+/// confused with the [`crate::adapters::redis_conn`] MODULE this delegates to), mirroring
+/// `RedisJwksCache::connect`'s connect pattern.
 /// Delegates to [`crate::adapters::redis_conn::connect`] for the tuned reconnect retry
 /// budget (SMA-473) — this function owns only the `AuthnError` mapping.
 async fn connect_redis(redis_url: &str) -> Result<ConnectionManager, AuthnError> {
