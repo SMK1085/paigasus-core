@@ -279,3 +279,25 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical }
             exp_annotations: { summary: "IAM authz is bypassing the Redis decision cache (Redis unhealthy)", description: "IAM authz decisions are bypassing the Redis decision cache. While this fires: the decision cache is gone (decisions still evaluate correctly, just slower), cross-replica API-key revocation stops being global, and (if authn.jwks_cache.backend=\"redis\") every token-authenticated request 503s (API-key auth fails open onto Postgres). NOTE: this alert only has a signal under authz.cache.backend=\"redis\" — on the default authz.cache.backend=\"memory\" the cache=\"bypass\" series never exists, sum() over an empty vector is empty, and this alert stays SILENT rather than firing. See RUNBOOK's \"Authz availability posture\"." }
+
+  # The `memory`-backend contract, pinned (SMA-473). This is a DIFFERENT shape from the block
+  # above: there, `cache="bypass"` exists and is merely flat at zero for a while. Here it does
+  # not exist AT ALL, which is what `authz.cache.backend = "memory"` actually looks like —
+  # `Generations::Memory::entity_gen` cannot error, so the label value is never emitted.
+  # `sum()` over an empty vector returns EMPTY, not 0, so the `> 0` comparison has nothing to
+  # evaluate and the alert stays SILENT rather than firing.
+  #
+  # That silence is a documented operator trap (the RUNBOOK calls it out alongside the same
+  # shape in IamAuditPartitionMaintenanceStalled), so it deserves a test rather than trust:
+  # someone "hardening" the rule into `... or vector(0)`, or aggregating in a way that
+  # synthesises a zero sample, would turn every memory-backend deployment into a permanent
+  # page. Evaluated at 25m — well past `for: 10m` — so a rule that fires here has had every
+  # chance to do so.
+  - interval: 1m
+    input_series:
+      - series: 'iam_authz_decisions_total{cache="hit",decision="allow"}'
+        values: '0+5x25'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: IamAuthzRedisCacheBypassed
+        exp_alerts: []
