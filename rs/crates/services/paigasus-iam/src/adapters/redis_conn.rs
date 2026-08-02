@@ -57,7 +57,7 @@ pub(crate) fn connection_manager_config() -> ConnectionManagerConfig {
 /// Returns a bare [`redis::RedisResult`] rather than a domain error because the callers map
 /// it differently on purpose: `http::connect_redis` to `AuthnError::Backend`,
 /// `RedisJwksCache::connect` to the fail-closed `AuthnError::Unavailable`.
-#[allow(dead_code, reason = "Task 2 (SMA-473) wires up the 8 call sites; unused until then")]
+#[cfg_attr(not(test), expect(dead_code, reason = "Task 2 (SMA-473) wires up the 8 call sites; unused until then"))]
 pub(crate) async fn connect(redis_url: &str) -> redis::RedisResult<ConnectionManager> {
     let client = redis::Client::open(redis_url)?;
     ConnectionManager::new_with_config(client, connection_manager_config()).await
@@ -152,6 +152,33 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "SMA-473: a command against a dead Redis took {elapsed:?}; the tuned config must bound it \
+             well under 2s (stock redis-rs is ~6.3-12.6s and cost a measured 19-28s per authz decision)"
+        );
+    }
+
+    /// Guards the eager contract directly (SMA-473 D10). The three tests above all exercise
+    /// `connection_manager_config()` or a hand-built `new_lazy_with_config` manager — none of
+    /// them call [`connect`] itself, so a later edit swapping its `new_with_config` for
+    /// `new_lazy_with_config` would pass every one of them. Against a dead port an eager
+    /// `connect` returns `Err` (it awaits the initial connection); a lazy one would return
+    /// `Ok` (the manager builds fine — the error only surfaces on the first command), so this
+    /// assertion actually distinguishes the two implementations rather than just exercising
+    /// the happy path.
+    #[tokio::test]
+    async fn connect_is_eager_so_a_dead_backend_fails_at_construction() {
+        let started = std::time::Instant::now();
+        let result = connect("redis://127.0.0.1:1").await;
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err(
+            "connect() returned Ok against an unreachable backend — that means connect went \
+             lazy, and AppState::new would no longer fail fast at boot (SMA-473 D10)",
+        );
+        assert!(err.is_io_error(), "expected an IO/connection error, got {err:?} — the probe never actually dialed");
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "SMA-473: connect() against a dead Redis took {elapsed:?}; the tuned config must bound it \
              well under 2s (stock redis-rs is ~6.3-12.6s and cost a measured 19-28s per authz decision)"
         );
     }
