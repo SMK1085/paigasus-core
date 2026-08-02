@@ -87,3 +87,13 @@ approved
 ---
 
 unlocked
+
+---
+
+<task-notification>
+<task-id>bk3uhd2eo</task-id>
+<tool-use-id>toolu_01CuJWfZa1doJdnpWe1btwx1</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/f485aa80-2440-4921-97d1-90d5a5f455f2/tasks/bk3uhd2eo.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll moon ci on the PR head SHA" completed (exit code 0)</summary>
+</task-notification>
