@@ -613,10 +613,12 @@ async fn redis_cache_backend_fails_open_when_redis_becomes_unavailable_mid_fligh
 /// `authz.policy_cache_ttl_secs`/`refresh_interval_secs` (1s/1s, wired exactly as `main.rs`
 /// wires them), not a hand-rolled fast interval, so the mechanism under test is the shipped one
 /// rather than a test-only fast path. What this asserts is CONVERGENCE, not a numeric bound: the
-/// install budget below is deliberately an order of magnitude wider than `ttl + poll`, because
-/// with Redis stopped the loop's own cadence stretches by whole reconnect-retry cycles (RUNBOOK
-/// "Revocation freshness is TTL-bounded"). Pinning the real bound here would only buy flakiness
-/// on a slow CI runner; the bound itself is a documented property, not this test's claim. The
+/// install budget below is deliberately far wider than `ttl + poll` — but NOT because the outage
+/// stretches the loop's cadence. SMA-473 capped the reconnect retry budget at one retry, so a
+/// failed `policy_gen` read costs ~100-200ms rather than whole retry cycles, and the RUNBOOK's
+/// "Revocation freshness is TTL-bounded" bound now holds during an outage too. The budget is wide
+/// purely as a failure DEADLINE against a slow CI runner; pinning the real bound here would only
+/// buy flakiness, and the bound itself is a documented property, not this test's claim. The
 /// acceptance harness never calls `IamConfig::validate`, so honouring its bounds (both non-zero,
 /// refresh <= ttl) is this test's own responsibility.
 #[tokio::test]

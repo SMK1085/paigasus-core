@@ -545,8 +545,9 @@ the Redis-backed entity-generation counter read **errored**, so no cache key cou
 minutes of it means the Redis backend is unhealthy, not that a single failover blipped. Decisions
 throughout remain **correct** — they are computed against the in-memory snapshot compiled from
 **Postgres**, which is the authoritative policy set (see "Authz availability posture" below) —
-and, since SMA-473 capped the reconnect retry budget, **fast** (~0.2–0.8 s per decision rather
-than the old 19–28 s). This alert exists precisely *because* those two facts mean nothing else
+and, since SMA-473 capped the reconnect retry budget, **fast** (~0.2–0.8 s per decision, up to
+~1.2 s for a cross-principal query, rather than the old 19–28 s). This alert exists precisely
+*because* those two facts mean nothing else
 will tell you: correct, prompt answers produce no error-rate signal and no client timeouts.
 
 **NOTE — `authz.cache.backend = "memory"` makes this alert go SILENT, not fire.** On the memory
@@ -559,19 +560,27 @@ deploy time rather than expecting the alert to tell you which one you are runnin
 
 **Likely causes:** Redis is down or unreachable (process stopped, container gone, network
 partition); credentials or TLS were rejected (`authz.cache.redis_url` wrong or rotated); a
-proxy/failover in front of Redis is refusing connections; or Redis is under `maxmemory` pressure
-hard enough to **error** commands (`OOM command not allowed` under `noeviction`) or to blow the
-500 ms `response_timeout`. Note what is *not* in this list: eviction under an `allkeys-*` policy.
-An evicted counter is a **missing** key, which `Generations::read` maps to `0` — a successful read
-of the wrong value, not an error — so it silently rewinds the counter instead of firing this
-alert. That is a separate failure mode; see the `maxmemory-policy` mandate below.
+proxy/failover in front of Redis is refusing connections; Redis is unresponsive enough to blow the
+500 ms `response_timeout` (a fork/save stall, a long-running command, heavy `maxmemory` pressure);
+or Redis 7 client eviction (`maxmemory-clients`) dropped IAM's connection.
+
+Note what is *not* in this list: **`maxmemory` rejecting or evicting keys**, neither of which can
+fire this alert. The read behind `cache="bypass"` is a plain `GET` (`Generations::read`), which is
+`readonly fast` and **not** `denyoom` — it keeps succeeding at `maxmemory` even under
+`noeviction`, where it is the *`INCR`* that bumps the counter which gets `OOM command not
+allowed`, and a failed bump is swallowed (see "Revocation freshness" below), never bypassed. An
+*evicted* counter is likewise a **missing** key, which `Generations::read` maps to `0` — a
+successful read of the wrong value, not an error — so an `allkeys-*` policy silently rewinds the
+counter instead of firing this alert. Both are real failure modes, just not this one; see the
+`maxmemory-policy` mandate below.
 
 **Blast radius while firing.** There is no decision cache and no entity-slice cache, so every
 decision pays a raw Postgres entity-slice load; a revoke's `policy_gen` bump is swallowed, so
 revocation freshness falls back to the TTL backstop (~31 s at the defaults). If the *same* Redis
 also backs `api_keys.introspect_cache`, cross-replica API-key revocation stops being global and
 degrades to per-replica TTL; and if it also backs `authn.jwks_cache.backend = "redis"` — which is
-fail-closed by design — **every authenticated request 503s** for the duration. That last shape is
+fail-closed by design — **every token-authenticated request 503s** for the duration (API-key
+authentication fails open onto Postgres and keeps working). That last shape is
 the one that *will* also trip `IamHighErrorRate`/`IamGrpcHighErrorRate`. (Each cache has its own
 `redis_url`, so a deployment that splits them may see only a subset of this.)
 
@@ -695,8 +704,9 @@ degradation into a total authorization outage. The contract is bounded-staleness
 the bound below is what makes that defensible. There is no config knob to opt into fail-closed,
 and adding one is explicitly out of scope.
 
-**Fail-open is bounded, not free: budget ~0.2–0.8 s per authz decision while Redis is down.**
-That bound exists only because it was deliberately imposed. `adapters::redis_conn::connect` is the
+**Fail-open is bounded, not free: budget ~0.2–0.8 s per authz decision while Redis is down — up
+to ~1.2 s for a cross-principal query (the table below).** That bound exists only because it was
+deliberately imposed. `adapters::redis_conn::connect` is the
 **single** place this service constructs the shared `ConnectionManager` (enforced by the
 `repo:redis-connect-single-site` CI gate), and it caps the reconnect budget at
 **`number_of_retries = 1`** — down from redis-rs's stock 6 (SMA-473). A counter read against a
@@ -736,7 +746,7 @@ Per-path cost against a **stopped or refused** Redis, before and after the cap (
 | `POST /v1/authz/is-authorized`, gated (cross-principal) query | 4–6 | ~38–57 s | **0.4–1.2 s** |
 | `DELETE /v1/authz/role-grants/{id}` (+ post-commit bump) | 3–4 | 28.4 s measured | **0.3–0.8 s** |
 | API-key authenticated request (cache miss: `get` + `put`) | 2 | ~19 s | **0.2–0.4 s** |
-| any authenticated request under a Redis JWKS cache (then 503) | 1 | ~6–12 s | **0.1–0.2 s** |
+| any token-authenticated request under a Redis JWKS cache (then 503) | 1 | ~6–12 s | **0.1–0.2 s** |
 
 Two rows deserve a note. The 3-cycle row is the *provisional-stamp* distinction: while the policy
 snapshot's generation stamp is still trusted, each decision's `reload_if_stale` adds its own
@@ -755,8 +765,10 @@ the TCP connect **fails immediately** — the process is stopped or the port ref
 (`ECONNREFUSED`). If the backend instead swallows SYNs (a `DROP` firewall rule, a partitioned
 network, a wedged host), no attempt errors early and each one runs to `connection_timeout`
 instead, so one capped cycle costs **~2.1 s** per failed command (two 1 s attempts plus the
-~100–200 ms delay between them) rather than ~100–200 ms. Multiply the "cycles" column by that for
-this shape. Bounding it further needs a **circuit breaker** that stops attempting Redis once the
+~100–200 ms delay between them) rather than ~100–200 ms. That 2.1 s is **calculated, not
+measured** — unlike the table above, nothing has ever been run against a blackholed backend here,
+so treat multiplying the "cycles" column by it as the *shape* of the residual rather than a figure
+to size a client timeout on. Bounding it further needs a **circuit breaker** that stops attempting Redis once the
 backend is known-down, which is deliberately **not** shipped (SMA-473 D7; see §6) — capping the
 retry count fixed the common shape without one.
 
@@ -774,17 +786,20 @@ client-side timeouts will **not** fire on the authz path, because every decision
 right answer in a fraction of a second. The signal is **`IamAuthzRedisCacheBypassed`**
 (`sum(rate(iam_authz_decisions_total{cache="bypass"}[5m])) > 0` for 10m, critical), whose catalog
 entry above carries the confirm/remediate steps and the `authz.cache.backend = "memory"` silence
-trap. Still page on it rather than treating it as a background degradation: the blast radius
-(no decision cache, no slice cache, per-replica API-key revocation, revocation freshness on the
-TTL backstop) is real even though latency no longer advertises it. The error-rate alerts do stay
-relevant for exactly one shape — a Redis-backed JWKS cache, which is fail-closed (next paragraph).
+trap. Still page on it rather than treating it as a background degradation: the blast radius (no
+decision cache, no slice cache, revocation freshness on the TTL backstop — plus, for whichever of
+`api_keys.introspect_cache` / `authn.jwks_cache` point at the *same* Redis, per-replica API-key
+revocation and a fail-closed authentication path) is real even though latency no longer advertises
+it. The error-rate alerts do stay relevant for exactly one shape — a Redis-backed JWKS cache,
+which is fail-closed (next paragraph).
 
 **Under a Redis JWKS cache, a Redis outage is an authentication outage, not an authz slowdown.**
 With `authn.jwks_cache.backend = "redis"`, `RedisJwksCache::get` maps **any** Redis error to
 `AuthnError::Unavailable` — deliberately fail-closed (`adapters::oidc::redis_cache`, spec
 §4.3/D15: key material is not something to guess at) — and `JwksProvider::key_for` consults the
-cache on **every** token validation. So
-every authenticated request `503`s for the duration of the outage, and *that* is what moves
+cache on **every** token validation. So every **token**-authenticated request (the OIDC bearer
+path — API-key authentication is the next paragraph, and fails open) `503`s for the duration of
+the outage, and *that* is what moves
 `IamHighErrorRate`/`IamGrpcHighErrorRate`. SMA-473 makes the failure **fast** (~0.1–0.2 s instead
 of ~6–12 s); it does not, and should not, make it succeed. The default backend is `memory`, which
 has no such coupling — if you run the Redis one, treat Redis as a hard availability dependency of
@@ -1108,7 +1123,7 @@ Not implemented in this cycle; tracked as explicit follow-ups:
 - **A Redis circuit breaker** that stops attempting the backend at all once it is known-down. The
   retry-schedule half of this — `number_of_retries = 1` on the one `ConnectionManager` this
   service builds — **shipped with SMA-473** and is what bounds a Redis outage to ~0.2–0.8 s per
-  authz decision (§4 "Authz availability posture"). A breaker was deliberately left out of that
+  authz decision, up to ~1.2 s cross-principal (§4 "Authz availability posture"). A breaker was deliberately left out of that
   change (SMA-473 D7) because the cap alone fixes the common shape: a **stopped or refused**
   Redis, where each attempt errors immediately. It remains the outstanding mitigation for a
   **blackholed** Redis (SYN dropped rather than refused), where no attempt errors early and
