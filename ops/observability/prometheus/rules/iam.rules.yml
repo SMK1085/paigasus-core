@@ -69,3 +69,27 @@ groups:
         for: 10m
         labels: { severity: critical }
         annotations: { summary: "IAM gRPC non-OK ratio > 5%" }
+      - alert: IamAuthzRedisCacheBypassed
+        # SMA-473. `cache="bypass"` is emitted ONLY when the entity-generation counter read
+        # errors (`cedar_authorizer.rs` step 3), which under `authz.cache.backend = "memory"`
+        # cannot happen — so a sustained nonzero rate means the Redis backend is unhealthy,
+        # with no healthy-state false positives.
+        #
+        # This alert exists BECAUSE SMA-473 made the outage quiet. Before it, a Redis outage
+        # announced itself as ~20-30s authz latency that tripped IamHighErrorRate and client
+        # timeouts. Bounding the retry budget removed that signal; without this rule a total
+        # Redis outage produces correct, fast decisions and NO page — while the decision cache
+        # is gone, cross-replica API-key revocation stops being global, and (under
+        # `jwks_cache.backend = "redis"`) every authenticated request 503s.
+        #
+        # `sum(...)` so the alert is one series, not one per `decision` label — and so the
+        # result carries no labels beyond `severity`.
+        #
+        # `for: 10m`, not 0m: a routine Redis failover briefly bypasses too, and that must
+        # not page. NOTE the `memory`-backend trap — the series does not exist there, `sum()`
+        # over an empty vector is empty, and this alert is SILENT rather than firing. See the
+        # RUNBOOK's "Authz availability posture".
+        expr: sum(rate(iam_authz_decisions_total{cache="bypass"}[5m])) > 0
+        for: 10m
+        labels: { severity: critical }
+        annotations: { summary: "IAM authz is bypassing the Redis decision cache (Redis unhealthy)" }
