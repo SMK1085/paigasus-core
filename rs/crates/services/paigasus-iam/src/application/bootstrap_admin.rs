@@ -82,9 +82,16 @@ pub struct BootstrapAdminSeederDeps<I, C> {
 /// Why a seed attempt failed. Deliberately a local enum rather than funnelling through
 /// `TenancyError`: `From<AuthzError> for TenancyError` collapses `Backend` into
 /// `TenancyError::Internal`, whose `Display` is the constant `"internal server error"`
-/// (`application/error.rs`). That would destroy the one diagnostic explaining WHY the
-/// bootstrap admin was never seeded — the Postgres constraint name in the source error
-/// (SMA-468 D7).
+/// (`application/error.rs`). Staying local preserves the source for BOTH branches, but not
+/// the same way: `Authz(#[from] AuthzError)` is transparent all the way down, so even
+/// `Display` (`%e`) recovers the underlying message. `Repository(#[from] RepositoryError)`
+/// is transparent too, but `RepositoryError::Backend`'s own `Display` is the literal
+/// `"backend error"` (`paigasus-iam-core/src/ports.rs`) — transparent forwarding stops at a
+/// constant string. Recovering the wrapped source on that path needs `Debug` (`?e`), which
+/// walks into the boxed error via the derived `#[derive(Debug)]`; `%e` on this enum silently
+/// collapses to `"backend error"` for every one of `uow.begin()`/`outbox.enqueue()`/
+/// `audit.record()`/`tx.commit()` — the exact write steps whose persistent failure causes the
+/// lockout D1 accepts (SMA-468 D7).
 #[derive(Debug, thiserror::Error)]
 enum SeedError {
     #[error(transparent)]
@@ -233,7 +240,7 @@ where
             counter!(names::IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL, "stage" => "txn").increment(1);
             tracing::warn!(
                 principal = %principal.canonical(),
-                error = %e,
+                error = ?e,
                 "bootstrap-admin seeding: failed to persist the platform_admin grant with its audit row; will retry on the next authentication. If this persists the bootstrap admin is NEVER seeded (lockout) — seed it manually and record the matching audit row"
             );
         }

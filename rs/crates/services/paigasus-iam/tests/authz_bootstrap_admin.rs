@@ -24,6 +24,10 @@ use paigasus_iam_core::{AccessRequest, Action, Authorizer, Effect, RequestContex
 use serde_json::json;
 use support::{app_with_config, send, test_config_with};
 
+/// The real end-to-end guard for SMA-468 D5's `policy_gen` bump: this test would fail if
+/// the post-commit `gen_bumper.bump()` were ever dropped from `seed_grant`, because a
+/// freshly seeded admin's very first authenticated request (below) would then be denied
+/// until the policy snapshot's ~31s TTL backstop, not merely delayed in some unit-level way.
 #[tokio::test]
 async fn bootstrap_identity_is_seeded_platform_admin_on_first_authentication_and_can_create_an_organization() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -231,5 +235,20 @@ async fn a_failed_audit_write_rolls_back_the_bootstrap_grant() {
     assert!(
         !grants.iter().any(|g| g.role_key == "platform_admin" && g.scope == GrantScope::Root),
         "SMA-468 AC1: a failed audit write must leave no platform_admin grant behind, got {grants:?}"
+    );
+
+    // Self-heal: with `audit_log` restored, the SAME identity authenticates again. This is
+    // the positive control for the assertion above — it proves the seeder actually ran on
+    // this path (not that it silently never fired at all, which would make the "no grant"
+    // assertion above vacuously true) — and it covers the "retries on its next
+    // authentication" claim made in the module doc, the warn message, and spec D1/§3.3,
+    // which nothing else in this suite exercises.
+    let (status, body) = send(&app, "GET", "/v1/organizations", None, Some(&token)).await;
+    assert_ne!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR, "the retry request must also succeed: {body}");
+
+    let grants = state.role_grant_store.list_by_principal(&principal.principal_id).await.expect("list_by_principal");
+    assert!(
+        grants.iter().any(|g| g.role_key == "platform_admin" && g.scope == GrantScope::Root),
+        "self-heal: the platform_admin grant must now exist once the transient audit failure clears, got {grants:?}"
     );
 }

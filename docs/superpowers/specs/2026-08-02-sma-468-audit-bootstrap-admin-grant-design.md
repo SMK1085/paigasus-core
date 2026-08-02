@@ -230,10 +230,17 @@ wrapping `RepositoryError` (from `uow`/`outbox`/`audit`) and `AuthzError` (from 
 
 It must **not** funnel through `TenancyError`. `From<AuthzError> for TenancyError` collapses
 `Backend` to `TenancyError::Internal` (asserted at `roles.rs:559`) whose `Display` is the
-constant `"internal server error"` (`error.rs:89-90`). Today's warn logs the concrete error
-(`bootstrap_admin.rs:119-125`, `error = %e`) — including the Postgres constraint name. Losing
-that would replace the one diagnostic explaining *why* the bootstrap admin was never seeded
-with a fixed string, directly undercutting D1.
+constant `"internal server error"` (`error.rs:89-90`). Staying local preserves the source, but
+not identically on both branches: `SeedError::Authz` is `#[error(transparent)]` over
+`AuthzError`, whose own `Backend` variant is *itself* transparent, so `Display` (`%e`) already
+recovers the concrete message on that path. `SeedError::Repository` is transparent over
+`RepositoryError`, but `RepositoryError::Backend`'s `Display` is the literal `"backend error"`
+(`ports.rs:52-53`) — transparency stops at a constant string there. Recovering the wrapped
+source for that branch needs `Debug` (`?e`), which walks into the boxed error via the derived
+`#[derive(Debug)]`. The warn sites must therefore log `error = ?e`, not `%e` — `%e` would
+silently collapse to `"backend error"` for `uow.begin()`/`outbox.enqueue()`/`audit.record()`/
+`tx.commit()`, which is exactly the write-step set whose persistent failure causes the lockout
+D1 accepts.
 
 **D8 — `application/bootstrap.rs` stays out of scope.** It seeds starter policies and the
 system role *catalog* — code-defined definitions, not grants.
@@ -400,6 +407,15 @@ safe.
   leaf. Because the seed is idempotent and never re-runs, that permanently erases the only
   audit row for the `platform_admin` grant — restoring exactly the condition SMA-468 exists to
   fix. Operators enabling committed-retention should know this row is not reproducible.
+- *`principal_prn` goes stale once the principal is deleted* (D4, accepted). D4 keeps
+  `principal_prn` and drops the IdP `subject` on the reasoning that `external_identity` maps
+  the two "for as long as the principal exists." Once the principal row is deleted,
+  `principal_prn` names a UUID that resolves to nothing and the `external_identity` join D4
+  relies on is gone too — so the row can no longer answer "who became platform admin" any
+  better than it could before D4, against m0006's stated intent that an audit entry survive
+  its actor's deletion. This is not unique to the bootstrap row — every actor PRN in
+  `audit_log` shares it — but it is worth naming here because D4 relied on the mapping to
+  justify dropping the `subject` in the first place.
 - *A bounded new stall on the auth path.* The partition maintainer takes
   `pg_advisory_xact_lock` + DDL on the parent with `lock_timeout = '5s'`
   (`pg_partition_maintainer.rs:45,137-151`). An `audit_log` insert arriving while that DDL is

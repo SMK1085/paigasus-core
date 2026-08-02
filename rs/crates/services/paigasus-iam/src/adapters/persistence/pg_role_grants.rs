@@ -4,9 +4,14 @@
 //! wrappers around [`RoleGrantStore::grant_in`]/[`RoleGrantStore::revoke_in`] (SMA-446, Slice
 //! B): they open their own `SeaOrmTransaction`, run the txn-scoped insert/delete on it,
 //! commit, then best-effort bump `policy_gen` via the shared `Generations` handle (spec
-//! §7/D11: "bumped on any policy CRUD or role grant/revoke") — kept for callers that don't
-//! (yet) drive their own `UnitOfWork` (`BootstrapAdminSeeder`, the `authz_role_grants.rs`/
-//! `authz_bootstrap.rs` integration tests). `grant_in`/`revoke_in` are the txn-scoped
+//! §7/D11: "bumped on any policy CRUD or role grant/revoke"). `BootstrapAdminSeeder` was the
+//! last production caller of `grant`; since SMA-468 it drives its own `UnitOfWork` instead —
+//! its grant, outbox event and audit row commit together on one transaction via `grant_in`,
+//! not `grant` — so a seed failure has a single diagnosable path rather than the wrapper's
+//! own bump-then-forget one. As of SMA-468, `grant`/`revoke` therefore have **zero production
+//! callers**; every remaining call site is test/integration-only (`authz_role_grants.rs`,
+//! `authz_bootstrap.rs`, `tests/support/mod.rs`, and `#[cfg(test)]` fixtures in
+//! `cedar_authorizer.rs`/`policy_snapshot.rs`). `grant_in`/`revoke_in` are the txn-scoped
 //! primitives `RoleService::grant`/`revoke` (the reference pattern) actually drive: they
 //! persist exactly the caller-built `RoleGrant` — including its `linked_policy_id` (the
 //! Cedar template-linked policy itself is materialized from grant rows at snapshot-compile
