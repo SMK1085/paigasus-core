@@ -12,3 +12,4 @@ pub mod http;
 pub mod id;
 pub mod oidc;
 pub mod persistence;
+pub(crate) mod redis_conn;
