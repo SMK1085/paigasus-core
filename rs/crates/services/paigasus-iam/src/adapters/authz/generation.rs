@@ -14,8 +14,8 @@
 
 use async_trait::async_trait;
 use paigasus_iam_core::{AuthzError, PolicyGenBumper};
+use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
-use redis::{AsyncCommands, Client};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -56,8 +56,7 @@ impl Generations {
     /// `RedisJwksCache::connect`): cross-replica counters via `INCR`/`GET` on the two
     /// well-known keys.
     pub async fn redis_connect(redis_url: &str) -> Result<Self, AuthzError> {
-        let client = Client::open(redis_url).map_err(redis_err)?;
-        let conn = ConnectionManager::new(client).await.map_err(redis_err)?;
+        let conn = crate::adapters::redis_conn::connect(redis_url).await.map_err(redis_err)?;
         Ok(Generations::Redis(conn))
     }
 

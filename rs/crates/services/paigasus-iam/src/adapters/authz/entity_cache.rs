@@ -35,8 +35,10 @@ use async_trait::async_trait;
 use paigasus_iam_core::authz::model::EntitySlice;
 use paigasus_iam_core::{AuthzError, EntitySliceLoader};
 use paigasus_kernel::Prn;
+use redis::AsyncCommands;
+#[cfg(test)]
+use redis::Client;
 use redis::aio::ConnectionManager;
-use redis::{AsyncCommands, Client};
 use std::sync::Arc;
 
 /// Redis key prefix (spec §7): `iam:authz:slice:<entity_gen>:<resource-prn>:<principal-prn>`.
@@ -63,8 +65,7 @@ impl SliceCache {
     /// `RedisJwksCache::connect`/`RedisDecisionCache::connect`). `ttl_secs` is applied to
     /// every cache write as Redis's own `EX` expiry.
     pub async fn connect(inner: Arc<dyn EntitySliceLoader>, redis_url: &str, ttl_secs: u64) -> Result<Self, AuthzError> {
-        let client = Client::open(redis_url).map_err(redis_connect_err)?;
-        let conn = ConnectionManager::new(client).await.map_err(redis_connect_err)?;
+        let conn = crate::adapters::redis_conn::connect(redis_url).await.map_err(redis_connect_err)?;
         Ok(Self { inner, conn, ttl_secs })
     }
 
@@ -229,7 +230,7 @@ mod tests {
     #[tokio::test]
     async fn load_fails_open_to_the_inner_loader_when_entity_gen_errors() {
         let client = Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never actually dialed");
-        let conn = ConnectionManager::new_lazy_with_config(client, redis::aio::ConnectionManagerConfig::new()).expect("lazy ConnectionManager construction never connects");
+        let conn = ConnectionManager::new_lazy_with_config(client, crate::adapters::redis_conn::connection_manager_config()).expect("lazy ConnectionManager construction never connects");
 
         let cache = SliceCache::from_connection(Arc::new(FailingGenLoader), conn, 60);
         let resource = prn("project", 1);

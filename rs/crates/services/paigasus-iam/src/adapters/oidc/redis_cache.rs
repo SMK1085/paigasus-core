@@ -10,8 +10,8 @@
 
 use async_trait::async_trait;
 use paigasus_iam_core::{AuthnError, Issuer};
+use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
-use redis::{AsyncCommands, Client};
 
 use super::jwks::{CachedJwks, JwksCache};
 
@@ -38,8 +38,7 @@ impl RedisJwksCache {
     /// that observed the drop still surfaces its error to the caller — see `get`/`put`
     /// below). `ttl_secs` is applied to every `put` as Redis's own `EX` expiry.
     pub async fn connect(redis_url: &str, ttl_secs: u64) -> Result<Self, AuthnError> {
-        let client = Client::open(redis_url).map_err(|err| log_unavailable(None, err.kind()))?;
-        let conn = ConnectionManager::new(client).await.map_err(|err| log_unavailable(None, err.kind()))?;
+        let conn = crate::adapters::redis_conn::connect(redis_url).await.map_err(|err| log_unavailable(None, err.kind()))?;
         Ok(Self { conn, ttl_secs })
     }
 }

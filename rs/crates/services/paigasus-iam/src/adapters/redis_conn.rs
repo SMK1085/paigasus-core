@@ -57,7 +57,6 @@ pub(crate) fn connection_manager_config() -> ConnectionManagerConfig {
 /// Returns a bare [`redis::RedisResult`] rather than a domain error because the callers map
 /// it differently on purpose: `http::connect_redis` to `AuthnError::Backend`,
 /// `RedisJwksCache::connect` to the fail-closed `AuthnError::Unavailable`.
-#[cfg_attr(not(test), expect(dead_code, reason = "Task 2 (SMA-473) wires up the 8 call sites; unused until then"))]
 pub(crate) async fn connect(redis_url: &str) -> redis::RedisResult<ConnectionManager> {
     let client = redis::Client::open(redis_url)?;
     ConnectionManager::new_with_config(client, connection_manager_config()).await
