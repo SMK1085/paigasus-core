@@ -473,25 +473,39 @@ In `moon.yml`, insert after the `wasm-getrandom-free` task block (before `promto
 
 ```yaml
   redis-connect-single-site:
-    description: 'Assert every redis `ConnectionManager` construction goes through `adapters::redis_conn`, so no call site can restore the unbounded reconnect retry budget (SMA-473).'
-    # Strict-equality guard, not an allowlist: SMA-473 deliberately converted EVERY site
-    # (including the test-only constructors) so this can be an exact "one file, nowhere else"
-    # check. Comment lines are excluded so prose may still name the API.
+    description: 'Assert redis connection config is owned solely by `adapters::redis_conn`, so no call site can restore the unbounded reconnect retry budget (SMA-473).'
+    # WHAT IS GATED, and why it is not simply "ConnectionManager::new":
+    #   - `ConnectionManager::new(` / `::new_with_config(` — the eager constructors the
+    #     helper owns. Allowed only in redis_conn.rs.
+    #   - the `ConnectionManagerConfig` TYPE — naming it is how you would build an untuned
+    #     config. Allowed only in redis_conn.rs.
+    # `ConnectionManager::new_lazy_with_config(...)` is deliberately NOT gated: two
+    # `#[cfg(test)]` sites legitimately call it, and they are safe precisely because the
+    # rule above means the only config they can obtain is `connection_manager_config()`.
+    #
+    # Comment lines are excluded so prose may still name the API.
+    #
+    # Two portability notes, both learned the hard way:
+    #   - Do NOT anchor paths on `^\./`. GNU grep (CI, Linux) emits the `./` prefix; ugrep
+    #     (some dev shells) strips it. An `^\./` anchor silently matches nothing on one of
+    #     them, which would make this gate pass while guarding nothing.
+    #   - The comment filter anchors on `:[0-9]+:[[:space:]]*//` so it tests the CONTENT,
+    #     not any `://` that happens to appear inside a redis URL on a code line.
     #
     # The control (`expected` must be non-empty) matters: without it, a rename of
     # redis_conn.rs — or a typo in the pattern — would make BOTH greps empty and the gate
     # would pass while guarding nothing.
     script: |
       cd rs/crates/services/paigasus-iam/src
-      hits="$(grep -rn 'ConnectionManager::new' . | grep -v ':[[:space:]]*//' || true)"
-      expected="$(printf '%s\n' "$hits" | grep '^\./adapters/redis_conn\.rs:' || true)"
-      offenders="$(printf '%s\n' "$hits" | grep -v '^\./adapters/redis_conn\.rs:' || true)"
+      hits="$(grep -rnE 'ConnectionManager::new\(|ConnectionManager::new_with_config\(|ConnectionManagerConfig' . | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      expected="$(printf '%s\n' "$hits" | grep -E 'adapters/redis_conn\.rs:' || true)"
+      offenders="$(printf '%s\n' "$hits" | grep -vE 'adapters/redis_conn\.rs:' || true)"
       if [ -z "$expected" ]; then
-        echo "no ConnectionManager construction found in adapters/redis_conn.rs — the guard is not guarding anything (renamed file? changed API?)" >&2
+        echo "no redis connection-config construction found in adapters/redis_conn.rs — the guard is not guarding anything (renamed file? changed API?)" >&2
         exit 2
       fi
       if [ -n "$offenders" ]; then
-        echo "redis ConnectionManager constructed outside adapters/redis_conn.rs (SMA-473 — route it through redis_conn::connect):" >&2
+        echo "redis connection config built outside adapters/redis_conn.rs (SMA-473 — use redis_conn::connect / connection_manager_config):" >&2
         printf '%s\n' "$offenders" >&2
         exit 1
       fi
@@ -500,6 +514,11 @@ In `moon.yml`, insert after the `wasm-getrandom-free` task block (before `promto
     inputs:
       - 'rs/crates/services/paigasus-iam/src/**/*'
 ```
+
+**Note on the probe in Step 3 below:** it must name something the gate actually
+catches. `ConnectionManager::new` without a paren is *not* gated (that is the bare
+path, and `new_lazy_with_config` must stay legal outside the helper) — use
+`ConnectionManagerConfig::new()` in the probe instead.
 
 - [ ] **Step 2: Verify the gate passes on the current (correct) tree**
 
@@ -516,7 +535,7 @@ A gate never seen red is not a gate. Introduce a temporary violation, confirm re
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-printf '\nfn _sma473_guard_probe() { let _ = redis::aio::ConnectionManager::new; }\n' \
+printf '\nfn _sma473_guard_probe() { let _ = redis::aio::ConnectionManagerConfig::new(); }\n' \
   >> rs/crates/services/paigasus-iam/src/adapters/clock.rs
 moon run repo:redis-connect-single-site   # expect FAIL, listing clock.rs
 git checkout -- rs/crates/services/paigasus-iam/src/adapters/clock.rs
