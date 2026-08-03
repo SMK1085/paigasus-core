@@ -386,14 +386,20 @@ end of this section only when the API itself is unreachable.
 - **Confirm the root cause is actually fixed before any bulk replay.** Mass parking is usually an
   outage (see Likely causes above); replaying into a still-broken publisher just re-parks the same
   rows on their very next failed attempt.
-- **A 10k-row replay delays live traffic by roughly 8 minutes, per relay replica.** A replayed row
-  keeps its original — older, lower — `id`, and the relay drains strictly `ORDER BY id ASCENDING`
-  at `[outbox].batch_size = 100` rows every `[outbox].poll_interval_secs = 5` seconds
-  (10,000 / 100 × 5s = 500s ≈ 8m for a single relay). A large replay is therefore drained to
-  completion, in full, before any newer/live row is touched by *that* relay. With N IAM replicas
-  each running their own relay and partitioning the work via `FOR UPDATE SKIP LOCKED`, the
-  effective delay is roughly **8/N minutes**, not a flat 8 — schedule a large bulk replay for a
-  low-traffic window, or replay in smaller batches, if even the divided delay to live traffic is
+- **A 10k-row replay adds roughly 8 minutes of low-id backlog for a relay to work through — an
+  idealized aggregate-capacity estimate, not a guaranteed delay before live traffic is touched.** A
+  replayed row keeps its original — older, lower — `id`, and the relay drains strictly
+  `ORDER BY id ASCENDING` at `[outbox].batch_size = 100` rows every
+  `[outbox].poll_interval_secs = 5` seconds (10,000 / 100 × 5s = 500s ≈ 8m for a single relay, if
+  it did nothing else the whole time). It is **not** true that the replay is drained to completion,
+  in full, before a relay touches any newer/live row: `FOR UPDATE SKIP LOCKED` means a relay that
+  finds the next lower-id replayed rows already locked by a peer (or mid-transaction) simply moves
+  on to the next available rows in the batch, which can include newer, live-traffic rows, rather
+  than blocking behind them — there is no strict global ordering guarantee here, only the relay's
+  poll predicate and `ORDER BY`. With N IAM replicas each running their own relay and partitioning
+  the work this way, the aggregate capacity consumed by the replay is roughly **8/N minutes' worth**
+  spread across the fleet, not a flat 8 charged to any one relay — schedule a large bulk replay for
+  a low-traffic window, or replay in smaller batches, if even that capacity hit to live traffic is
   unacceptable.
 - **`404` on any of the three replay/discard endpoints conflates several distinct states**: no row
   exists with that id, a row that was never parked (still live, or already published), a row
