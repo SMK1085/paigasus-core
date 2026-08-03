@@ -344,6 +344,10 @@ fn describe_iam_metrics() {
         "Denial-audit rows enqueued onto the bounded in-memory buffer, whether or not the enqueue also dropped an older row."
     );
     describe_counter!(
+        names::IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL,
+        "Bootstrap-admin seed attempts that failed and were swallowed, by stage (list = the pre-seed existence check, txn = the grant+audit+event transaction). A lost policy_gen bump is not counted."
+    );
+    describe_counter!(
         names::IAM_OUTBOX_RELAY_TICKS_TOTAL,
         "Outbox relay poll-loop iterations, labeled by result (ok/error) — the relay's liveness signal."
     );

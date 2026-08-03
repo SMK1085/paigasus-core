@@ -53,7 +53,7 @@ use crate::application::authenticate_api_key::AuthenticateApiKey;
 use crate::application::authenticate_token::{AuthenticateToken, JitPolicy};
 use crate::application::authorize::Authorize;
 use crate::application::bootstrap;
-use crate::application::bootstrap_admin::BootstrapAdminSeeder;
+use crate::application::bootstrap_admin::{BootstrapAdminSeeder, BootstrapAdminSeederDeps};
 use crate::application::create_user::{CreateUser, CreateUserDeps};
 use crate::application::memberships::MembershipService;
 use crate::application::organizations::OrganizationService;
@@ -417,10 +417,10 @@ impl AppState {
             teams: role_teams,
             projects: role_projects,
             authorize: authorize.clone(),
-            uow: role_uow,
-            outbox: role_outbox,
+            uow: role_uow.clone(),
+            outbox: role_outbox.clone(),
             audit: audit_log.clone(),
-            gen_bumper: role_gen_bumper,
+            gen_bumper: role_gen_bumper.clone(),
             ids: KernelIdGenerator,
             clock: SystemClock,
         });
@@ -451,7 +451,18 @@ impl AppState {
         // Shares the SAME `role_grant_store` handle `roles`/`snapshot` do (Task 21b): a
         // bootstrap-admin seed bumps the identical `policy_gen` counter `CedarAuthorizer`
         // polls, exactly like every other role-grant mutation in this composition root.
-        let bootstrap_seeder = BootstrapAdminSeeder::new(&authz_cfg.bootstrap_admins, role_grant_store.clone(), KernelIdGenerator, SystemClock);
+        let bootstrap_seeder = BootstrapAdminSeeder::new(BootstrapAdminSeederDeps {
+            admins_config: authz_cfg.bootstrap_admins.clone(),
+            grants: role_grant_store.clone(),
+            // SMA-468: the SAME uow/outbox/audit/gen_bumper instances `roles` uses, so a
+            // seeded grant is written and audited exactly like an operator-issued one.
+            uow: role_uow.clone(),
+            outbox: role_outbox.clone(),
+            audit: audit_log.clone(),
+            gen_bumper: role_gen_bumper.clone(),
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        });
 
         // --- SMA-445 Task 19: API-key auth router + service-account/api-key services -------
         // `api_key_hasher`/`api_key_cache` are the SAME shared instances `api_key_auth`

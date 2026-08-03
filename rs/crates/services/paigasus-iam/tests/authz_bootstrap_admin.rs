@@ -24,6 +24,10 @@ use paigasus_iam_core::{AccessRequest, Action, Authorizer, Effect, RequestContex
 use serde_json::json;
 use support::{app_with_config, send, test_config_with};
 
+/// The real end-to-end guard for SMA-468 D5's `policy_gen` bump: this test would fail if
+/// the post-commit `gen_bumper.bump()` were ever dropped from `seed_grant`, because a
+/// freshly seeded admin's very first authenticated request (below) would then be denied
+/// until the policy snapshot's ~31s TTL backstop, not merely delayed in some unit-level way.
 #[tokio::test]
 async fn bootstrap_identity_is_seeded_platform_admin_on_first_authentication_and_can_create_an_organization() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -182,4 +186,69 @@ async fn bootstrap_identity_is_seeded_over_grpc_too() {
     );
 
     server.abort();
+}
+
+/// SMA-468 AC1, the half the unit suite cannot prove: the seed's grant, audit row and outbox
+/// event are ONE transaction, so a failing audit write must leave NO `role_grant` row.
+///
+/// `application/bootstrap_admin.rs`'s unit tests use `FakeUnitOfWork`, which has no real
+/// transaction — its own doc says the fakes ignore `tx` and mutate immediately, so a failure
+/// on the LAST step there leaves the grant already written. Only Postgres can prove rollback.
+///
+/// The audit write is forced to fail by renaming `audit_log` after migration (this test owns
+/// its own ephemeral database). The request itself must still succeed: seeding is best-effort
+/// and must never fail the request that triggered it.
+#[tokio::test]
+async fn a_failed_audit_write_rolls_back_the_bootstrap_grant() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let mut cfg = test_config_with(&[(&idp, true)], 30);
+    cfg.authz.bootstrap_admins = vec![BootstrapAdmin {
+        issuer: idp.issuer.clone(),
+        subject: "bootstrap-sub".to_string(),
+    }];
+    let (app, state) = app_with_config(db.clone(), &cfg).await;
+
+    // Make every `audit_log` insert fail. Renaming the partitioned parent takes its children
+    // with it, so the seeder's `audit.record` errors and its transaction rolls back.
+    use sea_orm::ConnectionTrait;
+    db.execute_unprepared("ALTER TABLE audit_log RENAME TO audit_log_hidden").await.expect("rename audit_log");
+
+    let token = idp.bearer("bootstrap-sub", Some("bootstrap-admin@example.com"), "paigasus", 3600);
+    // Any authenticated route: the seeder runs in the bearer middleware, before the handler.
+    let (status, body) = send(&app, "GET", "/v1/organizations", None, Some(&token)).await;
+    assert_ne!(
+        status,
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        "seeding is best-effort: a failed audit write must never turn into a 500: {body}"
+    );
+
+    // Restore the table so the assertion below can use the normal query path.
+    db.execute_unprepared("ALTER TABLE audit_log_hidden RENAME TO audit_log").await.expect("restore audit_log");
+
+    // The principal exists (JIT-provisioned by authn) but must hold NO platform_admin grant:
+    // the audit failure rolled the whole seed back.
+    let principal = state.authn.resolve(&token, Provisioning::Disabled).await.expect("already provisioned");
+    let grants = state.role_grant_store.list_by_principal(&principal.principal_id).await.expect("list_by_principal");
+    assert!(
+        !grants.iter().any(|g| g.role_key == "platform_admin" && g.scope == GrantScope::Root),
+        "SMA-468 AC1: a failed audit write must leave no platform_admin grant behind, got {grants:?}"
+    );
+
+    // Self-heal: with `audit_log` restored, the SAME identity authenticates again. This is
+    // the positive control for the assertion above — it proves the seeder actually ran on
+    // this path (not that it silently never fired at all, which would make the "no grant"
+    // assertion above vacuously true) — and it covers the "retries on its next
+    // authentication" claim made in the module doc, the warn message, and spec D1/§3.3,
+    // which nothing else in this suite exercises.
+    let (status, body) = send(&app, "GET", "/v1/organizations", None, Some(&token)).await;
+    assert_ne!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR, "the retry request must also succeed: {body}");
+
+    let grants = state.role_grant_store.list_by_principal(&principal.principal_id).await.expect("list_by_principal");
+    assert!(
+        grants.iter().any(|g| g.role_key == "platform_admin" && g.scope == GrantScope::Root),
+        "self-heal: the platform_admin grant must now exist once the transient audit failure clears, got {grants:?}"
+    );
 }

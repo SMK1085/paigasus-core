@@ -24,6 +24,13 @@ pub const IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL: &str = "iam_authz_policy_snap
 pub const IAM_AUDIT_RECORDS_TOTAL: &str = "iam_audit_records_total";
 pub const IAM_DENIAL_AUDITS_DROPPED_TOTAL: &str = "iam_denial_audits_dropped_total";
 pub const IAM_DENIAL_AUDITS_ENQUEUED_TOTAL: &str = "iam_denial_audits_enqueued_total";
+/// SMA-468: a bootstrap-admin seed attempt that failed and was swallowed. `stage="list"` is
+/// the pre-seed existence check, `stage="txn"` the grant+audit+event transaction. A lost
+/// `policy_gen` bump is NOT counted — `PolicyGenBumper::bump` returns `()` and swallows
+/// internally, so it is structurally invisible here. A low nonzero value is not necessarily
+/// pathological: two concurrent first authentications by the same admin race, and the loser
+/// rolls back on the unique constraint with the net state still correct.
+pub const IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL: &str = "iam_bootstrap_admin_seed_failures_total";
 // IAM outbox relay
 pub const IAM_OUTBOX_RELAY_TICKS_TOTAL: &str = "iam_outbox_relay_ticks_total";
 pub const IAM_OUTBOX_RELAY_DRAINED_TOTAL: &str = "iam_outbox_relay_drained_total";
@@ -60,6 +67,7 @@ pub const ALL: &[&str] = &[
     IAM_AUDIT_RECORDS_TOTAL,
     IAM_DENIAL_AUDITS_DROPPED_TOTAL,
     IAM_DENIAL_AUDITS_ENQUEUED_TOTAL,
+    IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL,
     IAM_OUTBOX_RELAY_TICKS_TOTAL,
     IAM_OUTBOX_RELAY_DRAINED_TOTAL,
     IAM_OUTBOX_RELAY_PUBLISHED_TOTAL,
