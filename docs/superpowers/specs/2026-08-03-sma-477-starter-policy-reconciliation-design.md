@@ -1,6 +1,6 @@
 # SMA-477 — Starter policies reconcile by compare-and-warn, so any action-catalog change drifts forever
 
-**Status:** design
+**Status:** design (revised after adversarial review)
 **Date:** 2026-08-03
 **Issue:** [SMA-477](https://linear.app/smaschek/issue/SMA-477/iam-starter-policies-reconcile-by-compare-and-warn-so-any-action)
 **Project:** Paigasus IAM — Hardening
@@ -52,7 +52,7 @@ not.
 
 ### 1.3 What reading the code found beyond the issue
 
-Four findings materially shaped the design. All verified against `main` at `36c27f5`.
+All verified against `main` at `36c27f5`.
 
 **(a) There is no code path that can update a seeded starter policy.**
 `PgPolicyStore::put_in` (`pg_policies.rs:209-213`) and `delete_in` (`pg_policies.rs:295-297`)
@@ -63,14 +63,17 @@ capability, not just a changed `if`.
 
 **(b) Therefore "an operator edited the row" can only mean direct SQL.** There is no API path to
 a system-owned policy. This is what makes it defensible to treat these rows as code-owned rather
-than negotiating with whatever is in the database (D1).
+than negotiating with whatever is in the database (D1). It is also, as D2 admits, what makes the
+fingerprint a hint rather than a tamper-proof.
 
-**(c) A mixed-version rolling deploy is safe.** `PolicyEngine::compile`
-(`rs/crates/libs/paigasus-iam-core/src/authz/engine.rs:74-86`) uses `Policy::parse` /
-`Template::parse` — parse only, **no schema validation** (`authz::schema::validate_policy` is a
-separate function, called only from `put_in`). An old replica that reloads a newer policy source
-referencing an `Action` its binary does not know therefore parses it fine; the clause simply
-never matches. Self-healing cannot break a rolling deploy by poisoning an old replica's snapshot.
+**(c) A mixed-version rolling deploy cannot break an old replica's snapshot.**
+`PolicyEngine::compile` (`rs/crates/libs/paigasus-iam-core/src/authz/engine.rs:71-100`) uses
+`Policy::parse` / `Template::parse` — parse only, **no schema validation**
+(`authz::schema::validate_policy` is a separate function, called only from `put_in`). An old
+replica that reloads a newer policy source referencing an `Action` its binary does not know
+therefore parses it fine; the clause simply never matches. (This is *not* the same as saying
+mixed-version operation is safe — see D11, which addresses the direction that genuinely is
+unsafe.)
 
 **(d) `PolicyStore` has seven implementations** — one real (`PgPolicyStore`) and six test fakes
 (`cedar_authorizer.rs:384`, `policy_snapshot.rs:530` and `:603`, `policies.rs:291` and `:328`,
@@ -81,139 +84,209 @@ capability no request-path consumer uses (D5).
 a `role` row when absent and never updates it, so a code change to a role's `description` or
 `scope_kinds` drifts forever too — and unlike policies, completely silently. In scope (D7).
 
+**(f) Reconcile failure is currently harmless and would stop being so.** Against a seeded
+database today's `reconcile_starter` performs **zero writes**, so it cannot fail. Every path out
+of it propagates to `AppState::new` (`adapters/http/mod.rs:338`) and then to `main.rs:60`
+(`AppState::new(db.clone(), &config).await?`), i.e. process exit. Turning reconcile into an
+unconditional writer therefore introduces a new way for a replica to fail to start (D12).
+
 ## 2. Decisions
 
 ### D1 — System-owned starter policies are code-owned; boot converges the database to code
 
-Every boot converges each starter policy row to the code-defined source, unconditionally. There
-is no supported way to weaken a starter policy by editing the database.
+Every boot converges each starter policy row to the code-defined content, subject only to the
+revision guard in D11.
 
 This is what `system = true` plus the API's `SystemImmutable` guard already declare; the
 database was simply the one place the declaration was not enforced. Rejected alternative:
-preserve out-of-band edits and warn forever (the issue's option 1 as written). That was
-rejected because it leaves a weakened authorization boundary in effect indefinitely, and
-because a permanent warning is exactly the failure mode this issue exists to remove.
+preserve out-of-band edits and warn forever (the issue's option 1 as written). That leaves a
+weakened authorization boundary in effect indefinitely, and a permanent warning is exactly the
+failure mode this issue exists to remove.
 
 **Accepted cost, stated plainly.** An operator who hand-patches a starter policy during an
 incident — the only way to patch one, since the API refuses — has that patch reverted by the
-next replica boot. The escape hatch is to fork a *new*, non-system `policy_id`, which the
-`PutPolicy` API allows and which Cedar composes additively. That hatch is **partial and we do
-not pretend otherwise**: a forked `forbid` can add restrictions but can never remove a
-code-defined one, and a forked role *template* is never linked by any grant, because
+next replica boot.
+
+**There is effectively no escape hatch, and the earlier draft of this spec overstated one.**
+Forking a *new*, non-system `policy_id` lets an operator add a `forbid` that composes additively
+with the starter set, but: `PutPolicy` is Root-only (`platform_admin`), the policy must be
+hand-authored in Cedar, a fork can only ever *tighten* — it can never remove a code-defined
+`forbid` — and a forked role *template* is never linked by any grant, because
 `PolicyEngine::compile` resolves a grant's template by treating `RoleGrant::role_key` as the
-template's `policy_id` (`authz/roles.rs` module docs). So starter policies can be tightened
-out-of-band but never loosened. Deliberate.
+template's `policy_id` (`engine.rs:88-93`, `authz/roles.rs` module docs). So: starter policies
+can be tightened out-of-band and cannot be loosened at all. That is the intended posture, stated
+as a limitation rather than dressed up as a hatch.
 
-Rejected alternative: an opt-out config knob (`reconcile = enforce | warn_only`) so a
-deployment can pin policies. Rejected as YAGNI — new config surface, docs and tests for a
-scenario that has not occurred. If the emergency-patch case ever bites, the knob is a small
-follow-up on top of this design.
+Rejected alternative: an opt-out config knob (`reconcile = enforce | warn_only`). YAGNI — new
+config surface, docs and tests for a scenario that has not occurred. If the emergency-patch case
+ever bites, the knob is a small follow-up on top of this design.
 
-### D2 — A fingerprint column decides the *log level*, never the *action*
+### D2 — A content fingerprint decides the *log level*, never the *action* — and it is not tamper-proof
 
-`policy.source_fingerprint TEXT NULL` stores the blake3 hex of the `source` **this service last
-wrote** for that row. Reconcile compares the stored source against that fingerprint to answer
-one question — "did we write this row, or did someone else?" — and that answer selects the log
-level and whether to write an audit entry. It never changes what gets written.
+`policy.content_fingerprint TEXT NULL` stores the blake3 hex of a canonical encoding of the
+`(kind, source, description)` **this service last wrote** for that row. Reconcile compares the
+stored row against that fingerprint to answer one question — "did we write this row, or did
+something else?" — and that answer selects the log level, the metric label, and whether to write
+an audit entry. It never changes what gets written.
 
 Without it, always-converge still fixes most of the problem (warn once per release that changes
 a policy, then silent), but a routine action-catalog addition would still emit a false-positive
-WARN in every environment during exactly the upgrade window when operators are most likely to
-be reading boot logs. The issue's acceptance criterion — reconcile *silently* on a routine
-change, *warn* on a genuine edit — requires the distinction.
+WARN in every environment during exactly the upgrade window when operators are most likely to be
+reading boot logs. The issue's acceptance criterion — reconcile *silently* on a routine change,
+*warn* on a genuine edit — requires the distinction.
+
+**It detects accidents and naive edits, not adversaries.** Per (b), the only actor who can
+modify a system row is one with direct SQL access, and that same access trivially recomputes the
+fingerprint (`UPDATE policy SET source = <weakened>, content_fingerprint = <blake3 of weakened>`),
+which classifies as `Reconciled` — INFO, no audit row. The fingerprint is a **provenance hint**,
+not tamper evidence. Making it real would mean an HMAC under a pepper (the codebase has the
+idiom in `SecretHasher`, `paigasus-iam-core/src/ports.rs:199-202`), which drags secret material
+into the boot path for a threat model where the attacker already has write access to the
+authorization tables — and could equally grant themselves `platform_admin` in `role_grant`. Not
+worth it. The limit is stated here and in the runbook so nobody reads the WARN as a security
+guarantee.
+
+The fingerprint is **lowercase hex, 64 chars**: `blake3::hash(canonical.as_bytes()).to_hex()`,
+where `canonical` is a length-prefixed encoding of the three fields (length-prefixed so no field
+value can forge a boundary). A `CHECK (content_fingerprint ~ '^[0-9a-f]{64}$')` pins it.
 
 blake3 is already a workspace dependency of both crates (`rs/Cargo.toml:149`,
-`paigasus-iam-core/Cargo.toml:30`, `paigasus-iam/Cargo.toml:98`) for
-`CompiledPolicies::content_hash` and the decision-cache key. No new dependency, no `deny.toml`
-or `cargo-machete` churn.
+`paigasus-iam-core/Cargo.toml:30`, `paigasus-iam/Cargo.toml:98`). No new dependency, no
+`deny.toml` or `cargo-machete` churn.
 
-### D3 — No SQL backfill; the column is adopted at first boot
+### D3 — No SQL backfill; the columns are adopted at first boot, and adoption is audited
 
-blake3 is not computable in Postgres (`pgcrypto` does not offer it), so m0010 adds the column
-and stops. The first `reconcile_starter` after the upgrade stamps every system row, including
-rows whose source already matches code (a fingerprint-only write).
+blake3 is not computable in Postgres (`pgcrypto` does not offer it), so m0010 adds the columns
+and stops. The first `reconcile_starter` after the upgrade stamps every system row.
 
 This leaves a deliberate **one-boot trust window**: a row that existed before m0010 has no
-recorded provenance, so on that first boot it is *adopted* rather than warned about — including
-a row that was already hand-edited. That is acceptable because the interim remediation the
-current runbook prescribes is "make the stored source match the code", which converges to the
-same place, and because the alternative (warn on every unfingerprinted row) would reproduce the
-exact false-positive storm this issue is about. After that boot every system row carries a
-fingerprint and the window is closed.
+recorded provenance, so on that first boot it is *adopted* rather than warned about. Warning on
+every unfingerprinted row would reproduce the exact false-positive storm this issue is about.
+
+But that first boot is also the moment a pre-existing hand-edit is most likely to exist, and
+converging destroys it. So `Adopted { content_changed: true }` **writes the D8 audit row**
+(`reason: "adopted_unfingerprinted"`, carrying `previous_content`) while logging at **INFO, not
+WARN**. Forensics are preserved; no false alarm is raised. `Adopted { content_changed: false }`
+is a pure stamp — DEBUG, no audit.
 
 ### D4 — Classification order: provenance before content
 
-The classifier checks provenance (`fingerprint == blake3(stored_source)`) *before* asking
-whether the stored source matches code. A row hand-edited to exactly the code-defined value —
-which is remediation #1 in today's runbook — therefore still classifies as
-`ExternallyModified`.
+The classifier checks provenance (`fingerprint == blake3(canonical(stored))`) *before* asking
+whether the stored content matches code. A row hand-edited to exactly the code-defined value —
+which is remediation #1 in today's runbook — therefore still classifies as `ExternallyModified`.
 
 That is true, and worth saying once: something wrote that row and it was not this service. The
-outcome carries `source_changed: false` so the log line stays honest ("modified out of band;
+outcome carries `content_changed: false` so the log line stays honest ("modified out of band;
 content already matched"), and it self-heals on the same boot when the fingerprint is stamped.
-The alternative — a separate quiet outcome for "edited, but to the right value" — is a sixth
-state earning its keep only in one benign case.
 
-### D5 — A narrow boot-only port, not a seventh `PolicyStore` method
+### D5 — Narrow boot-only ports, not a seventh `PolicyStore` method
 
 `reconcile_system` goes on a new `SystemPolicyReconciler` port implemented only by
-`PgPolicyStore` (and one fake for the bootstrap unit tests), not on `PolicyStore`. Per (d)
-above, extending `PolicyStore` would force six unrelated test fakes to grow a method no
-request-path consumer calls. Interface-segregation, and it keeps the diff honest about what is
-actually a boot-time capability.
+`PgPolicyStore`, not on `PolicyStore`. Per (d), extending `PolicyStore` would force six
+unrelated test fakes to grow a method no request-path consumer calls.
 
-### D6 — `NonSystemCollision` leaves an operator's own policy alone
+A symmetric `SystemRoleReconciler` port covers the role half (D7), so `reconcile_starter` is
+fully fakeable and its whole orchestration — log level, metric, audit — is unit-testable without
+Docker. The earlier draft left the role half reaching for the SeaORM entity directly while
+*growing* that code; a pure comparison helper whose only caller needs Docker is the signature of
+a missing port, not a well-placed helper.
 
-If the row occupying a starter `policy_id` has `system = false`, reconcile writes nothing and
-warns. That state is reachable: a future release adds a ninth role whose key collides with a
-`policy_id` an operator already created through `PutPolicy`. Clobbering an operator's own policy
-would be strictly worse than the drift it replaces. This warning *is* permanent by design — the
-state needs a human, and there is nothing the service can safely do on its own.
+### D6 — The starter `policy_id` namespace is reserved, and non-system rows at those ids converge
+
+The earlier draft had a `NonSystemCollision` outcome that wrote nothing when the row at a
+starter `policy_id` had `system = false`. **That was a one-`UPDATE` bypass of D1's entire
+premise**: the only actor who can tamper is one with SQL access, and
+
+```sql
+UPDATE policy SET system = false, source = 'permit(principal, action, resource);'
+ WHERE policy_id = 'forbid-archived-writes';
+```
+
+would have exempted the row from convergence permanently, with a WARN and no audit row — cheaper
+than the tamper D8 exists to catch, and leaving the weakened policy governing decisions forever.
+
+Two changes close it:
+
+1. **`put_in` reserves the namespace.** Creating or updating a policy whose `policy_id` is in
+   `authz::roles::STARTER_POLICY_IDS` is rejected with `AuthzError::SystemImmutable` — reusing
+   the existing variant, so `TenancyError::SystemImmutable` and its API mapping are unchanged.
+   The check is on the id, not on the stored row's `system` flag, so it holds even for an id
+   that is not yet seeded.
+2. **`system = false` at a starter id is treated as broken provenance**, not as an operator's
+   policy: it classifies `ExternallyModified`, and the UPDATE restores `system = true` along
+   with the content. `NonSystemCollision` is deleted from the design.
+
+The residual case — an operator legitimately created a policy at an id that a *later* release
+turns into a role key — is now converged over rather than preserved. That is correct: a role
+template *must* exist at that `policy_id` or every grant of that role silently contributes
+nothing (`engine.rs:88-93`), so preserving the squatter would break the role. The audit row
+records exactly what was overwritten.
 
 ### D7 — Role rows converge too, without a fingerprint
 
-`seed_role_row` becomes `reconcile_role_row`: insert when absent (keeping the existing
-unique-violation absorption), otherwise compare `template_id` / `scope_kinds` / `description` /
-`system` against the code-defined `Role` and update on any difference.
+`seed_role_row` becomes `reconcile_role_row` behind `SystemRoleReconciler`: insert when absent
+(keeping the existing unique-violation absorption), otherwise compare `template_id` /
+`scope_kinds` / `description` / `system` against the code-defined `Role` and update on any
+difference.
 
 No fingerprint and no audit entry, because the columns are introspectable-only — nothing parses
 them back at runtime; the `role_key -> Role` catalog lookup is always code-defined
-(`bootstrap.rs` module docs). There is therefore no operator-edit story worth preserving and no
+(`bootstrap.rs` module docs). There is no operator-edit story worth preserving and no
 security-relevant content to record.
 
-### D8 — The tamper signal is durable: WARN plus one audit row
+### D8 — The tamper signal is durable: WARN, one audit row, and a metric
 
-Because reconcile now overwrites, the tampered source is destroyed. A transient boot-log line
-would be the only trace it ever existed. So `ExternallyModified` — and only that outcome — also
-writes one `audit_log` entry capturing the overwritten source.
+Because reconcile now overwrites, the modified content is destroyed. A transient boot-log line
+would be the only trace it ever existed. So `ExternallyModified` — and `Adopted` with
+`content_changed: true`, per D3 — also writes one `audit_log` entry capturing the overwritten
+content.
 
-The entry follows SMA-468's boot-time null-actor pattern verbatim: `action: "PutPolicy"`,
+The entry follows SMA-468's boot-time null-actor pattern: `action: "PutPolicy"`,
 `actor_prn: None` (no principal authorized this — a code deployment did), `outcome: Committed`,
-`resource_prn: Some("policy/{policy_id}")` matching `application::policies`'s existing non-PRN
-convention for policy identity (a `policy_id` is a caller-chosen string, not a `Uuid`, so it
-cannot round-trip through `Prn::build`), and
-`detail: { policy_id, source: "starter_policy_reconcile", reason: "external_modification", source_changed, previous_source }`.
+`determining_policies: vec![]`, and
+`detail: { policy_id, source: "starter_policy_reconcile", reason, content_changed, previous_content }`.
 
-`detail.source = "starter_policy_reconcile"` is what distinguishes this row from an
-operator-issued `PutPolicy`, exactly as `detail.source = "bootstrap_admins"` does for the
-bootstrap grant.
+`resource_prn` is **`Some(root_prn().canonical())`**. The earlier draft said `"policy/{id}"` and
+claimed that matched `application::policies` — it does not. `policy_aggregate_prn`
+(`policies.rs:55`) feeds only `DomainEvent::aggregate_prn`; every `PutPolicy`/`DeletePolicy`
+*audit* row uses `root_prn().canonical()` with the id in `detail` (`policies.rs:138+141`,
+`:188+191`), as does SMA-468's bootstrap grant (`bootstrap_admin.rs:171`). Using anything else
+would make reconcile's rows the only `PutPolicy` rows not reachable by
+`AuditFilter::resource_prn` (`audit.rs:46`), silently splitting the audit query surface.
 
-Rejected: an additional Prometheus counter. It would make the event alertable without anyone
-reading boot logs, but it pulls `ops/observability/` rules, dashboards and the
-`:observability-drift` gate into an otherwise IAM-local change. Noted as a follow-up (§7).
+`detail.source = "starter_policy_reconcile"` distinguishes this row from an operator-issued
+`PutPolicy`, exactly as `detail.source = "bootstrap_admins"` does for the bootstrap grant.
+`previous_content` is **truncated to 8 KiB** with a `previous_content_truncated: true` marker —
+it is attacker-influenced text being copied into an append-only table.
+
+`AuditLog::record_out_of_band` is the method used (`reconcile_policies` holds no `Transaction`);
+see D9.
+
+**A metric ships too**, reversing the earlier draft's rejection, which rested on a factually
+wrong claim. The `:observability-drift` gate's test is
+`dashboards_and_rules_reference_only_known_metrics`
+(`paigasus-observability/tests/drift.rs:138`) — it asserts that *ops artifacts reference
+registered families*, the reverse direction. Registering a name and emitting it touches nothing
+under `ops/observability/**` and cannot red the gate; `IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL`
+(`bootstrap_admin.rs:217,240`) is exact boot-time precedent. So:
+`iam_starter_policy_reconciles_total{outcome}` with a closed label set
+(`unchanged` | `seeded` | `adopted` | `reconciled` | `externally_modified` | `stale_binary` |
+`orphaned` | `failed`). Without it the tamper signal's only surfaces are a boot WARN — which
+§1.2 argues operators learn to ignore — and an audit row nobody queries. The alert rule stays a
+follow-up (§7).
 
 ### D9 — An audit-write failure logs ERROR and does not fail boot
 
-The revert has already committed by the time the audit row is written. Refusing to start the
-service because the audit insert hiccupped converts a bookkeeping failure into an outage, and
-the WARN still fires either way.
+The convergence has already committed by the time the audit row is written. Refusing to start
+the service because the audit insert hiccupped converts a bookkeeping failure into an outage,
+and the WARN and metric still fire.
 
-The cost is that the audit row is not atomic with the revert. Making it atomic would mean
+The cost is that the audit row is not atomic with the convergence. Making it atomic would mean
 constructing the entry inside `reconcile_system`'s transaction, which would drag `IdGenerator`
 and `Clock` into the persistence adapter and invert the layering for a rare path. Stated rather
 than engineered around.
 
-### D10 — `policy_gen` bumps only when the source actually changed
+### D10 — `policy_gen` bumps only when content actually changed
 
 Reconcile bumps the generation counter best-effort (the `put`/`delete` posture: logged and
 swallowed, because the write already committed) — but only when policy *content* changed. A
@@ -221,257 +294,437 @@ fingerprint-only stamp (D3) changes nothing a decision can observe, so it must n
 caches.
 
 The bump matters even though `reconcile_starter` runs before this process compiles its own
-snapshot: it is what tells the *other* replicas, already serving, to reload.
+snapshot: it is what tells the *other* replicas, already serving, to reload. That is also
+exactly why D11 is necessary.
+
+### D11 — Convergence is monotonic: an older binary never rewrites a newer starter policy set
+
+There is **one** `policy` table for the whole fleet. So a vN replica booting during a
+mixed-version window rewrites the shared row to vN's content and, via D10's bump, makes every
+already-serving vN+1 replica reload it (`PolicySnapshot::reload_if_stale`). Today's
+compare-and-warn design cannot do this because it never writes; unguarded always-converge can.
+
+The consequences split by policy kind, and neither is acceptable as a silent regression:
+- `forbid-archived-writes` reverting to a shorter action list is fail-**open** in a secondary
+  control — `roles.rs:249-253` documents it as a belt-and-braces guard with M1's in-txn guards
+  as the real gate — but fail-open is exactly the direction D1 exists to prevent.
+- A role *template* reverting is fail-**closed**: admins transiently lose a newly added action.
+
+Neither settles under blue/green or a long-lived canary, and an old pod can boot without anyone
+deciding to deploy it (HPA scale-up, crashloop restart, a held canary).
+
+**Mechanism.** `authz::roles::STARTER_POLICY_REVISION: u32`, persisted per row as
+`policy.starter_revision INTEGER NULL`. Reconcile writes only when
+`CODE_REVISION >= stored_revision`; a lower code revision yields `StaleBinary` — INFO, **no
+write, no audit** (an older binary has no authority over a row a newer release wrote, and
+deferring entirely is what keeps convergence monotonic). `NULL` reads as `0`, so every
+pre-m0010 row proceeds to normal classification.
+
+`CARGO_PKG_VERSION` cannot serve here: `paigasus-iam`'s version is `0.0.0`
+(`services/paigasus-iam/Cargo.toml:3`). So the constant is hand-maintained — and therefore
+paired with a guard so it cannot be forgotten: a unit test pins a blake3 hash over the canonical
+encoding of every starter policy, and reds the moment any starter policy's content changes,
+with a message instructing the author to bump `STARTER_POLICY_REVISION` and update the literal.
+This is the same self-enforcing drift-guard shape the repo already uses for codegen, the parity
+corpus, and observability.
+
+The guard also makes D1's rollback story honest: after a genuine downgrade, vN leaves vN+1's
+policy set in place rather than "self-healing" backwards into a looser one.
+
+### D12 — Reconcile failure does not stop a replica booting, except on the seeding path
+
+Per (f), every reconcile error currently reaches `main.rs:60` and exits the process. With
+reconcile writing on every boot, that would turn a transient Postgres blip, a lock wait, or a
+deadlock into "this replica will not start" — where before it started fine.
+
+The rule is split by whether the row exists:
+- **`Absent` (seeding) failures stay fatal.** `AppState::new`'s documented invariant is that the
+  initial snapshot "always compiles at least that starter set, never an empty one"
+  (`adapters/http/mod.rs:290-294`). Continuing past a failed *seed* would boot a replica with an
+  empty or partial policy set, denying everything. This preserves today's behaviour exactly.
+- **Convergence failures are logged at ERROR, counted (`outcome = "failed"`), and skipped.** The
+  stored row governed decisions perfectly well before this change; keeping it for one more boot
+  is strictly better than not booting.
+
+`validate_policy` failing on a *code-defined* source (§3.4 step 1) is a broken release, not an
+operator error — but it is also skip-and-continue, for the same reason: turning a bad build into
+"no replica in any environment starts" is a worse outage than one stale policy.
+
+The reconcile transaction sets `SET LOCAL lock_timeout = '5s'` (mirroring m0009/m0008) so a row
+lock held by a concurrent `PolicyService::put_in` — which also takes `lock_exclusive()`
+(`pg_policies.rs:208`) — cannot block startup indefinitely, before the HTTP listener binds and
+before the health endpoint can answer.
+
+### D13 — Orphaned system rows are reported, not removed
+
+A `system = true` policy row (or `role` row) whose id has left `starter_policies()` /
+`system_roles()` — a retired role — is not deleted. It keeps compiling via `list_all`, keeps
+linking any surviving `role_grant` (`engine.rs:88-93`), and `DeletePolicy` refuses to remove it
+(`SystemImmutable`). So "converges to code" is **additive-only**, and this design does not
+change that.
+
+Reconcile logs a WARN and counts `outcome = "orphaned"` for each such row. No audit entry: this
+fires on *every* boot until a human acts, and an append-only table must not accrue a row per
+replica per boot forever. A safe retirement path (revoking grants, dropping the FK'd `role` row,
+then the policy) is a real piece of work with its own ordering constraints — §7 follow-up.
 
 ## 3. The fix
 
 ### 3.1 New module — `paigasus_iam_core::authz::reconcile`
 
-Pure, no I/O, no `PolicyDocument` change (the fingerprint never enters the domain model):
+Pure, no I/O. `PolicyDocument` is unchanged — the fingerprint and revision are **port DTO**
+fields, not domain-model fields, which is why they live on `StoredPolicyRow` rather than on the
+document the rest of the system passes around:
 
 ```rust
-/// A borrowed view of the persisted row's three decision-relevant columns. Deliberately not
-/// `PolicyDocument` — the fingerprint is a persistence concern and must not enter the domain
-/// model, and the classifier needs no other column.
+/// A borrowed view of the persisted row's decision-relevant columns, as read by the
+/// reconciler port. Not a domain model and not part of `PolicyDocument`.
 pub struct StoredPolicyRow<'a> {
+    pub kind: PolicyKind,
     pub source: &'a str,
-    pub fingerprint: Option<&'a str>,
+    pub description: &'a str,
     pub system: bool,
+    pub fingerprint: Option<&'a str>,
+    pub revision: Option<u32>,
 }
 
 pub enum StarterPolicyOutcome {
     Absent,
     Unchanged,
-    Adopted { source_changed: bool },
+    StaleBinary,
+    Adopted { content_changed: bool, previous_content: Option<String> },
     Reconciled,
-    ExternallyModified { source_changed: bool, previous_source: String },
-    NonSystemCollision,
+    ExternallyModified { content_changed: bool, previous_content: String },
 }
 
 pub fn classify_starter_policy(
     stored: Option<StoredPolicyRow<'_>>,
-    code_source: &str,
+    code: &PolicyDocument,
+    code_revision: u32,
 ) -> StarterPolicyOutcome;
+
+/// Length-prefixed canonical encoding of the content-bearing triple, hashed for the
+/// fingerprint. Length-prefixed so no field value can forge a field boundary.
+pub fn content_fingerprint(kind: PolicyKind, source: &str, description: &str) -> String;
+
+/// D7's comparison, pure so it tests without Docker.
+pub fn role_row_matches(stored: &StoredRoleRow<'_>, code: &Role) -> bool;
 ```
 
-`ExternallyModified::previous_source` is the source we are about to overwrite. When
-`source_changed == false` it equals the code-defined source — the edit landed on exactly the
-right value (D4) — which is redundant but harmless, and keeps the audit row's shape uniform.
+Classification, in order:
 
-Truth table:
+| # | condition | outcome | writes | log | audit | metric label |
+|---|---|---|---|---|---|---|
+| 1 | no row | `Absent` | insert | INFO | no | `seeded` |
+| 2 | `stored.revision > code_revision` | `StaleBinary` | nothing | INFO | no | `stale_binary` |
+| 3 | `fingerprint IS NULL` | `Adopted { content_changed }` | content + stamp | DEBUG / INFO | only if changed | `adopted` |
+| 4 | `!system` **or** fingerprint mismatch | `ExternallyModified { .. }` | content + stamp (+ `system = true`) | **WARN** | **yes** | `externally_modified` |
+| 5 | content matches code | `Unchanged` | nothing | — | no | `unchanged` |
+| 6 | otherwise | `Reconciled` | content + stamp | INFO | no | `reconciled` |
 
-| stored row | `system` | provenance (`fp == blake3(source)`) | matches code | outcome | writes | log | audit |
-|---|---|---|---|---|---|---|---|
-| absent | — | — | — | `Absent` | insert | INFO | no |
-| present | `false` | — | — | `NonSystemCollision` | nothing | **WARN** | no |
-| present | `true` | `fp = NULL` | either | `Adopted { source_changed }` | source + fp | DEBUG/INFO | no |
-| present | `true` | mismatch | either | `ExternallyModified { .. }` | source + fp | **WARN** | **yes** |
-| present | `true` | match | yes | `Unchanged` | nothing | — | no |
-| present | `true` | match | no | `Reconciled` | source + fp | INFO | no |
+Row 3 logs DEBUG when `content_changed == false` (a pure stamp) and INFO when `true`, and
+audits only in the latter case (D3). Row 2 precedes everything else because an older binary
+defers unconditionally (D11). Row 4's `!system` disjunct is D6.
 
-`Adopted` logs at DEBUG when `source_changed == false` (pure fingerprint stamp, nothing
-happened operationally) and INFO when `true` (content converged under unknown provenance).
+`content_changed` compares the code-defined `(kind, source, description)` against the stored
+triple — **all three**, not `source` alone. The earlier draft converged only `source`, which left
+`kind` and `description` drifting forever; `pg_policies.rs::policy_content_matches` (`:88`)
+already treats all three as content-bearing, and a stale `kind` is not cosmetic: a `template`
+row stored as `static` makes `PolicyEngine::compile` call `Policy::parse` on template source
+(`engine.rs:78`), returning `Err`, which fails `PolicySnapshot::new` and therefore boot — a state
+a source-only reconcile could never repair.
 
-A pure `role_row_matches(stored, code) -> bool` helper lands here too, serving D7.
+### 3.2 New ports
 
-### 3.2 New port — `SystemPolicyReconciler`
-
-In `authz/ports.rs`, alongside the existing ports:
+In `authz/ports.rs`:
 
 ```rust
 #[async_trait]
 pub trait SystemPolicyReconciler: Send + Sync {
-    async fn reconcile_system(&self, doc: &PolicyDocument) -> Result<StarterPolicyOutcome, AuthzError>;
+    async fn reconcile_system(&self, doc: &PolicyDocument, revision: u32) -> Result<StarterPolicyOutcome, AuthzError>;
+    /// Ids of persisted `system = true` rows that are no longer code-defined (D13).
+    async fn orphaned_system_policy_ids(&self, known: &[&str]) -> Result<Vec<String>, AuthzError>;
+}
+
+#[async_trait]
+pub trait SystemRoleReconciler: Send + Sync {
+    async fn reconcile_role(&self, role: &Role) -> Result<RoleOutcome, AuthzError>;
+    async fn orphaned_system_role_keys(&self, known: &[&str]) -> Result<Vec<String>, AuthzError>;
 }
 ```
 
-### 3.3 Migration — `m0010_policy_source_fingerprint`
+### 3.3 `roles.rs` additions
+
+```rust
+/// Bumped whenever any starter policy's content changes. Guarded by
+/// `starter_policy_content_is_pinned` below — that test reds until this is bumped.
+pub const STARTER_POLICY_REVISION: u32 = 1;
+
+/// Every `policy_id` `starter_policies()` produces. A `const` so `put_in`'s reserved-namespace
+/// check (D6) is a slice scan, not nine `PolicyDocument` allocations per call.
+pub const STARTER_POLICY_IDS: &[&str] = &[FORBID_ARCHIVED_WRITES_ID, "platform_admin", /* ... */];
+```
+
+Two guard tests: `STARTER_POLICY_IDS` equals the ids `starter_policies()` actually produces
+(so the const cannot drift), and the D11 content-hash pin.
+
+### 3.4 Migration — `m0010_policy_reconcile_columns`
 
 Follows m0009 verbatim: `SET LOCAL lock_timeout = '5s'` so the `ACCESS EXCLUSIVE` request backs
 off rather than queueing ahead of in-flight writes during a rolling deploy, and
-`ADD COLUMN IF NOT EXISTS` because SeaORM's migrator does not serialize concurrent `up()`
-across replicas (m0007/m0008/m0009 module docs).
+`ADD COLUMN IF NOT EXISTS` because SeaORM's migrator does not serialize concurrent `up()` across
+replicas (m0007/m0008/m0009 module docs).
 
 ```sql
-ALTER TABLE "policy" ADD COLUMN IF NOT EXISTS source_fingerprint TEXT NULL;
+ALTER TABLE "policy"
+  ADD COLUMN IF NOT EXISTS content_fingerprint TEXT NULL,
+  ADD COLUMN IF NOT EXISTS starter_revision INTEGER NULL;
+ALTER TABLE "policy" DROP CONSTRAINT IF EXISTS ck_policy_fingerprint;
+ALTER TABLE "policy" ADD CONSTRAINT ck_policy_fingerprint
+  CHECK (content_fingerprint IS NULL OR content_fingerprint ~ '^[0-9a-f]{64}$');
 ```
 
-`down` drops it. No index — the column is only ever read as part of a `find_by_id` on the
-primary key. No backfill (D3).
+`down` drops both columns and the constraint. No index — the columns are only read as part of a
+`find_by_id` on the primary key. No backfill (D3).
 
-`entities/policy.rs` gains `pub source_fingerprint: Option<String>`.
+`entities/policy.rs` gains `pub content_fingerprint: Option<String>` and
+`pub starter_revision: Option<i32>`.
 
-### 3.4 `PgPolicyStore::reconcile_system`
+**`doc_to_model` must not learn about them** (`pg_policies.rs:139`): it is shared with `put_in`,
+and an operator policy written through `PutPolicy` must leave both columns NULL. Only
+`reconcile_system` sets them.
+
+### 3.5 `PgPolicyStore::reconcile_system`
 
 1. `validate_policy(&doc.source)?` — the same guard `put_in` applies. A code-defined source
-   always passes (`roles.rs`'s own test suite asserts it), so this is a tripwire against a bad
-   catalog change reaching the database, not a routine check.
-2. Open a transaction; `policy::Entity::find_by_id(...).lock_exclusive().one(txn)`.
-3. `classify_starter_policy(...)`.
+   always passes (`roles.rs`'s own suite asserts it), so this is a tripwire against a bad catalog
+   change reaching the database. Failure is skip-and-continue, not fatal (D12).
+2. Begin; `SET LOCAL lock_timeout = '5s'` (D12); `policy::Entity::find_by_id(..).lock_exclusive().one(txn)`.
+3. `classify_starter_policy(..)`.
 4. Act:
-   - `Absent` → INSERT with `source_fingerprint = blake3(doc.source)`, reusing the existing
-     SAVEPOINT unique-violation absorption (`pg_policies.rs:234-275`) — on violation, roll the
-     savepoint back, re-read the winner within the same outer transaction, and re-classify
-     against it (no second insert is possible, so this terminates).
-   - `Unchanged` / `NonSystemCollision` → no write.
-   - `Adopted` / `Reconciled` / `ExternallyModified` → UPDATE `source`, `source_fingerprint`,
-     `updated_at`; preserve the stored `created_at` (the `put_in` rule — an incoming
-     `doc.created_at` must never rewrite history).
-5. Commit, then best-effort `policy_gen` bump **only when the source changed** (D10).
+   - `Absent` → INSERT with fingerprint + revision, reusing the SAVEPOINT unique-violation
+     absorption (`pg_policies.rs:234-275`). On violation: roll the savepoint back, re-read the
+     winner **with `lock_exclusive()`** — the existing code's re-read is unlocked
+     (`pg_policies.rs:264`) because it only compares and returns, whereas we may UPDATE
+     afterwards — and re-classify against it. No second insert is possible, so this terminates.
+   - `Unchanged` / `StaleBinary` → no write.
+   - `Adopted` / `Reconciled` / `ExternallyModified` → UPDATE `kind`, `source`, `description`,
+     `system = true`, `content_fingerprint`, `starter_revision`, `updated_at`; preserve the
+     stored `created_at` (the `put_in` rule — an incoming `doc.created_at` must never rewrite
+     history). `updated_at` comes from the injected `Clock`, not `doc.updated_at`
+     (`starter_policies()` stamps that with its own `Utc::now()`, `roles.rs:231`).
+5. Commit, then best-effort `policy_gen` bump **only when content changed** (D10).
 
-`put_in` / `delete_in` and their `SystemImmutable` guard are **not touched**. The public
-`PutPolicy` API remains unable to edit a system row.
+`put_in` gains D6's reserved-namespace rejection. `delete_in` and the existing `SystemImmutable`
+guard are otherwise untouched.
 
-### 3.5 `bootstrap.rs` — split so the interesting half escapes Docker
+Note: a pure fingerprint stamp still bumps `updated_at`, which is operator-visible through
+`ListPolicies`. Documented in the runbook so it is not misread as a content change.
+
+### 3.6 `bootstrap.rs`
+
+Following the repo's DI convention at this arity — `BootstrapAdminSeederDeps`
+(`bootstrap_admin.rs:62-65`) and `RoleServiceDeps` use named-field `*Deps` structs with generic
+(not `&dyn`) `IdGenerator`/`Clock`:
 
 ```rust
-pub async fn reconcile_policies(
-    reconciler: &dyn SystemPolicyReconciler,
-    audit: &dyn AuditLog,
-    ids: &dyn IdGenerator,
-    clock: &dyn Clock,
-) -> Result<(), AuthzError>;
+pub struct ReconcileStarterDeps<I: IdGenerator, C: Clock> {
+    pub policies: Arc<dyn SystemPolicyReconciler>,
+    pub roles: Arc<dyn SystemRoleReconciler>,
+    pub audit: Arc<dyn AuditLog>,
+    pub ids: I,
+    pub clock: C,
+}
 
-pub async fn reconcile_roles(db: &DatabaseConnection) -> Result<(), AuthzError>;
-
-/// Policies first, then roles.
-pub async fn reconcile_starter(
-    reconciler: &dyn SystemPolicyReconciler,
-    audit: &dyn AuditLog,
-    ids: &dyn IdGenerator,
-    clock: &dyn Clock,
-    db: &DatabaseConnection,
-) -> Result<(), AuthzError>;
+pub async fn reconcile_policies(..) -> Result<(), AuthzError>;  // policies half
+pub async fn reconcile_roles(..) -> Result<(), AuthzError>;     // roles half
+pub async fn reconcile_starter(..) -> Result<(), AuthzError>;   // policies first, then roles
 ```
 
-`ids` mints the `AuditEntry`'s `id` and `correlation_id`; `clock` stamps `occurred_at` — the
-same two ports `bootstrap_admin.rs` takes for the same reason. This changes
-`reconcile_starter`'s signature, so every call site moves (`adapters/http/mod.rs:338` plus the
-four in `tests/authz_bootstrap.rs`).
-
 Policies stay first: every role template's `policy_id == Role::key == Role::template_id`, and
-`role.template_id` carries an FK to `policy.policy_id` (`fk_role_template`), so the referenced
-policy row must exist before the role row can be inserted.
+`role.template_id` carries an FK to `policy.policy_id` (`fk_role_template`,
+`m0004_create_authz.rs:103`), so the referenced policy row must exist before the role row can be
+inserted.
 
-`reconcile_policies` takes no `DatabaseConnection`, so the outcome → log-level → audit mapping
-is unit-testable against fakes. `reconcile_roles` keeps touching the `role` entity directly (as
-today — there is no `RoleRepository` port, by design) and stays Docker-covered.
+Neither half takes a `DatabaseConnection` any more (both sit behind ports, D5), so the whole
+orchestration — outcome → log level → metric → audit — is unit-testable against fakes. Only
+`Absent` failures propagate (D12).
 
-### 3.6 Composition root
+### 3.7 Composition root
 
-`adapters/http/mod.rs:338` currently calls `reconcile_starter(policy_store.as_ref(), &db)`.
-`PgAuditLog::new(db.clone())` moves above that call (it is a cheap, stateless handle; the
-`with_query_window` chaining stays where it is, on the instance the query API uses). The
-`KernelIdGenerator` / `SystemClock` values passed in are the same ones every other service gets.
+`adapters/http/mod.rs:338`. `PgAuditLog` is built **once**, above the reconcile call, with its
+`with_query_window(..)` chaining already applied — `with_query_window` takes `mut self` and
+returns `Self` (`pg_audit_log.rs:54`), so building a plain instance for reconcile and a windowed
+one for the query API would create two instances and violate the one-instance invariant
+documented at `adapters/http/mod.rs:393-400`. Reconcile simply does not use the window.
 
 ## 4. Tests
 
 ### 4.1 Unit — the classifier (Docker-free, primary guard)
 
-One test per row of §3.1's truth table, including explicitly:
-- provenance broken **and** content already matches code → `ExternallyModified { source_changed: false }` (D4);
-- `system = false` → `NonSystemCollision` regardless of content (D6);
-- `fingerprint = NULL` with content matching → `Adopted { source_changed: false }` (D3).
+One test per row of §3.1, plus explicitly:
+- `revision` strictly greater than code → `StaleBinary`, even when content differs and provenance
+  is broken (D11 precedence);
+- `system = false` → `ExternallyModified` regardless of fingerprint state (D6);
+- provenance broken **and** content already matches → `ExternallyModified { content_changed: false }` (D4);
+- `kind` differing alone, and `description` differing alone, each → `Reconciled` (§3.1's
+  three-field comparison);
+- `fingerprint IS NULL` + content matching → `Adopted { content_changed: false }`, no audit (D3);
+- `revision IS NULL` reads as `0` and does not trigger `StaleBinary`.
 
-### 4.2 Unit — `reconcile_policies` against fakes (Docker-free)
+### 4.2 Unit — `starter_policy_content_is_pinned` (D11's self-enforcing guard)
 
-A fake `SystemPolicyReconciler` returning scripted outcomes plus the existing in-memory audit
-fake, asserting:
-- exactly one audit entry, only for `ExternallyModified`, with the D8 shape (`action`,
-  null actor, `resource_prn`, `detail.source`, `detail.previous_source`);
-- no audit entry for `Absent` / `Adopted` / `Reconciled` / `Unchanged` / `NonSystemCollision`;
-- an audit-write failure does not fail the call (D9).
+blake3 over the canonical encoding of every starter policy, pinned to a literal, with a failure
+message instructing the author to bump `STARTER_POLICY_REVISION` and update the literal.
+Plus: `STARTER_POLICY_IDS` equals `starter_policies()`'s actual ids.
 
-### 4.3 Unit — the role-row comparison helper (Docker-free)
+### 4.3 Unit — `reconcile_starter` against fakes (Docker-free)
+
+Fake `SystemPolicyReconciler` / `SystemRoleReconciler` returning scripted outcomes, asserting:
+- exactly one audit entry for `ExternallyModified` and for `Adopted { content_changed: true }`,
+  with the D8 shape (`action: "PutPolicy"`, `actor_prn: None`,
+  `resource_prn == root_prn().canonical()`, `detail.source`, `detail.previous_content`);
+- no audit entry for `Unchanged` / `StaleBinary` / `Reconciled` / `Absent` /
+  `Adopted { content_changed: false }`;
+- `previous_content` over 8 KiB is truncated and marked;
+- an audit-write failure does not fail the call (D9);
+- a convergence failure is logged and skipped, an `Absent` failure propagates (D12);
+- the metric label matches the outcome for every variant.
+
+**`FakeAuditLog` needs extending first.** Its `record_out_of_band` is currently
+`unimplemented!("application-layer unit tests never call record_out_of_band")`
+(`fakes.rs:958-960`) and would panic — reconcile uses exactly that method (D9). A
+`FailingAuditLog` fake is also new work.
+
+### 4.4 Unit — the role-row comparison helper (Docker-free)
 
 Equal rows compare equal; each of `template_id` / `scope_kinds` / `description` / `system`
 differing is detected.
 
-### 4.4 Docker integration — `tests/authz_bootstrap.rs`
+### 4.5 Docker integration — `tests/authz_bootstrap.rs`
 
-Extending the existing suite:
-- fresh database → seeds every starter policy, every row carries a fingerprint;
-- immediate second run → writes nothing (all `Unchanged`), no audit rows;
-- **simulated code change**: rewrite a row's `source` *and* set a matching fingerprint, then
-  reconcile → the row converges back to the code-defined source, and **no** audit row is
-  written;
-- **simulated out-of-band edit**: rewrite a row's `source` only, leaving the fingerprint stale
-  → the row converges, and **exactly one** correctly-shaped audit row is written;
-- **pre-m0010 row**: set `source_fingerprint = NULL` → stamped, no audit row (D3);
-- **non-system collision**: insert a `system = false` row at a starter `policy_id` → left
-  untouched, no audit row (D6);
-- **role drift**: change a persisted `role.description` → converged on next reconcile (D7).
+- fresh database → seeds every starter policy; every row carries a fingerprint and revision;
+- immediate second run → writes nothing, no audit rows;
+- **simulated code change**: rewrite a row's content *and* set a matching fingerprint → converges
+  back to code, **no** audit row, `policy_gen` **incremented** (D10);
+- **simulated out-of-band edit**: rewrite content only, leaving the fingerprint stale → converges,
+  **exactly one** correctly-shaped audit row;
+- **`system = false` tamper**: set `system = false` → converged *and* `system` restored to `true`,
+  one audit row (D6);
+- **reserved namespace**: `PutPolicy` on a starter `policy_id` is rejected `SystemImmutable` (D6);
+- **pre-m0010 row**: set both new columns `NULL` → stamped; audit row iff content changed (D3);
+- **stale binary**: set `starter_revision` above `STARTER_POLICY_REVISION` → row untouched, no
+  audit, no bump (D11);
+- **fingerprint-only stamp** leaves `policy_gen` unchanged (D10);
+- **concurrent boot**: two `reconcile_system` calls raced against a fresh database → both succeed,
+  exactly one row, correct content (the SAVEPOINT re-classify path, §3.5);
+- **orphan**: a `system = true` row at an unknown id → WARN, left in place, no audit (D13);
+- **role drift**: change a persisted `role.description` → converged (D7).
 
-### 4.5 Existing suites
+### 4.6 Existing suites
 
-`authz_boot_smoke.rs`, `grpc_authz.rs`, `authz_policy_store.rs` and `authz_acceptance.rs` all
-exercise `reconcile_starter` or the policy store; they must stay green unchanged apart from the
-`reconcile_starter` signature.
+`authz_boot_smoke.rs`, `grpc_authz.rs`, `authz_policy_store.rs`, `authz_acceptance.rs` must stay
+green apart from the `reconcile_starter` signature change.
 
 ## 5. Documentation
 
 `docs/ops/RUNBOOK-observability.md` — the "Starter-policy drift warning at boot" section is
-rewritten, not amended. The behaviour it documents no longer exists:
-- starter policies are code-owned; a stored row is converged to the code-defined source at boot;
-- the new WARN fires only for an out-of-band edit, and what it means;
-- how to retrieve the audit row, including the SMA-467 lookback trap — `PgAuditLog::query`
+rewritten, not amended; the behaviour it documents no longer exists:
+- starter policies are code-owned and converged at boot; `PutPolicy` now rejects the starter id
+  namespace (D6);
+- the new WARN fires only for an out-of-band edit — **and is a provenance hint, not tamper
+  evidence** (D2's limit, stated plainly);
+- `iam_starter_policy_reconciles_total{outcome}` and what each label means;
+- how to retrieve the audit row, including the SMA-467 lookback trap: `PgAuditLog::query`
   applies a default window (`audit.query_default_window_days`, default 90) whenever both `from`
-  and `to` are absent, so an unfiltered query against an older database silently returns
-  nothing. Query `action = "PutPolicy"` with an explicit `from`, then match on
+  and `to` are absent, so an unfiltered query against an older database silently returns nothing.
+  Query `action = "PutPolicy"` with an explicit `from`, then match
   `detail.source = "starter_policy_reconcile"`;
-- that a hand-patched starter policy is reverted on the next boot, and that the supported way to
-  add restrictions is a new non-system `policy_id` — with D1's honest caveat that a starter
-  policy cannot be loosened this way at all.
+- that a hand-patched starter policy is reverted on the next boot, with D1's honest statement
+  that there is effectively no escape hatch;
+- that a fingerprint-only stamp bumps `updated_at` without changing content;
+- the `StaleBinary`/orphan lines and what an operator should do about each.
+- Fix the pre-existing id typo at `RUNBOOK-observability.md:1463` — `forbid_archived_writes`
+  should be `forbid-archived-writes` (`roles.rs:41`).
+
+Also stale and fixed in passing, since D7 rewrites both files: `bootstrap.rs:3` says "the seven
+system roles" and `tests/authz_bootstrap.rs:68` is named `..._the_seven_system_roles`;
+`system_roles()` returns **eight**.
 
 ## 6. Rollout, rollback, residual risk
 
-**Rollout.** m0010 adds a nullable column — no rewrite, no lock beyond the brief
-`ACCESS EXCLUSIVE` bounded by `lock_timeout`. The first boot after the upgrade adopts every
-system row's fingerprint and converges any drifted content, at INFO.
+**Rollout.** m0010 adds two nullable columns and a CHECK — no rewrite, and the brief
+`ACCESS EXCLUSIVE` is bounded by `lock_timeout`. The first boot after the upgrade stamps every
+system row and converges any drifted content, at INFO, auditing only where content changed (D3).
 
-**Mixed-version window is safe** (§1.3c): compile is parse-only, so an old replica reloading a
-newer source referencing an unknown `Action` parses it and simply never matches it. No compile
-failure, no snapshot poisoning — and `PolicySnapshot` never swaps in a failed compile anyway
-(its module docs: an `Err` is logged and the previous known-good set keeps serving).
+**Mixed-version is guarded, not merely survivable.** (c) establishes an old replica can always
+*parse* a newer source; D11 establishes an old replica never *overwrites* one. Together those
+give monotonic convergence: the fleet's policy set only ever moves forward, whichever replica
+boots.
 
-**Rollback self-heals.** Downgrading to vN finds vN+1's source carrying a *matching* fingerprint
-(vN+1 stamped it), classifies it `Reconciled`, and converges back to vN's source at INFO — not a
-false WARN. m0010's column is left in place; vN simply never reads it, and its
-compare-and-warn logic behaves exactly as it did before.
+**Rollback.** m0010's columns are left in place; vN never reads them, and its compare-and-warn
+logic behaves exactly as before. If a playbook ever runs `down()`, a vN+1 replica's entity breaks
+until the migration is re-applied — `down()` is not part of any deployment playbook here, and
+this is called out so it stays that way.
 
-**Residual risk 1 — flapping during a mixed-version window.** If vN and vN+1 replicas are both
-restarting, each boot rewrites the row to its own version and bumps `policy_gen`, so the row can
-flap and other replicas reload their snapshots each time. Bounded by the number of restarts,
-self-resolving once the deploy settles, and harmless (each installed set is internally
-consistent).
+**Residual risk 1 — the one-boot trust window** (D3): a pre-m0010 hand-edit is adopted rather
+than warned about on the first boot after upgrade. It is audited, so it is recoverable.
 
-**Residual risk 2 — the one-boot trust window** (D3): a pre-m0010 hand-edit is adopted rather
-than warned about on the first boot after upgrade. Accepted and documented.
+**Residual risk 2 — the fingerprint is not tamper-proof** (D2). An adversary with SQL write
+access recomputes it and the edit reads as a routine code change.
 
-**Residual risk 3 — audit row not atomic with the revert** (D9).
+**Residual risk 3 — the audit row is not atomic with the convergence** (D9).
+
+**Residual risk 4 — `STARTER_POLICY_REVISION` is hand-maintained.** The pinned-content test
+(§4.2) makes forgetting it a red build rather than a silent regression, but a determined author
+can bump the literal without bumping the revision.
+
+**Residual risk 5 — orphaned system rows are reported, never removed** (D13).
+
+**Unmeasured:** the fleet-wide cost of a `policy_gen` bump (`list_all` + full Cedar compile per
+replica, plus a decision-cache key-space rotation via `content_hash`, `engine.rs:98`). D11 bounds
+how often reconcile can trigger one — at most once per replica per release — which is why this is
+noted rather than measured.
 
 ## 7. Out of scope / follow-ups
 
-- **A Prometheus counter for out-of-band modification** (D8). Worth doing if starter-policy
-  tampering ever becomes a real concern; deliberately excluded here to keep the change inside
-  the IAM crate and off the `:observability-drift` gate.
-- **An opt-out "pin policies" config knob** (D1). Small follow-up if the emergency-patch case
-  ever bites.
-- **Fingerprinting role rows** (D7). Only worth it if those columns ever become load-bearing at
-  runtime, which they are not today.
-- **`PutPolicy`'s `SystemImmutable` guard** is unchanged. Making system policies editable
-  through the API is a different, larger decision.
+- **A retirement path for orphaned system policies/roles** (D13) — revoking grants, dropping the
+  FK'd `role` row, then the policy, in that order. Real work with its own ordering constraints.
+- **An alert rule on `iam_starter_policy_reconciles_total{outcome="externally_modified"}`.** The
+  metric ships here (D8); the rule and dashboard panel belong with the `ops/observability/` work.
+- **No `DomainEvent` / outbox event for a reconcile-driven change.** Every other writer of
+  `policy` content enqueues `EventType::PolicyPut` (`policies.rs:123-132`). Boot-time convergence
+  deliberately does not: it is a deployment consequence rather than an operator action, no
+  consumer of that stream exists yet, and emitting from bootstrap would require threading a
+  `UnitOfWork` through — which would also re-open D9's atomicity decision. Revisit when a
+  consumer exists.
+- **An HMAC-under-pepper fingerprint** (D2), if starter-policy tampering ever becomes a real
+  threat model rather than an accident-detection concern.
+- **An opt-out "pin policies" config knob** (D1).
+- **Fingerprinting role rows** (D7) — only worth it if those columns become load-bearing.
+- **`starter_policies()` taking an injected `now`** rather than calling `Utc::now()` internally
+  (`roles.rs:231`). Cosmetic here, since reconcile ignores the document's timestamps.
 
 ## 8. Acceptance criteria
 
-1. A routine action-catalog addition (a new `Action` that is a write and not a restore) changes
-   `forbid-archived-writes`'s generated source; on the next boot of a database seeded before the
-   change, the stored row is converged to the new source and **no `WARN` is logged**.
-2. A starter policy row whose `source` was changed out-of-band is converged to the code-defined
-   source, a `WARN` naming the `policy_id` is logged, and **exactly one** `audit_log` entry
-   records the overwritten source with `detail.source = "starter_policy_reconcile"`.
-3. A second boot with no code change and no external edit writes nothing and logs no `WARN`.
-4. A `system = false` row occupying a starter `policy_id` is left untouched and warned about.
-5. A `role` row whose persisted columns differ from the code-defined `Role` is converged.
-6. `PutPolicy` / `DeletePolicy` still reject mutation of a persisted `system = true` row with
-   `SystemImmutable`.
+1. A routine action-catalog addition changes `forbid-archived-writes`'s generated source; on the
+   next boot of a database seeded before the change, the stored row is converged and **no `WARN`
+   is logged**.
+2. The boot after that one writes nothing and logs no `WARN`.
+3. A starter policy row whose content was changed out-of-band is converged, a `WARN` naming the
+   `policy_id` is logged, and **exactly one** `audit_log` entry records the overwritten content
+   with `detail.source = "starter_policy_reconcile"` and `resource_prn == root_prn()`.
+4. A row set to `system = false` is converged **and** has `system` restored to `true`, with an
+   audit row; `PutPolicy` rejects any `policy_id` in the starter namespace with `SystemImmutable`.
+5. A row whose `starter_revision` exceeds the running binary's `STARTER_POLICY_REVISION` is left
+   untouched, with no audit row and no `policy_gen` bump.
+6. A fingerprint-only stamp does not bump `policy_gen`; a content change does.
+7. A pre-m0010 row (both new columns `NULL`) is stamped, and audited only if its content changed.
+8. A `role` row whose persisted columns differ from the code-defined `Role` is converged.
+9. A transient failure converging an existing row logs ERROR, increments
+   `iam_starter_policy_reconciles_total{outcome="failed"}`, and the replica still boots; a failure
+   *seeding* an absent row still fails boot.
+10. `PutPolicy` / `DeletePolicy` still reject mutation of a persisted `system = true` row with
+    `SystemImmutable`.
+11. Changing any starter policy's content without bumping `STARTER_POLICY_REVISION` reds
+    `starter_policy_content_is_pinned`.
