@@ -203,6 +203,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamPolicySnapshotReloadsStalled` | `(sum by (job, instance) (increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[10m])) or (up{job="iam"} == 1) * 0) == 0` for 5m | critical |
 | `IamAuditPartitionMaintenanceStalled` | `sum without (result) (increase(iam_audit_partition_maintenance_ticks_total[2d])) == 0` for 1h | warning |
 | `IamOutboxRetentionStalled` | `(sum by (job, instance) (increase(iam_outbox_retention_ticks_total[6h])) or (up{job="iam"} == 1) * 0) == 0` for 1h | warning |
+| `IamOutboxRetentionErroring` | `increase(iam_outbox_retention_ticks_total{result="error"}[6h]) > 0` for 2h | warning |
 | `IamOutboxDeadLetterBacklog` | `max by (job) (iam_outbox_parked_rows) > 0` for 1h | warning |
 | `IamHighErrorRate` | `sum(rate(iam_http_requests_total{status_class="5xx"}[5m])) / sum(rate(iam_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `IamGrpcHighErrorRate` | `sum(rate(iam_grpc_requests_total{grpc_status!="ok"}[5m])) / sum(rate(iam_grpc_requests_total[5m])) > 0.05` for 10m | critical |
@@ -670,6 +671,67 @@ loop exited but the process didn't restart.
   in one. If disk pressure is acute, a manual `VACUUM event_outbox;` reclaims space faster than
   waiting on autovacuum's own schedule; `VACUUM FULL event_outbox;` reclaims it fully but takes an
   **exclusive lock**, so run it only in a maintenance window, never casually against a live table.
+
+### `IamOutboxRetentionErroring` — the retention sweep is erroring on every tick (warning)
+
+**Meaning.** `increase(iam_outbox_retention_ticks_total{result="error"}[6h]) > 0` for 2h — at
+least one `PgOutboxMaintainer` tick has errored on the named target in the last 6 hours. This is
+a **different failure mode from `IamOutboxRetentionStalled` above, and the two are deliberately
+separate alerts**: that one sums `result="ok"` and `result="error"` together, so it can only tell
+you the maintainer has stopped ticking at all — a sweep that ticks every hour but fails one of
+its steps *every single time* looks perfectly healthy to it (the tick count keeps advancing).
+Before this alert existed, the only signal for that failure mode was a `warn!` log line nobody
+was necessarily watching, while `event_outbox` grew without bound underneath it.
+
+**`enabled = false` does NOT cause this alert — internalize that before you page on it.** Setting
+`[outbox.retention].enabled = false` only skips the two `DELETE` steps inside `tick`; the tick
+still runs, still refreshes `iam_outbox_parked_rows`, and still reports `result="ok"` (see
+`PgOutboxMaintainer::tick`: `errored` is only ever set by an actual failure, never by the
+`enabled` flag). So a firing `IamOutboxRetentionErroring` always means a **real** failure in one
+of the tick's steps — the published-row sweep, the parked-row sweep, or the parked-row gauge
+query — never an operator's intentional pause.
+
+**`for: 2h` is a time-to-page bound, not proof of repeated failure — read this before assuming a
+firing alert means "erroring for 2+ hours."** `increase(...[6h]) > 0` cannot distinguish a single
+error tick that already recovered from one still recurring: once any error lands in the 6h
+window the condition stays true for nearly the whole window regardless of what happens
+afterward, so `for: 2h` only delays the page by up to 2 hours relative to the first error — it
+does not require a second one. A genuinely one-off, already-resolved blip can still trip this
+alert around the 2-hour mark and will self-resolve a few hours later once that sample ages out of
+the 6h window; a sweep erroring on every tick (the case this alert exists for) will still be
+erroring when you look, and keeps re-firing until it's fixed.
+
+**Likely causes:** a Postgres-side permission or connectivity problem specific to `event_outbox`
+(so other queries against other tables keep working while this fails); a lock/statement-timeout
+being hit repeatedly on the same `DELETE`/count query (contention from a long-running manual
+operator query against `event_outbox`, most plausibly); or a `published_days`/`parked_days` value
+large enough to overflow `DateTime`'s representable range (`PgOutboxMaintainer::cutoff` degrades
+that to a logged, counted error rather than a panic — see its doc comment).
+
+**Confirm:**
+1. IAM logs for the tick's own `warn!`s — `outbox published-row sweep failed; will retry next
+   tick`, `outbox parked-row sweep failed; will retry next tick`, `outbox parked-row gauge query
+   failed` — which pinpoint which step is failing and (via the logged `error`) why.
+2. Check `iam_outbox_parked_rows` — if the gauge query is the failing step, this value goes stale
+   rather than merely growing, which narrows the cause.
+3. Check for long-running/blocked queries or a permissions change against `event_outbox` on the
+   Postgres side (`pg_stat_activity`, recent `GRANT`/`REVOKE` history).
+4. Confirm `[outbox.retention].published_days`/`parked_days` are the values you expect — an
+   accidental near-`u32::MAX` value degrades to a logged `Overflow` error every tick, which reads
+   identically to a Postgres-side failure in this alert alone; the log line names which cutoff
+   overflowed.
+
+**Remediation:**
+- Fix the underlying Postgres-side issue (restore connectivity/permissions, resolve the blocking
+  query); the maintainer needs no restart to recover — the very next tick tries again on its
+  normal `interval_secs` cadence.
+- If a misconfigured `published_days`/`parked_days` is the cause, correct it in `iam.toml` /
+  `IAM_OUTBOX__RETENTION__*` and redeploy.
+- Once fixed, expect this alert to keep firing for up to ~6 hours after the last error tick
+  (until that sample ages out of the window) even though the sweep is healthy again — that is
+  the same window-driven lag `IamOutboxRetentionStalled` has, not a sign the fix didn't take;
+  corroborate with `iam_outbox_parked_rows` moving again and a fresh absence of the `warn!` lines
+  above.
 
 ### `IamOutboxDeadLetterBacklog` — dead letters are awaiting an operator (warning)
 

@@ -369,6 +369,34 @@ tests:
           - exp_labels: { severity: warning, job: iam, instance: "window-check:8080" }
             exp_annotations: { summary: "IAM outbox retention sweep is not ticking", description: "No outbox retention tick in ~6 hours on iam/window-check:8080. Published event_outbox rows are not being deleted, so the table grows without bound, and the iam_outbox_parked_rows dead-letter gauge is stale. The sweep ticks on outbox.retention.interval_secs (default 3600 = hourly), so the 6h window assumes the default — widen it if interval_secs is increased. Unlike the audit equivalent, outbox.retention.enabled=false does NOT silence this: the maintainer is spawned unconditionally and still ticks to refresh the gauge, so silence here always means something is wrong. See RUNBOOK section 4." }
 
+  # IamOutboxRetentionErroring: increase(...{result="error"}[6h]) > 0, for: 2h. The healthy
+  # target emits ONLY result="ok" ticks — its counter climbs steadily and result="error" never
+  # exists as a series for it at all. That is the control this alert needs: without it, a
+  # regression that dropped the `{result="error"}` selector (so the expr matched result="ok" too)
+  # would treat this target's routine successful ticks as errors and page on it forever; with the
+  # selector correctly in place, this target must never appear in exp_alerts at ANY eval_time
+  # below. The second target's counter carries ONLY result="error" and climbs at the same rate,
+  # modelling a sweep that errors on every tick (the failure mode this alert exists to catch) —
+  # it must fire once the `for: 2h` hold elapses.
+  - interval: 1m
+    input_series:
+      - series: 'iam_outbox_retention_ticks_total{job="iam", instance="healthy:8080", result="ok"}'
+        values: '5+1x400'
+      - series: 'iam_outbox_retention_ticks_total{job="iam", instance="erroring:8080", result="error"}'
+        values: '0+1x400'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: IamOutboxRetentionErroring
+        exp_alerts: []
+      - eval_time: 119m
+        alertname: IamOutboxRetentionErroring
+        exp_alerts: []
+      - eval_time: 121m
+        alertname: IamOutboxRetentionErroring
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam, instance: "erroring:8080", result: "error" }
+            exp_annotations: { summary: "IAM outbox retention sweep is erroring on every tick", description: "iam_outbox_retention_ticks_total{result=\"error\"} increased on iam/erroring:8080 in the last 6 hours. The sweep IS ticking — unlike IamOutboxRetentionStalled, the maintainer task is alive and completing ticks — but at least one step failed on every recent tick: the published-row sweep, the parked-row sweep, or the parked-row gauge query. While this persists, published event_outbox rows are not being deleted, so the table grows without bound, and if the gauge query is the failing step iam_outbox_parked_rows also goes stale. outbox.retention.enabled=false does NOT cause this: a disabled sweep still ticks and still reports result=\"ok\" (it only skips the two DELETE steps), so a firing alert here always means a real failure, never an intentional pause. Check IAM logs for the tick's own warn!s (\"outbox published-row sweep failed; will retry next tick\", \"outbox parked-row sweep failed; will retry next tick\", \"outbox parked-row gauge query failed\") to see which step is failing and why. See RUNBOOK section 4." }
+
   # IamOutboxDeadLetterBacklog: a nonzero backlog held for an hour fires ONCE for the job even
   # though two replicas each report it (proving the `max by (job)` aggregation). The zero-valued
   # job is the control: a `>= 0` comparison would fire for it, `> 0` must not.
