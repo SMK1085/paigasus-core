@@ -175,17 +175,35 @@ mod tests {
         assert_ne!(DEFAULT_LIMIT, 1);
     }
 
+    /// Mirrors `audit.rs`'s `to_filter_passes_through_an_explicit_nonzero_limit` — a hardcoded
+    /// `limit: DEFAULT_LIMIT` inside `to_filter` (ignoring `Some(l)`) would still pass every
+    /// OTHER test in this module, since none of them ever exercises a nonzero, non-default
+    /// explicit limit.
     #[test]
-    fn to_filter_parses_rfc3339_park_times_and_a_uuid_cursor() {
+    fn to_filter_passes_through_an_explicit_nonzero_limit() {
+        assert_eq!(to_filter(DeadLetterQuery { limit: Some(5), ..q() }).unwrap().limit, 5);
+    }
+
+    /// Asserts the PASS-THROUGH direction, not just presence: a non-empty `event_type` and two
+    /// DISTINCT, exact RFC3339 instants must arrive on the `DeadLetterFilter` unchanged — `.
+    /// is_some()` alone would pass even if `to_filter` hardcoded `event_type: None` or swapped
+    /// `parked_from`/`parked_to` (review finding 2); comparing to the actual parsed `DateTime`
+    /// values, with `parked_from` and `parked_to` set to two DIFFERENT instants, catches both.
+    #[test]
+    fn to_filter_forwards_a_present_event_type_and_exact_park_instants_and_cursor() {
+        let from = DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z").unwrap().with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-08-02T00:00:00Z").unwrap().with_timezone(&Utc);
         let f = to_filter(DeadLetterQuery {
+            event_type: Some("iam.principal.created".to_string()),
             parked_from: Some("2026-08-01T00:00:00Z".to_string()),
             parked_to: Some("2026-08-02T00:00:00Z".to_string()),
             cursor: Some(Uuid::from_u128(7).to_string()),
             ..q()
         })
         .unwrap();
-        assert!(f.parked_from.is_some());
-        assert!(f.parked_to.is_some());
+        assert_eq!(f.event_type, Some("iam.principal.created".to_string()));
+        assert_eq!(f.parked_from, Some(from));
+        assert_eq!(f.parked_to, Some(to));
         assert_eq!(f.cursor, Some(Uuid::from_u128(7)));
     }
 
@@ -218,5 +236,31 @@ mod tests {
         .into_request()
         .unwrap();
         assert!(!req.is_valid(), "an absent max_rows must produce an invalid request, not a default");
+    }
+
+    /// Review finding 1: this is the ONE place a dropped filter is security-relevant — a
+    /// mutation that silently drops `event_type`/`parked_from`/`parked_to` inside
+    /// `into_request` would turn a narrowly-scoped bulk replay into "replay everything up to
+    /// `max_rows`", defeating the whole point of the filter fields existing on a *bulk*,
+    /// blast-radius-bounded endpoint. Asserts every field lands on the resulting
+    /// `BulkReplayRequest` with its EXACT expected value (parsed instants compared to the real
+    /// expected `DateTime`s, not `is_some()`), so dropping or swapping any one of them fails
+    /// this test.
+    #[test]
+    fn into_request_forwards_every_present_filter_field_and_max_rows() {
+        let from = DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z").unwrap().with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-08-02T00:00:00Z").unwrap().with_timezone(&Utc);
+        let req = BulkReplayBody {
+            event_type: Some("iam.principal.created".to_string()),
+            parked_from: Some("2026-08-01T00:00:00Z".to_string()),
+            parked_to: Some("2026-08-02T00:00:00Z".to_string()),
+            max_rows: Some(500),
+        }
+        .into_request()
+        .unwrap();
+        assert_eq!(req.event_type, Some("iam.principal.created".to_string()));
+        assert_eq!(req.parked_from, Some(from));
+        assert_eq!(req.parked_to, Some(to));
+        assert_eq!(req.max_rows, 500);
     }
 }
