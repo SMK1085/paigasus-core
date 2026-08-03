@@ -71,6 +71,20 @@ fn describe_error(err: &(dyn std::error::Error + 'static)) -> String {
     parts.join(": ")
 }
 
+/// Byte bound on a stored `last_error` (SMA-469). Deliberately a BYTE bound, not a char count:
+/// 1024 four-byte chars would be 4KB, past Postgres's ~2KB TOAST threshold, so a pathological
+/// publisher error string could bloat the row it is meant to describe.
+const MAX_ERROR_BYTES: usize = 1024;
+
+/// Bounds `s` to [`MAX_ERROR_BYTES`], cutting on a char boundary and marking the elision.
+fn truncate_error(s: &str) -> String {
+    if s.len() <= MAX_ERROR_BYTES {
+        return s.to_string();
+    }
+    let end = s.char_indices().map(|(i, _)| i).take_while(|i| *i <= MAX_ERROR_BYTES).last().unwrap_or(0);
+    format!("{}…", &s[..end])
+}
+
 /// Reconstructs a [`DomainEvent`] from a persisted `event_outbox` row for handing to
 /// [`EventPublisher::publish`]. Returns `Err` (a human-readable reason) for a malformed row — an
 /// unrecognized `event_type` wire string, an out-of-range `schema_version`, or invalid `payload`
@@ -153,8 +167,15 @@ impl OutboxRelay {
                     report.failures += 1;
                     let attempts = row.attempts + 1;
                     active.attempts = Set(attempts);
+                    // SMA-469: recorded on EVERY failed attempt, not only at parking — an
+                    // operator watching `attempts` climb wants the current reason, and the
+                    // dead-letter surface reads this column.
+                    active.last_error = Set(Some(truncate_error(&reason)));
                     if attempts >= self.max_attempts {
                         active.parked = Set(true);
+                        // `[outbox.retention].parked_days` measures from HERE, never from
+                        // `occurred_at` (m0009's module doc).
+                        active.parked_at = Set(Some(Utc::now()));
                         report.parked += 1;
                         tracing::error!(id = %row.id, event_type = %row.event_type, attempts, reason = %reason, "outbox event parked after max attempts (poison)");
                     } else {
@@ -325,5 +346,23 @@ mod tests {
         #[error("nope")]
         struct Bare;
         assert_eq!(describe_error(&Bare), "nope");
+    }
+
+    #[test]
+    fn truncate_error_leaves_a_short_string_untouched() {
+        assert_eq!(truncate_error("boom"), "boom");
+    }
+
+    #[test]
+    fn truncate_error_bounds_a_long_string_by_bytes_on_a_char_boundary() {
+        // 700 four-byte chars = 2800 bytes, comfortably over the 1024-byte bound and past
+        // Postgres's ~2KB TOAST threshold — the reason the bound is in BYTES, not chars.
+        let long = "😀".repeat(700);
+        let out = truncate_error(&long);
+        assert!(out.len() <= MAX_ERROR_BYTES + '…'.len_utf8(), "not bounded: {} bytes", out.len());
+        assert!(out.ends_with('…'), "expected an elision marker");
+        // The prefix must still be valid UTF-8 made of whole chars (String guarantees this;
+        // a naive byte slice would have panicked before we got here).
+        assert!(out.trim_end_matches('…').chars().all(|c| c == '😀'));
     }
 }
