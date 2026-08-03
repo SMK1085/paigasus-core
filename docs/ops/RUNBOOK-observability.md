@@ -301,8 +301,8 @@ marked `parked = true`, permanently excluded from future relay batches (the rela
 predicate is `published_at IS NULL AND parked = false`). This is deliberately a **counter of
 newly-parked rows**, not a gauge of the current parked-row count — a gauge summed per-tick would
 read `0` on every tick that parks nothing new and hide a slowly-growing parked backlog behind a
-flat panel; the currently-parked-row count is a derivable Prometheus query
-(`sum(increase(iam_outbox_relay_parked_total[…]))`) if needed, or a direct SQL count (below).
+flat panel; `iam_outbox_parked_rows` (§2.2, refreshed on every retention tick) is the exact answer
+to "how many rows are parked right now" if needed, or a direct SQL count (below).
 
 **Likely causes:** two distinct shapes, and telling them apart matters for what you do next.
 - **A single bad payload.** One event's payload is fundamentally unpublishable (malformed for the
@@ -773,9 +773,12 @@ the same reason — see §2.2's metric-catalog entry too.
 an hour — either a genuine payload/writer bug nobody has triaged yet, or a since-resolved outage
 whose parked backlog nobody has bulk-replayed.
 
-**Confirm:** `GET /v1/outbox/dead-letters?limit=200` (Root-only) to list what's actually parked,
-oldest first via `parked_from`/pagination; or the break-glass SQL under `IamOutboxEventsParked`
-above if the HTTP API itself is unreachable.
+**Confirm:** `GET /v1/outbox/dead-letters?limit=200` (Root-only) to list what's actually parked.
+`list` has no ordering knob — it is always **newest first** (`ORDER BY id DESC`), keyset-paginated
+via `cursor`/`next_cursor`; to find the OLDEST parked rows, page forward with `cursor` until the
+response is shorter than `limit` (the last page), or narrow with `parked_from`/`parked_to` and
+inspect the tail of that window. Use the break-glass SQL under `IamOutboxEventsParked` above
+(`ORDER BY occurred_at`) if the HTTP API itself is unreachable.
 
 **Remediation:** see the full remediation playbook under `IamOutboxEventsParked` above — replay a
 single row, bulk-replay a filtered set (`max_rows` required), or discard with a recorded
