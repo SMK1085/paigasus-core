@@ -26,7 +26,7 @@
 
 mod support;
 
-use chrono::{SubsecRound, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use paigasus_iam::adapters::authz::{CedarAuthorizer, Generations, GenerationsPolicyGenBumper, GenerationsReader, MemoryDecisionCache, PolicySnapshot, TracingAuditSink};
 use paigasus_iam::adapters::clock::SystemClock;
 use paigasus_iam::adapters::id::KernelIdGenerator;
@@ -270,17 +270,28 @@ async fn reconcile_system_converges_a_code_change_without_reporting_an_edit() {
     let store = PgPolicyStore::new(db.clone(), Generations::memory());
     let doc = starter_policies().into_iter().next().unwrap();
     store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
-    let seeded_created_at = policy::Entity::find_by_id(doc.policy_id.clone()).one(&db).await.unwrap().unwrap().created_at;
 
     // Simulate "the previous release wrote this": different source, CORRECTLY fingerprinted,
-    // and stamped with a STRICTLY LOWER revision than this binary carries — the ordinary
-    // "an older release seeded this row, we are the upgrade" shape.
+    // stamped with a STRICTLY LOWER revision than this binary carries, and created LONG AGO —
+    // the ordinary "an older release seeded this row, we are the upgrade" shape.
+    //
+    // The backdated `created_at` is what gives the assertion below any teeth. `doc.created_at`
+    // is `starter_policies()`'s own `Utc::now()`, and the seeding INSERT wrote exactly that, so
+    // reading the seeded value back and re-asserting it would compare `doc.created_at` against
+    // itself — bit-identical under BOTH `converged_model(doc, row.created_at, …)` and the
+    // `converged_model(doc, doc.created_at, …)` mistake it exists to catch. Forcing the stored
+    // value to something `doc` cannot possibly carry is what separates the two.
+    let backdated: DateTime<Utc> = "2020-01-01T00:00:00Z".parse().expect("static timestamp literal is valid RFC 3339");
     let old = "forbid(principal, action, resource) when { resource has effective_status };";
     let old_fp = content_fingerprint(doc.kind, old, &doc.description);
     tamper_policy(&db, &doc.policy_id, old, Some(&old_fp)).await;
     db.execute(Statement::from_string(
         DbBackend::Postgres,
-        format!(r#"UPDATE "policy" SET starter_revision = {} WHERE policy_id = '{}'"#, STARTER_POLICY_REVISION - 1, doc.policy_id),
+        format!(
+            r#"UPDATE "policy" SET starter_revision = {}, created_at = TIMESTAMPTZ '2020-01-01 00:00:00+00' WHERE policy_id = '{}'"#,
+            STARTER_POLICY_REVISION - 1,
+            doc.policy_id
+        ),
     ))
     .await
     .unwrap();
@@ -288,13 +299,13 @@ async fn reconcile_system_converges_a_code_change_without_reporting_an_edit() {
     assert_eq!(store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(), StarterPolicyOutcome::Reconciled);
     let row = policy::Entity::find_by_id(doc.policy_id.clone()).one(&db).await.unwrap().unwrap();
     assert_eq!(row.source, doc.source);
-    // A converge must preserve the ORIGINAL `created_at` — `reconcile_system`'s UPDATE branch
-    // threads the stored row's value through, deliberately NOT the incoming `doc.created_at`
-    // (which is `starter_policies()`'s own `Utc::now()`). "Unifying" that with the INSERT
-    // branch would silently reset every starter policy's creation date on every converging
-    // boot, and nothing else in this suite would notice. Mirrors the identical `put_in`
-    // invariant pinned in `tests/authz_policy_store.rs`.
-    assert_eq!(row.created_at, seeded_created_at, "a converge must not rewrite created_at");
+    // A converge must preserve the STORED row's `created_at` — `reconcile_system`'s UPDATE
+    // branch threads `row.created_at` through, deliberately NOT the incoming `doc.created_at`.
+    // "Unifying" that with the INSERT branch three lines below it would silently reset every
+    // starter policy's creation date on every converging boot, and nothing else in this suite
+    // would notice. Mirrors the identical `put_in` invariant pinned in
+    // `tests/authz_policy_store.rs`, which forges a `created_at` for the same reason.
+    assert_eq!(row.created_at, backdated, "a converge must preserve the stored created_at, not write doc.created_at");
     assert_eq!(row.starter_revision, Some(i32::try_from(STARTER_POLICY_REVISION).unwrap()), "the converge must restamp the revision");
 }
 
