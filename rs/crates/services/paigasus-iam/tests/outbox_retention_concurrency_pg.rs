@@ -173,14 +173,17 @@ async fn a_tick_does_not_hang_when_an_access_exclusive_lock_blocks_the_gauge_que
         max_batches_per_tick: 10,
     };
 
-    // The gauge query's `SET LOCAL lock_timeout` is 5s (`SWEEP_LOCK_TIMEOUT`); 20s is comfortably
-    // longer than that but far shorter than a genuine hang, so a regression that reintroduces an
-    // unscoped gauge query fails this test cleanly via the `.expect` message below — attributably,
-    // not as an ambiguous "slow machine" timeout — instead of stalling the suite indefinitely.
-    let report = tokio::time::timeout(std::time::Duration::from_secs(20), PgOutboxMaintainer::new(db.clone()).tick(now, policy))
+    // The gauge query's `SET LOCAL lock_timeout` is 5s (`SWEEP_LOCK_TIMEOUT`). 45s gives roughly a
+    // 9x margin over that — comfortably absorbing this host's documented Docker-VM contention
+    // (many parallel testcontainers can inflate an in-container 5s `lock_timeout` to 20s+ of wall
+    // clock; observed once at 21.3s under a full `--test-threads=4` crate run) — while staying far
+    // shorter than a genuine hang, so a regression that reintroduces an unscoped gauge query still
+    // fails this test cleanly via the `.expect` message below, attributably, rather than stalling
+    // the suite indefinitely or reading as an ambiguous "slow machine".
+    let report = tokio::time::timeout(std::time::Duration::from_secs(45), PgOutboxMaintainer::new(db.clone()).tick(now, policy))
         .await
         .expect(
-            "tick blocked for over 20s: the parked-row gauge query is not timeout-scoped and is \
+            "tick blocked for over 45s: the parked-row gauge query is not timeout-scoped and is \
              queueing indefinitely behind the ACCESS EXCLUSIVE table lock, rather than backing off \
              within its own 5s lock_timeout",
         );
