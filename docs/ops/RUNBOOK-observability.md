@@ -411,6 +411,11 @@ end of this section only when the API itself is unreachable.
   sweep delete rows older than that window on its normal `interval_secs` cadence, then set
   `parked_days` back to `0`. Unlike a bulk `DELETE`, this stays **reversible right up until the
   sweep actually runs** — an operator who changes their mind before the next tick loses nothing.
+  **Unlike a discard through the API, this path leaves no audit trail at all** — `PgOutboxMaintainer`
+  deletes each row with only a counter increment (`iam_outbox_rows_deleted_total{reason="parked"}`),
+  none of the discarded-event audit entry's payload, actor, or correlation id — so choose the
+  per-row API discard above instead whenever the deleted events might need reconstructing later,
+  and reserve `parked_days` for backlogs you're confident are safe to lose without a trace.
 - If a row's payload is genuinely malformed (a bug in the writer, not a downstream outage), it will
   never publish successfully no matter how many times it's replayed; leave it parked (or discard it
   with a recorded reconciliation plan) and open a follow-up to fix the writer, rather than looping

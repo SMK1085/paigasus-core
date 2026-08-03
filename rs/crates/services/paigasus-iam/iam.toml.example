@@ -138,7 +138,10 @@
 #                                # path — there is deliberately no bulk-discard endpoint: set a
 #                                # deliberate window, let the sweep retire a mass-parked backlog on
 #                                # its normal schedule, then set it back to 0. Unlike a bulk DELETE
-#                                # call this stays reversible right up until the sweep runs.
+#                                # call this stays reversible right up until the sweep runs. Unlike
+#                                # a discard through the dead-letter API, though, this path writes
+#                                # NO audit entry at all — only a counter increment — so the
+#                                # deleted event's payload/actor/correlation id are unrecoverable.
 # batch_size           = 1000   # rows per delete pass — default shown; must be >= 1
 # max_batches_per_tick = 50     # passes per tick, so one tick retires at most batch_size * this
 #                                # and a huge first sweep resumes next tick instead of holding one

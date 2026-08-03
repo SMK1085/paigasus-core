@@ -292,7 +292,7 @@ async fn main() -> anyhow::Result<()> {
         if config.outbox.retention.parked_days > 0 {
             tracing::warn!(
                 parked_days = config.outbox.retention.parked_days,
-                "outbox.retention.parked_days > 0 — parked (dead-letter) rows will be auto-deleted at this age, whether or not an operator has inspected them"
+                "outbox.retention.parked_days > 0 — parked (dead-letter) rows will be auto-deleted at this age, whether or not an operator has inspected them, and unlike a discard through the dead-letter HTTP API this deletion writes no audit entry at all (only a counter increment) — the event's payload, actor, and correlation id are gone"
             );
         }
         let maintainer = PgOutboxMaintainer::new(db_for_outbox_retention);
