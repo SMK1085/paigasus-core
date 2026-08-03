@@ -153,7 +153,9 @@ fn converged_model(doc: &PolicyDocument, created_at: DateTime<Utc>, now: DateTim
     }
 }
 
-fn map_err(e: DbErr) -> AuthzError {
+/// Shared with `pg_system_roles.rs` (SMA-477): both adapters map the same SeaORM `DbErr`
+/// into the same `AuthzError::Backend`.
+pub(crate) fn map_db_err(e: DbErr) -> AuthzError {
     AuthzError::Backend(Box::new(e))
 }
 
@@ -232,9 +234,9 @@ impl PolicyStore for PgPolicyStore {
     async fn list_all(&self) -> Result<Vec<PolicyDocument>, AuthzError> {
         // REPEATABLE READ: every row this transaction sees is a single consistent snapshot,
         // even if a concurrent `put`/`delete` commits mid-read (port doc contract).
-        let txn = self.db.begin_with_config(Some(IsolationLevel::RepeatableRead), None).await.map_err(map_err)?;
-        let models = policy::Entity::find().all(&txn).await.map_err(map_err)?;
-        txn.commit().await.map_err(map_err)?;
+        let txn = self.db.begin_with_config(Some(IsolationLevel::RepeatableRead), None).await.map_err(map_db_err)?;
+        let models = policy::Entity::find().all(&txn).await.map_err(map_db_err)?;
+        txn.commit().await.map_err(map_db_err)?;
 
         models.into_iter().map(model_to_doc).collect()
     }
@@ -244,7 +246,7 @@ impl PolicyStore for PgPolicyStore {
         // `PgRoleGrantStore::grant`: open a `SeaOrmTransaction`, drive the write via
         // `put_in`, commit, then best-effort bump — skipped entirely when the outcome is an
         // idempotent absorb (module docs: the winning writer already bumped for this row).
-        let txn = self.db.begin().await.map_err(map_err)?;
+        let txn = self.db.begin().await.map_err(map_db_err)?;
         let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
         let outcome = self.put_in(&*tx, doc).await?;
         tx.commit().await.map_err(map_txn_err)?;
@@ -257,7 +259,7 @@ impl PolicyStore for PgPolicyStore {
     async fn delete(&self, policy_id: &str) -> Result<(), AuthzError> {
         // Thin one-shot-`UnitOfWork` wrapper, mirroring `put` above / `PgRoleGrantStore::
         // revoke`.
-        let txn = self.db.begin().await.map_err(map_err)?;
+        let txn = self.db.begin().await.map_err(map_db_err)?;
         let tx: Box<dyn Transaction> = Box::new(SeaOrmTransaction { txn });
         let existed = self.delete_in(&*tx, policy_id).await?;
         tx.commit().await.map_err(map_txn_err)?;
@@ -272,7 +274,7 @@ impl PolicyStore for PgPolicyStore {
 
         let txn = recover_txn(tx).map_err(map_txn_err)?;
 
-        let existing = policy::Entity::find_by_id(doc.policy_id.clone()).lock_exclusive().one(txn).await.map_err(map_err)?;
+        let existing = policy::Entity::find_by_id(doc.policy_id.clone()).lock_exclusive().one(txn).await.map_err(map_db_err)?;
         if let Some(existing) = &existing
             && existing.system
         {
@@ -285,7 +287,7 @@ impl PolicyStore for PgPolicyStore {
         match existing {
             Some(existing) => {
                 let active = doc_to_model(doc, existing.created_at);
-                active.update(txn).await.map_err(map_err)?;
+                active.update(txn).await.map_err(map_db_err)?;
                 Ok(PutOutcome::Updated)
             }
             None => {
@@ -298,16 +300,16 @@ impl PolicyStore for PgPolicyStore {
                 // note) — so a unique-constraint violation rolls back only the savepoint, not
                 // the caller's outer `tx`.
                 let active = doc_to_model(doc, doc.created_at);
-                let sp = txn.begin().await.map_err(map_err)?;
+                let sp = txn.begin().await.map_err(map_db_err)?;
                 match active.insert(&sp).await {
                     Ok(_) => {
-                        sp.commit().await.map_err(map_err)?;
+                        sp.commit().await.map_err(map_db_err)?;
                         Ok(PutOutcome::Inserted)
                     }
                     Err(e) if matches!(e.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) => {
                         // `ROLLBACK TO SAVEPOINT`: discards only the failed INSERT — the
                         // caller's outer `tx` stays alive and usable (savepoint isolation).
-                        sp.rollback().await.map_err(map_err)?;
+                        sp.rollback().await.map_err(map_db_err)?;
 
                         // Re-read the row that won the race, WITHIN the same outer UoW txn
                         // (no fresh connection needed — the savepoint rollback cleared the
@@ -331,7 +333,7 @@ impl PolicyStore for PgPolicyStore {
                         let winner = policy::Entity::find_by_id(doc.policy_id.clone())
                             .one(txn)
                             .await
-                            .map_err(map_err)?
+                            .map_err(map_db_err)?
                             .ok_or_else(|| backend_err(format!("policy {}: unique-constraint violation on insert but no row found on re-read", doc.policy_id)))?;
 
                         if policy_content_matches(&winner, doc) {
@@ -345,7 +347,7 @@ impl PolicyStore for PgPolicyStore {
                     // The failed INSERT aborted only the savepoint (already rolled back
                     // implicitly by dropping `sp` here without commit); the outer `tx`
                     // remains usable by the caller.
-                    Err(e) => Err(map_err(e)),
+                    Err(e) => Err(map_db_err(e)),
                 }
             }
         }
@@ -354,7 +356,7 @@ impl PolicyStore for PgPolicyStore {
     async fn delete_in(&self, tx: &dyn Transaction, policy_id: &str) -> Result<bool, AuthzError> {
         let txn = recover_txn(tx).map_err(map_txn_err)?;
 
-        let Some(existing) = policy::Entity::find_by_id(policy_id.to_string()).lock_exclusive().one(txn).await.map_err(map_err)? else {
+        let Some(existing) = policy::Entity::find_by_id(policy_id.to_string()).lock_exclusive().one(txn).await.map_err(map_db_err)? else {
             // Idempotent: nothing to delete, nothing to invalidate — mirrors
             // `RoleGrantStore::revoke_in`'s posture.
             return Ok(false);
@@ -363,7 +365,7 @@ impl PolicyStore for PgPolicyStore {
             return Err(AuthzError::SystemImmutable(policy_id.to_string()));
         }
 
-        policy::Entity::delete_by_id(policy_id.to_string()).exec(txn).await.map_err(map_err)?;
+        policy::Entity::delete_by_id(policy_id.to_string()).exec(txn).await.map_err(map_db_err)?;
         Ok(true)
     }
 
@@ -384,19 +386,19 @@ impl SystemPolicyReconciler for PgPolicyStore {
         // `reconcile_policies` logs and skips rather than refusing to boot.
         validate_policy(&doc.source)?;
 
-        let txn = self.db.begin().await.map_err(map_err)?;
+        let txn = self.db.begin().await.map_err(map_db_err)?;
         // Bounds the worst case when a concurrent `PolicyService::put_in` holds the row lock:
         // this runs BEFORE the HTTP listener binds, so an unbounded wait is a startup hang.
-        txn.execute_unprepared("SET LOCAL lock_timeout = '5s';").await.map_err(map_err)?;
+        txn.execute_unprepared("SET LOCAL lock_timeout = '5s';").await.map_err(map_db_err)?;
 
-        let existing = policy::Entity::find_by_id(doc.policy_id.clone()).lock_exclusive().one(&txn).await.map_err(map_err)?;
+        let existing = policy::Entity::find_by_id(doc.policy_id.clone()).lock_exclusive().one(&txn).await.map_err(map_db_err)?;
         let outcome = classify_starter_policy(existing.as_ref().map(stored_row), doc, revision);
         let now = Utc::now();
 
         let outcome = match (&outcome, existing) {
             (StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary, _) => outcome,
             (_, Some(row)) => {
-                converged_model(doc, row.created_at, now, revision).update(&txn).await.map_err(map_err)?;
+                converged_model(doc, row.created_at, now, revision).update(&txn).await.map_err(map_db_err)?;
                 outcome
             }
             (_, None) => {
@@ -404,34 +406,34 @@ impl SystemPolicyReconciler for PgPolicyStore {
                 // an absent row. Run it on a SAVEPOINT so a unique violation rolls back only the
                 // insert, not the caller's transaction — the `put_in` pattern, except we re-read
                 // WITH the row lock, because unlike `put_in` we may go on to UPDATE.
-                let sp = txn.begin().await.map_err(map_err)?;
+                let sp = txn.begin().await.map_err(map_db_err)?;
                 match converged_model(doc, doc.created_at, now, revision).insert(&sp).await {
                     Ok(_) => {
-                        sp.commit().await.map_err(map_err)?;
+                        sp.commit().await.map_err(map_db_err)?;
                         StarterPolicyOutcome::Absent
                     }
                     Err(e) if matches!(e.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) => {
-                        sp.rollback().await.map_err(map_err)?;
+                        sp.rollback().await.map_err(map_db_err)?;
                         let winner = policy::Entity::find_by_id(doc.policy_id.clone())
                             .lock_exclusive()
                             .one(&txn)
                             .await
-                            .map_err(map_err)?
+                            .map_err(map_db_err)?
                             .ok_or_else(|| backend_err(format!("policy {}: unique-constraint violation on insert but no row found on re-read", doc.policy_id)))?;
                         // Re-classify against whoever won. This cannot recurse into the insert
                         // branch — the row provably exists now — so it terminates.
                         let re = classify_starter_policy(Some(stored_row(&winner)), doc, revision);
                         if !matches!(re, StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary) {
-                            converged_model(doc, winner.created_at, now, revision).update(&txn).await.map_err(map_err)?;
+                            converged_model(doc, winner.created_at, now, revision).update(&txn).await.map_err(map_db_err)?;
                         }
                         re
                     }
-                    Err(e) => return Err(map_err(e)),
+                    Err(e) => return Err(map_db_err(e)),
                 }
             }
         };
 
-        txn.commit().await.map_err(map_err)?;
+        txn.commit().await.map_err(map_db_err)?;
         if outcome.content_changed() {
             self.bump_policy_gen_best_effort().await;
         }
@@ -447,12 +449,12 @@ impl SystemPolicyReconciler for PgPolicyStore {
             .order_by_asc(policy::Column::PolicyId)
             .all(&self.db)
             .await
-            .map_err(map_err)?;
+            .map_err(map_db_err)?;
         Ok(rows.into_iter().map(|r| r.policy_id).filter(|id| !known.contains(&id.as_str())).collect())
     }
 
     async fn existing_policy_ids(&self) -> Result<Vec<String>, AuthzError> {
-        let rows = policy::Entity::find().all(&self.db).await.map_err(map_err)?;
+        let rows = policy::Entity::find().all(&self.db).await.map_err(map_db_err)?;
         Ok(rows.into_iter().map(|r| r.policy_id).collect())
     }
 }

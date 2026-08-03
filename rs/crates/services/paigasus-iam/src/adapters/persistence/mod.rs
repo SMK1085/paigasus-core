@@ -19,6 +19,7 @@ pub mod pg_projects;
 pub mod pg_repository;
 pub mod pg_role_grants;
 pub mod pg_service_accounts;
+pub mod pg_system_roles;
 pub mod pg_teams;
 pub mod uow;
 
@@ -38,6 +39,7 @@ pub use pg_projects::PgProjectRepository;
 pub use pg_repository::PgPrincipalRepository;
 pub use pg_role_grants::PgRoleGrantStore;
 pub use pg_service_accounts::PgServiceAccountRepository;
+pub use pg_system_roles::PgSystemRoleReconciler;
 pub use pg_teams::PgTeamRepository;
 pub use uow::{SeaOrmSavepoint, SeaOrmTransaction, SeaOrmUnitOfWork};
 

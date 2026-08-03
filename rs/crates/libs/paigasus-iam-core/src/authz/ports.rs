@@ -4,8 +4,8 @@
 //! abstractions, not on the eventual Postgres/cache/audit adapters (ADR-0005). Later M3
 //! tasks provide the service-crate implementations.
 
-use super::model::{AccessRequest, AuthzDecisionEvent, AuthzError, Decision, EntitySlice, PolicyDocument, PutOutcome, RoleGrant};
-use super::reconcile::StarterPolicyOutcome;
+use super::model::{AccessRequest, AuthzDecisionEvent, AuthzError, Decision, EntitySlice, PolicyDocument, PutOutcome, Role, RoleGrant};
+use super::reconcile::{RoleOutcome, StarterPolicyOutcome};
 use crate::ports::Transaction;
 use crate::value::PrincipalId;
 use async_trait::async_trait;
@@ -120,6 +120,18 @@ pub trait SystemPolicyReconciler: Send + Sync {
     async fn existing_policy_ids(&self) -> Result<Vec<String>, AuthzError>;
 }
 
+/// Boot-only reconciliation of the code-defined system role catalog (SMA-477 D7). Symmetric to
+/// [`SystemPolicyReconciler`] so `reconcile_starter` is fully fakeable without a database.
+///
+/// No fingerprint and no audit: these columns are introspectable-only — nothing parses them
+/// back at runtime (the `role_key -> Role` lookup is always code-defined), so there is no
+/// operator-edit story worth preserving and no security-relevant content to record.
+#[async_trait]
+pub trait SystemRoleReconciler: Send + Sync {
+    async fn reconcile_role(&self, role: &Role) -> Result<RoleOutcome, AuthzError>;
+    async fn orphaned_system_role_keys(&self, known: &[&str]) -> Result<Vec<String>, AuthzError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +141,5 @@ mod tests {
     fn assert_object_safe(_: &dyn Authorizer, _: &dyn PolicyStore, _: &dyn RoleGrantStore, _: &dyn EntitySliceLoader, _: &dyn DecisionCache, _: &dyn AuditSink) {}
 
     #[allow(dead_code)]
-    fn assert_reconciler_object_safe(_: &dyn SystemPolicyReconciler) {}
+    fn assert_reconciler_object_safe(_: &dyn SystemPolicyReconciler, _: &dyn SystemRoleReconciler) {}
 }

@@ -20,6 +20,12 @@
 //! policy CONTENT changed, and survives two replicas racing the same absent row. Plus
 //! `orphaned_system_policy_ids`, which reports retired system rows and never an operator's own.
 //!
+//! It also adds the symmetric `SystemRoleReconciler` cases: `reconcile_role` inserts an absent
+//! `role` row, is immediately idempotent, and converges a drifted row's `description`/
+//! `scope_kinds` back to the code-defined `Role` — unlike the policy side, silently and without
+//! a fingerprint (these columns are introspectable-only). Plus `orphaned_system_role_keys`,
+//! which reports a `system = true` row this build no longer defines.
+//!
 //! Runs against an ephemeral Postgres in Docker. In CI (`CI` env set) a missing Docker
 //! daemon is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note —
 //! same gating pattern as `tests/roundtrip.rs`/`tests/authz_role_grants.rs`.
@@ -518,4 +524,74 @@ async fn orphaned_system_policy_ids_reports_retired_starter_policies_only() {
     want.push("operator-policy".to_string());
     want.sort();
     assert_eq!(all_ids, want, "existing_policy_ids must report every persisted row, system or not");
+}
+
+#[tokio::test]
+async fn reconcile_role_inserts_then_converges_a_drifted_row() {
+    use paigasus_iam::adapters::persistence::PgSystemRoleReconciler;
+    use paigasus_iam_core::SystemRoleReconciler;
+    use paigasus_iam_core::authz::reconcile::RoleOutcome;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    // The role row's `template_id` carries an FK to `policy.policy_id`, so the templates must
+    // exist first — the same ordering `reconcile_starter` itself relies on.
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    for doc in starter_policies() {
+        use paigasus_iam_core::SystemPolicyReconciler;
+        use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+        store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+    }
+
+    let roles = PgSystemRoleReconciler::new(db.clone());
+    let code = system_roles().into_iter().find(|r| r.key == "org_admin").unwrap();
+
+    assert_eq!(roles.reconcile_role(&code).await.unwrap(), RoleOutcome::Inserted);
+    assert_eq!(roles.reconcile_role(&code).await.unwrap(), RoleOutcome::Unchanged);
+
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        r#"UPDATE "role" SET description = 'stale wording', scope_kinds = '["team"]' WHERE key = 'org_admin'"#.to_string(),
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(roles.reconcile_role(&code).await.unwrap(), RoleOutcome::Updated);
+    let row = role::Entity::find_by_id("org_admin".to_string()).one(&db).await.unwrap().unwrap();
+    assert_eq!(row.description.as_deref(), Some(code.description.as_str()));
+    assert_eq!(row.scope_kinds, r#"["organization"]"#);
+}
+
+#[tokio::test]
+async fn orphaned_system_role_keys_reports_retired_roles_only() {
+    use paigasus_iam::adapters::persistence::PgSystemRoleReconciler;
+    use paigasus_iam_core::SystemRoleReconciler;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    for doc in starter_policies() {
+        use paigasus_iam_core::SystemPolicyReconciler;
+        use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+        store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+    }
+    let roles = PgSystemRoleReconciler::new(db.clone());
+    for r in system_roles() {
+        roles.reconcile_role(&r).await.unwrap();
+    }
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        r#"INSERT INTO "role" (key, template_id, scope_kinds, description, system, created_at)
+           VALUES ('retired_role', 'org_admin', '["organization"]', NULL, true, now())"#
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+
+    // `system_roles()` must outlive the borrowed `&str` keys built from it — a fresh temporary
+    // per expression (e.g. `.leak()`-ing a `Vec<&str>` collected straight off `system_roles()
+    // .iter()`) drops the underlying `Role`s' `String`s at the end of the statement, dangling
+    // the very slice `orphaned_system_role_keys` is about to borrow.
+    let known_roles = system_roles();
+    let known: Vec<&str> = known_roles.iter().map(|r| r.key.as_str()).collect();
+    let orphans = roles.orphaned_system_role_keys(&known).await.unwrap();
+    assert_eq!(orphans, vec!["retired_role".to_string()]);
 }
