@@ -155,6 +155,27 @@ async fn lists_only_parked_rows_newest_first_and_pages_by_keyset() {
         .await
         .unwrap();
     assert_eq!(page2.iter().map(|e| e.id).collect::<Vec<_>>(), vec![a]);
+
+    // `parked_to` (the upper bound) is otherwise never exercised against a real database — only
+    // `parked_from` is used above, and nothing in the repo ever sets `parked_to` to anything but
+    // `None`. Seed one more row parked "now" (too recent for the window below) and bound the
+    // query on BOTH ends, proving the upper bound actually excludes it rather than merely being
+    // accepted and ignored.
+    let d = seed_parked(&db, 5, "iam.principal.created", 0).await;
+    let bounded = dead
+        .list(&DeadLetterFilter {
+            parked_from: Some(Utc::now() - ChronoDuration::days(2) - ChronoDuration::hours(1)),
+            parked_to: Some(Utc::now() - ChronoDuration::hours(12)),
+            ..filter()
+        })
+        .await
+        .unwrap();
+    assert!(!bounded.iter().any(|e| e.id == d), "a row parked too recently must be excluded by parked_to");
+    assert_eq!(
+        bounded.iter().map(|e| e.id).collect::<Vec<_>>(),
+        vec![c, b],
+        "parked_to must narrow the same window `recent` used, minus the too-recent row"
+    );
 }
 
 #[tokio::test]
@@ -289,7 +310,16 @@ async fn bulk_replay_honors_its_filter_cap_and_ascending_selection_order() {
     for i in 0..5u128 {
         created.push(seed_parked(&db, 100 + i, "iam.principal.created", 1).await);
     }
-    let other = seed_parked(&db, 200, "iam.role.granted", 1).await;
+    // Seeded BELOW the matching set's ids (50 < 100..104), not above (a prior version of this
+    // test used 200): the subquery is `ORDER BY id ASC LIMIT max_rows`, so with `max_rows = 2`
+    // it would pick `other` FIRST if the `event_type` filter were silently dropped — at id 200
+    // it would never be selected regardless of the filter (ids 100/101 are always the two
+    // lowest), making the filter assertion below pass even with no filter applied at all. At id
+    // 50 the filter is load-bearing: only the WHERE clause, not the ordering, keeps `other` out
+    // of the replayed set. (Confirmed by mutation-testing `filter_clauses`: removing its
+    // `event_type` clause turns this test red; restoring it turns it back green — see the task
+    // report.)
+    let other = seed_parked(&db, 50, "iam.role.granted", 1).await;
 
     // Capped at 2: must replay the two OLDEST (lowest v7 ids) of the matching set, so repeated
     // calls walk the backlog forward instead of re-selecting the same newest slice.
@@ -310,11 +340,72 @@ async fn bulk_replay_honors_its_filter_cap_and_ascending_selection_order() {
     assert_eq!(n, 2);
 
     for (i, id) in created.iter().enumerate() {
-        let parked = event_outbox::Entity::find_by_id(*id).one(&db).await.unwrap().unwrap().parked;
-        assert_eq!(parked, i >= 2, "the two oldest matching rows must be the ones replayed (index {i})");
+        let row = event_outbox::Entity::find_by_id(*id).one(&db).await.unwrap().unwrap();
+        let should_be_replayed = i < 2;
+        assert_eq!(row.parked, !should_be_replayed, "the two oldest matching rows must be the ones replayed (index {i})");
+        // A bulk-replayed row that keeps `attempts`/`parked_at` from its prior park would
+        // re-park on its very first subsequent failure — silently defeating the mass-outage
+        // recovery bulk replay exists for. Mirrors the single-row `replay_in` test's assertions.
+        if should_be_replayed {
+            assert_eq!(row.attempts, 0, "bulk replay must reset the attempt count (index {i})");
+            assert!(row.parked_at.is_none(), "bulk replay must clear the park time (index {i})");
+        } else {
+            assert_eq!(row.attempts, 5, "an unreplayed row's attempts must be untouched (index {i})");
+            assert!(row.parked_at.is_some(), "an unreplayed row's parked_at must be untouched (index {i})");
+        }
     }
-    assert!(
-        event_outbox::Entity::find_by_id(other).one(&db).await.unwrap().unwrap().parked,
-        "a row outside the event_type filter must not be replayed"
-    );
+    let other_row = event_outbox::Entity::find_by_id(other).one(&db).await.unwrap().unwrap();
+    assert!(other_row.parked, "a row outside the event_type filter must not be replayed");
+    assert_eq!(other_row.attempts, 5, "a row outside the filter must be completely untouched");
+}
+
+#[tokio::test]
+async fn bulk_replay_honors_a_parked_at_time_window() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        eprintln!("skipping dead-letter test: Docker unavailable");
+        return;
+    };
+    let dead = PgDeadLetters::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+
+    // Ids deliberately do NOT correlate with `parked_ago_days` (unlike the cap/order test's
+    // monotonic 100..104 ids above), and `max_rows` is set well above the matching-row count —
+    // so nothing here can be explained by `ORDER BY id ASC LIMIT max_rows` selecting a prefix.
+    // Only the `parked_from`/`parked_to` WHERE clauses can produce the right in/out split.
+    let too_old = seed_parked(&db, 500, "iam.principal.created", 10).await; // parked 10d ago: before `from`
+    let in_window_a = seed_parked(&db, 501, "iam.principal.created", 4).await; // parked 4d ago: inside
+    let too_new = seed_parked(&db, 502, "iam.principal.created", 0).await; // parked "now": after `to`
+    let in_window_b = seed_parked(&db, 499, "iam.principal.created", 2).await; // parked 2d ago: inside, LOWEST id of the four
+
+    let tx = uow.begin().await.unwrap();
+    let n = dead
+        .replay_matching_in(
+            &*tx,
+            &BulkReplayRequest {
+                event_type: None,
+                parked_from: Some(Utc::now() - ChronoDuration::days(5)),
+                parked_to: Some(Utc::now() - ChronoDuration::days(1)),
+                // Uncapped relative to the 4-row matching set: the window, not the cap or the
+                // id order, must be what explains the result below.
+                max_rows: 10,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(n, 2, "only the two rows parked inside the window are replayed");
+
+    for (id, expect_replayed, label) in [
+        (too_old, false, "too_old"),
+        (in_window_a, true, "in_window_a"),
+        (too_new, false, "too_new"),
+        (in_window_b, true, "in_window_b"),
+    ] {
+        let row = event_outbox::Entity::find_by_id(id).one(&db).await.unwrap().unwrap();
+        assert_eq!(row.parked, !expect_replayed, "{label}: the parked_at window, not id order, must decide replay");
+        if expect_replayed {
+            assert_eq!(row.attempts, 0, "{label}: bulk replay must reset the attempt count");
+            assert!(row.parked_at.is_none(), "{label}: bulk replay must clear the park time");
+        }
+    }
 }
