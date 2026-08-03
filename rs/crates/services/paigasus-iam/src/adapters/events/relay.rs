@@ -354,15 +354,57 @@ mod tests {
     }
 
     #[test]
-    fn truncate_error_bounds_a_long_string_by_bytes_on_a_char_boundary() {
+    fn truncate_error_leaves_a_string_exactly_at_the_bound_untouched() {
+        // Exactly MAX_ERROR_BYTES bytes (1-byte-per-char ASCII): the `s.len() <= MAX_ERROR_BYTES`
+        // fast path must return it verbatim, with no elision marker appended.
+        let exact = "a".repeat(MAX_ERROR_BYTES);
+        let out = truncate_error(&exact);
+        assert_eq!(out, exact, "a string exactly at the bound must be returned unchanged");
+        assert!(!out.ends_with('…'), "must not append an elision marker when nothing was cut");
+    }
+
+    #[test]
+    fn truncate_error_bounds_a_long_string_of_four_byte_chars_without_panicking() {
         // 700 four-byte chars = 2800 bytes, comfortably over the 1024-byte bound and past
         // Postgres's ~2KB TOAST threshold — the reason the bound is in BYTES, not chars.
+        // NOTE: this does NOT discriminate the correct implementation from a naive
+        // `&s[..MAX_ERROR_BYTES]` slice — 4 evenly divides 1024, so byte offset 1024 is always a
+        // valid boundary for this data either way. Kept as a smoke test; the char-boundary
+        // guard itself is exercised by `truncate_error_cuts_before_a_split_multibyte_char_not_through_it`.
         let long = "😀".repeat(700);
         let out = truncate_error(&long);
         assert!(out.len() <= MAX_ERROR_BYTES + '…'.len_utf8(), "not bounded: {} bytes", out.len());
         assert!(out.ends_with('…'), "expected an elision marker");
-        // The prefix must still be valid UTF-8 made of whole chars (String guarantees this;
-        // a naive byte slice would have panicked before we got here).
         assert!(out.trim_end_matches('…').chars().all(|c| c == '😀'));
+    }
+
+    #[test]
+    fn truncate_error_cuts_before_a_split_multibyte_char_not_through_it() {
+        // '€' is 3 bytes, and 1024 mod 3 == 1, so byte offset MAX_ERROR_BYTES (1024) lands ONE
+        // BYTE INTO the 342nd '€' (its 3-byte span is [1023, 1026)) rather than on a boundary.
+        // A naive `&s[..MAX_ERROR_BYTES]` slice would panic here; the correct implementation
+        // must instead cut at 1023 — the last char boundary <= MAX_ERROR_BYTES — giving up one
+        // trailing byte rather than splitting a character. This is the discriminating case the
+        // 4-byte-char test above cannot provide.
+        let long = "€".repeat(700); // 2100 bytes, well past MAX_ERROR_BYTES
+        let out = truncate_error(&long);
+        assert!(out.len() <= MAX_ERROR_BYTES + '…'.len_utf8(), "not bounded: {} bytes", out.len());
+        assert!(out.ends_with('…'), "expected an elision marker");
+        let prefix = out.trim_end_matches('…');
+        assert!(prefix.chars().all(|c| c == '€'), "prefix must be whole '€' chars, got: {prefix:?}");
+        assert_eq!(prefix.len(), 1023, "must give up the trailing partial byte rather than split a character");
+    }
+
+    #[test]
+    fn truncate_error_does_not_panic_when_the_first_character_alone_exceeds_the_bound() {
+        // A COMBINING ACUTE ACCENT (U+0301, 2 bytes) with no base character renders as one
+        // stacked glyph — a single perceived "character" — but is 700 separate `char`s in
+        // Rust's model, 1400 bytes total: more than MAX_ERROR_BYTES all by itself. Proves the
+        // cut logic never assumes a "character" a person would recognize maps to one small
+        // Rust `char`; it must still find a real char boundary partway through and not panic.
+        let one_visual_char = "\u{0301}".repeat(700); // 1400 bytes, one perceived glyph
+        let out = truncate_error(&one_visual_char);
+        assert!(out.len() <= MAX_ERROR_BYTES + '…'.len_utf8(), "not bounded: {} bytes", out.len());
+        assert!(out.ends_with('…'), "expected an elision marker");
     }
 }
