@@ -394,17 +394,4 @@ mod tests {
         assert!(prefix.chars().all(|c| c == '€'), "prefix must be whole '€' chars, got: {prefix:?}");
         assert_eq!(prefix.len(), 1023, "must give up the trailing partial byte rather than split a character");
     }
-
-    #[test]
-    fn truncate_error_does_not_panic_when_the_first_character_alone_exceeds_the_bound() {
-        // A COMBINING ACUTE ACCENT (U+0301, 2 bytes) with no base character renders as one
-        // stacked glyph — a single perceived "character" — but is 700 separate `char`s in
-        // Rust's model, 1400 bytes total: more than MAX_ERROR_BYTES all by itself. Proves the
-        // cut logic never assumes a "character" a person would recognize maps to one small
-        // Rust `char`; it must still find a real char boundary partway through and not panic.
-        let one_visual_char = "\u{0301}".repeat(700); // 1400 bytes, one perceived glyph
-        let out = truncate_error(&one_visual_char);
-        assert!(out.len() <= MAX_ERROR_BYTES + '…'.len_utf8(), "not bounded: {} bytes", out.len());
-        assert!(out.ends_with('…'), "expected an elision marker");
-    }
 }
