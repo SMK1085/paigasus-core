@@ -416,14 +416,18 @@ end of this section only when the API itself is unreachable.
   it through more failed attempts.
 
 **Break-glass fallback (API unreachable only).** If the HTTP API itself is down, a row can still
-be un-parked directly in Postgres — this mirrors the API's own `REPLAY_ONE_SQL` exactly (also
-clearing `parked_at`, not just `parked`/`attempts`, so the row lands in the identical state a real
-`replay` call would produce):
+be un-parked directly in Postgres — this mirrors the API's own `REPLAY_ONE_SQL` exactly, including
+its `AND parked = true` guard, not just the `parked_at`/`attempts`/`parked` reset:
 ```sql
 UPDATE event_outbox
 SET parked = false, attempts = 0, parked_at = NULL
-WHERE id = '<parked-row-id>';
+WHERE id = '<parked-row-id>' AND parked = true;
 ```
+The `AND parked = true` guard is not decoration: it is what makes a live or already-published row
+untouchable through this path, so a mistyped id can never silently zero a healthy row's `attempts`
+or clear its `parked_at`. If the id you paste in isn't actually parked, this statement affects
+**zero rows** — that is the guard working as intended (your id was wrong, or the row already
+recovered), not a failure to retry by dropping the guard.
 Prefer the API's `replay` endpoint whenever it is reachable — besides being the documented path, it
 is also what produces the audit trail (`ReplayOutboxDeadLetter`, in `audit_log`); a direct SQL
 `UPDATE` bypasses that entirely and leaves no record that the recovery action happened.
