@@ -46,6 +46,9 @@ pub enum Action {
     RevokeApiKey,
     ListApiKeys,
     ListAuditLog,
+    ListOutboxDeadLetters,
+    ReplayOutboxDeadLetter,
+    DiscardOutboxDeadLetter,
     InvokeModel,
 }
 
@@ -87,6 +90,9 @@ impl Action {
         Action::RevokeApiKey,
         Action::ListApiKeys,
         Action::ListAuditLog,
+        Action::ListOutboxDeadLetters,
+        Action::ReplayOutboxDeadLetter,
+        Action::DiscardOutboxDeadLetter,
         Action::InvokeModel,
     ];
 
@@ -130,6 +136,9 @@ impl Action {
             Action::RevokeApiKey => "RevokeApiKey",
             Action::ListApiKeys => "ListApiKeys",
             Action::ListAuditLog => "ListAuditLog",
+            Action::ListOutboxDeadLetters => "ListOutboxDeadLetters",
+            Action::ReplayOutboxDeadLetter => "ReplayOutboxDeadLetter",
+            Action::DiscardOutboxDeadLetter => "DiscardOutboxDeadLetter",
             Action::InvokeModel => "InvokeModel",
         }
     }
@@ -164,7 +173,8 @@ impl Action {
             | Action::GetServiceAccount
             | Action::ListServiceAccounts
             | Action::ListApiKeys
-            | Action::ListAuditLog => false,
+            | Action::ListAuditLog
+            | Action::ListOutboxDeadLetters => false,
             Action::CreateOrganization
             | Action::RenameOrganization
             | Action::ArchiveOrganization
@@ -187,6 +197,8 @@ impl Action {
             | Action::ArchiveServiceAccount
             | Action::IssueApiKey
             | Action::RevokeApiKey
+            | Action::ReplayOutboxDeadLetter
+            | Action::DiscardOutboxDeadLetter
             | Action::InvokeModel => true,
         }
     }
@@ -266,18 +278,35 @@ mod tests {
                 | Action::RevokeApiKey
                 | Action::ListApiKeys
                 | Action::ListAuditLog
+                | Action::ListOutboxDeadLetters
+                | Action::ReplayOutboxDeadLetter
+                | Action::DiscardOutboxDeadLetter
                 | Action::InvokeModel => {}
             }
         }
         for a in Action::ALL {
             assert_in_all(*a);
         }
-        assert_eq!(Action::ALL.len(), 36, "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model");
+        assert_eq!(Action::ALL.len(), 39, "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter");
     }
     #[test]
     fn list_audit_log_is_a_read_action() {
         assert!(!Action::ListAuditLog.is_write());
         assert_eq!(Action::parse("ListAuditLog"), Some(Action::ListAuditLog));
+    }
+    #[test]
+    fn outbox_dead_letter_actions_are_classified_and_round_trip() {
+        assert!(!Action::ListOutboxDeadLetters.is_write(), "listing dead letters is a read");
+        assert!(Action::ReplayOutboxDeadLetter.is_write(), "replay mutates the outbox");
+        assert!(Action::DiscardOutboxDeadLetter.is_write(), "discard deletes a row");
+        for a in [Action::ListOutboxDeadLetters, Action::ReplayOutboxDeadLetter, Action::DiscardOutboxDeadLetter] {
+            assert_eq!(Action::parse(a.as_wire()), Some(a), "{} must round-trip", a.as_wire());
+            assert!(Action::ALL.contains(&a), "{} must be in ALL", a.as_wire());
+        }
+        // None of the three is a restore, so all three land in the generated
+        // `forbid_archived_writes` list (harmless: they are Root-scoped and `Root` has no
+        // `effective_status` attribute, so the clause can never match them).
+        assert!(!Action::ReplayOutboxDeadLetter.is_restore());
     }
     #[test]
     fn restore_classification() {
