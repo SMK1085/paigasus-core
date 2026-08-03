@@ -19,6 +19,16 @@
 //! the consequence: a pass can return fewer than `batch_size` rows because a PEER replica
 //! holds them, so `passes < max_batches_per_tick` does NOT prove the backlog is drained. The
 //! next tick resumes.
+//!
+//! **`SKIP LOCKED` only skips conflicting ROW locks — it has no opinion on a TABLE-level lock.**
+//! A migration (m0009 itself takes `ACCESS EXCLUSIVE` on `event_outbox` for its whole body) or an
+//! operator's manual `ALTER`/`VACUUM FULL` running concurrently would otherwise make a sweep pass
+//! queue indefinitely, wedging the task rather than retrying. Mirroring `PgPartitionMaintainer`'s
+//! precedent, each pass in [`sweep`](PgOutboxMaintainer::sweep) runs inside its own short
+//! transaction that first issues `SET LOCAL lock_timeout` (bounds acquiring the lock) and
+//! `SET LOCAL statement_timeout` (bounds the `DELETE` itself once the lock is held); either
+//! tripping surfaces as an ordinary `DbErr` through the tick's existing partial-count
+//! `errored = true` path, exactly like any other pass failure.
 
 use std::future::Future;
 use std::time::Duration;
@@ -26,7 +36,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use metrics::{counter, gauge};
 use paigasus_observability::names;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, Statement, Value};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, Statement, TransactionTrait, Value};
 
 /// The sweep knobs a tick needs, decoupled from `config::OutboxRetentionConfig`
 /// (`interval_secs` lives in the loop, not a tick). `Copy` so tests/`run` pass it by value.
@@ -113,6 +123,41 @@ fn parked_sweep_sql() -> &'static str {
          WHERE parked = true AND parked_at IS NOT NULL AND parked_at < $1
          ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED
        )"#
+}
+
+/// Bounds how long a single sweep pass waits to ACQUIRE a conflicting table-level lock (e.g. a
+/// migration's or a manual `VACUUM FULL`'s `ACCESS EXCLUSIVE` on `event_outbox`) before giving up
+/// and erroring — matches `pg_partition_maintainer.rs`'s `LOCK_TIMEOUT`, which is the established,
+/// already-tuned value in this codebase for exactly this "back off rather than queue" posture, and
+/// keeping the two in step means a wedged replica's sweep and its partition maintainer time out on
+/// the same clock. 5 seconds is long enough that acquiring an uncontended lock never trips it —
+/// this is not a lock any well-behaved concurrent query normally holds for long — and short enough
+/// that a genuinely blocked pass gives the tick back to its `errored = true` retry path promptly
+/// rather than stalling the whole tick loop.
+const SWEEP_LOCK_TIMEOUT: &str = "5s";
+
+/// Bounds the `DELETE` itself, once the lock is held. Deliberately longer than
+/// [`SWEEP_LOCK_TIMEOUT`]: lock acquisition should be near-instant or not happen at all, but a
+/// `batch_size`-row (default 1,000, `[outbox.retention].batch_size`) indexed delete doing real
+/// I/O legitimately needs more headroom than a lock wait. 30 seconds comfortably covers a normal
+/// batch — the query plan is index-driven (see `published_sweep_query_does_not_resort_to_a_sequential_scan`
+/// in `tests/outbox_retention_pg.rs`) — while still bounding a pathological pass (e.g. index
+/// bloat, or contention among the delete's own row locks) to a fraction of the default hourly
+/// `interval_secs`, so one wedged pass can't consume the whole tick and every subsequent
+/// `max_batches_per_tick` pass this tick along with it.
+const SWEEP_STATEMENT_TIMEOUT: &str = "30s";
+
+/// The `SET LOCAL` statements issued at the top of every sweep pass's transaction, in the order
+/// they must run: `lock_timeout` bounds waiting on a conflicting table-level lock, then
+/// `statement_timeout` bounds the `DELETE` itself once that lock is held. A free function (rather
+/// than inlined `format!` calls in `sweep_pass`) so a unit test can pin the exact statement text
+/// and timeout values without spinning up Postgres — the same tripwire-test approach this module
+/// already uses for `published_sweep_sql`/`parked_sweep_sql`.
+fn sweep_pass_timeout_stmts() -> [String; 2] {
+    [
+        format!("SET LOCAL lock_timeout = '{SWEEP_LOCK_TIMEOUT}';"),
+        format!("SET LOCAL statement_timeout = '{SWEEP_STATEMENT_TIMEOUT}';"),
+    ]
 }
 
 #[derive(Clone)]
@@ -216,8 +261,9 @@ impl PgOutboxMaintainer {
     }
 
     /// Batched delete: repeat `sql` until a pass affects fewer than `batch_size` rows or
-    /// `max_batches_per_tick` is reached. Each pass is its OWN autocommit statement — never one
-    /// long transaction holding locks across the whole sweep. On error, returns what was
+    /// `max_batches_per_tick` is reached. Each pass runs in its OWN short transaction (via
+    /// [`sweep_pass`](Self::sweep_pass)) — never one long transaction holding locks across the
+    /// whole sweep. On error (including either bounded timeout tripping), returns what was
     /// deleted before it, so a partial sweep is still reported honestly.
     async fn sweep(&self, sql: &str, cutoff: DateTime<Utc>, policy: OutboxRetentionPolicy) -> Result<(u64, u32), (u64, u32, DbErr)> {
         // The loop's `affected < policy.batch_size` exit condition can never fire when
@@ -240,9 +286,8 @@ impl PgOutboxMaintainer {
         let mut total = 0u64;
         let mut passes = 0u32;
         while passes < policy.max_batches_per_tick {
-            let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, [Value::from(cutoff), Value::from(batch_limit)]);
-            let affected = match self.db.execute(stmt).await {
-                Ok(r) => r.rows_affected(),
+            let affected = match self.sweep_pass(sql, cutoff, batch_limit).await {
+                Ok(n) => n,
                 Err(e) => return Err((total, passes, e)),
             };
             passes += 1;
@@ -252,6 +297,24 @@ impl PgOutboxMaintainer {
             }
         }
         Ok((total, passes))
+    }
+
+    /// One delete pass, in its own short transaction: `SET LOCAL lock_timeout` bounds waiting on
+    /// a conflicting TABLE-level lock (`SKIP LOCKED` in `sql` already handles conflicting row
+    /// locks on its own), then `SET LOCAL statement_timeout` bounds the `DELETE` itself once the
+    /// lock is held. Either one tripping — or any other failure — errors the transaction; the
+    /// caller ([`sweep`](Self::sweep)) folds that into the tick's existing partial-count
+    /// `errored = true` path, so a blocked/slow pass gives up and retries next tick rather than
+    /// queueing indefinitely or panicking.
+    async fn sweep_pass(&self, sql: &str, cutoff: DateTime<Utc>, batch_limit: i64) -> Result<u64, DbErr> {
+        let txn = self.db.begin().await?;
+        for stmt in sweep_pass_timeout_stmts() {
+            txn.execute_unprepared(&stmt).await?;
+        }
+        let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, [Value::from(cutoff), Value::from(batch_limit)]);
+        let affected = txn.execute(stmt).await?.rows_affected();
+        txn.commit().await?;
+        Ok(affected)
     }
 
     async fn parked_row_count(&self) -> Result<u64, DbErr> {
@@ -317,6 +380,21 @@ mod tests {
             assert_eq!(sql.matches("$2").count(), 1, "{sql}");
             assert!(sql.find("$1").unwrap() < sql.find("$2").unwrap(), "$1 (cutoff) must precede $2 (batch size): {sql}");
         }
+    }
+
+    #[test]
+    fn sweep_pass_bounds_both_lock_and_statement_timeout_in_order() {
+        // A regression that dropped either `SET LOCAL`, or swapped their order, would leave a
+        // sweep pass free to queue indefinitely behind a table-level lock again — the exact
+        // failure mode this fix exists to close. Destructuring by position (rather than
+        // searching either string for either substring) is itself the order assertion: if
+        // `sweep_pass_timeout_stmts` ever returned statement_timeout first, `lock` below would
+        // bind to that string and immediately fail the `lock_timeout` substring check.
+        let [lock, statement] = sweep_pass_timeout_stmts();
+        assert!(lock.contains("SET LOCAL lock_timeout"), "lock_timeout must be issued first: {lock}");
+        assert!(lock.contains(SWEEP_LOCK_TIMEOUT), "{lock}");
+        assert!(statement.contains("SET LOCAL statement_timeout"), "{statement}");
+        assert!(statement.contains(SWEEP_STATEMENT_TIMEOUT), "{statement}");
     }
 
     #[test]
