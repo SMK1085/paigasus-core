@@ -10,12 +10,8 @@ mod support;
 use chrono::{Datelike, TimeZone, Utc};
 use paigasus_iam::adapters::persistence::Migrator;
 use paigasus_iam::adapters::persistence::entities::audit_log;
-use sea_orm::{ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait, PaginatorTrait, Set, Statement};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait, PaginatorTrait, Set, Statement};
 use sea_orm_migration::MigratorTrait;
-use testcontainers_modules::postgres::Postgres;
-use testcontainers_modules::testcontainers::ContainerAsync;
-use testcontainers_modules::testcontainers::ImageExt;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use uuid::Uuid;
 
 /// `true` iff `audit_log` is a partitioned table (has a row in `pg_partitioned_table`).
@@ -39,36 +35,6 @@ async fn physical_leaf(db: &impl ConnectionTrait, id: Uuid) -> String {
         .expect("row must exist to read its physical leaf")
         .try_get::<String>("", "leaf")
         .unwrap()
-}
-
-/// Starts a raw, ephemeral Postgres container WITHOUT running any migrations — mirrors
-/// `support::start_migrated_postgres` (same image/tag/CI-gating posture) but stops short of
-/// `Migrator::up(&db, None)` so the caller can drive `Migrator::up` step by step. Needed to seed
-/// the plain, pre-m0008 `audit_log` shape (m0001..m0007) with historical rows BEFORE m0008 ever
-/// runs — `support::start_migrated_postgres` always runs every migration up front, so it can
-/// never observe `existing_month_span`'s non-empty (pre-existing-data) branch.
-async fn start_raw_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseConnection)> {
-    let node = match Postgres::default().with_tag("16-alpine").start().await {
-        Ok(n) => n,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker is required for this test in CI: {e}");
-            }
-            eprintln!("skipping historical-copy test: Docker unavailable ({e})");
-            return None;
-        }
-    };
-    let port = node.get_host_port_ipv4(5432).await.unwrap();
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    // Pin the pool to a SINGLE connection so per-session state — notably a `SET TimeZone` issued
-    // by `routing_is_correct_under_a_non_utc_session_timezone` — is guaranteed to apply to the
-    // same physical connection that the subsequent `Migrator::up` runs on (a default multi-conn
-    // pool could migrate on a different, still-UTC session, making that regression test
-    // non-deterministic — CodeRabbit SMA-467 round 2).
-    let mut opts = ConnectOptions::new(url);
-    opts.max_connections(1).min_connections(1);
-    let db = Database::connect(opts).await.unwrap();
-    Some((node, db))
 }
 
 fn row(id: Uuid, outcome: &str, occurred_at: chrono::DateTime<Utc>) -> audit_log::ActiveModel {
@@ -181,7 +147,7 @@ async fn rows_across_multiple_and_gap_months_route_and_read_back() {
 /// TZ is non-UTC — and assert the PHYSICAL leaf, not just readability.
 #[tokio::test]
 async fn routing_is_correct_under_a_non_utc_session_timezone() {
-    let Some((_pg, db)) = start_raw_postgres().await else { return };
+    let Some((_pg, db)) = support::start_raw_postgres().await else { return };
 
     // Plain, pre-partition `audit_log` shape (m0001..m0007).
     Migrator::up(&db, Some(7)).await.expect("m0001..m0007 must apply");
@@ -203,9 +169,13 @@ async fn routing_is_correct_under_a_non_utc_session_timezone() {
 
     // Apply m0008 — the leaf-creating + copy/swap migration — UNDER a non-UTC session. This is
     // the actual regression surface: both `existing_month_span`'s bounds query and the leaf DDL's
-    // `FOR VALUES FROM/TO` literals must resolve in UTC, not the session TZ.
+    // `FOR VALUES FROM/TO` literals must resolve in UTC, not the session TZ. `None` also applies
+    // every migration after m0008 (m0009 as of SMA-469) — harmless here, since none of them touch
+    // `audit_log`.
     db.execute_unprepared("SET TimeZone = 'America/New_York';").await.unwrap();
-    Migrator::up(&db, None).await.expect("m0008 must apply correctly under a non-UTC session TZ");
+    Migrator::up(&db, None)
+        .await
+        .expect("m0008 (the migration under test) and any migrations after it must apply correctly under a non-UTC session TZ");
 
     assert!(audit_log_is_partitioned(&db).await, "audit_log must be partitioned after m0008");
     assert_eq!(
@@ -217,9 +187,19 @@ async fn routing_is_correct_under_a_non_utc_session_timezone() {
 
 /// m0008's `down` must restore the EXACT `m0006` plain-table shape (single-col PK on `id`, five
 /// indexes incl. `outcome`) while preserving every row that was in the partitioned table.
+///
+/// Pins the DB to EXACTLY m0001..m0008 via `start_raw_postgres` + `Migrator::up(&db, Some(8))`
+/// rather than `support::start_migrated_postgres` + `Migrator::down(&db, Some(N))`: counting
+/// `down` steps back from the tip couples this test to "however many migrations exist after
+/// m0008" — a count every later migration (m0009, SMA-469, and every one after it) would have to
+/// remember to bump, and a forgotten bump fails silently useful-looking as an `audit_log`
+/// assertion pointing at the wrong migration. Pinning the `up` count instead means
+/// `Migrator::down(&db, Some(1))` below is m0008's `down`, by construction, forever — it can
+/// never become "whatever happens to be last."
 #[tokio::test]
 async fn down_migration_restores_the_plain_m0006_shape_and_preserves_rows() {
-    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let Some((_pg, db)) = support::start_raw_postgres().await else { return };
+    Migrator::up(&db, Some(8)).await.expect("m0001..m0008 must apply");
 
     // Seed rows across outcomes (incl. a LIST-default stray) so the down-copy path is exercised
     // for every partition subtree, not just one.
@@ -230,12 +210,9 @@ async fn down_migration_restores_the_plain_m0006_shape_and_preserves_rows() {
     let before = audit_log::Entity::find().count(&db).await.unwrap();
     assert_eq!(before, 3, "all three seeded rows must be visible pre-down");
 
-    // Revert the two most-recently-applied migration steps: m0009's `down` (SMA-469, unrelated
-    // `event_outbox` columns/indexes) then m0008's `down`, the one this test is actually about.
-    // `Some(1)` would only undo whichever migration is currently last in `migrations()`, so this
-    // must grow every time a migration lands on top of m0008 — it is m0008's `down`, not "one
-    // step back", that this test asserts on.
-    Migrator::down(&db, Some(2)).await.expect("m0009 and m0008 down must succeed");
+    // The DB is pinned to exactly m0001..m0008 above, so "one step back" IS m0008's `down` —
+    // regardless of how many migrations land on top of m0008 in the future.
+    Migrator::down(&db, Some(1)).await.expect("m0008 down must succeed");
 
     assert!(!audit_log_is_partitioned(&db).await, "audit_log must be a plain table after down");
 
@@ -279,7 +256,7 @@ async fn down_migration_restores_the_plain_m0006_shape_and_preserves_rows() {
 /// lets `existing_month_span` see the seeded historical span and pre-create leaves for it.
 #[tokio::test]
 async fn historical_rows_seeded_before_m0008_survive_the_swap_and_route_to_their_leaf() {
-    let Some((_pg, db)) = start_raw_postgres().await else { return };
+    let Some((_pg, db)) = support::start_raw_postgres().await else { return };
 
     // Apply m0001..m0007 only — the plain, pre-partition `audit_log` shape (m0006).
     Migrator::up(&db, Some(7)).await.expect("m0001..m0007 must apply");
