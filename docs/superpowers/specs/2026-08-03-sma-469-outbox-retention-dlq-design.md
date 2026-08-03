@@ -176,17 +176,22 @@ source**. As written, every real publish failure would store `last_error = "back
 §1.1 says broker failure is the dominant parking mode. The column would ship looking informative
 and be useless.
 
-Two changes, both required:
+The fix is **one** change, not two: the relay builds `reason` by walking the full `source()` chain
+— a `describe_error` helper joining each level's `Display` with `": "` — so
+`PublishError::Backend(inner)` renders as `"backend error: <inner>: <inner's source>: …"` to
+arbitrary depth.
 
-1. `PublishError::Backend` becomes `#[error("backend error: {0}")]` so the boxed source renders.
-   This also fixes the existing `tracing::error!`/`warn!` lines at `relay.rs:140,142`, which have
-   the same defect today.
-2. The relay builds `reason` by walking the full source chain rather than taking `to_string()`
-   alone — a `describe_error` helper over `std::iter::successors(Some(&e as &dyn Error), |e|
-   e.source())` joined with `": "`, so a nested transport error reaches `last_error` even when an
-   intermediate layer's `Display` omits its source.
+`PublishError::Backend`'s attribute is deliberately **left as** `#[error("backend error")]`.
+Changing it to `#[error("backend error: {0}")]` was considered and rejected: thiserror's `#[from]`
+already makes the boxed error the variant's `source()`, so rendering it in `Display` *as well*
+would make every chain walk emit each inner message twice. The chain walk subsumes the format
+change, and confining the fix to the relay keeps the blast radius to this crate.
 
-A unit test asserts a two-level nested source string survives into the produced reason.
+This also repairs the existing `tracing::error!`/`warn!` lines at `relay.rs:140,142`, which log the
+same `reason` and are equally uninformative today.
+
+A unit test asserts a two-level nested source chain survives into the produced reason, and that no
+level is duplicated.
 
 ## 6. Unit 3 — retention sweeper
 
