@@ -27,7 +27,7 @@ use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox, pol
 use paigasus_iam::adapters::persistence::{PgAuditLog, PgOutbox, PgPolicyStore, SeaOrmUnitOfWork};
 use paigasus_iam_core::authz::model::{PolicyKind, root_prn};
 use paigasus_iam_core::{AuditEntry, AuditLog, AuditOutcome, AuthzError, DomainEvent, EventType, IdGenerator, Outbox, PolicyDocument, PolicyStore, PutOutcome, UnitOfWork};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
+use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 
 /// A well-formed, schema-valid static policy document (mirrors `authz::schema`'s own
 /// "well-formed" test fixture).
@@ -55,6 +55,8 @@ async fn seed_system_policy(db: &DatabaseConnection, policy_id: &str, now: DateT
         system: Set(true),
         created_at: Set(now),
         updated_at: Set(now),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     }
     .insert(db)
     .await
@@ -285,6 +287,8 @@ async fn concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_co
         system: Set(doc_a.system),
         created_at: Set(doc_a.created_at),
         updated_at: Set(doc_a.updated_at),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     }
     .insert(&txn_a)
     .await
@@ -361,6 +365,8 @@ async fn put_in_absorbs_a_same_content_savepoint_conflict_and_the_outer_txn_stay
         system: Set(doc.system),
         created_at: Set(doc.created_at),
         updated_at: Set(doc.updated_at),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     }
     .insert(&txn_a)
     .await
@@ -436,6 +442,8 @@ async fn put_in_surfaces_a_different_content_savepoint_conflict_and_the_outer_tx
         system: Set(doc_a.system),
         created_at: Set(doc_a.created_at),
         updated_at: Set(doc_a.updated_at),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     }
     .insert(&txn_a)
     .await

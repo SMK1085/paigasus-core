@@ -44,7 +44,7 @@ use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
 use paigasus_iam_core::authz::schema::validate_policy;
 use paigasus_iam_core::{AuthzError, PolicyDocument, PolicyStore, PutOutcome, RepositoryError, Transaction};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, DbErr, EntityTrait, IsolationLevel, QuerySelect, Set, SqlErr, TransactionTrait};
+use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, DatabaseConnection, DbErr, EntityTrait, IsolationLevel, QuerySelect, Set, SqlErr, TransactionTrait};
 
 // `Clone` lets the composition root hold a store handle inside a `#[derive(Clone))]`
 // service (mirrors `PgOrganizationRepository`'s precedent) — cheap: `DatabaseConnection`
@@ -145,6 +145,12 @@ fn doc_to_model(doc: &PolicyDocument, created_at: DateTime<Utc>) -> policy::Acti
         system: Set(doc.system),
         created_at: Set(created_at),
         updated_at: Set(doc.updated_at),
+        // SMA-477: NEVER `Set` here. `doc_to_model` is shared with `put_in`, which serves the
+        // public `PutPolicy` API — an operator-authored policy must carry no fingerprint and no
+        // starter revision. `NotSet` omits the column from the INSERT (DB default NULL) and from
+        // the UPDATE SET clause (existing value untouched); only `reconcile_system` writes them.
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     }
 }
 

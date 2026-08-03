@@ -498,7 +498,7 @@ pub async fn provision_platform_admin(state: &AppState, token: &str) -> String {
 #[allow(dead_code)]
 pub async fn seed_org_admin_role_row(db: &DatabaseConnection) {
     use paigasus_iam::adapters::persistence::entities::{policy, role};
-    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+    use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, EntityTrait, Set};
 
     if role::Entity::find_by_id("org_admin".to_string()).one(db).await.unwrap().is_some() {
         return;
@@ -512,6 +512,8 @@ pub async fn seed_org_admin_role_row(db: &DatabaseConnection) {
         system: Set(false),
         created_at: Set(now),
         updated_at: Set(now),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     }
     .insert(db)
     .await

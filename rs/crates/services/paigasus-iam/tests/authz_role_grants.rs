@@ -26,7 +26,7 @@ use paigasus_iam_core::{
     UnitOfWork,
 };
 use paigasus_kernel::{Prn, mint_uuid7};
-use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Set, Statement};
+use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Set, Statement};
 use uuid::Uuid;
 
 /// Seeds a `principal` + `organization` row via raw SQL — this test only needs valid FK
@@ -103,6 +103,8 @@ async fn seed_role(db: &DatabaseConnection, role_key: &str, now: DateTime<Utc>) 
         system: Set(false),
         created_at: Set(now),
         updated_at: Set(now),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     }
     .insert(db)
     .await
