@@ -30,6 +30,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use metrics::{counter, gauge};
+#[cfg(test)]
+use paigasus_iam_core::PublishError;
 use paigasus_iam_core::{DomainEvent, EventPublisher, EventType};
 use paigasus_observability::names;
 use sea_orm::sea_query::{LockBehavior, LockType};
@@ -50,6 +52,37 @@ pub struct TickReport {
     /// Age (seconds) of the oldest row in this tick's batch, if the batch was non-empty — a
     /// cheap staleness signal (no extra query: derived from the already-fetched rows).
     pub oldest_unpublished_age_secs: Option<i64>,
+}
+
+/// Renders `err` and its full `source()` chain as `"outer: middle: inner"`.
+///
+/// `PublishError::Backend`'s `Display` is the static string `"backend error"` — thiserror's
+/// `#[from]` makes the boxed cause the variant's `source()` rather than part of its message
+/// (`paigasus_iam_core::ports`), so `to_string()` alone tells an operator nothing about WHY a
+/// publish failed. Since the parked row's `last_error` (SMA-469) and the `error!`/`warn!` lines
+/// below all render this string, the chain walk is what makes any of them informative.
+fn describe_error(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut source = err.source();
+    while let Some(e) = source {
+        parts.push(e.to_string());
+        source = e.source();
+    }
+    parts.join(": ")
+}
+
+/// Byte bound on a stored `last_error` (SMA-469). Deliberately a BYTE bound, not a char count:
+/// 1024 four-byte chars would be 4KB, past Postgres's ~2KB TOAST threshold, so a pathological
+/// publisher error string could bloat the row it is meant to describe.
+const MAX_ERROR_BYTES: usize = 1024;
+
+/// Bounds `s` to [`MAX_ERROR_BYTES`], cutting on a char boundary and marking the elision.
+fn truncate_error(s: &str) -> String {
+    if s.len() <= MAX_ERROR_BYTES {
+        return s.to_string();
+    }
+    let end = s.char_indices().map(|(i, _)| i).take_while(|i| *i <= MAX_ERROR_BYTES).last().unwrap_or(0);
+    format!("{}…", &s[..end])
 }
 
 /// Reconstructs a [`DomainEvent`] from a persisted `event_outbox` row for handing to
@@ -121,7 +154,7 @@ impl OutboxRelay {
 
         for row in rows {
             let outcome = match row_to_domain_event(&row) {
-                Ok(ev) => publisher.publish(&ev).await.map_err(|e| e.to_string()),
+                Ok(ev) => publisher.publish(&ev).await.map_err(|e| describe_error(&e)),
                 Err(reason) => Err(reason),
             };
 
@@ -134,8 +167,15 @@ impl OutboxRelay {
                     report.failures += 1;
                     let attempts = row.attempts + 1;
                     active.attempts = Set(attempts);
+                    // SMA-469: recorded on EVERY failed attempt, not only at parking — an
+                    // operator watching `attempts` climb wants the current reason, and the
+                    // dead-letter surface reads this column.
+                    active.last_error = Set(Some(truncate_error(&reason)));
                     if attempts >= self.max_attempts {
                         active.parked = Set(true);
+                        // `[outbox.retention].parked_days` measures from HERE, never from
+                        // `occurred_at` (m0009's module doc).
+                        active.parked_at = Set(Some(Utc::now()));
                         report.parked += 1;
                         tracing::error!(id = %row.id, event_type = %row.event_type, attempts, reason = %reason, "outbox event parked after max attempts (poison)");
                     } else {
@@ -235,6 +275,8 @@ mod tests {
             published_at: None,
             attempts: 0,
             parked: false,
+            parked_at: None,
+            last_error: None,
         }
     }
 
@@ -279,5 +321,77 @@ mod tests {
         assert_eq!(ev.occurred_at, row.occurred_at);
         assert_eq!(ev.payload, serde_json::json!({"kind": "user"}));
         assert_eq!(ev.correlation_id, row.correlation_id);
+    }
+
+    /// A publish failure must carry its whole `source()` chain into the reason string —
+    /// `PublishError::Backend`'s own `Display` is the static "backend error" and renders
+    /// nothing about what actually failed (`ports.rs`).
+    #[test]
+    fn describe_error_walks_the_full_source_chain_without_duplicating_levels() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("transport closed")]
+        struct Inner;
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("publish failed")]
+        struct Outer(#[source] Inner);
+
+        let err = PublishError::from(Box::new(Outer(Inner)) as Box<dyn std::error::Error + Send + Sync>);
+        assert_eq!(describe_error(&err), "backend error: publish failed: transport closed");
+    }
+
+    #[test]
+    fn describe_error_of_a_sourceless_error_is_just_its_display() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("nope")]
+        struct Bare;
+        assert_eq!(describe_error(&Bare), "nope");
+    }
+
+    #[test]
+    fn truncate_error_leaves_a_short_string_untouched() {
+        assert_eq!(truncate_error("boom"), "boom");
+    }
+
+    #[test]
+    fn truncate_error_leaves_a_string_exactly_at_the_bound_untouched() {
+        // Exactly MAX_ERROR_BYTES bytes (1-byte-per-char ASCII): the `s.len() <= MAX_ERROR_BYTES`
+        // fast path must return it verbatim, with no elision marker appended.
+        let exact = "a".repeat(MAX_ERROR_BYTES);
+        let out = truncate_error(&exact);
+        assert_eq!(out, exact, "a string exactly at the bound must be returned unchanged");
+        assert!(!out.ends_with('…'), "must not append an elision marker when nothing was cut");
+    }
+
+    #[test]
+    fn truncate_error_bounds_a_long_string_of_four_byte_chars_without_panicking() {
+        // 700 four-byte chars = 2800 bytes, comfortably over the 1024-byte bound and past
+        // Postgres's ~2KB TOAST threshold — the reason the bound is in BYTES, not chars.
+        // NOTE: this does NOT discriminate the correct implementation from a naive
+        // `&s[..MAX_ERROR_BYTES]` slice — 4 evenly divides 1024, so byte offset 1024 is always a
+        // valid boundary for this data either way. Kept as a smoke test; the char-boundary
+        // guard itself is exercised by `truncate_error_cuts_before_a_split_multibyte_char_not_through_it`.
+        let long = "😀".repeat(700);
+        let out = truncate_error(&long);
+        assert!(out.len() <= MAX_ERROR_BYTES + '…'.len_utf8(), "not bounded: {} bytes", out.len());
+        assert!(out.ends_with('…'), "expected an elision marker");
+        assert!(out.trim_end_matches('…').chars().all(|c| c == '😀'));
+    }
+
+    #[test]
+    fn truncate_error_cuts_before_a_split_multibyte_char_not_through_it() {
+        // '€' is 3 bytes, and 1024 mod 3 == 1, so byte offset MAX_ERROR_BYTES (1024) lands ONE
+        // BYTE INTO the 342nd '€' (its 3-byte span is [1023, 1026)) rather than on a boundary.
+        // A naive `&s[..MAX_ERROR_BYTES]` slice would panic here; the correct implementation
+        // must instead cut at 1023 — the last char boundary <= MAX_ERROR_BYTES — giving up one
+        // trailing byte rather than splitting a character. This is the discriminating case the
+        // 4-byte-char test above cannot provide.
+        let long = "€".repeat(700); // 2100 bytes, well past MAX_ERROR_BYTES
+        let out = truncate_error(&long);
+        assert!(out.len() <= MAX_ERROR_BYTES + '…'.len_utf8(), "not bounded: {} bytes", out.len());
+        assert!(out.ends_with('…'), "expected an elision marker");
+        let prefix = out.trim_end_matches('…');
+        assert!(prefix.chars().all(|c| c == '€'), "prefix must be whole '€' chars, got: {prefix:?}");
+        assert_eq!(prefix.len(), 1023, "must give up the trailing partial byte rather than split a character");
     }
 }

@@ -297,6 +297,57 @@ pub struct OutboxConfig {
     /// future ticks). Validated non-zero in [`IamConfig::validate`] (a zero limit would park
     /// every row on its very first failed attempt, before ever getting a retry).
     pub max_attempts: u32,
+    /// Retention for the table the relay drains — see [`OutboxRetentionConfig`].
+    #[serde(default)]
+    pub retention: OutboxRetentionConfig,
+}
+
+/// `event_outbox` retention (SMA-469) — the knobs for
+/// [`PgOutboxMaintainer`](crate::adapters::persistence::PgOutboxMaintainer), the background
+/// sweep that bounds the outbox's growth. Nests under `[outbox]` exactly as
+/// [`RetentionConfig`] nests under `[audit]`; every field has a default, so an absent
+/// `[outbox.retention]` block is valid config.
+///
+/// **`0` means "never" for BOTH day windows** — one meaning for the sentinel across the whole
+/// block, deliberately: two different readings of `0` inside one table would be a trap.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OutboxRetentionConfig {
+    /// When `false`, the maintainer performs NO deletions — but it is still spawned and still
+    /// ticks, because the tick is what refreshes `iam_outbox_parked_rows`. Gating the SPAWN on
+    /// this would mean an operator who sets `enabled = false` (a plausible "stop deleting
+    /// things" reaction during an incident) silently loses the dead-letter backlog signal
+    /// while the relay keeps parking rows.
+    pub enabled: bool,
+    /// Seconds between sweep ticks. Validated non-zero.
+    pub interval_secs: u64,
+    /// Delete published rows older than this many days. `0` = never delete published rows.
+    pub published_days: u32,
+    /// Delete parked rows whose `parked_at` is older than this many days. `0` = never (the
+    /// default) — auto-deleting the very thing an operator is alerted to inspect must be a
+    /// deliberate choice, mirroring `audit.retention.committed_months`. A non-zero value
+    /// triggers a startup `warn!`.
+    pub parked_days: u32,
+    /// Rows deleted per pass. Validated non-zero.
+    pub batch_size: u64,
+    /// Passes per tick, so one tick retires at most `batch_size * this` rows and a huge first
+    /// sweep resumes next tick instead of holding one tick open. Config rather than a constant
+    /// because it is exactly as much an operational knob as `batch_size`: at the defaults a
+    /// deployment draining a 10M-row backlog needs ~8 days, and the operator doing that
+    /// drain must be able to raise it. Validated non-zero.
+    pub max_batches_per_tick: u32,
+}
+
+impl Default for OutboxRetentionConfig {
+    fn default() -> Self {
+        OutboxRetentionConfig {
+            enabled: true,
+            interval_secs: 3_600,
+            published_days: 7,
+            parked_days: 0,
+            batch_size: 1_000,
+            max_batches_per_tick: 50,
+        }
+    }
 }
 
 /// `GET /metrics` (SMA-446 Unit 3, mirrors `paigasus-gateway::config::MetricsConfig` field-for-
@@ -401,6 +452,7 @@ struct OutboxDefaults {
     poll_interval_secs: u64,
     batch_size: u64,
     max_attempts: u32,
+    retention: OutboxRetentionConfig,
 }
 
 impl Default for Defaults {
@@ -492,6 +544,7 @@ impl Default for OutboxDefaults {
             poll_interval_secs: 5,
             batch_size: 100,
             max_attempts: 5,
+            retention: OutboxRetentionConfig::default(),
         }
     }
 }
@@ -559,6 +612,7 @@ impl Default for OutboxConfig {
             poll_interval_secs: d.poll_interval_secs,
             batch_size: d.batch_size,
             max_attempts: d.max_attempts,
+            retention: d.retention,
         }
     }
 }
@@ -797,6 +851,21 @@ impl IamConfig {
         }
         if self.outbox.max_attempts == 0 {
             return Err("outbox.max_attempts must be at least 1 (0 would park every outbox row on its first failed publish attempt)".to_string());
+        }
+
+        // --- SMA-469: `[outbox.retention]` config ----------------------------------------------
+        // Same posture as the `[outbox]` checks directly above: each of these three is a divisor
+        // of the sweep's own behavior. Both `*_days` sentinels are deliberately NOT validated
+        // here — `0` is a legitimate "never delete" value for both `published_days` and
+        // `parked_days` (see `OutboxRetentionConfig`'s doc), so any `u32` value is accepted.
+        if self.outbox.retention.interval_secs == 0 {
+            return Err("outbox.retention.interval_secs must be at least 1 (0 would busy-loop the sweep)".to_string());
+        }
+        if self.outbox.retention.batch_size == 0 {
+            return Err("outbox.retention.batch_size must be at least 1 (0 would make every sweep pass delete nothing)".to_string());
+        }
+        if self.outbox.retention.max_batches_per_tick == 0 {
+            return Err("outbox.retention.max_batches_per_tick must be at least 1 (0 would make every sweep tick do no passes)".to_string());
         }
 
         // --- SMA-446 Unit 3: `[metrics]` config ------------------------------------------------
@@ -1941,6 +2010,118 @@ mod tests {
             assert_eq!(cfg.outbox.batch_size, 250);
             assert_eq!(cfg.outbox.max_attempts, 8);
             assert!(cfg.validate().is_ok(), "expected a fully-populated, valid [outbox] block (relay disabled) to pass validation");
+            Ok(())
+        });
+    }
+
+    // --- SMA-469: `[outbox.retention]` config -----------------------------------------------
+
+    #[test]
+    fn outbox_retention_defaults() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.outbox.retention.enabled, "retention must default to enabled");
+            assert_eq!(cfg.outbox.retention.interval_secs, 3600);
+            assert_eq!(cfg.outbox.retention.published_days, 7);
+            assert_eq!(cfg.outbox.retention.parked_days, 0, "parked rows must NOT age out by default");
+            assert_eq!(cfg.outbox.retention.batch_size, 1000);
+            assert_eq!(cfg.outbox.retention.max_batches_per_tick, 50);
+            assert!(cfg.validate().is_ok(), "outbox retention defaults alone should pass validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn outbox_retention_rejects_zero_interval_batch_and_max_batches() {
+        for mutate in [
+            (|c: &mut IamConfig| c.outbox.retention.interval_secs = 0) as fn(&mut IamConfig),
+            |c: &mut IamConfig| c.outbox.retention.batch_size = 0,
+            |c: &mut IamConfig| c.outbox.retention.max_batches_per_tick = 0,
+        ] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
+                let mut cfg: IamConfig = IamConfig::figment().extract()?;
+                mutate(&mut cfg);
+                assert!(cfg.validate().is_err(), "expected a zero retention knob to fail validation");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn outbox_retention_allows_zero_day_windows_meaning_never() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64()))?;
+            let mut cfg: IamConfig = IamConfig::figment().extract()?;
+            cfg.outbox.retention.published_days = 0;
+            cfg.outbox.retention.parked_days = 0;
+            assert!(cfg.validate().is_ok(), "0 days must be valid — it is the 'never delete' sentinel");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn outbox_retention_partial_toml_override_merges_with_defaults() {
+        // Real figment-merge exercise (not an in-memory struct mutation): a `[outbox.retention]`
+        // block that specifies only SOME keys must still land the REST on their documented
+        // defaults via figment's merge — the actual production config-loading path, and the
+        // single most common real-world config mistake if the defaults layer regresses.
+        //
+        // Also covers a nesting question: `[outbox]` carries its OWN `batch_size` (relay drain
+        // batch) and `[outbox.retention]` carries a DIFFERENT `batch_size` (sweep delete batch).
+        // Setting both in the same file proves TOML's table nesting keeps them distinct — no
+        // collision, no cross-contamination in either direction.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [outbox]
+                        batch_size = 250
+
+                        [outbox.retention]
+                        published_days = 30
+                        max_batches_per_tick = 200
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+
+                        [api_keys]
+                        pepper = "{}"
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+
+            // The two explicitly-configured retention keys took their configured values.
+            assert_eq!(cfg.outbox.retention.published_days, 30, "published_days must take the configured override");
+            assert_eq!(cfg.outbox.retention.max_batches_per_tick, 200, "max_batches_per_tick must take the configured override");
+
+            // Every UNSPECIFIED retention key must still land on its documented default,
+            // enumerated individually — asserting against `OutboxRetentionConfig::default()`
+            // wholesale would still pass even if the defaults layer were bypassed entirely
+            // (serde's own `#[derive(Default)]`-shaped fallback could paper over that), so each
+            // field is checked against its literal documented value instead.
+            assert!(cfg.outbox.retention.enabled, "enabled must still default to true when not overridden");
+            assert_eq!(cfg.outbox.retention.interval_secs, 3600, "interval_secs must still default to 3600 when not overridden");
+            assert_eq!(cfg.outbox.retention.parked_days, 0, "parked_days must still default to 0 when not overridden");
+            assert_eq!(cfg.outbox.retention.batch_size, 1000, "retention.batch_size must still default to 1000 when not overridden");
+
+            // The outbox-level `batch_size` (relay drain) and the retention-level `batch_size`
+            // (sweep delete) are distinct TOML tables and must not collide in either direction.
+            assert_eq!(cfg.outbox.batch_size, 250, "outbox.batch_size (relay) must take its own override, unaffected by [outbox.retention]");
+
+            assert!(
+                cfg.validate().is_ok(),
+                "a partial [outbox.retention] override merged with the rest of the defaults should pass validation"
+            );
             Ok(())
         });
     }

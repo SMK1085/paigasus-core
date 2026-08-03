@@ -271,7 +271,7 @@ mod tests {
         let svc = PolicyService::new(PolicyServiceDeps {
             policies,
             authorize: Authorize::new(Arc::new(fake)),
-            uow: Arc::new(FakeUnitOfWork),
+            uow: Arc::new(FakeUnitOfWork::default()),
             outbox: Arc::new(outbox.clone()),
             audit: Arc::new(audit.clone()),
             gen_bumper: Arc::new(bumper.clone()),

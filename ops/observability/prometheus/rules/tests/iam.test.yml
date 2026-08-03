@@ -301,3 +301,124 @@ tests:
       - eval_time: 25m
         alertname: IamAuthzRedisCacheBypassed
         exp_alerts: []
+
+  # IamOutboxRetentionStalled: a live target whose sweep counter never moves must fire; a target
+  # whose counter IS advancing is the control that proves the rule is not simply always-firing.
+  # The `stalled` counter is flat from t=0, so the condition (increase(...[6h]) == 0) is already
+  # true at the earliest evaluation — the same single-sample startup transient the `for: 2h`
+  # rationale in iam.rules.yml documents. The 30m/119m/121m trio below brackets the `for: 2h`
+  # hold the same way IamOutboxRetentionErroring's 30m/119m/121m trio brackets ITS `for: 2h`:
+  # comfortably not firing, not yet firing just before the hold elapses, firing just after.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="iam", instance="stalled:8080"}'
+        values: '1+0x400'
+      - series: 'iam_outbox_retention_ticks_total{job="iam", instance="stalled:8080", result="ok"}'
+        values: '5+0x400'
+      - series: 'up{job="iam", instance="healthy:8080"}'
+        values: '1+0x400'
+      - series: 'iam_outbox_retention_ticks_total{job="iam", instance="healthy:8080", result="ok"}'
+        values: '5+1x400'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: IamOutboxRetentionStalled
+        exp_alerts: []
+      - eval_time: 119m
+        alertname: IamOutboxRetentionStalled
+        exp_alerts: []
+      - eval_time: 121m
+        alertname: IamOutboxRetentionStalled
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam, instance: "stalled:8080" }
+            exp_annotations: { summary: "IAM outbox retention sweep is not ticking", description: "No outbox retention tick in ~6 hours on iam/stalled:8080. Published event_outbox rows are not being deleted, so the table grows without bound, and the iam_outbox_parked_rows dead-letter gauge is stale. The sweep ticks on outbox.retention.interval_secs (default 3600 = hourly), so the 6h window assumes the default — widen it if interval_secs is increased. Unlike the audit equivalent, outbox.retention.enabled=false does NOT silence this: the maintainer is spawned unconditionally and still ticks to refresh the gauge, so silence here always means something is wrong. See RUNBOOK section 4." }
+      - eval_time: 7h
+        alertname: IamOutboxRetentionStalled
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam, instance: "stalled:8080" }
+            exp_annotations: { summary: "IAM outbox retention sweep is not ticking", description: "No outbox retention tick in ~6 hours on iam/stalled:8080. Published event_outbox rows are not being deleted, so the table grows without bound, and the iam_outbox_parked_rows dead-letter gauge is stale. The sweep ticks on outbox.retention.interval_secs (default 3600 = hourly), so the 6h window assumes the default — widen it if interval_secs is increased. Unlike the audit equivalent, outbox.retention.enabled=false does NOT silence this: the maintainer is spawned unconditionally and still ticks to refresh the gauge, so silence here always means something is wrong. See RUNBOOK section 4." }
+
+  # IamOutboxRetentionStalled: a LIVE target that has never emitted the series at all must still
+  # fire — that is the `or (up == 1) * 0` fallback, and without it this case would be silent.
+  # `x420` (not `x400`) so the `up` series has a sample at the 7h eval instant itself: a series
+  # ending at 400m would be stale (past the 5m staleness lookback) by the 420m eval time, and the
+  # fallback — which depends entirely on `up` being live since there is no left-hand series at
+  # all here — would silently produce nothing.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="iam", instance="never-ticked:8080"}'
+        values: '1+0x420'
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: IamOutboxRetentionStalled
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam, instance: "never-ticked:8080" }
+            exp_annotations: { summary: "IAM outbox retention sweep is not ticking", description: "No outbox retention tick in ~6 hours on iam/never-ticked:8080. Published event_outbox rows are not being deleted, so the table grows without bound, and the iam_outbox_parked_rows dead-letter gauge is stale. The sweep ticks on outbox.retention.interval_secs (default 3600 = hourly), so the 6h window assumes the default — widen it if interval_secs is increased. Unlike the audit equivalent, outbox.retention.enabled=false does NOT silence this: the maintainer is spawned unconditionally and still ticks to refresh the gauge, so silence here always means something is wrong. See RUNBOOK section 4." }
+
+  # IamOutboxRetentionStalled: proves the [6h] window is actually enforced, not merely present.
+  # Neither case above can catch a regression to the neighbour's [2d]: `stalled`/`healthy` live
+  # out their whole ~7h simulated life inside a single 6h window, and `never-ticked` never has a
+  # left-hand series at all, so [6h] and [2d] agree on all three. Here the counter advances for
+  # the first 8h, then goes flat for the rest of this target's life, evaluated at 24h:
+  #   - correct [6h] window == [18h,24h] -> entirely inside the flat tail -> increase == 0 -> fires.
+  #   - regressed [2d]=48h window == [-24h,24h], i.e. effectively [0,24h] -> still captures the
+  #     0-8h climb -> increase > 0 -> would wrongly stay silent.
+  # `interval: 5m` (not 1m) keeps a 30h series readable (360 samples instead of 1800).
+  - interval: 5m
+    input_series:
+      - series: 'iam_outbox_retention_ticks_total{job="iam", instance="window-check:8080", result="ok"}'
+        values: '0+1x96 96x264'
+    alert_rule_test:
+      - eval_time: 24h
+        alertname: IamOutboxRetentionStalled
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam, instance: "window-check:8080" }
+            exp_annotations: { summary: "IAM outbox retention sweep is not ticking", description: "No outbox retention tick in ~6 hours on iam/window-check:8080. Published event_outbox rows are not being deleted, so the table grows without bound, and the iam_outbox_parked_rows dead-letter gauge is stale. The sweep ticks on outbox.retention.interval_secs (default 3600 = hourly), so the 6h window assumes the default — widen it if interval_secs is increased. Unlike the audit equivalent, outbox.retention.enabled=false does NOT silence this: the maintainer is spawned unconditionally and still ticks to refresh the gauge, so silence here always means something is wrong. See RUNBOOK section 4." }
+
+  # IamOutboxRetentionErroring: increase(...{result="error"}[6h]) > 0, for: 2h. The healthy
+  # target emits ONLY result="ok" ticks — its counter climbs steadily and result="error" never
+  # exists as a series for it at all. That is the control this alert needs: without it, a
+  # regression that dropped the `{result="error"}` selector (so the expr matched result="ok" too)
+  # would treat this target's routine successful ticks as errors and page on it forever; with the
+  # selector correctly in place, this target must never appear in exp_alerts at ANY eval_time
+  # below. The second target's counter carries ONLY result="error" and climbs at the same rate,
+  # modelling a sweep that errors on every tick (the failure mode this alert exists to catch) —
+  # it must fire once the `for: 2h` hold elapses.
+  - interval: 1m
+    input_series:
+      - series: 'iam_outbox_retention_ticks_total{job="iam", instance="healthy:8080", result="ok"}'
+        values: '5+1x400'
+      - series: 'iam_outbox_retention_ticks_total{job="iam", instance="erroring:8080", result="error"}'
+        values: '0+1x400'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: IamOutboxRetentionErroring
+        exp_alerts: []
+      - eval_time: 119m
+        alertname: IamOutboxRetentionErroring
+        exp_alerts: []
+      - eval_time: 121m
+        alertname: IamOutboxRetentionErroring
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam, instance: "erroring:8080", result: "error" }
+            exp_annotations: { summary: "IAM outbox retention sweep had a recent error", description: "iam_outbox_retention_ticks_total{result=\"error\"} increased on iam/erroring:8080 in the last 6 hours. The sweep IS ticking — unlike IamOutboxRetentionStalled, the maintainer task is alive and completing ticks — but at least one tick in that window had a failing step: the published-row sweep, the parked-row sweep, or the parked-row gauge query. While this persists, published event_outbox rows are not being deleted, so the table grows without bound, and if the gauge query is the failing step iam_outbox_parked_rows also goes stale. outbox.retention.enabled=false does NOT cause this: a disabled sweep still ticks and still reports result=\"ok\" (it only skips the two DELETE steps), so a firing alert here always means a real failure, never an intentional pause. Check IAM logs for the tick's own warn!s (\"outbox published-row sweep failed; will retry next tick\", \"outbox parked-row sweep failed; will retry next tick\", \"outbox parked-row gauge query failed\") to see which step is failing and why. See RUNBOOK section 4." }
+
+  # IamOutboxDeadLetterBacklog: a nonzero backlog held for an hour fires ONCE for the job even
+  # though two replicas each report it (proving the `max by (job)` aggregation). The zero-valued
+  # job is the control: a `>= 0` comparison would fire for it, `> 0` must not.
+  - interval: 1m
+    input_series:
+      - series: 'iam_outbox_parked_rows{job="iam", instance="a:8080"}'
+        values: '3+0x120'
+      - series: 'iam_outbox_parked_rows{job="iam", instance="b:8080"}'
+        values: '3+0x120'
+      - series: 'iam_outbox_parked_rows{job="iam-empty", instance="c:8080"}'
+        values: '0+0x120'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: IamOutboxDeadLetterBacklog
+        exp_alerts: []
+      - eval_time: 61m
+        alertname: IamOutboxDeadLetterBacklog
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam }
+            exp_annotations: { summary: "IAM outbox dead letters are awaiting an operator", description: "At least one event_outbox row has been parked for over an hour on iam and nobody has retired it. Parked rows are excluded from the relay's poll forever, so those events will never be delivered until an operator replays or discards them via /v1/outbox/dead-letters. This complements IamOutboxEventsParked: that one fires when something JUST parked, this one fires when nobody has dealt with it. See RUNBOOK section 4." }

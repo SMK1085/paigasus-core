@@ -3,8 +3,9 @@
 //! axum HTTP surface: `/healthz` (liveness), `/readyz` (DB-backed readiness), the
 //! `/v1` tenancy API (organizations/teams/projects/memberships/users, ADR-0014), the
 //! authn introspection endpoint (`/v1/authn/introspect`, SMA-443), the `/v1/authz`
-//! authorization API (`is-authorized`/policies/role-grants, SMA-444 Task 18), and the
-//! `/v1/audit` audit-log read endpoint (SMA-446 Task A11).
+//! authorization API (`is-authorized`/policies/role-grants, SMA-444 Task 18), the
+//! `/v1/audit` audit-log read endpoint (SMA-446 Task A11), and the operator-only
+//! `/v1/outbox/dead-letters` surface (SMA-469).
 
 mod api_keys;
 mod audit;
@@ -12,6 +13,7 @@ pub mod auth_middleware;
 pub mod authn;
 mod authz;
 pub mod authz_middleware;
+mod dead_letters;
 pub mod dto;
 pub mod error;
 mod memberships;
@@ -44,7 +46,7 @@ use crate::adapters::oidc::jwks::{HttpJwksFetcher, InMemoryJwksCache, JwksProvid
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
-    PgApiKeyRepository, PgAuditLog, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgPrincipalRepository,
+    PgApiKeyRepository, PgAuditLog, PgDeadLetters, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgPrincipalRepository,
     PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgTeamRepository, SeaOrmUnitOfWork,
 };
 use crate::application::api_keys::{ApiKeyService, ApiKeyServiceDeps};
@@ -55,6 +57,7 @@ use crate::application::authorize::Authorize;
 use crate::application::bootstrap;
 use crate::application::bootstrap_admin::{BootstrapAdminSeeder, BootstrapAdminSeederDeps};
 use crate::application::create_user::{CreateUser, CreateUserDeps};
+use crate::application::dead_letters::{DeadLetterDeps, DeadLetterService};
 use crate::application::memberships::MembershipService;
 use crate::application::organizations::OrganizationService;
 use crate::application::policies::{PolicyService, PolicyServiceDeps};
@@ -222,6 +225,9 @@ pub struct AppState {
     /// the Root-only restriction on `list` lives in `AuditQueryService` itself, not the Cedar
     /// schema (see its module doc).
     pub audit_query: AuditQueryService,
+    /// The dead-letter operator use case (SMA-469) — `GET/POST /v1/outbox/dead-letters*`
+    /// read through this. Root-only, enforced inside the service itself.
+    pub dead_letters: DeadLetterService,
     /// The persistent audit-log sink (`PgAuditLog`) the denial-audit [`DenialAuditDrain`]
     /// drains buffered denials into (SMA-446 Task A12) — the SAME `Arc<dyn AuditLog>` handle
     /// `audit_query` reads through. Exposed via [`AppState::audit_sink`] so `main.rs` (or a
@@ -448,6 +454,20 @@ impl AppState {
         // handle built above.
         let audit_query = AuditQueryService::new(audit_log.clone(), authorize.clone());
 
+        // SMA-469: the dead-letter surface over parked `event_outbox` rows. Its own
+        // `SeaOrmUnitOfWork` (a fresh instance is fine — `db.clone()` is a cheap
+        // `Arc`-backed pool handle, mirroring `role_uow`/`policy_uow`), so replay/discard
+        // and their audit entry commit atomically on one transaction.
+        let dead_letter_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
+        let dead_letters = DeadLetterService::new(DeadLetterDeps {
+            dead: Arc::new(PgDeadLetters::new(db.clone())),
+            uow: dead_letter_uow,
+            audit: audit_log.clone(),
+            ids: Arc::new(KernelIdGenerator),
+            clock: Arc::new(SystemClock),
+            authorize: authorize.clone(),
+        });
+
         // Shares the SAME `role_grant_store` handle `roles`/`snapshot` do (Task 21b): a
         // bootstrap-admin seed bumps the identical `policy_gen` counter `CedarAuthorizer`
         // polls, exactly like every other role-grant mutation in this composition root.
@@ -625,6 +645,7 @@ impl AppState {
             api_key_prefix: cfg.api_keys.key_prefix.clone(),
             api_key_introspect_body_limit: cfg.api_keys.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
             audit_query,
+            dead_letters,
             audit_log,
             denial_drain: Arc::new(Mutex::new(Some(denial_drain))),
         })
@@ -683,6 +704,7 @@ fn app_routes(state: AppState) -> Router {
         .merge(service_accounts::router())
         .merge(api_keys::router())
         .merge(audit::router())
+        .merge(dead_letters::router())
         // `route_layer` (not `layer`): the enforcement covers exactly the routes defined
         // above and never the merged-in `/healthz`/`/readyz`/introspect or the 404 fallback.
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware::require_bearer))
@@ -751,4 +773,34 @@ pub async fn serve_http(
     }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SMA-469: axum's router panics AT REGISTRATION time (inside `.route`/`.merge`, not
+    /// later at request time) when two patterns conflict — never a compile error. This
+    /// reproduces `app_routes`'s exact `protected` merge chain (sans `route_layer`/
+    /// `with_state`, which attach a `Service` layer / a state value and never touch routing)
+    /// so a conflict panics THIS test rather than surfacing only when `AppState::new` first
+    /// runs against a real database. The specific risk this guards: the literal
+    /// `/v1/outbox/dead-letters/replay` vs. the parameterized `/v1/outbox/dead-letters/{id}/
+    /// replay` differ in segment count, so axum's `matchit` router has no ambiguity between
+    /// them — but "should coexist" is exactly the kind of claim that deserves a runtime
+    /// proof, not just a doc comment.
+    #[test]
+    fn protected_router_merge_has_no_path_conflicts() {
+        let _: Router<AppState> = Router::new()
+            .merge(organizations::router())
+            .merge(teams::router())
+            .merge(projects::router())
+            .merge(memberships::router())
+            .merge(users::router())
+            .merge(authz::router())
+            .merge(service_accounts::router())
+            .merge(api_keys::router())
+            .merge(audit::router())
+            .merge(dead_letters::router());
+    }
 }

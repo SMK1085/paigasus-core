@@ -247,11 +247,45 @@
       ]
     },
     {
+      "id": 17,
+      "type": "stat",
+      "title": "Outbox dead-letter backlog",
+      "description": "max by (job) (iam_outbox_parked_rows) — current parked-row backlog; NEVER sum across replicas, every replica reports the same global count (SMA-469)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max by (job) (iam_outbox_parked_rows)",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Outbox rows deleted",
+      "description": "sum by (reason) (rate(iam_outbox_rows_deleted_total[5m])) — retention sweep deletes, by reason (SMA-469)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (reason) (rate(iam_outbox_rows_deleted_total[5m]))",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
       "id": 15,
       "type": "timeseries",
       "title": "Policy snapshot reloads",
       "description": "iam_authz_policy_snapshot_reloads_total by outcome — 'installed' must stay non-zero (SMA-470)",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 48 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 56 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
       "targets": [
@@ -268,7 +302,7 @@
       "type": "timeseries",
       "title": "Bootstrap-admin seed failures",
       "description": "iam_bootstrap_admin_seed_failures_total by stage — swallowed seed-attempt failures (SMA-468)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 56 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 64 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
       "targets": [

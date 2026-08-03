@@ -103,6 +103,11 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_outbox_relay_publish_failures_total` | counter | — | Rows whose `EventPublisher::publish` call failed in a tick (a subset of `drained`, superset of `parked`). |
 | `iam_outbox_relay_parked_total` | counter | — | Rows that hit `[outbox].max_attempts` and were **parked** (poison) in a tick — a **counter of newly-parked rows this tick**, deliberately not a gauge (a gauge summed per-tick would read `0` on every tick that parks nothing new, hiding a growing parked backlog behind a flat-looking panel). See §4 "Outbox parked events". |
 | `iam_outbox_oldest_unpublished_age_seconds` | gauge | — | Age (seconds) of the oldest unpublished-and-unparked row seen in the most recent non-empty tick's batch (`None` → reported as `0`). Freshness is bounded by `[outbox].poll_interval_secs`. **Freezes at its last value if the relay task wedges while the process stays alive** — it is a backlog-lag signal, not a liveness signal (see §4). |
+| `iam_outbox_retention_ticks_total` | counter | `result` (`ok`/`error`) | One increment per `PgOutboxMaintainer` sweep tick (SMA-469), regardless of whether the tick deleted anything. **This is the retention sweep's liveness signal, and it fires on every tick even when `[outbox.retention].enabled = false`** — unlike the audit-retention task, the outbox maintainer is spawned unconditionally and its tick always runs the gauge refresh below, so `enabled = false` never explains silence here. See §4 "IamOutboxRetentionStalled". |
+| `iam_outbox_rows_deleted_total` | counter | `reason` (`published`/`parked`) | Rows deleted by a sweep, split by which cutoff (`[outbox.retention].published_days` vs. `parked_days`) triggered the delete. `reason="parked"` staying at `0` is expected in steady state (`parked_days` defaults to `0` = never). |
+| `iam_outbox_parked_rows` | gauge | — | The **current** count of parked (dead-letter) rows (`SELECT count(*) … WHERE parked = true`), refreshed on every retention tick — including when `[outbox.retention].enabled = false`, so this gauge (and the alert below) never goes stale just because deletion is paused. **Per-replica, not global-unique**: every IAM replica's maintainer queries the same table and sets the identical count on its own gauge, so N replicas emit N identical series for one fact. **Aggregate with `max by (job)`, never `sum`** — summing reports N× the real backlog. See §4 "IamOutboxDeadLetterBacklog". |
+| `iam_outbox_dead_letters_replayed_total` | counter | `scope` (`one`/`bulk`) | Parked rows returned to the live queue. `scope="one"` increments by 1 per `POST /v1/outbox/dead-letters/{id}/replay` call; `scope="bulk"` increments by the **number of rows replayed** (not calls) per `POST /v1/outbox/dead-letters/replay` call — counted only after the enclosing transaction commits, so a rolled-back replay is never counted. |
+| `iam_outbox_dead_letters_discarded_total` | counter | — | Parked rows permanently discarded via `POST /v1/outbox/dead-letters/{id}/discard`. Counted only after commit, same as the replay counters. |
 | `iam_audit_partition_maintenance_ticks_total` | counter | `result` | One per audit partition-maintenance tick (create-ahead + prune). `result` ∈ `ok`/`error`. Liveness signal — see §4 "Audit partition maintenance stalled". |
 | `iam_audit_partitions_created_total` | counter | — | Monthly leaf partitions created by create-ahead. |
 | `iam_audit_partitions_dropped_total` | counter | `outcome` | Monthly leaf partitions dropped by retention. `outcome` ∈ `denied`/`committed`. |
@@ -167,7 +172,9 @@ Two dashboards are provisioned automatically (`grafana/dashboards/{iam,gateway}.
 - Audit write rate (by `outcome`).
 - Denial-audit drop rate — **should be flat 0**; any nonzero value is worth investigating (§4).
 - Outbox row: drained rate, published rate, publish-failure rate, parked events (15m window,
-  stat panel), oldest-unpublished age (stat panel — the key backlog SLO), relay tick rate.
+  stat panel), oldest-unpublished age (stat panel — the key backlog SLO), relay tick rate,
+  dead-letter backlog (stat panel, `max by (job)` — never read this as `sum`, see §2.2), rows
+  deleted by the retention sweep (rate, by `reason`).
 
 **Paigasus Gateway** (`gateway.json`):
 - HTTP request rate + p95 latency (RED, HTTP).
@@ -195,6 +202,9 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamOutboxRelayStalled` | `rate(iam_outbox_relay_ticks_total[10m]) == 0` | critical |
 | `IamPolicySnapshotReloadsStalled` | `(sum by (job, instance) (increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[10m])) or (up{job="iam"} == 1) * 0) == 0` for 5m | critical |
 | `IamAuditPartitionMaintenanceStalled` | `sum without (result) (increase(iam_audit_partition_maintenance_ticks_total[2d])) == 0` for 1h | warning |
+| `IamOutboxRetentionStalled` | `(sum by (job, instance) (increase(iam_outbox_retention_ticks_total[6h])) or (up{job="iam"} == 1) * 0) == 0` for 2h | warning |
+| `IamOutboxRetentionErroring` | `increase(iam_outbox_retention_ticks_total{result="error"}[6h]) > 0` for 2h | warning |
+| `IamOutboxDeadLetterBacklog` | `max by (job) (iam_outbox_parked_rows) > 0` for 1h | warning |
 | `IamHighErrorRate` | `sum(rate(iam_http_requests_total{status_class="5xx"}[5m])) / sum(rate(iam_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `IamGrpcHighErrorRate` | `sum(rate(iam_grpc_requests_total{grpc_status!="ok"}[5m])) / sum(rate(iam_grpc_requests_total[5m])) > 0.05` for 10m | critical |
 | `IamAuthzRedisCacheBypassed` | `sum(rate(iam_authz_decisions_total{cache="bypass"}[5m])) > 0` for 10m | critical |
@@ -291,19 +301,50 @@ marked `parked = true`, permanently excluded from future relay batches (the rela
 predicate is `published_at IS NULL AND parked = false`). This is deliberately a **counter of
 newly-parked rows**, not a gauge of the current parked-row count — a gauge summed per-tick would
 read `0` on every tick that parks nothing new and hide a slowly-growing parked backlog behind a
-flat panel; the currently-parked-row count is a derivable Prometheus query
-(`sum(increase(iam_outbox_relay_parked_total[…]))`) if needed, or a direct SQL count (below).
+flat panel; `iam_outbox_parked_rows` (§2.2, refreshed on every retention tick) is the exact answer
+to "how many rows are parked right now" if needed, or a direct SQL count (below).
 
-**Likely causes:** a single event's payload is fundamentally unpublishable (e.g. malformed for
-the specific `EventPublisher` backend, or an event type the consumer rejects deterministically) —
-retrying it forever would never succeed, hence the cap; or a broader outage caused every event in
-a window to exhaust its retries.
+**Likely causes:** two distinct shapes, and telling them apart matters for what you do next.
+- **A single bad payload.** One event's payload is fundamentally unpublishable (malformed for the
+  specific `EventPublisher` backend, or an event type the consumer rejects deterministically) —
+  retrying it forever would never succeed, hence the attempt cap.
+- **Mass parking — bounded by `[outbox].batch_size`, not "the whole backlog" — is still the
+  expected outage signature, not just a poison-message symptom.** The relay drains at most
+  `batch_size` (default `100`) rows per tick (`ORDER BY id LIMIT batch_size`), so within any single
+  poll interval only up to `batch_size` distinct rows can even be attempted, let alone parked — on
+  a backlog larger than `batch_size`, most of it is never selected during a short outage, so it
+  cannot possibly park. A row parks after `[outbox].max_attempts` (default `5`) consecutive failed
+  attempts; because the relay re-selects the same still-unpublished row on every subsequent tick,
+  that spans **four** poll intervals between its first and fifth attempt (20s at the default
+  `poll_interval_secs = 5`), plus up to one further interval for that first attempt to happen at
+  all — so **~25 seconds is the worst case for the first `batch_size` rows to park**, not for the
+  whole backlog to park at once. If the outage continues past that, the relay moves on to the next
+  `batch_size` rows (the previous batch is now excluded, `parked = true`) and repeats the same
+  ~20–25s cycle, so a longer outage parks proportionally more rows in `batch_size`-sized waves
+  rather than parking an unbounded backlog instantly. Many rows parking in a short window is still
+  the signal to suspect a resolved-or-ongoing outage before suspecting a payload bug — that
+  conclusion doesn't change, only the blast-radius number does; `IamOutboxDeadLetterBacklog`
+  (below) is the complementary alert for "a parked backlog nobody has dealt with yet."
 
 **Confirm:**
 1. IAM logs around the parked event's `id` — the relay emits `tracing::error!` with
    `id`/`event_type`/`attempts`/`reason` at the parking site, which usually explains *why* every
    attempt failed.
-2. Count currently-parked rows directly against Postgres:
+2. **The API is the primary way to inspect parked rows.** `GET /v1/outbox/dead-letters?event_type=&parked_from=&parked_to=&cursor=&limit=`
+   (Root-only — enforced inside `DeadLetterService`, not by the Cedar action schema itself; in
+   practice this means the caller needs a `platform_admin` grant scoped at Root) returns each
+   parked row's `last_error`, `attempts`, `parked_at`, and the raw `payload`, keyset-paginated via
+   `cursor`/`next_cursor` exactly like the audit query API. Absent/empty query params are
+   unfiltered; `limit` defaults to 50 and is capped at 200. **A caveat, not a bug:** a row with
+   `parked_at IS NULL` can never satisfy `parked_from`/`parked_to` (Postgres never evaluates a
+   `NULL` comparison as true), so such a row is invisible to `list` whenever either time bound is
+   set, and to bulk replay whenever a time bound narrows the match — it stays reachable via an
+   unfiltered (or only `event_type`-filtered) query, so nothing is permanently lost. The `m0009`
+   migration backfilled `parked_at = now()` for every pre-existing parked row, so exposure to this
+   is small in practice, but a triaging operator who knows a row is parked and can't find it in a
+   windowed query should think of this before assuming a bug.
+3. **Break-glass fallback (API unreachable only).** Count/inspect parked rows directly against
+   Postgres:
    ```sql
    SELECT id, event_type, attempts, occurred_at, aggregate_prn
    FROM event_outbox
@@ -311,25 +352,111 @@ a window to exhaust its retries.
    ORDER BY occurred_at;
    ```
 
-**Remediation (interim — manual, no automated replay tool exists yet):**
-- If the root cause was transient (e.g. a broker outage that has since recovered) and the
-  event's payload is otherwise valid, replay it by clearing its parked/attempts state so the
-  relay picks it back up on its next poll:
-  ```sql
-  UPDATE event_outbox
-  SET parked = false, attempts = 0
-  WHERE id = '<parked-row-id>';
-  ```
-  Do this for a small, deliberately-chosen set of rows after confirming the underlying failure
-  is fixed — blindly un-parking everything re-triggers the same failure loop if the root cause
-  wasn't transient.
-- If the event's payload is genuinely malformed (a bug in the writer, not a downstream outage),
-  it will never publish successfully; leave it parked and open a follow-up to fix the writer /
-  investigate how a bad row was written, rather than looping it through more failed attempts.
-- **A full dead-letter-queue subsystem and automated replay/pruning tooling are explicit
-  follow-ups (§6), not yet implemented.** Today "the DLQ" is just `parked = true` rows sitting in
-  `event_outbox` — there is no separate table, no UI, and no scheduled sweep. Treat the manual
-  SQL above as the only remediation path until that follow-up lands.
+**Before upgrading to (or past) the `m0009` migration, run `SELECT count(*) FROM event_outbox;`.**
+`m0009`'s `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock, and — unlike `m0008`'s partition
+DDL — that lock is held for the migration's *entire* remaining body, not released before the
+backfill: the `UPDATE … WHERE parked = true AND parked_at IS NULL` (a sequential scan, since its
+own supporting index is created only afterward) and both non-concurrent `CREATE INDEX` builds all
+run while still holding the same `ACCESS EXCLUSIVE` request the `ALTER TABLE` already queued,
+blocking every `PgOutbox::enqueue` for as long as they take. `SET LOCAL lock_timeout = '5s'`
+bounds how long Postgres will wait to *acquire* that lock — it does nothing to bound how long the
+migration *holds* it once acquired. On a small table this whole sequence is sub-second and
+invisible; on a table with a large accumulated backlog — precisely the deployment this feature
+exists to rescue — the backfill and index builds scale with row count, not disk size, so a large
+`count(*)` means a materially longer migration window with writes blocked throughout. Schedule the
+upgrade for a low-traffic window if the count is large.
+
+**Remediation.** The API is the primary recovery path — reach for the SQL fallback at the very
+end of this section only when the API itself is unreachable.
+- **Replay one row:** `POST /v1/outbox/dead-letters/{id}/replay` returns the named row to the live
+  queue; the relay picks it up on its next poll. **Discard one row permanently:**
+  `POST /v1/outbox/dead-letters/{id}/discard`. Both are Root-only, the same posture as the `GET`
+  listed under Confirm above.
+- **Bulk replay:** `POST /v1/outbox/dead-letters/replay` with a JSON body
+  `{"event_type": …, "parked_from": …, "parked_to": …, "max_rows": N}`. **`max_rows` is required**
+  — an absent or zero value is rejected with `400 invalid-bulk-replay` *before any store access*.
+  This is deliberate, not an oversight: an "at least one filter must be present" check was
+  considered and rejected, because `parked_from = "1970-01-01T00:00:00Z"` trivially satisfies such
+  a check while still matching every row — `max_rows` is the actual guard on blast radius. The
+  server additionally caps the effective replay count at 10,000 rows regardless of the requested
+  `max_rows`; the audit entry records both the requested `max_rows` and the enforced
+  `capped_max_rows`, so a request over the cap is auditable rather than silently truncated-looking.
+  **There is deliberately no bulk-discard endpoint** — see the `parked_days` bullet below for the
+  supported way to retire a backlog in bulk.
+- **Confirm the root cause is actually fixed before any bulk replay.** Mass parking is usually an
+  outage (see Likely causes above); replaying into a still-broken publisher just re-parks the same
+  rows on their very next failed attempt.
+- **A 10k-row replay adds roughly 8 minutes of low-id backlog for a relay to work through — an
+  idealized aggregate-capacity estimate, not a guaranteed delay before live traffic is touched.** A
+  replayed row keeps its original — older, lower — `id`, and the relay drains strictly
+  `ORDER BY id ASCENDING` at `[outbox].batch_size = 100` rows every
+  `[outbox].poll_interval_secs = 5` seconds (10,000 / 100 × 5s = 500s ≈ 8m for a single relay, if
+  it did nothing else the whole time). It is **not** true that the replay is drained to completion,
+  in full, before a relay touches any newer/live row: `FOR UPDATE SKIP LOCKED` means a relay that
+  finds the next lower-id replayed rows already locked by a peer (or mid-transaction) simply moves
+  on to the next available rows in the batch, which can include newer, live-traffic rows, rather
+  than blocking behind them — there is no strict global ordering guarantee here, only the relay's
+  poll predicate and `ORDER BY`. With N IAM replicas each running their own relay and partitioning
+  the work this way, the aggregate capacity consumed by the replay is roughly **8/N minutes' worth**
+  spread across the fleet, not a flat 8 charged to any one relay — schedule a large bulk replay for
+  a low-traffic window, or replay in smaller batches, if even that capacity hit to live traffic is
+  unacceptable.
+- **`404` on any of the three replay/discard endpoints conflates several distinct states**: no row
+  exists with that id, a row that was never parked (still live, or already published), a row
+  another actor (or another attempt of the *same* retry) already replayed or discarded, and —
+  rarely — a row the relay is mid-tick on and about to park. Do not chase a phantom id; re-`GET`/
+  `list` to confirm the row's current state before assuming a bug.
+- **Replay is not idempotent, and that is intentional — a `404` on retry is the expected
+  success-after-timeout signal, not a failure.** If a client times out waiting for a `replay`
+  response, the safe move is to simply retry the call: if the first attempt actually succeeded,
+  the retry gets `404`, and that `404` *is* confirmation recovery already happened — it is not an
+  error to keep chasing. A retried *bulk* replay is a fresh query, though, and can match a
+  different row set than the first attempt did (rows outside the original cursor/time bounds may
+  now qualify) — don't assume a retried bulk call is a strict no-op.
+- **Replay deliberately exercises the outbox's at-least-once delivery contract.** The relay was
+  already at-least-once (a publish that succeeds followed by a failed commit re-publishes the same
+  event), so every downstream consumer must already be idempotent — a manual replay just forces
+  that path to run on demand rather than introducing a new failure mode.
+- **Discard destroys delivery, not just evidence.** The underlying event already committed inside
+  IAM; discarding means it will now **never** reach any consumer — with a real broker-backed
+  `EventPublisher` (SMA-471) that becomes a permanent, silent divergence between IAM's own state
+  and everything downstream of it. The discard's audit entry is deliberately **lossless**: it
+  carries the complete event, payload included, and is the documented reconciliation input for
+  whatever manual/compensating action the now-undelivered event requires. **Write down a
+  reconciliation plan before discarding** — once discarded, that audit entry is the event's only
+  remaining trace.
+- **Bulk retirement of an old backlog uses `[outbox.retention].parked_days`, not a bulk-discard
+  call — there is deliberately no bulk-discard endpoint.** To retire a large accumulated parked
+  backlog on a schedule: set `parked_days` to a deliberate window (e.g. `30`), let the retention
+  sweep delete rows older than that window on its normal `interval_secs` cadence, then set
+  `parked_days` back to `0`. Unlike a bulk `DELETE`, this stays **reversible right up until the
+  sweep actually runs** — an operator who changes their mind before the next tick loses nothing.
+  **Unlike a discard through the API, this path leaves no audit trail at all** — `PgOutboxMaintainer`
+  deletes each row with only a counter increment (`iam_outbox_rows_deleted_total{reason="parked"}`),
+  none of the discarded-event audit entry's payload, actor, or correlation id — so choose the
+  per-row API discard above instead whenever the deleted events might need reconstructing later,
+  and reserve `parked_days` for backlogs you're confident are safe to lose without a trace.
+- If a row's payload is genuinely malformed (a bug in the writer, not a downstream outage), it will
+  never publish successfully no matter how many times it's replayed; leave it parked (or discard it
+  with a recorded reconciliation plan) and open a follow-up to fix the writer, rather than looping
+  it through more failed attempts.
+
+**Break-glass fallback (API unreachable only).** If the HTTP API itself is down, a row can still
+be un-parked directly in Postgres — this mirrors the API's own `REPLAY_ONE_SQL` exactly, including
+its `AND parked = true` guard, not just the `parked_at`/`attempts`/`parked` reset:
+```sql
+UPDATE event_outbox
+SET parked = false, attempts = 0, parked_at = NULL
+WHERE id = '<parked-row-id>' AND parked = true;
+```
+The `AND parked = true` guard is not decoration: it is what makes a live or already-published row
+untouchable through this path, so a mistyped id can never silently zero a healthy row's `attempts`
+or clear its `parked_at`. If the id you paste in isn't actually parked, this statement affects
+**zero rows** — that is the guard working as intended (your id was wrong, or the row already
+recovered), not a failure to retry by dropping the guard.
+Prefer the API's `replay` endpoint whenever it is reachable — besides being the documented path, it
+is also what produces the audit trail (`ReplayOutboxDeadLetter`, in `audit_log`); a direct SQL
+`UPDATE` bypasses that entirely and leaves no record that the recovery action happened.
 
 ### `IamOutboxRelayStalled` — the relay has stopped ticking (critical)
 
@@ -511,6 +638,171 @@ restart.
 - If a `*_default` partition has accumulated rows while the task was down, restarting the task
   alone does **not** move those rows back into a proper monthly leaf — see "Audit retention &
   partitioning" below for the manual reattach procedure.
+
+### `IamOutboxRetentionStalled` — the outbox retention sweep is not ticking (warning)
+
+**Meaning.** `(sum by (job, instance) (increase(iam_outbox_retention_ticks_total[6h])) or
+(up{job="iam"} == 1) * 0) == 0` for 2h — no `PgOutboxMaintainer` sweep tick in ~6 hours on the
+named target, even though the IAM process is up. The window is scaled to *this* task's own hourly
+default (`[outbox.retention].interval_secs = 3600`) — it is deliberately **not** copied from
+`IamAuditPartitionMaintenanceStalled`'s `[2d]` above, which matches the audit maintainer's *daily*
+interval; reusing that window here would tolerate ~48 consecutive missed ticks before paging. The
+`or (up{job="iam"} == 1) * 0` fallback mirrors the two alerts above it for the same reason: without
+it, a replica that spawned the maintainer but never completed a single tick emits no series at
+all, `increase()`/`sum()` over that absent series is empty, and `empty == 0` is also empty — the
+alert would stay silent exactly when things are worst.
+
+**`for: 2h` exceeds the sweep's own hourly tick interval on purpose — this is not a copy-paste of a
+bigger number for safety margin.** `main.rs` runs an awaited startup tick before the maintainer's
+first `interval_secs` sleep, so a freshly booted replica's counter gets its first sample at boot
+and its second an hour later. `increase()` over a single sample is `0` (there is no earlier point
+in the window to diff against), so the condition is already true at `t=0` — a perfectly healthy
+replica goes pending the instant it boots, regardless of hold length. A `for: 1h` hold would then
+need the second hourly tick to land *and* be scraped before the hold elapses — a photo finish
+against a 3600s interval that any tick jitter or scrape delay turns into a page against a healthy
+replica, on every restart. `for: 2h` gives the second tick a full extra cycle of slack to clear the
+condition well before the hold elapses. Worst-case detection is therefore ~8h (6h window + 2h
+hold) — an accepted trade-off for a sweep whose failure mode is slow, unbounded table growth, not
+something that needs minute-scale paging.
+
+**Unlike its audit-retention sibling, `[outbox.retention].enabled = false` does NOT silence this
+alert — that difference is deliberate and worth internalizing before you page on it.** Setting
+`[audit.retention].enabled = false` stops `PgPartitionMaintainer` from being spawned at all, so its
+tick counter never exists and `IamAuditPartitionMaintenanceStalled` goes quiet for as long as that
+config holds. `PgOutboxMaintainer` does not work that way: it is spawned **unconditionally**
+regardless of `[outbox.retention].enabled`, and `enabled = false` only skips the two `DELETE`
+steps inside `tick` — the tick itself still runs on `interval_secs`, still refreshes
+`iam_outbox_parked_rows` (the dead-letter backlog gauge), and still increments
+`iam_outbox_retention_ticks_total` either way. So if this alert fires, `enabled = false` is never
+an innocent explanation for it — silence here always means the maintainer task has actually
+stopped doing anything at all, ticking included.
+
+**Likely causes:** the maintainer task panicked/exited without bringing down the process; the task
+is stuck on a long-running or lock-contended `DELETE` against `event_outbox` (contention with the
+*relay* is structurally impossible — the sweep predicates and the relay's poll predicate are
+provably disjoint, per the module's own doc comment — but contention from a long-running manual
+operator query against the same table is not); or the shutdown-watch fired unexpectedly and the
+loop exited but the process didn't restart.
+
+**Confirm:**
+1. Verify the IAM process is actually up (`up{job="iam"} == 1`) — if it's down instead, this is
+   really a `TargetDown` situation.
+2. Check `iam_outbox_parked_rows` — frozen rather than moving corroborates a genuinely stalled
+   tick, since that gauge is refreshed as the last step of every tick, successful or not.
+3. IAM logs for a panic, an unhandled error, or the tick's own `warn!`s (`outbox published-row
+   sweep failed; will retry next tick`, `outbox parked-row sweep failed; will retry next tick`,
+   `outbox parked-row gauge query failed`) around the time ticks stopped.
+4. Check for long-running/blocked queries against `event_outbox` on the Postgres side
+   (`pg_stat_activity`).
+
+**Remediation:**
+- If the task has genuinely wedged, a **process restart** of `paigasus-iam` is the fastest
+  recovery — the maintainer re-spawns on boot and resumes on its normal `interval_secs` cadence;
+  `event_outbox` rows are durable in Postgres, so nothing is lost by restarting.
+- If a Postgres-side lock/hang caused the stall, resolving that may let the existing task recover
+  without a restart — check whether ticks resume before restarting the service.
+- **`DELETE` alone does not shrink `event_outbox`'s on-disk footprint.** Deleting rows only marks
+  their space reclaimable; autovacuum reclaims it asynchronously into the table's free space map
+  (available for future inserts, not a smaller file on disk). After a long stall, the first sweep
+  once ticking resumes may need to retire an unusually large accumulated backlog — bounded per tick
+  by `batch_size * max_batches_per_tick`, so a huge backlog drains over several ticks rather than
+  in one. If disk pressure is acute, a manual `VACUUM event_outbox;` reclaims space faster than
+  waiting on autovacuum's own schedule; `VACUUM FULL event_outbox;` reclaims it fully but takes an
+  **exclusive lock**, so run it only in a maintenance window, never casually against a live table.
+
+### `IamOutboxRetentionErroring` — the retention sweep had a recent error (warning)
+
+**Meaning.** `increase(iam_outbox_retention_ticks_total{result="error"}[6h]) > 0` for 2h — at
+least one `PgOutboxMaintainer` tick has errored on the named target in the last 6 hours. This is
+a **different failure mode from `IamOutboxRetentionStalled` above, and the two are deliberately
+separate alerts**: that one sums `result="ok"` and `result="error"` together, so it can only tell
+you the maintainer has stopped ticking at all — a sweep that ticks every hour but fails one of
+its steps *every single time* looks perfectly healthy to it (the tick count keeps advancing).
+Before this alert existed, the only signal for that failure mode was a `warn!` log line nobody
+was necessarily watching, while `event_outbox` grew without bound underneath it.
+
+**`enabled = false` does NOT cause this alert — internalize that before you page on it.** Setting
+`[outbox.retention].enabled = false` only skips the two `DELETE` steps inside `tick`; the tick
+still runs, still refreshes `iam_outbox_parked_rows`, and still reports `result="ok"` (see
+`PgOutboxMaintainer::tick`: `errored` is only ever set by an actual failure, never by the
+`enabled` flag). So a firing `IamOutboxRetentionErroring` always means a **real** failure in one
+of the tick's steps — the published-row sweep, the parked-row sweep, or the parked-row gauge
+query — never an operator's intentional pause.
+
+**`for: 2h` is a time-to-page bound, not proof of repeated failure — read this before assuming a
+firing alert means "erroring for 2+ hours."** `increase(...[6h]) > 0` cannot distinguish a single
+error tick that already recovered from one still recurring: once any error lands in the 6h
+window the condition stays true for nearly the whole window regardless of what happens
+afterward, so `for: 2h` only delays the page by up to 2 hours relative to the first error — it
+does not require a second one. A genuinely one-off, already-resolved blip can still trip this
+alert around the 2-hour mark and will self-resolve a few hours later once that sample ages out of
+the 6h window; a sweep erroring on every tick (the case this alert exists for) will still be
+erroring when you look, and keeps re-firing until it's fixed.
+
+**Likely causes:** a Postgres-side permission or connectivity problem specific to `event_outbox`
+(so other queries against other tables keep working while this fails); a lock/statement-timeout
+being hit repeatedly on the same `DELETE`/count query (contention from a long-running manual
+operator query against `event_outbox`, most plausibly); or a `published_days`/`parked_days` value
+large enough to overflow `DateTime`'s representable range (`PgOutboxMaintainer::cutoff` degrades
+that to a logged, counted error rather than a panic — see its doc comment).
+
+**Confirm:**
+1. IAM logs for the tick's own `warn!`s — `outbox published-row sweep failed; will retry next
+   tick`, `outbox parked-row sweep failed; will retry next tick`, `outbox parked-row gauge query
+   failed` — which pinpoint which step is failing and (via the logged `error`) why.
+2. Check `iam_outbox_parked_rows` — if the gauge query is the failing step, this value goes stale
+   rather than merely growing, which narrows the cause.
+3. Check for long-running/blocked queries or a permissions change against `event_outbox` on the
+   Postgres side (`pg_stat_activity`, recent `GRANT`/`REVOKE` history).
+4. Confirm `[outbox.retention].published_days`/`parked_days` are the values you expect — an
+   accidental near-`u32::MAX` value degrades to a logged `Overflow` error every tick, which reads
+   identically to a Postgres-side failure in this alert alone; the log line names which cutoff
+   overflowed.
+
+**Remediation:**
+- Fix the underlying Postgres-side issue (restore connectivity/permissions, resolve the blocking
+  query); the maintainer needs no restart to recover — the very next tick tries again on its
+  normal `interval_secs` cadence.
+- If a misconfigured `published_days`/`parked_days` is the cause, correct it in `iam.toml` /
+  `IAM_OUTBOX__RETENTION__*` and redeploy.
+- Once fixed, expect this alert to keep firing for up to ~6 hours after the last error tick
+  (until that sample ages out of the window) even though the sweep is healthy again — that is
+  the same window-driven lag `IamOutboxRetentionStalled` has, not a sign the fix didn't take;
+  corroborate with `iam_outbox_parked_rows` moving again and a fresh absence of the `warn!` lines
+  above.
+
+### `IamOutboxDeadLetterBacklog` — dead letters are awaiting an operator (warning)
+
+**Meaning.** `max by (job) (iam_outbox_parked_rows) > 0` for 1h — at least one `event_outbox` row
+has sat parked for over an hour and nobody has replayed or discarded it. This complements
+`IamOutboxEventsParked` above: that alert fires the moment something *just* parked (a 15-minute
+increase window); this one fires when a parked backlog has gone **unattended** for an hour,
+regardless of when the rows originally parked.
+
+**`max by (job)` is required here, not cosmetic — a bare `sum()` panel or alert would be wrong by
+a factor of the replica count.** Every IAM replica runs its own `PgOutboxMaintainer`, and every
+replica's sweep queries the *same* `event_outbox` table and sets the *same* global parked-row count
+on its own gauge — so N replicas emit N **identical** series for one underlying fact, not N
+independent counts to add together. `sum()` across them would report N× the real backlog, and a
+bare `iam_outbox_parked_rows > 0` with no aggregation at all would page once per replica for a
+single condition. The Grafana backlog panel (§3) uses the identical `max by (job)` aggregation for
+the same reason — see §2.2's metric-catalog entry too.
+
+**Likely causes:** the same causes as `IamOutboxEventsParked` above, just left unresolved for over
+an hour — either a genuine payload/writer bug nobody has triaged yet, or a since-resolved outage
+whose parked backlog nobody has bulk-replayed.
+
+**Confirm:** `GET /v1/outbox/dead-letters?limit=200` (Root-only) to list what's actually parked.
+`list` has no ordering knob — it is always **newest first** (`ORDER BY id DESC`), keyset-paginated
+via `cursor`/`next_cursor`; to find the OLDEST parked rows, page forward with `cursor` until the
+response is shorter than `limit` (the last page), or narrow with `parked_from`/`parked_to` and
+inspect the tail of that window. Use the break-glass SQL under `IamOutboxEventsParked` above
+(`ORDER BY occurred_at`) if the HTTP API itself is unreachable.
+
+**Remediation:** see the full remediation playbook under `IamOutboxEventsParked` above — replay a
+single row, bulk-replay a filtered set (`max_rows` required), or discard with a recorded
+reconciliation plan. This alert exists purely to make sure a parked backlog doesn't sit forgotten;
+it does not introduce a different recovery path from the one documented there.
 
 ### `IamGrpcHighErrorRate` — elevated non-OK gRPC status ratio (critical)
 
@@ -1141,6 +1433,46 @@ second audit row is ever produced. Consequently, if `audit.retention.committed_m
 set to a nonzero value, the row is eventually pruned like any other committed leaf and is **not
 reproducible** once gone.
 
+### Starter-policy drift warning at boot
+
+**Meaning.** On every boot, `bootstrap::reconcile_starter` compares each starter Cedar policy
+document's code-defined `source` (generated by `authz::roles::starter_policies()`) against
+whatever is currently persisted in the `policy` table under that same `policy_id`. Identical
+content is a no-op. Different content logs:
+```text
+starter policy drift: the stored source differs from the code-defined source; not overwriting a system-owned row
+```
+and moves on **without overwriting** the stored row — the policy store itself refuses to edit a
+persisted `system = true` row at all, so `reconcile_starter` never even attempts the write once it
+detects drift; it warns and continues, on purpose (mirrors the audit-retention posture above of
+warning rather than silently mutating operator/system-owned state).
+
+**Why SMA-469 makes this fire.** The `forbid_archived_writes` starter policy's action list is
+generated at compile time from `Action::ALL` filtered to `is_write() && !is_restore()` — it is
+deliberately not hand-maintained, so it can never fall out of sync with the action catalog as new
+actions are added. SMA-469 added two new write actions, `ReplayOutboxDeadLetter` and
+`DiscardOutboxDeadLetter` (both `is_write() == true`, neither a restore action), so the generated
+`forbid_archived_writes` source now includes them where a database seeded before this release does
+not. Any environment whose database already holds a persisted `forbid_archived_writes` row from
+before this deploy will log the drift warning on its first boot after upgrading — that is expected
+behavior, not a bug, and is the mechanism working exactly as designed: a system-owned policy is
+never silently rewritten out from under an operator who may have hand-edited it.
+
+**Remediation:** either
+1. update the system-owned `policy` row's `source` column directly to the current code-defined
+   value (`authz::roles::starter_policies()`'s output for `policy_id = "forbid_archived_writes"`
+   at the deployed version), or
+2. delete that row entirely and let `reconcile_starter` re-`put` a fresh one on the very next boot
+   (the "absent" branch of its reconciliation match — `bootstrap.rs`).
+
+Until one of those happens, the **stored** (stale) policy keeps governing decisions — this is not
+a decision-time outage, just a policy that has not yet picked up the two new archived-write
+forbids, so replaying or discarding a dead letter against an *archived* resource may not be
+forbidden the way the current code intends until the row is reconciled. Tracked as **SMA-477** for
+a proper automated fix (an in-place `system`-row update path); until it lands, reconciling a
+drifted starter policy by hand is a manual step required on every release whose code changes a
+starter policy's generated content.
+
 ---
 
 ## 5. Cardinality & privacy
@@ -1205,8 +1537,14 @@ Not implemented in this cycle; tracked as explicit follow-ups:
 - **Hosted Prometheus + Grafana deployment**, long-term metrics storage, and alert **routing**
   (Alertmanager → PagerDuty/Opsgenie or similar) — this RUNBOOK's alert rules define *what* fires,
   not *where it pages*; routing is deployment-specific and not yet configured anywhere.
-- **Outbox pruning + a full dead-letter-queue subsystem** for parked events (today: manual SQL
-  per §4's `IamOutboxEventsParked` entry; no scheduled sweep, no separate DLQ table/UI).
+- **A gRPC mirror of the `/v1/outbox/dead-letters` surface**, if a non-HTTP operator client ever
+  needs one — untracked, no follow-up issue filed. Deliberately out of scope for SMA-469 — the
+  HTTP adapter's own module doc calls this a scope decision, not an API-boundary principle, and
+  keeping it HTTP-only keeps `contracts/` untouched.
+- **Bulk discard**, if `[outbox.retention].parked_days` proves insufficient in practice for
+  retiring a mass-parked backlog. There is deliberately no bulk-discard endpoint today (SMA-469);
+  the supported bulk-retirement path is the retention sweep — see `IamOutboxEventsParked`'s
+  remediation (§4) for the `parked_days` procedure.
 - **`DETACH … CONCURRENTLY` partition drops** (PG14+) instead of a `lock_timeout`'d
   `DROP TABLE IF EXISTS`, and **auto-remediating a non-empty `DEFAULT` partition** (moving leaked
   rows into a freshly created leaf automatically instead of the manual §4 reattach procedure) —

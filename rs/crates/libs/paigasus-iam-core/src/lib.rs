@@ -8,6 +8,7 @@ pub mod api_key;
 pub mod audit;
 pub mod authn;
 pub mod authz;
+pub mod dead_letter;
 pub mod domain_event;
 pub mod ports;
 pub mod principal;
@@ -23,6 +24,7 @@ pub use authz::{
     AccessRequest, Action, AuditSink, Authorizer, AuthzError, Decision, DecisionCache, Effect, EntitySliceLoader, GrantScope, PolicyDocument, PolicyStore, PutOutcome, RequestContext, Role, RoleGrant,
     RoleGrantRef, RoleGrantStore,
 };
+pub use dead_letter::{BulkReplayRequest, DeadLetterEntry, DeadLetterFilter, DeadLetters};
 pub use domain_event::{DomainEvent, EventType};
 pub use ports::{
     ApiKeyRepository, AuditLog, Authenticator, Clock, ConflictKind, EventPublisher, ExternalIdentityRepository, IdGenerator, KeyEntropy, MembershipRecord, MembershipRepository, NodeView,

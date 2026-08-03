@@ -24,6 +24,15 @@ pub struct Model {
     pub published_at: Option<DateTimeUtc>,
     pub attempts: i32,
     pub parked: bool,
+    /// When the relay flipped `parked` to true (SMA-469). `[outbox.retention].parked_days`
+    /// measures from this, never from `occurred_at`. Expected to be non-NULL for a parked row,
+    /// but this is not schema-enforced (no CHECK constraint — a rolling deploy can have an old
+    /// replica park a row without stamping it, and that must not hard-fail).
+    pub parked_at: Option<DateTimeUtc>,
+    /// The most recent publish-failure reason, rewritten on EVERY failed attempt (not only at
+    /// parking) so an operator watching `attempts` climb sees the current cause. A later replay
+    /// operation does NOT NULL this out, so it still names the last real cause afterward too.
+    pub last_error: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

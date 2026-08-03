@@ -113,6 +113,41 @@
 # max_attempts        = 5             # publish failures before a row is parked (excluded from
 #                                      # future ticks) — default shown; must be >= 1
 
+# --- Outbox retention + dead letters (SMA-469) ---
+
+# [outbox.retention]
+# enabled              = true   # default shown. false disables DELETIONS ONLY — the maintainer
+#                                # is still spawned and still ticks every interval_secs regardless,
+#                                # because the tick is also what refreshes the
+#                                # iam_outbox_parked_rows dead-letter gauge. Contrast with
+#                                # [audit.retention].enabled=false, which stops that maintenance
+#                                # task from being spawned at all: pausing outbox deletion never
+#                                # blinds the IamOutboxRetentionStalled alert or the backlog gauge
+#                                # the way disabling audit retention silences its own stalled-alert.
+# interval_secs        = 3600   # seconds between sweep ticks — default shown (hourly); must be >= 1.
+#                                # Raising this requires widening the IamOutboxRetentionStalled
+#                                # alert's [6h] window, which assumes the default.
+# published_days       = 7      # delete published rows whose published_at is older than this —
+#                                # default shown; 0 = never. The outbox is a drained QUEUE, not a
+#                                # record of truth (audit_log is the durable trail), so a short
+#                                # window is the intended posture.
+# parked_days          = 0      # delete parked (dead-letter) rows whose parked_at is older than
+#                                # this — default shown (never). A non-zero value auto-deletes
+#                                # events an operator was alerted to inspect, so it is opt-in and
+#                                # logs a startup warn. It is ALSO the supported BULK-RETIREMENT
+#                                # path — there is deliberately no bulk-discard endpoint: set a
+#                                # deliberate window, let the sweep retire a mass-parked backlog on
+#                                # its normal schedule, then set it back to 0. Unlike a bulk DELETE
+#                                # call this stays reversible right up until the sweep runs. Unlike
+#                                # a discard through the dead-letter API, though, this path writes
+#                                # NO audit entry at all — only a counter increment — so the
+#                                # deleted event's payload/actor/correlation id are unrecoverable.
+# batch_size           = 1000   # rows per delete pass — default shown; must be >= 1
+# max_batches_per_tick = 50     # passes per tick, so one tick retires at most batch_size * this
+#                                # and a huge first sweep resumes next tick instead of holding one
+#                                # tick open — default shown; must be >= 1. Raise it when draining
+#                                # a large accumulated backlog (at the defaults, 50k rows/hour).
+
 # --- Metrics (SMA-446 Unit 3: Prometheus `GET /metrics`) ---
 
 # [metrics]

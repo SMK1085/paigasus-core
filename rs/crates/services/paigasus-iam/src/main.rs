@@ -9,7 +9,7 @@ use std::time::Duration;
 use paigasus_iam::adapters::events::{OutboxRelay, TracingEventPublisher};
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::{AppState, serve_http};
-use paigasus_iam::adapters::persistence::{Migrator, PgPartitionMaintainer, RetentionPolicy};
+use paigasus_iam::adapters::persistence::{Migrator, OutboxRetentionPolicy, PgOutboxMaintainer, PgPartitionMaintainer, RetentionPolicy};
 use paigasus_iam::config::IamConfig;
 use paigasus_observability::names;
 use sea_orm::Database;
@@ -62,6 +62,10 @@ async fn main() -> anyhow::Result<()> {
     // Kept for the partition-maintenance task (SMA-467), spawned below; cloned before the outbox
     // relay block consumes the original `db` handle.
     let db_for_maintenance = db.clone();
+
+    // Kept for the outbox retention sweep (SMA-469), spawned below — cloned here for the same
+    // reason `db_for_maintenance` is: the outbox-relay block consumes the original `db` handle.
+    let db_for_outbox_retention = db.clone();
 
     let request_timeout = Duration::from_secs(30);
     let (tx, rx) = tokio::sync::watch::channel(());
@@ -266,6 +270,50 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
+    {
+        // Outbox retention (SMA-469): bounded, batched deletes of aged published rows and —
+        // only when explicitly opted in — aged parked ones, plus the dead-letter backlog gauge.
+        // Mirrors the audit partition-maintenance block above, with one deliberate difference:
+        // this task is spawned UNCONDITIONALLY. `[outbox.retention].enabled = false` disables
+        // the DELETES (it rides along in the policy) but the tick still runs, because the tick
+        // is what refreshes `iam_outbox_parked_rows`. Gating the spawn on `enabled` would mean
+        // an operator who pauses deletion during an incident — a plausible reaction — silently
+        // loses the dead-letter backlog signal while the relay keeps parking rows.
+        let policy = OutboxRetentionPolicy {
+            enabled: config.outbox.retention.enabled,
+            published_days: config.outbox.retention.published_days,
+            parked_days: config.outbox.retention.parked_days,
+            batch_size: config.outbox.retention.batch_size,
+            max_batches_per_tick: config.outbox.retention.max_batches_per_tick,
+        };
+        if !config.outbox.retention.enabled {
+            tracing::warn!("outbox.retention.enabled = false — event_outbox rows will never be deleted and the table will grow without bound; the dead-letter backlog gauge still updates");
+        }
+        if config.outbox.retention.parked_days > 0 {
+            tracing::warn!(
+                parked_days = config.outbox.retention.parked_days,
+                "outbox.retention.parked_days > 0 — parked (dead-letter) rows will be auto-deleted at this age, whether or not an operator has inspected them, and unlike a discard through the dead-letter HTTP API this deletion writes no audit entry at all (only a counter increment) — the event's payload, actor, and correlation id are gone"
+            );
+        }
+        let maintainer = PgOutboxMaintainer::new(db_for_outbox_retention);
+        // An awaited startup sweep (non-fatal), mirroring the partition maintainer's: without
+        // it nothing happens for the first `interval_secs`, which on a deployment being rescued
+        // from an unbounded table is the wrong first impression.
+        let report = maintainer.clone().tick(chrono::Utc::now(), policy).await;
+        if report.errored {
+            tracing::warn!("initial outbox retention tick reported an error — continuing");
+        }
+        let interval = Duration::from_secs(config.outbox.retention.interval_secs);
+        let mut rx = rx.clone();
+        servers.spawn(async move {
+            maintainer
+                .run(policy, interval, async move {
+                    let _ = rx.changed().await;
+                })
+                .await;
+            Ok(())
+        });
+    }
 
     tracing::info!(%config.http_addr, %config.grpc_addr, "paigasus-iam started");
 
@@ -310,10 +358,11 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 17 metric families `paigasus-iam` emits
-/// directly (spec §4.1; includes the SMA-467 audit partition-maintenance families), via the
-/// `names::` consts so this can't drift from `names::ALL`, plus the 2 gRPC families via
-/// `paigasus_observability::describe_grpc()`. Mirrors the meanings documented in
+/// Registers `# HELP`/`# TYPE` exposition text for the 23 metric families `paigasus-iam` emits
+/// directly (spec §4.1; includes the SMA-467 audit partition-maintenance families and the
+/// SMA-469 outbox retention/dead-letter families), via the `names::` consts so the string used
+/// here can't drift from the one used at the increment/set call site, plus the 2 gRPC families
+/// via `paigasus_observability::describe_grpc()`. Mirrors the meanings documented in
 /// `docs/ops/RUNBOOK-observability.md` §2.1/§2.2.
 fn describe_iam_metrics() {
     use metrics::{describe_counter, describe_gauge, describe_histogram};
@@ -364,6 +413,24 @@ fn describe_iam_metrics() {
     describe_gauge!(
         names::IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS,
         "Age in seconds of the oldest unpublished-and-unparked outbox row seen in the most recent non-empty relay tick's batch."
+    );
+
+    describe_counter!(
+        names::IAM_OUTBOX_RETENTION_TICKS_TOTAL,
+        "Outbox retention sweep ticks, labeled by result (ok/error) — the sweep's liveness signal. Ticks even when [outbox.retention].enabled = false, because the tick also refreshes the dead-letter backlog gauge."
+    );
+    describe_counter!(names::IAM_OUTBOX_ROWS_DELETED_TOTAL, "event_outbox rows deleted by retention; label reason=published|parked.");
+    describe_gauge!(
+        names::IAM_OUTBOX_PARKED_ROWS,
+        "Parked (dead-letter) event_outbox rows awaiting an operator. Set independently by every replica — aggregate max by (job), never sum."
+    );
+    describe_counter!(
+        names::IAM_OUTBOX_DEAD_LETTERS_REPLAYED_TOTAL,
+        "Dead-letter ROWS returned to the live queue; label scope=one|bulk. Counts rows, not calls, so rate() is meaningful across both scopes."
+    );
+    describe_counter!(
+        names::IAM_OUTBOX_DEAD_LETTERS_DISCARDED_TOTAL,
+        "Dead letters permanently discarded by an operator — each one is an event that committed in IAM and will never reach any consumer."
     );
 
     describe_counter!(

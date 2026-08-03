@@ -38,6 +38,17 @@ pub const IAM_OUTBOX_RELAY_PUBLISHED_TOTAL: &str = "iam_outbox_relay_published_t
 pub const IAM_OUTBOX_RELAY_PUBLISH_FAILURES_TOTAL: &str = "iam_outbox_relay_publish_failures_total";
 pub const IAM_OUTBOX_RELAY_PARKED_TOTAL: &str = "iam_outbox_relay_parked_total";
 pub const IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS: &str = "iam_outbox_oldest_unpublished_age_seconds";
+// IAM outbox retention + dead letters (SMA-469)
+pub const IAM_OUTBOX_RETENTION_TICKS_TOTAL: &str = "iam_outbox_retention_ticks_total";
+pub const IAM_OUTBOX_ROWS_DELETED_TOTAL: &str = "iam_outbox_rows_deleted_total";
+/// Current parked-row count — the dead-letter backlog. Refreshed by every
+/// `PgOutboxMaintainer` tick, INCLUDING when `[outbox.retention].enabled = false` (the tick
+/// still runs for this gauge), so disabling deletion never blinds the backlog alert.
+/// Every replica sets the same global count, so this is PER-REPLICA: aggregate it
+/// `max by (job)` in alerts and dashboards, never `sum`.
+pub const IAM_OUTBOX_PARKED_ROWS: &str = "iam_outbox_parked_rows";
+pub const IAM_OUTBOX_DEAD_LETTERS_REPLAYED_TOTAL: &str = "iam_outbox_dead_letters_replayed_total";
+pub const IAM_OUTBOX_DEAD_LETTERS_DISCARDED_TOTAL: &str = "iam_outbox_dead_letters_discarded_total";
 // IAM audit partition maintenance
 pub const IAM_AUDIT_PARTITION_MAINTENANCE_TICKS_TOTAL: &str = "iam_audit_partition_maintenance_ticks_total";
 pub const IAM_AUDIT_PARTITIONS_CREATED_TOTAL: &str = "iam_audit_partitions_created_total";
@@ -74,6 +85,11 @@ pub const ALL: &[&str] = &[
     IAM_OUTBOX_RELAY_PUBLISH_FAILURES_TOTAL,
     IAM_OUTBOX_RELAY_PARKED_TOTAL,
     IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS,
+    IAM_OUTBOX_RETENTION_TICKS_TOTAL,
+    IAM_OUTBOX_ROWS_DELETED_TOTAL,
+    IAM_OUTBOX_PARKED_ROWS,
+    IAM_OUTBOX_DEAD_LETTERS_REPLAYED_TOTAL,
+    IAM_OUTBOX_DEAD_LETTERS_DISCARDED_TOTAL,
     IAM_AUDIT_PARTITION_MAINTENANCE_TICKS_TOTAL,
     IAM_AUDIT_PARTITIONS_CREATED_TOTAL,
     IAM_AUDIT_PARTITIONS_DROPPED_TOTAL,

@@ -59,6 +59,65 @@ groups:
         for: 1h
         labels: { severity: warning }
         annotations: { summary: "IAM audit partition-maintenance task is not ticking", description: "No successful audit partition-maintenance tick in ~2 days. Denied partitions won't be pruned (slow index/table bloat) and, after ahead_months, new-month create-ahead stops. The task ticks on interval_secs (default 86400 = daily), so the 2d window assumes the default daily interval — widen it if interval_secs is increased. NOTE: if audit.retention.enabled=false the series is absent and this alert stays silent — expected. See RUNBOOK §4." }
+      # The window is scaled to THIS task's hourly default (interval_secs = 3600), NOT copied
+      # from IamAuditPartitionMaintenanceStalled's [2d] — that alert's window matches the audit
+      # maintainer's DAILY interval, and reusing it here would tolerate ~48 consecutive missed
+      # ticks. The `or (up{job="iam"} == 1) * 0` fallback mirrors IamPolicySnapshotReloadsStalled:
+      # without it, a replica that spawned the maintainer but never completed a single tick emits
+      # no series at all, and `empty == 0` is empty — the alert would go silent exactly when
+      # things are worst.
+      #
+      # `for: 2h`, exceeding this task's own hourly tick interval, is deliberate — NOT a copy-paste
+      # of a bigger number for safety margin. `main.rs` runs an AWAITED startup tick before the
+      # maintainer's first `interval_secs` sleep, so a freshly booted replica's counter gets its
+      # FIRST sample at boot and its SECOND an hour later. `increase()` over a single sample is 0
+      # (there's no earlier point in the window to diff against), so `increase(...[6h]) == 0` is
+      # already true at t=0 — a perfectly healthy replica goes pending the instant it boots,
+      # regardless of hold length. With `for: 1h` the second hourly tick has to land AND be
+      # scraped before that hold elapses, which is a photo finish against `interval_secs = 3600`:
+      # any tick jitter or scrape delay pages a healthy replica after every restart. `for: 2h`
+      # gives the second tick a full extra cycle of slack to clear the condition well before the
+      # hold elapses. Worst-case detection becomes ~8h (6h window + 2h hold) — an acceptable trade
+      # for a sweep whose failure mode is slow, unbounded table growth, not something that needs
+      # minute-scale paging. This also brings the hold in line with its IamOutboxRetentionErroring
+      # sibling below, which independently arrived at `for: 2h` for a different reason.
+      - alert: IamOutboxRetentionStalled
+        expr: (sum by (job, instance) (increase(iam_outbox_retention_ticks_total[6h])) or (up{job="iam"} == 1) * 0) == 0
+        for: 2h
+        labels: { severity: warning }
+        annotations: { summary: "IAM outbox retention sweep is not ticking", description: "No outbox retention tick in ~6 hours on {{ $labels.job }}/{{ $labels.instance }}. Published event_outbox rows are not being deleted, so the table grows without bound, and the iam_outbox_parked_rows dead-letter gauge is stale. The sweep ticks on outbox.retention.interval_secs (default 3600 = hourly), so the 6h window assumes the default — widen it if interval_secs is increased. Unlike the audit equivalent, outbox.retention.enabled=false does NOT silence this: the maintainer is spawned unconditionally and still ticks to refresh the gauge, so silence here always means something is wrong. See RUNBOOK section 4." }
+      # A sweep that TICKS but ERRORS on every tick is invisible to IamOutboxRetentionStalled
+      # above: that alert sums `result="ok"` and `result="error"` together, so a healthy tick
+      # count and an all-erroring tick count look identical to it. `event_outbox` still grows
+      # without bound in that failure mode; the only signal without this alert is a `warn!` line.
+      #
+      # `for: 2h`, not 1h like its Stalled sibling — and it does NOT achieve the same guarantee.
+      # `increase(...[6h]) > 0` cannot distinguish "one error, now recovered" from "still
+      # erroring": once a single error tick lands in the window the condition stays true for
+      # nearly the whole 6h regardless of what happens afterward (the sample doesn't leave the
+      # window until it ages out near the 6h mark), so `for:` here bounds time-to-page, not
+      # repetition count. 2h gives the sweep's own "will retry next tick" behavior at least one
+      # extra hourly cycle to clear a genuinely transient failure (e.g. a single serialization
+      # conflict on one DELETE pass) before paging; a sweep erroring on EVERY tick — the failure
+      # mode this alert exists for — is trivially still erroring 2h later and pages reliably. A
+      # truly one-off blip that then recovers will still surface here once, ~2h after it
+      # happened, and resolve on its own once that sample ages past the 6h window — an accepted
+      # false-alarm rate for a warning-level page reacting to something that failed an entire
+      # DELETE outright.
+      - alert: IamOutboxRetentionErroring
+        expr: increase(iam_outbox_retention_ticks_total{result="error"}[6h]) > 0
+        for: 2h
+        labels: { severity: warning }
+        annotations: { summary: "IAM outbox retention sweep had a recent error", description: "iam_outbox_retention_ticks_total{result=\"error\"} increased on {{ $labels.job }}/{{ $labels.instance }} in the last 6 hours. The sweep IS ticking — unlike IamOutboxRetentionStalled, the maintainer task is alive and completing ticks — but at least one tick in that window had a failing step: the published-row sweep, the parked-row sweep, or the parked-row gauge query. While this persists, published event_outbox rows are not being deleted, so the table grows without bound, and if the gauge query is the failing step iam_outbox_parked_rows also goes stale. outbox.retention.enabled=false does NOT cause this: a disabled sweep still ticks and still reports result=\"ok\" (it only skips the two DELETE steps), so a firing alert here always means a real failure, never an intentional pause. Check IAM logs for the tick's own warn!s (\"outbox published-row sweep failed; will retry next tick\", \"outbox parked-row sweep failed; will retry next tick\", \"outbox parked-row gauge query failed\") to see which step is failing and why. See RUNBOOK section 4." }
+      # `max by (job)` is REQUIRED, not cosmetic: every replica runs a maintainer and each sets
+      # the same global count, so N replicas emit N identical series. A bare
+      # `iam_outbox_parked_rows > 0` would page N times for one condition, and a `sum()` panel
+      # would report N times the real backlog.
+      - alert: IamOutboxDeadLetterBacklog
+        expr: max by (job) (iam_outbox_parked_rows) > 0
+        for: 1h
+        labels: { severity: warning }
+        annotations: { summary: "IAM outbox dead letters are awaiting an operator", description: "At least one event_outbox row has been parked for over an hour on {{ $labels.job }} and nobody has retired it. Parked rows are excluded from the relay's poll forever, so those events will never be delivered until an operator replays or discards them via /v1/outbox/dead-letters. This complements IamOutboxEventsParked: that one fires when something JUST parked, this one fires when nobody has dealt with it. See RUNBOOK section 4." }
       - alert: IamHighErrorRate
         expr: sum(rate(iam_http_requests_total{status_class="5xx"}[5m])) / sum(rate(iam_http_requests_total[5m])) > 0.05
         for: 10m

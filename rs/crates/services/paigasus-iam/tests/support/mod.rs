@@ -6,7 +6,9 @@
 //! `start_migrated_postgres` runs against an ephemeral Postgres in Docker. In CI (`CI` env
 //! set) a missing Docker daemon is a HARD FAILURE; on a Docker-less laptop the test skips
 //! (returns `None`) with a note. Used by every integration test file that needs a real
-//! database.
+//! database. `start_raw_postgres` is the same container/CI-gating posture but skips the
+//! `Migrator::up(&db, None)` step, for tests that must drive migrations one step at a time
+//! (pinning the schema to an exact migration count) instead of always migrating to the tip.
 //!
 //! `start_mock_idp` serves an OIDC discovery document + JWKS from an in-process axum
 //! server over HTTPS with a runtime self-signed certificate (the JWKS fetcher
@@ -44,7 +46,7 @@ use paigasus_iam_core::{
     ApiKey, ApiKeyStatus, Clock, GrantScope, IdGenerator, OrganizationId, Principal, PrincipalId, PrincipalKind, PrincipalStatus, RoleGrant, ServiceAccount, TenancyNodeRef, display_prefix,
 };
 use paigasus_kernel::Prn;
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
 use std::sync::{Arc, RwLock};
@@ -77,6 +79,40 @@ pub async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, Data
     let db = Database::connect(&url).await.unwrap();
     Migrator::up(&db, None).await.unwrap();
 
+    Some((node, db))
+}
+
+/// Starts a raw, ephemeral Postgres container WITHOUT running any migrations — same
+/// image/tag/CI-gating posture as [`start_migrated_postgres`], but stops short of
+/// `Migrator::up(&db, None)` so the caller can drive `Migrator::up`/`Migrator::down` step by
+/// step. Needed whenever a test must pin the schema to an EXACT migration count (e.g. seed
+/// pre-existing data into the plain, pre-partition `audit_log` shape before m0008 ever runs —
+/// SMA-467 — or pin a migration's `up`/`down` under test so it stays meaningful regardless of
+/// how many migrations land on top of it later — SMA-469) rather than always migrating all the
+/// way to the tip the way [`start_migrated_postgres`] does.
+///
+/// Pins the pool to a SINGLE connection so per-session state — notably a `SET TimeZone` a
+/// caller issues before migrating — is guaranteed to apply to the same physical connection the
+/// subsequent `Migrator::up`/`Migrator::down` runs on (a default multi-connection pool could
+/// migrate on a different, unaffected session, making such a test non-deterministic —
+/// CodeRabbit SMA-467 round 2).
+#[allow(dead_code)]
+pub async fn start_raw_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseConnection)> {
+    let node = match Postgres::default().with_tag("16-alpine").start().await {
+        Ok(n) => n,
+        Err(e) => {
+            if std::env::var_os("CI").is_some() {
+                panic!("Docker is required for this test in CI: {e}");
+            }
+            eprintln!("skipping raw-postgres test: Docker unavailable ({e})");
+            return None;
+        }
+    };
+    let port = node.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let mut opts = ConnectOptions::new(url);
+    opts.max_connections(1).min_connections(1);
+    let db = Database::connect(opts).await.unwrap();
     Some((node, db))
 }
 

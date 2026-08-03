@@ -71,6 +71,8 @@ async fn seed_row(db: &DatabaseConnection, id: Uuid, occurred_at: chrono::DateTi
         published_at: Set(None),
         attempts: Set(0),
         parked: Set(false),
+        parked_at: Set(None),
+        last_error: Set(None),
     }
     .insert(db)
     .await
@@ -133,8 +135,17 @@ async fn failing_publisher_parks_the_row_after_max_attempts() {
         assert_eq!(row.parked, should_be_parked, "parked flips true exactly once attempts reaches max_attempts");
         if should_be_parked {
             assert_eq!(report.parked, 1);
+            // SMA-469: a parked row must carry BOTH the park time (what parked_days measures
+            // from) and a descriptive reason (what the dead-letter surface shows).
+            assert!(row.parked_at.is_some(), "a parked row must record parked_at");
+            let err = row.last_error.clone().expect("a parked row must record last_error");
+            assert!(err.contains("always fails"), "last_error must name the real cause, got: {err}");
+            assert!(err.starts_with("backend error: "), "expected the source chain to be walked, got: {err}");
         } else {
             assert_eq!(report.parked, 0);
+            // SMA-469: last_error is written on EVERY failed attempt, not only at parking.
+            assert!(row.last_error.is_some(), "last_error must be recorded on every failed attempt, not just at parking");
+            assert!(row.parked_at.is_none(), "parked_at must stay unset until the row is actually parked");
         }
     }
 
