@@ -548,9 +548,16 @@ async fn reconcile_role_inserts_then_converges_a_drifted_row() {
     assert_eq!(roles.reconcile_role(&code).await.unwrap(), RoleOutcome::Inserted);
     assert_eq!(roles.reconcile_role(&code).await.unwrap(), RoleOutcome::Unchanged);
 
+    // Backdate `created_at` to something the code side (`Utc::now()` at insert time) cannot
+    // possibly carry — mirrors `reconcile_system_converges_a_code_change_without_reporting_an_
+    // edit`'s identical rationale: reading the row back and re-asserting the value the seeding
+    // INSERT itself wrote would compare `Utc::now()` against itself, which cannot distinguish
+    // "the UPDATE branch preserved the stored created_at" from "it silently reset created_at to
+    // Utc::now() on every converge" — both read back as approximately-now either way.
+    let backdated: DateTime<Utc> = "2020-01-01T00:00:00Z".parse().expect("static timestamp literal is valid RFC 3339");
     db.execute(Statement::from_string(
         DbBackend::Postgres,
-        r#"UPDATE "role" SET description = 'stale wording', scope_kinds = '["team"]' WHERE key = 'org_admin'"#.to_string(),
+        r#"UPDATE "role" SET description = 'stale wording', scope_kinds = '["team"]', created_at = TIMESTAMPTZ '2020-01-01 00:00:00+00' WHERE key = 'org_admin'"#.to_string(),
     ))
     .await
     .unwrap();
@@ -559,6 +566,7 @@ async fn reconcile_role_inserts_then_converges_a_drifted_row() {
     let row = role::Entity::find_by_id("org_admin".to_string()).one(&db).await.unwrap().unwrap();
     assert_eq!(row.description.as_deref(), Some(code.description.as_str()));
     assert_eq!(row.scope_kinds, r#"["organization"]"#);
+    assert_eq!(row.created_at, backdated, "a converge must preserve the stored created_at, not reset it to Utc::now()");
 }
 
 #[tokio::test]
@@ -585,6 +593,21 @@ async fn orphaned_system_role_keys_reports_retired_roles_only() {
     ))
     .await
     .unwrap();
+    // An operator's own (non-system) role must NOT be reported — mirrors
+    // `orphaned_system_policy_ids_reports_retired_starter_policies_only`'s `operator-policy`
+    // row, and for the identical reason: every row this test otherwise creates is
+    // `system = true`, so without this row the `.filter(role::Column::System.eq(true))` guard
+    // in `orphaned_system_role_keys` could be dropped or inverted and this test would still
+    // pass (`retired_role` would still be the only key absent from `known`). `template_id`
+    // points at `org_admin`, a starter policy id seeded above — `fk_role_template`.
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        r#"INSERT INTO "role" (key, template_id, scope_kinds, description, system, created_at)
+           VALUES ('operator_role', 'org_admin', '["organization"]', NULL, false, now())"#
+            .to_string(),
+    ))
+    .await
+    .unwrap();
 
     // `system_roles()` must outlive the borrowed `&str` keys built from it — a fresh temporary
     // per expression (e.g. `.leak()`-ing a `Vec<&str>` collected straight off `system_roles()
@@ -593,5 +616,5 @@ async fn orphaned_system_role_keys_reports_retired_roles_only() {
     let known_roles = system_roles();
     let known: Vec<&str> = known_roles.iter().map(|r| r.key.as_str()).collect();
     let orphans = roles.orphaned_system_role_keys(&known).await.unwrap();
-    assert_eq!(orphans, vec!["retired_role".to_string()]);
+    assert_eq!(orphans, vec!["retired_role".to_string()], "a non-system role row must never be reported as orphaned");
 }
