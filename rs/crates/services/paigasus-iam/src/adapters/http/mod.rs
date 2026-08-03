@@ -47,7 +47,7 @@ use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
     PgApiKeyRepository, PgAuditLog, PgDeadLetters, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgPrincipalRepository,
-    PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgTeamRepository, SeaOrmUnitOfWork,
+    PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgTeamRepository, SeaOrmUnitOfWork,
 };
 use crate::application::api_keys::{ApiKeyService, ApiKeyServiceDeps};
 use crate::application::audit::AuditQueryService;
@@ -67,8 +67,8 @@ use crate::application::service_accounts::{ServiceAccountService, ServiceAccount
 use crate::application::teams::TeamService;
 use crate::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, JwksCacheBackend};
 use paigasus_iam_core::{
-    ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore, TeamRepository,
-    UnitOfWork,
+    ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore, SystemPolicyReconciler,
+    SystemRoleReconciler, TeamRepository, UnitOfWork,
 };
 
 pub type OrgSvc = OrganizationService<PgOrganizationRepository, KernelIdGenerator, SystemClock>;
@@ -289,9 +289,10 @@ impl AppState {
     /// redis cache below) when redis is configured but unreachable — `IamConfig::validate`
     /// has already guaranteed `redis_url` is present. The initial [`PolicySnapshot`] build
     /// reads whatever the policy store currently holds — [`bootstrap::reconcile_starter`]
-    /// (SMA-444 Task 17) runs first and seeds the starter Cedar policy set + the system role
-    /// catalog on a fresh/unseeded database, so the initial snapshot always compiles at least
-    /// that starter set, never an empty one.
+    /// (SMA-444 Task 17; converge-to-code since SMA-477) runs first and CONVERGES the starter
+    /// Cedar policy set + the system role catalog to the code-defined content on every boot
+    /// (seeding it on a fresh/unseeded database), so the initial snapshot always compiles at
+    /// least that starter set, never an empty or drifted one.
     pub async fn new(db: DatabaseConnection, cfg: &IamConfig) -> Result<AppState, AuthnError> {
         let authz_cfg = &cfg.authz;
         let (gens, redis_conn): (Generations, Option<ConnectionManager>) = match authz_cfg.cache.backend {
@@ -335,7 +336,35 @@ impl AppState {
 
         let policy_store: Arc<dyn PolicyStore> = Arc::new(PgPolicyStore::new(db.clone(), gens.clone()));
         let role_grant_store: Arc<dyn RoleGrantStore> = Arc::new(PgRoleGrantStore::new(db.clone(), gens.clone()));
-        bootstrap::reconcile_starter(policy_store.as_ref(), &db).await.map_err(|e| AuthnError::Backend(Box::new(e)))?;
+
+        // SMA-446 Task A10/A12 (built here, ahead of `reconcile_starter` just below and
+        // `roles` further down, since both need it too): the audit-log read+write handle.
+        // `audit_log` is a single shared `Arc<dyn AuditLog>` (`PgAuditLog` over `db`) that the
+        // read-side `audit_query` (A10) reads through, the denial-audit drain (A12, spawned by
+        // `main.rs`) writes buffered denials into, `RoleService`'s in-txn `AuditLog::record`
+        // writes through (B4), AND boot reconciliation's out-of-band audit entries write
+        // through (SMA-477) — one store instance, not several (mirrors `role_grant_store`'s
+        // single-shared-`Arc` posture). It is stashed on the returned state (`audit_log`
+        // field, reachable via `audit_sink()`) so `main.rs` can hand it to `drain.run(sink,
+        // shutdown)`. Built ABOVE the reconcile call so reconcile shares this SAME instance
+        // rather than a second, windowless one — `with_query_window` takes `mut self` and
+        // returns `Self`, so there is no way to build it twice and still share one `Arc`.
+        let audit_log: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()).with_query_window(cfg.audit.query_default_window_days, cfg.audit.query_max_window_days));
+
+        // SMA-477: the reconciler shares the SAME `PgPolicyStore` the snapshot reads from, so a
+        // converged policy's `policy_gen` bump is observed by this replica's own snapshot and by
+        // every other replica's.
+        let policy_reconciler: Arc<dyn SystemPolicyReconciler> = Arc::new(PgPolicyStore::new(db.clone(), gens.clone()));
+        let role_reconciler: Arc<dyn SystemRoleReconciler> = Arc::new(PgSystemRoleReconciler::new(db.clone()));
+        let reconcile_deps = bootstrap::ReconcileStarterDeps {
+            policies: policy_reconciler,
+            roles: role_reconciler,
+            audit: audit_log.clone(),
+            ids: KernelIdGenerator,
+            clock: SystemClock,
+        };
+        bootstrap::reconcile_starter(&reconcile_deps).await.map_err(|e| AuthnError::Backend(Box::new(e)))?;
+
         let snapshot = Arc::new(
             PolicySnapshot::new(policy_store.clone(), role_grant_store.clone())
                 .await
@@ -363,7 +392,7 @@ impl AppState {
         // buffer — so every decision is still logged, and every DENIAL is additionally queued
         // for out-of-band persistence. `denial_drain` is stashed in a take-once slot on the
         // returned state; `main.rs` spawns it against the `PgAuditLog` sink (`audit_log`, built
-        // below). The buffer itself is NOT retained on `AppState` (SMA-446 Task A10 removed the
+        // above). The buffer itself is NOT retained on `AppState` (SMA-446 Task A10 removed the
         // `main.rs` overflow-observability ticker that was its only reader — overflow is now
         // observable via the real `iam_denial_audits_dropped_total` metric emitted at the push
         // site, `adapters::authz::denial_audit::DenialAuditBuffer::push`), so `denial_buf` moves
@@ -389,16 +418,6 @@ impl AppState {
         // — so a grant/policy change made through these use cases bumps the same `gens`
         // counter `authz`'s `PolicySnapshot::reload_if_stale` polls (AC1).
         let authorize = Authorize::new(authz.clone() as Arc<dyn Authorizer>);
-
-        // SMA-446 Task A10/A12 (built here, ahead of `roles`, since Task B4's `RoleService`
-        // below needs it too): the audit-log read+write handle. `audit_log` is a single shared
-        // `Arc<dyn AuditLog>` (`PgAuditLog` over `db`) that the read-side `audit_query` (A10)
-        // reads through, the denial-audit drain (A12, spawned by `main.rs`) writes buffered
-        // denials into, AND `RoleService`'s in-txn `AuditLog::record` writes through (B4) — one
-        // store instance, not several (mirrors `role_grant_store`'s single-shared-`Arc`
-        // posture). It is stashed on the returned state (`audit_log` field, reachable via
-        // `audit_sink()`) so `main.rs` can hand it to `drain.run(sink, shutdown)`.
-        let audit_log: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()).with_query_window(cfg.audit.query_default_window_days, cfg.audit.query_max_window_days));
 
         // SMA-444 cross-tenant-escalation fix (FIX 2): `RoleService::resolve_scope`'s own
         // DB-lookup defense needs read access to the tenancy repos, independent of

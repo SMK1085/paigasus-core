@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `bootstrap::reconcile_starter` integration test (SMA-444 Task 17): against a freshly
-//! migrated, unseeded Postgres, `reconcile_starter` seeds every `authz::roles::
-//! starter_policies()` document (all `system = true`) and every `authz::roles::
+//! `bootstrap::reconcile_starter` integration test (SMA-444 Task 17; converge-to-code since
+//! SMA-477): against a freshly migrated, unseeded Postgres, `reconcile_starter` seeds every
+//! `authz::roles::starter_policies()` document (all `system = true`) and every `authz::roles::
 //! system_roles()` row into the `role` table; a second reconcile is idempotent (no
-//! duplicate rows, no error, no drift warning since nothing changed). A further end-to-end
+//! duplicate rows, no error — nothing to converge since nothing changed). A further end-to-end
 //! case proves the seeded set actually enforces: after a bootstrap `platform_admin` grant
 //! (seeded directly — the actual bootstrap-admin seeding path is a later task, SMA-444 Task
 //! 21), a REAL `RoleService::grant` of `org_admin` (authorized by that bootstrap grant, thus
@@ -41,7 +41,7 @@ use paigasus_iam::adapters::persistence::{
     PgAuditLog, PgEntitySliceLoader, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgProjectRepository, PgRoleGrantStore, PgTeamRepository, SeaOrmUnitOfWork,
 };
 use paigasus_iam::application::authorize::Authorize;
-use paigasus_iam::application::bootstrap::reconcile_starter;
+use paigasus_iam::application::bootstrap::{ReconcileStarterDeps, reconcile_starter};
 use paigasus_iam::application::roles::{RoleService, RoleServiceDeps};
 use paigasus_iam_core::authz::roles::{starter_policies, system_roles};
 use paigasus_iam_core::{
@@ -78,12 +78,25 @@ async fn seed_org(db: &DatabaseConnection, id: Uuid) {
     .unwrap();
 }
 
+/// Builds the boot-reconciliation deps over one database, mirroring `AppState::new`'s wiring.
+fn reconcile_deps(db: &DatabaseConnection, gens: &Generations) -> ReconcileStarterDeps<KernelIdGenerator, SystemClock> {
+    use paigasus_iam::adapters::persistence::PgSystemRoleReconciler;
+    ReconcileStarterDeps {
+        policies: Arc::new(PgPolicyStore::new(db.clone(), gens.clone())),
+        roles: Arc::new(PgSystemRoleReconciler::new(db.clone())),
+        audit: Arc::new(PgAuditLog::new(db.clone())),
+        ids: KernelIdGenerator,
+        clock: SystemClock,
+    }
+}
+
 #[tokio::test]
 async fn reconcile_seeds_every_starter_policy_and_the_seven_system_roles() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
 
-    let policy_store = PgPolicyStore::new(db.clone(), Generations::memory());
-    reconcile_starter(&policy_store, &db).await.unwrap();
+    let gens = Generations::memory();
+    let policy_store = PgPolicyStore::new(db.clone(), gens.clone());
+    reconcile_starter(&reconcile_deps(&db, &gens)).await.unwrap();
 
     let docs = policy_store.list_all().await.unwrap();
     let expected = starter_policies();
@@ -110,10 +123,11 @@ async fn reconcile_seeds_every_starter_policy_and_the_seven_system_roles() {
 async fn reconcile_is_idempotent_on_a_second_run() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
 
-    let policy_store = PgPolicyStore::new(db.clone(), Generations::memory());
-    reconcile_starter(&policy_store, &db).await.unwrap();
+    let gens = Generations::memory();
+    let policy_store = PgPolicyStore::new(db.clone(), gens.clone());
+    reconcile_starter(&reconcile_deps(&db, &gens)).await.unwrap();
     // A second run must succeed without error and without inserting duplicates or drifting.
-    reconcile_starter(&policy_store, &db).await.unwrap();
+    reconcile_starter(&reconcile_deps(&db, &gens)).await.unwrap();
 
     let docs = policy_store.list_all().await.unwrap();
     assert_eq!(docs.len(), starter_policies().len(), "a second reconcile must not duplicate policy rows");
@@ -143,7 +157,7 @@ async fn seeded_starter_set_plus_a_real_grant_enforces_end_to_end() {
     // `grant` bumps the SAME counter `CedarAuthorizer` checks before every decision.
     let gens = Generations::memory();
     let policy_store: Arc<dyn PolicyStore> = Arc::new(PgPolicyStore::new(db.clone(), gens.clone()));
-    reconcile_starter(policy_store.as_ref(), &db).await.unwrap();
+    reconcile_starter(&reconcile_deps(&db, &gens)).await.unwrap();
 
     let role_grant_store: Arc<dyn RoleGrantStore> = Arc::new(PgRoleGrantStore::new(db.clone(), gens.clone()));
     let snapshot = Arc::new(PolicySnapshot::new(policy_store.clone(), role_grant_store.clone()).await.unwrap());
