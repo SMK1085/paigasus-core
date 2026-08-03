@@ -23,10 +23,13 @@
 //! **`SKIP LOCKED` only skips conflicting ROW locks — it has no opinion on a TABLE-level lock.**
 //! A migration (m0009 itself takes `ACCESS EXCLUSIVE` on `event_outbox` for its whole body) or an
 //! operator's manual `ALTER`/`VACUUM FULL` running concurrently would otherwise make a sweep pass
-//! queue indefinitely, wedging the task rather than retrying. Mirroring `PgPartitionMaintainer`'s
-//! precedent, each pass in [`sweep`](PgOutboxMaintainer::sweep) runs inside its own short
+//! — or the backlog-gauge query, which runs even when deletion is disabled — queue indefinitely,
+//! wedging the task rather than retrying (and, because `run`'s `tokio::select!` only observes
+//! shutdown BETWEEN ticks, blocking graceful shutdown too). Mirroring `PgPartitionMaintainer`'s
+//! precedent, each pass in [`sweep`](PgOutboxMaintainer::sweep) AND the gauge read in
+//! [`parked_row_count`](PgOutboxMaintainer::parked_row_count) runs inside its own short
 //! transaction that first issues `SET LOCAL lock_timeout` (bounds acquiring the lock) and
-//! `SET LOCAL statement_timeout` (bounds the `DELETE` itself once the lock is held); either
+//! `SET LOCAL statement_timeout` (bounds the query itself once the lock is held); either
 //! tripping surfaces as an ordinary `DbErr` through the tick's existing partial-count
 //! `errored = true` path, exactly like any other pass failure.
 
@@ -147,10 +150,12 @@ const SWEEP_LOCK_TIMEOUT: &str = "5s";
 /// `max_batches_per_tick` pass this tick along with it.
 const SWEEP_STATEMENT_TIMEOUT: &str = "30s";
 
-/// The `SET LOCAL` statements issued at the top of every sweep pass's transaction, in the order
-/// they must run: `lock_timeout` bounds waiting on a conflicting table-level lock, then
-/// `statement_timeout` bounds the `DELETE` itself once that lock is held. A free function (rather
-/// than inlined `format!` calls in `sweep_pass`) so a unit test can pin the exact statement text
+/// The `SET LOCAL` statements issued at the top of every timeout-scoped transaction this module
+/// opens — both a sweep pass's `DELETE` ([`sweep_pass`](PgOutboxMaintainer::sweep_pass)) and the
+/// backlog-gauge `SELECT` ([`parked_row_count`](PgOutboxMaintainer::parked_row_count)) — in the
+/// order they must run: `lock_timeout` bounds waiting on a conflicting table-level lock, then
+/// `statement_timeout` bounds the query itself once that lock is held. A free function (rather
+/// than inlined `format!` calls at each call site) so a unit test can pin the exact statement text
 /// and timeout values without spinning up Postgres — the same tripwire-test approach this module
 /// already uses for `published_sweep_sql`/`parked_sweep_sql`.
 fn sweep_pass_timeout_stmts() -> [String; 2] {
@@ -233,7 +238,10 @@ impl PgOutboxMaintainer {
 
         // ALWAYS — including when `enabled = false`. This gauge is the dead-letter backlog
         // signal, and losing it because deletion was paused would blind the operator exactly
-        // when they are most likely to have paused it.
+        // when they are most likely to have paused it. Because it is the ONE statement that
+        // always runs, `parked_row_count` is timeout-scoped exactly like a sweep pass (SMA-469
+        // round-2 review, Finding 1) — an unbounded gauge query would otherwise be the sole thing
+        // left for a table-level lock to wedge on a deployment that has paused deletion.
         match self.parked_row_count().await {
             Ok(n) => {
                 report.parked_rows = n;
@@ -317,9 +325,23 @@ impl PgOutboxMaintainer {
         Ok(affected)
     }
 
+    /// Runs inside the SAME `SET LOCAL lock_timeout` / `statement_timeout` transaction pattern as
+    /// [`sweep_pass`](Self::sweep_pass), via [`sweep_pass_timeout_stmts`] — not a bare, unscoped
+    /// `query_one`. This is the ONE step `tick` issues unconditionally, including when
+    /// `policy.enabled = false`, so absent this scoping an `ACCESS EXCLUSIVE` table lock (m0009's
+    /// own migration, or a manual `ALTER`/`VACUUM FULL`) would have nothing bounded left to fall
+    /// back on: it would queue this query indefinitely, wedging the tick — and, since `run`'s
+    /// `tokio::select!` only observes shutdown BETWEEN ticks, graceful shutdown too (SMA-469
+    /// round-2 review, Finding 1). A tripped timeout surfaces as an ordinary `DbErr`, folded into
+    /// the same `Err` branch below as any other read failure.
     async fn parked_row_count(&self) -> Result<u64, DbErr> {
+        let txn = self.db.begin().await?;
+        for stmt in sweep_pass_timeout_stmts() {
+            txn.execute_unprepared(&stmt).await?;
+        }
         let stmt = Statement::from_string(DbBackend::Postgres, r#"SELECT count(*) AS n FROM "event_outbox" WHERE parked = true"#.to_string());
-        let row = self.db.query_one(stmt).await?;
+        let row = txn.query_one(stmt).await?;
+        txn.commit().await?;
         // `count(*)` always returns exactly one row, so `row` being `None` is unreachable in
         // practice — but a genuine column-decode failure MUST be propagated, not swallowed. The
         // previous `.and_then(|r| r.try_get(...).ok()).unwrap_or(0)` turned a broken read into a

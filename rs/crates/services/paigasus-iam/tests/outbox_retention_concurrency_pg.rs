@@ -109,3 +109,87 @@ async fn a_sweep_neither_blocks_on_nor_deletes_a_row_the_relay_holds_locked() {
     );
     assert!(event_outbox::Entity::find_by_id(aged).one(&db).await.unwrap().is_none());
 }
+
+/// SMA-469 round-2 review, Finding 1: unlike the two delete passes (bounded since round 1 by
+/// `sweep_pass`'s `SET LOCAL lock_timeout`/`statement_timeout` transaction), the parked-row
+/// backlog gauge used to run via a bare, unscoped `self.parked_row_count().await` outside any
+/// such transaction. That mattered more than it looked: the gauge query is the ONE statement
+/// `tick` issues unconditionally, including when `[outbox.retention].enabled = false` — so on a
+/// deployment that has paused deletion, an `ACCESS EXCLUSIVE` lock on `event_outbox` (exactly
+/// what m0009's own migration body takes for its whole duration, or what a manual
+/// `ALTER`/`VACUUM FULL` takes) would have nothing bounded left to fall back on: it would queue
+/// this query indefinitely, wedging the tick and — since `run`'s `tokio::select!` only observes
+/// shutdown BETWEEN ticks — blocking graceful shutdown too.
+///
+/// Holds an `ACCESS EXCLUSIVE` table lock open on a second, independent connection/session across
+/// a real tick (mirroring the hold-open technique above, but a TABLE-level lock rather than a
+/// ROW-level one — `SKIP LOCKED` has no opinion on the former) and proves the tick backs off
+/// within its bounded `lock_timeout` instead of hanging.
+#[tokio::test]
+async fn a_tick_does_not_hang_when_an_access_exclusive_lock_blocks_the_gauge_query() {
+    let Some((node, db)) = support::start_migrated_postgres().await else {
+        eprintln!("skipping outbox gauge-timeout test: Docker unavailable");
+        return;
+    };
+    let now = Utc::now();
+
+    // Row content is irrelevant to this scenario — an ACCESS EXCLUSIVE lock blocks the gauge's
+    // `SELECT count(*)` regardless of which rows exist or match the retention policy.
+    event_outbox::ActiveModel {
+        id: Set(Uuid::from_u128(1)),
+        occurred_at: Set(now),
+        event_type: Set("iam.principal.created".to_string()),
+        schema_version: Set(1),
+        aggregate_prn: Set("prn:pgs:iam:::principal/00000000-0000-0000-0000-0000000000aa".to_string()),
+        actor_prn: Set(None),
+        payload: Set(serde_json::json!({}).to_string()),
+        correlation_id: Set(None),
+        published_at: Set(None),
+        attempts: Set(0),
+        parked: Set(false),
+        parked_at: Set(None),
+        last_error: Set(None),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+
+    // A SECOND, independent connection (own pool, own physical session — not one borrowed from
+    // `db`'s own pool) takes the SAME lock mode m0009's migration body holds, and keeps it open
+    // for the whole tick.
+    let port = node.get_host_port_ipv4(5432).await.unwrap();
+    let holder = Database::connect(format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")).await.unwrap();
+    let held = holder.begin().await.unwrap();
+    held.execute_unprepared(r#"LOCK TABLE "event_outbox" IN ACCESS EXCLUSIVE MODE"#).await.unwrap();
+
+    // Deletion disabled: with retention paused, the gauge query is the ONLY statement this tick
+    // issues — precisely the production scenario Finding 1 describes, where an operator who has
+    // paused deletion loses the backlog gauge with no bounded delete pass left to fall back on.
+    let policy = OutboxRetentionPolicy {
+        enabled: false,
+        published_days: 7,
+        parked_days: 30,
+        batch_size: 100,
+        max_batches_per_tick: 10,
+    };
+
+    // The gauge query's `SET LOCAL lock_timeout` is 5s (`SWEEP_LOCK_TIMEOUT`); 20s is comfortably
+    // longer than that but far shorter than a genuine hang, so a regression that reintroduces an
+    // unscoped gauge query fails this test cleanly via the `.expect` message below — attributably,
+    // not as an ambiguous "slow machine" timeout — instead of stalling the suite indefinitely.
+    let report = tokio::time::timeout(std::time::Duration::from_secs(20), PgOutboxMaintainer::new(db.clone()).tick(now, policy))
+        .await
+        .expect(
+            "tick blocked for over 20s: the parked-row gauge query is not timeout-scoped and is \
+             queueing indefinitely behind the ACCESS EXCLUSIVE table lock, rather than backing off \
+             within its own 5s lock_timeout",
+        );
+
+    assert!(
+        report.errored,
+        "a tick whose gauge query is blocked by a table-level lock must report errored = true \
+         (the lock_timeout tripping is a DbErr, not a silent success)"
+    );
+
+    held.rollback().await.unwrap();
+}
