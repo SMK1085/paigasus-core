@@ -1101,9 +1101,23 @@ use sea_orm::{ColumnTrait, QueryFilter};
 Add a helper next to `policy_content_matches`:
 
 ```rust
-/// Borrows a stored row as the classifier's input view. `starter_revision` is `i32` in
-/// Postgres (no unsigned integer type); a negative value can only come from a hand edit, and
-/// clamping it to `0` makes it read as "oldest possible", which converges rather than defers.
+/// Borrows a stored row as the classifier's input view.
+///
+/// Two deliberate coercions, both of which this module elsewhere refuses to make — read the
+/// reasoning before "fixing" either:
+///
+/// - `starter_revision` is `i32` in Postgres (there is no unsigned integer type). A negative
+///   value can only come from a hand edit; clamping it to `0` makes it read as "oldest
+///   possible", which CONVERGES the row rather than deferring to it. Deferring on a
+///   hand-written negative would be the exploitable direction.
+/// - An unparseable `kind` degrades to `Static` here, where `model_to_doc` (line ~123) rightly
+///   surfaces it as `Backend`. The difference is what the value feeds: `model_to_doc` feeds the
+///   decision path, where a wrong kind silently changes authorization, so it must fail loudly.
+///   This value feeds only the CLASSIFIER, and a corrupt `kind` can only come from a hand edit
+///   — whose fingerprint therefore cannot match, so the row classifies `ExternallyModified` and
+///   gets converged (repairing the bad `kind`) no matter which variant is guessed here.
+///   Returning an error instead would make a corrupt row permanently unrepairable, which is the
+///   opposite of this function's purpose.
 fn stored_row(model: &policy::Model) -> StoredPolicyRow<'_> {
     StoredPolicyRow {
         kind: kind_from_str(&model.kind).unwrap_or(PolicyKind::Static),
