@@ -59,6 +59,27 @@ groups:
         for: 1h
         labels: { severity: warning }
         annotations: { summary: "IAM audit partition-maintenance task is not ticking", description: "No successful audit partition-maintenance tick in ~2 days. Denied partitions won't be pruned (slow index/table bloat) and, after ahead_months, new-month create-ahead stops. The task ticks on interval_secs (default 86400 = daily), so the 2d window assumes the default daily interval — widen it if interval_secs is increased. NOTE: if audit.retention.enabled=false the series is absent and this alert stays silent — expected. See RUNBOOK §4." }
+      # The window is scaled to THIS task's hourly default (interval_secs = 3600), NOT copied
+      # from IamAuditPartitionMaintenanceStalled's [2d] — that alert's window matches the audit
+      # maintainer's DAILY interval, and reusing it here would tolerate ~48 consecutive missed
+      # ticks. The `or (up{job="iam"} == 1) * 0` fallback mirrors IamPolicySnapshotReloadsStalled:
+      # without it, a replica that spawned the maintainer but never completed a single tick emits
+      # no series at all, and `empty == 0` is empty — the alert would go silent exactly when
+      # things are worst.
+      - alert: IamOutboxRetentionStalled
+        expr: (sum by (job, instance) (increase(iam_outbox_retention_ticks_total[6h])) or (up{job="iam"} == 1) * 0) == 0
+        for: 1h
+        labels: { severity: warning }
+        annotations: { summary: "IAM outbox retention sweep is not ticking", description: "No outbox retention tick in ~6 hours on {{ $labels.job }}/{{ $labels.instance }}. Published event_outbox rows are not being deleted, so the table grows without bound, and the iam_outbox_parked_rows dead-letter gauge is stale. The sweep ticks on outbox.retention.interval_secs (default 3600 = hourly), so the 6h window assumes the default — widen it if interval_secs is increased. Unlike the audit equivalent, outbox.retention.enabled=false does NOT silence this: the maintainer is spawned unconditionally and still ticks to refresh the gauge, so silence here always means something is wrong. See RUNBOOK section 4." }
+      # `max by (job)` is REQUIRED, not cosmetic: every replica runs a maintainer and each sets
+      # the same global count, so N replicas emit N identical series. A bare
+      # `iam_outbox_parked_rows > 0` would page N times for one condition, and a `sum()` panel
+      # would report N times the real backlog.
+      - alert: IamOutboxDeadLetterBacklog
+        expr: max by (job) (iam_outbox_parked_rows) > 0
+        for: 1h
+        labels: { severity: warning }
+        annotations: { summary: "IAM outbox dead letters are awaiting an operator", description: "At least one event_outbox row has been parked for over an hour on {{ $labels.job }} and nobody has retired it. Parked rows are excluded from the relay's poll forever, so those events will never be delivered until an operator replays or discards them via /v1/outbox/dead-letters. This complements IamOutboxEventsParked: that one fires when something JUST parked, this one fires when nobody has dealt with it. See RUNBOOK section 4." }
       - alert: IamHighErrorRate
         expr: sum(rate(iam_http_requests_total{status_class="5xx"}[5m])) / sum(rate(iam_http_requests_total[5m])) > 0.05
         for: 10m
