@@ -2064,6 +2064,68 @@ mod tests {
         });
     }
 
+    #[test]
+    fn outbox_retention_partial_toml_override_merges_with_defaults() {
+        // Real figment-merge exercise (not an in-memory struct mutation): a `[outbox.retention]`
+        // block that specifies only SOME keys must still land the REST on their documented
+        // defaults via figment's merge — the actual production config-loading path, and the
+        // single most common real-world config mistake if the defaults layer regresses.
+        //
+        // Also covers a nesting question: `[outbox]` carries its OWN `batch_size` (relay drain
+        // batch) and `[outbox.retention]` carries a DIFFERENT `batch_size` (sweep delete batch).
+        // Setting both in the same file proves TOML's table nesting keeps them distinct — no
+        // collision, no cross-contamination in either direction.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [outbox]
+                        batch_size = 250
+
+                        [outbox.retention]
+                        published_days = 30
+                        max_batches_per_tick = 200
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+
+                        [api_keys]
+                        pepper = "{}"
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+
+            // The two explicitly-configured retention keys took their configured values.
+            assert_eq!(cfg.outbox.retention.published_days, 30, "published_days must take the configured override");
+            assert_eq!(cfg.outbox.retention.max_batches_per_tick, 200, "max_batches_per_tick must take the configured override");
+
+            // Every UNSPECIFIED retention key must still land on its documented default,
+            // enumerated individually — asserting against `OutboxRetentionConfig::default()`
+            // wholesale would still pass even if the defaults layer were bypassed entirely
+            // (serde's own `#[derive(Default)]`-shaped fallback could paper over that), so each
+            // field is checked against its literal documented value instead.
+            assert!(cfg.outbox.retention.enabled, "enabled must still default to true when not overridden");
+            assert_eq!(cfg.outbox.retention.interval_secs, 3600, "interval_secs must still default to 3600 when not overridden");
+            assert_eq!(cfg.outbox.retention.parked_days, 0, "parked_days must still default to 0 when not overridden");
+            assert_eq!(cfg.outbox.retention.batch_size, 1000, "retention.batch_size must still default to 1000 when not overridden");
+
+            // The outbox-level `batch_size` (relay drain) and the retention-level `batch_size`
+            // (sweep delete) are distinct TOML tables and must not collide in either direction.
+            assert_eq!(cfg.outbox.batch_size, 250, "outbox.batch_size (relay) must take its own override, unaffected by [outbox.retention]");
+
+            assert!(
+                cfg.validate().is_ok(),
+                "a partial [outbox.retention] override merged with the rest of the defaults should pass validation"
+            );
+            Ok(())
+        });
+    }
+
     // --- SMA-446 Unit 3: `[metrics]` config -------------------------------------------------
 
     #[test]
