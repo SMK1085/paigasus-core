@@ -307,6 +307,22 @@ impl PgOutboxMaintainer {
         Ok((total, passes))
     }
 
+    /// Begins a transaction and applies [`sweep_pass_timeout_stmts`] to it — the single entry
+    /// point every timeout-scoped statement in this module goes through.
+    ///
+    /// Extracted rather than inlined at each call site because the divergence it prevents is not
+    /// hypothetical: round 1 of the SMA-469 review bounded the two DELETE passes and left
+    /// `parked_row_count` running bare, which round 2 then had to fix. Both are timeout-scoped by
+    /// construction now, and a third call site gets the setup by calling this rather than by
+    /// remembering to copy four lines.
+    async fn begin_timeout_scoped_txn(&self) -> Result<sea_orm::DatabaseTransaction, DbErr> {
+        let txn = self.db.begin().await?;
+        for stmt in sweep_pass_timeout_stmts() {
+            txn.execute_unprepared(&stmt).await?;
+        }
+        Ok(txn)
+    }
+
     /// One delete pass, in its own short transaction: `SET LOCAL lock_timeout` bounds waiting on
     /// a conflicting TABLE-level lock (`SKIP LOCKED` in `sql` already handles conflicting row
     /// locks on its own), then `SET LOCAL statement_timeout` bounds the `DELETE` itself once the
@@ -315,10 +331,7 @@ impl PgOutboxMaintainer {
     /// `errored = true` path, so a blocked/slow pass gives up and retries next tick rather than
     /// queueing indefinitely or panicking.
     async fn sweep_pass(&self, sql: &str, cutoff: DateTime<Utc>, batch_limit: i64) -> Result<u64, DbErr> {
-        let txn = self.db.begin().await?;
-        for stmt in sweep_pass_timeout_stmts() {
-            txn.execute_unprepared(&stmt).await?;
-        }
+        let txn = self.begin_timeout_scoped_txn().await?;
         let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, [Value::from(cutoff), Value::from(batch_limit)]);
         let affected = txn.execute(stmt).await?.rows_affected();
         txn.commit().await?;
@@ -335,10 +348,7 @@ impl PgOutboxMaintainer {
     /// round-2 review, Finding 1). A tripped timeout surfaces as an ordinary `DbErr`, folded into
     /// the same `Err` branch below as any other read failure.
     async fn parked_row_count(&self) -> Result<u64, DbErr> {
-        let txn = self.db.begin().await?;
-        for stmt in sweep_pass_timeout_stmts() {
-            txn.execute_unprepared(&stmt).await?;
-        }
+        let txn = self.begin_timeout_scoped_txn().await?;
         let stmt = Statement::from_string(DbBackend::Postgres, r#"SELECT count(*) AS n FROM "event_outbox" WHERE parked = true"#.to_string());
         let row = txn.query_one(stmt).await?;
         txn.commit().await?;
