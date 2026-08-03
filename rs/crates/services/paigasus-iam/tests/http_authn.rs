@@ -373,11 +373,15 @@ async fn key_rotation_validates_tokens_signed_with_the_new_key() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
-/// Every `/v1` route the tenancy + authz sub-routers expose (organizations/teams/projects/
-/// memberships/users/authz), paired with its method — the enumeration mirrors
-/// `src/adapters/http/{organizations,teams,projects,memberships,users,authz}.rs` route
-/// tables exactly. When adding a new /v1 route, it must appear here — this test converts
-/// default-open HTTP routing into a tested invariant (final-review Important 3).
+/// Every `/v1` route the tenancy + authz + dead-letter sub-routers expose (organizations/
+/// teams/projects/memberships/users/authz/dead-letters), paired with its method — the
+/// enumeration mirrors `src/adapters/http/{organizations,teams,projects,memberships,users,
+/// authz,dead_letters}.rs` route tables. When adding a new /v1 route, it must appear here —
+/// this test converts default-open HTTP routing into a tested invariant (final-review
+/// Important 3). NOTE (SMA-469 Task 15): this `Vec` is hand-maintained, NOT a generic
+/// route-table enumeration — `/v1/audit`, `/v1/service-accounts`, and `/v1/authn/api-keys/...`
+/// are already absent from it. Only the dead-letter routes were added here (Task 14's review
+/// carry-over); the pre-existing gaps for audit/service-accounts/api-keys are untouched.
 #[tokio::test]
 async fn every_protected_v1_route_requires_bearer() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -422,6 +426,12 @@ async fn every_protected_v1_route_requires_bearer() {
         ("POST", "/v1/authz/role-grants".to_string()),
         ("GET", "/v1/authz/role-grants".to_string()),
         ("DELETE", format!("/v1/authz/role-grants/{id}")),
+        // dead_letters.rs (SMA-469 Task 15 — Gap A: these four were absent, false claim
+        // corrected)
+        ("GET", "/v1/outbox/dead-letters".to_string()),
+        ("POST", "/v1/outbox/dead-letters/replay".to_string()),
+        ("POST", format!("/v1/outbox/dead-letters/{id}/replay")),
+        ("POST", format!("/v1/outbox/dead-letters/{id}/discard")),
     ];
 
     for (method, path) in &protected_routes {
