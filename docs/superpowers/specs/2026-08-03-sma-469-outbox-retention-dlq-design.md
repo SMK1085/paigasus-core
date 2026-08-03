@@ -1,6 +1,6 @@
 # SMA-469 — outbox retention + a real dead-letter path for parked events
 
-**Status:** revised after adversarial challenge (2026-08-03)
+**Status:** APPROVED (2026-08-03), after adversarial challenge and revision
 **Linear:** [SMA-469](https://linear.app/smaschek/issue/SMA-469/iam-outbox-retention-a-real-dead-letter-path-for-parked-events)
 **Related:** SMA-446 (surfaced the gap), SMA-467 (`audit_log`'s equivalent treatment), SMA-471 (real broker publisher)
 
@@ -382,8 +382,10 @@ also triggers; it is not created by this issue, but this issue is what fires it.
   them.
 - §10's runbook gains the operator remediation (update the system-owned `policy` row's `source` to
   match, or delete it and let `reconcile_starter` re-`put` it on next boot).
-- A follow-up issue should give system-owned starter policies real reconciliation rather than
-  compare-and-warn. **Flagged for Sven at GATE 1** — it may deserve to be filed before this lands.
+- **[SMA-477](https://linear.app/smaschek/issue/SMA-477/iam-starter-policies-reconcile-by-compare-and-warn-so-any-action)**
+  tracks giving system-owned starter policies real reconciliation rather than compare-and-warn.
+  Filed 2026-08-03; it does **not** block this issue, and this issue does not wait on it — the
+  runbook remediation covers the interim.
 
 ### 7.2 Core types and ports
 
@@ -683,7 +685,7 @@ emitted a tick.
 | **Discard destroys delivery, not just evidence** | A discarded event represents a state change that *did* commit in IAM and will now never reach any consumer — with SMA-471's real publisher that is permanent, silent divergence with no reconciliation path. The complete audit entry (§7.4) is the documented reconciliation input, and the runbook requires the operator to record a plan before discarding. |
 | A first tick over a huge backlog stalls | `max_batches_per_tick` (config) plus per-pass autocommit bounds it; the sweep resumes next tick; an awaited startup tick means it begins immediately. |
 | Migration fails a concurrent multi-replica boot | Idempotent `IF NOT EXISTS` DDL plus `SET LOCAL lock_timeout` (§4), following m0007/m0008 precedent. |
-| Permanent starter-policy drift warning on existing databases | Documented, with operator remediation in the runbook and a proposed follow-up issue (§7.1). Flagged at GATE 1. |
+| Permanent starter-policy drift warning on existing databases | Documented, with operator remediation in the runbook; the underlying reconciliation gap is tracked as SMA-477 (§7.1), which does not block this issue. |
 | New crate/dep gates red CI | No new dependencies. Still run the full `moon ci` graph before pushing — repo gates are not covered by per-project tasks. |
 
 ## 12. Rejected challenge findings
