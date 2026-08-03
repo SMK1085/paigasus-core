@@ -31,6 +31,17 @@ pub const IAM_DENIAL_AUDITS_ENQUEUED_TOTAL: &str = "iam_denial_audits_enqueued_t
 /// pathological: two concurrent first authentications by the same admin race, and the loser
 /// rolls back on the unique constraint with the net state still correct.
 pub const IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL: &str = "iam_bootstrap_admin_seed_failures_total";
+/// SMA-477: one increment per starter policy per boot, labelled by what reconciliation did.
+/// `outcome` is a closed set — `unchanged` | `seeded` | `adopted` | `reconciled` |
+/// `externally_modified` | `stale_binary` | `orphaned` | `failed` — never derived from anything
+/// caller-supplied, so it cannot mint cardinality.
+///
+/// `externally_modified` is the one worth alerting on: it means something other than this
+/// service wrote a system-owned policy row, which boot has just reverted. `stale_binary` means
+/// an older replica declined to overwrite a newer release's row — expected briefly during a
+/// deploy, suspicious if it persists. `orphaned` counts system rows whose id is no longer
+/// code-defined; nothing can delete those automatically.
+pub const IAM_STARTER_POLICY_RECONCILES_TOTAL: &str = "iam_starter_policy_reconciles_total";
 // IAM outbox relay
 pub const IAM_OUTBOX_RELAY_TICKS_TOTAL: &str = "iam_outbox_relay_ticks_total";
 pub const IAM_OUTBOX_RELAY_DRAINED_TOTAL: &str = "iam_outbox_relay_drained_total";
@@ -79,6 +90,7 @@ pub const ALL: &[&str] = &[
     IAM_DENIAL_AUDITS_DROPPED_TOTAL,
     IAM_DENIAL_AUDITS_ENQUEUED_TOTAL,
     IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL,
+    IAM_STARTER_POLICY_RECONCILES_TOTAL,
     IAM_OUTBOX_RELAY_TICKS_TOTAL,
     IAM_OUTBOX_RELAY_DRAINED_TOTAL,
     IAM_OUTBOX_RELAY_PUBLISHED_TOTAL,
