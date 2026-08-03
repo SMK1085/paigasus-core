@@ -49,6 +49,8 @@ fn event_to_model(ev: &DomainEvent) -> event_outbox::ActiveModel {
         published_at: Set(None),
         attempts: Set(0),
         parked: Set(false),
+        parked_at: Set(None),
+        last_error: Set(None),
     }
 }
 

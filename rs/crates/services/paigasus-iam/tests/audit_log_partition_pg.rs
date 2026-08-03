@@ -230,8 +230,12 @@ async fn down_migration_restores_the_plain_m0006_shape_and_preserves_rows() {
     let before = audit_log::Entity::find().count(&db).await.unwrap();
     assert_eq!(before, 3, "all three seeded rows must be visible pre-down");
 
-    // Revert exactly one migration step (m0008's `down`).
-    Migrator::down(&db, Some(1)).await.expect("m0008 down must succeed");
+    // Revert the two most-recently-applied migration steps: m0009's `down` (SMA-469, unrelated
+    // `event_outbox` columns/indexes) then m0008's `down`, the one this test is actually about.
+    // `Some(1)` would only undo whichever migration is currently last in `migrations()`, so this
+    // must grow every time a migration lands on top of m0008 — it is m0008's `down`, not "one
+    // step back", that this test asserts on.
+    Migrator::down(&db, Some(2)).await.expect("m0009 and m0008 down must succeed");
 
     assert!(!audit_log_is_partitioned(&db).await, "audit_log must be a plain table after down");
 

@@ -71,6 +71,8 @@ async fn seed_row(db: &DatabaseConnection, id: Uuid, occurred_at: chrono::DateTi
         published_at: Set(None),
         attempts: Set(0),
         parked: Set(false),
+        parked_at: Set(None),
+        last_error: Set(None),
     }
     .insert(db)
     .await

@@ -254,6 +254,8 @@ mod tests {
             published_at: None,
             attempts: 0,
             parked: false,
+            parked_at: None,
+            last_error: None,
         }
     }
 

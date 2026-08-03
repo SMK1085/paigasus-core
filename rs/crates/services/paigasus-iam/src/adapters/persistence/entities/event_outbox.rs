@@ -24,6 +24,13 @@ pub struct Model {
     pub published_at: Option<DateTimeUtc>,
     pub attempts: i32,
     pub parked: bool,
+    /// When the relay flipped `parked` to true (SMA-469). `[outbox.retention].parked_days`
+    /// measures from this, never from `occurred_at`. NULL only for a row that is not parked.
+    pub parked_at: Option<DateTimeUtc>,
+    /// The most recent publish-failure reason, rewritten on EVERY failed attempt (not only at
+    /// parking) so an operator watching `attempts` climb sees the current cause. Deliberately
+    /// preserved across a replay, so a re-parked row keeps the original evidence.
+    pub last_error: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
