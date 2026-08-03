@@ -704,7 +704,7 @@ loop exited but the process didn't restart.
   waiting on autovacuum's own schedule; `VACUUM FULL event_outbox;` reclaims it fully but takes an
   **exclusive lock**, so run it only in a maintenance window, never casually against a live table.
 
-### `IamOutboxRetentionErroring` — the retention sweep is erroring on every tick (warning)
+### `IamOutboxRetentionErroring` — the retention sweep had a recent error (warning)
 
 **Meaning.** `increase(iam_outbox_retention_ticks_total{result="error"}[6h]) > 0` for 2h — at
 least one `PgOutboxMaintainer` tick has errored on the named target in the last 6 hours. This is
