@@ -92,7 +92,13 @@ fn sweep_step(now: DateTime<Utc>, days: u32) -> SweepStep {
 }
 
 /// `$1` = cutoff timestamp, `$2` = batch size.
-fn published_sweep_sql() -> &'static str {
+///
+/// `pub` (but `#[doc(hidden)]`, not part of the crate's real public API) so
+/// `tests/outbox_retention_pg.rs` can `EXPLAIN` the EXACT statement the sweep issues, rather
+/// than a hand-copied string that could silently drift from this one (SMA-469 round-1 review,
+/// Finding 2).
+#[doc(hidden)]
+pub fn published_sweep_sql() -> &'static str {
     r#"DELETE FROM "event_outbox" WHERE id IN (
          SELECT id FROM "event_outbox"
          WHERE published_at IS NOT NULL AND published_at < $1 AND parked = false

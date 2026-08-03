@@ -15,6 +15,7 @@ mod support;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use paigasus_iam::adapters::persistence::entities::event_outbox;
+use paigasus_iam::adapters::persistence::pg_outbox_maintainer::published_sweep_sql;
 use paigasus_iam::adapters::persistence::{OutboxRetentionPolicy, PgOutboxMaintainer};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, PaginatorTrait, Set, Statement, Value};
 use uuid::Uuid;
@@ -70,6 +71,15 @@ async fn sweeps_aged_published_rows_and_leaves_live_and_parked_rows_alone() {
     let fresh = seed(&db, 2, Some(now - ChronoDuration::hours(1)), false, None).await;
     let live = seed(&db, 3, None, false, None).await;
     let parked = seed(&db, 4, None, true, Some(now - ChronoDuration::days(30))).await;
+    // Load-bearing for the published sweep's `AND parked = false` clause (round-1 review,
+    // Finding 1): every OTHER parked row seeded above has `published_at = None`, so it never
+    // matches `published_at IS NOT NULL AND published_at < $1` regardless of `parked = false` —
+    // deleting that clause from `published_sweep_sql()` would leave every other assertion in
+    // this test green. This is the one state that actually exercises the guard: aged AND
+    // published AND parked. `pg_outbox_maintainer.rs`'s own module doc notes a later task's
+    // `replay_in` becomes a second writer of `published_at`/`parked`, which is exactly why a row
+    // can end up in this state in production and why the guard matters.
+    let aged_published_but_parked = seed(&db, 5, Some(now - ChronoDuration::days(30)), true, Some(now - ChronoDuration::days(30))).await;
 
     let report = PgOutboxMaintainer::new(db.clone()).tick(now, policy(7, 0)).await;
 
@@ -80,7 +90,13 @@ async fn sweeps_aged_published_rows_and_leaves_live_and_parked_rows_alone() {
     assert!(exists(&db, fresh).await, "a published row inside the window must survive");
     assert!(exists(&db, live).await, "an undrained row must never be swept");
     assert!(exists(&db, parked).await, "a parked row must survive parked_days = 0");
-    assert_eq!(report.parked_rows, 1, "the backlog gauge must count the parked row");
+    assert!(
+        exists(&db, aged_published_but_parked).await,
+        "a parked row must survive the published sweep even when its published_at is also old — \
+         `parked = false` is what excludes it, not published_at; deleting `AND parked = false` \
+         from published_sweep_sql() must fail this assertion"
+    );
+    assert_eq!(report.parked_rows, 2, "the backlog gauge must count both parked rows");
 }
 
 #[tokio::test]
@@ -94,7 +110,13 @@ async fn sweeps_aged_parked_rows_only_when_parked_days_is_set_and_park_time_is_k
     let aged_parked = seed(&db, 10, None, true, Some(now - ChronoDuration::days(60))).await;
     let fresh_parked = seed(&db, 11, None, true, Some(now - ChronoDuration::days(1))).await;
     // A row parked with an UNKNOWN park time must never be swept — m0009 backfills these, so
-    // this state should be unreachable in production, which is exactly why the guard is tested.
+    // this state should be unreachable in production. NOTE (round-1 review correction): the
+    // assertion below holds unconditionally by SQL three-valued logic — `parked_at < $1` is
+    // NULL (not true) when `parked_at` is NULL, so the row is excluded from the WHERE clause
+    // whether or not `parked_sweep_sql()`'s explicit `parked_at IS NOT NULL` clause is present.
+    // That clause is honest defense-in-depth, not something this (or any) test could falsify by
+    // deleting it — do not read this assertion as coverage of that specific clause; it documents
+    // the intended behavior, which happens to be unfalsifiable-by-construction here.
     let unknown_parked = seed(&db, 12, None, true, None).await;
 
     let report = PgOutboxMaintainer::new(db.clone()).tick(now, policy(0, 30)).await;
@@ -160,26 +182,75 @@ async fn honors_batch_size_and_max_batches_per_tick_across_passes() {
     assert_eq!(event_outbox::Entity::find().count(&db).await.unwrap(), 0);
 }
 
-/// Task 2's (m0009) `ix_event_outbox_published` partial index exists specifically so the
-/// published sweep's inner `SELECT` can use it instead of a full-table scan under production
-/// row counts — nothing else in this suite proves the query is even ABLE to use it. This
-/// mirrors (rather than imports — `published_sweep_sql` is private to `pg_outbox_maintainer`)
-/// the exact inner `SELECT` the published sweep issues and inspects the chosen plan.
-///
-/// A one-row table does NOT exercise this: manually confirmed (not committed) that on a single
-/// seeded row Postgres reasonably prefers a `Seq Scan` over `event_outbox` — with hardly any
-/// pages to scan, the pkey/partial-index overhead isn't worth it, a legitimate planner cost
-/// decision rather than a bug. Bulk-inserting 50k rows still did not flip it as long as they
-/// were mostly-aged published rows: with `ORDER BY id LIMIT $2`, `event_outbox_pkey` (already
-/// in `id` order) lets the planner stop after the first 1000 qualifying rows without an
-/// explicit sort, which stays cheaper than the partial index for as long as most of the table
-/// matches the sweep's predicate. The realistic case — and the one this test seeds — is the
-/// opposite: a healthy relay drains published rows fast, so `event_outbox` is dominated by
-/// still-live (`published_at IS NULL`) rows that never even enter `ix_event_outbox_published`
-/// (its own `WHERE published_at IS NOT NULL`), while the few aged rows in the tiny backlog
-/// this sweep targets do. Under that realistic skew the partial index wins outright.
+/// Round-1 review, Finding 3: every assertion above reads `SweepReport` fields — which proves
+/// `parked_row_count()`/the sweep loops ran and their results reached the struct, but proves
+/// NOTHING about whether `tick` actually emits its metrics. No recorder is installed anywhere
+/// else in this suite, so `gauge!(...)`/`counter!(...)` are no-ops there; an assertion on
+/// `report.parked_rows` would pass identically whether or not the `gauge!` call inside `tick`
+/// had been deleted entirely. Mirrors `tests/relay_pg.rs`'s pattern (`paigasus_observability::
+/// init` + `handle.render()` + substring/line assertions on the Prometheus exposition) to prove
+/// the three metric families this module owns are actually emitted, with the label values
+/// `IamConfig`'s consumers (Task 17's alert rules) will depend on by name.
 #[tokio::test]
-async fn published_sweep_select_plan_uses_the_partial_index_under_a_realistic_backlog() {
+async fn tick_emits_its_metric_families_with_the_expected_labels() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        eprintln!("skipping outbox retention test: Docker unavailable");
+        return;
+    };
+    let now = Utc::now();
+    seed(&db, 300, Some(now - ChronoDuration::days(30)), false, None).await;
+    seed(&db, 301, None, true, Some(now - ChronoDuration::days(31))).await;
+
+    let handle = paigasus_observability::init("test-iam-outbox-retention-tick-metrics");
+    let report = PgOutboxMaintainer::new(db.clone()).tick(now, policy(7, 30)).await;
+    assert!(!report.errored);
+    assert_eq!(report.deleted_published, 1);
+    assert_eq!(report.deleted_parked, 1);
+
+    let out = handle.render();
+    assert!(
+        out.lines().any(|l| l.contains("iam_outbox_retention_ticks_total") && l.contains(r#"result="ok""#)),
+        "expected an iam_outbox_retention_ticks_total series labeled result=\"ok\":\n{out}"
+    );
+    assert!(!out.contains(r#"result="error""#), "a healthy tick must not emit a result=\"error\" series:\n{out}");
+    assert!(
+        out.lines().any(|l| l.contains("iam_outbox_rows_deleted_total") && l.contains(r#"reason="published""#)),
+        "expected an iam_outbox_rows_deleted_total series labeled reason=\"published\":\n{out}"
+    );
+    assert!(
+        out.lines().any(|l| l.contains("iam_outbox_rows_deleted_total") && l.contains(r#"reason="parked""#)),
+        "expected an iam_outbox_rows_deleted_total series labeled reason=\"parked\":\n{out}"
+    );
+    assert!(out.contains("iam_outbox_parked_rows"), "missing the backlog gauge:\n{out}");
+}
+
+/// Task 2's (m0009) `ix_event_outbox_published` partial index exists specifically so the
+/// published sweep can avoid a full-table scan under production row counts — nothing else in
+/// this suite proves the query is even ABLE to use an index. Builds `EXPLAIN` from the REAL
+/// `published_sweep_sql()` (round-1 review, Finding 2: a hand-copied SQL string would keep
+/// passing against stale text if the real query ever changed) rather than a re-typed copy.
+///
+/// The assertion is deliberately soft — NOT a sequential scan — rather than pinning the exact
+/// index name. Which index the planner picks is its own cost-based decision, sensitive to
+/// table shape/statistics/Postgres version/competing indexes; a seq scan is the one plan shape
+/// that would actually indicate a regression (the query can't use ANY index). Observed plans
+/// while shaping this test's seed data (recorded here, not asserted on, since the plan text
+/// itself is planner-version-fragile):
+///
+/// - One seeded row, no bulk data: `Seq Scan on event_outbox` — reasonable; with hardly any
+///   pages to scan, an index's overhead isn't worth it. This is why the test seeds more.
+/// - 20k-50k bulk rows, all/mostly aged-and-published: `Index Scan using event_outbox_pkey` —
+///   NOT the partial index, still not a seq scan. With `ORDER BY id LIMIT $2`, the pkey (already
+///   in `id` order) lets the planner stop after the first 1000 qualifying rows without an
+///   explicit sort; that stays cheaper than the partial index for as long as most of the table
+///   matches the sweep's predicate.
+/// - 50k still-LIVE (`published_at IS NULL`) rows + 1 aged published row (what this test seeds,
+///   below): `Index Scan using ix_event_outbox_published` (`Sort` on `id` on top, since that
+///   index isn't `id`-ordered). Mirrors a healthy relay, where `event_outbox` is dominated by
+///   unpublished traffic the relay hasn't drained yet, not a pile of stale published rows — the
+///   partial index wins outright once the aged-published predicate is actually selective.
+#[tokio::test]
+async fn published_sweep_query_does_not_resort_to_a_sequential_scan() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         eprintln!("skipping outbox retention test: Docker unavailable");
         return;
@@ -203,13 +274,7 @@ async fn published_sweep_select_plan_uses_the_partial_index_under_a_realistic_ba
     // Give the planner real statistics to work with rather than the post-migration defaults.
     db.execute_unprepared(r#"ANALYZE "event_outbox";"#).await.unwrap();
 
-    let stmt = Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        r#"EXPLAIN SELECT id FROM "event_outbox"
-             WHERE published_at IS NOT NULL AND published_at < $1 AND parked = false
-             ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED"#,
-        [Value::from(now), Value::from(1000i64)],
-    );
+    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, format!("EXPLAIN {}", published_sweep_sql()), [Value::from(now), Value::from(1000i64)]);
     let plan = db
         .query_all(stmt)
         .await
@@ -220,8 +285,5 @@ async fn published_sweep_select_plan_uses_the_partial_index_under_a_realistic_ba
         .join("\n");
 
     eprintln!("published sweep query plan:\n{plan}");
-    assert!(
-        plan.contains("ix_event_outbox_published"),
-        "expected the published sweep's SELECT to use ix_event_outbox_published; got:\n{plan}"
-    );
+    assert!(!plan.contains("Seq Scan"), "the published sweep's query must not fall back to a sequential scan; got:\n{plan}");
 }
