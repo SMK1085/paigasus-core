@@ -5,6 +5,7 @@
 
 mod support;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -408,4 +409,86 @@ async fn bulk_replay_honors_a_parked_at_time_window() {
             assert!(row.parked_at.is_none(), "{label}: bulk replay must clear the park time");
         }
     }
+}
+
+#[tokio::test]
+async fn list_and_bulk_replay_agree_on_the_same_filtered_id_set() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        eprintln!("skipping dead-letter test: Docker unavailable");
+        return;
+    };
+    let dead = PgDeadLetters::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+
+    // `list` (pg_dead_letters.rs) builds its filter through the SeaORM entity API;
+    // `replay_matching_in` builds the SAME `event_type`/`parked_from`/`parked_to` semantics as
+    // raw SQL via `filter_clauses`. They agree today, but nothing pins that a future edit to
+    // either one keeps them in sync — a divergence means "what an operator listed" no longer
+    // equals "what a bulk replay actually un-parked", discovered only after the fact.
+    //
+    // Ids are deliberately INTERLEAVED (matches at 700/702/704, decoys at 701/703/705/706)
+    // rather than grouped at one end of the id range, and both calls below pass a limit/max_rows
+    // (50) far above this 7-row total. That combination is what rules out an accidental pass:
+    // `list` selects `ORDER BY id DESC`, `replay_matching_in`'s subquery selects `ORDER BY id
+    // ASC` — opposite directions — so if either call's result were silently CAPPED, the two
+    // could agree merely because ordering-plus-cap happened to select the same visible slice on
+    // both sides (that exact trap already bit this file once, see
+    // `bulk_replay_honors_its_filter_cap_and_ascending_selection_order`'s comment on decoy
+    // placement). Interleaving the ids and keeping the cap far above the total means neither
+    // side's result is EVER truncated, so the only thing that can make `listed_ids` and
+    // `unparked_ids` agree below is the WHERE-clause semantics actually matching identically.
+    let match_a = seed_parked(&db, 700, "iam.principal.created", 4).await; // in [from, to]
+    let decoy_wrong_type = seed_parked(&db, 701, "iam.role.granted", 3).await; // in window, wrong type
+    let match_b = seed_parked(&db, 702, "iam.principal.created", 2).await; // in [from, to]
+    let decoy_too_old = seed_parked(&db, 703, "iam.principal.created", 10).await; // right type, before `from`
+    let match_c = seed_parked(&db, 704, "iam.principal.created", 3).await; // in [from, to]
+    let decoy_too_new = seed_parked(&db, 705, "iam.principal.created", 0).await; // right type, after `to`
+    let decoy_double_wrong = seed_parked(&db, 706, "iam.role.granted", 0).await; // wrong type AND after `to`
+
+    let event_type = Some("iam.principal.created".to_string());
+    let parked_from = Some(Utc::now() - ChronoDuration::days(5));
+    let parked_to = Some(Utc::now() - ChronoDuration::days(1));
+    let expected: HashSet<Uuid> = [match_a, match_b, match_c].into_iter().collect();
+
+    let listed = dead
+        .list(&DeadLetterFilter {
+            event_type: event_type.clone(),
+            parked_from,
+            parked_to,
+            cursor: None,
+            limit: 50,
+        })
+        .await
+        .unwrap();
+    let listed_ids: HashSet<Uuid> = listed.iter().map(|e| e.id).collect();
+    assert_eq!(listed_ids, expected, "list must return exactly the rows matching event_type + the parked_at window");
+
+    let tx = uow.begin().await.unwrap();
+    let n = dead
+        .replay_matching_in(
+            &*tx,
+            &BulkReplayRequest {
+                event_type,
+                parked_from,
+                parked_to,
+                max_rows: 50,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(n as usize, expected.len());
+
+    let mut unparked_ids: HashSet<Uuid> = HashSet::new();
+    for id in [match_a, decoy_wrong_type, match_b, decoy_too_old, match_c, decoy_too_new, decoy_double_wrong] {
+        let row = event_outbox::Entity::find_by_id(id).one(&db).await.unwrap().unwrap();
+        if !row.parked {
+            unparked_ids.insert(id);
+        }
+    }
+
+    // The actual point of this test: what `list` SAID was in scope is exactly what
+    // `replay_matching_in` ACTUALLY un-parked — not merely that each separately matches
+    // `expected` (which the assertions above already establish on their own).
+    assert_eq!(listed_ids, unparked_ids, "list and replay_matching_in must un-park exactly the same id set");
 }
