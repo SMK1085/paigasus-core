@@ -111,6 +111,8 @@ pub trait SystemPolicyReconciler: Send + Sync {
     /// Ids of persisted `system = true` rows NOT in `known` — retired starter policies that
     /// nothing can now delete ([`PolicyStore::delete`] refuses a system row). Reported, never
     /// removed: a safe retirement path has its own ordering constraints and is out of scope.
+    /// Sorted ascending by id: boot logs one line per orphan, and an unstable order would
+    /// reshuffle those lines run to run.
     async fn orphaned_system_policy_ids(&self, known: &[&str]) -> Result<Vec<String>, AuthzError>;
     /// Every persisted `policy_id`, captured once before reconciliation so boot can tell a
     /// SURVIVABLE convergence failure (the row exists and still governs) from a FATAL seeding

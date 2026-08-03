@@ -261,6 +261,7 @@ async fn reconcile_system_seeds_stamping_the_fingerprint_and_revision() {
 
 #[tokio::test]
 async fn reconcile_system_converges_a_code_change_without_reporting_an_edit() {
+    use paigasus_iam::adapters::persistence::entities::policy;
     use paigasus_iam_core::SystemPolicyReconciler;
     use paigasus_iam_core::authz::reconcile::{StarterPolicyOutcome, content_fingerprint};
     use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
@@ -269,14 +270,32 @@ async fn reconcile_system_converges_a_code_change_without_reporting_an_edit() {
     let store = PgPolicyStore::new(db.clone(), Generations::memory());
     let doc = starter_policies().into_iter().next().unwrap();
     store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+    let seeded_created_at = policy::Entity::find_by_id(doc.policy_id.clone()).one(&db).await.unwrap().unwrap().created_at;
 
-    // Simulate "the previous release wrote this": different source, CORRECTLY fingerprinted.
+    // Simulate "the previous release wrote this": different source, CORRECTLY fingerprinted,
+    // and stamped with a STRICTLY LOWER revision than this binary carries — the ordinary
+    // "an older release seeded this row, we are the upgrade" shape.
     let old = "forbid(principal, action, resource) when { resource has effective_status };";
     let old_fp = content_fingerprint(doc.kind, old, &doc.description);
     tamper_policy(&db, &doc.policy_id, old, Some(&old_fp)).await;
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        format!(r#"UPDATE "policy" SET starter_revision = {} WHERE policy_id = '{}'"#, STARTER_POLICY_REVISION - 1, doc.policy_id),
+    ))
+    .await
+    .unwrap();
 
     assert_eq!(store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(), StarterPolicyOutcome::Reconciled);
-    assert_eq!(stored_source(&db, &doc.policy_id).await, doc.source);
+    let row = policy::Entity::find_by_id(doc.policy_id.clone()).one(&db).await.unwrap().unwrap();
+    assert_eq!(row.source, doc.source);
+    // A converge must preserve the ORIGINAL `created_at` — `reconcile_system`'s UPDATE branch
+    // threads the stored row's value through, deliberately NOT the incoming `doc.created_at`
+    // (which is `starter_policies()`'s own `Utc::now()`). "Unifying" that with the INSERT
+    // branch would silently reset every starter policy's creation date on every converging
+    // boot, and nothing else in this suite would notice. Mirrors the identical `put_in`
+    // invariant pinned in `tests/authz_policy_store.rs`.
+    assert_eq!(row.created_at, seeded_created_at, "a converge must not rewrite created_at");
+    assert_eq!(row.starter_revision, Some(i32::try_from(STARTER_POLICY_REVISION).unwrap()), "the converge must restamp the revision");
 }
 
 #[tokio::test]
@@ -319,12 +338,15 @@ async fn reconcile_system_restores_a_cleared_system_flag() {
     store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
 
     // The bypass this guards: clearing `system` must not buy an exemption from convergence.
+    // `system = false` is the ONLY thing that changes here — content and fingerprint are left
+    // exactly as the seed wrote them. That isolation is the whole point: if the tamper also
+    // rewrote `source`, the row would classify `ExternallyModified` on the fingerprint
+    // mismatch alone and this test would stay green with `reconcile.rs`'s `!stored.system ||`
+    // guard deleted, which is precisely the bypass an adversarial spec review called the
+    // cheapest way to exempt a starter policy from convergence forever.
     db.execute(Statement::from_string(
         DbBackend::Postgres,
-        format!(
-            r#"UPDATE "policy" SET system = false, source = 'permit(principal, action, resource);' WHERE policy_id = '{}'"#,
-            doc.policy_id
-        ),
+        format!(r#"UPDATE "policy" SET system = false WHERE policy_id = '{}'"#, doc.policy_id),
     ))
     .await
     .unwrap();
@@ -472,4 +494,17 @@ async fn orphaned_system_policy_ids_reports_retired_starter_policies_only() {
 
     let orphans = store.orphaned_system_policy_ids(STARTER_POLICY_IDS).await.unwrap();
     assert_eq!(orphans, vec!["retired_role".to_string()]);
+
+    // `existing_policy_ids` feeds boot's fatal-vs-survivable decision (D12): a row that EXISTS
+    // still governs, so a convergence failure over it is survivable, whereas a missing row
+    // means the compiled snapshot would be incomplete. It must therefore report EVERY row —
+    // including the non-system `operator-policy` that `orphaned_system_policy_ids` filters
+    // out. Narrowing it to `system = true` would make an operator policy look absent.
+    let mut all_ids = store.existing_policy_ids().await.unwrap();
+    all_ids.sort();
+    let mut want: Vec<String> = STARTER_POLICY_IDS.iter().map(|id| (*id).to_string()).collect();
+    want.push("retired_role".to_string());
+    want.push("operator-policy".to_string());
+    want.sort();
+    assert_eq!(all_ids, want, "existing_policy_ids must report every persisted row, system or not");
 }

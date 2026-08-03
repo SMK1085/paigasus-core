@@ -57,7 +57,9 @@ use paigasus_iam_core::authz::model::PolicyKind;
 use paigasus_iam_core::authz::reconcile::{StarterPolicyOutcome, StoredPolicyRow, classify_starter_policy, content_fingerprint};
 use paigasus_iam_core::authz::schema::validate_policy;
 use paigasus_iam_core::{AuthzError, PolicyDocument, PolicyStore, PutOutcome, RepositoryError, SystemPolicyReconciler, Transaction};
-use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, IsolationLevel, QueryFilter, QuerySelect, Set, SqlErr, TransactionTrait};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect, Set, SqlErr, TransactionTrait,
+};
 
 // `Clone` lets the composition root hold a store handle inside a `#[derive(Clone))]`
 // service (mirrors `PgOrganizationRepository`'s precedent) — cheap: `DatabaseConnection`
@@ -437,7 +439,15 @@ impl SystemPolicyReconciler for PgPolicyStore {
     }
 
     async fn orphaned_system_policy_ids(&self, known: &[&str]) -> Result<Vec<String>, AuthzError> {
-        let rows = policy::Entity::find().filter(policy::Column::System.eq(true)).all(&self.db).await.map_err(map_err)?;
+        // `ORDER BY policy_id`: Task 7 iterates this list to log each orphan, so an unordered
+        // scan would reshuffle a boot's WARN lines run to run (and make any multi-orphan test
+        // flaky). Ordering is part of the contract, not an implementation detail.
+        let rows = policy::Entity::find()
+            .filter(policy::Column::System.eq(true))
+            .order_by_asc(policy::Column::PolicyId)
+            .all(&self.db)
+            .await
+            .map_err(map_err)?;
         Ok(rows.into_iter().map(|r| r.policy_id).filter(|id| !known.contains(&id.as_str())).collect())
     }
 
