@@ -304,9 +304,11 @@ tests:
 
   # IamOutboxRetentionStalled: a live target whose sweep counter never moves must fire; a target
   # whose counter IS advancing is the control that proves the rule is not simply always-firing.
-  # The `stalled` counter is flat from t=0, so the condition is true from the earliest possible
-  # evaluation — the 30m/61m pair below brackets the `for: 1h` hold the same way the DLQ alert's
-  # 30m/61m pair does: not yet firing just before the hold elapses, firing just after.
+  # The `stalled` counter is flat from t=0, so the condition (increase(...[6h]) == 0) is already
+  # true at the earliest evaluation — the same single-sample startup transient the `for: 2h`
+  # rationale in iam.rules.yml documents. The 30m/119m/121m trio below brackets the `for: 2h`
+  # hold the same way IamOutboxRetentionErroring's 30m/119m/121m trio brackets ITS `for: 2h`:
+  # comfortably not firing, not yet firing just before the hold elapses, firing just after.
   - interval: 1m
     input_series:
       - series: 'up{job="iam", instance="stalled:8080"}'
@@ -321,7 +323,10 @@ tests:
       - eval_time: 30m
         alertname: IamOutboxRetentionStalled
         exp_alerts: []
-      - eval_time: 61m
+      - eval_time: 119m
+        alertname: IamOutboxRetentionStalled
+        exp_alerts: []
+      - eval_time: 121m
         alertname: IamOutboxRetentionStalled
         exp_alerts:
           - exp_labels: { severity: warning, job: iam, instance: "stalled:8080" }

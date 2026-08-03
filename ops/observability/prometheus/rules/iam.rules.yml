@@ -66,9 +66,24 @@ groups:
       # without it, a replica that spawned the maintainer but never completed a single tick emits
       # no series at all, and `empty == 0` is empty — the alert would go silent exactly when
       # things are worst.
+      #
+      # `for: 2h`, exceeding this task's own hourly tick interval, is deliberate — NOT a copy-paste
+      # of a bigger number for safety margin. `main.rs` runs an AWAITED startup tick before the
+      # maintainer's first `interval_secs` sleep, so a freshly booted replica's counter gets its
+      # FIRST sample at boot and its SECOND an hour later. `increase()` over a single sample is 0
+      # (there's no earlier point in the window to diff against), so `increase(...[6h]) == 0` is
+      # already true at t=0 — a perfectly healthy replica goes pending the instant it boots,
+      # regardless of hold length. With `for: 1h` the second hourly tick has to land AND be
+      # scraped before that hold elapses, which is a photo finish against `interval_secs = 3600`:
+      # any tick jitter or scrape delay pages a healthy replica after every restart. `for: 2h`
+      # gives the second tick a full extra cycle of slack to clear the condition well before the
+      # hold elapses. Worst-case detection becomes ~8h (6h window + 2h hold) — an acceptable trade
+      # for a sweep whose failure mode is slow, unbounded table growth, not something that needs
+      # minute-scale paging. This also brings the hold in line with its IamOutboxRetentionErroring
+      # sibling below, which independently arrived at `for: 2h` for a different reason.
       - alert: IamOutboxRetentionStalled
         expr: (sum by (job, instance) (increase(iam_outbox_retention_ticks_total[6h])) or (up{job="iam"} == 1) * 0) == 0
-        for: 1h
+        for: 2h
         labels: { severity: warning }
         annotations: { summary: "IAM outbox retention sweep is not ticking", description: "No outbox retention tick in ~6 hours on {{ $labels.job }}/{{ $labels.instance }}. Published event_outbox rows are not being deleted, so the table grows without bound, and the iam_outbox_parked_rows dead-letter gauge is stale. The sweep ticks on outbox.retention.interval_secs (default 3600 = hourly), so the 6h window assumes the default — widen it if interval_secs is increased. Unlike the audit equivalent, outbox.retention.enabled=false does NOT silence this: the maintainer is spawned unconditionally and still ticks to refresh the gauge, so silence here always means something is wrong. See RUNBOOK section 4." }
       # A sweep that TICKS but ERRORS on every tick is invisible to IamOutboxRetentionStalled

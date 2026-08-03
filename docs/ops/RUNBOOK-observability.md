@@ -202,7 +202,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamOutboxRelayStalled` | `rate(iam_outbox_relay_ticks_total[10m]) == 0` | critical |
 | `IamPolicySnapshotReloadsStalled` | `(sum by (job, instance) (increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[10m])) or (up{job="iam"} == 1) * 0) == 0` for 5m | critical |
 | `IamAuditPartitionMaintenanceStalled` | `sum without (result) (increase(iam_audit_partition_maintenance_ticks_total[2d])) == 0` for 1h | warning |
-| `IamOutboxRetentionStalled` | `(sum by (job, instance) (increase(iam_outbox_retention_ticks_total[6h])) or (up{job="iam"} == 1) * 0) == 0` for 1h | warning |
+| `IamOutboxRetentionStalled` | `(sum by (job, instance) (increase(iam_outbox_retention_ticks_total[6h])) or (up{job="iam"} == 1) * 0) == 0` for 2h | warning |
 | `IamOutboxRetentionErroring` | `increase(iam_outbox_retention_ticks_total{result="error"}[6h]) > 0` for 2h | warning |
 | `IamOutboxDeadLetterBacklog` | `max by (job) (iam_outbox_parked_rows) > 0` for 1h | warning |
 | `IamHighErrorRate` | `sum(rate(iam_http_requests_total{status_class="5xx"}[5m])) / sum(rate(iam_http_requests_total[5m])) > 0.05` for 10m | critical |
@@ -636,7 +636,7 @@ restart.
 ### `IamOutboxRetentionStalled` — the outbox retention sweep is not ticking (warning)
 
 **Meaning.** `(sum by (job, instance) (increase(iam_outbox_retention_ticks_total[6h])) or
-(up{job="iam"} == 1) * 0) == 0` for 1h — no `PgOutboxMaintainer` sweep tick in ~6 hours on the
+(up{job="iam"} == 1) * 0) == 0` for 2h — no `PgOutboxMaintainer` sweep tick in ~6 hours on the
 named target, even though the IAM process is up. The window is scaled to *this* task's own hourly
 default (`[outbox.retention].interval_secs = 3600`) — it is deliberately **not** copied from
 `IamAuditPartitionMaintenanceStalled`'s `[2d]` above, which matches the audit maintainer's *daily*
@@ -645,6 +645,19 @@ interval; reusing that window here would tolerate ~48 consecutive missed ticks b
 it, a replica that spawned the maintainer but never completed a single tick emits no series at
 all, `increase()`/`sum()` over that absent series is empty, and `empty == 0` is also empty — the
 alert would stay silent exactly when things are worst.
+
+**`for: 2h` exceeds the sweep's own hourly tick interval on purpose — this is not a copy-paste of a
+bigger number for safety margin.** `main.rs` runs an awaited startup tick before the maintainer's
+first `interval_secs` sleep, so a freshly booted replica's counter gets its first sample at boot
+and its second an hour later. `increase()` over a single sample is `0` (there is no earlier point
+in the window to diff against), so the condition is already true at `t=0` — a perfectly healthy
+replica goes pending the instant it boots, regardless of hold length. A `for: 1h` hold would then
+need the second hourly tick to land *and* be scraped before the hold elapses — a photo finish
+against a 3600s interval that any tick jitter or scrape delay turns into a page against a healthy
+replica, on every restart. `for: 2h` gives the second tick a full extra cycle of slack to clear the
+condition well before the hold elapses. Worst-case detection is therefore ~8h (6h window + 2h
+hold) — an accepted trade-off for a sweep whose failure mode is slow, unbounded table growth, not
+something that needs minute-scale paging.
 
 **Unlike its audit-retention sibling, `[outbox.retention].enabled = false` does NOT silence this
 alert — that difference is deliberate and worth internalizing before you page on it.** Setting
