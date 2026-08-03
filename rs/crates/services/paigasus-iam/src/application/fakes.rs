@@ -872,15 +872,19 @@ impl KeyEntropy for SeqKeyEntropy {
     }
 }
 
-/// The no-op `Transaction` [`FakeUnitOfWork::begin`] hands out: `commit` always succeeds,
-/// `savepoint` is never reached by any current caller (`RoleService`'s reference pattern
-/// never opens one), and `as_any` downcasts to itself, mirroring `SeaOrmTransaction`'s own
-/// `as_any` contract.
-struct NoopTransaction;
+/// The `Transaction` [`FakeUnitOfWork::begin`] hands out: `commit` always succeeds AND
+/// increments the issuing [`FakeUnitOfWork`]'s own commit counter (SMA-469 review fix — see
+/// [`FakeUnitOfWork::commits`]'s doc); dropping it without calling `commit` — an early
+/// `return` on a `NotFound`/validation error, mirroring real rollback-on-drop — never touches
+/// the counter, exactly like a real transaction that never commits. `savepoint` is never
+/// reached by any current caller (`RoleService`'s reference pattern never opens one), and
+/// `as_any` downcasts to itself, mirroring `SeaOrmTransaction`'s own `as_any` contract.
+struct CountingTransaction(Arc<AtomicUsize>);
 
 #[async_trait]
-impl Transaction for NoopTransaction {
+impl Transaction for CountingTransaction {
     async fn commit(self: Box<Self>) -> Result<(), RepositoryError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -895,20 +899,34 @@ impl Transaction for NoopTransaction {
 
 /// In-memory `UnitOfWork` fake for application-service unit tests (SMA-446 Slice B — the
 /// `RoleService::grant`/`revoke` reference pattern B5-B7 copy): `begin` always succeeds with
-/// a [`NoopTransaction`]. There is no real backing store for these fakes to make atomic
-/// (`InMemoryRoleGrants::grant_in`/`revoke_in`, [`FakeOutbox::enqueue`], [`FakeAuditLog::
-/// record`] all ignore the `&dyn Transaction` they're handed and mutate their own state
-/// immediately) — what these unit tests actually exercise is the SERVICE's control flow
-/// (does it call the right ports, in the right order, only once every prior step
-/// succeeded); real cross-table commit/rollback atomicity is proven by the Postgres
-/// integration tests instead.
-#[derive(Clone, Copy, Default)]
-pub struct FakeUnitOfWork;
+/// a [`CountingTransaction`] sharing this fake's own counter. There is no real backing store
+/// for these fakes to make atomic (`InMemoryRoleGrants::grant_in`/`revoke_in`, [`FakeOutbox::
+/// enqueue`], [`FakeAuditLog::record`] all ignore the `&dyn Transaction` they're handed and
+/// mutate their own state immediately) — what these unit tests actually exercise is the
+/// SERVICE's control flow (does it call the right ports, in the right order, only once every
+/// prior step succeeded); real cross-table commit/rollback atomicity is proven by the
+/// Postgres integration tests instead.
+///
+/// `commits()` (SMA-469 review fix) reports how many transactions this fake has ever handed
+/// out were actually committed. Every other fake in this module mutates its own state
+/// regardless of whether `commit` is ever called — deleting a service's `tx.commit().await?`
+/// line entirely would otherwise pass every existing unit test unnoticed. A test that asserts
+/// `commits() == 1` after a successful mutating call closes that gap; mirrors how
+/// [`FakeDeadLetters::replay_matching_calls`] exposes a call counter for its own "must not be
+/// called" guarantee.
+#[derive(Clone, Default)]
+pub struct FakeUnitOfWork(Arc<AtomicUsize>);
+
+impl FakeUnitOfWork {
+    pub fn commits(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 #[async_trait]
 impl UnitOfWork for FakeUnitOfWork {
     async fn begin(&self) -> Result<Box<dyn Transaction>, RepositoryError> {
-        Ok(Box::new(NoopTransaction))
+        Ok(Box::new(CountingTransaction(self.0.clone())))
     }
 }
 
@@ -994,6 +1012,39 @@ impl DeadLetters for FakeDeadLetters {
 
     async fn discard_in(&self, _tx: &dyn Transaction, id: Uuid) -> Result<Option<DeadLetterEntry>, RepositoryError> {
         Ok(self.take(id))
+    }
+}
+
+/// A `DeadLetters` whose mutating methods simulate a mid-transaction store failure (SMA-469
+/// review fix), mirroring `roles.rs`'s `FailingGrantStore`: every one of `replay_in`/
+/// `replay_matching_in`/`discard_in` returns `RepositoryError::Backend`, so a service's error
+/// path — surfacing the error, never recording an audit entry, never committing — is proven
+/// against a genuine store failure rather than by code inspection alone. `list` is never
+/// exercised by any caller of this fake, so it panics rather than silently returning an empty
+/// vec (mirrors `FailingGrantStore`'s "implement exactly what's exercised" posture).
+#[derive(Clone, Copy, Default)]
+pub struct FailingDeadLetters;
+
+fn simulated_backend_failure() -> RepositoryError {
+    RepositoryError::Backend(Box::new(std::io::Error::other("simulated mid-txn store failure")))
+}
+
+#[async_trait]
+impl DeadLetters for FailingDeadLetters {
+    async fn list(&self, _f: &DeadLetterFilter) -> Result<Vec<DeadLetterEntry>, RepositoryError> {
+        unimplemented!("this fake only exercises the mutating methods")
+    }
+
+    async fn replay_in(&self, _tx: &dyn Transaction, _id: Uuid) -> Result<Option<DeadLetterEntry>, RepositoryError> {
+        Err(simulated_backend_failure())
+    }
+
+    async fn replay_matching_in(&self, _tx: &dyn Transaction, _r: &BulkReplayRequest) -> Result<u64, RepositoryError> {
+        Err(simulated_backend_failure())
+    }
+
+    async fn discard_in(&self, _tx: &dyn Transaction, _id: Uuid) -> Result<Option<DeadLetterEntry>, RepositoryError> {
+        Err(simulated_backend_failure())
     }
 }
 

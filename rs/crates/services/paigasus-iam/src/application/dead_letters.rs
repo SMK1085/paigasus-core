@@ -112,11 +112,17 @@ impl DeadLetterService {
         }
         let tx = self.uow.begin().await?;
         let replayed = self.dead.replay_matching_in(&*tx, &req).await?;
+        // `max_rows` records the REQUESTED budget verbatim; `capped_max_rows` records the
+        // effective ceiling actually enforced (`BulkReplayRequest::MAX_BULK_REPLAY`, Task 10) —
+        // kept as a SEPARATE field, not a silent overwrite of `max_rows`, so a request for e.g.
+        // 50_000 rows against the 10_000 cap audits unambiguously as "asked for 50000, allowed up
+        // to 10000, replayed 3" rather than reading like a partial failure.
         let detail = serde_json::json!({
             "event_type": req.event_type,
             "parked_from": req.parked_from.map(|t| t.to_rfc3339()),
             "parked_to": req.parked_to.map(|t| t.to_rfc3339()),
             "max_rows": req.max_rows,
+            "capped_max_rows": req.capped_max_rows(),
             "replayed": replayed,
         });
         let audit = self.audit_entry(actor, Action::ReplayOutboxDeadLetter, detail);
@@ -160,7 +166,7 @@ impl DeadLetterService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::fakes::{FakeAuditLog, FakeAuthorizer, FakeDeadLetters, FakeUnitOfWork, FixedClock, SeqIds};
+    use crate::application::fakes::{FailingDeadLetters, FakeAuditLog, FakeAuthorizer, FakeDeadLetters, FakeUnitOfWork, FixedClock, SeqIds};
     use chrono::Utc;
     use paigasus_iam_core::AuditOutcome;
 
@@ -207,6 +213,7 @@ mod tests {
         svc: DeadLetterService,
         audit: FakeAuditLog,
         dead: FakeDeadLetters,
+        uow: FakeUnitOfWork,
     }
 
     fn fixture(allow: &[Action]) -> Fixture {
@@ -216,15 +223,16 @@ mod tests {
         }
         let dead = FakeDeadLetters::default();
         let audit = FakeAuditLog::default();
+        let uow = FakeUnitOfWork::default();
         let svc = DeadLetterService::new(DeadLetterDeps {
             dead: Arc::new(dead.clone()),
-            uow: Arc::new(FakeUnitOfWork),
+            uow: Arc::new(uow.clone()),
             audit: Arc::new(audit.clone()),
             ids: Arc::new(SeqIds::default()),
             clock: Arc::new(FixedClock::default()),
             authorize: Authorize::new(Arc::new(authz)),
         });
-        Fixture { svc, audit, dead }
+        Fixture { svc, audit, dead, uow }
     }
 
     #[tokio::test]
@@ -245,10 +253,19 @@ mod tests {
         let replayed = f.svc.replay(&actor(), Uuid::from_u128(1)).await.unwrap();
         assert_eq!(replayed.id, Uuid::from_u128(1));
 
+        // Exactly one commit — a service that forgot `tx.commit().await?` would still return
+        // `Ok` here (every other fake mutates regardless of commit), so this is the guard that
+        // actually catches a silently-dropped, never-committed transaction.
+        assert_eq!(f.uow.commits(), 1, "replay must commit exactly once");
+
         let entries = f.audit.0.lock().unwrap();
         assert_eq!(entries.len(), 1, "replay must record exactly one audit entry");
         assert_eq!(entries[0].action, "ReplayOutboxDeadLetter");
         assert_eq!(entries[0].outcome, AuditOutcome::Committed);
+        // Root-scoped: the entry names the synthetic Root resource, not the replayed event's own
+        // aggregate — this IS the Root-only enforcement mechanism (module docs), so the audit
+        // trail must actually reflect it.
+        assert_eq!(entries[0].resource_prn, Some(root_prn().canonical()));
         assert_eq!(entries[0].detail["event_id"], serde_json::json!(Uuid::from_u128(1).to_string()));
         assert_eq!(entries[0].detail["event_type"], serde_json::json!("iam.principal.created"));
         // The row still exists after a replay, so its payload is not copied.
@@ -260,6 +277,8 @@ mod tests {
         let f = fixture(&[Action::DiscardOutboxDeadLetter]);
         f.dead.seed(entry(1));
         f.svc.discard(&actor(), Uuid::from_u128(1)).await.unwrap();
+
+        assert_eq!(f.uow.commits(), 1, "discard must commit exactly once");
 
         let entries = f.audit.0.lock().unwrap();
         assert_eq!(entries.len(), 1);
@@ -278,6 +297,7 @@ mod tests {
         assert!(matches!(f.svc.replay(&actor(), Uuid::from_u128(9)).await, Err(TenancyError::NotFound)));
         assert!(matches!(f.svc.discard(&actor(), Uuid::from_u128(9)).await, Err(TenancyError::NotFound)));
         assert_eq!(f.audit.0.lock().unwrap().len(), 0);
+        assert_eq!(f.uow.commits(), 0, "a NotFound must never commit — the transaction is dropped, not committed");
     }
 
     #[tokio::test]
@@ -287,6 +307,7 @@ mod tests {
         assert!(matches!(f.svc.replay_matching(&actor(), bulk(0)).await, Err(TenancyError::InvalidBulkReplay)));
         assert_eq!(f.dead.replay_matching_calls(), 0, "validation must happen before any store access");
         assert_eq!(f.audit.0.lock().unwrap().len(), 0);
+        assert_eq!(f.uow.commits(), 0, "a rejected bulk request must never even open, let alone commit, a transaction");
     }
 
     #[tokio::test]
@@ -296,11 +317,64 @@ mod tests {
         f.dead.seed(entry(2));
         let n = f.svc.replay_matching(&actor(), bulk(10)).await.unwrap();
         assert_eq!(n, 2);
+        assert_eq!(f.uow.commits(), 1, "bulk replay must commit exactly once");
 
         let entries = f.audit.0.lock().unwrap();
         assert_eq!(entries.len(), 1, "one bulk call is one audit entry");
         assert_eq!(entries[0].action, "ReplayOutboxDeadLetter");
         assert_eq!(entries[0].detail["replayed"], serde_json::json!(2));
         assert_eq!(entries[0].detail["max_rows"], serde_json::json!(10));
+        // The requested budget (10) is well under the 10_000 cap, so both fields agree here —
+        // `bulk_replay_audits_a_request_over_the_cap_distinctly_from_max_rows` below is what
+        // actually proves the two fields diverge when the cap binds.
+        assert_eq!(entries[0].detail["capped_max_rows"], serde_json::json!(10));
+    }
+
+    #[tokio::test]
+    async fn bulk_replay_audits_a_request_over_the_cap_distinctly_from_max_rows() {
+        let f = fixture(&[Action::ReplayOutboxDeadLetter]);
+        f.dead.seed(entry(1));
+        let requested = BulkReplayRequest::MAX_BULK_REPLAY + 1;
+        let n = f.svc.replay_matching(&actor(), bulk(requested)).await.unwrap();
+        assert_eq!(n, 1, "only the one seeded row exists to replay");
+
+        let entries = f.audit.0.lock().unwrap();
+        // `max_rows` is the REQUESTED value, verbatim — never silently overwritten by the cap.
+        assert_eq!(entries[0].detail["max_rows"], serde_json::json!(requested));
+        // `capped_max_rows` is the effective ceiling actually enforced — distinct from both the
+        // request and the (unrelated, coincidentally small) actual replay count.
+        assert_eq!(entries[0].detail["capped_max_rows"], serde_json::json!(BulkReplayRequest::MAX_BULK_REPLAY));
+    }
+
+    /// Mirrors `roles.rs`'s `a_store_error_mid_txn_rolls_back_and_never_emits_or_bumps_guard_d2`:
+    /// a store failure AFTER `uow.begin()` but before `audit.record`/`tx.commit()` must surface
+    /// as an error, never a false success, and must leave no audit entry and no commit behind.
+    #[tokio::test]
+    async fn a_store_error_mid_txn_rolls_back_and_never_audits_or_commits() {
+        let audit = FakeAuditLog::default();
+        let uow = FakeUnitOfWork::default();
+        let authz = FakeAuthorizer::default();
+        authz.allow(Action::ReplayOutboxDeadLetter, &root_prn());
+        authz.allow(Action::DiscardOutboxDeadLetter, &root_prn());
+        let svc = DeadLetterService::new(DeadLetterDeps {
+            dead: Arc::new(FailingDeadLetters),
+            uow: Arc::new(uow.clone()),
+            audit: Arc::new(audit.clone()),
+            ids: Arc::new(SeqIds::default()),
+            clock: Arc::new(FixedClock::default()),
+            authorize: Authorize::new(Arc::new(authz)),
+        });
+
+        let err = svc.replay(&actor(), Uuid::from_u128(1)).await.unwrap_err();
+        assert_eq!(err, TenancyError::Internal, "a store Backend error surfaces as Internal, never a false success");
+
+        let err = svc.replay_matching(&actor(), bulk(10)).await.unwrap_err();
+        assert_eq!(err, TenancyError::Internal);
+
+        let err = svc.discard(&actor(), Uuid::from_u128(2)).await.unwrap_err();
+        assert_eq!(err, TenancyError::Internal);
+
+        assert_eq!(audit.0.lock().unwrap().len(), 0, "a mid-txn store failure must never leave an audit entry behind");
+        assert_eq!(uow.commits(), 0, "a mid-txn store failure must never commit");
     }
 }

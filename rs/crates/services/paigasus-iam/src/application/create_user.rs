@@ -252,7 +252,7 @@ mod tests {
         let outbox = FakeOutbox::default();
         let uc = CreateUser::new(CreateUserDeps {
             repo,
-            uow: Arc::new(FakeUnitOfWork),
+            uow: Arc::new(FakeUnitOfWork::default()),
             outbox: Arc::new(outbox.clone()),
             id_gen: FixedIdGenerator(uuid),
             clock: FixedClock(now),
@@ -358,7 +358,7 @@ mod tests {
         // outbox (so this test can assert the second, rejected call enqueued nothing).
         let second = CreateUser::new(CreateUserDeps {
             repo: &repo,
-            uow: Arc::new(FakeUnitOfWork),
+            uow: Arc::new(FakeUnitOfWork::default()),
             outbox: Arc::new(outbox.clone()),
             id_gen: FixedIdGenerator(Uuid::from_u128(2)),
             clock: FixedClock(now),

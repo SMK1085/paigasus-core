@@ -290,7 +290,7 @@ mod tests {
         let seeder = BootstrapAdminSeeder::new(BootstrapAdminSeederDeps {
             admins_config: configured.to_vec(),
             grants: Arc::new(grants),
-            uow: Arc::new(FakeUnitOfWork),
+            uow: Arc::new(FakeUnitOfWork::default()),
             outbox: Arc::new(outbox),
             audit: Arc::new(audit),
             gen_bumper: Arc::new(bumps.clone()),
@@ -496,7 +496,7 @@ mod tests {
         let seeder = BootstrapAdminSeeder::new(BootstrapAdminSeederDeps {
             admins_config: admin_cfg(),
             grants: Arc::new(FailingGrants),
-            uow: Arc::new(FakeUnitOfWork),
+            uow: Arc::new(FakeUnitOfWork::default()),
             outbox: Arc::new(outbox),
             audit: Arc::new(audit),
             gen_bumper: Arc::new(bumps.clone()),
