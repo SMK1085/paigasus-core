@@ -5,6 +5,7 @@
 //! tasks provide the service-crate implementations.
 
 use super::model::{AccessRequest, AuthzDecisionEvent, AuthzError, Decision, EntitySlice, PolicyDocument, PutOutcome, RoleGrant};
+use super::reconcile::StarterPolicyOutcome;
 use crate::ports::Transaction;
 use crate::value::PrincipalId;
 use async_trait::async_trait;
@@ -97,6 +98,26 @@ pub trait AuditSink: Send + Sync {
     async fn record(&self, ev: &AuthzDecisionEvent);
 }
 
+/// Boot-only reconciliation of the code-owned starter policy set (SMA-477 D5). Deliberately
+/// NOT a [`PolicyStore`] method: `PolicyStore` has seven implementations, six of which are test
+/// fakes on the request path that would gain a method nothing calls.
+#[async_trait]
+pub trait SystemPolicyReconciler: Send + Sync {
+    /// Converge the persisted row for `doc.policy_id` to `doc`, stamping `revision`, and report
+    /// what happened. Writes nothing when the outcome is
+    /// [`StarterPolicyOutcome::Unchanged`] or [`StarterPolicyOutcome::StaleBinary`]. Bumps
+    /// `policy_gen` best-effort, and only when policy CONTENT changed.
+    async fn reconcile_system(&self, doc: &PolicyDocument, revision: u32) -> Result<StarterPolicyOutcome, AuthzError>;
+    /// Ids of persisted `system = true` rows NOT in `known` — retired starter policies that
+    /// nothing can now delete ([`PolicyStore::delete`] refuses a system row). Reported, never
+    /// removed: a safe retirement path has its own ordering constraints and is out of scope.
+    async fn orphaned_system_policy_ids(&self, known: &[&str]) -> Result<Vec<String>, AuthzError>;
+    /// Every persisted `policy_id`, captured once before reconciliation so boot can tell a
+    /// SURVIVABLE convergence failure (the row exists and still governs) from a FATAL seeding
+    /// failure (the row is missing, so the compiled snapshot would be incomplete) — SMA-477 D12.
+    async fn existing_policy_ids(&self) -> Result<Vec<String>, AuthzError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,4 +125,7 @@ mod tests {
     // Compile-time proof the authz ports are object-safe (injected as trait objects).
     #[allow(dead_code)]
     fn assert_object_safe(_: &dyn Authorizer, _: &dyn PolicyStore, _: &dyn RoleGrantStore, _: &dyn EntitySliceLoader, _: &dyn DecisionCache, _: &dyn AuditSink) {}
+
+    #[allow(dead_code)]
+    fn assert_reconciler_object_safe(_: &dyn SystemPolicyReconciler) {}
 }

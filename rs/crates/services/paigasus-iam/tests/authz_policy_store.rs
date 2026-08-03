@@ -14,6 +14,11 @@
 //! `AuditLog::record` commit atomically sharing one correlation id, mirroring
 //! `tests/authz_role_grants.rs`'s own B4 atomicity proof.
 //!
+//! SMA-477 adds one guard on the same public path: `put` must never write the reconciliation
+//! columns (`content_fingerprint`/`starter_revision`) on either the INSERT or the UPDATE
+//! branch — they belong to `SystemPolicyReconciler` alone. The reconciler's own behaviour is
+//! covered in `tests/authz_bootstrap.rs`.
+//!
 //! Runs against an ephemeral Postgres in Docker. In CI (`CI` env set) a missing Docker
 //! daemon is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note —
 //! same gating pattern as `tests/roundtrip.rs`.
@@ -198,6 +203,44 @@ async fn delete_of_a_non_system_policy_succeeds_and_bumps_policy_gen() {
 
     let all = store.list_all().await.unwrap();
     assert!(!all.iter().any(|d| d.policy_id == "deletable-policy"));
+}
+
+/// SMA-477 regression guard: the public `PutPolicy` path must leave `content_fingerprint` and
+/// `starter_revision` alone on BOTH the INSERT and the UPDATE branch. `doc_to_model` keeps them
+/// `NotSet` deliberately — those columns are `SystemPolicyReconciler`'s alone, and an
+/// operator-authored policy carrying a fingerprint would read as this service's own provenance.
+/// Without this test, a future edit flipping either `NotSet` to `Set(..)` would pass every other
+/// case in the suite.
+#[tokio::test]
+async fn put_never_writes_the_reconciliation_columns() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = valid_static_doc("operator-authored-policy", false, now);
+
+    // INSERT branch.
+    store.put(&doc).await.unwrap();
+    let row = policy::Entity::find_by_id("operator-authored-policy".to_string())
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("row present after put");
+    assert_eq!(row.content_fingerprint, None, "an operator-authored policy must carry no fingerprint");
+    assert_eq!(row.starter_revision, None, "an operator-authored policy must carry no starter revision");
+
+    // UPDATE branch — a second `put` with changed content.
+    let mut updated = doc.clone();
+    updated.description = "updated description".to_string();
+    updated.source = r#"permit(principal, action == Pgs::Iam::Action::"CreateOrganization", resource);"#.to_string();
+    store.put(&updated).await.unwrap();
+    let row = policy::Entity::find_by_id("operator-authored-policy".to_string())
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("row present after the update");
+    assert_eq!(row.source, updated.source, "the update must actually have landed");
+    assert_eq!(row.content_fingerprint, None, "an update must not start stamping a fingerprint either");
+    assert_eq!(row.starter_revision, None, "an update must not start stamping a starter revision either");
 }
 
 /// Deleting a policy id that was never persisted is a no-op success (idempotent DELETE

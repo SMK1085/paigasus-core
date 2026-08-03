@@ -22,7 +22,7 @@ pub use audit::{AuditEntry, AuditFilter, AuditOutcome};
 pub use authn::{AuthnError, AuthnPrincipal, Credential, ExternalIdentity, Issuer, PrincipalContext, ProvisioningDefect, TokenDefect, ValidatedClaims};
 pub use authz::{
     AccessRequest, Action, AuditSink, Authorizer, AuthzError, Decision, DecisionCache, Effect, EntitySliceLoader, GrantScope, PolicyDocument, PolicyStore, PutOutcome, RequestContext, Role, RoleGrant,
-    RoleGrantRef, RoleGrantStore,
+    RoleGrantRef, RoleGrantStore, SystemPolicyReconciler,
 };
 pub use dead_letter::{BulkReplayRequest, DeadLetterEntry, DeadLetterFilter, DeadLetters};
 pub use domain_event::{DomainEvent, EventType};

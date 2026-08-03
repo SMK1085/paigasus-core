@@ -35,6 +35,18 @@
 //! that branch. `put_in`/`delete_in` themselves never bump `policy_gen` (the caller's own
 //! awaited, post-commit responsibility, and — for `put_in` — skipped entirely on
 //! `AbsorbedIdempotent`, since the winning writer already bumped it for this row).
+//!
+//! SMA-477 adds a SECOND, boot-only write path on the same table:
+//! [`SystemPolicyReconciler::reconcile_system`]. It deliberately does NOT go through `put_in`,
+//! because `put_in`'s `SystemImmutable` guard is exactly what must keep holding for the public
+//! `PutPolicy` API — a starter policy that changes with the action catalog can otherwise never
+//! converge. `reconcile_system` opens its own transaction, `SET LOCAL lock_timeout = '5s'`
+//! (this runs before the HTTP listener binds, so an unbounded lock wait is a startup hang with
+//! no health endpoint to report it), takes the row lock, and hands the row to the pure
+//! `authz::reconcile::classify_starter_policy`, which decides whether to seed, converge
+//! silently, converge-and-report, or defer to a newer release. Only that path ever `Set`s
+//! `content_fingerprint`/`starter_revision` — see `doc_to_model`'s own note on why they stay
+//! `NotSet` for every operator-authored write.
 
 use super::entities::policy;
 use super::uow::{SeaOrmTransaction, recover_txn};
@@ -42,9 +54,10 @@ use crate::adapters::authz::Generations;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
+use paigasus_iam_core::authz::reconcile::{StarterPolicyOutcome, StoredPolicyRow, classify_starter_policy, content_fingerprint};
 use paigasus_iam_core::authz::schema::validate_policy;
-use paigasus_iam_core::{AuthzError, PolicyDocument, PolicyStore, PutOutcome, RepositoryError, Transaction};
-use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, DatabaseConnection, DbErr, EntityTrait, IsolationLevel, QuerySelect, Set, SqlErr, TransactionTrait};
+use paigasus_iam_core::{AuthzError, PolicyDocument, PolicyStore, PutOutcome, RepositoryError, SystemPolicyReconciler, Transaction};
+use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, IsolationLevel, QueryFilter, QuerySelect, Set, SqlErr, TransactionTrait};
 
 // `Clone` lets the composition root hold a store handle inside a `#[derive(Clone))]`
 // service (mirrors `PgOrganizationRepository`'s precedent) — cheap: `DatabaseConnection`
@@ -90,6 +103,52 @@ fn policy_content_matches(stored: &policy::Model, doc: &PolicyDocument) -> bool 
         && stored.source == doc.source
         && stored.description == if doc.description.is_empty() { None } else { Some(doc.description.clone()) }
         && stored.system == doc.system
+}
+
+/// Borrows a stored row as the classifier's input view.
+///
+/// Two deliberate coercions, both of which this module elsewhere refuses to make — read the
+/// reasoning before "fixing" either:
+///
+/// - `starter_revision` is `i32` in Postgres (there is no unsigned integer type). A negative
+///   value can only come from a hand edit; clamping it to `0` makes it read as "oldest
+///   possible", which CONVERGES the row rather than deferring to it. Deferring on a
+///   hand-written negative would be the exploitable direction.
+/// - An unparseable `kind` degrades to `Static` here, where `model_to_doc` rightly surfaces
+///   it as `Backend`. The difference is what the value feeds: `model_to_doc` feeds the
+///   decision path, where a wrong kind silently changes authorization, so it must fail loudly.
+///   This value feeds only the CLASSIFIER, and a corrupt `kind` can only come from a hand edit
+///   — whose fingerprint therefore cannot match, so the row classifies `ExternallyModified` and
+///   gets converged (repairing the bad `kind`) no matter which variant is guessed here.
+///   Returning an error instead would make a corrupt row permanently unrepairable, which is the
+///   opposite of this function's purpose.
+fn stored_row(model: &policy::Model) -> StoredPolicyRow<'_> {
+    StoredPolicyRow {
+        kind: kind_from_str(&model.kind).unwrap_or(PolicyKind::Static),
+        source: &model.source,
+        description: model.description.as_deref().unwrap_or(""),
+        system: model.system,
+        fingerprint: model.content_fingerprint.as_deref(),
+        revision: model.starter_revision.map(|r| u32::try_from(r).unwrap_or(0)),
+    }
+}
+
+/// The full column set a converge writes. `created_at` is deliberately preserved from the
+/// stored row — the incoming `doc.created_at` is `starter_policies()`'s own `Utc::now()` and
+/// must never rewrite history. `system` is always set back to `true`: clearing it is one of the
+/// things a converge exists to undo.
+fn converged_model(doc: &PolicyDocument, created_at: DateTime<Utc>, now: DateTime<Utc>, revision: u32) -> policy::ActiveModel {
+    policy::ActiveModel {
+        policy_id: Set(doc.policy_id.clone()),
+        kind: Set(kind_to_str(doc.kind).to_string()),
+        source: Set(doc.source.clone()),
+        description: Set(if doc.description.is_empty() { None } else { Some(doc.description.clone()) }),
+        system: Set(true),
+        created_at: Set(created_at),
+        updated_at: Set(now),
+        content_fingerprint: Set(Some(content_fingerprint(doc.kind, &doc.source, &doc.description))),
+        starter_revision: Set(Some(i32::try_from(revision).unwrap_or(i32::MAX))),
+    }
 }
 
 fn map_err(e: DbErr) -> AuthzError {
@@ -312,5 +371,78 @@ impl PolicyStore for PgPolicyStore {
 
     async fn bump_policy_gen(&self) -> Result<u64, AuthzError> {
         self.gens.bump_policy_gen().await
+    }
+}
+
+#[async_trait]
+impl SystemPolicyReconciler for PgPolicyStore {
+    async fn reconcile_system(&self, doc: &PolicyDocument, revision: u32) -> Result<StarterPolicyOutcome, AuthzError> {
+        // Same tripwire `put_in` applies. A code-defined source always passes (`roles.rs`'s own
+        // suite asserts it), so a failure here means a broken release, not operator input —
+        // `reconcile_policies` logs and skips rather than refusing to boot.
+        validate_policy(&doc.source)?;
+
+        let txn = self.db.begin().await.map_err(map_err)?;
+        // Bounds the worst case when a concurrent `PolicyService::put_in` holds the row lock:
+        // this runs BEFORE the HTTP listener binds, so an unbounded wait is a startup hang.
+        txn.execute_unprepared("SET LOCAL lock_timeout = '5s';").await.map_err(map_err)?;
+
+        let existing = policy::Entity::find_by_id(doc.policy_id.clone()).lock_exclusive().one(&txn).await.map_err(map_err)?;
+        let outcome = classify_starter_policy(existing.as_ref().map(stored_row), doc, revision);
+        let now = Utc::now();
+
+        let outcome = match (&outcome, existing) {
+            (StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary, _) => outcome,
+            (_, Some(row)) => {
+                converged_model(doc, row.created_at, now, revision).update(&txn).await.map_err(map_err)?;
+                outcome
+            }
+            (_, None) => {
+                // Our existence check and this INSERT are not atomic: two replicas can both see
+                // an absent row. Run it on a SAVEPOINT so a unique violation rolls back only the
+                // insert, not the caller's transaction — the `put_in` pattern, except we re-read
+                // WITH the row lock, because unlike `put_in` we may go on to UPDATE.
+                let sp = txn.begin().await.map_err(map_err)?;
+                match converged_model(doc, doc.created_at, now, revision).insert(&sp).await {
+                    Ok(_) => {
+                        sp.commit().await.map_err(map_err)?;
+                        StarterPolicyOutcome::Absent
+                    }
+                    Err(e) if matches!(e.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) => {
+                        sp.rollback().await.map_err(map_err)?;
+                        let winner = policy::Entity::find_by_id(doc.policy_id.clone())
+                            .lock_exclusive()
+                            .one(&txn)
+                            .await
+                            .map_err(map_err)?
+                            .ok_or_else(|| backend_err(format!("policy {}: unique-constraint violation on insert but no row found on re-read", doc.policy_id)))?;
+                        // Re-classify against whoever won. This cannot recurse into the insert
+                        // branch — the row provably exists now — so it terminates.
+                        let re = classify_starter_policy(Some(stored_row(&winner)), doc, revision);
+                        if !matches!(re, StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary) {
+                            converged_model(doc, winner.created_at, now, revision).update(&txn).await.map_err(map_err)?;
+                        }
+                        re
+                    }
+                    Err(e) => return Err(map_err(e)),
+                }
+            }
+        };
+
+        txn.commit().await.map_err(map_err)?;
+        if outcome.content_changed() {
+            self.bump_policy_gen_best_effort().await;
+        }
+        Ok(outcome)
+    }
+
+    async fn orphaned_system_policy_ids(&self, known: &[&str]) -> Result<Vec<String>, AuthzError> {
+        let rows = policy::Entity::find().filter(policy::Column::System.eq(true)).all(&self.db).await.map_err(map_err)?;
+        Ok(rows.into_iter().map(|r| r.policy_id).filter(|id| !known.contains(&id.as_str())).collect())
+    }
+
+    async fn existing_policy_ids(&self) -> Result<Vec<String>, AuthzError> {
+        let rows = policy::Entity::find().all(&self.db).await.map_err(map_err)?;
+        Ok(rows.into_iter().map(|r| r.policy_id).collect())
     }
 }

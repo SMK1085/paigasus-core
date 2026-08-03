@@ -12,6 +12,14 @@
 //! subsequent `is_authorized` call for an org-scoped action ALLOW — seed -> grant ->
 //! snapshot-reload -> enforce, real Cedar evaluation throughout, not fakes.
 //!
+//! SMA-477 adds the `SystemPolicyReconciler` cases: `reconcile_system` seeds an absent row
+//! (stamping `content_fingerprint`/`starter_revision`), is immediately idempotent, converges a
+//! code change silently, converges AND reports an out-of-band edit (handing the destroyed
+//! content back for the audit row), restores a cleared `system` flag, defers to a row written
+//! by a newer release, adopts a pre-m0010 (NULL-fingerprint) row, bumps `policy_gen` only when
+//! policy CONTENT changed, and survives two replicas racing the same absent row. Plus
+//! `orphaned_system_policy_ids`, which reports retired system rows and never an operator's own.
+//!
 //! Runs against an ephemeral Postgres in Docker. In CI (`CI` env set) a missing Docker
 //! daemon is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note —
 //! same gating pattern as `tests/roundtrip.rs`/`tests/authz_role_grants.rs`.
@@ -210,4 +218,258 @@ async fn seeded_starter_set_plus_a_real_grant_enforces_end_to_end() {
     };
     let decision = authz.is_authorized(&req).await.unwrap();
     assert_eq!(decision.effect, Effect::Allow, "org_admin on its own org must allow GetOrganization: {decision:?}");
+}
+
+/// Rewrites a stored policy row's content via raw SQL, optionally leaving the fingerprint
+/// stale — the difference between "a release changed the code" and "somebody edited the row".
+async fn tamper_policy(db: &DatabaseConnection, policy_id: &str, source: &str, fingerprint: Option<&str>) {
+    let fp = fingerprint.map_or("NULL".to_string(), |f| format!("'{f}'"));
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        format!(r#"UPDATE "policy" SET source = '{source}', content_fingerprint = {fp} WHERE policy_id = '{policy_id}'"#),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn stored_source(db: &DatabaseConnection, policy_id: &str) -> String {
+    use paigasus_iam::adapters::persistence::entities::policy;
+    policy::Entity::find_by_id(policy_id.to_string()).one(db).await.unwrap().unwrap().source
+}
+
+#[tokio::test]
+async fn reconcile_system_seeds_stamping_the_fingerprint_and_revision() {
+    use paigasus_iam::adapters::persistence::entities::policy;
+    use paigasus_iam_core::SystemPolicyReconciler;
+    use paigasus_iam_core::authz::reconcile::{StarterPolicyOutcome, content_fingerprint};
+    use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = starter_policies().into_iter().next().unwrap();
+
+    assert_eq!(store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(), StarterPolicyOutcome::Absent);
+
+    let row = policy::Entity::find_by_id(doc.policy_id.clone()).one(&db).await.unwrap().unwrap();
+    assert_eq!(row.content_fingerprint.as_deref(), Some(content_fingerprint(doc.kind, &doc.source, &doc.description).as_str()));
+    assert_eq!(row.starter_revision, Some(i32::try_from(STARTER_POLICY_REVISION).unwrap()));
+    assert!(row.system);
+
+    // Immediately idempotent.
+    assert_eq!(store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(), StarterPolicyOutcome::Unchanged);
+}
+
+#[tokio::test]
+async fn reconcile_system_converges_a_code_change_without_reporting_an_edit() {
+    use paigasus_iam_core::SystemPolicyReconciler;
+    use paigasus_iam_core::authz::reconcile::{StarterPolicyOutcome, content_fingerprint};
+    use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = starter_policies().into_iter().next().unwrap();
+    store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+
+    // Simulate "the previous release wrote this": different source, CORRECTLY fingerprinted.
+    let old = "forbid(principal, action, resource) when { resource has effective_status };";
+    let old_fp = content_fingerprint(doc.kind, old, &doc.description);
+    tamper_policy(&db, &doc.policy_id, old, Some(&old_fp)).await;
+
+    assert_eq!(store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(), StarterPolicyOutcome::Reconciled);
+    assert_eq!(stored_source(&db, &doc.policy_id).await, doc.source);
+}
+
+#[tokio::test]
+async fn reconcile_system_reports_and_reverts_an_out_of_band_edit() {
+    use paigasus_iam_core::SystemPolicyReconciler;
+    use paigasus_iam_core::authz::reconcile::StarterPolicyOutcome;
+    use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = starter_policies().into_iter().next().unwrap();
+    store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+
+    // Content rewritten, fingerprint left stale — nobody but us writes that column.
+    let edited = "forbid(principal, action, resource) when { resource has effective_status };";
+    tamper_policy(&db, &doc.policy_id, edited, Some(&"0".repeat(64))).await;
+
+    let out = store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+    let StarterPolicyOutcome::ExternallyModified {
+        content_changed: true,
+        previous_content,
+    } = out
+    else {
+        panic!("expected ExternallyModified, got {out:?}")
+    };
+    assert_eq!(previous_content.source, edited, "the overwritten source must be handed back for the audit row");
+    assert_eq!(stored_source(&db, &doc.policy_id).await, doc.source);
+}
+
+#[tokio::test]
+async fn reconcile_system_restores_a_cleared_system_flag() {
+    use paigasus_iam::adapters::persistence::entities::policy;
+    use paigasus_iam_core::SystemPolicyReconciler;
+    use paigasus_iam_core::authz::reconcile::StarterPolicyOutcome;
+    use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = starter_policies().into_iter().next().unwrap();
+    store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+
+    // The bypass this guards: clearing `system` must not buy an exemption from convergence.
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        format!(
+            r#"UPDATE "policy" SET system = false, source = 'permit(principal, action, resource);' WHERE policy_id = '{}'"#,
+            doc.policy_id
+        ),
+    ))
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(),
+        StarterPolicyOutcome::ExternallyModified { .. }
+    ));
+    let row = policy::Entity::find_by_id(doc.policy_id.clone()).one(&db).await.unwrap().unwrap();
+    assert!(row.system, "system must be restored, not left cleared");
+    assert_eq!(row.source, doc.source);
+}
+
+#[tokio::test]
+async fn reconcile_system_defers_to_a_newer_revision() {
+    use paigasus_iam_core::SystemPolicyReconciler;
+    use paigasus_iam_core::authz::reconcile::StarterPolicyOutcome;
+    use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = starter_policies().into_iter().next().unwrap();
+    store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+
+    let newer = "permit(principal, action, resource);";
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        format!(
+            r#"UPDATE "policy" SET source = '{newer}', starter_revision = {} WHERE policy_id = '{}'"#,
+            STARTER_POLICY_REVISION + 5,
+            doc.policy_id
+        ),
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(), StarterPolicyOutcome::StaleBinary);
+    assert_eq!(stored_source(&db, &doc.policy_id).await, newer, "an older binary must not rewrite a newer release's row");
+}
+
+#[tokio::test]
+async fn reconcile_system_adopts_a_pre_m0010_row() {
+    use paigasus_iam_core::SystemPolicyReconciler;
+    use paigasus_iam_core::authz::reconcile::StarterPolicyOutcome;
+    use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = starter_policies().into_iter().next().unwrap();
+    store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+
+    let old = "forbid(principal, action, resource) when { resource has effective_status };";
+    tamper_policy(&db, &doc.policy_id, old, None).await;
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        format!(r#"UPDATE "policy" SET starter_revision = NULL WHERE policy_id = '{}'"#, doc.policy_id),
+    ))
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(),
+        StarterPolicyOutcome::Adopted {
+            content_changed: true,
+            previous_content: Some(_)
+        }
+    ));
+    assert_eq!(stored_source(&db, &doc.policy_id).await, doc.source);
+}
+
+#[tokio::test]
+async fn a_fingerprint_only_stamp_does_not_bump_policy_gen_but_a_content_change_does() {
+    use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+    use paigasus_iam_core::{PolicyStore, SystemPolicyReconciler};
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = starter_policies().into_iter().next().unwrap();
+    store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+
+    // Clear the fingerprint but leave content correct: a pure stamp, invisible to any decision.
+    tamper_policy(&db, &doc.policy_id, &doc.source, None).await;
+    let before = store.policy_gen().await.unwrap();
+    store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+    assert_eq!(store.policy_gen().await.unwrap(), before, "a stamp changes nothing a decision can observe");
+
+    // Now a real content change.
+    tamper_policy(&db, &doc.policy_id, "permit(principal, action, resource);", None).await;
+    store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+    assert!(store.policy_gen().await.unwrap() > before, "a content change must invalidate");
+}
+
+#[tokio::test]
+async fn concurrent_reconcile_of_the_same_absent_policy_yields_exactly_one_row() {
+    use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+    use paigasus_iam_core::{PolicyStore, SystemPolicyReconciler};
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let a = Arc::new(PgPolicyStore::new(db.clone(), Generations::memory()));
+    let b = a.clone();
+    let doc = Arc::new(starter_policies().into_iter().next().unwrap());
+    let (d1, d2) = (doc.clone(), doc.clone());
+
+    let (r1, r2) = tokio::join!(
+        tokio::spawn(async move { a.reconcile_system(&d1, STARTER_POLICY_REVISION).await }),
+        tokio::spawn(async move { b.reconcile_system(&d2, STARTER_POLICY_REVISION).await }),
+    );
+    r1.unwrap().expect("racer 1 must not error");
+    r2.unwrap().expect("racer 2 must not error");
+
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let rows = store.list_all().await.unwrap();
+    assert_eq!(rows.iter().filter(|d| d.policy_id == doc.policy_id).count(), 1);
+    assert_eq!(rows.iter().find(|d| d.policy_id == doc.policy_id).unwrap().source, doc.source);
+}
+
+#[tokio::test]
+async fn orphaned_system_policy_ids_reports_retired_starter_policies_only() {
+    use paigasus_iam_core::SystemPolicyReconciler;
+    use paigasus_iam_core::authz::roles::{STARTER_POLICY_IDS, STARTER_POLICY_REVISION};
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    for doc in starter_policies() {
+        store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+    }
+    // A system row for a role this build no longer defines.
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        r#"INSERT INTO "policy" (policy_id, kind, source, description, system, created_at, updated_at)
+           VALUES ('retired_role', 'template', 'permit(principal == ?principal, action, resource in ?resource);', NULL, true, now(), now())"#
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+    // An operator's own (non-system) policy must NOT be reported.
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        r#"INSERT INTO "policy" (policy_id, kind, source, description, system, created_at, updated_at)
+           VALUES ('operator-policy', 'static', 'permit(principal, action, resource);', NULL, false, now(), now())"#
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let orphans = store.orphaned_system_policy_ids(STARTER_POLICY_IDS).await.unwrap();
+    assert_eq!(orphans, vec!["retired_role".to_string()]);
 }
