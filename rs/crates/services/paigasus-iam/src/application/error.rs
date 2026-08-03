@@ -86,6 +86,13 @@ pub enum TenancyError {
     /// decision, so it's a 400 rather than a `Deny`.
     #[error("unknown action: {0}")]
     InvalidAction(String),
+    /// A bulk dead-letter replay arrived without an explicit, non-zero `max_rows`
+    /// (SMA-469). The required row budget IS the guard on blast radius — an "at least one
+    /// filter must be present" check was rejected because `parked_from = 1970-01-01`
+    /// satisfies it while matching everything, which is how an operator naturally writes
+    /// "replay everything".
+    #[error("bulk replay requires an explicit non-zero max_rows")]
+    InvalidBulkReplay,
     #[error("internal server error")]
     Internal,
 }
@@ -116,6 +123,7 @@ impl TenancyError {
             Self::PolicyInvalid(_) => "policy-invalid",
             Self::PolicyConflict(_) => "policy-conflict",
             Self::InvalidAction(_) => "invalid-action",
+            Self::InvalidBulkReplay => "invalid-bulk-replay",
             Self::Internal => "internal",
         }
     }
@@ -133,7 +141,8 @@ impl TenancyError {
             | Self::UnknownRole(_)
             | Self::InvalidScope(_)
             | Self::PolicyInvalid(_)
-            | Self::InvalidAction(_) => ErrorClass::Validation,
+            | Self::InvalidAction(_)
+            | Self::InvalidBulkReplay => ErrorClass::Validation,
             Self::NotFound => ErrorClass::NotFound,
             Self::SlugConflict | Self::DuplicateMembership | Self::EmailConflict | Self::ServiceAccountNameConflict | Self::PolicyConflict(_) => ErrorClass::Conflict,
             Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership | Self::SystemImmutable(_) => ErrorClass::Precondition,

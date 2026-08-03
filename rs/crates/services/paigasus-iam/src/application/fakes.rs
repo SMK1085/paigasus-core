@@ -10,15 +10,16 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::{
-    AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, Clock, ConflictKind, Decision, DomainEvent, Effect,
-    IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization, OrganizationId, OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper,
-    PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome, RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher,
-    ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Team, TeamId, TeamRepository, TenancyNodeRef, Transaction, UnitOfWork,
+    AccessRequest, Action, ApiKey, ApiKeyId, ApiKeyRepository, ApiKeyStatus, AuditEntry, AuditFilter, AuditLog, Authorizer, AuthzError, BulkReplayRequest, Clock, ConflictKind, DeadLetterEntry,
+    DeadLetterFilter, DeadLetters, Decision, DomainEvent, Effect, IdGenerator, KeyEntropy, Membership, MembershipRecord, MembershipRepository, NodeStatus, NodeView, Organization, OrganizationId,
+    OrganizationRepository, Outbox, PolicyDocument, PolicyGenBumper, PolicyStore, PreconditionKind, Principal, PrincipalId, PrincipalStatus, Project, ProjectId, ProjectRepository, PutOutcome,
+    RepositoryError, RoleGrant, RoleGrantStore, Savepoint, SecretHasher, ServiceAccount, ServiceAccountRecord, ServiceAccountRepository, Slug, Team, TeamId, TeamRepository, TenancyNodeRef,
+    Transaction, UnitOfWork,
 };
 use paigasus_kernel::Prn;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -947,6 +948,52 @@ impl AuditLog for FakeAuditLog {
 
     async fn query(&self, _f: &AuditFilter) -> Result<Vec<AuditEntry>, RepositoryError> {
         unimplemented!("application-layer unit tests never call query")
+    }
+}
+
+/// In-memory [`DeadLetters`] for service tests (SMA-469). `replay_in`/`discard_in` REMOVE the
+/// entry, so a second call on the same id returns `None` — matching the adapter, whose
+/// `AND parked = true` predicate makes a replayed or discarded row unmatchable.
+#[derive(Clone, Default)]
+pub struct FakeDeadLetters {
+    entries: Arc<Mutex<Vec<DeadLetterEntry>>>,
+    replay_matching_calls: Arc<AtomicUsize>,
+}
+
+impl FakeDeadLetters {
+    pub fn seed(&self, e: DeadLetterEntry) {
+        self.entries.lock().unwrap().push(e);
+    }
+    pub fn replay_matching_calls(&self) -> usize {
+        self.replay_matching_calls.load(Ordering::SeqCst)
+    }
+    fn take(&self, id: Uuid) -> Option<DeadLetterEntry> {
+        let mut g = self.entries.lock().unwrap();
+        let idx = g.iter().position(|e| e.id == id)?;
+        Some(g.remove(idx))
+    }
+}
+
+#[async_trait]
+impl DeadLetters for FakeDeadLetters {
+    async fn list(&self, _f: &DeadLetterFilter) -> Result<Vec<DeadLetterEntry>, RepositoryError> {
+        Ok(self.entries.lock().unwrap().clone())
+    }
+
+    async fn replay_in(&self, _tx: &dyn Transaction, id: Uuid) -> Result<Option<DeadLetterEntry>, RepositoryError> {
+        Ok(self.take(id))
+    }
+
+    async fn replay_matching_in(&self, _tx: &dyn Transaction, r: &BulkReplayRequest) -> Result<u64, RepositoryError> {
+        self.replay_matching_calls.fetch_add(1, Ordering::SeqCst);
+        let mut g = self.entries.lock().unwrap();
+        let n = g.len().min(r.capped_max_rows() as usize);
+        g.drain(..n);
+        Ok(n as u64)
+    }
+
+    async fn discard_in(&self, _tx: &dyn Transaction, id: Uuid) -> Result<Option<DeadLetterEntry>, RepositoryError> {
+        Ok(self.take(id))
     }
 }
 

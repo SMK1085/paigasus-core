@@ -10,6 +10,7 @@ pub mod authorize;
 pub mod bootstrap;
 pub mod bootstrap_admin;
 pub mod create_user;
+pub mod dead_letters;
 pub mod error;
 #[cfg(test)]
 pub mod fakes;
