@@ -271,7 +271,19 @@ async fn published_sweep_query_does_not_resort_to_a_sequential_scan() {
     .await
     .unwrap();
 
-    // Give the planner real statistics to work with rather than the post-migration defaults.
+    // Deliberately explicit, NOT left to autovacuum/autoanalyze: those run on a background timer
+    // with no guarantee of completing within this test's lifetime, and are the first thing
+    // starved when the host is CPU/IO-contended by many concurrent containers — exactly the
+    // `moon ci` condition under heavy parallelism. Without this call the planner's statistics
+    // (and therefore its plan choice) would depend on whether a background process happened to
+    // win a race against the test, turning the assertion below into a check on scheduler luck
+    // rather than on query shape. Do NOT delete this as "redundant" even if it appears to have no
+    // effect locally: for THIS query, `ORDER BY id` already anchors the plan to
+    // `event_outbox_pkey` robustly enough that removing this call (verified) did not reproduce a
+    // Seq Scan even under a heavily CPU/IO-loaded rerun with zero table statistics
+    // (`pg_class.reltuples = -1`) — but that robustness is a property of the current query shape,
+    // not of having real statistics, and a future edit to the query (e.g. dropping `ORDER BY id`)
+    // could reinstate the dependency this call exists to remove.
     db.execute_unprepared(r#"ANALYZE "event_outbox";"#).await.unwrap();
 
     let stmt = Statement::from_sql_and_values(DbBackend::Postgres, format!("EXPLAIN {}", published_sweep_sql()), [Value::from(now), Value::from(1000i64)]);
