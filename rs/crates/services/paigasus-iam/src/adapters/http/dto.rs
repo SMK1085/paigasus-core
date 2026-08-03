@@ -8,8 +8,8 @@
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
 use paigasus_iam_core::{
-    ApiKey, AuditEntry, Credential, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant, RoleGrantRef,
-    ServiceAccountRecord, Team,
+    ApiKey, AuditEntry, Credential, DeadLetterEntry, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant,
+    RoleGrantRef, ServiceAccountRecord, Team,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -598,6 +598,80 @@ pub struct AuditQuery {
     pub to: Option<String>,
     pub cursor: Option<String>,
     pub limit: Option<u64>,
+}
+
+// --- SMA-469: `/v1/outbox/dead-letters` DTOs --------------------------------------------------
+
+/// A parked outbox row over HTTP (SMA-469). `payload` is emitted as a JSON **string** — it is
+/// the raw serialized TEXT exactly as stored, deliberately NOT re-parsed into a
+/// `serde_json::Value`: invalid payload JSON is one of the reasons a row parks, so a surface
+/// that could only render valid JSON could not display the rows it exists to explain.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeadLetterEntryDto {
+    pub id: Uuid,
+    pub occurred_at: DateTime<Utc>,
+    pub event_type: String,
+    pub schema_version: i32,
+    pub aggregate_prn: String,
+    pub actor_prn: Option<String>,
+    pub payload: String,
+    pub correlation_id: Option<Uuid>,
+    pub attempts: u32,
+    pub parked_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+}
+
+impl From<DeadLetterEntry> for DeadLetterEntryDto {
+    fn from(e: DeadLetterEntry) -> Self {
+        DeadLetterEntryDto {
+            id: e.id,
+            occurred_at: e.occurred_at,
+            event_type: e.event_type,
+            schema_version: e.schema_version,
+            aggregate_prn: e.aggregate_prn,
+            actor_prn: e.actor_prn,
+            payload: e.payload,
+            correlation_id: e.correlation_id,
+            attempts: e.attempts,
+            parked_at: e.parked_at,
+            last_error: e.last_error,
+        }
+    }
+}
+
+/// `next_cursor` is present only when the page came back FULL, mirroring `AuditListResponseDto`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeadLetterListResponseDto {
+    pub entries: Vec<DeadLetterEntryDto>,
+    pub next_cursor: Option<String>,
+}
+
+/// Query params for `GET /v1/outbox/dead-letters`. Timestamps stay raw `Option<String>` so a
+/// parse failure funnels through the handler's `{"error":{code,message}}` envelope, mirroring
+/// `AuditQuery`'s identical posture.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeadLetterQuery {
+    pub event_type: Option<String>,
+    pub parked_from: Option<String>,
+    pub parked_to: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<u64>,
+}
+
+/// Body for the bulk `POST /v1/outbox/dead-letters/replay`. `max_rows` is `Option` on the wire
+/// so an omitted field is distinguishable from an explicit `0` — both are rejected, but the
+/// type must be able to represent "absent" to reject it deliberately rather than defaulting.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BulkReplayBody {
+    pub event_type: Option<String>,
+    pub parked_from: Option<String>,
+    pub parked_to: Option<String>,
+    pub max_rows: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BulkReplayResponseDto {
+    pub replayed: u64,
 }
 
 #[cfg(test)]
