@@ -31,8 +31,9 @@ use paigasus_iam_core::{AuditEntry, AuditLog, AuditOutcome, AuthzError, Clock, I
 use paigasus_observability::names;
 use std::sync::Arc;
 
-/// Cap on the overwritten source copied into an audit entry. The value is attacker-influenced
-/// text landing in an append-only table, so it is bounded rather than trusted.
+/// Per-field cap on the overwritten content copied into an audit entry — applied to the source
+/// AND the description. The value is attacker-influenced text landing in an append-only table,
+/// so it is bounded rather than trusted.
 pub const MAX_AUDITED_SOURCE_BYTES: usize = 8 * 1024;
 
 /// Boot-time reconciliation dependencies. A named-field `*Deps` struct with generic
@@ -49,44 +50,98 @@ fn count(outcome_label: &'static str) {
     counter!(names::IAM_STARTER_POLICY_RECONCILES_TOTAL, "outcome" => outcome_label).increment(1);
 }
 
-/// Truncates on a char boundary so the result is always valid UTF-8 for `serde_json`.
-fn truncate_source(source: &str) -> (String, bool) {
-    if source.len() <= MAX_AUDITED_SOURCE_BYTES {
-        return (source.to_string(), false);
+/// Caps one copied text field at [`MAX_AUDITED_SOURCE_BYTES`], walking BACK to the nearest char
+/// boundary so `text[..end]` can never split a multi-byte character — slicing mid-character
+/// panics, and this runs inside `AppState::new`, so the panic would kill the replica before it
+/// served a request. The overwritten text is attacker-influenced, so it may well be the operator
+/// who chose where byte 8192 lands. A walked-back result is SHORTER than the cap.
+fn truncate_audited_text(text: &str) -> (String, bool) {
+    if text.len() <= MAX_AUDITED_SOURCE_BYTES {
+        return (text.to_string(), false);
     }
     let mut end = MAX_AUDITED_SOURCE_BYTES;
-    while !source.is_char_boundary(end) {
+    while !text.is_char_boundary(end) {
         end -= 1;
     }
-    (source[..end].to_string(), true)
+    (text[..end].to_string(), true)
+}
+
+/// Why a `reconcile_system` failure is (or is not) fatal, decided against the pre-loop snapshot
+/// of persisted ids. Split out as a pure function so each branch — and, critically, the message
+/// each one selects — is unit-testable: the three cases are genuinely different operational
+/// stories, and reporting one as another sends on-call the wrong way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureKind {
+    /// The row is persisted: it governed decisions perfectly well before this change.
+    Survivable,
+    /// The snapshot was readable and this id was NOT in it — the row really is missing.
+    FatalMissingRow,
+    /// The snapshot could not be read at all, so this row's existence is UNKNOWN. Fail closed,
+    /// but never claim the row is missing: it usually is not.
+    FatalUnknownSnapshot,
+}
+
+/// `snapshot == None` means the pre-loop read itself failed (see [`reconcile_policies`]).
+fn classify_failure(snapshot: Option<&[String]>, policy_id: &str) -> FailureKind {
+    match snapshot {
+        Some(ids) if ids.iter().any(|id| id == policy_id) => FailureKind::Survivable,
+        Some(_) => FailureKind::FatalMissingRow,
+        None => FailureKind::FatalUnknownSnapshot,
+    }
 }
 
 /// Reconciles every `authz::roles::starter_policies()` document. Only a failure to SEED an
 /// absent policy propagates (see the module docs).
 pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarterDeps<I, C>) -> Result<(), AuthzError> {
-    // Captured once, BEFORE any convergence: which ids already exist decides whether a failure
-    // below is survivable. An unreadable list degrades to "assume nothing exists", i.e. treat
-    // every failure as a fatal seed — the conservative direction, since the alternative is
-    // booting a replica with an incomplete policy set that denies everything.
-    let existing_ids = deps.policies.existing_policy_ids().await.unwrap_or_default();
+    // Captured once, BEFORE any convergence, so every policy is judged against ONE consistent
+    // basis and the whole loop costs one full-table read rather than nine.
+    //
+    // A FAILED read degrades to `None`, which [`classify_failure`] treats as fatal — the
+    // conservative direction, since the alternative is booting a replica with an incomplete
+    // policy set that denies everything. It is warned about rather than swallowed: a blip here
+    // against an intact database turns every later failure fatal, and an operator reading only
+    // the fatal line would otherwise be told the policy set is incomplete when it is not.
+    let existing_ids: Option<Vec<String>> = match deps.policies.existing_policy_ids().await {
+        Ok(ids) => Some(ids),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not read the persisted policy-id snapshot; every starter policy reconciliation failure this boot will be treated as fatal because no row can be proven to already exist"
+            );
+            None
+        }
+    };
 
     for doc in authz_roles::starter_policies() {
         let outcome = match deps.policies.reconcile_system(&doc, STARTER_POLICY_REVISION).await {
             Ok(outcome) => outcome,
-            // The row exists: it governed decisions perfectly well before this change, so
-            // keeping it for one more boot beats refusing to start (SMA-477 D12).
-            Err(err) if existing_ids.iter().any(|id| id == &doc.policy_id) => {
-                count("failed");
-                tracing::error!(policy_id = %doc.policy_id, error = %err, "starter policy reconciliation failed; keeping the stored row for this boot");
-                continue;
-            }
-            // The row is MISSING and could not be written. `AppState::new` guarantees the
-            // initial snapshot compiles at least the starter set; booting past this would
-            // compile a partial one, which denies everything.
             Err(err) => {
                 count("failed");
-                tracing::error!(policy_id = %doc.policy_id, error = %err, "failed to seed a missing starter policy; refusing to boot with an incomplete policy set");
-                return Err(err);
+                match classify_failure(existing_ids.as_deref(), &doc.policy_id) {
+                    // The row exists: it governed decisions perfectly well before this change,
+                    // so keeping it for one more boot beats refusing to start (SMA-477 D12).
+                    FailureKind::Survivable => {
+                        tracing::error!(policy_id = %doc.policy_id, error = %err, "starter policy reconciliation failed; keeping the stored row for this boot");
+                        continue;
+                    }
+                    // The row is MISSING and could not be written. `AppState::new` guarantees
+                    // the initial snapshot compiles at least the starter set; booting past this
+                    // would compile a partial one, which denies everything.
+                    FailureKind::FatalMissingRow => {
+                        tracing::error!(policy_id = %doc.policy_id, error = %err, "failed to seed a missing starter policy; refusing to boot with an incomplete policy set");
+                        return Err(err);
+                    }
+                    // Deliberately NOT the message above: the row is probably fine, we simply
+                    // could not prove it. Says so, and points at the warning that explains why.
+                    FailureKind::FatalUnknownSnapshot => {
+                        tracing::error!(
+                            policy_id = %doc.policy_id,
+                            error = %err,
+                            "starter policy reconciliation failed and the policy-id snapshot was unreadable (see the earlier warning), so this row cannot be proven to exist; refusing to boot rather than risk an incomplete policy set"
+                        );
+                        return Err(err);
+                    }
+                }
             }
         };
         count(outcome.metric_label());
@@ -143,7 +198,11 @@ async fn record_reconcile_audit<I: IdGenerator, C: Clock>(
     content_changed: bool,
     previous: &paigasus_iam_core::authz::reconcile::PolicyContent,
 ) {
-    let (source, truncated) = truncate_source(&previous.source);
+    // BOTH copied fields are capped: they come from the same externally-modified row, so the
+    // description is exactly as attacker-influenced as the source. Two flags rather than one —
+    // `truncated` has always meant "the source was truncated" and stays that way.
+    let (source, truncated) = truncate_audited_text(&previous.source);
+    let (description, description_truncated) = truncate_audited_text(&previous.description);
     let entry = AuditEntry {
         id: deps.ids.new_audit_id(),
         occurred_at: deps.clock.now(),
@@ -162,8 +221,9 @@ async fn record_reconcile_audit<I: IdGenerator, C: Clock>(
             "content_changed": content_changed,
             "previous_content": {
                 "source": source,
-                "description": previous.description,
+                "description": description,
                 "truncated": truncated,
+                "description_truncated": description_truncated,
             },
         }),
         correlation_id: Some(deps.ids.new_correlation_id()),
@@ -217,6 +277,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    /// Every starter `policy_id`, i.e. the snapshot a healthy database returns on a warm boot.
+    fn all_starter_ids() -> Vec<String> {
+        starter_policies().into_iter().map(|d| d.policy_id).collect()
+    }
+
+    fn backend_error(msg: &'static str) -> AuthzError {
+        AuthzError::Backend(Box::new(std::io::Error::other(msg)))
+    }
+
     /// Returns a scripted outcome for every policy, recording what it was asked to reconcile.
     #[derive(Default)]
     struct ScriptedPolicies {
@@ -226,13 +295,19 @@ mod tests {
         orphans: Vec<String>,
         existing: Vec<String>,
         existing_calls: AtomicUsize,
+        /// Simulates the pre-loop snapshot read itself failing, INDEPENDENTLY of `existing` —
+        /// so a fixture can hold "every row is really there, but we could not read the list".
+        existing_fails: bool,
+        /// The `known` set the orphan scan was called with, captured so a test can prove the
+        /// scan ran and was handed the code-defined ids.
+        orphan_known: Mutex<Vec<String>>,
     }
 
     impl ScriptedPolicies {
         fn with(outcome: StarterPolicyOutcome) -> Arc<Self> {
             Arc::new(ScriptedPolicies {
                 outcome: Mutex::new(Some(outcome)),
-                existing: starter_policies().into_iter().map(|d| d.policy_id).collect(),
+                existing: all_starter_ids(),
                 ..Default::default()
             })
         }
@@ -243,36 +318,55 @@ mod tests {
         async fn reconcile_system(&self, doc: &PolicyDocument, _revision: u32) -> Result<StarterPolicyOutcome, AuthzError> {
             self.seen.lock().unwrap().push(doc.policy_id.clone());
             if self.fail {
-                return Err(AuthzError::Backend(Box::new(std::io::Error::other("db down"))));
+                return Err(backend_error("db down"));
             }
             Ok(self.outcome.lock().unwrap().clone().unwrap_or(StarterPolicyOutcome::Unchanged))
         }
-        async fn orphaned_system_policy_ids(&self, _known: &[&str]) -> Result<Vec<String>, AuthzError> {
+        async fn orphaned_system_policy_ids(&self, known: &[&str]) -> Result<Vec<String>, AuthzError> {
+            *self.orphan_known.lock().unwrap() = known.iter().map(|k| (*k).to_string()).collect();
             Ok(self.orphans.clone())
         }
         async fn existing_policy_ids(&self) -> Result<Vec<String>, AuthzError> {
             self.existing_calls.fetch_add(1, Ordering::SeqCst);
+            if self.existing_fails {
+                return Err(backend_error("snapshot read failed"));
+            }
             Ok(self.existing.clone())
         }
     }
 
     #[derive(Default)]
-    struct ScriptedRoles;
+    struct ScriptedRoles {
+        fail: bool,
+        outcome: Option<RoleOutcome>,
+        seen: Mutex<Vec<String>>,
+        orphans: Vec<String>,
+        orphan_known: Mutex<Vec<String>>,
+    }
 
     #[async_trait::async_trait]
     impl SystemRoleReconciler for ScriptedRoles {
-        async fn reconcile_role(&self, _role: &Role) -> Result<RoleOutcome, AuthzError> {
-            Ok(RoleOutcome::Unchanged)
+        async fn reconcile_role(&self, role: &Role) -> Result<RoleOutcome, AuthzError> {
+            self.seen.lock().unwrap().push(role.key.clone());
+            if self.fail {
+                return Err(backend_error("role table down"));
+            }
+            Ok(self.outcome.unwrap_or(RoleOutcome::Unchanged))
         }
-        async fn orphaned_system_role_keys(&self, _known: &[&str]) -> Result<Vec<String>, AuthzError> {
-            Ok(vec![])
+        async fn orphaned_system_role_keys(&self, known: &[&str]) -> Result<Vec<String>, AuthzError> {
+            *self.orphan_known.lock().unwrap() = known.iter().map(|k| (*k).to_string()).collect();
+            Ok(self.orphans.clone())
         }
     }
 
     fn deps(policies: Arc<ScriptedPolicies>, audit: Arc<dyn AuditLog>) -> ReconcileStarterDeps<KernelIdGenerator, SystemClock> {
+        deps_with_roles(policies, Arc::new(ScriptedRoles::default()), audit)
+    }
+
+    fn deps_with_roles(policies: Arc<ScriptedPolicies>, roles: Arc<ScriptedRoles>, audit: Arc<dyn AuditLog>) -> ReconcileStarterDeps<KernelIdGenerator, SystemClock> {
         ReconcileStarterDeps {
             policies,
-            roles: Arc::new(ScriptedRoles),
+            roles,
             audit,
             ids: KernelIdGenerator,
             clock: SystemClock,
@@ -280,12 +374,16 @@ mod tests {
     }
 
     fn tampered() -> StarterPolicyOutcome {
+        tampered_with("permit(principal, action, resource);".to_string(), "old".to_string())
+    }
+
+    fn tampered_with(source: String, description: String) -> StarterPolicyOutcome {
         StarterPolicyOutcome::ExternallyModified {
             content_changed: true,
             previous_content: PolicyContent {
                 kind: PolicyKind::Static,
-                source: "permit(principal, action, resource);".to_string(),
-                description: "old".to_string(),
+                source,
+                description,
             },
         }
     }
@@ -305,7 +403,34 @@ mod tests {
         assert_eq!(e.outcome, AuditOutcome::Committed);
         assert_eq!(e.detail["source"], serde_json::json!("starter_policy_reconcile"));
         assert_eq!(e.detail["reason"], serde_json::json!("external_modification"));
+        assert_eq!(e.detail["policy_id"], serde_json::json!(starter_policies()[0].policy_id), "the row must name the policy it is about");
+        assert_eq!(e.detail["content_changed"], serde_json::json!(true));
         assert_eq!(e.detail["previous_content"]["source"], serde_json::json!("permit(principal, action, resource);"));
+        assert_eq!(e.detail["previous_content"]["description"], serde_json::json!("old"));
+    }
+
+    /// A row hand-edited to exactly the code-defined value is still an external edit, and is
+    /// still audited — but `content_changed` must report the truth rather than a hardcoded
+    /// `true`, or the entry claims content was destroyed when none was.
+    #[tokio::test]
+    async fn an_external_edit_that_changed_nothing_audits_with_content_changed_false() {
+        let entries = FakeAuditLog::default();
+        let d = deps(
+            ScriptedPolicies::with(StarterPolicyOutcome::ExternallyModified {
+                content_changed: false,
+                previous_content: PolicyContent {
+                    kind: PolicyKind::Static,
+                    source: "identical".to_string(),
+                    description: String::new(),
+                },
+            }),
+            Arc::new(entries.clone()),
+        );
+        reconcile_policies(&d).await.unwrap();
+
+        let rows = entries.0.lock().unwrap();
+        assert_eq!(rows.len(), starter_policies().len(), "provenance alone is still worth one row");
+        assert_eq!(rows[0].detail["content_changed"], serde_json::json!(false));
     }
 
     #[tokio::test]
@@ -336,6 +461,29 @@ mod tests {
         );
         reconcile_policies(&d).await.unwrap();
         assert!(stamped.0.lock().unwrap().is_empty(), "a pure fingerprint stamp is not an event");
+
+        // The classifier only attaches `previous_content` when the content actually changed, so
+        // this pair is unreachable through `classify_starter_policy` — which is precisely what
+        // the `content_changed` guard defends against, and the only fixture that can falsify it.
+        // Without this case, mutating that guard to `if true` leaves the suite green, because
+        // the `if let Some(..)` inside it never fires on a `previous_content: None` fixture.
+        let defensive = FakeAuditLog::default();
+        let d = deps(
+            ScriptedPolicies::with(StarterPolicyOutcome::Adopted {
+                content_changed: false,
+                previous_content: Some(PolicyContent {
+                    kind: PolicyKind::Static,
+                    source: "a misbehaving adapter's leftover snapshot".to_string(),
+                    description: String::new(),
+                }),
+            }),
+            Arc::new(defensive.clone()),
+        );
+        reconcile_policies(&d).await.unwrap();
+        assert!(
+            defensive.0.lock().unwrap().is_empty(),
+            "content_changed: false must suppress the audit even when a snapshot is attached"
+        );
     }
 
     #[tokio::test]
@@ -376,6 +524,49 @@ mod tests {
         assert_eq!(rows[0].detail["previous_content"]["truncated"], serde_json::json!(true));
     }
 
+    /// The ASCII fixture above cannot reach the char-boundary walk-back: byte 8192 of an all-`x`
+    /// string is always a boundary, so deleting the walk-back leaves that test green. A tampered
+    /// Cedar comment carrying any multi-byte text is the real case — and slicing mid-character
+    /// PANICS inside `AppState::new`, killing the replica.
+    #[tokio::test]
+    async fn a_multi_byte_previous_source_truncates_without_splitting_a_character() {
+        // A 3-byte char, so `MAX_AUDITED_SOURCE_BYTES % 3 == 2` lands strictly inside one.
+        let huge = "→".repeat(MAX_AUDITED_SOURCE_BYTES / 3 + 10);
+        assert!(huge.len() > MAX_AUDITED_SOURCE_BYTES, "fixture must exceed the cap");
+        assert!(!huge.is_char_boundary(MAX_AUDITED_SOURCE_BYTES), "fixture must put the cap mid-character or it proves nothing");
+
+        let entries = FakeAuditLog::default();
+        let d = deps(ScriptedPolicies::with(tampered_with(huge.clone(), String::new())), Arc::new(entries.clone()));
+        reconcile_policies(&d).await.unwrap();
+
+        let rows = entries.0.lock().unwrap();
+        let src = rows[0].detail["previous_content"]["source"].as_str().unwrap();
+        assert!(
+            src.len() < MAX_AUDITED_SOURCE_BYTES,
+            "the cap lands mid-character, so the result must walk BACK below it, got {}",
+            src.len()
+        );
+        assert!(huge.starts_with(src), "truncation must yield a prefix, never re-encoded or mangled text");
+        assert_eq!(rows[0].detail["previous_content"]["truncated"], serde_json::json!(true));
+    }
+
+    /// The description comes off the same externally-modified row as the source, so it is
+    /// equally attacker-influenced and equally capped — with its OWN flag, so neither field's
+    /// marker can stand in for the other's.
+    #[tokio::test]
+    async fn an_oversized_previous_description_is_truncated_and_separately_marked() {
+        let huge = "d".repeat(MAX_AUDITED_SOURCE_BYTES + 500);
+        let entries = FakeAuditLog::default();
+        let d = deps(ScriptedPolicies::with(tampered_with("small".to_string(), huge)), Arc::new(entries.clone()));
+        reconcile_policies(&d).await.unwrap();
+
+        let rows = entries.0.lock().unwrap();
+        let previous = &rows[0].detail["previous_content"];
+        assert_eq!(previous["description"].as_str().unwrap().len(), MAX_AUDITED_SOURCE_BYTES);
+        assert_eq!(previous["description_truncated"], serde_json::json!(true));
+        assert_eq!(previous["truncated"], serde_json::json!(false), "the source flag must track the source, not the description");
+    }
+
     #[tokio::test]
     async fn a_failing_audit_sink_does_not_fail_boot() {
         let d = deps(ScriptedPolicies::with(tampered()), Arc::new(FailingAuditLog));
@@ -406,9 +597,88 @@ mod tests {
         reconcile_policies(&d).await.expect_err("a failure to seed a missing starter policy must fail boot");
     }
 
-    /// The survivable-vs-fatal split above is only sound if the snapshot predates every write:
-    /// re-reading it per policy would let a row this boot just seeded make a LATER failure on a
-    /// still-missing row look survivable. One call, before the loop.
+    /// A failure classified against the snapshot has three genuinely different operational
+    /// stories, and reporting one as another sends on-call the wrong way — "refusing to boot
+    /// with an incomplete policy set" about a database holding all nine rows invites destructive
+    /// remediation. Collapsing the unreadable case into the missing-row case reddens here.
+    #[test]
+    fn a_failure_is_classified_against_the_snapshot_and_an_unreadable_one_is_its_own_case() {
+        let ids = vec!["forbid_archived_writes".to_string()];
+        assert_eq!(classify_failure(Some(&ids), "forbid_archived_writes"), FailureKind::Survivable);
+        assert_eq!(classify_failure(Some(&ids), "org_admin"), FailureKind::FatalMissingRow);
+        assert_eq!(
+            classify_failure(None, "forbid_archived_writes"),
+            FailureKind::FatalUnknownSnapshot,
+            "an unreadable snapshot must never be reported as a missing row"
+        );
+    }
+
+    /// A connection blip while reading the snapshot, against a database holding every row. The
+    /// degradation must be fail-CLOSED (we cannot prove the row is there) — and the fixture
+    /// populates `existing` with all nine ids, so a fake that ignored `existing_fails` would
+    /// take the survivable path and return `Ok`, reddening this test.
+    #[tokio::test]
+    async fn an_unreadable_id_snapshot_makes_every_failure_fatal() {
+        let scripted = Arc::new(ScriptedPolicies {
+            fail: true,
+            existing_fails: true,
+            existing: all_starter_ids(),
+            ..Default::default()
+        });
+        let d = deps(scripted.clone(), Arc::new(FakeAuditLog::default()));
+        reconcile_policies(&d)
+            .await
+            .expect_err("an unreadable snapshot must fail closed, not be swallowed into the survivable path");
+        assert_eq!(scripted.existing_calls.load(Ordering::SeqCst), 1, "the failed read is still only attempted once");
+    }
+
+    /// Requirement 7: an orphaned system row is REPORTED, never audited. `audit_log` is
+    /// append-only and this scan runs on every replica on every boot, so one audit row per
+    /// orphan would compound without bound. Nothing else pins that today.
+    #[tokio::test]
+    async fn orphaned_policy_rows_are_scanned_and_reported_but_never_audited() {
+        let scripted = Arc::new(ScriptedPolicies {
+            outcome: Mutex::new(Some(StarterPolicyOutcome::Unchanged)),
+            existing: all_starter_ids(),
+            orphans: vec!["retired_starter_a".to_string(), "retired_starter_b".to_string()],
+            ..Default::default()
+        });
+        let entries = FakeAuditLog::default();
+        let d = deps(scripted.clone(), Arc::new(entries.clone()));
+        reconcile_policies(&d).await.unwrap();
+
+        assert_eq!(
+            *scripted.orphan_known.lock().unwrap(),
+            STARTER_POLICY_IDS.iter().map(|k| (*k).to_string()).collect::<Vec<_>>(),
+            "the scan must run, and against the code-defined id set"
+        );
+        assert!(entries.0.lock().unwrap().is_empty(), "an orphan is logged and counted, never written to the append-only audit table");
+    }
+
+    /// The role half is untested otherwise: a role-table failure must NOT stop a replica (the
+    /// columns are introspectable-only), every role is still attempted, orphan keys are scanned,
+    /// and — as above — nothing here audits.
+    #[tokio::test]
+    async fn a_role_failure_never_stops_boot_and_orphan_roles_are_reported_not_audited() {
+        let roles = Arc::new(ScriptedRoles {
+            fail: true,
+            orphans: vec!["retired_role".to_string()],
+            ..Default::default()
+        });
+        let entries = FakeAuditLog::default();
+        let d = deps_with_roles(ScriptedPolicies::with(StarterPolicyOutcome::Unchanged), roles.clone(), Arc::new(entries.clone()));
+        reconcile_roles(&d).await.expect("a role reconciliation failure must never stop a replica starting");
+
+        let expected_keys: Vec<String> = authz_roles::system_roles().into_iter().map(|r| r.key).collect();
+        assert_eq!(*roles.seen.lock().unwrap(), expected_keys, "every role is still attempted after one fails");
+        assert_eq!(*roles.orphan_known.lock().unwrap(), expected_keys, "the orphan scan must run, against the code-defined role catalog");
+        assert!(entries.0.lock().unwrap().is_empty(), "role drift is cosmetic — logged, never audited");
+    }
+
+    /// One read, not nine: every policy is judged against ONE consistent basis, and the whole
+    /// loop costs a single full-table read. (Re-reading per policy would not flip any single
+    /// classification — the guard compares against the failing doc's OWN id — but it would make
+    /// the basis drift mid-loop and multiply the cost.)
     #[tokio::test]
     async fn the_existing_id_snapshot_is_read_once_before_the_loop() {
         let scripted = ScriptedPolicies::with(StarterPolicyOutcome::Reconciled);
