@@ -29,3 +29,39 @@ TESTS: `cargo nextest run -p paigasus-iam --no-tests=pass --test-threads=2` → 
 CONCERNS: none — both findings fixed, verified with a mutation test, and the flaky Docker/testcontainers full-parallelism failures (different unrelated test each run) are confirmed pre-existing machine contention, not caused by this change.</result>
 <usage><subagent_tokens>193185</subagent_tokens><tool_uses>43</tool_uses><duration_ms>757021</duration_ms></usage>
 </task-notification>
+
+---
+
+<task-notification>
+<task-id>a52227a7c061d667c</task-id>
+<tool-use-id>toolu_01MABy817AyWBcrrAVBRwxVx</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/f485aa80-2440-4921-97d1-90d5a5f455f2/tasks/a52227a7c061d667c.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 3: relay park metadata" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Clean. All work committed on the correct branch.
+
+STATUS: DONE
+COMMITS: 60461c4 — test(rs): make truncate_error's char-boundary test actually discriminate (SMA-469)
+TESTS: `cargo nextest run -p paigasus-iam --lib truncate_error` 5/5 pass; full `--lib` 332/332 pass; clippy `-D warnings` clean; `cargo fmt --check` clean; mutation test confirmed — naive `&amp;s[..MAX_ERROR_BYTES]` slice panicked on the new discriminating test (`end byte index 1024 is not a char boundary; it is inside '€'...`) while the old 4-byte-char test still passed under the same mutant, then reverted to green.
+CONCERNS: None — finding fully addressed with independently-verified evidence (mutation test both directions).</result>
+<usage><subagent_tokens>117432</subagent_tokens><tool_uses>25</tool_uses><duration_ms>393129</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a52227a7c061d667c</task-id>
+<tool-use-id>toolu_012m91vERmqAva3mXt3GrpfD</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/f485aa80-2440-4921-97d1-90d5a5f455f2/tasks/a52227a7c061d667c.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 3: relay park metadata" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Clean, on the correct branch.
+
+STATUS: DONE
+COMMITS: b130a77 — test(rs): drop the non-discriminating combining-mark truncate_error test (SMA-469)
+TESTS: `cargo nextest run -p paigasus-iam --lib truncate_error` 4/4 pass; full `--lib` 331/331 pass; clippy `-D warnings` clean; `cargo fmt --check` clean.
+CONCERNS: None — took option (a) (delete the flawed test) since its premise is unconstructible in UTF-8 and option (b) would only duplicate the euro-sign test's mechanism; the euro-sign test remains the sole, already mutation-verified discriminating case.</result>
+<usage><subagent_tokens>128323</subagent_tokens><tool_uses>10</tool_uses><duration_ms>102649</duration_ms></usage>
+</task-notification>
