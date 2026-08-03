@@ -352,6 +352,20 @@ flat panel; the currently-parked-row count is a derivable Prometheus query
    ORDER BY occurred_at;
    ```
 
+**Before upgrading to (or past) the `m0009` migration, run `SELECT count(*) FROM event_outbox;`.**
+`m0009`'s `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock, and — unlike `m0008`'s partition
+DDL — that lock is held for the migration's *entire* remaining body, not released before the
+backfill: the `UPDATE … WHERE parked = true AND parked_at IS NULL` (a sequential scan, since its
+own supporting index is created only afterward) and both non-concurrent `CREATE INDEX` builds all
+run while still holding the same `ACCESS EXCLUSIVE` request the `ALTER TABLE` already queued,
+blocking every `PgOutbox::enqueue` for as long as they take. `SET LOCAL lock_timeout = '5s'`
+bounds how long Postgres will wait to *acquire* that lock — it does nothing to bound how long the
+migration *holds* it once acquired. On a small table this whole sequence is sub-second and
+invisible; on a table with a large accumulated backlog — precisely the deployment this feature
+exists to rescue — the backfill and index builds scale with row count, not disk size, so a large
+`count(*)` means a materially longer migration window with writes blocked throughout. Schedule the
+upgrade for a low-traffic window if the count is large.
+
 **Remediation.** The API is the primary recovery path — reach for the SQL fallback at the very
 end of this section only when the API itself is unreachable.
 - **Replay one row:** `POST /v1/outbox/dead-letters/{id}/replay` returns the named row to the live
