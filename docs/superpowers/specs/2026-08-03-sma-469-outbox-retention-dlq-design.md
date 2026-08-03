@@ -23,12 +23,21 @@ retention, with maintenance metrics and an alert. The outbox never got the equiv
 
 ### 1.1 A failure-model finding that shaped the design
 
-At the shipped defaults (`poll_interval_secs = 5`, `max_attempts = 5`), a broker outage lasting
-**~25 seconds** exhausts every retry for every row in the backlog. Mass parking is therefore the
-*expected* outage signature, not a hypothetical — a poison-message-only mental model would be
-wrong. This drives three decisions: filtered bulk replay (§7.4), `parked_days` as the bulk
-*retirement* path (§3.3), and a `last_error` that is actually descriptive under broker failure
-(§5.1).
+The relay drains at most `batch_size` (default `100`) rows per tick (`ORDER BY id LIMIT
+batch_size`), so within any single poll interval only up to `batch_size` distinct rows can even be
+attempted, let alone parked — on a backlog larger than `batch_size`, most of it is never selected
+during a short outage. A row parks after `max_attempts` (default `5`) consecutive failed attempts;
+because the relay re-selects the same still-unpublished row on every subsequent tick, that spans
+**four** poll intervals between its first and fifth attempt (20s at the shipped
+`poll_interval_secs = 5`), plus up to one further interval for the first attempt to happen at all —
+so **~25 seconds is the worst case for the first `batch_size` rows to park**, not for the whole
+backlog to park at once. If the outage continues, the relay moves on to the next `batch_size` rows
+(the previous batch is now excluded, `parked = true`) and repeats the same ~20–25s cycle, so a
+longer outage parks proportionally more rows in `batch_size`-sized waves rather than parking an
+unbounded backlog instantly. Mass parking bounded by `batch_size` is still the *expected* outage
+signature, not a hypothetical — a poison-message-only mental model would be wrong. This drives
+three decisions: filtered bulk replay (§7.4), `parked_days` as the bulk *retirement* path (§3.3),
+and a `last_error` that is actually descriptive under broker failure (§5.1).
 
 ## 2. Goals / non-goals
 

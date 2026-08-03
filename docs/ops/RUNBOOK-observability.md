@@ -307,13 +307,23 @@ flat panel; the currently-parked-row count is a derivable Prometheus query
 - **A single bad payload.** One event's payload is fundamentally unpublishable (malformed for the
   specific `EventPublisher` backend, or an event type the consumer rejects deterministically) —
   retrying it forever would never succeed, hence the attempt cap.
-- **Mass parking — the expected outage signature, not just a poison-message symptom.** At the
-  defaults (`[outbox].poll_interval_secs = 5`, `[outbox].max_attempts = 5`), a broker outage of
-  only **~25 seconds** (5 attempts × the 5s poll interval) is enough to exhaust every retry for
-  **every** row that was in flight during the outage — the whole affected backlog parks together,
-  not just one row. If many rows parked in the same short window, suspect a resolved-or-ongoing
-  outage before suspecting a payload bug; `IamOutboxDeadLetterBacklog` (below) is the complementary
-  alert for "a parked backlog nobody has dealt with yet."
+- **Mass parking — bounded by `[outbox].batch_size`, not "the whole backlog" — is still the
+  expected outage signature, not just a poison-message symptom.** The relay drains at most
+  `batch_size` (default `100`) rows per tick (`ORDER BY id LIMIT batch_size`), so within any single
+  poll interval only up to `batch_size` distinct rows can even be attempted, let alone parked — on
+  a backlog larger than `batch_size`, most of it is never selected during a short outage, so it
+  cannot possibly park. A row parks after `[outbox].max_attempts` (default `5`) consecutive failed
+  attempts; because the relay re-selects the same still-unpublished row on every subsequent tick,
+  that spans **four** poll intervals between its first and fifth attempt (20s at the default
+  `poll_interval_secs = 5`), plus up to one further interval for that first attempt to happen at
+  all — so **~25 seconds is the worst case for the first `batch_size` rows to park**, not for the
+  whole backlog to park at once. If the outage continues past that, the relay moves on to the next
+  `batch_size` rows (the previous batch is now excluded, `parked = true`) and repeats the same
+  ~20–25s cycle, so a longer outage parks proportionally more rows in `batch_size`-sized waves
+  rather than parking an unbounded backlog instantly. Many rows parking in a short window is still
+  the signal to suspect a resolved-or-ongoing outage before suspecting a payload bug — that
+  conclusion doesn't change, only the blast-radius number does; `IamOutboxDeadLetterBacklog`
+  (below) is the complementary alert for "a parked backlog nobody has dealt with yet."
 
 **Confirm:**
 1. IAM logs around the parked event's `id` — the relay emits `tracing::error!` with
@@ -324,7 +334,14 @@ flat panel; the currently-parked-row count is a derivable Prometheus query
    practice this means the caller needs a `platform_admin` grant scoped at Root) returns each
    parked row's `last_error`, `attempts`, `parked_at`, and the raw `payload`, keyset-paginated via
    `cursor`/`next_cursor` exactly like the audit query API. Absent/empty query params are
-   unfiltered; `limit` defaults to 50 and is capped at 200.
+   unfiltered; `limit` defaults to 50 and is capped at 200. **A caveat, not a bug:** a row with
+   `parked_at IS NULL` can never satisfy `parked_from`/`parked_to` (Postgres never evaluates a
+   `NULL` comparison as true), so such a row is invisible to `list` whenever either time bound is
+   set, and to bulk replay whenever a time bound narrows the match — it stays reachable via an
+   unfiltered (or only `event_type`-filtered) query, so nothing is permanently lost. The `m0009`
+   migration backfilled `parked_at = now()` for every pre-existing parked row, so exposure to this
+   is small in practice, but a triaging operator who knows a row is parked and can't find it in a
+   windowed query should think of this before assuming a bug.
 3. **Break-glass fallback (API unreachable only).** Count/inspect parked rows directly against
    Postgres:
    ```sql
@@ -354,12 +371,15 @@ end of this section only when the API itself is unreachable.
 - **Confirm the root cause is actually fixed before any bulk replay.** Mass parking is usually an
   outage (see Likely causes above); replaying into a still-broken publisher just re-parks the same
   rows on their very next failed attempt.
-- **A 10k-row replay delays live traffic by roughly 8 minutes.** A replayed row keeps its
-  original — older, lower — `id`, and the relay drains strictly `ORDER BY id ASCENDING` at
-  `[outbox].batch_size = 100` rows every `[outbox].poll_interval_secs = 5` seconds. A large replay
-  is therefore drained to completion, in full, before any newer/live row is touched — schedule a
-  large bulk replay for a low-traffic window, or replay in smaller batches, if an 8-minute delay to
-  live traffic is unacceptable.
+- **A 10k-row replay delays live traffic by roughly 8 minutes, per relay replica.** A replayed row
+  keeps its original — older, lower — `id`, and the relay drains strictly `ORDER BY id ASCENDING`
+  at `[outbox].batch_size = 100` rows every `[outbox].poll_interval_secs = 5` seconds
+  (10,000 / 100 × 5s = 500s ≈ 8m for a single relay). A large replay is therefore drained to
+  completion, in full, before any newer/live row is touched by *that* relay. With N IAM replicas
+  each running their own relay and partitioning the work via `FOR UPDATE SKIP LOCKED`, the
+  effective delay is roughly **8/N minutes**, not a flat 8 — schedule a large bulk replay for a
+  low-traffic window, or replay in smaller batches, if even the divided delay to live traffic is
+  unacceptable.
 - **`404` on any of the three replay/discard endpoints conflates several distinct states**: no row
   exists with that id, a row that was never parked (still live, or already published), a row
   another actor (or another attempt of the *same* retry) already replayed or discarded, and —
@@ -396,10 +416,12 @@ end of this section only when the API itself is unreachable.
   it through more failed attempts.
 
 **Break-glass fallback (API unreachable only).** If the HTTP API itself is down, a row can still
-be un-parked directly in Postgres:
+be un-parked directly in Postgres — this mirrors the API's own `REPLAY_ONE_SQL` exactly (also
+clearing `parked_at`, not just `parked`/`attempts`, so the row lands in the identical state a real
+`replay` call would produce):
 ```sql
 UPDATE event_outbox
-SET parked = false, attempts = 0
+SET parked = false, attempts = 0, parked_at = NULL
 WHERE id = '<parked-row-id>';
 ```
 Prefer the API's `replay` endpoint whenever it is reachable — besides being the documented path, it
@@ -1408,10 +1430,10 @@ Not implemented in this cycle; tracked as explicit follow-ups:
 - **Hosted Prometheus + Grafana deployment**, long-term metrics storage, and alert **routing**
   (Alertmanager → PagerDuty/Opsgenie or similar) — this RUNBOOK's alert rules define *what* fires,
   not *where it pages*; routing is deployment-specific and not yet configured anywhere.
-- **A gRPC mirror of the `/v1/outbox/dead-letters` surface** (SMA-469), if a non-HTTP operator
-  client ever needs one. Deliberately out of scope today — the HTTP adapter's own module doc calls
-  this a scope decision, not an API-boundary principle, and keeping it HTTP-only keeps
-  `contracts/` untouched.
+- **A gRPC mirror of the `/v1/outbox/dead-letters` surface**, if a non-HTTP operator client ever
+  needs one — untracked, no follow-up issue filed. Deliberately out of scope for SMA-469 — the
+  HTTP adapter's own module doc calls this a scope decision, not an API-boundary principle, and
+  keeping it HTTP-only keeps `contracts/` untouched.
 - **Bulk discard**, if `[outbox.retention].parked_days` proves insufficient in practice for
   retiring a mass-parked backlog. There is deliberately no bulk-discard endpoint today (SMA-469);
   the supported bulk-retirement path is the retention sweep — see `IamOutboxEventsParked`'s
