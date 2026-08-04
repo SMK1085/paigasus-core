@@ -4,8 +4,9 @@
 //! `/v1` tenancy API (organizations/teams/projects/memberships/users, ADR-0014), the
 //! authn introspection endpoint (`/v1/authn/introspect`, SMA-443), the `/v1/authz`
 //! authorization API (`is-authorized`/policies/role-grants, SMA-444 Task 18), the
-//! `/v1/audit` audit-log read endpoint (SMA-446 Task A11), and the operator-only
-//! `/v1/outbox/dead-letters` surface (SMA-469).
+//! `/v1/audit` audit-log read endpoint (SMA-446 Task A11), the operator-only
+//! `/v1/outbox/dead-letters` surface (SMA-469), and the operator-only
+//! `/v1/authz/system-policies/{id}/retire` surface (SMA-481).
 
 mod api_keys;
 mod audit;
@@ -20,6 +21,7 @@ mod memberships;
 mod organizations;
 mod projects;
 mod service_accounts;
+mod system_retirement;
 mod teams;
 mod users;
 
@@ -47,7 +49,7 @@ use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
     PgApiKeyRepository, PgAuditLog, PgDeadLetters, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgPrincipalRepository,
-    PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgTeamRepository, SeaOrmUnitOfWork,
+    PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, SeaOrmUnitOfWork,
 };
 use crate::application::api_keys::{ApiKeyService, ApiKeyServiceDeps};
 use crate::application::audit::AuditQueryService;
@@ -64,6 +66,7 @@ use crate::application::policies::{PolicyService, PolicyServiceDeps};
 use crate::application::projects::ProjectService;
 use crate::application::roles::{RoleService, RoleServiceDeps};
 use crate::application::service_accounts::{ServiceAccountService, ServiceAccountServiceDeps};
+use crate::application::system_retirement::{SystemRetirementDeps, SystemRetirementService};
 use crate::application::teams::TeamService;
 use crate::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, JwksCacheBackend};
 use paigasus_iam_core::{
@@ -88,6 +91,11 @@ pub type PolicySvc = PolicyService<KernelIdGenerator, SystemClock>;
 /// The cold-start bootstrap-admin seeder (SMA-444 Task 21b), wired over the same `Arc<dyn
 /// RoleGrantStore>` `AppState.role_grant_store` holds — mirrors `RoleSvc`'s DI posture.
 pub type BootstrapAdminSvc = BootstrapAdminSeeder<KernelIdGenerator, SystemClock>;
+/// The system-row retirement use case (SMA-481) — `SystemRetirementService` is already
+/// concrete (no generic DI parameters, unlike `RoleSvc`/`PolicySvc` above), so this alias
+/// exists purely so `AppState`'s field reads like every other `*Svc`-suffixed one rather than
+/// naming the application-layer type directly.
+pub type SystemRetirementSvc = SystemRetirementService;
 
 /// The wired API-key bearer authenticator (SMA-445 Task 19) — consumed by BOTH enforcement
 /// seams (`auth_middleware::require_bearer`, `grpc::authn::AuthEnforce::call`): a presented
@@ -228,6 +236,12 @@ pub struct AppState {
     /// The dead-letter operator use case (SMA-469) — `GET/POST /v1/outbox/dead-letters*`
     /// read through this. Root-only, enforced inside the service itself.
     pub dead_letters: DeadLetterService,
+    /// Retirement of orphaned system-owned rows (SMA-481) — the `/v1/authz/system-policies/
+    /// {id}/retire` route calls through this. Deliberately its own service rather than a
+    /// `PolicySvc` method: it drives the privileged `SystemRowRetirer` port, which bypasses
+    /// `PolicyStore::delete_in`'s `SystemImmutable` guard and must stay unreachable from
+    /// ordinary policy CRUD.
+    pub retirement: SystemRetirementSvc,
     /// The persistent audit-log sink (`PgAuditLog`) the denial-audit [`DenialAuditDrain`]
     /// drains buffered denials into (SMA-446 Task A12) — the SAME `Arc<dyn AuditLog>` handle
     /// `audit_query` reads through. Exposed via [`AppState::audit_sink`] so `main.rs` (or a
@@ -491,6 +505,26 @@ impl AppState {
             authorize: authorize.clone(),
         });
 
+        // SMA-481: retirement of orphaned system-owned rows. `retirer` is the one instance
+        // this composition root ever builds (a brand-new, narrow port with a single call
+        // site, unlike the shared stores below) — but `outbox`/`gen_bumper`/`audit`/`ids`/
+        // `clock`/`authorize` are the SAME `role_outbox`/`role_gen_bumper`/`audit_log`/
+        // `KernelIdGenerator`/`SystemClock`/`authorize` handles `roles`/`bootstrap_seeder`
+        // already share above (not fresh instances): `PgOutbox` is a stateless marker and
+        // `GenerationsPolicyGenBumper` only matters via the `gens` handle it wraps, so reusing
+        // these Arcs costs nothing and keeps a retirement's event/audit/policy_gen bump on the
+        // identical shared handles every other authz mutation in this file bumps (mirrors the
+        // `role_grant_store` field doc's rationale for why THIS exact instance matters).
+        let retirement = SystemRetirementService::new(SystemRetirementDeps {
+            retirer: Arc::new(PgSystemRowRetirer::new(db.clone())),
+            outbox: role_outbox.clone(),
+            audit: audit_log.clone(),
+            gen_bumper: role_gen_bumper.clone(),
+            ids: Arc::new(KernelIdGenerator),
+            clock: Arc::new(SystemClock),
+            authorize: authorize.clone(),
+        });
+
         // Shares the SAME `role_grant_store` handle `roles`/`snapshot` do (Task 21b): a
         // bootstrap-admin seed bumps the identical `policy_gen` counter `CedarAuthorizer`
         // polls, exactly like every other role-grant mutation in this composition root.
@@ -669,6 +703,7 @@ impl AppState {
             api_key_introspect_body_limit: cfg.api_keys.max_token_bytes + INTROSPECT_BODY_OVERHEAD_BYTES,
             audit_query,
             dead_letters,
+            retirement,
             audit_log,
             denial_drain: Arc::new(Mutex::new(Some(denial_drain))),
         })
@@ -728,6 +763,7 @@ fn app_routes(state: AppState) -> Router {
         .merge(api_keys::router())
         .merge(audit::router())
         .merge(dead_letters::router())
+        .merge(system_retirement::router())
         // `route_layer` (not `layer`): the enforcement covers exactly the routes defined
         // above and never the merged-in `/healthz`/`/readyz`/introspect or the 404 fallback.
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware::require_bearer))
@@ -824,6 +860,7 @@ mod tests {
             .merge(service_accounts::router())
             .merge(api_keys::router())
             .merge(audit::router())
-            .merge(dead_letters::router());
+            .merge(dead_letters::router())
+            .merge(system_retirement::router());
     }
 }
