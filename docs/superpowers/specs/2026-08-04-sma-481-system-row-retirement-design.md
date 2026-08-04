@@ -365,10 +365,16 @@ org, team or project, and retirement of that role could never succeed. Root-scop
 unaffected: the synthetic `Root` entity carries no `effective_status`.
 
 Retirement does **not** delete these grants — that would breach D4's template guarantee for the
-convenience of one case. Instead the `Blocked` response flags each listed grant with
-`scope_archived: true`, and both the response message and §5's runbook name the supported
-sequence: **restore the node → revoke the grant → re-archive the node**. An operator who is not
-told this hits a refusal loop with no exit, which is worse than the original bug.
+convenience of one case. Instead the `Blocked` response's message and §5's runbook both name the
+supported sequence: **restore the node → revoke the grant → re-archive the node**. An operator
+who is not told this hits a refusal loop with no exit, which is worse than the original bug.
+
+**No per-grant `scope_archived` flag.** An earlier draft flagged each listed grant. Computing it
+is not a column read — `effective_status` is derived, not stored (`NodeStatus::effective(own,
+&ancestors)`), so it would mean resolving every listed grant's node *and its ancestor chain*
+across three tenancy tables, for a hint in an error body. It is also redundant: the operator
+learns which grant is affected at the exact moment it matters, when that grant's revoke returns
+`403`. The message and the runbook carry the whole remedy.
 
 ## 3. The fix
 
@@ -411,7 +417,7 @@ pub trait SystemRowRetirer: Send + Sync {
     async fn lock_role_in(&self, tx: &dyn Transaction, key: &str) -> Result<Option<StoredRole>, AuthzError>;
 
     /// Up to `limit + 1` surviving grants of `role_key`, ordered by id, plus the true
-    /// total — capped per D5. Each carries whether its scope node is archived (D12).
+    /// total — capped per D5. Ordered by id.
     async fn surviving_grants_in(&self, tx: &dyn Transaction, role_key: &str, limit: u64) -> Result<SurvivingGrants, AuthzError>;
 
     /// Proof-of-convergence check for D11: the minimum `starter_revision` across all
@@ -473,7 +479,7 @@ pub async fn retire(&self, actor: &Prn, id: &str, ack: bool) -> Result<RetireOut
     if role.is_some() {
         let survivors = self.retirer.surviving_grants_in(&*tx, id, GRANT_LIST_CAP).await?;
         if survivors.total > 0 {
-            return Ok(RetireOutcome::Blocked { /* … incl. scope_archived per grant */ });
+            return Ok(RetireOutcome::Blocked { /* role_key, grants, total, truncated */ });
         }
     }
 
@@ -535,7 +541,7 @@ or when the body is empty. The handler returns `Result<Response, ApiError>`:
   `role_deleted: false`", and a body is the operator's only immediate record of what was
   destroyed.
 - `Blocked` → `409` with code `grants-survive` and
-  `{"grants": [{"id", "principal_prn", "scope_prn", "scope_archived"}], "total_surviving", "truncated"}`.
+  `{"grants": [{"id", "principal_prn", "scope_prn"}], "total_surviving", "truncated"}`.
 - `NeedsAcknowledgement` → `409` with code `decision-change-unacknowledged` and
   `{"kind", "source", "description"}`.
 
@@ -548,8 +554,14 @@ Two new variants: `NotSystemOwned(String)` and `FleetNotConverged`, both
 `code()` and its stability test. `SystemImmutable` and `NotFound` are reused as-is. The two
 handler-produced codes are registered alongside them (D5).
 
-`pg_repository::conflict_kind` gains a `fk_role_grant_role` mapping so a concurrent grant that
-loses the D6 race surfaces as `UnknownRole`, not `Internal`.
+`pg_role_grants.rs` gains the FK mapping D6 requires. Note the precise mechanism, because the
+obvious place is the wrong one: the *shared* `persistence::map_err` already maps
+`ForeignKeyConstraintViolation` to `RepositoryError::NotFound`, but `pg_role_grants.rs` does not
+use it — it defines its own private `map_err` (`pg_role_grants.rs:74-76`) that collapses every
+`DbErr` into `AuthzError::Backend`. That local function is what turns the lost D6 race into a
+`500`. `grant_in` gains a `ForeignKeyConstraintViolation` branch returning
+`AuthzError::UnknownRole`-equivalent handling rather than `Backend`; the shared
+`conflict_kind` helper is untouched (it only attributes *unique* violations).
 
 ### 3.6 Composition root
 
@@ -575,8 +587,8 @@ In `application/system_retirement.rs`, mirroring `policies.rs`'s existing servic
 3. An unconverged fleet gets `FleetNotConverged`, asserted for both a low revision and a `NULL`.
 4. An absent id gets `NotFound`; a `system = false` **policy** row and a `system = false`
    **role** row each get `NotSystemOwned`.
-5. Surviving grants return `Blocked` with every grant, the true total, the `truncated` flag past
-   the cap, and `scope_archived` set — and the fakes prove **no delete, no event, no audit row,
+5. Surviving grants return `Blocked` with every grant, the true total, and the `truncated` flag past
+   the cap — and the fakes prove **no delete, no event, no audit row,
    no bump**.
 6. A static policy without the flag returns `NeedsAcknowledgement` carrying the content, writes
    nothing, and succeeds when the flag is set. The flag is a no-op on a template.
@@ -639,9 +651,9 @@ Fixtures seed the non-code-defined row-set by direct SeaORM insert — no suppor
 1. **The precondition, first:** every replica must be on a binary that no longer defines the id
    (D11). Retiring mid-rollout is silently undone.
 2. Read the orphan `WARN`; call the endpoint.
-3. On `409 grants-survive`, revoke each listed grant. **If a grant is flagged
-   `scope_archived`, restore the node → revoke → re-archive** (D12) — without this the operator
-   loops forever.
+3. On `409 grants-survive`, revoke each listed grant. **If a revoke returns `403` because
+   its scope node is archived, restore the node → revoke → re-archive** (D12) — without this
+   the operator loops forever.
 4. On `409 decision-change-unacknowledged`, read the returned content, decide, re-call with the
    flag (D4).
 5. On `409 fleet-not-converged`, wait for the rollout to finish.
@@ -715,8 +727,8 @@ step 6 makes the recovery explicit.
 4. Retiring an id with no `policy` row returns `404`; a `policy` or `role` row with
    `system = false` returns `409 not-system-owned`.
 5. Retiring an orphaned role while grants survive returns `409 grants-survive`; the body lists up
-   to 100 grants with id, principal PRN, scope PRN and `scope_archived`, plus the true
-   `total_surviving` and a `truncated` flag — and **no row is deleted, no event enqueued, no
+   to 100 grants with id, principal PRN and scope PRN, plus the true `total_surviving` and a
+   `truncated` flag, and its message names the archived-scope sequence (D12) — and **no row is deleted, no event enqueued, no
    audit row written, `policy_gen` not bumped**.
 6. Retiring an orphaned **static** policy without `acknowledge_decision_change` returns
    `409 decision-change-unacknowledged` carrying the `kind`/`source`/`description` that would be
