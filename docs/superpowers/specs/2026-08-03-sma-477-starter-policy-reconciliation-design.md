@@ -216,6 +216,17 @@ Two changes close it:
    policy: it classifies `ExternallyModified`, and the UPDATE restores `system = true` along
    with the content. `NonSystemCollision` is deleted from the design.
 
+**The `!system` check must precede the fingerprint branches, and the NULL-fingerprint branch must
+split on the revision.** (Added after the final whole-branch review, which found the first draft
+of §3.1's row ordering silently overriding this decision's prose.) `system = false` combined with
+a cleared `content_fingerprint` would otherwise reach row 3's adoption path — INFO, and with
+untouched content not audited at all — which is *cheaper* than the bypass this decision closed.
+And clearing the fingerprint alone downgrades a WARN-plus-audit to a routine `adopted` INFO. That
+second case is decidable rather than heuristic: this service writes `content_fingerprint` and
+`starter_revision` **together** (`converged_model` sets both, `doc_to_model` sets neither, m0010
+back-fills neither), so a revision without a fingerprint is provably a cleared column and never a
+pre-m0010 row. See §3.1's table for the resulting order.
+
 The residual case — an operator legitimately created a policy at an id that a *later* release
 turns into a role key — is now converged over rather than preserved. That is correct: a role
 template *must* exist at that `policy_id` or every grant of that role silently contributes
@@ -315,10 +326,29 @@ deciding to deploy it (HPA scale-up, crashloop restart, a held canary).
 
 **Mechanism.** `authz::roles::STARTER_POLICY_REVISION: u32`, persisted per row as
 `policy.starter_revision INTEGER NULL`. Reconcile writes only when
-`CODE_REVISION >= stored_revision`; a lower code revision yields `StaleBinary` — INFO, **no
-write, no audit** (an older binary has no authority over a row a newer release wrote, and
-deferring entirely is what keeps convergence monotonic). `NULL` reads as `0`, so every
-pre-m0010 row proceeds to normal classification.
+`CODE_REVISION >= stored_revision`; a lower code revision yields `StaleBinary` — **no write, no
+audit** (an older binary has no authority over a row a newer release wrote, and deferring entirely
+is what keeps convergence monotonic). `NULL` reads as `0`, so every pre-m0010 row proceeds to
+normal classification.
+
+**`StaleBinary` carries `provenance_ok`.** (Added after the final whole-branch review.) Because
+the revision check runs first and writes nothing, one
+`UPDATE policy SET source = '<weakened>', starter_revision = 2147483647` leaves the row diverged
+on every future boot — structurally the same bypass D6 closed, and recovery would need a
+`STARTER_POLICY_REVISION` past 2^31. The no-write behaviour cannot change without breaking this
+decision, so the outcome instead reports whether the stored row's provenance holds up
+(`system = true` plus a fingerprint over its own content). A genuine newer release always stamps
+both, so `provenance_ok == false` is unambiguous tampering with no false positives:
+
+- `provenance_ok: true` → INFO, metric `stale_binary` — the routine mixed-version case.
+- `provenance_ok: false` → **WARN** naming the row as diverged and stating that this binary will
+  not repair it, and metric **`externally_modified`**, so the planned alert (§7) fires rather than
+  the label operators are told to ignore during a deploy.
+
+**No audit row in either case.** Unlike a converged `ExternallyModified` — a one-off, because the
+next boot finds the row repaired — this recurs on every boot of every replica until a human acts,
+and `audit_log` is append-only. That is exactly the reasoning D13 applies to orphans. The WARN and
+the metric are the whole signal, and the runbook carries the remediation.
 
 `CARGO_PKG_VERSION` cannot serve here: `paigasus-iam`'s version is `0.0.0`
 (`services/paigasus-iam/Cargo.toml:3`). So the constant is hand-maintained — and therefore
@@ -342,6 +372,16 @@ The rule is split by whether the row exists:
   initial snapshot "always compiles at least that starter set, never an empty one"
   (`adapters/http/mod.rs:290-294`). Continuing past a failed *seed* would boot a replica with an
   empty or partial policy set, denying everything. This preserves today's behaviour exactly.
+
+  **This applies symmetrically to the role half (D7).** (Clarified after the final whole-branch
+  review, which found the implementation had made every role error survivable — a regression from
+  `main`, where `seed_role_row`'s error propagated.) `role_grant.role_key` carries an FK to
+  `role.key` (`fk_role_grant_role`, `m0004_create_authz.rs:134`), so a replica that boots past a
+  failed `platform_admin` INSERT on a fresh database does not fail at boot — it fails the first
+  bootstrap-admin grant with a raw foreign-key violation, at authentication time. So
+  `SystemRoleReconciler` gains `existing_role_keys`, the twin of `existing_policy_ids`, and
+  `reconcile_roles` decides fatality against a pre-loop snapshot exactly as `reconcile_policies`
+  does. Role *convergence* failures remain survivable: those columns are introspectable-only.
 - **Convergence failures are logged at ERROR, counted (`outcome = "failed"`), and skipped.** The
   stored row governed decisions perfectly well before this change; keeping it for one more boot
   is strictly better than not booting.
@@ -391,7 +431,7 @@ pub struct StoredPolicyRow<'a> {
 pub enum StarterPolicyOutcome {
     Absent,
     Unchanged,
-    StaleBinary,
+    StaleBinary { provenance_ok: bool },
     Adopted { content_changed: bool, previous_content: Option<String> },
     Reconciled,
     ExternallyModified { content_changed: bool, previous_content: String },
@@ -416,15 +456,26 @@ Classification, in order:
 | # | condition | outcome | writes | log | audit | metric label |
 |---|---|---|---|---|---|---|
 | 1 | no row | `Absent` | insert | INFO | no | `seeded` |
-| 2 | `stored.revision > code_revision` | `StaleBinary` | nothing | INFO | no | `stale_binary` |
-| 3 | `fingerprint IS NULL` | `Adopted { content_changed }` | content + stamp | DEBUG / INFO | only if changed | `adopted` |
-| 4 | `!system` **or** fingerprint mismatch | `ExternallyModified { .. }` | content + stamp (+ `system = true`) | **WARN** | **yes** | `externally_modified` |
-| 5 | content matches code | `Unchanged` | nothing | — | no | `unchanged` |
-| 6 | otherwise | `Reconciled` | content + stamp | INFO | no | `reconciled` |
+| 2 | `stored.revision > code_revision` | `StaleBinary { provenance_ok }` | nothing | INFO / **WARN** | no | `stale_binary` / `externally_modified` |
+| 3 | `!system` | `ExternallyModified { .. }` | content + stamp (+ `system = true`) | **WARN** | **yes** | `externally_modified` |
+| 4 | `fingerprint IS NULL` **and** `revision IS NULL` | `Adopted { content_changed }` | content + stamp | DEBUG / INFO | only if changed | `adopted` |
+| 5 | `fingerprint IS NULL` **but** `revision IS NOT NULL` | `ExternallyModified { .. }` | content + stamp | **WARN** | **yes** | `externally_modified` |
+| 6 | fingerprint mismatch | `ExternallyModified { .. }` | content + stamp | **WARN** | **yes** | `externally_modified` |
+| 7 | content matches code | `Unchanged` | nothing | — | no | `unchanged` |
+| 8 | otherwise | `Reconciled` | content + stamp | INFO | no | `reconciled` |
 
-Row 3 logs DEBUG when `content_changed == false` (a pure stamp) and INFO when `true`, and
-audits only in the latter case (D3). Row 2 precedes everything else because an older binary
-defers unconditionally (D11). Row 4's `!system` disjunct is D6.
+**The order is the security boundary, not presentation** — rows 3–5 are each a one-`UPDATE` way to
+downgrade the tamper signal, and the naive order (NULL-fingerprint before `!system`, no revision
+discriminator) makes every one of them cheaper than the edit it hides. This table's first draft
+had exactly that defect and shipped with it; the final whole-branch review caught it.
+
+Row 2 precedes everything else because an older binary defers unconditionally (D11), and its split
+log level / metric label is that decision's `provenance_ok` — the deferral itself is unconditional
+either way, and neither variant audits. Row 3 is D6, and it must precede rows 4–6 or a cleared
+`system` flag plus a cleared fingerprint lands in row 4. Row 5 is decidable because this service
+writes both provenance columns together (D6's addendum), so it is not a heuristic. Row 4 logs
+DEBUG when `content_changed == false` (a pure stamp) and INFO when `true`, and audits only in the
+latter case (D3).
 
 `content_changed` compares the code-defined `(kind, source, description)` against the stored
 triple — **all three**, not `source` alone. The earlier draft converged only `source`, which left
@@ -449,7 +500,10 @@ pub trait SystemPolicyReconciler: Send + Sync {
 #[async_trait]
 pub trait SystemRoleReconciler: Send + Sync {
     async fn reconcile_role(&self, role: &Role) -> Result<RoleOutcome, AuthzError>;
+    /// Sorted ascending by key, like its policy twin — boot logs one line per orphan.
     async fn orphaned_system_role_keys(&self, known: &[&str]) -> Result<Vec<String>, AuthzError>;
+    /// The twin of `existing_policy_ids`: boot's fatal-vs-survivable snapshot (D12).
+    async fn existing_role_keys(&self) -> Result<Vec<String>, AuthzError>;
 }
 ```
 
@@ -672,6 +726,16 @@ than warned about on the first boot after upgrade. It is audited, so it is recov
 
 **Residual risk 2 — the fingerprint is not tamper-proof** (D2). An adversary with SQL write
 access recomputes it and the edit reads as a routine code change.
+
+**Residual risk 2b — a forged high `starter_revision` is detected but cannot be auto-repaired**
+(D11). Because deferring to a newer revision is unconditional and writes nothing, a row stamped
+with a revision no running binary can beat stays diverged on every boot. It is no longer *silent*:
+the outcome carries `provenance_ok: false`, which raises a WARN and the `externally_modified`
+metric. But no replica will converge it — that requires either repairing the row directly or
+shipping a build with a higher `STARTER_POLICY_REVISION`, both documented in the runbook. This is
+the one place where D11's monotonicity guarantee and D1's convergence guarantee genuinely conflict,
+and monotonicity wins: an older binary that "repaired" such a row could equally be reverting a
+real newer release across the whole fleet.
 
 **Residual risk 3 — the audit row is not atomic with the convergence** (D9).
 

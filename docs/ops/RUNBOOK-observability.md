@@ -1450,10 +1450,10 @@ Each policy emits `iam_starter_policy_reconciles_total{outcome=...}`:
 | `seeded` | The row was absent and has been created. | None (expected on a fresh database). |
 | `reconciled` | A release changed the policy; the row was converged. | None — this is the routine case that used to warn forever. |
 | `adopted` | The row predates the fingerprint column, so its provenance was unknowable. | None, but see below if it also changed content. |
-| `stale_binary` | The stored row was written by a NEWER release; this replica left it alone. | Expected briefly during a deploy. Persisting means an old replica is still running. |
-| `externally_modified` | Something other than this service wrote the row. Converged and audited. | **Investigate.** |
+| `stale_binary` | The stored row was written by a NEWER release **and its provenance checks out**; this replica left it alone. | Expected briefly during a deploy. Persisting means an old replica is still running — or that the fleet was permanently rolled back, in which case it persists forever until a build with a higher `STARTER_POLICY_REVISION` ships. See below. |
+| `externally_modified` | Something other than this service wrote the row. Converged and audited — **except** when the row also claims a newer revision, which is warned about but *not* repaired (see below). | **Investigate.** |
 | `orphaned` | A `system = true` row whose id is no longer code-defined. | Investigate; it still compiles and still links grants, and `DeletePolicy` refuses to remove it. |
-| `failed` | Converging one row errored. A row that already existed is kept for this boot; an absent row that couldn't be seeded is fatal and the replica refuses to boot. | Check the ERROR log line — it names which case this was. Transient at low volume in the survivable case. |
+| `failed` | Converging one row errored. A row that already existed is kept for this boot; an absent row that couldn't be seeded is fatal. So is **any** failure when the pre-loop id snapshot was itself unreadable, because no row can then be proven to exist. | Check the ERROR log line — it names which of the three cases this was. Transient at low volume in the survivable case. |
 
 **`externally_modified` — the one that matters.** It logs
 
@@ -1467,7 +1467,11 @@ evidence. Retrieve it with `action = "PutPolicy"` and `resource_prn` = the Root 
 `detail.previous_content.source` and `detail.previous_content.description` hold the overwritten
 Cedar source and description — each capped independently at 8 KiB, flagged by its own
 `detail.previous_content.truncated` (source) / `detail.previous_content.description_truncated`
-(description).
+(description) — and `detail.previous_content.kind` holds the overwritten `static`/`template`
+value, which matters because a template stored as `static` fails to compile and takes boot down.
+
+The one `externally_modified` case that writes **no** audit row is the forged-revision case below,
+where nothing was overwritten because nothing was written at all.
 
 **Always pass an explicit `from`.** `PgAuditLog::query` applies a default lookback whenever both
 `from` and `to` are absent (`audit.query_default_window_days`, default 90), so an unfiltered
@@ -1484,9 +1488,42 @@ one, and a forked role *template* is never linked by any grant (a grant resolves
 `role_key`). Starter policies can be tightened out-of-band and cannot be loosened. If you need a
 different starter policy, change the code.
 
+**A newer revision this binary will not repair.** Reconcile defers unconditionally to a row whose
+`starter_revision` exceeds the running binary's `STARTER_POLICY_REVISION` — there is one `policy`
+table for the whole fleet, and an older replica rewriting a newer release's row is exactly what
+the revision guard exists to prevent. Two situations produce it, and they are told apart by the
+row's provenance:
+
+- **Provenance intact** (`system = true` and a fingerprint matching the row's own content, which
+  is what a genuine newer release always writes) → `outcome = "stale_binary"`, logged at INFO. A
+  mixed-version deploy window. If it persists, an old replica is still running; if it persists
+  *after* a deliberate rollback, that is also expected — vN leaves vN+1's policy set in place
+  rather than self-healing backwards into a looser one, and the only way forward is a build whose
+  `STARTER_POLICY_REVISION` exceeds the stored value.
+- **Provenance broken** → `outcome = "externally_modified"`, logged at **WARN**, message
+  `a starter policy row claims a revision newer than this binary's but its provenance does not
+  check out`. Nothing but a hand edit produces this: a real newer release stamps both columns
+  together. The row is **diverged and will not be repaired by any running replica** until a build
+  with a higher revision ships, so treat it as an active weakening of the authorization boundary.
+  **Remediation:** compare the stored `source` against `authz::roles::starter_policies()` for that
+  id, then either repair the row directly (restoring `system = true`, setting `starter_revision`
+  at or below the running binary's value, and clearing `content_fingerprint` so the next boot
+  converges and reports it) or ship a build with a higher `STARTER_POLICY_REVISION`.
+  There is deliberately **no audit row** for this case: unlike a converged edit, which is a
+  one-off because the next boot finds the row repaired, this recurs on every boot of every replica
+  until a human acts, and `audit_log` is append-only — the same reasoning that keeps orphans
+  unaudited. The WARN and this metric are the whole signal.
+
 **`adopted` on the first boot after upgrading** is expected: the fingerprint column starts NULL
 for every pre-existing row and is stamped on that boot. If the row's content had also drifted, an
 audit entry with `reason = "adopted_unfingerprinted"` records what was replaced.
+
+**`adopted` seen after that first post-upgrade boot is not routine.** Only a genuine pre-m0010 row
+adopts, and such a row has *both* `content_fingerprint` and `starter_revision` NULL — this service
+writes the two together and m0010 back-fills neither. A row that reappears as `adopted` therefore
+means somebody cleared both columns by hand. (Clearing only the fingerprint, leaving the revision
+stamped, is detected: it classifies `externally_modified` and is converged and audited like any
+other edit.)
 
 **A pure provenance stamp still bumps `updated_at`** without changing any content and without
 bumping `policy_gen`, so an `updated_at` change visible through `ListPolicies` is not by itself
