@@ -1435,9 +1435,12 @@ reproducible** once gone.
 
 ### Starter-policy reconciliation at boot
 
-**What happens.** On every boot, `bootstrap::reconcile_policies` converges each starter Cedar
-policy row to the code-defined content from `authz::roles::starter_policies()`, and
-`reconcile_roles` does the same for the `role` table. These rows are **code-owned**: the
+**What happens.** On every boot, `bootstrap::reconcile_policies` reconciles each starter Cedar
+policy row against the code-defined content from `authz::roles::starter_policies()`, and
+`reconcile_roles` does the same for the `role` table. Most rows converge, but two documented cases
+deliberately do not: a row claiming a `starter_revision` newer than the running binary's is left
+untouched (`stale_binary`, or the forged-revision case below), and a row whose convergence errors
+is kept for that boot (`failed`). These rows are **code-owned**: the
 `PutPolicy` API refuses both a persisted `system = true` row and any policy id in the starter
 namespace (`authz::roles::STARTER_POLICY_IDS`), so the database is not a supported place to
 customize them.
@@ -1451,7 +1454,7 @@ already unchanged is not counted at all, and (unlike a policy) neither is an orp
 | `unchanged` | Content matches and provenance checks out. | None. |
 | `seeded` | The row was absent and has been created. | None (expected on a fresh database). |
 | `reconciled` | A release changed the policy; the row was converged. | None — this is the routine case that used to warn forever. |
-| `adopted` | The row predates the fingerprint column, so its provenance was unknowable. | None, but see below if it also changed content. |
+| `adopted` | Both provenance columns were NULL, so the row's provenance was unknowable. That is expected for a row seeded before m0010 — but it is not proof of one; see below. | None on the first boot after upgrading. Afterwards, investigate. Also see below if it changed content. |
 | `stale_binary` | The stored row was written by a NEWER release **and its provenance checks out**; this replica left it alone. | Expected briefly during a deploy. Persisting means an old replica is still running — or that the fleet was permanently rolled back, in which case it persists forever until a build with a higher `STARTER_POLICY_REVISION` ships. See below. |
 | `externally_modified` | Something other than this service wrote the row. Converged and audited — **except** when the row also claims a newer revision, which is warned about but *not* repaired (see below). | **Investigate.** |
 | `orphaned` | A `system = true` **policy** row whose id is no longer code-defined. An orphaned system **role** row is WARN-logged (`reconcile_roles`) but does NOT increment this counter — a deliberate asymmetry with the policy half. | Investigate; it still compiles and still links grants, and `DeletePolicy` refuses to remove it. |
@@ -1484,7 +1487,10 @@ hint*, not tamper evidence: the only actor who can modify a `system = true` row 
 direct SQL access, and that same access recomputes the fingerprint trivially, at which point the
 edit reads as a routine code change. Do not treat a quiet log as proof nothing was touched.
 
-**A hand-patched starter policy is reverted on the next replica boot.** There is effectively no
+**A hand-patched starter policy is normally reverted on the next replica boot** — with one
+exception: a patch that also raises `starter_revision` above the running binary's is *not*
+repaired by any running replica, and needs the remediation in the next section. Otherwise there is
+effectively no
 escape hatch: a forked non-system policy can add a `forbid` but can never remove a code-defined
 one, and a forked role *template* is never linked by any grant (a grant resolves its template by
 `role_key`). Starter policies can be tightened out-of-band and cannot be loosened. If you need a
@@ -1506,7 +1512,9 @@ row's provenance:
   `a starter policy row claims a revision newer than this binary's but its provenance does not
   check out`. Nothing but a hand edit produces this: a real newer release stamps both columns
   together. The row is **diverged and will not be repaired by any running replica** until a build
-  with a higher revision ships, so treat it as an active weakening of the authorization boundary.
+  with a higher revision ships. Treat it as an unresolved divergence of the authorization boundary
+  — the row state alone does not say whether the stored policy is weaker, stricter, or merely
+  differently worded, which is what the first remediation step below establishes.
   **Remediation:** compare the stored `source` against `authz::roles::starter_policies()` for that
   id, then either repair the row directly (restoring `system = true`, setting `starter_revision`
   at or below the running binary's value, and clearing `content_fingerprint` so the next boot

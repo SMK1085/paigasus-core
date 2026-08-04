@@ -267,8 +267,13 @@ would make reconcile's rows the only `PutPolicy` rows not reachable by
 
 `detail.source = "starter_policy_reconcile"` distinguishes this row from an operator-issued
 `PutPolicy`, exactly as `detail.source = "bootstrap_admins"` does for the bootstrap grant.
-`previous_content` is **truncated to 8 KiB** with a `previous_content_truncated: true` marker —
-it is attacker-influenced text being copied into an append-only table.
+`previous_content` carries the overwritten `kind`, `source`, and `description`. `source` and
+`description` are each **truncated to 8 KiB independently**, flagged by
+`detail.previous_content.truncated` and `detail.previous_content.description_truncated`
+respectively — this is attacker-influenced text being copied into an append-only table. The `kind`
+is recorded rather than dropped because a wrong `kind` is not cosmetic: a `template` persisted as
+`static` fails `PolicySnapshot::new` and therefore boot, so it is exactly the field an
+investigator needs to see was destroyed.
 
 `AuditLog::record_out_of_band` is the method used (`reconcile_policies` holds no `Transaction`);
 see D9.
