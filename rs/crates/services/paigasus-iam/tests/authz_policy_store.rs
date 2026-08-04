@@ -554,6 +554,44 @@ async fn put_in_on_an_existing_system_policy_is_rejected_before_any_write() {
     tx.commit().await.expect("outer txn must still be usable after the rejected system-row edit");
 }
 
+/// SMA-477 D6: the starter ids are reserved even before they are seeded. Without this an
+/// operator could occupy one, and a row that is not `system = true` would then be exempt from
+/// boot-time convergence forever.
+#[tokio::test]
+async fn put_rejects_a_reserved_starter_policy_id() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let now = Utc::now();
+
+    let doc = PolicyDocument {
+        policy_id: "org_admin".to_string(),
+        kind: PolicyKind::Static,
+        source: "permit(principal, action, resource);".to_string(),
+        description: String::new(),
+        system: false,
+        created_at: now,
+        updated_at: now,
+    };
+
+    // Rejected on a FRESH database, i.e. before the id is seeded — the check is on the id, not
+    // on any stored row's `system` flag.
+    let err = store.put(&doc).await.expect_err("a reserved starter id must be rejected");
+    assert!(matches!(&err, AuthzError::SystemImmutable(id) if id == "org_admin"), "got {err:?}");
+
+    let forbid = PolicyDocument {
+        policy_id: "forbid-archived-writes".to_string(),
+        ..doc.clone()
+    };
+    assert!(matches!(store.put(&forbid).await, Err(AuthzError::SystemImmutable(_))));
+
+    // An operator's own id is unaffected.
+    let ok = PolicyDocument {
+        policy_id: "operator-policy".to_string(),
+        ..doc
+    };
+    store.put(&ok).await.expect("a non-reserved id must still be accepted");
+}
+
 /// SMA-446 Task B5 — the UoW reference pattern's atomicity proof at the store level (mirrors
 /// `tests/authz_role_grants.rs::grant_in_enqueue_and_record_commit_atomically_sharing_correlation_id`):
 /// `PgPolicyStore::put_in` + `PgOutbox::enqueue` + `PgAuditLog::record`, driven through the

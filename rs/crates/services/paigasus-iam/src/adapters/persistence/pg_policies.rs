@@ -55,6 +55,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
 use paigasus_iam_core::authz::reconcile::{StarterPolicyOutcome, StoredPolicyRow, classify_starter_policy, content_fingerprint};
+use paigasus_iam_core::authz::roles as authz_roles;
 use paigasus_iam_core::authz::schema::validate_policy;
 use paigasus_iam_core::{AuthzError, PolicyDocument, PolicyStore, PutOutcome, RepositoryError, SystemPolicyReconciler, Transaction};
 use sea_orm::{
@@ -271,6 +272,15 @@ impl PolicyStore for PgPolicyStore {
 
     async fn put_in(&self, tx: &dyn Transaction, doc: &PolicyDocument) -> Result<PutOutcome, AuthzError> {
         validate_policy(&doc.source)?;
+
+        // SMA-477 D6: the starter policy ids are code-owned, reserved whether or not they are
+        // seeded yet. Rejecting on the ID (not on a stored row's `system` flag) is what closes
+        // the `UPDATE policy SET system = false` bypass — an operator can never create a
+        // non-system row at one of these ids for a later release to trip over. Reuses
+        // `SystemImmutable` so the existing `TenancyError` and API mappings are unchanged.
+        if authz_roles::is_starter_policy_id(&doc.policy_id) {
+            return Err(AuthzError::SystemImmutable(doc.policy_id.clone()));
+        }
 
         let txn = recover_txn(tx).map_err(map_txn_err)?;
 
