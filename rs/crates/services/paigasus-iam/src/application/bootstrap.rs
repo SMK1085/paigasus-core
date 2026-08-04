@@ -152,10 +152,27 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
             StarterPolicyOutcome::Reconciled => {
                 tracing::info!(policy_id = %doc.policy_id, "converged starter policy to the code-defined content")
             }
-            StarterPolicyOutcome::StaleBinary => tracing::info!(
+            StarterPolicyOutcome::StaleBinary { provenance_ok: true } => tracing::info!(
                 policy_id = %doc.policy_id,
                 revision = STARTER_POLICY_REVISION,
                 "starter policy was written by a newer release; leaving it in place"
+            ),
+            // A revision this binary cannot beat, over a row that does NOT look like a newer
+            // release wrote it — a forged `starter_revision` is one `UPDATE`, and because the
+            // revision check runs first and writes nothing, it would otherwise exempt the row
+            // from convergence permanently and at INFO. Deferring is still the only safe action
+            // (D11: an older binary rewriting a newer release's row is what monotonicity forbids),
+            // so this WARNs about a divergence it explicitly will NOT repair.
+            //
+            // NO audit row, deliberately. Unlike a converged `ExternallyModified` — a one-off,
+            // because the next boot finds the row repaired — this recurs on EVERY boot of EVERY
+            // replica until a human acts, and `audit_log` is append-only. That is exactly the
+            // reasoning D13 applies to orphans; the WARN and the `externally_modified` metric
+            // carry the signal instead.
+            StarterPolicyOutcome::StaleBinary { provenance_ok: false } => tracing::warn!(
+                policy_id = %doc.policy_id,
+                revision = STARTER_POLICY_REVISION,
+                "a starter policy row claims a revision newer than this binary's but its provenance does not check out: the row was written outside this service and is DIVERGED from the code-defined content. This binary will NOT repair it — rewriting a row a newer release may have written is what the revision guard exists to prevent. Deploy a build whose STARTER_POLICY_REVISION exceeds the stored starter_revision, or repair the row directly"
             ),
             StarterPolicyOutcome::Adopted { content_changed, previous_content } => {
                 if *content_changed {
@@ -492,13 +509,28 @@ mod tests {
             StarterPolicyOutcome::Unchanged,
             StarterPolicyOutcome::Reconciled,
             StarterPolicyOutcome::Absent,
-            StarterPolicyOutcome::StaleBinary,
+            StarterPolicyOutcome::StaleBinary { provenance_ok: true },
+            // A deferral over a DIVERGED row is warned about and counted as
+            // `externally_modified`, but deliberately not audited: it recurs on every boot of
+            // every replica until a human acts, and `audit_log` is append-only — the same
+            // reasoning D13 applies to orphans. An audit row here would grow without bound.
+            StarterPolicyOutcome::StaleBinary { provenance_ok: false },
         ] {
             let entries = FakeAuditLog::default();
             let d = deps(ScriptedPolicies::with(outcome.clone()), Arc::new(entries.clone()));
             reconcile_policies(&d).await.unwrap();
             assert!(entries.0.lock().unwrap().is_empty(), "{outcome:?} must not audit");
         }
+    }
+
+    /// The metric label is the whole remediation path for a forged revision — the boot WARN is
+    /// one line in a log nobody is watching, and there is no audit row by design. Routing it to
+    /// `stale_binary` would file it under the outcome the runbook tells operators to expect
+    /// during a deploy.
+    #[test]
+    fn a_deferral_with_broken_provenance_is_counted_as_an_external_modification() {
+        assert_eq!(StarterPolicyOutcome::StaleBinary { provenance_ok: false }.metric_label(), "externally_modified");
+        assert_eq!(StarterPolicyOutcome::StaleBinary { provenance_ok: true }.metric_label(), "stale_binary");
     }
 
     #[tokio::test]

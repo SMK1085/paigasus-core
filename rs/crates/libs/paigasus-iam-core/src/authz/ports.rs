@@ -105,8 +105,10 @@ pub trait AuditSink: Send + Sync {
 pub trait SystemPolicyReconciler: Send + Sync {
     /// Converge the persisted row for `doc.policy_id` to `doc`, stamping `revision`, and report
     /// what happened. Writes nothing when the outcome is
-    /// [`StarterPolicyOutcome::Unchanged`] or [`StarterPolicyOutcome::StaleBinary`]. Bumps
-    /// `policy_gen` best-effort, and only when policy CONTENT changed.
+    /// [`StarterPolicyOutcome::Unchanged`] or [`StarterPolicyOutcome::StaleBinary`] — including
+    /// a `StaleBinary` whose `provenance_ok` is `false`: this binary reports the divergence but
+    /// must not repair it, or convergence stops being monotonic. Bumps `policy_gen`
+    /// best-effort, and only when policy CONTENT changed.
     async fn reconcile_system(&self, doc: &PolicyDocument, revision: u32) -> Result<StarterPolicyOutcome, AuthzError>;
     /// Ids of persisted `system = true` rows NOT in `known` — retired starter policies that
     /// nothing can now delete ([`PolicyStore::delete`] refuses a system row). Reported, never

@@ -394,6 +394,43 @@ async fn reconcile_system_restores_a_cleared_system_flag() {
 #[tokio::test]
 async fn reconcile_system_defers_to_a_newer_revision() {
     use paigasus_iam_core::SystemPolicyReconciler;
+    use paigasus_iam_core::authz::reconcile::{StarterPolicyOutcome, content_fingerprint};
+    use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = starter_policies().into_iter().next().unwrap();
+    store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+
+    // What a genuinely newer release leaves behind: new content, a higher revision, AND a
+    // fingerprint over that new content — it wrote all three in one statement, as we do.
+    let newer = "permit(principal, action, resource);";
+    let newer_fp = content_fingerprint(doc.kind, newer, &doc.description);
+    tamper_policy(&db, &doc.policy_id, newer, Some(&newer_fp)).await;
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        format!(r#"UPDATE "policy" SET starter_revision = {} WHERE policy_id = '{}'"#, STARTER_POLICY_REVISION + 5, doc.policy_id),
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(),
+        StarterPolicyOutcome::StaleBinary { provenance_ok: true },
+        "an intact newer-release row is the routine mixed-version case and must stay quiet"
+    );
+    assert_eq!(stored_source(&db, &doc.policy_id).await, newer, "an older binary must not rewrite a newer release's row");
+}
+
+/// The forged-revision bypass, end to end. One `UPDATE` setting `source` to something weakened
+/// and `starter_revision` past anything this binary can carry leaves the row diverged on every
+/// future boot — the revision check runs first and writes nothing. The row still must NOT be
+/// rewritten (that is what monotonic convergence forbids), but the outcome has to carry
+/// `provenance_ok: false`, which is what makes boot WARN and count `externally_modified` instead
+/// of filing it under the deploy-artifact label operators are told to ignore.
+#[tokio::test]
+async fn reconcile_system_flags_a_forged_revision_it_cannot_repair() {
+    use paigasus_iam_core::SystemPolicyReconciler;
     use paigasus_iam_core::authz::reconcile::StarterPolicyOutcome;
     use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
 
@@ -402,20 +439,99 @@ async fn reconcile_system_defers_to_a_newer_revision() {
     let doc = starter_policies().into_iter().next().unwrap();
     store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
 
-    let newer = "permit(principal, action, resource);";
+    // The literal statement from the review finding: content weakened, revision maxed, and the
+    // fingerprint left exactly as the seed wrote it — the forger has no reason to recompute it,
+    // and recomputing it would not help them here anyway.
+    let weakened = "permit(principal, action, resource);";
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        format!(r#"UPDATE "policy" SET source = '{weakened}', starter_revision = 2147483647 WHERE policy_id = '{}'"#, doc.policy_id),
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(),
+        StarterPolicyOutcome::StaleBinary { provenance_ok: false },
+        "a maxed revision over content the stored fingerprint does not describe is tampering, not a newer release"
+    );
+    assert_eq!(
+        stored_source(&db, &doc.policy_id).await,
+        weakened,
+        "and it is still NOT repaired — deferring unconditionally is what keeps convergence monotonic"
+    );
+}
+
+/// `UPDATE policy SET source = <weakened>, content_fingerprint = NULL` classified as `Adopted`
+/// (INFO, metric `adopted`, described in the runbook as routine) because the NULL-fingerprint
+/// branch used to precede the mismatch branch. It is decidable: this service writes the
+/// fingerprint and the revision together, so a stamped revision with no fingerprint is a cleared
+/// column, never a pre-m0010 row.
+#[tokio::test]
+async fn reconcile_system_treats_a_cleared_fingerprint_as_an_edit_not_an_adoption() {
+    use paigasus_iam_core::SystemPolicyReconciler;
+    use paigasus_iam_core::authz::reconcile::StarterPolicyOutcome;
+    use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = starter_policies().into_iter().next().unwrap();
+    store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+
+    // `starter_revision` is deliberately LEFT stamped — that is the whole discriminator. The
+    // pre-m0010 case (both columns NULL) is covered by `reconcile_system_adopts_a_pre_m0010_row`.
+    let weakened = "permit(principal, action, resource);";
+    tamper_policy(&db, &doc.policy_id, weakened, None).await;
+
+    let out = store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+    let StarterPolicyOutcome::ExternallyModified {
+        content_changed: true,
+        previous_content,
+    } = out
+    else {
+        panic!("expected ExternallyModified, got {out:?}")
+    };
+    assert_eq!(previous_content.source, weakened, "the overwritten source must reach the audit row");
+    assert_eq!(stored_source(&db, &doc.policy_id).await, doc.source, "and the row is converged back");
+}
+
+/// The cheaper half of the same bypass: `system = false` AND the fingerprint cleared in one
+/// statement. Under the shipped ordering this landed in the adoption branch with untouched
+/// content — DEBUG, no audit, no WARN. `!system` has to be checked before the fingerprint state.
+#[tokio::test]
+async fn reconcile_system_reports_a_cleared_system_flag_even_with_no_fingerprint() {
+    use paigasus_iam::adapters::persistence::entities::policy;
+    use paigasus_iam_core::SystemPolicyReconciler;
+    use paigasus_iam_core::authz::reconcile::StarterPolicyOutcome;
+    use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = starter_policies().into_iter().next().unwrap();
+    store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+
+    // CONTENT IS LEFT ALONE on purpose: with content also rewritten the row would classify
+    // `ExternallyModified` on the mismatch alone and prove nothing about the branch order.
     db.execute(Statement::from_string(
         DbBackend::Postgres,
         format!(
-            r#"UPDATE "policy" SET source = '{newer}', starter_revision = {} WHERE policy_id = '{}'"#,
-            STARTER_POLICY_REVISION + 5,
+            r#"UPDATE "policy" SET system = false, content_fingerprint = NULL, starter_revision = NULL WHERE policy_id = '{}'"#,
             doc.policy_id
         ),
     ))
     .await
     .unwrap();
 
-    assert_eq!(store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(), StarterPolicyOutcome::StaleBinary);
-    assert_eq!(stored_source(&db, &doc.policy_id).await, newer, "an older binary must not rewrite a newer release's row");
+    assert!(
+        matches!(
+            store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(),
+            StarterPolicyOutcome::ExternallyModified { content_changed: false, .. }
+        ),
+        "a cleared system flag must be reported however the provenance columns are left"
+    );
+    let row = policy::Entity::find_by_id(doc.policy_id.clone()).one(&db).await.unwrap().unwrap();
+    assert!(row.system, "system must be restored");
+    assert!(row.content_fingerprint.is_some(), "and the provenance columns restamped");
 }
 
 #[tokio::test]

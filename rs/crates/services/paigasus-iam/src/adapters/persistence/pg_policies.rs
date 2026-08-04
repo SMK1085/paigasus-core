@@ -406,7 +406,7 @@ impl SystemPolicyReconciler for PgPolicyStore {
         let now = Utc::now();
 
         let outcome = match (&outcome, existing) {
-            (StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary, _) => outcome,
+            (StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary { .. }, _) => outcome,
             (_, Some(row)) => {
                 converged_model(doc, row.created_at, now, revision).update(&txn).await.map_err(map_db_err)?;
                 outcome
@@ -433,7 +433,7 @@ impl SystemPolicyReconciler for PgPolicyStore {
                         // Re-classify against whoever won. This cannot recurse into the insert
                         // branch — the row provably exists now — so it terminates.
                         let re = classify_starter_policy(Some(stored_row(&winner)), doc, revision);
-                        if !matches!(re, StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary) {
+                        if !matches!(re, StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary { .. }) {
                             converged_model(doc, winner.created_at, now, revision).update(&txn).await.map_err(map_db_err)?;
                         }
                         re

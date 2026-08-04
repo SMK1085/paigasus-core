@@ -17,6 +17,25 @@
 //! **Provenance is checked before content** so a row hand-edited to exactly the code-defined
 //! value still reports the edit once, carrying `content_changed: false` so the message stays
 //! honest.
+//!
+//! **The classification ORDER is the security boundary**, not just presentation. It is, in full:
+//!
+//! 1. no row → `Absent`
+//! 2. `revision > code_revision` → `StaleBinary { provenance_ok }` (defer, but say whether the
+//!    row we are deferring to actually looks like a newer release's work)
+//! 3. `!system` → `ExternallyModified`
+//! 4. no fingerprint AND no revision → `Adopted` (a genuine pre-m0010 row)
+//! 5. no fingerprint BUT a revision → `ExternallyModified` (the column was CLEARED)
+//! 6. fingerprint mismatch → `ExternallyModified`
+//! 7. content matches code → `Unchanged`
+//! 8. otherwise → `Reconciled`
+//!
+//! Steps 3–5 exist because each is a one-`UPDATE` way to downgrade the tamper signal, and the
+//! naive order (NULL-fingerprint first, `!system` last) makes every one of them *cheaper* than
+//! the edit they hide. `content_fingerprint` and `starter_revision` are only ever written
+//! TOGETHER (`converged_model` sets both, `doc_to_model` sets neither, m0010 back-fills
+//! neither), which is exactly what makes step 5 decidable: a revision without a fingerprint
+//! cannot be a pre-m0010 row.
 
 use super::model::{NodeKind, PolicyDocument, PolicyKind, Role};
 
@@ -50,11 +69,19 @@ pub enum StarterPolicyOutcome {
     Absent,
     /// Content matches and the fingerprint proves we wrote it. Nothing to do.
     Unchanged,
-    /// The stored row was written by a NEWER release than this binary. Defer entirely
-    /// (SMA-477 D11): there is one `policy` table for the whole fleet, so an older replica
-    /// booting mid-deploy would otherwise push its own policy set onto every running newer
-    /// replica via the `policy_gen` bump.
-    StaleBinary,
+    /// The stored row claims a revision NEWER than this binary's. Defer entirely (SMA-477 D11):
+    /// there is one `policy` table for the whole fleet, so an older replica booting mid-deploy
+    /// would otherwise push its own policy set onto every running newer replica via the
+    /// `policy_gen` bump.
+    ///
+    /// `provenance_ok` reports whether the row actually looks like a newer release's work
+    /// (`system = true` plus a fingerprint over its own content). A genuine newer release always
+    /// stamps both, so `provenance_ok == false` is unambiguous: somebody forged a high revision,
+    /// and since the revision check runs FIRST, that one `UPDATE` would otherwise exempt the row
+    /// from convergence permanently and silently. Deferring is still the only safe action — this
+    /// binary cannot know whether a newer release also wrote the content — but the caller warns
+    /// and counts it as an external modification rather than a routine deploy artifact.
+    StaleBinary { provenance_ok: bool },
     /// The row predates the fingerprint column, so its provenance is unknowable. Converge and
     /// stamp. Audited only when the content actually changed — that is the one boot on which a
     /// pre-existing hand edit is destroyed, and it must not vanish silently.
@@ -74,7 +101,11 @@ impl StarterPolicyOutcome {
         match self {
             StarterPolicyOutcome::Absent => "seeded",
             StarterPolicyOutcome::Unchanged => "unchanged",
-            StarterPolicyOutcome::StaleBinary => "stale_binary",
+            // A deferral whose provenance does not check out is NOT a routine deploy artifact —
+            // it is a diverged row this binary refuses to repair, so it carries the label the
+            // tamper alert watches rather than the one operators are told to expect mid-deploy.
+            StarterPolicyOutcome::StaleBinary { provenance_ok: true } => "stale_binary",
+            StarterPolicyOutcome::StaleBinary { provenance_ok: false } => "externally_modified",
             StarterPolicyOutcome::Adopted { .. } => "adopted",
             StarterPolicyOutcome::Reconciled => "reconciled",
             StarterPolicyOutcome::ExternallyModified { .. } => "externally_modified",
@@ -87,7 +118,10 @@ impl StarterPolicyOutcome {
     pub fn content_changed(&self) -> bool {
         match self {
             StarterPolicyOutcome::Absent | StarterPolicyOutcome::Reconciled => true,
-            StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary => false,
+            // `StaleBinary` writes NOTHING in either provenance state, so it can never justify a
+            // fleet-wide cache invalidation — including the bad-provenance case, where a bump
+            // every boot of every replica would be pure churn over a row nobody touched.
+            StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary { .. } => false,
             StarterPolicyOutcome::Adopted { content_changed, .. } | StarterPolicyOutcome::ExternallyModified { content_changed, .. } => *content_changed,
         }
     }
@@ -131,19 +165,38 @@ pub fn content_fingerprint(kind: PolicyKind, source: &str, description: &str) ->
     hasher.finalize().to_hex().to_string()
 }
 
+/// Whether the stored row looks like something THIS service wrote: `system = true`, plus a
+/// fingerprint over the row's own current content. Both are written together on every write
+/// path this service has (`converged_model`), so a row failing either test was written by
+/// something else — which is all the fingerprint ever claims to tell you (see the module docs
+/// on why it is a provenance hint and not tamper evidence).
+fn provenance_ok(stored: &StoredPolicyRow<'_>) -> bool {
+    stored.system && stored.fingerprint.is_some_and(|fp| fp == content_fingerprint(stored.kind, stored.source, stored.description))
+}
+
 /// Decide what boot should do with one starter policy. See the truth table in the SMA-477
-/// design §3.1; the ORDER of these checks is load-bearing and documented per-branch.
+/// design §3.1; the ORDER of these checks is load-bearing (module docs) and documented
+/// per-branch below.
 #[must_use]
 pub fn classify_starter_policy(stored: Option<StoredPolicyRow<'_>>, code: &PolicyDocument, code_revision: u32) -> StarterPolicyOutcome {
+    // (1) Nothing persisted — seed it.
     let Some(stored) = stored else {
         return StarterPolicyOutcome::Absent;
     };
 
-    // (1) A newer release wrote this row. Defer unconditionally — an older binary has no
-    // authority over it, and deferring is what keeps fleet-wide convergence monotonic (D11).
+    // (2) The row claims a newer release wrote it. Defer unconditionally — an older binary has
+    // no authority over it, and deferring is what keeps fleet-wide convergence monotonic (D11).
     // A NULL revision reads as 0, so every pre-m0010 row falls through to normal handling.
+    //
+    // Because this check runs FIRST and writes nothing, a forged high revision is the cheapest
+    // possible exemption from convergence. We cannot repair it here without breaking D11, so we
+    // instead report whether the row's provenance holds up: a genuine newer release always
+    // stamps a fingerprint over its own content, so a mismatch here is tampering with no false
+    // positives, and the caller escalates the log level and the metric label accordingly.
     if stored.revision.unwrap_or(0) > code_revision {
-        return StarterPolicyOutcome::StaleBinary;
+        return StarterPolicyOutcome::StaleBinary {
+            provenance_ok: provenance_ok(&stored),
+        };
     }
 
     let content_changed = stored.kind != code.kind || stored.source != code.source || stored.description != code.description;
@@ -152,26 +205,47 @@ pub fn classify_starter_policy(stored: Option<StoredPolicyRow<'_>>, code: &Polic
         source: stored.source.to_string(),
         description: stored.description.to_string(),
     };
-
-    // (2) Pre-fingerprint row: provenance unknowable, so adopt rather than cry wolf (D3).
-    let Some(fingerprint) = stored.fingerprint else {
-        return StarterPolicyOutcome::Adopted {
-            content_changed,
-            previous_content: content_changed.then(previous),
-        };
+    let externally_modified = || StarterPolicyOutcome::ExternallyModified {
+        content_changed,
+        previous_content: previous(),
     };
 
     // (3) `!system` is treated as broken provenance, not as an operator's own policy: we only
     // ever write these rows with `system = true`, so a cleared flag means something else wrote
     // it — and without this, one `UPDATE policy SET system = false` would exempt a starter
-    // policy from convergence forever (D6).
-    if !stored.system || fingerprint != content_fingerprint(stored.kind, stored.source, stored.description) {
-        return StarterPolicyOutcome::ExternallyModified {
-            content_changed,
-            previous_content: previous(),
-        };
+    // policy from convergence forever (D6). This precedes the fingerprint branches below
+    // BECAUSE it must: clearing the flag and the fingerprint in the same statement would
+    // otherwise land in (4)'s adoption path, which is INFO and (when content is untouched) not
+    // even audited.
+    if !stored.system {
+        return externally_modified();
     }
 
+    let Some(fingerprint) = stored.fingerprint else {
+        return if stored.revision.is_some() {
+            // (5) A revision WITHOUT a fingerprint cannot be a pre-m0010 row: this service only
+            // ever writes the two together, `doc_to_model` writes neither, and m0010 back-fills
+            // neither. So the column was deliberately CLEARED — the cheapest way to downgrade a
+            // WARN-plus-audit into a routine `adopted` INFO — and it is reported as the edit it
+            // is. Note the asymmetry with (4) is provable, not heuristic.
+            externally_modified()
+        } else {
+            // (4) A genuine pre-fingerprint row: provenance is unknowable, so adopt rather than
+            // cry wolf at every environment on the first boot after the upgrade (D3).
+            StarterPolicyOutcome::Adopted {
+                content_changed,
+                previous_content: content_changed.then(previous),
+            }
+        };
+    };
+
+    // (6) The fingerprint does not describe the stored content: something rewrote the row
+    // without recomputing it.
+    if fingerprint != content_fingerprint(stored.kind, stored.source, stored.description) {
+        return externally_modified();
+    }
+
+    // (7)/(8) Provenance holds, so the only question left is whether the CODE moved.
     if content_changed { StarterPolicyOutcome::Reconciled } else { StarterPolicyOutcome::Unchanged }
 }
 
@@ -265,7 +339,67 @@ mod tests {
             fingerprint: Some("deadbeef"),
             revision: Some(9),
         };
-        assert_eq!(classify_starter_policy(Some(row), &code, 1), StarterPolicyOutcome::StaleBinary);
+        // Deferral is unconditional (D11) — but the outcome must NOT claim the provenance is
+        // fine, or a forged revision buys a permanent, silent, INFO-level exemption.
+        assert_eq!(classify_starter_policy(Some(row), &code, 1), StarterPolicyOutcome::StaleBinary { provenance_ok: false });
+    }
+
+    /// The forged-revision bypass, isolated. One `UPDATE policy SET source = <weakened>,
+    /// starter_revision = 2147483647` leaves the row diverged forever, because the revision check
+    /// runs first and writes nothing. It cannot be repaired here without breaking monotonicity —
+    /// so the outcome has to at least SAY the row's provenance is broken, which is what turns the
+    /// boot line into a WARN and the metric into `externally_modified`.
+    #[test]
+    fn a_forged_revision_over_weakened_content_is_deferred_but_flagged_as_bad_provenance() {
+        let code = code_doc();
+        let weakened = "permit(principal, action, resource);";
+        // Fingerprinted for the ORIGINAL content, as a real forger's row would be: they rewrote
+        // `source` and `starter_revision`, and left the stamp we wrote in place.
+        let stale_fp: &'static str = content_fingerprint(code.kind, &code.source, &code.description).leak();
+        let row = StoredPolicyRow {
+            kind: code.kind,
+            source: weakened,
+            description: &code.description,
+            system: true,
+            fingerprint: Some(stale_fp),
+            // The literal from the finding: the largest value the `INTEGER` column can hold, so
+            // recovery would need a `STARTER_POLICY_REVISION` past 2^31.
+            revision: Some(2_147_483_647),
+        };
+        assert_eq!(
+            classify_starter_policy(Some(row), &code, 1),
+            StarterPolicyOutcome::StaleBinary { provenance_ok: false },
+            "a high revision over content the stored fingerprint does not describe is tampering, not a newer release"
+        );
+    }
+
+    /// The no-false-positives half of the pair above: a genuinely newer release stamps BOTH the
+    /// revision and a fingerprint over its own content, so the ordinary mixed-version deploy —
+    /// the case operators are told to expect — must stay quiet.
+    #[test]
+    fn a_newer_release_row_with_intact_provenance_defers_quietly() {
+        let code = code_doc();
+        let newer_source = "permit(principal == ?principal, action, resource in ?resource) unless { false };";
+        let fp: &'static str = content_fingerprint(PolicyKind::Template, newer_source, "desc").leak();
+        let row = StoredPolicyRow {
+            kind: PolicyKind::Template,
+            source: newer_source,
+            description: "desc",
+            system: true,
+            fingerprint: Some(fp),
+            revision: Some(2),
+        };
+        assert_eq!(classify_starter_policy(Some(row), &code, 1), StarterPolicyOutcome::StaleBinary { provenance_ok: true });
+    }
+
+    /// `system = false` at a newer revision is the same forgery with a second lever pulled.
+    #[test]
+    fn a_newer_revision_with_a_cleared_system_flag_is_bad_provenance() {
+        let code = code_doc();
+        let (_, mut row) = matching_row(&code);
+        row.system = false;
+        row.revision = Some(99);
+        assert_eq!(classify_starter_policy(Some(row), &code, 1), StarterPolicyOutcome::StaleBinary { provenance_ok: false });
     }
 
     #[test]
@@ -276,18 +410,23 @@ mod tests {
         assert_eq!(classify_starter_policy(Some(row), &code, 1), StarterPolicyOutcome::Unchanged);
     }
 
+    /// The deferral boundary is strictly `>`, not `>=`: a row this very release stamped must
+    /// still converge when the code moves under it, or the first release after any revision bump
+    /// would never converge anything again.
     #[test]
     fn an_equal_revision_still_converges() {
         let code = code_doc();
+        let old_source = "permit(principal, action, resource);";
+        let fp: &'static str = content_fingerprint(PolicyKind::Template, old_source, "desc").leak();
         let row = StoredPolicyRow {
             kind: PolicyKind::Template,
-            source: "permit(principal, action, resource);",
+            source: old_source,
             description: "desc",
             system: true,
-            fingerprint: None,
+            fingerprint: Some(fp),
             revision: Some(1),
         };
-        assert!(matches!(classify_starter_policy(Some(row), &code, 1), StarterPolicyOutcome::Adopted { content_changed: true, .. }));
+        assert_eq!(classify_starter_policy(Some(row), &code, 1), StarterPolicyOutcome::Reconciled);
     }
 
     #[test]
@@ -295,6 +434,9 @@ mod tests {
         let code = code_doc();
         let (_, mut row) = matching_row(&code);
         row.fingerprint = None;
+        // A genuine pre-m0010 row has NEITHER column: m0010 adds them nullable and back-fills
+        // nothing. Leaving the revision stamped would make this the CLEARED-fingerprint case.
+        row.revision = None;
         assert_eq!(
             classify_starter_policy(Some(row), &code, 1),
             StarterPolicyOutcome::Adopted {
@@ -367,9 +509,82 @@ mod tests {
     #[test]
     fn a_non_system_row_is_an_external_modification_regardless_of_fingerprint() {
         // D6: `UPDATE policy SET system = false` must not buy an exemption from convergence.
+        // "Regardless of fingerprint" means all three states have to be exercised, not just the
+        // `Some(valid)` one: with the `!system` check placed AFTER the NULL-fingerprint branch
+        // (the order this file shipped with), the `None` case fell through to `Adopted` — INFO,
+        // and with untouched content not even audited — which is a cheaper bypass than the one
+        // D6 closed.
+        let code = code_doc();
+        let (_, base) = matching_row(&code);
+
+        let valid_fp = StoredPolicyRow { system: false, ..base };
+        assert!(
+            matches!(
+                classify_starter_policy(Some(valid_fp), &code, 1),
+                StarterPolicyOutcome::ExternallyModified { content_changed: false, .. }
+            ),
+            "system = false with a valid fingerprint"
+        );
+
+        let stale_fp: &'static str = "0".repeat(64).leak();
+        let stale = StoredPolicyRow {
+            system: false,
+            fingerprint: Some(stale_fp),
+            ..base
+        };
+        assert!(
+            matches!(classify_starter_policy(Some(stale), &code, 1), StarterPolicyOutcome::ExternallyModified { content_changed: false, .. }),
+            "system = false with a stale fingerprint"
+        );
+
+        // The case the old ordering got wrong. `revision` is left NULL too, so this is the
+        // WEAKEST possible fixture: nothing but the cleared `system` flag can produce the
+        // expected outcome.
+        let no_fp = StoredPolicyRow {
+            system: false,
+            fingerprint: None,
+            revision: None,
+            ..base
+        };
+        assert!(
+            matches!(classify_starter_policy(Some(no_fp), &code, 1), StarterPolicyOutcome::ExternallyModified { content_changed: false, .. }),
+            "system = false with NO fingerprint must not classify as a routine adoption"
+        );
+    }
+
+    /// `UPDATE policy SET source = <weakened>, content_fingerprint = NULL` — one statement that
+    /// turned a WARN-plus-audit into an `adopted` INFO, which the runbook describes as routine.
+    /// It is decidable because this service writes the fingerprint and the revision TOGETHER, so
+    /// a revision without a fingerprint is provably a cleared column and not a pre-m0010 row.
+    #[test]
+    fn a_cleared_fingerprint_on_a_stamped_row_is_an_external_modification() {
         let code = code_doc();
         let (_, mut row) = matching_row(&code);
-        row.system = false;
+        row.fingerprint = None;
+        row.source = "permit(principal, action, resource);";
+        assert!(
+            row.revision.is_some(),
+            "the fixture must keep the revision this service stamped, or it proves nothing about the discriminator"
+        );
+
+        let out = classify_starter_policy(Some(row), &code, 1);
+        let StarterPolicyOutcome::ExternallyModified {
+            content_changed: true,
+            previous_content,
+        } = out
+        else {
+            panic!("expected ExternallyModified, got {out:?}")
+        };
+        assert_eq!(previous_content.source, "permit(principal, action, resource);");
+    }
+
+    /// The same lever pulled without touching the content: still an edit, and still audited —
+    /// where `Adopted { content_changed: false }` would have been DEBUG with no audit row at all.
+    #[test]
+    fn a_cleared_fingerprint_alone_is_still_reported() {
+        let code = code_doc();
+        let (_, mut row) = matching_row(&code);
+        row.fingerprint = None;
         assert!(matches!(
             classify_starter_policy(Some(row), &code, 1),
             StarterPolicyOutcome::ExternallyModified { content_changed: false, .. }
@@ -445,7 +660,16 @@ mod tests {
     fn metric_labels_are_stable_and_distinct() {
         assert_eq!(StarterPolicyOutcome::Absent.metric_label(), "seeded");
         assert_eq!(StarterPolicyOutcome::Unchanged.metric_label(), "unchanged");
-        assert_eq!(StarterPolicyOutcome::StaleBinary.metric_label(), "stale_binary");
+        assert_eq!(StarterPolicyOutcome::StaleBinary { provenance_ok: true }.metric_label(), "stale_binary");
+        // A deferral this binary will not repair, over a row whose provenance is broken, is what
+        // the tamper alert exists for — `stale_binary` is documented as an expected deploy
+        // artifact, so labelling it that way would route the one case that matters to a row
+        // operators are told to ignore.
+        assert_eq!(
+            StarterPolicyOutcome::StaleBinary { provenance_ok: false }.metric_label(),
+            "externally_modified",
+            "bad provenance must reach the alert, not the ignore-me bucket"
+        );
         assert_eq!(StarterPolicyOutcome::Reconciled.metric_label(), "reconciled");
         assert_eq!(
             StarterPolicyOutcome::Adopted {
