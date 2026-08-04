@@ -566,6 +566,7 @@ async fn reconcile_system_adopts_a_pre_m0010_row() {
 
 #[tokio::test]
 async fn a_fingerprint_only_stamp_does_not_bump_policy_gen_but_a_content_change_does() {
+    use paigasus_iam_core::authz::reconcile::StarterPolicyOutcome;
     use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
     use paigasus_iam_core::{PolicyStore, SystemPolicyReconciler};
 
@@ -574,10 +575,24 @@ async fn a_fingerprint_only_stamp_does_not_bump_policy_gen_but_a_content_change_
     let doc = starter_policies().into_iter().next().unwrap();
     store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
 
-    // Clear the fingerprint but leave content correct: a pure stamp, invisible to any decision.
+    // Clear the fingerprint AND the revision so this is a genuine pre-m0010 pure stamp
+    // (`Adopted`), not `ExternallyModified`: clearing the fingerprint alone leaves
+    // `starter_revision` stamped, which classifies as a deliberately cleared column, not an
+    // unknowable-provenance row. Same pattern as `reconcile_system_adopts_a_pre_m0010_row`.
     tamper_policy(&db, &doc.policy_id, &doc.source, None).await;
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        format!(r#"UPDATE "policy" SET starter_revision = NULL WHERE policy_id = '{}'"#, doc.policy_id),
+    ))
+    .await
+    .unwrap();
+
     let before = store.policy_gen().await.unwrap();
-    store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+    let outcome = store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap();
+    assert!(
+        matches!(outcome, StarterPolicyOutcome::Adopted { content_changed: false, .. }),
+        "expected the Adopted pure-stamp path, got {outcome:?}"
+    );
     assert_eq!(store.policy_gen().await.unwrap(), before, "a stamp changes nothing a decision can observe");
 
     // Now a real content change.
