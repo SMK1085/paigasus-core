@@ -35,7 +35,7 @@
 
 use metrics::counter;
 use paigasus_iam_core::authz::model::root_prn;
-use paigasus_iam_core::authz::reconcile::{RoleOutcome, StarterPolicyOutcome};
+use paigasus_iam_core::authz::reconcile::{RoleOutcome, StarterPolicyOutcome, policy_kind_str};
 use paigasus_iam_core::authz::roles::{self as authz_roles, STARTER_POLICY_IDS, STARTER_POLICY_REVISION};
 use paigasus_iam_core::{AuditEntry, AuditLog, AuditOutcome, AuthzError, Clock, IdGenerator, PolicyDocument, SystemPolicyReconciler, SystemRoleReconciler};
 use paigasus_observability::names;
@@ -206,7 +206,18 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
         }
     }
 
-    for orphan in deps.policies.orphaned_system_policy_ids(STARTER_POLICY_IDS).await.unwrap_or_default() {
+    // A failed scan degrades to "no orphans", which is indistinguishable from a healthy database
+    // in the logs — so it is warned about rather than swallowed, exactly as the `existing_ids`
+    // read above is. Never fatal: this is a reporting scan, and every row it would have named is
+    // still compiling and still governing.
+    let orphans = match deps.policies.orphaned_system_policy_ids(STARTER_POLICY_IDS).await {
+        Ok(ids) => ids,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not scan for orphaned system policy rows; retired starter policies go unreported this boot");
+            Vec::new()
+        }
+    };
+    for orphan in orphans {
         count("orphaned");
         tracing::warn!(
             policy_id = %orphan,
@@ -248,6 +259,12 @@ async fn record_reconcile_audit<I: IdGenerator, C: Clock>(
             "reason": reason,
             "content_changed": content_changed,
             "previous_content": {
+                // The overwritten `kind`, as the wire string the column stores. Recorded rather
+                // than dropped because a wrong `kind` is not cosmetic: a `template` persisted as
+                // `static` makes `PolicyEngine::compile` parse template source as a static
+                // policy, which fails `PolicySnapshot::new` and therefore boot — so it is
+                // precisely the field an investigator needs to see was destroyed.
+                "kind": policy_kind_str(previous.kind),
                 "source": source,
                 "description": description,
                 "truncated": truncated,
@@ -516,6 +533,35 @@ mod tests {
         assert_eq!(e.detail["previous_content"]["description"], serde_json::json!("old"));
     }
 
+    /// The overwritten `kind` is recorded, not dropped. It is the one destroyed field that can
+    /// take boot itself down: a `template` persisted as `static` makes `PolicyEngine::compile`
+    /// parse template source as a static policy, failing `PolicySnapshot::new`. The fixture
+    /// deliberately carries `Template` while `tampered()`'s carries `Static`, so a hardcoded
+    /// string would redden one of the two.
+    #[tokio::test]
+    async fn the_audit_row_records_the_overwritten_policy_kind() {
+        for (kind, want) in [(PolicyKind::Template, "template"), (PolicyKind::Static, "static")] {
+            let entries = FakeAuditLog::default();
+            let d = deps(
+                ScriptedPolicies::with(StarterPolicyOutcome::ExternallyModified {
+                    content_changed: true,
+                    previous_content: PolicyContent {
+                        kind,
+                        source: "permit(principal, action, resource);".to_string(),
+                        description: String::new(),
+                    },
+                }),
+                Arc::new(entries.clone()),
+            );
+            reconcile_policies(&d).await.unwrap();
+            assert_eq!(
+                entries.0.lock().unwrap()[0].detail["previous_content"]["kind"],
+                serde_json::json!(want),
+                "the wire string the policy.kind column stores"
+            );
+        }
+    }
+
     /// A row hand-edited to exactly the code-defined value is still an external edit, and is
     /// still audited — but `content_changed` must report the truth rather than a hardcoded
     /// `true`, or the entry claims content was destroyed when none was.
@@ -725,11 +771,11 @@ mod tests {
     /// remediation. Collapsing the unreadable case into the missing-row case reddens here.
     #[test]
     fn a_failure_is_classified_against_the_snapshot_and_an_unreadable_one_is_its_own_case() {
-        let ids = vec!["forbid_archived_writes".to_string()];
-        assert_eq!(classify_failure(Some(&ids), "forbid_archived_writes"), FailureKind::Survivable);
+        let ids = vec!["forbid-archived-writes".to_string()];
+        assert_eq!(classify_failure(Some(&ids), "forbid-archived-writes"), FailureKind::Survivable);
         assert_eq!(classify_failure(Some(&ids), "org_admin"), FailureKind::FatalMissingRow);
         assert_eq!(
-            classify_failure(None, "forbid_archived_writes"),
+            classify_failure(None, "forbid-archived-writes"),
             FailureKind::FatalUnknownSnapshot,
             "an unreadable snapshot must never be reported as a missing row"
         );

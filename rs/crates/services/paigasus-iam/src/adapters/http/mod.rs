@@ -351,9 +351,13 @@ impl AppState {
         // returns `Self`, so there is no way to build it twice and still share one `Arc`.
         let audit_log: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()).with_query_window(cfg.audit.query_default_window_days, cfg.audit.query_max_window_days));
 
-        // SMA-477: the reconciler shares the SAME `PgPolicyStore` the snapshot reads from, so a
-        // converged policy's `policy_gen` bump is observed by this replica's own snapshot and by
-        // every other replica's.
+        // SMA-477: a SECOND `PgPolicyStore` value, deliberately — the reconciler needs
+        // `SystemPolicyReconciler` and `policy_store` above is typed as `Arc<dyn PolicyStore>`,
+        // which cannot be downcast to it. That costs nothing and changes nothing, because what
+        // has to be shared is not the struct: it is the `db` pool handle and the `Generations`
+        // handle, both cloned from the same values `policy_store` holds (each an `Arc` inside).
+        // So a converged policy's `policy_gen` bump lands on the very counter this replica's own
+        // snapshot reads, and on the shared redis counter every other replica polls.
         let policy_reconciler: Arc<dyn SystemPolicyReconciler> = Arc::new(PgPolicyStore::new(db.clone(), gens.clone()));
         let role_reconciler: Arc<dyn SystemRoleReconciler> = Arc::new(PgSystemRoleReconciler::new(db.clone()));
         let reconcile_deps = bootstrap::ReconcileStarterDeps {

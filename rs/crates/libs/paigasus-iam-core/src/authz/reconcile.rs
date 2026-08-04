@@ -259,6 +259,17 @@ pub fn scope_kinds_json(kinds: &[NodeKind]) -> String {
     format!("[{}]", items.join(","))
 }
 
+/// The wire string the `policy.kind` column stores. Lives here so the audit entry recording an
+/// overwritten row's `kind` (SMA-477 D8) and the adapter that persists it cannot drift apart —
+/// `pg_policies.rs::kind_to_str` delegates to this.
+#[must_use]
+pub fn policy_kind_str(kind: PolicyKind) -> &'static str {
+    match kind {
+        PolicyKind::Static => "static",
+        PolicyKind::Template => "template",
+    }
+}
+
 #[must_use]
 pub fn node_kind_str(kind: NodeKind) -> &'static str {
     match kind {
@@ -693,6 +704,75 @@ mod tests {
         );
     }
 
+    /// AC6/D10: `content_changed()` is the ONLY input to the `policy_gen` bump, so a wrong answer
+    /// either invalidates every replica's compiled policy set on every boot (a `true` where the
+    /// outcome wrote nothing) or lets a real convergence go unobserved until the snapshot's TTL
+    /// backstop (a `false` where it did). Nothing else pins the non-writing variants: they are
+    /// the ones a mutation can flip while the whole suite stays green.
+    #[test]
+    fn content_changed_is_true_exactly_for_the_outcomes_that_wrote_content() {
+        let previous = PolicyContent {
+            kind: PolicyKind::Static,
+            source: "old".to_string(),
+            description: String::new(),
+        };
+        let cases = [
+            (StarterPolicyOutcome::Absent, true, "a seed writes the whole row"),
+            (StarterPolicyOutcome::Reconciled, true, "a code change rewrites the content"),
+            (StarterPolicyOutcome::Unchanged, false, "nothing was written at all"),
+            (StarterPolicyOutcome::StaleBinary { provenance_ok: true }, false, "a deferral writes nothing"),
+            (
+                StarterPolicyOutcome::StaleBinary { provenance_ok: false },
+                false,
+                "a deferral writes nothing even when the row is diverged — bumping here would churn every boot",
+            ),
+            (
+                StarterPolicyOutcome::Adopted {
+                    content_changed: false,
+                    previous_content: None,
+                },
+                false,
+                "a pure provenance stamp changes nothing a decision can observe",
+            ),
+            (
+                StarterPolicyOutcome::Adopted {
+                    content_changed: true,
+                    previous_content: Some(previous.clone()),
+                },
+                true,
+                "adoption that also converged content",
+            ),
+            (
+                StarterPolicyOutcome::ExternallyModified {
+                    content_changed: false,
+                    previous_content: previous.clone(),
+                },
+                false,
+                "provenance-only repair on content that already matched",
+            ),
+            (
+                StarterPolicyOutcome::ExternallyModified {
+                    content_changed: true,
+                    previous_content: previous,
+                },
+                true,
+                "an edit that was converged away",
+            ),
+        ];
+        for (outcome, want, why) in cases {
+            assert_eq!(outcome.content_changed(), want, "{outcome:?}: {why}");
+        }
+    }
+
+    #[test]
+    fn policy_kind_str_covers_every_variant() {
+        // The persisted encoding: `pg_policies.rs::kind_to_str` delegates here, and the audit
+        // entry's `previous_content.kind` uses it, so both sides read the same strings the
+        // `ck_policy_kind` CHECK constraint allows.
+        assert_eq!(policy_kind_str(PolicyKind::Static), "static");
+        assert_eq!(policy_kind_str(PolicyKind::Template), "template");
+    }
+
     #[test]
     fn scope_kinds_json_renders_a_json_string_array() {
         assert_eq!(scope_kinds_json(&[NodeKind::Root]), r#"["root"]"#);
@@ -751,8 +831,8 @@ mod tests {
 
     #[test]
     fn an_empty_code_description_matches_a_null_column() {
-        // `seed_role_row` stores an empty description as NULL; the comparison must agree,
-        // or an empty-description role would "differ" on every single boot.
+        // `PgSystemRoleReconciler::reconcile_role` stores an empty description as NULL; the
+        // comparison must agree, or an empty-description role would "differ" on every boot.
         let code = Role {
             description: String::new(),
             ..code_role()

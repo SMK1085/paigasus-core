@@ -29,7 +29,9 @@
 //! stays alive and usable — then re-reads the row that won the race WITHIN that same outer
 //! txn and compares content: SAME content (a concurrent cold-boot `reconcile_starter` race
 //! between replicas inserting the identical starter policy, Task 17 follow-up) absorbs as
-//! [`PutOutcome::AbsorbedIdempotent`], mirroring `bootstrap.rs::seed_role_row`; DIFFERENT
+//! [`PutOutcome::AbsorbedIdempotent`], mirroring the same unique-violation absorption in
+//! `PgSystemRoleReconciler::reconcile_role` (SMA-477, where `bootstrap.rs::seed_role_row` moved
+//! when the role half grew a port of its own); DIFFERENT
 //! content (two `PutPolicy` API callers racing to create the same `policy_id`) is a genuine
 //! lost-update conflict and surfaces as `AuthzError::Conflict` — see the inline comments on
 //! that branch. `put_in`/`delete_in` themselves never bump `policy_gen` (the caller's own
@@ -54,7 +56,7 @@ use crate::adapters::authz::Generations;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
-use paigasus_iam_core::authz::reconcile::{StarterPolicyOutcome, StoredPolicyRow, classify_starter_policy, content_fingerprint};
+use paigasus_iam_core::authz::reconcile::{StarterPolicyOutcome, StoredPolicyRow, classify_starter_policy, content_fingerprint, policy_kind_str};
 use paigasus_iam_core::authz::roles as authz_roles;
 use paigasus_iam_core::authz::schema::validate_policy;
 use paigasus_iam_core::{AuthzError, PolicyDocument, PolicyStore, PutOutcome, RepositoryError, SystemPolicyReconciler, Transaction};
@@ -174,11 +176,10 @@ fn backend_err(msg: impl std::fmt::Display) -> AuthzError {
     AuthzError::Backend(Box::new(std::io::Error::other(msg.to_string())))
 }
 
+/// Delegates to the core encoding (SMA-477): the audit entry that records an overwritten row's
+/// `kind` renders it with the same function, so the two cannot drift.
 fn kind_to_str(kind: PolicyKind) -> &'static str {
-    match kind {
-        PolicyKind::Static => "static",
-        PolicyKind::Template => "template",
-    }
+    policy_kind_str(kind)
 }
 
 /// A stored `kind` value outside `{static, template}` is a data-integrity break (the
@@ -330,7 +331,8 @@ impl PolicyStore for PgPolicyStore {
                         //     starter policy against a fresh/unseeded DB) — the upsert intent
                         //     ("this policy_id is present with this content") is satisfied
                         //     either way; absorb it as `PutOutcome::AbsorbedIdempotent`,
-                        //     mirroring `bootstrap.rs::seed_role_row`'s absorption. The
+                        //     mirroring `PgSystemRoleReconciler::reconcile_role`'s own
+                        //     unique-violation absorption on the role table. The
                         //     caller skips its post-commit `policy_gen` bump on this outcome:
                         //     the winning writer's own `put`/`put_in` call already bumped it
                         //     for this row's creation, so bumping again here would just be a

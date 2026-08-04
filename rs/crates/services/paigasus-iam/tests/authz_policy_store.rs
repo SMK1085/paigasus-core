@@ -260,8 +260,9 @@ async fn delete_of_an_unknown_policy_id_is_a_noop() {
 /// check and its INSERT aren't atomic, so two replicas booting concurrently against a
 /// fresh, unseeded database can both observe `existing == None` for the same starter
 /// `policy_id` and both attempt to insert it — the loser must hit a unique-constraint
-/// violation and absorb it as an idempotent success (mirroring
-/// `bootstrap.rs::seed_role_row`), not fail its replica's `AppState::new`. This covers the
+/// violation and absorb it as an idempotent success (mirroring the same absorption in
+/// `PgSystemRoleReconciler::reconcile_role`, where `bootstrap.rs::seed_role_row` moved in
+/// SMA-477), not fail its replica's `AppState::new`. This covers the
 /// SAME-content case (both racers write the IDENTICAL starter policy document); the
 /// DIFFERENT-content case is covered separately below
 /// (`concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_conflict`).
