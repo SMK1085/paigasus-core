@@ -31,16 +31,24 @@ pub const IAM_DENIAL_AUDITS_ENQUEUED_TOTAL: &str = "iam_denial_audits_enqueued_t
 /// pathological: two concurrent first authentications by the same admin race, and the loser
 /// rolls back on the unique constraint with the net state still correct.
 pub const IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL: &str = "iam_bootstrap_admin_seed_failures_total";
-/// SMA-477: one increment per starter policy per boot, labelled by what reconciliation did.
-/// `outcome` is a closed set — `unchanged` | `seeded` | `adopted` | `reconciled` |
-/// `externally_modified` | `stale_binary` | `orphaned` | `failed` — never derived from anything
-/// caller-supplied, so it cannot mint cardinality.
+/// SMA-477: one increment per starter policy per boot, labelled by what reconciliation did —
+/// PLUS one `failed` increment per system ROLE reconciliation error (`bootstrap::
+/// reconcile_roles`'s own `count("failed")` call). A role's successful outcome
+/// (seeded/converged/unchanged) is never counted here, only its failure. `outcome` is a closed
+/// set — `unchanged` | `seeded` | `adopted` | `reconciled` | `externally_modified` |
+/// `stale_binary` | `orphaned` | `failed` — never derived from anything caller-supplied, so it
+/// cannot mint cardinality.
 ///
 /// `externally_modified` is the one worth alerting on: it means something other than this
 /// service wrote a system-owned policy row, which boot has just reverted. `stale_binary` means
 /// an older replica declined to overwrite a newer release's row — expected briefly during a
-/// deploy, suspicious if it persists. `orphaned` counts system rows whose id is no longer
-/// code-defined; nothing can delete those automatically.
+/// deploy, suspicious if it persists. `orphaned` counts system POLICY rows whose id is no longer
+/// code-defined; nothing can delete those automatically — an orphaned system ROLE row is
+/// WARN-logged but NOT counted here, an asymmetry with the policy half.
+///
+/// `failed` is the one label the two halves share: a starter-policy AND a system-role
+/// reconciliation error both land here under the identical label, distinguishable only via the
+/// accompanying ERROR log's `policy_id` vs `role_key` field, never via this metric alone.
 pub const IAM_STARTER_POLICY_RECONCILES_TOTAL: &str = "iam_starter_policy_reconciles_total";
 // IAM outbox relay
 pub const IAM_OUTBOX_RELAY_TICKS_TOTAL: &str = "iam_outbox_relay_ticks_total";

@@ -1442,7 +1442,9 @@ policy row to the code-defined content from `authz::roles::starter_policies()`, 
 namespace (`authz::roles::STARTER_POLICY_IDS`), so the database is not a supported place to
 customize them.
 
-Each policy emits `iam_starter_policy_reconciles_total{outcome=...}`:
+Each policy emits `iam_starter_policy_reconciles_total{outcome=...}`. System-ROLE reconciliation
+shares the same counter but only for the `failed` row below — a role that seeds, converges, or is
+already unchanged is not counted at all, and (unlike a policy) neither is an orphaned role row:
 
 | `outcome` | Meaning | Action |
 |---|---|---|
@@ -1452,8 +1454,8 @@ Each policy emits `iam_starter_policy_reconciles_total{outcome=...}`:
 | `adopted` | The row predates the fingerprint column, so its provenance was unknowable. | None, but see below if it also changed content. |
 | `stale_binary` | The stored row was written by a NEWER release **and its provenance checks out**; this replica left it alone. | Expected briefly during a deploy. Persisting means an old replica is still running — or that the fleet was permanently rolled back, in which case it persists forever until a build with a higher `STARTER_POLICY_REVISION` ships. See below. |
 | `externally_modified` | Something other than this service wrote the row. Converged and audited — **except** when the row also claims a newer revision, which is warned about but *not* repaired (see below). | **Investigate.** |
-| `orphaned` | A `system = true` row whose id is no longer code-defined. | Investigate; it still compiles and still links grants, and `DeletePolicy` refuses to remove it. |
-| `failed` | Converging one row errored. A row that already existed is kept for this boot; an absent row that couldn't be seeded is fatal. So is **any** failure when the pre-loop id snapshot was itself unreadable, because no row can then be proven to exist. | Check the ERROR log line — it names which of the three cases this was. Transient at low volume in the survivable case. |
+| `orphaned` | A `system = true` **policy** row whose id is no longer code-defined. An orphaned system **role** row is WARN-logged (`reconcile_roles`) but does NOT increment this counter — a deliberate asymmetry with the policy half. | Investigate; it still compiles and still links grants, and `DeletePolicy` refuses to remove it. |
+| `failed` | Converging one row errored — a starter **policy** row or a system **role** row, both under this same label. A row that already existed is kept for this boot; an absent row that couldn't be seeded is fatal. So is **any** failure when the pre-loop id snapshot was itself unreadable, because no row can then be proven to exist. | Check the ERROR log line — it names which of the three cases this was, and its `policy_id` vs `role_key` field says which half failed (the metric alone can't). Transient at low volume in the survivable case. |
 
 **`externally_modified` — the one that matters.** It logs
 
