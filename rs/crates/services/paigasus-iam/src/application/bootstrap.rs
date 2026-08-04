@@ -65,7 +65,11 @@ fn count(outcome_label: &'static str) {
 /// panics, and this runs inside `AppState::new`, so the panic would kill the replica before it
 /// served a request. The overwritten text is attacker-influenced, so it may well be the operator
 /// who chose where byte 8192 lands. A walked-back result is SHORTER than the cap.
-fn truncate_audited_text(text: &str) -> (String, bool) {
+///
+/// `pub(crate)`: `application::system_retirement`'s audit entry destroys the same kind of
+/// attacker-influenced content (a retired policy's `source`/`description`) and reuses this cap
+/// rather than re-deriving it (SMA-481 D9).
+pub(crate) fn truncate_audited_text(text: &str) -> (String, bool) {
     if text.len() <= MAX_AUDITED_SOURCE_BYTES {
         return (text.to_string(), false);
     }

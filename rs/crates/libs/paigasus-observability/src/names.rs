@@ -73,6 +73,16 @@ pub const IAM_AUDIT_PARTITION_MAINTENANCE_TICKS_TOTAL: &str = "iam_audit_partiti
 pub const IAM_AUDIT_PARTITIONS_CREATED_TOTAL: &str = "iam_audit_partitions_created_total";
 pub const IAM_AUDIT_PARTITIONS_DROPPED_TOTAL: &str = "iam_audit_partitions_dropped_total";
 pub const IAM_AUDIT_DEFAULT_PARTITION_ROWS: &str = "iam_audit_default_partition_rows";
+// IAM system row retirement (SMA-481)
+/// One increment per `SystemRetirementService::retire` call, labelled `outcome` = `retired` |
+/// `blocked` | `refused`. Retirement is a destructive, Root-only, operator-triggered action, and
+/// unlike a routine reconciliation drift, nothing else alerts on it: the `audit_log` row this
+/// call also writes is durable evidence, but durable is not the same as monitored — nothing
+/// polls `audit_log` for this action today, so a counter is the only thing that can page anyone
+/// on it. `refused` covers BOTH precondition failures (`FleetNotConverged`, an unacknowledged
+/// static policy) that never open a transaction; `retired`/`blocked` cover the two outcomes a
+/// transaction was actually opened for.
+pub const IAM_SYSTEM_ROWS_RETIRED_TOTAL: &str = "iam_system_rows_retired_total";
 
 /// Every metric family this workspace emits — the drift test (`tests/drift.rs`) extracts every
 /// `iam_`/`gateway_`-prefixed identifier from the committed dashboard/rule `expr`s, strips a
@@ -114,6 +124,7 @@ pub const ALL: &[&str] = &[
     IAM_AUDIT_PARTITIONS_CREATED_TOTAL,
     IAM_AUDIT_PARTITIONS_DROPPED_TOTAL,
     IAM_AUDIT_DEFAULT_PARTITION_ROWS,
+    IAM_SYSTEM_ROWS_RETIRED_TOTAL,
 ];
 
 #[cfg(test)]

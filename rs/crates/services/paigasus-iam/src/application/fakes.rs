@@ -879,7 +879,12 @@ impl KeyEntropy for SeqKeyEntropy {
 /// the counter, exactly like a real transaction that never commits. `savepoint` is never
 /// reached by any current caller (`RoleService`'s reference pattern never opens one), and
 /// `as_any` downcasts to itself, mirroring `SeaOrmTransaction`'s own `as_any` contract.
-struct CountingTransaction(Arc<AtomicUsize>);
+///
+/// `pub(crate)` (SMA-481): `system_retirement`'s own `ScriptedRetirer` fake hands this SAME
+/// type out of `begin_retirement` — its port returns a `Transaction` directly rather than going
+/// through a `UnitOfWork`, but the "was this ever actually committed" guarantee this type gives
+/// is exactly what its refusal tests need too. Reused, not re-derived — do not clone this type.
+pub(crate) struct CountingTransaction(pub(crate) Arc<AtomicUsize>);
 
 #[async_trait]
 impl Transaction for CountingTransaction {
