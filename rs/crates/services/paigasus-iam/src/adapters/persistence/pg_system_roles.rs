@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use paigasus_iam_core::authz::reconcile::{RoleOutcome, StoredRoleRow, role_row_matches, scope_kinds_json};
 use paigasus_iam_core::{AuthzError, Role, SystemRoleReconciler};
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set, SqlErr};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, SqlErr};
 
 #[derive(Clone)]
 pub struct PgSystemRoleReconciler {
@@ -78,13 +78,17 @@ impl SystemRoleReconciler for PgSystemRoleReconciler {
         // `ORDER BY key`, exactly as `orphaned_system_policy_ids` orders by `policy_id`: boot
         // logs one WARN line per orphan, so an unordered scan would reshuffle a boot's lines run
         // to run (and make any multi-orphan test flaky). Contract, not implementation detail.
-        let rows = role::Entity::find()
+        // Projected to the key column, matching `orphaned_system_policy_ids`: only the key is used.
+        let keys: Vec<String> = role::Entity::find()
+            .select_only()
+            .column(role::Column::Key)
             .filter(role::Column::System.eq(true))
             .order_by_asc(role::Column::Key)
+            .into_tuple()
             .all(&self.db)
             .await
             .map_err(map_db_err)?;
-        Ok(rows.into_iter().map(|r| r.key).filter(|k| !known.contains(&k.as_str())).collect())
+        Ok(keys.into_iter().filter(|k| !known.contains(&k.as_str())).collect())
     }
 
     async fn existing_role_keys(&self) -> Result<Vec<String>, AuthzError> {
@@ -92,7 +96,6 @@ impl SystemRoleReconciler for PgSystemRoleReconciler {
         // decision, and an operator's own non-system row at a code-defined key still means the
         // key exists (the INSERT would collide, not vanish). Narrowing it would report a present
         // row as missing and turn a survivable failure fatal.
-        let rows = role::Entity::find().all(&self.db).await.map_err(map_db_err)?;
-        Ok(rows.into_iter().map(|r| r.key).collect())
+        role::Entity::find().select_only().column(role::Column::Key).into_tuple().all(&self.db).await.map_err(map_db_err)
     }
 }

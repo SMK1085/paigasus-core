@@ -456,17 +456,30 @@ impl SystemPolicyReconciler for PgPolicyStore {
         // `ORDER BY policy_id`: Task 7 iterates this list to log each orphan, so an unordered
         // scan would reshuffle a boot's WARN lines run to run (and make any multi-orphan test
         // flaky). Ordering is part of the contract, not an implementation detail.
-        let rows = policy::Entity::find()
+        // Projected to the id column rather than `find().all()`: only the id is ever used, and a
+        // starter policy's `source` runs to multiple KB, so loading whole rows here would pull the
+        // entire system-owned policy set's Cedar text across the wire to throw it away.
+        let ids: Vec<String> = policy::Entity::find()
+            .select_only()
+            .column(policy::Column::PolicyId)
             .filter(policy::Column::System.eq(true))
             .order_by_asc(policy::Column::PolicyId)
+            .into_tuple()
             .all(&self.db)
             .await
             .map_err(map_db_err)?;
-        Ok(rows.into_iter().map(|r| r.policy_id).filter(|id| !known.contains(&id.as_str())).collect())
+        Ok(ids.into_iter().filter(|id| !known.contains(&id.as_str())).collect())
     }
 
     async fn existing_policy_ids(&self) -> Result<Vec<String>, AuthzError> {
-        let rows = policy::Entity::find().all(&self.db).await.map_err(map_db_err)?;
-        Ok(rows.into_iter().map(|r| r.policy_id).collect())
+        // Same projection reasoning as `orphaned_system_policy_ids`, and more so: this one is
+        // unfiltered, so `find().all()` would read every policy row's `source` on every boot.
+        policy::Entity::find()
+            .select_only()
+            .column(policy::Column::PolicyId)
+            .into_tuple()
+            .all(&self.db)
+            .await
+            .map_err(map_db_err)
     }
 }
