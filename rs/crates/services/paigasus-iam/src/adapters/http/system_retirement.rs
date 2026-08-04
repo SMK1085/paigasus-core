@@ -32,9 +32,20 @@
 //!
 //! **The request body is optional.** A `POST` with no body and no `Content-Type` header must
 //! not be rejected before ever reaching the service: the safe reading of an unspecified
-//! acknowledgement is "not acknowledged" (the service's own D4), so `Option<Json<RetireBody>>`
-//! plus `#[serde(default)]` on the one field collapses "didn't say" and "said no" into the
-//! identical `false`.
+//! acknowledgement is "not acknowledged" (the service's own D4), so `Option<EnvelopeJson<
+//! RetireBody>>` plus `#[serde(default)]` on the one field collapses "didn't say" and "said no"
+//! into the identical `false`. A body that DOES declare `Content-Type: application/json` but
+//! fails to parse still gets the crate's stable `{"error":{code,message}}` envelope, via the
+//! SAME `EnvelopeJson` (`http::authn`) `http::authn::introspect`/`http::api_keys::introspect`
+//! already reuse for exactly this normalisation, rather than axum's bare `JsonRejection` text.
+//!
+//! **The outcome -> response mapping is its own pure function (`response_for`), not inlined in
+//! the handler.** A fix-round review changed `Retired`'s status to `204` in an earlier revision
+//! of this file and reran the whole crate's test suite unchanged — nothing exercised the
+//! handler against a real `RetireOutcome` value, so the exact regression this module's doc
+//! calls out as load-bearing would have shipped silently. Pulling the match out into a function
+//! that takes an owned `RetireOutcome` and returns a `Response` lets every variant be
+//! constructed directly in a test, with no `AppState`/database/request needed.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -47,6 +58,7 @@ use paigasus_kernel::Prn;
 use serde_json::json;
 
 use super::AppState;
+use super::authn::EnvelopeJson;
 use super::error::ApiError;
 use crate::adapters::auth::AuthContext;
 
@@ -78,29 +90,38 @@ fn acknowledged(body: Option<RetireBody>) -> bool {
 /// `POST /v1/authz/system-policies/{id}/retire`: Root-only (enforced inside
 /// `SystemRetirementService::retire`). Returns `200` with what was destroyed, never `204` — a
 /// body is the operator's only immediate record of an irreversible act, and the two refusals
-/// below carry the information needed to act on them.
-async fn retire(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<String>, body: Option<Json<RetireBody>>) -> Result<Response, ApiError> {
-    let ack = acknowledged(body.map(|Json(b)| b));
-    match s.retirement.retire(&actor_prn(&ctx), &id, ack).await? {
+/// below carry the information needed to act on them. The actual outcome -> response mapping
+/// lives in `response_for` (this module's doc), so it stays testable independent of this thin
+/// axum-wiring layer.
+async fn retire(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<String>, body: Option<EnvelopeJson<RetireBody>>) -> Result<Response, ApiError> {
+    let ack = acknowledged(body.map(|EnvelopeJson(b)| b));
+    let outcome = s.retirement.retire(&actor_prn(&ctx), &id, ack).await?;
+    Ok(response_for(outcome))
+}
+
+/// Maps a `RetireOutcome` to its wire response — see this module's doc for why this is its own
+/// pure function rather than inlined in `retire` above.
+fn response_for(outcome: RetireOutcome) -> Response {
+    match outcome {
         RetireOutcome::Retired { policy_id, kind, role_deleted } => {
-            Ok((StatusCode::OK, Json(json!({ "policy_id": policy_id, "kind": policy_kind_str(kind), "role_deleted": role_deleted }))).into_response())
+            (StatusCode::OK, Json(json!({ "policy_id": policy_id, "kind": policy_kind_str(kind), "role_deleted": role_deleted }))).into_response()
         }
-        RetireOutcome::Blocked { role_key, grants, total, truncated } => Ok(conflict(
+        RetireOutcome::Blocked { role_key, grants, total, truncated } => conflict(
             "grants-survive",
             &format!(
                 "{total} grant(s) of '{role_key}' must be revoked before it can be retired. If a revoke returns 403 \
                  because its scope node is archived, restore the node, revoke, then re-archive it."
             ),
             json!({ "grants": grants_json(&grants), "total_surviving": total, "truncated": truncated }),
-        )),
-        RetireOutcome::NeedsAcknowledgement { policy_id, kind, source, description } => Ok(conflict(
+        ),
+        RetireOutcome::NeedsAcknowledgement { policy_id, kind, source, description } => conflict(
             "decision-change-unacknowledged",
             &format!(
                 "'{policy_id}' is a static policy: it is evaluated on every request, so retiring it changes decisions \
                  fleet-wide. Re-send with acknowledge_decision_change=true."
             ),
             json!({ "kind": policy_kind_str(kind), "source": source, "description": description }),
-        )),
+        ),
     }
 }
 
@@ -132,6 +153,7 @@ mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use axum::extract::{FromRequest, Request};
+    use paigasus_iam_core::authz::model::PolicyKind;
 
     #[test]
     fn retire_body_defaults_acknowledge_to_false_when_the_field_is_absent() {
@@ -152,21 +174,23 @@ mod tests {
         assert!(acknowledged(Some(RetireBody { acknowledge_decision_change: true })));
     }
 
-    /// Exercises the REAL extractor axum runs for the handler's `body: Option<Json<RetireBody>>`
-    /// parameter — not a hand-rolled stand-in — against a request with no body and no
-    /// `Content-Type` header at all (the shape a bare `curl -X POST` with no `-d`/`-H` sends).
-    /// `axum`'s `Option<Json<T>>` impl only yields `Ok(None)` when the header is absent; were
-    /// this handler to instead require `Json<RetireBody>` directly, the SAME request would be
-    /// rejected before ever reaching the service with a `415`/`400`, not the intended
-    /// "unacknowledged" default. Uses `&()` as the extractor's state — the `Json`/`Option`
-    /// extraction path never touches `AppState`, so no database or composition-root wiring is
-    /// needed to prove this.
+    /// Exercises the REAL extractor axum runs for the handler's `body: Option<EnvelopeJson<
+    /// RetireBody>>` parameter — not a hand-rolled stand-in — against a request with no body and
+    /// no `Content-Type` header at all (the shape a bare `curl -X POST` with no `-d`/`-H`
+    /// sends). `EnvelopeJson`'s `OptionalFromRequest` impl only yields `Ok(None)` when the
+    /// header is absent (mirrors axum's own `Json<T>` behavior exactly); were this handler to
+    /// instead require `EnvelopeJson<RetireBody>` directly, the SAME request would be rejected
+    /// before ever reaching the service with a `415`/`400`, not the intended "unacknowledged"
+    /// default. Uses `&()` as the extractor's state — the `Json`/`Option` extraction path never
+    /// touches `AppState`, so no database or composition-root wiring is needed to prove this.
     #[tokio::test]
     async fn a_request_with_no_body_at_all_extracts_as_none_and_defaults_to_unacknowledged() {
         let req = Request::builder().method("POST").uri("/v1/authz/system-policies/legacy_auditor/retire").body(Body::empty()).unwrap();
-        let extracted = <Option<Json<RetireBody>> as FromRequest<()>>::from_request(req, &()).await.expect("an absent body must never be a 400");
+        let extracted = <Option<EnvelopeJson<RetireBody>> as FromRequest<()>>::from_request(req, &())
+            .await
+            .expect("an absent body must never be a 400");
         assert!(extracted.is_none(), "no Content-Type header must yield None, never an attempt to parse zero bytes as JSON");
-        assert!(!acknowledged(extracted.map(|Json(b)| b)));
+        assert!(!acknowledged(extracted.map(|EnvelopeJson(b)| b)));
     }
 
     /// The sibling case: a body that DOES declare JSON but omits the field entirely (`{}`) must
@@ -179,10 +203,31 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from("{}"))
             .unwrap();
-        let extracted = <Option<Json<RetireBody>> as FromRequest<()>>::from_request(req, &())
+        let extracted = <Option<EnvelopeJson<RetireBody>> as FromRequest<()>>::from_request(req, &())
             .await
             .expect("a valid empty JSON object must never be rejected");
-        assert!(!acknowledged(extracted.map(|Json(b)| b)));
+        assert!(!acknowledged(extracted.map(|EnvelopeJson(b)| b)));
+    }
+
+    /// The fix-round-flagged gap this now closes: a body that DOES declare
+    /// `Content-Type: application/json` but fails to parse must render the crate's stable
+    /// `{"error":{code,message}}` envelope (via `EnvelopeJson`), not axum's bare `JsonRejection`
+    /// plain-text/differently-shaped body.
+    #[tokio::test]
+    async fn a_malformed_json_body_is_rejected_with_the_stable_error_envelope() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/authz/system-policies/legacy_auditor/retire")
+            .header("content-type", "application/json")
+            .body(Body::from("{not valid json"))
+            .unwrap();
+        let rejection = <Option<EnvelopeJson<RetireBody>> as FromRequest<()>>::from_request(req, &())
+            .await
+            .expect_err("malformed JSON must be rejected");
+        assert_eq!(rejection.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(rejection).await;
+        assert_eq!(body["error"]["code"], json!("invalid_request"));
+        assert_eq!(body["error"]["message"], json!("invalid request body"));
     }
 
     async fn body_json(resp: Response) -> serde_json::Value {
@@ -223,5 +268,100 @@ mod tests {
         assert_eq!(body["error"]["message"], json!("boom"));
         assert_eq!(body["total_surviving"], json!(3));
         assert_eq!(body["truncated"], json!(false));
+    }
+
+    /// The fix-round finding this whole `response_for` extraction exists to close: without a
+    /// test constructing a `RetireOutcome::Retired` directly and checking the response, a
+    /// `StatusCode::OK` -> `StatusCode::NO_CONTENT` regression on the success arm passed the
+    /// entire crate's test suite unchanged.
+    #[tokio::test]
+    async fn response_for_retired_is_200_with_what_was_destroyed() {
+        let outcome = RetireOutcome::Retired {
+            policy_id: "legacy_auditor".to_string(),
+            kind: PolicyKind::Template,
+            role_deleted: true,
+        };
+        let resp = response_for(outcome);
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a successful retirement must be 200, never 204 — the body is the only immediate record of the delete"
+        );
+        let body = body_json(resp).await;
+        assert_eq!(body["policy_id"], json!("legacy_auditor"));
+        assert_eq!(body["kind"], json!("template"));
+        assert_eq!(body["role_deleted"], json!(true));
+    }
+
+    /// `Retired` with no role row (a template with no linked role, or an acknowledged static
+    /// retirement) must report `role_deleted: false`, not merely omit the field.
+    #[tokio::test]
+    async fn response_for_retired_reports_role_deleted_false_when_no_role_existed() {
+        let outcome = RetireOutcome::Retired {
+            policy_id: "legacy_forbid".to_string(),
+            kind: PolicyKind::Static,
+            role_deleted: false,
+        };
+        let body = body_json(response_for(outcome)).await;
+        assert_eq!(body["kind"], json!("static"));
+        assert_eq!(body["role_deleted"], json!(false));
+    }
+
+    /// `Blocked` -> 409 `grants-survive`, with the surviving grants, the true total (not the
+    /// page length), `truncated`, AND the archived-scope guidance in the message — that
+    /// sentence is the operator's only exit from a revoke-403/archived-scope refusal loop, so
+    /// losing it silently would strand an operator exactly there.
+    #[tokio::test]
+    async fn response_for_blocked_is_409_with_grants_survive_and_the_archived_scope_guidance() {
+        let grants = vec![GrantRef {
+            id: "g1".to_string(),
+            principal_prn: "prn:iam::principal/00000000-0000-0000-0000-000000000001".to_string(),
+            scope_prn: "prn:iam::root".to_string(),
+        }];
+        let outcome = RetireOutcome::Blocked {
+            role_key: "legacy_auditor".to_string(),
+            grants,
+            total: 3,
+            truncated: false,
+        };
+        let resp = response_for(outcome);
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["code"], json!("grants-survive"));
+        let message = body["error"]["message"].as_str().expect("message must be a string");
+        assert!(message.contains("legacy_auditor"));
+        assert!(message.contains("3 grant"));
+        assert!(
+            message.contains("archived") && message.contains("re-archive"),
+            "the message must carry the archived-scope guidance (restore/revoke/re-archive) — \
+             an operator's only exit from a revoke-403 refusal loop: {message}"
+        );
+        assert_eq!(body["total_surviving"], json!(3));
+        assert_eq!(body["truncated"], json!(false));
+        assert_eq!(body["grants"][0]["id"], json!("g1"));
+        assert_eq!(body["grants"][0]["scope_prn"], json!("prn:iam::root"));
+    }
+
+    /// `NeedsAcknowledgement` -> 409 `decision-change-unacknowledged`, carrying the exact
+    /// content that would be destroyed (`kind`/`source`/`description`) — the refusal IS the
+    /// preview, so losing any one of these fields would silently blind an operator deciding
+    /// whether to re-send with `acknowledge_decision_change=true`.
+    #[tokio::test]
+    async fn response_for_needs_acknowledgement_is_409_with_the_content_that_would_be_destroyed() {
+        let outcome = RetireOutcome::NeedsAcknowledgement {
+            policy_id: "legacy_forbid".to_string(),
+            kind: PolicyKind::Static,
+            source: "forbid(principal, action, resource);".to_string(),
+            description: "a retired guard".to_string(),
+        };
+        let resp = response_for(outcome);
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["code"], json!("decision-change-unacknowledged"));
+        assert!(body["error"]["message"].as_str().unwrap().contains("legacy_forbid"));
+        assert!(body["error"]["message"].as_str().unwrap().contains("acknowledge_decision_change=true"));
+        assert_eq!(body["kind"], json!("static"));
+        assert_eq!(body["source"], json!("forbid(principal, action, resource);"));
+        assert_eq!(body["description"], json!("a retired guard"));
     }
 }
