@@ -225,7 +225,7 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
         count("orphaned");
         tracing::warn!(
             policy_id = %orphan,
-            "a system-owned policy row is no longer code-defined; it still compiles and still links grants, and DeletePolicy refuses to remove it"
+            "a system-owned policy row is no longer code-defined; it still compiles and still links grants, and DeletePolicy refuses to remove it. Retire it with POST /v1/authz/system-policies/{orphan}/retire once every replica is on a binary that no longer defines it (see RUNBOOK)"
         );
     }
     Ok(())
@@ -349,7 +349,10 @@ pub async fn reconcile_roles<I: IdGenerator, C: Clock>(deps: &ReconcileStarterDe
         }
     };
     for orphan in orphans {
-        tracing::warn!(role_key = %orphan, "a system role row is no longer code-defined; existing grants of it still resolve");
+        tracing::warn!(
+            role_key = %orphan,
+            "a system role row is no longer code-defined; existing grants of it still resolve. Revoke those grants, then retire it with POST /v1/authz/system-policies/{orphan}/retire (see RUNBOOK)"
+        );
     }
     Ok(())
 }
