@@ -12,16 +12,26 @@
 //!
 //! - a routine code change converges silently (INFO);
 //! - a row written by a NEWER release is left alone (`StaleBinary`) — see
-//!   `authz::roles::STARTER_POLICY_REVISION` for why that matters with one shared table;
+//!   `authz::roles::STARTER_POLICY_REVISION` for why that matters with one shared table. When
+//!   such a row's provenance does NOT check out, the deferral still stands (an older binary must
+//!   never rewrite a newer release's row) but it is reported as the divergence it is: WARN, and
+//!   the `externally_modified` metric label rather than `stale_binary`;
 //! - an out-of-band edit converges LOUDLY: WARN, a metric, and one audit entry capturing what
 //!   was overwritten, since converging destroys the evidence.
 //!
-//! **Failure posture (SMA-477 D12).** Converging an existing row is best-effort: an error is
-//! logged, counted, and skipped, because that row governed decisions perfectly well before this
-//! change and refusing to boot would turn a transient database blip into an outage. SEEDING an
-//! absent row stays fatal — `AppState::new` documents that the initial snapshot always compiles
-//! at least the starter set, and a replica that booted with a partial policy set would deny
-//! everything.
+//! **Failure posture (SMA-477 D12), applied symmetrically to BOTH halves.** Converging an
+//! existing row is best-effort: an error is logged, counted, and skipped, because that row
+//! governed decisions perfectly well before this change and refusing to boot would turn a
+//! transient database blip into an outage. SEEDING an absent row stays fatal:
+//!
+//! - for a policy, `AppState::new` documents that the initial snapshot always compiles at least
+//!   the starter set, and a replica that booted with a partial policy set would deny everything;
+//! - for a role, `role_grant.role_key` carries an FK to `role.key` (`fk_role_grant_role`), so a
+//!   replica that booted past a failed `platform_admin` INSERT does not fail at boot — it fails
+//!   the first bootstrap-admin grant with a raw foreign-key violation, at authentication time.
+//!
+//! Both halves therefore snapshot the persisted ids ONCE before their loop and decide fatality
+//! against it ([`classify_failure`]).
 
 use metrics::counter;
 use paigasus_iam_core::authz::model::root_prn;
@@ -81,10 +91,11 @@ enum FailureKind {
     FatalUnknownSnapshot,
 }
 
-/// `snapshot == None` means the pre-loop read itself failed (see [`reconcile_policies`]).
-fn classify_failure(snapshot: Option<&[String]>, policy_id: &str) -> FailureKind {
+/// `snapshot == None` means the pre-loop read itself failed (see [`reconcile_policies`]). Shared
+/// by both halves — `key` is a `policy_id` for the policy loop and a `role.key` for the role one.
+fn classify_failure(snapshot: Option<&[String]>, key: &str) -> FailureKind {
     match snapshot {
-        Some(ids) if ids.iter().any(|id| id == policy_id) => FailureKind::Survivable,
+        Some(ids) if ids.iter().any(|id| id == key) => FailureKind::Survivable,
         Some(_) => FailureKind::FatalMissingRow,
         None => FailureKind::FatalUnknownSnapshot,
     }
@@ -250,21 +261,73 @@ async fn record_reconcile_audit<I: IdGenerator, C: Clock>(
     }
 }
 
-/// Reconciles every `authz::roles::system_roles()` row. These columns are introspectable-only,
-/// so drift here is cosmetic — logged, never audited.
+/// Reconciles every `authz::roles::system_roles()` row. Drift in these columns is cosmetic (they
+/// are introspectable-only), so a failure to CONVERGE is logged and skipped and nothing here is
+/// ever audited — but a failure to SEED an absent row is fatal, exactly as on the policy half:
+/// `role_grant.role_key` carries an FK to `role.key`, so booting past a missing `platform_admin`
+/// row just moves the failure to the first bootstrap-admin grant, as a raw FK violation at
+/// authentication time.
 pub async fn reconcile_roles<I: IdGenerator, C: Clock>(deps: &ReconcileStarterDeps<I, C>) -> Result<(), AuthzError> {
+    // One read before the loop, degrading to `None` on failure — the policy half's posture and
+    // its reasoning verbatim (see [`reconcile_policies`]).
+    let existing_keys: Option<Vec<String>> = match deps.roles.existing_role_keys().await {
+        Ok(keys) => Some(keys),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not read the persisted role-key snapshot; every system role reconciliation failure this boot will be treated as fatal because no row can be proven to already exist"
+            );
+            None
+        }
+    };
+
     for role_def in authz_roles::system_roles() {
         match deps.roles.reconcile_role(&role_def).await {
             Ok(RoleOutcome::Inserted) => tracing::info!(role_key = %role_def.key, "seeded system role"),
             Ok(RoleOutcome::Updated) => tracing::info!(role_key = %role_def.key, "converged system role row to the code-defined catalog"),
             Ok(RoleOutcome::Unchanged) => {}
-            Err(err) => tracing::error!(role_key = %role_def.key, error = %err, "system role reconciliation failed; keeping the stored row for this boot"),
+            Err(err) => {
+                count("failed");
+                match classify_failure(existing_keys.as_deref(), &role_def.key) {
+                    // The row exists. Its columns are introspectable-only, so stale ones cost
+                    // nothing for one boot — strictly better than refusing to start.
+                    FailureKind::Survivable => {
+                        tracing::error!(role_key = %role_def.key, error = %err, "system role reconciliation failed; keeping the stored row for this boot");
+                    }
+                    // The row is MISSING and could not be written. Every grant of this role
+                    // takes an FK to it, so continuing defers the failure to the first
+                    // authentication that needs it — a far more confusing outage than this one.
+                    FailureKind::FatalMissingRow => {
+                        tracing::error!(role_key = %role_def.key, error = %err, "failed to seed a missing system role; refusing to boot with an incomplete role catalog");
+                        return Err(err);
+                    }
+                    // Deliberately NOT the message above: the row is probably fine, we simply
+                    // could not prove it. Points at the warning that explains why.
+                    FailureKind::FatalUnknownSnapshot => {
+                        tracing::error!(
+                            role_key = %role_def.key,
+                            error = %err,
+                            "system role reconciliation failed and the role-key snapshot was unreadable (see the earlier warning), so this row cannot be proven to exist; refusing to boot rather than risk an incomplete role catalog"
+                        );
+                        return Err(err);
+                    }
+                }
+            }
         }
     }
 
     let known: Vec<String> = authz_roles::system_roles().into_iter().map(|r| r.key).collect();
     let known_refs: Vec<&str> = known.iter().map(String::as_str).collect();
-    for orphan in deps.roles.orphaned_system_role_keys(&known_refs).await.unwrap_or_default() {
+    // Warned about rather than swallowed, for the same reason the policy scan is: a failed scan
+    // and a clean database are otherwise indistinguishable in the logs.
+    let orphans = match deps.roles.orphaned_system_role_keys(&known_refs).await {
+        Ok(keys) => keys,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not scan for orphaned system role rows; retired roles go unreported this boot");
+            Vec::new()
+        }
+    };
+    for orphan in orphans {
         tracing::warn!(role_key = %orphan, "a system role row is no longer code-defined; existing grants of it still resolve");
     }
     Ok(())
@@ -352,6 +415,11 @@ mod tests {
         }
     }
 
+    /// Every system role key, i.e. the snapshot a healthy database returns on a warm boot.
+    fn all_role_keys() -> Vec<String> {
+        authz_roles::system_roles().into_iter().map(|r| r.key).collect()
+    }
+
     #[derive(Default)]
     struct ScriptedRoles {
         fail: bool,
@@ -359,6 +427,21 @@ mod tests {
         seen: Mutex<Vec<String>>,
         orphans: Vec<String>,
         orphan_known: Mutex<Vec<String>>,
+        existing: Vec<String>,
+        existing_calls: AtomicUsize,
+        /// Simulates the pre-loop snapshot read failing INDEPENDENTLY of `existing`, so a
+        /// fixture can hold "every row is really there, but we could not read the list".
+        existing_fails: bool,
+    }
+
+    impl ScriptedRoles {
+        /// The healthy-database default: every role row already persisted.
+        fn seeded() -> Arc<Self> {
+            Arc::new(ScriptedRoles {
+                existing: all_role_keys(),
+                ..Default::default()
+            })
+        }
     }
 
     #[async_trait::async_trait]
@@ -374,10 +457,17 @@ mod tests {
             *self.orphan_known.lock().unwrap() = known.iter().map(|k| (*k).to_string()).collect();
             Ok(self.orphans.clone())
         }
+        async fn existing_role_keys(&self) -> Result<Vec<String>, AuthzError> {
+            self.existing_calls.fetch_add(1, Ordering::SeqCst);
+            if self.existing_fails {
+                return Err(backend_error("role snapshot read failed"));
+            }
+            Ok(self.existing.clone())
+        }
     }
 
     fn deps(policies: Arc<ScriptedPolicies>, audit: Arc<dyn AuditLog>) -> ReconcileStarterDeps<KernelIdGenerator, SystemClock> {
-        deps_with_roles(policies, Arc::new(ScriptedRoles::default()), audit)
+        deps_with_roles(policies, ScriptedRoles::seeded(), audit)
     }
 
     fn deps_with_roles(policies: Arc<ScriptedPolicies>, roles: Arc<ScriptedRoles>, audit: Arc<dyn AuditLog>) -> ReconcileStarterDeps<KernelIdGenerator, SystemClock> {
@@ -687,24 +777,90 @@ mod tests {
         assert!(entries.0.lock().unwrap().is_empty(), "an orphan is logged and counted, never written to the append-only audit table");
     }
 
-    /// The role half is untested otherwise: a role-table failure must NOT stop a replica (the
-    /// columns are introspectable-only), every role is still attempted, orphan keys are scanned,
-    /// and — as above — nothing here audits.
+    /// A failure to CONVERGE a persisted role row must not stop a replica — those columns are
+    /// introspectable-only, so stale ones cost nothing for a boot. Every role is still attempted,
+    /// orphan keys are still scanned, and — as above — nothing here audits.
     #[tokio::test]
-    async fn a_role_failure_never_stops_boot_and_orphan_roles_are_reported_not_audited() {
+    async fn a_role_convergence_failure_never_stops_boot_and_orphan_roles_are_reported_not_audited() {
         let roles = Arc::new(ScriptedRoles {
             fail: true,
             orphans: vec!["retired_role".to_string()],
+            // Every row is persisted, so every failure here is a CONVERGENCE failure.
+            existing: all_role_keys(),
             ..Default::default()
         });
         let entries = FakeAuditLog::default();
         let d = deps_with_roles(ScriptedPolicies::with(StarterPolicyOutcome::Unchanged), roles.clone(), Arc::new(entries.clone()));
-        reconcile_roles(&d).await.expect("a role reconciliation failure must never stop a replica starting");
+        reconcile_roles(&d).await.expect("a convergence failure over a persisted role row must never stop a replica starting");
 
-        let expected_keys: Vec<String> = authz_roles::system_roles().into_iter().map(|r| r.key).collect();
+        let expected_keys = all_role_keys();
         assert_eq!(*roles.seen.lock().unwrap(), expected_keys, "every role is still attempted after one fails");
         assert_eq!(*roles.orphan_known.lock().unwrap(), expected_keys, "the orphan scan must run, against the code-defined role catalog");
         assert!(entries.0.lock().unwrap().is_empty(), "role drift is cosmetic — logged, never audited");
+    }
+
+    /// The regression this pairs with: on `main`, `seed_role_row`'s error propagated and failed
+    /// boot. Making every role error survivable meant a fresh database whose `platform_admin`
+    /// INSERT failed booted "healthy" and then failed the first bootstrap-admin grant with a raw
+    /// `fk_role_grant_role` violation, at authentication time. An ABSENT row that cannot be
+    /// written must still refuse to boot.
+    #[tokio::test]
+    async fn a_role_seeding_failure_is_fatal_but_a_convergence_failure_is_not() {
+        let seed_fail = Arc::new(ScriptedRoles {
+            fail: true,
+            existing: vec![],
+            ..Default::default()
+        });
+        let d = deps_with_roles(ScriptedPolicies::with(StarterPolicyOutcome::Unchanged), seed_fail.clone(), Arc::new(FakeAuditLog::default()));
+        reconcile_roles(&d).await.expect_err("a failure to seed a missing system role must fail boot");
+        assert_eq!(seed_fail.seen.lock().unwrap().len(), 1, "a fatal seeding failure must stop at the first role, not plough on");
+
+        // The same error over a database that HAS the row is survivable — so the fixture's
+        // `existing` list, not the error itself, is what decides. A fatality rule that ignored
+        // the snapshot would make one of these two assertions red.
+        let converge_fail = Arc::new(ScriptedRoles {
+            fail: true,
+            existing: all_role_keys(),
+            ..Default::default()
+        });
+        let d = deps_with_roles(ScriptedPolicies::with(StarterPolicyOutcome::Unchanged), converge_fail, Arc::new(FakeAuditLog::default()));
+        reconcile_roles(&d).await.expect("the identical error over a persisted row must stay survivable");
+    }
+
+    /// The role twin of `an_unreadable_id_snapshot_makes_every_failure_fatal`: a blip reading the
+    /// key list must fail CLOSED, and the fixture holds every key so a fake that ignored
+    /// `existing_fails` would take the survivable path and return `Ok`.
+    #[tokio::test]
+    async fn an_unreadable_role_key_snapshot_makes_every_role_failure_fatal() {
+        let roles = Arc::new(ScriptedRoles {
+            fail: true,
+            existing_fails: true,
+            existing: all_role_keys(),
+            ..Default::default()
+        });
+        let d = deps_with_roles(ScriptedPolicies::with(StarterPolicyOutcome::Unchanged), roles.clone(), Arc::new(FakeAuditLog::default()));
+        reconcile_roles(&d)
+            .await
+            .expect_err("an unreadable role-key snapshot must fail closed, not be swallowed into the survivable path");
+        assert_eq!(roles.existing_calls.load(Ordering::SeqCst), 1, "the failed read is still only attempted once");
+    }
+
+    /// One read, not eight — the role twin of `the_existing_id_snapshot_is_read_once_before_the_
+    /// loop`.
+    #[tokio::test]
+    async fn the_existing_role_key_snapshot_is_read_once_before_the_loop() {
+        let roles = Arc::new(ScriptedRoles {
+            outcome: Some(RoleOutcome::Updated),
+            existing: all_role_keys(),
+            ..Default::default()
+        });
+        let d = deps_with_roles(ScriptedPolicies::with(StarterPolicyOutcome::Unchanged), roles.clone(), Arc::new(FakeAuditLog::default()));
+        reconcile_roles(&d).await.unwrap();
+        assert!(
+            roles.seen.lock().unwrap().len() > 1,
+            "the fixture must span several roles for a per-iteration read to be distinguishable"
+        );
+        assert_eq!(roles.existing_calls.load(Ordering::SeqCst), 1, "the role-key snapshot must be captured once, before any convergence");
     }
 
     /// One read, not nine: every policy is judged against ONE consistent basis, and the whole

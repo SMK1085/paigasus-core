@@ -131,7 +131,22 @@ pub trait SystemPolicyReconciler: Send + Sync {
 #[async_trait]
 pub trait SystemRoleReconciler: Send + Sync {
     async fn reconcile_role(&self, role: &Role) -> Result<RoleOutcome, AuthzError>;
+    /// Keys of persisted `system = true` rows NOT in `known` — retired roles. Reported, never
+    /// removed (same posture, and same out-of-scope retirement path, as
+    /// [`SystemPolicyReconciler::orphaned_system_policy_ids`]).
+    ///
+    /// Sorted ascending by key, for the same reason its policy twin is: boot logs one line per
+    /// orphan, and an unstable order would reshuffle those lines run to run.
     async fn orphaned_system_role_keys(&self, known: &[&str]) -> Result<Vec<String>, AuthzError>;
+    /// Every persisted `role.key`, captured once before reconciliation — the exact twin of
+    /// [`SystemPolicyReconciler::existing_policy_ids`], and load-bearing for the same reason:
+    /// boot must tell a SURVIVABLE convergence failure (the row exists; its columns are
+    /// introspectable-only, so stale ones cost nothing for one boot) from a FATAL seeding
+    /// failure. A missing `role` row is not cosmetic — `role_grant.role_key` carries an FK to it
+    /// (`fk_role_grant_role`), so a replica that booted past a failed INSERT fails the first
+    /// bootstrap-admin grant with a raw foreign-key violation at authentication time instead of
+    /// refusing to start.
+    async fn existing_role_keys(&self) -> Result<Vec<String>, AuthzError>;
 }
 
 #[cfg(test)]

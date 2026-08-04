@@ -715,10 +715,15 @@ async fn orphaned_system_role_keys_reports_retired_roles_only() {
     for r in system_roles() {
         roles.reconcile_role(&r).await.unwrap();
     }
+    // TWO retired rows, inserted in REVERSE key order. A heap scan returns them in insertion
+    // order, so without the `ORDER BY key` this asserts `["z_retired_role", "a_retired_role"]`
+    // and reddens — which is the only way a single-orphan fixture's ordering claim can be
+    // falsified at all.
     db.execute(Statement::from_string(
         DbBackend::Postgres,
         r#"INSERT INTO "role" (key, template_id, scope_kinds, description, system, created_at)
-           VALUES ('retired_role', 'org_admin', '["organization"]', NULL, true, now())"#
+           VALUES ('z_retired_role', 'org_admin', '["organization"]', NULL, true, now()),
+                  ('a_retired_role', 'org_admin', '["organization"]', NULL, true, now())"#
             .to_string(),
     ))
     .await
@@ -746,7 +751,21 @@ async fn orphaned_system_role_keys_reports_retired_roles_only() {
     let known_roles = system_roles();
     let known: Vec<&str> = known_roles.iter().map(|r| r.key.as_str()).collect();
     let orphans = roles.orphaned_system_role_keys(&known).await.unwrap();
-    assert_eq!(orphans, vec!["retired_role".to_string()], "a non-system role row must never be reported as orphaned");
+    assert_eq!(
+        orphans,
+        vec!["a_retired_role".to_string(), "z_retired_role".to_string()],
+        "orphans are reported ascending by key (boot logs one line each), and a non-system role row is never reported at all"
+    );
+
+    // `existing_role_keys` feeds boot's fatal-vs-survivable decision, so — like its policy twin —
+    // it must report EVERY row, `system` or not: an operator's row at a code-defined key still
+    // means the key exists, and reporting it absent would turn a survivable failure fatal.
+    let mut all_keys = roles.existing_role_keys().await.unwrap();
+    all_keys.sort();
+    let mut want: Vec<String> = known.iter().map(|k| (*k).to_string()).collect();
+    want.extend(["z_retired_role".to_string(), "a_retired_role".to_string(), "operator_role".to_string()]);
+    want.sort();
+    assert_eq!(all_keys, want, "existing_role_keys must report every persisted row, system or not");
 }
 
 /// The whole boot path: an out-of-band edit is converged AND leaves exactly one audit row that
