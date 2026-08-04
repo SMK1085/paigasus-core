@@ -5,6 +5,7 @@ pub mod engine;
 pub mod model;
 pub mod ports;
 pub mod reconcile;
+pub mod retirement;
 pub mod roles;
 pub mod schema;
 
