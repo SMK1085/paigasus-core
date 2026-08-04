@@ -91,7 +91,7 @@ fn reconcile_deps(db: &DatabaseConnection, gens: &Generations) -> ReconcileStart
 }
 
 #[tokio::test]
-async fn reconcile_seeds_every_starter_policy_and_the_seven_system_roles() {
+async fn reconcile_seeds_every_starter_policy_and_the_eight_system_roles() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
 
     let gens = Generations::memory();
@@ -631,4 +631,66 @@ async fn orphaned_system_role_keys_reports_retired_roles_only() {
     let known: Vec<&str> = known_roles.iter().map(|r| r.key.as_str()).collect();
     let orphans = roles.orphaned_system_role_keys(&known).await.unwrap();
     assert_eq!(orphans, vec!["retired_role".to_string()], "a non-system role row must never be reported as orphaned");
+}
+
+/// The whole boot path: an out-of-band edit is converged AND leaves exactly one audit row that
+/// the standard audit query can actually find.
+#[tokio::test]
+async fn boot_reverts_an_out_of_band_edit_and_records_it_in_the_audit_log() {
+    use paigasus_iam_core::AuditFilter;
+    use paigasus_iam_core::authz::model::root_prn;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let gens = Generations::memory();
+    reconcile_starter(&reconcile_deps(&db, &gens)).await.unwrap();
+
+    let target = "forbid-archived-writes";
+    let original = stored_source(&db, target).await;
+    tamper_policy(&db, target, "permit(principal, action, resource);", Some(&"0".repeat(64))).await;
+
+    reconcile_starter(&reconcile_deps(&db, &gens)).await.unwrap();
+    assert_eq!(stored_source(&db, target).await, original, "boot must converge the edited row back");
+
+    let audit = PgAuditLog::new(db.clone());
+    let entries = audit
+        .query(&AuditFilter {
+            actor_prn: None,
+            resource_prn: Some(root_prn().canonical()),
+            action: Some("PutPolicy".to_string()),
+            outcome: None,
+            from: Some(Utc::now() - chrono::Duration::days(1)),
+            to: None,
+            cursor: None,
+            limit: 50,
+        })
+        .await
+        .unwrap();
+
+    let ours: Vec<_> = entries.iter().filter(|e| e.detail["source"] == serde_json::json!("starter_policy_reconcile")).collect();
+    assert_eq!(ours.len(), 1, "exactly one reconciliation audit row");
+    assert_eq!(ours[0].detail["policy_id"], serde_json::json!(target));
+    assert_eq!(ours[0].detail["reason"], serde_json::json!("external_modification"));
+    assert_eq!(ours[0].detail["previous_content"]["source"], serde_json::json!("permit(principal, action, resource);"));
+    assert_eq!(ours[0].actor_prn, None);
+
+    // And a third boot is quiet again.
+    reconcile_starter(&reconcile_deps(&db, &gens)).await.unwrap();
+    let after = audit
+        .query(&AuditFilter {
+            actor_prn: None,
+            resource_prn: Some(root_prn().canonical()),
+            action: Some("PutPolicy".to_string()),
+            outcome: None,
+            from: Some(Utc::now() - chrono::Duration::days(1)),
+            to: None,
+            cursor: None,
+            limit: 50,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        after.iter().filter(|e| e.detail["source"] == serde_json::json!("starter_policy_reconcile")).count(),
+        1,
+        "a converged row must not keep auditing every boot"
+    );
 }
