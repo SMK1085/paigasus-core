@@ -49,6 +49,11 @@ pub enum Action {
     ListOutboxDeadLetters,
     ReplayOutboxDeadLetter,
     DiscardOutboxDeadLetter,
+    /// Retire an orphaned system-owned policy row (and its `role` row, if any) whose id the
+    /// code catalog no longer defines — SMA-481. Root-only, enforced in
+    /// `SystemRetirementService` rather than the Cedar schema, exactly like the three
+    /// dead-letter actions above.
+    RetireSystemPolicy,
     InvokeModel,
 }
 
@@ -93,6 +98,7 @@ impl Action {
         Action::ListOutboxDeadLetters,
         Action::ReplayOutboxDeadLetter,
         Action::DiscardOutboxDeadLetter,
+        Action::RetireSystemPolicy,
         Action::InvokeModel,
     ];
 
@@ -139,6 +145,7 @@ impl Action {
             Action::ListOutboxDeadLetters => "ListOutboxDeadLetters",
             Action::ReplayOutboxDeadLetter => "ReplayOutboxDeadLetter",
             Action::DiscardOutboxDeadLetter => "DiscardOutboxDeadLetter",
+            Action::RetireSystemPolicy => "RetireSystemPolicy",
             Action::InvokeModel => "InvokeModel",
         }
     }
@@ -199,6 +206,7 @@ impl Action {
             | Action::RevokeApiKey
             | Action::ReplayOutboxDeadLetter
             | Action::DiscardOutboxDeadLetter
+            | Action::RetireSystemPolicy
             | Action::InvokeModel => true,
         }
     }
@@ -281,13 +289,18 @@ mod tests {
                 | Action::ListOutboxDeadLetters
                 | Action::ReplayOutboxDeadLetter
                 | Action::DiscardOutboxDeadLetter
+                | Action::RetireSystemPolicy
                 | Action::InvokeModel => {}
             }
         }
         for a in Action::ALL {
             assert_in_all(*a);
         }
-        assert_eq!(Action::ALL.len(), 39, "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter");
+        assert_eq!(
+            Action::ALL.len(),
+            40,
+            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy"
+        );
     }
     #[test]
     fn list_audit_log_is_a_read_action() {
@@ -321,5 +334,12 @@ mod tests {
                 assert!(a.is_write(), "{}: every restore action must also be a write", a.as_wire());
             }
         }
+    }
+    #[test]
+    fn retire_system_policy_is_a_non_restore_write() {
+        assert_eq!(Action::RetireSystemPolicy.as_wire(), "RetireSystemPolicy");
+        assert!(Action::RetireSystemPolicy.is_write(), "retirement deletes policy and role rows");
+        assert!(!Action::RetireSystemPolicy.is_restore());
+        assert!(Action::ALL.contains(&Action::RetireSystemPolicy), "must be in the catalog or the forbid list misses it");
     }
 }
