@@ -136,7 +136,20 @@ impl SystemRowRetirer for PgSystemRowRetirer {
         if revisions.iter().any(Option::is_none) {
             return Ok(None);
         }
-        Ok(revisions.into_iter().flatten().map(|r| u32::try_from(r).unwrap_or(0)).min())
+        // The column is Postgres `i32` (no unsigned integer type exists), but every value this
+        // service itself ever writes is a non-negative `u32` cast up (`pg_policies.rs::
+        // converged_model`), so a negative value can only come from a hand edit — the same
+        // data-integrity-break posture `kind_from_str` takes for a `kind` outside its domain.
+        // Unlike the NULL case above, there is no safe direction to coerce a negative into:
+        // clamping it to `0` would read as "oldest possible" and defer retirement behind a row
+        // that is actually just corrupt, not genuinely old. Surface it loudly instead of
+        // guessing which way a silent default should lean.
+        revisions
+            .into_iter()
+            .flatten()
+            .map(|r| u32::try_from(r).map_err(|_| backend_err(format!("policy.starter_revision is negative: {r}"))))
+            .collect::<Result<Vec<u32>, AuthzError>>()
+            .map(|revisions| revisions.into_iter().min())
     }
 
     async fn delete_role_in(&self, tx: &dyn Transaction, key: &str) -> Result<bool, AuthzError> {

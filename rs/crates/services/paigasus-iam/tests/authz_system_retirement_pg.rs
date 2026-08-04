@@ -12,7 +12,7 @@ mod support;
 use chrono::Utc;
 use paigasus_iam::adapters::persistence::PgSystemRowRetirer;
 use paigasus_iam::adapters::persistence::entities::{policy, principal, role, role_grant};
-use paigasus_iam_core::{GrantScope, SystemRowRetirer};
+use paigasus_iam_core::{AuthzError, GrantScope, SystemRowRetirer};
 use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, DatabaseConnection, Set};
 use std::time::Duration;
 use uuid::Uuid;
@@ -51,19 +51,21 @@ async fn seed_orphan_chain(db: &DatabaseConnection, id: &str) {
     .unwrap();
 }
 
-/// Seeds `n` distinct principals, each granted `role_key` at the synthetic Root scope. Distinct
-/// PRINCIPALS (rather than distinct scopes) are what makes each grant a genuinely separate row
-/// under `uq_role_grant_principal_role_scope` (principal_id, role_key, scope_node_prn) — every
-/// grant here shares the same role and the same Root scope on purpose. Ids are minted from the
-/// loop index (never 0, so `Uuid::from_u128` never collides with `Uuid::nil()`), deterministic
-/// without needing a real id generator.
-async fn seed_grants(db: &DatabaseConnection, role_key: &str, n: u32) {
+/// Seeds one grant of `role_key` at the synthetic Root scope per entry in `ids`, inserted in
+/// the GIVEN order — the caller controls insertion order deliberately (fix round 1: a fixture
+/// that happens to insert in ascending-id order makes an "ordered by id" assertion
+/// self-satisfying, since a plain heap scan can return rows in insertion order by accident
+/// whether or not `ORDER BY id` is actually in the query). Each id doubles as both the grant's
+/// own `id` and its principal's `id`. Distinct PRINCIPALS (rather than distinct scopes) are
+/// what makes each grant a genuinely separate row under `uq_role_grant_principal_role_scope`
+/// (principal_id, role_key, scope_node_prn) — every grant here shares the same role and the
+/// same Root scope on purpose.
+async fn seed_grants(db: &DatabaseConnection, role_key: &str, ids: &[Uuid]) {
     let now = Utc::now();
-    for i in 0..n {
-        let principal_id = Uuid::from_u128(u128::from(i) + 1);
+    for &id in ids {
         principal::ActiveModel {
-            id: Set(principal_id),
-            prn: Set(format!("prn:pgs:iam:::principal/{principal_id}")),
+            id: Set(id),
+            prn: Set(format!("prn:pgs:iam:::principal/{id}")),
             kind: Set("user".to_string()),
             status: Set("active".to_string()),
             created_at: Set(now),
@@ -73,17 +75,16 @@ async fn seed_grants(db: &DatabaseConnection, role_key: &str, n: u32) {
         .await
         .unwrap();
 
-        let grant_id = principal_id;
         role_grant::ActiveModel {
-            id: Set(grant_id),
-            principal_id: Set(principal_id),
+            id: Set(id),
+            principal_id: Set(id),
             role_key: Set(role_key.to_string()),
             scope_kind: Set("root".to_string()),
             scope_node_prn: Set(GrantScope::Root.canonical_prn()),
             scope_org_id: Set(None),
             scope_team_id: Set(None),
             scope_project_id: Set(None),
-            linked_policy_id: Set(format!("grant:{grant_id}")),
+            linked_policy_id: Set(format!("grant:{id}")),
             created_at: Set(now),
         }
         .insert(db)
@@ -145,11 +146,40 @@ async fn the_fk_ordering_is_real_and_the_retirer_respects_it() {
     assert!(retirer.lock_policy_in(&*verify_tx, "legacy_auditor").await.unwrap().is_none());
 }
 
+/// Smoke-checks `lock_role_in`'s two read outcomes against a real row: it reads the right row
+/// (`key`/`system` round-trip) and correctly reports absence once the row is gone. This does
+/// **not** prove the row is actually locked `FOR UPDATE` — nothing here would catch a
+/// regression that dropped `.lock_exclusive()` from the query, since a single connection can't
+/// observe its own lock. Proving the lock itself holds needs two connections racing on the same
+/// key, which is Task 9's `a_concurrent_grant_blocks_then_reports_unknown_role`.
+#[tokio::test]
+async fn lock_role_in_reads_the_row_and_then_reports_its_absence() {
+    let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    seed_orphan_chain(&db, "legacy_auditor").await;
+    let retirer = PgSystemRowRetirer::new(db.clone());
+
+    let tx = retirer.begin_retirement(Duration::from_secs(5)).await.unwrap();
+    let found = retirer.lock_role_in(&*tx, "legacy_auditor").await.unwrap().expect("the seeded role row must be found");
+    assert_eq!(found.key, "legacy_auditor");
+    assert!(found.system, "the seeded role row is system-owned");
+
+    assert!(retirer.delete_role_in(&*tx, "legacy_auditor").await.unwrap());
+    assert!(retirer.lock_role_in(&*tx, "legacy_auditor").await.unwrap().is_none(), "the same transaction must see its own delete");
+    tx.commit().await.unwrap();
+}
+
 #[tokio::test]
 async fn surviving_grants_are_capped_and_report_the_true_total() {
     let Some((_c, db)) = support::start_migrated_postgres().await else { return };
     seed_orphan_chain(&db, "legacy_auditor").await;
-    seed_grants(&db, "legacy_auditor", 5).await;
+    // Deliberately inserted OUT of ascending-id order (5, 2, 4, 1, 3): if this seeded 1..=5 in
+    // order, sorting the returned page and comparing it to itself would pass whether or not
+    // `.order_by_asc(role_grant::Column::Id)` is even in the query — a heap scan can return rows
+    // in insertion order by accident. Shuffling the insertion order is what makes the assertion
+    // below actually exercise the ORDER BY clause: only a real ascending sort returns the two
+    // SMALLEST ids (1, 2) first, not the first two inserted (5, 2).
+    let ids = [Uuid::from_u128(5), Uuid::from_u128(2), Uuid::from_u128(4), Uuid::from_u128(1), Uuid::from_u128(3)];
+    seed_grants(&db, "legacy_auditor", &ids).await;
     let retirer = PgSystemRowRetirer::new(db.clone());
 
     let tx = retirer.begin_retirement(Duration::from_secs(5)).await.unwrap();
@@ -158,10 +188,9 @@ async fn surviving_grants_are_capped_and_report_the_true_total() {
     assert_eq!(survivors.total, 5, "the total is the truth, not the page size");
     assert!(survivors.truncated(2));
 
-    let ids: Vec<&str> = survivors.grants.iter().map(|g| g.id.as_str()).collect();
-    let mut sorted = ids.clone();
-    sorted.sort_unstable();
-    assert_eq!(ids, sorted, "ordered by id so a refusal lists them deterministically");
+    let got: Vec<String> = survivors.grants.iter().map(|g| g.id.clone()).collect();
+    let want: Vec<String> = [Uuid::from_u128(1), Uuid::from_u128(2)].into_iter().map(|u| u.to_string()).collect();
+    assert_eq!(got, want, "ordered by id ascending — the two SMALLEST ids, not the first two inserted");
 }
 
 #[tokio::test]
@@ -171,4 +200,39 @@ async fn min_starter_revision_reports_null_as_none() {
     seed_system_policy_with_revision(&db, "legacy_forbid", None).await;
     let retirer = PgSystemRowRetirer::new(db.clone());
     assert_eq!(retirer.min_starter_revision().await.unwrap(), None, "a NULL revision is unprovable, not zero");
+}
+
+/// Seeds a system-owned `policy` row with `starter_revision` forced to a value
+/// `Option<u32>`-typed helpers (`seed_system_policy_with_revision`) can't represent on purpose
+/// — a raw negative `i32`, only reachable via a hand edit (every value this service itself
+/// writes is cast up from a `u32`).
+async fn seed_system_policy_with_raw_revision(db: &DatabaseConnection, id: &str, revision: i32) {
+    let now = Utc::now();
+    policy::ActiveModel {
+        policy_id: Set(id.to_string()),
+        kind: Set("static".to_string()),
+        source: Set("forbid(principal, action, resource);".to_string()),
+        description: Set(None),
+        system: Set(true),
+        created_at: Set(now),
+        updated_at: Set(now),
+        content_fingerprint: NotSet,
+        starter_revision: Set(Some(revision)),
+    }
+    .insert(db)
+    .await
+    .unwrap();
+}
+
+/// Fix round 1: `min_starter_revision` used to coerce a negative `starter_revision` to `0`
+/// (`u32::try_from(r).unwrap_or(0)`) instead of surfacing it. Reading it as `0` — "oldest
+/// possible" — would defer retirement behind a row that is actually just corrupt, not
+/// genuinely old, so a negative value must error loudly instead of guessing a default.
+#[tokio::test]
+async fn min_starter_revision_rejects_a_negative_value_instead_of_coercing_it() {
+    let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    seed_system_policy_with_raw_revision(&db, "legacy_forbid", -1).await;
+    let retirer = PgSystemRowRetirer::new(db.clone());
+    let err = retirer.min_starter_revision().await.expect_err("a negative starter_revision must surface as an error, not coerce to 0");
+    assert!(matches!(err, AuthzError::Backend(_)), "unexpected error variant: {err:?}");
 }
