@@ -556,3 +556,33 @@ async fn granting_a_role_with_no_row_reports_unknown_role_not_internal() {
         "an FK violation on fk_role_grant_role means the role is gone, not that the backend broke; got {err:?}"
     );
 }
+
+/// SMA-481 review round 1 — `map_grant_err` must attribute the FK violation by constraint
+/// NAME, not just by "some foreign key fired": `role_grant` has five FKs
+/// (`fk_role_grant_principal`/`_role`/`_org`/`_team`/`_project`), and mapping all of them to
+/// `UnknownRole` would tell the caller the role is missing even when the role is fine and
+/// something else — here, the principal — is what's gone. A real `role` row is seeded below;
+/// the grant's `principal_id` names no row, so `fk_role_grant_principal` is what must fail,
+/// and the caller must be told the backend broke, not that a role it never asked about doesn't
+/// exist.
+#[tokio::test]
+async fn a_missing_principal_is_not_reported_as_an_unknown_role() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    seed_role(&db, "org_admin", now).await;
+
+    let principal_uuid = mint_uuid7(1_700_000_000_010, [11u8; 10]);
+    let principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", principal_uuid).unwrap());
+    let grant = make_grant(Uuid::from_u128(301), &principal, "org_admin", GrantScope::Root, now);
+
+    let store = PgRoleGrantStore::new(db.clone(), Generations::memory());
+    let uow = SeaOrmUnitOfWork::new(db);
+
+    let tx = uow.begin().await.unwrap();
+    let err = store.grant_in(&*tx, &grant).await.expect_err("no principal row means no grant");
+    assert!(
+        matches!(err, AuthzError::Backend(_)),
+        "a missing principal must not be reported as an unknown role — the role is fine, the principal is what's gone; got {err:?}"
+    );
+}

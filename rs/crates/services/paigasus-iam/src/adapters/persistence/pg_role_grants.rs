@@ -76,9 +76,17 @@ fn map_err(e: DbErr) -> AuthzError {
 }
 
 /// `grant_in`'s error mapping. The private [`map_err`] above collapses every `DbErr` into
-/// `Backend`, which is right for the reads and deletes around it but wrong here: a violation of
-/// `fk_role_grant_role` means the `role` row this grant names does not exist, which is exactly
-/// what `RoleService::grant` reports as `UnknownRole` before it ever reaches the database.
+/// `Backend`, which is right for the reads and deletes around it but wrong for exactly one of
+/// `role_grant`'s five foreign keys: a violation of `fk_role_grant_role` specifically means the
+/// `role` row this grant names does not exist, which is exactly what `RoleService::grant`
+/// reports as `UnknownRole` before it ever reaches the database. The other four —
+/// `fk_role_grant_principal`/`fk_role_grant_org`/`fk_role_grant_team`/`fk_role_grant_project` —
+/// mean something else entirely (a missing principal or tenancy node) and must stay `Backend`;
+/// matching on `SqlErr::ForeignKeyConstraintViolation` alone, without checking WHICH constraint
+/// fired, would confidently mislabel all five as "the role is gone" even when the role is fine.
+/// So this checks the constraint name embedded in the error text — mirroring `conflict_kind`'s
+/// (`persistence/mod.rs`) own name-based attribution for unique violations, not the raw
+/// message — before drawing the `UnknownRole` conclusion.
 ///
 /// This is not a theoretical branch. SMA-481 D6: a retirement holds the role row `FOR UPDATE`
 /// while a concurrent grant from a replica on an OLDER binary — one whose code catalog still
@@ -87,7 +95,7 @@ fn map_err(e: DbErr) -> AuthzError {
 /// gets a `500 internal error` for a condition the service understands perfectly well.
 fn map_grant_err(e: DbErr, role_key: &str) -> AuthzError {
     match e.sql_err() {
-        Some(SqlErr::ForeignKeyConstraintViolation(_)) => AuthzError::UnknownRole(role_key.to_string()),
+        Some(SqlErr::ForeignKeyConstraintViolation(ref msg)) if msg.contains("fk_role_grant_role") => AuthzError::UnknownRole(role_key.to_string()),
         _ => map_err(e),
     }
 }
