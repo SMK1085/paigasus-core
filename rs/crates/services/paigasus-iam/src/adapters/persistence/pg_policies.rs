@@ -184,8 +184,10 @@ fn kind_to_str(kind: PolicyKind) -> &'static str {
 
 /// A stored `kind` value outside `{static, template}` is a data-integrity break (the
 /// `ck_policy_kind` CHECK should prevent it) — surfaced as `Backend`, never a silent
-/// default, mirroring `pg_memberships.rs::parse_status`.
-fn kind_from_str(raw: &str) -> Result<PolicyKind, AuthzError> {
+/// default, mirroring `pg_memberships.rs::parse_status`. `pub(crate)`: `pg_system_row_
+/// retirer.rs` (SMA-481) reuses this exact match for `StoredPolicy::kind` rather than
+/// duplicating it — a stored value outside the set is the same data-integrity break there.
+pub(crate) fn kind_from_str(raw: &str) -> Result<PolicyKind, AuthzError> {
     match raw {
         "static" => Ok(PolicyKind::Static),
         "template" => Ok(PolicyKind::Template),
