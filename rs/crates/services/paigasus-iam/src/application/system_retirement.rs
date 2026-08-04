@@ -55,6 +55,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use metrics::counter;
 use paigasus_iam_core::authz::model::{PolicyKind, root_prn};
 use paigasus_iam_core::authz::roles::{self as authz_roles, STARTER_POLICY_REVISION};
@@ -138,13 +139,15 @@ impl SystemRetirementService {
         }
     }
 
-    /// Builds the retirement audit entry, sharing `corr` with the `DomainEvent` this same call
-    /// enqueues (the repo-wide one-correlation-id-per-mutation convention, `roles.rs`/
-    /// `policies.rs`).
-    fn audit_entry(&self, actor: &Prn, corr: Uuid, detail: serde_json::Value) -> AuditEntry {
+    /// Builds the retirement audit entry, sharing `corr` AND `now` with the `DomainEvent` this
+    /// same call enqueues — `now` is a caller-supplied parameter, not a second `self.clock.now()`
+    /// read, so the event and the audit entry record the identical instant for one act (mirrors
+    /// `policies.rs::delete`'s single `now`, and the "one act, one correlation id" property this
+    /// module's docs already assert must not be undermined by two different `occurred_at`s).
+    fn audit_entry(&self, actor: &Prn, corr: Uuid, now: DateTime<Utc>, detail: serde_json::Value) -> AuditEntry {
         AuditEntry {
             id: self.ids.new_audit_id(),
-            occurred_at: self.clock.now(),
+            occurred_at: now,
             actor_prn: Some(actor.canonical()),
             action: Action::RetireSystemPolicy.as_wire().to_string(),
             resource_prn: Some(root_prn().canonical()),
@@ -265,7 +268,7 @@ impl SystemRetirementService {
                 "description_truncated": description_truncated,
             },
         });
-        let entry = self.audit_entry(actor, corr, detail);
+        let entry = self.audit_entry(actor, corr, now, detail);
 
         self.outbox.enqueue(&*tx, &event).await?;
         self.audit.record(&*tx, &entry).await?;
@@ -317,6 +320,19 @@ mod tests {
         }
     }
 
+    /// A small `source` paired with an oversized `description` — the mirror image of
+    /// `stored_policy_with_source`, so a test can prove `description_truncated` is tracked
+    /// independently of `truncated` (the source flag) rather than one standing in for the other.
+    fn stored_policy_with_description(description: &str) -> StoredPolicy {
+        StoredPolicy {
+            policy_id: "legacy_auditor".to_string(),
+            kind: PolicyKind::Template,
+            source: "permit(principal, action, resource);".to_string(),
+            description: description.to_string(),
+            system: true,
+        }
+    }
+
     fn grant_ref(id: &str) -> GrantRef {
         GrantRef {
             id: id.to_string(),
@@ -331,6 +347,10 @@ mod tests {
     /// dispatch (real dispatch is the Postgres integration tests' job). `calls`/`commits` are
     /// `Arc`-backed so every `clone()` of a `ScriptedRetirer` shares one recorded-call log and
     /// one commit counter — the same reason every other fake in `fakes.rs` does this.
+    /// `cap_seen`/`lock_timeout_seen` record the ACTUAL arguments `surviving_grants_in`/
+    /// `begin_retirement` were called with, so a test can pin that the service really passed
+    /// `GRANT_LIST_CAP`/`LOCK_TIMEOUT` rather than some other value the fake happened not to
+    /// care about (fix-round-1 finding: both consts were previously unpinned by any assertion).
     #[derive(Clone)]
     struct ScriptedRetirer {
         policy: Option<StoredPolicy>,
@@ -341,6 +361,8 @@ mod tests {
         role_delete_returns_false: bool,
         calls: Arc<Mutex<Vec<String>>>,
         commits: Arc<AtomicUsize>,
+        cap_seen: Arc<Mutex<Option<u64>>>,
+        lock_timeout_seen: Arc<Mutex<Option<Duration>>>,
     }
 
     impl Default for ScriptedRetirer {
@@ -354,19 +376,13 @@ mod tests {
                 role_delete_returns_false: false,
                 calls: Arc::new(Mutex::new(Vec::new())),
                 commits: Arc::new(AtomicUsize::new(0)),
+                cap_seen: Arc::new(Mutex::new(None)),
+                lock_timeout_seen: Arc::new(Mutex::new(None)),
             }
         }
     }
 
     impl ScriptedRetirer {
-        /// Identity. `ScriptedRetirer`'s interior state already lives behind `Arc<Mutex<_>>`/
-        /// `Arc<AtomicUsize>` fields, so `clone()` alone shares state across every handle — this
-        /// exists purely so a call site can read as "this fake is shared across the service AND
-        /// the post-call assertions" without an actual `Arc<Self>` wrapper.
-        fn shared(self) -> Self {
-            self
-        }
-
         fn record(&self, name: &str) {
             self.calls.lock().unwrap().push(name.to_string());
         }
@@ -378,6 +394,17 @@ mod tests {
         fn commits(&self) -> usize {
             self.commits.load(Ordering::SeqCst)
         }
+
+        /// The `cap` argument `surviving_grants_in` was actually called with, if it was called.
+        fn cap_seen(&self) -> Option<u64> {
+            *self.cap_seen.lock().unwrap()
+        }
+
+        /// The `lock_timeout` argument `begin_retirement` was actually called with, if it was
+        /// called.
+        fn lock_timeout_seen(&self) -> Option<Duration> {
+            *self.lock_timeout_seen.lock().unwrap()
+        }
     }
 
     fn backend_err() -> AuthzError {
@@ -386,8 +413,9 @@ mod tests {
 
     #[async_trait]
     impl SystemRowRetirer for ScriptedRetirer {
-        async fn begin_retirement(&self, _lock_timeout: Duration) -> Result<Box<dyn Transaction>, AuthzError> {
+        async fn begin_retirement(&self, lock_timeout: Duration) -> Result<Box<dyn Transaction>, AuthzError> {
             self.record("begin_retirement");
+            *self.lock_timeout_seen.lock().unwrap() = Some(lock_timeout);
             Ok(Box::new(CountingTransaction(self.commits.clone())))
         }
 
@@ -401,8 +429,9 @@ mod tests {
             Ok(self.role.clone())
         }
 
-        async fn surviving_grants_in(&self, _tx: &dyn Transaction, _role_key: &str, _cap: u64) -> Result<SurvivingGrants, AuthzError> {
+        async fn surviving_grants_in(&self, _tx: &dyn Transaction, _role_key: &str, cap: u64) -> Result<SurvivingGrants, AuthzError> {
             self.record("surviving_grants_in");
+            *self.cap_seen.lock().unwrap() = Some(cap);
             Ok(self.survivors.clone())
         }
 
@@ -505,6 +534,64 @@ mod tests {
         (svc, outbox, audit, bumper)
     }
 
+    /// A `PolicyGenBumper` that snapshots a SHARED commit counter the instant `bump()` runs
+    /// (fix-round-1 finding: moving `gen_bumper.bump().await` above `tx.commit().await?` passed
+    /// every original test, because both `commits()` and the bumper's own call count were still
+    /// 1 either way). If `bump()` ever ran BEFORE the commit, the snapshot it captures would
+    /// read the pre-commit value — this is what actually distinguishes "after" from "before",
+    /// which a bare call-counter cannot.
+    #[derive(Clone)]
+    struct BumpSnapshotBumper {
+        commits: Arc<AtomicUsize>,
+        snapshot_at_bump: Arc<Mutex<Option<usize>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl BumpSnapshotBumper {
+        fn new(commits: Arc<AtomicUsize>) -> Self {
+            BumpSnapshotBumper {
+                commits,
+                snapshot_at_bump: Arc::new(Mutex::new(None)),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn snapshot_at_bump(&self) -> Option<usize> {
+            *self.snapshot_at_bump.lock().unwrap()
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl PolicyGenBumper for BumpSnapshotBumper {
+        async fn bump(&self) {
+            *self.snapshot_at_bump.lock().unwrap() = Some(self.commits.load(Ordering::SeqCst));
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Like `svc`, but wires a [`BumpSnapshotBumper`] sharing `retirer`'s OWN commit counter —
+    /// takes `ScriptedRetirer` concretely (not `impl SystemRowRetirer`) because the counter must
+    /// be cloned out before the retirer moves into the `Arc<dyn _>` trait object.
+    fn svc_with_bump_snapshot(retirer: ScriptedRetirer) -> (SystemRetirementService, BumpSnapshotBumper) {
+        let authz = FakeAuthorizer::default();
+        authz.allow(Action::RetireSystemPolicy, &root_prn());
+        let bumper = BumpSnapshotBumper::new(retirer.commits.clone());
+        let svc = SystemRetirementService::new(SystemRetirementDeps {
+            retirer: Arc::new(retirer),
+            outbox: Arc::new(FakeOutbox::default()),
+            audit: Arc::new(FakeAuditLog::default()),
+            gen_bumper: Arc::new(bumper.clone()),
+            ids: Arc::new(SeqIds::default()),
+            clock: Arc::new(FixedClock::default()),
+            authorize: Authorize::new(Arc::new(authz)),
+        });
+        (svc, bumper)
+    }
+
     /// Root-only, and the check comes first: an unauthorized caller must not learn whether the
     /// id exists, and must not take a row lock.
     #[tokio::test]
@@ -539,8 +626,7 @@ mod tests {
             let retirer = ScriptedRetirer {
                 min_revision: min,
                 ..Default::default()
-            }
-            .shared();
+            };
             let svc = svc(retirer.clone());
             assert_eq!(svc.retire(&actor(), "legacy_auditor", true).await.unwrap_err(), TenancyError::FleetNotConverged);
             assert!(!retirer.calls().contains(&"begin_retirement".to_string()));
@@ -551,7 +637,7 @@ mod tests {
     #[tokio::test]
     async fn an_absent_row_is_not_found_and_a_non_system_row_is_refused() {
         {
-            let retirer = ScriptedRetirer { policy: None, ..converged() }.shared();
+            let retirer = ScriptedRetirer { policy: None, ..converged() };
             let svc = svc(retirer.clone());
             assert_eq!(svc.retire(&actor(), "gone", true).await.unwrap_err(), TenancyError::NotFound);
             assert_eq!(retirer.commits(), 0, "a not-found row must never commit a transaction");
@@ -562,8 +648,7 @@ mod tests {
             let retirer = ScriptedRetirer {
                 policy: Some(stored_policy(false, PolicyKind::Template)),
                 ..converged()
-            }
-            .shared();
+            };
             let svc = svc(retirer.clone());
             assert_eq!(svc.retire(&actor(), "op_policy", true).await.unwrap_err(), TenancyError::NotSystemOwned("op_policy".to_string()));
             assert_eq!(retirer.commits(), 0);
@@ -578,8 +663,7 @@ mod tests {
                     system: false,
                 }),
                 ..converged()
-            }
-            .shared();
+            };
             let svc = svc(retirer.clone());
             assert_eq!(
                 svc.retire(&actor(), "legacy_auditor", true).await.unwrap_err(),
@@ -590,34 +674,63 @@ mod tests {
     }
 
     /// D4/D5: survivors block, and blocking writes NOTHING. The `total` is reported from the
-    /// store, not from the returned page's length.
+    /// store, not from the returned page's length. `truncated` is asserted BOTH ways (fix-round-1
+    /// finding: a `total: 7` fixture makes `total <= GRANT_LIST_CAP` vacuously true, so
+    /// `assert!(truncated || total <= GRANT_LIST_CAP)` never actually reads `truncated` — a
+    /// hardcoded `truncated: false` at the call site passed regardless). A role with 700
+    /// surviving grants must report `truncated: true`, or an operator who revokes the listed
+    /// page and retries would believe the response was complete when it was only the first page.
     #[tokio::test]
     async fn surviving_grants_block_the_retirement_and_write_nothing() {
-        let retirer = ScriptedRetirer {
-            survivors: SurvivingGrants {
-                grants: vec![grant_ref("a"), grant_ref("b")],
-                total: 7,
-            },
-            ..converged_with_role()
-        }
-        .shared();
-        let (svc, outbox, audit, bumper) = svc_with_sinks(retirer.clone());
+        // Over the cap: `truncated` must be true.
+        {
+            let retirer = ScriptedRetirer {
+                survivors: SurvivingGrants {
+                    grants: vec![grant_ref("a"), grant_ref("b")],
+                    total: 700,
+                },
+                ..converged_with_role()
+            };
+            let (svc, outbox, audit, bumper) = svc_with_sinks(retirer.clone());
 
-        let outcome = svc.retire(&actor(), "legacy_auditor", true).await.unwrap();
-        match outcome {
-            RetireOutcome::Blocked { role_key, grants, total, truncated } => {
-                assert_eq!(role_key, "legacy_auditor");
-                assert_eq!(grants.len(), 2);
-                assert_eq!(total, 7, "the true total, not the page length");
-                assert!(truncated || total <= GRANT_LIST_CAP);
+            let outcome = svc.retire(&actor(), "legacy_auditor", true).await.unwrap();
+            match outcome {
+                RetireOutcome::Blocked { role_key, grants, total, truncated } => {
+                    assert_eq!(role_key, "legacy_auditor");
+                    assert_eq!(grants.len(), 2);
+                    assert_eq!(total, 700, "the true total, not the page length");
+                    assert!(truncated, "700 surviving grants over a cap of {GRANT_LIST_CAP} must report truncated: true");
+                }
+                other => panic!("expected Blocked, got {other:?}"),
             }
-            other => panic!("expected Blocked, got {other:?}"),
+            assert!(!retirer.calls().iter().any(|c| c.starts_with("delete_")), "a blocked retirement deletes nothing");
+            assert!(outbox.0.lock().unwrap().is_empty(), "and enqueues nothing");
+            assert!(audit.0.lock().unwrap().is_empty(), "and audits nothing");
+            assert_eq!(bumper.calls(), 0, "and bumps nothing");
+            assert_eq!(retirer.commits(), 0, "a blocked retirement must never commit its transaction");
+            // Pins GRANT_LIST_CAP itself: the service must pass the real const, not some other
+            // value the fake happened not to care about (fix-round-1 finding).
+            assert_eq!(retirer.cap_seen(), Some(GRANT_LIST_CAP), "the service must call surviving_grants_in with GRANT_LIST_CAP");
         }
-        assert!(!retirer.calls().iter().any(|c| c.starts_with("delete_")), "a blocked retirement deletes nothing");
-        assert!(outbox.0.lock().unwrap().is_empty(), "and enqueues nothing");
-        assert!(audit.0.lock().unwrap().is_empty(), "and audits nothing");
-        assert_eq!(bumper.calls(), 0, "and bumps nothing");
-        assert_eq!(retirer.commits(), 0, "a blocked retirement must never commit its transaction");
+
+        // At or under the cap: `truncated` must be false.
+        {
+            let retirer = ScriptedRetirer {
+                survivors: SurvivingGrants {
+                    grants: vec![grant_ref("a"), grant_ref("b")],
+                    total: 7,
+                },
+                ..converged_with_role()
+            };
+            let svc = svc(retirer.clone());
+            match svc.retire(&actor(), "legacy_auditor", true).await.unwrap() {
+                RetireOutcome::Blocked { total, truncated, .. } => {
+                    assert_eq!(total, 7);
+                    assert!(!truncated, "7 surviving grants under the cap must report truncated: false");
+                }
+                other => panic!("expected Blocked, got {other:?}"),
+            }
+        }
     }
 
     /// D4's static half — the finding that invalidated the first draft's central claim.
@@ -634,12 +747,12 @@ mod tests {
             }),
             role: None,
             ..converged()
-        }
-        .shared();
+        };
         let (svc, outbox, audit, bumper) = svc_with_sinks(retirer.clone());
 
         match svc.retire(&actor(), "legacy_forbid", false).await.unwrap() {
-            RetireOutcome::NeedsAcknowledgement { source, description, kind, .. } => {
+            RetireOutcome::NeedsAcknowledgement { policy_id, source, description, kind } => {
+                assert_eq!(policy_id, "legacy_forbid");
                 assert_eq!(kind, PolicyKind::Static);
                 assert_eq!(source, "forbid(principal, action, resource);", "the refusal IS the preview");
                 assert_eq!(description, "a retired guard");
@@ -667,7 +780,7 @@ mod tests {
     /// are dealing with before calling.
     #[tokio::test]
     async fn the_acknowledgement_flag_is_ignored_for_a_template() {
-        let svc = svc(converged_with_role_and_no_grants().shared());
+        let svc = svc(converged_with_role_and_no_grants());
         assert!(svc.retire(&actor(), "legacy_auditor", false).await.unwrap().is_retired());
     }
 
@@ -675,7 +788,7 @@ mod tests {
     /// discriminator, one audit entry, ONE shared correlation_id, one awaited bump.
     #[tokio::test]
     async fn the_template_happy_path_deletes_role_then_policy_and_emits_one_of_each() {
-        let retirer = converged_with_role_and_no_grants().shared();
+        let retirer = converged_with_role_and_no_grants();
         let (svc, outbox, audit, bumper) = svc_with_sinks(retirer.clone());
 
         let outcome = svc.retire(&actor(), "legacy_auditor", false).await.unwrap();
@@ -696,6 +809,8 @@ mod tests {
         let events = outbox.0.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, EventType::PolicyDeleted);
+        assert_eq!(events[0].aggregate_prn, "policy/legacy_auditor");
+        assert_eq!(events[0].payload["policy_id"], serde_json::json!("legacy_auditor"));
         assert_eq!(events[0].payload["reason"], serde_json::json!("system_retirement"));
         assert_eq!(events[0].payload["role_deleted"], serde_json::json!(true));
 
@@ -703,10 +818,31 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].action, Action::RetireSystemPolicy.as_wire());
         assert_eq!(entries[0].resource_prn.as_deref(), Some(root_prn().canonical().as_str()));
+        assert_eq!(entries[0].outcome, AuditOutcome::Committed);
+        assert_eq!(entries[0].detail["role_deleted"], serde_json::json!(true));
         assert_eq!(entries[0].correlation_id, events[0].correlation_id, "one act, one correlation id");
 
         assert_eq!(bumper.calls(), 1, "awaited exactly once, post-commit");
         assert_eq!(retirer.commits(), 1, "the happy path must commit exactly once");
+        // Pins LOCK_TIMEOUT itself: a refactor that widened it (e.g. to an hour, defeating the
+        // "operator request must fail with a message rather than hang" contract) must be caught.
+        assert_eq!(retirer.lock_timeout_seen(), Some(LOCK_TIMEOUT), "the service must call begin_retirement with LOCK_TIMEOUT");
+    }
+
+    /// D10: the bump must run strictly AFTER the commit. Moving `gen_bumper.bump().await` above
+    /// `tx.commit().await?` passes every guard/happy-path test above unchanged — both `commits()`
+    /// and the bumper's own call count stay 1 either way (fix-round-1 finding). The bumper here
+    /// snapshots the retirer's shared commit counter the instant `bump()` runs: if the bump ran
+    /// before the commit, the snapshot reads 0 (not yet committed), not 1.
+    #[tokio::test]
+    async fn the_post_commit_bump_runs_strictly_after_the_transaction_commits() {
+        let retirer = converged_with_role_and_no_grants();
+        let (svc, bumper) = svc_with_bump_snapshot(retirer);
+
+        let _outcome = svc.retire(&actor(), "legacy_auditor", false).await.unwrap();
+
+        assert_eq!(bumper.calls(), 1);
+        assert_eq!(bumper.snapshot_at_bump(), Some(1), "the commit counter must already read 1 (committed) at the instant bump() runs");
     }
 
     /// D9: retirement destroys the evidence, so the audit row carries it — capped by the same
@@ -717,8 +853,7 @@ mod tests {
         let retirer = ScriptedRetirer {
             policy: Some(stored_policy_with_source(&huge)),
             ..converged_with_role_and_no_grants()
-        }
-        .shared();
+        };
         let (svc, _outbox, audit, _bumper) = svc_with_sinks(retirer);
         let _outcome = svc.retire(&actor(), "legacy_auditor", true).await.unwrap();
 
@@ -729,14 +864,35 @@ mod tests {
         assert_eq!(destroyed["truncated"], serde_json::json!(true));
     }
 
+    /// The `description` twin of the test above (fix-round-1 finding: only `source` truncation
+    /// was ever asserted, so bypassing the cap on `description` alone passed unnoticed). Mirrors
+    /// `bootstrap.rs`'s `an_oversized_previous_description_is_truncated_and_separately_marked`:
+    /// a small `source` proves `description_truncated` is tracked independently, not merely
+    /// mirroring the source's own `truncated` flag.
+    #[tokio::test]
+    async fn the_audit_entry_caps_an_oversized_description_independently_of_the_source() {
+        let huge = "d".repeat(MAX_AUDITED_SOURCE_BYTES + 500);
+        let retirer = ScriptedRetirer {
+            policy: Some(stored_policy_with_description(&huge)),
+            ..converged_with_role_and_no_grants()
+        };
+        let (svc, _outbox, audit, _bumper) = svc_with_sinks(retirer);
+        let _outcome = svc.retire(&actor(), "legacy_auditor", true).await.unwrap();
+
+        let entries = audit.0.lock().unwrap();
+        let destroyed = &entries[0].detail["destroyed_content"];
+        assert_eq!(destroyed["description"].as_str().unwrap().len(), MAX_AUDITED_SOURCE_BYTES);
+        assert_eq!(destroyed["description_truncated"], serde_json::json!(true));
+        assert_eq!(destroyed["truncated"], serde_json::json!(false), "the source flag must track the source, not the description");
+    }
+
     /// A failure between the deletes and the commit must leave nothing behind.
     #[tokio::test]
     async fn a_failure_before_commit_emits_nothing() {
         let retirer = ScriptedRetirer {
             fail_delete_policy: true,
             ..converged_with_role_and_no_grants()
-        }
-        .shared();
+        };
         let (svc, outbox, audit, bumper) = svc_with_sinks(retirer.clone());
         svc.retire(&actor(), "legacy_auditor", true).await.expect_err("a store failure must propagate");
         assert!(outbox.0.lock().unwrap().is_empty() && audit.0.lock().unwrap().is_empty() && bumper.calls() == 0);
@@ -750,8 +906,7 @@ mod tests {
         let retirer = ScriptedRetirer {
             role_delete_returns_false: true,
             ..converged_with_role_and_no_grants()
-        }
-        .shared();
+        };
         let svc = svc(retirer.clone());
         assert_eq!(svc.retire(&actor(), "legacy_auditor", true).await.unwrap_err(), TenancyError::Internal);
         assert_eq!(retirer.commits(), 0, "a data-integrity break must never commit");
