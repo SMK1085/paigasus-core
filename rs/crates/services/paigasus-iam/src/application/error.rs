@@ -93,6 +93,20 @@ pub enum TenancyError {
     /// "replay everything".
     #[error("bulk replay requires an explicit non-zero max_rows")]
     InvalidBulkReplay,
+    /// The row at this id exists but is not system-owned, so `RetireSystemPolicy` refuses it
+    /// (SMA-481 D7). Retirement must not become a second, differently-audited delete path for
+    /// operator-authored policies — `DeletePolicy` already serves those and applies its own
+    /// authorization. Raised for a non-system `policy` row AND for a non-system `role` row at
+    /// the same id.
+    #[error("not a system-owned row: {0}")]
+    NotSystemOwned(String),
+    /// At least one remaining system-owned row was last written by a binary older than this
+    /// one, so the fleet has not converged past the release that dropped the retiring id
+    /// (SMA-481 D11). Retiring now would be silently undone: `classify_starter_policy`
+    /// classifies an absent row as `Absent` BEFORE the revision guard runs, so any replica
+    /// whose catalog still defines the id re-seeds it unconditionally.
+    #[error("the fleet has not converged past this binary's starter policy revision")]
+    FleetNotConverged,
     #[error("internal server error")]
     Internal,
 }
@@ -124,6 +138,8 @@ impl TenancyError {
             Self::PolicyConflict(_) => "policy-conflict",
             Self::InvalidAction(_) => "invalid-action",
             Self::InvalidBulkReplay => "invalid-bulk-replay",
+            Self::NotSystemOwned(_) => "not-system-owned",
+            Self::FleetNotConverged => "fleet-not-converged",
             Self::Internal => "internal",
         }
     }
@@ -145,7 +161,7 @@ impl TenancyError {
             | Self::InvalidBulkReplay => ErrorClass::Validation,
             Self::NotFound => ErrorClass::NotFound,
             Self::SlugConflict | Self::DuplicateMembership | Self::EmailConflict | Self::ServiceAccountNameConflict | Self::PolicyConflict(_) => ErrorClass::Conflict,
-            Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership | Self::SystemImmutable(_) => ErrorClass::Precondition,
+            Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership | Self::SystemImmutable(_) | Self::NotSystemOwned(_) | Self::FleetNotConverged => ErrorClass::Precondition,
             Self::Forbidden => ErrorClass::Forbidden,
             Self::Internal => ErrorClass::Internal,
         }
@@ -322,5 +338,19 @@ mod tests {
 
         let err = TenancyError::from(DomainError::InvalidNodePrn("bad-prn".to_string()));
         assert!(matches!(err, TenancyError::InvalidPrn(_)));
+    }
+
+    /// Both retirement refusals are Preconditions, not Conflicts. They render 409 either way
+    /// today, but ErrorClass is what a future gRPC mirror translates — and SystemImmutable, the
+    /// third refusal this same endpoint can return, is already Precondition (see the assertion
+    /// above). Two sibling refusals on one endpoint must not diverge in class.
+    #[test]
+    fn the_retirement_refusals_share_system_immutable_s_class_and_have_stable_codes() {
+        assert_eq!(TenancyError::NotSystemOwned("p1".to_string()).class(), ErrorClass::Precondition);
+        assert_eq!(TenancyError::FleetNotConverged.class(), ErrorClass::Precondition);
+        assert_eq!(TenancyError::SystemImmutable("p1".to_string()).class(), ErrorClass::Precondition);
+
+        assert_eq!(TenancyError::NotSystemOwned("p1".to_string()).code(), "not-system-owned");
+        assert_eq!(TenancyError::FleetNotConverged.code(), "fleet-not-converged");
     }
 }
