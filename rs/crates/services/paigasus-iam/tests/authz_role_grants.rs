@@ -527,3 +527,32 @@ async fn a_store_error_mid_txn_leaves_no_outbox_or_audit_rows_and_no_gen_bump() 
     );
     assert_eq!(gens.policy_gen().await.unwrap(), before, "a rolled-back mid-txn failure must not bump policy_gen");
 }
+
+/// SMA-481 D6 — a grant against a role key with no `role` row must report the role as
+/// unknown, not as an internal error. This is the state a concurrent grant lands in after a
+/// retirement commits: it blocked on the `role` row's `FOR UPDATE` lock, then resumed to find
+/// no parent row, failing `fk_role_grant_role`. The principal/org are seeded (a real FK target
+/// `role_grant` also needs), but deliberately no `seed_role` call — the missing `role` row is
+/// exactly what this test is proving is handled.
+#[tokio::test]
+async fn granting_a_role_with_no_row_reports_unknown_role_not_internal() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+
+    let principal_uuid = mint_uuid7(1_700_000_000_009, [10u8; 10]);
+    let org_uuid = Uuid::from_u128(10);
+    seed_principal_and_org(&db, principal_uuid, org_uuid).await;
+
+    let principal = PrincipalId::from_prn(Prn::build("iam", "", None, "principal", principal_uuid).unwrap());
+    let grant = make_grant(Uuid::from_u128(300), &principal, "a_role_with_no_row", GrantScope::Root, now);
+
+    let store = PgRoleGrantStore::new(db.clone(), Generations::memory());
+    let uow = SeaOrmUnitOfWork::new(db);
+
+    let tx = uow.begin().await.unwrap();
+    let err = store.grant_in(&*tx, &grant).await.expect_err("no role row means no grant");
+    assert!(
+        matches!(err, AuthzError::UnknownRole(ref k) if k == "a_role_with_no_row"),
+        "an FK violation on fk_role_grant_role means the role is gone, not that the backend broke; got {err:?}"
+    );
+}
