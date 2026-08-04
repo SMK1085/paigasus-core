@@ -10,11 +10,29 @@
 mod support;
 
 use chrono::Utc;
-use paigasus_iam::adapters::persistence::PgSystemRowRetirer;
+use paigasus_iam::adapters::authz::{Generations, GenerationsPolicyGenBumper};
+use paigasus_iam::adapters::clock::SystemClock;
+use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::entities::{policy, principal, role, role_grant};
-use paigasus_iam_core::{AuthzError, GrantScope, SystemRowRetirer};
-use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, DatabaseConnection, Set};
+use paigasus_iam::adapters::persistence::{PgAuditLog, PgOutbox, PgPolicyStore, PgRoleGrantStore, PgSystemRoleReconciler, PgSystemRowRetirer};
+use paigasus_iam::application::authorize::Authorize;
+use paigasus_iam::application::error::TenancyError;
+use paigasus_iam::application::system_retirement::{SystemRetirementDeps, SystemRetirementService};
+use paigasus_iam_core::authz::engine::{CompiledPolicies, PolicyEngine};
+use paigasus_iam_core::authz::model::{ContextValue, EntitySlice, NodeKind, PolicyKind, ROOT_ENTITY, SliceEntity, root_prn};
+use paigasus_iam_core::authz::reconcile::StarterPolicyOutcome;
+use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+use paigasus_iam_core::{
+    AccessRequest, Action, Authorizer, AuthzError, Decision, Effect, GrantScope, PolicyDocument, PolicyStore, PrincipalId, RequestContext, RetireOutcome, Role, RoleGrant, RoleGrantStore,
+    SystemPolicyReconciler, SystemRoleReconciler, SystemRowRetirer,
+};
+use paigasus_kernel::Prn;
+use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, Database, DatabaseConnection, EntityTrait, Set};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
+use testcontainers_modules::postgres::Postgres;
+use testcontainers_modules::testcontainers::ContainerAsync;
 use uuid::Uuid;
 
 /// Seeds a system-owned template + role at a NON-code-defined id: the `policy` row first, then
@@ -22,6 +40,14 @@ use uuid::Uuid;
 /// retirement must undo in reverse. Direct SeaORM inserts on purpose: there is deliberately no
 /// supported path that writes a `role` row for a key the code catalog does not define — that
 /// absence IS the bug SMA-481 exists for.
+///
+/// `starter_revision` is stamped to THIS binary's own `STARTER_POLICY_REVISION` (Task 9): the
+/// five original tests above only ever drive `PgSystemRowRetirer`'s port methods directly, which
+/// never read it, but every Task 9 test below calls the full `SystemRetirementService::retire`,
+/// whose very first check refuses (`FleetNotConverged`) unless every remaining system-owned
+/// row's `starter_revision` is at least `STARTER_POLICY_REVISION` — a `NotSet`/NULL row (the
+/// original value) reads as unprovable and would refuse every one of them before ever reaching
+/// the interesting behaviour.
 async fn seed_orphan_chain(db: &DatabaseConnection, id: &str) {
     let now = Utc::now();
     policy::ActiveModel {
@@ -33,7 +59,7 @@ async fn seed_orphan_chain(db: &DatabaseConnection, id: &str) {
         created_at: Set(now),
         updated_at: Set(now),
         content_fingerprint: NotSet,
-        starter_revision: NotSet,
+        starter_revision: Set(Some(i32::try_from(STARTER_POLICY_REVISION).unwrap())),
     }
     .insert(db)
     .await
@@ -235,4 +261,422 @@ async fn min_starter_revision_rejects_a_negative_value_instead_of_coercing_it() 
     let retirer = PgSystemRowRetirer::new(db.clone());
     let err = retirer.min_starter_revision().await.expect_err("a negative starter_revision must surface as an error, not coerce to 0");
     assert!(matches!(err, AuthzError::Backend(_)), "unexpected error variant: {err:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Task 9: the decision change, the locks, and the fleet-skew failure mode.
+//
+// Everything above proves the retirer's own row-level mechanics. These prove the thing the
+// issue is actually about: a retired role's grant stops conferring permission, the row locks
+// genuinely block a racing writer (not merely "read the right row"), and the one documented
+// gap (D11 fleet skew) stays pinned rather than silently regressing.
+// ---------------------------------------------------------------------------------------------
+
+/// A Root-authorized actor PRN for [`retire`] — mirrors `system_retirement.rs`'s own unit-test
+/// `actor()` fixture.
+fn actor() -> Prn {
+    Prn::build("iam", "", None, "principal", Uuid::from_u128(1)).unwrap()
+}
+
+/// A second, wholly independent connection (own pool, own physical session) to the SAME
+/// container `support::start_migrated_postgres` already stood up — needed for every
+/// concurrency test below, which must race a REAL second session against a lock the first
+/// session holds open. Mirrors `tests/outbox_retention_concurrency_pg.rs`'s own "own pool, own
+/// physical session, not one borrowed from db's own pool" hold-open technique.
+async fn second_connection(container: &ContainerAsync<Postgres>) -> DatabaseConnection {
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    Database::connect(format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")).await.unwrap()
+}
+
+/// Seeds ONE grant of `role_key` at `scope` through the real `PgRoleGrantStore::grant` (not a
+/// raw insert): reusing the actual store means the scope-column mapping isn't reinvented here,
+/// and the returned `RoleGrant` is byte-for-byte what a caller can feed straight into
+/// `PolicyEngine::compile` without re-reading the row back. Requires the grant's `role_key` to
+/// already have a `role` row (`fk_role_grant_role`) — callers seed that first, typically via
+/// `seed_orphan_chain`.
+async fn seed_grant(db: &DatabaseConnection, role_key: &str, scope: GrantScope) -> RoleGrant {
+    let principal_id = Uuid::from_u128(0xA11CE);
+    let now = Utc::now();
+    principal::ActiveModel {
+        id: Set(principal_id),
+        prn: Set(format!("prn:pgs:iam:::principal/{principal_id}")),
+        kind: Set("user".to_string()),
+        status: Set("active".to_string()),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(db)
+    .await
+    .unwrap();
+
+    let grant_id = Uuid::from_u128(0xBEEF);
+    let grant = RoleGrant {
+        id: grant_id,
+        principal: PrincipalId::from_prn(Prn::build("iam", "", None, "principal", principal_id).unwrap()),
+        role_key: role_key.to_string(),
+        scope,
+        linked_policy_id: format!("grant:{grant_id}"),
+        created_at: now,
+    };
+    PgRoleGrantStore::new(db.clone(), Generations::memory()).grant(&grant).await.unwrap();
+    grant
+}
+
+/// Revokes a grant by id through the real `PgRoleGrantStore::revoke` — the runbook's own
+/// remedy for a `Blocked` retirement.
+async fn revoke_grant(db: &DatabaseConnection, id: Uuid) {
+    PgRoleGrantStore::new(db.clone(), Generations::memory()).revoke(id).await.unwrap();
+}
+
+/// `seed_orphan_chain` immediately followed by removing its `role` row — isolating that LOCKING
+/// THE POLICY ROW ALONE (not a role-row lock) is what must block a concurrent role insert
+/// referencing it (`fk_role_template`), the reason `SystemRetirementService::retire` locks the
+/// policy row, the FK PARENT, first (D6/§3.2). Reuses `seed_orphan_chain` rather than
+/// re-deriving the policy row's shape.
+async fn seed_policy_only(db: &DatabaseConnection, id: &str) {
+    seed_orphan_chain(db, id).await;
+    role::Entity::delete_by_id(id.to_string()).exec(db).await.unwrap();
+}
+
+/// Every stored [`PolicyDocument`] via the real `PgPolicyStore::list_all` — what a live compile
+/// would actually read.
+async fn load_all_policies(db: &DatabaseConnection) -> Vec<PolicyDocument> {
+    PgPolicyStore::new(db.clone(), Generations::memory()).list_all().await.unwrap()
+}
+
+/// The stored `policy` row at `id`, if any.
+async fn policy_row(db: &DatabaseConnection, id: &str) -> Option<policy::Model> {
+    policy::Entity::find_by_id(id.to_string()).one(db).await.unwrap()
+}
+
+/// The stored `role` row at `key`, if any.
+async fn role_row(db: &DatabaseConnection, key: &str) -> Option<role::Model> {
+    role::Entity::find_by_id(key.to_string()).one(db).await.unwrap()
+}
+
+/// The `PolicyDocument` an older binary's code catalog would still hand `reconcile_system` for
+/// `id` — the exact template shape `seed_orphan_chain` gives its policy row, so the fleet-skew
+/// test reconciles the identical document a retired row used to hold.
+fn orphan_doc(id: &str) -> PolicyDocument {
+    let now = Utc::now();
+    PolicyDocument {
+        policy_id: id.to_string(),
+        kind: PolicyKind::Template,
+        source: "permit(principal == ?principal, action, resource in ?resource);".to_string(),
+        description: String::new(),
+        system: true,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+/// A trivial `Authorizer` that unconditionally allows every request. `system_retirement.rs`'s
+/// own unit tests already cover the Root-only enforcement itself (`FakeAuthorizer`, `#[cfg(test)]`
+/// there and unreachable from an integration-test binary); these Postgres tests need only a
+/// caller who passes that check so they can exercise the actual row-level behaviour.
+struct AllowAllAuthorizer;
+
+#[async_trait::async_trait]
+impl Authorizer for AllowAllAuthorizer {
+    async fn is_authorized(&self, _req: &AccessRequest) -> Result<Decision, AuthzError> {
+        Ok(Decision {
+            effect: Effect::Allow,
+            determining_policies: Vec::new(),
+        })
+    }
+}
+
+/// Drives one `SystemRetirementService::retire` call over REAL Postgres-backed adapters
+/// (`PgSystemRowRetirer`/`PgOutbox`/`PgAuditLog`/`GenerationsPolicyGenBumper`), the same wiring
+/// `AppState::new` uses (`adapters/http/mod.rs`) — except `authorize` is an
+/// [`AllowAllAuthorizer`].
+async fn retire(db: &DatabaseConnection, id: &str, ack: bool) -> Result<RetireOutcome, TenancyError> {
+    let svc = SystemRetirementService::new(SystemRetirementDeps {
+        retirer: Arc::new(PgSystemRowRetirer::new(db.clone())),
+        outbox: Arc::new(PgOutbox::new()),
+        audit: Arc::new(PgAuditLog::new(db.clone())),
+        gen_bumper: Arc::new(GenerationsPolicyGenBumper::new(Generations::memory())),
+        ids: Arc::new(KernelIdGenerator),
+        clock: Arc::new(SystemClock),
+        authorize: Authorize::new(Arc::new(AllowAllAuthorizer)),
+    });
+    svc.retire(&actor(), id, ack).await
+}
+
+/// Builds the minimal `EntitySlice` (`Root` + `grant`'s principal) and drives one `action`
+/// decision at `Root` for `grant`'s principal against `policies` — copies the `Request`/
+/// `EntitySlice` construction `authz::engine`'s own tests use (its `slice`/`principal_prn`
+/// helpers), simplified to Root scope since `Action::ListAuditLog`'s resource IS Root, so no
+/// org/team/project ancestor chain is needed.
+fn decide(policies: &CompiledPolicies, grant: &RoleGrant, action: Action) -> Decision {
+    let principal_prn = grant.principal.prn().clone();
+    let principal_uid = paigasus_kernel::to_cedar_uid(&principal_prn);
+
+    let slice = EntitySlice {
+        entities: vec![
+            SliceEntity {
+                uid: (ROOT_ENTITY.0.to_string(), ROOT_ENTITY.1.to_string()),
+                parents: vec![],
+                attrs: BTreeMap::new(),
+            },
+            SliceEntity {
+                uid: (principal_uid.entity_type, principal_uid.entity_id),
+                parents: vec![],
+                attrs: BTreeMap::from([
+                    ("kind".to_string(), ContextValue::Str("user".to_string())),
+                    ("status".to_string(), ContextValue::Str("active".to_string())),
+                ]),
+            },
+        ],
+    };
+    let req = AccessRequest {
+        principal: principal_prn,
+        action,
+        resource: root_prn(),
+        context: RequestContext::empty(),
+    };
+    PolicyEngine::decide(&policies.policy_set, &slice, &req)
+}
+
+/// THE test. Everything else in this file checks rows; this checks a DECISION — the one thing
+/// that actually demonstrates the bug in SMA-481 is fixed. The "before" assertion is not
+/// optional: without it, a fixture that never granted anything in the first place would make
+/// the "after" assertion pass vacuously, proving nothing.
+#[tokio::test]
+async fn a_retired_role_s_grant_stops_conferring_permission() {
+    let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    seed_orphan_chain(&db, "legacy_auditor").await;
+    let grant = seed_grant(&db, "legacy_auditor", GrantScope::Root).await;
+
+    let before = PolicyEngine::compile(&load_all_policies(&db).await, std::slice::from_ref(&grant)).expect("compile succeeds");
+    assert_eq!(
+        decide(&before, &grant, Action::ListAuditLog).effect,
+        Effect::Allow,
+        "the fixture must actually grant, or the after-assertion proves nothing"
+    );
+
+    // Zero surviving grants, so the template retirement below is not blocked (D4/D5) — the
+    // runbook's own remedy, applied here so the retirement itself can succeed.
+    revoke_grant(&db, grant.id).await;
+    let outcome = retire(&db, "legacy_auditor", true).await.expect("no grants survive after the revoke above");
+    assert!(outcome.is_retired(), "expected the template to actually retire once its grant is revoked, got {outcome:?}");
+
+    // The SAME in-memory `grant` value, recompiled against the policies AFTER retirement: the
+    // template row is gone, so `PolicyEngine::compile` silently skips linking it (its own doc:
+    // "a grant naming an absent template is silently skipped") — that is the actual mechanism
+    // that stops the grant from conferring permission, not merely that the grant row itself was
+    // revoked.
+    let after = PolicyEngine::compile(&load_all_policies(&db).await, std::slice::from_ref(&grant)).expect("compile succeeds");
+    assert_eq!(decide(&after, &grant, Action::ListAuditLog).effect, Effect::Deny, "the template is gone, so the grant links nothing");
+}
+
+/// D6, both halves. The lock blocks the concurrent insert AND the caller that loses the race
+/// gets a mapped error (`AuthzError::UnknownRole`), not a raw `Backend`/500. Asserting only the
+/// blocking would go green against an unmapped-error regression.
+#[tokio::test]
+async fn a_concurrent_grant_blocks_then_reports_unknown_role() {
+    let Some((c, db_a)) = support::start_migrated_postgres().await else { return };
+    seed_orphan_chain(&db_a, "legacy_auditor").await;
+    let db_b = second_connection(&c).await;
+
+    let retirer = PgSystemRowRetirer::new(db_a.clone());
+    let tx = retirer.begin_retirement(Duration::from_secs(5)).await.unwrap();
+    // Locks the role row FOR UPDATE — D6's own mechanism, exercised directly (rather than
+    // through the full `retire()` service) so this test can race a SECOND connection against
+    // the held lock before the transaction ever commits.
+    retirer.lock_role_in(&*tx, "legacy_auditor").await.unwrap().expect("seeded role row must be found");
+
+    // A concurrent grant from a SEPARATE connection/session — simulating a replica on an older
+    // binary that still defines "legacy_auditor" and would happily grant it.
+    let principal_id = Uuid::from_u128(0xC0FFEE);
+    principal::ActiveModel {
+        id: Set(principal_id),
+        prn: Set(format!("prn:pgs:iam:::principal/{principal_id}")),
+        kind: Set("user".to_string()),
+        status: Set("active".to_string()),
+        created_at: Set(Utc::now()),
+        updated_at: Set(Utc::now()),
+    }
+    .insert(&db_b)
+    .await
+    .unwrap();
+    let grant_id = Uuid::from_u128(0xF00D);
+    let racing_grant = RoleGrant {
+        id: grant_id,
+        principal: PrincipalId::from_prn(Prn::build("iam", "", None, "principal", principal_id).unwrap()),
+        role_key: "legacy_auditor".to_string(),
+        scope: GrantScope::Root,
+        linked_policy_id: format!("grant:{grant_id}"),
+        created_at: Utc::now(),
+    };
+    let grant_store = PgRoleGrantStore::new(db_b.clone(), Generations::memory());
+    let mut handle = tokio::spawn(async move { grant_store.grant(&racing_grant).await });
+
+    // Prove the grant actually BLOCKS: actively polling it (not merely sleeping then checking
+    // `is_finished`) within a bounded window must itself time out while the role row's lock is
+    // still held.
+    tokio::time::timeout(Duration::from_millis(500), &mut handle)
+        .await
+        .expect_err("the grant must block behind the role row's FOR UPDATE lock, not complete while it is held");
+
+    // Release the lock: delete the role (and its parent policy) and commit.
+    assert!(retirer.delete_role_in(&*tx, "legacy_auditor").await.unwrap());
+    assert!(retirer.delete_policy_in(&*tx, "legacy_auditor").await.unwrap());
+    tx.commit().await.unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("the grant never resumed after the retirement transaction committed — the FOR UPDATE lock is not being released")
+        .unwrap();
+    match result {
+        Err(AuthzError::UnknownRole(role_key)) => assert_eq!(role_key, "legacy_auditor"),
+        other => panic!("expected UnknownRole once the role row is gone, got {other:?}"),
+    }
+}
+
+/// The policy row is the FK PARENT of the role row, so it is locked first — otherwise an older
+/// replica's `reconcile_role` INSERT slips in when no role row exists to lock, and the policy
+/// delete fails on `fk_role_template` with an unmapped error.
+#[tokio::test]
+async fn locking_the_policy_row_blocks_a_concurrent_role_insert() {
+    let Some((c, db_a)) = support::start_migrated_postgres().await else { return };
+    // Only the policy row: no role row exists yet, so `lock_role_in` would find nothing to
+    // lock — isolating that the POLICY lock alone is what must block the concurrent insert.
+    seed_policy_only(&db_a, "legacy_auditor").await;
+    let db_b = second_connection(&c).await;
+
+    let retirer = PgSystemRowRetirer::new(db_a.clone());
+    let tx = retirer.begin_retirement(Duration::from_secs(5)).await.unwrap();
+    retirer.lock_policy_in(&*tx, "legacy_auditor").await.unwrap().expect("seeded policy row must be found");
+
+    // Simulate an older replica's boot-time `reconcile_role`, inserting the role row this
+    // policy's id would back (`template_id == key`, the linkage convention `authz::engine`
+    // documents).
+    let role_def = Role {
+        key: "legacy_auditor".to_string(),
+        template_id: "legacy_auditor".to_string(),
+        scope_kinds: vec![NodeKind::Organization],
+        description: String::new(),
+        system: true,
+    };
+    let reconciler = PgSystemRoleReconciler::new(db_b.clone());
+    let mut handle = tokio::spawn(async move { reconciler.reconcile_role(&role_def).await });
+
+    tokio::time::timeout(Duration::from_millis(500), &mut handle)
+        .await
+        .expect_err("the role INSERT must block behind the policy row's FOR UPDATE lock — this is why retirement locks the policy row, the FK parent, first");
+
+    assert!(retirer.delete_policy_in(&*tx, "legacy_auditor").await.unwrap());
+    tx.commit().await.unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("the role insert never resumed after the policy row's lock was released")
+        .unwrap();
+    assert!(result.is_err(), "with the policy row gone, the blocked role insert must fail on fk_role_template, not silently succeed");
+}
+
+/// `lock_timeout` bounds the wait rather than hanging: this runs on an operator's request.
+#[tokio::test]
+async fn a_contended_row_times_out_rather_than_hanging() {
+    let Some((c, db_a)) = support::start_migrated_postgres().await else { return };
+    seed_orphan_chain(&db_a, "legacy_auditor").await;
+    let db_b = second_connection(&c).await;
+
+    // Connection A holds the policy row locked, uncommitted, for the rest of this test.
+    let retirer_a = PgSystemRowRetirer::new(db_a.clone());
+    let holder = retirer_a.begin_retirement(Duration::from_secs(30)).await.unwrap();
+    retirer_a.lock_policy_in(&*holder, "legacy_auditor").await.unwrap().expect("seeded policy row must be found");
+
+    // Connection B asks for the SAME row under a SHORT lock_timeout: an operator-triggered
+    // request must fail with an error rather than hang indefinitely. `tokio::time::timeout`
+    // around the call turns a regression that dropped the `SET LOCAL lock_timeout` guard into a
+    // clean, attributable failure instead of a hung test suite (mirrors
+    // `tests/outbox_retention_concurrency_pg.rs`'s own idiom).
+    let retirer_b = PgSystemRowRetirer::new(db_b.clone());
+    let contended = retirer_b.begin_retirement(Duration::from_millis(300)).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), retirer_b.lock_policy_in(&*contended, "legacy_auditor"))
+        .await
+        .expect("lock_policy_in hung past 10s instead of surfacing its own lock_timeout");
+    let err = result.expect_err("a row locked by another session must surface lock_timeout as an error, not succeed");
+    assert!(matches!(err, AuthzError::Backend(_)), "unexpected error variant: {err:?}");
+
+    drop(holder); // never committed -> rolls back, releasing the lock.
+}
+
+/// D11's known failure mode, pinned deliberately: it is documented, accepted behaviour (the
+/// runbook tells operators to wait for fleet convergence and retry), NOT a bug to fix here.
+/// `classify_starter_policy` classifies an absent row as `Absent` BEFORE the revision guard ever
+/// runs (`authz::reconcile`'s own module doc, step 1 of its classification order), so a replica
+/// whose code catalog still defines a retired id re-seeds the deleted row unconditionally — no
+/// in-band mechanism can bind a binary older than the mechanism itself. Pinning this is what
+/// stops it from being silently (re)discovered in production.
+#[tokio::test]
+async fn a_binary_that_still_defines_the_id_re_seeds_it_after_retirement() {
+    let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    seed_orphan_chain(&db, "legacy_auditor").await;
+    let first = retire(&db, "legacy_auditor", true).await.unwrap();
+    assert!(first.is_retired(), "the setup retirement itself must actually retire, got {first:?}");
+    assert!(policy_row(&db, "legacy_auditor").await.is_none(), "retirement must have removed the row");
+
+    // Simulate the older replica: reconcile the id as though its own code catalog still
+    // defines it.
+    let reconciler = PgPolicyStore::new(db.clone(), Generations::memory());
+    let outcome = reconciler.reconcile_system(&orphan_doc("legacy_auditor"), STARTER_POLICY_REVISION).await.unwrap();
+    assert_eq!(outcome, StarterPolicyOutcome::Absent, "classify_starter_policy must see an absent row and reseed unconditionally");
+
+    assert!(
+        policy_row(&db, "legacy_auditor").await.is_some(),
+        "Absent is classified BEFORE the revision guard, so an older binary re-seeds unconditionally — the documented D11 failure mode, pinned here so it cannot regress silently into a surprise"
+    );
+}
+
+/// Retirement is not an idempotent DELETE: a second call means the operator's model of the
+/// system is wrong and they should be told, not silently congratulated.
+#[tokio::test]
+async fn a_repeated_retirement_is_not_found_and_writes_nothing() {
+    let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    // A second, unrelated system row that is NEVER retired in this test: keeps
+    // `min_starter_revision` non-vacuous after "legacy_auditor" is gone. With zero system rows
+    // left, `min_starter_revision` would read `None` again (its own "any NULL/absent proves
+    // nothing" posture), and the SECOND retire below would refuse `FleetNotConverged` instead of
+    // `NotFound` — an artifact of a single-row test database, not a real fleet-convergence
+    // signal.
+    seed_orphan_chain(&db, "anchor_role").await;
+    seed_orphan_chain(&db, "legacy_auditor").await;
+
+    let first = retire(&db, "legacy_auditor", true).await.expect("first retirement succeeds");
+    assert!(first.is_retired(), "the first retirement must actually retire, got {first:?}");
+    assert!(policy_row(&db, "legacy_auditor").await.is_none());
+
+    let err = retire(&db, "legacy_auditor", true).await.expect_err("a second retirement of an already-gone id must not be idempotent");
+    assert!(matches!(err, TenancyError::NotFound), "retirement is not an idempotent DELETE: got {err:?}");
+    assert!(policy_row(&db, "anchor_role").await.is_some(), "the untouched anchor row must survive");
+}
+
+/// End to end, the way the runbook reads: blocked while a grant survives, revoke, then retire
+/// succeeds and both rows are gone.
+#[tokio::test]
+async fn grant_then_retire_then_revoke_then_retire() {
+    let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    seed_orphan_chain(&db, "legacy_auditor").await;
+    let grant = seed_grant(&db, "legacy_auditor", GrantScope::Root).await;
+
+    // A surviving grant blocks retirement — writes nothing (D4/D5).
+    match retire(&db, "legacy_auditor", true).await.unwrap() {
+        RetireOutcome::Blocked { role_key, total, .. } => {
+            assert_eq!(role_key, "legacy_auditor");
+            assert_eq!(total, 1);
+        }
+        other => panic!("expected Blocked while the grant survives, got {other:?}"),
+    }
+    assert!(policy_row(&db, "legacy_auditor").await.is_some(), "a blocked retirement must write nothing");
+
+    // The runbook's remedy: revoke the surviving grant, then retry.
+    revoke_grant(&db, grant.id).await;
+
+    let outcome = retire(&db, "legacy_auditor", true).await.expect("retirement succeeds once no grants survive");
+    assert!(outcome.is_retired());
+    assert!(policy_row(&db, "legacy_auditor").await.is_none(), "the policy row must be gone");
+    assert!(role_row(&db, "legacy_auditor").await.is_none(), "the role row must be gone");
 }
