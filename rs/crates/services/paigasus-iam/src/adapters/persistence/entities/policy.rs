@@ -16,6 +16,13 @@ pub struct Model {
     pub system: bool,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
+    /// SMA-477: blake3 of the `(kind, source, description)` this service last wrote. NULL for
+    /// operator-authored policies (only `SystemPolicyReconciler` ever sets it) and for system
+    /// rows seeded before m0010.
+    pub content_fingerprint: Option<String>,
+    /// SMA-477: `authz::roles::STARTER_POLICY_REVISION` of the binary that last wrote the row.
+    /// NULL reads as `0`.
+    pub starter_revision: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

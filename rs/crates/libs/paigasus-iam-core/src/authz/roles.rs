@@ -40,6 +40,47 @@ use chrono::Utc;
 /// The base static policy id (design §3.2).
 pub const FORBID_ARCHIVED_WRITES_ID: &str = "forbid-archived-writes";
 
+/// Bumped by hand whenever any starter policy's content changes — guarded by
+/// `starter_policy_content_is_pinned_to_the_declared_revision` below, which reds until it is.
+///
+/// Persisted per row as `policy.starter_revision`, and compared on every boot: a replica whose
+/// `STARTER_POLICY_REVISION` is LOWER than a stored row's leaves that row alone (SMA-477 D11).
+/// There is one `policy` table for the whole fleet, so without this an older replica booting
+/// mid-deploy — a rollback, a crashloop restart, an HPA scale-up, a held canary — would
+/// rewrite the shared row to its own older policy set and, via the `policy_gen` bump, push it
+/// onto every already-serving newer replica.
+///
+/// `CARGO_PKG_VERSION` cannot serve here: the crate is version `0.0.0`.
+pub const STARTER_POLICY_REVISION: u32 = 1;
+
+/// Every `policy_id` [`starter_policies`] produces, in the order it produces them. A `const`
+/// so the reserved-namespace check in `PolicyStore::put_in` is a slice scan rather than nine
+/// `PolicyDocument` allocations per call; kept honest by
+/// `starter_policy_ids_matches_what_starter_policies_actually_produces`.
+pub const STARTER_POLICY_IDS: &[&str] = &[
+    FORBID_ARCHIVED_WRITES_ID,
+    PLATFORM_ADMIN_KEY,
+    "org_admin",
+    "org_member",
+    "team_admin",
+    "team_member",
+    "project_admin",
+    "project_member",
+    "gateway_user",
+];
+
+/// Whether `id` is one of the code-owned starter policy ids. The public `PutPolicy` API
+/// rejects these outright (SMA-477 D6): the ids are reserved even before they are seeded, so
+/// an operator cannot occupy one and thereby exempt it from boot-time convergence.
+#[must_use]
+pub fn is_starter_policy_id(id: &str) -> bool {
+    STARTER_POLICY_IDS.contains(&id)
+}
+
+/// The pinned content hash guarding [`STARTER_POLICY_REVISION`] — see the test that reads it.
+#[cfg(test)]
+const EXPECTED_STARTER_CONTENT_HASH: &str = "dd6aedf061a8dba5bd0ef8dd4dacb8397a094825e274ce7e9aa3f4071eb1675d";
+
 /// `platform_admin`'s role key — also its template's `policy_id` (see module docs).
 const PLATFORM_ADMIN_KEY: &str = "platform_admin";
 
@@ -647,5 +688,48 @@ mod tests {
         assert!(starter_policies().iter().all(|d| d.system));
         assert!(starter_policies().iter().any(|d| d.policy_id == "org_admin" && d.kind == PolicyKind::Template));
         assert!(starter_policies().iter().any(|d| d.policy_id == FORBID_ARCHIVED_WRITES_ID && d.kind == PolicyKind::Static));
+    }
+
+    #[test]
+    fn starter_policy_ids_matches_what_starter_policies_actually_produces() {
+        // The const exists so `put_in`'s reserved-namespace check is a slice scan rather than
+        // nine `PolicyDocument` allocations per call. This test is what stops it drifting.
+        let actual: Vec<String> = starter_policies().into_iter().map(|d| d.policy_id).collect();
+        let declared: Vec<String> = STARTER_POLICY_IDS.iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(declared, actual, "STARTER_POLICY_IDS must list exactly the ids starter_policies() produces, in order");
+    }
+
+    #[test]
+    fn is_starter_policy_id_recognizes_every_starter_id_and_nothing_else() {
+        for id in STARTER_POLICY_IDS {
+            assert!(is_starter_policy_id(id), "{id} must be recognized");
+        }
+        assert!(!is_starter_policy_id("some-operator-policy"));
+        assert!(!is_starter_policy_id(""));
+    }
+
+    /// SMA-477 D11: `STARTER_POLICY_REVISION` is hand-maintained, so this pin is what stops it
+    /// being forgotten. It hashes the canonical content of every starter policy; any change to
+    /// a generated source, a role's action list, a description, or a kind reds it.
+    #[test]
+    fn starter_policy_content_is_pinned_to_the_declared_revision() {
+        let mut hasher = blake3::Hasher::new();
+        for doc in starter_policies() {
+            hasher.update(doc.policy_id.as_bytes());
+            hasher.update(crate::authz::reconcile::content_fingerprint(doc.kind, &doc.source, &doc.description).as_bytes());
+        }
+        let actual = hasher.finalize().to_hex().to_string();
+
+        assert_eq!(
+            actual, EXPECTED_STARTER_CONTENT_HASH,
+            "\n\nThe starter policy set's content changed.\n\
+             This is expected when you add an Action, edit a role's action list, or reword a \
+             description — but it means every deployed database now holds an older set.\n\n\
+             Do BOTH of these, in this order:\n\
+             1. Bump `STARTER_POLICY_REVISION` (currently {STARTER_POLICY_REVISION}) by one.\n\
+             2. Replace `EXPECTED_STARTER_CONTENT_HASH` with:\n     {actual}\n\n\
+             Skipping step 1 lets an older binary overwrite this release's policy set \
+             fleet-wide (SMA-477 D11).\n"
+        );
     }
 }

@@ -11,7 +11,7 @@ mod support;
 
 use chrono::{SubsecRound, Utc};
 use paigasus_iam::adapters::persistence::entities::{policy, role, role_grant};
-use sea_orm::{ActiveModelTrait, ConnectionTrait, DbBackend, EntityTrait, Set, Statement};
+use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, ConnectionTrait, DbBackend, EntityTrait, Set, Statement};
 use uuid::Uuid;
 
 /// The `principal` row every test below grants roles to.
@@ -108,6 +108,8 @@ async fn policy_role_role_grant_round_trip_through_postgres() {
         system: Set(false),
         created_at: Set(now),
         updated_at: Set(now),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     };
     policy_am.insert(&db).await.unwrap();
 
@@ -194,6 +196,8 @@ async fn role_grant_check_rejects_scope_kind_mismatch() {
         system: Set(false),
         created_at: Set(Utc::now().trunc_subsecs(6)),
         updated_at: Set(Utc::now().trunc_subsecs(6)),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     };
     policy_am.insert(&db).await.unwrap();
 

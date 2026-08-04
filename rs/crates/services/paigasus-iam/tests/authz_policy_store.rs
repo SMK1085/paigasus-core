@@ -14,6 +14,11 @@
 //! `AuditLog::record` commit atomically sharing one correlation id, mirroring
 //! `tests/authz_role_grants.rs`'s own B4 atomicity proof.
 //!
+//! SMA-477 adds one guard on the same public path: `put` must never write the reconciliation
+//! columns (`content_fingerprint`/`starter_revision`) on either the INSERT or the UPDATE
+//! branch — they belong to `SystemPolicyReconciler` alone. The reconciler's own behaviour is
+//! covered in `tests/authz_bootstrap.rs`.
+//!
 //! Runs against an ephemeral Postgres in Docker. In CI (`CI` env set) a missing Docker
 //! daemon is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note —
 //! same gating pattern as `tests/roundtrip.rs`.
@@ -27,7 +32,7 @@ use paigasus_iam::adapters::persistence::entities::{audit_log, event_outbox, pol
 use paigasus_iam::adapters::persistence::{PgAuditLog, PgOutbox, PgPolicyStore, SeaOrmUnitOfWork};
 use paigasus_iam_core::authz::model::{PolicyKind, root_prn};
 use paigasus_iam_core::{AuditEntry, AuditLog, AuditOutcome, AuthzError, DomainEvent, EventType, IdGenerator, Outbox, PolicyDocument, PolicyStore, PutOutcome, UnitOfWork};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
+use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 
 /// A well-formed, schema-valid static policy document (mirrors `authz::schema`'s own
 /// "well-formed" test fixture).
@@ -55,6 +60,8 @@ async fn seed_system_policy(db: &DatabaseConnection, policy_id: &str, now: DateT
         system: Set(true),
         created_at: Set(now),
         updated_at: Set(now),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     }
     .insert(db)
     .await
@@ -198,6 +205,44 @@ async fn delete_of_a_non_system_policy_succeeds_and_bumps_policy_gen() {
     assert!(!all.iter().any(|d| d.policy_id == "deletable-policy"));
 }
 
+/// SMA-477 regression guard: the public `PutPolicy` path must leave `content_fingerprint` and
+/// `starter_revision` alone on BOTH the INSERT and the UPDATE branch. `doc_to_model` keeps them
+/// `NotSet` deliberately — those columns are `SystemPolicyReconciler`'s alone, and an
+/// operator-authored policy carrying a fingerprint would read as this service's own provenance.
+/// Without this test, a future edit flipping either `NotSet` to `Set(..)` would pass every other
+/// case in the suite.
+#[tokio::test]
+async fn put_never_writes_the_reconciliation_columns() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let now = Utc::now().trunc_subsecs(6);
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let doc = valid_static_doc("operator-authored-policy", false, now);
+
+    // INSERT branch.
+    store.put(&doc).await.unwrap();
+    let row = policy::Entity::find_by_id("operator-authored-policy".to_string())
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("row present after put");
+    assert_eq!(row.content_fingerprint, None, "an operator-authored policy must carry no fingerprint");
+    assert_eq!(row.starter_revision, None, "an operator-authored policy must carry no starter revision");
+
+    // UPDATE branch — a second `put` with changed content.
+    let mut updated = doc.clone();
+    updated.description = "updated description".to_string();
+    updated.source = r#"permit(principal, action == Pgs::Iam::Action::"CreateOrganization", resource);"#.to_string();
+    store.put(&updated).await.unwrap();
+    let row = policy::Entity::find_by_id("operator-authored-policy".to_string())
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("row present after the update");
+    assert_eq!(row.source, updated.source, "the update must actually have landed");
+    assert_eq!(row.content_fingerprint, None, "an update must not start stamping a fingerprint either");
+    assert_eq!(row.starter_revision, None, "an update must not start stamping a starter revision either");
+}
+
 /// Deleting a policy id that was never persisted is a no-op success (idempotent DELETE
 /// semantics) rather than an error — and must not bump the generation, since nothing
 /// changed.
@@ -215,8 +260,9 @@ async fn delete_of_an_unknown_policy_id_is_a_noop() {
 /// check and its INSERT aren't atomic, so two replicas booting concurrently against a
 /// fresh, unseeded database can both observe `existing == None` for the same starter
 /// `policy_id` and both attempt to insert it — the loser must hit a unique-constraint
-/// violation and absorb it as an idempotent success (mirroring
-/// `bootstrap.rs::seed_role_row`), not fail its replica's `AppState::new`. This covers the
+/// violation and absorb it as an idempotent success (mirroring the same absorption in
+/// `PgSystemRoleReconciler::reconcile_role`, where `bootstrap.rs::seed_role_row` moved in
+/// SMA-477), not fail its replica's `AppState::new`. This covers the
 /// SAME-content case (both racers write the IDENTICAL starter policy document); the
 /// DIFFERENT-content case is covered separately below
 /// (`concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_conflict`).
@@ -285,6 +331,8 @@ async fn concurrent_put_of_the_same_new_policy_id_with_different_content_is_a_co
         system: Set(doc_a.system),
         created_at: Set(doc_a.created_at),
         updated_at: Set(doc_a.updated_at),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     }
     .insert(&txn_a)
     .await
@@ -361,6 +409,8 @@ async fn put_in_absorbs_a_same_content_savepoint_conflict_and_the_outer_txn_stay
         system: Set(doc.system),
         created_at: Set(doc.created_at),
         updated_at: Set(doc.updated_at),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     }
     .insert(&txn_a)
     .await
@@ -436,6 +486,8 @@ async fn put_in_surfaces_a_different_content_savepoint_conflict_and_the_outer_tx
         system: Set(doc_a.system),
         created_at: Set(doc_a.created_at),
         updated_at: Set(doc_a.updated_at),
+        content_fingerprint: NotSet,
+        starter_revision: NotSet,
     }
     .insert(&txn_a)
     .await
@@ -501,6 +553,44 @@ async fn put_in_on_an_existing_system_policy_is_rejected_before_any_write() {
     let outcome = store.put_in(&*tx, &sibling).await.unwrap();
     assert!(matches!(outcome, PutOutcome::Inserted), "expected Inserted, got {outcome:?}");
     tx.commit().await.expect("outer txn must still be usable after the rejected system-row edit");
+}
+
+/// SMA-477 D6: the starter ids are reserved even before they are seeded. Without this an
+/// operator could occupy one, and a row that is not `system = true` would then be exempt from
+/// boot-time convergence forever.
+#[tokio::test]
+async fn put_rejects_a_reserved_starter_policy_id() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let now = Utc::now();
+
+    let doc = PolicyDocument {
+        policy_id: "org_admin".to_string(),
+        kind: PolicyKind::Static,
+        source: "permit(principal, action, resource);".to_string(),
+        description: String::new(),
+        system: false,
+        created_at: now,
+        updated_at: now,
+    };
+
+    // Rejected on a FRESH database, i.e. before the id is seeded — the check is on the id, not
+    // on any stored row's `system` flag.
+    let err = store.put(&doc).await.expect_err("a reserved starter id must be rejected");
+    assert!(matches!(&err, AuthzError::SystemImmutable(id) if id == "org_admin"), "got {err:?}");
+
+    let forbid = PolicyDocument {
+        policy_id: "forbid-archived-writes".to_string(),
+        ..doc.clone()
+    };
+    assert!(matches!(store.put(&forbid).await, Err(AuthzError::SystemImmutable(_))));
+
+    // An operator's own id is unaffected.
+    let ok = PolicyDocument {
+        policy_id: "operator-policy".to_string(),
+        ..doc
+    };
+    store.put(&ok).await.expect("a non-reserved id must still be accepted");
 }
 
 /// SMA-446 Task B5 — the UoW reference pattern's atomicity proof at the store level (mirrors

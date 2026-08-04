@@ -4,7 +4,8 @@
 //! abstractions, not on the eventual Postgres/cache/audit adapters (ADR-0005). Later M3
 //! tasks provide the service-crate implementations.
 
-use super::model::{AccessRequest, AuthzDecisionEvent, AuthzError, Decision, EntitySlice, PolicyDocument, PutOutcome, RoleGrant};
+use super::model::{AccessRequest, AuthzDecisionEvent, AuthzError, Decision, EntitySlice, PolicyDocument, PutOutcome, Role, RoleGrant};
+use super::reconcile::{RoleOutcome, StarterPolicyOutcome};
 use crate::ports::Transaction;
 use crate::value::PrincipalId;
 use async_trait::async_trait;
@@ -97,6 +98,57 @@ pub trait AuditSink: Send + Sync {
     async fn record(&self, ev: &AuthzDecisionEvent);
 }
 
+/// Boot-only reconciliation of the code-owned starter policy set (SMA-477 D5). Deliberately
+/// NOT a [`PolicyStore`] method: `PolicyStore` has seven implementations, six of which are test
+/// fakes on the request path that would gain a method nothing calls.
+#[async_trait]
+pub trait SystemPolicyReconciler: Send + Sync {
+    /// Converge the persisted row for `doc.policy_id` to `doc`, stamping `revision`, and report
+    /// what happened. Writes nothing when the outcome is
+    /// [`StarterPolicyOutcome::Unchanged`] or [`StarterPolicyOutcome::StaleBinary`] — including
+    /// a `StaleBinary` whose `provenance_ok` is `false`: this binary reports the divergence but
+    /// must not repair it, or convergence stops being monotonic. Bumps `policy_gen`
+    /// best-effort, and only when policy CONTENT changed.
+    async fn reconcile_system(&self, doc: &PolicyDocument, revision: u32) -> Result<StarterPolicyOutcome, AuthzError>;
+    /// Ids of persisted `system = true` rows NOT in `known` — retired starter policies that
+    /// nothing can now delete ([`PolicyStore::delete`] refuses a system row). Reported, never
+    /// removed: a safe retirement path has its own ordering constraints and is out of scope.
+    /// Sorted ascending by id: boot logs one line per orphan, and an unstable order would
+    /// reshuffle those lines run to run.
+    async fn orphaned_system_policy_ids(&self, known: &[&str]) -> Result<Vec<String>, AuthzError>;
+    /// Every persisted `policy_id`, captured once before reconciliation so boot can tell a
+    /// SURVIVABLE convergence failure (the row exists and still governs) from a FATAL seeding
+    /// failure (the row is missing, so the compiled snapshot would be incomplete) — SMA-477 D12.
+    async fn existing_policy_ids(&self) -> Result<Vec<String>, AuthzError>;
+}
+
+/// Boot-only reconciliation of the code-defined system role catalog (SMA-477 D7). Symmetric to
+/// [`SystemPolicyReconciler`] so `reconcile_starter` is fully fakeable without a database.
+///
+/// No fingerprint and no audit: these columns are introspectable-only — nothing parses them
+/// back at runtime (the `role_key -> Role` lookup is always code-defined), so there is no
+/// operator-edit story worth preserving and no security-relevant content to record.
+#[async_trait]
+pub trait SystemRoleReconciler: Send + Sync {
+    async fn reconcile_role(&self, role: &Role) -> Result<RoleOutcome, AuthzError>;
+    /// Keys of persisted `system = true` rows NOT in `known` — retired roles. Reported, never
+    /// removed (same posture, and same out-of-scope retirement path, as
+    /// [`SystemPolicyReconciler::orphaned_system_policy_ids`]).
+    ///
+    /// Sorted ascending by key, for the same reason its policy twin is: boot logs one line per
+    /// orphan, and an unstable order would reshuffle those lines run to run.
+    async fn orphaned_system_role_keys(&self, known: &[&str]) -> Result<Vec<String>, AuthzError>;
+    /// Every persisted `role.key`, captured once before reconciliation — the exact twin of
+    /// [`SystemPolicyReconciler::existing_policy_ids`], and load-bearing for the same reason:
+    /// boot must tell a SURVIVABLE convergence failure (the row exists; its columns are
+    /// introspectable-only, so stale ones cost nothing for one boot) from a FATAL seeding
+    /// failure. A missing `role` row is not cosmetic — `role_grant.role_key` carries an FK to it
+    /// (`fk_role_grant_role`), so a replica that booted past a failed INSERT fails the first
+    /// bootstrap-admin grant with a raw foreign-key violation at authentication time instead of
+    /// refusing to start.
+    async fn existing_role_keys(&self) -> Result<Vec<String>, AuthzError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,4 +156,7 @@ mod tests {
     // Compile-time proof the authz ports are object-safe (injected as trait objects).
     #[allow(dead_code)]
     fn assert_object_safe(_: &dyn Authorizer, _: &dyn PolicyStore, _: &dyn RoleGrantStore, _: &dyn EntitySliceLoader, _: &dyn DecisionCache, _: &dyn AuditSink) {}
+
+    #[allow(dead_code)]
+    fn assert_reconciler_object_safe(_: &dyn SystemPolicyReconciler, _: &dyn SystemRoleReconciler) {}
 }

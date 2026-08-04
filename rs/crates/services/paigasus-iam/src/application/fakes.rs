@@ -946,17 +946,21 @@ impl Outbox for FakeOutbox {
 
 /// In-memory `AuditLog` fake for `roles.rs` (and later B5-B7) unit tests: `record` records
 /// every in-txn call (ignoring `tx`, see [`FakeUnitOfWork`]'s doc) so a test can assert what
-/// was written. `record_out_of_band`/`query` are unused by every current caller of this fake
-/// and panic if reached — a future caller that needs them should extend this fake rather than
-/// silently no-op (mirrors this module's other `InMemory*` fakes' "implement exactly what's
-/// exercised" posture).
+/// was written. `record_out_of_band` records into the SAME buffer (SMA-477), so a caller that
+/// audits outside a transaction is asserted on in one place. `query` is unused by every
+/// current caller of this fake and panics if reached — a future caller that needs it should
+/// extend this fake rather than silently no-op (mirrors this module's other `InMemory*` fakes'
+/// "implement exactly what's exercised" posture).
 #[derive(Clone, Default)]
 pub struct FakeAuditLog(pub Arc<Mutex<Vec<AuditEntry>>>);
 
 #[async_trait]
 impl AuditLog for FakeAuditLog {
-    async fn record_out_of_band(&self, _e: &AuditEntry) -> Result<(), RepositoryError> {
-        unimplemented!("application-layer unit tests never call record_out_of_band")
+    async fn record_out_of_band(&self, e: &AuditEntry) -> Result<(), RepositoryError> {
+        // SMA-477: `bootstrap::reconcile_policies` holds no `Transaction`, so it records
+        // out of band. Same buffer as `record` — assertions read one place.
+        self.0.lock().unwrap().push(e.clone());
+        Ok(())
     }
 
     async fn record(&self, _tx: &dyn Transaction, e: &AuditEntry) -> Result<(), RepositoryError> {
@@ -966,6 +970,26 @@ impl AuditLog for FakeAuditLog {
 
     async fn query(&self, _f: &AuditFilter) -> Result<Vec<AuditEntry>, RepositoryError> {
         unimplemented!("application-layer unit tests never call query")
+    }
+}
+
+/// An `AuditLog` whose out-of-band writes always fail — proves boot survives a failed audit
+/// write (SMA-477 D9). `record`/`query` are unreachable for this fake's only caller.
+#[derive(Clone, Default)]
+pub struct FailingAuditLog;
+
+#[async_trait]
+impl AuditLog for FailingAuditLog {
+    async fn record_out_of_band(&self, _e: &AuditEntry) -> Result<(), RepositoryError> {
+        Err(RepositoryError::Backend(Box::new(std::io::Error::other("audit sink down"))))
+    }
+
+    async fn record(&self, _tx: &dyn Transaction, _e: &AuditEntry) -> Result<(), RepositoryError> {
+        unimplemented!("FailingAuditLog is only used for the out-of-band path")
+    }
+
+    async fn query(&self, _f: &AuditFilter) -> Result<Vec<AuditEntry>, RepositoryError> {
+        unimplemented!("FailingAuditLog is only used for the out-of-band path")
     }
 }
 
