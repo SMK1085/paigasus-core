@@ -209,6 +209,26 @@ mod tests {
         assert!(!acknowledged(extracted.map(|EnvelopeJson(b)| b)));
     }
 
+    /// The third case, and the one an operator is most likely to trip over: declaring
+    /// `Content-Type: application/json` while sending a GENUINELY empty body (`curl -X POST -H
+    /// 'Content-Type: application/json'` with no `--data`). This is NOT the same request as the
+    /// no-header case above and does NOT mean "unacknowledged" — the header commits the request
+    /// to carrying JSON, and zero bytes is not valid JSON, so it is rejected. Pinned because
+    /// `docs/ops/RUNBOOK-observability.md` now tells operators exactly this, and a runbook claim
+    /// nothing enforces is one refactor away from being a lie.
+    #[tokio::test]
+    async fn declaring_json_then_sending_an_empty_body_is_rejected_not_treated_as_unacknowledged() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/authz/system-policies/legacy_auditor/retire")
+            .header("content-type", "application/json")
+            .body(Body::empty())
+            .unwrap();
+        <Option<EnvelopeJson<RetireBody>> as FromRequest<()>>::from_request(req, &())
+            .await
+            .expect_err("Content-Type: application/json with zero bytes must be rejected, never silently unacknowledged");
+    }
+
     /// The fix-round-flagged gap this now closes: a body that DOES declare
     /// `Content-Type: application/json` but fails to parse must render the crate's stable
     /// `{"error":{code,message}}` envelope (via `EnvelopeJson`), not axum's bare `JsonRejection`

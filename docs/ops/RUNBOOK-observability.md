@@ -1566,12 +1566,20 @@ reached every replica before calling `retire` at all.
 
 **2. Read the orphan `WARN`, then call the endpoint** as an actor holding a `platform_admin`
 grant at Root:
-```
+```http
 POST /v1/authz/system-policies/{id}/retire
-Content-Type: application/json        # optional — an absent/empty body means "not acknowledged"
+Content-Type: application/json
 
 {"acknowledge_decision_change": false}
 ```
+**The body is optional, but "no body" and "empty body" are not the same request.** Omit the
+`Content-Type` header entirely to send no body — that extracts as `None` and means "not
+acknowledged". If you *do* send `Content-Type: application/json`, the body must be valid JSON:
+`{}` (the field defaults to `false`) or an explicit `{"acknowledge_decision_change": …}`. A
+`Content-Type: application/json` header with a genuinely empty body is a malformed request and
+returns `400`, not an unacknowledged retirement — so `curl -X POST -H 'Content-Type:
+application/json'` with no `--data` fails, while the same `curl` without the header succeeds.
+
 A `200` returns `{"policy_id", "kind", "role_deleted"}` — the operator's only immediate record of
 exactly what was destroyed (the durable copy is the `RetireSystemPolicy` audit entry, written in
 the same transaction). Anything else below is a refusal, not a partial success — none of them
