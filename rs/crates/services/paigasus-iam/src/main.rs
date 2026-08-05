@@ -358,11 +358,12 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 23 metric families `paigasus-iam` emits
-/// directly (spec §4.1; includes the SMA-467 audit partition-maintenance families and the
-/// SMA-469 outbox retention/dead-letter families), via the `names::` consts so the string used
-/// here can't drift from the one used at the increment/set call site, plus the 2 gRPC families
-/// via `paigasus_observability::describe_grpc()`. Mirrors the meanings documented in
+/// Registers `# HELP`/`# TYPE` exposition text for the 24 metric families `paigasus-iam` emits
+/// directly (spec §4.1; includes the SMA-467 audit partition-maintenance families, the
+/// SMA-469 outbox retention/dead-letter families, and the SMA-481 system-row-retirement
+/// family), via the `names::` consts so the string used here can't drift from the one used at
+/// the increment/set call site, plus the 2 gRPC families via
+/// `paigasus_observability::describe_grpc()`. Mirrors the meanings documented in
 /// `docs/ops/RUNBOOK-observability.md` §2.1/§2.2.
 fn describe_iam_metrics() {
     use metrics::{describe_counter, describe_gauge, describe_histogram};
@@ -445,6 +446,11 @@ fn describe_iam_metrics() {
     describe_gauge!(
         names::IAM_AUDIT_DEFAULT_PARTITION_ROWS,
         "Rows currently in the audit DEFAULT partitions — should be 0; nonzero means create-ahead fell behind."
+    );
+
+    describe_counter!(
+        names::IAM_SYSTEM_ROWS_RETIRED_TOTAL,
+        "Retirements of orphaned system-owned policy/role rows, by outcome (retired/blocked/refused)."
     );
 }
 

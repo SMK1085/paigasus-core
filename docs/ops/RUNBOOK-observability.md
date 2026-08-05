@@ -113,6 +113,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_audit_partitions_dropped_total` | counter | `outcome` | Monthly leaf partitions dropped by retention. `outcome` ∈ `denied`/`committed`. |
 | `iam_audit_default_partition_rows` | gauge | — | Rows currently in the audit `DEFAULT` partitions. **Should be 0**; nonzero ⇒ create-ahead fell behind (freezes when the task is stalled while retention stays enabled — the ticks counter is the primary liveness signal there; when retention is **disabled** neither metric exists at all, see §4 "Audit partition maintenance stalled"). |
 | `iam_bootstrap_admin_seed_failures_total` | counter | `stage` | Swallowed `BootstrapAdminSeeder` seed failures (SMA-468 D6). `stage` ∈ `list` (the `list_by_principal` existence check errored) / `txn` (the `begin`/`grant_in`/`enqueue`/`record`/`commit` sequence errored). Deliberately has **no alert** (D6) — watch the "Bootstrap-admin seed failures" panel on the IAM dashboard, or query `/metrics` directly. **Read it as a rate, not a level.** It is monotonic, so a single historical failure leaves it nonzero forever, including long after the identity was successfully seeded on a later attempt — an absolute nonzero value proves nothing on its own. What indicates an ongoing lockout is a counter that is **still climbing** (`increase(iam_bootstrap_admin_seed_failures_total[15m]) > 0`, sustained): the seed is idempotent-by-existence, so once the grant row commits this stops incrementing for that identity, and a seed that never commits is retried on every subsequent authentication. Confirm by looking for the grant row itself before concluding lockout. **A low, one-off increase is benign**: two concurrent first authentications by the same bootstrap identity can both pass the existence check and both attempt `grant_in`; the loser violates the unique grant constraint and rolls back under `stage="txn"` while the winner's grant commits — net state is correct and self-correcting. |
+| `iam_system_rows_retired_total` | counter | `outcome` | Retirements of orphaned system-owned `policy`/`role` rows via `POST /v1/authz/system-policies/{id}/retire` (SMA-481, §4 "Retiring an orphaned system-owned row"). `outcome` ∈ `retired` (the deletes, the `PolicyDeleted` event and the audit row all committed) / `blocked` (surviving grants stopped it — nothing written) / `refused` (`fleet-not-converged`, or a static policy retired without `acknowledge_decision_change` — nothing written). **Not one increment per call:** `403` (non-Root), `409 system-immutable` (the id is still code-defined), `404`, and `409 not-system-owned` all return WITHOUT touching this counter — none of them are the fleet-skew / decision-change / blast-radius concerns it exists to page on. **No alert rule ships for it today** — retirement is a rare, deliberate, Root-only action, so this is a signal you query rather than one that pages you. It is nevertheless the only *monitorable* trace of the action: the `RetireSystemPolicy` `audit_log` row written in the same transaction is durable evidence, but nothing polls `audit_log` for it, and durable is not the same as monitored. |
 
 ### 2.3 `paigasus-gateway` — IAM dependency, OpenAI upstream
 
@@ -1457,7 +1458,7 @@ already unchanged is not counted at all, and (unlike a policy) neither is an orp
 | `adopted` | Both provenance columns were NULL, so the row's provenance was unknowable. That is expected for a row seeded before m0010 — but it is not proof of one; see below. | None on the first boot after upgrading. Afterwards, investigate. Also see below if it changed content. |
 | `stale_binary` | The stored row was written by a NEWER release **and its provenance checks out**; this replica left it alone. | Expected briefly during a deploy. Persisting means an old replica is still running — or that the fleet was permanently rolled back, in which case it persists forever until a build with a higher `STARTER_POLICY_REVISION` ships. See below. |
 | `externally_modified` | Something other than this service wrote the row. Converged and audited — **except** when the row also claims a newer revision, which is warned about but *not* repaired (see below). | **Investigate.** |
-| `orphaned` | A `system = true` **policy** row whose id is no longer code-defined. An orphaned system **role** row is WARN-logged (`reconcile_roles`) but does NOT increment this counter — a deliberate asymmetry with the policy half. | Investigate; it still compiles and still links grants, and `DeletePolicy` refuses to remove it. |
+| `orphaned` | A `system = true` **policy** row whose id is no longer code-defined. An orphaned system **role** row is WARN-logged (`reconcile_roles`) but does NOT increment this counter — a deliberate asymmetry with the policy half. | Retire it with `POST /v1/authz/system-policies/{id}/retire` once the fleet has converged — see "Retiring an orphaned system-owned row (SMA-481)" below. |
 | `failed` | Converging one row errored — a starter **policy** row or a system **role** row, both under this same label. A row that already existed is kept for this boot; an absent row that couldn't be seeded is fatal. So is **any** failure when the pre-loop id snapshot was itself unreadable, because no row can then be proven to exist. | Check the ERROR log line — it names which of the three cases this was, and its `policy_id` vs `role_key` field says which half failed (the metric alone can't). Transient at low volume in the survivable case. |
 
 **`externally_modified` — the one that matters.** It logs
@@ -1538,6 +1539,87 @@ other edit.)
 **A pure provenance stamp still bumps `updated_at`** without changing any content and without
 bumping `policy_gen`, so an `updated_at` change visible through `ListPolicies` is not by itself
 evidence of a policy change.
+
+### Retiring an orphaned system-owned row (SMA-481)
+
+**What this is for.** The `orphaned` outcome above, and the sibling role-half `WARN` (`reconcile_roles`
+does not increment a counter for it), name a `policy`/`role` row whose id
+`authz::roles`/`authz::roles::starter_policies()` no longer defines. That row still compiles,
+still links grants, and `PutPolicy`/`DeletePolicy` refuse to touch it (SMA-481 D3/D7) — it stays
+in this half-alive state forever unless an operator acts. `POST
+/v1/authz/system-policies/{id}/retire` is the only supported way to remove it: Root-only,
+enforced inside `SystemRetirementService::retire` (in practice, the caller needs a
+`platform_admin` grant at Root — the same posture as the dead-letter endpoints, §4). Follow the
+steps below **in order**: the order is what keeps you from getting stuck, more than any of the
+prose around it.
+
+**1. Precondition, before anything else: every replica must be on a binary that no longer defines
+the id.** `classify_starter_policy` (`paigasus-iam-core::authz::reconcile`) classifies an absent
+row as `Absent` — "seed it" — *before* the revision guard ever runs. So a replica whose code
+catalog still defines the retiring id will silently re-seed the policy row (and, for a role id,
+its paired `role` row too, via `reconcile_roles`) the moment it next boots or reconciles.
+Retiring mid-rollout is not merely risky, it is **silently undone**. `retire` does guard this
+in-band (`409 fleet-not-converged`, step 3 below), but that guard only sees rows that still
+exist at call time — it cannot stop a replica from re-seeding a row you just successfully
+deleted a moment earlier. Confirm the rollout that dropped the id from the code catalog has
+reached every replica before calling `retire` at all.
+
+**2. Read the orphan `WARN`, then call the endpoint** as an actor holding a `platform_admin`
+grant at Root:
+```http
+POST /v1/authz/system-policies/{id}/retire
+Content-Type: application/json
+
+{"acknowledge_decision_change": false}
+```
+**The body is optional, but "no body" and "empty body" are not the same request.** Omit the
+`Content-Type` header entirely to send no body — that extracts as `None` and means "not
+acknowledged". If you *do* send `Content-Type: application/json`, the body must be valid JSON:
+`{}` (the field defaults to `false`) or an explicit `{"acknowledge_decision_change": …}`. A
+`Content-Type: application/json` header with a genuinely empty body is a malformed request and
+returns `400`, not an unacknowledged retirement — so `curl -X POST -H 'Content-Type:
+application/json'` with no `--data` fails, while the same `curl` without the header succeeds.
+
+A `200` returns `{"policy_id", "kind", "role_deleted"}` — the operator's only immediate record of
+exactly what was destroyed (the durable copy is the `RetireSystemPolicy` audit entry, written in
+the same transaction). Anything else below is a refusal, not a partial success — none of them
+write anything.
+
+**3. Handle a refusal:**
+
+| response | meaning | what to do |
+|---|---|---|
+| `409 fleet-not-converged` | Some remaining **starter policy** row — one whose id the running binary still defines — was last written by a binary older than this one's `STARTER_POLICY_REVISION`, carries no revision at all (pre-m0010), or no starter row exists yet. Step 1's precondition, checked in-band. The orphan's own revision is deliberately not consulted: it is always older by construction, so counting it would refuse every genuine orphan. | Wait for the rollout to finish, then retry. There is no override. |
+| `409 grants-survive` | The role still has live grants (the body lists `grants[]`, `total_surviving`, `truncated`). | Revoke each listed grant — `DELETE /v1/authz/role-grants/{id}` — then retry `retire`. **If a revoke 403s because its scope node is archived** (`RevokeRole` is a write action, and `forbid-archived-writes` blocks it even for `platform_admin`): restore the node (`POST /v1/{organizations\|projects\|teams}/{id}/restore`, matching the node's kind), revoke the grant, then re-archive it (`POST .../archive`). Skip this detour and there is no way to ever revoke a grant at an archived scope — the operator loops on `grants-survive` forever. |
+| `409 decision-change-unacknowledged` | The id is a **static** policy — evaluated on every request rather than through a grant — so removing it changes decisions fleet-wide the instant it commits. The body's `source`/`description`/`kind` is exactly the content that would be destroyed; the refusal IS the preview. | Read `source`, decide whether the change is really wanted, then re-send with `{"acknowledge_decision_change": true}`. The flag is a harmless no-op if the id turns out to be a template instead. |
+| `409 system-immutable` | The id is still code-defined — this was never an orphan. | Nothing to retire; a live starter row is governed by `PutPolicy`/`DeletePolicy`, not this endpoint. |
+| `404` | No row exists at that id. | **Retirement is deliberately not idempotent** — a second retirement of an id already retired also 404s. Treat an unexpected `404` as "the operator's model of the system is wrong," not as a no-op repeat: re-`GET`/list the row before assuming this was a retry. |
+
+**4. Confirm, and know what a returning `WARN` means.** After a `200`, confirm the orphan `WARN`
+is gone on the next boot of every replica. **If it comes back, the fleet had not actually
+converged when `retire` was called** — some replica's code catalog still defined the id and
+re-seeded the row per step 1 — and the fix is simply to repeat the retirement once convergence is
+confirmed. **Nothing is corrupted**; the row was re-seeded, not left half-deleted.
+
+**5. Watch the metric.** `iam_system_rows_retired_total{outcome="retired"}` increments once the
+deletes, the `PolicyDeleted` event, and the audit entry all commit (see `names.rs`'s doc comment,
+§2.2, for exactly which outcomes do — and, just as importantly, do NOT — touch this counter).
+`outcome="blocked"`/`outcome="refused"` exist too, but watching only `retired` misses a
+retirement that keeps getting blocked or refused without ever succeeding.
+
+**6. What this endpoint cannot reach.** A hand-inserted `role` row whose `template_id != key`.
+Every row this service itself ever wrote satisfies `policy_id == role.key == role.template_id`
+(`authz::roles` module doc), and the endpoint keys off that one shared id — `lock_policy_in`/
+`lock_role_in` both look it up directly, with no separate lookup for a mismatched
+`template_id`. A `role` row with a mismatched `template_id` can only have been written by hand,
+outside this service, and is unreachable through `retire`; it needs direct database work instead
+(remove the row and whatever grants now reference it in FK order — grants, then role, then
+policy — since `fk_role_grant_role` and `fk_role_template` are both restrict). **That is the
+order the foreign keys force on you by hand; it is not the order the service follows.** `retire`
+never deletes a grant at all: it refuses (`409 grants-survive`) while any survive and makes you
+revoke them through the audited `RevokeRole` path first (design D4), so its own delete order is
+only role → policy. Deleting grants by hand here bypasses that audit trail and the
+`policy_gen` bump — it is the unsupported path, which is exactly why it is the last resort.
 
 ---
 

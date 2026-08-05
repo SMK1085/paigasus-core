@@ -23,7 +23,7 @@ namespace Pgs::Iam {
          PutPolicy, DeletePolicy, ListPolicies, GrantRole, RevokeRole, ListRoleGrants,
          CreateServiceAccount, GetServiceAccount, ListServiceAccounts, ArchiveServiceAccount,
          IssueApiKey, RevokeApiKey, ListApiKeys, ListAuditLog, ListOutboxDeadLetters,
-         ReplayOutboxDeadLetter, DiscardOutboxDeadLetter, InvokeModel
+         ReplayOutboxDeadLetter, DiscardOutboxDeadLetter, RetireSystemPolicy, InvokeModel
     appliesTo { principal: [Principal], resource: [Root, Organization, Team, Project] };
 }
 "#;
@@ -59,5 +59,11 @@ mod tests {
     #[test]
     fn a_malformed_policy_is_rejected() {
         assert!(validate_policy("permit(this is not cedar);").is_err());
+    }
+    /// SCHEMA_SRC's action list is hand-maintained. If the new action is missing there,
+    /// `validate_policy` rejects the newly-generated forbid-archived-writes source and boot fails.
+    #[test]
+    fn the_retire_action_validates_against_the_embedded_schema() {
+        assert!(validate_policy(r#"permit(principal, action == Pgs::Iam::Action::"RetireSystemPolicy", resource);"#).is_ok());
     }
 }

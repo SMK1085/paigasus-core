@@ -65,7 +65,11 @@ fn count(outcome_label: &'static str) {
 /// panics, and this runs inside `AppState::new`, so the panic would kill the replica before it
 /// served a request. The overwritten text is attacker-influenced, so it may well be the operator
 /// who chose where byte 8192 lands. A walked-back result is SHORTER than the cap.
-fn truncate_audited_text(text: &str) -> (String, bool) {
+///
+/// `pub(crate)`: `application::system_retirement`'s audit entry destroys the same kind of
+/// attacker-influenced content (a retired policy's `source`/`description`) and reuses this cap
+/// rather than re-deriving it (SMA-481 D9).
+pub(crate) fn truncate_audited_text(text: &str) -> (String, bool) {
     if text.len() <= MAX_AUDITED_SOURCE_BYTES {
         return (text.to_string(), false);
     }
@@ -221,7 +225,7 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
         count("orphaned");
         tracing::warn!(
             policy_id = %orphan,
-            "a system-owned policy row is no longer code-defined; it still compiles and still links grants, and DeletePolicy refuses to remove it"
+            "a system-owned policy row is no longer code-defined; it still compiles and still links grants, and DeletePolicy refuses to remove it. Retire it with POST /v1/authz/system-policies/{orphan}/retire once every replica is on a binary that no longer defines it (see RUNBOOK)"
         );
     }
     Ok(())
@@ -345,7 +349,10 @@ pub async fn reconcile_roles<I: IdGenerator, C: Clock>(deps: &ReconcileStarterDe
         }
     };
     for orphan in orphans {
-        tracing::warn!(role_key = %orphan, "a system role row is no longer code-defined; existing grants of it still resolve");
+        tracing::warn!(
+            role_key = %orphan,
+            "a system role row is no longer code-defined; existing grants of it still resolve. Revoke those grants, then retire it with POST /v1/authz/system-policies/{orphan}/retire (see RUNBOOK)"
+        );
     }
     Ok(())
 }

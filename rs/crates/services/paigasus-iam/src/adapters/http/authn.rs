@@ -10,7 +10,7 @@
 //! upstream error text ever reach the response (spec §6.3).
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, FromRequest, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, OptionalFromRequest, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -65,8 +65,23 @@ impl IntoResponse for AuthnApiError {
 /// `pub(crate)` (rather than private): `adapters::http::api_keys`'s introspect handler
 /// (SMA-445 Task 20) reuses this SAME envelope for `POST /v1/authn/api-keys/introspect`
 /// rather than duplicating the rejection-mapping logic — the two routes share one
-/// unauthenticated-body-limited posture (spec H1).
+/// unauthenticated-body-limited posture (spec H1). `adapters::http::system_retirement`
+/// (SMA-481) reuses it too, via `Option<EnvelopeJson<T>>` below, for a route whose body is
+/// optional but whose malformed-body response must still match this envelope.
+#[derive(Debug)]
 pub(crate) struct EnvelopeJson<T>(pub(crate) T);
+
+/// Maps a `JsonRejection` into the stable `{"error":{code,message}}` envelope — shared by both
+/// `EnvelopeJson`'s required (`FromRequest`) and optional (`OptionalFromRequest`) extraction
+/// paths below so the two can never drift apart on status/code/message.
+fn envelope_rejection(rejection: JsonRejection) -> Response {
+    let (code, message) = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        ("request_too_large", "request body too large")
+    } else {
+        ("invalid_request", "invalid request body")
+    };
+    (rejection.status(), Json(json!({ "error": { "code": code, "message": message } }))).into_response()
+}
 
 impl<S, T> FromRequest<S> for EnvelopeJson<T>
 where
@@ -78,14 +93,29 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(req, state).await {
             Ok(Json(value)) => Ok(EnvelopeJson(value)),
-            Err(rejection) => {
-                let (code, message) = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                    ("request_too_large", "request body too large")
-                } else {
-                    ("invalid_request", "invalid request body")
-                };
-                Err((rejection.status(), Json(json!({ "error": { "code": code, "message": message } }))).into_response())
-            }
+            Err(rejection) => Err(envelope_rejection(rejection)),
+        }
+    }
+}
+
+/// `Option<EnvelopeJson<T>>` support (SMA-481): mirrors axum's own `Json<T>:
+/// OptionalFromRequest` impl exactly for the "is there a body at all" question — no
+/// `Content-Type` header means `Ok(None)` (never an attempt to parse zero bytes as JSON) — but
+/// a body that DOES declare `Content-Type: application/json` and fails to parse still gets the
+/// SAME stable envelope the required `FromRequest` impl above produces, rather than axum's bare
+/// `JsonRejection` text escaping the house error contract.
+impl<S, T> OptionalFromRequest<S> for EnvelopeJson<T>
+where
+    Json<T>: OptionalFromRequest<S, Rejection = JsonRejection>,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Option<Self>, Self::Rejection> {
+        match <Json<T> as OptionalFromRequest<S>>::from_request(req, state).await {
+            Ok(Some(Json(value))) => Ok(Some(EnvelopeJson(value))),
+            Ok(None) => Ok(None),
+            Err(rejection) => Err(envelope_rejection(rejection)),
         }
     }
 }
@@ -115,8 +145,64 @@ async fn introspect(State(state): State<AppState>, EnvelopeJson(body): EnvelopeJ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::to_bytes;
+    use axum::body::{Body, to_bytes};
+    use axum::extract::Request;
     use paigasus_iam_core::{ProvisioningDefect, TokenDefect};
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct Probe {
+        x: i32,
+    }
+
+    /// `Option<EnvelopeJson<T>>`'s "no body at all" branch (SMA-481): no `Content-Type` header
+    /// must yield `Ok(None)`, mirroring axum's own `Json<T>: OptionalFromRequest` behavior
+    /// exactly — never an attempt to parse zero bytes as JSON.
+    #[tokio::test]
+    async fn optional_envelope_json_yields_none_when_no_content_type_is_present() {
+        let req = Request::builder().method("POST").uri("/").body(Body::empty()).unwrap();
+        let extracted = <Option<EnvelopeJson<Probe>> as FromRequest<()>>::from_request(req, &())
+            .await
+            .expect("an absent body must never be a 400/415");
+        assert!(extracted.is_none());
+    }
+
+    /// The malformed-body case a fix-round review flagged: `Content-Type: application/json`
+    /// declared but the body doesn't parse must still render the SAME `{"error":{code,message}}`
+    /// envelope the required `EnvelopeJson` extraction produces — not axum's bare `JsonRejection`
+    /// text escaping the house error contract.
+    #[tokio::test]
+    async fn optional_envelope_json_maps_a_malformed_body_to_the_stable_envelope() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from("{not json"))
+            .unwrap();
+        let rejection = <Option<EnvelopeJson<Probe>> as FromRequest<()>>::from_request(req, &())
+            .await
+            .expect_err("malformed JSON must be rejected");
+        assert_eq!(rejection.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(rejection.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], json!("invalid_request"));
+        assert_eq!(body["error"]["message"], json!("invalid request body"));
+    }
+
+    /// The happy path: a present, well-formed body still extracts to `Some`.
+    #[tokio::test]
+    async fn optional_envelope_json_extracts_some_for_a_well_formed_body() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"x": 1}"#))
+            .unwrap();
+        let extracted = <Option<EnvelopeJson<Probe>> as FromRequest<()>>::from_request(req, &())
+            .await
+            .expect("a well-formed body must not be rejected");
+        assert!(matches!(extracted, Some(EnvelopeJson(Probe { x: 1 }))));
+    }
 
     /// Renders the funnel and returns `(status, WWW-Authenticate header, json body)`.
     async fn rendered(err: AuthnError) -> (StatusCode, Option<String>, serde_json::Value) {

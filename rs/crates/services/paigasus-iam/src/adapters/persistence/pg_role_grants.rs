@@ -36,7 +36,7 @@ use crate::adapters::authz::Generations;
 use async_trait::async_trait;
 use paigasus_iam_core::{AuthzError, GrantScope, PrincipalId, RepositoryError, RoleGrant, RoleGrantStore, TenancyNodeRef, Transaction};
 use paigasus_kernel::Prn;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set, SqlErr, TransactionTrait};
 use uuid::Uuid;
 
 // `Clone` lets the composition root hold a store handle inside a `#[derive(Clone)]` service
@@ -73,6 +73,31 @@ impl PgRoleGrantStore {
 
 fn map_err(e: DbErr) -> AuthzError {
     AuthzError::Backend(Box::new(e))
+}
+
+/// `grant_in`'s error mapping. The private [`map_err`] above collapses every `DbErr` into
+/// `Backend`, which is right for the reads and deletes around it but wrong for exactly one of
+/// `role_grant`'s five foreign keys: a violation of `fk_role_grant_role` specifically means the
+/// `role` row this grant names does not exist, which is exactly what `RoleService::grant`
+/// reports as `UnknownRole` before it ever reaches the database. The other four —
+/// `fk_role_grant_principal`/`fk_role_grant_org`/`fk_role_grant_team`/`fk_role_grant_project` —
+/// mean something else entirely (a missing principal or tenancy node) and must stay `Backend`;
+/// matching on `SqlErr::ForeignKeyConstraintViolation` alone, without checking WHICH constraint
+/// fired, would confidently mislabel all five as "the role is gone" even when the role is fine.
+/// So this checks the constraint name embedded in the error text — mirroring `conflict_kind`'s
+/// (`persistence/mod.rs`) own name-based attribution for unique violations, not the raw
+/// message — before drawing the `UnknownRole` conclusion.
+///
+/// This is not a theoretical branch. SMA-481 D6: a retirement holds the role row `FOR UPDATE`
+/// while a concurrent grant from a replica on an OLDER binary — one whose code catalog still
+/// defines the retired role — blocks behind it. When the retirement commits with the row
+/// deleted, that grant resumes, re-runs its FK check and fails. Without this mapping the caller
+/// gets a `500 internal error` for a condition the service understands perfectly well.
+fn map_grant_err(e: DbErr, role_key: &str) -> AuthzError {
+    match e.sql_err() {
+        Some(SqlErr::ForeignKeyConstraintViolation(ref msg)) if msg.contains("fk_role_grant_role") => AuthzError::UnknownRole(role_key.to_string()),
+        _ => map_err(e),
+    }
 }
 
 /// A stored-error helper for a corrupt/unparseable `scope_node_prn` or `principal_id` — a
@@ -186,7 +211,7 @@ impl RoleGrantStore for PgRoleGrantStore {
 
     async fn grant_in(&self, tx: &dyn Transaction, g: &RoleGrant) -> Result<(), AuthzError> {
         let txn = recover_txn(tx).map_err(map_txn_err)?;
-        grant_to_model(g).insert(txn).await.map_err(map_err)?;
+        grant_to_model(g).insert(txn).await.map_err(|e| map_grant_err(e, &g.role_key))?;
         Ok(())
     }
 

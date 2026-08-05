@@ -51,7 +51,10 @@ pub const FORBID_ARCHIVED_WRITES_ID: &str = "forbid-archived-writes";
 /// onto every already-serving newer replica.
 ///
 /// `CARGO_PKG_VERSION` cannot serve here: the crate is version `0.0.0`.
-pub const STARTER_POLICY_REVISION: u32 = 1;
+///
+/// `2`: SMA-481 added the `RetireSystemPolicy` action, which — being a non-restore write —
+/// joins `forbid-archived-writes`'s generated action list and so changes its `source`.
+pub const STARTER_POLICY_REVISION: u32 = 2;
 
 /// Every `policy_id` [`starter_policies`] produces, in the order it produces them. A `const`
 /// so the reserved-namespace check in `PolicyStore::put_in` is a slice scan rather than nine
@@ -79,7 +82,7 @@ pub fn is_starter_policy_id(id: &str) -> bool {
 
 /// The pinned content hash guarding [`STARTER_POLICY_REVISION`] — see the test that reads it.
 #[cfg(test)]
-const EXPECTED_STARTER_CONTENT_HASH: &str = "dd6aedf061a8dba5bd0ef8dd4dacb8397a094825e274ce7e9aa3f4071eb1675d";
+const EXPECTED_STARTER_CONTENT_HASH: &str = "6b6b6d461e3e76d4f9ef53bd149362d257f5c0545c542134e93091f12ad63c39";
 
 /// `platform_admin`'s role key — also its template's `policy_id` (see module docs).
 const PLATFORM_ADMIN_KEY: &str = "platform_admin";
@@ -730,6 +733,17 @@ mod tests {
              2. Replace `EXPECTED_STARTER_CONTENT_HASH` with:\n     {actual}\n\n\
              Skipping step 1 lets an older binary overwrite this release's policy set \
              fleet-wide (SMA-477 D11).\n"
+        );
+    }
+
+    /// The new action must actually reach the generated forbid list — the whole reason
+    /// STARTER_POLICY_REVISION has to move. A hand-updated hash with the action missing from
+    /// `Action::ALL` would otherwise look green.
+    #[test]
+    fn the_retire_action_is_in_the_generated_forbid_source() {
+        assert!(
+            forbid_archived_writes_source().contains(r#"Pgs::Iam::Action::"RetireSystemPolicy""#),
+            "RetireSystemPolicy is a write action, so it must appear in forbid-archived-writes"
         );
     }
 }

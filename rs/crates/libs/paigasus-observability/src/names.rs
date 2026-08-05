@@ -73,6 +73,24 @@ pub const IAM_AUDIT_PARTITION_MAINTENANCE_TICKS_TOTAL: &str = "iam_audit_partiti
 pub const IAM_AUDIT_PARTITIONS_CREATED_TOTAL: &str = "iam_audit_partitions_created_total";
 pub const IAM_AUDIT_PARTITIONS_DROPPED_TOTAL: &str = "iam_audit_partitions_dropped_total";
 pub const IAM_AUDIT_DEFAULT_PARTITION_ROWS: &str = "iam_audit_default_partition_rows";
+// IAM system row retirement (SMA-481)
+/// Labelled `outcome` = `refused` | `blocked` | `retired` — but this is NOT one increment per
+/// `SystemRetirementService::retire` call. Four outcomes return without touching this counter
+/// at all: `Forbidden` (the Root-only check), `SystemImmutable` (still code-defined),
+/// `NotFound`, and `NotSystemOwned` — none of them are the fleet-skew/decision-change/
+/// blast-radius concerns this metric exists to page on, so they are not instrumented here.
+/// `refused` fires for `FleetNotConverged` (before any transaction opens) AND for an
+/// unacknowledged static-policy retirement (`NeedsAcknowledgement` — this one DOES open a
+/// transaction and lock the policy row before refusing; `lock_role_in` still runs
+/// unconditionally, but a static policy has no `role` row to lock, so only the policy row is
+/// actually held — "refused" describes the outcome, not "never opened a transaction"). `blocked`
+/// fires when surviving grants stop a retirement after a transaction opened. `retired` fires
+/// once the deletes, event and audit entry all committed.
+/// Retirement is a destructive, Root-only, operator-triggered action, and unlike a routine
+/// reconciliation drift, nothing else alerts on it: the `audit_log` row this call also writes is
+/// durable evidence, but durable is not the same as monitored — nothing polls `audit_log` for
+/// this action today, so this counter is the only thing that can page anyone on it.
+pub const IAM_SYSTEM_ROWS_RETIRED_TOTAL: &str = "iam_system_rows_retired_total";
 
 /// Every metric family this workspace emits — the drift test (`tests/drift.rs`) extracts every
 /// `iam_`/`gateway_`-prefixed identifier from the committed dashboard/rule `expr`s, strips a
@@ -114,6 +132,7 @@ pub const ALL: &[&str] = &[
     IAM_AUDIT_PARTITIONS_CREATED_TOTAL,
     IAM_AUDIT_PARTITIONS_DROPPED_TOTAL,
     IAM_AUDIT_DEFAULT_PARTITION_ROWS,
+    IAM_SYSTEM_ROWS_RETIRED_TOTAL,
 ];
 
 #[cfg(test)]
