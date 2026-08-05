@@ -94,7 +94,13 @@ impl SystemRowRetirer for PgSystemRowRetirer {
         // hanging forever is precisely the failure mode being designed out on a privileged,
         // operator-triggered path. No caller passes `Duration::ZERO` today (`LOCK_TIMEOUT` is
         // 5s); a future one plainly means "do not wait", which 1ms delivers and `'0'` would not.
-        let millis = lock_timeout.as_millis().max(1);
+        //
+        // The upper bound is clamped for the mirror-image reason: `as_millis()` is `u128`, but
+        // Postgres rejects a `lock_timeout` above `INT_MAX` milliseconds, so an over-large
+        // `Duration` would fail `begin_retirement` outright with an opaque `Backend` error
+        // instead of yielding the long-but-usable timeout the caller asked for. Clamping both
+        // ends keeps every `Duration` a caller can construct mapping to a legal statement.
+        let millis = lock_timeout.as_millis().clamp(1, u128::from(i32::MAX.unsigned_abs()));
         txn.execute_unprepared(&format!("SET LOCAL lock_timeout = '{millis}ms';")).await.map_err(map_db_err)?;
         Ok(Box::new(SeaOrmTransaction { txn }))
     }

@@ -179,6 +179,48 @@ async fn seed_system_policy_with_revision(db: &DatabaseConnection, id: &str, rev
     .unwrap();
 }
 
+/// The static-policy acknowledgement path (D4), at the Postgres level. Every other test in this
+/// file retires a TEMPLATE seeded by `seed_orphan_chain` and passes `ack = true`, so until now
+/// `NeedsAcknowledgement` and the acknowledged static retirement were covered only by the
+/// service's unit tests against fakes — and the static path is the DANGEROUS half of D4, the one
+/// where deleting the row genuinely changes decisions fleet-wide rather than removing an inert
+/// template.
+///
+/// It also exercises a distinct row shape against the real adapter: a `policy` row with no
+/// `role` row, so `lock_role_in` returns `None` and `delete_role_in` is never called. A fake
+/// cannot prove that shape survives the FKs.
+#[tokio::test]
+async fn a_static_orphan_needs_acknowledgement_at_the_postgres_level_then_retires_without_a_role() {
+    let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    converge_starter_set(&db).await;
+    seed_system_policy_with_revision(&db, "legacy_forbid", Some(ORPHAN_REVISION)).await;
+
+    // Unacknowledged: refuses, hands back the content that would be destroyed, writes nothing.
+    match retire(&db, "legacy_forbid", false).await.unwrap() {
+        RetireOutcome::NeedsAcknowledgement { policy_id, kind, source, .. } => {
+            assert_eq!(policy_id, "legacy_forbid");
+            assert_eq!(kind, PolicyKind::Static, "a static row must not be mistaken for a template");
+            assert_eq!(source, "forbid(principal, action, resource);", "the refusal must preview what would be lost");
+        }
+        other => panic!("a static policy without acknowledgement must refuse, got {other:?}"),
+    }
+    assert!(policy_row(&db, "legacy_forbid").await.is_some(), "an unacknowledged refusal must delete nothing");
+
+    // Acknowledged: retires, and reports that no role row was involved.
+    let outcome = retire(&db, "legacy_forbid", true).await.unwrap();
+    assert_eq!(
+        outcome,
+        RetireOutcome::Retired {
+            policy_id: "legacy_forbid".to_string(),
+            kind: PolicyKind::Static,
+            role_deleted: false,
+        },
+        "a static orphan has no role row, so role_deleted must be false"
+    );
+    assert!(policy_row(&db, "legacy_forbid").await.is_none());
+    assert!(role_row(&db, "legacy_forbid").await.is_none(), "no role row should ever have existed");
+}
+
 #[tokio::test]
 async fn the_fk_ordering_is_real_and_the_retirer_respects_it() {
     let Some((_c, db)) = support::start_migrated_postgres().await else { return };
