@@ -120,11 +120,18 @@ pub trait SystemRowRetirer: Send + Sync {
     /// Up to `cap` surviving grants of `role_key`, ordered by id, plus the true total.
     async fn surviving_grants_in(&self, tx: &dyn Transaction, role_key: &str, cap: u64) -> Result<SurvivingGrants, AuthzError>;
 
-    /// The lowest `starter_revision` across all remaining system-owned `policy` rows, or `None`
-    /// if any is NULL. D11's proof-of-convergence input: a value below this binary's
+    /// The lowest `starter_revision` across the remaining STARTER POLICY rows — the ids
+    /// [`crate::authz::roles::STARTER_POLICY_IDS`] still defines — or `None` if any is NULL or
+    /// none exist at all. D11's proof-of-convergence input: a value below this binary's
     /// `STARTER_POLICY_REVISION` means some replica older than this one wrote a row recently,
     /// so retiring now risks being silently undone. Read outside the transaction — it is
     /// advisory evidence, not an invariant.
+    ///
+    /// Deliberately the code-defined set, NOT every `system = true` row: the orphan being
+    /// retired is itself system-owned, and its revision is by construction that of the last
+    /// binary which still defined it — always strictly below this one (or NULL). Including it
+    /// would make the guard refuse every genuine orphan, forever. An empty set is `None`, not
+    /// "converged": an unseeded database proves nothing.
     async fn min_starter_revision(&self) -> Result<Option<u32>, AuthzError>;
 
     /// Deletes the `role` row; returns whether one existed.
@@ -169,8 +176,9 @@ mod tests {
     }
 
     /// The cap is what keeps an unbounded grant list off the wire and out of memory. The
-    /// adapter selects `cap + 1` rows so the service can detect truncation without a second
-    /// COUNT-shaped round trip being the only source of truth.
+    /// adapter selects at most `cap` rows and a SEPARATE `COUNT` over the same locked
+    /// transaction, so truncation is derived by comparing the true total against the cap —
+    /// never guessed from the returned page's own length.
     #[test]
     fn truncation_is_derived_from_the_cap_not_guessed() {
         let under = SurvivingGrants { grants: vec![], total: 3 };

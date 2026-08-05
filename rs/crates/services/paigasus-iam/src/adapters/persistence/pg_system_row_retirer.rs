@@ -12,6 +12,7 @@ use super::entities::{policy, role, role_grant};
 use super::pg_policies::{kind_from_str, map_db_err};
 use super::uow::{SeaOrmTransaction, recover_txn};
 use async_trait::async_trait;
+use paigasus_iam_core::authz::roles as authz_roles;
 use paigasus_iam_core::{AuthzError, GrantRef, RepositoryError, StoredPolicy, StoredRole, SurvivingGrants, SystemRowRetirer, Transaction};
 use paigasus_kernel::Prn;
 use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait};
@@ -87,9 +88,14 @@ impl SystemRowRetirer for PgSystemRowRetirer {
         // before any locking read. Postgres takes an interval literal, so the duration is
         // rendered in milliseconds — an operator-triggered request must fail with a message
         // rather than hang behind a concurrent writer's row lock.
-        txn.execute_unprepared(&format!("SET LOCAL lock_timeout = '{}ms';", lock_timeout.as_millis()))
-            .await
-            .map_err(map_db_err)?;
+        //
+        // Zero is clamped to 1ms, never rendered verbatim: Postgres reads `lock_timeout = '0'`
+        // as "disable the timeout entirely", the exact INVERSE of this method's contract, and
+        // hanging forever is precisely the failure mode being designed out on a privileged,
+        // operator-triggered path. No caller passes `Duration::ZERO` today (`LOCK_TIMEOUT` is
+        // 5s); a future one plainly means "do not wait", which 1ms delivers and `'0'` would not.
+        let millis = lock_timeout.as_millis().max(1);
+        txn.execute_unprepared(&format!("SET LOCAL lock_timeout = '{millis}ms';")).await.map_err(map_db_err)?;
         Ok(Box::new(SeaOrmTransaction { txn }))
     }
 
@@ -122,17 +128,32 @@ impl SystemRowRetirer for PgSystemRowRetirer {
     }
 
     async fn min_starter_revision(&self) -> Result<Option<u32>, AuthzError> {
-        // Any NULL means "unprovable", never "zero" — a pre-m0010 row proves nothing about
-        // which binary last wrote it, and reading it as 0 would be the safe-sounding direction
-        // that silently permits the retirement D11 exists to defer.
+        // The CODE-DEFINED starter policy ids only (D11) — deliberately NOT `system = true`.
+        // `system = true` also matches the orphan currently being retired, and an orphan's own
+        // `starter_revision` is by construction the revision of the last binary that still
+        // DEFINED it: dropping an id from `starter_policies()` changes the starter content hash,
+        // which forces a `STARTER_POLICY_REVISION` bump, and `reconcile_policies` only iterates
+        // code-defined docs so nothing ever restamps the orphan. An orphan is therefore always
+        // strictly below this binary (or NULL for a pre-m0010 row) — counting it would refuse
+        // every real orphan, forever. The starter rows are exactly the set THIS binary converged
+        // at boot, so their revision is genuine evidence about what the rest of the fleet wrote.
         let revisions: Vec<Option<i32>> = policy::Entity::find()
             .select_only()
             .column(policy::Column::StarterRevision)
-            .filter(policy::Column::System.eq(true))
+            .filter(policy::Column::PolicyId.is_in(authz_roles::STARTER_POLICY_IDS.iter().copied()))
             .into_tuple()
             .all(&self.db)
             .await
             .map_err(map_db_err)?;
+        // No starter rows at all (an unseeded database, or one whose boot convergence never
+        // ran) is NOT convergence — it is the absence of any evidence, and an empty set's
+        // minimum must never silently read as proof. `None` here refuses, same as a NULL.
+        if revisions.is_empty() {
+            return Ok(None);
+        }
+        // Any NULL means "unprovable", never "zero" — a pre-m0010 row proves nothing about
+        // which binary last wrote it, and reading it as 0 would be the safe-sounding direction
+        // that silently permits the retirement D11 exists to defer.
         if revisions.iter().any(Option::is_none) {
             return Ok(None);
         }

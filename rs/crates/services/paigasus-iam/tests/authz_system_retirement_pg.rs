@@ -21,13 +21,13 @@ use paigasus_iam::application::system_retirement::{SystemRetirementDeps, SystemR
 use paigasus_iam_core::authz::engine::{CompiledPolicies, PolicyEngine};
 use paigasus_iam_core::authz::model::{ContextValue, EntitySlice, NodeKind, PolicyKind, ROOT_ENTITY, SliceEntity, root_prn};
 use paigasus_iam_core::authz::reconcile::StarterPolicyOutcome;
-use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+use paigasus_iam_core::authz::roles::{FORBID_ARCHIVED_WRITES_ID, STARTER_POLICY_REVISION};
 use paigasus_iam_core::{
     AccessRequest, Action, Authorizer, AuthzError, Decision, Effect, GrantScope, PolicyDocument, PolicyStore, PrincipalId, RequestContext, RetireOutcome, Role, RoleGrant, RoleGrantStore,
     SystemPolicyReconciler, SystemRoleReconciler, SystemRowRetirer,
 };
 use paigasus_kernel::Prn;
-use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, Database, DatabaseConnection, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, ConnectionTrait, Database, DatabaseConnection, DbBackend, EntityTrait, Set, Statement};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,20 +35,34 @@ use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ContainerAsync;
 use uuid::Uuid;
 
+/// The revision a REAL orphan carries: strictly below this binary's own. An orphan's
+/// `starter_revision` is, by construction, the revision of the last binary that still DEFINED
+/// its id — dropping an id from `starter_policies()` changes the starter content hash, which
+/// `starter_policy_content_is_pinned_to_the_declared_revision` forces you to answer with a
+/// `STARTER_POLICY_REVISION` bump, and `reconcile_policies` only iterates code-defined docs, so
+/// nothing ever restamps the orphan afterwards. `saturating_sub` only for a hypothetical
+/// revision `0`; today it is `2`.
+const ORPHAN_REVISION: u32 = STARTER_POLICY_REVISION.saturating_sub(1);
+
 /// Seeds a system-owned template + role at a NON-code-defined id: the `policy` row first, then
 /// the `role` row that references it — `fk_role_template` requires that order, the same order
 /// retirement must undo in reverse. Direct SeaORM inserts on purpose: there is deliberately no
 /// supported path that writes a `role` row for a key the code catalog does not define — that
 /// absence IS the bug SMA-481 exists for.
 ///
-/// `starter_revision` is stamped to THIS binary's own `STARTER_POLICY_REVISION` (Task 9): the
-/// five original tests above only ever drive `PgSystemRowRetirer`'s port methods directly, which
-/// never read it, but every Task 9 test below calls the full `SystemRetirementService::retire`,
-/// whose very first check refuses (`FleetNotConverged`) unless every remaining system-owned
-/// row's `starter_revision` is at least `STARTER_POLICY_REVISION` — a `NotSet`/NULL row (the
-/// original value) reads as unprovable and would refuse every one of them before ever reaching
-/// the interesting behaviour.
+/// Stamped at [`ORPHAN_REVISION`] — BELOW this binary's — because that is the only value a
+/// naturally-orphaned row can hold. An earlier fixture stamped it at `STARTER_POLICY_REVISION`
+/// to get past `retire`'s D11 guard; that modelled a state which cannot occur, and hid the fact
+/// that the guard was counting the orphan itself and so refused every real orphan forever. The
+/// evidence `retire` actually reads is the converged STARTER set — see [`converge_starter_set`],
+/// which every test calling `retire` seeds through the real boot path.
 async fn seed_orphan_chain(db: &DatabaseConnection, id: &str) {
+    seed_orphan_chain_at(db, id, Some(ORPHAN_REVISION)).await;
+}
+
+/// [`seed_orphan_chain`] with the orphan's `starter_revision` forced — `None` models a
+/// pre-m0010 row, which is just as realistic an orphan as an older-but-present revision.
+async fn seed_orphan_chain_at(db: &DatabaseConnection, id: &str, revision: Option<u32>) {
     let now = Utc::now();
     policy::ActiveModel {
         policy_id: Set(id.to_string()),
@@ -59,7 +73,7 @@ async fn seed_orphan_chain(db: &DatabaseConnection, id: &str) {
         created_at: Set(now),
         updated_at: Set(now),
         content_fingerprint: NotSet,
-        starter_revision: Set(Some(i32::try_from(STARTER_POLICY_REVISION).unwrap())),
+        starter_revision: Set(revision.map(|r| i32::try_from(r).expect("test revision fits i32"))),
     }
     .insert(db)
     .await
@@ -73,6 +87,29 @@ async fn seed_orphan_chain(db: &DatabaseConnection, id: &str) {
         created_at: Set(now),
     }
     .insert(db)
+    .await
+    .unwrap();
+}
+
+/// Seeds the REAL starter policy set + system roles through the REAL boot convergence path
+/// (`bootstrap::reconcile_starter`, wired exactly as `tests/authz_bootstrap.rs` wires it), which
+/// stamps every starter row at this binary's `STARTER_POLICY_REVISION`.
+///
+/// This — not the orphan's own revision — is what makes the fleet look converged to D11's guard.
+/// Running the real path rather than hand-rolling rows means the fixture cannot drift from what
+/// boot actually writes: if `reconcile_system` ever stopped stamping the revision, these tests
+/// would go red rather than keep passing against a hand-built lie.
+async fn converge_starter_set(db: &DatabaseConnection) {
+    use paigasus_iam::application::bootstrap::{ReconcileStarterDeps, reconcile_starter};
+
+    let gens = Generations::memory();
+    reconcile_starter(&ReconcileStarterDeps {
+        policies: Arc::new(PgPolicyStore::new(db.clone(), gens.clone())),
+        roles: Arc::new(PgSystemRoleReconciler::new(db.clone())),
+        audit: Arc::new(PgAuditLog::new(db.clone())),
+        ids: KernelIdGenerator,
+        clock: SystemClock,
+    })
     .await
     .unwrap();
 }
@@ -122,7 +159,8 @@ async fn seed_grants(db: &DatabaseConnection, role_key: &str, ids: &[Uuid]) {
 /// Seeds a bare system-owned `policy` row at `id` with `starter_revision` forced to `revision`
 /// (`None` simulates a pre-m0010 row) — `min_starter_revision`'s fixture, deliberately without
 /// the role-row half of `seed_orphan_chain`: this test only exercises the advisory revision
-/// read, never a delete.
+/// read, never a delete. Callers pass a CODE-DEFINED starter id when they want the row to be
+/// seen at all: `min_starter_revision` reads `STARTER_POLICY_IDS`, not `system = true`.
 async fn seed_system_policy_with_revision(db: &DatabaseConnection, id: &str, revision: Option<u32>) {
     let now = Utc::now();
     policy::ActiveModel {
@@ -222,10 +260,43 @@ async fn surviving_grants_are_capped_and_report_the_true_total() {
 #[tokio::test]
 async fn min_starter_revision_reports_null_as_none() {
     let Some((_c, db)) = support::start_migrated_postgres().await else { return };
-    // A pre-m0010 row: system-owned with a NULL starter_revision.
-    seed_system_policy_with_revision(&db, "legacy_forbid", None).await;
+    // A pre-m0010 STARTER row: a code-defined id with a NULL starter_revision. The id must be
+    // a real starter id — a non-starter row is invisible to this read, so seeding one would
+    // make the assertion pass for the empty-set reason instead of the NULL reason.
+    seed_system_policy_with_revision(&db, FORBID_ARCHIVED_WRITES_ID, None).await;
     let retirer = PgSystemRowRetirer::new(db.clone());
     assert_eq!(retirer.min_starter_revision().await.unwrap(), None, "a NULL revision is unprovable, not zero");
+}
+
+/// The empty set must NOT read as "converged" — an unseeded database (or one whose boot
+/// convergence never ran) is the absence of evidence, and `min()` over nothing is `None`
+/// deliberately, not incidentally. Without this, a database with no starter rows would silently
+/// permit every retirement.
+#[tokio::test]
+async fn min_starter_revision_reports_an_unseeded_database_as_none() {
+    let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    let retirer = PgSystemRowRetirer::new(db.clone());
+    assert_eq!(retirer.min_starter_revision().await.unwrap(), None, "no starter rows at all is unprovable, not converged");
+}
+
+/// THE regression guard on the query's filter. `min_starter_revision` must read only the
+/// CODE-DEFINED starter ids: filtering on `system = true` instead also matches the orphan being
+/// retired, whose revision is always older by construction — which made the D11 guard refuse
+/// every real orphan, forever. Restoring `.filter(policy::Column::System.eq(true))` turns the
+/// `STARTER_POLICY_REVISION` below into `ORPHAN_REVISION` and reds this.
+#[tokio::test]
+async fn min_starter_revision_ignores_the_orphan_and_reads_only_the_starter_set() {
+    let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    converge_starter_set(&db).await;
+    seed_orphan_chain(&db, "legacy_auditor").await;
+    seed_orphan_chain_at(&db, "legacy_null", None).await;
+
+    let retirer = PgSystemRowRetirer::new(db.clone());
+    assert_eq!(
+        retirer.min_starter_revision().await.unwrap(),
+        Some(STARTER_POLICY_REVISION),
+        "two system-owned orphans (one older, one NULL) must not drag the converged starter set's minimum down"
+    );
 }
 
 /// Seeds a system-owned `policy` row with `starter_revision` forced to a value
@@ -257,7 +328,9 @@ async fn seed_system_policy_with_raw_revision(db: &DatabaseConnection, id: &str,
 #[tokio::test]
 async fn min_starter_revision_rejects_a_negative_value_instead_of_coercing_it() {
     let Some((_c, db)) = support::start_migrated_postgres().await else { return };
-    seed_system_policy_with_raw_revision(&db, "legacy_forbid", -1).await;
+    // A code-defined starter id, for the same reason `min_starter_revision_reports_null_as_none`
+    // needs one: a non-starter row is invisible to the read and would prove nothing.
+    seed_system_policy_with_raw_revision(&db, FORBID_ARCHIVED_WRITES_ID, -1).await;
     let retirer = PgSystemRowRetirer::new(db.clone());
     let err = retirer.min_starter_revision().await.expect_err("a negative starter_revision must surface as an error, not coerce to 0");
     assert!(matches!(err, AuthzError::Backend(_)), "unexpected error variant: {err:?}");
@@ -445,6 +518,7 @@ fn decide(policies: &CompiledPolicies, grant: &RoleGrant, action: Action) -> Dec
 #[tokio::test]
 async fn a_retired_role_s_grant_stops_conferring_permission() {
     let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    converge_starter_set(&db).await;
     seed_orphan_chain(&db, "legacy_auditor").await;
     let grant = seed_grant(&db, "legacy_auditor", GrantScope::Root).await;
 
@@ -614,6 +688,7 @@ async fn a_contended_row_times_out_rather_than_hanging() {
 #[tokio::test]
 async fn a_binary_that_still_defines_the_id_re_seeds_it_after_retirement() {
     let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    converge_starter_set(&db).await;
     seed_orphan_chain(&db, "legacy_auditor").await;
     let first = retire(&db, "legacy_auditor", true).await.unwrap();
     assert!(first.is_retired(), "the setup retirement itself must actually retire, got {first:?}");
@@ -636,12 +711,11 @@ async fn a_binary_that_still_defines_the_id_re_seeds_it_after_retirement() {
 #[tokio::test]
 async fn a_repeated_retirement_is_not_found_and_writes_nothing() {
     let Some((_c, db)) = support::start_migrated_postgres().await else { return };
-    // A second, unrelated system row that is NEVER retired in this test: keeps
-    // `min_starter_revision` non-vacuous after "legacy_auditor" is gone. With zero system rows
-    // left, `min_starter_revision` would read `None` again (its own "any NULL/absent proves
-    // nothing" posture), and the SECOND retire below would refuse `FleetNotConverged` instead of
-    // `NotFound` — an artifact of a single-row test database, not a real fleet-convergence
-    // signal.
+    converge_starter_set(&db).await;
+    // A second orphan that is NEVER retired here: it pins that retirement touches ONLY the id
+    // it was given. (It used to exist to keep `min_starter_revision` non-vacuous after
+    // "legacy_auditor" was gone — that was an artifact of the old `system = true` filter; the
+    // converged starter set above is now what supplies the convergence evidence.)
     seed_orphan_chain(&db, "anchor_role").await;
     seed_orphan_chain(&db, "legacy_auditor").await;
 
@@ -659,6 +733,7 @@ async fn a_repeated_retirement_is_not_found_and_writes_nothing() {
 #[tokio::test]
 async fn grant_then_retire_then_revoke_then_retire() {
     let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    converge_starter_set(&db).await;
     seed_orphan_chain(&db, "legacy_auditor").await;
     let grant = seed_grant(&db, "legacy_auditor", GrantScope::Root).await;
 
@@ -679,4 +754,81 @@ async fn grant_then_retire_then_revoke_then_retire() {
     assert!(outcome.is_retired());
     assert!(policy_row(&db, "legacy_auditor").await.is_none(), "the policy row must be gone");
     assert!(role_row(&db, "legacy_auditor").await.is_none(), "the role row must be gone");
+}
+
+/// THE regression test for the bug this file's fixtures used to hide: a REALISTICALLY stamped
+/// orphan — one whose `starter_revision` is below the running binary's, or NULL, the only two
+/// values a naturally-orphaned row can hold — must retire successfully against a converged
+/// starter set. The old `min_starter_revision` filtered `system = true`, which matched the
+/// orphan itself, so D11's guard measured the very row being retired and refused every real
+/// orphan forever. Restore that filter and both cases below fail with `FleetNotConverged`.
+///
+/// The old fixture could not catch this: it stamped the orphan at `STARTER_POLICY_REVISION`, a
+/// value no naturally-orphaned row can hold, which is exactly what made the broken guard pass.
+#[tokio::test]
+async fn a_realistically_stamped_orphan_retires_against_a_converged_starter_set() {
+    let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    converge_starter_set(&db).await;
+    // An orphan left behind by an older binary (revision below this one's) …
+    seed_orphan_chain_at(&db, "legacy_auditor", Some(ORPHAN_REVISION)).await;
+    // … and a pre-m0010 orphan, which carries no revision at all.
+    seed_orphan_chain_at(&db, "legacy_prehistoric", None).await;
+
+    let outcome = retire(&db, "legacy_auditor", true).await.expect("an orphan below the current revision must still be retirable");
+    assert!(outcome.is_retired(), "expected the older-revision orphan to retire, got {outcome:?}");
+    assert!(policy_row(&db, "legacy_auditor").await.is_none());
+
+    let outcome = retire(&db, "legacy_prehistoric", true).await.expect("a NULL-revision (pre-m0010) orphan must still be retirable");
+    assert!(outcome.is_retired(), "expected the NULL-revision orphan to retire, got {outcome:?}");
+    assert!(policy_row(&db, "legacy_prehistoric").await.is_none());
+}
+
+/// The other half of the guard, which must NOT be lost while fixing the above: a genuinely
+/// unconverged fleet still refuses. Here the skew is where D11 actually looks for it — a STARTER
+/// policy row (a still-code-defined id) last written by an older binary — so the retirement of a
+/// perfectly ordinary orphan is deferred.
+#[tokio::test]
+async fn a_starter_row_below_the_current_revision_still_refuses() {
+    let Some((_c, db)) = support::start_migrated_postgres().await else { return };
+    converge_starter_set(&db).await;
+    seed_orphan_chain(&db, "legacy_auditor").await;
+
+    // Simulate an older replica having last written one starter row.
+    db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        format!(r#"UPDATE "policy" SET starter_revision = {ORPHAN_REVISION} WHERE policy_id = '{FORBID_ARCHIVED_WRITES_ID}'"#),
+    ))
+    .await
+    .unwrap();
+
+    let err = retire(&db, "legacy_auditor", true)
+        .await
+        .expect_err("a starter row below the current revision must defer the retirement");
+    assert!(matches!(err, TenancyError::FleetNotConverged), "expected FleetNotConverged, got {err:?}");
+    assert!(policy_row(&db, "legacy_auditor").await.is_some(), "a refused retirement must write nothing");
+}
+
+/// `Duration::ZERO` must not disable the lock timeout. Postgres reads `lock_timeout = '0'` as
+/// "wait forever" — the exact inverse of the intent on this privileged path — so the adapter
+/// clamps it to 1ms. Without the clamp this test hangs on the contended row until the outer
+/// `tokio::time::timeout` fires, which is the failure it exists to make attributable.
+#[tokio::test]
+async fn a_zero_lock_timeout_fails_fast_rather_than_disabling_the_timeout() {
+    let Some((c, db_a)) = support::start_migrated_postgres().await else { return };
+    seed_orphan_chain(&db_a, "legacy_auditor").await;
+    let db_b = second_connection(&c).await;
+
+    let retirer_a = PgSystemRowRetirer::new(db_a.clone());
+    let holder = retirer_a.begin_retirement(Duration::from_secs(30)).await.unwrap();
+    retirer_a.lock_policy_in(&*holder, "legacy_auditor").await.unwrap().expect("seeded policy row must be found");
+
+    let retirer_b = PgSystemRowRetirer::new(db_b.clone());
+    let contended = retirer_b.begin_retirement(Duration::ZERO).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), retirer_b.lock_policy_in(&*contended, "legacy_auditor"))
+        .await
+        .expect("a zero lock_timeout was rendered as '0ms', which Postgres reads as NO timeout — the call hung instead of failing");
+    let err = result.expect_err("a contended row under a zero (clamped to 1ms) lock_timeout must error, not succeed");
+    assert!(matches!(err, AuthzError::Backend(_)), "unexpected error variant: {err:?}");
+
+    drop(holder);
 }

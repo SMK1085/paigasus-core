@@ -39,10 +39,15 @@
 //! proof is.** No in-band mechanism can fully close the fleet-skew window: a binary old enough
 //! to still define the retiring id is also old enough to predate any tombstone check this
 //! service could add. So `retire` refuses (`TenancyError::FleetNotConverged`) unless every
-//! remaining system-owned row's `starter_revision` is at least this binary's own
-//! `STARTER_POLICY_REVISION` — the strongest evidence available, not a guarantee. A `NULL`
+//! remaining STARTER POLICY row — the ids `authz::roles::STARTER_POLICY_IDS` still defines —
+//! carries a `starter_revision` of at least this binary's own `STARTER_POLICY_REVISION`: the
+//! strongest evidence available, not a guarantee. It is measured over the CODE-DEFINED set, not
+//! over every `system = true` row, because the orphan being retired is itself system-owned and
+//! its revision is by construction that of the last binary which still defined it — always
+//! older than this one, so including it would refuse every genuine orphan forever. A `NULL`
 //! revision refuses too: it proves nothing about which binary last wrote the row, and treating
-//! it as `0` would permit exactly the retirement this guard exists to defer.
+//! it as `0` would permit exactly the retirement this guard exists to defer. So does an empty
+//! set: an unseeded database is no evidence, not proof of convergence.
 //!
 //! **D12 — a grant at an archived scope cannot be revoked, so the endpoint says so instead of
 //! looping.** `RevokeRole` is itself inside `forbid-archived-writes`'s forbid, so an operator

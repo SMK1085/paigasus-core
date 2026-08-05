@@ -100,9 +100,13 @@ pub enum TenancyError {
     /// the same id.
     #[error("not a system-owned row: {0}")]
     NotSystemOwned(String),
-    /// At least one remaining system-owned row was last written by a binary older than this
-    /// one, so the fleet has not converged past the release that dropped the retiring id
-    /// (SMA-481 D11). Retiring now would be silently undone: `classify_starter_policy`
+    /// At least one remaining STARTER POLICY row — one whose id the code catalog still defines
+    /// — was last written by a binary older than this one (or carries no revision at all), so
+    /// the fleet has not converged past the release that dropped the retiring id (SMA-481 D11).
+    /// Deliberately measured over the code-defined set rather than every system-owned row: the
+    /// orphan under retirement is itself system-owned and always carries an older revision, so
+    /// counting it would refuse every genuine orphan. Retiring now would be silently undone:
+    /// `classify_starter_policy`
     /// classifies an absent row as `Absent` BEFORE the revision guard runs, so any replica
     /// whose catalog still defines the id re-seeds it unconditionally.
     #[error("the fleet has not converged past this binary's starter policy revision")]

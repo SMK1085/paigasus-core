@@ -578,11 +578,14 @@ pub trait SystemRowRetirer: Send + Sync {
     /// Up to `cap` surviving grants of `role_key`, ordered by id, plus the true total.
     async fn surviving_grants_in(&self, tx: &dyn Transaction, role_key: &str, cap: u64) -> Result<SurvivingGrants, AuthzError>;
 
-    /// The lowest `starter_revision` across all remaining system-owned `policy` rows, or `None`
-    /// if any is NULL. D11's proof-of-convergence input: a value below this binary's
-    /// `STARTER_POLICY_REVISION` means some replica older than this one wrote a row recently,
-    /// so retiring now risks being silently undone. Read outside the transaction — it is
-    /// advisory evidence, not an invariant.
+    /// The lowest `starter_revision` across the remaining STARTER POLICY rows — the ids
+    /// `STARTER_POLICY_IDS` still defines — or `None` if any is NULL or none exist. D11's
+    /// proof-of-convergence input: a value below this binary's `STARTER_POLICY_REVISION` means
+    /// some replica older than this one wrote a row recently, so retiring now risks being
+    /// silently undone. Read outside the transaction — advisory evidence, not an invariant.
+    /// NOT every `system = true` row: that set includes the orphan being retired, whose own
+    /// revision is by construction older than this binary's, so counting it would refuse every
+    /// genuine orphan forever.
     async fn min_starter_revision(&self) -> Result<Option<u32>, AuthzError>;
 
     /// Deletes the `role` row; returns whether one existed.
@@ -756,17 +759,23 @@ impl SystemRowRetirer for PgSystemRowRetirer {
     }
 
     async fn min_starter_revision(&self) -> Result<Option<u32>, AuthzError> {
-        // Any NULL means "unprovable", never "zero" — a pre-m0010 row proves nothing about
-        // which binary last wrote it, and reading it as 0 would be the safe-sounding direction
-        // that silently permits the retirement D11 exists to defer.
+        // The CODE-DEFINED starter ids only, never `system = true` — that set includes the
+        // orphan being retired, whose revision is always older by construction (D11).
         let revisions: Vec<Option<i32>> = policy::Entity::find()
             .select_only()
             .column(policy::Column::StarterRevision)
-            .filter(policy::Column::System.eq(true))
+            .filter(policy::Column::PolicyId.is_in(authz_roles::STARTER_POLICY_IDS.iter().copied()))
             .into_tuple()
             .all(&self.db)
             .await
             .map_err(map_db_err)?;
+        // No starter rows at all is the ABSENCE of evidence, not convergence.
+        if revisions.is_empty() {
+            return Ok(None);
+        }
+        // Any NULL means "unprovable", never "zero" — a pre-m0010 row proves nothing about
+        // which binary last wrote it, and reading it as 0 would be the safe-sounding direction
+        // that silently permits the retirement D11 exists to defer.
         if revisions.iter().any(Option::is_none) {
             return Ok(None);
         }

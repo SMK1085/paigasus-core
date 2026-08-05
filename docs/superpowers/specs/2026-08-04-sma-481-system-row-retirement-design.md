@@ -416,12 +416,14 @@ pub trait SystemRowRetirer: Send + Sync {
     /// Locks `key`'s `role` row FOR UPDATE, returning it if present (D6).
     async fn lock_role_in(&self, tx: &dyn Transaction, key: &str) -> Result<Option<StoredRole>, AuthzError>;
 
-    /// Up to `limit + 1` surviving grants of `role_key`, ordered by id, plus the true
-    /// total — capped per D5. Ordered by id.
+    /// Up to `limit` surviving grants of `role_key`, ordered by id, plus the true total
+    /// from a separate COUNT over the same locked transaction — capped per D5.
     async fn surviving_grants_in(&self, tx: &dyn Transaction, role_key: &str, limit: u64) -> Result<SurvivingGrants, AuthzError>;
 
-    /// Proof-of-convergence check for D11: the minimum `starter_revision` across all
-    /// remaining system-owned rows, or `None` if any is NULL.
+    /// Proof-of-convergence check for D11: the minimum `starter_revision` across the
+    /// remaining STARTER POLICY rows (the ids `STARTER_POLICY_IDS` still defines), or
+    /// `None` if any is NULL or none exist. NOT every system-owned row — that set includes
+    /// the orphan being retired, whose revision is always older by construction.
     async fn min_starter_revision(&self) -> Result<Option<u32>, AuthzError>;
 
     async fn delete_role_in(&self, tx: &dyn Transaction, key: &str) -> Result<bool, AuthzError>;
@@ -722,8 +724,10 @@ step 6 makes the recovery explicit.
    retirer port (the `Authorize` check itself reads an entity slice; nothing else is touched).
 2. Retiring a **code-defined** starter policy id — a role key or `forbid-archived-writes` —
    returns `409 system-immutable` before any row is read or transaction opened.
-3. Retiring when any remaining system-owned row's `starter_revision` is below this binary's, or
-   is `NULL`, returns `409 fleet-not-converged` and writes nothing.
+3. Retiring when any remaining **starter policy** row's `starter_revision` (the code-defined set
+   per D11 — never the orphan's own, which is always older by construction) is below this
+   binary's, or is `NULL`, or when no starter row exists at all, returns
+   `409 fleet-not-converged` and writes nothing.
 4. Retiring an id with no `policy` row returns `404`; a `policy` or `role` row with
    `system = false` returns `409 not-system-owned`.
 5. Retiring an orphaned role while grants survive returns `409 grants-survive`; the body lists up
