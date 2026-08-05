@@ -224,9 +224,16 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::empty())
             .unwrap();
-        <Option<EnvelopeJson<RetireBody>> as FromRequest<()>>::from_request(req, &())
+        let rejection = <Option<EnvelopeJson<RetireBody>> as FromRequest<()>>::from_request(req, &())
             .await
             .expect_err("Content-Type: application/json with zero bytes must be rejected, never silently unacknowledged");
+        // Asserting the STATUS and the envelope, not merely that some error occurred: the runbook
+        // promises operators a `400`, so a regression that changed it to a 415 or dropped the
+        // stable envelope would still leave an `expect_err`-only test green.
+        assert_eq!(rejection.status(), StatusCode::BAD_REQUEST, "the runbook documents a 400 for this exact request");
+        let body = body_json(rejection).await;
+        assert_eq!(body["error"]["code"], json!("invalid_request"));
+        assert_eq!(body["error"]["message"], json!("invalid request body"));
     }
 
     /// The fix-round-flagged gap this now closes: a body that DOES declare
