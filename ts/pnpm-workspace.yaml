@@ -22,6 +22,12 @@ overrides:
   # next@16.2.9 (latest stable) hard-pins postcss@8.4.31; the fix only ships in Next
   # 16.3 (preview/canary already pin 8.5.10). Interim — drop once Next 16.3 is stable.
   'postcss@<8.5.10': '>=8.5.10'
+  # conventional-commits-parser 7.0.1 (pulled in by @commitlint/parse@21.2.0) reads
+  # dependabot's `updated-dependencies:` YAML block as a git footer, so the footer starts
+  # on a line with no blank line before it and `footer-leading-blank` reds the commitlint
+  # parity gate on EVERY dependabot PR. Fixed upstream in 7.1.1. Scoped to @commitlint/parse
+  # so semantic-release keeps its own parser major. Drop once @commitlint/parse floors it.
+  '@commitlint/parse>conventional-commits-parser': '>=7.1.1'
 
 # Catalog — single bump-point for shared dep versions across the workspace.
 # Per-package package.json references these as "<dep>": "catalog:".
