@@ -194,13 +194,24 @@ async fn a_static_orphan_needs_acknowledgement_at_the_postgres_level_then_retire
     let Some((_c, db)) = support::start_migrated_postgres().await else { return };
     converge_starter_set(&db).await;
     seed_system_policy_with_revision(&db, "legacy_forbid", Some(ORPHAN_REVISION)).await;
+    // A NON-EMPTY description, set deliberately: the shared seeder stores NULL, and asserting
+    // the preview carries an empty string would pass just as well if the field were dropped
+    // entirely. The preview exists so an operator can read what they are about to destroy, and
+    // the description is half of that.
+    let mut described: policy::ActiveModel = policy_row(&db, "legacy_forbid").await.unwrap().into();
+    described.description = Set(Some("retired guard, kept for the audit trail".to_string()));
+    described.update(&db).await.unwrap();
 
     // Unacknowledged: refuses, hands back the content that would be destroyed, writes nothing.
     match retire(&db, "legacy_forbid", false).await.unwrap() {
-        RetireOutcome::NeedsAcknowledgement { policy_id, kind, source, .. } => {
+        RetireOutcome::NeedsAcknowledgement { policy_id, kind, source, description } => {
             assert_eq!(policy_id, "legacy_forbid");
             assert_eq!(kind, PolicyKind::Static, "a static row must not be mistaken for a template");
             assert_eq!(source, "forbid(principal, action, resource);", "the refusal must preview what would be lost");
+            assert_eq!(
+                description, "retired guard, kept for the audit trail",
+                "the preview must carry the description too, not just the source"
+            );
         }
         other => panic!("a static policy without acknowledgement must refuse, got {other:?}"),
     }
