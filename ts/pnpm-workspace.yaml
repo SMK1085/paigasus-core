@@ -22,43 +22,49 @@ overrides:
   # next@16.2.9 (latest stable) hard-pins postcss@8.4.31; the fix only ships in Next
   # 16.3 (preview/canary already pin 8.5.10). Interim — drop once Next 16.3 is stable.
   'postcss@<8.5.10': '>=8.5.10'
+  # conventional-commits-parser 7.0.1 (pulled in by @commitlint/parse@21.2.0) reads
+  # dependabot's `updated-dependencies:` YAML block as a git footer, so the footer starts
+  # on a line with no blank line before it and `footer-leading-blank` reds the commitlint
+  # parity gate on EVERY dependabot PR. Fixed upstream in 7.1.1. Scoped to @commitlint/parse
+  # so semantic-release keeps its own parser major. Drop once @commitlint/parse floors it.
+  '@commitlint/parse>conventional-commits-parser': '>=7.1.1'
 
 # Catalog — single bump-point for shared dep versions across the workspace.
 # Per-package package.json references these as "<dep>": "catalog:".
 # pnpm-lock.yaml pins exact resolved versions; the carets here cap the upgrade window.
 catalog:
   # Runtime (React + Next)
-  react: ^19.2.7
-  react-dom: ^19.2.7
-  next: ^16.2.10
+  react: ^19.2.8
+  react-dom: ^19.2.8
+  next: ^16.2.12
   # TypeScript + ESLint + Prettier
   typescript: ^6.0.3
-  eslint: ^10.6.0
+  eslint: ^10.8.0
   '@eslint/js': ^10.0.1
-  '@eslint-react/eslint-plugin': ^5.10.1
+  '@eslint-react/eslint-plugin': ^5.18.1
   'eslint-plugin-react-hooks': ^7.1.1
   'eslint-plugin-jsx-a11y': ^6.10.2
-  'typescript-eslint': ^8.62.1
-  prettier: ^3.9.4
+  'typescript-eslint': ^8.65.0
+  prettier: ^3.9.6
   # Test runner
-  vitest: ^4.1.9
+  vitest: ^4.1.10
   # Type declarations
-  '@types/react': ^19.2.17
-  '@types/react-dom': ^19.2.3
+  '@types/react': ^19.2.18
+  '@types/react-dom': ^19.2.4
   # Track the Node runtime major (Active LTS 24); Dependabot ignores major bumps so
   # the types can't drift ahead of the runtime (see .github/dependabot.yml).
-  '@types/node': ^24.13.2
+  '@types/node': ^24.13.3
   # Per-package add-ons (catalog-listed so they bump centrally even when used in only one app)
-  '@next/eslint-plugin-next': ^16.2.10
+  '@next/eslint-plugin-next': ^16.2.12
   '@tanstack/eslint-plugin-query': ^5.100.14
   # Commit tooling (SMA-371)
-  '@commitlint/cli': ^21.2.0
+  '@commitlint/cli': ^21.2.1
   '@commitlint/config-conventional': ^21.2.0
   # Release tooling (SMA-406 — dormant semantic-release + parity adapter)
-  semantic-release: ^25.0.5
+  semantic-release: ^25.0.8
   '@semantic-release/commit-analyzer': ^13.0.1
   # Protobuf-ES v2 runtime (SMA-389)
-  '@bufbuild/protobuf': ^2.12.1
+  '@bufbuild/protobuf': ^2.13.0
   # napi-rs CLI — drives `napi build --platform` for the Node FFI binding (SMA-420).
   # It is a devDependency of @paigasus/node-bindings, but that crate is reached via a `file:`
   # specifier (not a workspace member), and pnpm does NOT install a dependency's devDeps — so
