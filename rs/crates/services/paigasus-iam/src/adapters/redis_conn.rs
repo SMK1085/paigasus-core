@@ -814,16 +814,83 @@ mod tests {
         assert!(err.is_io_error(), "SMA-476 D4: the short-circuit error must be an IO error");
         assert!(err.to_string().contains(BREAKER_OPEN_MESSAGE));
     }
+
+    /// SMA-476 AC1: the blackholed shape, MEASURED rather than calculated. Before this test the
+    /// ~2.1 s figure in the issue and the RUNBOOK was arithmetic — nothing had ever been run
+    /// against a backend that swallows SYNs.
+    ///
+    /// One test, both numbers: command #1 is the pre-breaker per-command cost (the breaker is
+    /// still Closed), commands #4+ are the post-breaker cost.
+    ///
+    /// Bounds are deliberately loose — same posture as
+    /// `a_command_against_an_unreachable_backend_fails_fast`'s 2 s. A contended CI runner adds
+    /// scheduler jitter, and these assertions only have to discriminate between "dialled"
+    /// (~2.1 s) and "short-circuited" (~0), not to pin exact timings.
+    #[tokio::test]
+    async fn a_blackholed_backend_costs_seconds_per_command_until_the_breaker_opens() {
+        use redis::AsyncCommands;
+
+        let blackhole = test_support::start().await;
+        let mut conn = new_lazy_for_tests(&blackhole.url, RedisRole::Authz).expect("well-formed redis URL");
+
+        let overall = std::time::Instant::now();
+
+        // --- Command #1: breaker Closed, so this is a real dial. THE measured number. ---
+        let started = std::time::Instant::now();
+        let first: redis::RedisResult<Option<Vec<u8>>> = conn.get("sma476:probe").await;
+        let first_elapsed = started.elapsed();
+        eprintln!("SMA-476 AC1: command #1 (blackholed, breaker Closed) took {first_elapsed:?}");
+
+        let err = first.expect_err("a blackholed backend must error");
+        assert!(err.is_io_error(), "expected an IO/timeout error, got {err:?}");
+        assert!(!err.to_string().contains(BREAKER_OPEN_MESSAGE), "command #1 must be a real dial, not a short-circuit");
+        assert!(
+            first_elapsed >= Duration::from_millis(1900),
+            "a blackholed command took only {first_elapsed:?} — the listener REFUSED or reset instead of \
+             blackholing (check that test_support retains the accepted TcpStream), so this test is \
+             measuring the wrong thing"
+        );
+        assert!(
+            first_elapsed < Duration::from_millis(3500),
+            "a blackholed command took {first_elapsed:?}, well past the expected ~2.1s (2 x connection_timeout + one jittered min_delay)"
+        );
+
+        // --- Commands #2, #3: still Closed, still real dials. These trip the breaker. ---
+        let _: redis::RedisResult<Option<Vec<u8>>> = conn.get("sma476:probe").await;
+        let _: redis::RedisResult<Option<Vec<u8>>> = conn.get("sma476:probe").await;
+
+        // --- Command #4 onwards: breaker Open, short-circuited. ---
+        for i in 4..=10 {
+            let started = std::time::Instant::now();
+            let result: redis::RedisResult<Option<Vec<u8>>> = conn.get("sma476:probe").await;
+            let elapsed = started.elapsed();
+            let err = result.expect_err("an open breaker must error");
+            assert!(
+                err.to_string().contains(BREAKER_OPEN_MESSAGE),
+                "command #{i} dialled instead of short-circuiting — the breaker never opened"
+            );
+            assert!(
+                elapsed < Duration::from_millis(100),
+                "command #{i} took {elapsed:?}; an open breaker must return without touching the network"
+            );
+        }
+
+        // --- The aggregate, which is what makes the fix legible. ---
+        // Ten un-broken commands cost ~21s. Three real dials plus seven short-circuits cost
+        // ~6.3s. This bound sits between, with margin on both sides: it fails if the breaker
+        // never opens, and passes only if it did.
+        let total = overall.elapsed();
+        eprintln!("SMA-476 AC1: all ten commands (breaker Closed then Open) took {total:?} in aggregate");
+        assert!(
+            total < Duration::from_secs(14),
+            "ten commands against a blackholed backend took {total:?}; without the breaker this is ~21s, with it ~6.3s"
+        );
+    }
 }
 
 /// Shared test fixtures for the SMA-476 breaker tests. Lives here rather than in each adapter so
 /// the five posture tests (Task 6) and the blackhole measurement (Task 4) use one implementation.
-///
-/// `#[allow(dead_code)]`: unlike the rest of this module, nothing in Tasks 3+5 calls this — its
-/// callers are Task 4 (the blackhole measurement) and Task 6 (the five adapter posture tests),
-/// neither landed yet. Remove this allow once either does.
 #[cfg(test)]
-#[allow(dead_code)]
 pub(crate) mod test_support {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -852,6 +919,8 @@ pub(crate) mod test_support {
     /// — do not add credentials or a db index to these tests' URLs.
     pub(crate) struct Blackhole {
         pub(crate) url: String,
+        // Read only by `start_responding`, below — dead until Task 7 (the recovery test) calls it.
+        #[allow(dead_code)]
         responding: Arc<AtomicBool>,
         _held: Arc<AsyncMutex<Vec<tokio::net::TcpStream>>>,
         _accept: tokio::task::JoinHandle<()>,
@@ -859,7 +928,9 @@ pub(crate) mod test_support {
 
     impl Blackhole {
         /// Switch the listener from blackholing to answering as a minimal RESP server. Only
-        /// affects connections opened AFTER this call. Used by the recovery test (Task 7).
+        /// affects connections opened AFTER this call. Used by the recovery test (Task 7); dead
+        /// until it lands.
+        #[allow(dead_code)]
         pub(crate) fn start_responding(&self) {
             self.responding.store(true, Ordering::SeqCst);
         }
