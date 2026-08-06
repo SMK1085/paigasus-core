@@ -212,12 +212,28 @@ impl RedisGenerations {
     /// the moment Redis accepts writes again.
     async fn repair(&self, which: Which, delta: u64, reason: &'static str) -> u64 {
         let state = which.redis(self);
-        let _gate = state.repair_gate.lock().await;
+        let Ok(_gate) = state.repair_gate.try_lock() else {
+            // Another task on this replica is already repairing this counter. Queueing behind it
+            // would serialize every generation read — and while a repair keeps FAILING the
+            // re-check below can never short-circuit, so the queue never drains and the authz
+            // hot path is capped at ~1/RTT. Give up immediately with the deterministic local
+            // fallback instead: `delta` is `high_water + REWIND_JUMP`, the same value a failed
+            // repair returns, so it is already beyond everything this process has observed and
+            // is safe to key on. The cost is that this call may use a different generation than
+            // the in-flight repair lands on — transient key-space fragmentation, which is
+            // exactly what D4 already accepts as safe. Mirrors `PolicySnapshot::reload_if_stale`,
+            // which `try_lock`s the same gate shape for the same reason.
+            return delta;
+        };
 
         // Re-check under the gate. `delta` was computed as `high_water + REWIND_JUMP` from a
-        // read taken BEFORE we queued; a repair that completed while we waited raises the mark
-        // to its own `INCRBY` result, which is necessarily >= that same `delta`. So this
-        // comparison is exactly "someone already repaired" — no extra round trip needed.
+        // read taken BEFORE we queued; in the common case a repair that completed while we
+        // waited raises the mark to its own `INCRBY` result, which is at least that same
+        // `delta` — so this comparison is usually exactly "someone already repaired", no extra
+        // round trip needed. A concurrent `Steady` observation can slip in between another
+        // task's `load` and its gate entry, so it computes a delta one larger and this
+        // re-check misses by one; the resulting redundant `INCRBY` is harmless (relative, so it
+        // only moves the counter further forward and can never re-enter a used key space).
         let high_water = state.high_water.load(Ordering::SeqCst);
         if high_water >= delta {
             return high_water;
@@ -659,5 +675,34 @@ mod tests {
 
         // ...and the OTHER counter's mark must be untouched.
         assert_eq!(redis.settle(Which::Entity, 1, "lower").await, 1, "policy_gen's mark must not leak into entity_gen");
+    }
+
+    /// The gate is taken with `try_lock`, not `lock`: a caller that finds a repair already in
+    /// flight must return the deterministic local fallback immediately rather than queueing.
+    /// While a repair keeps failing, the re-check inside the gate can never short-circuit, so
+    /// a blocking `lock` would serialize every generation read behind one failing Redis round
+    /// trip — a throughput ceiling on the authz hot path.
+    ///
+    /// Holding the gate for the duration is what makes this discriminate: against a blocking
+    /// `lock` this test would hang rather than fail.
+    #[tokio::test]
+    async fn a_repair_that_cannot_take_the_gate_returns_the_local_fallback_without_queueing() {
+        let client = redis::Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never reachable");
+        let conn = ConnectionManager::new_lazy_with_config(client, crate::adapters::redis_conn::connection_manager_config()).expect("lazy ConnectionManager construction never connects");
+        let Generations::Redis(redis) = Generations::from_connection(conn) else {
+            panic!("from_connection must build the Redis variant");
+        };
+
+        // Teach this process a high-water mark, then hold the entity gate so the repair below
+        // cannot take it.
+        redis.settle(Which::Entity, 12, "lower").await;
+        let held = Which::Entity.redis(&redis).repair_gate.clone();
+        let _held_guard = held.lock().await;
+
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), redis.settle(Which::Entity, 0, "missing"))
+            .await
+            .expect("a blocked gate must not make settle queue — try_lock, not lock");
+
+        assert_eq!(settled, 12 + REWIND_JUMP, "a gate miss must return the deterministic local fallback");
     }
 }
