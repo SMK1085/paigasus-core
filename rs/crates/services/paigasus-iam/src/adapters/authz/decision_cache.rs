@@ -300,4 +300,26 @@ mod tests {
         let cache = MemoryDecisionCache::new();
         assert!(cache.get("iam:authz:dec:never:cached:x").await.is_none());
     }
+
+    /// SMA-476 AC3: an OPEN breaker must not change the fail-open contract (D12) — a `get`
+    /// still degrades to a plain miss, a `put` is still swallowed.
+    ///
+    /// Pointed at a BLACKHOLE, not a closed port: a closed port refuses in microseconds, which
+    /// looks identical to a short-circuit. Here a command that actually dialled would cost
+    /// ~2.1 s, so the elapsed assertion proves the breaker short-circuited.
+    #[tokio::test]
+    async fn an_open_breaker_keeps_the_decision_cache_failing_open() {
+        let blackhole = crate::adapters::redis_conn::test_support::start().await;
+        let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, crate::adapters::redis_conn::RedisRole::Authz).expect("well-formed redis URL");
+        let cache = RedisDecisionCache::from_connection(conn, 60);
+        let key = decision_key("content-a", 2, &base_request());
+
+        let started = std::time::Instant::now();
+        let got = cache.get(&key).await;
+        cache.put(&key, &sample_decision()).await;
+        let elapsed = started.elapsed();
+
+        assert!(got.is_none(), "SMA-476 AC3: an open breaker must read as a plain MISS, never an error (fail-open, D12)");
+        assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the calls dialled instead of short-circuiting");
+    }
 }

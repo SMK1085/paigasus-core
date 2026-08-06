@@ -393,4 +393,25 @@ mod tests {
         cache.put(id, &sample_validation()).await;
         cache.evict(id).await;
     }
+
+    /// SMA-476 AC3: fail-open (D5) is preserved under an open breaker.
+    ///
+    /// Pointed at a BLACKHOLE, not a closed port: a closed port refuses in microseconds, which
+    /// looks identical to a short-circuit. Here a command that actually dialled would cost
+    /// ~2.1 s, so the elapsed assertion proves the breaker short-circuited.
+    #[tokio::test]
+    async fn an_open_breaker_keeps_the_api_key_cache_failing_open() {
+        let blackhole = crate::adapters::redis_conn::test_support::start().await;
+        let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, RedisRole::ApiKeys).expect("well-formed redis URL");
+        let cache = RedisApiKeyCache::from_connection(conn, 30);
+        let key_id = ApiKeyId::from_uuid(Uuid::from_u128(1));
+
+        let started = std::time::Instant::now();
+        let got = cache.get(key_id).await;
+        cache.evict(key_id).await;
+        let elapsed = started.elapsed();
+
+        assert!(got.is_none(), "SMA-476 AC3: an open breaker must read as a plain MISS (fail-open, D5)");
+        assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the calls dialled instead of short-circuiting");
+    }
 }

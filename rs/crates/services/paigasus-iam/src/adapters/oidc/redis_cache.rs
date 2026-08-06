@@ -83,3 +83,33 @@ fn log_serde_unavailable(issuer: &Issuer) -> AuthnError {
     tracing::warn!(issuer = %issuer, error_kind = "serde_json", "redis jwks cache error");
     AuthnError::Unavailable
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SMA-476 AC3, the asymmetric one. `RedisJwksCache` is the ONLY fail-CLOSED Redis consumer:
+    /// an open breaker must still produce `AuthnError::Unavailable` — the posture is unchanged,
+    /// it just arrives instantly instead of after ~2.1 s (SMA-476 D9).
+    ///
+    /// Pointed at a BLACKHOLE, not a closed port: a closed port refuses in microseconds, which
+    /// looks identical to a short-circuit. Here a command that actually dialled would cost
+    /// ~2.1 s, so the elapsed assertion proves the breaker short-circuited.
+    #[tokio::test]
+    async fn an_open_breaker_keeps_the_jwks_cache_failing_closed() {
+        let blackhole = crate::adapters::redis_conn::test_support::start().await;
+        let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, RedisRole::Jwks).expect("well-formed redis URL");
+        let cache = RedisJwksCache { conn, ttl_secs: 300 };
+        let issuer = Issuer::parse("https://idp.example.com").expect("a well-formed issuer");
+
+        let started = std::time::Instant::now();
+        let got = cache.get(&issuer).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(got, Err(AuthnError::Unavailable)),
+            "SMA-476 AC3: the JWKS cache must stay fail-CLOSED under an open breaker, got {got:?}"
+        );
+        assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the get dialled instead of short-circuiting");
+    }
+}

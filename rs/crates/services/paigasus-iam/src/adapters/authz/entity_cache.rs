@@ -174,6 +174,30 @@ mod tests {
         Prn::build("iam", "", None, resource_type, Uuid::from_u128(n)).expect("static test prn parts are valid")
     }
 
+    /// Builds a non-empty `EntitySlice` for `(resource, principal)` — shape copied from
+    /// `tests/authz_cache_redis.rs`'s `slice_for` (this file's own test module had no
+    /// equivalent).
+    fn slice_for(resource: &Prn, principal: &Prn) -> EntitySlice {
+        let resource_uid = paigasus_kernel::to_cedar_uid(resource);
+        let principal_uid = paigasus_kernel::to_cedar_uid(principal);
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("kind".to_string(), paigasus_iam_core::authz::model::ContextValue::Str("test-fixture".to_string()));
+        EntitySlice {
+            entities: vec![
+                paigasus_iam_core::authz::model::SliceEntity {
+                    uid: (resource_uid.entity_type, resource_uid.entity_id),
+                    parents: vec![],
+                    attrs: attrs.clone(),
+                },
+                paigasus_iam_core::authz::model::SliceEntity {
+                    uid: (principal_uid.entity_type, principal_uid.entity_id),
+                    parents: vec![],
+                    attrs,
+                },
+            ],
+        }
+    }
+
     #[test]
     fn slice_key_is_stable_for_identical_inputs() {
         let resource = prn("project", 1);
@@ -240,5 +264,54 @@ mod tests {
             .expect("an entity_gen()-only Redis failure must fail open to the inner (Postgres) loader, not error");
 
         assert_eq!(slice, EntitySlice::default());
+    }
+
+    /// Counts `load` calls (so the open-breaker test can assert the inner Postgres loader was
+    /// actually reached) with a fixed `entity_gen`. No equivalent existed in this file's test
+    /// module before this test.
+    #[derive(Default)]
+    struct CountingLoader {
+        loads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingLoader {
+        fn loads(&self) -> usize {
+            self.loads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl EntitySliceLoader for CountingLoader {
+        async fn load(&self, resource: &Prn, principal: &Prn) -> Result<EntitySlice, AuthzError> {
+            self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(slice_for(resource, principal))
+        }
+        async fn entity_gen(&self) -> Result<u64, AuthzError> {
+            Ok(7)
+        }
+    }
+
+    /// SMA-476 AC3, D11's half: an open breaker must fall through to the inner loader, not fail.
+    ///
+    /// Pointed at a BLACKHOLE, not a closed port: a closed port refuses in microseconds, which
+    /// looks identical to a short-circuit. Here a command that actually dialled would cost
+    /// ~2.1 s, so the elapsed assertion proves the breaker short-circuited.
+    #[tokio::test]
+    async fn an_open_breaker_falls_through_to_the_inner_slice_loader() {
+        let blackhole = crate::adapters::redis_conn::test_support::start().await;
+        let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, crate::adapters::redis_conn::RedisRole::Authz).expect("well-formed redis URL");
+        let inner = Arc::new(CountingLoader::default());
+        let cache = SliceCache::from_connection(inner.clone(), conn, 60);
+
+        let started = std::time::Instant::now();
+        let slice = cache
+            .load(&prn("project", 2), &prn("principal", 1))
+            .await
+            .expect("an open breaker must never fail a load — it only bypasses the cache");
+        let elapsed = started.elapsed();
+
+        assert_eq!(inner.loads(), 1, "SMA-476 AC3: the inner (Postgres) loader must be reached");
+        assert!(!slice.entities.is_empty(), "the inner loader's slice must be returned verbatim");
+        assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the cache dialled instead of short-circuiting");
     }
 }
