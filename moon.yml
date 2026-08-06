@@ -143,53 +143,44 @@ tasks:
       - 'rs/crates/bindings/paigasus-wasm/src/**/*'
 
   redis-connect-single-site:
-    description: 'Assert redis connection config is owned solely by `adapters::redis_conn`, so no call site can restore the unbounded reconnect retry budget (SMA-473).'
-    # WHAT IS GATED, and why it is not simply "ConnectionManager::new":
-    #   - `ConnectionManager::new(` / `::new_with_config(` — the eager constructors the
-    #     helper owns. Allowed only in redis_conn.rs.
-    #   - the `ConnectionManagerConfig` TYPE — naming it is how you would build an untuned
-    #     config. Allowed only in redis_conn.rs.
-    #   - `.get_connection_manager` — the `redis::Client` convenience constructors
-    #     (`get_connection_manager`, `_with_config`, `_lazy`). The plain one is the FIRST
-    #     `ConnectionManager` example in redis-rs's own docs and internally does
-    #     `ConnectionManager::new(self.clone())` (`redis-1.3.0/src/client.rs:453`), i.e. it
-    #     restores the stock 6-retry config without ever naming a gated symbol. This term is
-    #     here for the accidental/copy-paste bypass, which is exactly what that API is.
-    # `ConnectionManager::new_lazy_with_config(...)` is gated DIFFERENTLY, by the second check
-    # below, because a flat ban would be wrong: two `#[cfg(test)]` sites legitimately call it
-    # (an eager constructor would dial out, which is the whole point of those tests). Rather
-    # than exempt them by path — an allowlist, which would destroy this gate's strict-equality
-    # property — every call outside `redis_conn.rs` must NAME `connection_manager_config()` on
-    # the same line. That keeps the retry budget correct wherever it is used. The residual it
-    # deliberately does not catch: a *production* lazy call would still be un-eager and so skip
-    # `AppState::new`'s fail-fast-at-boot (SMA-473 D10) — a narrower concern than the retry
-    # budget, and one no grep can distinguish from a `#[cfg(test)]` call.
+    description: 'Assert the redis `ConnectionManager` type name never appears outside `adapters::redis_conn`, so no call site can bypass the circuit breaker (SMA-473, SMA-476).'
+    # WHAT IS GATED: the `ConnectionManager` TYPE NAME itself, anywhere outside redis_conn.rs.
     #
-    # SCOPE is `src/` AND `tests/` (AC1 says "production and test"): a Docker-gated
-    # integration test is just as able to construct a stock manager as production code.
+    # SMA-473 gated only the constructors (`::new(`, `::new_with_config(`,
+    # `ConnectionManagerConfig`, `.get_connection_manager`), because adapters legitimately HELD a
+    # `ConnectionManager` in a field. Since SMA-476 they hold a `RedisHandle` instead, so the type
+    # name has no business appearing anywhere else — and banning the name outright is strictly
+    # stronger: you cannot bypass the circuit breaker without naming a connection, and you cannot
+    # name one.
     #
-    # Comment lines are excluded so prose may still name the API — several `tests/*.rs`
-    # module docs do.
+    # This subsumes SMA-473's separate `new_lazy_with_config` rule (which required naming
+    # `connection_manager_config()` on the same line): that call cannot be made without the type
+    # name either, so the rule was deleted rather than kept as dead weight.
+    #
+    # `.get_connection_manager` is kept as its own term because the `redis::Client` convenience
+    # constructors return a `ConnectionManager` without the caller ever naming the type
+    # (`redis-1.3.0/src/client.rs:453`) — exactly the accidental/copy-paste bypass.
+    #
+    # SCOPE is `src/` AND `tests/`: a Docker-gated integration test is just as able to construct a
+    # stock manager as production code.
+    #
+    # Comment lines are excluded so prose may still name the API — several module docs do. NOTE
+    # the filter anchors on `//` only, so a `/* ... */` BLOCK comment naming ConnectionManager
+    # WILL trip this gate. Use `//` in this crate when writing about the type.
     #
     # Two portability notes, both learned the hard way:
     #   - Do NOT anchor paths on `^\./`. GNU grep (CI, Linux) emits the `./` prefix; ugrep
     #     (some dev shells) strips it. An `^\./` anchor silently matches nothing on one of
     #     them, which would make this gate pass while guarding nothing. Passing `src tests`
-    #     explicitly (rather than `.`) sidesteps that divergence entirely — every hit is
-    #     prefixed `src/` or `tests/` on both implementations — but the patterns below still
-    #     stay unanchored so a future switch back to `.` cannot silently break them.
+    #     explicitly (rather than `.`) sidesteps that divergence entirely.
     #   - The comment filter anchors on `:[0-9]+:[[:space:]]*//` so it tests the CONTENT,
     #     not any `://` that happens to appear inside a redis URL on a code line.
     #
-    # The control (`expected` must be non-empty) matters, but not for a rename: renaming
-    # redis_conn.rs leaves its constructions in `hits` under a path the `expected` filter no
-    # longer matches, so the control trips first and exits 2 (and the offenders branch would
-    # have caught it anyway). What the control is really for is the case where `hits` itself
-    # goes empty — a typo in the pattern, or redis-rs renaming the API upstream — because
-    # then BOTH greps are empty and, without it, the gate would pass while guarding nothing.
+    # The control (`expected` must be non-empty) is what catches a pattern typo or an upstream
+    # rename: without it, BOTH greps could go empty and the gate would pass while guarding nothing.
     script: |
       cd rs/crates/services/paigasus-iam
-      hits="$(grep -rnE 'ConnectionManager::new\(|ConnectionManager::new_with_config\(|ConnectionManagerConfig|\.get_connection_manager' src tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      hits="$(grep -rnE 'ConnectionManager|\.get_connection_manager' src tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
       expected="$(printf '%s\n' "$hits" | grep -E 'adapters/redis_conn\.rs:' || true)"
       offenders="$(printf '%s\n' "$hits" | grep -vE 'adapters/redis_conn\.rs:' || true)"
       if [ -z "$expected" ]; then
@@ -200,15 +191,6 @@ tasks:
         echo "redis connection config built outside adapters/redis_conn.rs (SMA-473 — use redis_conn::connect / connection_manager_config):" >&2
         printf '%s\n' "$offenders" >&2
         exit 1
-      fi
-      lazy="$(grep -rnE 'ConnectionManager::new_lazy_with_config' src tests | grep -vE ':[0-9]+:[[:space:]]*//' | grep -vE 'adapters/redis_conn\.rs:' || true)"
-      if [ -n "$lazy" ]; then
-        untuned="$(printf '%s\n' "$lazy" | grep -v 'connection_manager_config' || true)"
-        if [ -n "$untuned" ]; then
-          echo "ConnectionManager::new_lazy_with_config called without redis_conn::connection_manager_config() (SMA-473 — a stock config restores the 6-retry budget):" >&2
-          printf '%s\n' "$untuned" >&2
-          exit 1
-        fi
       fi
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
