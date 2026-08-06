@@ -1369,15 +1369,20 @@ to resolve, which meant any Redis interruption **shorter than that was absorbed*
 succeeded, just slowly, and authentication never noticed. The capped budget absorbs only one
 ~100–200 ms retry. So a routine event like a **2 s primary failover**, previously invisible here,
 now `503`s every OIDC-bearer request for at least those ~2 s of actual disruption — and, since
-SMA-476, **for the breaker's own recovery window layered on top if the failover trips it**: three
-concurrent connection failures is a low bar under load (see "A blackholed Redis is the residual"
-above), so the honest figure for a failover that trips the breaker is up to **~6 s** of 503s in
-total, not just the ~2 s of the failover itself. A failover that stays under the breaker's
+SMA-476, for longer than that if the failover trips the breaker: three concurrent connection
+failures is a low bar under load (see "A blackholed Redis is the residual" above). Two numbers,
+two different starting points: the breaker itself contributes up to **~6 s of recovery lag measured
+from when it opens** (the headline figure used throughout this section) — and because the breaker
+does not open until three failures have accumulated, roughly ~2 s into the failover, the **total
+token-auth impact measured from the start of the failover** is up to **~8 s**, not the ~6 s alone.
+Use the ~6 s figure to reason about the breaker's own behavior; use ~8 s to size a client timeout or
+readiness probe against the failover as a whole. A failover that stays under the breaker's
 `FAILURE_THRESHOLD` (3 consecutive failures on that connection) still costs only the original ~2 s.
 
 **None of the three original `for: 10m` rules fire on an isolated blip of that size** —
 `IamAuthzRedisCacheBypassed`, `IamHighErrorRate` and `IamGrpcHighErrorRate` all need ten sustained
-minutes, and even the ~6 s breaker-inflated case is over in seconds. That much is unchanged from
+minutes, and even the ~8 s breaker-inflated case (measured from the start of the failover, per
+above) is over in seconds. That much is unchanged from
 before SMA-476. What SMA-476 adds is two narrower signals, and it is no longer accurate to say **no**
 alert fires: **`IamRedisBreakerFlapping`** (`for: 0m`, counting transitions rather than requiring
 sustained duration) fires if this kind of event *repeats* — five-plus breaker trips in 10 minutes,
