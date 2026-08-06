@@ -108,6 +108,10 @@ pub const RESOURCE_NOT_FOUND_MARKER: &str = "resource-not-found";
 /// any real Redis connection in a unit test. [`Generations`] (Task 10's concrete
 /// memory/redis backend) implements this directly below, so production callers just wrap a
 /// plain `Generations` in an `Arc`.
+///
+/// **SMA-474:** on the `redis` backend a "read" through this port is no longer guaranteed
+/// read-only — a rewound counter is repaired forward with an `INCRBY` inline in
+/// [`Generations::read`], single-flighted per counter (see `adapters::authz::generation`).
 #[async_trait]
 pub trait GenerationsReader: Send + Sync {
     async fn policy_gen(&self) -> Result<u64, AuthzError>;

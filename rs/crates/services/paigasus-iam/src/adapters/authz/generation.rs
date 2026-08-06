@@ -11,10 +11,20 @@
 //!   `iam:authz:entity_gen` via a breaker-wrapped, auto-reconnecting `RedisHandle` —
 //!   cross-replica, survives restarts. Mirrors `adapters::oidc::redis_cache::RedisJwksCache`'s
 //!   connect/clone-per-call pattern; the underlying `Arc`-backed `ConnectionManager` sits
-//!   behind a per-connection circuit breaker (SMA-476).
+//!   behind a per-connection circuit breaker (SMA-476). Since SMA-474 it also carries a
+//!   per-counter process-local high-water mark: neither key has a TTL, so an `allkeys-*`
+//!   eviction (or a `FLUSHALL`, a restart without persistence, a failover to an empty replica)
+//!   silently rewinds the counter and lets the fleet re-enter a cache key space that still
+//!   holds live entries. A value below the mark is repaired forward with one atomic `INCRBY`.
+//!   **NOTE this makes a "read" a potential Redis WRITE** on the rewind path — `INCRBY` is
+//!   `denyoom` where `GET` is not, so under `maxmemory` pressure the repair can be rejected
+//!   (as can an open breaker, which short-circuits it); that is why a failed repair falls back
+//!   locally rather than erroring (design D4/§3.7).
 
 use async_trait::async_trait;
+use metrics::counter;
 use paigasus_iam_core::{AuthzError, PolicyGenBumper};
+use paigasus_observability::names;
 use redis::AsyncCommands;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -151,6 +161,96 @@ pub struct RedisGenerations {
     entity: CounterState,
 }
 
+impl RedisGenerations {
+    /// Applies the monotonicity guard to one freshly-observed counter value and returns the
+    /// value the caller should actually use (SMA-474 §3.2).
+    ///
+    /// **Infallible on purpose (D4).** A failed repair must never become an error: every
+    /// caller of `Generations::read` treats an error as "bypass the caches entirely"
+    /// (`CedarAuthorizer::cache_key`, `SliceCache::load`), and because the high-water mark
+    /// never decreases, one failed repair would make that bypass PERMANENT — a raw Postgres
+    /// entity-slice load per decision until the process restarts. On `policy_gen` it would
+    /// cost more than speed: an error drives `load_and_compile` to a provisional stamp, and
+    /// `reload_if_stale` then suppresses request-driven reloads entirely, costing
+    /// same-decision revocation visibility. `Err` from `read`/`bump` therefore keeps its
+    /// existing, narrower meaning — the Redis command itself failed.
+    ///
+    /// `reason` labels the metric only; it never affects the decision.
+    async fn settle(&self, which: Which, observed: u64, reason: &'static str) -> u64 {
+        let state = which.redis(self);
+        let high_water = state.high_water.load(Ordering::SeqCst);
+        match guard(observed, high_water) {
+            GuardOutcome::Steady => {
+                state.high_water.fetch_max(observed, Ordering::SeqCst);
+                observed
+            }
+            GuardOutcome::Repair { delta } => self.repair(which, delta, reason).await,
+            GuardOutcome::Ceiling => {
+                counter!(names::IAM_AUTHZ_GENERATION_REWINDS_TOTAL, "counter" => which.label(), "outcome" => "ceiling", "reason" => reason).increment(1);
+                tracing::error!(
+                    counter = which.label(),
+                    "authz generation counter rewound but the repair would overflow redis's i64 counter — serving the high-water mark; \
+                     flush iam:authz:slice:* and iam:authz:dec:*, then SET both generation keys to 0 (see the RUNBOOK)"
+                );
+                high_water
+            }
+        }
+    }
+
+    /// The repair itself: one atomic `INCRBY key delta`, single-flighted per counter.
+    ///
+    /// The gate is what stops a herd. Every replica reads a generation on essentially every
+    /// authz decision, so at the instant of a rewind many in-flight tasks reach here at once;
+    /// without it each would issue its own `INCRBY` and the counter would advance by
+    /// `delta × in-flight` instead of `delta`.
+    ///
+    /// On failure the high-water mark is deliberately **left alone**. Raising it to the
+    /// fallback would make the next call compute `high_water + REWIND_JUMP` all over again,
+    /// growing the delta by a million per read and reaching [`REPAIR_DELTA_CEILING`] in short
+    /// order. Leaving it stable means every subsequent call derives the SAME fallback — a
+    /// stable, disjoint local key space — and retries the `INCRBY`, so the fleet re-converges
+    /// the moment Redis accepts writes again.
+    async fn repair(&self, which: Which, delta: u64, reason: &'static str) -> u64 {
+        let state = which.redis(self);
+        let _gate = state.repair_gate.lock().await;
+
+        // Re-check under the gate. `delta` was computed as `high_water + REWIND_JUMP` from a
+        // read taken BEFORE we queued; a repair that completed while we waited raises the mark
+        // to its own `INCRBY` result, which is necessarily >= that same `delta`. So this
+        // comparison is exactly "someone already repaired" — no extra round trip needed.
+        let high_water = state.high_water.load(Ordering::SeqCst);
+        if high_water >= delta {
+            return high_water;
+        }
+
+        let mut conn = self.conn.clone();
+        let repaired: Result<u64, redis::RedisError> = conn.incr(which.key(), delta as i64).await;
+        match repaired {
+            Ok(value) => {
+                state.high_water.fetch_max(value, Ordering::SeqCst);
+                counter!(names::IAM_AUTHZ_GENERATION_REWINDS_TOTAL, "counter" => which.label(), "outcome" => "repaired", "reason" => reason).increment(1);
+                tracing::warn!(
+                    counter = which.label(),
+                    reason,
+                    "authz generation counter rewound — repaired forward in redis; check redis maxmemory-policy (must be volatile-*, never allkeys-*)"
+                );
+                value
+            }
+            Err(err) => {
+                counter!(names::IAM_AUTHZ_GENERATION_REWINDS_TOTAL, "counter" => which.label(), "outcome" => "repair_failed", "reason" => reason).increment(1);
+                tracing::warn!(
+                    counter = which.label(),
+                    reason,
+                    error_kind = ?err.kind(),
+                    "authz generation counter rewound and the repair write failed — serving a process-local generation instead \
+                     (disjoint key space, no cross-replica cache sharing until redis accepts writes again)"
+                );
+                delta
+            }
+        }
+    }
+}
+
 /// The two authz generation counters (spec §7/D11), abstracted over an in-process
 /// (`memory`) or Redis (`redis`) backend. Cheap to clone — every variant's payload is
 /// `Arc`-backed — so one `Generations` can be shared across every store/loader/cache that
@@ -214,8 +314,12 @@ impl Generations {
             Generations::Memory(mem) => Ok(which.memory(mem).load(Ordering::SeqCst)),
             Generations::Redis(redis) => {
                 let mut conn = redis.conn.clone();
-                let val: Option<u64> = conn.get(which.key()).await.map_err(redis_err)?;
-                Ok(val.unwrap_or(0))
+                let observed: Option<u64> = conn.get(which.key()).await.map_err(redis_err)?;
+                // A vanished key and a key that came back lower are different operator
+                // stories: the first is eviction or data loss, the second a failover to a
+                // replica holding an older value.
+                let reason = if observed.is_none() { "missing" } else { "lower" };
+                Ok(redis.settle(which, observed.unwrap_or(0), reason).await)
             }
         }
     }
@@ -223,13 +327,24 @@ impl Generations {
     /// Shared bump path: an atomic in-process increment, or Redis `INCR` (which also
     /// initializes a missing key at `0` before incrementing — same effective semantics as
     /// the memory backend's default-0 start). Both return the value AFTER the bump.
+    ///
+    /// **SMA-474:** on the `redis` backend the returned value is the bumped counter AFTER the
+    /// monotonicity guard, so a bump that landed on a rewound key returns the repaired
+    /// generation rather than `previous + 1`. `INCR` against a missing key returns `1`, which
+    /// is precisely the re-entry the guard exists to prevent — which is why the guard is on
+    /// this path and not only on `read`. The memory backend still returns `previous + 1`
+    /// exactly; the two backends differ here by design. No caller reads the value.
     async fn bump(&self, which: Which) -> Result<u64, AuthzError> {
         match self {
             Generations::Memory(mem) => Ok(which.memory(mem).fetch_add(1, Ordering::SeqCst) + 1),
             Generations::Redis(redis) => {
                 let mut conn = redis.conn.clone();
-                let val: u64 = conn.incr(which.key(), 1_i64).await.map_err(redis_err)?;
-                Ok(val)
+                let observed: u64 = conn.incr(which.key(), 1_i64).await.map_err(redis_err)?;
+                // `INCR` initializes a missing key at 0 before incrementing, so a result of
+                // exactly 1 means the key was absent — a heuristic, and only ever a metric
+                // label, never part of the decision.
+                let reason = if observed == 1 { "missing" } else { "lower" };
+                Ok(redis.settle(which, observed, reason).await)
             }
         }
     }
@@ -460,5 +575,89 @@ mod tests {
         assert_eq!(entity.high_water.load(Ordering::SeqCst), 0);
         assert!(!Arc::ptr_eq(&policy.high_water, &entity.high_water), "policy_gen and entity_gen must not share high-water state");
         assert!(policy.repair_gate.try_lock().is_ok(), "a fresh repair gate must start unlocked");
+    }
+
+    /// The memory backend must be completely untouched by SMA-474 — its counters are
+    /// in-process `AtomicU64`s and cannot rewind, so it must never pay the guard's cost or
+    /// emit the rewind metric. A regression here would mean `settle` leaked onto the memory
+    /// arm of `read`/`bump`.
+    #[tokio::test]
+    async fn the_memory_backend_never_repairs_and_stays_strictly_incremental() {
+        let gens = Generations::memory();
+
+        for expected in 1..=5_u64 {
+            assert_eq!(gens.bump_entity_gen().await.unwrap(), expected, "memory bumps must stay +1 exactly");
+        }
+        assert_eq!(gens.entity_gen().await.unwrap(), 5);
+        assert_eq!(gens.policy_gen().await.unwrap(), 0, "entity_gen activity must not move policy_gen");
+    }
+
+    /// `settle` is infallible by design (D4): a failed repair must NEVER become an error,
+    /// because every caller of `read` treats an error as "bypass the caches entirely", and
+    /// the high-water mark never decreases — so one failed repair would make that bypass
+    /// permanent. This drives `settle` against a manager pointed at a closed port, so the
+    /// `INCRBY` inside `repair` is guaranteed to fail.
+    ///
+    /// The returned value must still be beyond the high-water mark: a disjoint local key
+    /// space is safe, re-entering a used one is not.
+    #[tokio::test]
+    async fn a_failed_repair_falls_back_locally_instead_of_erroring() {
+        let client = redis::Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never reachable");
+        let conn = ConnectionManager::new_lazy_with_config(client, crate::adapters::redis_conn::connection_manager_config()).expect("lazy ConnectionManager construction never connects");
+        let Generations::Redis(redis) = Generations::from_connection(conn) else {
+            panic!("from_connection must build the Redis variant");
+        };
+
+        // Teach this process that the counter has been at 42, then hand it a rewound 0.
+        redis.settle(Which::Entity, 42, "lower").await;
+        let settled = redis.settle(Which::Entity, 0, "missing").await;
+
+        assert!(
+            settled >= 42 + REWIND_JUMP,
+            "a failed repair must still return a value beyond everything this process observed, got {settled}"
+        );
+    }
+
+    /// The fallback must be STABLE across repeated failures. If a failed repair raised the
+    /// high-water mark to its own fallback value, the next call would compute
+    /// `high_water + REWIND_JUMP` again and the delta would grow by a million per read,
+    /// reaching the i64 ceiling in short order.
+    #[tokio::test]
+    async fn repeated_failed_repairs_do_not_ratchet_the_fallback_upward() {
+        let client = redis::Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never reachable");
+        let conn = ConnectionManager::new_lazy_with_config(client, crate::adapters::redis_conn::connection_manager_config()).expect("lazy ConnectionManager construction never connects");
+        let Generations::Redis(redis) = Generations::from_connection(conn) else {
+            panic!("from_connection must build the Redis variant");
+        };
+
+        redis.settle(Which::Entity, 42, "lower").await;
+
+        let first = redis.settle(Which::Entity, 0, "missing").await;
+        let second = redis.settle(Which::Entity, 0, "missing").await;
+        let third = redis.settle(Which::Entity, 0, "missing").await;
+
+        assert_eq!(first, second, "a failed repair must not move the high-water mark");
+        assert_eq!(second, third);
+    }
+
+    /// A successful observation raises the mark, which is what makes the NEXT rewind
+    /// detectable. Pure-in-process: `settle` on the steady-state path touches no I/O.
+    #[tokio::test]
+    async fn a_steady_observation_raises_the_high_water_mark() {
+        let client = redis::Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never reachable");
+        let conn = ConnectionManager::new_lazy_with_config(client, crate::adapters::redis_conn::connection_manager_config()).expect("lazy ConnectionManager construction never connects");
+        let Generations::Redis(redis) = Generations::from_connection(conn) else {
+            panic!("from_connection must build the Redis variant");
+        };
+
+        assert_eq!(redis.settle(Which::Policy, 3, "lower").await, 3, "a steady observation is returned unchanged");
+        assert_eq!(redis.settle(Which::Policy, 9, "lower").await, 9);
+
+        // Rewinding below 9 must now be detected — proving the mark rose to 9.
+        let settled = redis.settle(Which::Policy, 8, "lower").await;
+        assert!(settled >= 9 + REWIND_JUMP, "8 is below the mark of 9 and must be treated as a rewind, got {settled}");
+
+        // ...and the OTHER counter's mark must be untouched.
+        assert_eq!(redis.settle(Which::Entity, 1, "lower").await, 1, "policy_gen's mark must not leak into entity_gen");
     }
 }
