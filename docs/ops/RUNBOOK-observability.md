@@ -970,11 +970,20 @@ rewound counter is repaired forward automatically. The one exception is
 
    **Re-check both values once the roll-restart in step 3 is underway.** If any replica was *not*
    yet at the ceiling, its next read sees `0` far below its own mark, takes the repair path, and
-   `INCRBY`s the counter straight back off `0`. That is harmless — the value it lands on is
-   `mark + 1000000`, beyond any generation the fleet has used, so it is still a disjoint key
-   space — but the end state is then that value rather than `0`, and step 1's "comes back at
-   generation `0`" no longer describes it. Only re-run step 2 if you want the tidier end state;
-   nothing is unsafe if you do not.
+   `INCRBY`s the counter straight back off `0`. The end state is then that value rather than `0`,
+   and step 1's "comes back at generation `0`" no longer describes it. Re-run step 2 if you want
+   the tidier end state.
+
+   The value it lands on is `mark + 1000000`, which is beyond every generation **that replica**
+   has observed — but that is a process-local guarantee, not a fleet-wide one. A replica whose
+   mark lags the fleet maximum badly enough can in principle land inside a generation another
+   replica has live entries under. That residue is the documented limit of a process-local
+   high-water mark (design §3.4: the jump reduces the window by roughly six orders of magnitude,
+   it does not eliminate it), and it is bounded by the same
+   `slice_cache_ttl_secs + decision_cache_ttl_secs` window as an unrepaired rewind — never worse
+   than doing nothing. Eliminating it needs a durable generation floor, which is SMA-475. During
+   *this* procedure the exposure is smaller still, because the fleet is being restarted onto
+   fresh marks anyway.
 3. **Roll-restart the IAM replicas.** Not optional, and not merely hygiene. The ceiling is a
    property of each process's *own* high-water mark, which lives in memory and is untouched by
    anything you do to Redis — so after step 2 every running replica reads `0`, sees it far below
