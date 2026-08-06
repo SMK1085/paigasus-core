@@ -327,6 +327,41 @@ This is a real new correlated failure, and it is why D4 must not turn a failed r
 error: the fallback keeps an OOM'd repair from cascading into a full cache bypass at the worst
 possible moment. §5 corrects the RUNBOOK paragraph that currently promises the opposite.
 
+## 3a. Post-implementation amendments
+
+Written after the branch was built. §3.2 as drafted said the single-flight mutex is taken with a
+blocking `lock`, so "concurrent in-flight requests on this replica issue one `INCRBY`, not one
+each." The shipped code (`RedisGenerations::repair`, `generation.rs`) takes it with `try_lock`
+instead, and that is a correction, not a style choice.
+
+**Why the blocking version was wrong.** A failed repair deliberately never raises the high-water
+mark (D4) — that is what keeps the fallback stable across repeated failures instead of
+ratcheting the delta toward the ceiling. But it also means the in-gate re-check
+(`high_water >= delta`) can never short-circuit while a repair keeps failing: every waiter drains
+through in turn, each one re-attempts the same doomed `INCRBY` against the same unhealthy Redis,
+and none of them return until their own attempt completes. Under sustained `maxmemory` pressure
+— precisely the condition most likely to make a repair fail in the first place, per §3.7 — a
+blocking gate serializes every generation read on this replica behind one failing Redis round
+trip at a time, capping the authz hot path at roughly one decision per RTT. That is a
+per-replica throughput ceiling introduced by the fix itself, on the exact failure path the fix
+exists to make safe.
+
+**The fix.** `try_lock`, not `lock`. A caller that finds the gate already held returns the
+deterministic local fallback immediately — `delta`, i.e. `high_water + REWIND_JUMP`, the same
+value a failed repair itself returns — rather than queueing behind the in-flight attempt. This
+mirrors `PolicySnapshot::reload_if_stale`, which `try_lock`s its own reload gate for the same
+reason (`policy_snapshot.rs`). The cost is accepting more transient key-space fragmentation than
+the blocking version would have produced: a call that loses the gate race may end up using a
+different generation than the in-flight repair lands on. D4 already treats that shape of
+fragmentation as safe — it is disjoint, not re-entrant, and self-corrects once the fleet
+converges — so this is not a new risk, only a larger dose of an already-accepted one.
+
+**What did not change.** The gate still ensures at most one in-flight `INCRBY` per counter per
+process — `try_lock` prevents concurrent writers the same way `lock` would, it just declines to
+queue a second one. AC2's "single-flighted per counter per process" holds under either
+implementation. §3.2's prose above is left as the dated design record; this section is what
+actually shipped.
+
 ## 4. Observability
 
 New counter in `paigasus-observability`'s `names.rs`:
