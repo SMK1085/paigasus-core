@@ -358,7 +358,7 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 26 metric families `paigasus-iam` emits
+/// Registers `# HELP`/`# TYPE` exposition text for the 27 metric families `paigasus-iam` emits
 /// directly (spec §4.1; includes the SMA-467 audit partition-maintenance families, the
 /// SMA-469 outbox retention/dead-letter families, the SMA-476 Redis circuit-breaker families,
 /// and the SMA-481 system-row-retirement family), via the `names::` consts so the string used
@@ -388,6 +388,10 @@ fn describe_iam_metrics() {
     describe_counter!(
         names::IAM_REDIS_BREAKER_TRANSITIONS_TOTAL,
         "Redis circuit-breaker state transitions, labeled by role and to=closed|half_open|open. Catches flapping the gauge cannot see: the open window is 2s while scrapes are 15-30s apart."
+    );
+    describe_counter!(
+        names::IAM_AUTHZ_GENERATION_REWINDS_TOTAL,
+        "Rewinds of a Redis authz generation counter, labeled by counter (policy_gen/entity_gen), outcome (repaired/repair_failed/ceiling) and reason (missing/lower)."
     );
     describe_counter!(
         names::IAM_AUDIT_RECORDS_TOTAL,

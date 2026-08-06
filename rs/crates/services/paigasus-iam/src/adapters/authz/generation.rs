@@ -18,6 +18,7 @@ use paigasus_iam_core::{AuthzError, PolicyGenBumper};
 use redis::AsyncCommands;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 
@@ -67,6 +68,47 @@ fn guard(observed: u64, high_water: u64) -> GuardOutcome {
     }
 }
 
+/// Which of the two counters an operation is about. Replaces the pair of accessor closures
+/// the read/bump helpers used to take: each counter now needs FOUR things (a Redis key, a
+/// metric label, an in-process `AtomicU64`, and a Redis-side `CounterState`), and threading
+/// four closures through would be worse than one dispatch enum.
+#[derive(Clone, Copy)]
+enum Which {
+    Policy,
+    Entity,
+}
+
+impl Which {
+    fn key(self) -> &'static str {
+        match self {
+            Which::Policy => POLICY_GEN_KEY,
+            Which::Entity => ENTITY_GEN_KEY,
+        }
+    }
+
+    /// The `counter` label on [`paigasus_observability::names::IAM_AUTHZ_GENERATION_REWINDS_TOTAL`].
+    fn label(self) -> &'static str {
+        match self {
+            Which::Policy => "policy_gen",
+            Which::Entity => "entity_gen",
+        }
+    }
+
+    fn memory(self, mem: &MemoryGenerations) -> &Arc<AtomicU64> {
+        match self {
+            Which::Policy => &mem.policy_gen,
+            Which::Entity => &mem.entity_gen,
+        }
+    }
+
+    fn redis(self, redis: &RedisGenerations) -> &CounterState {
+        match self {
+            Which::Policy => &redis.policy,
+            Which::Entity => &redis.entity,
+        }
+    }
+}
+
 /// The `memory` backend's payload: two independent counters, each `Arc`-shared so cloning
 /// `Generations` is cheap and every clone observes the same counters. `pub` only because
 /// it's reachable through `Generations::Memory`'s public tuple field (the
@@ -79,6 +121,36 @@ pub struct MemoryGenerations {
     entity_gen: Arc<AtomicU64>,
 }
 
+/// One Redis counter's process-local state (SMA-474).
+///
+/// `high_water` is the largest value this PROCESS has ever observed for the counter. It only
+/// ever rises, and it is what makes a rewind detectable: Redis mapping a missing key to `0`
+/// is indistinguishable from a genuine `0` without it.
+///
+/// `repair_gate` single-flights the repair. Every replica reads a generation on essentially
+/// every authz decision, so at the instant of a rewind many in-flight requests observe it at
+/// once; without the gate each would issue its own `INCRBY`. Mirrors
+/// `PolicySnapshot::reload_gate`'s use of a `tokio::sync::Mutex` for the same herd.
+#[derive(Clone, Default)]
+struct CounterState {
+    high_water: Arc<AtomicU64>,
+    repair_gate: Arc<AsyncMutex<()>>,
+}
+
+/// The `redis` backend's payload: the shared connection plus per-counter rewind state.
+///
+/// `pub` for the same reason as [`MemoryGenerations`] — it is reachable through
+/// `Generations::Redis`'s public tuple field (the `private_interfaces` lint) — with every
+/// field private, so it stays unconstructible and unmatchable from outside this module.
+/// Callers only ever get one via [`Generations::redis_connect`] or
+/// [`Generations::from_connection`].
+#[derive(Clone)]
+pub struct RedisGenerations {
+    conn: RedisHandle,
+    policy: CounterState,
+    entity: CounterState,
+}
+
 /// The two authz generation counters (spec §7/D11), abstracted over an in-process
 /// (`memory`) or Redis (`redis`) backend. Cheap to clone — every variant's payload is
 /// `Arc`-backed — so one `Generations` can be shared across every store/loader/cache that
@@ -87,7 +159,7 @@ pub struct MemoryGenerations {
 #[derive(Clone)]
 pub enum Generations {
     Memory(MemoryGenerations),
-    Redis(RedisHandle),
+    Redis(RedisGenerations),
 }
 
 impl Generations {
@@ -97,38 +169,52 @@ impl Generations {
         Generations::Memory(MemoryGenerations::default())
     }
 
-    /// Opens `redis_url` and wraps it in an auto-reconnecting `RedisHandle` (mirrors
-    /// `RedisJwksCache::connect`): cross-replica counters via `INCR`/`GET` on the two
+    /// Wraps an ALREADY-CONNECTED [`RedisHandle`]: `AppState::new` shares ONE Redis
+    /// connection across the redis-backed `Generations` + `RedisDecisionCache` + `SliceCache`,
+    /// so they also share one circuit breaker (SMA-476). Matches the `from_connection` entry
+    /// point `SliceCache`/`RedisDecisionCache` already expose; [`Self::redis_connect`] stays
+    /// the standalone-caller/test entry point.
+    #[must_use]
+    pub fn from_connection(conn: RedisHandle) -> Self {
+        Generations::Redis(RedisGenerations {
+            conn,
+            policy: CounterState::default(),
+            entity: CounterState::default(),
+        })
+    }
+
+    /// Opens `redis_url` and wraps it in a breaker-wrapped, auto-reconnecting `RedisHandle`
+    /// (mirrors `RedisJwksCache::connect`): cross-replica counters via `INCR`/`GET` on the two
     /// well-known keys.
     pub async fn redis_connect(redis_url: &str) -> Result<Self, AuthzError> {
         let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::Authz).await.map_err(redis_err)?;
-        Ok(Generations::Redis(conn))
+        Ok(Generations::from_connection(conn))
     }
 
     pub async fn policy_gen(&self) -> Result<u64, AuthzError> {
-        self.read(POLICY_GEN_KEY, |m| &m.policy_gen).await
+        self.read(Which::Policy).await
     }
 
     pub async fn bump_policy_gen(&self) -> Result<u64, AuthzError> {
-        self.bump(POLICY_GEN_KEY, |m| &m.policy_gen).await
+        self.bump(Which::Policy).await
     }
 
     pub async fn entity_gen(&self) -> Result<u64, AuthzError> {
-        self.read(ENTITY_GEN_KEY, |m| &m.entity_gen).await
+        self.read(Which::Entity).await
     }
 
     pub async fn bump_entity_gen(&self) -> Result<u64, AuthzError> {
-        self.bump(ENTITY_GEN_KEY, |m| &m.entity_gen).await
+        self.bump(Which::Entity).await
     }
 
     /// Shared read path: the in-process counter's current value, or Redis `GET` (a missing
     /// key — nothing has bumped it yet — reads as `0`, never an error).
-    async fn read(&self, key: &str, counter: impl FnOnce(&MemoryGenerations) -> &Arc<AtomicU64>) -> Result<u64, AuthzError> {
+    async fn read(&self, which: Which) -> Result<u64, AuthzError> {
         match self {
-            Generations::Memory(mem) => Ok(counter(mem).load(Ordering::SeqCst)),
-            Generations::Redis(conn) => {
-                let mut conn = conn.clone();
-                let val: Option<u64> = conn.get(key).await.map_err(redis_err)?;
+            Generations::Memory(mem) => Ok(which.memory(mem).load(Ordering::SeqCst)),
+            Generations::Redis(redis) => {
+                let mut conn = redis.conn.clone();
+                let val: Option<u64> = conn.get(which.key()).await.map_err(redis_err)?;
                 Ok(val.unwrap_or(0))
             }
         }
@@ -137,12 +223,12 @@ impl Generations {
     /// Shared bump path: an atomic in-process increment, or Redis `INCR` (which also
     /// initializes a missing key at `0` before incrementing — same effective semantics as
     /// the memory backend's default-0 start). Both return the value AFTER the bump.
-    async fn bump(&self, key: &str, counter: impl FnOnce(&MemoryGenerations) -> &Arc<AtomicU64>) -> Result<u64, AuthzError> {
+    async fn bump(&self, which: Which) -> Result<u64, AuthzError> {
         match self {
-            Generations::Memory(mem) => Ok(counter(mem).fetch_add(1, Ordering::SeqCst) + 1),
-            Generations::Redis(conn) => {
-                let mut conn = conn.clone();
-                let val: u64 = conn.incr(key, 1_i64).await.map_err(redis_err)?;
+            Generations::Memory(mem) => Ok(which.memory(mem).fetch_add(1, Ordering::SeqCst) + 1),
+            Generations::Redis(redis) => {
+                let mut conn = redis.conn.clone();
+                let val: u64 = conn.incr(which.key(), 1_i64).await.map_err(redis_err)?;
                 Ok(val)
             }
         }
@@ -252,7 +338,10 @@ mod tests {
     async fn an_open_breaker_keeps_redis_generations_propagating_the_error() {
         let blackhole = crate::adapters::redis_conn::test_support::start().await;
         let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, RedisRole::Authz).expect("well-formed redis URL");
-        let gens = Generations::Redis(conn);
+        // `from_connection` rather than `Generations::Redis(..)`: since SMA-474 the variant
+        // carries per-counter rewind state alongside the handle, so it is no longer
+        // constructible from a bare `RedisHandle`.
+        let gens = Generations::from_connection(conn);
 
         let started = std::time::Instant::now();
         let result = gens.policy_gen().await;
@@ -297,10 +386,7 @@ mod tests {
         let GuardOutcome::Repair { delta } = guard(0, 100) else {
             panic!("a rewind from 100 to 0 must repair");
         };
-        assert!(
-            delta >= 100 + 1_000_000,
-            "SMA-474 §3.4: the repair must jump far past the high-water mark, not by 1 — got {delta}"
-        );
+        assert!(delta >= 100 + 1_000_000, "SMA-474 §3.4: the repair must jump far past the high-water mark, not by 1 — got {delta}");
     }
 
     /// Redis counters are i64 and `INCRBY` past `i64::MAX` errors. A high-water mark close
@@ -318,5 +404,61 @@ mod tests {
     fn guard_still_repairs_just_below_the_ceiling() {
         let high_water = REPAIR_DELTA_CEILING - REWIND_JUMP;
         assert_eq!(guard(0, high_water), GuardOutcome::Repair { delta: REPAIR_DELTA_CEILING });
+    }
+
+    /// `Generations::Redis` carries per-counter state now, so it can no longer be built by
+    /// wrapping a bare `RedisHandle`. `from_connection` is the replacement, and it must keep
+    /// the cheap-to-clone posture the type has always had — `AppState::new` shares ONE handle
+    /// across every store, loader and cache (and, since SMA-476, one circuit breaker with it).
+    ///
+    /// Uses a lazily-connecting manager (`127.0.0.1:1` is a closed port), so this never dials
+    /// out and needs no Docker: construction and cloning touch no I/O.
+    #[tokio::test]
+    async fn from_connection_builds_a_redis_backend_that_is_cheap_to_clone() {
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
+            .expect("well-formed redis URL, never actually dialed");
+
+        let gens = Generations::from_connection(conn);
+        let clone = gens.clone();
+
+        assert!(matches!(gens, Generations::Redis(_)));
+        assert!(matches!(clone, Generations::Redis(_)));
+    }
+
+    /// `Which` is what removed the duplicated per-counter plumbing. Pin the two mappings that
+    /// a copy-paste slip would silently invert — a swapped key would make `policy_gen` and
+    /// `entity_gen` share one Redis key, which no other test in this file would catch.
+    #[test]
+    fn which_maps_each_counter_to_its_own_redis_key_and_metric_label() {
+        assert_eq!(Which::Policy.key(), POLICY_GEN_KEY);
+        assert_eq!(Which::Entity.key(), ENTITY_GEN_KEY);
+        assert_ne!(Which::Policy.key(), Which::Entity.key());
+
+        assert_eq!(Which::Policy.label(), "policy_gen");
+        assert_eq!(Which::Entity.label(), "entity_gen");
+    }
+
+    /// `Which::redis` is the Redis-side twin of `Which::memory`, pinning that it routes each
+    /// counter to its OWN `CounterState` rather than a shared one — a copy-paste slip here
+    /// would make a policy_gen rewind repair silently gate on (or observe the high-water mark
+    /// of) entity_gen instead. Nothing consumes `CounterState` yet (Task 3 wires the guard
+    /// in); this only pins the plumbing this task adds: a fresh state starts at high-water 0
+    /// with an unlocked repair gate.
+    #[tokio::test]
+    async fn which_redis_routes_each_counter_to_its_own_independent_counter_state() {
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
+            .expect("well-formed redis URL, never actually dialed");
+        let gens = Generations::from_connection(conn);
+        let Generations::Redis(redis) = &gens else {
+            panic!("from_connection must build the Redis variant");
+        };
+
+        let policy = Which::Policy.redis(redis);
+        let entity = Which::Entity.redis(redis);
+
+        assert_eq!(policy.high_water.load(Ordering::SeqCst), 0, "a fresh handle has observed nothing yet");
+        assert_eq!(entity.high_water.load(Ordering::SeqCst), 0);
+        assert!(!Arc::ptr_eq(&policy.high_water, &entity.high_water), "policy_gen and entity_gen must not share high-water state");
+        assert!(policy.repair_gate.try_lock().is_ok(), "a fresh repair gate must start unlocked");
     }
 }
