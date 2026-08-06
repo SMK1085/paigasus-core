@@ -36,10 +36,9 @@ use paigasus_iam_core::authz::model::EntitySlice;
 use paigasus_iam_core::{AuthzError, EntitySliceLoader};
 use paigasus_kernel::Prn;
 use redis::AsyncCommands;
-#[cfg(test)]
-use redis::Client;
-use redis::aio::ConnectionManager;
 use std::sync::Arc;
+
+use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 
 /// Redis key prefix (spec §7): `iam:authz:slice:<entity_gen>:<resource-prn>:<principal-prn>`.
 const KEY_PREFIX: &str = "iam:authz:slice:";
@@ -56,7 +55,7 @@ fn slice_key(entity_gen: u64, resource: &Prn, principal: &Prn) -> String {
 /// the inner loader — this decorator never tracks its own generation state.
 pub struct SliceCache {
     inner: Arc<dyn EntitySliceLoader>,
-    conn: ConnectionManager,
+    conn: RedisHandle,
     ttl_secs: u64,
 }
 
@@ -65,7 +64,7 @@ impl SliceCache {
     /// `RedisJwksCache::connect`/`RedisDecisionCache::connect`). `ttl_secs` is applied to
     /// every cache write as Redis's own `EX` expiry.
     pub async fn connect(inner: Arc<dyn EntitySliceLoader>, redis_url: &str, ttl_secs: u64) -> Result<Self, AuthzError> {
-        let conn = crate::adapters::redis_conn::connect(redis_url).await.map_err(redis_connect_err)?;
+        let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::Authz).await.map_err(redis_connect_err)?;
         Ok(Self { inner, conn, ttl_secs })
     }
 
@@ -73,7 +72,7 @@ impl SliceCache {
     /// `AppState::new` shares ONE redis connection across the redis-backed `Generations` +
     /// `RedisDecisionCache` + `SliceCache` rather than each opening its own — `connect` above
     /// stays the standalone-caller/test entry point.
-    pub(crate) fn from_connection(inner: Arc<dyn EntitySliceLoader>, conn: ConnectionManager, ttl_secs: u64) -> Self {
+    pub(crate) fn from_connection(inner: Arc<dyn EntitySliceLoader>, conn: RedisHandle, ttl_secs: u64) -> Self {
         Self { inner, conn, ttl_secs }
     }
 }
@@ -229,8 +228,7 @@ mod tests {
     /// server / Docker.
     #[tokio::test]
     async fn load_fails_open_to_the_inner_loader_when_entity_gen_errors() {
-        let client = Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never actually dialed");
-        let conn = ConnectionManager::new_lazy_with_config(client, crate::adapters::redis_conn::connection_manager_config()).expect("lazy ConnectionManager construction never connects");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", crate::adapters::redis_conn::RedisRole::Authz).expect("well-formed redis URL, never actually reachable");
 
         let cache = SliceCache::from_connection(Arc::new(FailingGenLoader), conn, 60);
         let resource = prn("project", 1);

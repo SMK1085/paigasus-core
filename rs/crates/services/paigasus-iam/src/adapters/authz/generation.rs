@@ -10,14 +10,15 @@
 //! - **`redis`**: `INCR`/`GET` against the well-known keys `iam:authz:policy_gen`/
 //!   `iam:authz:entity_gen` via an auto-reconnecting, `Arc`-backed `ConnectionManager` —
 //!   cross-replica, survives restarts. Mirrors `adapters::oidc::redis_cache::RedisJwksCache`'s
-//!   connect/clone-per-call pattern.
+//!   connect/clone-per-call pattern, itself behind a per-connection circuit breaker (SMA-476).
 
 use async_trait::async_trait;
 use paigasus_iam_core::{AuthzError, PolicyGenBumper};
 use redis::AsyncCommands;
-use redis::aio::ConnectionManager;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 
 const POLICY_GEN_KEY: &str = "iam:authz:policy_gen";
 const ENTITY_GEN_KEY: &str = "iam:authz:entity_gen";
@@ -42,7 +43,7 @@ pub struct MemoryGenerations {
 #[derive(Clone)]
 pub enum Generations {
     Memory(MemoryGenerations),
-    Redis(ConnectionManager),
+    Redis(RedisHandle),
 }
 
 impl Generations {
@@ -56,7 +57,7 @@ impl Generations {
     /// `RedisJwksCache::connect`): cross-replica counters via `INCR`/`GET` on the two
     /// well-known keys.
     pub async fn redis_connect(redis_url: &str) -> Result<Self, AuthzError> {
-        let conn = crate::adapters::redis_conn::connect(redis_url).await.map_err(redis_err)?;
+        let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::Authz).await.map_err(redis_err)?;
         Ok(Generations::Redis(conn))
     }
 

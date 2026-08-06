@@ -25,9 +25,10 @@
 use async_trait::async_trait;
 use paigasus_iam_core::{AccessRequest, AuthzError, Decision, DecisionCache};
 use redis::AsyncCommands;
-use redis::aio::ConnectionManager;
 use std::collections::HashMap;
 use std::sync::Mutex;
+
+use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 
 /// Redis/in-proc key prefix (spec §7): `iam:authz:dec:<policy_content>:<entity_gen>:<hash>`.
 const KEY_PREFIX: &str = "iam:authz:dec:";
@@ -114,7 +115,7 @@ impl DecisionCache for MemoryDecisionCache {
 /// `PolicySnapshot`/Cedar on a miss, so a Redis outage only costs the accelerator, never a
 /// decision.
 pub struct RedisDecisionCache {
-    conn: ConnectionManager,
+    conn: RedisHandle,
     ttl_secs: u64,
 }
 
@@ -124,7 +125,7 @@ impl RedisDecisionCache {
     /// entry disappearing after `ttl_secs` (or on eviction) never surfaces as anything
     /// other than a subsequent miss.
     pub async fn connect(redis_url: &str, ttl_secs: u64) -> Result<Self, AuthzError> {
-        let conn = crate::adapters::redis_conn::connect(redis_url).await.map_err(redis_connect_err)?;
+        let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::Authz).await.map_err(redis_connect_err)?;
         Ok(Self { conn, ttl_secs })
     }
 
@@ -132,7 +133,7 @@ impl RedisDecisionCache {
     /// `AppState::new` shares ONE redis connection across the redis-backed `Generations` +
     /// `RedisDecisionCache` + `SliceCache` rather than each opening its own — `connect` above
     /// stays the standalone-caller/test entry point.
-    pub(crate) fn from_connection(conn: ConnectionManager, ttl_secs: u64) -> Self {
+    pub(crate) fn from_connection(conn: RedisHandle, ttl_secs: u64) -> Self {
         Self { conn, ttl_secs }
     }
 }

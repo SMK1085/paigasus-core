@@ -48,30 +48,105 @@ pub(crate) fn connection_manager_config() -> ConnectionManagerConfig {
     ConnectionManagerConfig::new().set_number_of_retries(CONNECT_RETRIES).set_max_delay(RETRY_MAX_DELAY)
 }
 
-/// Opens `redis_url` and wraps it in a [`ConnectionManager`] built with
-/// [`connection_manager_config`] — the ONLY way this crate constructs one (enforced by the
-/// `repo:redis-connect-single-site` CI gate).
+/// A `ConnectionManager` behind a per-connection circuit breaker (SMA-476).
 ///
-/// **Eager**: `new_with_config` awaits the initial connection, so a Redis that is down at
-/// boot still fails `AppState::new` rather than yielding a manager that fails later. That
-/// preserves the pre-SMA-473 contract — but note the tolerance window shrinks from ~6–12 s
-/// to ~200 ms, so a Redis slow to start now costs one crash-restart (SMA-473 D10).
+/// Implements [`redis::aio::ConnectionLike`], which is what makes the breaker transparent:
+/// redis-rs's `AsyncCommands` is a blanket impl over that trait
+/// (`redis-1.3.0/src/commands/mod.rs:3288` — note it requires `Send + Sync + Sized`, which the
+/// trait's own declaration does not), so every `conn.get(..)` / `conn.set_ex(..)` call site keeps
+/// compiling and behaving identically while gaining the breaker.
 ///
-/// Returns a bare [`redis::RedisResult`] rather than a domain error because the callers map
-/// it differently on purpose: `http::connect_redis` to `AuthnError::Backend`,
+/// `req_packed_command` is the correct seam rather than merely a convenient one: it is where
+/// `ConnectionManager` awaits its shared connect future, i.e. where the ~2.1 s against a
+/// blackholed backend is actually spent.
+///
+/// **Coupling to watch on a redis-rs upgrade** (SMA-476 §6 risk 5): the `AsyncCommands` blanket
+/// impl over `ConnectionLike`, and the `ArcSwap<Shared<..>>` memoization that makes recovery cost
+/// two open windows rather than one.
+#[derive(Clone, Debug)]
+pub struct RedisHandle {
+    conn: ConnectionManager,
+    breaker: Arc<Breaker>,
+}
+
+impl redis::aio::ConnectionLike for RedisHandle {
+    fn req_packed_command<'a>(&'a mut self, cmd: &'a redis::Cmd) -> redis::RedisFuture<'a, redis::Value> {
+        Box::pin(async move {
+            let permit = match self.breaker.admit() {
+                Admission::Pass(permit) => permit,
+                Admission::ShortCircuit => return Err(breaker_open_error()),
+            };
+            let result = self.conn.req_packed_command(cmd).await;
+            permit.record(&result);
+            result
+        })
+    }
+
+    fn req_packed_commands<'a>(&'a mut self, cmd: &'a redis::Pipeline, offset: usize, count: usize) -> redis::RedisFuture<'a, Vec<redis::Value>> {
+        // Implemented for real even though no call site pipelines today: `unimplemented!()`
+        // behind a trait method redis-rs may call is a live panic, not a placeholder.
+        Box::pin(async move {
+            let permit = match self.breaker.admit() {
+                Admission::Pass(permit) => permit,
+                Admission::ShortCircuit => return Err(breaker_open_error()),
+            };
+            let result = self.conn.req_packed_commands(cmd, offset, count).await;
+            permit.record(&result);
+            result
+        })
+    }
+
+    fn get_db(&self) -> i64 {
+        self.conn.get_db()
+    }
+}
+
+/// Opens `redis_url` and wraps it in a [`RedisHandle`] — a [`ConnectionManager`] built with
+/// [`connection_manager_config`] behind a fresh circuit breaker. The ONLY way this crate obtains
+/// a Redis connection (enforced by the `repo:redis-connect-single-site` CI gate, which since
+/// SMA-476 also bans naming the `ConnectionManager` type outside this module).
+///
+/// **Eager**: `new_with_config` awaits the initial connection, so a Redis that is down at boot
+/// still fails `AppState::new` rather than yielding a manager that fails later. That preserves
+/// the pre-SMA-473 contract — but note the tolerance window shrinks from ~6-12 s to ~200 ms, so a
+/// Redis slow to start now costs one crash-restart (SMA-473 D10).
+///
+/// The boot dial is deliberately NOT breaker-mediated (SMA-476 D11): the breaker starts Closed
+/// and wraps commands only. A single boot dial has nothing to break on.
+///
+/// Returns a bare [`redis::RedisResult`] rather than a domain error because the callers map it
+/// differently on purpose: `http::connect_redis` to `AuthnError::Backend`,
 /// `RedisJwksCache::connect` to the fail-closed `AuthnError::Unavailable`.
-pub(crate) async fn connect(redis_url: &str) -> redis::RedisResult<ConnectionManager> {
+pub(crate) async fn connect(redis_url: &str, role: RedisRole) -> redis::RedisResult<RedisHandle> {
     let client = redis::Client::open(redis_url)?;
-    ConnectionManager::new_with_config(client, connection_manager_config()).await
+    let conn = ConnectionManager::new_with_config(client, connection_manager_config()).await?;
+    Ok(RedisHandle { conn, breaker: Breaker::new(role) })
+}
+
+/// A lazily-connecting handle with a CLOSED breaker and short test durations.
+///
+/// Required wherever a test must actually dial: the production [`connect`] is eager, so against a
+/// dead or blackholed backend it fails before any command can be issued.
+#[cfg(test)]
+pub(crate) fn new_lazy_for_tests(redis_url: &str, role: RedisRole) -> redis::RedisResult<RedisHandle> {
+    let client = redis::Client::open(redis_url)?;
+    let conn = ConnectionManager::new_lazy_with_config(client, connection_manager_config())?;
+    Ok(RedisHandle { conn, breaker: Breaker::new(role) })
+}
+
+/// A lazily-connecting handle whose breaker is forced OPEN, for proving that a call site
+/// short-circuits rather than dials. NOT interchangeable with [`new_lazy_for_tests`].
+#[cfg(test)]
+pub(crate) fn with_open_breaker_for_tests(redis_url: &str, role: RedisRole) -> redis::RedisResult<RedisHandle> {
+    let handle = new_lazy_for_tests(redis_url, role)?;
+    handle.breaker.force_open_for_tests();
+    Ok(handle)
 }
 
 // ---- SMA-476: circuit breaker ------------------------------------------------------------
 //
-// Task 3's `RedisHandle` wires this state machine into the production command call sites;
-// until then, everything below runs only from `#[cfg(test)]`, and this workspace denies
-// `dead_code` in-source (`[workspace.lints.rust] warnings = "deny"`). Items unreachable from
-// the plain (non-test) `lib` target below carry `#[allow(dead_code)]`; each is removed once
-// Task 3 lands and calls it from production code.
+// `RedisHandle` (defined above `connect`) wires this state machine into the production
+// command call sites via `ConnectionLike::req_packed_command`/`req_packed_commands`.
 
 /// Consecutive counted failures that trip the breaker (SMA-476 D6). Three rather than one so a
 /// first connect attempt landing in a failover gap — the case SMA-473's single retry exists for —
@@ -100,7 +175,6 @@ pub(crate) const BREAKER_OPEN_MESSAGE: &str = "redis circuit breaker open (SMA-4
 /// Which connection a breaker guards. A CLOSED set, so the `role` metric label is bounded by the
 /// type system and cannot mint cardinality (SMA-476 D10).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum RedisRole {
     Authz,
     ApiKeys,
@@ -118,7 +192,6 @@ impl RedisRole {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 enum BreakerState {
     Closed,
     HalfOpen,
@@ -134,7 +207,6 @@ impl BreakerState {
         }
     }
 
-    #[allow(dead_code)]
     fn as_label(self) -> &'static str {
         match self {
             BreakerState::Closed => "closed",
@@ -144,7 +216,7 @@ impl BreakerState {
     }
 }
 
-#[allow(dead_code)]
+#[derive(Debug)]
 struct Inner {
     state: BreakerState,
     consecutive_failures: u32,
@@ -154,7 +226,11 @@ struct Inner {
 /// Per-connection circuit breaker (SMA-476 D1). `Arc`-shared, so every clone of a
 /// [`RedisHandle`] observes one breaker — load-bearing, because all eleven command call sites do
 /// `self.conn.clone()` per command.
-#[allow(dead_code)]
+///
+/// `Debug` is derived (not part of the original design, added because [`connect`]'s Ok type
+/// replaced [`ConnectionManager`] — which already implemented `Debug` — with [`RedisHandle`], and
+/// `Result::expect_err` requires `T: Debug`; see `connect_is_eager_so_a_dead_backend_fails_at_construction`).
+#[derive(Debug)]
 pub(crate) struct Breaker {
     role: RedisRole,
     open_duration: Duration,
@@ -164,7 +240,6 @@ pub(crate) struct Breaker {
 
 /// What [`Breaker::admit`] decided. `Pass` carries an RAII permit whose `Drop` records a failure
 /// if no outcome was reported (SMA-476 D8).
-#[allow(dead_code)]
 pub(crate) enum Admission {
     Pass(ProbePermit),
     ShortCircuit,
@@ -173,14 +248,12 @@ pub(crate) enum Admission {
 /// Reports one command's outcome back to the breaker. Consumed by [`ProbePermit::record`]; if it
 /// is instead DROPPED without recording — an axum handler future cancelled by a client
 /// disconnect — `Drop` records a failure, so a half-open breaker can never wedge (SMA-476 D8).
-#[allow(dead_code)]
 pub(crate) struct ProbePermit {
     breaker: Arc<Breaker>,
     reported: bool,
 }
 
 impl ProbePermit {
-    #[allow(dead_code)]
     pub(crate) fn record<T>(mut self, result: &redis::RedisResult<T>) {
         self.reported = true;
         let healthy = match result {
@@ -205,7 +278,6 @@ impl Drop for ProbePermit {
     }
 }
 
-#[allow(dead_code)]
 impl Breaker {
     pub(crate) fn new(role: RedisRole) -> Arc<Breaker> {
         Breaker::with_durations(role, OPEN_DURATION, HALF_OPEN_DEADLINE)
@@ -292,9 +364,6 @@ impl Breaker {
         counter!(names::IAM_REDIS_BREAKER_TRANSITIONS_TOTAL, "role" => self.role.as_label(), "to" => next.as_label()).increment(1);
     }
 
-    // Task 3 removes this `#[allow(dead_code)]`: `force_open_for_tests` is unused until
-    // Task 3's connection-handle tests call it.
-    #[allow(dead_code)]
     #[cfg(test)]
     pub(crate) fn force_open_for_tests(self: &Arc<Self>) {
         let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -316,7 +385,6 @@ impl Breaker {
 /// Everything else — `UnexpectedReturnType`, `Client`, `Extension`, `InvalidClientConfig`,
 /// `RESP3NotSupported`, every `Server(..)` — means the backend answered and is healthy.
 /// `ErrorKind` is `#[non_exhaustive]`, so this must not be written as an exhaustive match.
-#[allow(dead_code)]
 fn counts_as_failure(err: &redis::RedisError) -> bool {
     err.is_io_error() || matches!(err.retry_method(), redis::RetryMethod::Reconnect | redis::RetryMethod::ReconnectFromInitialConnections)
 }
@@ -324,7 +392,6 @@ fn counts_as_failure(err: &redis::RedisError) -> bool {
 /// The error an open breaker returns instead of dialling. `ErrorKind::Io` so `is_io_error()`
 /// holds and all five adapters' error arms fire exactly as they do against a genuinely dead
 /// socket (SMA-476 D4) — they all read `err.kind()` and nothing else.
-#[allow(dead_code)]
 fn breaker_open_error() -> redis::RedisError {
     redis::RedisError::from((redis::ErrorKind::Io, BREAKER_OPEN_MESSAGE))
 }
@@ -402,18 +469,17 @@ mod tests {
     async fn a_command_against_an_unreachable_backend_fails_fast() {
         use redis::AsyncCommands;
 
-        let client = redis::Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never actually reachable");
-        let mut conn = ConnectionManager::new_lazy_with_config(client, connection_manager_config()).expect("lazy ConnectionManager construction never connects");
+        // Exactly ONE command: with more, SMA-476's breaker would open at the third and the
+        // later ones would short-circuit rather than measuring a real dial.
+        let mut conn = new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz).expect("well-formed redis URL, never actually reachable");
 
         let started = std::time::Instant::now();
         let result: redis::RedisResult<Option<Vec<u8>>> = conn.get("sma473:probe").await;
         let elapsed = started.elapsed();
 
-        // Control: without this the deadline could pass for the WRONG reason — a malformed
-        // URL or an invalid config erroring instantly looks identical to a fast, correct
-        // failure. (It cannot separate a fast refuse from a slow timeout; the deadline does.)
         let err = result.expect_err("an unreachable backend must error, not return a value");
         assert!(err.is_io_error(), "expected an IO/connection error, got {err:?} — the probe never actually dialed");
+        assert!(!err.to_string().contains(BREAKER_OPEN_MESSAGE), "this must measure a real dial, not a short-circuit");
 
         assert!(
             elapsed < Duration::from_secs(2),
@@ -433,7 +499,7 @@ mod tests {
     #[tokio::test]
     async fn connect_is_eager_so_a_dead_backend_fails_at_construction() {
         let started = std::time::Instant::now();
-        let result = connect("redis://127.0.0.1:1").await;
+        let result = connect("redis://127.0.0.1:1", RedisRole::Authz).await;
         let elapsed = started.elapsed();
 
         let err = result.expect_err(
@@ -668,5 +734,149 @@ mod tests {
             Duration::from_secs(5),
             "SMA-476 D8: must comfortably exceed a worst-case ~2.1s dial so it never pre-empts a merely-slow probe"
         );
+    }
+
+    /// SMA-476 D1. Every one of the eleven call sites does `self.conn.clone()` per command, so a
+    /// `#[derive(Clone)]` over a non-`Arc` breaker field would compile and silently give every
+    /// call its own breaker — which would never open. This is that guard.
+    #[tokio::test]
+    async fn cloning_a_handle_shares_one_breaker() {
+        use redis::AsyncCommands;
+
+        let handle = with_open_breaker_for_tests("redis://127.0.0.1:1", RedisRole::Authz).expect("well-formed url");
+        let mut clone = handle.clone();
+
+        let started = std::time::Instant::now();
+        let result: redis::RedisResult<Option<Vec<u8>>> = clone.get("sma476:probe").await;
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("an open breaker must short-circuit with an error");
+        assert!(
+            err.to_string().contains(BREAKER_OPEN_MESSAGE),
+            "a CLONE dialled instead of short-circuiting — the breaker is not Arc-shared: {err:?}"
+        );
+        assert!(elapsed < Duration::from_millis(100), "short-circuit took {elapsed:?}");
+    }
+
+    /// The interception itself: an `AsyncCommands` call on a `RedisHandle` must route through the
+    /// breaker. If `ConnectionLike` is ever implemented by delegating verbatim to the inner
+    /// manager, this fails.
+    #[tokio::test]
+    async fn an_open_breaker_short_circuits_asynccommands_without_dialling() {
+        use redis::AsyncCommands;
+
+        let mut handle = with_open_breaker_for_tests("redis://127.0.0.1:1", RedisRole::Jwks).expect("well-formed url");
+        let result: redis::RedisResult<Option<Vec<u8>>> = handle.get("sma476:probe").await;
+        let err = result.expect_err("an open breaker must error");
+        assert!(err.is_io_error(), "SMA-476 D4: the short-circuit error must be an IO error");
+        assert!(err.to_string().contains(BREAKER_OPEN_MESSAGE));
+    }
+}
+
+/// Shared test fixtures for the SMA-476 breaker tests. Lives here rather than in each adapter so
+/// the five posture tests (Task 6) and the blackhole measurement (Task 4) use one implementation.
+///
+/// `#[allow(dead_code)]`: unlike the rest of this module, nothing in Tasks 3+5 calls this — its
+/// callers are Task 4 (the blackhole measurement) and Task 6 (the five adapter posture tests),
+/// neither landed yet. Remove this allow once either does.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) mod test_support {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    /// A listener that reproduces a BLACKHOLED Redis: it accepts the TCP connection and then
+    /// never replies, so redis-rs's dial runs to `connection_timeout`.
+    ///
+    /// Why this is the right shape: the dial ALWAYS awaits a server response —
+    /// `connection_setup_pipeline` always appends `CLIENT SETINFO LIB-NAME`/`LIB-VER`
+    /// (`redis-1.3.0/src/connection.rs:1380-1400`) — and the whole dial, resolver included, sits
+    /// inside `rt.timeout(connection_timeout)` (`client.rs:495-520`). So the connect burns the
+    /// full 1 s, twice (one retry = two attempts), exactly as a dropped SYN would, with no root,
+    /// no iptables and no Docker.
+    ///
+    /// **The accepted streams MUST be retained.** Dropping a `TcpStream` — the natural way to
+    /// write "ignore the socket" — makes the kernel send FIN/RST, redis-rs's setup-pipeline read
+    /// returns EOF immediately, and a command costs microseconds instead of ~2.1 s. The accept
+    /// task's `JoinHandle` is retained for the same reason.
+    ///
+    /// **Precondition for the ~1 s-per-attempt bound:** the setup pipeline must be non-empty. It
+    /// is guarded by `if !connection_info.skip_set_lib_name`, and an empty pipeline short-circuits
+    /// to `Ok` without I/O (`aio/mod.rs:110-112`), which would move the hang to `response_timeout`
+    /// (500 ms) instead. A plain `redis://host:port` URL (RESP2, no auth, db 0) keeps it non-empty
+    /// — do not add credentials or a db index to these tests' URLs.
+    pub(crate) struct Blackhole {
+        pub(crate) url: String,
+        responding: Arc<AtomicBool>,
+        _held: Arc<AsyncMutex<Vec<tokio::net::TcpStream>>>,
+        _accept: tokio::task::JoinHandle<()>,
+    }
+
+    impl Blackhole {
+        /// Switch the listener from blackholing to answering as a minimal RESP server. Only
+        /// affects connections opened AFTER this call. Used by the recovery test (Task 7).
+        pub(crate) fn start_responding(&self) {
+            self.responding.store(true, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) async fn start() -> Blackhole {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("binding an ephemeral loopback port never fails in tests");
+        let port = listener.local_addr().expect("a bound listener always has a local address").port();
+        let responding = Arc::new(AtomicBool::new(false));
+        let held: Arc<AsyncMutex<Vec<tokio::net::TcpStream>>> = Arc::new(AsyncMutex::new(Vec::new()));
+
+        let accept_responding = Arc::clone(&responding);
+        let accept_held = Arc::clone(&held);
+        let accept = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { return };
+                if accept_responding.load(Ordering::SeqCst) {
+                    tokio::spawn(serve_minimal_resp(stream));
+                } else {
+                    // Hold it open forever — see the struct doc for why dropping breaks the test.
+                    accept_held.lock().await.push(stream);
+                }
+            }
+        });
+
+        Blackhole {
+            url: format!("redis://127.0.0.1:{port}"),
+            responding,
+            _held: held,
+            _accept: accept,
+        }
+    }
+
+    /// Answers just enough RESP for redis-rs to complete a dial and one `GET`: `+OK` for each
+    /// setup-pipeline command, `$-1` (null bulk string) for anything else. Deliberately dumb —
+    /// it only has to let the half-open probe succeed.
+    async fn serve_minimal_resp(mut stream: tokio::net::TcpStream) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut buf = vec![0_u8; 4096];
+        loop {
+            let Ok(n) = stream.read(&mut buf).await else { return };
+            if n == 0 {
+                return;
+            }
+            let request = String::from_utf8_lossy(&buf[..n]).to_ascii_uppercase();
+            // One reply per command in the batch. The setup pipeline sends CLIENT SETINFO twice;
+            // a GET arrives on its own.
+            let commands = request.matches("\r\n$").count().max(1);
+            let mut reply = String::new();
+            for _ in 0..commands {
+                if request.contains("GET") && !request.contains("SETINFO") {
+                    reply.push_str("$-1\r\n");
+                } else {
+                    reply.push_str("+OK\r\n");
+                }
+            }
+            if stream.write_all(reply.as_bytes()).await.is_err() {
+                return;
+            }
+        }
     }
 }

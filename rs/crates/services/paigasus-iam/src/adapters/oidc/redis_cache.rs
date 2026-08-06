@@ -11,9 +11,9 @@
 use async_trait::async_trait;
 use paigasus_iam_core::{AuthnError, Issuer};
 use redis::AsyncCommands;
-use redis::aio::ConnectionManager;
 
 use super::jwks::{CachedJwks, JwksCache};
+use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 
 /// Redis key prefix for cached JWKS entries (spec §4.3): `iam:jwks:<issuer canonical
 /// string>`.
@@ -28,7 +28,7 @@ fn cache_key(issuer: &Issuer) -> String {
 /// for concurrent callers), so `get`/`put` clone it per call rather than holding a lock.
 /// `connect` is the sole constructor — Task 10's composition root calls it verbatim.
 pub struct RedisJwksCache {
-    conn: ConnectionManager,
+    conn: RedisHandle,
     ttl_secs: u64,
 }
 
@@ -38,7 +38,9 @@ impl RedisJwksCache {
     /// that observed the drop still surfaces its error to the caller — see `get`/`put`
     /// below). `ttl_secs` is applied to every `put` as Redis's own `EX` expiry.
     pub async fn connect(redis_url: &str, ttl_secs: u64) -> Result<Self, AuthnError> {
-        let conn = crate::adapters::redis_conn::connect(redis_url).await.map_err(|err| log_unavailable(None, err.kind()))?;
+        let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::Jwks)
+            .await
+            .map_err(|err| log_unavailable(None, err.kind()))?;
         Ok(Self { conn, ttl_secs })
     }
 }

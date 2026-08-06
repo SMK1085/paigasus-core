@@ -38,13 +38,12 @@ use chrono::{DateTime, Utc};
 use paigasus_iam_core::{ApiKeyId, PrincipalId, PrincipalStatus};
 use paigasus_kernel::Prn;
 use redis::AsyncCommands;
-#[cfg(test)]
-use redis::Client;
-use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 
 /// Redis/in-proc key prefix (spec §9): `iam:apikey:<keyid>`.
 const KEY_PREFIX: &str = "iam:apikey:";
@@ -198,7 +197,7 @@ impl ApiKeyValidationCache for MemoryApiKeyCache {
 /// caller always falls through to a real DB validation on a miss, so a Redis outage only ever
 /// costs the accelerator, never a validation.
 pub struct RedisApiKeyCache {
-    conn: ConnectionManager,
+    conn: RedisHandle,
     ttl_secs: u64,
 }
 
@@ -208,17 +207,21 @@ impl RedisApiKeyCache {
     /// disappearing after `ttl_secs` (or on eviction) never surfaces as anything other than a
     /// subsequent miss.
     pub async fn connect(redis_url: &str, ttl_secs: u64) -> Result<Self, redis::RedisError> {
-        let conn = crate::adapters::redis_conn::connect(redis_url).await?;
+        let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::ApiKeys).await?;
         Ok(Self { conn, ttl_secs })
     }
 
-    /// Builds a cache over an ALREADY-CONNECTED `ConnectionManager`: mirrors
+    /// Builds a cache over an ALREADY-CONNECTED handle: mirrors
     /// `RedisDecisionCache::from_connection`/`SliceCache::from_connection` (SMA-444 Task 21) —
-    /// a future `AppState` wiring can share ONE redis connection across the redis-backed
-    /// `Generations` + `RedisDecisionCache` + `SliceCache` + this cache rather than each
-    /// opening its own; `connect` above stays the standalone-caller/test entry point.
+    /// `AppState::new` shares ONE redis connection across the redis-backed `Generations` +
+    /// `RedisDecisionCache` + `SliceCache` + this cache rather than each opening its own;
+    /// `connect` above stays the standalone-caller/test entry point.
+    ///
+    /// `pub(crate)`, not `pub` (SMA-476 D13): `adapters::redis_conn` is a `pub(crate)` module, so
+    /// a `pub fn` taking a `RedisHandle` would be a private-type-in-public-interface and
+    /// `cargo clippy -- -D warnings` would fail the build. Every caller is in-crate.
     #[must_use]
-    pub fn from_connection(conn: ConnectionManager, ttl_secs: u64) -> Self {
+    pub(crate) fn from_connection(conn: RedisHandle, ttl_secs: u64) -> Self {
         Self { conn, ttl_secs }
     }
 }
@@ -382,8 +385,7 @@ mod tests {
     /// which is the cost SMA-473 removed.
     #[tokio::test]
     async fn redis_cache_fails_open_when_the_backend_is_unreachable() {
-        let client = Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never actually dialed");
-        let conn = ConnectionManager::new_lazy_with_config(client, crate::adapters::redis_conn::connection_manager_config()).expect("lazy ConnectionManager construction never connects");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::ApiKeys).expect("well-formed redis URL, never actually reachable");
         let cache = RedisApiKeyCache::from_connection(conn, 30);
         let id = ApiKeyId::from_uuid(Uuid::from_u128(12));
 

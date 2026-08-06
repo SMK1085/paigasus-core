@@ -28,7 +28,6 @@ mod users;
 use async_trait::async_trait;
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use paigasus_iam_core::{Authenticator, AuthnError, Authorizer, Issuer, ValidatedClaims};
-use redis::aio::ConnectionManager;
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde_json::json;
 use std::net::SocketAddr;
@@ -51,6 +50,7 @@ use crate::adapters::persistence::{
     PgApiKeyRepository, PgAuditLog, PgDeadLetters, PgEntitySliceLoader, PgExternalIdentityRepository, PgMembershipRepository, PgOrganizationRepository, PgOutbox, PgPolicyStore, PgPrincipalRepository,
     PgProjectRepository, PgRoleGrantStore, PgServiceAccountRepository, PgSystemRoleReconciler, PgSystemRowRetirer, PgTeamRepository, SeaOrmUnitOfWork,
 };
+use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 use crate::application::api_keys::{ApiKeyService, ApiKeyServiceDeps};
 use crate::application::audit::AuditQueryService;
 use crate::application::authenticate_api_key::AuthenticateApiKey;
@@ -309,7 +309,7 @@ impl AppState {
     /// least that starter set, never an empty or drifted one.
     pub async fn new(db: DatabaseConnection, cfg: &IamConfig) -> Result<AppState, AuthnError> {
         let authz_cfg = &cfg.authz;
-        let (gens, redis_conn): (Generations, Option<ConnectionManager>) = match authz_cfg.cache.backend {
+        let (gens, redis_conn): (Generations, Option<RedisHandle>) = match authz_cfg.cache.backend {
             AuthzCacheBackend::Memory => (Generations::memory(), None),
             AuthzCacheBackend::Redis => {
                 // `IamConfig::validate` rejects a redis backend without a URL at boot; a
@@ -319,7 +319,7 @@ impl AppState {
                     .redis_url
                     .as_deref()
                     .ok_or_else(|| AuthnError::Backend("authz.cache.backend = \"redis\" without redis_url (IamConfig::validate must run first)".into()))?;
-                let conn = connect_redis(redis_url).await?;
+                let conn = connect_redis(redis_url, RedisRole::Authz).await?;
                 (Generations::Redis(conn.clone()), Some(conn))
             }
         };
@@ -571,7 +571,7 @@ impl AppState {
                             .redis_url
                             .as_deref()
                             .ok_or_else(|| AuthnError::Backend("api_keys.introspect_cache.backend = \"redis\" without redis_url (IamConfig::validate must run first)".into()))?;
-                        connect_redis(redis_url).await?
+                        connect_redis(redis_url, RedisRole::ApiKeys).await?
                     }
                 };
                 Arc::new(RedisApiKeyCache::from_connection(conn, cfg.api_keys.introspect_cache.ttl_secs))
@@ -710,16 +710,19 @@ impl AppState {
     }
 }
 
-/// Opens `redis_url` and wraps it in an auto-reconnecting `ConnectionManager` — shared by every
+/// Opens `redis_url` and wraps it in a breaker-guarded [`RedisHandle`] — shared by every
 /// redis-backed cache `AppState::new` wires (the authz `Generations`/`RedisDecisionCache`/
 /// `SliceCache` trio, SMA-444 Task 21; the API-key `RedisApiKeyCache`, SMA-445 Task 19, when it
 /// can't reuse the already-open `redis_conn` LOCAL BINDING in `AppState::new` — not to be
 /// confused with the [`crate::adapters::redis_conn`] MODULE this delegates to), mirroring
 /// `RedisJwksCache::connect`'s connect pattern.
-/// Delegates to [`crate::adapters::redis_conn::connect`] for the tuned reconnect retry
-/// budget (SMA-473) — this function owns only the `AuthnError` mapping.
-async fn connect_redis(redis_url: &str) -> Result<ConnectionManager, AuthnError> {
-    crate::adapters::redis_conn::connect(redis_url).await.map_err(|e| AuthnError::Backend(Box::new(e)))
+///
+/// Delegates to [`crate::adapters::redis_conn::connect`] for the tuned reconnect retry budget
+/// (SMA-473) and the per-connection circuit breaker (SMA-476) — this function owns only the
+/// `AuthnError` mapping. `role` labels this connection's breaker metrics; see SMA-476 D10 for why
+/// a shared connection reports as `authz` even when it also serves the API-key cache.
+async fn connect_redis(redis_url: &str, role: RedisRole) -> Result<RedisHandle, AuthnError> {
+    crate::adapters::redis_conn::connect(redis_url, role).await.map_err(|e| AuthnError::Backend(Box::new(e)))
 }
 
 /// Liveness only — stateless, so it is testable without a database.
