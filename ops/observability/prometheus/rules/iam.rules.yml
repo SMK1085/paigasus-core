@@ -199,3 +199,30 @@ groups:
         for: 0m
         labels: { severity: warning }
         annotations: { summary: "IAM Redis circuit breaker is flapping (role {{ $labels.role }})", description: "The Redis circuit breaker for role {{ $labels.role }} opened more than 5 times in 10m. Each open costs a cache-bypass window; repeated opens suggest an intermittently unhealthy backend rather than a clean outage. NOTE the state gauge may read 0 at scrape time — that is why this rule watches transitions, not state." }
+
+      - alert: IamAuthzGenerationRewound
+        # SMA-474. A Redis generation counter came back BELOW what a process had already
+        # observed, and `Generations` repaired it forward. Neither `iam:authz:policy_gen` nor
+        # `iam:authz:entity_gen` carries a TTL, so under `allkeys-*` they are ordinary eviction
+        # candidates — and an evicted key reads back as `0`, which before SMA-474 was a
+        # successful read of the wrong value that nothing detected.
+        #
+        # WARNING, not critical, and deliberately so: the mechanism self-heals, and three of
+        # the four causes are BENIGN. A FLUSHALL, a restart without persistence, and a failover
+        # to an empty replica all destroy the slice/decision caches along with the counter,
+        # leaving a cold cache rather than a stale one (the generations, slice cache and
+        # decision cache share ONE connection — `AppState::new`). Only SELECTIVE eviction is
+        # hazardous, and this signal cannot tell them apart on its own; the RUNBOOK entry
+        # carries the triage step. Do NOT reword the annotation to claim this is conclusive
+        # evidence of `allkeys-*`.
+        #
+        # `sum by (counter, outcome)`, never a bare `sum()`: the grouping is what lets the
+        # promtool fixture use a flat series as a control (a bare sum folds every series into
+        # one total, so no control is possible), and it puts the counter and outcome on the
+        # alert where triage needs them. `outcome="repair_failed"` is the one that matters
+        # operationally — Redis rejected the repair write, so that replica is serving a
+        # process-local generation with no cross-replica cache sharing.
+        expr: sum by (counter, outcome) (increase(iam_authz_generation_rewinds_total[15m])) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "IAM authz generation counter rewound", description: "A Redis authz generation counter (iam:authz:policy_gen / iam:authz:entity_gen) came back lower than this process had already observed, and was repaired forward. Neither key carries a TTL, so the usual cause is allkeys-* eviction — check CONFIG GET maxmemory-policy, which must be volatile-*. A FLUSHALL, a restart without persistence, or a failover to an empty replica also produce this, and those are benign: they destroy the slice/decision caches along with the counter, leaving a cold cache rather than a stale one. Check whether iam:authz:slice:* and iam:authz:dec:* are also empty to tell them apart. outcome=repair_failed means Redis rejected the repair write (INCRBY is denyoom) and the replica is serving a process-local generation with no cross-replica cache sharing. See RUNBOOK's \"Authz availability posture\"." }

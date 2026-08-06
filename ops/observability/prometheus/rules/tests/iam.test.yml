@@ -542,4 +542,49 @@ tests:
     alert_rule_test:
       - eval_time: 10m
         alertname: IamRedisBreakerFlapping
+  # IamAuthzGenerationRewound (SMA-474): sum by (counter, outcome) (increase(...[15m])) > 0,
+  # for: 5m.
+  #
+  # `sum by (counter, outcome)`, never a bare `sum()`. A bare sum has no label selector to
+  # drop, so no added series can act as a control — every series folds into the same total and
+  # necessarily fires. Grouping is what makes the flat `policy_gen` series below discriminate:
+  # under the correct rule its group's `increase()` is 0 and stays silent while the moving
+  # `entity_gen` group fires, so a `>= 0` mutant is caught by the flat group firing too.
+  # Grouping also separates benign `repaired` from page-worthy `repair_failed` in the alert
+  # itself.
+  - interval: 1m
+    input_series:
+      # The control: flat at zero throughout. `increase()` over it is 0 for every window, so
+      # only a `>= 0` mutant produces an alert for this group.
+      - series: 'iam_authz_generation_rewinds_total{counter="policy_gen",outcome="repaired",reason="missing"}'
+        values: '0+0x30'
+      # The signal: nothing until t=10m, then a genuine rewind stream.
+      - series: 'iam_authz_generation_rewinds_total{counter="entity_gen",outcome="repaired",reason="missing"}'
+        values: '0+0x9 1+1x21'
+    alert_rule_test:
+      # Healthy window: nothing has moved anywhere. A `>= 0` mutant fires here on BOTH groups.
+      - eval_time: 5m
+        alertname: IamAuthzGenerationRewound
+        exp_alerts: []
+      # The signal has been true since ~t=11m, so `for: 5m` has elapsed. Exactly ONE alert —
+      # the flat policy_gen group must still be silent, which is what pins `> 0` over `>= 0`.
+      - eval_time: 20m
+        alertname: IamAuthzGenerationRewound
+        exp_alerts:
+          - exp_labels: { severity: warning, counter: entity_gen, outcome: repaired }
+            exp_annotations: { summary: "IAM authz generation counter rewound", description: "A Redis authz generation counter (iam:authz:policy_gen / iam:authz:entity_gen) came back lower than this process had already observed, and was repaired forward. Neither key carries a TTL, so the usual cause is allkeys-* eviction — check CONFIG GET maxmemory-policy, which must be volatile-*. A FLUSHALL, a restart without persistence, or a failover to an empty replica also produce this, and those are benign: they destroy the slice/decision caches along with the counter, leaving a cold cache rather than a stale one. Check whether iam:authz:slice:* and iam:authz:dec:* are also empty to tell them apart. outcome=repair_failed means Redis rejected the repair write (INCRBY is denyoom) and the replica is serving a process-local generation with no cross-replica cache sharing. See RUNBOOK's \"Authz availability posture\"." }
+
+  # The `memory`-backend contract, pinned (SMA-474; same shape as the SMA-473 block above).
+  # `authz.cache.backend = "memory"` uses in-process AtomicU64 counters that cannot rewind, so
+  # this series is never emitted at all. `sum by (...)` over an empty vector is EMPTY, not 0,
+  # so the `> 0` comparison has nothing to evaluate and the alert stays SILENT. Someone
+  # "hardening" the rule with `or vector(0)` would turn every memory-backend deployment into a
+  # permanent page. Evaluated at 25m, well past `for: 5m`.
+  - interval: 1m
+    input_series:
+      - series: 'iam_authz_decisions_total{cache="hit",decision="allow"}'
+        values: '0+5x25'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: IamAuthzGenerationRewound
         exp_alerts: []
