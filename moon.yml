@@ -143,15 +143,18 @@ tasks:
       - 'rs/crates/bindings/paigasus-wasm/src/**/*'
 
   redis-connect-single-site:
-    description: 'Assert the redis `ConnectionManager` type name never appears outside `adapters::redis_conn`, so no call site can bypass the circuit breaker (SMA-473, SMA-476).'
-    # WHAT IS GATED: the `ConnectionManager` TYPE NAME itself, anywhere outside redis_conn.rs.
+    description: 'Assert the redis `ConnectionManager` type name, and the known unnamed-connection constructors, never appear outside `adapters::redis_conn`, so no known call site can bypass the circuit breaker (SMA-473, SMA-476).'
+    # WHAT IS GATED: the `ConnectionManager` TYPE NAME, plus a maintained allowlist of
+    # `redis::Client` methods that hand back an ALTERNATIVE `ConnectionLike` without ever naming a
+    # gated type — anywhere outside redis_conn.rs.
     #
     # SMA-473 gated only the constructors (`::new(`, `::new_with_config(`,
     # `ConnectionManagerConfig`, `.get_connection_manager`), because adapters legitimately HELD a
     # `ConnectionManager` in a field. Since SMA-476 they hold a `RedisHandle` instead, so the type
-    # name has no business appearing anywhere else — and banning the name outright is strictly
-    # stronger: you cannot bypass the circuit breaker without naming a connection, and you cannot
-    # name one.
+    # name has no business appearing anywhere else — and banning the name outright is a real
+    # strengthening: it closes the copy-paste-a-typed-field bypass that motivated SMA-473. It is
+    # NOT a proof that no unnamed bypass can exist (see the next paragraph and D12 in the design
+    # doc, which used to overclaim this).
     #
     # This subsumes SMA-473's separate `new_lazy_with_config` rule (which required naming
     # `connection_manager_config()` on the same line): that call cannot be made without the type
@@ -160,6 +163,22 @@ tasks:
     # `.get_connection_manager` is kept as its own term because the `redis::Client` convenience
     # constructors return a `ConnectionManager` without the caller ever naming the type
     # (`redis-1.3.0/src/client.rs:453`) — exactly the accidental/copy-paste bypass.
+    #
+    # `.get_multiplexed_async_connection` and `.get_connection` are gated for the SAME reason
+    # (SMA-476 review): `redis::Client::open(u)?.get_multiplexed_async_connection().await` yields
+    # a `MultiplexedConnection`, which — like `ConnectionManager` — implements `ConnectionLike`
+    # and is accepted by the same `AsyncCommands` blanket impl, all without naming a gated type.
+    # `.get_connection` is the sync equivalent (`redis::Connection`). Both were zero-occurrence
+    # (latent, not a live bug) when added. This list is maintained by hand, not derived from the
+    # `ConnectionLike` trait, so a FUTURE redis-rs method of the same shape needs its own term
+    # added here — this gate is an allowlist of known escape hatches, not an exhaustive one.
+    #
+    # `.get_connection` ALONE is ambiguous: `persistence/migration/*.rs` calls SeaORM's
+    # `SchemaManager::get_connection` (same method name, unrelated crate, returns a DB connection)
+    # on every migration file, which would otherwise produce a wall of false offenders. Migrations
+    # are architecturally Postgres-only — they never touch Redis — so that directory alone is
+    # excluded from THIS term. It stays fully in scope for `ConnectionManager` and the other two
+    # terms, none of which collide with anything SeaORM exposes.
     #
     # SCOPE is `src/` AND `tests/`: a Docker-gated integration test is just as able to construct a
     # stock manager as production code.
@@ -180,7 +199,9 @@ tasks:
     # rename: without it, BOTH greps could go empty and the gate would pass while guarding nothing.
     script: |
       cd rs/crates/services/paigasus-iam
-      hits="$(grep -rnE 'ConnectionManager|\.get_connection_manager' src tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      named_hits="$(grep -rnE 'ConnectionManager|\.get_connection_manager|\.get_multiplexed_async_connection' src tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      bare_get_connection_hits="$(grep -rnE '\.get_connection\b' src tests | grep -vE ':[0-9]+:[[:space:]]*//' | grep -v '/persistence/migration/' || true)"
+      hits="$(printf '%s\n%s\n' "$named_hits" "$bare_get_connection_hits" | grep -v '^$' || true)"
       expected="$(printf '%s\n' "$hits" | grep -E 'adapters/redis_conn\.rs:' || true)"
       offenders="$(printf '%s\n' "$hits" | grep -vE 'adapters/redis_conn\.rs:' || true)"
       if [ -z "$expected" ]; then
@@ -188,7 +209,7 @@ tasks:
         exit 2
       fi
       if [ -n "$offenders" ]; then
-        echo "redis connection config built outside adapters/redis_conn.rs (SMA-473 — use redis_conn::connect / connection_manager_config):" >&2
+        echo "redis connection config built outside adapters/redis_conn.rs (SMA-473 — use redis_conn::connect):" >&2
         printf '%s\n' "$offenders" >&2
         exit 1
       fi
