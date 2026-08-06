@@ -566,6 +566,19 @@ mod tests {
             "SMA-476 D8: a dropped ProbePermit must record a failure and re-open — otherwise the \
              breaker wedges half-open for the process lifetime, silently bypassing the cache forever"
         );
+
+        // Discriminates Open from a still-HalfOpen breaker: the open window is 50ms and the
+        // half-open deadline is 200ms, so only a breaker that actually transitioned to Open
+        // re-admits after 60ms. If Drop::drop were a no-op, the breaker would still be
+        // HalfOpen here (60ms < 200ms) and this would short-circuit instead.
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(
+            matches!(b.admit(), Admission::Pass(_)),
+            "SMA-476 D8: a dropped ProbePermit must record a FAILURE, not merely leave the \
+             breaker half-open — after the 50ms open window elapses the breaker must have \
+             re-opened and be admitting a fresh probe; if it is still short-circuiting here, \
+             Drop::drop is not recording a failure and the breaker will wedge half-open forever"
+        );
     }
 
     /// SMA-476 D8, defence 2 — belt and braces, in case defence 1 is ever refactored away.
