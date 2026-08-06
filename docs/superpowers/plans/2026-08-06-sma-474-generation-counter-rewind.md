@@ -515,6 +515,17 @@ EOF
 
 ### Task 3: Wire the guard into `read` and `bump`
 
+> **Amendment — this task's code below is superseded; the plan is left as the dated record.**
+> Two things in the `repair`/`settle` sketch below did not survive implementation and review:
+> the gate is taken with `try_lock`, not the blocking `state.repair_gate.lock().await` shown here
+> (and the in-gate re-check comment's claim that a completed repair's result is "**necessarily**
+> `>=` that same `delta`" is off by one against a concurrent `Steady` observation); and the
+> `GuardOutcome::Ceiling` arm returns `high_water + REWIND_JUMP`, not `high_water`. Read
+> `## 3a. Post-implementation amendments` in
+> `docs/superpowers/specs/2026-08-06-sma-474-generation-counter-rewind-design.md` — §3a.1 and
+> §3a.2 — for what shipped and why. The same section's §3a.3 adds the metric priming this task
+> did not have.
+
 The behaviour change. After this task a rewind is detected, repaired, counted and logged.
 
 **Files:**

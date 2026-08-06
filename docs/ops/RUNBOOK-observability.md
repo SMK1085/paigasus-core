@@ -96,7 +96,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_redis_breaker_state` | gauge | `role` | Per-connection Redis circuit breaker state (SMA-476): `0` = closed, `1` = half_open, `2` = open. Set at construction as well as on every transition, so "no data" always means a scrape/registration problem, never an unset breaker. `role` ∈ `authz`/`api_keys`/`jwks` (closed set — `api_keys` exists only in the split configuration). **Per-replica** — aggregate with `max by (job, role)`, never `sum`. See §4 "Authz availability posture" and the three breaker alerts (`IamRedisBreakerOpen`/`IamJwksRedisBreakerOpen`/`IamRedisBreakerFlapping`). |
 | `iam_redis_breaker_transitions_total` | counter | `role`, `to` | Every breaker state transition. `to` ∈ `open`/`half_open`/`closed`. **Not redundant with the gauge above**: a breaker that opens for 2 s every 30 s reads `0` in most 15–30 s scrapes, so this counter is the only artifact that survives a sub-scrape-interval state — it is what `IamRedisBreakerFlapping` watches. |
 | `iam_authz_policy_snapshot_reloads_total` | counter | `outcome` | Every `PolicySnapshot` reload attempt. `outcome` ∈ `installed` (a fresher compiled set replaced the live one), `rejected` (an out-of-order reload lost its race and was discarded — benign in isolation), `failed` (the load or Cedar compile errored; the last-known-good snapshot keeps serving). `installed` must stay non-zero: the TTL backstop installs one every `authz.policy_cache_ttl_secs` regardless of generation movement, and silence means revocations are not taking effect (SMA-470). |
-| `iam_authz_generation_rewinds_total` | counter | `counter`, `outcome`, `reason` | A Redis authz generation counter read back **below** what the process had already observed (SMA-474). `counter` ∈ `policy_gen`/`entity_gen`. `outcome` ∈ `repaired` (jumped forward with an atomic `INCRBY`, persisted so other replicas converge) / `repair_failed` (Redis rejected the write — `INCRBY` is `denyoom`, so `maxmemory` pressure does this; the replica falls back to a process-local generation, which is safe but stops cross-replica cache sharing) / `ceiling` (the repair would overflow Redis's i64 counter — see the remediation below). `reason` ∈ `missing` (the key was gone) / `lower` (it came back at a smaller value, e.g. a failover to a stale replica). **Only ever emitted on the `redis` backend** — the `memory` backend's in-process counters cannot rewind. |
+| `iam_authz_generation_rewinds_total` | counter | `counter`, `outcome`, `reason` | A Redis authz generation counter read back **below** what the process had already observed (SMA-474). `counter` ∈ `policy_gen`/`entity_gen`. `outcome` ∈ `repaired` (jumped forward with an atomic `INCRBY`, persisted so other replicas converge) / `repair_failed` (Redis rejected the write — `INCRBY` is `denyoom`, so `maxmemory` pressure does this; the replica falls back to a process-local generation, which is safe but stops cross-replica cache sharing) / `ceiling` (the repair would overflow Redis's i64 counter — see the remediation below). `reason` ∈ `missing` (the key was gone) / `lower` (it came back at a smaller value, e.g. a failover to a stale replica). **Only ever emitted on the `redis` backend** — the `memory` backend's in-process counters cannot rewind, and the series is *absent* there, which is what keeps `IamAuthzGenerationRewound` silent on a single-replica deployment. On the `redis` backend all 12 label combinations are **registered at zero from boot** (`Generations::from_connection`), so a flat line of zeros is the healthy state, not a missing metric — without that, the series would first appear already at `1` and `increase()` would baseline on it, so a single rewind could never fire the alert. |
 | `iam_audit_records_total` | counter | `outcome`, `result` | Every `PgAuditLog::record`/`record_out_of_band` call. `outcome` ∈ `committed` (mutation audit rows) / `denied` (denial audit rows). `result` is `"ok"` for an INSERT that did not error. **Caveat:** this counts insert-attempts-not-erroring, not durably-committed rows — an in-transaction `record` call on a mutation's UoW bumps `result="ok"` before that transaction's outer `commit()`, so a rare downstream rollback leaves the row invisible even though the counter already incremented. This only diverges on the mutation-error path, which is itself visible elsewhere as a `result="error"`/5xx signal, so it doesn't mislead in steady state. |
 | `iam_denial_audits_dropped_total` | counter | — | Bumped at `DenialAuditBuffer::push`'s drop-oldest site when the bounded denial-audit buffer is full. **Non-zero means the audit trail for denials has gaps** — see §4 "Denial-audit drops". |
 | `iam_denial_audits_enqueued_total` | counter | — | Bumped on every `DenialAuditBuffer::push`, whether or not it also drops. Compare against the dropped counter to gauge loss ratio during a denial burst. |
@@ -935,9 +935,20 @@ sharing until it is relieved. Nothing about the decision path needs manual repai
 the caches repopulate on their own, the snapshot recovers on generation *inequality*, and a
 rewound counter is repaired forward automatically. The one exception is
 `iam_authz_generation_rewinds_total{outcome="ceiling"}` — a counter within a factor of two of
-`i64::MAX`, which cannot be repaired further. Remediate by hand: `DEL` the
-`iam:authz:slice:*` and `iam:authz:dec:*` key spaces, then `SET iam:authz:policy_gen 0` and
-`SET iam:authz:entity_gen 0`.
+`i64::MAX`, which cannot be repaired further.
+
+<a id="ceiling-remediation"></a>
+**Ceiling remediation (manual, three steps — all three are required):**
+
+1. `DEL` the `iam:authz:slice:*` and `iam:authz:dec:*` key spaces. Do this **first**: it is what
+   makes step 3 safe, because the fleet comes back at generation `0` into an empty key space.
+2. `SET iam:authz:policy_gen 0` and `SET iam:authz:entity_gen 0`.
+3. **Roll-restart the IAM replicas.** Not optional, and not merely hygiene. The ceiling is a
+   property of each process's *own* high-water mark, which lives in memory and is untouched by
+   anything you do to Redis — so after step 2 every running replica reads `0`, sees it far below
+   its own mark, takes the ceiling arm again, and keeps serving its own process-local generation
+   with no cross-replica cache sharing. Only a restart resets the marks to `0`. Skipping this step
+   leaves the alert firing and the fleet fragmented, with Redis looking healthy.
 
 ### `IamAuthzGenerationRewound` — a Redis authz generation counter rewound (warning)
 
@@ -952,7 +963,7 @@ the mechanism self-heals (see Blast radius below), and — per Triage below — 
 causes are entirely benign.
 
 **Confirm:**
-1. `CONFIG GET maxmemory-policy` — the `maxmemory-policy` mandate above is the single most likely
+1. `CONFIG GET maxmemory-policy` — the `maxmemory-policy` mandate below is the single most likely
    explanation for a *repeated* firing; a `volatile-*` policy fixes it at the root.
 2. Break down by
    `sum by (counter, outcome, reason) (increase(iam_authz_generation_rewinds_total[15m]))` to see
@@ -972,22 +983,33 @@ still-live key space (§3.4 of the design doc). Check whether `iam:authz:slice:*
 `iam:authz:dec:*` are also empty — if they are, this was whole-Redis loss, not the hazardous
 case.
 
-**Blast radius:**
-- `outcome="repaired"` — self-heals. The counter is now beyond every generation this process has
-  observed by a wide margin (`REWIND_JUMP = 1_000_000`); no action needed.
-- `outcome="repair_failed"` — Redis rejected the repairing `INCRBY` (most likely `maxmemory`
-  OOM). This replica falls back to a process-local generation, which is safe (a disjoint key
-  space, never a re-entered one) but stops that replica sharing cache entries with the rest of
-  the fleet until Redis accepts writes again — see the `IamAuthzRedisCacheBypassed` remediation
-  above.
-- `outcome="ceiling"` — the repair would overflow Redis's i64 counter (the high-water mark is
-  within a factor of two of `i64::MAX`). This cannot self-heal; it needs the manual remediation
-  above (`DEL iam:authz:slice:*`/`iam:authz:dec:*`, then `SET` both generation keys to `0`).
+**Blast radius.** All three outcomes land the observing replica `REWIND_JUMP = 1_000_000`
+generations past everything **that process** has observed. That is the residue described in the
+triage paragraph above and in the `maxmemory-policy` mandate below: the jump reduces the chance of
+landing back in a live key space by roughly six orders of magnitude, it does **not** eliminate it
+— a replica that has not read the counter in a very long time (a canary held out of the load
+balancer, say) can still in principle repair into the live band. Read "disjoint" below as "disjoint
+from what this replica has seen", never as a guarantee against the rest of the fleet. Structural
+elimination is SMA-475.
 
-**Remediation:** set `maxmemory-policy` to a `volatile-*` value (the mandate above) — that is
+- `outcome="repaired"` — self-heals, and it is the only outcome that heals the *fleet*: the jump
+  landed in Redis, so every other replica converges on it. No action needed beyond the mandate.
+- `outcome="repair_failed"` — Redis rejected the repairing `INCRBY` (most likely `maxmemory`
+  OOM), so nothing was written and only this replica moved. It serves a process-local
+  generation: disjoint from its own recent key space (subject to the residue above), but it stops
+  sharing cache entries with the rest of the fleet until Redis accepts writes again — see the
+  `IamAuthzRedisCacheBypassed` remediation above.
+- `outcome="ceiling"` — the repair *delta* would overflow Redis's i64 counter (the high-water mark
+  is within a factor of two of `i64::MAX`), so no `INCRBY` is even attempted. The replica serves
+  the same shape of process-local generation as `repair_failed` — it does **not** replay its own
+  high-water mark — but unlike `repair_failed` this cannot self-heal when Redis recovers, because
+  nothing about Redis is what is wrong. It needs the three-step
+  [ceiling remediation](#ceiling-remediation) above, **including the rolling restart**.
+
+**Remediation:** set `maxmemory-policy` to a `volatile-*` value (the mandate below) — that is
 what stops selective eviction of the two generation keys from happening at all. A `repaired` or
 `repair_failed` occurrence needs no other action beyond that; a `ceiling` occurrence needs the
-manual remediation above.
+[three-step manual remediation](#ceiling-remediation) above.
 
 ### `IamRedisBreakerOpen` — Redis circuit breaker is not closed (warning)
 

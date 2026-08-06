@@ -61,8 +61,19 @@ enum GuardOutcome {
     /// A rewind. Repair with `INCRBY key delta`, which lands at `stored + delta`, hence at
     /// least `high_water + REWIND_JUMP` for any stored value (D5's invariant).
     Repair { delta: u64 },
-    /// A rewind that cannot be repaired without overflowing Redis's i64 counter. Unreachable
-    /// in practice (~10^10 rewind events); the RUNBOOK carries the manual remediation.
+    /// A rewind that cannot be repaired without overflowing Redis's i64 counter. Redis is left
+    /// alone and the caller gets a process-local generation instead (see [`RedisGenerations::
+    /// settle`]).
+    ///
+    /// **Not "unreachable in practice".** An earlier draft argued the ceiling needed ~10^10
+    /// rewind events because it modelled successive events as ADDING `N × (high_water + JUMP)`
+    /// evaluated at `high_water ≈ 0`. Growth is geometric, not additive: the repair delta is a
+    /// function of the mark, and the mark absorbs the previous event's result, so with `m`
+    /// replicas racing one rewind the counter follows `H_{k+1} = m · (H_k + JUMP)`. At `m = 10`
+    /// that reaches [`REPAIR_DELTA_CEILING`] in ~13 rewind events. Rare, but reachable — which
+    /// is why this arm must return a value beyond the mark rather than the mark itself. The
+    /// RUNBOOK carries the manual remediation (which needs a rolling restart, because the marks
+    /// that got here are process-local).
     Ceiling,
 }
 
@@ -189,10 +200,21 @@ impl RedisGenerations {
                 counter!(names::IAM_AUTHZ_GENERATION_REWINDS_TOTAL, "counter" => which.label(), "outcome" => "ceiling", "reason" => reason).increment(1);
                 tracing::error!(
                     counter = which.label(),
-                    "authz generation counter rewound but the repair would overflow redis's i64 counter — serving the high-water mark; \
-                     flush iam:authz:slice:* and iam:authz:dec:*, then SET both generation keys to 0 (see the RUNBOOK)"
+                    reason,
+                    "authz generation counter rewound but the repair would overflow redis's i64 counter — serving a process-local \
+                     generation past the high-water mark; flush iam:authz:slice:* and iam:authz:dec:*, SET both generation keys to 0, \
+                     then ROLL-RESTART the iam replicas to reset their process-local marks (see the RUNBOOK)"
                 );
-                high_water
+                // NOT `high_water`. The mark is a generation this process observed as LIVE, so
+                // returning it re-enters a key space whose entries may still be inside
+                // `slice_cache_ttl_secs` — precisely the defect SMA-474 exists to prevent, and it
+                // would apply to EVERY read for the rest of the process's life. Jump past it
+                // instead, exactly like the local fallback in `repair`. This value never reaches
+                // Redis (the arm issues no command), so the i64 bound that produced the ceiling
+                // does not apply to it; `saturating_add` keeps a mark near `u64::MAX` from
+                // wrapping back into the used range. The arm does not raise the mark, so
+                // recomputation is stable — every subsequent call derives the same generation.
+                high_water.saturating_add(REWIND_JUMP)
             }
         }
     }
@@ -267,6 +289,41 @@ impl RedisGenerations {
     }
 }
 
+/// Every `outcome` label value [`RedisGenerations::settle`]/[`RedisGenerations::repair`] can
+/// emit, and every `reason` value `Generations::read`/`Generations::bump` can derive. Adding an
+/// arm to either without extending these lists ships a series that only exists after it first
+/// fires — the exact defect [`prime_rewind_metric`] exists to prevent.
+const REWIND_OUTCOMES: [&str; 3] = ["repaired", "repair_failed", "ceiling"];
+const REWIND_REASONS: [&str; 2] = ["missing", "lower"];
+
+/// Registers all 12 `(counter, outcome, reason)` series of
+/// [`names::IAM_AUTHZ_GENERATION_REWINDS_TOTAL`] at zero, WITHOUT incrementing any of them.
+///
+/// **Why this is not decoration.** `metrics-rs` creates a labelled series on its first
+/// `increment`, so without this the series does not exist until a rewind happens, and its first
+/// exposed sample is already `1`. Prometheus `increase()` takes the first sample in the window as
+/// its baseline, so a series that appears at `1` and stays at `1` yields `increase() = 0`
+/// forever: `IamAuthzGenerationRewound` could never fire on a SINGLE rewind, and the Grafana
+/// `rate()` panel stayed flat through it. Priming makes the exposition start at `0`, so the first
+/// increment is a visible step — which is what design §3.6's "a rewind is no longer silent"
+/// actually requires. `counter!` registers the handle on its own; dropping it unincremented is
+/// the whole point.
+///
+/// **Redis path only.** It is called from [`Generations::from_connection`], never from
+/// [`Generations::memory`]: the memory backend's counters are in-process `AtomicU64`s that cannot
+/// rewind, and `ops/observability/prometheus/rules/tests/iam.test.yml` pins the
+/// "series absent ⇒ alert silent" contract for it. Priming there would turn the closed label set
+/// into 12 permanently-zero series on every single-replica deployment and destroy that contract.
+fn prime_rewind_metric() {
+    for which in [Which::Policy, Which::Entity] {
+        for outcome in REWIND_OUTCOMES {
+            for reason in REWIND_REASONS {
+                let _registered = counter!(names::IAM_AUTHZ_GENERATION_REWINDS_TOTAL, "counter" => which.label(), "outcome" => outcome, "reason" => reason);
+            }
+        }
+    }
+}
+
 /// The two authz generation counters (spec §7/D11), abstracted over an in-process
 /// (`memory`) or Redis (`redis`) backend. Cheap to clone — every variant's payload is
 /// `Arc`-backed — so one `Generations` can be shared across every store/loader/cache that
@@ -280,6 +337,9 @@ pub enum Generations {
 
 impl Generations {
     /// In-process counters, both starting at 0. Single-replica only (spec §7).
+    ///
+    /// Deliberately does NOT call [`prime_rewind_metric`] — see that function's "Redis path
+    /// only" note.
     #[must_use]
     pub fn memory() -> Self {
         Generations::Memory(MemoryGenerations::default())
@@ -292,6 +352,7 @@ impl Generations {
     /// the standalone-caller/test entry point.
     #[must_use]
     pub fn from_connection(conn: RedisHandle) -> Self {
+        prime_rewind_metric();
         Generations::Redis(RedisGenerations {
             conn,
             policy: CounterState::default(),
@@ -572,9 +633,9 @@ mod tests {
     /// `Which::redis` is the Redis-side twin of `Which::memory`, pinning that it routes each
     /// counter to its OWN `CounterState` rather than a shared one — a copy-paste slip here
     /// would make a policy_gen rewind repair silently gate on (or observe the high-water mark
-    /// of) entity_gen instead. Nothing consumes `CounterState` yet (Task 3 wires the guard
-    /// in); this only pins the plumbing this task adds: a fresh state starts at high-water 0
-    /// with an unlocked repair gate.
+    /// of) entity_gen instead. It also pins the starting condition every rewind assertion in
+    /// this file depends on: a fresh handle's `CounterState` is high-water 0 with an unlocked
+    /// repair gate, so nothing has been "observed" until a `settle` says so.
     #[tokio::test]
     async fn which_redis_routes_each_counter_to_its_own_independent_counter_state() {
         let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
@@ -618,8 +679,8 @@ mod tests {
     /// space is safe, re-entering a used one is not.
     #[tokio::test]
     async fn a_failed_repair_falls_back_locally_instead_of_erroring() {
-        let client = redis::Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never reachable");
-        let conn = ConnectionManager::new_lazy_with_config(client, crate::adapters::redis_conn::connection_manager_config()).expect("lazy ConnectionManager construction never connects");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
+            .expect("well-formed redis URL, never actually dialed");
         let Generations::Redis(redis) = Generations::from_connection(conn) else {
             panic!("from_connection must build the Redis variant");
         };
@@ -640,8 +701,8 @@ mod tests {
     /// reaching the i64 ceiling in short order.
     #[tokio::test]
     async fn repeated_failed_repairs_do_not_ratchet_the_fallback_upward() {
-        let client = redis::Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never reachable");
-        let conn = ConnectionManager::new_lazy_with_config(client, crate::adapters::redis_conn::connection_manager_config()).expect("lazy ConnectionManager construction never connects");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
+            .expect("well-formed redis URL, never actually dialed");
         let Generations::Redis(redis) = Generations::from_connection(conn) else {
             panic!("from_connection must build the Redis variant");
         };
@@ -657,11 +718,17 @@ mod tests {
     }
 
     /// A successful observation raises the mark, which is what makes the NEXT rewind
-    /// detectable. Pure-in-process: `settle` on the steady-state path touches no I/O.
+    /// detectable.
+    ///
+    /// The steady-state `settle` calls are pure in-process — no connection is dialed. The
+    /// rewind call in the middle is not: it reaches `repair`, which issues a real `INCRBY`
+    /// against the closed port `127.0.0.1:1` and fails, so what the assertion after it observes
+    /// is the D4 local fallback. That is fine for what this test pins (the mark rose to 9), and
+    /// it needs no Docker — a connection refusal is as deterministic as a success.
     #[tokio::test]
     async fn a_steady_observation_raises_the_high_water_mark() {
-        let client = redis::Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never reachable");
-        let conn = ConnectionManager::new_lazy_with_config(client, crate::adapters::redis_conn::connection_manager_config()).expect("lazy ConnectionManager construction never connects");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
+            .expect("well-formed redis URL, never actually dialed");
         let Generations::Redis(redis) = Generations::from_connection(conn) else {
             panic!("from_connection must build the Redis variant");
         };
@@ -687,8 +754,8 @@ mod tests {
     /// `lock` this test would hang rather than fail.
     #[tokio::test]
     async fn a_repair_that_cannot_take_the_gate_returns_the_local_fallback_without_queueing() {
-        let client = redis::Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never reachable");
-        let conn = ConnectionManager::new_lazy_with_config(client, crate::adapters::redis_conn::connection_manager_config()).expect("lazy ConnectionManager construction never connects");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
+            .expect("well-formed redis URL, never actually dialed");
         let Generations::Redis(redis) = Generations::from_connection(conn) else {
             panic!("from_connection must build the Redis variant");
         };
@@ -704,5 +771,138 @@ mod tests {
             .expect("a blocked gate must not make settle queue — try_lock, not lock");
 
         assert_eq!(settled, 12 + REWIND_JUMP, "a gate miss must return the deterministic local fallback");
+    }
+
+    /// The `Ceiling` arm must NOT serve the high-water mark. The mark is a generation this
+    /// process observed as **live**, so returning it re-enters a key space whose entries may
+    /// still be inside `slice_cache_ttl_secs` — the stale-`Allow` replay this whole change
+    /// exists to prevent. And unlike a one-off, a saturated counter takes this arm on EVERY
+    /// subsequent read, so the re-entry would be permanent for the life of the process.
+    ///
+    /// The arm is reachable, contrary to an earlier "~10^10 rewind events" estimate: the repair
+    /// delta is a function of the mark and the mark absorbs the previous event's result, so
+    /// overshoot compounds geometrically (`H_{k+1} = m · (H_k + REWIND_JUMP)` for `m` replicas
+    /// racing one rewind) — ~13 events at `m = 10`.
+    ///
+    /// Needs no Docker: the arm issues no Redis command, so the closed port is never dialed.
+    #[tokio::test]
+    async fn a_rewind_at_the_ceiling_serves_a_generation_past_the_high_water_mark() {
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
+            .expect("well-formed redis URL, never actually dialed");
+        let Generations::Redis(redis) = Generations::from_connection(conn) else {
+            panic!("from_connection must build the Redis variant");
+        };
+
+        // Drive the mark to the ceiling with an ordinary steady observation, then rewind under
+        // it. The `guard` assertion is the fixture's own control: without it a change to
+        // `REPAIR_DELTA_CEILING` could quietly move this test onto the `Repair` arm, where it
+        // would keep passing while asserting nothing about `Ceiling`.
+        let mark = REPAIR_DELTA_CEILING;
+        assert_eq!(redis.settle(Which::Entity, mark, "lower").await, mark, "a steady observation is returned unchanged");
+        assert_eq!(guard(0, mark), GuardOutcome::Ceiling, "this test must actually exercise the Ceiling arm");
+
+        let settled = redis.settle(Which::Entity, 0, "missing").await;
+
+        assert!(
+            settled > mark,
+            "the Ceiling arm must not replay a generation this process observed as live — got {settled} against a high-water mark of {mark}"
+        );
+        assert_eq!(
+            settled,
+            redis.settle(Which::Entity, 0, "missing").await,
+            "the Ceiling arm does not raise the mark, so repeated calls must derive the SAME generation"
+        );
+    }
+
+    /// A `metrics::Recorder` that only remembers which keys were REGISTERED (the values are
+    /// irrelevant here — priming registers without incrementing).
+    ///
+    /// Installed thread-locally through `metrics::with_local_recorder`, deliberately NOT through
+    /// `paigasus_observability::init`: that installs a PROCESS-GLOBAL recorder, so an
+    /// "is this series absent?" assertion against it would be coupled to every other test in the
+    /// binary that happens to build a redis-backed `Generations`. A local recorder makes the
+    /// assertion below true or false on its own.
+    #[derive(Default)]
+    struct RegisteredKeys(std::sync::Mutex<Vec<metrics::Key>>);
+
+    impl RegisteredKeys {
+        /// Every registered rewind series, rendered `counter/outcome/reason` and sorted.
+        fn rewind_series(&self) -> Vec<String> {
+            let mut out: Vec<String> = self
+                .0
+                .lock()
+                .expect("test-only mutex, never poisoned")
+                .iter()
+                .filter(|key| key.name() == names::IAM_AUTHZ_GENERATION_REWINDS_TOTAL)
+                .map(|key| key.labels().map(|label| format!("{}={}", label.key(), label.value())).collect::<Vec<_>>().join(","))
+                .collect();
+            out.sort();
+            out
+        }
+    }
+
+    impl metrics::Recorder for RegisteredKeys {
+        fn describe_counter(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
+        fn describe_gauge(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
+        fn describe_histogram(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
+
+        fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+            self.0.lock().expect("test-only mutex, never poisoned").push(key.clone());
+            metrics::Counter::noop()
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    /// SMA-474 final review (I2). `metrics-rs` creates a labelled series on its FIRST
+    /// `increment`, so without priming `iam_authz_generation_rewinds_total` would not exist until
+    /// a rewind happened and its first exposed sample would already be `1`. Prometheus
+    /// `increase()` baselines on the first sample in the window, so a series that appears at `1`
+    /// and stays at `1` yields `increase() = 0` forever: `IamAuthzGenerationRewound` could never
+    /// fire on a SINGLE rewind. Priming is what makes "a rewind is no longer silent" true.
+    ///
+    /// The memory half is not a nicety. Its counters are in-process `AtomicU64`s that cannot
+    /// rewind, and `ops/observability/prometheus/rules/tests/iam.test.yml` pins the
+    /// "series absent ⇒ alert silent" contract for that backend — priming there would break it.
+    #[tokio::test]
+    async fn only_the_redis_backend_primes_the_rewind_metrics_whole_label_set() {
+        let recorder = RegisteredKeys::default();
+
+        metrics::with_local_recorder(&recorder, || {
+            let _memory = Generations::memory();
+        });
+        assert!(
+            recorder.rewind_series().is_empty(),
+            "the memory backend must register NO rewind series — the alert's memory-backend silence contract depends on it, got {:?}",
+            recorder.rewind_series()
+        );
+
+        // Built outside the closure: `new_lazy_with_config` spawns onto the runtime, while
+        // `from_connection` (the thing under test) is synchronous.
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
+            .expect("well-formed redis URL, never actually dialed");
+        metrics::with_local_recorder(&recorder, || {
+            let _redis = Generations::from_connection(conn);
+        });
+
+        let expected: Vec<String> = ["policy_gen", "entity_gen"]
+            .iter()
+            .flat_map(|c| {
+                REWIND_OUTCOMES
+                    .iter()
+                    .flat_map(move |o| REWIND_REASONS.iter().map(move |r| format!("counter={c},outcome={o},reason={r}")))
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        assert_eq!(expected.len(), 12, "the label set is closed at 2 counters x 3 outcomes x 2 reasons");
+        assert_eq!(recorder.rewind_series(), expected, "the redis backend must register every rewind series at zero from boot");
     }
 }

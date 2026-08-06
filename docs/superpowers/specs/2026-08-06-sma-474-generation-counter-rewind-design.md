@@ -176,14 +176,33 @@ replica), so it needs an `INCRBY` fallback anyway — two primitives, two code p
 round trips in the partial-rewind case. With the per-process single-flight and the ceiling
 check in §3.2, `INCRBY`'s overshoot is bounded and harmless, so the simpler shape wins.
 
-**Overshoot is bounded.** Every replica reads a generation on essentially every decision
-(`cedar_authorizer.rs:164`, and `pg_entity_slice.rs:173` via `SliceCache::load`), so at the
-instant of a rewind many in-flight requests observe it at once. §3.2 single-flights the repair
-per counter per process, so each replica contributes at most one `INCRBY` per rewind event, and
-a fleet of N replicas advances the counter by at most `N × (high_water + JUMP)`. At
-`JUMP = 1_000_000` and N in the hundreds that is ~10⁸ per rewind event against an `i64::MAX` of
-~9.2 × 10¹⁸ — around 10¹⁰ rewind events of headroom. The counter is a cache-key discriminator
-with no meaning of its own, so a large value costs nothing.
+**Overshoot is bounded per event, but it compounds geometrically across events.** Every replica
+reads a generation on essentially every decision (`cedar_authorizer.rs:164`, and
+`pg_entity_slice.rs:173` via `SliceCache::load`), so at the instant of a rewind many in-flight
+requests observe it at once. §3.2 single-flights the repair per counter per process, so each
+replica contributes at most one `INCRBY` per rewind event, and a fleet in which `m` replicas race
+the same rewind advances the counter by about `m × (high_water + JUMP)` for that event.
+
+> **Correction (final whole-branch review).** The original text stopped there and read that bound
+> as if successive events *added*: evaluating `N × (high_water + JUMP)` at `high_water ≈ 0` gives
+> ~10⁸ per event, and dividing `i64::MAX ≈ 9.2 × 10¹⁸` by it suggested "~10¹⁰ rewind events of
+> headroom". **That arithmetic is wrong.** The delta is a function of the mark, and the mark
+> absorbs the previous event's result, so growth is geometric, not additive:
+>
+> ```text
+> H_{k+1} = m · (H_k + JUMP)
+> ```
+>
+> The single-flight gate does not damp this across replicas, because it is per-process: replica
+> B's in-gate re-check loads B's *own* mark, which A's repair never touches, so B always proceeds
+> to its own `INCRBY`. With `m = 10` and `JUMP = 10⁶` the sequence runs 10⁷, 1.1 × 10⁸,
+> 1.11 × 10⁹, … reaching `REPAIR_DELTA_CEILING` (≈ 4.6 × 10¹⁸) at **k ≈ 13** — thirteen rewind
+> events, not ten billion. Still rare (a fleet that rewinds thirteen times has a `maxmemory-policy`
+> problem the alert will have been shouting about), but *reachable* — so the `Ceiling` arm is a
+> live code path, not a theoretical one, and it is specified accordingly in §3a.
+
+The counter is a cache-key discriminator with no meaning of its own, so a large value costs
+nothing up to the i64 bound; the ceiling check in §3.2 is what handles the bound itself.
 
 ## 3. The fix
 
@@ -329,7 +348,40 @@ possible moment. §5 corrects the RUNBOOK paragraph that currently promises the 
 
 ## 3a. Post-implementation amendments
 
-Written after the branch was built. §3.2 as drafted said the single-flight mutex is taken with a
+Written after the branch was built. Two corrections, both to things §3 as drafted got wrong.
+
+### 3a.1 The `Ceiling` arm serves `high_water + JUMP`, not `high_water`
+
+The arm was implemented returning the high-water mark itself, on the reasoning recorded in §2.5
+that it was unreachable anyway. That reasoning was wrong twice over. The arm is reachable in ~13
+rewind events (§2.5's correction), and returning the mark is precisely the key-space re-entry this
+change exists to prevent: the mark is a generation this process observed as **live**, so a cache
+entry written under it before the rewind and still inside `slice_cache_ttl_secs` gets replayed as
+a stale `Allow`. Worse than a one-off, a saturated counter takes this arm on *every* subsequent
+read, so the re-entry would last for the life of the process — the exact opposite of §3.6's
+"disjoint, never re-entrant".
+
+The arm therefore returns `high_water.saturating_add(REWIND_JUMP)`. Three things make that sound:
+
+- **The i64 bound does not apply.** The arm issues no Redis command at all — the value is
+  process-local, exactly like D4's failed-repair fallback. What is bounded is what can be *stored*
+  in Redis, and nothing is stored here. `saturating_add` covers the degenerate `u64::MAX` mark
+  rather than wrapping back into the used range.
+- **It is deterministic.** The arm does not raise the mark (same rule as a failed repair, D4), so
+  every subsequent call recomputes the same generation — a stable local key space, not a
+  ratcheting one.
+- **It carries the same residue, and no more.** It is the identical shape as the `repair_failed`
+  fallback: disjoint from everything *this process* has observed, subject to §3.4's residual
+  limitation for a replica that has not read the counter in a very long time.
+
+`outcome="ceiling"` still needs manual remediation, because Redis itself is not repaired. The
+RUNBOOK's procedure now also requires a **rolling restart** of the IAM replicas: `SET`ting the
+Redis keys to `0` does not touch the process-local marks that reached the ceiling, so without a
+restart every replica reads `0`, takes this arm again, and keeps serving its own local generation.
+
+### 3a.2 The repair gate is taken with `try_lock`, not `lock`
+
+§3.2 as drafted said the single-flight mutex is taken with a
 blocking `lock`, so "concurrent in-flight requests on this replica issue one `INCRBY`, not one
 each." The shipped code (`RedisGenerations::repair`, `generation.rs`) takes it with `try_lock`
 instead, and that is a correction, not a style choice.
@@ -361,6 +413,32 @@ process — `try_lock` prevents concurrent writers the same way `lock` would, it
 queue a second one. AC2's "single-flighted per counter per process" holds under either
 implementation. §3.2's prose above is left as the dated design record; this section is what
 actually shipped.
+
+### 3a.3 The whole label set is primed at zero on the redis path
+
+§3.6 claims "a rewind is no longer silent: it increments a counter, emits a warn, and fires an
+alert". As first implemented the last clause was false, and the promtool fixture did not catch it
+because it seeded its signal series at `0` — a shape the exporter never produced.
+
+`metrics-rs` creates a labelled series on its **first** `increment`, so
+`iam_authz_generation_rewinds_total{…}` did not exist until a rewind happened, and its first
+exposed sample was already `1`. Prometheus `increase()` baselines on the first sample *inside* the
+window, so a series that appears at `1` and stays at `1` — one rewind, which is the case that
+matters most — yields `increase() = 0` forever. `IamAuthzGenerationRewound` could never fire on a
+single rewind, and the Grafana `rate()` panel stayed flat through it. That falsifies §3.6 and
+undercuts D2, whose whole argument for shipping code over documentation is that "detection is the
+missing half".
+
+`Generations::from_connection` therefore registers all 12 `(counter, outcome, reason)`
+combinations with `counter!` and **does not increment them**, so the redis backend exposes the
+whole closed label set at zero from boot and the first rewind is a visible `0 → 1` step.
+
+**Only on the redis path.** `Generations::memory()` must not prime: its counters are in-process
+`AtomicU64`s that cannot rewind, and the rule's memory-backend contract is that the series is
+*absent*, so `sum by (…)` over an empty vector is empty and the alert stays silent rather than
+becoming a permanent page on every single-replica deployment. Both halves are pinned — in Rust by
+`only_the_redis_backend_primes_the_rewind_metrics_whole_label_set`, and in promtool by the
+memory-backend block plus a new block whose signal series appears mid-window at a nonzero value.
 
 ## 4. Observability
 

@@ -552,13 +552,21 @@ tests:
   # `entity_gen` group fires, so a `>= 0` mutant is caught by the flat group firing too.
   # Grouping also separates benign `repaired` from page-worthy `repair_failed` in the alert
   # itself.
+  #
+  # Both series are seeded at `0` from t=0. That is faithful to production ONLY because
+  # `Generations::from_connection` primes the whole closed `(counter, outcome, reason)` label set
+  # at zero on the redis path — `metrics-rs` otherwise creates a labelled series on its first
+  # `increment`, so the first sample ever scraped would be `1` and `increase()` would baseline on
+  # it. The block AFTER this one pins the un-primed shape.
   - interval: 1m
     input_series:
       # The control: flat at zero throughout. `increase()` over it is 0 for every window, so
       # only a `>= 0` mutant produces an alert for this group.
       - series: 'iam_authz_generation_rewinds_total{counter="policy_gen",outcome="repaired",reason="missing"}'
         values: '0+0x30'
-      # The signal: nothing until t=10m, then a genuine rewind stream.
+      # The signal: zero-seeded (priming) until t=10m, then a genuine rewind stream. The step
+      # from 0 to 1 at t=10m is the FIRST rewind, and it must be visible to `increase()` — that
+      # is exactly what priming buys.
       - series: 'iam_authz_generation_rewinds_total{counter="entity_gen",outcome="repaired",reason="missing"}'
         values: '0+0x9 1+1x21'
     alert_rule_test:
@@ -572,6 +580,44 @@ tests:
         alertname: IamAuthzGenerationRewound
         exp_alerts:
           - exp_labels: { severity: warning, counter: entity_gen, outcome: repaired }
+            exp_annotations: { summary: "IAM authz generation counter rewound", description: "A Redis authz generation counter (iam:authz:policy_gen / iam:authz:entity_gen) came back lower than this process had already observed, and was repaired forward. Neither key carries a TTL, so the usual cause is allkeys-* eviction — check CONFIG GET maxmemory-policy, which must be volatile-*. A FLUSHALL, a restart without persistence, or a failover to an empty replica also produce this, and those are benign: they destroy the slice/decision caches along with the counter, leaving a cold cache rather than a stale one. Check whether iam:authz:slice:* and iam:authz:dec:* are also empty to tell them apart. outcome=repair_failed means Redis rejected the repair write (INCRBY is denyoom) and the replica is serving a process-local generation with no cross-replica cache sharing. See RUNBOOK's \"Authz availability posture\"." }
+
+  # The same rule against a series that APPEARS mid-window at a nonzero value (SMA-474 final
+  # review). The block above seeds both series at `0` from t=0, which is a shape the exporter did
+  # not originally produce: `metrics-rs` creates a labelled series on its first `increment`, so
+  # before priming the first sample ever scraped was already `1`. `increase()` baselines on the
+  # first sample IN the window, so that shape is genuinely different arithmetic — and the block
+  # above could not tell a working rule from one that only copes with zero-seeded series.
+  #
+  # `Generations::from_connection` now primes the whole closed label set at zero, so production
+  # exposition matches the block above. This block pins that the rule copes with the other shape
+  # too — which matters for the window that straddles a fresh replica's first scrape, and for any
+  # future emit site that forgets to prime.
+  #
+  # `_` is promtool's absent-sample marker: no sample at all until t=11m, then the signal starts
+  # AT 1 and keeps climbing. `outcome="repair_failed"` on purpose — the operationally important
+  # outcome, and the one the annotation calls out by name.
+  - interval: 1m
+    input_series:
+      # The signal: absent for 11m, then appears already at 1 and grows.
+      - series: 'iam_authz_generation_rewinds_total{counter="entity_gen",outcome="repair_failed",reason="missing"}'
+        values: '_x10 1+1x20'
+      # The control: appears at the same instant, at a nonzero value, and never moves again. A
+      # counter that is merely NONZERO is not a rewind — only one that INCREASES is. `increase()`
+      # over it is 0, so this group must stay silent, and a `>= 0` mutant lights it up.
+      - series: 'iam_authz_generation_rewinds_total{counter="policy_gen",outcome="repair_failed",reason="missing"}'
+        values: '_x10 3+0x20'
+    alert_rule_test:
+      # Before either series exists: `sum by (...)` over an empty vector is empty, nothing fires.
+      - eval_time: 5m
+        alertname: IamAuthzGenerationRewound
+        exp_alerts: []
+      # The signal has been increasing since t=12m, so `for: 5m` has elapsed by t=17m. Exactly ONE
+      # alert: the flat-but-nonzero policy_gen group must still be silent.
+      - eval_time: 20m
+        alertname: IamAuthzGenerationRewound
+        exp_alerts:
+          - exp_labels: { severity: warning, counter: entity_gen, outcome: repair_failed }
             exp_annotations: { summary: "IAM authz generation counter rewound", description: "A Redis authz generation counter (iam:authz:policy_gen / iam:authz:entity_gen) came back lower than this process had already observed, and was repaired forward. Neither key carries a TTL, so the usual cause is allkeys-* eviction — check CONFIG GET maxmemory-policy, which must be volatile-*. A FLUSHALL, a restart without persistence, or a failover to an empty replica also produce this, and those are benign: they destroy the slice/decision caches along with the counter, leaving a cold cache rather than a stale one. Check whether iam:authz:slice:* and iam:authz:dec:* are also empty to tell them apart. outcome=repair_failed means Redis rejected the repair write (INCRBY is denyoom) and the replica is serving a process-local generation with no cross-replica cache sharing. See RUNBOOK's \"Authz availability posture\"." }
 
   # The `memory`-backend contract, pinned (SMA-474; same shape as the SMA-473 block above).

@@ -11,7 +11,8 @@
 //! handle converges, a bump right after a rewind cannot re-enter a used generation, repairing
 //! one counter leaves the other alone, a repair Redis rejects (`CONFIG SET maxmemory 1`) falls
 //! back locally instead of erroring, and the emitted `iam_authz_generation_rewinds_total`
-//! carries the exact label values Grafana/alerting hard-code.
+//! carries the exact label values Grafana/alerting hard-code — for BOTH outcomes a live Redis can
+//! produce, `repaired` and `repair_failed`.
 //!
 //! Runs against an ephemeral Redis in Docker. In CI (`CI` env set) a missing Docker daemon
 //! is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note — same
@@ -180,6 +181,24 @@ async fn repairing_one_counter_leaves_the_other_alone() {
     assert_eq!(raw_get(&url, "iam:authz:policy_gen").await, Some(3));
 }
 
+/// The value of the `iam_authz_generation_rewinds_total` sample carrying every one of `labels`,
+/// or `None` if no such sample was exposed.
+///
+/// A bare `contains()` on a label pair is **not** enough on this metric: since the final SMA-474
+/// review the redis backend primes its whole closed label set at zero from boot
+/// (`prime_rewind_metric`, so `increase()` can see the first rewind as a step from 0 rather than
+/// a series that appears already at 1), which means every `outcome`/`reason` string is present in
+/// the exposition whether or not anything was ever counted. Only the VALUE distinguishes
+/// "recorded" from "primed".
+fn rewind_sample(rendered: &str, labels: &[&str]) -> Option<f64> {
+    rendered
+        .lines()
+        .filter(|line| line.starts_with("iam_authz_generation_rewinds_total{"))
+        .find(|line| labels.iter().all(|label| line.contains(label)))
+        .and_then(|line| line.rsplit_once(' '))
+        .and_then(|(_, value)| value.trim().parse().ok())
+}
+
 /// D4: a repair that Redis REJECTS must still return `Ok`, with a value beyond the high-water
 /// mark, and must leave the Redis-side value alone.
 ///
@@ -187,11 +206,23 @@ async fn repairing_one_counter_leaves_the_other_alone() {
 /// rejected with `OOM command not allowed`, while `GET` is `readonly` and keeps succeeding.
 /// That asymmetry is the same one `RUNBOOK-observability.md` documents for the pre-SMA-474
 /// read path — it is what makes it possible to fail ONLY the repair.
+///
+/// It also owns the ONLY coverage of `outcome="repair_failed"` (design §9 AC3). That string is
+/// hard-coded into the `IamAuthzGenerationRewound` annotation, the metric catalog and the
+/// blast-radius table in `docs/ops/RUNBOOK-observability.md`, and it is the operationally
+/// important outcome — the replica is serving a process-local generation with no cross-replica
+/// cache sharing — so a typo on the emit side would ship exactly the silent gap the alert exists
+/// to close. This is the only test in the suite that can produce it: it needs a Redis that
+/// accepts `GET` and rejects `INCRBY`.
 #[tokio::test]
 async fn a_repair_rejected_by_redis_falls_back_locally_instead_of_erroring() {
     let Some((_node, url)) = start_redis().await else {
         return;
     };
+    // `init` is a `get_or_init` over a process-global recorder, so calling it here is safe even
+    // though the sibling metric test in this binary calls it too. It must run BEFORE
+    // `redis_connect`, or the priming registrations would land on the no-op recorder.
+    let handle = paigasus_observability::init("test-authz-generations-redis-repair-failed-metric");
     let gens = Generations::redis_connect(&url).await.expect("connect to redis");
 
     for _ in 0..6 {
@@ -207,6 +238,21 @@ async fn a_repair_rejected_by_redis_falls_back_locally_instead_of_erroring() {
     let settled = gens.entity_gen().await.expect("a failed repair must fall back locally, never error (D4)");
     assert!(settled > 6, "the local fallback must still be beyond the high-water mark, got {settled}");
     assert_eq!(raw_get(&url, "iam:authz:entity_gen").await, None, "a rejected repair must not have written anything");
+
+    // ...and it must be COUNTED as `repair_failed`, with the labels the alert annotation and the
+    // RUNBOOK's blast-radius table hard-code (design §9 AC3).
+    let out = handle.render();
+    let failed = rewind_sample(&out, &[r#"counter="entity_gen""#, r#"outcome="repair_failed""#, r#"reason="missing""#])
+        .unwrap_or_else(|| panic!("expected an iam_authz_generation_rewinds_total sample for the rejected repair:\n{out}"));
+    assert!(failed >= 1.0, "a rejected repair must be counted as outcome=\"repair_failed\", got {failed}:\n{out}");
+
+    // The control. Only `entity_gen` rewound here, so its twin must still read zero — that is
+    // what makes the `counter` label above load-bearing rather than incidental, since a
+    // hard-coded or swapped label would light up both. `policy_gen`/`repair_failed` is chosen
+    // deliberately: no other test in this binary can record it, so the control does not depend on
+    // this file's tests each getting their own process.
+    let other = rewind_sample(&out, &[r#"counter="policy_gen""#, r#"outcome="repair_failed""#]).expect("priming exposes the whole label set at zero on the redis backend");
+    assert_eq!(other, 0.0, "only entity_gen rewound — policy_gen must not be counted, got {other}:\n{out}");
 
     // Restore, so the container is usable if this test is ever extended.
     let _: () = redis::cmd("CONFIG").arg("SET").arg("maxmemory").arg("0").query_async(&mut admin).await.expect("CONFIG SET maxmemory 0");
@@ -239,4 +285,11 @@ async fn a_repair_records_iam_authz_generation_rewinds_total_with_expected_label
     assert!(out.contains(r#"counter="entity_gen""#), "expected a counter=\"entity_gen\" label:\n{out}");
     assert!(out.contains(r#"outcome="repaired""#), "expected an outcome=\"repaired\" label:\n{out}");
     assert!(out.contains(r#"reason="missing""#), "expected a reason=\"missing\" label:\n{out}");
+
+    // Added by the final SMA-474 review, and load-bearing: the redis backend now PRIMES the whole
+    // closed label set at zero (`prime_rewind_metric`), so all four `contains()` calls above are
+    // satisfied by the primed exposition alone. Only a value separates "counted" from "primed".
+    let repaired = rewind_sample(&out, &[r#"counter="entity_gen""#, r#"outcome="repaired""#, r#"reason="missing""#])
+        .unwrap_or_else(|| panic!("expected an iam_authz_generation_rewinds_total sample for the repair:\n{out}"));
+    assert!(repaired >= 1.0, "the repair must be COUNTED, not merely primed, got {repaired}:\n{out}");
 }
