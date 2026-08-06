@@ -24,6 +24,49 @@ use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 const POLICY_GEN_KEY: &str = "iam:authz:policy_gen";
 const ENTITY_GEN_KEY: &str = "iam:authz:entity_gen";
 
+/// How far past the observing process's high-water mark a rewind repair jumps.
+///
+/// **Deliberately not `+1`.** A minimum jump is actively harmful (design §3.4): a replica
+/// whose high-water lags the fleet repairs straight into a generation that still holds live
+/// cache entries, replaying pre-change state that doing nothing would have avoided. The jump
+/// has to clear every generation used within the longest cache TTL. One million generations
+/// is one million tenancy mutations — over 16,000 per second sustained against the 60 s
+/// `authz.slice_cache_ttl_secs` default.
+const REWIND_JUMP: u64 = 1_000_000;
+
+/// Ceiling on the repair delta. Redis counters are **i64**: `INCRBY` past `i64::MAX` returns
+/// `ERR increment or decrement would overflow`, and a delta above `i64::MAX` is rejected as
+/// out of range. Halved because the delta is ADDED to whatever Redis currently stores, which
+/// is read in a separate round trip and so is not exactly the value the guard saw — the
+/// halving is headroom for that stored value.
+const REPAIR_DELTA_CEILING: u64 = (i64::MAX as u64) / 2;
+
+/// What [`guard`] decided about one freshly-observed counter value.
+#[derive(Debug, PartialEq, Eq)]
+enum GuardOutcome {
+    /// At or beyond everything this process has observed — return it unchanged. The steady
+    /// state: one atomic compare, no extra round trip.
+    Steady,
+    /// A rewind. Repair with `INCRBY key delta`, which lands at `stored + delta`, hence at
+    /// least `high_water + REWIND_JUMP` for any stored value (D5's invariant).
+    Repair { delta: u64 },
+    /// A rewind that cannot be repaired without overflowing Redis's i64 counter. Unreachable
+    /// in practice (~10^10 rewind events); the RUNBOOK carries the manual remediation.
+    Ceiling,
+}
+
+/// The monotonicity decision, as a pure function of two numbers — no connection, no state,
+/// so it is exhaustively unit-testable. See [`GuardOutcome`] for what each arm means.
+fn guard(observed: u64, high_water: u64) -> GuardOutcome {
+    if observed >= high_water {
+        return GuardOutcome::Steady;
+    }
+    match high_water.checked_add(REWIND_JUMP) {
+        Some(delta) if delta <= REPAIR_DELTA_CEILING => GuardOutcome::Repair { delta },
+        _ => GuardOutcome::Ceiling,
+    }
+}
+
 /// The `memory` backend's payload: two independent counters, each `Arc`-shared so cloning
 /// `Generations` is cheap and every clone observes the same counters. `pub` only because
 /// it's reachable through `Generations::Memory`'s public tuple field (the
@@ -220,5 +263,60 @@ mod tests {
             "SMA-476 AC3: an open breaker must still PROPAGATE as AuthzError::Backend — Generations::Redis is not fail-open, got {result:?}"
         );
         assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the read dialled instead of short-circuiting");
+    }
+
+    /// Steady state: an observation at or beyond everything this process has seen is
+    /// returned untouched. `observed == high_water` is the ordinary case (a counter that
+    /// hasn't moved since the last read), and a fresh handle is `0/0`.
+    #[test]
+    fn guard_is_steady_when_the_observation_is_at_or_beyond_the_high_water_mark() {
+        assert_eq!(guard(0, 0), GuardOutcome::Steady, "a fresh handle must not repair");
+        assert_eq!(guard(7, 7), GuardOutcome::Steady);
+        assert_eq!(guard(9, 7), GuardOutcome::Steady, "a counter that advanced is not a rewind");
+    }
+
+    /// The defect this whole design exists for: a counter that came back BELOW what this
+    /// process already observed.
+    #[test]
+    fn guard_repairs_a_rewind_to_zero() {
+        assert_eq!(guard(0, 7), GuardOutcome::Repair { delta: 7 + REWIND_JUMP });
+    }
+
+    /// A partial rewind — a failover to a replica holding an older value — is the same
+    /// defect, not a special case.
+    #[test]
+    fn guard_repairs_a_partial_rewind_to_a_nonzero_lower_value() {
+        assert_eq!(guard(3, 7), GuardOutcome::Repair { delta: 7 + REWIND_JUMP });
+    }
+
+    /// Design §3.4: the jump is deliberately LARGE. A `+1` repair lands a lagging replica
+    /// inside a generation that may still hold live cache entries — worse than doing
+    /// nothing. If someone "simplifies" this to `high_water + 1`, this test must fail.
+    #[test]
+    fn the_repair_delta_clears_the_high_water_mark_by_a_wide_margin() {
+        let GuardOutcome::Repair { delta } = guard(0, 100) else {
+            panic!("a rewind from 100 to 0 must repair");
+        };
+        assert!(
+            delta >= 100 + 1_000_000,
+            "SMA-474 §3.4: the repair must jump far past the high-water mark, not by 1 — got {delta}"
+        );
+    }
+
+    /// Redis counters are i64 and `INCRBY` past `i64::MAX` errors. A high-water mark close
+    /// to the ceiling must degrade to `Ceiling`, never produce a delta that would overflow
+    /// or wrap.
+    #[test]
+    fn guard_reports_ceiling_rather_than_overflowing_the_i64_counter() {
+        assert_eq!(guard(0, REPAIR_DELTA_CEILING), GuardOutcome::Ceiling);
+        assert_eq!(guard(0, u64::MAX), GuardOutcome::Ceiling, "must saturate, not panic or wrap");
+    }
+
+    /// The boundary itself: one below the ceiling still repairs, so `Ceiling` is not
+    /// triggered early.
+    #[test]
+    fn guard_still_repairs_just_below_the_ceiling() {
+        let high_water = REPAIR_DELTA_CEILING - REWIND_JUMP;
+        assert_eq!(guard(0, high_water), GuardOutcome::Repair { delta: REPAIR_DELTA_CEILING });
     }
 }
