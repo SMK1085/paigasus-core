@@ -224,8 +224,11 @@ Append to the existing `#[cfg(test)] mod tests` in `redis_conn.rs`:
         assert!(matches!(b.admit(), Admission::ShortCircuit), "SMA-476 D6: three consecutive failures must open the breaker");
     }
 
+    /// Named for what it actually asserts: a long run of short-circuits must not disturb
+    /// recovery. (It cannot separately prove short-circuits are "not counted" — `on_failure` is
+    /// a no-op in the Open state either way — so it does not claim to.)
     #[test]
-    fn an_open_breaker_does_not_count_short_circuits_as_failures() {
+    fn an_open_breaker_still_recovers_after_many_short_circuits() {
         let b = test_breaker();
         fail_once(&b);
         fail_once(&b);
@@ -233,8 +236,6 @@ Append to the existing `#[cfg(test)] mod tests` in `redis_conn.rs`:
         for _ in 0..100 {
             assert!(matches!(b.admit(), Admission::ShortCircuit));
         }
-        // If short-circuits were recorded, the window logic below would still work, but the
-        // failure count would be meaningless. Prove the breaker recovers normally regardless.
         std::thread::sleep(Duration::from_millis(60));
         pass(&b).record(&Ok(()));
         assert!(matches!(b.admit(), Admission::Pass(_)), "a successful probe must close the breaker");
