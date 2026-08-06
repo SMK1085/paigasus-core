@@ -8,9 +8,10 @@
 //! - **`memory`**: two in-process `Arc<AtomicU64>` counters — single-replica, process
 //!   lifetime only (a second process/replica sees its own independent counters).
 //! - **`redis`**: `INCR`/`GET` against the well-known keys `iam:authz:policy_gen`/
-//!   `iam:authz:entity_gen` via an auto-reconnecting, `Arc`-backed `ConnectionManager` —
+//!   `iam:authz:entity_gen` via a breaker-wrapped, auto-reconnecting `RedisHandle` —
 //!   cross-replica, survives restarts. Mirrors `adapters::oidc::redis_cache::RedisJwksCache`'s
-//!   connect/clone-per-call pattern, itself behind a per-connection circuit breaker (SMA-476).
+//!   connect/clone-per-call pattern; the underlying `Arc`-backed `ConnectionManager` sits
+//!   behind a per-connection circuit breaker (SMA-476).
 
 use async_trait::async_trait;
 use paigasus_iam_core::{AuthzError, PolicyGenBumper};
@@ -53,7 +54,7 @@ impl Generations {
         Generations::Memory(MemoryGenerations::default())
     }
 
-    /// Opens `redis_url` and wraps it in an auto-reconnecting `ConnectionManager` (mirrors
+    /// Opens `redis_url` and wraps it in an auto-reconnecting `RedisHandle` (mirrors
     /// `RedisJwksCache::connect`): cross-replica counters via `INCR`/`GET` on the two
     /// well-known keys.
     pub async fn redis_connect(redis_url: &str) -> Result<Self, AuthzError> {

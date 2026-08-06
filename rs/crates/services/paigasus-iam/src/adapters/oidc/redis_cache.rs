@@ -23,9 +23,9 @@ fn cache_key(issuer: &Issuer) -> String {
     format!("{KEY_PREFIX}{}", issuer.as_str())
 }
 
-/// `JwksCache` backed by Redis via an auto-reconnecting `ConnectionManager` (spec §4.3/D15).
-/// `ConnectionManager` is cheap to clone (an `Arc`-wrapped multiplexed connection designed
-/// for concurrent callers), so `get`/`put` clone it per call rather than holding a lock.
+/// `JwksCache` backed by Redis via a breaker-wrapped, auto-reconnecting `RedisHandle` (spec
+/// §4.3/D15). `RedisHandle` is cheap to clone (an `Arc`-wrapped multiplexed `ConnectionManager`
+/// designed for concurrent callers), so `get`/`put` clone it per call rather than holding a lock.
 /// `connect` is the sole constructor — Task 10's composition root calls it verbatim.
 pub struct RedisJwksCache {
     conn: RedisHandle,
@@ -33,10 +33,10 @@ pub struct RedisJwksCache {
 }
 
 impl RedisJwksCache {
-    /// Opens `redis_url` and wraps it in a `ConnectionManager`, which transparently
-    /// reconnects in the background on transient connection loss (the in-flight command
-    /// that observed the drop still surfaces its error to the caller — see `get`/`put`
-    /// below). `ttl_secs` is applied to every `put` as Redis's own `EX` expiry.
+    /// Opens `redis_url` and wraps it in a `RedisHandle`, which transparently reconnects in
+    /// the background on transient connection loss (the in-flight command that observed the
+    /// drop still surfaces its error to the caller — see `get`/`put` below). `ttl_secs` is
+    /// applied to every `put` as Redis's own `EX` expiry.
     pub async fn connect(redis_url: &str, ttl_secs: u64) -> Result<Self, AuthnError> {
         let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::Jwks)
             .await

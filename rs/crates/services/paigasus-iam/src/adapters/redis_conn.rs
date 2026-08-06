@@ -128,10 +128,13 @@ pub(crate) async fn connect(redis_url: &str, role: RedisRole) -> redis::RedisRes
     Ok(RedisHandle { conn, breaker: Breaker::new(role) })
 }
 
-/// A lazily-connecting handle with a CLOSED breaker and short test durations.
+/// A lazily-connecting handle with a CLOSED breaker, using [`Breaker::new`]'s PRODUCTION
+/// durations (2s open / 5s half-open probe budget) — NOT short test durations, despite the name.
 ///
 /// Required wherever a test must actually dial: the production [`connect`] is eager, so against a
-/// dead or blackholed backend it fails before any command can be issued.
+/// dead or blackholed backend it fails before any command can be issued. A test that needs a
+/// short window instead must hand-roll a [`RedisHandle`] with [`Breaker::with_durations`] (see
+/// `the_breaker_recloses_once_the_backend_answers_again`).
 #[cfg(test)]
 pub(crate) fn new_lazy_for_tests(redis_url: &str, role: RedisRole) -> redis::RedisResult<RedisHandle> {
     let client = redis::Client::open(redis_url)?;
@@ -643,7 +646,7 @@ mod tests {
             }
         }
         assert_eq!(admitted, 1, "SMA-476 D8: half-open must admit exactly one probe, not {admitted}");
-        std::mem::forget(permits); // keep Drop from re-opening before the assertion above is read
+        std::mem::forget(permits); // forget, not drop: the assertion above already ran; this just avoids ProbePermit::drop spuriously re-opening the breaker when the vec goes out of scope
     }
 
     #[test]
@@ -791,7 +794,7 @@ mod tests {
         assert_eq!(
             OPEN_DURATION,
             Duration::from_secs(2),
-            "SMA-476 D7: recovery costs TWO windows (a half-open probe consumes ConnectionManager's memoized connect future), so this bounds recovery at ~2x2s + one dial. Do not raise it without re-reading D7."
+            "SMA-476 D7: recovery cost is regime-dependent, not a fixed two windows — reconnect() spawns the replacement dial the instant a command fails, so a blackholed backend's probe typically joins that in-flight dial (ONE window) while a refused backend's probe consumes an already-resolved Err (TWO windows). Either way this bounds recovery at <= 2x2s + one connect budget. Do not raise it without re-reading D7."
         );
         assert_eq!(
             HALF_OPEN_DEADLINE,
@@ -1037,7 +1040,7 @@ pub(crate) mod test_support {
     /// — do not add credentials or a db index to these tests' URLs.
     pub(crate) struct Blackhole {
         pub(crate) url: String,
-        // Read only by `start_responding`, below.
+        // Written only by `start_responding`, below; read by the accept loop in `start`.
         responding: Arc<AtomicBool>,
         _held: Arc<AsyncMutex<Vec<tokio::net::TcpStream>>>,
         _accept: tokio::task::JoinHandle<()>,

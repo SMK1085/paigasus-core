@@ -14,7 +14,7 @@
 //!
 //! Two implementations: [`MemoryDecisionCache`] (single-replica, process lifetime only —
 //! same posture as `Generations::memory`) and [`RedisDecisionCache`] (cross-replica,
-//! `ConnectionManager`, mirroring `adapters::oidc::redis_cache::RedisJwksCache`'s
+//! `RedisHandle`, mirroring `adapters::oidc::redis_cache::RedisJwksCache`'s
 //! connect/clone-per-call pattern). **Both fail OPEN (D12):** a decision cache is a pure
 //! accelerator over `PolicySnapshot`/Cedar — never the system of record — so a `get` that
 //! can't be served cleanly (a Redis error, or a payload that fails to deserialize) is
@@ -102,10 +102,10 @@ impl DecisionCache for MemoryDecisionCache {
     }
 }
 
-/// `DecisionCache` backed by Redis via an auto-reconnecting `ConnectionManager` (spec §7),
-/// mirroring `adapters::oidc::redis_cache::RedisJwksCache`. Cheap to clone the connection
-/// per call — `ConnectionManager` is itself `Arc`-backed and designed for concurrent
-/// callers.
+/// `DecisionCache` backed by Redis via a breaker-wrapped, auto-reconnecting `RedisHandle`
+/// (spec §7), mirroring `adapters::oidc::redis_cache::RedisJwksCache`. Cheap to clone the
+/// connection per call — `RedisHandle` wraps an `Arc`-backed `ConnectionManager` and is
+/// itself designed for concurrent callers.
 ///
 /// **Fail-open (D12):** unlike `RedisJwksCache` (which fails CLOSED on a Redis error — a
 /// stale/unreachable JWKS cache is an auth-availability concern), this cache fails OPEN:
@@ -120,7 +120,7 @@ pub struct RedisDecisionCache {
 }
 
 impl RedisDecisionCache {
-    /// Opens `redis_url` and wraps it in a `ConnectionManager`. `ttl_secs` is applied to
+    /// Opens `redis_url` and wraps it in a `RedisHandle`. `ttl_secs` is applied to
     /// every `put` as Redis's own `EX` expiry — this cache is a fail-open accelerator, so an
     /// entry disappearing after `ttl_secs` (or on eviction) never surfaces as anything
     /// other than a subsequent miss.
@@ -129,7 +129,7 @@ impl RedisDecisionCache {
         Ok(Self { conn, ttl_secs })
     }
 
-    /// Builds a cache over an ALREADY-CONNECTED `ConnectionManager` (SMA-444 Task 21):
+    /// Builds a cache over an ALREADY-CONNECTED `RedisHandle` (SMA-444 Task 21):
     /// `AppState::new` shares ONE redis connection across the redis-backed `Generations` +
     /// `RedisDecisionCache` + `SliceCache` rather than each opening its own — `connect` above
     /// stays the standalone-caller/test entry point.

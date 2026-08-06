@@ -292,12 +292,12 @@ impl AppState {
     /// has already guaranteed `redis_url` is present and every issuer parses.
     ///
     /// **Authorizer wiring (SMA-444 Task 15/21):** ONE shared [`Generations`] handle — the
-    /// `memory` backend, or a `redis` `ConnectionManager` selected by `authz.cache.backend`
+    /// `memory` backend, or a `redis` `RedisHandle` selected by `authz.cache.backend`
     /// (Task 21) — feeds the authz Postgres stores (`PgPolicyStore`, `PgRoleGrantStore`,
     /// `PgEntitySliceLoader`) AND the three tenancy repositories below, so a policy/grant
     /// change bumps `policy_gen` and a tenancy structure/status change bumps `entity_gen` —
     /// both observed by the SAME counters `CedarAuthorizer`'s decision cache keys off. When
-    /// `redis` is configured, the SAME `ConnectionManager` (`redis_conn` below) also backs
+    /// `redis` is configured, the SAME `RedisHandle` (`redis_conn` below) also backs
     /// the decision cache (`RedisDecisionCache`) and the entity-slice cache (`SliceCache`) —
     /// one shared connection, not three independent ones. Fails fast (mirroring the JWKS
     /// redis cache below) when redis is configured but unreachable — `IamConfig::validate`

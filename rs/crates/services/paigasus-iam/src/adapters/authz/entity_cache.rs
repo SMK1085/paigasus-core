@@ -60,7 +60,7 @@ pub struct SliceCache {
 }
 
 impl SliceCache {
-    /// Opens `redis_url` and wraps it in a `ConnectionManager` (mirrors
+    /// Opens `redis_url` and wraps it in a `RedisHandle` (mirrors
     /// `RedisJwksCache::connect`/`RedisDecisionCache::connect`). `ttl_secs` is applied to
     /// every cache write as Redis's own `EX` expiry.
     pub async fn connect(inner: Arc<dyn EntitySliceLoader>, redis_url: &str, ttl_secs: u64) -> Result<Self, AuthzError> {
@@ -68,7 +68,7 @@ impl SliceCache {
         Ok(Self { inner, conn, ttl_secs })
     }
 
-    /// Wraps `inner` over an ALREADY-CONNECTED `ConnectionManager` (SMA-444 Task 21):
+    /// Wraps `inner` over an ALREADY-CONNECTED `RedisHandle` (SMA-444 Task 21):
     /// `AppState::new` shares ONE redis connection across the redis-backed `Generations` +
     /// `RedisDecisionCache` + `SliceCache` rather than each opening its own — `connect` above
     /// stays the standalone-caller/test entry point.
@@ -247,7 +247,7 @@ mod tests {
     /// D11/D12's core regression guard: when the inner loader's `entity_gen()` errors (a
     /// Redis-only outage under `authz.cache.backend = redis`), `SliceCache::load` must fail
     /// OPEN — returning the inner loader's `Ok` slice — never propagate the `entity_gen()`
-    /// error. Uses a lazily-connecting `ConnectionManager` (never dials out) since the
+    /// error. Uses a lazily-connecting `RedisHandle` (never dials out) since the
     /// fail-open path returns before touching Redis at all, so this needs no live Redis
     /// server / Docker.
     #[tokio::test]

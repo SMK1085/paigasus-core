@@ -14,7 +14,7 @@
 //!
 //! Two implementations, mirroring `adapters::authz::decision_cache` exactly: [`MemoryApiKeyCache`]
 //! (single-replica, TTL-bounded `Mutex<HashMap<..>>`) and [`RedisApiKeyCache`] (cross-replica,
-//! `ConnectionManager`, same connect/clone-per-call pattern as `RedisDecisionCache`/`SliceCache`).
+//! `RedisHandle`, same connect/clone-per-call pattern as `RedisDecisionCache`/`SliceCache`).
 //!
 //! **Both fail OPEN (D5):** this cache is a pure accelerator over the Postgres-backed
 //! `ApiKeyRepository` — never the system of record — so a `get` that can't be served cleanly (a
@@ -187,10 +187,10 @@ impl ApiKeyValidationCache for MemoryApiKeyCache {
     }
 }
 
-/// `ApiKeyValidationCache` backed by Redis via an auto-reconnecting `ConnectionManager` (spec
-/// §9), mirroring `adapters::authz::decision_cache::RedisDecisionCache`. Cheap to clone the
-/// connection per call — `ConnectionManager` is itself `Arc`-backed and designed for
-/// concurrent callers.
+/// `ApiKeyValidationCache` backed by Redis via a breaker-wrapped, auto-reconnecting
+/// `RedisHandle` (spec §9), mirroring `adapters::authz::decision_cache::RedisDecisionCache`.
+/// Cheap to clone the connection per call — `RedisHandle` wraps an `Arc`-backed
+/// `ConnectionManager` and is itself designed for concurrent callers.
 ///
 /// **Fail-open (D5):** every error path (connect, I/O, or (de)serialize) on `get` returns
 /// `None` — a plain miss — and every error on `put`/`evict` is logged and swallowed. The
@@ -202,7 +202,7 @@ pub struct RedisApiKeyCache {
 }
 
 impl RedisApiKeyCache {
-    /// Opens `redis_url` and wraps it in a `ConnectionManager`. `ttl_secs` is applied to every
+    /// Opens `redis_url` and wraps it in a `RedisHandle`. `ttl_secs` is applied to every
     /// `put` as Redis's own `EX` expiry — this cache is a fail-open accelerator, so an entry
     /// disappearing after `ttl_secs` (or on eviction) never surfaces as anything other than a
     /// subsequent miss.

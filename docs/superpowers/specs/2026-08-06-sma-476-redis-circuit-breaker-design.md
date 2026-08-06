@@ -418,9 +418,19 @@ says so.
 ### D12 — The CI gate gets stronger, not just preserved
 
 Once no adapter names `ConnectionManager`, `repo:redis-connect-single-site` bans the **type
-name** outside `redis_conn.rs` in addition to the constructors it already bans. That turns
-"the breaker is used everywhere" from a convention into a structural property: there is no way
-to obtain a connection that bypasses it, because there is no way to name one.
+name** outside `redis_conn.rs` in addition to the constructors it already bans. That closes the
+copy-paste-a-typed-field bypass that motivated SMA-473 and turns "the breaker is used
+everywhere" from a bare convention into a structural property *for that class of bypass*.
+
+It is not a proof that no unnamed bypass can exist. Post-implementation review found one:
+`redis::Client::open(u)?.get_multiplexed_async_connection().await` yields a `MultiplexedConnection`
+which, like `ConnectionManager`, implements `ConnectionLike` and is accepted by the same
+`AsyncCommands` blanket impl — all without naming any type the gate banned. The gate now also
+bans `.get_multiplexed_async_connection` and `.get_connection` by name (`moon.yml`), but that is
+a maintained allowlist of known escape hatches, not something derived from the `ConnectionLike`
+trait itself: a future redis-rs method of the same shape needs its own term added by hand. Treat
+"cannot bypass the breaker without naming a connection" as the gate's *intent*, not a guarantee
+it mechanically enforces.
 
 The gate's comment filter anchors on `:[0-9]+:[[:space:]]*//` (`moon.yml:192`), so a `/* … */`
 block comment naming `ConnectionManager` would trip the new ban. The gate's own comment block
