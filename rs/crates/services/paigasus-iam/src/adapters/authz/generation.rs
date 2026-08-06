@@ -194,4 +194,30 @@ mod tests {
             "PolicyGenBumper::bump must drive the same counter RoleService reads through Generations"
         );
     }
+
+    /// SMA-476 AC3, the fifth posture: `Generations::Redis` fails CLOSED like `RedisJwksCache`
+    /// — unlike the four fail-open caches, a generation read/bump error PROPAGATES as
+    /// `AuthzError::Backend`, because a swallowed-and-defaulted generation would silently widen
+    /// the decision/slice cache key space and risk serving a stale decision (SMA-470 D4). An
+    /// open breaker must not change that: it still propagates, just without dialling.
+    ///
+    /// Pointed at a BLACKHOLE, not a closed port: a closed port refuses in microseconds, which
+    /// looks identical to a short-circuit. Here a command that actually dialled would cost
+    /// ~2.1 s, so the elapsed assertion proves the breaker short-circuited.
+    #[tokio::test]
+    async fn an_open_breaker_keeps_redis_generations_propagating_the_error() {
+        let blackhole = crate::adapters::redis_conn::test_support::start().await;
+        let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, RedisRole::Authz).expect("well-formed redis URL");
+        let gens = Generations::Redis(conn);
+
+        let started = std::time::Instant::now();
+        let result = gens.policy_gen().await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(AuthzError::Backend(_))),
+            "SMA-476 AC3: an open breaker must still PROPAGATE as AuthzError::Backend — Generations::Redis is not fail-open, got {result:?}"
+        );
+        assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the read dialled instead of short-circuiting");
+    }
 }
