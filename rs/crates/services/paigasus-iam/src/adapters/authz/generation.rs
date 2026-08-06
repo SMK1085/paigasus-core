@@ -202,7 +202,8 @@ impl RedisGenerations {
                     counter = which.label(),
                     reason,
                     "authz generation counter rewound but the repair would overflow redis's i64 counter — serving a process-local \
-                     generation past the high-water mark; flush iam:authz:slice:* and iam:authz:dec:*, SET both generation keys to 0, \
+                     generation past the high-water mark; SCAN+UNLINK the iam:authz:slice:* and iam:authz:dec:* namespaces \
+                     (DEL does not expand globs), SET both generation keys to 0, \
                      then ROLL-RESTART the iam replicas to reset their process-local marks (see the RUNBOOK)"
                 );
                 // NOT `high_water`. The mark is a generation this process observed as LIVE, so

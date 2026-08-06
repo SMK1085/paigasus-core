@@ -940,8 +940,23 @@ rewound counter is repaired forward automatically. The one exception is
 <a id="ceiling-remediation"></a>
 **Ceiling remediation (manual, three steps — all three are required):**
 
-1. `DEL` the `iam:authz:slice:*` and `iam:authz:dec:*` key spaces. Do this **first**: it is what
-   makes step 3 safe, because the fleet comes back at generation `0` into an empty key space.
+1. Delete every key in the `iam:authz:slice:*` and `iam:authz:dec:*` namespaces. Do this
+   **first**: it is what makes step 3 safe, because the fleet comes back at generation `0` into
+   an empty key space.
+
+   **`DEL` does not expand globs.** `DEL iam:authz:slice:*` deletes a key *literally named*
+   `iam:authz:slice:*`, finds nothing, and reports success — which is worse than failing, because
+   step 3's safety argument assumes the namespaces are empty. Iterate with `SCAN` and delete in
+   batches with `UNLINK`, which frees the keys on a background thread rather than blocking the
+   server:
+
+   ```bash
+   redis-cli --scan --pattern 'iam:authz:slice:*' | xargs -r -n 500 redis-cli UNLINK
+   redis-cli --scan --pattern 'iam:authz:dec:*'   | xargs -r -n 500 redis-cli UNLINK
+   ```
+
+   Then re-run both `--scan` commands and confirm each returns nothing before moving to step 2.
+   Never use `KEYS` for this — it blocks the server for the whole sweep.
 2. `SET iam:authz:policy_gen 0` and `SET iam:authz:entity_gen 0`.
 3. **Roll-restart the IAM replicas.** Not optional, and not merely hygiene. The ceiling is a
    property of each process's *own* high-water mark, which lives in memory and is untouched by
