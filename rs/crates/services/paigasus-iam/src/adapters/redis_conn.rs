@@ -886,6 +886,56 @@ mod tests {
             "ten commands against a blackholed backend took {total:?}; without the breaker this is ~21s, with it ~6.3s"
         );
     }
+
+    /// SMA-476 D7. The breaker must re-close once the backend answers again.
+    ///
+    /// Asserts a BOUND, not an exact window count, on purpose. Recovery costs two windows today
+    /// because `ConnectionManager` memoizes its connect future in an `ArcSwap<Shared<..>>`
+    /// (`connection_manager.rs:335,387,681`), so the first probe after a quiet window consumes an
+    /// already-resolved `Err` without dialling. That is a redis-rs internal: a future version
+    /// that recovers in ONE window is an improvement and must not red this build.
+    #[tokio::test]
+    async fn the_breaker_recloses_once_the_backend_answers_again() {
+        use redis::AsyncCommands;
+
+        let blackhole = test_support::start().await;
+        // A 50ms window keeps this test fast; the production value is pinned separately.
+        let client = redis::Client::open(blackhole.url.as_str()).expect("well-formed redis URL");
+        let conn = ConnectionManager::new_lazy_with_config(client, connection_manager_config()).expect("lazy construction never connects");
+        let mut handle = RedisHandle {
+            conn,
+            breaker: Breaker::with_durations(RedisRole::Authz, Duration::from_millis(50), Duration::from_millis(500)),
+        };
+
+        for _ in 0..3 {
+            let _: redis::RedisResult<Option<Vec<u8>>> = handle.get("sma476:probe").await;
+        }
+        let short_circuited: redis::RedisResult<Option<Vec<u8>>> = handle.get("sma476:probe").await;
+        assert!(
+            short_circuited.expect_err("expected an error").to_string().contains(BREAKER_OPEN_MESSAGE),
+            "the breaker must be open before recovery can be tested"
+        );
+
+        blackhole.start_responding();
+
+        // Probe repeatedly; each attempt is one window. Generous cap: two windows is the
+        // expectation, ten is "it never recovers".
+        let mut recovered = false;
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            let result: redis::RedisResult<Option<Vec<u8>>> = handle.get("sma476:probe").await;
+            if result.is_ok() {
+                recovered = true;
+                break;
+            }
+        }
+
+        assert!(recovered, "SMA-476 D7: the breaker never re-closed after the backend started answering — recovery is wedged");
+
+        // And it stays closed: a command right after recovery must not short-circuit.
+        let after: redis::RedisResult<Option<Vec<u8>>> = handle.get("sma476:probe").await;
+        assert!(after.is_ok(), "the breaker re-opened immediately after a successful probe: {after:?}");
+    }
 }
 
 /// Shared test fixtures for the SMA-476 breaker tests. Lives here rather than in each adapter so
@@ -919,8 +969,7 @@ pub(crate) mod test_support {
     /// — do not add credentials or a db index to these tests' URLs.
     pub(crate) struct Blackhole {
         pub(crate) url: String,
-        // Read only by `start_responding`, below — dead until Task 7 (the recovery test) calls it.
-        #[allow(dead_code)]
+        // Read only by `start_responding`, below.
         responding: Arc<AtomicBool>,
         _held: Arc<AsyncMutex<Vec<tokio::net::TcpStream>>>,
         _accept: tokio::task::JoinHandle<()>,
@@ -928,9 +977,7 @@ pub(crate) mod test_support {
 
     impl Blackhole {
         /// Switch the listener from blackholing to answering as a minimal RESP server. Only
-        /// affects connections opened AFTER this call. Used by the recovery test (Task 7); dead
-        /// until it lands.
-        #[allow(dead_code)]
+        /// affects connections opened AFTER this call. Used by the recovery test (Task 7).
         pub(crate) fn start_responding(&self) {
             self.responding.store(true, Ordering::SeqCst);
         }
