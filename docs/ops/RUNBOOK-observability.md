@@ -957,7 +957,24 @@ rewound counter is repaired forward automatically. The one exception is
 
    Then re-run both `--scan` commands and confirm each returns nothing before moving to step 2.
    Never use `KEYS` for this — it blocks the server for the whole sweep.
+
+   **The sweep does not have to be atomic, and the replicas do not have to be stopped.** `SCAN`
+   is not a snapshot, so a live replica can write a cache key between the final scan and step 2 —
+   but it cannot write one that matters here. A ceiling-state replica is serving its *own*
+   process-local generation (a value near `i64::MAX/2`), so every key it writes during the window
+   lands in that key space, never in generation `0`'s. The fleet returns to `0` only after step 3
+   restarts it, at which point those stragglers are in a disjoint space and simply age out at
+   their TTL. Quiescing the fleet would convert a rare, non-urgent condition into an authz outage
+   for no correctness gain, which is the opposite of the posture in "Authz availability" above.
 2. `SET iam:authz:policy_gen 0` and `SET iam:authz:entity_gen 0`.
+
+   **Re-check both values once the roll-restart in step 3 is underway.** If any replica was *not*
+   yet at the ceiling, its next read sees `0` far below its own mark, takes the repair path, and
+   `INCRBY`s the counter straight back off `0`. That is harmless — the value it lands on is
+   `mark + 1000000`, beyond any generation the fleet has used, so it is still a disjoint key
+   space — but the end state is then that value rather than `0`, and step 1's "comes back at
+   generation `0`" no longer describes it. Only re-run step 2 if you want the tidier end state;
+   nothing is unsafe if you do not.
 3. **Roll-restart the IAM replicas.** Not optional, and not merely hygiene. The ceiling is a
    property of each process's *own* high-water mark, which lives in memory and is untouched by
    anything you do to Redis — so after step 2 every running replica reads `0`, sees it far below
