@@ -358,12 +358,12 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 24 metric families `paigasus-iam` emits
+/// Registers `# HELP`/`# TYPE` exposition text for the 26 metric families `paigasus-iam` emits
 /// directly (spec §4.1; includes the SMA-467 audit partition-maintenance families, the
-/// SMA-469 outbox retention/dead-letter families, and the SMA-481 system-row-retirement
-/// family), via the `names::` consts so the string used here can't drift from the one used at
-/// the increment/set call site, plus the 2 gRPC families via
-/// `paigasus_observability::describe_grpc()`. Mirrors the meanings documented in
+/// SMA-469 outbox retention/dead-letter families, the SMA-476 Redis circuit-breaker families,
+/// and the SMA-481 system-row-retirement family), via the `names::` consts so the string used
+/// here can't drift from the one used at the increment/set call site, plus the 2 gRPC families
+/// via `paigasus_observability::describe_grpc()`. Mirrors the meanings documented in
 /// `docs/ops/RUNBOOK-observability.md` §2.1/§2.2.
 fn describe_iam_metrics() {
     use metrics::{describe_counter, describe_gauge, describe_histogram};
@@ -380,6 +380,14 @@ fn describe_iam_metrics() {
     describe_counter!(
         names::IAM_AUTHZ_DECISIONS_TOTAL,
         "Every CedarAuthorizer::is_authorized outcome, labeled by decision (allow/deny) and cache (hit/miss/bypass)."
+    );
+    describe_gauge!(
+        names::IAM_REDIS_BREAKER_STATE,
+        "Redis circuit-breaker state per connection: 0=closed, 1=half_open, 2=open. Label role=authz|api_keys|jwks. Set independently by every replica — aggregate max by (job, role), never sum. role=\"api_keys\" only exists when authz.cache.backend=\"memory\" and api_keys.introspect_cache.backend=\"redis\"; otherwise those commands are attributed to role=\"authz\"."
+    );
+    describe_counter!(
+        names::IAM_REDIS_BREAKER_TRANSITIONS_TOTAL,
+        "Redis circuit-breaker state transitions, labeled by role and to=closed|half_open|open. Catches flapping the gauge cannot see: the open window is 2s while scrapes are 15-30s apart."
     );
     describe_counter!(
         names::IAM_AUDIT_RECORDS_TOTAL,

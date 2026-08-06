@@ -50,6 +50,31 @@ pub const IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL: &str = "iam_bootstrap_admin_s
 /// reconciliation error both land here under the identical label, distinguishable only via the
 /// accompanying ERROR log's `policy_id` vs `role_key` field, never via this metric alone.
 pub const IAM_STARTER_POLICY_RECONCILES_TOTAL: &str = "iam_starter_policy_reconciles_total";
+// IAM Redis circuit breaker (SMA-476)
+/// The circuit-breaker state for one Redis connection: `0` = closed (commands pass through),
+/// `1` = half_open (one probe admitted), `2` = open (every command short-circuits instantly).
+///
+/// `role` is a CLOSED set — `authz` | `api_keys` | `jwks` — derived from a Rust enum, never from
+/// anything caller-supplied, so it cannot mint cardinality.
+///
+/// Three attribution caveats, all consequences of how `AppState::new` shares connections rather
+/// than of the breaker itself:
+/// - `role="api_keys"` exists ONLY when `authz.cache.backend = "memory"` while
+///   `api_keys.introspect_cache.backend = "redis"`. Otherwise the API-key cache reuses the authz
+///   connection and its commands are attributed to `role="authz"` — a missing `api_keys` series
+///   does NOT mean the API-key cache is idle.
+/// - Two roles may front the SAME physical Redis with independent breakers, so `authz` at 0 while
+///   `jwks` is at 2 does not imply two backends.
+/// - Set independently by every replica — aggregate `max by (job, role)`, never `sum`.
+pub const IAM_REDIS_BREAKER_STATE: &str = "iam_redis_breaker_state";
+/// One increment per circuit-breaker state transition; `to` = `closed` | `half_open` | `open`.
+///
+/// NOT redundant with [`IAM_REDIS_BREAKER_STATE`]. The open window is 2 s while scrapes are
+/// 15–30 s apart, so a breaker that opens and re-closes between two scrapes is invisible to the
+/// gauge — `changes()` over it undercounts by construction. A chronically sick backend that flaps
+/// is exactly the condition worth catching early, and this counter is the only artifact that
+/// survives a sub-scrape-interval state.
+pub const IAM_REDIS_BREAKER_TRANSITIONS_TOTAL: &str = "iam_redis_breaker_transitions_total";
 // IAM outbox relay
 pub const IAM_OUTBOX_RELAY_TICKS_TOTAL: &str = "iam_outbox_relay_ticks_total";
 pub const IAM_OUTBOX_RELAY_DRAINED_TOTAL: &str = "iam_outbox_relay_drained_total";
@@ -112,6 +137,8 @@ pub const ALL: &[&str] = &[
     IAM_GRPC_REQUEST_DURATION_SECONDS,
     IAM_AUTHZ_DECISIONS_TOTAL,
     IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL,
+    IAM_REDIS_BREAKER_STATE,
+    IAM_REDIS_BREAKER_TRANSITIONS_TOTAL,
     IAM_AUDIT_RECORDS_TOTAL,
     IAM_DENIAL_AUDITS_DROPPED_TOTAL,
     IAM_DENIAL_AUDITS_ENQUEUED_TOTAL,
