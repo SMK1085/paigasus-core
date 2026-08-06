@@ -95,7 +95,9 @@ later await returns the cached result instantly. On an error, `reconnect_if_io_e
 in a fresh dial future and **spawns it detached** (`:649`) — it runs to completion whether or not
 anyone is waiting.
 
-Two consequences, both of which the first draft of this spec got wrong in opposite directions:
+Three consequences. The first two are what the first draft of this spec got wrong in opposite
+directions; code review surfaced the third, and it is the regime this design's own recovery test
+(§4.4) actually lands in:
 
 1. **Back-to-back commands each pay a full dial.** Command N's failure spawns dial N+1 at time
    T; command N+1 arrives at ~T and awaits an in-flight dial, paying the full ~2.1 s. This is
@@ -106,9 +108,18 @@ Two consequences, both of which the first draft of this spec got wrong in opposi
    half-open probe loads that resolved future and gets its answer in microseconds, **without
    touching the network** — then swaps in yet another fresh dial whose result only becomes
    visible to the *next* probe.
+3. **A command issued while the replacement dial is still mid-flight joins it and pays only the
+   remainder.** Neither of the above: not "immediately at T" (consequence 1's full ~2.1 s) nor
+   "long after the dial resolved" (consequence 2's ~0 s) — it lands in between, awaits the SAME
+   `Shared` future consequence 1's command pays in full, and pays only whatever time is left on
+   it. Whenever a dial takes longer than the gap between commands — e.g. a blackholed backend's
+   ~2.1 s dial against a half-open probe arriving one 2 s `OPEN_DURATION` window after the dial
+   was spawned — a probe lands here, not in consequence 2.
 
-Consequence 2 is what makes the recovery model in D7 what it is, and it is the single most
-surprising property in this design.
+Consequences 2 and 3 are what make the recovery model in D7 what it is, and which one a given
+recovery lands in — one open window (3) or two (2) — is decided entirely by dial duration versus
+the open window, not by anything the breaker itself controls. This is the single most surprising
+property in this design.
 
 ## 2. Decisions
 
@@ -247,38 +258,56 @@ The wall-clock exposure before the breaker opens is not `3 × 2.1 s` in general:
 three failures land near-simultaneously (~2.1 s total), while under strictly serial traffic it is
 ~6.3 s. Both figures are documented rather than one being presented as *the* number.
 
-### D7 — Recovery takes up to two open windows, not one — so the window is 2 s
+### D7 — Recovery costs one or two open windows, bounded at two — so the window is 2 s
 
 `OPEN_DURATION = 2s`.
 
-After the window expires, exactly one probe is admitted (D8). Per §1.4's consequence 2, that
-probe consumes the **already-memoized** result of the dial spawned when the breaker opened —
-instantly, without touching the network — and only *then* swaps in a fresh dial. So the first
-probe after Redis recovers still sees the stale `Err` and re-opens; the *second* probe sees the
-fresh success and closes.
+After the window expires, exactly one probe is admitted (D8). Which window that probe recovers in
+is regime-dependent (§1.4 consequences 2 and 3) — decided by dial duration versus the 2 s open
+window, not by anything the breaker itself controls:
+
+- **Timeout-class outage** (dial time ≳ window — e.g. a blackholed backend's ~2.1 s dial against
+  this 2 s window): §1.4 consequence 3. The probe arrives while the dial spawned when the breaker
+  opened is STILL in flight, joins it, and pays only the remainder. **One window.** §4.4's
+  recovery test confirms this directly — its 50 ms window against a ~2.1 s dial guarantees this
+  regime, and it is today's redis-rs behaviour, not a hoped-for future improvement.
+- **Refusal-class outage** (dial time ≪ window — e.g. a stopped/refused Redis's ~0.2 s dial): §1.4
+  consequence 2. The dial has long since resolved and memoized its `Err` by the time a probe
+  arrives, so that probe consumes the stale `Err` instantly, without touching the network, and
+  only *then* swaps in the fresh dial the *next* probe will see succeed. **Two windows.**
+
+Production sees both regimes — a blackhole and a refusal are different shapes of the same class
+of outage. The bound holds either way:
 
 ```
 recovery ≤ 2 × OPEN_DURATION + one dial ≈ 2 × 2 s + ~2.1 s ≈ 6 s worst case
 ```
 
-This inverts the cost model the first draft used, in both directions:
+because a probe that fails has, by construction, just spawned a dial that starts running only
+after recovery — so the probe after *that* one is guaranteed to join or consume a success, never
+another failure. (One documented exception to this bound: §6 residual risk #7.)
 
-- **Probes are essentially free**, not ~2.1 s each. There is no steady-state probe cost to
-  amortise, which is what makes a *short* window affordable.
-- **Recovery is two windows**, so the window must be short for the total to stay reasonable.
+This still inverts the cost model the first draft used, in both directions:
 
-Hence 2 s rather than the 5 s a "probes cost 2.1 s" model would have argued for. The only cost
-of a shorter window is one detached dial per window (0.5/s) — negligible.
+- **Probes are essentially free** in the refusal-class regime, not ~2.1 s each — no steady-state
+  probe cost to amortise, which is what makes a *short* window affordable.
+- **Recovery can cost two windows** in the refusal-class regime, so the window must be short for
+  the worst case to stay reasonable.
+
+Hence 2 s rather than the 5 s a "probes always cost 2.1 s" model would have argued for. The only
+cost of a shorter window is one detached dial per window (0.5/s) — negligible.
 
 The residual §1 opened with is therefore reduced but not eliminated: the ~2.1 s per-command cost
 still applies to the failures that open the breaker, and to the in-flight cohort (§6 risk #4).
 What the breaker removes is that cost on every *subsequent* command.
 
-**No automated test pins the two-window bound.** It is a property of redis-rs's internals, cited
-above and re-derived from source, and confirmed once by the §5 manual procedure. §4.5 adds a
-hermetic recovery test that pins the observable contract (the breaker does re-close, within a
-bounded number of windows) without asserting the exact count, so a redis-rs change that improves
-this does not red the build.
+**No automated test pins an exact window count — only the ≤ 2-window-plus-one-dial bound.** Which
+regime a given recovery lands in is a property of redis-rs's internals and the shape of the
+outage, cited above and re-derived from source. §4.4 adds a hermetic recovery test that pins the
+observable contract (the breaker does re-close, within a bounded number of windows) without
+asserting which regime it lands in or an exact count, so a redis-rs change that shifts the regime,
+or improves either one, does not red the build. The refusal-class (two-window) regime is confirmed
+separately, once, by the §5 manual procedure.
 
 ### D8 — Half-open admits exactly one probe, and cannot wedge
 
@@ -636,8 +665,10 @@ pipeline's two `CLIENT SETINFO` commands, `$-1` for a `GET`.
 
 The test drives the breaker Open against the blackhole, clears the flag, and asserts the breaker
 returns to Closed within a bounded number of windows. It asserts **a bound, not an exact count**
-(D7): the two-window behaviour is a redis-rs internal, and a future version that recovers in one
-window should not red the build.
+(D7): which of the two regimes a recovery lands in is a redis-rs internal, decided by dial
+duration versus the open window (§1.4 consequences 2 and 3) — this test's 50 ms window against a
+~2.1 s dial puts it in the timeout-class, one-window regime, and a redis-rs change that shifts
+that, or improves either regime, should not red the build.
 
 ### 4.5 Observability — unit (AC5)
 
@@ -666,9 +697,10 @@ claim to verify when the suites run, not an assumption.
 **RUNBOOK §4 "Authz availability posture"** — the "A blackholed Redis is the residual" paragraph
 is rewritten: the ~2.1 s figure becomes **measured** (citing §4.2) and is reframed as the cost of
 the failures that open the breaker and of the in-flight cohort, not of every command. New
-material: the breaker's states and constants, D7's two-window recovery bound and *why* it is two,
-D9's JWKS asymmetry with the ~6 s token-auth outage spelled out, D6's failover-trip consequence,
-and D10's two metrics with the three attribution caveats.
+material: the breaker's states and constants, D7's regime-dependent recovery bound (one window for
+a timeout-class outage, two for a refusal-class one, capped at two either way) and *why*, D9's
+JWKS asymmetry with the ~6 s token-auth outage spelled out, D6's failover-trip consequence, and
+D10's two metrics with the three attribution caveats.
 
 **RUNBOOK §4** gains `IamRedisBreakerOpen`, `IamJwksRedisBreakerOpen` and
 `IamRedisBreakerFlapping` entries in the house format.
@@ -715,10 +747,28 @@ deployment that never has a Redis problem never observes the breaker at all.
    pays the full ~2.1 s — under 200 concurrent requests that is 200 × 2.1 s, not 3 × 2.1 s. The
    breaker bounds the *duration* of an outage's cost, not its initial burst.
 5. **`ConnectionLike` is a lower-level trait than `AsyncCommands`, and D7 depends on
-   `futures::Shared` memoization.** A redis-rs major bump could change either. Both couplings are
-   called out in the module doc, and §4.4 pins the observable contract rather than the mechanism.
-6. **No automated test pins the two-window recovery bound** (D7) — deliberately, so an
-   improvement upstream does not red the build. The §5 manual procedure is what confirms it.
+   `futures::Shared` join/memoization behaviour.** A redis-rs major bump could change either. Both
+   couplings are called out in the module doc, and §4.4 pins the observable contract rather than
+   the mechanism.
+6. **No automated test pins an exact window count** (D7) — only the ≤ 2-window-plus-one-dial
+   bound, deliberately, so a redis-rs change that shifts which regime a recovery lands in, or
+   improves either one, does not red the build. §4.4's unit test confirms the timeout-class
+   (one-window) regime directly; the §5 manual procedure is what confirms the refusal-class
+   (two-window) regime.
+7. **`reconnect_if_io_error!` only reconnects on IO-class errors, so an `AuthenticationFailed`
+   memoizes forever and recovery in that case is unbounded, not ≤ 2 windows.**
+   `connection_manager.rs:402-411`'s macro checks `e.is_io_error()` before spawning a replacement
+   dial at all; for a non-IO error — most notably `AuthenticationFailed`, e.g. a rotated Redis
+   password — nothing ever replaces the memoized `Err` in the `ArcSwap`, because nothing about
+   §1.4's mechanism reconnects on anything but an IO-class failure. There is no natural "recovery"
+   event to trigger a fresh dial; only a process restart (which rebuilds the `ConnectionManager`
+   from scratch) or an operator fixing the credential and restarting recovers it. This is
+   pre-existing redis-rs behaviour, not a defect this design introduces — the breaker does not
+   make it worse, it just fails faster (a synchronous short-circuit instead of a ~2.1 s dial per
+   command) — but it interacts directly with D5's classifier, which deliberately counts
+   `AuthenticationFailed` as a breaker failure (because redis-rs itself treats it as
+   connection-fatal, per D5). A rotated password is therefore a case the breaker cannot recover
+   from on its own, same as today without the breaker.
 
 ## 7. Out of scope
 

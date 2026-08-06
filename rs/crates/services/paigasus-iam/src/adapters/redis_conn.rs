@@ -61,8 +61,13 @@ pub(crate) fn connection_manager_config() -> ConnectionManagerConfig {
 /// blackholed backend is actually spent.
 ///
 /// **Coupling to watch on a redis-rs upgrade** (SMA-476 §6 risk 5): the `AsyncCommands` blanket
-/// impl over `ConnectionLike`, and the `ArcSwap<Shared<..>>` memoization that makes recovery cost
-/// two open windows rather than one.
+/// impl over `ConnectionLike`, and the `ArcSwap<Shared<..>>` memoization whose recovery cost is
+/// regime-dependent rather than a fixed two windows — `reconnect()` spawns the replacement
+/// connect future the instant a command fails (`redis-1.3.0/src/aio/connection_manager.rs:649`),
+/// not on the next probe, so whether a probe joins that still-in-flight dial (one window) or
+/// consumes an already-resolved `Err` (two windows) depends on dial duration vs the open window.
+/// See [`OPEN_DURATION`]'s doc for both regimes; either way the bound stays ≤ 2 open windows plus
+/// one connect budget.
 #[derive(Clone, Debug)]
 pub struct RedisHandle {
     conn: ConnectionManager,
@@ -155,12 +160,28 @@ pub(crate) const FAILURE_THRESHOLD: u32 = 3;
 
 /// How long an open breaker short-circuits before admitting one probe (SMA-476 D7).
 ///
-/// Two seconds, not five, because recovery costs TWO windows: `ConnectionManager` holds an
-/// `ArcSwap<Shared<..>>` connect future (`redis-1.3.0/src/aio/connection_manager.rs:335,387`) and
-/// `Shared` MEMOIZES, so the first probe after a quiet window consumes an already-resolved `Err`
-/// in microseconds without touching the network, and only the SECOND probe sees a fresh dial.
-/// The upside of the same fact is that probes are essentially free, which is what makes a short
-/// window affordable.
+/// Two seconds, not five. `ConnectionManager` holds an `ArcSwap<Shared<..>>` connect future
+/// (`redis-1.3.0/src/aio/connection_manager.rs:335,387`), and `reconnect()` replaces it the
+/// INSTANT a command fails — `runtime.spawn(new_connection).detach()` at
+/// `connection_manager.rs:649` — rather than waiting for the next probe to ask for one. That
+/// timing detail makes recovery cost regime-dependent, not a fixed two windows:
+///
+/// - **Timeout-class outage** (e.g. a blackholed backend, dial time ≳ this window): the
+///   replacement dial is still in flight when the probe arrives, so the probe joins it — via
+///   `Shared` — and pays only the remainder. **One window.** This is
+///   `the_breaker_recloses_once_the_backend_answers_again`'s regime (a 50 ms window against a
+///   ~2.1 s dial), and it is today's redis-rs behaviour, not a hoped-for future improvement.
+/// - **Refusal-class outage** (e.g. a stopped/refused Redis, dial time ≪ this window): the
+///   replacement dial has long since resolved to a memoized `Err` by the time a probe arrives, so
+///   that probe consumes the stale `Err` in microseconds without touching the network, and only
+///   spawns the dial that will see the recovered backend — which the FOLLOWING probe joins.
+///   **Two windows.**
+///
+/// Production sees both regimes depending on failure mode. Either way the bound holds: a probe
+/// that fails has, by construction, just spawned a dial that starts after recovery, so the next
+/// probe is guaranteed to consume an `Ok` — recovery is always ≤ 2 open windows plus one connect
+/// budget, which is what this value tunes. (`AuthenticationFailed`-class errors are a documented
+/// exception to this bound — see SMA-476 §6.)
 pub(crate) const OPEN_DURATION: Duration = Duration::from_secs(2);
 
 /// A half-open older than this admits another probe regardless (SMA-476 D8) — the second of two
@@ -889,11 +910,14 @@ mod tests {
 
     /// SMA-476 D7. The breaker must re-close once the backend answers again.
     ///
-    /// Asserts a BOUND, not an exact window count, on purpose. Recovery costs two windows today
-    /// because `ConnectionManager` memoizes its connect future in an `ArcSwap<Shared<..>>`
-    /// (`connection_manager.rs:335,387,681`), so the first probe after a quiet window consumes an
-    /// already-resolved `Err` without dialling. That is a redis-rs internal: a future version
-    /// that recovers in ONE window is an improvement and must not red this build.
+    /// Asserts a BOUND, not an exact window count, on purpose. How many windows recovery costs is
+    /// regime-dependent (see [`OPEN_DURATION`]'s doc): `ConnectionManager::reconnect()` spawns the
+    /// replacement connect future the instant a command fails (`connection_manager.rs:649`), not
+    /// on the next probe, so a probe either joins that still-in-flight dial (one window — this
+    /// test's regime, a 50 ms window against a blackholed backend's ~2.1 s dial) or consumes an
+    /// already-resolved `Err` from a dial that finished long ago (two windows — a refusal-class
+    /// outage's regime). Both are today's redis-rs behaviour, not a hoped-for future improvement;
+    /// only a violation of the ≤ 2-window-plus-one-dial bound should ever red this build.
     #[tokio::test]
     async fn the_breaker_recloses_once_the_backend_answers_again() {
         use redis::AsyncCommands;
@@ -918,8 +942,11 @@ mod tests {
 
         blackhole.start_responding();
 
-        // Probe repeatedly; each attempt is one window. Generous cap: two windows is the
-        // expectation, ten is "it never recovers".
+        // Probe repeatedly. Each iteration sleeps one window, but an admitted probe is NOT
+        // bounded to that sleep — it can join a still-in-flight replacement dial and cost most of
+        // a full connect budget (~1.2s remainder here) rather than returning in microseconds.
+        // Generous cap: recovering within the first couple of iterations is the expectation, ten
+        // is "it never recovers".
         let mut recovered = false;
         for _ in 0..10 {
             tokio::time::sleep(Duration::from_millis(60)).await;
@@ -1065,8 +1092,13 @@ pub(crate) mod test_support {
                 return;
             }
             let request = String::from_utf8_lossy(&buf[..n]).to_ascii_uppercase();
-            // One reply per command in the batch. The setup pipeline sends CLIENT SETINFO twice;
-            // a GET arrives on its own.
+            // NOT one reply per command: `\r\n$` counts RESP bulk-string ARGUMENTS, so this
+            // over-counts — 4 for one `CLIENT SETINFO` (command + subcommand + 2 args), 8 for the
+            // 2-command setup pipeline, 2 for a bare `GET`. That is fine: over-supplying replies
+            // is the safe direction here, since `execute_connection_pipeline` reads exactly the
+            // `count` values it expects off the front and leaves the rest buffered, and
+            // `PipelineSink` drops values it has no receiver for — so this comfortably
+            // over-answers rather than ever starving the client of a reply it is waiting on.
             let commands = request.matches("\r\n$").count().max(1);
             let mut reply = String::new();
             for _ in 0..commands {
