@@ -140,6 +140,13 @@ axum-server = { version = "0.7", default-features = false, features = ["tls-rust
 # fast-forwards past `AUDIT_PERSIST_TIMEOUT` instead of a real multi-second sleep (feature-only
 # addition: `tokio` is already a normal dependency above, unified with this for test builds).
 tokio = { workspace = true, features = ["test-util"] }
+# `adapters::redis_conn` tests — `metrics_util::debugging::{DebuggingRecorder, Snapshotter}`
+# proves the breaker's gauge/counter are actually EMITTED (SMA-476 AC5), not just registered.
+# Pinned to the version already resolved transitively via `metrics-exporter-prometheus`
+# (`rs/Cargo.lock`). That consumer disables default features and only enables
+# recency/registry/storage, so "debugging" is turned on explicitly here — dev-only, unified
+# into test builds and never the shipped binary.
+metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
 
 [lints]
 workspace = true

@@ -936,6 +936,47 @@ mod tests {
         let after: redis::RedisResult<Option<Vec<u8>>> = handle.get("sma476:probe").await;
         assert!(after.is_ok(), "the breaker re-opened immediately after a successful probe: {after:?}");
     }
+
+    /// SMA-476 AC5. `tests/drift.rs` proves rules reference registered names; nothing proves a
+    /// name is ever EMITTED. This does.
+    ///
+    /// Uses a local recorder rather than the global one so it cannot race other tests.
+    #[test]
+    fn breaker_transitions_emit_the_gauge_and_the_counter() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            let b = Breaker::with_durations(RedisRole::Jwks, Duration::from_millis(50), Duration::from_millis(200));
+            // Three failures: Closed -> Open.
+            for _ in 0..3 {
+                match b.admit() {
+                    Admission::Pass(permit) => permit.record::<()>(&Err(io_err())),
+                    Admission::ShortCircuit => panic!("the breaker opened early"),
+                }
+            }
+        });
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        let gauge = snapshot
+            .iter()
+            .find(|(key, _, _, _)| key.key().name() == names::IAM_REDIS_BREAKER_STATE)
+            .expect("SMA-476 AC5: iam_redis_breaker_state was never emitted");
+        assert!(gauge.0.key().labels().any(|l| l.key() == "role" && l.value() == "jwks"), "the gauge must carry the role label");
+        assert!(
+            matches!(gauge.3, DebugValue::Gauge(v) if (v.into_inner() - 2.0).abs() < f64::EPSILON),
+            "an open breaker must report 2, got {:?}",
+            gauge.3
+        );
+
+        let transitions = snapshot
+            .iter()
+            .find(|(key, _, _, _)| key.key().name() == names::IAM_REDIS_BREAKER_TRANSITIONS_TOTAL)
+            .expect("SMA-476 AC5: iam_redis_breaker_transitions_total was never emitted");
+        assert!(matches!(transitions.3, DebugValue::Counter(n) if n >= 1), "expected at least one transition, got {:?}", transitions.3);
+    }
 }
 
 /// Shared test fixtures for the SMA-476 breaker tests. Lives here rather than in each adapter so
