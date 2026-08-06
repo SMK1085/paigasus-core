@@ -424,8 +424,14 @@ tests:
             exp_annotations: { summary: "IAM outbox dead letters are awaiting an operator", description: "At least one event_outbox row has been parked for over an hour on iam and nobody has retired it. Parked rows are excluded from the relay's poll forever, so those events will never be delivered until an operator replays or discards them via /v1/outbox/dead-letters. This complements IamOutboxEventsParked: that one fires when something JUST parked, this one fires when nobody has dealt with it. See RUNBOOK section 4." }
 
   # SMA-476 breaker alerts. The `authz` series sits at 2 (open) and `api_keys` at 0 throughout:
-  # that second series is the CONTROL. Without it both inputs would be nonzero and a broken expr
-  # (`>= 0`, or a missing role filter) would still produce exactly the expected alerts and pass.
+  # that second series is the CONTROL for IamRedisBreakerOpen's `role!="jwks"` filter. Without it
+  # both inputs would be nonzero and a broken expr (`>= 0`, or a missing role filter) would still
+  # produce exactly the expected alerts and pass.
+  #
+  # IamJwksRedisBreakerOpen needs its OWN control: its `role="jwks"` selector filters out
+  # `api_keys` before that comparison ever runs, so without a second, zero-valued `role="jwks"`
+  # series (job "iam-empty", below) every input the rule actually sees would be 2 — a `!= 0` weakened
+  # to `>= 0` would still pass.
   - interval: 1m
     input_series:
       - series: 'iam_redis_breaker_state{job="iam", role="authz"}'
@@ -434,6 +440,8 @@ tests:
         values: '0+0x5'
       - series: 'iam_redis_breaker_state{job="iam", role="jwks"}'
         values: '2+0x5'
+      - series: 'iam_redis_breaker_state{job="iam-empty", role="jwks"}'
+        values: '0+0x5'
     alert_rule_test:
       - eval_time: 1m
         alertname: IamRedisBreakerOpen
@@ -455,13 +463,18 @@ tests:
               summary: "IAM JWKS Redis circuit breaker is not closed — token auth is failing closed"
               description: "The Redis circuit breaker for the JWKS cache has been open or half-open for 1m. RedisJwksCache fails CLOSED, so every token-authenticated request is returning 503 (API-key auth is unaffected — it fails open onto Postgres). Recovery lags Redis by up to ~6s after it returns. See RUNBOOK's \"Authz availability posture\"."
 
-  # Flapping: eight opens in 10m against a control that never opens.
+  # Flapping: ten opens in 10m against a control series with the SAME volume but a different
+  # `to=` value. That mismatch is deliberate: it proves the rule's `{to="open"}` selector matters
+  # rather than being decorative. If it were dropped, an unfiltered increase() would also count
+  # this closed-transition series, so role=jwks would spuriously cross the >5 threshold too and
+  # produce an alert this fixture does not expect — the fixture would fail. A control that never
+  # transitions at all (the old `0+0x10` shape) could not tell the two cases apart.
   - interval: 1m
     input_series:
       - series: 'iam_redis_breaker_transitions_total{job="iam", role="authz", to="open"}'
         values: '0+1x10'
-      - series: 'iam_redis_breaker_transitions_total{job="iam", role="jwks", to="open"}'
-        values: '0+0x10'
+      - series: 'iam_redis_breaker_transitions_total{job="iam", role="jwks", to="closed"}'
+        values: '0+1x10'
     alert_rule_test:
       - eval_time: 10m
         alertname: IamRedisBreakerFlapping

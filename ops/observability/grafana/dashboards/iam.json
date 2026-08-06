@@ -318,7 +318,7 @@
       "id": 19,
       "type": "stat",
       "title": "Redis circuit breaker state (0=closed 1=half-open 2=open)",
-      "description": "max by (role) (iam_redis_breaker_state) — current breaker state per role; NEVER sum across replicas, every replica reports its own state (SMA-476)",
+      "description": "max by (job, role) (iam_redis_breaker_state) — current breaker state per job and role; NEVER sum across replicas, every replica reports its own state (SMA-476)",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 72 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
@@ -326,8 +326,8 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "max by (role) (iam_redis_breaker_state)",
-          "legendFormat": "{{role}}"
+          "expr": "max by (job, role) (iam_redis_breaker_state)",
+          "legendFormat": "{{job}} {{role}}"
         }
       ]
     }
