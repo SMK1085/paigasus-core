@@ -238,8 +238,9 @@ pub(crate) struct Breaker {
     inner: Mutex<Inner>,
 }
 
-/// What [`Breaker::admit`] decided. `Pass` carries an RAII permit whose `Drop` records a failure
-/// if no outcome was reported (SMA-476 D8).
+/// What [`Breaker::admit`] decided. `Pass` carries an RAII permit whose `Drop` re-opens the
+/// breaker if it was `HalfOpen` and no outcome was reported (SMA-476 D8) — in every other state,
+/// a dropped permit is a no-op.
 pub(crate) enum Admission {
     Pass(ProbePermit),
     ShortCircuit,
@@ -247,7 +248,11 @@ pub(crate) enum Admission {
 
 /// Reports one command's outcome back to the breaker. Consumed by [`ProbePermit::record`]; if it
 /// is instead DROPPED without recording — an axum handler future cancelled by a client
-/// disconnect — `Drop` records a failure, so a half-open breaker can never wedge (SMA-476 D8).
+/// disconnect (also `serve_http`'s `TimeoutLayer`) — `Drop` records a failure ONLY when the
+/// breaker is `HalfOpen`, so a half-open breaker can never wedge (SMA-476 D8). In `Closed` (and
+/// `Open`) it is a no-op: a dropped permit means no result was ever observed, so it is not
+/// evidence about the backend — treating "no information" as "failure" is a category error, and
+/// in `Closed` it would let cancelled client requests trip the breaker against a healthy Redis.
 pub(crate) struct ProbePermit {
     breaker: Arc<Breaker>,
     reported: bool,
@@ -273,7 +278,7 @@ impl ProbePermit {
 impl Drop for ProbePermit {
     fn drop(&mut self) {
         if !self.reported {
-            self.breaker.on_failure();
+            self.breaker.on_probe_abandoned();
         }
     }
 }
@@ -351,6 +356,22 @@ impl Breaker {
             }
             BreakerState::HalfOpen => self.transition(&mut inner, BreakerState::Open),
             BreakerState::Open => {}
+        }
+    }
+
+    /// Called from [`ProbePermit`]'s `Drop` when a permit was abandoned without recording an
+    /// outcome. Transitions to `Open` ONLY if the breaker is currently `HalfOpen` — that is the
+    /// one state where an abandoned probe is a wedge hazard (the single half-open slot is spent
+    /// and nothing else will ever re-arm it before [`HALF_OPEN_DEADLINE`]). In `Closed` and
+    /// `Open` this is a no-op: a dropped permit means no result was ever observed, so it carries
+    /// no evidence about the backend's health — treating "no information" as "failure" is a
+    /// category error, and in `Closed` it would let cancelled client requests (axum drops
+    /// handler futures on client disconnect; `serve_http`'s `TimeoutLayer` too) open the breaker
+    /// against a perfectly healthy Redis (SMA-476 D8).
+    fn on_probe_abandoned(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if inner.state == BreakerState::HalfOpen {
+            self.transition(&mut inner, BreakerState::Open);
         }
     }
 
@@ -644,6 +665,28 @@ mod tests {
              breaker half-open — after the 50ms open window elapses the breaker must have \
              re-opened and be admitting a fresh probe; if it is still short-circuiting here, \
              Drop::drop is not recording a failure and the breaker will wedge half-open forever"
+        );
+    }
+
+    /// SMA-476 D8 correction: a dropped `ProbePermit` while `Closed` must NOT be treated as a
+    /// failure. Axum drops handler futures on client disconnect and `serve_http` wraps the
+    /// router in a `TimeoutLayer`, so without this the breaker would open against a perfectly
+    /// healthy Redis purely because clients hung up — a dropped permit means no result was ever
+    /// observed, so it is not evidence about the backend.
+    #[test]
+    fn a_dropped_probe_permit_while_closed_does_not_open_the_breaker() {
+        let b = test_breaker();
+
+        drop(pass(&b)); // never records an outcome
+        drop(pass(&b));
+        drop(pass(&b)); // FAILURE_THRESHOLD (3) abandoned permits
+
+        assert!(
+            matches!(b.admit(), Admission::Pass(_)),
+            "SMA-476 D8: a dropped ProbePermit while Closed must NOT count as a failure — a \
+             dropped permit means no result was ever observed, so treating it as a failure lets \
+             cancelled client requests (axum drops handler futures on disconnect; serve_http's \
+             TimeoutLayer) trip the breaker against a perfectly healthy Redis"
         );
     }
 

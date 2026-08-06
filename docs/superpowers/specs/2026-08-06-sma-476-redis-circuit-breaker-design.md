@@ -288,18 +288,34 @@ atomic compare-and-swap under the same `std::sync::Mutex`. Every other concurren
 unrelated request latencies to one probe's dial and rebuild the thundering herd the breaker
 exists to prevent.
 
-The probe's outcome is delivered by an **RAII guard**, not by a bare `record(result)` call. This
-is not stylistic. The probe runs inside an axum handler, and axum drops handler futures on client
-disconnect (`serve_http` also wraps the router in a `TimeoutLayer`). With a bare call, a probe
-future dropped mid-await would leave the breaker HalfOpen **forever**: the CAS has already fired
-so no second probe is ever admitted, no success ever resets it, and every command short-circuits
-for the remaining process lifetime — a silent, permanent cache bypass, and on the JWKS handle,
-permanent 503s until restart.
+The probe's outcome is delivered by an **RAII guard** (`ProbePermit`), not by a bare
+`record(result)` call. This is not stylistic. The probe runs inside an axum handler, and axum
+drops handler futures on client disconnect (`serve_http` also wraps the router in a
+`TimeoutLayer`). With a bare call, a probe future dropped mid-await would leave the breaker
+HalfOpen **forever**: the CAS has already fired so no second probe is ever admitted, no success
+ever resets it, and every command short-circuits for the remaining process lifetime — a silent,
+permanent cache bypass, and on the JWKS handle, permanent 503s until restart.
+
+`ProbePermit` is issued for **every** admitted command, in every state, not only half-open
+probes — so what `Drop` does with an unreported permit has to be right in Closed and Open too, not
+just in HalfOpen. A dropped permit means **no result was ever observed**: it is not evidence about
+the backend at all, only about the caller (a client disconnect, or `serve_http`'s
+`TimeoutLayer`). Treating "no information" as "failure" is a category error, and in the Closed
+state it is actively harmful — axum drops handler futures on client disconnect, so three
+*cancelled*, not failed, client requests would trip `FAILURE_THRESHOLD` and open the breaker
+against a perfectly healthy Redis; on the fail-closed JWKS handle that is `OPEN_DURATION` (2 s)
+during which every token-authenticated request 503s for a reason that has nothing to do with
+Redis. (Surfaced by code review; the fix is `Drop` scoping its action to HalfOpen, below.)
+
+**HalfOpen is the one state where an abandoned permit is a wedge hazard**, for the reason above:
+the CAS has already fired, so nothing else will ever re-arm that window before
+`HALF_OPEN_DEADLINE`.
 
 Two independent defences, because this failure mode is severe and silent:
 
-1. The guard's `Drop` records a **failure** when neither success nor failure was recorded,
-   re-opening the window.
+1. The guard's `Drop` records a **failure**, re-opening the window — but **only when the breaker
+   is currently HalfOpen**. In Closed and Open, `Drop` is a no-op: there is no wedge to guard
+   against, and counting the drop would be the category error above.
 2. A staleness deadline: `HALF_OPEN_DEADLINE = 5s`. If the state has been HalfOpen longer than
    that, another probe is admitted regardless. Five seconds comfortably exceeds a worst-case
    ~2.1 s dial, so it never pre-empts a probe that is merely slow.
@@ -431,9 +447,11 @@ struct Breaker {
 
 `Breaker::admit()` locks, applies D7/D8's transitions, drops the guard, and returns either a
 short-circuit decision or a `ProbePermit` RAII guard. `ProbePermit::record(&RedisResult<_>)`
-classifies via D5 and consumes the guard; its `Drop` records a failure if `record` was never
-called (D8). Any state change sets the gauge and increments the transitions counter (D10). The
-mutex guard is never held across an await (D3).
+classifies via D5 and consumes the guard; if `record` was never called, its `Drop` records a
+failure **only when the breaker is currently HalfOpen** — in Closed and Open it is a no-op,
+because an unrecorded drop is not evidence about the backend (D8). Any state change sets the
+gauge and increments the transitions counter (D10). The mutex guard is never held across an await
+(D3).
 
 `RedisHandle` is `pub` inside the `pub(crate)` module, with private fields, `Clone` (sharing the
 breaker `Arc` — D1), and implements `ConnectionLike`:
@@ -532,8 +550,11 @@ Docker-free, no sockets; a `Breaker` constructed with a 50 ms window.
 - After the window: exactly one probe admitted out of N concurrent `admit()` calls; the other
   N−1 short-circuit rather than block (D8).
 - Probe success → Closed; probe failure → Open for another full window.
-- **A dropped `ProbePermit` re-opens** — the D8 wedge guard. Written by obtaining a permit and
-  dropping it without calling `record`.
+- **A dropped `ProbePermit` re-opens a HalfOpen breaker** — the D8 wedge guard. Written by
+  obtaining a permit while HalfOpen and dropping it without calling `record`.
+- **A dropped `ProbePermit` does NOT open a Closed breaker** — the D8 correction. Drops
+  `FAILURE_THRESHOLD` permits while Closed and asserts the breaker is still admitting; a failure
+  here means cancelled client requests can trip the breaker against a healthy backend.
 - **A HalfOpen state older than `HALF_OPEN_DEADLINE` admits another probe** — the second D8
   defence, in case the first is ever refactored away.
 - Classifier (D5): `ErrorKind::Io` counts; a timeout-flavoured `Io` counts (the blackhole case);
