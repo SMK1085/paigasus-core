@@ -300,6 +300,9 @@ pub struct OutboxConfig {
     /// Retention for the table the relay drains — see [`OutboxRetentionConfig`].
     #[serde(default)]
     pub retention: OutboxRetentionConfig,
+    /// The delivery sink the relay drains into — see [`PublisherConfig`].
+    #[serde(default)]
+    pub publisher: PublisherConfig,
 }
 
 /// `event_outbox` retention (SMA-469) — the knobs for
@@ -347,6 +350,97 @@ impl Default for OutboxRetentionConfig {
             batch_size: 1_000,
             max_batches_per_tick: 50,
         }
+    }
+}
+
+/// The outbox relay's delivery sink (SMA-471). Mirrors `[authn.jwks_cache]` /
+/// `[authz.cache]` field-for-field: a `backend` enum plus the connection fields the non-default
+/// backend needs, all `Option` with NO default so `validate` can require them meaningfully.
+///
+/// Defaults to `tracing`, so an absent `[outbox.publisher]` block — and every existing config
+/// file — keeps working with no broker available (SMA-471 D12).
+///
+/// `Debug`/`Serialize` are hand-rolled rather than derived (see the impls below `PublisherBackend`)
+/// so `url` — which may carry credentials (`nats://user:pass@host`) — never round-trips into a
+/// log line or a `readyz` config dump; mirrors `RawPepper`'s redaction idiom above. Unlike
+/// `RawPepper`, `Serialize` is still needed here (`OutboxConfig`/`IamConfig`'s derived
+/// `Serialize` does not skip this field the way `ApiKeyConfig` skips `pepper`), so both
+/// directions are hand-rolled instead of one being omitted entirely.
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+pub struct PublisherConfig {
+    pub backend: PublisherBackend,
+    /// Required when `backend = "nats"`. May carry credentials (`nats://user:pass@host`), so it
+    /// is redacted in `Debug`/`Serialize` — see the manual impls below.
+    pub url: Option<String>,
+    pub stream: String,
+    /// CloudEvents `source`. MUST be a URI and MUST stay stable for a stream's lifetime:
+    /// consumers dedup on `id` alone while CloudEvents scopes identity to `(source, id)`
+    /// (SMA-471 D6).
+    pub source: String,
+    pub publish_timeout_secs: u64,
+    /// JetStream's per-stream dedup window. A COVERAGE window, not a guarantee — see
+    /// `IamConfig::validate` and SMA-471 D3/D10 for what it does and does not cover.
+    pub duplicate_window_secs: u64,
+    /// Stream `max_age`. `0` = unlimited (warns at startup when this service creates the
+    /// stream): an unbounded `File` stream grows until the broker's disk fills.
+    pub max_age_secs: u64,
+    /// Path to a NATS `.creds` (JWT + nkey seed). A path, not a secret — no redaction needed.
+    pub credentials_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PublisherBackend {
+    Tracing,
+    Nats,
+}
+
+impl Default for PublisherConfig {
+    fn default() -> Self {
+        PublisherConfig {
+            backend: PublisherBackend::Tracing,
+            url: None,
+            stream: "IAM_EVENTS".to_string(),
+            source: "urn:paigasus:iam".to_string(),
+            publish_timeout_secs: 2,
+            duplicate_window_secs: 3_600,
+            max_age_secs: 604_800,
+            credentials_file: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for PublisherConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublisherConfig")
+            .field("backend", &self.backend)
+            .field("url", &self.url.as_ref().map(|_| "<redacted>"))
+            .field("stream", &self.stream)
+            .field("source", &self.source)
+            .field("publish_timeout_secs", &self.publish_timeout_secs)
+            .field("duplicate_window_secs", &self.duplicate_window_secs)
+            .field("max_age_secs", &self.max_age_secs)
+            .field("credentials_file", &self.credentials_file)
+            .finish()
+    }
+}
+
+impl Serialize for PublisherConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("PublisherConfig", 8)?;
+        state.serialize_field("backend", &self.backend)?;
+        state.serialize_field("url", &self.url.as_ref().map(|_| "<redacted>"))?;
+        state.serialize_field("stream", &self.stream)?;
+        state.serialize_field("source", &self.source)?;
+        state.serialize_field("publish_timeout_secs", &self.publish_timeout_secs)?;
+        state.serialize_field("duplicate_window_secs", &self.duplicate_window_secs)?;
+        state.serialize_field("max_age_secs", &self.max_age_secs)?;
+        state.serialize_field("credentials_file", &self.credentials_file)?;
+        state.end()
     }
 }
 
@@ -441,11 +535,15 @@ struct AuditDefaults {
     query_max_window_days: u32,
 }
 
-// Mirrors `OutboxConfig` field-for-field. `poll_interval_secs = 5` / `batch_size = 100` /
-// `max_attempts = 5` are the spec-example steady-state values (frequent enough to keep
-// `event_outbox` drained close to real time, generous enough to absorb a burst without an
-// oversized single transaction); `relay_enabled = true` because the relay is the intended
-// steady-state behavior (see `OutboxConfig`'s doc for the disabled path).
+// Mirrors `OutboxConfig` field-for-field. `poll_interval_secs = 5` / `batch_size = 100` are the
+// spec-example steady-state values (frequent enough to keep `event_outbox` drained close to real
+// time, generous enough to absorb a burst without an oversized single transaction);
+// `relay_enabled = true` because the relay is the intended steady-state behavior (see
+// `OutboxConfig`'s doc for the disabled path). `max_attempts = 60` (SMA-471 D9, raised from 5) so
+// a routine broker restart does not dead-letter the in-flight backlog before it recovers.
+// `publisher` defaults to the `tracing` backend (see `PublisherConfig`'s doc) so an absent
+// `[outbox.publisher]` block — and every pre-SMA-471 config file — keeps working with no broker
+// available.
 #[derive(Serialize)]
 struct OutboxDefaults {
     relay_enabled: bool,
@@ -453,6 +551,7 @@ struct OutboxDefaults {
     batch_size: u64,
     max_attempts: u32,
     retention: OutboxRetentionConfig,
+    publisher: PublisherConfig,
 }
 
 impl Default for Defaults {
@@ -543,8 +642,9 @@ impl Default for OutboxDefaults {
             relay_enabled: true,
             poll_interval_secs: 5,
             batch_size: 100,
-            max_attempts: 5,
+            max_attempts: 60,
             retention: OutboxRetentionConfig::default(),
+            publisher: PublisherConfig::default(),
         }
     }
 }
@@ -613,6 +713,7 @@ impl Default for OutboxConfig {
             batch_size: d.batch_size,
             max_attempts: d.max_attempts,
             retention: d.retention,
+            publisher: d.publisher,
         }
     }
 }
@@ -851,6 +952,54 @@ impl IamConfig {
         }
         if self.outbox.max_attempts == 0 {
             return Err("outbox.max_attempts must be at least 1 (0 would park every outbox row on its first failed publish attempt)".to_string());
+        }
+
+        // --- SMA-471: `[outbox.publisher]` config ----------------------------------------------
+        // Every rule below except (6) is gated on the `nats` backend — a `tracing` deployment
+        // must never fail boot over a broker it does not run.
+        if self.outbox.publisher.backend == PublisherBackend::Nats {
+            let p = &self.outbox.publisher;
+            if p.url.is_none() {
+                return Err("outbox.publisher.backend = \"nats\" requires outbox.publisher.url".to_string());
+            }
+            if p.publish_timeout_secs == 0 {
+                return Err("outbox.publisher.publish_timeout_secs must be at least 1".to_string());
+            }
+            if p.duplicate_window_secs == 0 {
+                return Err("outbox.publisher.duplicate_window_secs must be at least 1".to_string());
+            }
+            if p.stream.is_empty() {
+                return Err("outbox.publisher.stream must not be empty".to_string());
+            }
+            // A relative reference is legal CloudEvents but an absolute URI is RECOMMENDED, and
+            // free text (a space) is not a URI-reference at all. Reject what is clearly not one.
+            if p.source.is_empty() || p.source.chars().any(char::is_whitespace) {
+                return Err("outbox.publisher.source must be a URI with no whitespace".to_string());
+            }
+            // SMA-471 D10. A FLOOR, not a guarantee: it catches the one republish gap fully
+            // determined by config (an operator raising `max_attempts` past the window). It does
+            // NOT cover a tick rollback, a crash-restart, or an operator dead-letter replay —
+            // see the spec's D3. `saturating_mul` because `max_attempts` is u32 and the product
+            // overflows a naive multiply.
+            let retry_span = u64::from(self.outbox.max_attempts).saturating_mul(self.outbox.poll_interval_secs);
+            if p.duplicate_window_secs <= retry_span {
+                return Err(format!(
+                    "outbox.publisher.duplicate_window_secs ({}) must exceed outbox.max_attempts × outbox.poll_interval_secs ({} × {} = {}) — otherwise a row's last retry falls outside JetStream's dedup window and double-delivers",
+                    p.duplicate_window_secs, self.outbox.max_attempts, self.outbox.poll_interval_secs, retry_span
+                ));
+            }
+            // SMA-471 D8: JetStream itself requires duplicate_window <= max_age when max_age > 0.
+            if p.max_age_secs != 0 && p.max_age_secs <= p.duplicate_window_secs {
+                return Err(format!(
+                    "outbox.publisher.max_age_secs ({}) must exceed duplicate_window_secs ({}), or be 0 for unlimited",
+                    p.max_age_secs, p.duplicate_window_secs
+                ));
+            }
+        }
+        // (6) Not gated: a config that names a broker but never spawns the relay publishes
+        // nothing while looking correct.
+        if !self.outbox.relay_enabled && self.outbox.publisher.backend == PublisherBackend::Nats {
+            return Err("outbox.relay_enabled = false with outbox.publisher.backend = \"nats\" would publish nothing — set backend = \"tracing\" or enable the relay".to_string());
         }
 
         // --- SMA-469: `[outbox.retention]` config ----------------------------------------------
@@ -1893,7 +2042,9 @@ mod tests {
             assert!(cfg.outbox.relay_enabled, "relay_enabled must default to true");
             assert_eq!(cfg.outbox.poll_interval_secs, 5);
             assert_eq!(cfg.outbox.batch_size, 100);
-            assert_eq!(cfg.outbox.max_attempts, 5);
+            // SMA-471 D9: raised from 5 so a routine broker restart does not dead-letter the
+            // in-flight backlog — see `outbox_max_attempts_defaults_to_sixty` for the dedicated test.
+            assert_eq!(cfg.outbox.max_attempts, 60);
             assert!(cfg.validate().is_ok(), "outbox defaults alone should pass validation");
             Ok(())
         });
@@ -2124,6 +2275,211 @@ mod tests {
             );
             Ok(())
         });
+    }
+
+    // --- SMA-471: `[outbox.publisher]` config -----------------------------------------------
+
+    /// SMA-471 test helper: loads an `IamConfig` from `extra_toml` layered on top of the same
+    /// minimal valid base (one issuer + a valid `[api_keys]` pepper) every `[outbox]`/
+    /// `[outbox.retention]`/`[metrics]` test above already builds by hand via
+    /// `format!("{}\n[api_keys]\npepper = \"{}\"", minimal_issuer_toml(), valid_pepper_b64())` —
+    /// same `Jail`/`IamConfig::figment()` construction idiom, just factored out because every
+    /// `[outbox.publisher]` test below needs it.
+    fn load_config_with(extra_toml: &str) -> IamConfig {
+        let mut loaded = None;
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"\n{extra_toml}", minimal_issuer_toml(), valid_pepper_b64()))?;
+            loaded = Some(IamConfig::figment().extract()?);
+            Ok(())
+        });
+        loaded.expect("figment extraction to succeed for a well-formed test fixture")
+    }
+
+    /// The minimal valid config with no `[outbox.publisher]` override — every publisher field on
+    /// its documented default.
+    fn load_minimal_config() -> IamConfig {
+        load_config_with("")
+    }
+
+    /// Loads `extra_toml` on top of the minimal base and returns `validate()`'s result directly.
+    fn validate_result(extra_toml: &str) -> Result<(), String> {
+        load_config_with(extra_toml).validate()
+    }
+
+    /// Loads `extra_toml`, asserts validation failed, and returns the error string.
+    fn validate_err(extra_toml: &str) -> String {
+        validate_result(extra_toml).expect_err("expected this fixture to fail validation")
+    }
+
+    #[test]
+    fn outbox_publisher_defaults_are_the_tracing_backend() {
+        let cfg = load_minimal_config();
+        assert_eq!(cfg.outbox.publisher.backend, PublisherBackend::Tracing);
+        assert_eq!(cfg.outbox.publisher.url, None);
+        assert_eq!(cfg.outbox.publisher.credentials_file, None);
+        assert_eq!(cfg.outbox.publisher.stream, "IAM_EVENTS");
+        assert_eq!(cfg.outbox.publisher.source, "urn:paigasus:iam");
+        assert_eq!(cfg.outbox.publisher.publish_timeout_secs, 2);
+        assert_eq!(cfg.outbox.publisher.duplicate_window_secs, 3_600);
+        assert_eq!(cfg.outbox.publisher.max_age_secs, 604_800);
+    }
+
+    /// D9: raised from 5 so a routine broker restart does not dead-letter the in-flight backlog.
+    #[test]
+    fn outbox_max_attempts_defaults_to_sixty() {
+        assert_eq!(load_minimal_config().outbox.max_attempts, 60);
+    }
+
+    #[test]
+    fn nats_backend_requires_a_url() {
+        let err = validate_err(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+        "#,
+        );
+        assert!(err.contains("outbox.publisher.url"), "{err}");
+    }
+
+    /// D10: the floor is necessary-not-sufficient, and the message must name all three fields.
+    #[test]
+    fn duplicate_window_must_exceed_the_retry_span() {
+        let err = validate_err(
+            r#"
+            [outbox]
+            max_attempts = 60
+            poll_interval_secs = 5
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://localhost:4222"
+            duplicate_window_secs = 100
+        "#,
+        );
+        assert!(err.contains("duplicate_window_secs"), "{err}");
+        assert!(err.contains("max_attempts"), "{err}");
+        assert!(err.contains("poll_interval_secs"), "{err}");
+    }
+
+    /// Strict `>`: equality is REJECTED, one second more is accepted.
+    #[test]
+    fn duplicate_window_boundary_is_exclusive() {
+        let at = r#"
+            [outbox]
+            max_attempts = 10
+            poll_interval_secs = 5
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://localhost:4222"
+            duplicate_window_secs = 50
+            max_age_secs = 0
+        "#;
+        assert!(validate_result(at).is_err(), "equality must be rejected");
+        assert!(validate_result(&at.replace("duplicate_window_secs = 50", "duplicate_window_secs = 51")).is_ok());
+    }
+
+    /// A `u32::MAX` max_attempts must be rejected, not overflow-panic in the product.
+    #[test]
+    fn a_huge_max_attempts_is_rejected_not_panicking() {
+        let err = validate_err(
+            r#"
+            [outbox]
+            max_attempts = 4294967295
+            poll_interval_secs = 3600
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://localhost:4222"
+            duplicate_window_secs = 3600
+        "#,
+        );
+        assert!(err.contains("duplicate_window_secs"), "{err}");
+    }
+
+    /// D10: the floor is gated on the backend — a tracing deployment must not fail boot over NATS.
+    #[test]
+    fn the_window_floor_does_not_apply_to_the_tracing_backend() {
+        assert!(
+            validate_result(
+                r#"
+            [outbox]
+            max_attempts = 60
+            poll_interval_secs = 5
+            [outbox.publisher]
+            backend = "tracing"
+            duplicate_window_secs = 1
+        "#
+            )
+            .is_ok()
+        );
+    }
+
+    /// D8: JetStream requires duplicate_window <= max_age when max_age > 0. 0 means unlimited.
+    #[test]
+    fn max_age_must_exceed_the_duplicate_window_unless_unlimited() {
+        let base = r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://localhost:4222"
+            duplicate_window_secs = 3600
+        "#;
+        assert!(validate_result(&format!("{base}\nmax_age_secs = 1800")).is_err());
+        assert!(validate_result(&format!("{base}\nmax_age_secs = 0")).is_ok(), "0 = unlimited");
+        assert!(validate_result(&format!("{base}\nmax_age_secs = 7200")).is_ok());
+    }
+
+    #[test]
+    fn source_must_parse_as_a_uri() {
+        let err = validate_err(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://localhost:4222"
+            source = "my prod cluster"
+        "#,
+        );
+        assert!(err.contains("outbox.publisher.source"), "{err}");
+    }
+
+    /// A config that publishes nothing while claiming a broker must not boot silently.
+    #[test]
+    fn a_disabled_relay_with_the_nats_backend_is_rejected() {
+        let err = validate_err(
+            r#"
+            [outbox]
+            relay_enabled = false
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://localhost:4222"
+        "#,
+        );
+        assert!(err.contains("relay_enabled"), "{err}");
+        assert!(err.contains("outbox.publisher.backend"), "{err}");
+    }
+
+    #[test]
+    fn zero_timeout_and_zero_window_are_rejected() {
+        for field in ["publish_timeout_secs", "duplicate_window_secs"] {
+            let err = validate_err(&format!(
+                r#"
+                [outbox.publisher]
+                backend = "nats"
+                url = "nats://localhost:4222"
+                {field} = 0
+            "#
+            ));
+            assert!(err.contains(field), "{field}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_publisher_url_is_redacted_in_debug() {
+        let cfg = PublisherConfig {
+            url: Some("nats://user:hunter2@host:4222".to_string()),
+            ..PublisherConfig::default()
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains("hunter2"), "credentials leaked into Debug: {rendered}");
+        assert!(rendered.contains("redacted"), "{rendered}");
     }
 
     // --- SMA-446 Unit 3: `[metrics]` config -------------------------------------------------

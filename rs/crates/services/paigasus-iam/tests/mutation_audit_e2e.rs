@@ -121,8 +121,9 @@ async fn mutation_emits_correlated_outbox_and_audit_rows_and_the_relay_publishes
     assert_eq!(outbox_row.correlation_id, audit_row.correlation_id, "the outbox and audit rows must share one correlation id");
 
     // (e) run ONE `OutboxRelay` tick, constructed over the SAME db the app is using, with a
-    // counting publisher and `max_attempts`/`batch_size` mirroring `OutboxConfig`'s defaults ->
-    // the outbox row now has `published_at` set, and the counting publisher saw it.
+    // counting publisher and `max_attempts`/`batch_size` fixed for this test (no longer tracking
+    // `OutboxConfig`'s defaults, which SMA-471 raised `max_attempts` on) -> the outbox row now
+    // has `published_at` set, and the counting publisher saw it.
     let relay = OutboxRelay::new(state.db.clone(), Duration::from_secs(60), 100, 5);
     let publisher = Arc::new(CountingPublisher::default());
     let report = relay.tick(publisher.as_ref()).await.expect("relay tick succeeds");
