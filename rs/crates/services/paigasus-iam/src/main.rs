@@ -358,13 +358,13 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 27 metric families `paigasus-iam` emits
+/// Registers `# HELP`/`# TYPE` exposition text for the 32 metric families `paigasus-iam` emits
 /// directly (spec §4.1; includes the SMA-467 audit partition-maintenance families, the
 /// SMA-469 outbox retention/dead-letter families, the SMA-476 Redis circuit-breaker families,
-/// and the SMA-481 system-row-retirement family), via the `names::` consts so the string used
-/// here can't drift from the one used at the increment/set call site, plus the 2 gRPC families
-/// via `paigasus_observability::describe_grpc()`. Mirrors the meanings documented in
-/// `docs/ops/RUNBOOK-observability.md` §2.1/§2.2.
+/// the SMA-481 system-row-retirement family, and the SMA-471 NATS publisher families), via the
+/// `names::` consts so the string used here can't drift from the one used at the increment/set
+/// call site, plus the 2 gRPC families via `paigasus_observability::describe_grpc()`. Mirrors
+/// the meanings documented in `docs/ops/RUNBOOK-observability.md` §2.1/§2.2.
 fn describe_iam_metrics() {
     use metrics::{describe_counter, describe_gauge, describe_histogram};
 
@@ -471,6 +471,19 @@ fn describe_iam_metrics() {
     describe_counter!(
         names::IAM_SYSTEM_ROWS_RETIRED_TOTAL,
         "Retirements of orphaned system-owned policy/role rows, by outcome (retired/blocked/refused)."
+    );
+
+    describe_counter!(
+        names::IAM_NATS_PUBLISH_DUPLICATES_TOTAL,
+        "JetStream acks returned as duplicates — a relay redelivery collapsed by Nats-Msg-Id dedup."
+    );
+    describe_histogram!(
+        names::IAM_NATS_PUBLISH_DURATION_SECONDS,
+        "JetStream publish ack round-trip latency, inside the relay's lock-holding transaction."
+    );
+    describe_gauge!(
+        names::IAM_NATS_CONNECTED,
+        "1 when the NATS client reports a live connection, 0 otherwise. Per-replica: aggregate max by (job)."
     );
 }
 

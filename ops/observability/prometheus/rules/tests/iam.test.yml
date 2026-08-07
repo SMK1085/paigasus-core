@@ -47,6 +47,25 @@ tests:
           - exp_labels: { severity: warning }
             exp_annotations: { summary: "IAM outbox parked a poison event" }
 
+  # IamOutboxPublishFailures: increase(...[5m]) > 0 for 5m.
+  # The flat control series is what makes this test discriminating: a rule written `>= 0` would
+  # fire on it, and the negative expectation below would fail.
+  - interval: 1m
+    input_series:
+      - series: 'iam_outbox_relay_publish_failures_total{job="iam", instance="a"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10 11'
+      - series: 'iam_outbox_relay_publish_failures_total{job="iam", instance="control"}'
+        values: '0+0x11'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: IamOutboxPublishFailures
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: IamOutboxPublishFailures
+        exp_alerts:
+          - exp_labels: { severity: warning, job: "iam", instance: "a" }
+            exp_annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)" }
+
   # IamOutboxRelayStalled: rate(...[10m]) == 0, for: 10m — the ticks counter is flat (not ticking).
   - interval: 1m
     input_series:

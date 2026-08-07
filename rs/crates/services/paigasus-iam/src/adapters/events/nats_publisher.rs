@@ -26,7 +26,9 @@ use async_nats::jetstream::context::{CreateStreamError, PublishError as JetStrea
 use async_nats::jetstream::message::PublishMessage;
 use async_nats::jetstream::{self, publish::PublishAck, stream::StorageType};
 use async_trait::async_trait;
+use metrics::{counter, gauge, histogram};
 use paigasus_iam_core::{DomainEvent, EventPublisher, PublishError};
+use paigasus_observability::names;
 
 use crate::adapters::events::cloud_event::{CloudEvent, render_id};
 use crate::config::PublisherConfig;
@@ -230,6 +232,24 @@ impl NatsEventPublisher {
         let info = stream.cached_info();
         verify_stream(&cfg.stream, &info.config, want_window)?;
 
+        // Primed HERE, not in `describe_iam_metrics`: that runs only when `metrics.enabled`, and
+        // a metrics-rs counter first appears at the value of its first increment — an unprimed
+        // counter can never satisfy an `increase() > 0` alert on the FIRST duplicate. Same
+        // constructor-priming pattern as `redis_conn::Breaker::with_durations`.
+        counter!(names::IAM_NATS_PUBLISH_DUPLICATES_TOTAL).increment(0);
+
+        // See IAM_NATS_CONNECTED's doc for why this cannot live inside `publish`. `js.client()`
+        // (not the `client` local above, already moved into `jetstream::new`) hands back a cheap
+        // clone of the same multiplexed connection handle.
+        let probe = js.client();
+        tokio::spawn(async move {
+            loop {
+                let up = probe.connection_state() != async_nats::connection::State::Disconnected;
+                gauge!(names::IAM_NATS_CONNECTED).set(if up { 1.0 } else { 0.0 });
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+
         if cfg.max_age_secs == 0 {
             tracing::warn!(stream = %cfg.stream, "outbox.publisher.max_age_secs = 0 — the JetStream stream has no age limit and will grow until the broker's disk fills");
         }
@@ -274,7 +294,14 @@ impl NatsEventPublisher {
             return Err(NatsPublisherError::Disconnected);
         }
 
+        let started = std::time::Instant::now();
         let result = self.send_and_await_ack(ev).await;
+        histogram!(names::IAM_NATS_PUBLISH_DURATION_SECONDS).record(started.elapsed().as_secs_f64());
+        if let Ok(ack) = &result
+            && ack.duplicate
+        {
+            counter!(names::IAM_NATS_PUBLISH_DUPLICATES_TOTAL).increment(1);
+        }
         match &result {
             Ok(_) => self.breaker.on_success(),
             Err(_) => self.breaker.on_failure(),

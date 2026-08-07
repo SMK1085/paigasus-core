@@ -127,6 +127,19 @@ pub const IAM_AUDIT_DEFAULT_PARTITION_ROWS: &str = "iam_audit_default_partition_
 /// durable evidence, but durable is not the same as monitored — nothing polls `audit_log` for
 /// this action today, so this counter is the only thing that can page anyone on it.
 pub const IAM_SYSTEM_ROWS_RETIRED_TOTAL: &str = "iam_system_rows_retired_total";
+// IAM NATS publisher (SMA-471)
+/// Acks returned with `duplicate = true` — JetStream collapsing a relay redelivery. A rising
+/// rate means publish acks are being lost and the relay is retrying. Primed at zero by
+/// `NatsEventPublisher::connect` so the FIRST duplicate can satisfy an `increase() > 0` alert.
+pub const IAM_NATS_PUBLISH_DUPLICATES_TOTAL: &str = "iam_nats_publish_duplicates_total";
+/// Ack round-trip latency. On the critical path of a lock-holding relay transaction, so this is
+/// a database-health metric as much as a broker one.
+pub const IAM_NATS_PUBLISH_DURATION_SECONDS: &str = "iam_nats_publish_duration_seconds";
+/// 1 when the client reports a live connection, 0 otherwise. Sampled by a BACKGROUND task, not
+/// set inside `publish`: during a total outage every row eventually parks, `publish` stops being
+/// called, and a publish-driven gauge would freeze exactly when it matters. Every replica sets
+/// its own value, so aggregate `max by (job)` — never `sum`.
+pub const IAM_NATS_CONNECTED: &str = "iam_nats_connected";
 
 /// Every metric family this workspace emits — the drift test (`tests/drift.rs`) extracts every
 /// `iam_`/`gateway_`-prefixed identifier from the committed dashboard/rule `expr`s, strips a
@@ -172,6 +185,9 @@ pub const ALL: &[&str] = &[
     IAM_AUDIT_PARTITIONS_DROPPED_TOTAL,
     IAM_AUDIT_DEFAULT_PARTITION_ROWS,
     IAM_SYSTEM_ROWS_RETIRED_TOTAL,
+    IAM_NATS_PUBLISH_DUPLICATES_TOTAL,
+    IAM_NATS_PUBLISH_DURATION_SECONDS,
+    IAM_NATS_CONNECTED,
 ];
 
 #[cfg(test)]

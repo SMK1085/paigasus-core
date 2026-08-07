@@ -17,6 +17,15 @@ groups:
         for: 0m
         labels: { severity: warning }
         annotations: { summary: "IAM outbox parked a poison event" }
+      # SMA-471: with a real broker, publish failures are the earliest signal that delivery is
+      # broken — earlier than parking (max_attempts × poll_interval) and earlier than backlog
+      # age. The counter is already primed: relay.rs increments it by 0 on every tick, so the
+      # series exists before the first failure and `increase()` can fire on it.
+      - alert: IamOutboxPublishFailures
+        expr: increase(iam_outbox_relay_publish_failures_total[5m]) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "IAM outbox publishes are failing (broker unreachable or rejecting)" }
       - alert: IamOutboxRelayStalled
         expr: rate(iam_outbox_relay_ticks_total[10m]) == 0
         for: 10m
