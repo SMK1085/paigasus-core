@@ -245,6 +245,10 @@ struct Inner {
     state: BreakerState,
     consecutive_failures: u32,
     changed_at: Instant,
+    /// Bumped by every [`Breaker::transition`] call. Lets a [`ProbePermit`] tell whether the
+    /// breaker has moved on since it was issued — see [`ProbePermit`]'s doc for the race this
+    /// guards against.
+    epoch: u64,
 }
 
 /// Per-connection circuit breaker (SMA-476 D1). `Arc`-shared, so every clone of a
@@ -277,9 +281,21 @@ pub(crate) enum Admission {
 /// `Open`) it is a no-op: a dropped permit means no result was ever observed, so it is not
 /// evidence about the backend — treating "no information" as "failure" is a category error, and
 /// in `Closed` it would let cancelled client requests trip the breaker against a healthy Redis.
+///
+/// **Carries the breaker's `epoch` as of admission** (post any transition [`Breaker::admit`]
+/// itself performed) to guard a second, orthogonal race: a command admitted while `Closed` can
+/// still be in flight when three *other* commands fail and open the breaker; if that command then
+/// completes with `Ok`, applying it unconditionally would transition straight back to `Closed`,
+/// bypassing the open window entirely moments after it began. Both [`ProbePermit::record`] and
+/// the abandoned-probe path ([`Breaker::on_probe_abandoned`]) apply their outcome only if this
+/// epoch still matches the breaker's *current* epoch — a mismatch means the breaker has moved on
+/// (via some other transition) since this permit was issued, so the outcome is stale and carries
+/// no information about the current window.
 pub(crate) struct ProbePermit {
     breaker: Arc<Breaker>,
     reported: bool,
+    /// The breaker's epoch at the moment this permit was issued. See the struct doc.
+    epoch: u64,
 }
 
 impl ProbePermit {
@@ -292,9 +308,9 @@ impl ProbePermit {
             Err(err) => !counts_as_failure(err),
         };
         if healthy {
-            self.breaker.on_success();
+            self.breaker.on_success(self.epoch);
         } else {
-            self.breaker.on_failure();
+            self.breaker.on_failure(self.epoch);
         }
     }
 }
@@ -302,7 +318,7 @@ impl ProbePermit {
 impl Drop for ProbePermit {
     fn drop(&mut self) {
         if !self.reported {
-            self.breaker.on_probe_abandoned();
+            self.breaker.on_probe_abandoned(self.epoch);
         }
     }
 }
@@ -324,6 +340,7 @@ impl Breaker {
                 state: BreakerState::Closed,
                 consecutive_failures: 0,
                 changed_at: Instant::now(),
+                epoch: 0,
             }),
         })
     }
@@ -333,7 +350,13 @@ impl Breaker {
     /// The mutex guard is dropped before returning and is NEVER held across an `.await` — holding
     /// it would make the returned future `!Send` and break `AsyncCommands`' blanket impl, which
     /// requires `Send + Sync` (`redis-1.3.0/src/commands/mod.rs:3288`).
+    ///
+    /// Captures the CURRENT epoch — post any transition this call itself performs — into the
+    /// returned [`ProbePermit`], so a permit admitted in `Closed` carries that epoch, and a probe
+    /// admitted by the very transition into `HalfOpen` carries the epoch that transition just set
+    /// (see [`ProbePermit`]'s doc for why this matters).
     pub(crate) fn admit(self: &Arc<Self>) -> Admission {
+        let epoch;
         {
             let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             match inner.state {
@@ -354,23 +377,39 @@ impl Breaker {
                     self.transition(&mut inner, BreakerState::HalfOpen);
                 }
             }
+            epoch = inner.epoch;
         }
         Admission::Pass(ProbePermit {
             breaker: Arc::clone(self),
             reported: false,
+            epoch,
         })
     }
 
-    fn on_success(&self) {
+    /// Applies a success IF `epoch` still matches the breaker's current epoch — see
+    /// [`ProbePermit`]'s doc. A mismatch means the breaker transitioned (e.g. opened on other
+    /// commands' failures) since this permit was issued, so this outcome is stale and must not
+    /// bypass whatever window is now in effect.
+    fn on_success(&self, epoch: u64) {
         let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if inner.epoch != epoch {
+            return;
+        }
         inner.consecutive_failures = 0;
         if inner.state != BreakerState::Closed {
             self.transition(&mut inner, BreakerState::Closed);
         }
     }
 
-    fn on_failure(&self) {
+    /// Applies a failure IF `epoch` still matches the breaker's current epoch — see
+    /// [`ProbePermit`]'s doc. In practice a stale failure is redundant with `Open`'s existing
+    /// no-op arm below, but checking uniformly with `on_success` keeps the two outcome paths
+    /// symmetric and correct if that arm's behaviour ever changes.
+    fn on_failure(&self, epoch: u64) {
         let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if inner.epoch != epoch {
+            return;
+        }
         match inner.state {
             BreakerState::Closed => {
                 inner.consecutive_failures = inner.consecutive_failures.saturating_add(1);
@@ -384,24 +423,34 @@ impl Breaker {
     }
 
     /// Called from [`ProbePermit`]'s `Drop` when a permit was abandoned without recording an
-    /// outcome. Transitions to `Open` ONLY if the breaker is currently `HalfOpen` — that is the
-    /// one state where an abandoned probe is a wedge hazard (the single half-open slot is spent
-    /// and nothing else will ever re-arm it before [`HALF_OPEN_DEADLINE`]). In `Closed` and
-    /// `Open` this is a no-op: a dropped permit means no result was ever observed, so it carries
-    /// no evidence about the backend's health — treating "no information" as "failure" is a
-    /// category error, and in `Closed` it would let cancelled client requests (axum drops
-    /// handler futures on client disconnect; `serve_http`'s `TimeoutLayer` too) open the breaker
-    /// against a perfectly healthy Redis (SMA-476 D8).
-    fn on_probe_abandoned(&self) {
+    /// outcome. Transitions to `Open` ONLY if the breaker is currently `HalfOpen` AND `epoch`
+    /// still matches the breaker's current epoch — that is the one state where an abandoned probe
+    /// is a wedge hazard (the single half-open slot is spent and nothing else will ever re-arm it
+    /// before [`HALF_OPEN_DEADLINE`]), and the epoch check ensures we are re-opening on account of
+    /// THIS abandonment rather than a stale permit from a half-open window that has already been
+    /// re-armed or resolved. In `Closed` and `Open` this is a no-op: a dropped permit means no
+    /// result was ever observed, so it carries no evidence about the backend's health — treating
+    /// "no information" as "failure" is a category error, and in `Closed` it would let cancelled
+    /// client requests (axum drops handler futures on client disconnect; `serve_http`'s
+    /// `TimeoutLayer` too) open the breaker against a perfectly healthy Redis (SMA-476 D8).
+    fn on_probe_abandoned(&self, epoch: u64) {
         let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if inner.epoch != epoch {
+            return;
+        }
         if inner.state == BreakerState::HalfOpen {
             self.transition(&mut inner, BreakerState::Open);
         }
     }
 
+    /// Applies a state transition and bumps [`Inner::epoch`] — the single point where the epoch
+    /// changes, which is what lets a [`ProbePermit`] detect that the breaker has moved on since it
+    /// was issued (SMA-476, CodeRabbit round 1: a late outcome from a pre-transition permit must
+    /// not silently apply to whatever window is current by the time it reports).
     fn transition(&self, inner: &mut Inner, next: BreakerState) {
         inner.state = next;
         inner.changed_at = Instant::now();
+        inner.epoch = inner.epoch.wrapping_add(1);
         if next == BreakerState::Closed {
             inner.consecutive_failures = 0;
         }
@@ -711,6 +760,35 @@ mod tests {
              dropped permit means no result was ever observed, so treating it as a failure lets \
              cancelled client requests (axum drops handler futures on disconnect; serve_http's \
              TimeoutLayer) trip the breaker against a perfectly healthy Redis"
+        );
+    }
+
+    /// CodeRabbit round 1 on SMA-476: a command admitted while `Closed` can still be in flight
+    /// when three OTHER commands fail and open the breaker. Without the epoch guard, that command
+    /// completing with `Ok` calls `on_success`, which unconditionally transitions to `Closed` —
+    /// bypassing the just-started open window entirely. This is the epoch's reason to exist: it
+    /// must NOT close the breaker, which must stay `Open` for the rest of `OPEN_DURATION`.
+    #[test]
+    fn a_late_success_from_a_pre_open_permit_does_not_close_a_freshly_opened_breaker() {
+        let b = test_breaker();
+
+        // Admitted while Closed — this permit's epoch predates the open transition below.
+        let stale_permit = pass(&b);
+
+        // Three OTHER commands fail and open the breaker while the permit above is still held.
+        fail_once(&b);
+        fail_once(&b);
+        fail_once(&b);
+        assert!(matches!(b.admit(), Admission::ShortCircuit), "the breaker must be open before the race is exercised");
+
+        // The stale permit finally reports Ok. Without the epoch guard this would close the
+        // breaker immediately, moments after it opened.
+        stale_permit.record(&Ok(()));
+
+        assert!(
+            matches!(b.admit(), Admission::ShortCircuit),
+            "SMA-476: a late Ok from a permit admitted before the breaker opened must not close \
+             it — the open window must run its full course regardless of stale outcomes"
         );
     }
 
