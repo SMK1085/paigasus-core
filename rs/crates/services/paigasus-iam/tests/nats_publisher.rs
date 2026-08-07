@@ -292,3 +292,75 @@ async fn dedup_survives_a_broker_restart() {
 
     assert_eq!(stream_info(&url).await.state.messages, 1, "dedup state must survive a restart");
 }
+
+/// SMA-471 D11: a stopped broker must fail via the connection-state gate, an order of magnitude
+/// faster than `publish_timeout_secs` — so this test FAILS if the gate is deleted and the ack
+/// timeout provides the bound instead.
+#[tokio::test]
+async fn a_stopped_broker_fails_fast_not_on_the_ack_timeout() {
+    let Some((node, url)) = start_nats().await else { return };
+    let publisher = NatsEventPublisher::connect(&cfg(&url)).await.unwrap();
+    node.stop().await.unwrap();
+
+    // Let the client observe the drop before timing the gate.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let started = std::time::Instant::now();
+    let err = publisher.publish(&event(Uuid::from_u128(5), EventType::PolicyDeleted)).await.expect_err("must fail");
+    let elapsed = started.elapsed();
+
+    assert!(elapsed < std::time::Duration::from_millis(200), "expected the connection-state gate, took {elapsed:?}");
+    assert!(describe_chain(&err).contains("connection is down"), "{}", describe_chain(&err));
+}
+
+/// SMA-471 D11: the relay publishes serially inside ONE lock-holding transaction, so a
+/// blackholed broker must not cost `batch_size × publish_timeout_secs`. This is the test that
+/// distinguishes the breaker from its absence — the stopped-broker case above cannot, because
+/// there `connection_state()` flips to `Disconnected` and the (cheaper) connection-state gate
+/// alone bounds it.
+///
+/// **Deviates from a bare accept-and-never-answer TCP listener** (what an earlier draft of this
+/// test used). Verified against the vendored async-nats 0.50.0 source
+/// (`connector.rs::try_connect_to_server`, `options.rs::connection_timeout` default 5s): the
+/// very first thing a client does after the TCP handshake is wait for the server's `INFO` line,
+/// bounded by `connection_timeout`. A listener that never writes anything therefore fails
+/// `NatsEventPublisher::connect` itself (both the initial handshake AND, even if that were
+/// stubbed out, `get_or_create_stream`'s own request/response) — it can never reach the point of
+/// calling `publish`, so it cannot prove anything about the breaker.
+///
+/// Instead: connect for real against a live, unpaused broker (so the handshake and stream-ensure
+/// both succeed), then **pause the container**. Docker pause freezes the server's process via
+/// the cgroup freezer without closing the TCP connection — the kernel keeps ACKing bytes into the
+/// socket's receive buffer even though no userspace process on the other end will ever read or
+/// respond to them. That is exactly the scenario the breaker exists for: the client's
+/// `connection_state()` stays `Connected` (the default `ping_interval` is 60s, far longer than
+/// this test runs, so the client's own heartbeat never notices), so the connection-state gate
+/// does NOT catch it — only repeated ack-timeout failures accumulating in the breaker do.
+#[tokio::test]
+async fn a_blackholed_broker_does_not_hold_a_batch_open() {
+    let Some((node, url)) = start_nats().await else { return };
+    let mut c = cfg(&url);
+    c.publish_timeout_secs = 1;
+    let publisher = NatsEventPublisher::connect(&c)
+        .await
+        .expect("connect against a live, unpaused broker must succeed")
+        // Shrinks the breaker's open window so this test's bound reflects the breaker's own
+        // cost formula (FAILURE_THRESHOLD × publish_timeout_secs) rather than happening to pass
+        // because a fixed 100-iteration loop can't outrun the production 2s window either way.
+        .with_breaker_durations_for_tests(std::time::Duration::from_millis(200));
+
+    node.pause().await.expect("pause the broker container to blackhole it");
+
+    let started = std::time::Instant::now();
+    for i in 0..100u128 {
+        let _ = publisher.publish(&event(Uuid::from_u128(1000 + i), EventType::RoleGranted)).await;
+    }
+    let elapsed = started.elapsed();
+
+    node.unpause().await.expect("unpause before the container is torn down");
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "100 publishes against a paused (blackholed) broker took {elapsed:?}; without the breaker this is ~100s"
+    );
+}

@@ -38,6 +38,79 @@ const SUBJECT_FILTER: &str = "iam.>";
 /// Structured-mode CloudEvents content type (SMA-471 D6).
 const CONTENT_TYPE: &str = "application/cloudevents+json; charset=utf-8";
 
+/// Consecutive publish failures that open the breaker. Three rather than one, mirroring
+/// `redis_conn.rs`'s `FAILURE_THRESHOLD`: a single blip during a reconnect must not disable the
+/// sink for a whole window.
+const FAILURE_THRESHOLD: u32 = 3;
+
+/// How long an open breaker short-circuits before admitting one probe.
+const OPEN_DURATION: Duration = Duration::from_secs(2);
+
+/// A deliberately minimal consecutive-failure breaker (SMA-471 D11).
+///
+/// **Why this exists at all**: `OutboxRelay::tick` publishes the whole batch inside ONE
+/// transaction holding `FOR UPDATE` locks. At `batch_size = 100` and a 2 s ack timeout, an
+/// unbroken adapter against a blackholed broker holds 100 row locks for ~200 s, blocks
+/// autovacuum, and makes SIGTERM take just as long — past a normal grace period, so the
+/// orchestrator SIGKILLs mid-tick and the batch rolls back. With the breaker a bad tick costs
+/// `FAILURE_THRESHOLD × publish_timeout_secs` instead.
+///
+/// Far simpler than `redis_conn.rs`'s `Breaker`: no half-open permit, no epoch, no metrics
+/// role label. Those exist there because the Redis breaker guards eleven concurrent call sites
+/// on the authz hot path; this one guards a single serial background loop, where a probe that
+/// is admitted and then fails simply re-opens the window on the next `on_failure`.
+#[derive(Debug)]
+struct Breaker {
+    open_duration: Duration,
+    inner: std::sync::Mutex<BreakerInner>,
+}
+
+#[derive(Debug)]
+struct BreakerInner {
+    consecutive_failures: u32,
+    opened_at: Option<std::time::Instant>,
+}
+
+impl Breaker {
+    fn with_durations(open_duration: Duration) -> Breaker {
+        Breaker {
+            open_duration,
+            inner: std::sync::Mutex::new(BreakerInner {
+                consecutive_failures: 0,
+                opened_at: None,
+            }),
+        }
+    }
+
+    /// `true` = go ahead and dial. An open breaker admits exactly one probe per window: the
+    /// `opened_at` reset means the next caller short-circuits again until this probe reports.
+    fn admit(&self) -> bool {
+        let mut inner = self.inner.lock().expect("breaker mutex poisoned");
+        match inner.opened_at {
+            None => true,
+            Some(at) if at.elapsed() >= self.open_duration => {
+                inner.opened_at = Some(std::time::Instant::now());
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    fn on_success(&self) {
+        let mut inner = self.inner.lock().expect("breaker mutex poisoned");
+        inner.consecutive_failures = 0;
+        inner.opened_at = None;
+    }
+
+    fn on_failure(&self) {
+        let mut inner = self.inner.lock().expect("breaker mutex poisoned");
+        inner.consecutive_failures = inner.consecutive_failures.saturating_add(1);
+        if inner.consecutive_failures >= FAILURE_THRESHOLD {
+            inner.opened_at = Some(std::time::Instant::now());
+        }
+    }
+}
+
 /// Why a publish (or the connect that precedes it) failed.
 ///
 /// Every fallible variant keeps its cause as a `source()` rather than folding it into the
@@ -77,9 +150,9 @@ pub enum NatsPublisherError {
     Serialize(#[source] serde_json::Error),
     #[error("jetstream publish failed")]
     Publish(#[source] JetStreamPublishError),
-    /// Reserved for the connection-state short-circuit (SMA-471 Task 4): once the client
-    /// reports a down connection, publishing is refused up front instead of burning a full
-    /// `publish_timeout_secs` per outbox row in the batch.
+    /// The connection-state short-circuit (SMA-471 Task 4 / D11): the client already knows its
+    /// connection is down, or the [`Breaker`] is open, so publishing is refused up front instead
+    /// of burning a full `publish_timeout_secs` per outbox row in the batch.
     #[error("nats connection is down")]
     Disconnected,
 }
@@ -88,8 +161,8 @@ pub enum NatsPublisherError {
 /// TCP connection and reconnects in the background, so no pooling is needed.
 ///
 /// The client itself is deliberately NOT a separate field: [`jetstream::Context::client`] hands
-/// back a (cheap) clone of it, which is where the connection-state short-circuit of Task 4 gets
-/// its `Client::connection_state()`.
+/// back a (cheap) clone of it, which is where the connection-state short-circuit (Task 4) gets
+/// its `Client::connection_state()` — see `publish_ack`.
 ///
 /// `Debug` is derived rather than redacted: neither field carries the (possibly
 /// credential-bearing) broker URL — `PublisherConfig` keeps that redacted at the config layer,
@@ -99,6 +172,7 @@ pub enum NatsPublisherError {
 pub struct NatsEventPublisher {
     jetstream: jetstream::Context,
     source: String,
+    breaker: Breaker,
 }
 
 impl NatsEventPublisher {
@@ -169,19 +243,58 @@ impl NatsEventPublisher {
         Ok(NatsEventPublisher {
             jetstream: js,
             source: cfg.source.clone(),
+            breaker: Breaker::with_durations(OPEN_DURATION),
         })
     }
 
     /// The real publish. [`EventPublisher::publish`] delegates here and discards the ack; tests
     /// use this to assert `duplicate == true`, which the port's `Result<(), _>` cannot express.
     ///
+    /// **Gated before any I/O** (SMA-471 Task 4 / D11): an open breaker, or a client that
+    /// already knows its connection is down, is refused up front instead of burning a full
+    /// `publish_timeout_secs` per outbox row — see [`Breaker`]'s doc for why that bound matters
+    /// to `OutboxRelay::tick`'s lock-holding transaction.
+    ///
     /// # Errors
     ///
-    /// [`NatsPublisherError::Serialize`] if the event will not render as JSON, and
-    /// [`NatsPublisherError::Publish`] for anything the broker refuses or fails to ack in time —
-    /// including "no stream found for given subject", which is what an operator sees if the
-    /// stream is deleted out from under a running service.
+    /// [`NatsPublisherError::Disconnected`] if the breaker is open or the client already
+    /// reports a down connection, [`NatsPublisherError::Serialize`] if the event will not
+    /// render as JSON, and [`NatsPublisherError::Publish`] for anything the broker refuses or
+    /// fails to ack in time — including "no stream found for given subject", which is what an
+    /// operator sees if the stream is deleted out from under a running service.
     pub async fn publish_ack(&self, ev: &DomainEvent) -> Result<PublishAck, NatsPublisherError> {
+        if !self.breaker.admit() {
+            return Err(NatsPublisherError::Disconnected);
+        }
+        // `Pending` (a reconnect in flight) is allowed through: a reconnect typically completes
+        // well inside the ack timeout, and short-circuiting it would turn every brief blip into
+        // a breaker trip. Only `Disconnected` fails fast.
+        if self.jetstream.client().connection_state() == async_nats::connection::State::Disconnected {
+            self.breaker.on_failure();
+            return Err(NatsPublisherError::Disconnected);
+        }
+
+        let result = self.send_and_await_ack(ev).await;
+        match &result {
+            Ok(_) => self.breaker.on_success(),
+            Err(_) => self.breaker.on_failure(),
+        }
+        result
+    }
+
+    /// Test-only override of the breaker's open window. Not `#[cfg(test)]`-gated: an
+    /// integration test in `tests/nats_publisher.rs` (a separate compilation unit that does not
+    /// see this crate's `cfg(test)`) needs to shrink `OPEN_DURATION` so its assertion bounds the
+    /// breaker's own behaviour rather than an incidental interaction with a fixed iteration
+    /// count. `pub` on an already-public type, so it costs nothing in a production build.
+    pub fn with_breaker_durations_for_tests(mut self, open_duration: Duration) -> NatsEventPublisher {
+        self.breaker = Breaker::with_durations(open_duration);
+        self
+    }
+
+    /// Serialize, publish, and await the persistence ack — the body `publish_ack` gates with
+    /// the breaker and connection-state checks above.
+    async fn send_and_await_ack(&self, ev: &DomainEvent) -> Result<PublishAck, NatsPublisherError> {
         let body = serde_json::to_vec(&CloudEvent::from_domain_event(ev, &self.source)).map_err(NatsPublisherError::Serialize)?;
 
         let mut headers = async_nats::HeaderMap::new();
@@ -360,5 +473,40 @@ mod tests {
         let err = verify_stream("IAM_EVENTS", &live, WANT_WINDOW).unwrap_err();
         let rendered = format!("{err}");
         assert_eq!(rendered, "stream IAM_EVENTS has duplicate_window = 5s, but this service requires 3600s");
+    }
+
+    // `Breaker` unit tests (SMA-471 Task 4 / D11). No broker needed — `Breaker` is a plain
+    // consecutive-failure counter with no NATS dependency at all.
+
+    #[test]
+    fn the_breaker_opens_after_three_consecutive_failures() {
+        let b = Breaker::with_durations(Duration::from_secs(2));
+        assert!(b.admit(), "starts closed");
+        for _ in 0..3 {
+            b.on_failure();
+        }
+        assert!(!b.admit(), "three consecutive failures must open it");
+    }
+
+    #[test]
+    fn a_success_resets_the_failure_run() {
+        let b = Breaker::with_durations(Duration::from_secs(2));
+        b.on_failure();
+        b.on_failure();
+        b.on_success();
+        b.on_failure();
+        b.on_failure();
+        assert!(b.admit(), "the run was broken, so two more failures must not open it");
+    }
+
+    #[test]
+    fn an_open_breaker_admits_a_probe_once_the_window_elapses() {
+        let b = Breaker::with_durations(Duration::from_millis(20));
+        for _ in 0..3 {
+            b.on_failure();
+        }
+        assert!(!b.admit());
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(b.admit(), "one probe must be admitted after the open window");
     }
 }
