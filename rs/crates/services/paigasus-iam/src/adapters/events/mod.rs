@@ -6,8 +6,10 @@
 //! `tracing`-backed `EventPublisher` implementation to inject. Wiring this into the composition
 //! root (`main.rs`, alongside `spawn_reload`/the denial-audit drain) is a later task (B9).
 
+pub mod cloud_event;
 pub mod relay;
 pub mod tracing_publisher;
 
+pub use cloud_event::{CloudEvent, render_id};
 pub use relay::{OutboxRelay, TickReport};
 pub use tracing_publisher::TracingEventPublisher;
