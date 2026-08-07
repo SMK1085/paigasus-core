@@ -2529,7 +2529,6 @@ dependencies = [
  "cedar-policy",
  "chrono",
  "figment",
- "futures",
  "hmac",
  "jsonwebtoken",
  "metrics",

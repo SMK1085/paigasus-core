@@ -114,33 +114,47 @@ async fn ensure_is_idempotent() {
     assert_eq!(info.config.subjects, vec!["iam.>".to_string()]);
 }
 
+/// Asserts what actually lands on the wire: the subject, both headers, and the whole
+/// CloudEvents body.
+///
+/// **Read back from the STREAM, not from a core subscription** — and that is a correctness
+/// requirement, not a style choice. A core subscriber would have to be registered on the server
+/// before the publish lands, and nothing in the client API makes that orderable across two
+/// independent connections: `Client::flush` resolves on a bare `AsyncWrite::poll_flush` of its
+/// own socket (`async-nats-0.50.0/src/connection.rs:753`, signalled at `lib.rs:658`), so it
+/// proves the SUB bytes left this process and nothing about whether the server has parsed them.
+/// Meanwhile the publisher's ack-waited publish is a full round-trip on a *different*
+/// connection, and can complete first. That is a genuine race, and it fails often on a loaded
+/// machine.
+///
+/// Reading the stream has no ordering requirement at all: `publish` returns `Ok` only after
+/// JetStream has acked persistence, so the message is durable state by the time this queries
+/// for it. It is also the more faithful assertion — real consumers read the stream.
+///
+/// The read is keyed on **sequence**, not subject, so `msg.subject` is a real assertion rather
+/// than an echo of the query. Sequence 1 is unambiguous: `connect` creates the stream fresh in
+/// this test's own container, and this is the only publish against it.
 #[tokio::test]
 async fn publishes_a_cloud_event_on_the_wire_subject() {
     let Some((_node, url)) = start_nats().await else { return };
     let publisher = NatsEventPublisher::connect(&cfg(&url)).await.unwrap();
 
-    let client = async_nats::connect(&url).await.unwrap();
-    let mut sub = client.subscribe("iam.>").await.unwrap();
-    // `subscribe` only queues the SUB on this client's own writer task. The publish below goes
-    // out on a DIFFERENT connection, so without a flush the two are unordered and the message
-    // can be delivered before the server has registered the interest.
-    client.flush().await.unwrap();
-
+    // Through the PORT method — `OutboxRelay::tick` calls exactly this.
     let ev = event(Uuid::from_u128(1), EventType::PrincipalCreated);
     publisher.publish(&ev).await.expect("publish");
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), futures::StreamExt::next(&mut sub))
-        .await
-        .expect("no message within 5s")
-        .expect("subscription closed");
+    let js = jetstream::new(async_nats::connect(&url).await.unwrap());
+    let stream = js.get_stream("IAM_EVENTS").await.unwrap();
+    let msg = stream.get_raw_message(1).await.expect("the published message must be readable at sequence 1");
+
     assert_eq!(msg.subject.as_str(), "iam.principal.created");
     assert_eq!(
-        msg.headers.as_ref().and_then(|h| h.get("Content-Type")).map(async_nats::HeaderValue::as_str),
+        msg.headers.get("Content-Type").map(async_nats::HeaderValue::as_str),
         Some("application/cloudevents+json; charset=utf-8"),
         "structured-mode CloudEvents content type must be on the wire (D6)"
     );
     assert_eq!(
-        msg.headers.as_ref().and_then(|h| h.get("Nats-Msg-Id")).map(async_nats::HeaderValue::as_str),
+        msg.headers.get("Nats-Msg-Id").map(async_nats::HeaderValue::as_str),
         Some(ev.id.hyphenated().to_string().as_str()),
         "Nats-Msg-Id must be the event id, rendered exactly as the CloudEvents `id` (D3)"
     );

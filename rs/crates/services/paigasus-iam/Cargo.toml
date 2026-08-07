@@ -129,9 +129,6 @@ testcontainers = "0.27"
 # same for `tests/nats_publisher.rs` (SMA-471): the module also carries `NatsServerCmd`, whose
 # `with_jetstream()` is what starts the server with `--jetstream` — the stock image does not.
 testcontainers-modules = { version = "0.15", features = ["postgres", "redis", "nats"] }
-# `tests/nats_publisher.rs` — `StreamExt::next` on the core-NATS `Subscriber` that asserts what
-# actually lands on the wire. Dev-only; the publisher itself needs no stream combinators.
-futures = { workspace = true }
 # `adapters::oidc::validator` tests — mints runtime EC P-256 keypairs so ES256 tokens can
 # be signed locally without committing PEM/JWK fixtures (spec §8 mock-IdP refinement,
 # SMA-443 Task 7). Dev-only: never enters the shipped binary; the workspace baseline

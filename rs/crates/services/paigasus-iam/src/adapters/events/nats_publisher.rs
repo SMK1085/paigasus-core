@@ -43,6 +43,14 @@ const CONTENT_TYPE: &str = "application/cloudevents+json; charset=utf-8";
 /// Every fallible variant keeps its cause as a `source()` rather than folding it into the
 /// message: `relay.rs::describe_error` walks that chain into `event_outbox.last_error`, and
 /// that string is the whole of what an operator sees on a parked row.
+///
+/// **Reading that output:** every `async_nats` error is an `async_nats::error::Error<Kind>`,
+/// which puts its cause in BOTH its own `Display` (`"{kind}: {source}"`) and its `source()`.
+/// `describe_error` walks the chain, so when a NATS error carries an inner cause the innermost
+/// text appears twice — `"backend error: nats connect failed: IO error: connection refused:
+/// connection refused"`. That is upstream's rendering, not a bug here, and it is left alone:
+/// dropping `#[source]` to de-duplicate it would truncate the chain instead, which costs an
+/// operator far more than the repetition does.
 #[derive(Debug, thiserror::Error)]
 pub enum NatsPublisherError {
     /// The configured `credentials_file` could not be read or parsed. Split out from
