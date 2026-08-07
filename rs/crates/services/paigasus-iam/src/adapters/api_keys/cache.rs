@@ -214,8 +214,10 @@ impl RedisApiKeyCache {
     /// Builds a cache over an ALREADY-CONNECTED handle: mirrors
     /// `RedisDecisionCache::from_connection`/`SliceCache::from_connection` (SMA-444 Task 21) —
     /// `AppState::new` shares ONE redis connection across the redis-backed `Generations` +
-    /// `RedisDecisionCache` + `SliceCache` + this cache rather than each opening its own;
-    /// `connect` above stays the standalone-caller/test entry point.
+    /// `RedisDecisionCache` + `SliceCache` rather than each opening its own, and extends that
+    /// sharing to THIS cache only when `api_keys.introspect_cache.redis_url` matches the authz
+    /// one textually (SMA-485 D1); otherwise this cache is handed its own connection, dialled
+    /// with `RedisRole::ApiKeys`. `connect` above stays the standalone-caller/test entry point.
     ///
     /// `pub(crate)`, not `pub` (SMA-476 D13): `adapters::redis_conn` is a `pub(crate)` module, so
     /// a `pub fn` taking a `RedisHandle` would be a private-type-in-public-interface and

@@ -67,10 +67,13 @@ pub const IAM_STARTER_POLICY_RECONCILES_TOTAL: &str = "iam_starter_policy_reconc
 ///
 /// Three attribution caveats, all consequences of how `AppState::new` shares connections rather
 /// than of the breaker itself:
-/// - `role="api_keys"` exists ONLY when `authz.cache.backend = "memory"` while
-///   `api_keys.introspect_cache.backend = "redis"`. Otherwise the API-key cache reuses the authz
-///   connection and its commands are attributed to `role="authz"` — a missing `api_keys` series
-///   does NOT mean the API-key cache is idle.
+/// - `role="api_keys"` exists ONLY when the API-key cache holds its own connection: either
+///   `authz.cache.backend = "memory"` while `api_keys.introspect_cache.backend = "redis"`, or
+///   both are redis-backed with `redis_url`s that differ textually after trimming (SMA-485 D1).
+///   Otherwise the API-key cache reuses the authz connection and its commands are attributed to
+///   `role="authz"` — a missing `api_keys` series does NOT mean the API-key cache is idle.
+///   Conversely, because the comparison is textual, two spellings of ONE endpoint produce an
+///   `api_keys` series fronting the same physical Redis — see the next caveat.
 /// - Two roles may front the SAME physical Redis with independent breakers, so `authz` at 0 while
 ///   `jwks` is at 2 does not imply two backends.
 /// - Set independently by every replica — aggregate `max by (job, role)`, never `sum`.

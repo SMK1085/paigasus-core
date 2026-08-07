@@ -734,15 +734,17 @@ impl AppState {
 
 /// Opens `redis_url` and wraps it in a breaker-guarded [`RedisHandle`] — shared by every
 /// redis-backed cache `AppState::new` wires (the authz `Generations`/`RedisDecisionCache`/
-/// `SliceCache` trio, SMA-444 Task 21; the API-key `RedisApiKeyCache`, SMA-445 Task 19, when it
-/// can't reuse the already-open `redis_conn` LOCAL BINDING in `AppState::new` — not to be
-/// confused with the [`crate::adapters::redis_conn`] MODULE this delegates to), mirroring
-/// `RedisJwksCache::connect`'s connect pattern.
+/// `SliceCache` trio, SMA-444 Task 21; the API-key `RedisApiKeyCache`, SMA-445 Task 19, when
+/// [`shares_one_connection`] says its configured URL matches the authz one — otherwise that cache
+/// gets its OWN handle from this same function, SMA-485). The `redis_conn` LOCAL BINDING in
+/// `AppState::new` is not to be confused with the [`crate::adapters::redis_conn`] MODULE this
+/// delegates to. Mirrors `RedisJwksCache::connect`'s connect pattern.
 ///
 /// Delegates to [`crate::adapters::redis_conn::connect`] for the tuned reconnect retry budget
 /// (SMA-473) and the per-connection circuit breaker (SMA-476) — this function owns only the
-/// `AuthnError` mapping. `role` labels this connection's breaker metrics; see SMA-476 D10 for why
-/// a shared connection reports as `authz` even when it also serves the API-key cache.
+/// `AuthnError` mapping. `role` labels this connection's breaker metrics; a SHARED connection
+/// reports every command as `authz`, including the API-key cache's (SMA-476 D10, as amended by
+/// SMA-485 D1: sharing now requires the two URLs to match).
 async fn connect_redis(redis_url: &str, role: RedisRole) -> Result<RedisHandle, AuthnError> {
     crate::adapters::redis_conn::connect(redis_url, role).await.map_err(|e| AuthnError::Backend(Box::new(e)))
 }
