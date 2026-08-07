@@ -986,10 +986,21 @@ impl IamConfig {
             if p.stream.is_empty() {
                 return Err("outbox.publisher.stream must not be empty".to_string());
             }
-            // A relative reference is legal CloudEvents but an absolute URI is RECOMMENDED, and
-            // free text (a space) is not a URI-reference at all. Reject what is clearly not one.
-            if p.source.is_empty() || p.source.chars().any(char::is_whitespace) {
-                return Err("outbox.publisher.source must be a URI with no whitespace".to_string());
+            // CloudEvents requires `source` to be a non-empty URI-reference and RECOMMENDS an
+            // absolute URI. We require the absolute form (`url::Url::parse` rejects relative
+            // references): the value is copied verbatim into every published envelope, it must
+            // stay stable for a stream's lifetime (D6), and a stricter check here costs an
+            // operator nothing while catching typos that would otherwise ship malformed events
+            // to external consumers.
+            //
+            // A hand-rolled "non-empty and no whitespace" check was the first attempt and was
+            // too weak — it accepted `%` and `http://[`, both of which are malformed
+            // URI-references (CodeRabbit, PR 112). `url` is already in this crate's dependency
+            // tree via `async-nats` and `redis`, so parsing properly costs no extra build.
+            if let Err(e) = url::Url::parse(&p.source) {
+                return Err(format!(
+                    "outbox.publisher.source must be an absolute URI (CloudEvents RECOMMENDs one, and it is copied verbatim into every event): {e}"
+                ));
             }
             // SMA-471 D10. A FLOOR, not a guarantee: it catches the one republish gap fully
             // determined by config (an operator raising `max_attempts` past the window). It does
@@ -2460,17 +2471,44 @@ mod tests {
         assert!(validate_result(&at.replace("max_age_secs = 3600", "max_age_secs = 3601")).is_ok());
     }
 
+    /// `source` is copied verbatim into every published envelope, so a malformed value ships
+    /// spec-violating CloudEvents to external consumers. The original check was "non-empty and
+    /// no whitespace", which accepted `%` and `http://[` — both malformed URI-references
+    /// (CodeRabbit, PR 112). These cases are the ones that discriminate a real parse from that
+    /// hand-rolled approximation: whitespace alone would not.
     #[test]
-    fn source_must_parse_as_a_uri() {
-        let err = validate_err(
-            r#"
-            [outbox.publisher]
-            backend = "nats"
-            url = "nats://localhost:4222"
-            source = "my prod cluster"
-        "#,
-        );
-        assert!(err.contains("outbox.publisher.source"), "{err}");
+    fn source_must_parse_as_an_absolute_uri() {
+        for bad in ["my prod cluster", "%", "http://[", "", "paigasus/iam"] {
+            let err = validate_err(&format!(
+                r#"
+                [outbox.publisher]
+                backend = "nats"
+                url = "nats://localhost:4222"
+                source = "{bad}"
+            "#
+            ));
+            assert!(err.contains("outbox.publisher.source"), "{bad:?} should have been rejected, got: {err}");
+        }
+    }
+
+    /// The shipped default and other realistic absolute forms must pass. `urn:paigasus:iam` is
+    /// the default, and a URN is exactly the case a naive "must contain ://" check would break.
+    #[test]
+    fn an_absolute_uri_source_is_accepted() {
+        for good in ["urn:paigasus:iam", "https://paigasus.dev/iam", "https://iam.eu-central-1.paigasus.dev"] {
+            assert!(
+                validate_result(&format!(
+                    r#"
+                    [outbox.publisher]
+                    backend = "nats"
+                    url = "nats://localhost:4222"
+                    source = "{good}"
+                "#
+                ))
+                .is_ok(),
+                "{good:?} is a valid absolute URI and must be accepted"
+            );
+        }
     }
 
     /// A config that publishes nothing while claiming a broker must not boot silently.

@@ -99,6 +99,9 @@ redis = { workspace = true }
 # `(principal, action, resource, context)` serialization into the decision cache's key
 # (SMA-444 Task 14).
 blake3 = { workspace = true }
+# `config::IamConfig::validate` — parses `[outbox.publisher].source` as an absolute URI so a
+# malformed value cannot reach the CloudEvents envelope (SMA-471).
+url = { workspace = true }
 # `adapters::api_keys::hasher::HmacSecretHasher` — the `SecretHasher` port's v1 impl,
 # HMAC-SHA-256(pepper, secret) (SMA-445 Task 13). Not workspace-pinned: this crate's own
 # dep, at the same versions `paigasus-iam-core`'s dev-dependencies already resolve in

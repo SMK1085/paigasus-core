@@ -151,8 +151,14 @@ pub const IAM_NATS_PUBLISH_DUPLICATES_TOTAL: &str = "iam_nats_publish_duplicates
 pub const IAM_NATS_PUBLISH_DURATION_SECONDS: &str = "iam_nats_publish_duration_seconds";
 /// 1 when the client reports a live connection, 0 otherwise. Sampled by a BACKGROUND task, not
 /// set inside `publish`: during a total outage every row eventually parks, `publish` stops being
-/// called, and a publish-driven gauge would freeze exactly when it matters. Every replica sets
-/// its own value, so aggregate `max by (job)` — never `sum`.
+/// called, and a publish-driven gauge would freeze exactly when it matters.
+///
+/// **Per-replica, and unlike [`IAM_OUTBOX_PARKED_ROWS`] the replicas do NOT agree.** That gauge
+/// reports one global fact every replica computes identically, so `max by (job)` is right there.
+/// This one reports each replica's own connection state, so `max by (job)` returns 1 while any
+/// single replica is still connected — hiding exactly the partial outage worth paging on
+/// (CodeRabbit, PR 112). Keep `instance` to see which replica is down, or use `min by (job)` to
+/// ask "are all replicas connected". Never `sum`.
 pub const IAM_NATS_CONNECTED: &str = "iam_nats_connected";
 
 /// Every metric family this workspace emits — the drift test (`tests/drift.rs`) extracts every

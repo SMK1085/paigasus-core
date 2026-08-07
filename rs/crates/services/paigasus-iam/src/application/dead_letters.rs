@@ -29,11 +29,30 @@ use crate::application::error::TenancyError;
 /// `beyond_dedup_window` replay label (see [`DeadLetterService::replay`]'s doc and its call
 /// site). This application service has no publisher config of its own, and threading it in
 /// would couple the dead-letter surface to a broker it otherwise knows nothing about — so this
-/// is a constant, not config. A deployment that WIDENS `duplicate_window_secs` beyond this
-/// value only ever sees CONSERVATIVE labelling as a result: some rows get labelled `"true"`
-/// (beyond the dedup window) that were, under the real wider window, still deduped. That is the
-/// safe direction to be wrong — it can only over-warn an operator about a republish risk, never
-/// hide one.
+/// is a constant, not config.
+///
+/// **This label is an exposure ESTIMATE, not a verdict**, and it is wrong in both directions by
+/// bounded amounts. Read it as "how many replays are plausibly past the window", never as proof
+/// about any single event. Three separate approximations stack (the last two were raised by
+/// CodeRabbit on PR 112):
+///
+/// 1. **The window may not be 3600s.** A deployment that widens `duplicate_window_secs` sees
+///    over-warning (`"true"` for rows the real, wider window still deduped); one that narrows it
+///    — legal, since `IamConfig::validate` only enforces a floor of
+///    `max_attempts × poll_interval_secs` — sees under-warning.
+/// 2. **`parked_at` is the wrong clock.** JetStream's window starts when it STORED the first
+///    publish; `parked_at` is stamped only once the relay exhausts `max_attempts`, i.e. about
+///    `max_attempts × poll_interval_secs` later (~5 min at defaults). So the elapsed time this
+///    measures is systematically SHORTER than the real one, and the label under-reports `"true"`
+///    by roughly that margin.
+/// 3. **A parked row may never have been stored at all.** If every attempt failed before
+///    reaching the server there is no duplicate to create, yet a long-parked row still labels
+///    `"true"`. Harmless over-warning.
+///
+/// Making this exact needs a `first_attempt_at` column on `event_outbox` (a migration) plus the
+/// effective `duplicate_window_secs` plumbed in — deliberately deferred, because nothing branches
+/// on this label: it is observability only, and an approximate signal about a real risk beats no
+/// signal about it. See SMA-471 §8.
 const ASSUMED_DEDUP_WINDOW_SECS: u32 = 3_600;
 
 /// Constructor bag, mirroring `RoleServiceDeps` — keeps `new` from growing a six-argument
@@ -127,11 +146,11 @@ impl DeadLetterService {
         // that — refusing the replay would remove the operator's only recovery tool — so it is
         // measured instead.
         //
-        // Compared against a CONSTANT rather than `outbox.publisher.duplicate_window_secs`:
-        // this application service has no publisher config, and threading it in would couple the
-        // dead-letter surface to a broker it otherwise knows nothing about. The constant matches
-        // the shipped default; a deployment that widens the window sees conservative labelling
-        // (some `true`s that were in fact still deduped), which is the safe direction to be wrong.
+        // Compared against a CONSTANT rather than `outbox.publisher.duplicate_window_secs`, and
+        // measured from `parked_at` rather than from the first publish attempt. Both are
+        // approximations with bounded, two-directional error — see
+        // `ASSUMED_DEDUP_WINDOW_SECS`'s doc for the full accounting and why it is deferred.
+        // The label is observability only; nothing branches on it.
         let beyond_dedup_window = match entry.parked_at {
             Some(parked_at) => {
                 if Utc::now().signed_duration_since(parked_at).num_seconds() > i64::from(ASSUMED_DEDUP_WINDOW_SECS) {
