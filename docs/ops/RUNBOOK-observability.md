@@ -950,9 +950,19 @@ rewound counter is repaired forward automatically. The one exception is
    batches with `UNLINK`, which frees the keys on a background thread rather than blocking the
    server:
 
+   **Target the configured Redis explicitly.** A bare `redis-cli` talks to `127.0.0.1:6379`
+   db `0`, so on a jump host it will happily sweep — or fail to sweep — the wrong instance while
+   reporting success. Bind host, port and database on every command, exactly as the confirm step
+   for `IamAuthzRedisCacheBypassed` above does, and note that the `xargs` child needs the same
+   flags as the scan:
+
    ```bash
-   redis-cli --scan --pattern 'iam:authz:slice:*' | xargs -r -n 500 redis-cli UNLINK
-   redis-cli --scan --pattern 'iam:authz:dec:*'   | xargs -r -n 500 redis-cli UNLINK
+   # Same host/port/db as the confirm step above. Do NOT paste authz.cache.redis_url into -u.
+   RC="redis-cli -h <host> -p <port> -n <db>"
+   export REDISCLI_AUTH="$REDIS_PASSWORD"
+
+   $RC --scan --pattern 'iam:authz:slice:*' | xargs -r -n 500 $RC UNLINK
+   $RC --scan --pattern 'iam:authz:dec:*'   | xargs -r -n 500 $RC UNLINK
    ```
 
    Then re-run both `--scan` commands and confirm each returns nothing before moving to step 2.
@@ -979,9 +989,15 @@ rewound counter is repaired forward automatically. The one exception is
    mark lags the fleet maximum badly enough can in principle land inside a generation another
    replica has live entries under. That residue is the documented limit of a process-local
    high-water mark (design §3.4: the jump reduces the window by roughly six orders of magnitude,
-   it does not eliminate it), and it is bounded by the same
-   `slice_cache_ttl_secs + decision_cache_ttl_secs` window as an unrepaired rewind — never worse
-   than doing nothing. Eliminating it needs a durable generation floor, which is SMA-475. During
+   it does not eliminate it), and any collision it does cause is bounded by the same
+   `slice_cache_ttl_secs + decision_cache_ttl_secs` window as an unrepaired rewind. That bound is
+   on the *duration*; it is **not** a proof that repairing is always at least as safe as not
+   repairing. A badly lagging replica can land on a generation another replica is still using,
+   where the un-repaired rewound value might have been a long-dead key space — so for that
+   replica, in that window, the repair can be the riskier of the two. What makes the trade worth
+   taking is that the lag is sub-second for any replica serving traffic, while an un-repaired
+   rewind is hazardous for every replica at once. Eliminating the residue needs a durable
+   generation floor, which is SMA-475. During
    *this* procedure the exposure is smaller still, because the fleet is being restarted onto
    fresh marks anyway.
 3. **Roll-restart the IAM replicas.** Not optional, and not merely hygiene. The ceiling is a
@@ -1012,17 +1028,26 @@ causes are entirely benign.
    (`repair_failed`), or hit the ceiling (`ceiling`), and whether the key vanished (`missing`) or
    came back lower (`lower`).
 
-**Triage the benign vs. hazardous split.** A rewind has four possible causes, and only one is
-actually hazardous. Eviction under `allkeys-*`, a `FLUSHALL`, a restart without persistence, and
-a failover to an empty replica all present identically as a missing/lower generation counter,
-but the *last three* also destroy the `iam:authz:slice:*` and `iam:authz:dec:*` key spaces along
-with the counter — `AppState::new` wires the generations, the slice cache, and the decision
-cache off the same Redis connection — which is whole-Redis loss and leaves the caches cold
-rather than stale: safe. Only *selective* eviction of just the two generation keys is hazardous:
-the caches survive, and a repair that lands short of clearing them can, in principle, re-enter a
-still-live key space (§3.4 of the design doc). Check whether `iam:authz:slice:*` and
-`iam:authz:dec:*` are also empty — if they are, this was whole-Redis loss, not the hazardous
-case.
+**Triage the benign vs. hazardous split.** A rewind has five possible causes, and the split is
+not by cause name — it is by **whether the cache key spaces died with the counter**.
+
+*Benign (cold cache, not stale):* a `FLUSHALL`, a restart without persistence, and a failover to
+an **empty** replica. All three are whole-Redis loss, so they also destroy `iam:authz:slice:*`
+and `iam:authz:dec:*` — `AppState::new` wires the generations, the slice cache and the decision
+cache off the same Redis connection — leaving nothing stale to re-enter.
+
+*Hazardous (caches survive):* selective eviction of just the two generation keys under
+`allkeys-*`, **and a failover to a stale but non-empty replica**. The second one is easy to miss
+because it does not look like data loss at all: the replica answers normally, returns a *lower*
+generation (`reason="lower"`), and still holds cache entries written under the generations it is
+reporting — so a repair that lands short of clearing them can re-enter a still-live key space
+(§3.4 of the design doc). Note this is the one cause that presents as `lower` rather than
+`missing`, which makes the `reason` label the fastest way to spot it.
+
+**So triage on the caches, not the cause.** Check whether `iam:authz:slice:*` and
+`iam:authz:dec:*` are also empty. If they are, this was whole-Redis loss — benign. If they
+survived, treat it as hazardous regardless of which cause you suspect, and read the blast-radius
+paragraph below.
 
 **Blast radius.** All three outcomes land the observing replica `REWIND_JUMP = 1_000_000`
 generations past everything **that process** has observed. That is the residue described in the
@@ -2088,6 +2113,10 @@ prevents Prometheus cardinality blow-ups / OOM.
 - `role` — the closed `RedisRole` enum (SMA-476): `authz`/`api_keys`/`jwks`. Bounded by the type
   system at the call site, not derived from anything caller-supplied.
 - `to` — the breaker's target state on a transition (SMA-476): `open`/`half_open`/`closed`.
+- `counter` — which authz generation counter rewound (SMA-474): `policy_gen`/`entity_gen`.
+  Derived from a Rust enum (`Which`), never from anything caller-supplied.
+- `reason` — how a rewind presented (SMA-474): `missing` (the key was gone) / `lower` (it came
+  back at a smaller value). Two literals chosen at the emit site.
 - gRPC `service`/`method` — **compile-time string literals** supplied at each `record_grpc` call
   site (e.g. `"Authorization"`/`"IsAuthorized"`), never derived from the request `:path` — a
   scanning client hitting an arbitrary RPC path cannot mint new label values, unlike an HTTP

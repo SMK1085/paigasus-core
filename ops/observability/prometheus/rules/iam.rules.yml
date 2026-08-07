@@ -207,14 +207,16 @@ groups:
         # candidates — and an evicted key reads back as `0`, which before SMA-474 was a
         # successful read of the wrong value that nothing detected.
         #
-        # WARNING, not critical, and deliberately so: the mechanism self-heals, and three of
-        # the four causes are BENIGN. A FLUSHALL, a restart without persistence, and a failover
-        # to an empty replica all destroy the slice/decision caches along with the counter,
-        # leaving a cold cache rather than a stale one (the generations, slice cache and
-        # decision cache share ONE connection — `AppState::new`). Only SELECTIVE eviction is
-        # hazardous, and this signal cannot tell them apart on its own; the RUNBOOK entry
-        # carries the triage step. Do NOT reword the annotation to claim this is conclusive
-        # evidence of `allkeys-*`.
+        # WARNING, not critical, and deliberately so: the mechanism self-heals, and the benign
+        # causes outnumber the hazardous ones. The split is NOT by cause name but by whether the
+        # cache key spaces died with the counter. A FLUSHALL, a restart without persistence and a
+        # failover to an EMPTY replica are whole-Redis loss — they destroy the slice/decision
+        # caches too (all three share ONE connection, `AppState::new`), leaving a cold cache
+        # rather than a stale one. Hazardous: selective eviction of just the generation keys, AND
+        # a failover to a stale but NON-EMPTY replica, which answers normally, reports a lower
+        # generation, and still holds entries written under it. This signal cannot tell them
+        # apart on its own; the RUNBOOK entry carries the triage step. Do NOT reword the
+        # annotation to claim this is conclusive evidence of `allkeys-*`.
         #
         # `sum by (counter, outcome)`, never a bare `sum()`: the grouping is what lets the
         # promtool fixture use a flat series as a control (a bare sum folds every series into
@@ -225,4 +227,4 @@ groups:
         expr: sum by (counter, outcome) (increase(iam_authz_generation_rewinds_total[15m])) > 0
         for: 5m
         labels: { severity: warning }
-        annotations: { summary: "IAM authz generation counter rewound", description: "A Redis authz generation counter (iam:authz:policy_gen / iam:authz:entity_gen) came back lower than this process had already observed, and was repaired forward. Neither key carries a TTL, so the usual cause is allkeys-* eviction — check CONFIG GET maxmemory-policy, which must be volatile-*. A FLUSHALL, a restart without persistence, or a failover to an empty replica also produce this, and those are benign: they destroy the slice/decision caches along with the counter, leaving a cold cache rather than a stale one. Check whether iam:authz:slice:* and iam:authz:dec:* are also empty to tell them apart. outcome=repair_failed means Redis rejected the repair write (INCRBY is denyoom) and the replica is serving a process-local generation with no cross-replica cache sharing. See RUNBOOK's \"Authz availability posture\"." }
+        annotations: { summary: "IAM authz generation counter rewound", description: "A Redis authz generation counter (iam:authz:policy_gen / iam:authz:entity_gen) came back lower than this process had already observed, and was repaired forward. Neither key carries a TTL, so the usual cause is allkeys-* eviction — check CONFIG GET maxmemory-policy, which must be volatile-*. A FLUSHALL, a restart without persistence, or a failover to an EMPTY replica also produce this and are benign — they destroy the slice/decision caches along with the counter, leaving a cold cache rather than a stale one. A failover to a stale but NON-EMPTY replica is NOT benign: it returns a lower generation (reason=lower) while still holding cache entries written under it. Triage on the caches, not the cause: check whether iam:authz:slice:* and iam:authz:dec:* are also empty — if they survived, treat it as hazardous. outcome=repair_failed means Redis rejected the repair write (INCRBY is denyoom) and the replica is serving a process-local generation with no cross-replica cache sharing. See RUNBOOK's \"Authz availability posture\"." }

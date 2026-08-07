@@ -66,10 +66,13 @@ wipes both caches — leaving a cold, correct cache rather than a stale one. The
 **selective** loss of just the counter key, which is exactly what `allkeys-*` eviction
 produces, since neither generation key carries a TTL.
 
-This has a consequence for §4's alerting that the first draft of this design got wrong: of the
-four rewind causes listed in §1, three (`FLUSHALL`, restart without persistence, failover to
-an empty replica) destroy the caches along with the counter and are therefore **benign**. Only
-selective eviction is hazardous. The signal cannot distinguish them by itself — see §4.
+This has a consequence for §4's alerting that the first draft of this design got wrong. The
+benign/hazardous split is **not by cause name** — it is by whether the cache key spaces died
+with the counter. `FLUSHALL`, a restart without persistence, and a failover to an **empty**
+replica are whole-Redis loss and therefore **benign**. Hazardous are selective eviction of just
+the generation keys and — added after CodeRabbit's review of the PR — a failover to a stale but
+**non-empty** replica, which answers normally, reports a *lower* generation, and still holds
+cache entries written under it. The signal cannot distinguish them by itself — see §4.
 
 ## 2. Decisions
 
@@ -472,11 +475,11 @@ alongside the existing authz panels.
 (never a bare `sum()` — see below), with an explicit `for:` duration.
 
 The alert's diagnosis must **not** claim a rewind is near-conclusive evidence of `allkeys-*`.
-Per §1.2, three of the four rewind causes destroy the caches along with the counter and are
-benign; only selective eviction is hazardous, and the metric cannot tell them apart on its own.
-The RUNBOOK entry therefore enumerates all four causes and gives the human triage step —
-whether the `iam:authz:slice:*` / `iam:authz:dec:*` key spaces are also empty, which
-distinguishes whole-Redis loss from selective eviction. A code-side probe (a sentinel key, or
+Per §1.2 the benign causes are the whole-Redis-loss ones, which destroy the caches along with
+the counter; selective eviction and a stale non-empty failover are hazardous, and the metric
+cannot tell them apart on its own. The RUNBOOK entry therefore enumerates every cause and gives
+the human triage step — whether the `iam:authz:slice:*` / `iam:authz:dec:*` key spaces are also
+empty, which is what actually separates whole-Redis loss from the hazardous cases. A code-side probe (a sentinel key, or
 `DBSIZE`) was considered and rejected: it adds a round trip and state to a rare path to
 automate a judgement an operator makes reliably in one command.
 
