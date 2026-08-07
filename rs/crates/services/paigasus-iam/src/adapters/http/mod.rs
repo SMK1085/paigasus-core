@@ -725,6 +725,26 @@ async fn connect_redis(redis_url: &str, role: RedisRole) -> Result<RedisHandle, 
     crate::adapters::redis_conn::connect(redis_url, role).await.map_err(|e| AuthnError::Backend(Box::new(e)))
 }
 
+/// Whether the API-key introspect cache may reuse the authz connection: textual equality of the
+/// two configured URLs after trimming, **not** endpoint identity (SMA-485 D1).
+///
+/// `redis://cache:6379` and `redis://cache:6379/0` name one backend spelled two ways and
+/// deliberately get two connections — erring toward a second connection is wasteful, never wrong
+/// (the key namespaces are disjoint: `iam:apikey:` vs `iam:authz:*` vs `iam:jwks:`), whereas
+/// erring the other way is what SMA-485 exists to fix. Normalising through redis-rs was declined
+/// because it would not resolve the motivating case either — `redis://localhost:6379` vs
+/// `redis://127.0.0.1:6379` differs by HOST, which no parser resolves at config-read time — while
+/// putting credential comparison (`ConnectionInfo` carries `password`) into the composition root.
+///
+/// The trim is load-bearing, not cosmetic. `IamConfig::validate` trims `authn.issuers` but no
+/// `redis_url`, and URL parsing strips surrounding C0 controls and spaces — so a trailing newline
+/// from an env-var override dials perfectly well and would differ only textually, silently
+/// splitting a deployment the operator believes is unified.
+#[allow(dead_code)] // TEMPORARY: removed in the same commit that adds the call site.
+pub(crate) fn shares_one_connection(authz_url: &str, api_key_url: &str) -> bool {
+    authz_url.trim() == api_key_url.trim()
+}
+
 /// Liveness only — stateless, so it is testable without a database.
 pub fn health_router() -> Router {
     Router::new().route("/healthz", get(healthz))
@@ -865,5 +885,28 @@ mod tests {
             .merge(audit::router())
             .merge(dead_letters::router())
             .merge(system_retirement::router());
+    }
+
+    /// SMA-485 D1: the API-key introspect cache reuses the authz connection on TEXTUAL equality
+    /// after trimming — deliberately not endpoint identity. Every row here is a spelling D1
+    /// names explicitly, so the accepted costs are executable rather than prose.
+    ///
+    /// Trimming is not cosmetic: URL parsing strips leading/trailing C0 controls and spaces, so
+    /// `redis://a:6379\n` (an env-var override or a heredoc'd secret) DIALS FINE and would
+    /// otherwise split a deployment the operator believes is unified — silently, since the only
+    /// symptom is an `iam_redis_breaker_state{role="api_keys"}` series that reads as deliberate.
+    #[test]
+    fn shares_one_connection_is_trimmed_textual_equality() {
+        for (authz, api_key, expected, why) in [
+            ("redis://a:6379", "redis://a:6379", true, "identical: SMA-444 Task 21's optimisation"),
+            ("redis://a:6379", "redis://a:6379\n", true, "trailing newline is trimmed"),
+            (" redis://a:6379 ", "redis://a:6379", true, "surrounding spaces are trimmed"),
+            ("redis://a:6379", "redis://a:6379/0", false, "accepted cost: explicit default db"),
+            ("redis://localhost:6379", "redis://127.0.0.1:6379", false, "accepted cost: host alias"),
+            ("redis://:pw1@a:6379", "redis://:pw2@a:6379", false, "credentials differ"),
+            ("redis://a:6379", "redis://b:6379", false, "the genuine split this issue is about"),
+        ] {
+            assert_eq!(shares_one_connection(authz, api_key), expected, "{why}: ({authz:?}, {api_key:?})");
+        }
     }
 }
