@@ -383,7 +383,7 @@ fn describe_iam_metrics() {
     );
     describe_gauge!(
         names::IAM_REDIS_BREAKER_STATE,
-        "Redis circuit-breaker state per connection: 0=closed, 1=half_open, 2=open. Label role=authz|api_keys|jwks. Set independently by every replica — aggregate max by (job, role), never sum. role=\"api_keys\" exists only when the API-key cache holds its own connection: authz.cache.backend=\"memory\", or the two redis_urls differ textually (SMA-485). Otherwise those commands are attributed to role=\"authz\"."
+        "Redis circuit-breaker state per connection: 0=closed, 1=half_open, 2=open. Label role=authz|api_keys|jwks. Set independently by every replica — aggregate max by (job, role), never sum. role=\"api_keys\" requires api_keys.introspect_cache.backend=\"redis\" AND that cache holding its own connection: either authz.cache.backend=\"memory\", or both Redis-backed with redis_urls that differ after trimming (SMA-485). Otherwise those commands are attributed to role=\"authz\"."
     );
     describe_counter!(
         names::IAM_REDIS_BREAKER_TRANSITIONS_TOTAL,
