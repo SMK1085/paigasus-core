@@ -619,6 +619,69 @@ pub fn sample_sa(name: &str, owner: TenancyNodeRef) -> (Principal, ServiceAccoun
 
 // --- SMA-445 Task 10: `PgApiKeyRepository`-driven test helpers ----------------------------
 
+// --- SMA-471 Task 6: `event_outbox`-driven test helpers -----------------------------------
+//
+// Lifted from `tests/relay_pg.rs::seed_row` (which stays as-is — its callers need a
+// caller-controlled `occurred_at` for age-based assertions) for `tests/nats_publisher.rs`'s
+// end-to-end relay test, which only needs a fresh unpublished row inserted "now" plus the two
+// read-back queries below (`event_outbox` itself has no `pub` port in `paigasus_iam_core`, so a
+// test driving the real relay against a real broker has no way to read it back except direct
+// SeaORM entity queries).
+
+/// Inserts one fresh, unpublished `event_outbox` row with the given `id` (`occurred_at =
+/// Utc::now()`) — bypassing the `Outbox`/`UnitOfWork` ports, mirroring `relay_pg.rs::seed_row`'s
+/// field values exactly (same fixed `event_type`/`payload`), just without a caller-controlled
+/// `occurred_at`.
+#[allow(dead_code)]
+pub async fn insert_outbox_row(db: &DatabaseConnection, id: Uuid) {
+    use paigasus_iam::adapters::persistence::entities::event_outbox;
+    use paigasus_iam_core::EventType;
+    use sea_orm::{ActiveModelTrait, Set};
+
+    event_outbox::ActiveModel {
+        id: Set(id),
+        occurred_at: Set(Utc::now()),
+        event_type: Set(EventType::PrincipalCreated.as_wire().to_string()),
+        schema_version: Set(1),
+        aggregate_prn: Set(format!("prn:pgs:iam:::principal/{id}")),
+        actor_prn: Set(None),
+        payload: Set(serde_json::json!({"kind": "user"}).to_string()),
+        correlation_id: Set(None),
+        published_at: Set(None),
+        attempts: Set(0),
+        parked: Set(false),
+        parked_at: Set(None),
+        last_error: Set(None),
+    }
+    .insert(db)
+    .await
+    .expect("insert event_outbox row");
+}
+
+/// Count of `event_outbox` rows with `published_at IS NULL` — the "still needs delivery" set a
+/// healthy drain must empty.
+#[allow(dead_code)]
+pub async fn unpublished_count(db: &DatabaseConnection) -> u64 {
+    use paigasus_iam::adapters::persistence::entities::event_outbox;
+    use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+
+    event_outbox::Entity::find()
+        .filter(event_outbox::Column::PublishedAt.is_null())
+        .count(db)
+        .await
+        .expect("count unpublished event_outbox rows")
+}
+
+/// The `last_error` column of the `event_outbox` row `id` — `None` if the row has never
+/// recorded a failed attempt (or does not exist).
+#[allow(dead_code)]
+pub async fn last_error(db: &DatabaseConnection, id: Uuid) -> Option<String> {
+    use paigasus_iam::adapters::persistence::entities::event_outbox;
+    use sea_orm::EntityTrait;
+
+    event_outbox::Entity::find_by_id(id).one(db).await.expect("query event_outbox row").and_then(|row| row.last_error)
+}
+
 /// Builds a fresh `(ApiKey, Vec<u8>)` pair for `PgApiKeyRepository::issue` tests — mints the
 /// key id via the real `KernelIdGenerator`/`SystemClock` adapters (mirrors `sample_sa`'s
 /// precedent). `scope` must already exist as a real row (its owning `organization`/`team`/

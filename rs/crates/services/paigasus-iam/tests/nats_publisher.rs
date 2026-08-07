@@ -4,6 +4,8 @@
 //! NATS in Docker, with the house gating: a missing Docker daemon is a HARD FAILURE in CI and a
 //! skip on a Docker-less laptop (mirrors `tests/redis_jwks_cache.rs`).
 
+mod support;
+
 use std::time::Duration;
 
 use async_nats::jetstream;
@@ -363,4 +365,40 @@ async fn a_blackholed_broker_does_not_hold_a_batch_open() {
         elapsed < std::time::Duration::from_secs(20),
         "100 publishes against a paused (blackholed) broker took {elapsed:?}; without the breaker this is ~100s"
     );
+}
+
+/// End-to-end: real Postgres + real NATS through the real relay. Proves the adapter satisfies the
+/// contract `OutboxRelay` actually depends on, not just the one its own unit tests assert.
+#[tokio::test]
+async fn the_relay_drains_rows_into_jetstream() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let Some((node, url)) = start_nats().await else { return };
+    let publisher = NatsEventPublisher::connect(&cfg(&url)).await.unwrap();
+
+    // Insert two unpublished outbox rows directly, the way `relay_pg.rs` does.
+    let ids = [Uuid::from_u128(0xA1), Uuid::from_u128(0xA2)];
+    for id in ids {
+        support::insert_outbox_row(&db, id).await;
+    }
+
+    let relay = paigasus_iam::adapters::events::OutboxRelay::new(db.clone(), Duration::from_secs(5), 100, 60);
+    let report = relay.tick(&publisher).await.unwrap();
+    assert_eq!(report.drained, 2);
+    assert_eq!(report.failures, 0);
+
+    let js = jetstream::new(async_nats::connect(&url).await.unwrap());
+    let info = js.get_stream("IAM_EVENTS").await.unwrap().info().await.unwrap().clone();
+    assert_eq!(info.state.messages, 2);
+    assert_eq!(support::unpublished_count(&db).await, 0, "published_at must be stamped");
+
+    // A stopped broker leaves rows unpublished, with attempts and last_error recorded.
+    node.stop().await.unwrap();
+    for id in [Uuid::from_u128(0xB1)] {
+        support::insert_outbox_row(&db, id).await;
+    }
+    let report = relay.tick(&publisher).await.unwrap();
+    assert_eq!(report.drained, 1);
+    assert_eq!(report.failures, 1);
+    assert_eq!(support::unpublished_count(&db).await, 1);
+    assert!(support::last_error(&db, Uuid::from_u128(0xB1)).await.is_some(), "last_error must be recorded");
 }

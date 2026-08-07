@@ -6,11 +6,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use paigasus_iam::adapters::events::{OutboxRelay, TracingEventPublisher};
+use paigasus_iam::adapters::events::{NatsEventPublisher, OutboxRelay, TracingEventPublisher};
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::{AppState, serve_http};
 use paigasus_iam::adapters::persistence::{Migrator, OutboxRetentionPolicy, PgOutboxMaintainer, PgPartitionMaintainer, RetentionPolicy};
-use paigasus_iam::config::IamConfig;
+use paigasus_iam::config::{IamConfig, PublisherBackend};
+use paigasus_iam_core::EventPublisher;
 use paigasus_observability::names;
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
@@ -69,6 +70,39 @@ async fn main() -> anyhow::Result<()> {
 
     let request_timeout = Duration::from_secs(30);
     let (tx, rx) = tokio::sync::watch::channel(());
+    let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
+
+    // SMA-471: the outbox relay's delivery sink, selected and — for the `nats` backend —
+    // actually DIALLED here, before the first `servers.spawn` below binds a port. Constructing
+    // it inside the relay block further down (where it would otherwise naturally belong) would
+    // put this `?` after the HTTP, metrics and gRPC listeners are already live: an early return
+    // at that point would skip the graceful-shutdown `tx.send(())` and abort those listeners'
+    // in-flight requests instead of never having accepted one. The whole point of fail-fast boot
+    // is that it fails with nothing bound.
+    //
+    // `config.validate()` (called above, before this point) already rejects `relay_enabled =
+    // false` together with `backend = "nats"`, so the `Tracing` arm below is reachable both when
+    // the relay is enabled AND when it's disabled — never a live NATS backend with no relay to
+    // drain into it.
+    let publisher: Arc<dyn EventPublisher> = match config.outbox.publisher.backend {
+        PublisherBackend::Nats => {
+            let nats = Arc::new(NatsEventPublisher::connect(&config.outbox.publisher).await?);
+            // The `iam_nats_connected` gauge sampler (SMA-471 review fix): folded into the same
+            // shutdown-watched `servers` `JoinSet` as every other background task here, rather
+            // than left as a detached `tokio::spawn` — see `NatsEventPublisher::
+            // spawn_connection_gauge_sampler`'s doc for why that used to be a bug. Cloning the
+            // `Arc` (rather than moving `nats` itself) is what lets the same publisher also be
+            // handed to the relay block below.
+            let sampler = nats.clone();
+            let mut gauge_rx = rx.clone();
+            let handle = sampler.spawn_connection_gauge_sampler(async move {
+                let _ = gauge_rx.changed().await;
+            });
+            servers.spawn(async move { handle.await.map_err(anyhow::Error::from) });
+            nats
+        }
+        PublisherBackend::Tracing => Arc::new(TracingEventPublisher),
+    };
 
     // Same-port `/metrics` (SMA-446 Unit 3): built here, threaded into `serve_http` below, only
     // when enabled AND no separate `metrics.addr` is configured — `metrics.enabled = false`, or a
@@ -79,7 +113,6 @@ async fn main() -> anyhow::Result<()> {
         _ => None,
     };
 
-    let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
     {
         let mut rx = rx.clone();
         let state = state.clone();
@@ -198,10 +231,12 @@ async fn main() -> anyhow::Result<()> {
     {
         // The outbox relay (SMA-446 Slice B, Task B9): drains `event_outbox` rows — written by
         // `PgOutbox::enqueue` inside each triggering mutation's own transaction (Task B2) — into
-        // calls on an injected `EventPublisher`, on the same shutdown-watch as every other task
-        // above. Built directly off the `db` handle kept alive above (not through `AppState`) so
-        // `AppState::new`'s signature stays unchanged; `TracingEventPublisher` (Task B8) is a
-        // placeholder sink ahead of a real message-bus publisher (a later slice).
+        // calls on the `publisher` selected and constructed above, on the same shutdown-watch as
+        // every other task here. Built directly off the `db` handle kept alive above (not through
+        // `AppState`) so `AppState::new`'s signature stays unchanged. `publisher` is either the
+        // real NATS JetStream sink (SMA-471, ADR-0016) or `TracingEventPublisher` (Task B8, a
+        // logging-only sink for deployments with no broker configured) — never constructed here;
+        // this block only consumes whichever one boot already selected.
         //
         // `max_attempts` is `u32` in config (a natural "count" type for an operator to read/
         // write) but `i32` in `OutboxRelay::new` (mirroring the `event_outbox.attempts` Postgres
@@ -218,7 +253,7 @@ async fn main() -> anyhow::Result<()> {
             );
             servers.spawn(async move {
                 relay
-                    .run(Arc::new(TracingEventPublisher), async move {
+                    .run(publisher, async move {
                         let _ = rx.changed().await;
                     })
                     .await;
