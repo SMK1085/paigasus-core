@@ -20,6 +20,7 @@
 //! from the stored messages' `Nats-Msg-Id` headers after a broker restart, which
 //! `tests/nats_publisher.rs::dedup_survives_a_broker_restart` asserts against a real broker.
 
+use std::future::Future;
 use std::time::Duration;
 
 use async_nats::jetstream::context::{CreateStreamError, PublishError as JetStreamPublishError};
@@ -29,6 +30,7 @@ use async_trait::async_trait;
 use metrics::{counter, gauge, histogram};
 use paigasus_iam_core::{DomainEvent, EventPublisher, PublishError};
 use paigasus_observability::names;
+use tokio::task::JoinHandle;
 
 use crate::adapters::events::cloud_event::{CloudEvent, render_id};
 use crate::config::PublisherConfig;
@@ -238,18 +240,13 @@ impl NatsEventPublisher {
         // constructor-priming pattern as `redis_conn::Breaker::with_durations`.
         counter!(names::IAM_NATS_PUBLISH_DUPLICATES_TOTAL).increment(0);
 
-        // See IAM_NATS_CONNECTED's doc for why this cannot live inside `publish`. `js.client()`
-        // (not the `client` local above, already moved into `jetstream::new`) hands back a cheap
-        // clone of the same multiplexed connection handle.
-        let probe = js.client();
-        tokio::spawn(async move {
-            loop {
-                let up = probe.connection_state() != async_nats::connection::State::Disconnected;
-                gauge!(names::IAM_NATS_CONNECTED).set(if up { 1.0 } else { 0.0 });
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        });
-
+        // The `iam_nats_connected` gauge sampler is NOT started here (SMA-471 review fix — it
+        // used to be a bare detached `tokio::spawn` at this exact point). Starting it inside
+        // `connect` would mean every caller — including the several unit/integration tests that
+        // call `connect` and never intend to run anything past their own scope — gets an orphan
+        // background task with no shutdown future and no `JoinHandle`, which is exactly the bug
+        // this fix removes. See [`Self::spawn_connection_gauge_sampler`]'s doc: the production
+        // caller (`main.rs`) calls it exactly once, immediately after `connect` succeeds.
         if cfg.max_age_secs == 0 {
             tracing::warn!(stream = %cfg.stream, "outbox.publisher.max_age_secs = 0 — the JetStream stream has no age limit and will grow until the broker's disk fills");
         }
@@ -264,6 +261,56 @@ impl NatsEventPublisher {
             jetstream: js,
             source: cfg.source.clone(),
             breaker: Breaker::with_durations(OPEN_DURATION),
+        })
+    }
+
+    /// Spawns the `iam_nats_connected` gauge sampler on its own task and hands back its
+    /// [`JoinHandle`] — the SMA-471 review carry-over fix.
+    ///
+    /// **Before this fix**, `connect` spawned this loop itself with a bare `tokio::spawn`: no
+    /// shutdown future, no `JoinHandle`. That broke this service's universal background-task
+    /// convention — `PolicySnapshot::spawn_reload`, the denial-audit drain, the outbox relay,
+    /// and `PgPartitionMaintainer::run` all take a `shutdown: impl Future<Output = ()>`,
+    /// `tokio::select!` against it, and hand a `JoinHandle` back to `main.rs` to fold into the
+    /// `servers` `JoinSet` (mirrors [`crate::adapters::authz::PolicySnapshot::spawn_reload`]'s
+    /// shape exactly). A detached sampler has two concrete failure modes: a panic inside it dies
+    /// silently with nothing to `.await` and surface the panic, AND the gauge freezes at
+    /// whatever value it last sampled — a second-order recurrence of exactly the outage
+    /// [`names::IAM_NATS_CONNECTED`] exists to catch (its own doc: sampled by a background task
+    /// rather than inside `publish`, specifically because during a total outage `publish` stops
+    /// being called and a publish-driven gauge would freeze exactly when it matters).
+    ///
+    /// **Why a separate method rather than inline in `connect`**: several unit/integration
+    /// tests call `connect` directly and never intend to run a background task past their own
+    /// scope (`tests/nats_publisher.rs` alone calls it ~10 times); a caller-supplied `shutdown`
+    /// future is the only sound way to bound this loop's lifetime, and `connect`'s own signature
+    /// has no shutdown parameter to source one from. Splitting it out also means calling this
+    /// method twice on the same publisher is the caller's mistake to avoid, not something
+    /// `connect` could ever have double-spawn-guarded on its own — `main.rs` calls it exactly
+    /// once, immediately after `connect` succeeds, which is also the only call site that exists.
+    ///
+    /// Samples immediately (not after the first `poll` interval) — unlike `spawn_reload`, whose
+    /// `select!` races the first sleep against shutdown before ever polling — so the gauge
+    /// reflects reality from the instant this task starts rather than reporting nothing (a
+    /// scrape in the gap would simply see no series yet) for up to `poll`.
+    pub fn spawn_connection_gauge_sampler<S>(&self, shutdown: S) -> JoinHandle<()>
+    where
+        S: Future<Output = ()> + Send + 'static,
+    {
+        // `self.jetstream.client()` hands back a cheap clone of the same multiplexed connection
+        // handle `publish_ack` itself reads via `self.jetstream.client().connection_state()` —
+        // there is no separate `client` field (see this struct's doc).
+        let probe = self.jetstream.client();
+        tokio::spawn(async move {
+            tokio::pin!(shutdown);
+            loop {
+                let up = probe.connection_state() != async_nats::connection::State::Disconnected;
+                gauge!(names::IAM_NATS_CONNECTED).set(if up { 1.0 } else { 0.0 });
+                tokio::select! {
+                    () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    () = &mut shutdown => break,
+                }
+            }
         })
     }
 
