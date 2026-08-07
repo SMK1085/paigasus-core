@@ -185,8 +185,9 @@ impl NatsEventPublisher {
     /// `get_or_create_stream` creates or fetches; it does NOT reconcile an existing stream's
     /// config. That non-reconciliation is deliberate — this service must never silently reshape
     /// a stream external consumers depend on — but adoption is conditional: a stream whose
-    /// `duplicate_window` is shorter than configured, or whose storage is not `File`, or whose
-    /// subjects do not cover `iam.>`, fails boot rather than being adopted.
+    /// `duplicate_window` is shorter than configured, whose `retention` is not `Limits`, whose
+    /// storage is not `File`, or whose subjects do not cover `iam.>`, fails boot rather than
+    /// being adopted.
     ///
     /// # Errors
     ///
@@ -387,7 +388,27 @@ impl NatsEventPublisher {
 }
 
 /// Fails when the live stream's config is weaker than what this service requires (D7).
+///
+/// Deliberately narrow: this checks `retention`, `duplicate_window`, `storage`, `subjects`, and
+/// `max_age` — the properties D3's dedup story and D8's "survive a restart" claim actually rest
+/// on. `max_msgs` / `max_bytes` / `discard` are the same class of drift (a pre-existing stream
+/// could be adopted with a byte or message cap this service never asked for) but are out of
+/// scope for SMA-471; a residual gap, not an oversight.
 fn verify_stream(name: &str, live: &jetstream::stream::Config, want_window: Duration) -> Result<(), NatsPublisherError> {
+    // Checked first: `retention` is the property every other check is pointless without. A
+    // `WorkQueue` stream drops a message once ONE subscriber acks it; an `Interest` stream drops
+    // it once "all known observables" have acked — vacuously true when nothing subscribes, which
+    // is every deployment of this PR (no consumer side ships yet, spec §8). A stream adopted with
+    // either policy passes `duplicate_window`/`storage`/`subjects`/`max_age` unmodified and looks
+    // completely healthy while discarding every message on arrival.
+    if live.retention != jetstream::stream::RetentionPolicy::Limits {
+        return Err(NatsPublisherError::StreamConfigDrift {
+            stream: name.to_string(),
+            field: "retention",
+            want: "limits".to_string(),
+            got: format!("{:?}", live.retention).to_lowercase(),
+        });
+    }
     if live.duplicate_window < want_window {
         return Err(NatsPublisherError::StreamConfigDrift {
             stream: name.to_string(),
@@ -475,6 +496,33 @@ mod tests {
     fn a_matching_config_passes() {
         verify_stream("IAM_EVENTS", &matching(), WANT_WINDOW).expect("a matching config must be adopted");
     }
+
+    /// `WorkQueue` removes a message once ONE subscriber acks it. This PR ships no consumer
+    /// side, so on a `WorkQueue` stream nothing would ever ack and — worse — anything that did
+    /// subscribe would race every other reader for the single delivery.
+    #[test]
+    fn work_queue_retention_is_drift() {
+        let mut live = matching();
+        live.retention = jetstream::stream::RetentionPolicy::WorkQueue;
+        assert_eq!(drifted_field(verify_stream("IAM_EVENTS", &live, WANT_WINDOW)), "retention");
+    }
+
+    /// `Interest` removes a message once all known observables have acked it — vacuously true
+    /// with zero observables, which is every deployment of this PR. The worst finding in the
+    /// SMA-471 review: this is the one drift that discards every message on arrival while every
+    /// other check (`duplicate_window`, `storage`, `subjects`, `max_age`) still passes.
+    #[test]
+    fn interest_retention_is_drift() {
+        let mut live = matching();
+        live.retention = jetstream::stream::RetentionPolicy::Interest;
+        assert_eq!(drifted_field(verify_stream("IAM_EVENTS", &live, WANT_WINDOW)), "retention");
+    }
+
+    // No "non-drift direction" test analogous to `a_longer_duplicate_window_is_not_drift` or
+    // `an_extra_subject_alongside_the_filter_is_not_drift`: unlike a window or a subject set,
+    // retention has no "stronger than asked" value — `Limits` is the only policy that does not
+    // drop messages based on subscriber acknowledgement, so `a_matching_config_passes` above
+    // already covers the sole non-drift case.
 
     #[test]
     fn a_shorter_duplicate_window_is_drift() {
