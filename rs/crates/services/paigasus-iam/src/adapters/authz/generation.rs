@@ -608,8 +608,7 @@ mod tests {
     /// out and needs no Docker: construction and cloning touch no I/O.
     #[tokio::test]
     async fn from_connection_builds_a_redis_backend_that_is_cheap_to_clone() {
-        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
-            .expect("well-formed redis URL, never actually dialed");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz).expect("well-formed redis URL, never actually dialed");
 
         let gens = Generations::from_connection(conn);
         let clone = gens.clone();
@@ -639,8 +638,7 @@ mod tests {
     /// repair gate, so nothing has been "observed" until a `settle` says so.
     #[tokio::test]
     async fn which_redis_routes_each_counter_to_its_own_independent_counter_state() {
-        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
-            .expect("well-formed redis URL, never actually dialed");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz).expect("well-formed redis URL, never actually dialed");
         let gens = Generations::from_connection(conn);
         let Generations::Redis(redis) = &gens else {
             panic!("from_connection must build the Redis variant");
@@ -680,8 +678,7 @@ mod tests {
     /// space is safe, re-entering a used one is not.
     #[tokio::test]
     async fn a_failed_repair_falls_back_locally_instead_of_erroring() {
-        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
-            .expect("well-formed redis URL, never actually dialed");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz).expect("well-formed redis URL, never actually dialed");
         let Generations::Redis(redis) = Generations::from_connection(conn) else {
             panic!("from_connection must build the Redis variant");
         };
@@ -702,8 +699,7 @@ mod tests {
     /// reaching the i64 ceiling in short order.
     #[tokio::test]
     async fn repeated_failed_repairs_do_not_ratchet_the_fallback_upward() {
-        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
-            .expect("well-formed redis URL, never actually dialed");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz).expect("well-formed redis URL, never actually dialed");
         let Generations::Redis(redis) = Generations::from_connection(conn) else {
             panic!("from_connection must build the Redis variant");
         };
@@ -728,8 +724,7 @@ mod tests {
     /// it needs no Docker — a connection refusal is as deterministic as a success.
     #[tokio::test]
     async fn a_steady_observation_raises_the_high_water_mark() {
-        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
-            .expect("well-formed redis URL, never actually dialed");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz).expect("well-formed redis URL, never actually dialed");
         let Generations::Redis(redis) = Generations::from_connection(conn) else {
             panic!("from_connection must build the Redis variant");
         };
@@ -755,8 +750,7 @@ mod tests {
     /// `lock` this test would hang rather than fail.
     #[tokio::test]
     async fn a_repair_that_cannot_take_the_gate_returns_the_local_fallback_without_queueing() {
-        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
-            .expect("well-formed redis URL, never actually dialed");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz).expect("well-formed redis URL, never actually dialed");
         let Generations::Redis(redis) = Generations::from_connection(conn) else {
             panic!("from_connection must build the Redis variant");
         };
@@ -788,8 +782,7 @@ mod tests {
     /// Needs no Docker: the arm issues no Redis command, so the closed port is never dialed.
     #[tokio::test]
     async fn a_rewind_at_the_ceiling_serves_a_generation_past_the_high_water_mark() {
-        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
-            .expect("well-formed redis URL, never actually dialed");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz).expect("well-formed redis URL, never actually dialed");
         let Generations::Redis(redis) = Generations::from_connection(conn) else {
             panic!("from_connection must build the Redis variant");
         };
@@ -884,10 +877,9 @@ mod tests {
             recorder.rewind_series()
         );
 
-        // Built outside the closure: `new_lazy_with_config` spawns onto the runtime, while
+        // Built outside the closure: constructing the handle spawns onto the runtime, while
         // `from_connection` (the thing under test) is synchronous.
-        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz)
-            .expect("well-formed redis URL, never actually dialed");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::Authz).expect("well-formed redis URL, never actually dialed");
         metrics::with_local_recorder(&recorder, || {
             let _redis = Generations::from_connection(conn);
         });
