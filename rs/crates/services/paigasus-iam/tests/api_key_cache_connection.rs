@@ -64,6 +64,24 @@ fn split_config(base: &IamConfig, authz_url: &str, api_key_url: Option<&str>) ->
 const API_KEYS_SERIES: &str = r#"iam_redis_breaker_state{role="api_keys"}"#;
 const AUTHZ_SERIES: &str = r#"iam_redis_breaker_state{role="authz"}"#;
 
+/// The error plus its whole `source()` chain, flattened.
+///
+/// `AuthnError::Backend`'s `Display` is the bare literal `"backend error"` — every detail lives
+/// in the boxed source. So `err.to_string()` alone is the SAME string for a dial failure and for
+/// a missing-URL wiring defect, which would make both discriminating assertions below vacuously
+/// true. This is also what an operator sees at boot: `main` returns `anyhow::Result<()>`, whose
+/// `Termination` prints the cause chain under "Caused by:".
+fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        out.push_str(" | ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
+}
+
 /// All four phases in ONE test function, deliberately. Two reasons, neither of them the
 /// `OnceLock`: container reuse (four `AppState::new` boots against one Postgres + one Redis, not
 /// four pairs), and correctness under a plain `cargo test`, where the whole file shares one
@@ -124,21 +142,23 @@ async fn api_key_cache_shares_the_authz_connection_only_on_matching_urls() {
     // `AppState` is not `Debug` (it derives `Clone` only), so `unwrap_err`/`expect_err` will not
     // compile — assert on `is_err()` instead. Same trap SMA-476 documented in `redis_conn.rs`.
     let cfg = split_config(&base, &redis_url, Some("redis://127.0.0.1:1"));
-    let err = AppState::new(db.clone(), &cfg).await.err().map(|e| e.to_string());
-    assert!(err.is_some(), "phase c: an unreachable api_keys redis_url must fail boot — it is dialled now");
-    let err = err.unwrap();
-    // Discriminates a DIAL failure from phase (d)'s wiring-defect error. Deliberately not
-    // asserting on "Connection refused", which is OS-specific. Phases (a)/(b) having already
-    // booted against these same containers is what rules out an environmental explanation.
-    assert!(!err.contains("IamConfig::validate"), "phase c: expected a dial failure, got the missing-url wiring defect: {err}");
+    let err = AppState::new(db.clone(), &cfg).await.err();
+    let err = error_chain(err.as_ref().expect("phase c: an unreachable api_keys redis_url must fail boot — it is dialled now"));
+    // Discriminates a DIAL failure from phase (d)'s wiring-defect error, and pins the context
+    // that tells an operator WHICH of the two possible connections failed. Deliberately not
+    // asserting on "Connection refused", which is OS-specific.
+    assert!(
+        err.contains("api_keys.introspect_cache.redis_url is unreachable"),
+        "phase c: expected the dial failure to name the config key, got: {err}"
+    );
+    assert!(!err.contains("IamConfig::validate"), "phase c: expected a dial failure, not the missing-url wiring defect: {err}");
+    // The URL must not reach the logs (SMA-476 D4's posture) — it can carry a password.
+    assert!(!err.contains("127.0.0.1:1"), "phase c: the boot error must not echo the configured URL: {err}");
 
     // --- Phase (d): a missing URL is a wiring defect, not "inherit authz's" (D2) -------------
     // Before SMA-485 this booted, because the `Some(conn)` arm masked the absent URL.
     let cfg = split_config(&base, &redis_url, None);
-    let err = AppState::new(db.clone(), &cfg).await.err().map(|e| e.to_string());
-    assert!(err.is_some(), "phase d: backend=redis without redis_url must fail boot");
-    assert!(
-        err.as_deref().unwrap_or_default().contains("IamConfig::validate"),
-        "phase d: expected the wiring-defect error naming validate, got: {err:?}"
-    );
+    let err = AppState::new(db.clone(), &cfg).await.err();
+    let err = error_chain(err.as_ref().expect("phase d: backend=redis without redis_url must fail boot"));
+    assert!(err.contains("IamConfig::validate"), "phase d: expected the wiring-defect error naming validate, got: {err}");
 }
