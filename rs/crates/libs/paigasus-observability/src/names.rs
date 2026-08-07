@@ -102,6 +102,20 @@ pub const IAM_OUTBOX_ROWS_DELETED_TOTAL: &str = "iam_outbox_rows_deleted_total";
 /// Every replica sets the same global count, so this is PER-REPLICA: aggregate it
 /// `max by (job)` in alerts and dashboards, never `sum`.
 pub const IAM_OUTBOX_PARKED_ROWS: &str = "iam_outbox_parked_rows";
+/// Labelled `scope` = `one` | `bulk` (which `DeadLetterService` call replayed the row(s)) and
+/// `beyond_dedup_window` = `true` | `false` | `unknown` (SMA-471 D4) — a CLOSED set, never
+/// derived from anything caller-supplied, so it cannot mint cardinality.
+///
+/// `beyond_dedup_window` exists because `REPLAY_ONE_SQL` un-parks a row by its EXISTING id,
+/// which `NatsEventPublisher` sends as `Nats-Msg-Id`, and JetStream only deduplicates within
+/// its `duplicate_window_secs` of the row's first publish. `scope="one"` computes the label
+/// from the replayed row's own `parked_at` against a constant mirroring the shipped
+/// `duplicate_window_secs` default (not plumbed config — see `ASSUMED_DEDUP_WINDOW_SECS`'s doc
+/// in `dead_letters.rs`): `true` means the row parked longer ago than that window, so the
+/// replay may republish an event the stream already holds; `false` means it parked recently
+/// enough that JetStream's dedup almost certainly still covers it. `scope="bulk"` is always
+/// `unknown` — `replay_matching_in` returns only a row COUNT, never the rows, so no per-row
+/// `parked_at` exists to compare.
 pub const IAM_OUTBOX_DEAD_LETTERS_REPLAYED_TOTAL: &str = "iam_outbox_dead_letters_replayed_total";
 pub const IAM_OUTBOX_DEAD_LETTERS_DISCARDED_TOTAL: &str = "iam_outbox_dead_letters_discarded_total";
 // IAM audit partition maintenance
