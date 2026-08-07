@@ -309,7 +309,12 @@ impl AppState {
     /// least that starter set, never an empty or drifted one.
     pub async fn new(db: DatabaseConnection, cfg: &IamConfig) -> Result<AppState, AuthnError> {
         let authz_cfg = &cfg.authz;
-        let (gens, redis_conn): (Generations, Option<RedisHandle>) = match authz_cfg.cache.backend {
+        // SMA-485 D5: the handle is paired with the URL it was OPENED with, not left for a
+        // later, independent re-read of `authz_cfg.cache.redis_url` to guess at. The API-key
+        // cache below decides whether to reuse this connection by comparing against that URL, so
+        // pairing them makes the comparison structurally be against this handle's own origin —
+        // and deletes the `(Some(handle), None)` state that a second read would have to handle.
+        let (gens, redis_conn): (Generations, Option<(RedisHandle, &str)>) = match authz_cfg.cache.backend {
             AuthzCacheBackend::Memory => (Generations::memory(), None),
             AuthzCacheBackend::Redis => {
                 // `IamConfig::validate` rejects a redis backend without a URL at boot; a
@@ -320,7 +325,7 @@ impl AppState {
                     .as_deref()
                     .ok_or_else(|| AuthnError::Backend("authz.cache.backend = \"redis\" without redis_url (IamConfig::validate must run first)".into()))?;
                 let conn = connect_redis(redis_url, RedisRole::Authz).await?;
-                (Generations::from_connection(conn.clone()), Some(conn))
+                (Generations::from_connection(conn.clone()), Some((conn, redis_url)))
             }
         };
 
@@ -394,12 +399,12 @@ impl AppState {
         let slices: Arc<dyn EntitySliceLoader> = {
             let pg_loader: Arc<dyn EntitySliceLoader> = Arc::new(PgEntitySliceLoader::new(db.clone(), gens.clone()));
             match &redis_conn {
-                Some(conn) => Arc::new(SliceCache::from_connection(pg_loader, conn.clone(), authz_cfg.slice_cache_ttl_secs)) as Arc<dyn EntitySliceLoader>,
+                Some((conn, _)) => Arc::new(SliceCache::from_connection(pg_loader, conn.clone(), authz_cfg.slice_cache_ttl_secs)) as Arc<dyn EntitySliceLoader>,
                 None => pg_loader,
             }
         };
         let decisions: Arc<dyn DecisionCache> = match &redis_conn {
-            Some(conn) => Arc::new(RedisDecisionCache::from_connection(conn.clone(), authz_cfg.decision_cache_ttl_secs)),
+            Some((conn, _)) => Arc::new(RedisDecisionCache::from_connection(conn.clone(), authz_cfg.decision_cache_ttl_secs)),
             None => Arc::new(MemoryDecisionCache::new()),
         };
 
@@ -556,23 +561,40 @@ impl AppState {
         let api_key_cache: Arc<dyn ApiKeyValidationCache> = match cfg.api_keys.introspect_cache.backend {
             ApiKeyCacheBackend::Memory => Arc::new(MemoryApiKeyCache::new(cfg.api_keys.introspect_cache.ttl_secs)),
             ApiKeyCacheBackend::Redis => {
-                // Reuse the SHARED `redis_conn` opened above for `authz.cache.backend =
-                // "redis"` when one exists (the ordinary single-Redis deployment posture)
-                // rather than opening a second, independent connection; only dial a fresh one
-                // when authz's own cache is memory-backed but `api_keys.introspect_cache`
-                // still wants redis. `IamConfig::validate` guarantees `redis_url` is present
-                // whenever this arm needs to open its own connection.
+                // SMA-485: reuse the SHARED `redis_conn` opened above ONLY when the two
+                // configured URLs match textually after trimming (`shares_one_connection`, D1) —
+                // that is SMA-444 Task 21's one-connection-per-deployment optimisation, and it is
+                // sound precisely when both URLs name the same endpoint. Before SMA-485 the reuse
+                // was unconditional, so an operator who pointed `api_keys.introspect_cache` at a
+                // second Redis got the authz one anyway: the URL `IamConfig::validate` REQUIRES
+                // was then discarded, and SMA-476 D1's per-connection breaker isolation silently
+                // did not hold (one connection, one breaker, so an authz outage short-circuited
+                // API-key introspection against a healthy backend).
+                //
+                // The URL is read BEFORE the match, so a missing one is a loud wiring defect
+                // rather than a silent fallback to the authz connection (D2) — matching the
+                // authz arm above and the JWKS arm below. `IamConfig::validate` rejects that
+                // config at boot; `AppState::new` takes a bare `&IamConfig`, so this stays a
+                // real fallible step here.
+                let api_key_url = cfg
+                    .api_keys
+                    .introspect_cache
+                    .redis_url
+                    .as_deref()
+                    .ok_or_else(|| AuthnError::Backend("api_keys.introspect_cache.backend = \"redis\" without redis_url (IamConfig::validate must run first)".into()))?;
+                //
+                // The dial failure is re-wrapped with the config key that caused it. Before
+                // SMA-485 there was at most ONE Redis dial in this function, so a bare
+                // "Connection refused" was unambiguous; now there can be two, and this is the one
+                // whose URL was previously ignored — i.e. the one most likely to hold a stale or
+                // placeholder value that has never been dialled before. The message names the KEY,
+                // never the URL: a `redis::RedisError` does not echo the URL it failed on, and
+                // that posture (SMA-476 D4) is deliberate, since this string reaches the logs.
                 let conn = match &redis_conn {
-                    Some(conn) => conn.clone(),
-                    None => {
-                        let redis_url = cfg
-                            .api_keys
-                            .introspect_cache
-                            .redis_url
-                            .as_deref()
-                            .ok_or_else(|| AuthnError::Backend("api_keys.introspect_cache.backend = \"redis\" without redis_url (IamConfig::validate must run first)".into()))?;
-                        connect_redis(redis_url, RedisRole::ApiKeys).await?
-                    }
+                    Some((conn, authz_url)) if shares_one_connection(authz_url, api_key_url) => conn.clone(),
+                    _ => connect_redis(api_key_url, RedisRole::ApiKeys)
+                        .await
+                        .map_err(|e| AuthnError::Backend(format!("api_keys.introspect_cache.redis_url is unreachable ({e}) — since SMA-485 it is dialled rather than ignored").into()))?,
                 };
                 Arc::new(RedisApiKeyCache::from_connection(conn, cfg.api_keys.introspect_cache.ttl_secs))
             }
@@ -712,17 +734,38 @@ impl AppState {
 
 /// Opens `redis_url` and wraps it in a breaker-guarded [`RedisHandle`] — shared by every
 /// redis-backed cache `AppState::new` wires (the authz `Generations`/`RedisDecisionCache`/
-/// `SliceCache` trio, SMA-444 Task 21; the API-key `RedisApiKeyCache`, SMA-445 Task 19, when it
-/// can't reuse the already-open `redis_conn` LOCAL BINDING in `AppState::new` — not to be
-/// confused with the [`crate::adapters::redis_conn`] MODULE this delegates to), mirroring
-/// `RedisJwksCache::connect`'s connect pattern.
+/// `SliceCache` trio, SMA-444 Task 21; the API-key `RedisApiKeyCache`, SMA-445 Task 19, when
+/// [`shares_one_connection`] says its configured URL matches the authz one — otherwise that cache
+/// gets its OWN handle from this same function, SMA-485). The `redis_conn` LOCAL BINDING in
+/// `AppState::new` is not to be confused with the [`crate::adapters::redis_conn`] MODULE this
+/// delegates to. Mirrors `RedisJwksCache::connect`'s connect pattern.
 ///
 /// Delegates to [`crate::adapters::redis_conn::connect`] for the tuned reconnect retry budget
 /// (SMA-473) and the per-connection circuit breaker (SMA-476) — this function owns only the
-/// `AuthnError` mapping. `role` labels this connection's breaker metrics; see SMA-476 D10 for why
-/// a shared connection reports as `authz` even when it also serves the API-key cache.
+/// `AuthnError` mapping. `role` labels this connection's breaker metrics; a SHARED connection
+/// reports every command as `authz`, including the API-key cache's (SMA-476 D10, as amended by
+/// SMA-485 D1: sharing now requires the two URLs to match).
 async fn connect_redis(redis_url: &str, role: RedisRole) -> Result<RedisHandle, AuthnError> {
     crate::adapters::redis_conn::connect(redis_url, role).await.map_err(|e| AuthnError::Backend(Box::new(e)))
+}
+
+/// Whether the API-key introspect cache may reuse the authz connection: textual equality of the
+/// two configured URLs after trimming, **not** endpoint identity (SMA-485 D1).
+///
+/// `redis://cache:6379` and `redis://cache:6379/0` name one backend spelled two ways and
+/// deliberately get two connections — erring toward a second connection is wasteful, never wrong
+/// (the key namespaces are disjoint: `iam:apikey:` vs `iam:authz:*` vs `iam:jwks:`), whereas
+/// erring the other way is what SMA-485 exists to fix. Normalising through redis-rs was declined
+/// because it would not resolve the motivating case either — `redis://localhost:6379` vs
+/// `redis://127.0.0.1:6379` differs by HOST, which no parser resolves at config-read time — while
+/// putting credential comparison (`ConnectionInfo` carries `password`) into the composition root.
+///
+/// The trim is load-bearing, not cosmetic. `IamConfig::validate` trims `authn.issuers` but no
+/// `redis_url`, and URL parsing strips surrounding C0 controls and spaces — so a trailing newline
+/// from an env-var override dials perfectly well and would differ only textually, silently
+/// splitting a deployment the operator believes is unified.
+pub(crate) fn shares_one_connection(authz_url: &str, api_key_url: &str) -> bool {
+    authz_url.trim() == api_key_url.trim()
 }
 
 /// Liveness only — stateless, so it is testable without a database.
@@ -865,5 +908,28 @@ mod tests {
             .merge(audit::router())
             .merge(dead_letters::router())
             .merge(system_retirement::router());
+    }
+
+    /// SMA-485 D1: the API-key introspect cache reuses the authz connection on TEXTUAL equality
+    /// after trimming — deliberately not endpoint identity. Every row here is a spelling D1
+    /// names explicitly, so the accepted costs are executable rather than prose.
+    ///
+    /// Trimming is not cosmetic: URL parsing strips leading/trailing C0 controls and spaces, so
+    /// `redis://a:6379\n` (an env-var override or a heredoc'd secret) DIALS FINE and would
+    /// otherwise split a deployment the operator believes is unified — silently, since the only
+    /// symptom is an `iam_redis_breaker_state{role="api_keys"}` series that reads as deliberate.
+    #[test]
+    fn shares_one_connection_is_trimmed_textual_equality() {
+        for (authz, api_key, expected, why) in [
+            ("redis://a:6379", "redis://a:6379", true, "identical: SMA-444 Task 21's optimisation"),
+            ("redis://a:6379", "redis://a:6379\n", true, "trailing newline is trimmed"),
+            (" redis://a:6379 ", "redis://a:6379", true, "surrounding spaces are trimmed"),
+            ("redis://a:6379", "redis://a:6379/0", false, "accepted cost: explicit default db"),
+            ("redis://localhost:6379", "redis://127.0.0.1:6379", false, "accepted cost: host alias"),
+            ("redis://:pw1@a:6379", "redis://:pw2@a:6379", false, "credentials differ"),
+            ("redis://a:6379", "redis://b:6379", false, "the genuine split this issue is about"),
+        ] {
+            assert_eq!(shares_one_connection(authz, api_key), expected, "{why}: ({authz:?}, {api_key:?})");
+        }
     }
 }
