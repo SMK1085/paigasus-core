@@ -991,7 +991,7 @@ impl IamConfig {
             // SMA-471 D8: JetStream itself requires duplicate_window <= max_age when max_age > 0.
             if p.max_age_secs != 0 && p.max_age_secs <= p.duplicate_window_secs {
                 return Err(format!(
-                    "outbox.publisher.max_age_secs ({}) must exceed duplicate_window_secs ({}), or be 0 for unlimited",
+                    "outbox.publisher.max_age_secs ({}) must exceed outbox.publisher.duplicate_window_secs ({}), or be 0 for unlimited",
                     p.max_age_secs, p.duplicate_window_secs
                 ));
             }
@@ -2427,6 +2427,24 @@ mod tests {
         assert!(validate_result(&format!("{base}\nmax_age_secs = 7200")).is_ok());
     }
 
+    /// Strict `>`: equality is REJECTED, one second more is accepted — pins the D8 boundary the
+    /// same way `duplicate_window_boundary_is_exclusive` pins the retry-span rule's boundary
+    /// above. The base test's 1800/0/7200 fixtures never exercise exactly
+    /// `max_age_secs == duplicate_window_secs`, so a `<=` weakened to `<` would still pass all
+    /// three.
+    #[test]
+    fn max_age_boundary_is_exclusive() {
+        let at = r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://localhost:4222"
+            duplicate_window_secs = 3600
+            max_age_secs = 3600
+        "#;
+        assert!(validate_result(at).is_err(), "max_age_secs == duplicate_window_secs must be rejected");
+        assert!(validate_result(&at.replace("max_age_secs = 3600", "max_age_secs = 3601")).is_ok());
+    }
+
     #[test]
     fn source_must_parse_as_a_uri() {
         let err = validate_err(
@@ -2480,6 +2498,22 @@ mod tests {
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("hunter2"), "credentials leaked into Debug: {rendered}");
         assert!(rendered.contains("redacted"), "{rendered}");
+    }
+
+    /// Companion to `the_publisher_url_is_redacted_in_debug`: `Serialize` is hand-rolled
+    /// SEPARATELY from `Debug` (see `PublisherConfig`'s doc), specifically so a credentialed
+    /// `url` cannot leak into a serialized config dump either — `serde_json` is already a
+    /// regular (non-dev) dependency of this crate (see `pepper_never_appears_in_debug_or_
+    /// serialized_config` above for the identical pattern applied to `api_keys.pepper`).
+    #[test]
+    fn the_publisher_url_is_redacted_in_serialize() {
+        let cfg = PublisherConfig {
+            url: Some("nats://user:hunter2@host:4222".to_string()),
+            ..PublisherConfig::default()
+        };
+        let serialized = serde_json::to_string(&cfg).expect("PublisherConfig serializes");
+        assert!(!serialized.contains("hunter2"), "credentials leaked into Serialize: {serialized}");
+        assert!(serialized.contains("redacted"), "{serialized}");
     }
 
     // --- SMA-446 Unit 3: `[metrics]` config -------------------------------------------------
