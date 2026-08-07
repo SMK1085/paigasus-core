@@ -388,9 +388,17 @@ pub struct PublisherConfig {
     /// is redacted in `Debug`/`Serialize` — see the manual impls below.
     pub url: Option<String>,
     pub stream: String,
-    /// CloudEvents `source`. MUST be a URI and MUST stay stable for a stream's lifetime:
-    /// consumers dedup on `id` alone while CloudEvents scopes identity to `(source, id)`
-    /// (SMA-471 D6).
+    /// CloudEvents `source`, copied verbatim into every published envelope. MUST stay stable for
+    /// a stream's lifetime: consumers dedup on `id` alone while CloudEvents scopes identity to
+    /// `(source, id)` (SMA-471 D6), so changing this on a live stream is a breaking operational
+    /// act.
+    ///
+    /// Validated as an **absolute** URI via `url::Url::parse` — deliberately narrower than
+    /// CloudEvents, which permits any RFC 3986 URI-reference and merely RECOMMENDs the absolute
+    /// form. Non-special schemes (`urn:`, `tag:`, `mailto:`, a bare custom scheme) all parse; only
+    /// relative references and malformed values are rejected. Validation parses but never
+    /// rewrites: the raw string is what ships, so WHATWG normalization (which would lowercase the
+    /// scheme and host) never changes what consumers see.
     pub source: String,
     pub publish_timeout_secs: u64,
     /// JetStream's per-stream dedup window. A COVERAGE window, not a guarantee — see
@@ -2491,11 +2499,25 @@ mod tests {
         }
     }
 
-    /// The shipped default and other realistic absolute forms must pass. `urn:paigasus:iam` is
-    /// the default, and a URN is exactly the case a naive "must contain ://" check would break.
+    /// Scheme coverage for the accepted side (CodeRabbit, PR 112). `url::Url::parse` implements
+    /// the WHATWG URL Standard, which treats six "special" schemes (http/https/ws/wss/ftp/file)
+    /// differently from everything else — so the cases that matter here are the NON-special ones,
+    /// which a naive "must contain `://`" check would reject outright. `urn:` is the shipped
+    /// default; `tag:`/`mailto:`/a bare custom scheme are the other realistic shapes an operator
+    /// might reach for.
     #[test]
-    fn an_absolute_uri_source_is_accepted() {
-        for good in ["urn:paigasus:iam", "https://paigasus.dev/iam", "https://iam.eu-central-1.paigasus.dev"] {
+    fn every_realistic_absolute_uri_scheme_is_accepted() {
+        for good in [
+            "urn:paigasus:iam",                              // the shipped default
+            "urn:uuid:6e8bc430-9c3a-11d9-9669-0800200c9a66", // non-special, opaque path
+            "tag:paigasus.dev,2026:iam",                     // non-special, commas
+            "mailto:ops@paigasus.dev",                       // non-special, '@' in path
+            "paigasus:iam",                                  // bare custom scheme
+            "https://paigasus.dev/iam",                      // special scheme
+            "https://iam.eu-central-1.paigasus.dev",
+            "nats://host:4222",
+            "file:///x",
+        ] {
             assert!(
                 validate_result(&format!(
                     r#"
@@ -2509,6 +2531,26 @@ mod tests {
                 "{good:?} is a valid absolute URI and must be accepted"
             );
         }
+    }
+
+    /// Validation must PARSE `source` without rewriting it. WHATWG normalization lowercases the
+    /// scheme and host (`HTTPS://Paigasus.DEV/IAM` parses to `https://paigasus.dev/IAM`), and
+    /// every published envelope carries this field verbatim — so if validation ever swapped in
+    /// the normalized form, the `source` external consumers see would silently change on upgrade.
+    /// D6 requires it to stay stable for the lifetime of a stream, which makes this load-bearing.
+    #[test]
+    fn validation_does_not_normalize_the_source_it_accepts() {
+        let raw = "HTTPS://Paigasus.DEV/IAM";
+        let cfg = load_config_with(&format!(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://localhost:4222"
+            source = "{raw}"
+        "#
+        ));
+        assert!(cfg.validate().is_ok(), "the value must be accepted in the first place");
+        assert_eq!(cfg.outbox.publisher.source, raw, "validation must not rewrite `source` into its WHATWG-normalized form");
     }
 
     /// A config that publishes nothing while claiming a broker must not boot silently.
