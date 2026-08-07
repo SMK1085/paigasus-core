@@ -358,7 +358,7 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 26 metric families `paigasus-iam` emits
+/// Registers `# HELP`/`# TYPE` exposition text for the 27 metric families `paigasus-iam` emits
 /// directly (spec §4.1; includes the SMA-467 audit partition-maintenance families, the
 /// SMA-469 outbox retention/dead-letter families, the SMA-476 Redis circuit-breaker families,
 /// and the SMA-481 system-row-retirement family), via the `names::` consts so the string used
@@ -390,6 +390,14 @@ fn describe_iam_metrics() {
         "Redis circuit-breaker state transitions, labeled by role and to=closed|half_open|open. Catches flapping the gauge cannot see: the open window is 2s while scrapes are 15-30s apart."
     );
     describe_counter!(
+        names::IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL,
+        "Every PolicySnapshot reload attempt, labeled by outcome (installed/rejected/failed). 'installed' must stay non-zero — the TTL backstop installs one every authz.policy_cache_ttl_secs regardless of whether the generation counter moved, so silence means revocations are not taking effect (SMA-470)."
+    );
+    describe_counter!(
+        names::IAM_AUTHZ_GENERATION_REWINDS_TOTAL,
+        "Rewinds of a Redis authz generation counter, labeled by counter (policy_gen/entity_gen), outcome (repaired/repair_failed/ceiling) and reason (missing/lower)."
+    );
+    describe_counter!(
         names::IAM_AUDIT_RECORDS_TOTAL,
         "Every audit-log insert attempt (mutation or denial), labeled by outcome (committed/denied) and result."
     );
@@ -404,6 +412,10 @@ fn describe_iam_metrics() {
     describe_counter!(
         names::IAM_BOOTSTRAP_ADMIN_SEED_FAILURES_TOTAL,
         "Bootstrap-admin seed attempts that failed and were swallowed, by stage (list = the pre-seed existence check, txn = the grant+audit+event transaction). A lost policy_gen bump is not counted."
+    );
+    describe_counter!(
+        names::IAM_STARTER_POLICY_RECONCILES_TOTAL,
+        "Boot-time starter-policy reconciliation, labeled by outcome (unchanged/seeded/reconciled/adopted/stale_binary/externally_modified/orphaned/failed). System-role reconciliation shares this counter for the 'failed' label only."
     );
     describe_counter!(
         names::IAM_OUTBOX_RELAY_TICKS_TOTAL,

@@ -21,6 +21,14 @@ pub const IAM_GRPC_REQUEST_DURATION_SECONDS: &str = "iam_grpc_request_duration_s
 // IAM authz / audit
 pub const IAM_AUTHZ_DECISIONS_TOTAL: &str = "iam_authz_decisions_total";
 pub const IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL: &str = "iam_authz_policy_snapshot_reloads_total";
+/// Rewinds of a Redis authz generation counter (`iam:authz:policy_gen`/`iam:authz:entity_gen`),
+/// by `counter`, `outcome` (`repaired`/`repair_failed`/`ceiling`) and `reason`
+/// (`missing`/`lower`). Non-zero means a counter was observed to have **rewound** — read back
+/// below what the process had already seen. `reason` says which kind: `missing` is the key
+/// itself gone (most often `allkeys-*` eviction, which the RUNBOOK's `maxmemory-policy` mandate
+/// exists to prevent), while `lower` is a key that still exists at a smaller value, e.g. a
+/// failover to a replica carrying stale data. Only `missing` implies key loss (SMA-474).
+pub const IAM_AUTHZ_GENERATION_REWINDS_TOTAL: &str = "iam_authz_generation_rewinds_total";
 pub const IAM_AUDIT_RECORDS_TOTAL: &str = "iam_audit_records_total";
 pub const IAM_DENIAL_AUDITS_DROPPED_TOTAL: &str = "iam_denial_audits_dropped_total";
 pub const IAM_DENIAL_AUDITS_ENQUEUED_TOTAL: &str = "iam_denial_audits_enqueued_total";
@@ -137,6 +145,7 @@ pub const ALL: &[&str] = &[
     IAM_GRPC_REQUEST_DURATION_SECONDS,
     IAM_AUTHZ_DECISIONS_TOTAL,
     IAM_AUTHZ_POLICY_SNAPSHOT_RELOADS_TOTAL,
+    IAM_AUTHZ_GENERATION_REWINDS_TOTAL,
     IAM_REDIS_BREAKER_STATE,
     IAM_REDIS_BREAKER_TRANSITIONS_TOTAL,
     IAM_AUDIT_RECORDS_TOTAL,

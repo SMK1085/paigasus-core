@@ -330,6 +330,23 @@
           "legendFormat": "{{job}} {{role}}"
         }
       ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Authz generation rewinds",
+      "description": "iam_authz_generation_rewinds_total by counter/outcome — non-zero means a Redis generation key was lost (SMA-474); check CONFIG GET maxmemory-policy",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 64 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(iam_authz_generation_rewinds_total[$__rate_interval])) by (counter, outcome)",
+          "legendFormat": "{{counter}} {{outcome}}"
+        }
+      ]
     }
   ]
 }

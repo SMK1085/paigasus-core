@@ -320,7 +320,7 @@ impl AppState {
                     .as_deref()
                     .ok_or_else(|| AuthnError::Backend("authz.cache.backend = \"redis\" without redis_url (IamConfig::validate must run first)".into()))?;
                 let conn = connect_redis(redis_url, RedisRole::Authz).await?;
-                (Generations::Redis(conn.clone()), Some(conn))
+                (Generations::from_connection(conn.clone()), Some(conn))
             }
         };
 
