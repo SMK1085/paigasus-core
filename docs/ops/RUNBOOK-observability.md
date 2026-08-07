@@ -172,9 +172,10 @@ Two dashboards are provisioned automatically (`grafana/dashboards/{iam,gateway}.
 - gRPC request rate + non-OK ratio (RED, gRPC — gRPC failures don't show up as HTTP 5xx, so this
   panel is the only place to see them at a glance).
 - Authz decisions (allow vs. deny rate) + cache hit ratio.
-- Redis circuit breaker state (SMA-476, stat panel, `max by (role)` — **never** `sum` across
-  replicas, every replica reports its own state): 0=closed, 1=half-open, 2=open, per `role`. See
-  §4 "Authz availability posture" and the three breaker alerts.
+- Redis circuit breaker state (SMA-476, stat panel, `max by (job, role)` — **never** `sum` across
+  replicas, every replica reports its own state; `job` is kept so prod and canary don't collapse
+  into one series): 0=closed, 1=half-open, 2=open, per `role`. See §4 "Authz availability posture"
+  and the three breaker alerts.
 - Audit write rate (by `outcome`).
 - Denial-audit drop rate — **should be flat 0**; any nonzero value is worth investigating (§4).
 - Outbox row: drained rate, published rate, publish-failure rate, parked events (15m window,
@@ -216,7 +217,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamAuthzRedisCacheBypassed` | `sum(rate(iam_authz_decisions_total{cache="bypass"}[5m])) > 0` for 10m | critical |
 | `IamRedisBreakerOpen` | `max by (job, role) (iam_redis_breaker_state{role!="jwks"}) != 0` for 2m | warning |
 | `IamJwksRedisBreakerOpen` | `max by (job, role) (iam_redis_breaker_state{role="jwks"}) != 0` for 1m | critical |
-| `IamRedisBreakerFlapping` | `sum by (job, role) (increase(iam_redis_breaker_transitions_total{to="open"}[10m])) > 5` | warning |
+| `IamRedisBreakerFlapping` | `max by (job, role) (increase(iam_redis_breaker_transitions_total{to="open"}[10m])) > 5` | warning |
 | `GatewayHighErrorRate` | `sum(rate(gateway_http_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `GatewayIamDependencyUnavailable` | `rate(gateway_iam_calls_total{result="unavailable"}[5m]) > 0` for 5m | critical |
 | `GatewayUpstreamErrors` | `sum(rate(gateway_upstream_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_upstream_requests_total[5m])) > 0.05` for 10m | warning |
@@ -962,8 +963,9 @@ direct signal of the two.
 **Confirm:** `PING` Redis directly from the IAM host (see the credential-handling note under
 `IamAuthzRedisCacheBypassed` above — never pass a secret-bearing URL on the command line); check
 IAM logs for `redis circuit breaker open` and any authentication errors; compare
-`iam_redis_breaker_transitions_total{role, to="open"}` over the same window — one transition that
-has not since closed points at stuck-open (check credentials), several point at flapping.
+`iam_redis_breaker_transitions_total{role="<role>", to="open"}` (substitute the alert's own `role`
+label) over the same window — one transition that has not since closed points at stuck-open (check
+credentials), several point at flapping.
 
 **Remediation:** restore Redis reachability if that is the cause — the breaker re-probes
 automatically once it clears, no IAM-side action needed. If the cause is a rejected credential,
@@ -994,7 +996,7 @@ redeploy and is single-replica-appropriate only, so it is not a live incident re
 
 ### `IamRedisBreakerFlapping` — Redis circuit breaker is flapping (warning)
 
-**Meaning.** `sum by (job, role) (increase(iam_redis_breaker_transitions_total{to="open"}[10m])) >
+**Meaning.** `max by (job, role) (increase(iam_redis_breaker_transitions_total{to="open"}[10m])) >
 5` — the breaker for `role` opened more than five times in the last 10 minutes. This exists because
 neither breaker-state alert above can see a breaker that opens and re-closes **inside one scrape
 interval**: `OPEN_DURATION` is 2 s while Prometheus scrapes every 15–30 s, so a breaker opening for
@@ -1015,10 +1017,10 @@ dropping IAM's connection; or ordinary connection churn crossing `FAILURE_THRESH
 consecutive) periodically — see `IamRedisBreakerOpen` above for why 3 is a low bar under real
 concurrency.
 
-**Confirm:** graph `iam_redis_breaker_transitions_total{role, to="open"}` as a rate/increase to see
-the actual cadence; correlate against Redis-side metrics (memory, CPU, connected-clients) and any
-proxy/load-balancer health checks in front of it; rule out a client-eviction loop via Redis's own
-`CLIENT LIST` output and eviction logs.
+**Confirm:** graph `iam_redis_breaker_transitions_total{role="<role>", to="open"}` (substitute the
+alert's own `role` label) as a rate/increase to see the actual cadence; correlate against Redis-side
+metrics (memory, CPU, connected-clients) and any proxy/load-balancer health checks in front of it;
+rule out a client-eviction loop via Redis's own `CLIENT LIST` output and eviction logs.
 
 **Remediation:** stabilize the backend (relieve memory/CPU pressure, fix the flapping network path,
 address client eviction) — this is a Redis-health problem, not something to fix IAM-side. Do not

@@ -355,6 +355,25 @@ Timing uses `std::time::Instant` (monotonic). No `Clock` port injection: the bre
 elapsed durations, never wall-clock instants, so there is nothing for a test clock to control
 that parameterizing the durations does not already handle.
 
+**A third race, orthogonal to the wedge above: a stale permit's outcome must not cross a state
+transition it never witnessed.** (Surfaced by CodeRabbit round 1 on the SMA-476 PR.) A permit
+admitted while `Closed` can still be in flight when three *other* commands fail and open the
+breaker; if that permit then completes with `Ok`, `on_success` unconditionally moves to `Closed`
+— bypassing the just-started open window entirely, moments after it began. This is a different
+failure mode from the wedge above: no CAS is stuck and no window fails to re-arm, but the
+guarantee that once open, the breaker stays open for `OPEN_DURATION`, is defeated all the same.
+
+The fix is a monotonically increasing **epoch** on `Inner`, incremented by every call to
+`transition`. `admit()` captures the current epoch — post any transition it itself performs —
+into the `ProbePermit` it returns, so a permit admitted in `Closed` with no intervening
+transition carries that epoch, and a probe admitted by the very transition into `HalfOpen`
+carries the epoch that transition just set. Both `ProbePermit::record` and the abandoned-probe
+`Drop` path apply their outcome only if the permit's epoch still matches the breaker's *current*
+epoch; a mismatch means the breaker has moved on since the permit was issued, so the outcome
+carries no information about the current window and is dropped. A late *failure* needs no
+separate reasoning: `on_failure` is already a no-op while `Open`, so the epoch check there is
+belt-and-braces symmetry with `on_success`, not a fix in its own right.
+
 ### D9 — The breaker covers every handle, including the fail-closed JWKS one
 
 Uniform coverage. `RedisJwksCache` still returns `AuthnError::Unavailable` on every Redis error
@@ -480,7 +499,7 @@ struct Breaker {
     role: RedisRole,
     open_duration: Duration,        // fields, not consts, so tests use 50ms
     half_open_deadline: Duration,
-    inner: std::sync::Mutex<Inner>, // { state, consecutive_failures, changed_at }
+    inner: std::sync::Mutex<Inner>, // { state, consecutive_failures, changed_at, epoch }
 }
 ```
 

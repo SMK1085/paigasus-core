@@ -195,7 +195,7 @@ groups:
         # is sampled at 0 most of the time and the `for:` clause never holds. A chronically sick
         # backend looks exactly like that, and this counter is the only artifact that survives a
         # sub-scrape-interval state.
-        expr: sum by (job, role) (increase(iam_redis_breaker_transitions_total{to="open"}[10m])) > 5
+        expr: max by (job, role) (increase(iam_redis_breaker_transitions_total{to="open"}[10m])) > 5
         for: 0m
         labels: { severity: warning }
         annotations: { summary: "IAM Redis circuit breaker is flapping (role {{ $labels.role }})", description: "The Redis circuit breaker for role {{ $labels.role }} opened more than 5 times in 10m. Each open costs a cache-bypass window; repeated opens suggest an intermittently unhealthy backend rather than a clean outage. NOTE the state gauge may read 0 at scrape time — that is why this rule watches transitions, not state." }
