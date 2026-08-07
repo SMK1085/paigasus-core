@@ -154,6 +154,22 @@ blake3 = "1"
 # `metrics` 0.24 (facade) + `metrics-exporter-prometheus` 0.18 (their compatible pairing).
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
+# async-nats — the official NATS Rust client, and `paigasus-iam`'s outbox `EventPublisher`
+# backend (ADR-0016, SMA-471). `default-features = false` for the same "minimal baseline, add
+# per-crate" reason as reqwest/sea-orm/redis above: the default set drags in object-store, kv,
+# websockets, service and nuid, none of which a publisher needs. `jetstream` is the one that
+# earns its keep — the ack-waiting publish and the stream-config verification both live there.
+# `server_2_10`/`server_2_11` gate the newer stream-config fields against the broker versions
+# ADR-0016 targets.
+#
+# TLS posture: the crate offers `ring` and `aws-lc-rs`. `ring` is selected explicitly to match
+# the workspace's rustls/ring baseline (see reqwest/sea-orm/redis above) — `aws-lc-rs` would
+# link a SECOND rustls CryptoProvider and panic at runtime with "no process-level
+# CryptoProvider available", as well as adding a native cmake build dep. `nkeys` backs the
+# `.creds` (JWT + nkey seed) auth `[outbox.publisher].credentials_file` allows.
+async-nats = { version = "0.50", default-features = false, features = [
+  "jetstream", "ring", "server_2_10", "server_2_11", "nkeys",
+] }
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
 # via the Moon `lint` task's `-D warnings`.
