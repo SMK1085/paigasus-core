@@ -82,7 +82,7 @@ fn render_time(t: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Timelike};
     use paigasus_iam_core::EventType;
     use uuid::Uuid;
 
