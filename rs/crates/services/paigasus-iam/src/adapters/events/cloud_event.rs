@@ -71,10 +71,12 @@ pub fn render_id(id: Uuid) -> String {
     id.hyphenated().to_string()
 }
 
-/// RFC 3339 with second precision and a `Z` suffix. `occurred_at` is already microsecond-
-/// truncated by the `Clock` port, but the wire format is pinned here rather than inherited.
+/// RFC 3339 with microsecond precision and a `Z` suffix. `occurred_at` is already microsecond-
+/// truncated by the `Clock` port, and the wire format matches that precision deliberately so
+/// consumers keep sub-second ordering. Widening precision later would be a breaking change to
+/// the public contract.
 fn render_time(t: DateTime<Utc>) -> String {
-    t.to_rfc3339_opts(SecondsFormat::Secs, true)
+    t.to_rfc3339_opts(SecondsFormat::Micros, true)
 }
 
 #[cfg(test)]
@@ -91,7 +93,7 @@ mod tests {
             schema_version: 1,
             aggregate_prn: aggregate.to_string(),
             actor_prn: actor.map(str::to_string),
-            occurred_at: Utc.with_ymd_and_hms(2026, 8, 7, 12, 30, 45).unwrap(),
+            occurred_at: Utc.with_ymd_and_hms(2026, 8, 7, 12, 30, 45).unwrap().with_nanosecond(123_456_000).unwrap(),
             payload: serde_json::json!({"kind": "user", "nested": {"a": 1}}),
             correlation_id: correlation,
         }
@@ -121,8 +123,11 @@ mod tests {
     fn time_is_rfc3339_and_round_trips() {
         let ev = sample(None, None, "prn:x");
         let rendered = render(&ev)["time"].as_str().unwrap().to_string();
+        // Verify the rendered string includes microsecond digits
+        assert!(rendered.contains("123456"), "rendered time must include microseconds: {rendered}");
+        // Verify it parses back to exactly the original DateTime
         let parsed = chrono::DateTime::parse_from_rfc3339(&rendered).unwrap().with_timezone(&Utc);
-        assert_eq!(parsed, ev.occurred_at);
+        assert_eq!(parsed, ev.occurred_at, "time must round-trip exactly");
     }
 
     /// CloudEvents has no null attribute values — absent optionals are OMITTED, not `null`.
