@@ -64,3 +64,24 @@ that CI absorbs via `actions/cache`.
   "Materialize main ref" step.
 - GUI git clients often strip `PATH`; add `~/.proto/shims` to their environment if
   hooks fail with "command not found".
+
+## NATS (optional — outbox publisher, SMA-471)
+
+The outbox publisher defaults to `backend = "tracing"` and needs nothing. To run the real
+JetStream sink locally:
+
+```bash
+nats-server -js          # the whole setup; JetStream must be enabled or stream ensure fails
+```
+
+then set:
+
+```toml
+[outbox.publisher]
+backend = "nats"
+url     = "nats://127.0.0.1:4222"
+```
+
+The service creates and verifies the `IAM_EVENTS` stream at boot, and refuses to start if an
+existing stream's `duplicate_window`, storage or subjects are weaker than configured.
+Integration tests need no local server — they start their own container.

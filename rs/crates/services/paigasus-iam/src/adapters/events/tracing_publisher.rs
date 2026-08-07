@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `TracingEventPublisher`: an [`EventPublisher`] that emits one structured `tracing::info!`
-//! per relayed event (SMA-446, Slice B Task B8) — a placeholder sink for local dev / early
-//! environments ahead of a real message-bus publisher (a later slice). There is no I/O here
-//! that can fail, so `publish` always returns `Ok(())`.
+//! per relayed event (SMA-446, Slice B Task B8) — the broker-less default sink, for local dev
+//! and any deployment that has not opted into a real broker.
+//! [`NatsEventPublisher`](super::NatsEventPublisher) (SMA-471, ADR-0016) is the production sink;
+//! `[outbox.publisher].backend` selects between them and defaults to `"tracing"`, so this
+//! publisher is not going away. There is no I/O here that can fail, so `publish` always returns
+//! `Ok(())`.
 
 use async_trait::async_trait;
 use paigasus_iam_core::{DomainEvent, EventPublisher, PublishError};
