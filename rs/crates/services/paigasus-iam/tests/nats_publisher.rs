@@ -402,3 +402,102 @@ async fn the_relay_drains_rows_into_jetstream() {
     assert_eq!(support::unpublished_count(&db).await, 1);
     assert!(support::last_error(&db, Uuid::from_u128(0xB1)).await.is_some(), "last_error must be recorded");
 }
+
+/// AC8: the three NATS metric families must be "registered, described, and **emitted**".
+/// `describe_iam_metrics` (main.rs) and the `names::ALL` drift test already cover registration
+/// and description; nothing previously proved emission, and the riskiest part — that
+/// `spawn_connection_gauge_sampler` is ever actually called (`main.rs:98`) — was asserted by
+/// nothing at all.
+///
+/// **This genuinely cannot be done Docker-free**, unlike `redis_conn.rs`'s equivalent
+/// (`breaker_transitions_emit_the_gauge_and_the_counter`, which needs no Redis at all because
+/// `ConnectionManager::new_lazy_with_config` never dials). `async-nats` has no lazy/mock client
+/// constructor: `NatsEventPublisher::connect` cannot return `Ok` — and so a `NatsEventPublisher`
+/// cannot exist at all, let alone reach the priming line or have a sampler spawned against it —
+/// until a real TCP handshake AND a real JetStream `STREAM.INFO`/`STREAM.CREATE` round trip have
+/// both already succeeded against a real server. A hand-rolled stub server would need to speak
+/// enough of the JetStream request/reply protocol to satisfy `get_or_create_stream`, which is
+/// reimplementing the thing under test, not a reasonable test shortcut.
+///
+/// Uses `metrics::set_default_local_recorder` (a guard), not `with_local_recorder` (which only
+/// accepts a synchronous closure and so cannot straddle `.await` points). Holding the guard is
+/// sound specifically because `#[tokio::test]` defaults to the CURRENT-THREAD runtime flavor:
+/// this test body and the `tokio::spawn`ed sampler task below are polled on the very same OS
+/// thread, so the thread-local recorder installed here is visible inside the sampler's loop too
+/// — that would NOT hold under `#[tokio::test(flavor = "multi_thread")]`.
+#[tokio::test]
+async fn nats_metrics_are_actually_emitted() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use paigasus_observability::names;
+
+    let Some((_node, url)) = start_nats().await else { return };
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+
+    let publisher = NatsEventPublisher::connect(&cfg(&url)).await.expect("connect");
+
+    // `iam_nats_publish_duplicates_total` is primed at ZERO inside `connect` itself (SMA-471),
+    // specifically so the FIRST duplicate can still satisfy `increase() > 0` — a metrics-rs
+    // counter otherwise only appears in the registry at the value of its first increment.
+    let snapshot = snapshotter.snapshot().into_vec();
+    let primed = snapshot
+        .iter()
+        .find(|(key, _, _, _)| key.key().name() == names::IAM_NATS_PUBLISH_DUPLICATES_TOTAL)
+        .expect("SMA-471 AC8: iam_nats_publish_duplicates_total was never emitted by connect()");
+    assert!(matches!(primed.3, DebugValue::Counter(0)), "expected connect() to prime the counter at 0, got {:?}", primed.3);
+
+    // `iam_nats_publish_duration_seconds` is recorded around every `publish_ack` call, and
+    // `iam_nats_publish_duplicates_total` increments past its primed zero on a duplicate ack —
+    // one fresh publish plus one deliberate redelivery of the same event id proves both.
+    let id = Uuid::from_u128(0xC1);
+    publisher.publish(&event(id, EventType::RoleGranted)).await.expect("first publish");
+    publisher.publish(&event(id, EventType::RoleGranted)).await.expect("redelivery must dedup, not error");
+
+    let snapshot = snapshotter.snapshot().into_vec();
+    let duration = snapshot
+        .iter()
+        .find(|(key, _, _, _)| key.key().name() == names::IAM_NATS_PUBLISH_DURATION_SECONDS)
+        .expect("SMA-471 AC8: iam_nats_publish_duration_seconds was never emitted by publish_ack()");
+    assert!(
+        matches!(&duration.3, DebugValue::Histogram(samples) if samples.len() >= 2),
+        "expected 2 recorded durations, got {:?}",
+        duration.3
+    );
+    let duplicates = snapshot
+        .iter()
+        .find(|(key, _, _, _)| key.key().name() == names::IAM_NATS_PUBLISH_DUPLICATES_TOTAL)
+        .expect("iam_nats_publish_duplicates_total disappeared after being primed");
+    assert!(
+        matches!(duplicates.3, DebugValue::Counter(1)),
+        "expected the redelivery to bump the counter to 1, got {:?}",
+        duplicates.3
+    );
+
+    // `iam_nats_connected` is set by the BACKGROUND sampler, not by `publish` — this is the
+    // review's specific concern: `main.rs:98` is the only production call site for
+    // `spawn_connection_gauge_sampler`, and nothing previously proved it is ever reached.
+    let (tx, mut rx) = tokio::sync::watch::channel(());
+    let handle = publisher.spawn_connection_gauge_sampler(async move {
+        let _ = rx.changed().await;
+    });
+    // The sampler's own doc promises it samples immediately on start (not after its first
+    // sleep) — this still needs at least one scheduler tick to actually run on this
+    // current-thread runtime, which the sleep below yields for.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let snapshot = snapshotter.snapshot().into_vec();
+    let gauge = snapshot
+        .iter()
+        .find(|(key, _, _, _)| key.key().name() == names::IAM_NATS_CONNECTED)
+        .expect("SMA-471 AC8: iam_nats_connected was never emitted by spawn_connection_gauge_sampler()");
+    assert!(
+        matches!(gauge.3, DebugValue::Gauge(v) if (v.into_inner() - 1.0).abs() < f64::EPSILON),
+        "expected a live connection to read 1, got {:?}",
+        gauge.3
+    );
+
+    drop(tx);
+    handle.await.expect("sampler task panicked");
+}
