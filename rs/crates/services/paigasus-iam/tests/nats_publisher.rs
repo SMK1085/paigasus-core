@@ -48,33 +48,56 @@ async fn start_nats() -> Option<(ContainerAsync<Nats>, String)> {
 /// inspect issued in that gap comes back `PortNotExposed`. It is rare for one container and
 /// reproducible when this suite races eight of them (nextest runs each `#[tokio::test]` in its
 /// own process, in parallel).
+/// How long the container-readiness helpers below will wait. This is a LOAD BUDGET, not an
+/// expectation: on an idle machine both return in well under a second, and they return as soon as
+/// the condition holds, so a generous ceiling costs nothing in the happy path. It is deliberately
+/// large because the failure it guards is Docker being slow under contention — this suite runs 12
+/// tests in parallel, each with its own container, and the restart test stops and starts one while
+/// the other eleven are still churning. A 30s ceiling was observed to expire under exactly that
+/// load (a full-suite run that normally takes 3.7s took 33s), which is a CI flake, not a defect in
+/// the code under test.
+const CONTAINER_READY_BUDGET: Duration = Duration::from_secs(90);
+
 async fn url_of(node: &ContainerAsync<Nats>) -> String {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + CONTAINER_READY_BUDGET;
     loop {
         match node.get_host_port_ipv4(4222).await {
             Ok(port) => return format!("nats://127.0.0.1:{port}"),
-            Err(e) if std::time::Instant::now() >= deadline => panic!("nats port was never published within 30s: {e}"),
+            Err(e) if std::time::Instant::now() >= deadline => {
+                panic!("nats port was never published within {CONTAINER_READY_BUDGET:?}: {e}")
+            }
             Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
 }
 
-/// Blocks until the broker accepts a connection, or panics after 30s. `ContainerAsync::start`
-/// does NOT re-apply the image's `ready_conditions` — those are only awaited by the initial
-/// `AsyncRunner::start` — so a restarted container needs its own readiness wait.
+/// Blocks until the broker is serving **JetStream**, or panics after [`CONTAINER_READY_BUDGET`].
+/// `ContainerAsync::start` does NOT re-apply the image's `ready_conditions` — those are only
+/// awaited by the initial `AsyncRunner::start` — so a restarted container needs its own wait.
+///
+/// Probes JetStream rather than merely opening a connection: `nats-server` accepts TCP before it
+/// has finished recovering JetStream state from disk, so a bare `connect` can succeed while a
+/// subsequent stream lookup still fails. Callers here restart a broker and then immediately assert
+/// on recovered dedup state, so "accepts connections" is the wrong readiness signal.
 async fn await_ready(url: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + CONTAINER_READY_BUDGET;
     loop {
-        match async_nats::connect(url).await {
-            Ok(client) => {
-                drop(client);
-                return;
-            }
-            Err(e) if std::time::Instant::now() >= deadline => {
-                panic!("nats did not come back up within 30s: {e}");
-            }
-            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        // A full JetStream round-trip: connect, then look up the stream the caller is about to
+        // assert on. Retries on ANY error, including a not-yet-recovered stream — which is the
+        // point. The sole caller restarts a broker whose `IAM_EVENTS` stream already exists and is
+        // file-backed, so "the stream is queryable again" is precisely the condition it needs.
+        let ready = match async_nats::connect(url).await {
+            Ok(client) => async_nats::jetstream::new(client).get_stream("IAM_EVENTS").await.is_ok(),
+            Err(_) => false,
+        };
+        if ready {
+            return;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nats jetstream did not recover the IAM_EVENTS stream within {CONTAINER_READY_BUDGET:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

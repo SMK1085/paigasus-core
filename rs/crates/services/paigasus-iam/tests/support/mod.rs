@@ -76,10 +76,42 @@ pub async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, Data
 
     let port = node.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let db = Database::connect(&url).await.unwrap();
+    let db = connect_when_ready(&url).await;
     Migrator::up(&db, None).await.unwrap();
 
     Some((node, db))
+}
+
+/// How long [`connect_when_ready`] waits for a freshly-started Postgres to accept connections.
+/// A LOAD BUDGET, not an expectation — it returns on the first successful connect, which on an
+/// idle machine is immediate.
+const PG_READY_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Connects to a just-started Postgres container, retrying until it actually accepts.
+///
+/// **Why this is not a bare `Database::connect(..).unwrap()`** (which is what it replaced): the
+/// `testcontainers` Postgres ready-condition is log-based, and the official image logs
+/// "ready to accept connections" *twice* — once at the end of its `initdb`/init-scripts phase,
+/// then again after the real startup that follows. A container matched on the first line is
+/// therefore reported ready while the server is still about to restart, so an immediate connect
+/// races that restart and fails with a connection-refused/reset.
+///
+/// The race is old and pre-existing, but it is load-sensitive: it fires when many containers
+/// start concurrently, and SMA-471 added twelve more Docker-backed tests to this crate, which
+/// makes it fire measurably more often (observed here: `api_key_auth` failing 1 run in 3 at
+/// `Database::connect`). Retrying is the standard fix and costs nothing on the happy path.
+async fn connect_when_ready(opts: impl Into<ConnectOptions>) -> DatabaseConnection {
+    let opts = opts.into();
+    let deadline = std::time::Instant::now() + PG_READY_BUDGET;
+    loop {
+        match Database::connect(opts.clone()).await {
+            Ok(db) => return db,
+            Err(e) => {
+                assert!(std::time::Instant::now() < deadline, "postgres did not accept connections within {PG_READY_BUDGET:?}: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
 }
 
 /// Starts a raw, ephemeral Postgres container WITHOUT running any migrations — same
@@ -112,7 +144,8 @@ pub async fn start_raw_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseC
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let mut opts = ConnectOptions::new(url);
     opts.max_connections(1).min_connections(1);
-    let db = Database::connect(opts).await.unwrap();
+    // Same startup race as `start_migrated_postgres` — see `connect_when_ready`'s doc.
+    let db = connect_when_ready(opts).await;
     Some((node, db))
 }
 
