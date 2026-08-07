@@ -296,6 +296,21 @@ pub struct OutboxConfig {
     /// Attempts (publish failures) before a row is parked (`parked = true`, excluded from
     /// future ticks). Validated non-zero in [`IamConfig::validate`] (a zero limit would park
     /// every row on its very first failed attempt, before ever getting a retry).
+    ///
+    /// Defaults to **60** (SMA-471 D9, raised from `5`): a row survives
+    /// `max_attempts × poll_interval_secs` of consecutive publish failures before parking, which
+    /// at the default `poll_interval_secs = 5` is ≈5 minutes — enough that a routine broker
+    /// restart does not dead-letter the whole in-flight backlog into the SMA-469 dead-letter
+    /// surface (the old default of `5` gave only ~25 seconds).
+    ///
+    /// **The cost, paid on every deployment regardless of `[outbox.publisher].backend`:** the
+    /// relay drains strictly `ORDER BY id` (FIFO) one attempt per row per tick, so a
+    /// *permanently* failing row — not transient, believed impossible today since all eight
+    /// payload shapes are small fixed objects (spec §5) — now head-of-line blocks every healthy
+    /// row behind it (up to `batch_size` of them) for ~5 minutes instead of ~25 seconds before it
+    /// parks and the relay moves on. Accepted; `PublishError::Permanent`, parking a deterministic
+    /// failure immediately instead of retrying it to exhaustion, is the follow-up that removes
+    /// this cost (spec §7).
     pub max_attempts: u32,
     /// Retention for the table the relay drains — see [`OutboxRetentionConfig`].
     #[serde(default)]
