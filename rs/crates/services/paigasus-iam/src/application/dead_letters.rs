@@ -376,6 +376,51 @@ mod tests {
         assert_eq!(beyond_dedup_window_label(&snapshot), "false");
     }
 
+    /// Pins the comparison's DIRECTION at `dead_letters.rs`'s `beyond_dedup_window` computation:
+    /// it is strict `>` against `ASSUMED_DEDUP_WINDOW_SECS`, not `>=`. The two tests above (3h
+    /// and 30s) are nowhere near the 3_600s threshold, so flipping `>` to `>=` would pass both
+    /// unchanged — neither discriminates the operator. This test targets the boundary itself: a
+    /// row parked EXACTLY at the threshold must still read `"false"` (strict `>` requires aging
+    /// PAST it, not just reaching it), while a row one second further must read `"true"`.
+    ///
+    /// Deliberately NOT constructed as `Utc::now() - Duration::seconds(3_600)`: `replay`'s own
+    /// `Utc::now()` call happens a small amount of wall-clock time AFTER this line runs (test
+    /// setup, `with_debug_recorder`'s runtime construction, `fixture()`, the async dispatch),
+    /// so the elapsed time it actually measures is `3_600s + that gap`. `num_seconds()` truncates
+    /// towards zero, so if the gap is small the count still reads `3_600` — but "small" is not
+    /// "zero", and a slow CI runner could push the gap over a full second, silently reading
+    /// `3_601` and making the `"false"` assertion flaky in exactly the direction that would
+    /// falsely BLAME a correct implementation.
+    ///
+    /// Instead each target is offset 500ms INTO its intended integer second (`3_600_500ms` /
+    /// `3_601_500ms` ago): `num_seconds()` still truncates to `3_600`/`3_601` respectively as
+    /// long as the setup-to-comparison gap stays under ~500ms, which a synchronous, no-I/O,
+    /// in-memory test (no real network/disk/broker anywhere on this path) is never remotely
+    /// close to — the 500ms margin is roughly three orders of magnitude more slack than this
+    /// test's actual overhead needs.
+    #[test]
+    fn replaying_pins_the_strict_greater_than_at_the_window_boundary() {
+        let window_ms = i64::from(ASSUMED_DEDUP_WINDOW_SECS) * 1_000;
+
+        let at_boundary = with_debug_recorder(async {
+            let f = fixture(&[Action::ReplayOutboxDeadLetter]);
+            f.dead.seed(entry_parked_at(1, Utc::now() - chrono::Duration::milliseconds(window_ms + 500)));
+            f.svc.replay(&actor(), Uuid::from_u128(1)).await.unwrap();
+        });
+        assert_eq!(
+            beyond_dedup_window_label(&at_boundary),
+            "false",
+            "a row parked EXACTLY at the window boundary must not be flagged — the comparison is strict `>`, not `>=`"
+        );
+
+        let one_second_past = with_debug_recorder(async {
+            let f = fixture(&[Action::ReplayOutboxDeadLetter]);
+            f.dead.seed(entry_parked_at(2, Utc::now() - chrono::Duration::milliseconds(window_ms + 1_500)));
+            f.svc.replay(&actor(), Uuid::from_u128(2)).await.unwrap();
+        });
+        assert_eq!(beyond_dedup_window_label(&one_second_past), "true", "one second past the window boundary must flip to true");
+    }
+
     /// `replay_matching_in` returns only a row COUNT, never the rows, so `replay_matching` has
     /// no `parked_at` to compare against the window — this pins that the label degrades to
     /// `"unknown"` rather than silently defaulting to `"false"` (which would UNDER-warn) or
