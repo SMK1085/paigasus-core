@@ -162,3 +162,40 @@ groups:
         for: 10m
         labels: { severity: critical }
         annotations: { summary: "IAM authz is bypassing the Redis decision cache (Redis unhealthy)", description: "IAM authz decisions are bypassing the Redis decision cache. While this fires: the decision cache is gone (decisions still evaluate correctly, just slower), cross-replica API-key revocation stops being global, and (if authn.jwks_cache.backend=\"redis\") every token-authenticated request 503s (API-key auth fails open onto Postgres). NOTE: this alert only has a signal under authz.cache.backend=\"redis\" — on the default authz.cache.backend=\"memory\" the cache=\"bypass\" series never exists, sum() over an empty vector is empty, and this alert stays SILENT rather than firing. See RUNBOOK's \"Authz availability posture\"." }
+      - alert: IamRedisBreakerOpen
+        # SMA-476. `!= 0` rather than `== 2` on purpose: the gauge legitimately sits at 1
+        # (half_open) while a probe is in flight, and an `== 2` expression with a `for:` clause
+        # could reset every time a scrape lands on a probe — i.e. never fire during exactly the
+        # outage it exists for.
+        #
+        # `max by (job, role)` because the gauge is per-replica: every replica sets its own, so
+        # sum() would report nonsense.
+        #
+        # role="jwks" is EXCLUDED here and paged separately below at critical severity — an open
+        # JWKS breaker is a total token-auth outage, not a degradation.
+        expr: max by (job, role) (iam_redis_breaker_state{role!="jwks"}) != 0
+        for: 2m
+        labels: { severity: warning }
+        annotations: { summary: "IAM Redis circuit breaker is not closed (role {{ $labels.role }})", description: "The Redis circuit breaker for role {{ $labels.role }} has been open or half-open for 2m, so authz/API-key cache commands are short-circuiting instantly instead of dialling. Decisions remain CORRECT (these caches fail open onto Postgres) but uncached. Recovery lags Redis by up to ~6s after it returns. See RUNBOOK's \"Authz availability posture\"." }
+      - alert: IamJwksRedisBreakerOpen
+        # SMA-476 D9. RedisJwksCache is the ONLY fail-CLOSED Redis consumer: its error propagates
+        # through JwksProvider::key_for as AuthnError::Unavailable, so while this fires EVERY
+        # token-authenticated request 503s. That is an outage, not a degradation.
+        #
+        # It cannot be left to IamAuthzRedisCacheBypassed as a "critical companion": that rule is
+        # structurally SILENT under authz.cache.backend="memory", which is exactly the split
+        # configuration where a JWKS Redis may be the only Redis in play.
+        expr: max by (job, role) (iam_redis_breaker_state{role="jwks"}) != 0
+        for: 1m
+        labels: { severity: critical }
+        annotations: { summary: "IAM JWKS Redis circuit breaker is not closed — token auth is failing closed", description: "The Redis circuit breaker for the JWKS cache has been open or half-open for 1m. RedisJwksCache fails CLOSED, so every token-authenticated request is returning 503 (API-key auth is unaffected — it fails open onto Postgres). Recovery lags Redis by up to ~6s after it returns. See RUNBOOK's \"Authz availability posture\"." }
+      - alert: IamRedisBreakerFlapping
+        # SMA-476 D10. Neither rule above can fire on a breaker that opens and re-closes INSIDE
+        # one scrape interval: the open window is 2s while scrapes are 15-30s apart, so the gauge
+        # is sampled at 0 most of the time and the `for:` clause never holds. A chronically sick
+        # backend looks exactly like that, and this counter is the only artifact that survives a
+        # sub-scrape-interval state.
+        expr: max by (job, role) (increase(iam_redis_breaker_transitions_total{to="open"}[10m])) > 5
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "IAM Redis circuit breaker is flapping (role {{ $labels.role }})", description: "The Redis circuit breaker for role {{ $labels.role }} opened more than 5 times in 10m. Each open costs a cache-bypass window; repeated opens suggest an intermittently unhealthy backend rather than a clean outage. NOTE the state gauge may read 0 at scrape time — that is why this rule watches transitions, not state." }

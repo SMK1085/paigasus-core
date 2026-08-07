@@ -14,7 +14,7 @@
 //!
 //! Two implementations: [`MemoryDecisionCache`] (single-replica, process lifetime only —
 //! same posture as `Generations::memory`) and [`RedisDecisionCache`] (cross-replica,
-//! `ConnectionManager`, mirroring `adapters::oidc::redis_cache::RedisJwksCache`'s
+//! `RedisHandle`, mirroring `adapters::oidc::redis_cache::RedisJwksCache`'s
 //! connect/clone-per-call pattern). **Both fail OPEN (D12):** a decision cache is a pure
 //! accelerator over `PolicySnapshot`/Cedar — never the system of record — so a `get` that
 //! can't be served cleanly (a Redis error, or a payload that fails to deserialize) is
@@ -25,9 +25,10 @@
 use async_trait::async_trait;
 use paigasus_iam_core::{AccessRequest, AuthzError, Decision, DecisionCache};
 use redis::AsyncCommands;
-use redis::aio::ConnectionManager;
 use std::collections::HashMap;
 use std::sync::Mutex;
+
+use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 
 /// Redis/in-proc key prefix (spec §7): `iam:authz:dec:<policy_content>:<entity_gen>:<hash>`.
 const KEY_PREFIX: &str = "iam:authz:dec:";
@@ -101,10 +102,10 @@ impl DecisionCache for MemoryDecisionCache {
     }
 }
 
-/// `DecisionCache` backed by Redis via an auto-reconnecting `ConnectionManager` (spec §7),
-/// mirroring `adapters::oidc::redis_cache::RedisJwksCache`. Cheap to clone the connection
-/// per call — `ConnectionManager` is itself `Arc`-backed and designed for concurrent
-/// callers.
+/// `DecisionCache` backed by Redis via a breaker-wrapped, auto-reconnecting `RedisHandle`
+/// (spec §7), mirroring `adapters::oidc::redis_cache::RedisJwksCache`. Cheap to clone the
+/// connection per call — `RedisHandle` wraps an `Arc`-backed `ConnectionManager` and is
+/// itself designed for concurrent callers.
 ///
 /// **Fail-open (D12):** unlike `RedisJwksCache` (which fails CLOSED on a Redis error — a
 /// stale/unreachable JWKS cache is an auth-availability concern), this cache fails OPEN:
@@ -114,25 +115,25 @@ impl DecisionCache for MemoryDecisionCache {
 /// `PolicySnapshot`/Cedar on a miss, so a Redis outage only costs the accelerator, never a
 /// decision.
 pub struct RedisDecisionCache {
-    conn: ConnectionManager,
+    conn: RedisHandle,
     ttl_secs: u64,
 }
 
 impl RedisDecisionCache {
-    /// Opens `redis_url` and wraps it in a `ConnectionManager`. `ttl_secs` is applied to
+    /// Opens `redis_url` and wraps it in a `RedisHandle`. `ttl_secs` is applied to
     /// every `put` as Redis's own `EX` expiry — this cache is a fail-open accelerator, so an
     /// entry disappearing after `ttl_secs` (or on eviction) never surfaces as anything
     /// other than a subsequent miss.
     pub async fn connect(redis_url: &str, ttl_secs: u64) -> Result<Self, AuthzError> {
-        let conn = crate::adapters::redis_conn::connect(redis_url).await.map_err(redis_connect_err)?;
+        let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::Authz).await.map_err(redis_connect_err)?;
         Ok(Self { conn, ttl_secs })
     }
 
-    /// Builds a cache over an ALREADY-CONNECTED `ConnectionManager` (SMA-444 Task 21):
+    /// Builds a cache over an ALREADY-CONNECTED `RedisHandle` (SMA-444 Task 21):
     /// `AppState::new` shares ONE redis connection across the redis-backed `Generations` +
     /// `RedisDecisionCache` + `SliceCache` rather than each opening its own — `connect` above
     /// stays the standalone-caller/test entry point.
-    pub(crate) fn from_connection(conn: ConnectionManager, ttl_secs: u64) -> Self {
+    pub(crate) fn from_connection(conn: RedisHandle, ttl_secs: u64) -> Self {
         Self { conn, ttl_secs }
     }
 }
@@ -298,5 +299,27 @@ mod tests {
     async fn memory_cache_get_of_missing_key_is_none() {
         let cache = MemoryDecisionCache::new();
         assert!(cache.get("iam:authz:dec:never:cached:x").await.is_none());
+    }
+
+    /// SMA-476 AC3: an OPEN breaker must not change the fail-open contract (D12) — a `get`
+    /// still degrades to a plain miss, a `put` is still swallowed.
+    ///
+    /// Pointed at a BLACKHOLE, not a closed port: a closed port refuses in microseconds, which
+    /// looks identical to a short-circuit. Here a command that actually dialled would cost
+    /// ~2.1 s, so the elapsed assertion proves the breaker short-circuited.
+    #[tokio::test]
+    async fn an_open_breaker_keeps_the_decision_cache_failing_open() {
+        let blackhole = crate::adapters::redis_conn::test_support::start().await;
+        let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, crate::adapters::redis_conn::RedisRole::Authz).expect("well-formed redis URL");
+        let cache = RedisDecisionCache::from_connection(conn, 60);
+        let key = decision_key("content-a", 2, &base_request());
+
+        let started = std::time::Instant::now();
+        let got = cache.get(&key).await;
+        cache.put(&key, &sample_decision()).await;
+        let elapsed = started.elapsed();
+
+        assert!(got.is_none(), "SMA-476 AC3: an open breaker must read as a plain MISS, never an error (fail-open, D12)");
+        assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the calls dialled instead of short-circuiting");
     }
 }

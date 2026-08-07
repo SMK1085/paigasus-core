@@ -2,7 +2,7 @@
 
 //! `Generations`'s Redis backend integration test (SMA-444 Task 10): `policy_gen`/
 //! `entity_gen` are independent `INCR`-backed counters that round-trip across two clones
-//! sharing one `ConnectionManager` (D11's cross-replica premise — a bump made through one
+//! sharing one `RedisHandle` (D11's cross-replica premise — a bump made through one
 //! handle must be visible through another).
 //!
 //! Runs against an ephemeral Redis in Docker. In CI (`CI` env set) a missing Docker daemon

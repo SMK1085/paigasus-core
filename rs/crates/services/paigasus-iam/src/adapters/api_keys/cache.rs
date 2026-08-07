@@ -14,7 +14,7 @@
 //!
 //! Two implementations, mirroring `adapters::authz::decision_cache` exactly: [`MemoryApiKeyCache`]
 //! (single-replica, TTL-bounded `Mutex<HashMap<..>>`) and [`RedisApiKeyCache`] (cross-replica,
-//! `ConnectionManager`, same connect/clone-per-call pattern as `RedisDecisionCache`/`SliceCache`).
+//! `RedisHandle`, same connect/clone-per-call pattern as `RedisDecisionCache`/`SliceCache`).
 //!
 //! **Both fail OPEN (D5):** this cache is a pure accelerator over the Postgres-backed
 //! `ApiKeyRepository` — never the system of record — so a `get` that can't be served cleanly (a
@@ -38,13 +38,12 @@ use chrono::{DateTime, Utc};
 use paigasus_iam_core::{ApiKeyId, PrincipalId, PrincipalStatus};
 use paigasus_kernel::Prn;
 use redis::AsyncCommands;
-#[cfg(test)]
-use redis::Client;
-use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 
 /// Redis/in-proc key prefix (spec §9): `iam:apikey:<keyid>`.
 const KEY_PREFIX: &str = "iam:apikey:";
@@ -188,37 +187,41 @@ impl ApiKeyValidationCache for MemoryApiKeyCache {
     }
 }
 
-/// `ApiKeyValidationCache` backed by Redis via an auto-reconnecting `ConnectionManager` (spec
-/// §9), mirroring `adapters::authz::decision_cache::RedisDecisionCache`. Cheap to clone the
-/// connection per call — `ConnectionManager` is itself `Arc`-backed and designed for
-/// concurrent callers.
+/// `ApiKeyValidationCache` backed by Redis via a breaker-wrapped, auto-reconnecting
+/// `RedisHandle` (spec §9), mirroring `adapters::authz::decision_cache::RedisDecisionCache`.
+/// Cheap to clone the connection per call — `RedisHandle` wraps an `Arc`-backed
+/// `ConnectionManager` and is itself designed for concurrent callers.
 ///
 /// **Fail-open (D5):** every error path (connect, I/O, or (de)serialize) on `get` returns
 /// `None` — a plain miss — and every error on `put`/`evict` is logged and swallowed. The
 /// caller always falls through to a real DB validation on a miss, so a Redis outage only ever
 /// costs the accelerator, never a validation.
 pub struct RedisApiKeyCache {
-    conn: ConnectionManager,
+    conn: RedisHandle,
     ttl_secs: u64,
 }
 
 impl RedisApiKeyCache {
-    /// Opens `redis_url` and wraps it in a `ConnectionManager`. `ttl_secs` is applied to every
+    /// Opens `redis_url` and wraps it in a `RedisHandle`. `ttl_secs` is applied to every
     /// `put` as Redis's own `EX` expiry — this cache is a fail-open accelerator, so an entry
     /// disappearing after `ttl_secs` (or on eviction) never surfaces as anything other than a
     /// subsequent miss.
     pub async fn connect(redis_url: &str, ttl_secs: u64) -> Result<Self, redis::RedisError> {
-        let conn = crate::adapters::redis_conn::connect(redis_url).await?;
+        let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::ApiKeys).await?;
         Ok(Self { conn, ttl_secs })
     }
 
-    /// Builds a cache over an ALREADY-CONNECTED `ConnectionManager`: mirrors
+    /// Builds a cache over an ALREADY-CONNECTED handle: mirrors
     /// `RedisDecisionCache::from_connection`/`SliceCache::from_connection` (SMA-444 Task 21) —
-    /// a future `AppState` wiring can share ONE redis connection across the redis-backed
-    /// `Generations` + `RedisDecisionCache` + `SliceCache` + this cache rather than each
-    /// opening its own; `connect` above stays the standalone-caller/test entry point.
+    /// `AppState::new` shares ONE redis connection across the redis-backed `Generations` +
+    /// `RedisDecisionCache` + `SliceCache` + this cache rather than each opening its own;
+    /// `connect` above stays the standalone-caller/test entry point.
+    ///
+    /// `pub(crate)`, not `pub` (SMA-476 D13): `adapters::redis_conn` is a `pub(crate)` module, so
+    /// a `pub fn` taking a `RedisHandle` would be a private-type-in-public-interface and
+    /// `cargo clippy -- -D warnings` would fail the build. Every caller is in-crate.
     #[must_use]
-    pub fn from_connection(conn: ConnectionManager, ttl_secs: u64) -> Self {
+    pub(crate) fn from_connection(conn: RedisHandle, ttl_secs: u64) -> Self {
         Self { conn, ttl_secs }
     }
 }
@@ -382,13 +385,33 @@ mod tests {
     /// which is the cost SMA-473 removed.
     #[tokio::test]
     async fn redis_cache_fails_open_when_the_backend_is_unreachable() {
-        let client = Client::open("redis://127.0.0.1:1").expect("well-formed redis URL, never actually dialed");
-        let conn = ConnectionManager::new_lazy_with_config(client, crate::adapters::redis_conn::connection_manager_config()).expect("lazy ConnectionManager construction never connects");
+        let conn = crate::adapters::redis_conn::new_lazy_for_tests("redis://127.0.0.1:1", RedisRole::ApiKeys).expect("well-formed redis URL, never actually reachable");
         let cache = RedisApiKeyCache::from_connection(conn, 30);
         let id = ApiKeyId::from_uuid(Uuid::from_u128(12));
 
         assert!(cache.get(id).await.is_none(), "an unreachable redis must degrade to a plain miss, not panic/error");
         cache.put(id, &sample_validation()).await;
         cache.evict(id).await;
+    }
+
+    /// SMA-476 AC3: fail-open (D5) is preserved under an open breaker.
+    ///
+    /// Pointed at a BLACKHOLE, not a closed port: a closed port refuses in microseconds, which
+    /// looks identical to a short-circuit. Here a command that actually dialled would cost
+    /// ~2.1 s, so the elapsed assertion proves the breaker short-circuited.
+    #[tokio::test]
+    async fn an_open_breaker_keeps_the_api_key_cache_failing_open() {
+        let blackhole = crate::adapters::redis_conn::test_support::start().await;
+        let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, RedisRole::ApiKeys).expect("well-formed redis URL");
+        let cache = RedisApiKeyCache::from_connection(conn, 30);
+        let key_id = ApiKeyId::from_uuid(Uuid::from_u128(1));
+
+        let started = std::time::Instant::now();
+        let got = cache.get(key_id).await;
+        cache.evict(key_id).await;
+        let elapsed = started.elapsed();
+
+        assert!(got.is_none(), "SMA-476 AC3: an open breaker must read as a plain MISS (fail-open, D5)");
+        assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the calls dialled instead of short-circuiting");
     }
 }

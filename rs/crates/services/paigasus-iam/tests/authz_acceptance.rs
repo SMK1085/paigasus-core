@@ -446,7 +446,7 @@ async fn ac3_policy_change_takes_effect_within_the_cache_ttl_bound_over_http() {
 /// SAME Redis `authz.cache` backend: a grant made through A's API is visible to B's very next
 /// decision. This is NOT the AC1/AC3 synchronous-reload mechanism operating twice by
 /// coincidence — A and B are genuinely separate `CedarAuthorizer`/`PolicySnapshot`/
-/// `Generations::Redis` instances (separate `ConnectionManager`s, even), so the only way B can
+/// `Generations::Redis` instances (separate `RedisHandle`s, even), so the only way B can
 /// observe A's grant is the shared Redis `policy_gen` counter (`INCR`/`GET` on a well-known
 /// key, `src/adapters/authz/generation.rs`) — the actual cross-replica premise `authz.
 /// policy_cache_ttl_secs`/`refresh_interval_secs` exist to bound.

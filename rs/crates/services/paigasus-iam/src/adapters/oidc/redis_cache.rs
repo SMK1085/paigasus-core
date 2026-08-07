@@ -11,9 +11,9 @@
 use async_trait::async_trait;
 use paigasus_iam_core::{AuthnError, Issuer};
 use redis::AsyncCommands;
-use redis::aio::ConnectionManager;
 
 use super::jwks::{CachedJwks, JwksCache};
+use crate::adapters::redis_conn::{RedisHandle, RedisRole};
 
 /// Redis key prefix for cached JWKS entries (spec §4.3): `iam:jwks:<issuer canonical
 /// string>`.
@@ -23,22 +23,24 @@ fn cache_key(issuer: &Issuer) -> String {
     format!("{KEY_PREFIX}{}", issuer.as_str())
 }
 
-/// `JwksCache` backed by Redis via an auto-reconnecting `ConnectionManager` (spec §4.3/D15).
-/// `ConnectionManager` is cheap to clone (an `Arc`-wrapped multiplexed connection designed
-/// for concurrent callers), so `get`/`put` clone it per call rather than holding a lock.
+/// `JwksCache` backed by Redis via a breaker-wrapped, auto-reconnecting `RedisHandle` (spec
+/// §4.3/D15). `RedisHandle` is cheap to clone (an `Arc`-wrapped multiplexed `ConnectionManager`
+/// designed for concurrent callers), so `get`/`put` clone it per call rather than holding a lock.
 /// `connect` is the sole constructor — Task 10's composition root calls it verbatim.
 pub struct RedisJwksCache {
-    conn: ConnectionManager,
+    conn: RedisHandle,
     ttl_secs: u64,
 }
 
 impl RedisJwksCache {
-    /// Opens `redis_url` and wraps it in a `ConnectionManager`, which transparently
-    /// reconnects in the background on transient connection loss (the in-flight command
-    /// that observed the drop still surfaces its error to the caller — see `get`/`put`
-    /// below). `ttl_secs` is applied to every `put` as Redis's own `EX` expiry.
+    /// Opens `redis_url` and wraps it in a `RedisHandle`, which transparently reconnects in
+    /// the background on transient connection loss (the in-flight command that observed the
+    /// drop still surfaces its error to the caller — see `get`/`put` below). `ttl_secs` is
+    /// applied to every `put` as Redis's own `EX` expiry.
     pub async fn connect(redis_url: &str, ttl_secs: u64) -> Result<Self, AuthnError> {
-        let conn = crate::adapters::redis_conn::connect(redis_url).await.map_err(|err| log_unavailable(None, err.kind()))?;
+        let conn = crate::adapters::redis_conn::connect(redis_url, RedisRole::Jwks)
+            .await
+            .map_err(|err| log_unavailable(None, err.kind()))?;
         Ok(Self { conn, ttl_secs })
     }
 }
@@ -80,4 +82,34 @@ fn log_unavailable(issuer: Option<&Issuer>, kind: redis::ErrorKind) -> AuthnErro
 fn log_serde_unavailable(issuer: &Issuer) -> AuthnError {
     tracing::warn!(issuer = %issuer, error_kind = "serde_json", "redis jwks cache error");
     AuthnError::Unavailable
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SMA-476 AC3, the asymmetric one. `RedisJwksCache` is the ONLY fail-CLOSED Redis consumer:
+    /// an open breaker must still produce `AuthnError::Unavailable` — the posture is unchanged,
+    /// it just arrives instantly instead of after ~2.1 s (SMA-476 D9).
+    ///
+    /// Pointed at a BLACKHOLE, not a closed port: a closed port refuses in microseconds, which
+    /// looks identical to a short-circuit. Here a command that actually dialled would cost
+    /// ~2.1 s, so the elapsed assertion proves the breaker short-circuited.
+    #[tokio::test]
+    async fn an_open_breaker_keeps_the_jwks_cache_failing_closed() {
+        let blackhole = crate::adapters::redis_conn::test_support::start().await;
+        let conn = crate::adapters::redis_conn::with_open_breaker_for_tests(&blackhole.url, RedisRole::Jwks).expect("well-formed redis URL");
+        let cache = RedisJwksCache { conn, ttl_secs: 300 };
+        let issuer = Issuer::parse("https://idp.example.com").expect("a well-formed issuer");
+
+        let started = std::time::Instant::now();
+        let got = cache.get(&issuer).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(got, Err(AuthnError::Unavailable)),
+            "SMA-476 AC3: the JWKS cache must stay fail-CLOSED under an open breaker, got {got:?}"
+        );
+        assert!(elapsed < std::time::Duration::from_millis(100), "took {elapsed:?} — the get dialled instead of short-circuiting");
+    }
 }

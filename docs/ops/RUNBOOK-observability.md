@@ -93,6 +93,8 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_grpc_requests_total` | counter | `service`, `method`, `grpc_status` | One increment per completed tonic handler call. `service`/`method` are compile-time string literals (e.g. `service="Authorization"`, `method="IsAuthorized"`) — never derived from the request path, so cardinality is bounded to the known RPC set (Tenancy / Authentication / Authorization / ServiceAccount / Audit). `grpc_status` is `"ok"` or the canonical tonic status-code name (`permission_denied`, `unavailable`, `invalid_argument`, …). |
 | `iam_grpc_request_duration_seconds` | histogram | `service`, `method` | gRPC handler latency, recorded at the same handler-boundary call site as the counter above. |
 | `iam_authz_decisions_total` | counter | `decision`, `cache` | Every `CedarAuthorizer::is_authorized` outcome. `decision` ∈ `allow`/`deny`. `cache` ∈ `hit` (served from the decision cache, keyed on the compiled policy set's **content hash** plus the entity generation — deny hits are still re-audited, allow hits are not), `miss` (computed fresh), or `bypass` (the Redis-backed entity-generation counter was unreadable, so the cache was skipped entirely and the decision was computed directly against the last-known-good policy snapshot — see §4 "Authz availability"). The highest-value operational signal in the catalog: allow/deny volume and cache effectiveness. |
+| `iam_redis_breaker_state` | gauge | `role` | Per-connection Redis circuit breaker state (SMA-476): `0` = closed, `1` = half_open, `2` = open. Set at construction as well as on every transition, so "no data" always means a scrape/registration problem, never an unset breaker. `role` ∈ `authz`/`api_keys`/`jwks` (closed set — `api_keys` exists only in the split configuration). **Per-replica** — aggregate with `max by (job, role)`, never `sum`. See §4 "Authz availability posture" and the three breaker alerts (`IamRedisBreakerOpen`/`IamJwksRedisBreakerOpen`/`IamRedisBreakerFlapping`). |
+| `iam_redis_breaker_transitions_total` | counter | `role`, `to` | Every breaker state transition. `to` ∈ `open`/`half_open`/`closed`. **Not redundant with the gauge above**: a breaker that opens for 2 s every 30 s reads `0` in most 15–30 s scrapes, so this counter is the only artifact that survives a sub-scrape-interval state — it is what `IamRedisBreakerFlapping` watches. |
 | `iam_authz_policy_snapshot_reloads_total` | counter | `outcome` | Every `PolicySnapshot` reload attempt. `outcome` ∈ `installed` (a fresher compiled set replaced the live one), `rejected` (an out-of-order reload lost its race and was discarded — benign in isolation), `failed` (the load or Cedar compile errored; the last-known-good snapshot keeps serving). `installed` must stay non-zero: the TTL backstop installs one every `authz.policy_cache_ttl_secs` regardless of generation movement, and silence means revocations are not taking effect (SMA-470). |
 | `iam_audit_records_total` | counter | `outcome`, `result` | Every `PgAuditLog::record`/`record_out_of_band` call. `outcome` ∈ `committed` (mutation audit rows) / `denied` (denial audit rows). `result` is `"ok"` for an INSERT that did not error. **Caveat:** this counts insert-attempts-not-erroring, not durably-committed rows — an in-transaction `record` call on a mutation's UoW bumps `result="ok"` before that transaction's outer `commit()`, so a rare downstream rollback leaves the row invisible even though the counter already incremented. This only diverges on the mutation-error path, which is itself visible elsewhere as a `result="error"`/5xx signal, so it doesn't mislead in steady state. |
 | `iam_denial_audits_dropped_total` | counter | — | Bumped at `DenialAuditBuffer::push`'s drop-oldest site when the bounded denial-audit buffer is full. **Non-zero means the audit trail for denials has gaps** — see §4 "Denial-audit drops". |
@@ -170,6 +172,10 @@ Two dashboards are provisioned automatically (`grafana/dashboards/{iam,gateway}.
 - gRPC request rate + non-OK ratio (RED, gRPC — gRPC failures don't show up as HTTP 5xx, so this
   panel is the only place to see them at a glance).
 - Authz decisions (allow vs. deny rate) + cache hit ratio.
+- Redis circuit breaker state (SMA-476, stat panel, `max by (job, role)` — **never** `sum` across
+  replicas, every replica reports its own state; `job` is kept so prod and canary don't collapse
+  into one series): 0=closed, 1=half-open, 2=open, per `role`. See §4 "Authz availability posture"
+  and the three breaker alerts.
 - Audit write rate (by `outcome`).
 - Denial-audit drop rate — **should be flat 0**; any nonzero value is worth investigating (§4).
 - Outbox row: drained rate, published rate, publish-failure rate, parked events (15m window,
@@ -209,6 +215,9 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamHighErrorRate` | `sum(rate(iam_http_requests_total{status_class="5xx"}[5m])) / sum(rate(iam_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `IamGrpcHighErrorRate` | `sum(rate(iam_grpc_requests_total{grpc_status!="ok"}[5m])) / sum(rate(iam_grpc_requests_total[5m])) > 0.05` for 10m | critical |
 | `IamAuthzRedisCacheBypassed` | `sum(rate(iam_authz_decisions_total{cache="bypass"}[5m])) > 0` for 10m | critical |
+| `IamRedisBreakerOpen` | `max by (job, role) (iam_redis_breaker_state{role!="jwks"}) != 0` for 2m | warning |
+| `IamJwksRedisBreakerOpen` | `max by (job, role) (iam_redis_breaker_state{role="jwks"}) != 0` for 1m | critical |
+| `IamRedisBreakerFlapping` | `max by (job, role) (increase(iam_redis_breaker_transitions_total{to="open"}[10m])) > 5` | warning |
 | `GatewayHighErrorRate` | `sum(rate(gateway_http_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_http_requests_total[5m])) > 0.05` for 10m | critical |
 | `GatewayIamDependencyUnavailable` | `rate(gateway_iam_calls_total{result="unavailable"}[5m]) > 0` for 5m | critical |
 | `GatewayUpstreamErrors` | `sum(rate(gateway_upstream_requests_total{status_class="5xx"}[5m])) / sum(rate(gateway_upstream_requests_total[5m])) > 0.05` for 10m | warning |
@@ -918,6 +927,107 @@ rewinding the counters silently the whole time. Nothing about the decision path
 needs repair afterwards: the caches repopulate on their own and the snapshot recovers on
 generation *inequality*, so a counter that came back rewound still converges.
 
+### `IamRedisBreakerOpen` — Redis circuit breaker is not closed (warning)
+
+**Meaning.** `max by (job, role) (iam_redis_breaker_state{role!="jwks"}) != 0` sustained for 2m —
+the per-connection Redis circuit breaker (SMA-476) for `role` (`authz`, or `api_keys` in the split
+configuration) has read Open or HalfOpen for at least 2 minutes, not just a momentary probe. `!= 0`
+rather than `== 2` (open) is deliberate: the gauge legitimately reads `1` (half_open) while a probe
+is in flight, and comparing on the exact open value with a `for:` clause could reset every time a
+scrape happened to land during a probe. `max by (job, role)` because the gauge is **per-replica** —
+every replica sets its own copy, so `sum()` would add unrelated replicas' states together.
+`role="jwks"` is deliberately excluded — see `IamJwksRedisBreakerOpen` below, paged separately at
+critical severity because that path is fail-closed.
+
+**What this means for correctness: nothing.** `authz` and `api_keys` are both fail-open handles —
+while their breaker is open, `RedisDecisionCache`/`SliceCache`/`RedisApiKeyCache` calls
+short-circuit instantly instead of dialling, and every affected decision or lookup falls through to
+Postgres. This is the same underlying condition `IamAuthzRedisCacheBypassed` above surfaces via a
+decision-cache label; this alert observes it via the breaker's own state instead, and is the more
+direct signal of the two.
+
+**Likely causes — distinguish these, because the fix differs:**
+- **Redis is genuinely down or unreachable** (stopped, network partition, connections refused) —
+  fix Redis; nothing in IAM resolves this on its own.
+- **The backend is intermittently unhealthy (flapping)** rather than cleanly down — see
+  `IamRedisBreakerFlapping` below. A single firing of this alert does not distinguish a clean
+  outage from a flapping one; only the transitions counter does.
+- **The breaker is stuck open** — it has read non-closed for far longer than the ~6 s worst-case
+  recovery bound documented above, or every `HalfOpen` probe keeps failing even though Redis itself
+  looks reachable. **Check credentials before you check reachability**: redis-rs's
+  `reconnect_if_io_error!` only replaces the memoized connection future on an IO-class error, so an
+  `AuthenticationFailed` (a rotated password) leaves it stale forever — the breaker's classifier
+  still counts that as a failure, so a stuck-open breaker from a bad credential looks identical to
+  an outage from the gauge alone.
+
+**Confirm:** `PING` Redis directly from the IAM host (see the credential-handling note under
+`IamAuthzRedisCacheBypassed` above — never pass a secret-bearing URL on the command line); check
+IAM logs for `redis circuit breaker open` and any authentication errors; compare
+`iam_redis_breaker_transitions_total{role="<role>", to="open"}` (substitute the alert's own `role`
+label) over the same window — one transition that has not since closed points at stuck-open (check
+credentials), several point at flapping.
+
+**Remediation:** restore Redis reachability if that is the cause — the breaker re-probes
+automatically once it clears, no IAM-side action needed. If the cause is a rejected credential,
+fixing it is **not** sufficient by itself: fix the credential (`authz.cache.redis_url` /
+`api_keys.introspect_cache.redis_url`) **and** restart the process — the memoized failed connection
+future is never replaced without one, so a credential fix alone leaves the breaker stuck open
+indefinitely (see "A blackholed Redis is the residual" above).
+
+### `IamJwksRedisBreakerOpen` — JWKS Redis circuit breaker is not closed, token auth is failing closed (critical)
+
+**Meaning.** `max by (job, role) (iam_redis_breaker_state{role="jwks"}) != 0` sustained for 1m —
+the JWKS Redis breaker has read Open or HalfOpen for at least a minute. Unlike the two fail-open
+roles above, `RedisJwksCache` fails **closed** (unchanged posture, SMA-476 D9): every Redis error
+maps to `AuthnError::Unavailable`, and `JwksProvider::key_for` consults the cache on every token
+validation. So while this fires, **every token-authenticated request 503s** — API-key
+authentication is unaffected, it fails open onto Postgres — for as long as the breaker stays
+non-closed, plus up to the ~6 s recovery bound (see "Authz availability posture" above) after Redis
+itself comes back. The short `for: 1m`, versus 2m/10m elsewhere, reflects that this is a total
+outage of one auth path, not a graceful degradation: page immediately, do not wait for
+corroboration from `IamHighErrorRate`.
+
+**Likely causes, Confirm, and Remediation:** identical triage to `IamRedisBreakerOpen` above —
+Redis down, a rejected/rotated credential (check this first if the breaker looks stuck open), or a
+flapping backend (`IamRedisBreakerFlapping` below). The only difference is blast radius: this is a
+**total token-auth outage**, not a cache bypass. There is no config-only mitigation for the outage
+window itself — `authn.jwks_cache.backend = "memory"` removes the dependency entirely but needs a
+redeploy and is single-replica-appropriate only, so it is not a live incident response.
+
+### `IamRedisBreakerFlapping` — Redis circuit breaker is flapping (warning)
+
+**Meaning.** `max by (job, role) (increase(iam_redis_breaker_transitions_total{to="open"}[10m])) >
+5` — the breaker for `role` opened more than five times in the last 10 minutes. This exists because
+neither breaker-state alert above can see a breaker that opens and re-closes **inside one scrape
+interval**: `OPEN_DURATION` is 2 s while Prometheus scrapes every 15–30 s, so a breaker opening for
+2 s every 30 s — chronically sick, exactly the condition worth catching early — is sampled at `0`
+in most scrapes and neither `for:` clause above ever holds. The transitions counter is the only
+artifact that survives a sub-scrape-interval open window, which is why this rule watches it instead
+of the gauge (`for: 0m` — the `increase()` window already provides the debounce).
+
+**What this means: the backend is intermittently unhealthy, not cleanly down.** Each open costs one
+recovery window against whichever caller tripped it (a cache-bypass window for `authz`/`api_keys`,
+a 503 window for `jwks`) — five-plus of those in 10 minutes is a materially worse user-facing
+experience than one clean outage of the same total duration, because it repeats without settling.
+
+**Likely causes:** a Redis under memory or CPU pressure that intermittently misses its
+`response_timeout` (500 ms) or `connection_timeout` (1 s); a flapping network path or a
+load-balancer/proxy in front of Redis; Redis client eviction (`maxmemory-clients`) repeatedly
+dropping IAM's connection; or ordinary connection churn crossing `FAILURE_THRESHOLD` (3
+consecutive) periodically — see `IamRedisBreakerOpen` above for why 3 is a low bar under real
+concurrency.
+
+**Confirm:** graph `iam_redis_breaker_transitions_total{role="<role>", to="open"}` (substitute the
+alert's own `role` label) as a rate/increase to see the actual cadence; correlate against Redis-side
+metrics (memory, CPU, connected-clients) and any proxy/load-balancer health checks in front of it;
+rule out a client-eviction loop via Redis's own `CLIENT LIST` output and eviction logs.
+
+**Remediation:** stabilize the backend (relieve memory/CPU pressure, fix the flapping network path,
+address client eviction) — this is a Redis-health problem, not something to fix IAM-side. Do not
+conflate this with `IamRedisBreakerOpen`/`IamJwksRedisBreakerOpen`'s "Redis is genuinely down" case:
+those two triage toward "is Redis reachable at all", this one toward "why does Redis keep becoming
+briefly unreachable".
+
 ### `IamHighErrorRate` / `GatewayHighErrorRate` — elevated HTTP 5xx ratio (critical)
 
 **Meaning.** More than 5% of HTTP responses on the respective service's main router were `5xx`
@@ -1054,7 +1164,12 @@ schedule never reaches), meaning a dead backend is retried on a
 jitter, which *adds* `rand(0, delay)` to each step (`delay × 1.0–2.0`), so a cycle ran ~6.3–12.6 s
 with an expected ~9.5 s — and a `ConnectionManager` burns a **full cycle per failed command**,
 because the failing command only kicks off a background reconnect and the *next* command awaits a
-brand-new cycle. A single request performs several such reads (`policy_gen`, `entity_gen`,
+brand-new cycle. **That "full cycle per command" behavior holds only when commands arrive faster
+than a dial completes** — true throughout this table, since nothing here introduced any deliberate
+gap. Since SMA-476 that is no longer the whole story: the circuit breaker described under "A
+blackholed Redis is the residual" below deliberately opens a gap (2 s) far longer than any dial,
+specifically so that *not every command* pays a fresh cycle — only the handful that trip the
+breaker do. A single request performs several such reads (`policy_gen`, `entity_gen`,
 the slice cache's own `entity_gen`, plus a post-commit bump on a mutation), which is how one
 decision reached 19–28 s.
 
@@ -1082,20 +1197,117 @@ after. The one directly measured post-fix number is the Docker-free unit test
 `api_keys::cache::tests::redis_cache_fails_open_when_the_backend_is_unreachable`, which went from
 **28.403 s to 0.471 s**; it issues three Redis commands, i.e. ~9.5 s → ~0.16 s per failed command.
 
-**A blackholed Redis is the residual, and it costs ~10× the table.** Every number above assumes
-the TCP connect **fails immediately** — the process is stopped or the port refuses
-(`ECONNREFUSED`). If the backend instead swallows SYNs (a `DROP` firewall rule, a partitioned
-network, a wedged host), no attempt errors early and each one runs to `connection_timeout`
-instead, so one capped cycle costs **~2.1 s** per failed command (two 1 s attempts plus the
-~100–200 ms delay between them) rather than ~100–200 ms. The same 1 s bound covers a **hung DNS
-resolver**, not just a dropped SYN: `connection_timeout` wraps the entire connect including
-address resolution (`redis-1.3.0/src/client.rs:505-510`). That 2.1 s is **calculated, not
-measured** — unlike the stopped/refused shape above, which has been exercised end-to-end, nothing
-has ever been run against a blackholed backend here,
-so treat multiplying the "cycles" column by it as the *shape* of the residual rather than a figure
-to size a client timeout on. Bounding it further needs a **circuit breaker** that stops attempting Redis once the
-backend is known-down, which is deliberately **not** shipped (SMA-473 D7; see §6) — capping the
-retry count fixed the common shape without one.
+**A blackholed Redis is the residual, and it is now bounded by a circuit breaker (SMA-476).** Every
+number in the table above assumes the TCP connect **fails immediately** — the process is stopped or
+the port refuses (`ECONNREFUSED`). If the backend instead swallows SYNs (a `DROP` firewall rule, a
+partitioned network, a wedged host, or the accept-and-never-reply shape `docker pause` reproduces —
+see "Manual blackhole verification" below), no attempt errors early and each one runs to
+`connection_timeout` instead, so one capped cycle costs **~2.15 s** per failed command (two 1 s
+attempts plus the ~100–200 ms delay between them) rather than ~100–200 ms. The same 1 s bound
+covers a **hung DNS resolver**, not just a dropped SYN: `connection_timeout` wraps the entire
+connect including address resolution (`redis-1.3.0/src/client.rs:505-510`).
+
+**That ~2.15 s figure is now measured, not calculated — the single most important correction in
+this section.**
+`adapters::redis_conn::tests::a_blackholed_backend_costs_seconds_per_command_until_the_breaker_opens`
+drives a real dial against a Docker-free blackholed listener and pins it directly. Three runs of one command against a Closed
+breaker: **2.1531 s / 2.1540 s / 2.1523 s** — tight enough to be a floor (two ~1 s
+`connection_timeout` attempts plus a jittered retry delay), not an estimate. The same test's
+ten-command aggregate — three real dials that trip the breaker, then seven short-circuits — measured
+**~6.46 s** (6.4616 / 6.4598 / 6.4583 s across the three runs), against **~21.5 s** for what ten
+un-broken commands would cost. Both figures are the authoritative source for this section; "Manual
+blackhole verification" below reproduces the *shape* by hand but is not where these numbers come
+from.
+
+**Since SMA-476, that ~2.15 s cost applies only to the failures that open the breaker, and to the
+request cohort already in flight when the outage starts — not to every command.** A per-connection
+circuit breaker (`adapters::redis_conn::RedisHandle`; one breaker per connection — one instance per
+`RedisRole`, i.e. `authz`, `api_keys` in the split configuration, and `jwks`) now sits in front of
+every Redis command:
+
+- **`FAILURE_THRESHOLD = 3`** consecutive connection-class failures open it. Three, not one,
+  deliberately — SMA-473 already capped the retry budget at `number_of_retries = 1` specifically to
+  tolerate a first attempt landing in a failover gap, and opening on a single failure would defeat
+  that. **Stated plainly because it surprises people: three concurrent connection failures is a low
+  bar, so a routine Redis failover under load will trip this breaker.** For the fail-open caches
+  (`authz`, `api_keys`) that costs one bypass window; for `jwks` — fail-closed — it means every
+  token-authenticated request 503s for that window (numbers below).
+- **A dropped or cancelled command does not count as a failure unless the breaker is already
+  half-open.** A client disconnect means the request observed no result at all — that is not
+  evidence about the backend — so counting it while Closed would let three merely-cancelled
+  requests trip the breaker against a perfectly healthy Redis. In the HalfOpen state a dropped probe
+  *does* count, by design: there the alternative is a wedge that never re-arms.
+- **`OPEN_DURATION = 2 s`.** While open, every command short-circuits with a synthetic error in
+  microseconds instead of dialling — the measured ~6.46 s-for-ten-commands figure above *is* this in
+  action: commands 4–10 each cost under 100 ms once the breaker trips at command 3.
+- **`HALF_OPEN_DEADLINE = 5 s`.** After the open window, exactly one probe is admitted; if the
+  breaker has sat half-open longer than this (an abandoned probe), another is admitted regardless,
+  so it cannot wedge open forever on a dropped future.
+
+**Recovery costs one or two open windows depending on the shape of the outage — not a fixed two.**
+An earlier draft of this document claimed recovery always costs two windows; that was wrong and has
+been corrected here. `ConnectionManager::reconnect()` **spawns** the replacement dial the instant a
+command fails (`redis-1.3.0/src/aio/connection_manager.rs:649`), not when the next probe asks for
+one, so which window the recovering probe lands in depends on dial duration versus the 2 s window:
+
+- **Timeout-class outage** (dial time ≳ the window — e.g. a blackholed backend's ~2.15 s dial
+  against a 2 s window): the replacement dial spawned when the breaker opened is still in flight
+  when the probe arrives, so the probe joins it and pays only the remainder. **Typically one
+  window.**
+- **Refusal-class outage** (dial time ≪ the window — e.g. a stopped/refused Redis's ~0.2 s dial):
+  the replacement dial has long since resolved to a memoized `Err` by the time a probe arrives, so
+  that probe consumes the stale `Err` in microseconds without touching the network, and only *then*
+  spawns the dial the *next* probe will see recovered. **Typically two windows.**
+
+Production sees both shapes — a blackhole and a refusal are different flavors of the same class of
+outage — so **`recovery ≤ 2 × OPEN_DURATION + one connect budget ≈ 6 s` is the number to operate
+against either way**, even though the common case is faster.
+
+**One documented exception to that bound: a rotated Redis password can make recovery unbounded.**
+redis-rs's `reconnect_if_io_error!` only spawns a replacement dial on an IO-class error
+(`connection_manager.rs:402-411`); `ErrorKind::AuthenticationFailed` is not IO-class, so a stale,
+failed connection future is never replaced — nothing about the mechanism above reconnects on
+anything but an IO-class failure. This is **pre-existing redis-rs behaviour, not a breaker defect**
+— but the breaker's classifier (SMA-476 D5) deliberately counts `AuthenticationFailed` as a breaker
+failure, because redis-rs itself treats it as connection-fatal. **If you see a breaker that has been
+open far longer than the ~6 s bound above, check credentials before you check reachability** — but
+fixing the credential is not enough by itself: **both** fixing the credential **and** restarting
+the process are required. The memoized `Err` lives in the running process's `ArcSwap`, so fixing
+the password alone leaves it exactly where it was — there is no event left to trigger a fresh dial,
+so a process left running against a now-correct credential waits forever. Restarting alone without
+fixing the credential just reproduces the same stuck breaker after the boot dial (unaffected by the
+breaker — SMA-476 D11) also fails. The breaker cannot recover from this on its own either way.
+
+**The JWKS asymmetry, stated with numbers.** `RedisJwksCache` still fails **closed** on every Redis
+error — that posture is unchanged — the breaker just makes the failure instant instead of ~2.15 s.
+So while the `jwks`-role breaker is open or half-open, **100% of token-authenticated requests
+503**, and that continues for up to the ~6 s recovery bound above *even after Redis itself has
+recovered*, because the breaker's own window has to run its course. Combined with the failover-trip
+note above: a routine failover under load now costs up to a ~6 s token-auth outage on a Redis-backed
+JWKS cache, where the `authz`/`api_keys` roles pay only a cache-bypass window of the same length.
+API-key authentication is unaffected either way — it fails open onto Postgres.
+
+**Reading the breaker's metrics.** `iam_redis_breaker_state{role}` is a gauge — `0 = closed`,
+`1 = half_open`, `2 = open` — set at construction as well as on every transition, so "no data"
+always means a scrape or registration problem, never an unset breaker.
+`iam_redis_breaker_transitions_total{role, to}` is a counter (`to` ∈ `open|half_open|closed`); it is
+**not redundant with the gauge** — a breaker that opens for 2 s every 30 s reads as `0` in most
+15–30 s scrapes, so the counter is the only artifact that survives a sub-scrape-interval state. Three
+attribution caveats, all worth knowing before reading either metric:
+- `role="api_keys"` exists **only** in the split configuration
+  (`api_keys.introspect_cache` pointed at its own Redis). Ordinarily the API-key cache reuses the
+  `authz` handle, so a missing `api_keys` series does not mean the API-key cache is idle — check
+  `role="authz"` instead.
+- Two roles may front the **same physical Redis** with independent breakers, so `role="authz"` at 0
+  while `role="jwks"` is at 2 does not imply two separate backends — it can be one Redis that one
+  handle happened to reconnect to first.
+- The gauge is **per-replica**: aggregate with `max by (job, role)`, never `sum` — summing would add
+  unrelated replicas' states together into a meaningless number.
+
+Since SMA-476, `IamRedisBreakerOpen` / `IamJwksRedisBreakerOpen` / `IamRedisBreakerFlapping` (see
+the alert catalog above) are the most direct signal of everything in this subsection — keyed off the
+breaker's own state rather than a decision-cache side effect. Reach for those first; the narrative
+below (`IamAuthzRedisCacheBypassed`) remains accurate but is one step removed.
 
 **Boot still fails fast — just ~50× sooner.** `redis_conn::connect` is eager
 (`ConnectionManager::new_with_config` awaits the initial connection), so a Redis that is down when
@@ -1158,12 +1370,34 @@ discovering at 3am. The old 6-retry schedule made the shared connection future t
 to resolve, which meant any Redis interruption **shorter than that was absorbed**: the command
 succeeded, just slowly, and authentication never noticed. The capped budget absorbs only one
 ~100–200 ms retry. So a routine event like a **2 s primary failover**, previously invisible here,
-now `503`s every OIDC-bearer request for those ~2 s — and **no alert fires**, because
-`IamAuthzRedisCacheBypassed`, `IamHighErrorRate` and `IamGrpcHighErrorRate` are all `for: 10m`
-and this is over in seconds. That is the accepted trade (SMA-473 D6): the alternative is a
-multi-second stall on *every* authenticated request during a real, unbounded outage. If users
-report sporadic 503-then-fine authentication, correlate against Redis failover/restart events
-before hunting for an IAM bug.
+now `503`s every OIDC-bearer request for at least those ~2 s of actual disruption — and, since
+SMA-476, for longer than that if the failover trips the breaker: three concurrent connection
+failures is a low bar under load (see "A blackholed Redis is the residual" above). Two numbers,
+two different starting points: the breaker itself contributes up to **~6 s of recovery lag measured
+from when it opens** (the headline figure used throughout this section) — and because the breaker
+does not open until three failures have accumulated, roughly ~2 s into the failover, the **total
+token-auth impact measured from the start of the failover** is up to **~8 s**, not the ~6 s alone.
+Use the ~6 s figure to reason about the breaker's own behavior; use ~8 s to size a client timeout or
+readiness probe against the failover as a whole. A failover that stays under the breaker's
+`FAILURE_THRESHOLD` (3 consecutive failures on that connection) still costs only the original ~2 s.
+
+**None of the three original `for: 10m` rules fire on an isolated blip of that size** —
+`IamAuthzRedisCacheBypassed`, `IamHighErrorRate` and `IamGrpcHighErrorRate` all need ten sustained
+minutes, and even the ~8 s breaker-inflated case (measured from the start of the failover, per
+above) is over in seconds. That much is unchanged from
+before SMA-476. What SMA-476 adds is two narrower signals, and it is no longer accurate to say **no**
+alert fires: **`IamRedisBreakerFlapping`** (`for: 0m`, counting transitions rather than requiring
+sustained duration) fires if this kind of event *repeats* — five-plus breaker trips in 10 minutes,
+which a genuinely flapping primary or a string of failovers can produce even though no single trip
+lasts anywhere near that long; and **`IamJwksRedisBreakerOpen`**'s much shorter `for: 1m` is the
+alert that *could* catch a single event, if its recovery runs long enough to approach a minute (a
+slower or blackhole-flavored failover, or a breaker that does not cleanly reclose) — a clean,
+isolated ~2 s failover with the typical ~6 s recovery still stays comfortably under that bound and
+stays silent, same as before. That is the accepted trade (SMA-473 D6, still standing after
+SMA-476): the alternative is a multi-second stall on *every* authenticated request during a real,
+unbounded outage. If users report sporadic 503-then-fine authentication, correlate against Redis
+failover/restart events before hunting for an IAM bug, and check
+`iam_redis_breaker_transitions_total` for the same window to see whether the breaker was involved.
 
 The default backend is `memory`, which
 has no such coupling — if you run the Redis one, treat Redis as a hard availability dependency of
@@ -1272,6 +1506,76 @@ The snapshot does recover (`reload_if_stale` reloads on generation *inequality*,
 precisely so a `FLUSHALL` can't freeze it until restart), but an `allkeys-*` policy turns a
 routine memory-pressure event into an authz-freshness event for no benefit. Verify with
 `CONFIG GET maxmemory-policy`.
+
+### Manual blackhole verification (`docker pause` / `DOCKER-USER`)
+
+The Docker-free automated test cited throughout the section above is the authoritative source for
+every number in it. This procedure exists to let an operator confirm the *mechanism* by hand — one
+straightforward way to reproduce it, and one plausible-looking way that does not work. Both
+descriptions below are corrections: the obvious mental model of each is wrong.
+
+**`docker pause` reproduces the blackhole shape — it does not drop SYNs.** The cgroup freezer
+`docker pause` uses stops the **process**, not the network stack: the listening socket stays live
+in the kernel, which keeps completing TCP handshakes into the accept backlog (Redis's
+`tcp-backlog` defaults to 511) whether or not anything is scheduled to `accept()` them. The result
+is exactly the accept-and-never-reply shape this section is about — connect succeeds, the read
+hangs — right up until the backlog fills. It is the easiest way to reproduce the shape; it is
+simply not a SYN drop. `docker unpause` turns the same setup into a recovery test.
+
+```bash
+docker run -d --name sma476-redis -p 6399:6379 redis:7-alpine
+docker exec sma476-redis redis-cli ping    # PONG — confirm it answers before pausing
+docker pause sma476-redis
+# probe against the published port while paused (see below for what to expect)
+docker unpause sma476-redis
+# probe again to see the recovery
+docker rm -f sma476-redis
+```
+
+**What was actually run for this RUNBOOK entry, and what was observed.** The host this was written
+on had neither a host-installed `redis-cli` nor `iptables` (Docker Desktop on macOS — no Linux
+netfilter chains are exposed to the host at all), so the probe step above used a raw TCP client
+(`nc`) against the host-published port instead of `redis-cli`, and only the `docker pause` leg
+could be exercised end to end. What that showed:
+
+- **Paused:** `printf 'PING\r\n' | nc -w 5 localhost 6399` connected immediately (no
+  `ECONNREFUSED`) and received **no reply** for the full 5 s the probe was allowed to wait — it
+  timed out idle, not refused. That is the accept-and-never-reply shape, confirmed live.
+- **Unpaused:** the identical probe returned `+PONG` in **0.009 s**.
+
+**This does not reproduce the ~2.15 s figure, and that is expected, not a discrepancy.**
+`nc`/`redis-cli` have no client-side response timeout analogous to redis-rs's `response_timeout`
+(500 ms) or `connection_timeout` (1 s) — left unbounded, a probe against a paused Redis simply
+hangs until you give up, the backlog fills, or you unpause it (this was confirmed directly: an
+earlier attempt with `redis-cli -t 30` neither returned nor errored inside 40 s and had to be
+killed). The ~2.15 s / ~6.46 s figures in this section come **only** from Task 4's hermetic test,
+which exercises the actual production client configuration
+(`adapters::redis_conn::connect`'s `ConnectionManagerConfig`), not a generic client against a
+manually paused container. Use this procedure to confirm the *mechanism*; use the automated test's
+numbers to reason about *duration*.
+
+**`iptables -I INPUT -p tcp --dport 6379 -j DROP` will not catch traffic to a Docker-published
+port — this leg was not run here (no Linux netfilter on this host), but the reason is
+architectural, not host-specific, and is worth stating plainly so nobody reaches for it during an
+incident.** A connection to a `-p 6399:6379`-published port is DNAT'd before routing decides where
+it goes, and the post-NAT packet never reaches `INPUT` at all, because the destination is the
+container's network namespace, not the host's own stack. A rule dropped into `INPUT` never sees
+this traffic.
+
+**Neither does `DOCKER-USER`, for a probe run *from the Docker host itself* — the exact case this
+procedure's `nc localhost 6399` above is an example of.** `DOCKER-USER` is a hook on the `filter`
+table's `FORWARD` chain, and a packet only takes the `FORWARD` path when it arrives on one
+interface and leaves on another — true for traffic reaching the published port from **outside**
+the host (`nat PREROUTING` → routing → `FORWARD`/`DOCKER-USER`), but not for traffic a **local**
+process originates. A locally-originated packet to a DNAT'd destination stays on the
+**`nat OUTPUT` → `filter OUTPUT` → `POSTROUTING`** path — it is never forwarded, so `DOCKER-USER`
+never evaluates it either, regardless of the rule's contents. The only mechanism that reliably
+black-holes a **host-originated** probe is dropping the traffic inside the **container's own
+network namespace** (e.g. `nsenter --net=<container-netns> iptables …`, or an `ip netns` variant),
+which acts on the traffic after it has already crossed into the container's stack. `DOCKER-USER` is
+the right tool only for traffic arriving from a genuinely external host. On a Linux operator host,
+prefer `docker pause` anyway — it needs no `iptables` access, no netns entry, and reproduces the
+identical shape regardless of where the probe originates.
 
 ### Audit retention & partitioning
 
@@ -1643,6 +1947,9 @@ prevents Prometheus cardinality blow-ups / OOM.
 - `outcome` — `committed`/`denied`.
 - `operation` — `introspect`/`authorize`.
 - `result` — `ok`/`denied`/`unavailable`/`error`.
+- `role` — the closed `RedisRole` enum (SMA-476): `authz`/`api_keys`/`jwks`. Bounded by the type
+  system at the call site, not derived from anything caller-supplied.
+- `to` — the breaker's target state on a transition (SMA-476): `open`/`half_open`/`closed`.
 - gRPC `service`/`method` — **compile-time string literals** supplied at each `record_grpc` call
   site (e.g. `"Authorization"`/`"IsAuthorized"`), never derived from the request `:path` — a
   scanning client hitting an arbitrary RPC path cannot mint new label values, unlike an HTTP
@@ -1703,18 +2010,26 @@ Not implemented in this cycle; tracked as explicit follow-ups:
   don't exist yet; this cycle scoped gateway metrics to the M0 auth+proxy surface only.
 - **A combined IAM introspect-and-authorize RPC**, which would also reduce the gateway's
   per-request round-trip count and the surface area of `GatewayIamDependencyUnavailable`.
-- **A Redis circuit breaker** that stops attempting the backend at all once it is known-down. The
-  retry-schedule half of this — `number_of_retries = 1` on every `ConnectionManager` built
-  through `adapters::redis_conn::connect`, which since SMA-473 is all of them — **shipped with
-  SMA-473** and is what bounds a Redis outage to ~0.2–0.6 s per
-  authz decision, ~0.3–0.8 s per authz-mutating request, and up to ~1.2 s for a gated
-  cross-principal decision (§4 "Authz availability posture"). A breaker was deliberately left out of that
-  change (SMA-473 D7) because the cap alone fixes the common shape: a **stopped or refused**
-  Redis, where each attempt errors immediately. It remains the outstanding mitigation for a
-  **blackholed** Redis (SYN dropped rather than refused), where no attempt errors early and
-  `connection_timeout` dominates at ~2.1 s per failed command. Note the knob is still the retry
-  schedule and the breaker, **not** `connection_timeout`/`response_timeout` — those are already
-  bounded by redis-rs's defaults (1 s / 500 ms) and are deliberately left there.
+- **A Redis circuit breaker shipped in SMA-476** — every Redis command now runs behind a
+  per-connection breaker (`adapters::redis_conn::RedisHandle`) that stops attempting a known-down
+  backend, capping the recovery lag added on top of any Redis outage at ~6 s instead of paying
+  ~2.15 s **per failed command** for the outage's entire duration. Degradation (cache bypass, or
+  503s on the fail-closed JWKS path) still lasts as long as the breaker itself stays non-closed,
+  plus that ~6 s recovery lag once Redis is back — it is not a flat "6 s and done". See §4 "Authz
+  availability posture" for the full mechanism, the measured numbers, and the three alerts. What
+  remains genuinely open:
+  - **`connection_timeout` stays at redis-rs's 1 s default** (SMA-476 D2) — a remote/managed Redis
+    (higher baseline RTT, a proxy hop in front of it) makes a global tightening a false-trip risk
+    against connections that are merely slow, not down, so it was deliberately left alone rather
+    than tuned down alongside the breaker.
+  - **SMA-473 D10's boot-tolerance residual.** `redis_conn::connect` is still eager and
+    breaker-independent at boot (SMA-476 D11: a single boot dial has nothing to break on, so the
+    breaker starts Closed and wraps commands only), so a Redis that is down or slow to start at
+    boot still fails `AppState::new` and costs a crash-restart, exactly as before this cycle. If a
+    deferred retry-loop-at-boot ever ships to close that gap, it must be revisited **together with**
+    D11's decision: a boot that retries is a boot that *can* accumulate failures, and whether those
+    should seed the breaker is a real question this cycle deliberately left open rather than
+    answered.
 - **Postgres-backed generation counters**, so a grant/revoke and its invalidation bump commit in
   one transaction. That removes §4's revocation-staleness window entirely rather than bounding
   it, and removes the `maxmemory-policy` mandate; it needs an ADR and a migration (SMA-470 D3).
