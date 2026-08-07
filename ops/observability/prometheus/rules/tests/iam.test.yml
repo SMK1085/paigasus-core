@@ -463,6 +463,47 @@ tests:
               summary: "IAM JWKS Redis circuit breaker is not closed — token auth is failing closed"
               description: "The Redis circuit breaker for the JWKS cache has been open or half-open for 1m. RedisJwksCache fails CLOSED, so every token-authenticated request is returning 503 (API-key auth is unaffected — it fails open onto Postgres). Recovery lags Redis by up to ~6s after it returns. See RUNBOOK's \"Authz availability posture\"."
 
+  # SMA-476 mutation coverage: IamRedisBreakerOpen must ALSO fire on half_open (state 1), not
+  # only open (state 2). Every case above only ever samples state 2, so a regression that
+  # narrowed `!= 0` to `== 2` would pass all of them while going silent here. That is not a
+  # theoretical gap: HALF_OPEN_DEADLINE exists precisely because a probe whose future gets
+  # cancelled can leave the breaker stuck at half_open indefinitely, which is exactly the state
+  # an operator must be paged about.
+  - interval: 1m
+    input_series:
+      - series: 'iam_redis_breaker_state{job="iam", role="authz"}'
+        values: '1+0x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: IamRedisBreakerOpen
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: IamRedisBreakerOpen
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam, role: authz }
+            exp_annotations:
+              summary: "IAM Redis circuit breaker is not closed (role authz)"
+              description: "The Redis circuit breaker for role authz has been open or half-open for 2m, so authz/API-key cache commands are short-circuiting instantly instead of dialling. Decisions remain CORRECT (these caches fail open onto Postgres) but uncached. Recovery lags Redis by up to ~6s after it returns. See RUNBOOK's \"Authz availability posture\"."
+
+  # SMA-476 mutation coverage: same `!= 0` vs `== 2` gap as above, but for IamJwksRedisBreakerOpen
+  # at critical severity — a half-open JWKS breaker stuck past its HALF_OPEN_DEADLINE means every
+  # token-authenticated request is 503ing while this alert stays quiet under the `== 2` mutant.
+  - interval: 1m
+    input_series:
+      - series: 'iam_redis_breaker_state{job="iam", role="jwks"}'
+        values: '1+0x5'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: IamJwksRedisBreakerOpen
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: IamJwksRedisBreakerOpen
+        exp_alerts:
+          - exp_labels: { severity: critical, job: iam, role: jwks }
+            exp_annotations:
+              summary: "IAM JWKS Redis circuit breaker is not closed — token auth is failing closed"
+              description: "The Redis circuit breaker for the JWKS cache has been open or half-open for 1m. RedisJwksCache fails CLOSED, so every token-authenticated request is returning 503 (API-key auth is unaffected — it fails open onto Postgres). Recovery lags Redis by up to ~6s after it returns. See RUNBOOK's \"Authz availability posture\"."
+
   # Flapping: ten opens in 10m against a control series with the SAME volume but a different
   # `to=` value. That mismatch is deliberate: it proves the rule's `{to="open"}` selector matters
   # rather than being decorative. If it were dropped, an unfiltered increase() would also count
