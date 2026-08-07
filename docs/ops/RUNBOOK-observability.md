@@ -93,7 +93,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_grpc_requests_total` | counter | `service`, `method`, `grpc_status` | One increment per completed tonic handler call. `service`/`method` are compile-time string literals (e.g. `service="Authorization"`, `method="IsAuthorized"`) — never derived from the request path, so cardinality is bounded to the known RPC set (Tenancy / Authentication / Authorization / ServiceAccount / Audit). `grpc_status` is `"ok"` or the canonical tonic status-code name (`permission_denied`, `unavailable`, `invalid_argument`, …). |
 | `iam_grpc_request_duration_seconds` | histogram | `service`, `method` | gRPC handler latency, recorded at the same handler-boundary call site as the counter above. |
 | `iam_authz_decisions_total` | counter | `decision`, `cache` | Every `CedarAuthorizer::is_authorized` outcome. `decision` ∈ `allow`/`deny`. `cache` ∈ `hit` (served from the decision cache, keyed on the compiled policy set's **content hash** plus the entity generation — deny hits are still re-audited, allow hits are not), `miss` (computed fresh), or `bypass` (the Redis-backed entity-generation counter was unreadable, so the cache was skipped entirely and the decision was computed directly against the last-known-good policy snapshot — see §4 "Authz availability"). The highest-value operational signal in the catalog: allow/deny volume and cache effectiveness. |
-| `iam_redis_breaker_state` | gauge | `role` | Per-connection Redis circuit breaker state (SMA-476): `0` = closed, `1` = half_open, `2` = open. Set at construction as well as on every transition, so "no data" always means a scrape/registration problem, never an unset breaker. `role` ∈ `authz`/`api_keys`/`jwks` (closed set — `api_keys` exists only in the split configuration). **Per-replica** — aggregate with `max by (job, role)`, never `sum`. See §4 "Authz availability posture" and the three breaker alerts (`IamRedisBreakerOpen`/`IamJwksRedisBreakerOpen`/`IamRedisBreakerFlapping`). |
+| `iam_redis_breaker_state` | gauge | `role` | Per-connection Redis circuit breaker state (SMA-476): `0` = closed, `1` = half_open, `2` = open. Set at construction as well as on every transition, so "no data" always means a scrape/registration problem, never an unset breaker. `role` ∈ `authz`/`api_keys`/`jwks` (closed set — `api_keys` exists only when that cache holds its own connection: distinct `redis_url`s, or a memory-backed authz cache — SMA-485). **Per-replica** — aggregate with `max by (job, role)`, never `sum`. See §4 "Authz availability posture" and the three breaker alerts (`IamRedisBreakerOpen`/`IamJwksRedisBreakerOpen`/`IamRedisBreakerFlapping`). |
 | `iam_redis_breaker_transitions_total` | counter | `role`, `to` | Every breaker state transition. `to` ∈ `open`/`half_open`/`closed`. **Not redundant with the gauge above**: a breaker that opens for 2 s every 30 s reads `0` in most 15–30 s scrapes, so this counter is the only artifact that survives a sub-scrape-interval state — it is what `IamRedisBreakerFlapping` watches. |
 | `iam_authz_policy_snapshot_reloads_total` | counter | `outcome` | Every `PolicySnapshot` reload attempt. `outcome` ∈ `installed` (a fresher compiled set replaced the live one), `rejected` (an out-of-order reload lost its race and was discarded — benign in isolation), `failed` (the load or Cedar compile errored; the last-known-good snapshot keeps serving). `installed` must stay non-zero: the TTL backstop installs one every `authz.policy_cache_ttl_secs` regardless of generation movement, and silence means revocations are not taking effect (SMA-470). |
 | `iam_authz_generation_rewinds_total` | counter | `counter`, `outcome`, `reason` | A Redis authz generation counter read back **below** what the process had already observed (SMA-474). `counter` ∈ `policy_gen`/`entity_gen`. `outcome` ∈ `repaired` (jumped forward with an atomic `INCRBY`, persisted so other replicas converge) / `repair_failed` (Redis rejected the write — `INCRBY` is `denyoom`, so `maxmemory` pressure does this; the replica falls back to a process-local generation, which is safe but stops cross-replica cache sharing) / `ceiling` (the repair would overflow Redis's i64 counter — see the remediation below). `reason` ∈ `missing` (the key was gone) / `lower` (it came back at a smaller value, e.g. a failover to a stale replica). **Only ever emitted on the `redis` backend** — the `memory` backend's in-process counters cannot rewind, and the series is *absent* there, which is what keeps `IamAuthzGenerationRewound` silent on a single-replica deployment. On the `redis` backend all 12 label combinations are **registered at zero from boot** (`Generations::from_connection`), so a flat line of zeros is the healthy state, not a missing metric — without that, the series would first appear already at `1` and `increase()` would baseline on it, so a single rewind could never fire the alert. |
@@ -1080,8 +1080,9 @@ what stops selective eviction of the two generation keys from happening at all. 
 ### `IamRedisBreakerOpen` — Redis circuit breaker is not closed (warning)
 
 **Meaning.** `max by (job, role) (iam_redis_breaker_state{role!="jwks"}) != 0` sustained for 2m —
-the per-connection Redis circuit breaker (SMA-476) for `role` (`authz`, or `api_keys` in the split
-configuration) has read Open or HalfOpen for at least 2 minutes, not just a momentary probe. `!= 0`
+the per-connection Redis circuit breaker (SMA-476) for `role` (`authz`, or `api_keys` when that
+cache holds its own connection) has read Open or HalfOpen for at least 2 minutes, not just a
+momentary probe. `!= 0`
 rather than `== 2` (open) is deliberate: the gauge legitimately reads `1` (half_open) while a probe
 is in flight, and comparing on the exact open value with a `for:` clause could reset every time a
 scrape happened to land during a probe. `max by (job, role)` because the gauge is **per-replica** —
@@ -1372,7 +1373,7 @@ from.
 **Since SMA-476, that ~2.15 s cost applies only to the failures that open the breaker, and to the
 request cohort already in flight when the outage starts — not to every command.** A per-connection
 circuit breaker (`adapters::redis_conn::RedisHandle`; one breaker per connection — one instance per
-`RedisRole`, i.e. `authz`, `api_keys` in the split configuration, and `jwks`) now sits in front of
+`RedisRole`, i.e. `authz`, `api_keys` when that cache holds its own connection, and `jwks`) now sits in front of
 every Redis command:
 
 - **`FAILURE_THRESHOLD = 3`** consecutive connection-class failures open it. Three, not one,
@@ -1444,10 +1445,14 @@ always means a scrape or registration problem, never an unset breaker.
 **not redundant with the gauge** — a breaker that opens for 2 s every 30 s reads as `0` in most
 15–30 s scrapes, so the counter is the only artifact that survives a sub-scrape-interval state. Three
 attribution caveats, all worth knowing before reading either metric:
-- `role="api_keys"` exists **only** in the split configuration
-  (`api_keys.introspect_cache` pointed at its own Redis). Ordinarily the API-key cache reuses the
-  `authz` handle, so a missing `api_keys` series does not mean the API-key cache is idle — check
-  `role="authz"` instead.
+- `role="api_keys"` exists **only** when the API-key cache holds its own connection — since
+  SMA-485 that means `api_keys.introspect_cache.redis_url` differs from `authz.cache.redis_url`
+  as a **string** (trimmed), or the authz cache is `memory`-backed. Ordinarily the two URLs are
+  identical and the API-key cache reuses the `authz` handle, so a missing `api_keys` series does
+  not mean the API-key cache is idle — check `role="authz"` instead. The comparison being textual
+  cuts the other way too: two spellings of one endpoint (`…:6379` vs `…:6379/0`, a host alias, a
+  differing password) produce an `api_keys` series fronting the same physical Redis, which is the
+  next caveat's case arrived at by accident rather than by design.
 - Two roles may front the **same physical Redis** with independent breakers, so `role="authz"` at 0
   while `role="jwks"` is at 2 does not imply two separate backends — it can be one Redis that one
   handle happened to reconnect to first.
@@ -1466,6 +1471,18 @@ that only fails on first use. What changed is the tolerance window: ~6–12 s of
 ~200 ms. A Redis that is merely **slow to start** is therefore no longer absorbed at boot and now
 costs one crash-restart. Depend on the orchestrator's restart policy or a readiness/ordering
 constraint for that, not on the connect budget (SMA-473 D10).
+
+**A boot failure naming `api_keys.introspect_cache.redis_url`, on a deployment that started fine
+yesterday.** Since SMA-485 that URL is actually dialled. It was previously ignored whenever
+`authz.cache.backend = "redis"`, so a wrong or unreachable value was harmless — and
+`IamConfig::validate` **requires** the field, so a config written under the old behaviour is
+exactly the kind likely to carry a stale or placeholder value that has never been dialled. The
+process exits with `backend error` and, under "Caused by:", `api_keys.introspect_cache.redis_url
+is unreachable (…)`. **Remediation:** fix the endpoint, or — to restore the previous behaviour
+exactly — set `api_keys.introspect_cache.redis_url` byte-identical to `authz.cache.redis_url`.
+Note this dial happens *late* in `AppState::new`, after boot reconciliation and the initial
+policy-snapshot compile, so each crash-loop attempt pays a full Postgres reconcile and Cedar
+compile before failing — which makes the next paragraph's backoff warning sharper, not milder.
 
 **Verify that your orchestrator actually applies restart backoff — do not assume it.** D10's
 reasoning rests on restart backoff dominating the recovery time either way, and the cadence it
@@ -1553,12 +1570,17 @@ The default backend is `memory`, which
 has no such coupling — if you run the Redis one, treat Redis as a hard availability dependency of
 authentication itself and size its redundancy accordingly.
 
-**`RedisApiKeyCache` usually shares the same connection, and sits on the hottest path.** It
-reuses the `redis_conn` handle **only when `authz.cache.backend = "redis"`**; with the authz
-cache on `memory` it dials its own `ConnectionManager` from
-`api_keys.introspect_cache.redis_url` (`adapters/http/mod.rs`), which may be a different Redis
-and in any case keeps its own independent connection and reconnect state. So a single Redis
-outage need not hit both paths, and in the split configuration each fails on its own schedule.
+**`RedisApiKeyCache` usually shares the same connection, and sits on the hottest path.** Since
+SMA-485 it reuses the `redis_conn` handle **only when `api_keys.introspect_cache.redis_url` and
+`authz.cache.redis_url` are the same string** (compared textually, after trimming — see the
+`iam_redis_breaker_state` caveats above). Otherwise — the two URLs differ, or the authz cache is
+on `memory` — it dials its own connection from `api_keys.introspect_cache.redis_url`
+(`adapters/http/mod.rs`), with its own breaker, its own reconnect state and its own
+`role="api_keys"` metrics. So a single Redis outage need not hit both paths, and in the split
+configuration each fails on its own schedule. Before SMA-485 that promise did not hold with authz
+on Redis: the API-key URL was ignored, both caches shared one connection and therefore one
+breaker, so an authz-Redis outage short-circuited API-key introspection against a Redis that was
+perfectly healthy.
 The gateway's
 `IntrospectApiKey`/`IsAuthorized` pair is the busiest gRPC traffic in normal operation (see
 `IamGrpcHighErrorRate` above), and every API-key-authenticated request reads this cache: a miss
