@@ -147,6 +147,20 @@ cedar-policy = "4"
 # Only consumed by `paigasus-iam`; no wasm/binding exposure (SMA-448's getrandom-free posture
 # is unaffected — blake3's default features carry no OS-entropy dependency).
 blake3 = "1"
+# url — WHATWG URL Standard parsing. `paigasus-iam` validates `[outbox.publisher].source` with it: the value
+# is copied verbatim into every published CloudEvents envelope, so a malformed one ships
+# spec-violating events to external subscribers (SMA-471). Promoted to a direct dependency rather
+# than hand-rolling a check — it is ALREADY in the tree transitively via `async-nats` and `redis`,
+# so this costs no additional build or supply-chain surface.
+#
+# NOTE the contract this pins is deliberately NARROWER than CloudEvents': the spec allows any RFC
+# 3986 URI-*reference* (relative included) and only RECOMMENDs an absolute URI, while `Url::parse`
+# implements the WHATWG standard and accepts absolute URIs only. That is the intent — `source`
+# must stay stable for a stream's lifetime (SMA-471 D6), so a relative reference is not something a
+# deployment should be able to set. Verified empirically that no realistic absolute scheme is lost:
+# `urn:`, `tag:`, `mailto:`, bare custom schemes and the six WHATWG "special" schemes all parse
+# (`config::tests::every_realistic_absolute_uri_scheme_is_accepted`).
+url = "2"
 # metrics / metrics-exporter-prometheus — the `metrics` facade + Prometheus exporter that back
 # `paigasus-observability` (SMA-446). The exporter is `default-features = false`: we install the
 # global recorder in-process and render the exposition through our own axum `GET /metrics` route,
@@ -154,6 +168,22 @@ blake3 = "1"
 # `metrics` 0.24 (facade) + `metrics-exporter-prometheus` 0.18 (their compatible pairing).
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
+# async-nats — the official NATS Rust client, and `paigasus-iam`'s outbox `EventPublisher`
+# backend (ADR-0016, SMA-471). `default-features = false` for the same "minimal baseline, add
+# per-crate" reason as reqwest/sea-orm/redis above: the default set drags in object-store, kv,
+# websockets, service and nuid, none of which a publisher needs. `jetstream` is the one that
+# earns its keep — the ack-waiting publish and the stream-config verification both live there.
+# `server_2_10`/`server_2_11` gate the newer stream-config fields against the broker versions
+# ADR-0016 targets.
+#
+# TLS posture: the crate offers `ring` and `aws-lc-rs`. `ring` is selected explicitly to match
+# the workspace's rustls/ring baseline (see reqwest/sea-orm/redis above) — `aws-lc-rs` would
+# link a SECOND rustls CryptoProvider and panic at runtime with "no process-level
+# CryptoProvider available", as well as adding a native cmake build dep. `nkeys` backs the
+# `.creds` (JWT + nkey seed) auth `[outbox.publisher].credentials_file` allows.
+async-nats = { version = "0.50", default-features = false, features = [
+  "jetstream", "ring", "server_2_10", "server_2_11", "nkeys",
+] }
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
 # via the Moon `lint` task's `-D warnings`.

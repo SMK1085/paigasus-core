@@ -99,6 +99,9 @@ redis = { workspace = true }
 # `(principal, action, resource, context)` serialization into the decision cache's key
 # (SMA-444 Task 14).
 blake3 = { workspace = true }
+# `config::IamConfig::validate` — parses `[outbox.publisher].source` as an absolute URI so a
+# malformed value cannot reach the CloudEvents envelope (SMA-471).
+url = { workspace = true }
 # `adapters::api_keys::hasher::HmacSecretHasher` — the `SecretHasher` port's v1 impl,
 # HMAC-SHA-256(pepper, secret) (SMA-445 Task 13). Not workspace-pinned: this crate's own
 # dep, at the same versions `paigasus-iam-core`'s dev-dependencies already resolve in
@@ -106,6 +109,10 @@ blake3 = { workspace = true }
 # `TestHasher` this mirrors.
 hmac = "0.12"
 sha2 = "0.10"
+# `adapters::events::nats_publisher::NatsEventPublisher` — the production outbox sink
+# (SMA-471, ADR-0016): connects to NATS, ensures/verifies the JetStream stream, and publishes
+# each `event_outbox` row as a CloudEvent, waiting for the JetStream ack.
+async-nats = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as
@@ -121,8 +128,10 @@ tokio-stream = { workspace = true, features = ["net"] }
 # container. Dev-only: never enters the published/shipped binary.
 testcontainers = "0.27"
 # `tests/redis_jwks_cache.rs` — AC #8: a real Redis round-trip via an ephemeral Docker
-# container (SMA-443 Task 8), same pattern as the Postgres round-trip above.
-testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
+# container (SMA-443 Task 8), same pattern as the Postgres round-trip above. `nats` adds the
+# same for `tests/nats_publisher.rs` (SMA-471): the module also carries `NatsServerCmd`, whose
+# `with_jetstream()` is what starts the server with `--jetstream` — the stock image does not.
+testcontainers-modules = { version = "0.15", features = ["postgres", "redis", "nats"] }
 # `adapters::oidc::validator` tests — mints runtime EC P-256 keypairs so ES256 tokens can
 # be signed locally without committing PEM/JWK fixtures (spec §8 mock-IdP refinement,
 # SMA-443 Task 7). Dev-only: never enters the shipped binary; the workspace baseline

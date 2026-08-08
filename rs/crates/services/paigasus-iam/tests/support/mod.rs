@@ -76,10 +76,42 @@ pub async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, Data
 
     let port = node.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let db = Database::connect(&url).await.unwrap();
+    let db = connect_when_ready(&url).await;
     Migrator::up(&db, None).await.unwrap();
 
     Some((node, db))
+}
+
+/// How long [`connect_when_ready`] waits for a freshly-started Postgres to accept connections.
+/// A LOAD BUDGET, not an expectation — it returns on the first successful connect, which on an
+/// idle machine is immediate.
+const PG_READY_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Connects to a just-started Postgres container, retrying until it actually accepts.
+///
+/// **Why this is not a bare `Database::connect(..).unwrap()`** (which is what it replaced): the
+/// `testcontainers` Postgres ready-condition is log-based, and the official image logs
+/// "ready to accept connections" *twice* — once at the end of its `initdb`/init-scripts phase,
+/// then again after the real startup that follows. A container matched on the first line is
+/// therefore reported ready while the server is still about to restart, so an immediate connect
+/// races that restart and fails with a connection-refused/reset.
+///
+/// The race is old and pre-existing, but it is load-sensitive: it fires when many containers
+/// start concurrently, and SMA-471 added twelve more Docker-backed tests to this crate, which
+/// makes it fire measurably more often (observed here: `api_key_auth` failing 1 run in 3 at
+/// `Database::connect`). Retrying is the standard fix and costs nothing on the happy path.
+async fn connect_when_ready(opts: impl Into<ConnectOptions>) -> DatabaseConnection {
+    let opts = opts.into();
+    let deadline = std::time::Instant::now() + PG_READY_BUDGET;
+    loop {
+        match Database::connect(opts.clone()).await {
+            Ok(db) => return db,
+            Err(e) => {
+                assert!(std::time::Instant::now() < deadline, "postgres did not accept connections within {PG_READY_BUDGET:?}: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
 }
 
 /// Starts a raw, ephemeral Postgres container WITHOUT running any migrations — same
@@ -112,7 +144,8 @@ pub async fn start_raw_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseC
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let mut opts = ConnectOptions::new(url);
     opts.max_connections(1).min_connections(1);
-    let db = Database::connect(opts).await.unwrap();
+    // Same startup race as `start_migrated_postgres` — see `connect_when_ready`'s doc.
+    let db = connect_when_ready(opts).await;
     Some((node, db))
 }
 
@@ -618,6 +651,69 @@ pub fn sample_sa(name: &str, owner: TenancyNodeRef) -> (Principal, ServiceAccoun
 }
 
 // --- SMA-445 Task 10: `PgApiKeyRepository`-driven test helpers ----------------------------
+
+// --- SMA-471 Task 6: `event_outbox`-driven test helpers -----------------------------------
+//
+// Lifted from `tests/relay_pg.rs::seed_row` (which stays as-is — its callers need a
+// caller-controlled `occurred_at` for age-based assertions) for `tests/nats_publisher.rs`'s
+// end-to-end relay test, which only needs a fresh unpublished row inserted "now" plus the two
+// read-back queries below (`event_outbox` itself has no `pub` port in `paigasus_iam_core`, so a
+// test driving the real relay against a real broker has no way to read it back except direct
+// SeaORM entity queries).
+
+/// Inserts one fresh, unpublished `event_outbox` row with the given `id` (`occurred_at =
+/// Utc::now()`) — bypassing the `Outbox`/`UnitOfWork` ports, mirroring `relay_pg.rs::seed_row`'s
+/// field values exactly (same fixed `event_type`/`payload`), just without a caller-controlled
+/// `occurred_at`.
+#[allow(dead_code)]
+pub async fn insert_outbox_row(db: &DatabaseConnection, id: Uuid) {
+    use paigasus_iam::adapters::persistence::entities::event_outbox;
+    use paigasus_iam_core::EventType;
+    use sea_orm::{ActiveModelTrait, Set};
+
+    event_outbox::ActiveModel {
+        id: Set(id),
+        occurred_at: Set(Utc::now()),
+        event_type: Set(EventType::PrincipalCreated.as_wire().to_string()),
+        schema_version: Set(1),
+        aggregate_prn: Set(format!("prn:pgs:iam:::principal/{id}")),
+        actor_prn: Set(None),
+        payload: Set(serde_json::json!({"kind": "user"}).to_string()),
+        correlation_id: Set(None),
+        published_at: Set(None),
+        attempts: Set(0),
+        parked: Set(false),
+        parked_at: Set(None),
+        last_error: Set(None),
+    }
+    .insert(db)
+    .await
+    .expect("insert event_outbox row");
+}
+
+/// Count of `event_outbox` rows with `published_at IS NULL` — the "still needs delivery" set a
+/// healthy drain must empty.
+#[allow(dead_code)]
+pub async fn unpublished_count(db: &DatabaseConnection) -> u64 {
+    use paigasus_iam::adapters::persistence::entities::event_outbox;
+    use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+
+    event_outbox::Entity::find()
+        .filter(event_outbox::Column::PublishedAt.is_null())
+        .count(db)
+        .await
+        .expect("count unpublished event_outbox rows")
+}
+
+/// The `last_error` column of the `event_outbox` row `id` — `None` if the row has never
+/// recorded a failed attempt (or does not exist).
+#[allow(dead_code)]
+pub async fn last_error(db: &DatabaseConnection, id: Uuid) -> Option<String> {
+    use paigasus_iam::adapters::persistence::entities::event_outbox;
+    use sea_orm::EntityTrait;
+
+    event_outbox::Entity::find_by_id(id).one(db).await.expect("query event_outbox row").and_then(|row| row.last_error)
+}
 
 /// Builds a fresh `(ApiKey, Vec<u8>)` pair for `PgApiKeyRepository::issue` tests — mints the
 /// key id via the real `KernelIdGenerator`/`SystemClock` adapters (mirrors `sample_sa`'s

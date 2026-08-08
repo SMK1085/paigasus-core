@@ -86,7 +86,7 @@ label (`iam` / `gateway`) distinguishes the two.
 `/metrics` and `/healthz`/`/readyz` are excluded from `http_metrics_layer` (or collapse to their
 own bounded `route` template) so scrape/health traffic doesn't dominate the RED metrics.
 
-### 2.2 `paigasus-iam` — gRPC, authz, audit, outbox relay
+### 2.2 `paigasus-iam` — gRPC, authz, audit, outbox relay, NATS publisher
 
 | metric | type | labels | meaning / expected range |
 |---|---|---|---|
@@ -109,7 +109,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_outbox_retention_ticks_total` | counter | `result` (`ok`/`error`) | One increment per `PgOutboxMaintainer` sweep tick (SMA-469), regardless of whether the tick deleted anything. **This is the retention sweep's liveness signal, and it fires on every tick even when `[outbox.retention].enabled = false`** — unlike the audit-retention task, the outbox maintainer is spawned unconditionally and its tick always runs the gauge refresh below, so `enabled = false` never explains silence here. See §4 "IamOutboxRetentionStalled". |
 | `iam_outbox_rows_deleted_total` | counter | `reason` (`published`/`parked`) | Rows deleted by a sweep, split by which cutoff (`[outbox.retention].published_days` vs. `parked_days`) triggered the delete. `reason="parked"` staying at `0` is expected in steady state (`parked_days` defaults to `0` = never). |
 | `iam_outbox_parked_rows` | gauge | — | The **current** count of parked (dead-letter) rows (`SELECT count(*) … WHERE parked = true`), refreshed on every retention tick — including when `[outbox.retention].enabled = false`, so this gauge (and the alert below) never goes stale just because deletion is paused. **Per-replica, not global-unique**: every IAM replica's maintainer queries the same table and sets the identical count on its own gauge, so N replicas emit N identical series for one fact. **Aggregate with `max by (job)`, never `sum`** — summing reports N× the real backlog. See §4 "IamOutboxDeadLetterBacklog". |
-| `iam_outbox_dead_letters_replayed_total` | counter | `scope` (`one`/`bulk`) | Parked rows returned to the live queue. `scope="one"` increments by 1 per `POST /v1/outbox/dead-letters/{id}/replay` call; `scope="bulk"` increments by the **number of rows replayed** (not calls) per `POST /v1/outbox/dead-letters/replay` call — counted only after the enclosing transaction commits, so a rolled-back replay is never counted. |
+| `iam_outbox_dead_letters_replayed_total` | counter | `scope` (`one`/`bulk`), `beyond_dedup_window` (`true`/`false`/`unknown`) | Parked rows returned to the live queue. `scope="one"` increments by 1 per `POST /v1/outbox/dead-letters/{id}/replay` call; `scope="bulk"` increments by the **number of rows replayed** (not calls) per `POST /v1/outbox/dead-letters/replay` call — counted only after the enclosing transaction commits, so a rolled-back replay is never counted. `beyond_dedup_window` (SMA-471 D4) flags replays that JetStream's `duplicate_window` will **not** collapse, because replay keeps the row's id and therefore its `Nats-Msg-Id`: `"true"` = the row parked longer ago than the assumed window (3600s) so a consumer will very likely see the event twice; `"false"` = parked recently enough that dedup should still absorb it; `"unknown"` = the bulk path, which returns a row count rather than rows and so cannot answer per-row (it is therefore **always** `"unknown"` for `scope="bulk"`). Read it as an exposure estimate, not a verdict — it measures from `parked_at`, which is `max_attempts × poll_interval_secs` (~5 min at defaults) AFTER the first publish attempt JetStream would have deduplicated against, so it under-reports `"true"` by roughly that margin. |
 | `iam_outbox_dead_letters_discarded_total` | counter | — | Parked rows permanently discarded via `POST /v1/outbox/dead-letters/{id}/discard`. Counted only after commit, same as the replay counters. |
 | `iam_audit_partition_maintenance_ticks_total` | counter | `result` | One per audit partition-maintenance tick (create-ahead + prune). `result` ∈ `ok`/`error`. Liveness signal — see §4 "Audit partition maintenance stalled". |
 | `iam_audit_partitions_created_total` | counter | — | Monthly leaf partitions created by create-ahead. |
@@ -117,6 +117,9 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_audit_default_partition_rows` | gauge | — | Rows currently in the audit `DEFAULT` partitions. **Should be 0**; nonzero ⇒ create-ahead fell behind (freezes when the task is stalled while retention stays enabled — the ticks counter is the primary liveness signal there; when retention is **disabled** neither metric exists at all, see §4 "Audit partition maintenance stalled"). |
 | `iam_bootstrap_admin_seed_failures_total` | counter | `stage` | Swallowed `BootstrapAdminSeeder` seed failures (SMA-468 D6). `stage` ∈ `list` (the `list_by_principal` existence check errored) / `txn` (the `begin`/`grant_in`/`enqueue`/`record`/`commit` sequence errored). Deliberately has **no alert** (D6) — watch the "Bootstrap-admin seed failures" panel on the IAM dashboard, or query `/metrics` directly. **Read it as a rate, not a level.** It is monotonic, so a single historical failure leaves it nonzero forever, including long after the identity was successfully seeded on a later attempt — an absolute nonzero value proves nothing on its own. What indicates an ongoing lockout is a counter that is **still climbing** (`increase(iam_bootstrap_admin_seed_failures_total[15m]) > 0`, sustained): the seed is idempotent-by-existence, so once the grant row commits this stops incrementing for that identity, and a seed that never commits is retried on every subsequent authentication. Confirm by looking for the grant row itself before concluding lockout. **A low, one-off increase is benign**: two concurrent first authentications by the same bootstrap identity can both pass the existence check and both attempt `grant_in`; the loser violates the unique grant constraint and rolls back under `stage="txn"` while the winner's grant commits — net state is correct and self-correcting. |
 | `iam_system_rows_retired_total` | counter | `outcome` | Retirements of orphaned system-owned `policy`/`role` rows via `POST /v1/authz/system-policies/{id}/retire` (SMA-481, §4 "Retiring an orphaned system-owned row"). `outcome` ∈ `retired` (the deletes, the `PolicyDeleted` event and the audit row all committed) / `blocked` (surviving grants stopped it — nothing written) / `refused` (`fleet-not-converged`, or a static policy retired without `acknowledge_decision_change` — nothing written). **Not one increment per call:** `403` (non-Root), `409 system-immutable` (the id is still code-defined), `404`, and `409 not-system-owned` all return WITHOUT touching this counter — none of them are the fleet-skew / decision-change / blast-radius concerns it exists to page on. **No alert rule ships for it today** — retirement is a rare, deliberate, Root-only action, so this is a signal you query rather than one that pages you. It is nevertheless the only *monitorable* trace of the action: the `RetireSystemPolicy` `audit_log` row written in the same transaction is durable evidence, but nothing polls `audit_log` for it, and durable is not the same as monitored. |
+| `iam_nats_publish_duplicates_total` | counter | — | Only emitted under `[outbox.publisher].backend = "nats"` (SMA-471). Every JetStream publish ack that came back `duplicate = true` — the `Nats-Msg-Id` dedup (D3) collapsing a relay redelivery of a row it already published once (the common case: the first publish's own ack was lost, so the relay retried a row JetStream already has). The adapter treats a duplicate ack as `Ok(())`, same as a fresh publish. Primed at zero in `NatsEventPublisher::connect`, before any publish, specifically so the *first* duplicate can still satisfy an `increase() > 0` query (a metrics-rs counter otherwise only appears at its first increment's value). A rising rate is not itself broken — it means acks are being lost somewhere in the round trip — but a rate that tracks the publish rate closely is worth investigating (§ D3 in the design doc: dedup covers a lost-ack retry, not a crash/DB-outage republish or an operator dead-letter replay, all of which are legitimately-intentional duplicates too). No dedicated alert ships for it (spec §7 — dashboard panels are out of scope); read it from `/metrics` or the dashboard panel. |
+| `iam_nats_publish_duration_seconds` | histogram | — | Only emitted under `backend = "nats"`. The JetStream publish-ack round trip (`send_publish` request leg **and** the ack await, both — D2), recorded around every `publish_ack` call regardless of outcome. This sits inside the outbox relay's single lock-holding transaction (§1.3 of the design doc), so a rising p99 here is not just "NATS is slow" — it is directly lengthening how long `event_outbox` row locks and a pool connection are held per tick. Compare against `[outbox.publisher].publish_timeout_secs` (default 2s): a p99 approaching that ceiling means publishes are close to timing out, which is a leading indicator for `IamOutboxPublishFailures` below. |
+| `iam_nats_connected` | gauge | — | Only emitted under `backend = "nats"`. `1` when the NATS client reports a live connection, `0` otherwise (`async_nats::connection::State::Disconnected`). Sampled by a **background task** (`spawn_connection_gauge_sampler`) on a 5s interval, deliberately **not** set inside `publish` — during a total outage every row eventually parks, `publish` stops being called at all, and a publish-driven gauge would freeze exactly when it matters most. **Per-replica, and the replicas genuinely disagree** — unlike `iam_outbox_parked_rows` (one global count every replica computes identically, where `max by (job)` is correct), this reports each replica's *own* connection state. `max by (job)` therefore reads `1` while any single replica is still connected, hiding exactly the partial outage worth investigating. Keep `instance` to identify which replica is down, or use `min by (job)` to ask "are **all** replicas connected". Never `sum`. This is the fastest-to-update of the three NATS signals — see "NATS backend: boot hard-fails…" below for what a `0` reading alongside a crash-looping *new* pod means versus a `0` on an already-running one. |
 
 ### 2.3 `paigasus-gateway` — IAM dependency, OpenAI upstream
 
@@ -207,6 +210,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamDenialAuditDrops` | `rate(iam_denial_audits_dropped_total[5m]) > 0` | warning |
 | `IamOutboxBacklogAgeHigh` | `iam_outbox_oldest_unpublished_age_seconds > 300` | warning |
 | `IamOutboxEventsParked` | `increase(iam_outbox_relay_parked_total[15m]) > 0` | warning |
+| `IamOutboxPublishFailures` | `increase(iam_outbox_relay_publish_failures_total[5m]) > 0` for 5m | warning |
 | `IamOutboxRelayStalled` | `rate(iam_outbox_relay_ticks_total[10m]) == 0` | critical |
 | `IamPolicySnapshotReloadsStalled` | `(sum by (job, instance) (increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[10m])) or (up{job="iam"} == 1) * 0) == 0` for 5m | critical |
 | `IamAuditPartitionMaintenanceStalled` | `sum without (result) (increase(iam_audit_partition_maintenance_ticks_total[2d])) == 0` for 1h | warning |
@@ -278,10 +282,12 @@ FOR UPDATE SKIP LOCKED` (safe across multiple IAM replicas — two replicas neve
 row) and handing each to `EventPublisher::publish`. A growing oldest-unpublished age means rows
 are being enqueued (by mutation use-cases) faster than the relay is successfully publishing them.
 
-**Likely causes:** the `EventPublisher` implementation is failing/erroring on most publishes (in
-this repo, the only implementation is `TracingEventPublisher`, which only fails on
-serialization-adjacent bugs — in a real deployment with a broker-backed publisher, this usually
-means the broker is unreachable or rejecting writes); the relay is running but its
+**Likely causes:** the `EventPublisher` implementation is failing/erroring on most publishes.
+Which implementation is running depends on `[outbox.publisher].backend`: the default `tracing`
+(`TracingEventPublisher`) only fails on serialization-adjacent bugs, while the optional
+production backend `nats` (`NatsEventPublisher`, SMA-471) fails whenever the broker is
+unreachable or rejecting writes — on that backend check `IamOutboxPublishFailures` and
+`iam_nats_connected` first, they are both faster signals than backlog age. Other causes: the relay is running but its
 `poll_interval_secs`/`batch_size` are too conservative for current write volume; or the relay
 task itself is wedged (in which case `IamOutboxRelayStalled`, below, is the more precise signal —
 check that alert too).
@@ -308,7 +314,8 @@ check that alert too).
 ### `IamOutboxEventsParked` — a poison event was parked
 
 **Meaning.** `iam_outbox_relay_parked_total` increased in the last 15 minutes — at least one
-`event_outbox` row hit `[outbox].max_attempts` (default `5`) consecutive publish failures and was
+`event_outbox` row hit `[outbox].max_attempts` (default **`60`**, raised from `5` by SMA-471 —
+see the arithmetic and the "why" below) consecutive publish failures and was
 marked `parked = true`, permanently excluded from future relay batches (the relay's poll
 predicate is `published_at IS NULL AND parked = false`). This is deliberately a **counter of
 newly-parked rows**, not a gauge of the current parked-row count — a gauge summed per-tick would
@@ -325,18 +332,31 @@ to "how many rows are parked right now" if needed, or a direct SQL count (below)
   `batch_size` (default `100`) rows per tick (`ORDER BY id LIMIT batch_size`), so within any single
   poll interval only up to `batch_size` distinct rows can even be attempted, let alone parked — on
   a backlog larger than `batch_size`, most of it is never selected during a short outage, so it
-  cannot possibly park. A row parks after `[outbox].max_attempts` (default `5`) consecutive failed
-  attempts; because the relay re-selects the same still-unpublished row on every subsequent tick,
-  that spans **four** poll intervals between its first and fifth attempt (20s at the default
-  `poll_interval_secs = 5`), plus up to one further interval for that first attempt to happen at
-  all — so **~25 seconds is the worst case for the first `batch_size` rows to park**, not for the
-  whole backlog to park at once. If the outage continues past that, the relay moves on to the next
-  `batch_size` rows (the previous batch is now excluded, `parked = true`) and repeats the same
-  ~20–25s cycle, so a longer outage parks proportionally more rows in `batch_size`-sized waves
-  rather than parking an unbounded backlog instantly. Many rows parking in a short window is still
-  the signal to suspect a resolved-or-ongoing outage before suspecting a payload bug — that
-  conclusion doesn't change, only the blast-radius number does; `IamOutboxDeadLetterBacklog`
-  (below) is the complementary alert for "a parked backlog nobody has dealt with yet."
+  cannot possibly park. A row parks after `[outbox].max_attempts` (default **`60`**, see below)
+  consecutive failed attempts; because the relay re-selects the same still-unpublished row on
+  every subsequent tick, that spans **59** poll intervals between its first and sixtieth attempt
+  (295s at the default `poll_interval_secs = 5`), plus up to one further interval for that first
+  attempt to happen at all — so **~300 seconds (5 minutes) is the worst case for the first
+  `batch_size` rows to park**, not for the whole backlog to park at once. If the outage continues
+  past that, the relay moves on to the next `batch_size` rows (the previous batch is now excluded,
+  `parked = true`) and repeats the same ~5-minute cycle, so a longer outage parks proportionally
+  more rows in `batch_size`-sized waves rather than parking an unbounded backlog instantly. Many
+  rows parking in a short window is still the signal to suspect a resolved-or-ongoing outage before
+  suspecting a payload bug — that conclusion doesn't change, only the blast-radius number does;
+  `IamOutboxDeadLetterBacklog` (below) is the complementary alert for "a parked backlog nobody has
+  dealt with yet."
+
+  **This window used to be ~25 seconds** (`max_attempts = 5`) before SMA-471. It was widened
+  deliberately, not relaxed carelessly: with a real broker-backed `EventPublisher`, a routine
+  broker restart is now a realistic multi-second outage, and 25 seconds of tolerance dead-lettered
+  the *entire in-flight backlog* into the dead-letter surface for something as ordinary as a NATS
+  rolling restart, forcing an operator to manually replay it afterward (itself a
+  duplicate-delivery event — see the NATS section below). ~5 minutes of tolerance absorbs that
+  routine case; the accepted cost is that a *genuinely* poison row — one that will never succeed no
+  matter how many times it's retried — now burns 60 attempts and up to `batch_size` other rows
+  behind it head-of-line block for ~5 minutes instead of ~25 seconds before the relay parks it and
+  moves on. See `rs/crates/services/paigasus-iam/src/config.rs`'s doc comment on
+  `OutboxConfig::max_attempts` for the full rationale.
 
 **Confirm:**
 1. IAM logs around the parked event's `id` — the relay emits `tracing::error!` with
@@ -469,6 +489,105 @@ recovered), not a failure to retry by dropping the guard.
 Prefer the API's `replay` endpoint whenever it is reachable — besides being the documented path, it
 is also what produces the audit trail (`ReplayOutboxDeadLetter`, in `audit_log`); a direct SQL
 `UPDATE` bypasses that entirely and leaves no record that the recovery action happened.
+
+### `IamOutboxPublishFailures` — outbox publishes are failing (warning)
+
+**Meaning.** `iam_outbox_relay_publish_failures_total` increased in the last 5 minutes and stayed
+increased for the `for: 5m` hold — a row's `EventPublisher::publish` call errored during a relay
+tick. This is deliberately the **earliest** outbox signal: it can fire before
+`IamOutboxBacklogAgeHigh` (which needs the backlog to actually age past 5 minutes) and well before
+`IamOutboxEventsParked` (which needs a row to exhaust `[outbox].max_attempts`, now ~5 minutes at
+the default `poll_interval_secs`, see above). The counter is primed at zero from boot
+(`relay.rs` increments it by 0 on every tick, even a tick that fails nothing), so `increase() > 0`
+can fire on the very first failure rather than needing a pre-existing nonzero baseline.
+
+**Likely causes.** With the `tracing` backend (the default) this alert should never fire —
+`TracingEventPublisher::publish` only errors on serialization-adjacent bugs. With
+`backend = "nats"` (SMA-471) the far more common cause is the broker itself: unreachable
+(`NatsPublisherError::Disconnected`, `::Connect`, or a tripped [D11] breaker short-circuiting
+before dialling), refusing the write (stream deleted out from under a running service, subject
+permission revoked), or an oversized payload past NATS's `max_payload`.
+
+**Confirm:**
+1. `iam_nats_connected` (§2.2) — is the NATS client's own view of the connection down? A flat `0`
+   points straight at broker connectivity; a `1` alongside failing publishes points at something
+   more specific (permissions, a deleted stream, an oversized payload).
+2. IAM logs / `event_outbox.last_error` on the affected rows — `relay.rs`'s `describe_error` walks
+   the full `source()` chain of `NatsPublisherError`, so the row's `last_error` names which
+   `NatsPublisherError` variant fired, not just "backend error".
+3. `rate(iam_outbox_relay_publish_failures_total[5m])` vs. `rate(iam_outbox_relay_drained_total[5m])`
+   — is this every row failing (broker down) or a subset (one bad payload)?
+4. `histogram_quantile(0.99, rate(iam_nats_publish_duration_seconds_bucket[5m]))` (§2.2) — publishes
+   consistently near `[outbox.publisher].publish_timeout_secs` point at a slow/blackholed broker
+   rather than a fast, clean rejection.
+
+**Remediation:**
+- Broker down or unreachable: restore NATS connectivity (or wait out a routine restart — D9 raised
+  `max_attempts` specifically so this no longer needs urgent action within the first ~25 seconds).
+  `async-nats` reconnects in the background on its own once the broker returns; no service restart
+  is needed.
+- Stream deleted or permission revoked: this does not self-heal — `NatsEventPublisher` never
+  recreates or re-authenticates a stream after boot (D7 is boot-time only). Restore the stream
+  (or the permission) and, if the stream itself was recreated from scratch, restart IAM so
+  `connect`'s D7 verification runs again against the new stream's config.
+- Oversized payload: `NatsPublisherError::Publish`'s message should name the size problem
+  directly (D9's guard test asserts this). This is treated as a permanently-failing row today
+  (`PublishError::Permanent` — immediate parking instead of retrying — is a documented follow-up,
+  spec §7); it will keep failing every attempt until parked, at which point `IamOutboxEventsParked`
+  is the relevant playbook.
+- If failures stop but the backlog is still elevated, check `IamOutboxBacklogAgeHigh` next — a
+  resolved publish-failure spell can still leave a backlog that needs `batch_size`/
+  `poll_interval_secs` tuning to drain promptly.
+
+### NATS backend: boot hard-fails on an unreachable broker or a drifted stream (SMA-471)
+
+**What happens.** With `[outbox.publisher].backend = "nats"`, `NatsEventPublisher::connect` runs
+**before any listener is spawned** — before HTTP, gRPC, metrics, and before the outbox relay
+starts (D7). If it returns `Err`, `main.rs` propagates it straight out of `main()` via `?`: the
+process exits nonzero with **no port bound**, so this never shows up as a `/healthz`/`/readyz`
+failure, an `IamHighErrorRate` blip, or any Prometheus series at all — there is nothing scraping
+yet. Under an orchestrator this presents as **`CrashLoopBackOff`**, not a degraded-but-serving
+pod.
+
+**Why boot-time rather than a background retry.** A NATS-backed deployment that started serving
+HTTP/gRPC traffic with no working delivery sink would look healthy on every existing check while
+silently accumulating an outbox backlog with no bound (D7's rationale). Failing fast, before
+anything binds, is the deliberate trade — see spec §3.3 and §7 for why `/readyz` does *not* also
+gate on NATS health post-boot (a broker outage on an already-running replica does not take it out
+of rotation; `IamOutboxPublishFailures` above, `IamOutboxBacklogAgeHigh`, and
+`iam_nats_connected` are that signal instead).
+
+**Two distinct causes, both fatal at boot, told apart by the log line and error text:**
+
+- **Broker unreachable or credentials rejected.** `NatsPublisherError::Connect` /
+  `NatsPublisherError::Credentials`. The process log's final line before exit is the propagated
+  error's `Display` chain, e.g. `nats connect failed: IO error: connection refused: connection
+  refused` (upstream `async-nats` renders the cause in both its own `Display` and `source()`, so
+  the innermost text can appear twice — that duplication is upstream's rendering, not a bug here).
+  `NatsPublisherError::Credentials` names the unreadable `credentials_file` path directly.
+  **Remediation:** restore broker reachability (network, DNS, the `nats-server` process itself) or
+  fix the `url`/`credentials_file` config, then let the orchestrator restart the pod (or restart
+  it manually).
+- **Stream config drift (D7).** `NatsPublisherError::StreamConfigDrift`. `connect` ensures the
+  `IAM_EVENTS` stream exists (`get_or_create_stream`) but — deliberately — does **not** reconcile
+  an already-existing stream's config, because this service must never silently reshape a stream
+  external consumers already depend on. Instead it verifies the live stream's `retention`,
+  `duplicate_window`, `storage`, `subjects`, and `max_age` against what `[outbox.publisher]`
+  requires and hard-fails if any is weaker. The error names exactly which field and both values,
+  e.g. `stream IAM_EVENTS has duplicate_window = 120s, but this service requires 3600s`, or
+  `stream IAM_EVENTS has retention = interest, but this service requires limits` — the
+  retention case is the most consequential: an `Interest`- or `WorkQueue`-retention stream
+  silently discards messages on arrival once this PR ships (no consumer subscribes yet), so
+  rejecting it at boot rather than adopting it is intentional, not overly strict. **Remediation:**
+  either reconfigure `IAM_EVENTS` on the broker to match what the error names (an operator action
+  outside this service — `nats stream edit`, or delete-and-let-`connect`-recreate it if no other
+  consumer already depends on its current config), or relax `[outbox.publisher]`'s own config to
+  match an intentionally different existing stream. This is never transient — restarting the pod
+  without changing anything reproduces the identical failure every time.
+
+**Confirm which case you're in** from the log line alone; no metrics exist to query for a pod that
+never finished booting. `kubectl logs` (or the platform-equivalent) on the crash-looping pod is
+the only signal.
 
 ### `IamOutboxRelayStalled` — the relay has stopped ticking (critical)
 

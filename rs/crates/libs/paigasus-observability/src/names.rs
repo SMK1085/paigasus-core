@@ -102,6 +102,20 @@ pub const IAM_OUTBOX_ROWS_DELETED_TOTAL: &str = "iam_outbox_rows_deleted_total";
 /// Every replica sets the same global count, so this is PER-REPLICA: aggregate it
 /// `max by (job)` in alerts and dashboards, never `sum`.
 pub const IAM_OUTBOX_PARKED_ROWS: &str = "iam_outbox_parked_rows";
+/// Labelled `scope` = `one` | `bulk` (which `DeadLetterService` call replayed the row(s)) and
+/// `beyond_dedup_window` = `true` | `false` | `unknown` (SMA-471 D4) — a CLOSED set, never
+/// derived from anything caller-supplied, so it cannot mint cardinality.
+///
+/// `beyond_dedup_window` exists because `REPLAY_ONE_SQL` un-parks a row by its EXISTING id,
+/// which `NatsEventPublisher` sends as `Nats-Msg-Id`, and JetStream only deduplicates within
+/// its `duplicate_window_secs` of the row's first publish. `scope="one"` computes the label
+/// from the replayed row's own `parked_at` against a constant mirroring the shipped
+/// `duplicate_window_secs` default (not plumbed config — see `ASSUMED_DEDUP_WINDOW_SECS`'s doc
+/// in `dead_letters.rs`): `true` means the row parked longer ago than that window, so the
+/// replay may republish an event the stream already holds; `false` means it parked recently
+/// enough that JetStream's dedup almost certainly still covers it. `scope="bulk"` is always
+/// `unknown` — `replay_matching_in` returns only a row COUNT, never the rows, so no per-row
+/// `parked_at` exists to compare.
 pub const IAM_OUTBOX_DEAD_LETTERS_REPLAYED_TOTAL: &str = "iam_outbox_dead_letters_replayed_total";
 pub const IAM_OUTBOX_DEAD_LETTERS_DISCARDED_TOTAL: &str = "iam_outbox_dead_letters_discarded_total";
 // IAM audit partition maintenance
@@ -127,6 +141,25 @@ pub const IAM_AUDIT_DEFAULT_PARTITION_ROWS: &str = "iam_audit_default_partition_
 /// durable evidence, but durable is not the same as monitored — nothing polls `audit_log` for
 /// this action today, so this counter is the only thing that can page anyone on it.
 pub const IAM_SYSTEM_ROWS_RETIRED_TOTAL: &str = "iam_system_rows_retired_total";
+// IAM NATS publisher (SMA-471)
+/// Acks returned with `duplicate = true` — JetStream collapsing a relay redelivery. A rising
+/// rate means publish acks are being lost and the relay is retrying. Primed at zero by
+/// `NatsEventPublisher::connect` so the FIRST duplicate can satisfy an `increase() > 0` alert.
+pub const IAM_NATS_PUBLISH_DUPLICATES_TOTAL: &str = "iam_nats_publish_duplicates_total";
+/// Ack round-trip latency. On the critical path of a lock-holding relay transaction, so this is
+/// a database-health metric as much as a broker one.
+pub const IAM_NATS_PUBLISH_DURATION_SECONDS: &str = "iam_nats_publish_duration_seconds";
+/// 1 when the client reports a live connection, 0 otherwise. Sampled by a BACKGROUND task, not
+/// set inside `publish`: during a total outage every row eventually parks, `publish` stops being
+/// called, and a publish-driven gauge would freeze exactly when it matters.
+///
+/// **Per-replica, and unlike [`IAM_OUTBOX_PARKED_ROWS`] the replicas do NOT agree.** That gauge
+/// reports one global fact every replica computes identically, so `max by (job)` is right there.
+/// This one reports each replica's own connection state, so `max by (job)` returns 1 while any
+/// single replica is still connected — hiding exactly the partial outage worth paging on
+/// (CodeRabbit, PR 112). Keep `instance` to see which replica is down, or use `min by (job)` to
+/// ask "are all replicas connected". Never `sum`.
+pub const IAM_NATS_CONNECTED: &str = "iam_nats_connected";
 
 /// Every metric family this workspace emits — the drift test (`tests/drift.rs`) extracts every
 /// `iam_`/`gateway_`-prefixed identifier from the committed dashboard/rule `expr`s, strips a
@@ -172,6 +205,9 @@ pub const ALL: &[&str] = &[
     IAM_AUDIT_PARTITIONS_DROPPED_TOTAL,
     IAM_AUDIT_DEFAULT_PARTITION_ROWS,
     IAM_SYSTEM_ROWS_RETIRED_TOTAL,
+    IAM_NATS_PUBLISH_DUPLICATES_TOTAL,
+    IAM_NATS_PUBLISH_DURATION_SECONDS,
+    IAM_NATS_CONNECTED,
 ];
 
 #[cfg(test)]

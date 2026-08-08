@@ -64,3 +64,40 @@ that CI absorbs via `actions/cache`.
   "Materialize main ref" step.
 - GUI git clients often strip `PATH`; add `~/.proto/shims` to their environment if
   hooks fail with "command not found".
+
+## NATS (optional — outbox publisher, SMA-471)
+
+The outbox publisher defaults to `backend = "tracing"` and needs nothing. To run the real
+JetStream sink locally:
+
+```bash
+nats-server -js          # the whole setup; JetStream must be enabled or stream ensure fails
+```
+
+then set:
+
+```toml
+[outbox.publisher]
+backend = "nats"
+url     = "nats://127.0.0.1:4222"
+```
+
+The service creates `IAM_EVENTS` if it is absent. If it already exists it is **adopted, never
+reshaped** — `get_or_create_stream` does not reconcile, deliberately, so the service can never
+silently alter a stream external consumers depend on. Adoption is conditional instead: boot
+fails unless the live stream satisfies all five checks, naming the offending field.
+
+| Field | Required |
+| -- | -- |
+| `retention` | exactly `limits`. `work_queue` deletes a message once one subscriber acks it, and `interest` deletes it once all known observables have — and no consumer ships yet, so on an `interest` stream that condition is vacuous and events are discarded on arrival while every publish still acks. |
+| `storage` | exactly `file`. `memory` loses everything on a broker restart. |
+| `duplicate_window` | **at least** the configured `duplicate_window_secs` (a wider window is fine). |
+| `subjects` | must contain `iam.>`. |
+| `max_age` | `0` (unlimited), or greater than `duplicate_window` — JetStream's own constraint. |
+
+`retention`, `storage` and `duplicate_window` are **not editable in place** on a live JetStream
+stream. Fixing drift in any of those means draining or accepting the loss of the messages the
+stream holds, deleting it, and letting the service recreate it — plan that as a maintenance
+window, not a config tweak. `subjects` and `max_age` can be edited with `nats stream edit`.
+
+Integration tests need no local server — they start their own container.
