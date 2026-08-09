@@ -19,20 +19,40 @@
 //! `..._reconnects_total` at 0 straight through a real outage. With `eager_reconnect(false)`,
 //! `try_recv() -> Ok(None)` is the explicit "reconnected, may have missed notifications" signal.
 //!
-//! **No TCP keepalives are available — a deviation from D15, and the one caveat worth carrying
-//! forward.** sqlx-postgres 0.8.6 exposes NO keepalive setters on `PgConnectOptions`; the string
-//! `keepalive` does not occur anywhere in that crate's source. They cannot be smuggled in through
-//! `database_url` either — unrecognised URL parameters are logged and discarded
-//! (`sqlx-postgres-0.8.6/src/options/parse.rs:107`). Setting socket-level keepalives would need a
-//! new dependency (`socket2`), which this change is not permitted to add.
+//! **Keepalives are a SERVER-side setting here, and they are an operator knob (D15).** Two
+//! separate things get confused in this area, so both are stated plainly.
 //!
-//! The consequence is real. `try_recv` has no read timeout, so a silently-dropped connection can
-//! leave Postgres believing this session is alive and LISTENing — the half-open case that fills
-//! the async notification queue. A full queue makes every transaction calling `NOTIFY` fail AT
-//! COMMIT, i.e. every IAM mutation (D4). Nothing in this process shortens that window: recovery
-//! waits on the OS default keepalive, which on Linux is ~2 h. The only in-process signal is the
-//! watchdog warning below, correlated with a flat
-//! `iam_outbox_listener_notifications_total` — which is precisely why the watchdog exists.
+//! *Client-side keepalives do not exist in sqlx 0.8.6.* There are no keepalive setters on
+//! `PgConnectOptions` — the string `keepalive` does not occur anywhere in that crate's source —
+//! and configuring the socket directly would need a new dependency (`socket2`). So this process
+//! cannot shorten its own detection of a dead peer; `try_recv` has no read timeout, and a
+//! silently-dropped connection is noticed only when the OS default keepalive expires (~2 h on
+//! Linux). What that costs is *client-side recovery speed*, and nothing else.
+//!
+//! *It would not have fixed the queue-fill anyway.* The D4 hazard is that Postgres's async
+//! notification queue fills up, at which point every transaction calling `NOTIFY` fails AT COMMIT
+//! — i.e. every IAM mutation. The queue cannot be truncated past the oldest backend still
+//! listening, and that backend is on the SERVER. A client-side keepalive only makes THIS process
+//! notice and reconnect; it never reaps the server's half, which is the half holding the queue.
+//! Client keepalives were never the mitigation for D4.
+//!
+//! *The lever that does work* is the server-side GUC family `tcp_keepalives_idle` /
+//! `tcp_keepalives_interval` / `tcp_keepalives_count` — all `PGC_USERSET`, so they can be set per
+//! session with no code here. sqlx accepts them as URL query parameters in the `options[key]=value`
+//! form (`sqlx-postgres-0.8.6/src/options/parse.rs:101-105`), so they go on
+//! `[outbox].listen_database_url`:
+//!
+//! ```text
+//! postgres://…?options[tcp_keepalives_idle]=30&options[tcp_keepalives_interval]=10&options[tcp_keepalives_count]=3
+//! ```
+//!
+//! This stays an operator knob rather than a hardcoded connect option on purpose: a startup
+//! `options` parameter is rejected outright by PgBouncer and unsupported by RDS Proxy and
+//! Supavisor, so hardcoding it would turn "no nudge behind this pooler" into "the listener never
+//! connects at all". See the SMA-489 runbook for when to set it.
+//!
+//! Absent that knob, the earliest in-process signal is the watchdog warning below correlated with
+//! a flat `iam_outbox_listener_notifications_total` — which is precisely why the watchdog exists.
 
 use std::future::Future;
 use std::str::FromStr;
@@ -126,6 +146,11 @@ impl PgOutboxListener {
 
             backoff = BACKOFF_START;
             gauge!(names::IAM_OUTBOX_LISTENER_CONNECTED).set(1.0);
+            // The ONLY site that increments `reconnects_total`, which is what keeps it at exactly
+            // one per connection loss: every loss (`Ok(None)` or `Err`) breaks to this loop, and a
+            // reconnect that has not succeeded yet is not a reconnect, so a long outage counts
+            // once when it finally recovers rather than once per failed attempt. `connected_before`
+            // excludes the very first connect, which is not a RE-connect.
             if connected_before {
                 counter!(names::IAM_OUTBOX_LISTENER_RECONNECTS_TOTAL).increment(1);
             }
@@ -160,12 +185,21 @@ impl PgOutboxListener {
                         // notification arriving with no waiter registered is not lost.
                         self.wake.notify_one();
                     }
-                    // `eager_reconnect(false)` makes this "the connection dropped and was
-                    // re-established; notifications may have been missed". The poll covers the
-                    // gap (D8) — Postgres does not queue for an absent listener.
+                    // With `eager_reconnect(false)` this means "the connection dropped", NOT "it
+                    // was re-established": sqlx would rebuild it only LAZILY, inside the next
+                    // `try_recv`. So the connection is genuinely down at this point and the gauge
+                    // must say so. Breaking to the outer loop — rather than falling through to
+                    // that lazy path — keeps one loss equal to exactly one
+                    // `reconnects_total` increment (the outer loop counts it on the successful
+                    // re-establish); incrementing here as well would double-count every loss whose
+                    // lazy reconnect then failed. It also re-issues `LISTEN` explicitly, which is
+                    // the point of opting out of eager reconnect in the first place. Notifications
+                    // sent during the gap are gone — Postgres does not queue for an absent
+                    // listener — and the poll covers them (D8).
                     Ok(None) => {
-                        counter!(names::IAM_OUTBOX_LISTENER_RECONNECTS_TOTAL).increment(1);
-                        tracing::warn!("outbox listener reconnected; notifications during the gap were dropped and will be picked up by the poll");
+                        tracing::warn!("outbox listener lost its connection; reconnecting, and notifications missed during the gap will be picked up by the poll");
+                        gauge!(names::IAM_OUTBOX_LISTENER_CONNECTED).set(0.0);
+                        break;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "outbox listener connection failed; reconnecting");
