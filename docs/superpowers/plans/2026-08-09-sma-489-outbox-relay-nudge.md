@@ -1650,6 +1650,21 @@ async notification queue — a listening session that stopped consuming prevents
 truncating it. Check `SELECT pg_notification_queue_usage();` (1.0 means full). Setting
 `[outbox].wake_on_commit = false` and restarting stops the writer emitting notifications and
 restores mutations immediately.
+
+**Preventing that wedge.** A listener whose socket goes half-open leaves the *server* believing
+the session is alive and still `LISTEN`ing, so the queue cannot be truncated. Client-side TCP
+keepalives do not help — they let the client notice, not the server reap. The lever that works is
+the server-side GUC family, set per deployment through the listener's own DSN (all three are
+`PGC_USERSET`, so no elevated privilege is needed):
+
+```toml
+[outbox]
+listen_database_url = "postgres://…?options[tcp_keepalives_idle]=30&options[tcp_keepalives_interval]=10&options[tcp_keepalives_count]=3"
+```
+
+This is deliberately not hardcoded: a startup `options` parameter is rejected outright by
+PgBouncer and unsupported by RDS Proxy and Supavisor, so baking it in would turn "no nudge behind
+this pooler" into "the listener never connects at all".
 ```
 
 - [ ] **Step 5: Commit**

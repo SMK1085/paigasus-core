@@ -345,13 +345,34 @@ So:
 - Call `eager_reconnect(false)` and use `try_recv()`. `Ok(None)` then means "the connection was
   lost and re-established, notifications may have been missed" — which is precisely the signal
   the gauge and the reconnect counter should be driven from.
-- Set **TCP keepalives** on the listener's connect options — this is the mechanism that actually
-  heals a wedge. sqlx sets none and `try_recv` has no read timeout, so a silently-dropped
-  connection leaves Postgres believing the session is alive and LISTENing: the half-open case that
-  fills the notification queue and triggers D4. With `keepalives_idle = 30s`,
-  `keepalives_interval = 10s`, `keepalives_retries = 3`, a dead peer surfaces as an error from
-  `try_recv` within ~60 s and the existing reconnect path handles it. Well inside the time the
-  8 GB queue needs to fill.
+- **Keepalives: corrected during implementation, twice over.** This decision originally called for
+  client-side TCP keepalives on the listener's connect options. Two things were wrong with that.
+
+  First, the API does not exist: `keepalive` appears **zero** times in `sqlx-postgres 0.8.6`, and
+  the DSN parser discards a bare `keepalives=` parameter (`options/parse.rs:107`).
+
+  Second, and more importantly, **client-side keepalives would not have mitigated D4 anyway.**
+  They let *this process* notice a dead peer and reconnect. They do nothing about the server's
+  backend, which is the half that still believes the session is alive, still holds its `LISTEN`,
+  and therefore still prevents the async notification queue from being truncated. The D4 chain
+  runs through the *server* side, which client keepalives never touch.
+
+  The lever that does work is the **server-side** GUC family `tcp_keepalives_idle` /
+  `_interval` / `_count`. All three are `PGC_USERSET`, so a session can set them for its own
+  backend, after which the server detects the dead client, exits, and frees the queue. And it
+  needs no code at all: `sqlx 0.8.6` accepts `options[key]=value` as a **URL query parameter**
+  (`options/parse.rs:101-105`), and D6 already gives the listener its own
+  `[outbox].listen_database_url`. So this is an operator knob, documented in the runbook:
+
+  ```
+  listen_database_url = "postgres://…?options[tcp_keepalives_idle]=30&options[tcp_keepalives_interval]=10&options[tcp_keepalives_count]=3"
+  ```
+
+  Deliberately **not** hardcoded into the connect options. Sending a startup `options` parameter
+  is rejected outright by PgBouncer (`unsupported startup parameter: options`) and unsupported by
+  RDS Proxy and Supavisor — hardcoding it would turn "the nudge is unavailable behind this
+  pooler" into "the listener can never connect at all", which is strictly worse. Setting it per
+  deployment puts the choice where the topology is actually known.
 - Add an **observability-only watchdog**: if no notification has arrived within
   `max(60s, 3 × poll_interval)`, log a warning. It deliberately does **not** force a reconnect.
   A forced reconnect on silence would be wrong — silence is the normal state of a quiet system
@@ -494,7 +515,7 @@ failing at commit (D4).
 | `pg_notify` statement itself errors | Propagates from `enqueue`; the transaction is poisoned and would fail at commit regardless. Not the queue-full path. |
 | Listener cannot connect at boot | Log (never the URL), gauge 0, backoff, retry forever. Boot succeeds; delivery is poll-only meanwhile (D7). |
 | Listener connection drops | sqlx reconnects internally; surfaced as `Ok(None)` → gauge/counter updated (D15). Notifications during the gap are lost outright — Postgres does not queue for an absent listener — and the poll covers them (D8). |
-| Listener wedges (half-open TCP) | TCP keepalives surface it as a `try_recv` error within ~60 s and the reconnect path handles it (D15). This is the case that would otherwise fill the queue and trigger row 1. The watchdog only warns; it never forces a reconnect, because silence is normal on a quiet system. |
+| Listener wedges (half-open TCP) | Client-side detection falls back to the OS keepalive default (~2 h on Linux); the watchdog warns but never forces a reconnect, because silence is normal on a quiet system. The queue-fill half of this — the dangerous half, row 1 — is addressed on the **server** side, by setting `tcp_keepalives_*` through `listen_database_url`'s DSN so the backend reaps itself (D15). |
 | Relay tick returns `DbErr` | Unchanged: logged, `ticks_total{result="error"}` incremented. Additionally ends any continuation run (D9). |
 | Publisher fails during a continuation run | Continues while `drained > failures`; stops when no row in the batch succeeded (D9). |
 | Shutdown during a continuation run | Checked between ticks; the in-flight tick always completes (D10). |
