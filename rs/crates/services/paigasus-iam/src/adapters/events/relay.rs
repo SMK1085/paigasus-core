@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use metrics::{counter, gauge};
+use metrics::{counter, gauge, histogram};
 #[cfg(test)]
 use paigasus_iam_core::PublishError;
 use paigasus_iam_core::{DomainEvent, EventPublisher, EventType};
@@ -108,6 +108,28 @@ fn row_to_domain_event(row: &event_outbox::Model) -> Result<DomainEvent, String>
     })
 }
 
+/// Which rows a tick may drain (SMA-489 D13).
+///
+/// The distinction exists to keep retry cadence pinned to `poll_interval_secs`. `tick`
+/// increments `attempts` once per tick for every row it locks, and nothing throttles how often
+/// a *nudged* tick happens — so if nudged ticks drained everything, a failing row would burn
+/// its retry budget at the COMMIT rate. At 2 mutations/s a row would reach the default
+/// `max_attempts = 60` in ~30 s instead of ~5 min, dead-lettering the in-flight backlog on a
+/// routine broker restart, and voiding `IamConfig::validate`'s
+/// `duplicate_window_secs > max_attempts × poll_interval_secs` dedup floor while leaving that
+/// check passing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickMode {
+    /// Every unpublished, unparked row — the poll tick's mode, and the pre-SMA-489 behaviour.
+    All,
+    /// Only never-attempted rows (`attempts = 0`) — every nudge- and backlog-driven tick.
+    ///
+    /// A row that has failed once is invisible to nudged ticks and is retried only by the poll.
+    /// Side benefit: fresh events are no longer head-of-line blocked behind a poison row on the
+    /// nudge path.
+    Fresh,
+}
+
 /// The transactional-outbox relay: polls `event_outbox` for unpublished, unparked rows and
 /// drains them through an injected [`EventPublisher`]. `Clone`: `DatabaseConnection` is an
 /// `Arc`-backed pool handle (mirrors every other adapter in this crate), so the composition
@@ -131,15 +153,24 @@ impl OutboxRelay {
         }
     }
 
-    /// Runs exactly one drain tick (the transactional-outbox pattern described in the module
-    /// docs) and returns its [`TickReport`]. Public (not just used internally by [`Self::run`])
-    /// so tests can drive individual, deterministic ticks rather than racing the poll loop.
+    /// Runs exactly one drain tick over EVERY eligible row and returns its [`TickReport`].
+    /// Equivalent to `tick_with(publisher, TickMode::All)`; kept as-is so existing callers and
+    /// tests are unaffected.
     pub async fn tick(&self, publisher: &dyn EventPublisher) -> Result<TickReport, DbErr> {
+        self.tick_with(publisher, TickMode::All).await
+    }
+
+    /// [`Self::tick`], restricted to `mode`'s row set (SMA-489 D13).
+    pub async fn tick_with(&self, publisher: &dyn EventPublisher, mode: TickMode) -> Result<TickReport, DbErr> {
         let txn = self.db.begin().await?;
 
-        let rows = event_outbox::Entity::find()
+        let mut query = event_outbox::Entity::find()
             .filter(event_outbox::Column::PublishedAt.is_null())
-            .filter(event_outbox::Column::Parked.eq(false))
+            .filter(event_outbox::Column::Parked.eq(false));
+        if mode == TickMode::Fresh {
+            query = query.filter(event_outbox::Column::Attempts.eq(0));
+        }
+        let rows = query
             .order_by_asc(event_outbox::Column::Id)
             .limit(self.batch_size)
             .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
@@ -161,7 +192,12 @@ impl OutboxRelay {
             let mut active = row.clone().into_active_model();
             match outcome {
                 Ok(()) => {
-                    active.published_at = Set(Some(Utc::now()));
+                    let published_at = Utc::now();
+                    // SMA-489: the only end-to-end proof the nudge works in production.
+                    // `oldest_unpublished_age_seconds` cannot serve — it is reset to 0 on every
+                    // empty tick, and the nudge makes empty ticks common.
+                    histogram!(names::IAM_OUTBOX_PUBLISH_LAG_SECONDS).record(published_at.signed_duration_since(row.occurred_at).num_milliseconds() as f64 / 1000.0);
+                    active.published_at = Set(Some(published_at));
                 }
                 Err(reason) => {
                     report.failures += 1;
@@ -209,21 +245,20 @@ impl OutboxRelay {
         Ok(report)
     }
 
-    /// Runs one drain [`Self::tick`] and records its outcome on the `ticks_total{result}`
-    /// run-loop counter (`result="ok"` on success; `result="error"` plus a `tracing::warn!`
-    /// on a DB-level tick error). This is the exact body [`Self::run`] executes per poll
-    /// interval, factored out so `run`'s only remaining logic is the `select!` shutdown loop.
-    /// Intended for `run` and tests only — production callers should use [`Self::run`]; it is
-    /// `pub` for the same reason [`Self::tick`] is: to let tests assert the ok/error tick
-    /// counters deterministically without racing the poll loop (SMA-465).
-    pub async fn tick_and_record(&self, publisher: &dyn EventPublisher) {
-        match self.tick(publisher).await {
-            Ok(_) => {
+    /// Runs one [`Self::tick_with`] and records its outcome on the `ticks_total{result}`
+    /// run-loop counter. Returns `tick_with`'s own `Result` so [`Self::run`]'s backlog
+    /// continuation (SMA-489 D9) can read `drained`/`failures` and so an `Err` ends a
+    /// continuation run instead of hot-looping a broken database.
+    pub async fn tick_and_record(&self, publisher: &dyn EventPublisher, mode: TickMode) -> Result<TickReport, DbErr> {
+        match self.tick_with(publisher, mode).await {
+            Ok(report) => {
                 counter!(names::IAM_OUTBOX_RELAY_TICKS_TOTAL, "result" => "ok").increment(1);
+                Ok(report)
             }
             Err(err) => {
                 counter!(names::IAM_OUTBOX_RELAY_TICKS_TOTAL, "result" => "error").increment(1);
                 tracing::warn!(error = %err, "outbox relay tick failed; retrying next interval");
+                Err(err)
             }
         }
     }
@@ -242,7 +277,7 @@ impl OutboxRelay {
         loop {
             tokio::select! {
                 () = tokio::time::sleep(self.poll_interval) => {
-                    self.tick_and_record(publisher.as_ref()).await;
+                    let _ = self.tick_and_record(publisher.as_ref(), TickMode::All).await;
                 }
                 () = &mut shutdown => break,
             }

@@ -18,5 +18,5 @@ pub mod tracing_publisher;
 
 pub use cloud_event::{CloudEvent, render_id};
 pub use nats_publisher::{NatsEventPublisher, NatsPublisherError};
-pub use relay::{OutboxRelay, TickReport};
+pub use relay::{OutboxRelay, TickMode, TickReport};
 pub use tracing_publisher::TracingEventPublisher;

@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use paigasus_iam::adapters::events::OutboxRelay;
+use paigasus_iam::adapters::events::{OutboxRelay, TickMode};
 use paigasus_iam::adapters::persistence::entities::event_outbox;
 use paigasus_iam_core::{DomainEvent, EventPublisher, EventType, PublishError};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Set, Statement, TransactionTrait};
@@ -252,7 +252,7 @@ async fn tick_and_record_emits_ticks_total_with_ok_result() {
     let relay = OutboxRelay::new(db.clone(), Duration::from_secs(60), 10, 5);
     let publisher = CountingPublisher::default();
 
-    relay.tick_and_record(&publisher).await;
+    let _ = relay.tick_and_record(&publisher, TickMode::All).await;
 
     let out = handle.render();
     assert!(
@@ -273,7 +273,7 @@ async fn tick_and_record_emits_ticks_total_with_error_result_on_db_fault() {
     let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(60), 10, 5);
     let publisher = CountingPublisher::default();
 
-    relay.tick_and_record(&publisher).await;
+    let _ = relay.tick_and_record(&publisher, TickMode::All).await;
 
     let out = handle.render();
     assert!(
