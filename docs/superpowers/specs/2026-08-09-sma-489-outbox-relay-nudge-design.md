@@ -209,13 +209,39 @@ in-flight tick, rolling back a transaction whose events the publisher may alread
 SMA-471 D3's unbounded-republish gap, on every graceful shutdown. Today's loop never does this
 (it races only the sleep) and this design preserves that.
 
+**The poll deadline is absolute, not a per-iteration sleep.** A `sleep(self.poll_interval)`
+constructed *inside* the `select!` restarts on every outer iteration — including every nudged
+one — so at any commit rate above one per interval (≈0.2/s at the 5 s default, far below §1.5's
+design point) the poll arm would never fire at all. Since `TickMode::All` is the only path that
+selects `attempts > 0` rows, a row that failed once would then never be retried and never
+parked: it would simply sit unpublished forever. Silently, too — `oldest_unpublished_age_seconds`
+is derived from each tick's own row set, so `Fresh` ticks keep overwriting it while ignoring the
+stuck rows. The deadline is therefore hoisted out of the loop and only advanced when the poll arm
+actually fires.
+
+**Arm order is load-bearing too, and for a second reason.** `biased` takes the *first ready* arm,
+so ordering `notify` ahead of `poll` reintroduces the same starvation at a higher traffic rate: a
+saturating nudge stream keeps a permit permanently ready, and the overdue poll deadline is never
+even polled (measured: 1295 notify ticks, 0 poll ticks). That rate is ~5 commits/s — inside
+§1.5's design point, not outside it. The order must be **shutdown → poll → notify**.
+This costs nudge latency nothing, because `sleep_until` is `Pending` at every instant except its
+deadline, so `notify` still wins every other poll of the `select!`.
+
+Rejected alternative: an `if Instant::now() >= next_poll` pre-check before the `select!`. It
+bypasses the shutdown arm entirely, and since a `"poll"` source also skips the debounce, a
+permanently-overdue deadline could spin without ever observing shutdown.
+
 ```rust
+let mut next_poll = tokio::time::Instant::now() + self.poll_interval;
 'outer: loop {
     let source = tokio::select! {
         biased;                                        // shutdown wins a tie, deterministically
-        () = &mut shutdown                          => break 'outer,
-        () = wake.notified()                        => WakeSource::Notify,
-        () = tokio::time::sleep(self.poll_interval) => WakeSource::Poll,
+        () = &mut shutdown                       => break 'outer,
+        () = tokio::time::sleep_until(next_poll) => {
+            next_poll = tokio::time::Instant::now() + self.poll_interval;
+            WakeSource::Poll
+        }
+        () = wake.notified()                     => WakeSource::Notify,
     };
     let mut mode = TickMode::from(source);             // D13
     loop {
@@ -295,9 +321,15 @@ produces R×N wakeups and `SKIP LOCKED` makes N-1 of those ticks do wasted work.
 250 ms poll (4 tx/s/replica) as a busy-loop; shipping an unbounded tick rate would be worse.
 
 After any notify- or backlog-driven tick the relay waits `wake_debounce_ms` (± up to 25% jitter,
-so N replicas do not converge on the same instant) before honouring another nudge. The poll arm
-is unaffected. At §1.5's design point the debounce is essentially never reached; it is a
-backstop that bounds the worst case to ~5 ticks/s/replica.
+so N replicas do not converge on the same instant) before honouring another nudge. At §1.5's
+design point the debounce is essentially never reached; it is a backstop that bounds the worst
+case to ~5 ticks/s/replica.
+
+The poll's *cadence* is unaffected — its deadline is absolute (D10), so a debounce cannot delay
+it beyond the interval. One edge does exist: a poll-driven tick that continues into a backlog
+drain is a backlog tick by the time it ends, so it pays one debounce before the loop re-arms.
+200 ms against a 5 s interval, and the poll deadline it re-arms against has not moved. Noise,
+recorded rather than engineered around.
 
 **D15 — listener liveness is driven by `try_recv`, not by `recv` errors, plus keepalives and a
 watchdog.** The earlier draft's reconnect loop would not have worked. `PgListener` sets

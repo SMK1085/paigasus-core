@@ -534,15 +534,32 @@ Replace the whole `run` method:
             counter!(names::IAM_OUTBOX_RELAY_WAKEUPS_TOTAL, "source" => source).increment(0);
         }
 
+        // The poll deadline is ABSOLUTE and lives outside the loop. A
+        // `sleep(self.poll_interval)` constructed inside the `select!` would restart on every
+        // outer iteration — including every nudged one — so above ~1 commit per interval the
+        // poll arm would never fire. `TickMode::All` is the only path that selects rows with
+        // `attempts > 0`, so a row that failed once would then never be retried and never
+        // parked. Silently: `oldest_unpublished_age_seconds` is derived from each tick's own
+        // row set, so `Fresh` ticks keep overwriting it while ignoring the stuck rows.
+        let mut next_poll = tokio::time::Instant::now() + self.poll_interval;
+
         'outer: loop {
             // `biased` so a ready shutdown always beats a ready notify permit. Without it the
             // choice is random, an extra tick can run after shutdown, and the tests that assert
             // otherwise become flaky. It costs nothing: the tick is not inside this select.
+            // ARM ORDER IS LOAD-BEARING: `biased` takes the first READY arm, so `notify` ahead
+            // of `poll` starves the poll arm again under a saturating nudge stream (a permit is
+            // permanently ready, so the overdue deadline is never polled — measured 1295 notify
+            // / 0 poll, at ~5 commits/s, inside the design point). shutdown -> poll -> notify.
+            // Costs nudge latency nothing: `sleep_until` is Pending except at its deadline.
             let mut source = tokio::select! {
                 biased;
                 () = &mut shutdown => break 'outer,
+                () = tokio::time::sleep_until(next_poll) => {
+                    next_poll = tokio::time::Instant::now() + self.poll_interval;
+                    "poll"
+                }
                 () = wake.notified() => "notify",
-                () = tokio::time::sleep(self.poll_interval) => "poll",
             };
             let mut mode = if source == "poll" { TickMode::All } else { TickMode::Fresh };
 
