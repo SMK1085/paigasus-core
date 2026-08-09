@@ -312,6 +312,39 @@ pub struct OutboxConfig {
     /// failure immediately instead of retrying it to exhaustion, is the follow-up that removes
     /// this cost (spec §7).
     pub max_attempts: u32,
+    /// SMA-489 D11. When `true` (the default) each `PgOutbox::enqueue` emits
+    /// `pg_notify('iam_outbox_event','')` on the mutation's own transaction, and `main.rs`
+    /// spawns the `PgOutboxListener` that turns those notifications into relay wakeups.
+    ///
+    /// Gates **both halves on purpose.** The writer is not free to leave on: a listener that
+    /// wedges while still holding its `LISTEN` fills Postgres's async notification queue, and a
+    /// full queue makes every transaction that calls `NOTIFY` **fail at commit** — i.e. every
+    /// IAM mutation. An escape hatch that could not switch the writer off would not be one.
+    ///
+    /// `false` restores today's *wakeup* behaviour exactly (poll-only, no notify statement). It
+    /// does NOT restore today's *drain* behaviour: the relay's backlog continuation (D9) is
+    /// independent of this flag and stays active.
+    pub wake_on_commit: bool,
+    /// SMA-489 D14. Minimum gap between two nudge-driven ticks, in milliseconds (± up to 25%
+    /// jitter so replicas do not converge). Validated non-zero.
+    ///
+    /// `Notify::notify_one` stores a permit, so under sustained write traffic there is always
+    /// one pending and the relay would otherwise tick back-to-back with zero idle. NOTIFY is
+    /// broadcast to every listening session, so R commits/s × N replicas produces R×N wakeups
+    /// and `SKIP LOCKED` makes N-1 of those ticks do wasted work. At the design point
+    /// (<10 mutations/s, 2-3 replicas) this is never reached; it bounds the worst case.
+    ///
+    /// Does NOT apply to the poll arm — that is already bounded by `poll_interval_secs`.
+    pub wake_debounce_ms: u64,
+    /// SMA-489 D6/§1.5. Connection string for the listener only; falls back to `database_url`.
+    ///
+    /// **`LISTEN` requires a direct connection or a SESSION-mode pooler.** PgBouncer's
+    /// transaction and statement modes do not support it, and the failure is silent and total:
+    /// `pg_notify` still succeeds on the writer side while the listener receives nothing
+    /// forever. This field exists so a deployment that fronts Postgres with a transaction-mode
+    /// pooler can point the listener at a direct endpoint without moving the main connection.
+    /// `IamOutboxNotificationsAbsent` is the alert that detects the misconfiguration.
+    pub listen_database_url: Option<String>,
     /// Retention for the table the relay drains — see [`OutboxRetentionConfig`].
     #[serde(default)]
     pub retention: OutboxRetentionConfig,
@@ -573,6 +606,9 @@ struct OutboxDefaults {
     poll_interval_secs: u64,
     batch_size: u64,
     max_attempts: u32,
+    wake_on_commit: bool,
+    wake_debounce_ms: u64,
+    listen_database_url: Option<String>,
     retention: OutboxRetentionConfig,
     publisher: PublisherConfig,
 }
@@ -666,6 +702,9 @@ impl Default for OutboxDefaults {
             poll_interval_secs: 5,
             batch_size: 100,
             max_attempts: 60,
+            wake_on_commit: true,
+            wake_debounce_ms: 200,
+            listen_database_url: None,
             retention: OutboxRetentionConfig::default(),
             publisher: PublisherConfig::default(),
         }
@@ -735,6 +774,9 @@ impl Default for OutboxConfig {
             poll_interval_secs: d.poll_interval_secs,
             batch_size: d.batch_size,
             max_attempts: d.max_attempts,
+            wake_on_commit: d.wake_on_commit,
+            wake_debounce_ms: d.wake_debounce_ms,
+            listen_database_url: d.listen_database_url,
             retention: d.retention,
             publisher: d.publisher,
         }
@@ -976,6 +1018,11 @@ impl IamConfig {
         if self.outbox.max_attempts == 0 {
             return Err("outbox.max_attempts must be at least 1 (0 would park every outbox row on its first failed publish attempt)".to_string());
         }
+        // SMA-489 D14: a zero debounce removes the tick-rate floor entirely, which is the
+        // busy-loop the whole design exists to avoid.
+        if self.outbox.wake_debounce_ms == 0 {
+            return Err("outbox.wake_debounce_ms must be at least 1 (0 would remove the nudge tick-rate floor)".to_string());
+        }
 
         // --- SMA-471: `[outbox.publisher]` config ----------------------------------------------
         // Every rule below except (6) is gated on the `nats` backend — a `tracing` deployment
@@ -1034,6 +1081,10 @@ impl IamConfig {
         // nothing while looking correct.
         if !self.outbox.relay_enabled && self.outbox.publisher.backend == PublisherBackend::Nats {
             return Err("outbox.relay_enabled = false with outbox.publisher.backend = \"nats\" would publish nothing — set backend = \"tracing\" or enable the relay".to_string());
+        }
+        // SMA-489 §3.4: no relay means nothing to wake. Not an error — just dead config.
+        if !self.outbox.relay_enabled && self.outbox.wake_on_commit {
+            tracing::warn!("outbox.wake_on_commit = true with outbox.relay_enabled = false — no relay is spawned, so no listener is spawned either and the setting has no effect");
         }
 
         // --- SMA-469: `[outbox.retention]` config ----------------------------------------------
@@ -2363,6 +2414,27 @@ mod tests {
     #[test]
     fn outbox_max_attempts_defaults_to_sixty() {
         assert_eq!(load_minimal_config().outbox.max_attempts, 60);
+    }
+
+    // --- SMA-489: outbox wake-on-commit config ---------------------------------------------
+
+    #[test]
+    fn outbox_wake_defaults_are_on_with_a_200ms_debounce() {
+        let cfg = load_minimal_config();
+        assert!(cfg.outbox.wake_on_commit, "the nudge is on by default (SMA-489 D11)");
+        assert_eq!(cfg.outbox.wake_debounce_ms, 200, "SMA-489 D14 default");
+        assert_eq!(cfg.outbox.listen_database_url, None, "falls back to database_url");
+    }
+
+    #[test]
+    fn zero_wake_debounce_is_rejected() {
+        let err = validate_err(
+            r#"
+            [outbox]
+            wake_debounce_ms = 0
+        "#,
+        );
+        assert!(err.contains("wake_debounce_ms"), "{err}");
     }
 
     #[test]
