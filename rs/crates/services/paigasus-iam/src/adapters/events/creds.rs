@@ -50,11 +50,19 @@ pub struct ParsedCredentials {
 /// Extracts the single line inside the `-----BEGIN {label}-----` / `------END {label}------`
 /// block, if present. Hand-rolled rather than regex-backed: two delimited blocks do not need a
 /// regex engine, and keying on the label is the strictness this module wants.
+///
+/// Bounded by the label-specific `END {label}` marker, not a bare run of dashes: base64url's
+/// alphabet includes `-`, so a JWT body can legitimately contain `---`, and a dash-run bound
+/// would truncate it there — a corrupt-but-"successful" parse whose only symptom is an opaque
+/// `AuthorizationViolation` from the broker much later.
 fn block(raw: &str, label: &str) -> Option<String> {
     let begin = raw.find(&format!("BEGIN {label}"))?;
     let after_begin = raw[begin..].find('\n')? + begin + 1;
-    let end = raw[after_begin..].find("---")? + after_begin;
-    let body: String = raw[after_begin..end].split_whitespace().collect();
+    let end_marker = format!("END {label}");
+    let end_abs = after_begin + raw[after_begin..].find(&end_marker)?;
+    // Back up to the start of the marker's line so the `------` prefix on it is excluded.
+    let body_end = raw[..end_abs].rfind('\n').map(|i| i + 1).unwrap_or(after_begin);
+    let body: String = raw[after_begin..body_end].split_whitespace().collect();
     if body.is_empty() { None } else { Some(body) }
 }
 
@@ -140,6 +148,30 @@ mod tests {
         let parsed = parse_credentials(&creds_file("header.payload.signature", &seed)).expect("valid creds");
         assert_eq!(parsed.jwt.as_deref(), Some("header.payload.signature"));
         assert_eq!(parsed.key_pair.seed().unwrap(), seed);
+    }
+
+    /// base64url's alphabet includes `-`, so a JWT can legitimately contain `---`. Bounding the
+    /// block on a bare dash run truncated it silently and produced a corrupt-but-successful parse,
+    /// which only surfaced as an opaque AuthorizationViolation against the broker.
+    #[test]
+    fn a_jwt_containing_three_dashes_is_not_truncated() {
+        let jwt = "abc.def---ghi.jkl";
+        let parsed = parse_credentials(&creds_file(jwt, &a_seed())).expect("valid creds");
+        assert_eq!(parsed.jwt.as_deref(), Some(jwt));
+    }
+
+    /// A JWT block that is opened but never terminated must fail closed as `MissingJwt`, not
+    /// silently swallow the rest of the file (including the seed block that follows it) or fall
+    /// back to treating the file as seed-only.
+    #[test]
+    fn an_unterminated_jwt_block_is_rejected() {
+        let seed = a_seed();
+        let raw = format!(
+            "-----BEGIN NATS USER JWT-----\nheader.payload.signature\n\n\
+             -----BEGIN USER NKEY SEED-----\n{seed}\n------END USER NKEY SEED------\n"
+        );
+        let err = parse_credentials(&raw).expect_err("an unterminated JWT block must not parse");
+        assert!(matches!(err, CredsError::MissingJwt), "got {err:?}");
     }
 
     /// A bare seed file (`.nk`) authenticates by nkey instead — the fixture shape SMA-493 D2's
