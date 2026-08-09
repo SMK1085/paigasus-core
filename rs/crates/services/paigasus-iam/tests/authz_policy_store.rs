@@ -608,7 +608,7 @@ async fn put_in_enqueue_and_record_commit_atomically_sharing_correlation_id() {
     let gens = Generations::memory();
     let store = PgPolicyStore::new(db.clone(), gens.clone());
     let uow = SeaOrmUnitOfWork::new(db.clone());
-    let outbox = PgOutbox::new();
+    let outbox = PgOutbox::new(true);
     let audit = PgAuditLog::new(db.clone());
 
     let doc = valid_static_doc("atomic-put", false, now);
