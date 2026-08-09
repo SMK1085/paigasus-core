@@ -146,9 +146,17 @@ pub const IAM_OUTBOX_LISTENER_NOTIFICATIONS_TOTAL: &str = "iam_outbox_listener_n
 /// exactly the partial outage worth knowing about. Use `min by (job)` to ask "are all replicas
 /// listening", or keep `instance` to see which one is down. Never `sum`.
 pub const IAM_OUTBOX_LISTENER_CONNECTED: &str = "iam_outbox_listener_connected";
-/// Outbox-listener reconnects. Driven by sqlx's `try_recv() -> Ok(None)` signal (it reconnects
-/// internally and reports possible message loss that way), NOT by a `recv()` error — `recv()`
-/// loops over the internal reconnect and would leave this at 0 through a real outage.
+/// Successful re-establishments of the outbox listener's `LISTEN` connection. `PgOutboxListener`
+/// increments this at a single site in its reconnect path, so it counts identically however the
+/// loss surfaced — `try_recv() -> Ok(None)` and an `Err` both break to that one path (SMA-489).
+///
+/// **This counts recoveries, not failures**, which inverts the usual reading of a `_total`. A
+/// listener down through a long outage increments this ONCE, on recovery — never once per failed
+/// attempt — so a value that stops climbing mid-incident means "still down", and only
+/// [`IAM_OUTBOX_LISTENER_CONNECTED`] separates that from "healthy and quiet". The alertable shape
+/// is therefore a steadily CLIMBING value: it means Postgres is churning the listener connection,
+/// and every cycle is a window in which notifications were dropped and delivery fell back to the
+/// poll.
 pub const IAM_OUTBOX_LISTENER_RECONNECTS_TOTAL: &str = "iam_outbox_listener_reconnects_total";
 // IAM audit partition maintenance
 pub const IAM_AUDIT_PARTITION_MAINTENANCE_TICKS_TOTAL: &str = "iam_audit_partition_maintenance_ticks_total";
