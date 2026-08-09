@@ -313,12 +313,20 @@ So:
 - Call `eager_reconnect(false)` and use `try_recv()`. `Ok(None)` then means "the connection was
   lost and re-established, notifications may have been missed" — which is precisely the signal
   the gauge and the reconnect counter should be driven from.
-- Set **TCP keepalives** on the listener's connect options. sqlx sets none and `recv` has no read
-  timeout, so a silently-dropped connection leaves Postgres believing the session is alive and
-  LISTENing — the half-open case that fills the notification queue and triggers D4.
-- Add a **watchdog**: if no notification has arrived within `3 × poll_interval`, run a cheap
-  liveness statement on the listener connection and force a reconnect if it fails. Cheap, and it
-  converts a silent wedge into a reconnect plus a counter increment.
+- Set **TCP keepalives** on the listener's connect options — this is the mechanism that actually
+  heals a wedge. sqlx sets none and `try_recv` has no read timeout, so a silently-dropped
+  connection leaves Postgres believing the session is alive and LISTENing: the half-open case that
+  fills the notification queue and triggers D4. With `keepalives_idle = 30s`,
+  `keepalives_interval = 10s`, `keepalives_retries = 3`, a dead peer surfaces as an error from
+  `try_recv` within ~60 s and the existing reconnect path handles it. Well inside the time the
+  8 GB queue needs to fill.
+- Add an **observability-only watchdog**: if no notification has arrived within
+  `max(60s, 3 × poll_interval)`, log a warning. It deliberately does **not** force a reconnect.
+  A forced reconnect on silence would be wrong — silence is the normal state of a quiet system
+  (no mutations ⇒ no notifications), so it would churn a connection every watchdog period on an
+  idle deployment while proving nothing. Keepalives already cover the case the watchdog would
+  otherwise be guessing at; the warning exists so an operator correlating "no notifications" with
+  §1.5's pooler failure has a log line as well as a metric.
 
 Note also that `PgListener::connect` uses a default 30 s pool acquire timeout, so a genuinely
 unreachable Postgres takes ~30 s to surface — the backoff is sized against that (§3.2), not
@@ -364,8 +372,14 @@ Loop:
    - `Ok(Some(_))` → `iam_outbox_listener_notifications_total` += 1; `wake.notify_one()`.
    - `Ok(None)` → reconnected under us; gauge 1 via step 3's counter path, continue.
    - `Err(_)` → gauge 0, log, back to step 1.
-   - watchdog elapsed with no notification → cheap liveness statement; on failure, force
-     reconnect.
+   - watchdog elapsed with no notification → `warn!` only, no reconnect (D15).
+
+Connection construction, satisfying D6 and D15 together: build `PgConnectOptions` from the URL,
+set the keepalives, open a **private** `PgPool` with `max_connections(1)`, then
+`PgListener::connect_with(&pool)`. That pool is the listener's own — it is emphatically not
+SeaORM's, so D6's "does not consume a request-serving slot" still holds — and going through
+`connect_with` is the only way to supply connect options, which `PgListener::connect(url)` does
+not accept.
 
 Backoff starts at 250 ms and doubles to a 30 s cap. **Shutdown is raced against the backoff
 sleep and against the connect/listen attempts, not only against `try_recv`** — otherwise a
@@ -448,7 +462,7 @@ failing at commit (D4).
 | `pg_notify` statement itself errors | Propagates from `enqueue`; the transaction is poisoned and would fail at commit regardless. Not the queue-full path. |
 | Listener cannot connect at boot | Log (never the URL), gauge 0, backoff, retry forever. Boot succeeds; delivery is poll-only meanwhile (D7). |
 | Listener connection drops | sqlx reconnects internally; surfaced as `Ok(None)` → gauge/counter updated (D15). Notifications during the gap are lost outright — Postgres does not queue for an absent listener — and the poll covers them (D8). |
-| Listener wedges (half-open TCP) | Keepalives plus the watchdog force a reconnect (D15). This is the case that would otherwise fill the queue and trigger row 1. |
+| Listener wedges (half-open TCP) | TCP keepalives surface it as a `try_recv` error within ~60 s and the reconnect path handles it (D15). This is the case that would otherwise fill the queue and trigger row 1. The watchdog only warns; it never forces a reconnect, because silence is normal on a quiet system. |
 | Relay tick returns `DbErr` | Unchanged: logged, `ticks_total{result="error"}` incremented. Additionally ends any continuation run (D9). |
 | Publisher fails during a continuation run | Continues while `drained > failures`; stops when no row in the batch succeeded (D9). |
 | Shutdown during a continuation run | Checked between ticks; the in-flight tick always completes (D10). |
@@ -506,7 +520,7 @@ non-zero, `listen_database_url` falls back to `database_url`, and the
 | `.../adapters/persistence/pg_outbox_listener.rs` | **New** — listener adapter |
 | `.../adapters/persistence/mod.rs` | Re-export |
 | `.../adapters/events/relay.rs` | `wake` param, D10 loop, `TickMode`, `tick_with`, `tick_and_record` return type, wakeup counter, lag histogram |
-| `.../adapters/http/mod.rs` | Six `PgOutbox::new()` call sites gain the flag |
+| `.../adapters/http/mod.rs` | Five `PgOutbox::new()` call sites gain the flag (lines 347, 460, 482, 619, 639) |
 | `.../src/config.rs` | Three fields, defaults, validation, warning |
 | `.../src/main.rs` | `Arc<Notify>`, spawn listener, 5 × `describe_*!`, family count 32 → 37 |
 | `.../tests/relay_pg.rs` | `run` caller at line 296; scenarios above |
