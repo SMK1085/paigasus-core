@@ -496,7 +496,7 @@ Five families, each added to `ALL` and to `describe_iam_metrics`:
 | `iam_outbox_publish_lag_seconds` | histogram | `now − occurred_at` at publish time. **This is what proves AC1 in production** — nothing else does. `iam_outbox_oldest_unpublished_age_seconds` cannot: it is overwritten to 0 on every empty tick (`relay.rs:207`), and D14's higher tick rate makes it noisier still. The existing `paigasus-observability` buckets already span 5 ms - 10 s. |
 | `iam_outbox_listener_notifications_total` | counter | Without it, `wakeups_total{source="notify"} == 0` cannot distinguish "a pooler ate LISTEN / Postgres never notified" (§1.5) from "the relay never observed the permit". |
 | `iam_outbox_listener_connected` | gauge | 0/1. **Per-replica, and replicas do not agree** — the same caveat `IAM_NATS_CONNECTED` carries (`names.rs:159-162`). `max by (job)` reports 1 while any single replica is connected, hiding the partial outage worth knowing about. Use `min by (job)`; never `sum`. |
-| `iam_outbox_listener_reconnects_total` | counter | Driven by D15's `Ok(None)` path, not by `recv` errors. |
+| `iam_outbox_listener_reconnects_total` | counter | Increments once per successful **re-establishment**, from a single site in the reconnect path, whether the loss surfaced as `try_recv() -> Ok(None)` or as an `Err`. So a long outage counts **once, on recovery** — this is a count of recoveries, not of failures. |
 
 One alert rule **is** in scope, because §1.5's silent-pooler failure is otherwise undetectable:
 `iam_outbox_listener_notifications_total` flat at zero while
