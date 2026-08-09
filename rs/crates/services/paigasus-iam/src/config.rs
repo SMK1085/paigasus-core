@@ -409,6 +409,33 @@ pub struct PublisherConfig {
     pub max_age_secs: u64,
     /// Path to a NATS `.creds` (JWT + nkey seed). A path, not a secret — no redaction needed.
     pub credentials_file: Option<String>,
+    /// Path to a PEM bundle of root CAs used to verify the broker's certificate (SMA-493 D7).
+    ///
+    /// **This REPLACES the system trust store, it does not extend it.**
+    /// `ConnectOptions::add_root_certificates` assigns rather than appends (`options.rs:543`),
+    /// and `config_tls` skips `load_native_certs()` entirely once any certificate is named
+    /// (`tls.rs:61`). Concatenate every CA the client needs into one file — naming only a private
+    /// CA and later moving the broker behind a public one is a total outage that presents as a
+    /// bare TLS error. Omitted, the system trust store is used, which is the pre-SMA-493
+    /// behaviour.
+    ///
+    /// Re-read on every connection attempt (`connector.rs:544`), so a rotated bundle needs no
+    /// restart.
+    pub root_ca_bundle: Option<String>,
+    /// The client's `_INBOX` prefix (SMA-493 D4). MUST match the `subscribe` grant in the NATS
+    /// account, or every publish times out waiting for an ack it is not allowed to receive.
+    ///
+    /// Not cosmetic: JetStream acks and pull-consumer deliveries both land on the client's inbox,
+    /// so inside a shared account a client holding `sub _INBOX.>` can read another client's
+    /// deliveries. Per-user prefixes are the only way to close that, because inbox replies are
+    /// the one subject space every client must be able to read. `None` keeps async-nats' default
+    /// `_INBOX`, so a deployment that has not adopted `ops/nats/` is unaffected.
+    pub inbox_prefix: Option<String>,
+    /// Escape hatch for a dev or CI broker (SMA-493 D6). Relaxes BOTH the `tls://` requirement
+    /// and the `credentials_file` requirement — it legalises an unauthenticated broker as well as
+    /// an unencrypted one, which is why it is not called `allow_plaintext`. Never relaxes the ban
+    /// on url-embedded credentials, which async-nats ignores outright.
+    pub allow_insecure_broker: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -429,6 +456,9 @@ impl Default for PublisherConfig {
             duplicate_window_secs: 3_600,
             max_age_secs: 604_800,
             credentials_file: None,
+            root_ca_bundle: None,
+            inbox_prefix: None,
+            allow_insecure_broker: false,
         }
     }
 }
@@ -444,6 +474,9 @@ impl std::fmt::Debug for PublisherConfig {
             .field("duplicate_window_secs", &self.duplicate_window_secs)
             .field("max_age_secs", &self.max_age_secs)
             .field("credentials_file", &self.credentials_file)
+            .field("root_ca_bundle", &self.root_ca_bundle)
+            .field("inbox_prefix", &self.inbox_prefix)
+            .field("allow_insecure_broker", &self.allow_insecure_broker)
             .finish()
     }
 }
@@ -454,7 +487,7 @@ impl Serialize for PublisherConfig {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("PublisherConfig", 8)?;
+        let mut state = serializer.serialize_struct("PublisherConfig", 11)?;
         state.serialize_field("backend", &self.backend)?;
         state.serialize_field("url", &self.url.as_ref().map(|_| "<redacted>"))?;
         state.serialize_field("stream", &self.stream)?;
@@ -463,6 +496,9 @@ impl Serialize for PublisherConfig {
         state.serialize_field("duplicate_window_secs", &self.duplicate_window_secs)?;
         state.serialize_field("max_age_secs", &self.max_age_secs)?;
         state.serialize_field("credentials_file", &self.credentials_file)?;
+        state.serialize_field("root_ca_bundle", &self.root_ca_bundle)?;
+        state.serialize_field("inbox_prefix", &self.inbox_prefix)?;
+        state.serialize_field("allow_insecure_broker", &self.allow_insecure_broker)?;
         state.end()
     }
 }
@@ -984,6 +1020,35 @@ impl IamConfig {
             let p = &self.outbox.publisher;
             if p.url.is_none() {
                 return Err("outbox.publisher.backend = \"nats\" requires outbox.publisher.url".to_string());
+            }
+            // --- SMA-493 D6: transport + credential posture --------------------------------
+            // Parsed once and reused: `url::Url` is already this function's dependency (the
+            // `source` check below), and both rules below ask questions about the same parse.
+            // A url that does not parse at all is left to `connect` to report, exactly as
+            // before — this block tightens posture, it does not add a syntax gate.
+            if let Some(raw) = p.url.as_deref()
+                && let Ok(parsed) = url::Url::parse(raw)
+            {
+                // Unconditional, no escape hatch: async-nats never reads url userinfo
+                // (`ServerAddr::username`/`password` have no caller in the connect path), so a
+                // config carrying `nats://user:pass@host` connects ANONYMOUSLY while looking
+                // authenticated. Rejecting it is the only way that misconception surfaces.
+                if !parsed.username().is_empty() || parsed.password().is_some() {
+                    return Err(
+                        "outbox.publisher.url must not embed credentials — async-nats ignores them entirely, so the connection would be anonymous; use outbox.publisher.credentials_file".to_string(),
+                    );
+                }
+                if parsed.scheme() != "tls" && !p.allow_insecure_broker {
+                    return Err(format!(
+                        "outbox.publisher.url must use tls:// for the nats backend (got {}://) — set outbox.publisher.allow_insecure_broker = true for a dev or CI broker, which also waives the credentials_file requirement",
+                        parsed.scheme()
+                    ));
+                }
+            }
+            if p.credentials_file.is_none() && !p.allow_insecure_broker {
+                return Err(
+                    "outbox.publisher.backend = \"nats\" requires outbox.publisher.credentials_file (a NATS .creds) — set outbox.publisher.allow_insecure_broker = true for a dev or CI broker, which also waives the tls:// requirement".to_string()
+                );
             }
             if p.publish_timeout_secs == 0 {
                 return Err("outbox.publisher.publish_timeout_secs must be at least 1".to_string());
@@ -2386,7 +2451,8 @@ mod tests {
             poll_interval_secs = 5
             [outbox.publisher]
             backend = "nats"
-            url = "nats://localhost:4222"
+            url = "tls://localhost:4222"
+            credentials_file = "/etc/paigasus/iam.creds"
             duplicate_window_secs = 100
         "#,
         );
@@ -2404,7 +2470,8 @@ mod tests {
             poll_interval_secs = 5
             [outbox.publisher]
             backend = "nats"
-            url = "nats://localhost:4222"
+            url = "tls://localhost:4222"
+            credentials_file = "/etc/paigasus/iam.creds"
             duplicate_window_secs = 50
             max_age_secs = 0
         "#;
@@ -2422,7 +2489,8 @@ mod tests {
             poll_interval_secs = 3600
             [outbox.publisher]
             backend = "nats"
-            url = "nats://localhost:4222"
+            url = "tls://localhost:4222"
+            credentials_file = "/etc/paigasus/iam.creds"
             duplicate_window_secs = 3600
         "#,
         );
@@ -2453,7 +2521,8 @@ mod tests {
         let base = r#"
             [outbox.publisher]
             backend = "nats"
-            url = "nats://localhost:4222"
+            url = "tls://localhost:4222"
+            credentials_file = "/etc/paigasus/iam.creds"
             duplicate_window_secs = 3600
         "#;
         assert!(validate_result(&format!("{base}\nmax_age_secs = 1800")).is_err());
@@ -2471,7 +2540,8 @@ mod tests {
         let at = r#"
             [outbox.publisher]
             backend = "nats"
-            url = "nats://localhost:4222"
+            url = "tls://localhost:4222"
+            credentials_file = "/etc/paigasus/iam.creds"
             duplicate_window_secs = 3600
             max_age_secs = 3600
         "#;
@@ -2491,7 +2561,8 @@ mod tests {
                 r#"
                 [outbox.publisher]
                 backend = "nats"
-                url = "nats://localhost:4222"
+                url = "tls://localhost:4222"
+                credentials_file = "/etc/paigasus/iam.creds"
                 source = "{bad}"
             "#
             ));
@@ -2523,7 +2594,8 @@ mod tests {
                     r#"
                     [outbox.publisher]
                     backend = "nats"
-                    url = "nats://localhost:4222"
+                    url = "tls://localhost:4222"
+                    credentials_file = "/etc/paigasus/iam.creds"
                     source = "{good}"
                 "#
                 ))
@@ -2545,7 +2617,8 @@ mod tests {
             r#"
             [outbox.publisher]
             backend = "nats"
-            url = "nats://localhost:4222"
+            url = "tls://localhost:4222"
+            credentials_file = "/etc/paigasus/iam.creds"
             source = "{raw}"
         "#
         ));
@@ -2562,7 +2635,8 @@ mod tests {
             relay_enabled = false
             [outbox.publisher]
             backend = "nats"
-            url = "nats://localhost:4222"
+            url = "tls://localhost:4222"
+            credentials_file = "/etc/paigasus/iam.creds"
         "#,
         );
         assert!(err.contains("relay_enabled"), "{err}");
@@ -2576,7 +2650,8 @@ mod tests {
                 r#"
                 [outbox.publisher]
                 backend = "nats"
-                url = "nats://localhost:4222"
+                url = "tls://localhost:4222"
+                credentials_file = "/etc/paigasus/iam.creds"
                 {field} = 0
             "#
             ));
@@ -2609,6 +2684,101 @@ mod tests {
         let serialized = serde_json::to_string(&cfg).expect("PublisherConfig serializes");
         assert!(!serialized.contains("hunter2"), "credentials leaked into Serialize: {serialized}");
         assert!(serialized.contains("redacted"), "{serialized}");
+    }
+
+    // --- SMA-493: transport + credential posture ---------------------------------------------
+
+    /// D6 rule 1. The default posture: a `nats` backend must speak TLS.
+    #[test]
+    fn a_plaintext_url_is_rejected() {
+        let err = validate_err(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://localhost:4222"
+            credentials_file = "/etc/paigasus/iam.creds"
+        "#,
+        );
+        assert!(err.contains("tls://"), "{err}");
+        assert!(err.contains("allow_insecure_broker"), "the message must name the escape hatch: {err}");
+    }
+
+    #[test]
+    fn a_plaintext_url_is_accepted_with_the_insecure_flag() {
+        validate_result(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://localhost:4222"
+            allow_insecure_broker = true
+        "#,
+        )
+        .expect("the explicit dev/CI escape hatch must be honoured");
+    }
+
+    /// D6 rule 2, unconditional. async-nats never reads url userinfo (`lib.rs:1682` has no
+    /// caller), so accepting it would let a config that LOOKS authenticated connect anonymously.
+    #[test]
+    fn url_embedded_credentials_are_rejected_even_with_the_insecure_flag() {
+        let err = validate_err(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "nats://user:pass@localhost:4222"
+            allow_insecure_broker = true
+        "#,
+        );
+        assert!(err.contains("credentials_file"), "{err}");
+    }
+
+    /// D6 rule 3.
+    #[test]
+    fn the_nats_backend_requires_a_credentials_file() {
+        let err = validate_err(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "tls://localhost:4222"
+        "#,
+        );
+        assert!(err.contains("credentials_file"), "{err}");
+    }
+
+    #[test]
+    fn a_tls_url_with_credentials_passes() {
+        validate_result(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "tls://nats.internal:4222"
+            credentials_file = "/etc/paigasus/iam.creds"
+            root_ca_bundle = "/etc/paigasus/nats-ca.pem"
+            inbox_prefix = "_INBOX_IAM_PUB"
+        "#,
+        )
+        .expect("the documented production shape must validate");
+    }
+
+    /// Every SMA-493 rule is gated on the `nats` backend: a `tracing` deployment must never fail
+    /// boot over a broker it does not run.
+    #[test]
+    fn the_tracing_backend_is_unaffected_by_the_transport_rules() {
+        validate_result(
+            r#"
+            [outbox.publisher]
+            backend = "tracing"
+            url = "nats://user:pass@localhost:4222"
+        "#,
+        )
+        .expect("the tracing backend ignores publisher transport posture entirely");
+    }
+
+    #[test]
+    fn the_new_publisher_fields_default_to_absent() {
+        let cfg = load_minimal_config();
+        assert_eq!(cfg.outbox.publisher.root_ca_bundle, None);
+        assert_eq!(cfg.outbox.publisher.inbox_prefix, None);
+        assert!(!cfg.outbox.publisher.allow_insecure_broker);
     }
 
     // --- SMA-446 Unit 3: `[metrics]` config -------------------------------------------------
