@@ -284,28 +284,21 @@ git commit -m "feat(rs): register the outbox nudge and listener metric families 
 - Consumes: Task 2's `names::IAM_OUTBOX_PUBLISH_LAG_SECONDS`.
 - Produces: `pub enum TickMode { All, Fresh }`; `pub async fn tick_with(&self, publisher: &dyn EventPublisher, mode: TickMode) -> Result<TickReport, DbErr>`; `pub async fn tick_and_record(&self, publisher: &dyn EventPublisher, mode: TickMode) -> Result<TickReport, DbErr>`. `tick(&self, publisher)` keeps its current signature and delegates with `TickMode::All`, so the ~8 existing test call sites are untouched. Task 4 consumes all of these.
 
-- [ ] **Step 1: Write the failing test**
+**Testing note — read before starting.** This task is a refactor (splitting `tick`) plus one
+additive histogram. `TickMode::Fresh`'s actual behaviour — that it skips already-attempted rows —
+requires a real Postgres and is proven by Task 8's
+`nudged_ticks_do_not_burn_a_failing_rows_retry_budget`, which is the acceptance test for D13.
+**Do not invent a unit test here that merely asserts the two enum variants differ**; it would
+assert nothing about behaviour. The gate for this task is: the existing relay test suite still
+passes unchanged, and the crate builds clean under `-D warnings`.
 
-Append to `relay.rs`'s `#[cfg(test)] mod tests`:
-
-```rust
-/// `TickMode::Fresh` is the D13 retry-metering mode; the two modes must be distinguishable
-/// (a `TickMode` that collapsed to one value would silently un-meter retries).
-#[test]
-fn tick_modes_are_distinct() {
-    assert_ne!(TickMode::All, TickMode::Fresh);
-}
-```
-
-The real proof of `TickMode::Fresh` is the Postgres test in Task 8 (`attempts` advances once, not N); this unit test only pins the type down so Task 3 lands compiling and tested.
-
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 1: Record the current test baseline**
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cd rs && cargo test -p paigasus-iam --lib adapters::events::relay 2>&1 | tail -20
+cd rs && cargo test -p paigasus-iam --lib adapters::events::relay 2>&1 | tail -5
 ```
-Expected: FAIL — `cannot find type TickMode`.
+Note the pass count — it must be identical at Step 8.
 
 - [ ] **Step 3: Add `TickMode`**
 
