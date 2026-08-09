@@ -293,7 +293,128 @@ async fn run_terminates_on_shutdown() {
     let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(60), 10, 5);
     let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
 
-    tokio::time::timeout(Duration::from_secs(5), relay.run(publisher, std::future::ready(())))
+    tokio::time::timeout(Duration::from_secs(5), relay.run(publisher, std::sync::Arc::new(tokio::sync::Notify::new()), std::future::ready(())))
         .await
         .expect("run must return promptly once its shutdown future resolves");
+}
+
+/// Sums the sample values of every `name`-named series in a Prometheus text exposition body,
+/// skipping `# HELP`/`# TYPE` comment lines and any other metric family. Used instead of a plain
+/// `contains` so the run-loop tests below can assert on tick COUNTS, not just presence.
+///
+/// NOTE: `paigasus_observability::init` installs one PROCESS-GLOBAL recorder, so these sums are
+/// only meaningful under `cargo nextest`'s process-per-test isolation — the same assumption the
+/// pre-existing `result="ok"`/`result="error"` exclusivity assertions in this file already make.
+fn sum_metric_from(rendered: &str, name: &str) -> u64 {
+    rendered
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter(|l| l.split(['{', ' ']).next() == Some(name))
+        .filter_map(|l| l.rsplit(' ').next())
+        .filter_map(|v| v.trim().parse::<f64>().ok())
+        .sum::<f64>() as u64
+}
+
+fn ticks_total_from(rendered: &str) -> u64 {
+    sum_metric_from(rendered, "iam_outbox_relay_ticks_total")
+}
+
+fn wakeups_total_from(rendered: &str) -> u64 {
+    sum_metric_from(rendered, "iam_outbox_relay_wakeups_total")
+}
+
+/// SMA-489 AC1's mechanism: a notify permit starts a tick without waiting out the poll
+/// interval. The 600s interval means a `source="notify"` series can ONLY appear if the notify
+/// arm fired.
+#[tokio::test]
+async fn a_notify_permit_wakes_the_run_loop_before_the_poll_interval() {
+    let handle = paigasus_observability::init("test-iam-relay-wake-notify");
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(600), 10, 5).with_wake_debounce(Duration::from_millis(1));
+    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+    let w = wake.clone();
+    let run = tokio::spawn(async move {
+        relay
+            .run(publisher, w, async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+
+    wake.notify_one();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _ = tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), run).await.expect("run exits").expect("no panic");
+
+    let out = handle.render();
+    assert!(
+        out.lines()
+            .any(|l| l.contains("iam_outbox_relay_wakeups_total") && l.contains(r#"source="notify""#) && !l.trim_end().ends_with(" 0")),
+        "expected a non-zero source=\"notify\" wakeup — the notify arm never fired:\n{out}"
+    );
+}
+
+/// SMA-489 AC7/D14: the debounce floors the nudge-driven tick rate. 200 notifications delivered
+/// as fast as possible must NOT produce 200 ticks.
+#[tokio::test]
+async fn the_debounce_bounds_the_nudge_driven_tick_rate() {
+    let handle = paigasus_observability::init("test-iam-relay-wake-debounce");
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(600), 10, 5).with_wake_debounce(Duration::from_millis(100));
+    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+    let w = wake.clone();
+    let run = tokio::spawn(async move {
+        relay
+            .run(publisher, w, async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+
+    let started = std::time::Instant::now();
+    for _ in 0..200 {
+        wake.notify_one();
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let elapsed = started.elapsed();
+    let _ = tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), run).await.expect("run exits").expect("no panic");
+
+    // Debounce is 100ms ± 25% jitter, so the floor is 75ms; allow generous headroom.
+    let ceiling = (elapsed.as_millis() / 75) as u64 + 2;
+    let rendered = handle.render();
+    let ticks = ticks_total_from(&rendered);
+    assert!(ticks <= ceiling, "{ticks} ticks in {elapsed:?} exceeds the debounce ceiling of {ceiling}");
+    assert!(ticks >= 1, "the debounce suppressed every tick");
+    assert_eq!(
+        wakeups_total_from(&rendered),
+        ticks_total_from(&rendered),
+        "wakeups_total must increment exactly once per tick, or no ratio query against ticks_total is valid"
+    );
+}
+
+/// SMA-489 AC9/D10: with a permit already pending AND shutdown resolved, the `biased` select
+/// must pick shutdown — no extra tick after shutdown.
+#[tokio::test]
+async fn a_pending_permit_does_not_win_a_race_against_a_resolved_shutdown() {
+    let handle = paigasus_observability::init("test-iam-relay-wake-shutdown-bias");
+    let wake = Arc::new(tokio::sync::Notify::new());
+    wake.notify_one(); // permit stored BEFORE run starts
+    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(600), 10, 5);
+    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+
+    tokio::time::timeout(Duration::from_secs(5), relay.run(publisher, wake, std::future::ready(())))
+        .await
+        .expect("run must return promptly even with a permit pending");
+
+    let out = handle.render();
+    assert!(
+        !out.lines().any(|l| l.contains("iam_outbox_relay_ticks_total") && !l.trim_end().ends_with(" 0")),
+        "a tick ran despite shutdown being ready — the outer select! is not biased:\n{out}"
+    );
 }

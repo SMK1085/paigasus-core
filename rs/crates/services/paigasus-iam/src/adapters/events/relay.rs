@@ -140,6 +140,7 @@ pub struct OutboxRelay {
     poll_interval: Duration,
     batch_size: u64,
     max_attempts: i32,
+    wake_debounce: Duration,
 }
 
 impl OutboxRelay {
@@ -150,7 +151,16 @@ impl OutboxRelay {
             poll_interval,
             batch_size,
             max_attempts,
+            wake_debounce: Duration::from_millis(200),
         }
+    }
+
+    /// Overrides the D14 nudge debounce (default 200 ms). Builder rather than a `new` parameter
+    /// so the existing four-argument call sites across the test suite stay untouched.
+    #[must_use]
+    pub fn with_wake_debounce(mut self, d: Duration) -> Self {
+        self.wake_debounce = d;
+        self
     }
 
     /// Runs exactly one drain tick over EVERY eligible row and returns its [`TickReport`].
@@ -263,23 +273,74 @@ impl OutboxRelay {
         }
     }
 
-    /// Runs the relay loop until `shutdown` resolves: sleep `poll_interval`, tick, repeat —
-    /// mirrors `PolicySnapshot::spawn_reload`'s `tokio::select!` shutdown-watch exactly (sleep
-    /// races shutdown first, so the very first tick runs after one poll interval, not
-    /// immediately). A tick-level error (e.g. a dropped connection) is logged and the loop keeps
-    /// going; per-row publish failures never reach here — [`Self::tick`] already turns those
-    /// into `attempts`/`parked` bookkeeping on the same transaction.
-    pub async fn run<S>(self, publisher: Arc<dyn EventPublisher>, shutdown: S)
+    /// Runs the relay loop until `shutdown` resolves.
+    ///
+    /// Three things can start a tick: the `poll_interval` timer (draining every eligible row,
+    /// `TickMode::All`), a `wake` permit from the `PgOutboxListener` (SMA-489), or SMA-489 D9's
+    /// backlog continuation. The latter two use `TickMode::Fresh` so retry cadence stays pinned
+    /// to `poll_interval` (D13).
+    ///
+    /// **Shutdown is checked BETWEEN ticks, never raced AROUND one.** Racing `shutdown` against
+    /// the tick itself would cancel it mid-flight, rolling back a transaction whose events the
+    /// publisher may already have accepted — SMA-471 D3's unbounded-republish gap, on every
+    /// graceful shutdown.
+    ///
+    /// SOUNDNESS: `S: Future` is not `FusedFuture`, and polling a completed future is a contract
+    /// violation. This shape is sound only because EVERY path that observes `shutdown` ready
+    /// breaks the loop immediately. Preserve that if you restructure, or switch to a
+    /// `CancellationToken`/`watch::Receiver`, which are poll-after-ready safe.
+    pub async fn run<S>(self, publisher: Arc<dyn EventPublisher>, wake: Arc<tokio::sync::Notify>, shutdown: S)
     where
         S: Future<Output = ()> + Send,
     {
         tokio::pin!(shutdown);
-        loop {
-            tokio::select! {
-                () = tokio::time::sleep(self.poll_interval) => {
-                    let _ = self.tick_and_record(publisher.as_ref(), TickMode::All).await;
+
+        // SMA-489 D12: prime every label value at zero. A metrics-rs series first appears
+        // already at 1, so an `increase()` rule could never fire on a label's first occurrence.
+        for source in ["notify", "poll", "backlog"] {
+            counter!(names::IAM_OUTBOX_RELAY_WAKEUPS_TOTAL, "source" => source).increment(0);
+        }
+
+        'outer: loop {
+            // `biased` so a ready shutdown always beats a ready notify permit. Without it the
+            // choice is random, an extra tick can run after shutdown, and the tests that assert
+            // otherwise become flaky. It costs nothing: the tick is not inside this select.
+            let mut source = tokio::select! {
+                biased;
+                () = &mut shutdown => break 'outer,
+                () = wake.notified() => "notify",
+                () = tokio::time::sleep(self.poll_interval) => "poll",
+            };
+            let mut mode = if source == "poll" { TickMode::All } else { TickMode::Fresh };
+
+            loop {
+                counter!(names::IAM_OUTBOX_RELAY_WAKEUPS_TOTAL, "source" => source).increment(1);
+                let Ok(report) = self.tick_and_record(publisher.as_ref(), mode).await else {
+                    break; // already logged and counted; never hot-loop a broken database
+                };
+                // D9: continue only on a FULL batch that made progress. `drained > failures`
+                // rather than `failures == 0` so one poison row cannot disable the continuation.
+                if report.drained < self.batch_size || report.drained <= report.failures {
+                    break;
                 }
-                () = &mut shutdown => break,
+                // Poll shutdown WITHOUT cancelling anything, then keep draining.
+                let stopping = std::future::poll_fn(|cx| std::task::Poll::Ready(shutdown.as_mut().poll(cx).is_ready())).await;
+                if stopping {
+                    break 'outer;
+                }
+                source = "backlog";
+                mode = TickMode::Fresh;
+            }
+
+            // D14: floor the nudge-driven tick rate. The poll arm is already bounded.
+            if source != "poll" {
+                let jitter = 0.75 + rand::random::<f64>() * 0.5;
+                let delay = self.wake_debounce.mul_f64(jitter);
+                tokio::select! {
+                    biased;
+                    () = &mut shutdown => break 'outer,
+                    () = tokio::time::sleep(delay) => {}
+                }
             }
         }
     }
@@ -428,5 +489,20 @@ mod tests {
         let prefix = out.trim_end_matches('…');
         assert!(prefix.chars().all(|c| c == '€'), "prefix must be whole '€' chars, got: {prefix:?}");
         assert_eq!(prefix.len(), 1023, "must give up the trailing partial byte rather than split a character");
+    }
+
+    /// The D9 continuation predicate, isolated. The mixed case is what discriminates
+    /// `drained > failures` from the naive `failures == 0`: a single poison row sits at a fixed
+    /// FIFO position and reappears in every batch until it parks 60 attempts later, so
+    /// `failures == 0` would leave the continuation dead exactly when a deep backlog needs it.
+    #[test]
+    fn continuation_predicate_requires_a_full_batch_that_made_progress() {
+        let batch = 100u64;
+        let should_continue = |drained: u64, failures: u64| drained == batch && drained > failures;
+
+        assert!(should_continue(100, 0), "full batch, all published");
+        assert!(should_continue(100, 99), "full batch, one row published — still progress");
+        assert!(!should_continue(100, 100), "full batch, nothing published — would hot-loop");
+        assert!(!should_continue(99, 0), "partial batch — queue is drained");
     }
 }

@@ -251,9 +251,13 @@ async fn main() -> anyhow::Result<()> {
                 config.outbox.batch_size,
                 i32::try_from(config.outbox.max_attempts).unwrap_or(i32::MAX),
             );
+            // SMA-489: `run` now races a wake `Notify` against the poll sleep. Until the
+            // `PgOutboxListener` is wired in (SMA-489 Task 7), nothing ever pokes this handle, so
+            // the relay behaves exactly as before — poll-interval only.
+            let wake = std::sync::Arc::new(tokio::sync::Notify::new());
             servers.spawn(async move {
                 relay
-                    .run(publisher, async move {
+                    .run(publisher, wake, async move {
                         let _ = rx.changed().await;
                     })
                     .await;
