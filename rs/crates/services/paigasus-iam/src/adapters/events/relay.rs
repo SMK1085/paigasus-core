@@ -301,6 +301,15 @@ impl OutboxRelay {
             counter!(names::IAM_OUTBOX_RELAY_WAKEUPS_TOTAL, "source" => source).increment(0);
         }
 
+        // The poll deadline is ABSOLUTE and lives outside the loop. A
+        // `sleep(self.poll_interval)` constructed inside the `select!` would restart on every
+        // outer iteration — including every nudged one — so above ~1 commit per interval the
+        // poll arm would never fire. `TickMode::All` is the only path that selects rows with
+        // `attempts > 0`, so a row that failed once would then never be retried and never
+        // parked. Silently: `oldest_unpublished_age_seconds` is derived from each tick's own
+        // row set, so `Fresh` ticks keep overwriting it while ignoring the stuck rows.
+        let mut next_poll = tokio::time::Instant::now() + self.poll_interval;
+
         'outer: loop {
             // `biased` so a ready shutdown always beats a ready notify permit. Without it the
             // choice is random, an extra tick can run after shutdown, and the tests that assert
@@ -308,8 +317,18 @@ impl OutboxRelay {
             let mut source = tokio::select! {
                 biased;
                 () = &mut shutdown => break 'outer,
+                // The poll arm is ordered AHEAD of notify deliberately. `biased` takes the first
+                // ready arm, and a saturating nudge stream keeps a permit permanently available —
+                // so with notify first, an overdue absolute deadline would never even be polled
+                // (measured: notify 1295, poll 0). Ordering poll first costs nudge latency
+                // nothing, because this arm is only ready once its deadline has arrived.
+                () = tokio::time::sleep_until(next_poll) => {
+                    // Advance ONLY when the poll arm actually fires. Re-arming it on nudged
+                    // iterations would reintroduce the starvation in a subtler form.
+                    next_poll = tokio::time::Instant::now() + self.poll_interval;
+                    "poll"
+                }
                 () = wake.notified() => "notify",
-                () = tokio::time::sleep(self.poll_interval) => "poll",
             };
             let mut mode = if source == "poll" { TickMode::All } else { TickMode::Fresh };
 

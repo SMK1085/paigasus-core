@@ -400,21 +400,139 @@ async fn the_debounce_bounds_the_nudge_driven_tick_rate() {
 
 /// SMA-489 AC9/D10: with a permit already pending AND shutdown resolved, the `biased` select
 /// must pick shutdown — no extra tick after shutdown.
+///
+/// Repeated 20x deliberately. Without `biased`, `select!` polls its arms from a random start
+/// index, and only 1 of the 3 start indices reaches the notify arm before the (also ready)
+/// shutdown arm — so a single scenario would catch a missing `biased` just ~1/3 of the time
+/// (measured: 7/20). Twenty independent trials take the miss rate to (2/3)^20 ≈ 0.03%. This adds
+/// no flakiness in the passing direction: WITH `biased` the outcome is deterministic, and each
+/// `run` returns immediately because its shutdown is already resolved.
 #[tokio::test]
 async fn a_pending_permit_does_not_win_a_race_against_a_resolved_shutdown() {
     let handle = paigasus_observability::init("test-iam-relay-wake-shutdown-bias");
-    let wake = Arc::new(tokio::sync::Notify::new());
-    wake.notify_one(); // permit stored BEFORE run starts
-    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(600), 10, 5);
-    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
 
-    tokio::time::timeout(Duration::from_secs(5), relay.run(publisher, wake, std::future::ready(())))
-        .await
-        .expect("run must return promptly even with a permit pending");
+    for _ in 0..20 {
+        // A fresh Notify (permit pre-stored) and a fresh pre-resolved shutdown per trial, so the
+        // trials are independent rather than 20 polls of one already-consumed permit.
+        let wake = Arc::new(tokio::sync::Notify::new());
+        wake.notify_one(); // permit stored BEFORE run starts
+        let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(600), 10, 5);
+        let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+
+        tokio::time::timeout(Duration::from_secs(5), relay.run(publisher, wake, std::future::ready(())))
+            .await
+            .expect("run must return promptly even with a permit pending");
+    }
+
+    let ticks = ticks_total_from(&handle.render());
+    assert_eq!(ticks, 0, "{ticks} tick(s) ran despite shutdown being ready — the outer select! is not biased");
+}
+
+/// SMA-489 regression guard: the poll arm must still fire under a CONTINUOUS nudge stream.
+///
+/// The bug this pins: building the poll timer as `sleep(self.poll_interval)` *inside* the outer
+/// `select!` restarts it on every outer iteration, including every nudged one — so at any commit
+/// rate above one per interval the poll arm never fires again. That is silent data loss, not a
+/// slowdown: `TickMode::All` is the only mode that selects rows with `attempts > 0`, so a row that
+/// failed once would never be retried and never parked, while `oldest_unpublished_age_seconds`
+/// (derived from each tick's own row set) keeps being overwritten by the `Fresh` ticks that ignore
+/// it. The fix is an ABSOLUTE `sleep_until(next_poll)` deadline that advances only when the poll
+/// arm fires.
+///
+/// Nudges arrive every 50ms against a 200ms poll interval — 4x oversubscribed, so the inline-sleep
+/// version reaches the deadline zero times.
+#[tokio::test]
+async fn a_continuous_nudge_stream_does_not_starve_the_poll_arm() {
+    let handle = paigasus_observability::init("test-iam-relay-poll-starvation");
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_millis(200), 10, 5).with_wake_debounce(Duration::from_millis(1));
+    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+    let w = wake.clone();
+    let run = tokio::spawn(async move {
+        relay
+            .run(publisher, w, async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+
+    // 40 nudges x 50ms = ~2s, i.e. ~10 poll intervals' worth of continuous nudging.
+    for _ in 0..40 {
+        wake.notify_one();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), run).await.expect("run exits").expect("no panic");
 
     let out = handle.render();
+    let polls = out
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .find(|l| l.contains("iam_outbox_relay_wakeups_total") && l.contains(r#"source="poll""#))
+        .and_then(|l| l.rsplit(' ').next())
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or(0.0) as u64;
+
     assert!(
-        !out.lines().any(|l| l.contains("iam_outbox_relay_ticks_total") && !l.trim_end().ends_with(" 0")),
-        "a tick ran despite shutdown being ready — the outer select! is not biased:\n{out}"
+        polls > 0,
+        "the poll arm never fired across ~2s of 200ms intervals under a continuous nudge stream — \
+         it is being starved, so no row with attempts > 0 would ever be retried:\n{out}"
+    );
+}
+
+/// SMA-489 regression guard, part 2: the poll arm must still fire when a permit is *always*
+/// pending at the moment the `select!` is entered.
+///
+/// Distinct from the test above, and it pins a distinct bug. An absolute `sleep_until` deadline
+/// alone is NOT sufficient: `biased` polls arms in source order and takes the first ready one, so
+/// if the notify arm precedes the poll arm, a permanently-available permit means the poll arm is
+/// never even polled and an overdue deadline is ignored forever. Measured on that ordering:
+/// `source="notify" 1295`, `source="poll" 0` over 2s of 200ms intervals — the exact starvation the
+/// absolute deadline was introduced to fix, just at a higher traffic threshold (roughly one commit
+/// per tick+debounce, ~5/s at the 200ms default, inside the <10 mutations/s design point).
+///
+/// Hence the arm order: shutdown, then poll, then notify. The poll arm is only ready at its
+/// deadline, so ordering it ahead of notify costs nudge latency nothing.
+#[tokio::test]
+async fn a_saturating_nudge_stream_does_not_starve_the_poll_arm() {
+    let handle = paigasus_observability::init("test-iam-relay-poll-starvation-saturating");
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_millis(200), 10, 5).with_wake_debounce(Duration::from_millis(1));
+    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+    let w = wake.clone();
+    let run = tokio::spawn(async move {
+        relay
+            .run(publisher, w, async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+
+    // Nudge as fast as the scheduler allows for ~2s, so a permit is essentially always pending.
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(2000) {
+        wake.notify_one();
+        tokio::task::yield_now().await;
+    }
+    let _ = tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), run).await.expect("run exits").expect("no panic");
+
+    let out = handle.render();
+    let polls = out
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .find(|l| l.contains("iam_outbox_relay_wakeups_total") && l.contains(r#"source="poll""#))
+        .and_then(|l| l.rsplit(' ').next())
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or(0.0) as u64;
+
+    assert!(
+        polls > 0,
+        "the poll arm never fired under a saturating nudge stream — an always-ready notify arm is \
+         starving the absolute poll deadline, so no row with attempts > 0 would ever be retried:\n{out}"
     );
 }
