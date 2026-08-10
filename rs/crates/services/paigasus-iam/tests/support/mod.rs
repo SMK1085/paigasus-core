@@ -153,9 +153,9 @@ pub async fn start_raw_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseC
             return None;
         }
     };
-    let port = node.get_host_port_ipv4(5432).await.unwrap();
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let mut opts = ConnectOptions::new(url);
+    // Through `connection_url`, not a second inline `format!` — one definition of the URL, as
+    // that helper's doc claims (CodeRabbit SMA-489 round 1).
+    let mut opts = ConnectOptions::new(connection_url(&node).await);
     opts.max_connections(1).min_connections(1);
     // Same startup race as `start_migrated_postgres` — see `connect_when_ready`'s doc.
     let db = connect_when_ready(opts).await;
