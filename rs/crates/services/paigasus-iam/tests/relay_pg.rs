@@ -234,23 +234,41 @@ async fn tick_with_a_non_empty_batch_emits_relay_metrics() {
     // `PrometheusHandle::render()` always emits a `# TYPE <name> ...` line for a registered
     // family, so a bare `contains()` check here would pass even with zero samples present — it
     // would prove only that the family is registered, not that this tick actually recorded a
-    // value. Parse the numeric sample instead (`sum_metric_from`, defined below), matching the
-    // known outcome of this tick: one row drained, published, with no failures or parking.
-    assert_eq!(sum_metric_from(&out, "iam_outbox_relay_drained_total"), 1, "drained counter should count the one seeded row:\n{out}");
+    // value. Parse the numeric sample instead (`support::sum_metric_from`), matching the known
+    // outcome of this tick: one row drained, published, with no failures or parking.
     assert_eq!(
-        sum_metric_from(&out, "iam_outbox_relay_published_total"),
-        1,
+        support::sum_metric_from(&out, "iam_outbox_relay_drained_total"),
+        1.0,
+        "drained counter should count the one seeded row:\n{out}"
+    );
+    assert_eq!(
+        support::sum_metric_from(&out, "iam_outbox_relay_published_total"),
+        1.0,
         "published counter should count the one seeded row:\n{out}"
     );
     assert_eq!(
-        sum_metric_from(&out, "iam_outbox_relay_publish_failures_total"),
-        0,
+        support::sum_metric_from(&out, "iam_outbox_relay_publish_failures_total"),
+        0.0,
         "publish_failures counter should be zero on a healthy tick:\n{out}"
     );
-    assert_eq!(sum_metric_from(&out, "iam_outbox_relay_parked_total"), 0, "parked counter should be zero on a healthy tick:\n{out}");
+    assert_eq!(
+        support::sum_metric_from(&out, "iam_outbox_relay_parked_total"),
+        0.0,
+        "parked counter should be zero on a healthy tick:\n{out}"
+    );
     assert!(
-        sum_metric_from(&out, "iam_outbox_oldest_unpublished_age_seconds") > 0,
+        support::sum_metric_from(&out, "iam_outbox_oldest_unpublished_age_seconds") > 0.0,
         "oldest-unpublished-age gauge should be nonzero for a row seeded 5s in the past:\n{out}"
+    );
+    // SMA-489 `iam_outbox_publish_lag_seconds` (`relay.rs`, recorded per SUCCESSFUL publish).
+    // `names.rs` and the RUNBOOK both call it "the only signal that proves the nudge works in
+    // production", and until this assertion existed deleting the `histogram!` line left the whole
+    // suite green. `_count` is the observation count the exporter renders for the family
+    // (summary or histogram alike), so this pins that the record call ran for this tick's one
+    // published row — not merely that the family is registered.
+    assert!(
+        support::sum_metric_from(&out, "iam_outbox_publish_lag_seconds_count") >= 1.0,
+        "publish-lag histogram should have recorded an observation for the published row:\n{out}"
     );
 }
 
@@ -314,29 +332,15 @@ async fn run_terminates_on_shutdown() {
         .expect("run must return promptly once its shutdown future resolves");
 }
 
-/// Sums the sample values of every `name`-named series in a Prometheus text exposition body,
-/// skipping `# HELP`/`# TYPE` comment lines and any other metric family. Used instead of a plain
-/// `contains` so the run-loop tests below can assert on tick COUNTS, not just presence.
-///
-/// NOTE: `paigasus_observability::init` installs one PROCESS-GLOBAL recorder, so these sums are
-/// only meaningful under `cargo nextest`'s process-per-test isolation — the same assumption the
-/// pre-existing `result="ok"`/`result="error"` exclusivity assertions in this file already make.
-fn sum_metric_from(rendered: &str, name: &str) -> u64 {
-    rendered
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .filter(|l| l.split(['{', ' ']).next() == Some(name))
-        .filter_map(|l| l.rsplit(' ').next())
-        .filter_map(|v| v.trim().parse::<f64>().ok())
-        .sum::<f64>() as u64
-}
-
+/// Tick count as a whole number — the run-loop tests below compare it against integer ceilings
+/// and against `wakeups_total_from`, so a float would only add noise. `sum_metric_from` (shared,
+/// `support/mod.rs`) is the single parsing implementation; only the `u64` narrowing lives here.
 fn ticks_total_from(rendered: &str) -> u64 {
-    sum_metric_from(rendered, "iam_outbox_relay_ticks_total")
+    support::sum_metric_from(rendered, "iam_outbox_relay_ticks_total") as u64
 }
 
 fn wakeups_total_from(rendered: &str) -> u64 {
-    sum_metric_from(rendered, "iam_outbox_relay_wakeups_total")
+    support::sum_metric_from(rendered, "iam_outbox_relay_wakeups_total") as u64
 }
 
 /// SMA-489 AC1's mechanism: a notify permit starts a tick without waiting out the poll
@@ -450,10 +454,10 @@ async fn a_pending_permit_does_not_win_a_race_against_a_resolved_shutdown() {
 /// `select!` restarts it on every outer iteration, including every nudged one — so at any commit
 /// rate above one per interval the poll arm never fires again. That is silent data loss, not a
 /// slowdown: `TickMode::All` is the only mode that selects rows with `attempts > 0`, so a row that
-/// failed once would never be retried and never parked, while `oldest_unpublished_age_seconds`
-/// (derived from each tick's own row set) keeps being overwritten by the `Fresh` ticks that ignore
-/// it. The fix is an ABSOLUTE `sleep_until(next_poll)` deadline that advances only when the poll
-/// arm fires.
+/// failed once would never be retried and never parked, while `oldest_unpublished_age_seconds` —
+/// which only an `All` tick refreshes — would freeze at its last poll-tick value rather than track
+/// the stuck backlog. The fix is an ABSOLUTE `sleep_until(next_poll)` deadline that advances only
+/// when the poll arm fires.
 ///
 /// Nudges arrive every 50ms against a 200ms poll interval — 4x oversubscribed, so the inline-sleep
 /// version reaches the deadline zero times.

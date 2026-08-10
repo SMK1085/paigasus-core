@@ -728,6 +728,36 @@ pub async fn last_error(db: &DatabaseConnection, id: Uuid) -> Option<String> {
     event_outbox::Entity::find_by_id(id).one(db).await.expect("query event_outbox row").and_then(|row| row.last_error)
 }
 
+// --- Prometheus-exposition assertion helper (SMA-489) -------------------------------------
+
+/// Sums the sample values of every `name`-named series in a Prometheus text exposition body
+/// (`PrometheusHandle::render()` output), skipping `# HELP`/`# TYPE` comment lines and every other
+/// metric family. `f64` so it reads gauges and histogram `_sum`s as faithfully as counters.
+///
+/// **The `!l.starts_with('#')` filter is the whole point, not a tidy-up.** `PrometheusHandle::
+/// render` writes a `# TYPE <name> counter` line for every REGISTERED metric
+/// (`metrics-exporter-prometheus`'s `recorder.rs`, `write_type_line`, unconditionally and ahead of
+/// any samples), and several call sites register their counters at zero on startup (SMA-489 D12
+/// priming). So a `rendered.contains("iam_outbox_listener_reconnects_total")`-style assertion —
+/// even one that also excludes lines ending in `" 0"` — is satisfied by the TYPE COMMENT alone,
+/// with no sample present at all, and can never fail. Verified: with the `increment(1)` at
+/// `pg_outbox_listener.rs:155` removed, the string-matching form of `relay_nudge_pg.rs`'s
+/// reconnect assertion still passed. Parse the value, do not grep the name.
+///
+/// NOTE: `paigasus_observability::init` installs one PROCESS-GLOBAL recorder, so these sums are
+/// only meaningful under `cargo nextest`'s process-per-test isolation — the same assumption the
+/// `result="ok"`/`result="error"` exclusivity assertions in `relay_pg.rs` already make.
+#[allow(dead_code)]
+pub fn sum_metric_from(rendered: &str, name: &str) -> f64 {
+    rendered
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter(|l| l.split(['{', ' ']).next() == Some(name))
+        .filter_map(|l| l.rsplit(' ').next())
+        .filter_map(|v| v.trim().parse::<f64>().ok())
+        .sum()
+}
+
 /// Builds a fresh `(ApiKey, Vec<u8>)` pair for `PgApiKeyRepository::issue` tests — mints the
 /// key id via the real `KernelIdGenerator`/`SystemClock` adapters (mirrors `sample_sa`'s
 /// precedent). `scope` must already exist as a real row (its owning `organization`/`team`/

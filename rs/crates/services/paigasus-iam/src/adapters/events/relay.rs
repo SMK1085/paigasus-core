@@ -250,7 +250,18 @@ impl OutboxRelay {
         counter!(names::IAM_OUTBOX_RELAY_PUBLISH_FAILURES_TOTAL).increment(report.failures);
         counter!(names::IAM_OUTBOX_RELAY_PUBLISHED_TOTAL).increment(report.drained.saturating_sub(report.failures));
         counter!(names::IAM_OUTBOX_RELAY_PARKED_TOTAL).increment(report.parked);
-        gauge!(names::IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS).set(report.oldest_unpublished_age_secs.unwrap_or(0) as f64);
+        // SMA-489: the backlog-age gauge is refreshed by `TickMode::All` ticks ONLY. `Fresh`
+        // excludes `attempts > 0`, so the instant a publisher starts failing — exactly when this
+        // gauge matters — a nudged tick's row set no longer contains the stuck rows, and setting
+        // the gauge from it would overwrite the real backlog age with a fresh row's age, or with
+        // `0` on an empty batch. Under steady commit traffic that is not a blip: every scrape
+        // landing after a nudged tick resets `IamOutboxBacklogAgeHigh`'s `for: 5m` pending state,
+        // and the alert may never fire at all. The poll tick sees every eligible row, so it is
+        // the only tick whose batch is representative of the backlog. Cost: the gauge's refresh
+        // rate is exactly `poll_interval`, which is what the RUNBOOK already documents.
+        if mode == TickMode::All {
+            gauge!(names::IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS).set(report.oldest_unpublished_age_secs.unwrap_or(0) as f64);
+        }
 
         Ok(report)
     }
@@ -306,8 +317,9 @@ impl OutboxRelay {
         // outer iteration — including every nudged one — so above ~1 commit per interval the
         // poll arm would never fire. `TickMode::All` is the only path that selects rows with
         // `attempts > 0`, so a row that failed once would then never be retried and never
-        // parked. Silently: `oldest_unpublished_age_seconds` is derived from each tick's own
-        // row set, so `Fresh` ticks keep overwriting it while ignoring the stuck rows.
+        // parked. Silently: `TickMode::All` is also the only path that refreshes
+        // `oldest_unpublished_age_seconds` (see `tick_with`), so the gauge would freeze at its
+        // last poll-tick value while the stuck backlog grew behind it.
         let mut next_poll = tokio::time::Instant::now() + self.poll_interval;
 
         'outer: loop {

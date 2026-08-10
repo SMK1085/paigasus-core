@@ -196,30 +196,6 @@ async fn listening_backends(db: &DatabaseConnection) -> i64 {
     .expect("bigint count")
 }
 
-/// Sums the sample values of every `name`-named series in a Prometheus text exposition body.
-///
-/// Copied from `relay_pg.rs::sum_metric_from` (each `tests/*.rs` compiles its own `mod support;`,
-/// so test binaries cannot share free functions), widened to `f64` so it reads gauges too.
-///
-/// **The `!l.starts_with('#')` filter is the whole point, not a tidy-up.** `PrometheusHandle::
-/// render` writes a `# TYPE <name> counter` line for every REGISTERED metric
-/// (`metrics-exporter-prometheus`'s `recorder.rs`, `write_type_line`, unconditionally and ahead of
-/// any samples), and `PgOutboxListener::run` registers its counters at zero on startup (D12
-/// priming). So a `rendered.contains("iam_outbox_listener_reconnects_total")`-style assertion —
-/// even one that also excludes lines ending in `" 0"` — is satisfied by the TYPE COMMENT alone,
-/// with no sample present at all, and can never fail. Verified: with the `increment(1)` at
-/// `pg_outbox_listener.rs:155` removed, the string-matching form of this file's reconnect
-/// assertion still passed. Parse the value, do not grep the name.
-fn sum_metric_from(rendered: &str, name: &str) -> f64 {
-    rendered
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .filter(|l| l.split(['{', ' ']).next() == Some(name))
-        .filter_map(|l| l.rsplit(' ').next())
-        .filter_map(|v| v.trim().parse::<f64>().ok())
-        .sum()
-}
-
 /// Polls `cond` every 25 ms until it holds or `budget` elapses. Used for POSITIVE assertions
 /// ("this eventually happens") so a loaded machine costs latency, not a false failure; negative
 /// assertions ("this must not happen") deliberately keep their fixed waits.
@@ -524,17 +500,17 @@ async fn a_killed_listener_backend_reconnects_and_still_delivers() {
     let _ = tokio::time::timeout(Duration::from_secs(10), listen_handle).await;
 
     assert!(woke.is_ok(), "the listener never delivered a notification after its backend was killed");
-    // Both signals, parsed rather than grepped — see `sum_metric_from`'s doc for why a
+    // Both signals, parsed rather than grepped — see `support::sum_metric_from`'s doc for why a
     // name-contains assertion here is vacuous.
     assert!(
-        sum_metric_from(&out, "iam_outbox_listener_reconnects_total") >= 1.0,
+        support::sum_metric_from(&out, "iam_outbox_listener_reconnects_total") >= 1.0,
         "reconnects_total never moved — liveness is not being detected:\n{out}"
     );
     // The gauge is what separates "still down" from "healthy and quiet" for an operator: a
     // reconnect counter that moved proves the loss was NOTICED, but only `connected = 1` proves
     // the listener came back.
     assert_eq!(
-        sum_metric_from(&out, "iam_outbox_listener_connected"),
+        support::sum_metric_from(&out, "iam_outbox_listener_connected"),
         1.0,
         "the connected gauge did not return to 1 after the reconnect:\n{out}"
     );

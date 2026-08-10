@@ -275,7 +275,10 @@ async fn main() -> anyhow::Result<()> {
                 // point it elsewhere without moving the main pool (SMA-489 §1.5).
                 let listen_url = config.outbox.listen_database_url.clone().unwrap_or_else(|| config.database_url.clone());
                 // Watchdog is observability-only (D15): warn on silence, never reconnect on it.
-                let watchdog = std::cmp::max(Duration::from_secs(60), Duration::from_secs(config.outbox.poll_interval_secs * 3));
+                // `saturating_mul`: `validate` puts no upper bound on `poll_interval_secs`, so a
+                // plain `* 3` is an unchecked `u64` multiply that panics in a debug build on an
+                // absurd (but accepted) config. Saturating just pins the watchdog at "never".
+                let watchdog = std::cmp::max(Duration::from_secs(60), Duration::from_secs(config.outbox.poll_interval_secs.saturating_mul(3)));
                 let listener = PgOutboxListener::new(listen_url, wake, watchdog);
                 let mut rx = rx.clone();
                 servers.spawn(async move {
