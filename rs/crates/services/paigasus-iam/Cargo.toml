@@ -113,6 +113,9 @@ sha2 = "0.10"
 # (SMA-471, ADR-0016): connects to NATS, ensures/verifies the JetStream stream, and publishes
 # each `event_outbox` row as a CloudEvent, waiting for the JetStream ack.
 async-nats = { workspace = true }
+# `adapters::events::creds` signs the server nonce on every connection attempt so a rotated
+# `.creds` is picked up without a restart (SMA-493 D8).
+nkeys = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as
@@ -156,6 +159,9 @@ tokio = { workspace = true, features = ["test-util"] }
 # recency/registry/storage, so "debugging" is turned on explicitly here — dev-only, unified
 # into test builds and never the shipped binary.
 metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
+# `adapters::events::creds` tests — `each_call_re_reads_the_file_from_disk` etc. need a real
+# file on disk to prove the loader re-reads on every call rather than caching (SMA-493 D8).
+tempfile = "3"
 
 [lints]
 workspace = true

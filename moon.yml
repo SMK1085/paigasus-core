@@ -118,6 +118,49 @@ tasks:
       - 'ops/observability/grafana/dashboards/**/*'
       - 'rs/crates/libs/paigasus-observability/**/*'
 
+  nats-permissions:
+    description: 'Assert the committed ops/nats permission set is exactly sufficient for the IAM publisher and the gateway consumer, and no broader (SMA-493).'
+    # Duplicates paigasus-iam-rs:test ON PURPOSE, same reasoning as observability-drift above:
+    # `ops/` has no moon.yml so it belongs to the root `repo` project, while the crate's `test`
+    # inputs are project-relative — an ops-only change (which is exactly how a permission set
+    # gets loosened) would otherwise never make the crate affected, and the guard would not run
+    # on the PRs that need it.
+    # Moon does not enable errexit for `script:` blocks — a failing command followed by a
+    # succeeding one still exits the task 0 — so `set -euo pipefail` is required explicitly or
+    # a failing check-subjects.sh would be masked by a passing test suite (CodeRabbit, SMA-493).
+    script: |
+      set -euo pipefail
+      bash ops/nats/check-subjects.sh
+      ( cd rs && cargo nextest run --no-tests=pass -p paigasus-iam --test nats_permissions )
+    toolchain: 'system'
+    # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
+    # Per entry:
+    #   - 'ops/nats/**/*' — the committed permission set itself; this is what the suite proves
+    #     is correct, and what check-subjects.sh checks against provision.sh's subject lists.
+    #   - 'tests/nats_permissions.rs' — the suite's own source.
+    #   - 'src/adapters/events/**/*' — the publisher/consumer adapter code the suite exercises
+    #     against a real broker (creds loading, nats_publisher, relay).
+    #   - 'src/config.rs' — only `PublisherConfig`/`PublisherBackend` (~130 of this file's ~2855
+    #     lines) actually feed the suite. Deliberately NOT narrowed further: this file holds
+    #     ~15 unrelated config structs sharing one module, Moon inputs are file-level (no line
+    #     ranges), and splitting `PublisherConfig` out is a real refactor of a file five other
+    #     SMA-493 tasks already touched — out of scope here. So an edit anywhere in config.rs
+    #     triggers this container suite even when unrelated to publishing; that's accepted as
+    #     the cheaper failure mode versus a missed gate on an actual `PublisherConfig` change.
+    #   - 'Cargo.toml', 'rs/Cargo.lock' — dependency/version changes that could alter broker
+    #     client behavior (e.g. the NATS crate itself).
+    # NOT included: 'tests/support/**/*' (~748 lines of shared auth/tenancy/audit/API-key test
+    # infra) — nats_permissions.rs has no `mod support;` and never references it (unlike ~30
+    # other test files in this crate that do), so it is not a real dependency; including it
+    # would trigger this Docker-backed, TLS-cert-minting suite on unrelated test-fixture changes.
+    inputs:
+      - 'ops/nats/**/*'
+      - 'rs/crates/services/paigasus-iam/tests/nats_permissions.rs'
+      - 'rs/crates/services/paigasus-iam/src/adapters/events/**/*'
+      - 'rs/crates/services/paigasus-iam/src/config.rs'
+      - 'rs/crates/services/paigasus-iam/Cargo.toml'
+      - 'rs/Cargo.lock'
+
   wasm-getrandom-free:
     description: 'Assert the wasm binding pulls no `getrandom` — the kernel mints UUIDv7 from injected bytes, so wasm32-unknown-unknown stays buildable (SMA-448).'
     # Resolve the FULL dependency tree first (fail LOUD if `cargo tree` itself errors — a broken
@@ -221,7 +264,11 @@ tasks:
 
   promtool:
     description: 'promtool validates the Prometheus scrape config + alert rules + rule unit tests under ops/observability/prometheus/ (SMA-446).'
+    # Moon does not enable errexit for `script:` blocks — same latent defect as nats-permissions
+    # above (CodeRabbit, SMA-493): without this, a failing `check config` would be masked by a
+    # passing `check rules`/`test rules`.
     script: |
+      set -euo pipefail
       promtool check config ops/observability/prometheus/prometheus.yml
       promtool check rules ops/observability/prometheus/rules/*.rules.yml
       promtool test rules ops/observability/prometheus/rules/tests/*.test.yml
