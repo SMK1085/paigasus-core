@@ -7,9 +7,16 @@
 # Requires THREE tools — nsc alone cannot do this job:
 #   nsc   — mints the operator, accounts, users and .creds files
 #   nats  — creates the stream and the filtered durable consumer (a running-server operation)
-#   a nats-server that loads the generated resolver config (see step 4 below)
+#   a nats-server that loads the generated resolver config (see step 3 below)
 #
 # The subject lists come from `subjects.env`; edit them there, never here.
+#
+# TWO PASSES, because minting identities and getting a broker to recognize them are genuinely
+# separate steps with a manual action (include the resolver config, restart the broker) in
+# between: pass one (default, PUSH unset) mints the operator/account/users and generates the
+# resolver config, then STOPS. Pass two (PUSH=1) pushes the account to the now-restarted broker
+# and only then creates the stream and durable consumer. See the "phase split" comment below for
+# why the broker-facing half cannot run on pass one.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,7 +57,11 @@ add_user() {
   # (SMA-493 §3.1). Rotation stays available — the service re-reads its .creds on every
   # connection attempt (D8) — it is simply not forced on a schedule. An operator who DOES set an
   # expiry takes on monitoring it; nothing here alerts on approaching expiry.
-  nsc add user --account PAIGASUS_IAM --name "$name" "${args[@]}"
+  #
+  # Guarded the same way the operator/account calls above are: pass one must be safely
+  # re-runnable (and pass two re-runs this same code path before reaching the phase split below),
+  # so a user that already exists is not a failure.
+  nsc add user --account PAIGASUS_IAM --name "$name" "${args[@]}" 2>/dev/null || echo "user $name already exists"
   nsc generate creds --account PAIGASUS_IAM --name "$name" > "$OUT_DIR/$name.creds"
   chmod 600 "$OUT_DIR/$name.creds"
 }
@@ -59,17 +70,31 @@ add_user iam-publisher    PUBLISHER_PUB   PUBLISHER_SUB
 add_user gateway-consumer CONSUMER_PUB    CONSUMER_SUB
 add_user iam-provisioner  PROVISIONER_PUB PROVISIONER_SUB
 
-# --- 3. Resolver config + push --------------------------------------------------------------
-# The broker needs this stanza to validate the account JWTs minted above; `nsc push` uploads the
-# account itself. Without both, every service authenticates against a server that has never heard
-# of the account.
+# --- 3. Resolver config -----------------------------------------------------------------------
+# The broker needs this stanza to validate the account JWTs minted above. Without it, every
+# service authenticates against a server that has never heard of the account.
 nsc generate config --nats-resolver > "$OUT_DIR/resolver.conf"
-echo "include the generated $OUT_DIR/resolver.conf in the broker's nats-server.conf, restart it, then re-run with PUSH=1"
-if [ "${PUSH:-0}" = "1" ]; then
-  nsc push --account PAIGASUS_IAM
+
+# --- Phase split -------------------------------------------------------------------------------
+# Everything below this point talks to a RUNNING broker that must already have the resolver
+# config above loaded — `nsc push` and every `nats` CLI call after it authenticate against
+# PAIGASUS_IAM, which the broker does not recognize until an operator has included
+# $OUT_DIR/resolver.conf in its nats-server.conf and restarted it. On a first (pass-one) run that
+# is never true yet, so continuing past this point would just fail against a server that has
+# never heard of this account. Stopping here on pass one is deliberate — not a missing step, and
+# not something to "simplify" away — it is what makes it safe to hand the operator the resolver
+# config, wait for them to install it and restart the broker, and only THEN continue with
+# PUSH=1.
+if [ "${PUSH:-0}" != "1" ]; then
+  echo "include the generated $OUT_DIR/resolver.conf in the broker's nats-server.conf, restart it, then re-run with PUSH=1"
+  exit 0
 fi
 
-# --- 4. Stream + durable (nats CLI, against the running broker) -----------------------------
+# --- 4. Push + stream + durable (nats CLI, against the running broker) ------------------------
+# `nsc push` uploads the account itself; without it the broker still would not recognize
+# PAIGASUS_IAM even with the resolver config loaded and the broker restarted.
+nsc push --account PAIGASUS_IAM
+
 # The stream config MUST match `PublisherConfig`'s defaults: SMA-471 D7 fails the service's boot
 # when an adopted stream is weaker than configured, and retention/storage/duplicate_window are
 # NOT editable in place — fixing drift means deleting the stream, i.e. a maintenance window.
