@@ -1046,11 +1046,25 @@ impl IamConfig {
                 // own parser (`ServerAddr::from_str`) requires `://` to recognize a scheme at
                 // all and prepends `nats://` to anything lacking it, so this would actually be
                 // dialled as `nats://tls:user@host:4222`: plaintext, with `tls`/`user` silently
-                // discarded. Requiring the literal `tls://` prefix on the raw string (which
-                // implies `://` is present at all) closes that gap.
-                if !raw.starts_with("tls://") && !p.allow_insecure_broker {
+                // discarded. Requiring the literal `://` on the raw string closes that gap.
+                // The scheme itself is compared case-INsensitively (`eq_ignore_ascii_case`) to
+                // match both `url::Url::parse` (lowercases the scheme per the WHATWG URL
+                // Standard) and async-nats' `ServerAddr::from_url`, which compares against that
+                // same lowercased scheme — so `TLS://host:4222` is accepted here exactly as it
+                // is by async-nats, instead of forcing an operator to reach for
+                // `allow_insecure_broker` over a mere casing mismatch.
+                let scheme_is_tls = raw.split_once("://").is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("tls"));
+                if !scheme_is_tls && !p.allow_insecure_broker {
+                    // Report only the scheme-shaped prefix (substring before the first `:`),
+                    // never the full raw url: a malformed url with no `://` but baked-in
+                    // credentials (e.g. `user:hunter2@host:4222`) parses via `url::Url` as an
+                    // opaque scheme "user" with EMPTY username/password, so the credentials
+                    // check above does not catch it — and `PublisherConfig`'s hand-rolled
+                    // `Debug`/`Serialize` impls redact this exact field specifically so it never
+                    // reaches a log line; interpolating `raw` here would bypass that redaction.
+                    let scheme_hint = raw.split(':').next().unwrap_or(raw);
                     return Err(format!(
-                        "outbox.publisher.url must use tls:// for the nats backend (got {raw:?}) — set outbox.publisher.allow_insecure_broker = true for a dev or CI broker, which also waives the credentials_file requirement"
+                        "outbox.publisher.url must use tls:// for the nats backend (got {scheme_hint:?}) — set outbox.publisher.allow_insecure_broker = true for a dev or CI broker, which also waives the credentials_file requirement"
                     ));
                 }
             }
@@ -2786,6 +2800,48 @@ mod tests {
         "#,
         )
         .expect("the documented production shape must validate");
+    }
+
+    /// Regression: `url::Url::parse` lowercases the scheme per the WHATWG URL Standard, and so
+    /// does async-nats' own `ServerAddr::from_url`, which compares against that same lowercased
+    /// `Url::scheme()` — so async-nats itself dials `TLS://...` over TLS. The raw-string check
+    /// (added to close the schemeless-masquerade gap covered by
+    /// `a_schemeless_url_masquerading_as_tls_is_rejected` above) must stay case-insensitive on
+    /// the scheme portion, or an operator would be forced to reach for `allow_insecure_broker`
+    /// — the dev/CI escape hatch — over a mere casing mismatch.
+    #[test]
+    fn an_uppercase_tls_scheme_is_accepted() {
+        validate_result(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "TLS://localhost:4222"
+            credentials_file = "/etc/paigasus/iam.creds"
+        "#,
+        )
+        .expect("the scheme check must be case-insensitive, matching async-nats' own comparison");
+    }
+
+    /// Regression: the rejection message must never echo the raw url. A malformed url with no
+    /// `://` but baked-in credentials (`user:hunter2@host:4222`) parses via `url::Url` as an
+    /// opaque scheme "user" with EMPTY username/password, so the unconditional embedded-
+    /// credentials check above does NOT catch it — the raw string, password included, must not
+    /// then leak into the returned (and potentially logged) validation error. `PublisherConfig`'s
+    /// hand-rolled `Debug`/`Serialize` impls redact this exact field for the same reason (see
+    /// `the_publisher_url_is_redacted_in_serialize` above).
+    #[test]
+    fn a_rejected_url_with_a_password_does_not_leak_it_into_the_error() {
+        let err = validate_err(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "user:hunter2@host:4222"
+            credentials_file = "/etc/paigasus/iam.creds"
+        "#,
+        );
+        assert!(!err.contains("hunter2"), "password leaked into validation error: {err}");
+        assert!(err.contains("tls://"), "{err}");
+        assert!(err.contains("allow_insecure_broker"), "the message must name the escape hatch: {err}");
     }
 
     /// Every SMA-493 rule is gated on the `nats` backend: a `tracing` deployment must never fail
