@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use paigasus_iam::adapters::events::OutboxRelay;
+use paigasus_iam::adapters::events::{OutboxRelay, TickMode};
 use paigasus_iam::adapters::persistence::entities::event_outbox;
 use paigasus_iam_core::{DomainEvent, EventPublisher, EventType, PublishError};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Set, Statement, TransactionTrait};
@@ -231,11 +231,45 @@ async fn tick_with_a_non_empty_batch_emits_relay_metrics() {
     assert_eq!(report.drained, 1);
 
     let out = handle.render();
-    assert!(out.contains("iam_outbox_relay_drained_total"), "missing drained counter:\n{out}");
-    assert!(out.contains("iam_outbox_relay_published_total"), "missing published counter:\n{out}");
-    assert!(out.contains("iam_outbox_relay_publish_failures_total"), "missing publish_failures counter:\n{out}");
-    assert!(out.contains("iam_outbox_relay_parked_total"), "missing parked counter:\n{out}");
-    assert!(out.contains("iam_outbox_oldest_unpublished_age_seconds"), "missing oldest-unpublished-age gauge:\n{out}");
+    // `PrometheusHandle::render()` always emits a `# TYPE <name> ...` line for a registered
+    // family, so a bare `contains()` check here would pass even with zero samples present — it
+    // would prove only that the family is registered, not that this tick actually recorded a
+    // value. Parse the numeric sample instead (`support::sum_metric_from`), matching the known
+    // outcome of this tick: one row drained, published, with no failures or parking.
+    assert_eq!(
+        support::sum_metric_from(&out, "iam_outbox_relay_drained_total"),
+        1.0,
+        "drained counter should count the one seeded row:\n{out}"
+    );
+    assert_eq!(
+        support::sum_metric_from(&out, "iam_outbox_relay_published_total"),
+        1.0,
+        "published counter should count the one seeded row:\n{out}"
+    );
+    assert_eq!(
+        support::sum_metric_from(&out, "iam_outbox_relay_publish_failures_total"),
+        0.0,
+        "publish_failures counter should be zero on a healthy tick:\n{out}"
+    );
+    assert_eq!(
+        support::sum_metric_from(&out, "iam_outbox_relay_parked_total"),
+        0.0,
+        "parked counter should be zero on a healthy tick:\n{out}"
+    );
+    assert!(
+        support::sum_metric_from(&out, "iam_outbox_oldest_unpublished_age_seconds") > 0.0,
+        "oldest-unpublished-age gauge should be nonzero for a row seeded 5s in the past:\n{out}"
+    );
+    // SMA-489 `iam_outbox_publish_lag_seconds` (`relay.rs`, recorded per SUCCESSFUL publish).
+    // `names.rs` and the RUNBOOK both call it "the only signal that proves the nudge works in
+    // production", and until this assertion existed deleting the `histogram!` line left the whole
+    // suite green. `_count` is the observation count the exporter renders for the family
+    // (summary or histogram alike), so this pins that the record call ran for this tick's one
+    // published row — not merely that the family is registered.
+    assert!(
+        support::sum_metric_from(&out, "iam_outbox_publish_lag_seconds_count") >= 1.0,
+        "publish-lag histogram should have recorded an observation for the published row:\n{out}"
+    );
 }
 
 /// SMA-465 (replaces the old wall-clock-racing run-loop test): `tick_and_record` on a healthy,
@@ -252,7 +286,7 @@ async fn tick_and_record_emits_ticks_total_with_ok_result() {
     let relay = OutboxRelay::new(db.clone(), Duration::from_secs(60), 10, 5);
     let publisher = CountingPublisher::default();
 
-    relay.tick_and_record(&publisher).await;
+    let _ = relay.tick_and_record(&publisher, TickMode::All).await;
 
     let out = handle.render();
     assert!(
@@ -273,7 +307,7 @@ async fn tick_and_record_emits_ticks_total_with_error_result_on_db_fault() {
     let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(60), 10, 5);
     let publisher = CountingPublisher::default();
 
-    relay.tick_and_record(&publisher).await;
+    let _ = relay.tick_and_record(&publisher, TickMode::All).await;
 
     let out = handle.render();
     assert!(
@@ -293,7 +327,239 @@ async fn run_terminates_on_shutdown() {
     let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(60), 10, 5);
     let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
 
-    tokio::time::timeout(Duration::from_secs(5), relay.run(publisher, std::future::ready(())))
+    tokio::time::timeout(Duration::from_secs(5), relay.run(publisher, std::sync::Arc::new(tokio::sync::Notify::new()), std::future::ready(())))
         .await
         .expect("run must return promptly once its shutdown future resolves");
+}
+
+/// Tick count as a whole number — the run-loop tests below compare it against integer ceilings
+/// and against `wakeups_total_from`, so a float would only add noise. `sum_metric_from` (shared,
+/// `support/mod.rs`) is the single parsing implementation; only the `u64` narrowing lives here.
+fn ticks_total_from(rendered: &str) -> u64 {
+    support::sum_metric_from(rendered, "iam_outbox_relay_ticks_total") as u64
+}
+
+fn wakeups_total_from(rendered: &str) -> u64 {
+    support::sum_metric_from(rendered, "iam_outbox_relay_wakeups_total") as u64
+}
+
+/// The `source="poll"` series of `iam_outbox_relay_wakeups_total` specifically — unlike
+/// `wakeups_total_from`, which sums across every `source` label via `sum_metric_from`, the two
+/// poll-starvation regression guards below need the poll arm's count isolated from the notify
+/// arm's. `find` (not `filter`+`sum`) mirrors `sum_metric_from`'s label-matching intent for a
+/// SINGLE series, since Prometheus text exposition never repeats one label set on two lines.
+/// Filtering out `#`-prefixed lines is load-bearing, not cosmetic: a `# TYPE
+/// iam_outbox_relay_wakeups_total counter` line also contains the metric name and would
+/// otherwise satisfy `find` first, making the assertion vacuous (already bitten this branch
+/// twice).
+fn poll_wakeups_total_from(rendered: &str) -> u64 {
+    rendered
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .find(|l| l.contains("iam_outbox_relay_wakeups_total") && l.contains(r#"source="poll""#))
+        .and_then(|l| l.rsplit(' ').next())
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or(0.0) as u64
+}
+
+/// SMA-489 AC1's mechanism: a notify permit starts a tick without waiting out the poll
+/// interval. The 600s interval means a `source="notify"` series can ONLY appear if the notify
+/// arm fired.
+#[tokio::test]
+async fn a_notify_permit_wakes_the_run_loop_before_the_poll_interval() {
+    let handle = paigasus_observability::init("test-iam-relay-wake-notify");
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(600), 10, 5).with_wake_debounce(Duration::from_millis(1));
+    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+    let w = wake.clone();
+    let run = tokio::spawn(async move {
+        relay
+            .run(publisher, w, async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+
+    wake.notify_one();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _ = tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), run).await.expect("run exits").expect("no panic");
+
+    let out = handle.render();
+    assert!(
+        out.lines()
+            .any(|l| l.contains("iam_outbox_relay_wakeups_total") && l.contains(r#"source="notify""#) && !l.trim_end().ends_with(" 0")),
+        "expected a non-zero source=\"notify\" wakeup — the notify arm never fired:\n{out}"
+    );
+}
+
+/// SMA-489 AC7/D14: the debounce floors the nudge-driven tick rate. 200 notifications delivered
+/// as fast as possible must NOT produce 200 ticks.
+#[tokio::test]
+async fn the_debounce_bounds_the_nudge_driven_tick_rate() {
+    let handle = paigasus_observability::init("test-iam-relay-wake-debounce");
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(600), 10, 5).with_wake_debounce(Duration::from_millis(100));
+    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+    let w = wake.clone();
+    let run = tokio::spawn(async move {
+        relay
+            .run(publisher, w, async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+
+    let started = std::time::Instant::now();
+    for _ in 0..200 {
+        wake.notify_one();
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let elapsed = started.elapsed();
+    let _ = tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), run).await.expect("run exits").expect("no panic");
+
+    // Debounce is 100ms ± 25% jitter, so the floor is 75ms; allow generous headroom.
+    let ceiling = (elapsed.as_millis() / 75) as u64 + 2;
+    let rendered = handle.render();
+    let ticks = ticks_total_from(&rendered);
+    assert!(ticks <= ceiling, "{ticks} ticks in {elapsed:?} exceeds the debounce ceiling of {ceiling}");
+    assert!(ticks >= 1, "the debounce suppressed every tick");
+    assert_eq!(
+        wakeups_total_from(&rendered),
+        ticks_total_from(&rendered),
+        "wakeups_total must increment exactly once per tick, or no ratio query against ticks_total is valid"
+    );
+}
+
+/// SMA-489 AC9/D10: with a permit already pending AND shutdown resolved, the `biased` select
+/// must pick shutdown — no extra tick after shutdown.
+///
+/// Repeated 20x deliberately. Without `biased`, `select!` polls its arms from a random start
+/// index, and only 1 of the 3 start indices reaches the notify arm before the (also ready)
+/// shutdown arm — so a single scenario would catch a missing `biased` just ~1/3 of the time
+/// (measured: 7/20). Twenty independent trials take the miss rate to (2/3)^20 ≈ 0.03%. This adds
+/// no flakiness in the passing direction: WITH `biased` the outcome is deterministic, and each
+/// `run` returns immediately because its shutdown is already resolved.
+#[tokio::test]
+async fn a_pending_permit_does_not_win_a_race_against_a_resolved_shutdown() {
+    let handle = paigasus_observability::init("test-iam-relay-wake-shutdown-bias");
+
+    for _ in 0..20 {
+        // A fresh Notify (permit pre-stored) and a fresh pre-resolved shutdown per trial, so the
+        // trials are independent rather than 20 polls of one already-consumed permit.
+        let wake = Arc::new(tokio::sync::Notify::new());
+        wake.notify_one(); // permit stored BEFORE run starts
+        let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_secs(600), 10, 5);
+        let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+
+        tokio::time::timeout(Duration::from_secs(5), relay.run(publisher, wake, std::future::ready(())))
+            .await
+            .expect("run must return promptly even with a permit pending");
+    }
+
+    let ticks = ticks_total_from(&handle.render());
+    assert_eq!(ticks, 0, "{ticks} tick(s) ran despite shutdown being ready — the outer select! is not biased");
+}
+
+/// SMA-489 regression guard: the poll arm must still fire under a CONTINUOUS nudge stream.
+///
+/// The bug this pins: building the poll timer as `sleep(self.poll_interval)` *inside* the outer
+/// `select!` restarts it on every outer iteration, including every nudged one — so at any commit
+/// rate above one per interval the poll arm never fires again. That is silent data loss, not a
+/// slowdown: `TickMode::All` is the only mode that selects rows with `attempts > 0`, so a row that
+/// failed once would never be retried and never parked, while `oldest_unpublished_age_seconds` —
+/// which only an `All` tick refreshes — would freeze at its last poll-tick value rather than track
+/// the stuck backlog. The fix is an ABSOLUTE `sleep_until(next_poll)` deadline that advances only
+/// when the poll arm fires.
+///
+/// Nudges arrive every 50ms against a 200ms poll interval — 4x oversubscribed, so the inline-sleep
+/// version reaches the deadline zero times.
+#[tokio::test]
+async fn a_continuous_nudge_stream_does_not_starve_the_poll_arm() {
+    let handle = paigasus_observability::init("test-iam-relay-poll-starvation");
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_millis(200), 10, 5).with_wake_debounce(Duration::from_millis(1));
+    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+    let w = wake.clone();
+    let run = tokio::spawn(async move {
+        relay
+            .run(publisher, w, async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+
+    // 40 nudges x 50ms = ~2s, i.e. ~10 poll intervals' worth of continuous nudging.
+    for _ in 0..40 {
+        wake.notify_one();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), run).await.expect("run exits").expect("no panic");
+
+    let out = handle.render();
+    let polls = poll_wakeups_total_from(&out);
+
+    assert!(
+        polls > 0,
+        "the poll arm never fired across ~2s of 200ms intervals under a continuous nudge stream — \
+         it is being starved, so no row with attempts > 0 would ever be retried:\n{out}"
+    );
+}
+
+/// SMA-489 regression guard, part 2: the poll arm must still fire when a permit is *always*
+/// pending at the moment the `select!` is entered.
+///
+/// Distinct from the test above, and it pins a distinct bug. An absolute `sleep_until` deadline
+/// alone is NOT sufficient: `biased` polls arms in source order and takes the first ready one, so
+/// if the notify arm precedes the poll arm, a permanently-available permit means the poll arm is
+/// never even polled and an overdue deadline is ignored forever. Measured on that ordering:
+/// `source="notify" 1295`, `source="poll" 0` over 2s of 200ms intervals — the exact starvation the
+/// absolute deadline was introduced to fix, just at a higher traffic threshold (roughly one commit
+/// per tick+debounce, ~5/s at the 200ms default, inside the <10 mutations/s design point).
+///
+/// Hence the arm order: shutdown, then poll, then notify. The poll arm is only ready at its
+/// deadline, so ordering it ahead of notify costs nudge latency nothing.
+#[tokio::test]
+async fn a_saturating_nudge_stream_does_not_starve_the_poll_arm() {
+    let handle = paigasus_observability::init("test-iam-relay-poll-starvation-saturating");
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let relay = OutboxRelay::new(DatabaseConnection::Disconnected, Duration::from_millis(200), 10, 5).with_wake_debounce(Duration::from_millis(1));
+    let publisher: Arc<dyn EventPublisher> = Arc::new(CountingPublisher::default());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+    let w = wake.clone();
+    let run = tokio::spawn(async move {
+        relay
+            .run(publisher, w, async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+
+    // Nudge as fast as the scheduler allows for ~2s, so a permit is essentially always pending.
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(2000) {
+        wake.notify_one();
+        tokio::task::yield_now().await;
+    }
+    let _ = tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), run).await.expect("run exits").expect("no panic");
+
+    let out = handle.render();
+    let polls = poll_wakeups_total_from(&out);
+
+    assert!(
+        polls > 0,
+        "the poll arm never fired under a saturating nudge stream — an always-ready notify arm is \
+         starving the absolute poll deadline, so no row with attempts > 0 would ever be retried:\n{out}"
+    );
 }

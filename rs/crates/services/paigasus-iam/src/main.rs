@@ -9,7 +9,7 @@ use std::time::Duration;
 use paigasus_iam::adapters::events::{NatsEventPublisher, OutboxRelay, TracingEventPublisher};
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::{AppState, serve_http};
-use paigasus_iam::adapters::persistence::{Migrator, OutboxRetentionPolicy, PgOutboxMaintainer, PgPartitionMaintainer, RetentionPolicy};
+use paigasus_iam::adapters::persistence::{Migrator, OutboxRetentionPolicy, PgOutboxListener, PgOutboxMaintainer, PgPartitionMaintainer, RetentionPolicy};
 use paigasus_iam::config::{IamConfig, PublisherBackend};
 use paigasus_iam_core::EventPublisher;
 use paigasus_observability::names;
@@ -31,6 +31,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("no authz.bootstrap_admins configured — a fresh deployment has no platform administrator and cannot create organizations or grant roles");
     }
 
+    // SMA-489 §3.4: inert config, not invalid — `validate()` above deliberately returns `Ok` for
+    // it. The diagnostic lives HERE rather than inside `validate()` because `validate()` runs
+    // before `paigasus_logging::init` above, so a `warn!` from there would be emitted before the
+    // service logger exists and silently lost (CodeRabbit round 1).
+    if !config.outbox.relay_enabled && config.outbox.wake_on_commit {
+        tracing::warn!("outbox.wake_on_commit = true with outbox.relay_enabled = false — no relay is spawned, so no listener is spawned either and the setting has no effect");
+    }
+
     // Metrics (SMA-446 Unit 3, mirrors `paigasus-gateway::main`'s identical Unit 2 wiring):
     // install the global Prometheus recorder only when `[metrics]` is enabled — `!enabled`
     // means no recorder is installed AND `/metrics` is never mounted below (a `None` handle
@@ -45,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         describe_iam_metrics();
     }
 
-    let db = Database::connect(&config.database_url).await?;
+    let db = Database::connect(config.database_url.as_str()).await?;
     Migrator::up(&db, None).await?;
     // Built once and cloned into each server task below (a cheap handle-clone: every
     // per-aggregate service just wraps the same underlying connection pool, and the wired
@@ -244,21 +252,54 @@ async fn main() -> anyhow::Result<()> {
         // wrapped negative `max_attempts` would park every row on its very first failed publish
         // (`attempts >= max_attempts` true immediately), the opposite of the configured intent.
         if config.outbox.relay_enabled {
-            let mut rx = rx.clone();
+            // SMA-489: the relay and the listener share one `Arc<Notify>` — the listener pokes
+            // it on every `iam_outbox_event` notification, `run` races it against the poll
+            // sleep. Created here (not in `AppState`) because both consumers live in this block.
+            let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+            // Named (not shadowing `rx`) because the `wake_on_commit` block below needs its own
+            // `rx.clone()` off the un-moved outer binding, mirroring the `gauge_rx` naming the
+            // NATS connection-gauge sampler above uses for the same reason.
+            let mut relay_rx = rx.clone();
             let relay = OutboxRelay::new(
                 db,
                 Duration::from_secs(config.outbox.poll_interval_secs),
                 config.outbox.batch_size,
                 i32::try_from(config.outbox.max_attempts).unwrap_or(i32::MAX),
-            );
+            )
+            .with_wake_debounce(Duration::from_millis(config.outbox.wake_debounce_ms));
+            let relay_wake = wake.clone();
             servers.spawn(async move {
                 relay
-                    .run(publisher, async move {
-                        let _ = rx.changed().await;
+                    .run(publisher, relay_wake, async move {
+                        let _ = relay_rx.changed().await;
                     })
                     .await;
                 Ok(())
             });
+
+            if config.outbox.wake_on_commit {
+                // The listener gets its own connection string: `LISTEN` needs a direct or
+                // session-mode connection, so a deployment behind a transaction-mode pooler can
+                // point it elsewhere without moving the main pool (SMA-489 §1.5).
+                let listen_url = config.outbox.listen_database_url.as_ref().unwrap_or(&config.database_url).as_str().to_string();
+                // Watchdog is observability-only (D15): warn on silence, never reconnect on it.
+                // `saturating_mul`: `validate` puts no upper bound on `poll_interval_secs`, so a
+                // plain `* 3` is an unchecked `u64` multiply that panics in a debug build on an
+                // absurd (but accepted) config. Saturating just pins the watchdog at "never".
+                let watchdog = std::cmp::max(Duration::from_secs(60), Duration::from_secs(config.outbox.poll_interval_secs.saturating_mul(3)));
+                let listener = PgOutboxListener::new(listen_url, wake, watchdog);
+                let mut rx = rx.clone();
+                servers.spawn(async move {
+                    listener
+                        .run(async move {
+                            let _ = rx.changed().await;
+                        })
+                        .await;
+                    Ok(())
+                });
+            } else {
+                tracing::info!("outbox.wake_on_commit = false — no commit notification is emitted and no listener runs; delivery is gated by outbox.poll_interval_secs");
+            }
         } else {
             tracing::warn!("outbox relay disabled — event_outbox rows will accrue undrained");
         }
@@ -393,10 +434,11 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 32 metric families `paigasus-iam` emits
+/// Registers `# HELP`/`# TYPE` exposition text for the 37 metric families `paigasus-iam` emits
 /// directly (spec §4.1; includes the SMA-467 audit partition-maintenance families, the
 /// SMA-469 outbox retention/dead-letter families, the SMA-476 Redis circuit-breaker families,
-/// the SMA-481 system-row-retirement family, and the SMA-471 NATS publisher families), via the
+/// the SMA-481 system-row-retirement family, the SMA-471 NATS publisher families, and the
+/// SMA-489 commit-nudge/listener families), via the
 /// `names::` consts so the string used here can't drift from the one used at the increment/set
 /// call site, plus the 2 gRPC families via `paigasus_observability::describe_grpc()`. Mirrors
 /// the meanings documented in `docs/ops/RUNBOOK-observability.md` §2.1/§2.2.
@@ -468,7 +510,7 @@ fn describe_iam_metrics() {
     );
     describe_gauge!(
         names::IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS,
-        "Age in seconds of the oldest unpublished-and-unparked outbox row seen in the most recent non-empty relay tick's batch."
+        "Age in seconds of the oldest unpublished-and-unparked outbox row seen in the most recent poll tick's batch."
     );
 
     describe_counter!(
@@ -487,6 +529,27 @@ fn describe_iam_metrics() {
     describe_counter!(
         names::IAM_OUTBOX_DEAD_LETTERS_DISCARDED_TOTAL,
         "Dead letters permanently discarded by an operator — each one is an event that committed in IAM and will never reach any consumer."
+    );
+
+    describe_counter!(
+        names::IAM_OUTBOX_RELAY_WAKEUPS_TOTAL,
+        "Relay ticks by what woke them: notify (a Postgres LISTEN notification), poll (the poll_interval_secs timer) or backlog (the continuation after a full batch that made progress). One increment per TICK, so sum without (source) equals sum without (result) of iam_outbox_relay_ticks_total."
+    );
+    describe_histogram!(
+        names::IAM_OUTBOX_PUBLISH_LAG_SECONDS,
+        "End-to-end outbox latency: now - occurred_at when a row is successfully published. The only signal that proves the commit-nudge is working; iam_outbox_oldest_unpublished_age_seconds cannot, as it is refreshed only by poll ticks and reflects that tick's batch."
+    );
+    describe_counter!(
+        names::IAM_OUTBOX_LISTENER_NOTIFICATIONS_TOTAL,
+        "Notifications the outbox listener received. Flat at zero while rows are being drained means LISTEN is not reaching this replica — most likely a transaction-mode connection pooler, which silently does not support it."
+    );
+    describe_gauge!(
+        names::IAM_OUTBOX_LISTENER_CONNECTED,
+        "1 when the outbox listener holds a live LISTEN connection, 0 otherwise. Per-replica and the replicas do NOT agree — aggregate with min by (job), never sum or max."
+    );
+    describe_counter!(
+        names::IAM_OUTBOX_LISTENER_RECONNECTS_TOTAL,
+        "Outbox-listener reconnects. Climbing means Postgres is churning the listener connection; notifications during each gap are dropped and picked up by the poll."
     );
 
     describe_counter!(

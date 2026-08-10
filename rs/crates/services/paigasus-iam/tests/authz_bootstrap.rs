@@ -201,7 +201,7 @@ async fn seeded_starter_set_plus_a_real_grant_enforces_end_to_end() {
     // over the SAME `gens` handle this test's `CedarAuthorizer` reads through (so the grant
     // below's post-commit bump is the one `is_authorized`'s pre-decision reload observes).
     let role_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
-    let role_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+    let role_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new(true));
     let role_audit: Arc<dyn AuditLog> = Arc::new(PgAuditLog::new(db.clone()));
     let role_gen_bumper: Arc<dyn PolicyGenBumper> = Arc::new(GenerationsPolicyGenBumper::new(gens.clone()));
     let role_service = RoleService::new(RoleServiceDeps {

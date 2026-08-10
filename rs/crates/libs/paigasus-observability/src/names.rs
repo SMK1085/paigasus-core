@@ -118,6 +118,46 @@ pub const IAM_OUTBOX_PARKED_ROWS: &str = "iam_outbox_parked_rows";
 /// `parked_at` exists to compare.
 pub const IAM_OUTBOX_DEAD_LETTERS_REPLAYED_TOTAL: &str = "iam_outbox_dead_letters_replayed_total";
 pub const IAM_OUTBOX_DEAD_LETTERS_DISCARDED_TOTAL: &str = "iam_outbox_dead_letters_discarded_total";
+/// Relay ticks, labeled by what woke them: `notify` (a Postgres `LISTEN` notification),
+/// `poll` (the `poll_interval_secs` timer) or `backlog` (SMA-489 D9's continuation after a
+/// full batch that made progress).
+///
+/// **One increment per TICK, not per wakeup** — so
+/// `sum without (source) (iam_outbox_relay_wakeups_total)` equals
+/// `sum without (result) (iam_outbox_relay_ticks_total)`, an invariant the integration tests
+/// assert. All three label values are primed at zero when the relay starts: a metrics-rs series
+/// first appears already at 1, so an `increase()` rule could otherwise never fire on the first
+/// occurrence of a label value.
+pub const IAM_OUTBOX_RELAY_WAKEUPS_TOTAL: &str = "iam_outbox_relay_wakeups_total";
+/// End-to-end outbox latency: `now - occurred_at` at the moment a row is successfully
+/// published. **This is the only signal that proves the SMA-489 nudge is working in
+/// production.** [`IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS`] cannot: it is reset to 0 on
+/// every empty tick, and the nudge makes empty ticks far more frequent.
+pub const IAM_OUTBOX_PUBLISH_LAG_SECONDS: &str = "iam_outbox_publish_lag_seconds";
+/// Notifications the `PgOutboxListener` actually received. Distinguishes "Postgres never
+/// notified us — e.g. a transaction-mode pooler silently swallowed `LISTEN`" from "the relay
+/// never observed the permit", which `iam_outbox_relay_wakeups_total{source="notify"}` alone
+/// cannot (SMA-489 §1.5).
+pub const IAM_OUTBOX_LISTENER_NOTIFICATIONS_TOTAL: &str = "iam_outbox_listener_notifications_total";
+/// 1 when the outbox listener holds a live `LISTEN` connection, 0 otherwise.
+///
+/// **Per-replica, and the replicas do NOT agree** — the same caveat [`IAM_NATS_CONNECTED`]
+/// carries. `max by (job)` returns 1 while any single replica is still connected, hiding
+/// exactly the partial outage worth knowing about. Use `min by (job)` to ask "are all replicas
+/// listening", or keep `instance` to see which one is down. Never `sum`.
+pub const IAM_OUTBOX_LISTENER_CONNECTED: &str = "iam_outbox_listener_connected";
+/// Successful re-establishments of the outbox listener's `LISTEN` connection. `PgOutboxListener`
+/// increments this at a single site in its reconnect path, so it counts identically however the
+/// loss surfaced — `try_recv() -> Ok(None)` and an `Err` both break to that one path (SMA-489).
+///
+/// **This counts recoveries, not failures**, which inverts the usual reading of a `_total`. A
+/// listener down through a long outage increments this ONCE, on recovery — never once per failed
+/// attempt — so a value that stops climbing mid-incident means "still down", and only
+/// [`IAM_OUTBOX_LISTENER_CONNECTED`] separates that from "healthy and quiet". The alertable shape
+/// is therefore a steadily CLIMBING value: it means Postgres is churning the listener connection,
+/// and every cycle is a window in which notifications were dropped and delivery fell back to the
+/// poll.
+pub const IAM_OUTBOX_LISTENER_RECONNECTS_TOTAL: &str = "iam_outbox_listener_reconnects_total";
 // IAM audit partition maintenance
 pub const IAM_AUDIT_PARTITION_MAINTENANCE_TICKS_TOTAL: &str = "iam_audit_partition_maintenance_ticks_total";
 pub const IAM_AUDIT_PARTITIONS_CREATED_TOTAL: &str = "iam_audit_partitions_created_total";
@@ -200,6 +240,11 @@ pub const ALL: &[&str] = &[
     IAM_OUTBOX_PARKED_ROWS,
     IAM_OUTBOX_DEAD_LETTERS_REPLAYED_TOTAL,
     IAM_OUTBOX_DEAD_LETTERS_DISCARDED_TOTAL,
+    IAM_OUTBOX_RELAY_WAKEUPS_TOTAL,
+    IAM_OUTBOX_PUBLISH_LAG_SECONDS,
+    IAM_OUTBOX_LISTENER_NOTIFICATIONS_TOTAL,
+    IAM_OUTBOX_LISTENER_CONNECTED,
+    IAM_OUTBOX_LISTENER_RECONNECTS_TOTAL,
     IAM_AUDIT_PARTITION_MAINTENANCE_TICKS_TOTAL,
     IAM_AUDIT_PARTITIONS_CREATED_TOTAL,
     IAM_AUDIT_PARTITIONS_DROPPED_TOTAL,

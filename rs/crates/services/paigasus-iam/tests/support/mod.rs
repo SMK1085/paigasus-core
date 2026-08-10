@@ -74,12 +74,25 @@ pub async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, Data
         }
     };
 
-    let port = node.get_host_port_ipv4(5432).await.unwrap();
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let url = connection_url(&node).await;
     let db = connect_when_ready(&url).await;
     Migrator::up(&db, None).await.unwrap();
 
     Some((node, db))
+}
+
+/// The `postgres://` URL of an already-started container from [`start_migrated_postgres`] /
+/// [`start_raw_postgres`]. The SINGLE definition of that URL: `start_migrated_postgres` builds its
+/// own connection through this too, so a caller that needs the string and a caller that needs the
+/// pool can never drift apart.
+///
+/// SeaORM's `DatabaseConnection` deliberately does not expose the URL it was built from, and the
+/// SMA-489 nudge tests need one for components that take a connection string rather than a pool
+/// handle — `PgOutboxListener::new(url, ..)` and a bare `sqlx::PgListener::connect(&url)` used as
+/// an independent observer of `pg_notify`. Both must reach the SAME database as `db`.
+pub async fn connection_url(pg: &ContainerAsync<Postgres>) -> String {
+    let port = pg.get_host_port_ipv4(5432).await.expect("mapped postgres port");
+    format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")
 }
 
 /// How long [`connect_when_ready`] waits for a freshly-started Postgres to accept connections.
@@ -140,9 +153,9 @@ pub async fn start_raw_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseC
             return None;
         }
     };
-    let port = node.get_host_port_ipv4(5432).await.unwrap();
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let mut opts = ConnectOptions::new(url);
+    // Through `connection_url`, not a second inline `format!` — one definition of the URL, as
+    // that helper's doc claims (CodeRabbit SMA-489 round 1).
+    let mut opts = ConnectOptions::new(connection_url(&node).await);
     opts.max_connections(1).min_connections(1);
     // Same startup race as `start_migrated_postgres` — see `connect_when_ready`'s doc.
     let db = connect_when_ready(opts).await;
@@ -304,7 +317,7 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
     IamConfig {
         http_addr: "127.0.0.1:0".parse().unwrap(),
         grpc_addr: "127.0.0.1:0".parse().unwrap(),
-        database_url: "unused-in-tests".to_string(),
+        database_url: "unused-in-tests".into(),
         log_level: "info".to_string(),
         authn: AuthnConfig {
             leeway_secs: 60,
@@ -713,6 +726,36 @@ pub async fn last_error(db: &DatabaseConnection, id: Uuid) -> Option<String> {
     use sea_orm::EntityTrait;
 
     event_outbox::Entity::find_by_id(id).one(db).await.expect("query event_outbox row").and_then(|row| row.last_error)
+}
+
+// --- Prometheus-exposition assertion helper (SMA-489) -------------------------------------
+
+/// Sums the sample values of every `name`-named series in a Prometheus text exposition body
+/// (`PrometheusHandle::render()` output), skipping `# HELP`/`# TYPE` comment lines and every other
+/// metric family. `f64` so it reads gauges and histogram `_sum`s as faithfully as counters.
+///
+/// **The `!l.starts_with('#')` filter is the whole point, not a tidy-up.** `PrometheusHandle::
+/// render` writes a `# TYPE <name> counter` line for every REGISTERED metric
+/// (`metrics-exporter-prometheus`'s `recorder.rs`, `write_type_line`, unconditionally and ahead of
+/// any samples), and several call sites register their counters at zero on startup (SMA-489 D12
+/// priming). So a `rendered.contains("iam_outbox_listener_reconnects_total")`-style assertion —
+/// even one that also excludes lines ending in `" 0"` — is satisfied by the TYPE COMMENT alone,
+/// with no sample present at all, and can never fail. Verified: with the `increment(1)` at
+/// `pg_outbox_listener.rs:155` removed, the string-matching form of `relay_nudge_pg.rs`'s
+/// reconnect assertion still passed. Parse the value, do not grep the name.
+///
+/// NOTE: `paigasus_observability::init` installs one PROCESS-GLOBAL recorder, so these sums are
+/// only meaningful under `cargo nextest`'s process-per-test isolation — the same assumption the
+/// `result="ok"`/`result="error"` exclusivity assertions in `relay_pg.rs` already make.
+#[allow(dead_code)]
+pub fn sum_metric_from(rendered: &str, name: &str) -> f64 {
+    rendered
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter(|l| l.split(['{', ' ']).next() == Some(name))
+        .filter_map(|l| l.rsplit(' ').next())
+        .filter_map(|v| v.trim().parse::<f64>().ok())
+        .sum()
 }
 
 /// Builds a fresh `(ApiKey, Vec<u8>)` pair for `PgApiKeyRepository::issue` tests — mints the

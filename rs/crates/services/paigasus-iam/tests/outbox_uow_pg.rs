@@ -58,7 +58,7 @@ fn entry() -> AuditEntry {
 async fn commit_makes_both_outbox_and_audit_rows_visible() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
     let uow = SeaOrmUnitOfWork::new(db.clone());
-    let outbox = PgOutbox::new();
+    let outbox = PgOutbox::new(true);
     let audit = PgAuditLog::new(db.clone());
 
     let ev = event();
@@ -94,7 +94,7 @@ async fn commit_makes_both_outbox_and_audit_rows_visible() {
 async fn dropping_without_commit_rolls_back_both_outbox_and_audit_rows() {
     let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
     let uow = SeaOrmUnitOfWork::new(db.clone());
-    let outbox = PgOutbox::new();
+    let outbox = PgOutbox::new(true);
     let audit = PgAuditLog::new(db.clone());
 
     let tx = uow.begin().await.expect("begin");

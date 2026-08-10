@@ -198,7 +198,7 @@ fn keycloak_config(issuer: &str) -> IamConfig {
     IamConfig {
         http_addr: "127.0.0.1:0".parse().unwrap(),
         grpc_addr: "127.0.0.1:0".parse().unwrap(),
-        database_url: "unused-in-tests".to_string(),
+        database_url: "unused-in-tests".into(),
         log_level: "info".to_string(),
         authn: AuthnConfig {
             leeway_secs: 60,

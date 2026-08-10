@@ -344,7 +344,7 @@ impl AppState {
         // a cheap `Arc`-backed pool handle). OUTBOX-ONLY: no audit entry, no generation bump —
         // principal creation is not in the AC audit set.
         let user_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
-        let user_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let user_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new(cfg.outbox.wake_on_commit));
         let users = CreateUser::new(CreateUserDeps {
             repo: PgPrincipalRepository::new(db.clone()),
             uow: user_uow,
@@ -457,7 +457,7 @@ impl AppState {
         // mutation in this composition root bumps — `RoleService` itself never imports
         // `Generations` directly (ADR-0005), only through the `PolicyGenBumper` port.
         let role_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
-        let role_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let role_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new(cfg.outbox.wake_on_commit));
         let role_gen_bumper: Arc<dyn PolicyGenBumper> = Arc::new(GenerationsPolicyGenBumper::new(gens.clone()));
         let roles = RoleService::new(RoleServiceDeps {
             grants: role_grant_store.clone(),
@@ -479,7 +479,7 @@ impl AppState {
         // best-effort `GenerationsPolicyGenBumper` post-commit bump over the SAME `gens`
         // handle every other authz mutation in this composition root bumps.
         let policy_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
-        let policy_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let policy_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new(cfg.outbox.wake_on_commit));
         let policy_gen_bumper: Arc<dyn PolicyGenBumper> = Arc::new(GenerationsPolicyGenBumper::new(gens.clone()));
         let policies = PolicyService::new(PolicyServiceDeps {
             policies: policy_store.clone(),
@@ -616,7 +616,7 @@ impl AppState {
         // generation bump. `archive`'s post-commit cache-evict runs over the SAME
         // `api_key_cache` handle `api_key_auth`/`api_keys` read/evict through.
         let service_account_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
-        let service_account_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let service_account_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new(cfg.outbox.wake_on_commit));
         let service_accounts = ServiceAccountService::new(ServiceAccountServiceDeps {
             repo: PgServiceAccountRepository::new(db.clone()),
             keys: Arc::new(PgApiKeyRepository::new(db.clone())) as Arc<dyn ApiKeyRepository>,
@@ -636,7 +636,7 @@ impl AppState {
         // the post-commit step this service DOES run (`revoke`'s cache-evict) is over the SAME
         // `api_key_cache` handle `api_key_auth` reads through, already threaded below.
         let api_key_uow: Arc<dyn UnitOfWork> = Arc::new(SeaOrmUnitOfWork::new(db.clone()));
-        let api_key_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new());
+        let api_key_outbox: Arc<dyn Outbox> = Arc::new(PgOutbox::new(cfg.outbox.wake_on_commit));
         let api_keys = ApiKeyService::new(ApiKeyServiceDeps {
             keys: PgApiKeyRepository::new(db.clone()),
             service_accounts: PgServiceAccountRepository::new(db.clone()),
