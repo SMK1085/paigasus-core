@@ -88,10 +88,20 @@ tests:
   # drained counter climbs steadily — rows ARE being written and drained, but the LISTEN nudge
   # never arrives, the exact "pooler silently eats LISTEN" signature this alert exists to catch.
   #
-  # `iam-healthy` is the MANDATORY control this task calls out: both its counters climb at the
+  # `iam-healthy` is a MANDATORY control this task calls out: both its counters climb at the
   # same rate, so notifications ARE flowing. Without this series, an all-firing fixture (e.g. a
   # rule regressed from `== 0` to `>= 0`) would still pass — the negative assertion below is what
   # catches that regression. `iam-healthy` must NEVER appear in exp_alerts at any eval_time.
+  #
+  # `iam-idle` is a SECOND, independently necessary control, added after the first review round:
+  # both its counters are flat at zero — a deployment with nothing to notify about because
+  # nothing is being written. The left-hand `== 0` term is true for it (same as the real `iam`
+  # target), so ONLY the right-hand `(drained[30m]) > 0` term keeps it silent. Dropping that
+  # right-hand clause (verified by hand: `promtool test rules` goes from SUCCESS to FAILED on
+  # exactly this series when the clause is removed, and back to SUCCESS when restored) would
+  # page on every idle deployment — `iam-healthy` cannot catch that regression, because
+  # `iam-healthy`'s own notifications are non-flat and already fail the left-hand term on their
+  # own. `iam-idle` must NEVER appear in exp_alerts at any eval_time either.
   - interval: 1m
     input_series:
       - series: 'iam_outbox_listener_notifications_total{job="iam",instance="a"}'
@@ -102,6 +112,10 @@ tests:
         values: '0+5x40' # control: notifications flowing
       - series: 'iam_outbox_relay_drained_total{job="iam-healthy",instance="b"}'
         values: '0+5x40'
+      - series: 'iam_outbox_listener_notifications_total{job="iam-idle",instance="c"}'
+        values: '0+0x40' # control: nothing to notify about
+      - series: 'iam_outbox_relay_drained_total{job="iam-idle",instance="c"}'
+        values: '0+0x40' # control: nothing being drained either
     alert_rule_test:
       - eval_time: 35m
         alertname: IamOutboxNotificationsAbsent

@@ -37,9 +37,16 @@ groups:
       # fallback. This is the only alert that catches that specific failure mode. It must fire on
       # "rows are being written and drained, yet no notification has ever arrived" — not merely
       # on "no notifications" alone, which would also be true, and harmless, on an idle deployment
-      # with nothing to notify about. `sum by (job)` so a healthy replica cannot mask a wedged
-      # one; the right-hand `> 0` term is the mandatory control, proving delivery is actually
-      # happening and the left side isn't just quiet because there is nothing to drain.
+      # with nothing to notify about; the right-hand `> 0` term is the mandatory control for that,
+      # proving delivery is actually happening and the left side isn't just quiet because there is
+      # nothing to drain.
+      #
+      # `sum by (job)` detects a whole DEPLOYMENT that never receives notifications — the
+      # pooler-in-front-of-everyone case this alert exists for — not a single wedged replica among
+      # otherwise-healthy ones: within one job, a healthy instance's climbing notifications sum
+      # together with a wedged instance's flat ones, so the wedged one is masked here. That
+      # per-replica case is `iam_outbox_listener_connected` aggregated with `min by (job)` (never
+      # `max` or `sum` — the replicas do not agree), not this alert.
       - alert: IamOutboxNotificationsAbsent
         expr: (sum by (job) (increase(iam_outbox_listener_notifications_total[30m])) == 0) and (sum by (job) (increase(iam_outbox_relay_drained_total[30m])) > 0)
         for: 0m
