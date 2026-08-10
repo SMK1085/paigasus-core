@@ -543,6 +543,62 @@ async fn a_tls_connection_without_the_ca_bundle_fails_verification() {
     assert!(format!("{err:?}").contains("InvalidCertificate"), "expected a certificate-verification failure, got {err:?}");
 }
 
+/// SMA-493 D8's regression net, and it must be able to detect the regression: corrupt the
+/// credential AFTER a successful connect, force a reconnect, and require the reconnect to fail.
+///
+/// Under the pre-SMA-493 `with_credentials_file` this assertion is FALSE — the credential was
+/// cached at connect and the reconnect succeeds regardless of what the file now says. A weaker
+/// version of this test ("restart, publish again, expect success") passes identically before and
+/// after the change and would have shipped the fix with a net that cannot catch its own removal.
+#[tokio::test]
+async fn a_corrupted_credential_is_noticed_on_reconnect() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let cfg = cfg_for(&fixture, &fixture.publisher, PUBLISHER_INBOX);
+
+    let publisher = NatsEventPublisher::connect(&cfg).await.expect("first connect");
+    publisher.publish(&event(1, EventType::RoleGranted)).await.expect("first publish");
+
+    // Rotate to garbage, then force a fresh connection attempt by constructing a new publisher —
+    // which is the same code path a reconnect takes, since the auth callback is per-attempt.
+    std::fs::write(&fixture.publisher.seed_path, "not a credential any more").expect("overwrite the credential");
+
+    let err = NatsEventPublisher::connect(&cfg).await.expect_err("a corrupted credential must not be papered over by a cached one");
+    assert!(
+        format!("{err}").contains(&fixture.publisher.seed_path.to_string_lossy().to_string()),
+        "the error must name the path: {err}"
+    );
+}
+
+/// SMA-493 D8's happy half, redesigned to actually discriminate (see the report for why the
+/// brief's own version does not): rotate the publisher's `seed_path` **file**, in place, to a
+/// DIFFERENT declared identity's seed — the consumer's — then go back through
+/// `NatsEventPublisher::connect` on the SAME `cfg` (same path, same `credentials_file`, same
+/// `inbox_prefix`).
+///
+/// The consumer's grant does not cover `$JS.API.STREAM.CREATE.IAM_EVENTS` /
+/// `$JS.API.STREAM.INFO.IAM_EVENTS` — the calls `connect`'s stream-ensure step makes — so if the
+/// rotated file content is actually read and used, that step is refused. A cached publisher
+/// credential would instead sail through it exactly as the first `connect` did, so this fails
+/// under a cached-credential implementation (verified by the Step 3 mutation).
+#[tokio::test]
+async fn a_rotated_credential_is_picked_up_without_a_restart() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let cfg = cfg_for(&fixture, &fixture.publisher, PUBLISHER_INBOX);
+    NatsEventPublisher::connect(&cfg).await.expect("first connect as the publisher");
+
+    // Same path, different identity: the consumer's seed, which the fixture also declares.
+    let consumer_seed = std::fs::read_to_string(&fixture.consumer.seed_path).expect("consumer seed");
+    std::fs::write(&fixture.publisher.seed_path, &consumer_seed).expect("rotate the credential in place");
+
+    let err = NatsEventPublisher::connect(&cfg)
+        .await
+        .expect_err("the rotated (consumer) identity must be in force, and it cannot ensure the stream");
+    assert!(
+        matches!(err, NatsPublisherError::Ensure { .. }),
+        "expected the rotated identity's stream-ensure to be refused, got {err:?}"
+    );
+}
+
 /// And a bundle that is well-formed but wrong must also fail — proving the bundle is actually
 /// consulted rather than merely present.
 #[tokio::test]
