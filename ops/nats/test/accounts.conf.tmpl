@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Static-nkey mirror of the production account (SMA-493 D2), included by both fixture server
+# configs so the plaintext and TLS runs cannot drift apart.
+#
+# The `{{…_NKEY}}` placeholders are rendered at test time with freshly minted public keys:
+# committing fixed identities would mean committing their seeds, which are private keys. The
+# permission lists — the part that actually matters — are committed verbatim and asserted against
+# `subjects.env` by `check-subjects.sh`.
+#
+# Production uses operator-mode JWTs instead (see `provision.sh`); the subject lists are identical
+# in both encodings.
+
+accounts {
+  SYS: {
+    users: [ { nkey: "{{SYS_NKEY}}" } ]
+  }
+
+  PAIGASUS_IAM: {
+    # max_mem 0 disables memory storage outright: the stream is File-backed (SMA-471 D8) and a
+    # memory stream would silently lose everything on a broker restart.
+    jetstream: { max_mem: 0, max_file: 536870912, max_streams: 4, max_consumers: 32 }
+
+    users: [
+      {
+        nkey: "{{PUBLISHER_NKEY}}"
+        permissions: {
+          publish:   { allow: [ "iam.>", "$JS.API.STREAM.INFO.IAM_EVENTS", "$JS.API.STREAM.CREATE.IAM_EVENTS" ] }
+          subscribe: { allow: [ "_INBOX_IAM_PUB.>" ] }
+        }
+      },
+      {
+        nkey: "{{CONSUMER_NKEY}}"
+        permissions: {
+          publish:   { allow: [ "$JS.API.CONSUMER.MSG.NEXT.IAM_EVENTS.gateway-cache-invalidator", "$JS.API.CONSUMER.INFO.IAM_EVENTS.gateway-cache-invalidator", "$JS.ACK.IAM_EVENTS.gateway-cache-invalidator.>" ] }
+          subscribe: { allow: [ "_INBOX_GW.>" ] }
+        }
+      },
+      {
+        nkey: "{{PROVISIONER_NKEY}}"
+        permissions: {
+          publish:   { allow: [ "$JS.API.INFO", "$JS.API.STREAM.>", "$JS.API.CONSUMER.>" ] }
+          subscribe: { allow: [ "_INBOX_PROV.>" ] }
+        }
+      }
+    ]
+  }
+}
+
+system_account: SYS
