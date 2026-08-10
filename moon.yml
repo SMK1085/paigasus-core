@@ -118,6 +118,27 @@ tasks:
       - 'ops/observability/grafana/dashboards/**/*'
       - 'rs/crates/libs/paigasus-observability/**/*'
 
+  nats-permissions:
+    description: 'Assert the committed ops/nats permission set is exactly sufficient for the IAM publisher and the gateway consumer, and no broader (SMA-493).'
+    # Duplicates paigasus-iam-rs:test ON PURPOSE, same reasoning as observability-drift above:
+    # `ops/` has no moon.yml so it belongs to the root `repo` project, while the crate's `test`
+    # inputs are project-relative — an ops-only change (which is exactly how a permission set
+    # gets loosened) would otherwise never make the crate affected, and the guard would not run
+    # on the PRs that need it.
+    script: |
+      bash ops/nats/check-subjects.sh
+      ( cd rs && cargo nextest run --no-tests=pass -p paigasus-iam --test nats_permissions )
+    toolchain: 'system'
+    # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
+    inputs:
+      - 'ops/nats/**/*'
+      - 'rs/crates/services/paigasus-iam/tests/nats_permissions.rs'
+      - 'rs/crates/services/paigasus-iam/tests/support/**/*'
+      - 'rs/crates/services/paigasus-iam/src/adapters/events/**/*'
+      - 'rs/crates/services/paigasus-iam/src/config.rs'
+      - 'rs/crates/services/paigasus-iam/Cargo.toml'
+      - 'rs/Cargo.lock'
+
   wasm-getrandom-free:
     description: 'Assert the wasm binding pulls no `getrandom` — the kernel mints UUIDv7 from injected bytes, so wasm32-unknown-unknown stays buildable (SMA-448).'
     # Resolve the FULL dependency tree first (fail LOUD if `cargo tree` itself errors — a broken
