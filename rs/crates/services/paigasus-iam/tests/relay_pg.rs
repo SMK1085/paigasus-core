@@ -231,11 +231,27 @@ async fn tick_with_a_non_empty_batch_emits_relay_metrics() {
     assert_eq!(report.drained, 1);
 
     let out = handle.render();
-    assert!(out.contains("iam_outbox_relay_drained_total"), "missing drained counter:\n{out}");
-    assert!(out.contains("iam_outbox_relay_published_total"), "missing published counter:\n{out}");
-    assert!(out.contains("iam_outbox_relay_publish_failures_total"), "missing publish_failures counter:\n{out}");
-    assert!(out.contains("iam_outbox_relay_parked_total"), "missing parked counter:\n{out}");
-    assert!(out.contains("iam_outbox_oldest_unpublished_age_seconds"), "missing oldest-unpublished-age gauge:\n{out}");
+    // `PrometheusHandle::render()` always emits a `# TYPE <name> ...` line for a registered
+    // family, so a bare `contains()` check here would pass even with zero samples present — it
+    // would prove only that the family is registered, not that this tick actually recorded a
+    // value. Parse the numeric sample instead (`sum_metric_from`, defined below), matching the
+    // known outcome of this tick: one row drained, published, with no failures or parking.
+    assert_eq!(sum_metric_from(&out, "iam_outbox_relay_drained_total"), 1, "drained counter should count the one seeded row:\n{out}");
+    assert_eq!(
+        sum_metric_from(&out, "iam_outbox_relay_published_total"),
+        1,
+        "published counter should count the one seeded row:\n{out}"
+    );
+    assert_eq!(
+        sum_metric_from(&out, "iam_outbox_relay_publish_failures_total"),
+        0,
+        "publish_failures counter should be zero on a healthy tick:\n{out}"
+    );
+    assert_eq!(sum_metric_from(&out, "iam_outbox_relay_parked_total"), 0, "parked counter should be zero on a healthy tick:\n{out}");
+    assert!(
+        sum_metric_from(&out, "iam_outbox_oldest_unpublished_age_seconds") > 0,
+        "oldest-unpublished-age gauge should be nonzero for a row seeded 5s in the past:\n{out}"
+    );
 }
 
 /// SMA-465 (replaces the old wall-clock-racing run-loop test): `tick_and_record` on a healthy,
