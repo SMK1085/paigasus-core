@@ -54,10 +54,12 @@ single most likely misconfiguration in the whole design, and it presents as late
    (`RUNBOOK-observability.md` §4) to confirm timing and scope.
 3. Add the refused subject to the right identity's `PUBLISHER_PUB` / `CONSUMER_PUB` /
    `PROVISIONER_PUB` list in `ops/nats/subjects.env`. Keep `ops/nats/test/accounts.conf.tmpl` in
-   sync — `check-subjects.sh` fails CI the instant the two disagree — then re-mint and push the
-   widened grant (`nsc edit user`, `nsc push`; see `ops/nats/README.md`). A live connection carries
-   the permission set from its original `CONNECT`, so the affected service needs to reconnect
-   (restart it, or wait for its own reconnect) before the wider grant takes effect.
+   sync — `check-subjects.sh` fails CI the instant the two disagree — then re-mint the widened
+   grant and redeliver it (`nsc edit user`, `nsc generate creds`; see [`ops/nats/README.md`
+   §"Widening an existing user's grant"](../../ops/nats/README.md#widening-an-existing-users-grant)
+   for the exact commands and why re-running `provision.sh` here is a silent no-op). A live
+   connection carries the permission set from its original `CONNECT`, so the affected service needs
+   to reconnect (restart it, or wait for its own reconnect) before the wider grant takes effect.
 
 ## 2. Every publish times out and nothing appears in the log — the inbox-prefix mismatch
 
@@ -147,10 +149,10 @@ malformed: ...") or a broker-side authorization refusal.
 **every** connection attempt rather than cached from the first — that is what makes rotation
 possible without a restart (D8). It cuts both ways: a reconnect failure right after a rotation
 means the *new* file is the problem, not the old one. Two distinct causes produce the two log
-shapes above: the new file itself is malformed (the callback fails locally before ever contacting
-the broker — see §4's two variants), or the file parses fine but its user has been removed from
-`PAIGASUS_IAM` (the JWT is well-formed, but the account no longer recognizes it, and the broker
-refuses the authentication).
+shapes above: the new file itself is malformed (the callback fails before the broker ever
+evaluates the credential — see §4's two variants), or the file parses fine but its user has been
+removed from `PAIGASUS_IAM` (the JWT is well-formed, but the account no longer recognizes it, and
+the broker refuses the authentication).
 
 **Remediation.** Roll back to the previous, known-good `.creds` file — no restart needed either
 way, since the very next connection attempt re-reads whatever is on disk. Then re-mint the intended

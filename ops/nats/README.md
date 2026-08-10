@@ -56,6 +56,38 @@ Deploy `iam-publisher.creds` with `paigasus-iam` and `gateway-consumer.creds` wi
 **Never** ship `iam-provisioner.creds` in a deployment — see `permissions.md` §9 for why it is an
 operator artifact, not a service credential.
 
+## Widening an existing user's grant
+
+Adding a subject to `subjects.env` for a user that already exists is **not** what re-running
+`provision.sh` does. `add_user`'s `nsc add user` call fails against an existing user, the script's
+own guard swallows that failure ("user $name already exists"), and it then regenerates `.creds`
+from the **unchanged** local JWT — the grant is not widened, the run exits `0`, and nothing tells
+you it didn't work. Re-running `provision.sh` to pick up a `subjects.env` edit only works for a
+**brand-new** user; for an existing one it is a silent no-op.
+
+To actually widen a live user's permissions:
+
+```bash
+nsc edit user --account PAIGASUS_IAM --name <user> --allow-pub '<subject>'
+# repeat --allow-pub / --allow-sub (each additive, not a replacement) for every subject being
+# added, then regenerate the .creds file so it carries the newly re-signed permission set:
+nsc generate creds --account PAIGASUS_IAM --name <user> > <path-to-deploy>.creds
+```
+
+`<user>` is one of `iam-publisher` / `gateway-consumer` / `iam-provisioner`; `<subject>` is exactly
+what you added to that user's `*_PUB`/`*_SUB` array in `subjects.env` (keep the file and `nsc`'s
+local state in sync by hand — editing one does not update the other).
+
+**No `nsc push` here.** Unlike an account-level change (JetStream limits, signing keys — what the
+`provision.sh` phase-split's push step is for), a user's permission grant is baked directly into
+that user's own signed JWT and is never uploaded to the broker at all — the client presents it at
+`CONNECT` time, and the broker verifies its signature against the account key it already has. The
+step that actually matters is regenerating the `.creds` file (the local JWT changed) and delivering
+it to wherever the service reads it, via the same **atomic replacement** rotation requires
+(`RUNBOOK-nats.md` §5, `permissions.md` §8) — never a truncate-and-rewrite in place.
+`NatsEventPublisher` re-reads the file on every connection attempt (D8), so the running service
+picks up the wider grant on its next reconnect; no restart is needed either way.
+
 ## More
 
 For deployment/runbook-level operational guidance (rotation, incident response, monitoring),
