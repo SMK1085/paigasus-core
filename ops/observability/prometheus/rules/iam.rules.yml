@@ -31,6 +31,40 @@ groups:
         for: 10m
         labels: { severity: critical }
         annotations: { summary: "IAM outbox relay is not ticking (stalled but process alive)" }
+      # SMA-489. LISTEN is silently unsupported by transaction- and statement-mode connection
+      # poolers (PgBouncer's defaults): the writer's `pg_notify` still succeeds, so nothing else
+      # in this catalog looks wrong, and the relay keeps working via its poll_interval_secs
+      # fallback. This is the only alert that catches that specific failure mode. It must fire on
+      # "rows are being written and drained, yet no notification has ever arrived" — not merely
+      # on "no notifications" alone, which would also be true, and harmless, on an idle deployment
+      # with nothing to notify about; the right-hand `> 0` term is the mandatory control for that,
+      # proving delivery is actually happening and the left side isn't just quiet because there is
+      # nothing to drain.
+      #
+      # BOTH terms aggregate `by (job, instance)`, not `by (job)` — per-REPLICA detection at
+      # identical cost. `NOTIFY` is broadcast to EVERY listening session, so on a healthy
+      # deployment every replica's notification counter climbs independently; a single replica
+      # whose `LISTEN` is wedged has a FLAT notification counter while its own `drained` keeps
+      # climbing off the poll fallback, which is precisely this alert's shape scoped to that one
+      # instance. Under `sum by (job)` the healthy replicas' climbing notifications sum together
+      # with the wedged replica's flat ones and mask it completely — and the wedged replica is
+      # delivering every event a full `poll_interval_secs` late without anything saying so. The
+      # whole-deployment pooler case this alert exists for still fires, simply as one alert per
+      # instance rather than one for the job. `iam_outbox_listener_connected` aggregated with
+      # `min by (job)` (never `max` or `sum` — the replicas do not agree) remains the
+      # complementary signal for a listener that is DOWN rather than silently unheard.
+      #
+      # `for: 15m`, not `0m`, because the condition has a REAL transient: immediately after a
+      # restart that left a drained backlog behind and before any new mutation commits, the
+      # [30m] window still sees the pre-restart drain while there is genuinely nothing to notify
+      # about yet — both terms can hold for ~2 minutes on a perfectly healthy replica. Against a
+      # 30-minute window a 15-minute hold costs nothing in detection: the failure mode this alert
+      # exists for (a pooler eating LISTEN) persists indefinitely, so it is caught either way.
+      - alert: IamOutboxNotificationsAbsent
+        expr: (sum by (job, instance) (increase(iam_outbox_listener_notifications_total[30m])) == 0) and (sum by (job, instance) (increase(iam_outbox_relay_drained_total[30m])) > 0)
+        for: 15m
+        labels: { severity: warning }
+        annotations: { summary: "IAM outbox commit nudges are not arriving (LISTEN likely blocked by a pooler)", description: "No iam_outbox_listener_notifications_total notification has arrived on {{ $labels.job }}/{{ $labels.instance }} in the last 30 minutes, even though iam_outbox_relay_drained_total shows rows being written and drained in that same window — rows ARE flowing, but never via the LISTEN/NOTIFY nudge. Delivery has silently fallen back to [outbox].poll_interval_secs (~5s), which is correct but not what this deployment is configured for. Most likely cause: a transaction- or statement-mode connection pooler in front of Postgres (PgBouncer's defaults do not support LISTEN) — the writer's pg_notify still succeeds, so nothing else looks wrong. If only SOME replicas are alerting, the pooler is not the cause — look at that instance's own listener (iam_outbox_listener_connected, iam_outbox_listener_reconnects_total). See RUNBOOK section 4." }
       - alert: IamPolicySnapshotReloadsStalled
         # Three things this expression has to get right (SMA-470).
         #

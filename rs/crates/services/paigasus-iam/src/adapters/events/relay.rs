@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use metrics::{counter, gauge};
+use metrics::{counter, gauge, histogram};
 #[cfg(test)]
 use paigasus_iam_core::PublishError;
 use paigasus_iam_core::{DomainEvent, EventPublisher, EventType};
@@ -108,6 +108,28 @@ fn row_to_domain_event(row: &event_outbox::Model) -> Result<DomainEvent, String>
     })
 }
 
+/// Which rows a tick may drain (SMA-489 D13).
+///
+/// The distinction exists to keep retry cadence pinned to `poll_interval_secs`. `tick`
+/// increments `attempts` once per tick for every row it locks, and nothing throttles how often
+/// a *nudged* tick happens — so if nudged ticks drained everything, a failing row would burn
+/// its retry budget at the COMMIT rate. At 2 mutations/s a row would reach the default
+/// `max_attempts = 60` in ~30 s instead of ~5 min, dead-lettering the in-flight backlog on a
+/// routine broker restart, and voiding `IamConfig::validate`'s
+/// `duplicate_window_secs > max_attempts × poll_interval_secs` dedup floor while leaving that
+/// check passing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickMode {
+    /// Every unpublished, unparked row — the poll tick's mode, and the pre-SMA-489 behaviour.
+    All,
+    /// Only never-attempted rows (`attempts = 0`) — every nudge- and backlog-driven tick.
+    ///
+    /// A row that has failed once is invisible to nudged ticks and is retried only by the poll.
+    /// Side benefit: fresh events are no longer head-of-line blocked behind a poison row on the
+    /// nudge path.
+    Fresh,
+}
+
 /// The transactional-outbox relay: polls `event_outbox` for unpublished, unparked rows and
 /// drains them through an injected [`EventPublisher`]. `Clone`: `DatabaseConnection` is an
 /// `Arc`-backed pool handle (mirrors every other adapter in this crate), so the composition
@@ -118,6 +140,7 @@ pub struct OutboxRelay {
     poll_interval: Duration,
     batch_size: u64,
     max_attempts: i32,
+    wake_debounce: Duration,
 }
 
 impl OutboxRelay {
@@ -128,18 +151,36 @@ impl OutboxRelay {
             poll_interval,
             batch_size,
             max_attempts,
+            wake_debounce: Duration::from_millis(200),
         }
     }
 
-    /// Runs exactly one drain tick (the transactional-outbox pattern described in the module
-    /// docs) and returns its [`TickReport`]. Public (not just used internally by [`Self::run`])
-    /// so tests can drive individual, deterministic ticks rather than racing the poll loop.
+    /// Overrides the D14 nudge debounce (default 200 ms). Builder rather than a `new` parameter
+    /// so the existing four-argument call sites across the test suite stay untouched.
+    #[must_use]
+    pub fn with_wake_debounce(mut self, d: Duration) -> Self {
+        self.wake_debounce = d;
+        self
+    }
+
+    /// Runs exactly one drain tick over EVERY eligible row and returns its [`TickReport`].
+    /// Equivalent to `tick_with(publisher, TickMode::All)`; kept as-is so existing callers and
+    /// tests are unaffected.
     pub async fn tick(&self, publisher: &dyn EventPublisher) -> Result<TickReport, DbErr> {
+        self.tick_with(publisher, TickMode::All).await
+    }
+
+    /// [`Self::tick`], restricted to `mode`'s row set (SMA-489 D13).
+    pub async fn tick_with(&self, publisher: &dyn EventPublisher, mode: TickMode) -> Result<TickReport, DbErr> {
         let txn = self.db.begin().await?;
 
-        let rows = event_outbox::Entity::find()
+        let mut query = event_outbox::Entity::find()
             .filter(event_outbox::Column::PublishedAt.is_null())
-            .filter(event_outbox::Column::Parked.eq(false))
+            .filter(event_outbox::Column::Parked.eq(false));
+        if mode == TickMode::Fresh {
+            query = query.filter(event_outbox::Column::Attempts.eq(0));
+        }
+        let rows = query
             .order_by_asc(event_outbox::Column::Id)
             .limit(self.batch_size)
             .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
@@ -161,7 +202,12 @@ impl OutboxRelay {
             let mut active = row.clone().into_active_model();
             match outcome {
                 Ok(()) => {
-                    active.published_at = Set(Some(Utc::now()));
+                    let published_at = Utc::now();
+                    // SMA-489: the only end-to-end proof the nudge works in production.
+                    // `oldest_unpublished_age_seconds` cannot serve — it is refreshed only by poll
+                    // ticks and reflects that tick's batch, so it cannot show end-to-end publish latency.
+                    histogram!(names::IAM_OUTBOX_PUBLISH_LAG_SECONDS).record(published_at.signed_duration_since(row.occurred_at).num_milliseconds() as f64 / 1000.0);
+                    active.published_at = Set(Some(published_at));
                 }
                 Err(reason) => {
                     report.failures += 1;
@@ -204,47 +250,128 @@ impl OutboxRelay {
         counter!(names::IAM_OUTBOX_RELAY_PUBLISH_FAILURES_TOTAL).increment(report.failures);
         counter!(names::IAM_OUTBOX_RELAY_PUBLISHED_TOTAL).increment(report.drained.saturating_sub(report.failures));
         counter!(names::IAM_OUTBOX_RELAY_PARKED_TOTAL).increment(report.parked);
-        gauge!(names::IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS).set(report.oldest_unpublished_age_secs.unwrap_or(0) as f64);
+        // SMA-489: the backlog-age gauge is refreshed by `TickMode::All` ticks ONLY. `Fresh`
+        // excludes `attempts > 0`, so the instant a publisher starts failing — exactly when this
+        // gauge matters — a nudged tick's row set no longer contains the stuck rows, and setting
+        // the gauge from it would overwrite the real backlog age with a fresh row's age, or with
+        // `0` on an empty batch. Under steady commit traffic that is not a blip: every scrape
+        // landing after a nudged tick resets `IamOutboxBacklogAgeHigh`'s `for: 5m` pending state,
+        // and the alert may never fire at all. The poll tick sees every eligible row, so it is
+        // the only tick whose batch is representative of the backlog. Cost: the gauge's refresh
+        // rate is exactly `poll_interval`, which is what the RUNBOOK already documents.
+        if mode == TickMode::All {
+            gauge!(names::IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS).set(report.oldest_unpublished_age_secs.unwrap_or(0) as f64);
+        }
 
         Ok(report)
     }
 
-    /// Runs one drain [`Self::tick`] and records its outcome on the `ticks_total{result}`
-    /// run-loop counter (`result="ok"` on success; `result="error"` plus a `tracing::warn!`
-    /// on a DB-level tick error). This is the exact body [`Self::run`] executes per poll
-    /// interval, factored out so `run`'s only remaining logic is the `select!` shutdown loop.
-    /// Intended for `run` and tests only — production callers should use [`Self::run`]; it is
-    /// `pub` for the same reason [`Self::tick`] is: to let tests assert the ok/error tick
-    /// counters deterministically without racing the poll loop (SMA-465).
-    pub async fn tick_and_record(&self, publisher: &dyn EventPublisher) {
-        match self.tick(publisher).await {
-            Ok(_) => {
+    /// Runs one [`Self::tick_with`] and records its outcome on the `ticks_total{result}`
+    /// run-loop counter. Returns `tick_with`'s own `Result` so [`Self::run`]'s backlog
+    /// continuation (SMA-489 D9) can read `drained`/`failures` and so an `Err` ends a
+    /// continuation run instead of hot-looping a broken database.
+    pub async fn tick_and_record(&self, publisher: &dyn EventPublisher, mode: TickMode) -> Result<TickReport, DbErr> {
+        match self.tick_with(publisher, mode).await {
+            Ok(report) => {
                 counter!(names::IAM_OUTBOX_RELAY_TICKS_TOTAL, "result" => "ok").increment(1);
+                Ok(report)
             }
             Err(err) => {
                 counter!(names::IAM_OUTBOX_RELAY_TICKS_TOTAL, "result" => "error").increment(1);
                 tracing::warn!(error = %err, "outbox relay tick failed; retrying next interval");
+                Err(err)
             }
         }
     }
 
-    /// Runs the relay loop until `shutdown` resolves: sleep `poll_interval`, tick, repeat —
-    /// mirrors `PolicySnapshot::spawn_reload`'s `tokio::select!` shutdown-watch exactly (sleep
-    /// races shutdown first, so the very first tick runs after one poll interval, not
-    /// immediately). A tick-level error (e.g. a dropped connection) is logged and the loop keeps
-    /// going; per-row publish failures never reach here — [`Self::tick`] already turns those
-    /// into `attempts`/`parked` bookkeeping on the same transaction.
-    pub async fn run<S>(self, publisher: Arc<dyn EventPublisher>, shutdown: S)
+    /// Runs the relay loop until `shutdown` resolves.
+    ///
+    /// Three things can start a tick: the `poll_interval` timer (draining every eligible row,
+    /// `TickMode::All`), a `wake` permit from the `PgOutboxListener` (SMA-489), or SMA-489 D9's
+    /// backlog continuation. The latter two use `TickMode::Fresh` so retry cadence stays pinned
+    /// to `poll_interval` (D13).
+    ///
+    /// **Shutdown is checked BETWEEN ticks, never raced AROUND one.** Racing `shutdown` against
+    /// the tick itself would cancel it mid-flight, rolling back a transaction whose events the
+    /// publisher may already have accepted — SMA-471 D3's unbounded-republish gap, on every
+    /// graceful shutdown.
+    ///
+    /// SOUNDNESS: `S: Future` is not `FusedFuture`, and polling a completed future is a contract
+    /// violation. This shape is sound only because EVERY path that observes `shutdown` ready
+    /// breaks the loop immediately. Preserve that if you restructure, or switch to a
+    /// `CancellationToken`/`watch::Receiver`, which are poll-after-ready safe.
+    pub async fn run<S>(self, publisher: Arc<dyn EventPublisher>, wake: Arc<tokio::sync::Notify>, shutdown: S)
     where
         S: Future<Output = ()> + Send,
     {
         tokio::pin!(shutdown);
-        loop {
-            tokio::select! {
-                () = tokio::time::sleep(self.poll_interval) => {
-                    self.tick_and_record(publisher.as_ref()).await;
+
+        // SMA-489 D12: prime every label value at zero. A metrics-rs series first appears
+        // already at 1, so an `increase()` rule could never fire on a label's first occurrence.
+        for source in ["notify", "poll", "backlog"] {
+            counter!(names::IAM_OUTBOX_RELAY_WAKEUPS_TOTAL, "source" => source).increment(0);
+        }
+
+        // The poll deadline is ABSOLUTE and lives outside the loop. A
+        // `sleep(self.poll_interval)` constructed inside the `select!` would restart on every
+        // outer iteration — including every nudged one — so above ~1 commit per interval the
+        // poll arm would never fire. `TickMode::All` is the only path that selects rows with
+        // `attempts > 0`, so a row that failed once would then never be retried and never
+        // parked. Silently: `TickMode::All` is also the only path that refreshes
+        // `oldest_unpublished_age_seconds` (see `tick_with`), so the gauge would freeze at its
+        // last poll-tick value while the stuck backlog grew behind it.
+        let mut next_poll = tokio::time::Instant::now() + self.poll_interval;
+
+        'outer: loop {
+            // `biased` so a ready shutdown always beats a ready notify permit. Without it the
+            // choice is random, an extra tick can run after shutdown, and the tests that assert
+            // otherwise become flaky. It costs nothing: the tick is not inside this select.
+            let mut source = tokio::select! {
+                biased;
+                () = &mut shutdown => break 'outer,
+                // The poll arm is ordered AHEAD of notify deliberately. `biased` takes the first
+                // ready arm, and a saturating nudge stream keeps a permit permanently available —
+                // so with notify first, an overdue absolute deadline would never even be polled
+                // (measured: notify 1295, poll 0). Ordering poll first costs nudge latency
+                // nothing, because this arm is only ready once its deadline has arrived.
+                () = tokio::time::sleep_until(next_poll) => {
+                    // Advance ONLY when the poll arm actually fires. Re-arming it on nudged
+                    // iterations would reintroduce the starvation in a subtler form.
+                    next_poll = tokio::time::Instant::now() + self.poll_interval;
+                    "poll"
                 }
-                () = &mut shutdown => break,
+                () = wake.notified() => "notify",
+            };
+            let mut mode = if source == "poll" { TickMode::All } else { TickMode::Fresh };
+
+            loop {
+                counter!(names::IAM_OUTBOX_RELAY_WAKEUPS_TOTAL, "source" => source).increment(1);
+                let Ok(report) = self.tick_and_record(publisher.as_ref(), mode).await else {
+                    break; // already logged and counted; never hot-loop a broken database
+                };
+                // D9: continue only on a FULL batch that made progress. `drained > failures`
+                // rather than `failures == 0` so one poison row cannot disable the continuation.
+                if report.drained < self.batch_size || report.drained <= report.failures {
+                    break;
+                }
+                // Poll shutdown WITHOUT cancelling anything, then keep draining.
+                let stopping = std::future::poll_fn(|cx| std::task::Poll::Ready(shutdown.as_mut().poll(cx).is_ready())).await;
+                if stopping {
+                    break 'outer;
+                }
+                source = "backlog";
+                mode = TickMode::Fresh;
+            }
+
+            // D14: floor the nudge-driven tick rate. The poll arm is already bounded.
+            if source != "poll" {
+                let jitter = 0.75 + rand::random::<f64>() * 0.5;
+                let delay = self.wake_debounce.mul_f64(jitter);
+                tokio::select! {
+                    biased;
+                    () = &mut shutdown => break 'outer,
+                    () = tokio::time::sleep(delay) => {}
+                }
             }
         }
     }
@@ -393,5 +520,20 @@ mod tests {
         let prefix = out.trim_end_matches('…');
         assert!(prefix.chars().all(|c| c == '€'), "prefix must be whole '€' chars, got: {prefix:?}");
         assert_eq!(prefix.len(), 1023, "must give up the trailing partial byte rather than split a character");
+    }
+
+    /// The D9 continuation predicate, isolated. The mixed case is what discriminates
+    /// `drained > failures` from the naive `failures == 0`: a single poison row sits at a fixed
+    /// FIFO position and reappears in every batch until it parks 60 attempts later, so
+    /// `failures == 0` would leave the continuation dead exactly when a deep backlog needs it.
+    #[test]
+    fn continuation_predicate_requires_a_full_batch_that_made_progress() {
+        let batch = 100u64;
+        let should_continue = |drained: u64, failures: u64| drained == batch && drained > failures;
+
+        assert!(should_continue(100, 0), "full batch, all published");
+        assert!(should_continue(100, 99), "full batch, one row published — still progress");
+        assert!(!should_continue(100, 100), "full batch, nothing published — would hot-loop");
+        assert!(!should_continue(99, 0), "partial batch — queue is drained");
     }
 }

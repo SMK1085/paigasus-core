@@ -51,7 +51,7 @@ async fn issue_in_enqueue_and_record_commit_atomically_sharing_correlation_id_no
     let (key, hash) = support::sample_key(&sa.principal_id, owner.clone());
 
     let uow = SeaOrmUnitOfWork::new(db.clone());
-    let outbox = PgOutbox::new();
+    let outbox = PgOutbox::new(true);
     let audit = PgAuditLog::new(db.clone());
 
     let now = Utc::now();
@@ -143,7 +143,7 @@ async fn a_store_error_mid_txn_leaves_no_outbox_or_audit_rows() {
     repo.issue(&first_key, &hash).await.unwrap();
 
     let uow = SeaOrmUnitOfWork::new(db.clone());
-    let outbox = PgOutbox::new();
+    let outbox = PgOutbox::new(true);
     let audit = PgAuditLog::new(db.clone());
     let now = Utc::now();
     let corr = KernelIdGenerator.new_correlation_id();

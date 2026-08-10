@@ -18,18 +18,24 @@ use super::map_err;
 use super::uow::recover_txn;
 use async_trait::async_trait;
 use paigasus_iam_core::{DomainEvent, Outbox, RepositoryError, Transaction};
-use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, DbBackend, Set, Statement};
 
-/// Stateless: `enqueue` never touches `&self`, only the caller-supplied transaction — but the
-/// port is injected as `Arc<dyn Outbox>` (mirrors every other adapter in this module), so a
-/// unit struct is the simplest shape that satisfies that composition-root convention.
-#[derive(Clone, Copy, Default)]
-pub struct PgOutbox;
+/// `enqueue` never touches `&self` beyond reading [`Self::notify`] — all writes go to the
+/// caller-supplied transaction — but the port is injected as `Arc<dyn Outbox>` (mirroring every
+/// other adapter here), so a tiny value type is the simplest shape satisfying that convention.
+///
+/// Deliberately NOT `Default`: the only sensible default for `notify` is `true`, and a
+/// `Default` that silently shipped `false` would disable SMA-489 with no diagnostic.
+#[derive(Clone, Copy)]
+pub struct PgOutbox {
+    notify: bool,
+}
 
 impl PgOutbox {
+    /// `notify` mirrors `[outbox].wake_on_commit` (SMA-489 D11).
     #[must_use]
-    pub fn new() -> Self {
-        PgOutbox
+    pub fn new(notify: bool) -> Self {
+        PgOutbox { notify }
     }
 }
 
@@ -54,11 +60,36 @@ fn event_to_model(ev: &DomainEvent) -> event_outbox::ActiveModel {
     }
 }
 
+/// The Postgres channel the relay's `PgOutboxListener` subscribes to (SMA-489 D3). Lowercase
+/// on purpose: sqlx emits `LISTEN "iam_outbox_event"` (quoted, case-preserving) while
+/// `pg_notify` takes the channel as a VALUE — the two agree only while the name has no
+/// uppercase.
+const WAKE_CHANNEL: &str = "iam_outbox_event";
+
 #[async_trait]
 impl Outbox for PgOutbox {
     async fn enqueue(&self, tx: &dyn Transaction, ev: &DomainEvent) -> Result<(), RepositoryError> {
         let txn = recover_txn(tx)?;
         event_to_model(ev).insert(txn).await.map_err(map_err)?;
+        if self.notify {
+            // SMA-489 D2. Emitted INSIDE the caller's transaction on purpose: Postgres buffers
+            // the notification and delivers it ONLY if that transaction commits, discarding it
+            // on rollback. That is what makes "signal after commit" structural here rather than
+            // a rule every call site has to remember.
+            //
+            // The payload is empty (D3): the relay re-queries for work anyway, and an empty
+            // payload means a hostile session that LISTENs on this channel — they are
+            // database-wide and unprivileged — learns only that SOME mutation happened, never
+            // which principal or event type.
+            //
+            // NOTE (D4): if Postgres's async notification queue is FULL this does not fail
+            // here — the transaction fails at COMMIT instead, surfacing from
+            // `SeaOrmTransaction::commit` as an opaque backend error. That is why
+            // `[outbox].wake_on_commit` gates this writer and not only the listener.
+            txn.execute(Statement::from_string(DbBackend::Postgres, format!("SELECT pg_notify('{WAKE_CHANNEL}', '')")))
+                .await
+                .map_err(map_err)?;
+        }
         Ok(())
     }
 }

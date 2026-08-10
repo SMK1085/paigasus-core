@@ -401,7 +401,7 @@ async fn grant_in_enqueue_and_record_commit_atomically_sharing_correlation_id() 
     let gens = Generations::memory();
     let store = PgRoleGrantStore::new(db.clone(), gens.clone());
     let uow = SeaOrmUnitOfWork::new(db.clone());
-    let outbox = PgOutbox::new();
+    let outbox = PgOutbox::new(true);
     let audit = PgAuditLog::new(db.clone());
 
     let corr = KernelIdGenerator.new_correlation_id();
@@ -481,7 +481,7 @@ async fn a_store_error_mid_txn_leaves_no_outbox_or_audit_rows_and_no_gen_bump() 
     let before = gens.policy_gen().await.unwrap();
 
     let uow = SeaOrmUnitOfWork::new(db.clone());
-    let outbox = PgOutbox::new();
+    let outbox = PgOutbox::new(true);
     let audit = PgAuditLog::new(db.clone());
     let corr = KernelIdGenerator.new_correlation_id();
     let event = DomainEvent {

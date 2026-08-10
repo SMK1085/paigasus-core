@@ -519,7 +519,7 @@ impl Authorizer for AllowAllAuthorizer {
 async fn retire(db: &DatabaseConnection, id: &str, ack: bool) -> Result<RetireOutcome, TenancyError> {
     let svc = SystemRetirementService::new(SystemRetirementDeps {
         retirer: Arc::new(PgSystemRowRetirer::new(db.clone())),
-        outbox: Arc::new(PgOutbox::new()),
+        outbox: Arc::new(PgOutbox::new(true)),
         audit: Arc::new(PgAuditLog::new(db.clone())),
         gen_bumper: Arc::new(GenerationsPolicyGenBumper::new(Generations::memory())),
         ids: Arc::new(KernelIdGenerator),
