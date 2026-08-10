@@ -112,11 +112,18 @@ nats --server "$NATS_URL" --creds "$OUT_DIR/iam-provisioner.creds" \
   --no-allow-rollup --no-deny-delete --no-deny-purge --defaults
 
 # The durable carries the subject filter, because a pull consumer's permissions cannot (D5).
-filter_csv=$(IFS=,; echo "${CONSUMER_FILTER_SUBJECTS[*]}")
+# `--filter` is REPEATABLE (natscli's StringsVar), not comma-splitting — comma-splitting only
+# happens on the interactive prompt path, which `--filter` on the command line skips entirely. A
+# single comma-joined value would be accepted as ONE literal filter subject containing commas,
+# which starts with `iam.` (so it passes the stream's subject-overlap check with no error) and
+# then matches no real event subject ever again — the consumer looks healthy and silently
+# delivers nothing. Pass one `--filter` per subject, the same pattern `add_user` above uses for
+# `--allow-pub`/`--allow-sub`. Do NOT collapse this back into a comma-joined string.
+filter_args=()
+for s in "${CONSUMER_FILTER_SUBJECTS[@]}"; do filter_args+=(--filter "$s"); done
 nats --server "$NATS_URL" --creds "$OUT_DIR/iam-provisioner.creds" \
   consumer add "$STREAM_NAME" "$DURABLE_NAME" \
-  --pull \
-  --filter "$filter_csv" \
+  --pull "${filter_args[@]}" \
   --ack explicit \
   --deliver all \
   --max-deliver 5 \

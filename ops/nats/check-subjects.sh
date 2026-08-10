@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# Asserts the committed test fixture grants EXACTLY the subjects in `subjects.env` (SMA-493 D10).
+# Asserts the committed test fixture grants EXACTLY the subjects in `subjects.env` (SMA-493 D10),
+# PER IDENTITY — not merely that the same subjects appear somewhere in the file. A flattened-set
+# comparison (union everything, compare sets) would pass even if, say, `iam.>` were granted to
+# `gateway-consumer` instead of `iam-publisher`: the two identities' allow-lists would still union
+# to the same overall set, so nothing would look wrong. That is exactly the mistake this gate
+# exists to catch — the whole point of SMA-493 is that `gateway-consumer` must NOT be able to read
+# `iam.>` — so each user's own stanza is checked against that user's own `subjects.env` arrays,
+# not against the pooled total.
 #
 # Why this exists: the permission lists live in two encodings — `provision.sh` (what deploys) and
 # `accounts.conf.tmpl` (what the integration test proves). Without this gate the artifact that is
@@ -16,34 +23,84 @@ source "$here/subjects.env"
 tmpl="$here/test/accounts.conf.tmpl"
 fail=0
 
-expect_present() {
-  local subject="$1"
-  if ! grep -qF -- "\"$subject\"" "$tmpl"; then
-    echo "MISSING from accounts.conf.tmpl: $subject" >&2
+# Bounds one identity's stanza to the lines from its own nkey placeholder up to (but not
+# including) the NEXT identity's nkey placeholder — or end of file for the last identity — then
+# checks that stanza's own `publish:`/`subscribe:` lines against that identity's own PUB/SUB
+# arrays, in both directions. `next_placeholder` empty means "to end of file".
+check_identity() {
+  local identity="$1" nkey_placeholder="$2"; shift 2
+  local -n pub_arr="$1"; shift
+  local -n sub_arr="$1"; shift
+  local next_placeholder="${1:-}"
+
+  local start
+  start=$(grep -nF -- "$nkey_placeholder" "$tmpl" | head -1 | cut -d: -f1)
+  if [ -z "$start" ]; then
+    echo "MISSING from accounts.conf.tmpl: no nkey placeholder $nkey_placeholder found for $identity" >&2
     fail=1
+    return
   fi
+
+  local end
+  if [ -n "$next_placeholder" ]; then
+    local next_start
+    next_start=$(grep -nF -- "$next_placeholder" "$tmpl" | head -1 | cut -d: -f1)
+    end=$((next_start - 1))
+  else
+    end=$(wc -l < "$tmpl")
+  fi
+
+  local block pub_line sub_line
+  block=$(sed -n "${start},${end}p" "$tmpl")
+  # Each identity's stanza has exactly one `publish:`/`subscribe:` line in this template's
+  # formatting (one allow-list per direction, all on one line) — bounding the search to this
+  # identity's own line range is what makes the per-identity assertion possible at all.
+  pub_line=$(grep 'publish:' <<< "$block" || true)
+  sub_line=$(grep 'subscribe:' <<< "$block" || true)
+
+  local s
+  for s in "${pub_arr[@]}"; do
+    if ! grep -qF -- "\"$s\"" <<< "$pub_line"; then
+      echo "MISSING from accounts.conf.tmpl: $s (expected in $identity's publish.allow)" >&2
+      fail=1
+    fi
+  done
+  for s in "${sub_arr[@]}"; do
+    if ! grep -qF -- "\"$s\"" <<< "$sub_line"; then
+      echo "MISSING from accounts.conf.tmpl: $s (expected in $identity's subscribe.allow)" >&2
+      fail=1
+    fi
+  done
+
+  # The other direction: every quoted subject in THIS identity's own allow lists must be
+  # accounted for by THIS identity's own subjects.env arrays, so one identity cannot quietly grant
+  # something subjects.env only authorised for a different identity.
+  local pub_declared sub_declared pub_granted sub_granted
+  pub_declared=$(printf '%s\n' "${pub_arr[@]}" | sort -u)
+  sub_declared=$(printf '%s\n' "${sub_arr[@]}" | sort -u)
+  pub_granted=$(grep -oE 'allow: \[[^]]*\]' <<< "$pub_line" | grep -oE '"[^"]+"' | tr -d '"' | sort -u || true)
+  sub_granted=$(grep -oE 'allow: \[[^]]*\]' <<< "$sub_line" | grep -oE '"[^"]+"' | tr -d '"' | sort -u || true)
+
+  local g
+  while IFS= read -r g; do
+    [ -z "$g" ] && continue
+    if ! printf '%s\n' "$pub_declared" | grep -qxF -- "$g"; then
+      echo "UNDECLARED grant in accounts.conf.tmpl (not in subjects.env): $g (found in $identity's publish.allow)" >&2
+      fail=1
+    fi
+  done <<< "$pub_granted"
+  while IFS= read -r g; do
+    [ -z "$g" ] && continue
+    if ! printf '%s\n' "$sub_declared" | grep -qxF -- "$g"; then
+      echo "UNDECLARED grant in accounts.conf.tmpl (not in subjects.env): $g (found in $identity's subscribe.allow)" >&2
+      fail=1
+    fi
+  done <<< "$sub_granted"
 }
 
-for s in "${PUBLISHER_PUB[@]}" "${PUBLISHER_SUB[@]}" \
-         "${CONSUMER_PUB[@]}" "${CONSUMER_SUB[@]}" \
-         "${PROVISIONER_PUB[@]}" "${PROVISIONER_SUB[@]}"; do
-  expect_present "$s"
-done
-
-# The other direction: every quoted subject inside an allow list must be accounted for, so a
-# fixture cannot quietly grant something `subjects.env` never authorised.
-declared=$(printf '%s\n' "${PUBLISHER_PUB[@]}" "${PUBLISHER_SUB[@]}" \
-                          "${CONSUMER_PUB[@]}" "${CONSUMER_SUB[@]}" \
-                          "${PROVISIONER_PUB[@]}" "${PROVISIONER_SUB[@]}" | sort -u)
-granted=$(grep -oE 'allow: \[[^]]*\]' "$tmpl" | grep -oE '"[^"]+"' | tr -d '"' | sort -u)
-
-while IFS= read -r s; do
-  [ -z "$s" ] && continue
-  if ! printf '%s\n' "$declared" | grep -qxF -- "$s"; then
-    echo "UNDECLARED grant in accounts.conf.tmpl (not in subjects.env): $s" >&2
-    fail=1
-  fi
-done <<< "$granted"
+check_identity iam-publisher    '{{PUBLISHER_NKEY}}'   PUBLISHER_PUB   PUBLISHER_SUB   '{{CONSUMER_NKEY}}'
+check_identity gateway-consumer '{{CONSUMER_NKEY}}'    CONSUMER_PUB    CONSUMER_SUB    '{{PROVISIONER_NKEY}}'
+check_identity iam-provisioner  '{{PROVISIONER_NKEY}}' PROVISIONER_PUB PROVISIONER_SUB ''
 
 if [ "$fail" -ne 0 ]; then
   echo "ops/nats: accounts.conf.tmpl and subjects.env disagree" >&2
