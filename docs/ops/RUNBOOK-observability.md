@@ -589,6 +589,10 @@ of rotation; `IamOutboxPublishFailures` above, `IamOutboxBacklogAgeHigh`, and
 never finished booting. `kubectl logs` (or the platform-equivalent) on the crash-looping pod is
 the only signal.
 
+> **Permissions, TLS and credentials** have their own runbook: [`RUNBOOK-nats.md`](./RUNBOOK-nats.md)
+> (SMA-493). A denied publish presents as a *timeout*, not an error, so it does not look like
+> anything in this section.
+
 ### `IamOutboxRelayStalled` — the relay has stopped ticking (critical)
 
 **Meaning.** `rate(iam_outbox_relay_ticks_total[10m]) == 0` for 10 minutes — the relay's poll

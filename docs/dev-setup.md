@@ -80,7 +80,15 @@ then set:
 [outbox.publisher]
 backend = "nats"
 url     = "nats://127.0.0.1:4222"
+# Required for a local broker: the nats backend otherwise demands tls:// AND a credentials_file
+# (SMA-493). This one flag waives both — it legalises an unauthenticated broker as well as an
+# unencrypted one, which is why it is not called `allow_plaintext`. Never set it in a deployment.
+allow_insecure_broker = true
 ```
+
+For the production shape — a dedicated account, least-privilege subject permissions, TLS and
+`.creds` — see [`ops/nats/README.md`](../ops/nats/README.md) and
+[`docs/ops/RUNBOOK-nats.md`](./ops/RUNBOOK-nats.md).
 
 The service creates `IAM_EVENTS` if it is absent. If it already exists it is **adopted, never
 reshaped** — `get_or_create_stream` does not reconcile, deliberately, so the service can never
