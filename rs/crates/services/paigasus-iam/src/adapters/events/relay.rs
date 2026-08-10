@@ -204,8 +204,8 @@ impl OutboxRelay {
                 Ok(()) => {
                     let published_at = Utc::now();
                     // SMA-489: the only end-to-end proof the nudge works in production.
-                    // `oldest_unpublished_age_seconds` cannot serve — it is reset to 0 on every
-                    // empty tick, and the nudge makes empty ticks common.
+                    // `oldest_unpublished_age_seconds` cannot serve — it is refreshed only by poll
+                    // ticks and reflects that tick's batch, so it cannot show end-to-end publish latency.
                     histogram!(names::IAM_OUTBOX_PUBLISH_LAG_SECONDS).record(published_at.signed_duration_since(row.occurred_at).num_milliseconds() as f64 / 1000.0);
                     active.published_at = Set(Some(published_at));
                 }

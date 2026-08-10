@@ -502,7 +502,7 @@ fn describe_iam_metrics() {
     );
     describe_gauge!(
         names::IAM_OUTBOX_OLDEST_UNPUBLISHED_AGE_SECONDS,
-        "Age in seconds of the oldest unpublished-and-unparked outbox row seen in the most recent non-empty relay tick's batch."
+        "Age in seconds of the oldest unpublished-and-unparked outbox row seen in the most recent poll tick's batch."
     );
 
     describe_counter!(
@@ -529,7 +529,7 @@ fn describe_iam_metrics() {
     );
     describe_histogram!(
         names::IAM_OUTBOX_PUBLISH_LAG_SECONDS,
-        "End-to-end outbox latency: now - occurred_at when a row is successfully published. The only signal that proves the commit-nudge is working; iam_outbox_oldest_unpublished_age_seconds cannot, as it resets to 0 on every empty tick."
+        "End-to-end outbox latency: now - occurred_at when a row is successfully published. The only signal that proves the commit-nudge is working; iam_outbox_oldest_unpublished_age_seconds cannot, as it is refreshed only by poll ticks and reflects that tick's batch."
     );
     describe_counter!(
         names::IAM_OUTBOX_LISTENER_NOTIFICATIONS_TOTAL,
