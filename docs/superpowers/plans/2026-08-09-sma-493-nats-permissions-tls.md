@@ -1,23 +1,24 @@
 # SMA-493 — NATS permissions, TLS and credential rotation: Implementation Plan
 
-> **Superseded during implementation.** This plan is a record of intent, not current guidance — do
-> not copy code from it. Several of its code blocks turned out to be defective and were replaced
-> during implementation:
-> - the `.creds` `block()` parser bounded the body on a bare `---`, truncating any JWT containing
->   three consecutive dashes (base64url includes `-`) — fixed in `875555d`
-> - `provision.sh`'s two-pass flow ran broker operations before the account was pushed, and
->   `add_user` was not idempotent — fixed in `aacd9c6`
-> - `nats consumer add --filter` is a repeatable flag, so the comma-joined value became a single
->   literal filter subject matching nothing — fixed in `c7fd948`
-> - `check-subjects.sh` compared flattened subject sets rather than per-identity assignments —
->   fixed in `c7fd948`
-> - the rotation tests reached their second attempt via a fresh `connect()`, which re-reads under
->   the old implementation too, so they did not test the per-client caching defect at all — fixed
->   in `fe98696`
-> - the Moon task's `inputs` listed `tests/support/**`, which the suite does not use — fixed in
->   `86224ca`
->
-> For current behavior, read the merged source, not this document.
+**Superseded during implementation.** This plan is a record of intent, not current guidance — do
+not copy code from it. Several of its code blocks turned out to be defective and were replaced
+during implementation:
+
+- the `.creds` `block()` parser bounded the body on a bare `---`, truncating any JWT containing
+  three consecutive dashes (base64url includes `-`) — fixed in `875555d`
+- `provision.sh`'s two-pass flow ran broker operations before the account was pushed, and
+  `add_user` was not idempotent — fixed in `aacd9c6`
+- `nats consumer add --filter` is a repeatable flag, so the comma-joined value became a single
+  literal filter subject matching nothing — fixed in `c7fd948`
+- `check-subjects.sh` compared flattened subject sets rather than per-identity assignments —
+  fixed in `c7fd948`
+- the rotation tests reached their second attempt via a fresh `connect()`, which re-reads under
+  the old implementation too, so they did not test the per-client caching defect at all — fixed
+  in `fe98696`
+- the Moon task's `inputs` listed `tests/support/**`, which the suite does not use — fixed in
+  `86224ca`
+
+For current behavior, read the merged source, not this document.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
