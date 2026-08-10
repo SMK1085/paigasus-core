@@ -191,8 +191,9 @@ user.
 `provision.sh` §4 creates the `IAM_EVENTS` stream with specific values — `--storage file`,
 `--retention limits`, `--dupe-window 1h`, `--max-age 7d`, `--subjects "iam.>"`. These are not
 arbitrary operator defaults; they must match `PublisherConfig::default()`
-(`rs/crates/services/paigasus-iam/src/config.rs`) field-for-field, because `NatsEventPublisher::
-connect` **adopts** an existing stream rather than reconciling it (SMA-471 D7): if the live stream
+(`rs/crates/services/paigasus-iam/src/config.rs`) field-for-field, because
+`NatsEventPublisher::connect` **adopts** an existing stream rather than reconciling it
+(SMA-471 D7): if the live stream
 is weaker than the service's configured expectations — a shorter `duplicate_window`, a
 non-`Limits` retention policy, non-`File` storage, or subjects that don't cover `iam.>` — boot
 fails outright with a typed drift error rather than silently reshaping (or worse, silently
