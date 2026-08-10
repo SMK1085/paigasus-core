@@ -343,6 +343,25 @@ fn wakeups_total_from(rendered: &str) -> u64 {
     support::sum_metric_from(rendered, "iam_outbox_relay_wakeups_total") as u64
 }
 
+/// The `source="poll"` series of `iam_outbox_relay_wakeups_total` specifically — unlike
+/// `wakeups_total_from`, which sums across every `source` label via `sum_metric_from`, the two
+/// poll-starvation regression guards below need the poll arm's count isolated from the notify
+/// arm's. `find` (not `filter`+`sum`) mirrors `sum_metric_from`'s label-matching intent for a
+/// SINGLE series, since Prometheus text exposition never repeats one label set on two lines.
+/// Filtering out `#`-prefixed lines is load-bearing, not cosmetic: a `# TYPE
+/// iam_outbox_relay_wakeups_total counter` line also contains the metric name and would
+/// otherwise satisfy `find` first, making the assertion vacuous (already bitten this branch
+/// twice).
+fn poll_wakeups_total_from(rendered: &str) -> u64 {
+    rendered
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .find(|l| l.contains("iam_outbox_relay_wakeups_total") && l.contains(r#"source="poll""#))
+        .and_then(|l| l.rsplit(' ').next())
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or(0.0) as u64
+}
+
 /// SMA-489 AC1's mechanism: a notify permit starts a tick without waiting out the poll
 /// interval. The 600s interval means a `source="notify"` series can ONLY appear if the notify
 /// arm fired.
@@ -487,13 +506,7 @@ async fn a_continuous_nudge_stream_does_not_starve_the_poll_arm() {
     tokio::time::timeout(Duration::from_secs(5), run).await.expect("run exits").expect("no panic");
 
     let out = handle.render();
-    let polls = out
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .find(|l| l.contains("iam_outbox_relay_wakeups_total") && l.contains(r#"source="poll""#))
-        .and_then(|l| l.rsplit(' ').next())
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .unwrap_or(0.0) as u64;
+    let polls = poll_wakeups_total_from(&out);
 
     assert!(
         polls > 0,
@@ -542,13 +555,7 @@ async fn a_saturating_nudge_stream_does_not_starve_the_poll_arm() {
     tokio::time::timeout(Duration::from_secs(5), run).await.expect("run exits").expect("no panic");
 
     let out = handle.render();
-    let polls = out
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .find(|l| l.contains("iam_outbox_relay_wakeups_total") && l.contains(r#"source="poll""#))
-        .and_then(|l| l.rsplit(' ').next())
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .unwrap_or(0.0) as u64;
+    let polls = poll_wakeups_total_from(&out);
 
     assert!(
         polls > 0,
