@@ -655,6 +655,17 @@ Most likely causes, in order:
    climbs regardless of what its neighbours do. Check `iam_outbox_listener_connected` (keep
    `instance`, or aggregate with `min by (job)` — never `max` or `sum`, the replicas do not
    agree) and `iam_outbox_listener_reconnects_total` for that instance.
+3. **A dead-letter replay is draining during a quiet period** — benign, and the one *false
+   positive* this alert has. Not every drained row was ever notified about: a replay (SMA-469,
+   `POST /v1/outbox/dead-letters/…/replay`) returns parked rows to the live queue with a direct
+   `UPDATE` that clears `parked`/`attempts` and emits **no** `pg_notify`, so replayed rows wait
+   for the poll by design. The alert's evidence term is
+   `increase(iam_outbox_relay_drained_total[30m]) > 0`, which counts those rows too — so a
+   sustained replay on a deployment taking no ordinary mutations satisfies both terms with a
+   perfectly healthy listener. Check `increase(iam_outbox_dead_letters_replayed_total[30m])` over
+   the same window: if it accounts for the drained rows, the alert is explained and there is
+   nothing to fix. Confirm by watching whether the counter resumes climbing once ordinary
+   mutations do.
 
 `[outbox].wake_on_commit = false` is **not** a possible cause: with the flag off no listener is
 spawned at all, so `iam_outbox_listener_notifications_total` is never registered, `increase()`
