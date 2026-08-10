@@ -478,3 +478,79 @@ async fn neither_service_identity_can_subscribe_to_the_others_inbox() {
     publisher_client.flush().await.expect("flush");
     expect_permissions_violation(&mut publisher_events, "_INBOX_GW.>").await;
 }
+
+/// Mints a CA and a server certificate signed by it, with an IP SAN for 127.0.0.1 (the tests dial
+/// a mapped host port). Nothing is committed: `rcgen` is already a dev-dependency here for the
+/// mock IdP, and a per-run key pair keeps certificate material out of git entirely.
+fn mint_tls(dir: &std::path::Path) -> (Vec<u8>, Vec<u8>, PathBuf) {
+    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, SanType};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.distinguished_name.push(DnType::CommonName, "paigasus-nats-test-ca");
+    let ca_key = KeyPair::generate().expect("ca key");
+    let ca_cert = ca_params.self_signed(&ca_key).expect("self-signed ca");
+
+    let mut srv_params = CertificateParams::new(vec!["localhost".to_string()]).expect("server params");
+    srv_params.subject_alt_names.push(SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    let srv_key = KeyPair::generate().expect("server key");
+    let srv_cert = srv_params.signed_by(&srv_key, &ca_cert, &ca_key).expect("server cert signed by the ca");
+
+    let ca_path = dir.join("ca.pem");
+    std::fs::write(&ca_path, ca_cert.pem()).expect("write ca pem");
+    (srv_cert.pem().into_bytes(), srv_key.serialize_pem().into_bytes(), ca_path)
+}
+
+/// D7's field is what makes a private-CA broker dialable at all — without it async-nats falls back
+/// to the system trust store (`tls.rs:61`), which will never contain a per-run CA.
+#[tokio::test]
+async fn the_publisher_connects_over_tls_with_a_named_ca_bundle() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_pem, key_pem, ca_path) = mint_tls(dir.path());
+    let extra = vec![("/etc/nats/server-cert.pem".to_string(), cert_pem), ("/etc/nats/server-key.pem".to_string(), key_pem)];
+
+    let Some(fixture) = start_fixture("nats-server-tls.conf", extra).await else { return };
+
+    let mut cfg = cfg_for(&fixture, &fixture.publisher, "_INBOX_IAM_PUB");
+    cfg.url = Some(fixture.url.replace("nats://", "tls://"));
+    cfg.root_ca_bundle = Some(ca_path.to_string_lossy().to_string());
+
+    let publisher = NatsEventPublisher::connect(&cfg).await.expect("a tls:// connection with a named CA must succeed");
+    publisher.publish(&event(1, EventType::RoleGranted)).await.expect("publish over TLS");
+}
+
+/// The negative control. Without it the test above would pass even if `root_ca_bundle` were
+/// ignored entirely and verification silently disabled.
+#[tokio::test]
+async fn a_tls_connection_without_the_ca_bundle_fails_verification() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_pem, key_pem, _ca_path) = mint_tls(dir.path());
+    let extra = vec![("/etc/nats/server-cert.pem".to_string(), cert_pem), ("/etc/nats/server-key.pem".to_string(), key_pem)];
+
+    let Some(fixture) = start_fixture("nats-server-tls.conf", extra).await else { return };
+
+    let mut cfg = cfg_for(&fixture, &fixture.publisher, "_INBOX_IAM_PUB");
+    cfg.url = Some(fixture.url.replace("nats://", "tls://"));
+    // root_ca_bundle deliberately unset: the per-run CA is in no system trust store.
+    NatsEventPublisher::connect(&cfg).await.expect_err("a private CA must not verify against the system trust store");
+}
+
+/// And a bundle that is well-formed but wrong must also fail — proving the bundle is actually
+/// consulted rather than merely present.
+#[tokio::test]
+async fn a_tls_connection_with_an_unrelated_ca_bundle_fails_verification() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_pem, key_pem, _ca_path) = mint_tls(dir.path());
+    let extra = vec![("/etc/nats/server-cert.pem".to_string(), cert_pem), ("/etc/nats/server-key.pem".to_string(), key_pem)];
+
+    let Some(fixture) = start_fixture("nats-server-tls.conf", extra).await else { return };
+
+    let other = tempfile::tempdir().expect("tempdir");
+    let (_c, _k, unrelated_ca) = mint_tls(other.path());
+
+    let mut cfg = cfg_for(&fixture, &fixture.publisher, "_INBOX_IAM_PUB");
+    cfg.url = Some(fixture.url.replace("nats://", "tls://"));
+    cfg.root_ca_bundle = Some(unrelated_ca.to_string_lossy().to_string());
+    NatsEventPublisher::connect(&cfg).await.expect_err("an unrelated CA must not verify the broker's certificate");
+}
