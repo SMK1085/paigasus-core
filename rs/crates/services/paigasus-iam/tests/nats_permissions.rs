@@ -414,3 +414,34 @@ async fn the_consumer_cannot_subscribe_to_or_forge_events() {
 
     expect_publish_denied(&client, &mut events, "iam.role.granted").await;
 }
+
+/// **The claim D4 actually rests on**, and the only case here that is about the inbox space rather
+/// than about a subject a service was never meant to touch.
+///
+/// This is NOT redundant with the other subscribe denials. `iam.>` and `$JS.API…` are subjects
+/// neither identity has any business reading, so denying them is uncontroversial. An inbox is the
+/// opposite: it is the one subject space every client MUST be able to subscribe to, because
+/// JetStream acks and pull-consumer deliveries both land there and no request completes without
+/// them. That is exactly why a shared `_INBOX.>` grant is dangerous — inside a single account it
+/// would let `gateway-consumer` subscribe to the publisher's ack inbox, and `iam-publisher` to the
+/// consumer's message deliveries, reading in full the event stream neither is allowed to read
+/// directly. Per-user prefixes (`subjects.env`'s `*_INBOX_PREFIX`) are the only way to close that,
+/// and until this test existed nothing proved the prefixes were ENFORCED rather than merely
+/// distinct.
+///
+/// Asserted in both directions, so widening either identity's `subscribe` grant to a bare
+/// `_INBOX.>` — the natural "just make it work" fix when an ack times out — fails here.
+#[tokio::test]
+async fn neither_service_identity_can_subscribe_to_the_others_inbox() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+
+    let (consumer_client, mut consumer_events) = client_for(&fixture, &fixture.consumer, CONSUMER_INBOX).await;
+    let _consumer_sub = consumer_client.subscribe("_INBOX_IAM_PUB.>").await.expect("accepted locally, refused by the server");
+    consumer_client.flush().await.expect("flush");
+    expect_permissions_violation(&mut consumer_events, "_INBOX_IAM_PUB.>").await;
+
+    let (publisher_client, mut publisher_events) = client_for(&fixture, &fixture.publisher, PUBLISHER_INBOX).await;
+    let _publisher_sub = publisher_client.subscribe("_INBOX_GW.>").await.expect("accepted locally, refused by the server");
+    publisher_client.flush().await.expect("flush");
+    expect_permissions_violation(&mut publisher_events, "_INBOX_GW.>").await;
+}
