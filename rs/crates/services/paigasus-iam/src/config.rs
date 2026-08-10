@@ -1159,10 +1159,12 @@ impl IamConfig {
         if !self.outbox.relay_enabled && self.outbox.publisher.backend == PublisherBackend::Nats {
             return Err("outbox.relay_enabled = false with outbox.publisher.backend = \"nats\" would publish nothing — set backend = \"tracing\" or enable the relay".to_string());
         }
-        // SMA-489 §3.4: no relay means nothing to wake. Not an error — just dead config.
-        if !self.outbox.relay_enabled && self.outbox.wake_on_commit {
-            tracing::warn!("outbox.wake_on_commit = true with outbox.relay_enabled = false — no relay is spawned, so no listener is spawned either and the setting has no effect");
-        }
+        // SMA-489 §3.4: `relay_enabled = false` with `wake_on_commit = true` is inert, not
+        // invalid, so it stays an `Ok` here and is NOT diagnosed here either — `main.rs` calls
+        // `validate()` BEFORE `paigasus_logging::init`, so a `warn!` emitted from this function
+        // is written before the service logger exists and is silently lost. The diagnostic lives
+        // in `main.rs` immediately after logging init instead (CodeRabbit round 1). Keep
+        // `validate` free of logging side effects generally: it is a pure predicate over config.
 
         // --- SMA-469: `[outbox.retention]` config ----------------------------------------------
         // Same posture as the `[outbox]` checks directly above: each of these three is a divisor

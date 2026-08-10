@@ -31,6 +31,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("no authz.bootstrap_admins configured — a fresh deployment has no platform administrator and cannot create organizations or grant roles");
     }
 
+    // SMA-489 §3.4: inert config, not invalid — `validate()` above deliberately returns `Ok` for
+    // it. The diagnostic lives HERE rather than inside `validate()` because `validate()` runs
+    // before `paigasus_logging::init` above, so a `warn!` from there would be emitted before the
+    // service logger exists and silently lost (CodeRabbit round 1).
+    if !config.outbox.relay_enabled && config.outbox.wake_on_commit {
+        tracing::warn!("outbox.wake_on_commit = true with outbox.relay_enabled = false — no relay is spawned, so no listener is spawned either and the setting has no effect");
+    }
+
     // Metrics (SMA-446 Unit 3, mirrors `paigasus-gateway::main`'s identical Unit 2 wiring):
     // install the global Prometheus recorder only when `[metrics]` is enabled — `!enabled`
     // means no recorder is installed AND `/metrics` is never mounted below (a `None` handle
