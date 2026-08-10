@@ -1022,26 +1022,35 @@ impl IamConfig {
                 return Err("outbox.publisher.backend = \"nats\" requires outbox.publisher.url".to_string());
             }
             // --- SMA-493 D6: transport + credential posture --------------------------------
-            // Parsed once and reused: `url::Url` is already this function's dependency (the
-            // `source` check below), and both rules below ask questions about the same parse.
-            // A url that does not parse at all is left to `connect` to report, exactly as
-            // before — this block tightens posture, it does not add a syntax gate.
-            if let Some(raw) = p.url.as_deref()
-                && let Ok(parsed) = url::Url::parse(raw)
-            {
+            // `url::Url` is already this function's dependency (the `source` check below). A
+            // url that does not parse at all is left to `connect` to report, exactly as before
+            // — this block tightens posture, it does not add a syntax gate.
+            if let Some(raw) = p.url.as_deref() {
                 // Unconditional, no escape hatch: async-nats never reads url userinfo
                 // (`ServerAddr::username`/`password` have no caller in the connect path), so a
                 // config carrying `nats://user:pass@host` connects ANONYMOUSLY while looking
-                // authenticated. Rejecting it is the only way that misconception surfaces.
-                if !parsed.username().is_empty() || parsed.password().is_some() {
+                // authenticated. Rejecting it is the only way that misconception surfaces. Only
+                // checked when `raw` actually parses with a userinfo component — a url that
+                // does not parse at all is left to `connect` to report.
+                if let Ok(parsed) = url::Url::parse(raw)
+                    && (!parsed.username().is_empty() || parsed.password().is_some())
+                {
                     return Err(
                         "outbox.publisher.url must not embed credentials — async-nats ignores them entirely, so the connection would be anonymous; use outbox.publisher.credentials_file".to_string(),
                     );
                 }
-                if parsed.scheme() != "tls" && !p.allow_insecure_broker {
+                // Checked on the RAW string, not `url::Url::parse`'s scheme: a schemeless form
+                // like `tls:user@host:4222` (missing `//`) parses via `url::Url` as a
+                // cannot-be-a-base URL with scheme "tls" and EMPTY userinfo — passing both the
+                // check above and a naive `parsed.scheme() == "tls"` check — while async-nats'
+                // own parser (`ServerAddr::from_str`) requires `://` to recognize a scheme at
+                // all and prepends `nats://` to anything lacking it, so this would actually be
+                // dialled as `nats://tls:user@host:4222`: plaintext, with `tls`/`user` silently
+                // discarded. Requiring the literal `tls://` prefix on the raw string (which
+                // implies `://` is present at all) closes that gap.
+                if !raw.starts_with("tls://") && !p.allow_insecure_broker {
                     return Err(format!(
-                        "outbox.publisher.url must use tls:// for the nats backend (got {}://) — set outbox.publisher.allow_insecure_broker = true for a dev or CI broker, which also waives the credentials_file requirement",
-                        parsed.scheme()
+                        "outbox.publisher.url must use tls:// for the nats backend (got {raw:?}) — set outbox.publisher.allow_insecure_broker = true for a dev or CI broker, which also waives the credentials_file requirement"
                     ));
                 }
             }
@@ -2729,6 +2738,26 @@ mod tests {
         "#,
         );
         assert!(err.contains("credentials_file"), "{err}");
+    }
+
+    /// D6 rules 1+2, hardened: `url::Url::parse` treats a schemeless form like
+    /// `tls:user@host:4222` (missing `//`) as a cannot-be-a-base URL with scheme "tls" and
+    /// EMPTY userinfo — passing a naive `parsed.scheme() == "tls"` check and the embedded-
+    /// credentials check above it, even though async-nats' own parser requires `://` to
+    /// recognize a scheme at all and would actually dial this as `nats://tls:user@host:4222`:
+    /// plaintext, with `tls`/`user` silently discarded. The raw-string check must catch it.
+    #[test]
+    fn a_schemeless_url_masquerading_as_tls_is_rejected() {
+        let err = validate_err(
+            r#"
+            [outbox.publisher]
+            backend = "nats"
+            url = "tls:user@host:4222"
+            credentials_file = "/etc/paigasus/iam.creds"
+        "#,
+        );
+        assert!(err.contains("tls://"), "{err}");
+        assert!(err.contains("allow_insecure_broker"), "the message must name the escape hatch: {err}");
     }
 
     /// D6 rule 3.

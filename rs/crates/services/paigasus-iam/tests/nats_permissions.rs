@@ -246,6 +246,11 @@ async fn expect_permissions_violation(rx: &mut mpsc::UnboundedReceiver<String>, 
 /// the new authentication took effect, so no violation (or, in the happy-path test, no delivery)
 /// was ever observed within the budget.
 async fn force_reconnect_and_await(client: &async_nats::Client, rx: &mut mpsc::UnboundedReceiver<String>) {
+    // Drain any already-queued events first: a genuine blip between `client_for` and this call
+    // would otherwise leave a stale `disconnected`/`connected` pair sitting in the channel, and
+    // the loop below could match against THAT pair and return before the forced cycle below has
+    // actually happened.
+    while rx.try_recv().is_ok() {}
     client.force_reconnect().await.expect("force_reconnect is accepted locally");
     let deadline = tokio::time::Instant::now() + VIOLATION_BUDGET;
     let mut disconnected = false;

@@ -16,6 +16,11 @@
 # the wrong file.
 set -euo pipefail
 
+# `local -n` (nameref) below needs bash >= 4.3; macOS ships 3.2 as `/bin/bash`. Guard first so a
+# contributor running this locally gets an actionable message instead of a raw syntax error.
+(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3) )) || {
+  echo "this script needs bash >= 4.3 (macOS ships 3.2 — try: brew install bash)" >&2; exit 1; }
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$here/subjects.env"

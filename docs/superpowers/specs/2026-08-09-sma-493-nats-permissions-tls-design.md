@@ -25,7 +25,8 @@ regression test in `cloud_event.rs` holding that line.
 That audit is not the interesting half. The subject is `aggregate_prn` (D5) and the envelope
 carries an `actorprn` extension attribute, so a subscriber that can read `iam.>` observes, in
 real time, **who granted whom which role on which org or project, and who revoked what**. That
-is the platform's authorization change graph, reconstructable without decoding a single payload.
+is the platform's authorization change graph, reconstructable from the envelope alone, with no
+application-level access.
 
 There is no application-level mitigation. The publisher cannot know who is subscribed. On a
 shared NATS account, every co-tenant is a subscriber.

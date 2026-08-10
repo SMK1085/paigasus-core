@@ -5,9 +5,10 @@ of truth — `provision.sh` mints production users from it, `ops/nats/test/accou
 mirrors it for tests, and `check-subjects.sh` fails the build the moment the two disagree). Read
 it before touching either file: the grants below are the security boundary for the entire IAM
 event stream — `iam.>` carries the platform's full authorization change graph (every role grant,
-revocation, policy change and API-key revocation), in real time, without a payload needing to be
-decoded. Getting a grant list wrong here is not a cosmetic misconfiguration; it is either an outage
-(too narrow) or a confidentiality breach (too wide).
+revocation, policy change and API-key revocation), in real time, reconstructable from the
+envelope alone, with no application-level access. Getting a grant list wrong here is not a
+cosmetic misconfiguration; it is either an outage (too narrow) or a confidentiality breach (too
+wide).
 
 NATS permissions are **allow-list only**. There is no explicit "deny" syntax in the account block
 below — a subject that does not appear in a user's `publish.allow` or `subscribe.allow` list is

@@ -144,10 +144,11 @@ impl Breaker {
 /// operator far more than the repetition does.
 #[derive(Debug, thiserror::Error)]
 pub enum NatsPublisherError {
-    /// The configured `credentials_file` could not be read or parsed. Split out from
-    /// [`Self::Connect`] because `ConnectOptions::with_credentials_file` fails with a bare
-    /// `io::Error` that names neither NATS nor the path — "No such file or directory" alone is
-    /// not an actionable boot error.
+    /// The configured `credentials_file` could not be read. Split out from [`Self::Connect`] so
+    /// a missing/unreadable file surfaces a typed boot error naming the path — a bare
+    /// `io::Error` alone ("No such file or directory") is not an actionable boot error without
+    /// it. A file that reads fine but is not a valid credential is [`Self::CredentialsParse`],
+    /// not this variant.
     #[error("nats credentials file {path} could not be loaded")]
     Credentials {
         path: String,
@@ -215,10 +216,12 @@ impl NatsEventPublisher {
     ///
     /// # Errors
     ///
-    /// [`NatsPublisherError::Credentials`] / [`NatsPublisherError::Connect`] when the broker
-    /// cannot be reached or authenticated against, [`NatsPublisherError::Ensure`] when the
-    /// stream can neither be fetched nor created, and [`NatsPublisherError::StreamConfigDrift`]
-    /// when an existing stream is weaker than this service requires.
+    /// [`NatsPublisherError::Credentials`] when the credentials file cannot be read,
+    /// [`NatsPublisherError::CredentialsParse`] when it can be read but is not a valid NATS
+    /// credential, [`NatsPublisherError::Connect`] when the broker cannot be reached or
+    /// authenticated against, [`NatsPublisherError::Ensure`] when the stream can neither be
+    /// fetched nor created, and [`NatsPublisherError::StreamConfigDrift`] when an existing
+    /// stream is weaker than this service requires.
     ///
     /// # Panics
     ///
@@ -252,6 +255,16 @@ impl NatsEventPublisher {
         // refuses to deliver — which is why the event callback below matters so much.
         if let Some(prefix) = &cfg.inbox_prefix {
             opts = opts.custom_inbox_prefix(prefix.clone());
+        } else if cfg.credentials_file.is_some() {
+            // Belt-and-braces (SMA-493 review): a credentialed deployment on a least-privilege
+            // account almost always grants `subscribe` on a per-user inbox prefix, not the
+            // async-nats default `_INBOX`. Not a `validate()` error — an account that grants
+            // `sub _INBOX.>` is a legitimate (if wider) deployment shape — but the failure mode
+            // when it's wrong is a silent hang (every publish times out waiting for an ack the
+            // broker refuses to deliver), so warn instead of staying silent.
+            tracing::warn!(
+                "outbox.publisher.credentials_file is set but outbox.publisher.inbox_prefix is not — using the default `_INBOX` prefix, which will make every publish time out if the account grants only a per-user prefix (see ops/nats/permissions.md §7)"
+            );
         }
         // D7: REPLACES the system trust store (see the field's doc). Re-read per attempt.
         if let Some(bundle) = &cfg.root_ca_bundle {

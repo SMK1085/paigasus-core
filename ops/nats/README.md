@@ -56,6 +56,21 @@ Deploy `iam-publisher.creds` with `paigasus-iam` and `gateway-consumer.creds` wi
 **Never** ship `iam-provisioner.creds` in a deployment — see `permissions.md` §9 for why it is an
 operator artifact, not a service credential.
 
+`paigasus-iam`'s production `[outbox.publisher]` block, consuming the `iam-publisher.creds` just
+deployed:
+
+```toml
+[outbox.publisher]
+backend          = "nats"
+url              = "tls://nats.internal:4222"
+credentials_file = "/etc/paigasus/iam-publisher.creds"
+root_ca_bundle   = "/etc/paigasus/nats-ca.pem"  # REPLACES the system trust store
+inbox_prefix     = "_INBOX_IAM_PUB"             # MUST match PUBLISHER_INBOX_PREFIX
+```
+
+See `permissions.md` §6 for why `root_ca_bundle` replaces rather than extends the system trust
+store, and §7 for why `inbox_prefix` must match this account's grant exactly.
+
 ## Widening an existing user's grant
 
 Adding a subject to `subjects.env` for a user that already exists is **not** what re-running
