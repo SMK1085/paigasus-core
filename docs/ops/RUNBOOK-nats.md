@@ -116,8 +116,13 @@ without changing the grant reproduces the identical failure every time.
 `nats credentials file <path> could not be loaded` or `nats credentials file <path> could not be
 parsed`.
 
-**Cause.** Two deliberately distinct error variants (`nats_publisher.rs`), split because "the file
-is missing" and "the file is not what you think it is" have different remediations:
+**Cause.** A valid credential file has two labelled, properly-terminated blocks — a
+`-----BEGIN NATS USER JWT-----` … `------END NATS USER JWT------` block and a
+`-----BEGIN USER NKEY SEED-----` … `------END USER NKEY SEED------` block — exactly what `nsc
+generate creds` produces. The loader also accepts a bare seed-only file: just the `USER NKEY SEED`
+block, no JWT block, for nkey-only authentication (`creds.rs`'s module doc). Two deliberately
+distinct error variants (`nats_publisher.rs`), split because "the file is missing" and "the file is
+not what you think it is" have different remediations:
 
 - `NatsPublisherError::Credentials` — the file could not be **read**: absent, wrong permissions, an
   unmounted volume. Wraps the underlying `io::Error`.

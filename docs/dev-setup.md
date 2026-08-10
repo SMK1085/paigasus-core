@@ -103,9 +103,12 @@ fails unless the live stream satisfies all five checks, naming the offending fie
 | `subjects` | must contain `iam.>`. |
 | `max_age` | `0` (unlimited), or greater than `duplicate_window` — JetStream's own constraint. |
 
-`retention`, `storage` and `duplicate_window` are **not editable in place** on a live JetStream
-stream. Fixing drift in any of those means draining or accepting the loss of the messages the
-stream holds, deleting it, and letting the service recreate it — plan that as a maintenance
-window, not a config tweak. `subjects` and `max_age` can be edited with `nats stream edit`.
+`storage` is **never editable in place** on a live JetStream stream, and `retention` cannot be
+changed to or from `workqueue` either — both rejected outright by JetStream's Stream Update API.
+Since the table above only ever flags a live `retention` of `interest` or `workqueue` as invalid,
+a `workqueue` drift needs the same treatment as `storage`: draining or accepting the loss of the
+messages the stream holds, deleting it, and letting the service recreate it — plan that as a
+maintenance window, not a config tweak. `duplicate_window`, an `interest`-retention drift,
+`subjects`, and `max_age` can all be edited in place with `nats stream edit`.
 
 Integration tests need no local server — they start their own container.

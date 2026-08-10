@@ -579,10 +579,14 @@ of rotation; `IamOutboxPublishFailures` above, `IamOutboxBacklogAgeHigh`, and
   retention case is the most consequential: an `Interest`- or `WorkQueue`-retention stream
   silently discards messages on arrival once this PR ships (no consumer subscribes yet), so
   rejecting it at boot rather than adopting it is intentional, not overly strict. **Remediation:**
-  either reconfigure `IAM_EVENTS` on the broker to match what the error names (an operator action
-  outside this service — `nats stream edit`, or delete-and-let-`connect`-recreate it if no other
-  consumer already depends on its current config), or relax `[outbox.publisher]`'s own config to
-  match an intentionally different existing stream. This is never transient — restarting the pod
+  which operator action works depends on the field the error names. `duplicate_window` is editable
+  in place with `nats stream edit`, and so is a `retention` drift to `interest` — neither needs
+  touching the stream's data. `storage` is never editable in place, and `retention` cannot be
+  changed to or from `workqueue` either (both rejected outright by JetStream's Stream Update API):
+  fixing either means delete-and-let-`connect`-recreate `IAM_EVENTS`, which is a maintenance window
+  and, unless drained first, data loss — only safe if no other consumer already depends on the
+  stream's current config. Either way, an alternative is to relax `[outbox.publisher]`'s own config
+  to match an intentionally different existing stream. This is never transient — restarting the pod
   without changing anything reproduces the identical failure every time.
 
 **Confirm which case you're in** from the log line alone; no metrics exist to query for a pod that
@@ -590,8 +594,10 @@ never finished booting. `kubectl logs` (or the platform-equivalent) on the crash
 the only signal.
 
 > **Permissions, TLS and credentials** have their own runbook: [`RUNBOOK-nats.md`](./RUNBOOK-nats.md)
-> (SMA-493). A denied publish presents as a *timeout*, not an error, so it does not look like
-> anything in this section.
+> (SMA-493). A denied publish does not fail its *request* with a permissions error — it times out,
+> so it never crash-loops like anything in this section. It is not silent, though: the broker's
+> permissions-violation text is still logged at `error` level (`RUNBOOK-nats.md` §1), and
+> `IamOutboxPublishFailures` (§4 above) still fires once a tick's publish times out.
 
 ### `IamOutboxRelayStalled` — the relay has stopped ticking (critical)
 

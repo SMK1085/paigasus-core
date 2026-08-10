@@ -125,7 +125,11 @@ tasks:
     # inputs are project-relative — an ops-only change (which is exactly how a permission set
     # gets loosened) would otherwise never make the crate affected, and the guard would not run
     # on the PRs that need it.
+    # Moon does not enable errexit for `script:` blocks — a failing command followed by a
+    # succeeding one still exits the task 0 — so `set -euo pipefail` is required explicitly or
+    # a failing check-subjects.sh would be masked by a passing test suite (CodeRabbit, SMA-493).
     script: |
+      set -euo pipefail
       bash ops/nats/check-subjects.sh
       ( cd rs && cargo nextest run --no-tests=pass -p paigasus-iam --test nats_permissions )
     toolchain: 'system'
@@ -260,7 +264,11 @@ tasks:
 
   promtool:
     description: 'promtool validates the Prometheus scrape config + alert rules + rule unit tests under ops/observability/prometheus/ (SMA-446).'
+    # Moon does not enable errexit for `script:` blocks — same latent defect as nats-permissions
+    # above (CodeRabbit, SMA-493): without this, a failing `check config` would be masked by a
+    # passing `check rules`/`test rules`.
     script: |
+      set -euo pipefail
       promtool check config ops/observability/prometheus/prometheus.yml
       promtool check rules ops/observability/prometheus/rules/*.rules.yml
       promtool test rules ops/observability/prometheus/rules/tests/*.test.yml

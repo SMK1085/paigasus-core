@@ -198,9 +198,17 @@ non-`Limits` retention policy, non-`File` storage, or subjects that don't cover 
 fails outright with a typed drift error rather than silently reshaping (or worse, silently
 under-protecting) a stream other consumers may already depend on.
 
-Three of the checked fields — **retention policy, storage type, and `duplicate_window`** — are not
-editable on a live JetStream stream. Fixing a drift in any of them requires deleting and
-re-creating the stream, which means a maintenance window and, unless messages are drained first,
-data loss. Keep `provision.sh`'s stream-add flags and `PublisherConfig::default()` in sync by hand;
-there is no automated gate cross-checking them the way `check-subjects.sh` cross-checks the
-permission lists (nothing in CI can reach a running broker to inspect a live stream's config).
+**Storage type** is never editable on a live JetStream stream — the Stream Update API rejects any
+storage-type change outright — so fixing a `storage` drift always means deleting and re-creating
+the stream: a maintenance window and, unless messages are drained first, data loss. **Retention
+policy** is editable except to or from `workqueue`, which the Update API also rejects outright;
+the drift check above can only ever flag a live retention of `interest` or `workqueue` (it wants
+`Limits`), so in practice an `interest` drift is fixable with `nats stream edit`, but a `workqueue`
+drift needs the same delete-and-re-create treatment as `storage`. **`duplicate_window`** IS
+editable in place with `nats stream edit` — verified empirically against a real broker (SMA-493
+CodeRabbit round 1) — despite an earlier revision of this document listing it alongside the two
+truly immovable cases above.
+
+Keep `provision.sh`'s stream-add flags and `PublisherConfig::default()` in sync by hand; there is
+no automated gate cross-checking them the way `check-subjects.sh` cross-checks the permission
+lists (nothing in CI can reach a running broker to inspect a live stream's config).

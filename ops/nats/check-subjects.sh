@@ -38,8 +38,12 @@ check_identity() {
   local -n sub_arr="$1"; shift
   local next_placeholder="${1:-}"
 
+  # `|| true` on each of these: under `set -e`/`pipefail`, a `grep` that matches nothing makes
+  # the pipeline (and so the plain assignment) fail, which would exit the WHOLE script right here
+  # — before the `[ -z ... ]` checks below ever run — turning a named "MISSING placeholder"
+  # diagnostic into a silent, unexplained abort. Tolerating no-match keeps the diagnostics live.
   local start
-  start=$(grep -nF -- "$nkey_placeholder" "$tmpl" | head -1 | cut -d: -f1)
+  start=$(grep -nF -- "$nkey_placeholder" "$tmpl" | head -1 | cut -d: -f1 || true)
   if [ -z "$start" ]; then
     echo "MISSING from accounts.conf.tmpl: no nkey placeholder $nkey_placeholder found for $identity" >&2
     fail=1
@@ -49,7 +53,12 @@ check_identity() {
   local end
   if [ -n "$next_placeholder" ]; then
     local next_start
-    next_start=$(grep -nF -- "$next_placeholder" "$tmpl" | head -1 | cut -d: -f1)
+    next_start=$(grep -nF -- "$next_placeholder" "$tmpl" | head -1 | cut -d: -f1 || true)
+    if [ -z "$next_start" ]; then
+      echo "MISSING from accounts.conf.tmpl: no nkey placeholder $next_placeholder found (needed to bound $identity's stanza)" >&2
+      fail=1
+      return
+    fi
     end=$((next_start - 1))
   else
     end=$(wc -l < "$tmpl")

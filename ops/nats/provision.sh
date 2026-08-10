@@ -32,6 +32,13 @@ OPERATOR="${OPERATOR:-paigasus}"
 OUT_DIR="${OUT_DIR:-$here/out}"
 NATS_URL="${NATS_URL:?set NATS_URL, e.g. tls://nats.internal:4222}"
 
+# Restrict the creation mode of everything below (the .creds files' JWT + nkey seed included) BEFORE
+# anything secret is created — the operator's umask (typically 0644-permissive, e.g. 022) would
+# otherwise leave `nsc generate creds`'s redirected output world- or group-readable for the window
+# between the shell creating the file and the following `chmod 600` narrowing it. `chmod 600` below
+# stays as belt-and-braces.
+umask 077
+
 mkdir -p "$OUT_DIR"
 
 # --- 1. Operator + accounts -----------------------------------------------------------------
@@ -101,9 +108,13 @@ fi
 nsc push --account PAIGASUS_IAM
 
 # The stream config MUST match `PublisherConfig`'s defaults: SMA-471 D7 fails the service's boot
-# when an adopted stream is weaker than configured, and retention/storage/duplicate_window are
-# NOT editable in place — fixing drift means deleting the stream, i.e. a maintenance window.
-# See rs/crates/services/paigasus-iam/src/config.rs (`impl Default for PublisherConfig`).
+# when an adopted stream is weaker than configured. `storage` is NEVER editable in place, and
+# `retention` cannot change to/from `workqueue` either (both rejected outright by the Stream
+# Update API) — fixing either kind of drift means deleting the stream, i.e. a maintenance window.
+# `duplicate_window`, and a `retention` drift to `interest` (this stream's only other invalid
+# state), ARE editable via `nats stream edit` — verified empirically, SMA-493 CodeRabbit round 1.
+# See rs/crates/services/paigasus-iam/src/config.rs (`impl Default for PublisherConfig`) and
+# ops/nats/permissions.md §10 for the full picture.
 nats --server "$NATS_URL" --creds "$OUT_DIR/iam-provisioner.creds" \
   stream add "$STREAM_NAME" \
   --subjects "iam.>" \
