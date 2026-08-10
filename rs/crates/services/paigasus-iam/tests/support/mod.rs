@@ -74,8 +74,7 @@ pub async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, Data
         }
     };
 
-    let port = node.get_host_port_ipv4(5432).await.unwrap();
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let url = connection_url(&node).await;
     let db = connect_when_ready(&url).await;
     Migrator::up(&db, None).await.unwrap();
 
@@ -83,14 +82,14 @@ pub async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, Data
 }
 
 /// The `postgres://` URL of an already-started container from [`start_migrated_postgres`] /
-/// [`start_raw_postgres`], built from the SAME host/port/credential logic those two use.
+/// [`start_raw_postgres`]. The SINGLE definition of that URL: `start_migrated_postgres` builds its
+/// own connection through this too, so a caller that needs the string and a caller that needs the
+/// pool can never drift apart.
 ///
 /// SeaORM's `DatabaseConnection` deliberately does not expose the URL it was built from, and the
 /// SMA-489 nudge tests need one for components that take a connection string rather than a pool
 /// handle — `PgOutboxListener::new(url, ..)` and a bare `sqlx::PgListener::connect(&url)` used as
-/// an independent observer of `pg_notify`. Both must reach the SAME database as `db`, so this
-/// derives the URL from the container rather than letting each test hand-roll it.
-#[allow(dead_code)]
+/// an independent observer of `pg_notify`. Both must reach the SAME database as `db`.
 pub async fn connection_url(pg: &ContainerAsync<Postgres>) -> String {
     let port = pg.get_host_port_ipv4(5432).await.expect("mapped postgres port");
     format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")
