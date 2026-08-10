@@ -14,7 +14,10 @@ use std::net::SocketAddr;
 pub struct IamConfig {
     pub http_addr: SocketAddr,
     pub grpc_addr: SocketAddr,
-    pub database_url: String,
+    /// The main SeaORM connection string. A [`RedactedUrl`] because a Postgres DSN routinely
+    /// carries a password (`postgres://user:pass@host/db`) and this struct is dumped to logs and
+    /// `readyz`; read the real value with [`RedactedUrl::as_str`].
+    pub database_url: RedactedUrl,
     pub log_level: String,
     pub authn: AuthnConfig,
     pub authz: AuthzConfig,
@@ -22,6 +25,72 @@ pub struct IamConfig {
     pub audit: AuditConfig,
     pub outbox: OutboxConfig,
     pub metrics: MetricsConfig,
+}
+
+/// A connection URL that may embed credentials (`postgres://user:pass@host/db`) — the redacting
+/// newtype worn by [`IamConfig::database_url`] and [`OutboxConfig::listen_database_url`].
+///
+/// `IamConfig` derives `Debug`/`Serialize` because it is dumped in logs/`readyz` (`main.rs`), so a
+/// DSN's password must never round-trip through either: both outbound directions emit a fixed
+/// `<redacted>` placeholder, while `Deserialize` is hand-rolled to delegate straight to `String`
+/// so figment still populates the REAL value from whichever layer (default/toml/env) supplied it.
+/// Exactly [`RawPepper`]'s idiom, and the same job `PublisherConfig`'s hand-rolled
+/// `Debug`/`Serialize` do for `nats://user:pass@host`.
+///
+/// A newtype rather than per-container manual impls **because redaction then travels with the
+/// type**: a future credential-bearing URL field is protected by choosing this type, not by
+/// remembering to extend two hand-written impls that spell out every sibling field. (`RawPepper`
+/// can skip `Serialize` entirely — `ApiKeyConfig` marks its field `#[serde(skip_serializing)]` —
+/// but these two fields are genuinely serialized, so the impl has to exist and redact in place.)
+///
+/// Deliberately implements neither `Display` nor `AsRef<str>`: the only way out is
+/// [`as_str`](RedactedUrl::as_str), which is greppable and cannot be reached by accident through a
+/// `{}` in a format string.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RedactedUrl(String);
+
+impl RedactedUrl {
+    /// The REAL url, for handing to a connection constructor. Never log the result.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for RedactedUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RedactedUrl").field(&"<redacted>").finish()
+    }
+}
+
+impl<'de> Deserialize<'de> for RedactedUrl {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(RedactedUrl)
+    }
+}
+
+impl Serialize for RedactedUrl {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str("<redacted>")
+    }
+}
+
+impl From<String> for RedactedUrl {
+    fn from(url: String) -> Self {
+        RedactedUrl(url)
+    }
+}
+
+impl From<&str> for RedactedUrl {
+    fn from(url: &str) -> Self {
+        RedactedUrl(url.to_string())
+    }
 }
 
 /// BYO-IdP OIDC authentication config (spec §6.4). `issuers` is intentionally left
@@ -344,7 +413,10 @@ pub struct OutboxConfig {
     /// forever. This field exists so a deployment that fronts Postgres with a transaction-mode
     /// pooler can point the listener at a direct endpoint without moving the main connection.
     /// `IamOutboxNotificationsAbsent` is the alert that detects the misconfiguration.
-    pub listen_database_url: Option<String>,
+    ///
+    /// A [`RedactedUrl`] for the same reason `database_url` is: it is a full DSN, credentials
+    /// included, and this struct is dumped in logs/`readyz`.
+    pub listen_database_url: Option<RedactedUrl>,
     /// Retention for the table the relay drains — see [`OutboxRetentionConfig`].
     #[serde(default)]
     pub retention: OutboxRetentionConfig,
@@ -608,6 +680,11 @@ struct OutboxDefaults {
     max_attempts: u32,
     wake_on_commit: bool,
     wake_debounce_ms: u64,
+    // Plain `String`, not `RedactedUrl` — same exception `ApiKeyDefaults::pepper` takes: this
+    // struct only ever feeds figment's default LAYER and is never itself logged or dumped, and a
+    // `RedactedUrl` here would serialize the literal `"<redacted>"` INTO that layer. The default
+    // is `None` either way; figment still deserializes the merged value into
+    // `OutboxConfig::listen_database_url: Option<RedactedUrl>` whichever layer supplied it.
     listen_database_url: Option<String>,
     retention: OutboxRetentionConfig,
     publisher: PublisherConfig,
@@ -776,7 +853,7 @@ impl Default for OutboxConfig {
             max_attempts: d.max_attempts,
             wake_on_commit: d.wake_on_commit,
             wake_debounce_ms: d.wake_debounce_ms,
-            listen_database_url: d.listen_database_url,
+            listen_database_url: d.listen_database_url.map(RedactedUrl::from),
             retention: d.retention,
             publisher: d.publisher,
         }
@@ -1138,7 +1215,7 @@ mod tests {
             jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
             jail.create_file("iam.toml", minimal_issuer_toml())?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
-            assert_eq!(cfg.database_url, "postgres://u:p@localhost/db");
+            assert_eq!(cfg.database_url.as_str(), "postgres://u:p@localhost/db");
             assert_eq!(cfg.http_addr.to_string(), "0.0.0.0:8080");
             assert_eq!(cfg.log_level, "info");
             Ok(())
@@ -1919,7 +1996,11 @@ mod tests {
             // No `[api_keys]` in the file at all — the pepper comes purely from the env var.
             jail.create_file("iam.toml", minimal_issuer_toml())?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
-            assert_eq!(cfg.database_url, "postgres://u:p@localhost/db", "the flat IAM_DATABASE_URL env var must still map to database_url");
+            assert_eq!(
+                cfg.database_url.as_str(),
+                "postgres://u:p@localhost/db",
+                "the flat IAM_DATABASE_URL env var must still map to database_url"
+            );
             assert_eq!(cfg.api_keys.pepper.0, pepper, "IAM_API_KEYS__PEPPER must populate api_keys.pepper");
             assert!(cfg.api_keys.pepper().is_ok(), "the env-injected pepper must decode via ApiKeyConfig::pepper");
             assert!(cfg.validate().is_ok(), "a config whose only pepper source is IAM_API_KEYS__PEPPER must pass validation");
@@ -1959,6 +2040,72 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    /// Companion to `pepper_never_appears_in_debug_or_serialized_config`, for the two connection
+    /// DSNs (SMA-489 CodeRabbit round 1). Both routinely carry a password, and `IamConfig` is
+    /// dumped to logs and `readyz` — so `RedactedUrl` has to cover BOTH outbound directions for
+    /// BOTH fields. `database_url` is in here alongside the new `listen_database_url` on purpose:
+    /// redacting one while its identically-sensitive neighbour two fields away leaked would be
+    /// incoherent.
+    #[test]
+    fn connection_urls_never_appear_in_debug_or_serialized_config() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://main_user:main_pw_secret@db.example.com/iam");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [api_keys]
+                        pepper = "{}"
+
+                        [outbox]
+                        listen_database_url = "postgres://listen_user:listen_pw_secret@direct.example.com/iam"
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+
+            // Sanity: both REAL values round-tripped through figment, so the "must not contain"
+            // assertions below cannot pass vacuously — and `as_str` still yields something usable
+            // at the `Database::connect`/`PgOutboxListener::new` call sites.
+            assert_eq!(cfg.database_url.as_str(), "postgres://main_user:main_pw_secret@db.example.com/iam");
+            assert_eq!(
+                cfg.outbox.listen_database_url.as_ref().map(RedactedUrl::as_str),
+                Some("postgres://listen_user:listen_pw_secret@direct.example.com/iam")
+            );
+
+            let debugged = format!("{cfg:?}");
+            assert!(!debugged.contains("main_pw_secret"), "database_url leaked into IamConfig's Debug output: {debugged}");
+            assert!(!debugged.contains("listen_pw_secret"), "listen_database_url leaked into IamConfig's Debug output: {debugged}");
+            assert!(!debugged.contains("db.example.com"), "database_url's host leaked into IamConfig's Debug output: {debugged}");
+            assert!(!debugged.contains("direct.example.com"), "listen_database_url's host leaked into IamConfig's Debug output: {debugged}");
+
+            let serialized = serde_json::to_string(&cfg).expect("IamConfig serializes");
+            assert!(!serialized.contains("main_pw_secret"), "database_url leaked into IamConfig's serialized form: {serialized}");
+            assert!(!serialized.contains("listen_pw_secret"), "listen_database_url leaked into IamConfig's serialized form: {serialized}");
+            // The placeholder must actually be emitted IN PLACE — a field silently dropped from
+            // the dump would also satisfy the two assertions above.
+            assert!(serialized.contains(r#""database_url":"<redacted>""#), "{serialized}");
+            assert!(serialized.contains(r#""listen_database_url":"<redacted>""#), "{serialized}");
+
+            Ok(())
+        });
+    }
+
+    /// The newtype itself, without figment in the way: `Debug` and `Serialize` both render the
+    /// placeholder, and `as_str` is the one door out.
+    #[test]
+    fn redacted_url_renders_a_placeholder_in_both_outbound_directions() {
+        let url = RedactedUrl::from("postgres://u:p@localhost/db");
+        assert_eq!(format!("{url:?}"), r#"RedactedUrl("<redacted>")"#);
+        assert_eq!(serde_json::to_string(&url).expect("RedactedUrl serializes"), r#""<redacted>""#);
+        assert_eq!(url.as_str(), "postgres://u:p@localhost/db", "as_str must still yield the REAL url");
     }
 
     // --- SMA-446 Task A12: `[audit]` config ------------------------------------------------

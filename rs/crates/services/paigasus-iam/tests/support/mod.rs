@@ -317,7 +317,7 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
     IamConfig {
         http_addr: "127.0.0.1:0".parse().unwrap(),
         grpc_addr: "127.0.0.1:0".parse().unwrap(),
-        database_url: "unused-in-tests".to_string(),
+        database_url: "unused-in-tests".into(),
         log_level: "info".to_string(),
         authn: AuthnConfig {
             leeway_secs: 60,

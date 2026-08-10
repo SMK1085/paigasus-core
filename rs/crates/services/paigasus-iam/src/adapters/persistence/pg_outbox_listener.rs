@@ -130,8 +130,10 @@ impl PgOutboxListener {
             let mut listener = match listener {
                 Ok(l) => l,
                 Err(e) => {
-                    // NEVER log `self.url` — `IamConfig.database_url` is not redacted in the
-                    // config's derived Debug/Serialize, unlike `PublisherConfig::url`.
+                    // NEVER log `self.url`. It is a DSN, credentials included — which is exactly
+                    // why the config field it came from is a `config::RedactedUrl`; that type
+                    // keeps the value out of the config's Debug/`readyz` dumps, and this call
+                    // site is the other half of the same rule.
                     tracing::warn!(error = %e, "outbox listener could not connect; delivery stays poll-only until it recovers");
                     gauge!(names::IAM_OUTBOX_LISTENER_CONNECTED).set(0.0);
                     tokio::select! {

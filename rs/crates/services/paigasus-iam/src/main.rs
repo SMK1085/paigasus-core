@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
         describe_iam_metrics();
     }
 
-    let db = Database::connect(&config.database_url).await?;
+    let db = Database::connect(config.database_url.as_str()).await?;
     Migrator::up(&db, None).await?;
     // Built once and cloned into each server task below (a cheap handle-clone: every
     // per-aggregate service just wraps the same underlying connection pool, and the wired
@@ -273,7 +273,7 @@ async fn main() -> anyhow::Result<()> {
                 // The listener gets its own connection string: `LISTEN` needs a direct or
                 // session-mode connection, so a deployment behind a transaction-mode pooler can
                 // point it elsewhere without moving the main pool (SMA-489 §1.5).
-                let listen_url = config.outbox.listen_database_url.clone().unwrap_or_else(|| config.database_url.clone());
+                let listen_url = config.outbox.listen_database_url.as_ref().unwrap_or(&config.database_url).as_str().to_string();
                 // Watchdog is observability-only (D15): warn on silence, never reconnect on it.
                 // `saturating_mul`: `validate` puts no upper bound on `poll_interval_secs`, so a
                 // plain `* 3` is an unchecked `u64` multiply that panics in a debug build on an
