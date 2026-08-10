@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use async_nats::jetstream;
 use chrono::Utc;
-use paigasus_iam::adapters::events::NatsEventPublisher;
+use paigasus_iam::adapters::events::{NatsEventPublisher, NatsPublisherError};
 use paigasus_iam::config::{PublisherBackend, PublisherConfig};
 use paigasus_iam_core::{DomainEvent, EventPublisher, EventType};
 use testcontainers::core::WaitFor;
@@ -533,7 +533,14 @@ async fn a_tls_connection_without_the_ca_bundle_fails_verification() {
     let mut cfg = cfg_for(&fixture, &fixture.publisher, "_INBOX_IAM_PUB");
     cfg.url = Some(fixture.url.replace("nats://", "tls://"));
     // root_ca_bundle deliberately unset: the per-run CA is in no system trust store.
-    NatsEventPublisher::connect(&cfg).await.expect_err("a private CA must not verify against the system trust store");
+    let err = NatsEventPublisher::connect(&cfg).await.expect_err("a private CA must not verify against the system trust store");
+    // `expect_err` alone would also pass for an unrelated connect failure (a dead container, a
+    // CI-contention timeout) — asserting the *cause* is what makes this a proof about
+    // certificate verification specifically. `NatsPublisherError::Connect`'s `Display` is the
+    // fixed literal `"nats connect failed"` (see the enum's doc comment); the rustls cause only
+    // shows up in `Debug`, which renders `InvalidCertificate(UnknownIssuer)` here.
+    assert!(matches!(err, NatsPublisherError::Connect(_)), "expected a connect failure, got {err:?}");
+    assert!(format!("{err:?}").contains("InvalidCertificate"), "expected a certificate-verification failure, got {err:?}");
 }
 
 /// And a bundle that is well-formed but wrong must also fail — proving the bundle is actually
@@ -552,5 +559,11 @@ async fn a_tls_connection_with_an_unrelated_ca_bundle_fails_verification() {
     let mut cfg = cfg_for(&fixture, &fixture.publisher, "_INBOX_IAM_PUB");
     cfg.url = Some(fixture.url.replace("nats://", "tls://"));
     cfg.root_ca_bundle = Some(unrelated_ca.to_string_lossy().to_string());
-    NatsEventPublisher::connect(&cfg).await.expect_err("an unrelated CA must not verify the broker's certificate");
+    let err = NatsEventPublisher::connect(&cfg).await.expect_err("an unrelated CA must not verify the broker's certificate");
+    // Same reasoning as the no-bundle control above. Empirically this renders
+    // `InvalidCertificate(BadSignature)` rather than `UnknownIssuer` — both `mint_tls` CAs share a
+    // CommonName, so the issuer name matches but the signature does not — but the shared
+    // `InvalidCertificate` marker is what both controls are asserting on.
+    assert!(matches!(err, NatsPublisherError::Connect(_)), "expected a connect failure, got {err:?}");
+    assert!(format!("{err:?}").contains("InvalidCertificate"), "expected a certificate-verification failure, got {err:?}");
 }
