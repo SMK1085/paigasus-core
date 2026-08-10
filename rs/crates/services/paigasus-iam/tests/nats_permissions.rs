@@ -543,13 +543,25 @@ async fn a_tls_connection_without_the_ca_bundle_fails_verification() {
     assert!(format!("{err:?}").contains("InvalidCertificate"), "expected a certificate-verification failure, got {err:?}");
 }
 
-/// SMA-493 D8's regression net, and it must be able to detect the regression: corrupt the
-/// credential AFTER a successful connect, force a reconnect, and require the reconnect to fail.
+/// SMA-493 D8's regression net, and it must be able to detect the regression: after a successful
+/// connect, rotate the credential to a FRESH, syntactically valid nkey seed the broker's account
+/// does not declare, and require the next connection attempt to fail authentication.
 ///
-/// Under the pre-SMA-493 `with_credentials_file` this assertion is FALSE — the credential was
-/// cached at connect and the reconnect succeeds regardless of what the file now says. A weaker
-/// version of this test ("restart, publish again, expect success") passes identically before and
-/// after the change and would have shipped the fix with a net that cannot catch its own removal.
+/// **Why a well-formed-but-unrecognized seed, not a garbled string.** `connect` runs its own
+/// PRE-FLIGHT read+parse (`nats_publisher.rs`, right before `with_auth_callback` is installed) —
+/// a check the auth callback's per-attempt re-read has nothing to do with. A garbage rewrite (the
+/// brief's original shape) is caught there, on EVERY implementation, callback or not — proven
+/// empirically: mutating the auth callback alone (`creds::auth_from_credentials`, caching the
+/// parsed credential in a `OnceLock` after its first read — same file shape, same first connect,
+/// only the re-read removed) left this test PASSING, because the pre-flight rejected the garbled
+/// file before the cached callback ever ran. A syntactically valid seed clears that pre-flight
+/// unconditionally, so the entire outcome rests on whether the actual network handshake signs
+/// with the file's CURRENT content or a cached one.
+///
+/// Under the pre-SMA-493 `with_credentials_file`, or under the `OnceLock`-cached callback above,
+/// this assertion is FALSE: the ORIGINAL (still broker-recognized) key material signs the nonce
+/// and the second connect succeeds — see the report for the exact failing output under both
+/// mutations.
 #[tokio::test]
 async fn a_corrupted_credential_is_noticed_on_reconnect() {
     let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
@@ -558,15 +570,21 @@ async fn a_corrupted_credential_is_noticed_on_reconnect() {
     let publisher = NatsEventPublisher::connect(&cfg).await.expect("first connect");
     publisher.publish(&event(1, EventType::RoleGranted)).await.expect("first publish");
 
-    // Rotate to garbage, then force a fresh connection attempt by constructing a new publisher —
-    // which is the same code path a reconnect takes, since the auth callback is per-attempt.
-    std::fs::write(&fixture.publisher.seed_path, "not a credential any more").expect("overwrite the credential");
+    // Rotate to a fresh, well-formed nkey seed the broker's PAIGASUS_IAM account never declared,
+    // then force a fresh connection attempt by constructing a new publisher — which is the same
+    // code path a reconnect takes, since the auth callback is per-attempt.
+    let unknown = nkeys::KeyPair::new_user();
+    let unknown_seed = unknown.seed().expect("a fresh keypair exposes its seed");
+    std::fs::write(
+        &fixture.publisher.seed_path,
+        format!("-----BEGIN USER NKEY SEED-----\n{unknown_seed}\n------END USER NKEY SEED------\n"),
+    )
+    .expect("rotate to a broker-unrecognized credential");
 
-    let err = NatsEventPublisher::connect(&cfg).await.expect_err("a corrupted credential must not be papered over by a cached one");
-    assert!(
-        format!("{err}").contains(&fixture.publisher.seed_path.to_string_lossy().to_string()),
-        "the error must name the path: {err}"
-    );
+    let err = NatsEventPublisher::connect(&cfg)
+        .await
+        .expect_err("a rotated, broker-unrecognized credential must not be papered over by a cached one");
+    assert!(matches!(err, NatsPublisherError::Connect(_)), "expected an authentication failure, got {err:?}");
 }
 
 /// SMA-493 D8's happy half, redesigned to actually discriminate (see the report for why the
