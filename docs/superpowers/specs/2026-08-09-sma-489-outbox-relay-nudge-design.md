@@ -416,23 +416,33 @@ PgOutboxListener::new(url: String, wake: Arc<Notify>, watchdog: Duration)
 
 Loop:
 
-1. Connect: `PgListener::connect(&url)` with TCP keepalives set and `eager_reconnect(false)`
-   (D15). On error → gauge 0, log, backoff, retry.
+1. Connect: build the private pool described below, `PgListener::connect_with(&pool)`, then
+   `eager_reconnect(false)` (D15). **No keepalives are set here** — sqlx 0.8.6 has no client-side
+   keepalive setters at all, and the lever that matters is the *server*-side
+   `tcp_keepalives_*` GUC family, which an operator supplies as `options[…]=…` query parameters
+   on `[outbox].listen_database_url` (D15). This step therefore reads the URL and nothing else.
+   On error → gauge 0, log, backoff, retry.
 2. `listener.listen("iam_outbox_event")`. On error → as above.
 3. Gauge 1; if this was a reconnect rather than first connect, increment
    `iam_outbox_listener_reconnects_total`.
 4. `select!` `listener.try_recv()` against `shutdown` and the watchdog timer.
    - `Ok(Some(_))` → `iam_outbox_listener_notifications_total` += 1; `wake.notify_one()`.
-   - `Ok(None)` → reconnected under us; gauge 1 via step 3's counter path, continue.
+   - `Ok(None)` → the connection **dropped**, and with `eager_reconnect(false)` sqlx would
+     rebuild it only lazily inside the *next* `try_recv` — so it is genuinely down here. Gauge 0,
+     log, and **break back to step 1**, which reconnects explicitly and re-issues `LISTEN` (the
+     whole point of opting out of eager reconnect). It does not `continue`: step 3 is the single
+     site that counts a recovery, so routing every loss through the outer loop keeps one loss
+     equal to exactly one `reconnects_total` increment.
    - `Err(_)` → gauge 0, log, back to step 1.
    - watchdog elapsed with no notification → `warn!` only, no reconnect (D15).
 
-Connection construction, satisfying D6 and D15 together: build `PgConnectOptions` from the URL,
-set the keepalives, open a **private** `PgPool` with `max_connections(1)`, then
-`PgListener::connect_with(&pool)`. That pool is the listener's own — it is emphatically not
-SeaORM's, so D6's "does not consume a request-serving slot" still holds — and going through
-`connect_with` is the only way to supply connect options, which `PgListener::connect(url)` does
-not accept.
+Connection construction, satisfying D6: build `PgConnectOptions::from_str(&url)`, open a
+**private** `PgPool` with `max_connections(1)`, then `PgListener::connect_with(&pool)`. That pool
+is the listener's own — it is emphatically not SeaORM's, so D6's "does not consume a
+request-serving slot" still holds — and going through `connect_with` is what caps the pool at one
+connection, which `PgListener::connect(url)` gives no way to do. The connect options are taken
+wholesale from the DSN and never mutated in code (D15), which is exactly what leaves the
+`options[tcp_keepalives_*]` knob to the operator.
 
 Backoff starts at 250 ms and doubles to a 30 s cap. **Shutdown is raced against the backoff
 sleep and against the connect/listen attempts, not only against `try_recv`** — otherwise a
@@ -440,9 +450,11 @@ replica whose Postgres is unreachable could take ~60 s (30 s backoff + 30 s acqu
 honour SIGTERM, and SMA-471 D11 already flagged exceeding `terminationGracePeriodSeconds` as a
 real problem for this service.
 
-**The connection URL must never appear in a log line.** `IamConfig.database_url` is not redacted
-in `IamConfig`'s derived `Debug`/`Serialize` (unlike `PublisherConfig::url` and `RawPepper`), so
-the listener logs the error only, never the target — mirroring SMA-471 §5.
+**The connection URL must never appear in a log line.** The listener logs the error only, never
+the target — mirroring SMA-471 §5. The config side is covered too: `database_url` and
+`listen_database_url` are both `config::RedactedUrl`, a redacting newtype in the same family as
+`RawPepper` and `PublisherConfig`'s hand-rolled `Debug`/`Serialize`, so neither DSN reaches a log
+line or a `readyz` config dump either.
 
 ### 3.3 Relay — `adapters/events/relay.rs`
 
@@ -465,9 +477,11 @@ The `Arc<Notify>` is created in the existing `if config.outbox.relay_enabled` bl
 uses.
 
 `relay_enabled = false` means **no listener either** (it would be notifying nobody); the existing
-`warn!` covers it. `IamConfig::validate` gains a warning — not a rejection — for
-`relay_enabled = false` with `wake_on_commit = true`, mirroring the existing
-`relay_enabled = false` + `backend = "nats"` handling at `config.rs:1035`.
+`warn!` covers it. `relay_enabled = false` with `wake_on_commit = true` gets a warning — not a
+rejection — since it is inert rather than invalid config, so `IamConfig::validate` still returns
+`Ok` for it. The `warn!` itself sits in `main.rs` next to the `authz.bootstrap_admins` one, **not**
+in `validate()`: `main` calls `validate()` before `paigasus_logging::init`, so a diagnostic emitted
+from inside it would be written before the service logger exists and silently lost.
 
 `AppState::new`'s signature is untouched (D2), so the ordering constraint at `main.rs:59-61`
 needs no rework. `describe_iam_metrics` (`main.rs:403`) gains five `describe_*!` calls and its
@@ -514,7 +528,7 @@ failing at commit (D4).
 | Notification queue full | The mutation **fails at COMMIT** (D4), surfacing as an opaque `RepositoryError::Backend` from `SeaOrmTransaction::commit`. Mitigated by D15 (prevent the wedge that causes it) and recoverable by `wake_on_commit = false` (D11). |
 | `pg_notify` statement itself errors | Propagates from `enqueue`; the transaction is poisoned and would fail at commit regardless. Not the queue-full path. |
 | Listener cannot connect at boot | Log (never the URL), gauge 0, backoff, retry forever. Boot succeeds; delivery is poll-only meanwhile (D7). |
-| Listener connection drops | sqlx reconnects internally; surfaced as `Ok(None)` → gauge/counter updated (D15). Notifications during the gap are lost outright — Postgres does not queue for an absent listener — and the poll covers them (D8). |
+| Listener connection drops | Surfaces as `try_recv() -> Ok(None)`; because `eager_reconnect` is **off**, sqlx does *not* rebuild it internally, so the listener zeroes the gauge and reconnects explicitly through the outer loop, which re-issues `LISTEN` and counts the recovery once (D15). Notifications during the gap are lost outright — Postgres does not queue for an absent listener — and the poll covers them (D8). |
 | Listener wedges (half-open TCP) | Client-side detection falls back to the OS keepalive default (~2 h on Linux); the watchdog warns but never forces a reconnect, because silence is normal on a quiet system. The queue-fill half of this — the dangerous half, row 1 — is addressed on the **server** side, by setting `tcp_keepalives_*` through `listen_database_url`'s DSN so the backend reaps itself (D15). |
 | Relay tick returns `DbErr` | Unchanged: logged, `ticks_total{result="error"}` incremented. Additionally ends any continuation run (D9). |
 | Publisher fails during a continuation run | Continues while `drained > failures`; stops when no row in the batch succeeded (D9). |
