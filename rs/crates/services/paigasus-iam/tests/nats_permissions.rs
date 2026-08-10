@@ -232,6 +232,36 @@ async fn expect_permissions_violation(rx: &mut mpsc::UnboundedReceiver<String>, 
     }
 }
 
+/// Forces `client` to reconnect and blocks until the disconnect-then-reconnect cycle has actually
+/// completed, observed as a `"disconnected"` [`async_nats::Event`] followed by a `"connected"`
+/// one on `rx`.
+///
+/// **Why this is not just `client.force_reconnect().await`.** That call only confirms the
+/// reconnect command was accepted into an internal channel — its own doc: "does not wait for
+/// connection to be re-established". A `.publish()` issued right after it is a genuine race: it
+/// can be queued and sent over the OLD, still-open connection before the connector has even begun
+/// tearing it down, silently testing the ORIGINAL identity instead of the rotated one. This was
+/// not a hypothetical — it is exactly what happened on the first run of the two rotation tests
+/// below (see the report): both passed the reconnect but the publish that followed landed before
+/// the new authentication took effect, so no violation (or, in the happy-path test, no delivery)
+/// was ever observed within the budget.
+async fn force_reconnect_and_await(client: &async_nats::Client, rx: &mut mpsc::UnboundedReceiver<String>) {
+    client.force_reconnect().await.expect("force_reconnect is accepted locally");
+    let deadline = tokio::time::Instant::now() + VIOLATION_BUDGET;
+    let mut disconnected = false;
+    let mut seen: Vec<String> = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(event)) if !disconnected && event == "disconnected" => disconnected = true,
+            Ok(Some(event)) if disconnected && event == "connected" => return,
+            Ok(Some(event)) => seen.push(event),
+            Ok(None) => panic!("event stream closed before the reconnect completed; saw {seen:?}"),
+            Err(_) => panic!("the client never completed a disconnect-then-reconnect cycle within {VIOLATION_BUDGET:?}; saw {seen:?}"),
+        }
+    }
+}
+
 /// `id` is caller-supplied and must be distinct per publish: it becomes `Nats-Msg-Id`, and
 /// JetStream would otherwise collapse two events into one dedup hit. `Uuid::from_u128` rather than
 /// a v4/v7 constructor because the workspace pins `uuid` with **no features** (a v7 rng pulls
@@ -543,80 +573,6 @@ async fn a_tls_connection_without_the_ca_bundle_fails_verification() {
     assert!(format!("{err:?}").contains("InvalidCertificate"), "expected a certificate-verification failure, got {err:?}");
 }
 
-/// SMA-493 D8's regression net, and it must be able to detect the regression: after a successful
-/// connect, rotate the credential to a FRESH, syntactically valid nkey seed the broker's account
-/// does not declare, and require the next connection attempt to fail authentication.
-///
-/// **Why a well-formed-but-unrecognized seed, not a garbled string.** `connect` runs its own
-/// PRE-FLIGHT read+parse (`nats_publisher.rs`, right before `with_auth_callback` is installed) —
-/// a check the auth callback's per-attempt re-read has nothing to do with. A garbage rewrite (the
-/// brief's original shape) is caught there, on EVERY implementation, callback or not — proven
-/// empirically: mutating the auth callback alone (`creds::auth_from_credentials`, caching the
-/// parsed credential in a `OnceLock` after its first read — same file shape, same first connect,
-/// only the re-read removed) left this test PASSING, because the pre-flight rejected the garbled
-/// file before the cached callback ever ran. A syntactically valid seed clears that pre-flight
-/// unconditionally, so the entire outcome rests on whether the actual network handshake signs
-/// with the file's CURRENT content or a cached one.
-///
-/// Under the pre-SMA-493 `with_credentials_file`, or under the `OnceLock`-cached callback above,
-/// this assertion is FALSE: the ORIGINAL (still broker-recognized) key material signs the nonce
-/// and the second connect succeeds — see the report for the exact failing output under both
-/// mutations.
-#[tokio::test]
-async fn a_corrupted_credential_is_noticed_on_reconnect() {
-    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
-    let cfg = cfg_for(&fixture, &fixture.publisher, PUBLISHER_INBOX);
-
-    let publisher = NatsEventPublisher::connect(&cfg).await.expect("first connect");
-    publisher.publish(&event(1, EventType::RoleGranted)).await.expect("first publish");
-
-    // Rotate to a fresh, well-formed nkey seed the broker's PAIGASUS_IAM account never declared,
-    // then force a fresh connection attempt by constructing a new publisher — which is the same
-    // code path a reconnect takes, since the auth callback is per-attempt.
-    let unknown = nkeys::KeyPair::new_user();
-    let unknown_seed = unknown.seed().expect("a fresh keypair exposes its seed");
-    std::fs::write(
-        &fixture.publisher.seed_path,
-        format!("-----BEGIN USER NKEY SEED-----\n{unknown_seed}\n------END USER NKEY SEED------\n"),
-    )
-    .expect("rotate to a broker-unrecognized credential");
-
-    let err = NatsEventPublisher::connect(&cfg)
-        .await
-        .expect_err("a rotated, broker-unrecognized credential must not be papered over by a cached one");
-    assert!(matches!(err, NatsPublisherError::Connect(_)), "expected an authentication failure, got {err:?}");
-}
-
-/// SMA-493 D8's happy half, redesigned to actually discriminate (see the report for why the
-/// brief's own version does not): rotate the publisher's `seed_path` **file**, in place, to a
-/// DIFFERENT declared identity's seed — the consumer's — then go back through
-/// `NatsEventPublisher::connect` on the SAME `cfg` (same path, same `credentials_file`, same
-/// `inbox_prefix`).
-///
-/// The consumer's grant does not cover `$JS.API.STREAM.CREATE.IAM_EVENTS` /
-/// `$JS.API.STREAM.INFO.IAM_EVENTS` — the calls `connect`'s stream-ensure step makes — so if the
-/// rotated file content is actually read and used, that step is refused. A cached publisher
-/// credential would instead sail through it exactly as the first `connect` did, so this fails
-/// under a cached-credential implementation (verified by the Step 3 mutation).
-#[tokio::test]
-async fn a_rotated_credential_is_picked_up_without_a_restart() {
-    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
-    let cfg = cfg_for(&fixture, &fixture.publisher, PUBLISHER_INBOX);
-    NatsEventPublisher::connect(&cfg).await.expect("first connect as the publisher");
-
-    // Same path, different identity: the consumer's seed, which the fixture also declares.
-    let consumer_seed = std::fs::read_to_string(&fixture.consumer.seed_path).expect("consumer seed");
-    std::fs::write(&fixture.publisher.seed_path, &consumer_seed).expect("rotate the credential in place");
-
-    let err = NatsEventPublisher::connect(&cfg)
-        .await
-        .expect_err("the rotated (consumer) identity must be in force, and it cannot ensure the stream");
-    assert!(
-        matches!(err, NatsPublisherError::Ensure { .. }),
-        "expected the rotated identity's stream-ensure to be refused, got {err:?}"
-    );
-}
-
 /// And a bundle that is well-formed but wrong must also fail — proving the bundle is actually
 /// consulted rather than merely present.
 #[tokio::test]
@@ -640,4 +596,130 @@ async fn a_tls_connection_with_an_unrelated_ca_bundle_fails_verification() {
     // `InvalidCertificate` marker is what both controls are asserting on.
     assert!(matches!(err, NatsPublisherError::Connect(_)), "expected a connect failure, got {err:?}");
     assert!(format!("{err:?}").contains("InvalidCertificate"), "expected a certificate-verification failure, got {err:?}");
+}
+
+/// SMA-493 D8's regression net, and it must be able to detect the regression: rotate a LIVE,
+/// already-authenticated client's credential file to a DIFFERENT declared identity, force that
+/// SAME client to reconnect, and require the reconnect to adopt the new identity's grants.
+///
+/// **Why a live-client reconnect, not a second `connect()` call — a design mistake made and
+/// caught in review.** An earlier version of this test called `NatsEventPublisher::connect`
+/// twice. That does not discriminate: `with_credentials_file` (`options.rs:429-431` →
+/// `credentials()` at `:520-528`) reads and parses the file inside `ConnectOptions`'s own
+/// CONSTRUCTOR, freezing an `Arc<KeyPair>` into the signing closure it returns — but that cache
+/// belongs to ONE `ConnectOptions` build. A brand-new `connect()` call constructs a brand-new
+/// `ConnectOptions` and therefore reads the CURRENT file regardless of which implementation is in
+/// force, so calling `connect()` twice cannot tell "cached across this client's own reconnects"
+/// apart from "read fresh every attempt". The property D8 actually fixes only shows up on a
+/// genuine reconnect of an ALREADY-connected client: `Client::force_reconnect`
+/// (`client.rs:957`) re-triggers the same auth process its own doc names as the tool "to
+/// re-trigger the auth-callback" — exactly what happens when the underlying TCP connection drops
+/// and async-nats reconnects on its own.
+///
+/// `client_for` is used here rather than `NatsEventPublisher::connect` for two reasons: it hands
+/// back the raw [`async_nats::Client`] `force_reconnect` needs (which `NatsEventPublisher` does
+/// not expose), and its callback body is `auth_from_credentials` — the exact function
+/// `NatsEventPublisher::connect` installs — so this test still exercises production code, not a
+/// diverged test double.
+///
+/// The publisher's `iam.>` grant is already proven sufficient elsewhere in this file
+/// (`the_publisher_grant_covers_ensure_and_every_event_subject`), so no separate "before"
+/// assertion is needed here — the interesting behaviour is entirely in what happens AFTER the
+/// rotation.
+///
+/// Under a per-CLIENT cached credential — the real pre-SMA-493 shape, and the shape any future
+/// regression would take (hoisting the read/parse out of the callback into `ConnectOptions`
+/// construction while keeping the bare-nkey parser) — this assertion is FALSE: the reconnect
+/// re-authenticates as the ORIGINAL, still-cached publisher identity, the publish is permitted,
+/// no violation ever arrives, and the test times out instead of catching anything. Verified via
+/// an isolated per-client-cache mutation — see the report for the failing output.
+#[tokio::test]
+async fn a_rotated_credential_is_honoured_on_the_clients_own_reconnect() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, mut events) = client_for(&fixture, &fixture.publisher, PUBLISHER_INBOX).await;
+
+    // Same path, different (narrower) identity: the consumer's seed, which cannot publish iam.*
+    // at all.
+    let consumer_seed = std::fs::read_to_string(&fixture.consumer.seed_path).expect("consumer seed");
+    std::fs::write(&fixture.publisher.seed_path, &consumer_seed).expect("rotate the credential in place");
+
+    // Force the SAME already-authenticated client to reconnect — the real code path a dropped
+    // TCP connection's automatic reconnect takes, per `Client::force_reconnect`'s own doc — and
+    // wait for that cycle to actually finish before publishing (see `force_reconnect_and_await`'s
+    // doc for why publishing right after `force_reconnect()` alone is a race).
+    force_reconnect_and_await(&client, &mut events).await;
+
+    client.publish("iam.role.granted", "{}".into()).await.expect("a denied publish is still accepted locally");
+    client.flush().await.expect("flush");
+    expect_permissions_violation(&mut events, "iam.role.granted").await;
+}
+
+/// The happy half, and the actual operational claim SMA-493 D8 exists for: a credential rotated
+/// to a NEW, VALID identity is picked up by the running process without a restart — the outage
+/// this issue addresses is a service that could recover from a rotation but doesn't, not one that
+/// merely notices a bad one.
+///
+/// Starts as the CONSUMER, whose grant excludes `iam.*` entirely, and confirms that denial as the
+/// baseline — so a later success can only be explained by the rotated (publisher) identity
+/// actually being in force, not by some other misconfiguration. Rotates the consumer's seed
+/// FILE, in place, to the publisher's seed, force-reconnects the SAME client (see the sibling
+/// test's doc for why a live reconnect and not a second `connect()` call), then publishes again.
+///
+/// **A CORE publish, not a JetStream request/reply, and verified through a SEPARATE client.**
+/// `client_for`'s `custom_inbox_prefix` is fixed at construction (`CONSUMER_INBOX` here) and does
+/// not change across a reconnect; the rotated (publisher) identity's own subscribe grant is
+/// `_INBOX_IAM_PUB.>`, not `_INBOX_GW.>`, so a `$JS.API` round trip on THIS client would itself be
+/// refused by the inbox mismatch (D4) — a false negative unrelated to the property under test.
+/// A plain `client.publish` sidesteps that: JetStream's stream engine captures any message
+/// published on a subject its `subjects` filter covers, ack or no ack, as long as the PUBLISH
+/// itself is permitted. A second, independent, un-rotated provisioner connection then confirms
+/// delivery by polling the stream's own message count — a positive signal that fails in the safe
+/// direction: if the rotation were never adopted, the count never moves and the bounded poll times
+/// out and panics, it does not silently pass.
+///
+/// Under a per-CLIENT cached credential this assertion is FALSE: the reconnect keeps
+/// authenticating as the original (cached) consumer identity, the publish stays denied, the
+/// stream's message count never moves, and the poll below times out — verified via the same
+/// isolated per-client-cache mutation as the sibling test, see the report.
+#[tokio::test]
+async fn a_rotated_credential_restores_a_denied_publish_without_a_restart() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    // Ensure the stream exists first (via the real production path), so there is somewhere for a
+    // later permitted publish to land and be independently verified.
+    NatsEventPublisher::connect(&cfg_for(&fixture, &fixture.publisher, PUBLISHER_INBOX))
+        .await
+        .expect("ensure the stream exists first");
+
+    let (client, mut events) = client_for(&fixture, &fixture.consumer, CONSUMER_INBOX).await;
+    expect_publish_denied(&client, &mut events, "iam.role.granted").await;
+
+    // Rotate the FILE in place to the publisher's seed, then force this SAME client to
+    // reconnect and wait for that cycle to actually finish (see `force_reconnect_and_await`'s
+    // doc for why publishing right after `force_reconnect()` alone is a race).
+    let publisher_seed = std::fs::read_to_string(&fixture.publisher.seed_path).expect("publisher seed");
+    std::fs::write(&fixture.consumer.seed_path, &publisher_seed).expect("rotate to the publisher identity");
+    force_reconnect_and_await(&client, &mut events).await;
+
+    client
+        .publish("iam.role.granted", "{}".into())
+        .await
+        .expect("the rotated (publisher) identity's publish must be accepted locally");
+    client.flush().await.expect("flush");
+
+    let (verify_client, _verify_events) = client_for(&fixture, &fixture.provisioner, PROVISIONER_INBOX).await;
+    let js = jetstream::new(verify_client);
+    let deadline = tokio::time::Instant::now() + VIOLATION_BUDGET;
+    loop {
+        let mut stream = js.get_stream(STREAM).await.expect("the provisioner grant covers STREAM.INFO");
+        let info = stream.info().await.expect("the provisioner grant covers a fresh STREAM.INFO round trip");
+        if info.state.messages >= 1 {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the rotated (publisher) identity's publish never reached the stream within {VIOLATION_BUDGET:?} — \
+             the reconnect must not have adopted the rotated credential"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
