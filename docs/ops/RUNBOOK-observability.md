@@ -105,7 +105,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_outbox_relay_published_total` | counter | — | Rows successfully published in a tick (`drained − failures`). |
 | `iam_outbox_relay_publish_failures_total` | counter | — | Rows whose `EventPublisher::publish` call failed in a tick (a subset of `drained`, superset of `parked`). |
 | `iam_outbox_relay_parked_total` | counter | — | Rows that hit `[outbox].max_attempts` and were **parked** (poison) in a tick — a **counter of newly-parked rows this tick**, deliberately not a gauge (a gauge summed per-tick would read `0` on every tick that parks nothing new, hiding a growing parked backlog behind a flat-looking panel). See §4 "Outbox parked events". |
-| `iam_outbox_oldest_unpublished_age_seconds` | gauge | — | Age (seconds) of the oldest unpublished-and-unparked row seen in the most recent non-empty tick's batch (`None` → reported as `0`). Freshness is bounded by `[outbox].poll_interval_secs`. **Freezes at its last value if the relay task wedges while the process stays alive** — it is a backlog-lag signal, not a liveness signal (see §4). |
+| `iam_outbox_oldest_unpublished_age_seconds` | gauge | — | Age (seconds) of the oldest unpublished-and-unparked row seen in the most recent **poll** tick's batch (`None` → reported as `0`). **Refreshed by poll ticks only** (SMA-489): nudge- and backlog-driven ticks run in `TickMode::Fresh`, which excludes rows with `attempts > 0`, so their batch is not representative of the backlog and they deliberately leave this gauge alone — otherwise, the moment a publisher started failing, every nudged tick would overwrite the real backlog age with `0` or a fresh row's age, resetting `IamOutboxBacklogAgeHigh`'s `for: 5m` pending state on each scrape and (under steady commit traffic) possibly stopping it firing at all. Its refresh rate is therefore exactly `[outbox].poll_interval_secs`, regardless of commit rate. **Freezes at its last value if the relay task wedges while the process stays alive** — it is a backlog-lag signal, not a liveness signal (see §4). |
 | `iam_outbox_retention_ticks_total` | counter | `result` (`ok`/`error`) | One increment per `PgOutboxMaintainer` sweep tick (SMA-469), regardless of whether the tick deleted anything. **This is the retention sweep's liveness signal, and it fires on every tick even when `[outbox.retention].enabled = false`** — unlike the audit-retention task, the outbox maintainer is spawned unconditionally and its tick always runs the gauge refresh below, so `enabled = false` never explains silence here. See §4 "IamOutboxRetentionStalled". |
 | `iam_outbox_rows_deleted_total` | counter | `reason` (`published`/`parked`) | Rows deleted by a sweep, split by which cutoff (`[outbox.retention].published_days` vs. `parked_days`) triggered the delete. `reason="parked"` staying at `0` is expected in steady state (`parked_days` defaults to `0` = never). |
 | `iam_outbox_parked_rows` | gauge | — | The **current** count of parked (dead-letter) rows (`SELECT count(*) … WHERE parked = true`), refreshed on every retention tick — including when `[outbox.retention].enabled = false`, so this gauge (and the alert below) never goes stale just because deletion is paused. **Per-replica, not global-unique**: every IAM replica's maintainer queries the same table and sets the identical count on its own gauge, so N replicas emit N identical series for one fact. **Aggregate with `max by (job)`, never `sum`** — summing reports N× the real backlog. See §4 "IamOutboxDeadLetterBacklog". |
@@ -217,7 +217,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamOutboxEventsParked` | `increase(iam_outbox_relay_parked_total[15m]) > 0` | warning |
 | `IamOutboxPublishFailures` | `increase(iam_outbox_relay_publish_failures_total[5m]) > 0` for 5m | warning |
 | `IamOutboxRelayStalled` | `rate(iam_outbox_relay_ticks_total[10m]) == 0` | critical |
-| `IamOutboxNotificationsAbsent` | `(sum by (job) (increase(iam_outbox_listener_notifications_total[30m])) == 0) and (sum by (job) (increase(iam_outbox_relay_drained_total[30m])) > 0)` | warning |
+| `IamOutboxNotificationsAbsent` | `(sum by (job, instance) (increase(iam_outbox_listener_notifications_total[30m])) == 0) and (sum by (job, instance) (increase(iam_outbox_relay_drained_total[30m])) > 0)` for 15m | warning |
 | `IamPolicySnapshotReloadsStalled` | `(sum by (job, instance) (increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[10m])) or (up{job="iam"} == 1) * 0) == 0` for 5m | critical |
 | `IamAuditPartitionMaintenanceStalled` | `sum without (result) (increase(iam_audit_partition_maintenance_ticks_total[2d])) == 0` for 1h | warning |
 | `IamOutboxRetentionStalled` | `(sum by (job, instance) (increase(iam_outbox_retention_ticks_total[6h])) or (up{job="iam"} == 1) * 0) == 0` for 2h | warning |
@@ -641,16 +641,26 @@ Rows are being written and drained, but the listener has received no `iam_outbox
 notification for 30 minutes. Delivery has silently fallen back to `[outbox].poll_interval_secs`
 (~5 s), which is correct but not what this deployment is configured for.
 
+Both terms aggregate `by (job, instance)`, so this fires **per replica**. Start by checking how
+many replicas are alerting — that alone splits the two causes below.
+
 Most likely causes, in order:
 
-1. **A transaction- or statement-mode connection pooler** in front of Postgres. PgBouncer's
-   `transaction` and `statement` modes do not support `LISTEN` — the writer's `pg_notify` still
-   succeeds, so nothing else looks wrong. Point `[outbox].listen_database_url` at a direct or
-   session-mode endpoint.
-2. `[outbox].wake_on_commit = false` — check the effective config; the service logs an `info`
-   line at boot when the nudge is disabled.
-3. The listener is down: check `iam_outbox_listener_connected` with `min by (job)` (never `max`
-   or `sum` — the replicas do not agree) and `iam_outbox_listener_reconnects_total`.
+1. **A transaction- or statement-mode connection pooler** in front of Postgres — the cause when
+   **every** replica is alerting. PgBouncer's `transaction` and `statement` modes do not support
+   `LISTEN`; the writer's `pg_notify` still succeeds, so nothing else looks wrong. Point
+   `[outbox].listen_database_url` at a direct or session-mode endpoint.
+2. **One replica's listener is down or wedged** — the cause when only *some* replicas are
+   alerting. `NOTIFY` is broadcast to every listening session, so a healthy replica's counter
+   climbs regardless of what its neighbours do. Check `iam_outbox_listener_connected` (keep
+   `instance`, or aggregate with `min by (job)` — never `max` or `sum`, the replicas do not
+   agree) and `iam_outbox_listener_reconnects_total` for that instance.
+
+`[outbox].wake_on_commit = false` is **not** a possible cause: with the flag off no listener is
+spawned at all, so `iam_outbox_listener_notifications_total` is never registered, `increase()`
+over the absent series returns an empty vector, and this alert is structurally silent rather than
+firing. (The service does log an `info` line at boot when the nudge is disabled — that, not this
+alert, is where a disabled nudge shows up.)
 
 **If IAM mutations are also failing at commit** with an opaque backend error, suspect a full
 async notification queue — a listening session that stopped consuming prevents Postgres from
