@@ -111,17 +111,23 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
     // The permission lists are read from the COMMITTED template verbatim; only the identities are
     // substituted. That is what makes this a test of the artifact that ships rather than of a
     // convenient copy of it.
-    let rendered = std::fs::read_to_string(ops.join("accounts.conf.tmpl"))
-        .expect("the committed accounts template must be readable")
+    let tmpl_path = ops.join("accounts.conf.tmpl");
+    let rendered = std::fs::read_to_string(&tmpl_path)
+        .unwrap_or_else(|e| panic!("the committed accounts template {} must be readable: {e}", tmpl_path.display()))
         .replace("{{SYS_NKEY}}", &sys.public_key)
         .replace("{{PUBLISHER_NKEY}}", &publisher.public_key)
         .replace("{{CONSUMER_NKEY}}", &consumer.public_key)
         .replace("{{PROVISIONER_NKEY}}", &provisioner.public_key);
 
+    // Named, not inlined: `server_conf` varies per caller (the TLS fixture picks a different file),
+    // so a typo must panic with the path it looked for rather than a bare "os error 2".
+    let server_conf_path = ops.join(server_conf);
+    let server_conf_bytes = std::fs::read(&server_conf_path).unwrap_or_else(|e| panic!("the fixture server config {} must be readable: {e}", server_conf_path.display()));
+
     let mut image = GenericImage::new("nats", "2.10.14")
         .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
         .with_copy_to("/etc/nats/accounts.conf", rendered.into_bytes())
-        .with_copy_to("/etc/nats/nats-server.conf", std::fs::read(ops.join(server_conf)).expect("server conf"))
+        .with_copy_to("/etc/nats/nats-server.conf", server_conf_bytes)
         .with_cmd(["-c", "/etc/nats/nats-server.conf"]);
     for (target, bytes) in extra_files {
         image = image.with_copy_to(target, bytes);
@@ -282,13 +288,19 @@ async fn provision(fixture: &Fixture) {
         .expect("the provisioner grant must cover consumer creation");
 }
 
-/// Sufficiency: the committed publisher grant must cover stream ensure plus a publish on EVERY
-/// subject this service can emit. Iterating `EventType::ALL` (SMA-493 §3.4) is what makes a ninth
-/// event type this test's business — a new variant that nobody granted fails here rather than in
-/// production.
+/// Sufficiency: the committed publisher grant must cover stream ensure plus a publish on every
+/// subject this service can emit.
 ///
-/// Note that this exercises the ack path too, which is the whole reason a "write-only" publisher
-/// still needs a `subscribe` grant: `publish` returns `Ok` only after JetStream's ack lands on the
+/// **What the `EventType::ALL` loop does and does not buy.** It does NOT add per-subject permission
+/// coverage: the publisher's grant is the `iam.>` wildcard, so any variant whose wire string stays
+/// under `iam.` is permitted by construction and a single publish would prove the same thing. What
+/// the loop actually earns is (a) the ack path and the stream's `subjects` filter exercised once per
+/// variant, and (b) a variant that ever renders OUTSIDE the `iam.` prefix — the one case the
+/// wildcard does not absorb, and the one that would otherwise ship silently unpublishable. Read it
+/// as cheap breadth, not as the guarantee that a ninth event type is permitted.
+///
+/// The ack path is the substantive assertion here, and it is why a "write-only" publisher still
+/// needs a `subscribe` grant at all: `publish` returns `Ok` only after JetStream's ack lands on the
 /// client's inbox, so an inbox prefix that did not match the grant would time out every iteration.
 #[tokio::test]
 async fn the_publisher_grant_covers_ensure_and_every_event_subject() {
@@ -382,10 +394,27 @@ async fn the_consumer_grant_covers_pulling_and_acking_from_the_provisioned_durab
     msg.double_ack().await.expect("the consumer grant must cover $JS.ACK on its own durable");
 }
 
-/// The control that makes D5's filter binding. A consumer that can CREATE can set its own
-/// `filter_subjects` and read everything — so the NAMED form must be denied, not merely the bare
-/// one: async-nats builds `CONSUMER.CREATE.{stream}.{name}` (`context.rs:1512`), and a grant
-/// written as `CONSUMER.CREATE.*` would match neither that nor the legacy DURABLE form.
+/// The control that makes D5's filter binding. The consumer is narrowed by the PRE-PROVISIONED
+/// durable's `filter_subjects`, not by any subject permission — pull deliveries arrive on its inbox,
+/// never on `iam.*` — so that narrowing is only binding while the consumer cannot run a CREATE verb
+/// against the stream. nats-server 2.10 lets CREATE **update** an existing consumer's
+/// `filter_subjects`, so a consumer that can CREATE can rewrite its own filter to `iam.>` and read
+/// the entire authorization change graph using nothing but the `MSG.NEXT` grant it already holds.
+///
+/// Four subjects, in two pairs, because they fail differently:
+///
+/// - The `wide-open` / bare forms catch a grant that named the verb too loosely. async-nats builds
+///   `CONSUMER.CREATE.{stream}.{name}` (`context.rs:1512`), so a grant written as
+///   `CONSUMER.CREATE.*` would match neither that nor the legacy `CONSUMER.DURABLE.CREATE` form —
+///   the NAMED form has to be tested, not just the bare one.
+/// - **The own-durable forms are the ones a convenience wildcard would open**, and they are the
+///   reason this test is not already covered by the three above. The consumer's allow-list is
+///   currently fully enumerated (`CONSUMER.MSG.NEXT.…gateway-cache-invalidator`,
+///   `CONSUMER.INFO.…gateway-cache-invalidator`), so the property holds today. The natural future
+///   edit — collapsing those two into `$JS.API.CONSUMER.*.IAM_EVENTS.gateway-cache-invalidator` —
+///   leaves all three `wide-open`/bare subjects denied and would keep this test green while handing
+///   the consumer CREATE on its own durable, which is the whole escalation. Asserting the
+///   own-durable name is what makes that edit fail here instead of in production.
 #[tokio::test]
 async fn the_consumer_cannot_create_a_wider_consumer_in_any_form() {
     let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
@@ -396,6 +425,10 @@ async fn the_consumer_cannot_create_a_wider_consumer_in_any_form() {
         "$JS.API.CONSUMER.CREATE.IAM_EVENTS.wide-open",
         "$JS.API.CONSUMER.CREATE.IAM_EVENTS",
         "$JS.API.CONSUMER.DURABLE.CREATE.IAM_EVENTS.wide-open",
+        // Its OWN durable — the form a `CONSUMER.*.IAM_EVENTS.gateway-cache-invalidator` wildcard
+        // would grant while every subject above stayed denied.
+        "$JS.API.CONSUMER.CREATE.IAM_EVENTS.gateway-cache-invalidator",
+        "$JS.API.CONSUMER.DURABLE.CREATE.IAM_EVENTS.gateway-cache-invalidator",
     ] {
         expect_publish_denied(&client, &mut events, subject).await;
     }
