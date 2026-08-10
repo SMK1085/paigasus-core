@@ -81,6 +81,34 @@ tests:
           - exp_labels: { severity: critical }
             exp_annotations: { summary: "IAM outbox relay is not ticking (stalled but process alive)" }
 
+  # IamOutboxNotificationsAbsent (SMA-489): (sum by (job) (increase(notifications[30m])) == 0)
+  # and (sum by (job) (increase(drained[30m])) > 0), for: 0m.
+  #
+  # The `iam` job's notifications counter is flat at zero for the whole simulated life while its
+  # drained counter climbs steadily — rows ARE being written and drained, but the LISTEN nudge
+  # never arrives, the exact "pooler silently eats LISTEN" signature this alert exists to catch.
+  #
+  # `iam-healthy` is the MANDATORY control this task calls out: both its counters climb at the
+  # same rate, so notifications ARE flowing. Without this series, an all-firing fixture (e.g. a
+  # rule regressed from `== 0` to `>= 0`) would still pass — the negative assertion below is what
+  # catches that regression. `iam-healthy` must NEVER appear in exp_alerts at any eval_time.
+  - interval: 1m
+    input_series:
+      - series: 'iam_outbox_listener_notifications_total{job="iam",instance="a"}'
+        values: '0+0x40' # flat: no notification ever arrives
+      - series: 'iam_outbox_relay_drained_total{job="iam",instance="a"}'
+        values: '0+5x40' # rows ARE being drained
+      - series: 'iam_outbox_listener_notifications_total{job="iam-healthy",instance="b"}'
+        values: '0+5x40' # control: notifications flowing
+      - series: 'iam_outbox_relay_drained_total{job="iam-healthy",instance="b"}'
+        values: '0+5x40'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: IamOutboxNotificationsAbsent
+        exp_alerts:
+          - exp_labels: { severity: warning, job: iam }
+            exp_annotations: { summary: "IAM outbox commit nudges are not arriving (LISTEN likely blocked by a pooler)", description: "No iam_outbox_listener_notifications_total notification has arrived on iam in the last 30 minutes, even though iam_outbox_relay_drained_total shows rows being written and drained in that same window — rows ARE flowing, but never via the LISTEN/NOTIFY nudge. Delivery has silently fallen back to [outbox].poll_interval_secs (~5s), which is correct but not what this deployment is configured for. Most likely cause: a transaction- or statement-mode connection pooler in front of Postgres (PgBouncer's defaults do not support LISTEN) — the writer's pg_notify still succeeds, so nothing else looks wrong. See RUNBOOK section 4." }
+
   # IamPolicySnapshotReloadsStalled: healthy fleet — every backstop cycle installs, so
   # sum by (job, instance) (increase(...{outcome="installed"}[10m])) stays well above 0 and the
   # alert never fires. The `up` series is what the expr's `or` fallback keys off; a live target
