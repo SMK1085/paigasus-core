@@ -67,6 +67,13 @@ use tokio::sync::Notify;
 /// The channel `PgOutbox::enqueue` notifies. Must match `pg_outbox::WAKE_CHANNEL`.
 const WAKE_CHANNEL: &str = "iam_outbox_event";
 
+/// `application_name` set on the listener's own connection. This is an operator aid, not a
+/// behavioural knob: it makes the connection identifiable in `pg_stat_activity` (e.g. `WHERE
+/// application_name = '...'`), which is exactly what's needed to spot the wedged-listener case
+/// the SMA-489 runbook describes — distinguishing this single long-lived LISTEN connection from
+/// every other backend the service opens.
+const LISTENER_APPLICATION_NAME: &str = "paigasus-iam-outbox-listener";
+
 const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
 
@@ -95,7 +102,7 @@ impl PgOutboxListener {
     /// already holds one for `batch_size × publish-latency`. Going through a pool at all is
     /// forced by `PgListener::connect(&str)` not accepting connect options.
     async fn connect(&self) -> Result<PgListener, sea_orm::sqlx::Error> {
-        let opts = PgConnectOptions::from_str(&self.url)?;
+        let opts = PgConnectOptions::from_str(&self.url)?.application_name(LISTENER_APPLICATION_NAME);
         let pool = PgPoolOptions::new().max_connections(1).connect_with(opts).await?;
         let mut listener = PgListener::connect_with(&pool).await?;
         listener.eager_reconnect(false);

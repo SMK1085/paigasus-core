@@ -175,19 +175,23 @@ async fn row(db: &DatabaseConnection, id: Uuid) -> event_outbox::Model {
     event_outbox::Entity::find_by_id(id).one(db).await.expect("query event_outbox").expect("row present")
 }
 
-/// Counts the backends OTHER than this one whose last statement was a `LISTEN` — i.e. the
-/// `PgOutboxListener`'s session, once it has actually subscribed (sqlx issues exactly
-/// `LISTEN "iam_outbox_event";`, `sqlx-postgres-0.8.6/src/listener.rs:498`).
+/// Counts the backends OTHER than this one carrying the `PgOutboxListener`'s `application_name`
+/// (`paigasus-iam-outbox-listener`, set in `pg_outbox_listener.rs`'s `connect`) — i.e. the
+/// `PgOutboxListener`'s own session, once it has actually connected.
 ///
-/// Matching on `LISTEN%` rather than on the channel name is deliberate. `pg_stat_activity.query`
-/// holds each backend's LAST statement, so a predicate spelling out `%iam_outbox_event%` would
-/// match the probe/terminate statements THEMSELVES on whichever SeaORM pool connection last ran
-/// them — and `pid <> pg_backend_pid()` only excludes the one running right now, not its siblings
-/// in the pool. That would both report a phantom listener and terminate a pool connection.
+/// Matching on `application_name` rather than on the last-run statement text (`LISTEN%`) or the
+/// channel name is deliberate. `pg_stat_activity.query` holds each backend's LAST statement, so
+/// either of those alternatives could match some OTHER connection that happens to have last run a
+/// `LISTEN` on this channel — e.g. `wake_on_commit_false_emits_no_notification` below opens its
+/// own bare `PgListener` on the same channel — or the probe/terminate statement itself on
+/// whichever SeaORM pool connection last ran it (that string literally contains the channel
+/// name), and `pid <> pg_backend_pid()` only excludes the one running right now, not its siblings
+/// in the pool. `application_name` identifies exactly this component, independent of what it is
+/// doing right now or which other backends are momentarily also `LISTEN`ing.
 async fn listening_backends(db: &DatabaseConnection) -> i64 {
     db.query_one(sea_orm::Statement::from_string(
         sea_orm::DbBackend::Postgres,
-        "SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE query LIKE 'LISTEN%' AND pid <> pg_backend_pid()",
+        "SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE application_name = 'paigasus-iam-outbox-listener' AND pid <> pg_backend_pid()",
     ))
     .await
     .expect("query pg_stat_activity")
@@ -471,10 +475,12 @@ async fn a_killed_listener_backend_reconnects_and_still_delivers() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Kill every backend that is LISTENing (not our own admin connection). See
-    // `listening_backends` for why the predicate matches on `LISTEN%` rather than the channel
-    // name.
-    db.execute_unprepared("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE 'LISTEN%' AND pid <> pg_backend_pid()")
+    // Kill the outbox listener's backend specifically (identified by its `application_name`, not
+    // our own admin connection). Matching on `application_name` rather than on `LISTEN%` or the
+    // channel name means this can ONLY ever hit `PgOutboxListener`'s own session, even once a
+    // second listener (of any kind) exists in this file — see `listening_backends` above for the
+    // full reasoning, which applies identically here.
+    db.execute_unprepared("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'paigasus-iam-outbox-listener' AND pid <> pg_backend_pid()")
         .await
         .expect("terminate listener backend");
 
