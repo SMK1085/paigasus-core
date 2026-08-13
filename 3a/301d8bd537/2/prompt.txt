@@ -1,0 +1,1 @@
+This is just a planning session, so no artifacts are to be written to the repo. I want to scope out the frontend pieces. i envision multiple next.js apps for the backend services, e.g. the AI Gateway, the IAM service, but with common components or packages (e.g. auth, header). what does a solid setup look like?
