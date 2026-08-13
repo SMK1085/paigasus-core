@@ -109,8 +109,10 @@ tests:
   #
   # The `iam-healthy` enqueues series MUST climb (`0+5x40`). With no series for that job, a rule
   # regressed from `== 0` to `>= 0` makes its left-hand term true, but `sum by (job)` over an
-  # ABSENT series is empty, `and on (job)` drops it, no alert is produced — and the mutant passes,
-  # silently retiring the guard this block exists for.
+  # ABSENT series is empty, `and on (job)` drops it, no alert is produced — this block stops
+  # discriminating that mutant. The masked-replica block below still catches it (its `healthy:8080`
+  # instance carries its own enqueues series), so this series is redundancy, not this block's sole
+  # guard against that regression.
   #
   # The `iam` enqueues series MUST start climbing at t=0 (`0+5x40`). The `eval_time: 10m` empty
   # assertion below is the only thing pinning `for: 15m`, and it discriminates only because the
@@ -233,6 +235,26 @@ tests:
         values: '0+0x40' # this replica drained NOTHING — it was not doing outbox work
       - series: 'iam_outbox_notifying_enqueues_total{job="iam",instance="nodrain:8080"}'
         values: '0+5x40' # nudges WERE emitted, but nothing committed
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: IamOutboxNotificationsAbsent
+        exp_alerts: []
+
+  # IamOutboxNotificationsAbsent (SMA-495): the LISTENER-ABSENT silence. Under
+  # `[outbox].wake_on_commit = false` no listener is spawned at all, so
+  # `iam_outbox_listener_notifications_total` is never registered; `increase()` over the absent
+  # series is an EMPTY vector and the alert is structurally silent rather than firing. Correct —
+  # a disabled nudge shows up in the boot log, not here. Pinned because this is the silence a
+  # future reader is most likely to "fix" by copying the `or (up{job="iam"} == 1) * 0` fallback
+  # from IamPolicySnapshotReloadsStalled below, which would page forever on every nudge-disabled
+  # deployment with nothing going red.
+  - interval: 1m
+    input_series:
+      # deliberately NO iam_outbox_listener_notifications_total series
+      - series: 'iam_outbox_relay_drained_total{job="iam",instance="nolisten:8080"}'
+        values: '0+5x40'
+      - series: 'iam_outbox_notifying_enqueues_total{job="iam",instance="nolisten:8080"}'
+        values: '0+5x40'
     alert_rule_test:
       - eval_time: 35m
         alertname: IamOutboxNotificationsAbsent

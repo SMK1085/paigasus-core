@@ -548,7 +548,10 @@ async fn wake_on_commit_false_emits_no_notification() {
     let tx = uow.begin().await.expect("begin");
     notifying.enqueue(&*tx, &sample_event()).await.expect("enqueue");
     tx.commit().await.expect("commit");
-    listener.recv().await.expect("the notifying writer's own notification");
+    tokio::time::timeout(Duration::from_secs(10), listener.recv())
+        .await
+        .expect("the notifying writer's own notification arrives")
+        .expect("listener recv");
 
     let outbox = PgOutbox::new(false); // the escape hatch
     let tx = uow.begin().await.expect("begin");

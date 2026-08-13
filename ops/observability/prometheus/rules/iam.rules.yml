@@ -37,9 +37,9 @@ groups:
       # fallback. This is the only alert that catches that specific failure mode. It must fire on
       # "rows are being written and drained, yet no notification has ever arrived" — not merely
       # on "no notifications" alone, which would also be true, and harmless, on an idle deployment
-      # with nothing to notify about; the right-hand `> 0` term is the mandatory control for that,
-      # proving delivery is actually happening and the left side isn't just quiet because there is
-      # nothing to drain.
+      # with nothing to notify about; the `drained` term's `> 0` is one of the two mandatory
+      # controls for that, proving delivery is actually happening and the left side isn't just
+      # quiet because there is nothing to drain.
       #
       # SMA-495. There are THREE terms, and the two control terms prove different things. The
       # `drained` term proves THIS REPLICA was alive and doing outbox work — that is all it ever
@@ -78,8 +78,9 @@ groups:
       # nothing for this alert to say anyway. Ship the binary before these rules, and roll the
       # rules back with the binary.
       #
-      # BOTH terms aggregate `by (job, instance)`, not `by (job)` — per-REPLICA detection at
-      # identical cost. `NOTIFY` is broadcast to EVERY listening session, so on a healthy
+      # The listener term and the `drained` term aggregate `by (job, instance)`, not
+      # `by (job)` — per-REPLICA detection at identical cost. `NOTIFY` is broadcast to
+      # EVERY listening session, so on a healthy
       # deployment every replica's notification counter climbs independently; a single replica
       # whose `LISTEN` is wedged has a FLAT notification counter while its own `drained` keeps
       # climbing off the poll fallback, which is precisely this alert's shape scoped to that one
