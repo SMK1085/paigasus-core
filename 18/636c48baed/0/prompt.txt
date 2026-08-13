@@ -1,0 +1,38 @@
+<task-notification>
+<task-id>aa3588fbf897f9467</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/5cbfa745-8823-4187-8db1-08c7f00d8f2d/tasks/aa3588fbf897f9467.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 4: alert expression + promtool" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Fix round 1/5 complete.
+
+**Status:** DONE
+
+**New commit SHA:** `32dd660241bc19c9fb35ae9c0ff2acad9f090794` (signed `G`, commitlint parity-checked on the final message including the appended `Entire-Checkpoint:` trailer — exit 0, scope `test(repo)`). Working tree clean; both gates green on the committed tree.
+
+**Mutation 5 behaved exactly as specified.** Deleting only the `drained` conjunct now yields one FAILED entry naming `nodrain:8080` at `time: 35m`, exit code 1. Restored from a pristine copy, `diff` empty, and the post-restore `repo:promtool` hash (`fd6ec53b`) matches the pre-mutation green run, so the committed tree is byte-for-byte the verified state.
+
+**I reproduced both Important findings myself before fixing, rather than taking them on trust:**
+- Finding 1: `grep -in roll` on the rule file returns only the deploy-ordering line 76 and an unrelated "rolling restart" at 127. The rollback justification is genuinely at `pg_outbox.rs:99` ("Counted PRE-COMMIT: ... a rolled-back mutation increments this while delivering nothing"). Pointer repointed there and to the new block.
+- Finding 2: against my own commit `8c3964d`, deleting the `drained` conjunct left the suite **fully green** — zero coverage, confirmed. The `nodrain` block was added verbatim as supplied.
+
+Both Minors fixed as one-liners; for Minor 2 I confirmed the gating at `main.rs:64` (`if config.outbox.wake_on_commit { ...increment(0) }`) before writing the clause.
+
+**Concerns — two, both worth a moment:**
+
+1. **The brief's premise was falsified by the brief's own instructions, and I did not catch it.** Task 4 told me to add a flat enqueues series to `iam-idle`, which is precisely what retired the `drained` guard, while the same brief asserted that guard still existed. I verified the four mutations it *listed* and did not check whether my edit had silently removed coverage elsewhere. The general lesson for Tasks 5-6: adding a series to an existing fixture block can retire a guard that block used to provide, and a prescribed mutation list will not surface that — only re-running a mutation on the *untouched* conjuncts will. If any later task edits these blocks again, mutation 5 should be re-run.
+
+2. **Minor, non-blocking:** the older SMA-489 comment at the top of the rule still says "the right-hand `&gt; 0` term is the mandatory control", singular, which now under-describes a three-term expression. The brief explicitly told me to leave that paragraph unmodified, so I did. It is stale rather than wrong (the sentence remains true of the term it describes), but a future reader may find the singular phrasing confusing next to the SMA-495 paragraph directly below it.</result>
+<usage><subagent_tokens>125921</subagent_tokens><tool_uses>15</tool_uses><duration_ms>238440</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b4mppf6pa</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/5cbfa745-8823-4187-8db1-08c7f00d8f2d/tasks/b4mppf6pa.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait out the CodeRabbit rate-limit window" completed (exit code 0)</summary>
+</task-notification>
