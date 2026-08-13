@@ -118,7 +118,10 @@ pub struct AuthnConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct JwksCacheConfig {
     pub backend: JwksCacheBackend,
-    pub redis_url: Option<String>,
+    /// Required when `backend = "redis"`. A [`RedactedUrl`] because a Redis connection string
+    /// carries credentials exactly as a Postgres DSN does (`redis://user:pass@host:6379/0`);
+    /// read the real value with [`RedactedUrl::as_str`].
+    pub redis_url: Option<RedactedUrl>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -164,7 +167,9 @@ pub struct AuthzConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AuthzCacheConfig {
     pub backend: AuthzCacheBackend,
-    pub redis_url: Option<String>,
+    /// Required when `backend = "redis"`. A [`RedactedUrl`], same reason as
+    /// [`JwksCacheConfig::redis_url`]; read the real value with [`RedactedUrl::as_str`].
+    pub redis_url: Option<RedactedUrl>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -272,7 +277,9 @@ impl<'de> Deserialize<'de> for RawPepper {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ApiKeyCacheConfig {
     pub backend: ApiKeyCacheBackend,
-    pub redis_url: Option<String>,
+    /// Required when `backend = "redis"`. A [`RedactedUrl`], same reason as
+    /// [`JwksCacheConfig::redis_url`]; read the real value with [`RedactedUrl::as_str`].
+    pub redis_url: Option<RedactedUrl>,
     pub ttl_secs: u64,
 }
 
@@ -1528,7 +1535,7 @@ mod tests {
             )?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert_eq!(cfg.authn.jwks_cache.backend, JwksCacheBackend::Redis);
-            assert_eq!(cfg.authn.jwks_cache.redis_url.as_deref(), Some("redis://localhost:6379"));
+            assert_eq!(cfg.authn.jwks_cache.redis_url.as_ref().map(RedactedUrl::as_str), Some("redis://localhost:6379"));
             assert!(cfg.validate().is_ok(), "expected a redis backend with redis_url to pass validation");
             Ok(())
         });
@@ -1760,7 +1767,7 @@ mod tests {
             assert_eq!(cfg.authz.decision_cache_ttl_secs, 20);
             assert_eq!(cfg.authz.refresh_interval_secs, 2);
             assert_eq!(cfg.authz.cache.backend, AuthzCacheBackend::Redis);
-            assert_eq!(cfg.authz.cache.redis_url.as_deref(), Some("redis://localhost:6379"));
+            assert_eq!(cfg.authz.cache.redis_url.as_ref().map(RedactedUrl::as_str), Some("redis://localhost:6379"));
             assert_eq!(cfg.authz.bootstrap_admins.len(), 1);
             assert_eq!(cfg.authz.bootstrap_admins[0].issuer, "https://idp.example.com/realms/acme");
             assert_eq!(cfg.authz.bootstrap_admins[0].subject, "platform-admin-sub");
@@ -2065,7 +2072,7 @@ mod tests {
             assert_eq!(cfg.api_keys.default_expiry_days, Some(365));
             assert_eq!(cfg.api_keys.last_used_throttle_secs, 60);
             assert_eq!(cfg.api_keys.introspect_cache.backend, ApiKeyCacheBackend::Redis);
-            assert_eq!(cfg.api_keys.introspect_cache.redis_url.as_deref(), Some("redis://localhost:6379"));
+            assert_eq!(cfg.api_keys.introspect_cache.redis_url.as_ref().map(RedactedUrl::as_str), Some("redis://localhost:6379"));
             assert_eq!(cfg.api_keys.introspect_cache.ttl_secs, 30);
             assert!(cfg.api_keys.pepper().is_ok(), "a valid pepper must decode via ApiKeyConfig::pepper");
             assert!(cfg.validate().is_ok(), "expected a fully-populated, valid [api_keys] block to pass validation");
@@ -2196,6 +2203,81 @@ mod tests {
         assert_eq!(format!("{url:?}"), r#"RedactedUrl("<redacted>")"#);
         assert_eq!(serde_json::to_string(&url).expect("RedactedUrl serializes"), r#""<redacted>""#);
         assert_eq!(url.as_str(), "postgres://u:p@localhost/db", "as_str must still yield the REAL url");
+    }
+
+    /// SMA-496. Companion to `connection_urls_never_appear_in_debug_or_serialized_config`
+    /// above: a Redis connection string carries credentials exactly as a Postgres DSN does
+    /// (`redis://user:pass@host:6379/0`), and `IamConfig` derives `Debug`/`Serialize`, so
+    /// `RedactedUrl` has to cover BOTH outbound directions for all three cache URLs too.
+    ///
+    /// Each URL gets its own password and host so a leak names its own source.
+    #[test]
+    fn cache_urls_never_appear_in_debug_or_serialized_config() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://db_user:db_pw_secret@db.example.com/iam");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [api_keys]
+                        pepper = "{}"
+
+                        [authn.jwks_cache]
+                        backend = "redis"
+                        redis_url = "redis://jwks_user:jwks_pw_secret@jwks.example.com:6379/0"
+
+                        [authz.cache]
+                        backend = "redis"
+                        redis_url = "redis://authz_user:authz_pw_secret@authz.example.com:6379/1"
+
+                        [api_keys.introspect_cache]
+                        backend = "redis"
+                        redis_url = "redis://apikey_user:apikey_pw_secret@apikey.example.com:6379/2"
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+
+            // Sanity: all three REAL values round-tripped through figment, so the "must not
+            // contain" assertions below cannot pass merely because figment populated nothing —
+            // and `as_str` still yields something usable at the `connect_redis` call sites.
+            assert_eq!(
+                cfg.authn.jwks_cache.redis_url.as_ref().map(RedactedUrl::as_str),
+                Some("redis://jwks_user:jwks_pw_secret@jwks.example.com:6379/0")
+            );
+            assert_eq!(
+                cfg.authz.cache.redis_url.as_ref().map(RedactedUrl::as_str),
+                Some("redis://authz_user:authz_pw_secret@authz.example.com:6379/1")
+            );
+            assert_eq!(
+                cfg.api_keys.introspect_cache.redis_url.as_ref().map(RedactedUrl::as_str),
+                Some("redis://apikey_user:apikey_pw_secret@apikey.example.com:6379/2")
+            );
+
+            let debugged = format!("{cfg:?}");
+            let serialized = serde_json::to_string(&cfg).expect("IamConfig serializes");
+
+            // Hosts are asserted as EXACT names, never as a bare "example.com": the mandatory
+            // issuer is `https://idp.example.com/...` and is deliberately NOT redacted, so a
+            // blanket substring check would fail on it.
+            for secret in ["jwks_pw_secret", "authz_pw_secret", "apikey_pw_secret", "jwks.example.com", "authz.example.com", "apikey.example.com"] {
+                assert!(!debugged.contains(secret), "{secret} leaked into IamConfig's Debug output: {debugged}");
+                assert!(!serialized.contains(secret), "{secret} leaked into IamConfig's serialized form: {serialized}");
+            }
+
+            // The placeholder must land IN PLACE, and in the right NUMBER. A field silently
+            // dropped from the dump satisfies the "must not contain" assertions above just as
+            // well as a redacted one does, which is why this is a count and not a `contains`.
+            assert_eq!(serialized.matches(r#""redis_url":"<redacted>""#).count(), 3, "{serialized}");
+            assert_eq!(debugged.matches(r#"redis_url: Some(RedactedUrl("<redacted>"))"#).count(), 3, "{debugged}");
+
+            Ok(())
+        });
     }
 
     // --- SMA-446 Task A12: `[audit]` config ------------------------------------------------
