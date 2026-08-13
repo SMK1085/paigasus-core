@@ -71,9 +71,12 @@ groups:
       # would license an alert against replica B.
       #
       # NOTE the deploy ordering this creates: until at least one replica per job runs a binary
-      # emitting `iam_outbox_notifying_enqueues_total`, that term is an EMPTY vector, `and on (job)`
-      # matches nothing, and this alert is structurally silent. Ship the binary before these rules,
-      # and roll the rules back with the binary.
+      # emitting `iam_outbox_notifying_enqueues_total` with `[outbox].wake_on_commit = true`, that
+      # term is an EMPTY vector, `and on (job)` matches nothing, and this alert is structurally
+      # silent. The config half is not a second caveat but the same one: the series is primed only
+      # under `wake_on_commit` (`main.rs`), and a deployment that has turned the nudge off has
+      # nothing for this alert to say anyway. Ship the binary before these rules, and roll the
+      # rules back with the binary.
       #
       # BOTH terms aggregate `by (job, instance)`, not `by (job)` — per-REPLICA detection at
       # identical cost. `NOTIFY` is broadcast to EVERY listening session, so on a healthy

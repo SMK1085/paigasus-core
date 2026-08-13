@@ -100,9 +100,12 @@ tests:
   #
   # NOTE (SMA-495): this block no longer discriminates WHICH control keeps `iam-idle` silent —
   # both its drained and its enqueues series are flat, so deleting either clause leaves it silent.
-  # The `replay only` block below is what pins the enqueues clause; the drained clause's own
-  # justification is the rollback case documented on the rule (a window where every mutation rolls
-  # back climbs enqueues while draining nothing). Do not read this block as proof of either.
+  # The `replay only` block below is what pins the enqueues clause; the `nodrain` block pins the
+  # drained clause, whose justification is the pre-commit rollback case (the counter is
+  # incremented before COMMIT, so a window where every mutation rolls back climbs enqueues while
+  # draining nothing) — documented at the increment site,
+  # rs/crates/services/paigasus-iam/src/adapters/persistence/pg_outbox.rs:99, NOT on the rule.
+  # Do not read this block as proof of either.
   #
   # The `iam-healthy` enqueues series MUST climb (`0+5x40`). With no series for that job, a rule
   # regressed from `== 0` to `>= 0` makes its left-hand term true, but `sum by (job)` over an
@@ -111,8 +114,9 @@ tests:
   #
   # The `iam` enqueues series MUST start climbing at t=0 (`0+5x40`). The `eval_time: 10m` empty
   # assertion below is the only thing pinning `for: 15m`, and it discriminates only because the
-  # condition is true from t=1m; a series that starts later destroys that guard without failing
-  # anything.
+  # condition is true from t=1m; a series that starts climbing after ~t=9m destroys that guard
+  # without failing anything (a series starting at t=6m still makes the condition true by t=7m, so
+  # a `for: 0m` mutant would still fire at the 10m assertion).
   #
   # The `eval_time: 10m` assertion is what pins `for: 15m`. The condition is true from t=1m
   # onward (the first evaluation at which `increase()` has two samples to work with), so a rule
@@ -212,6 +216,23 @@ tests:
       - series: 'iam_outbox_relay_drained_total{job="iam",instance="predeploy:8080"}'
         values: '0+5x40'
       # deliberately NO iam_outbox_notifying_enqueues_total series
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: IamOutboxNotificationsAbsent
+        exp_alerts: []
+
+  # IamOutboxNotificationsAbsent (SMA-495): nudges emitted, but THIS replica drained nothing — the
+  # pre-commit rollback window of pg_outbox.rs:99, and what now pins the `drained` conjunct.
+  # `iam-idle` no longer discriminates it (all of iam-idle's series are flat). Mutation: delete the
+  # `drained` conjunct from the rule and this block FIRES.
+  - interval: 1m
+    input_series:
+      - series: 'iam_outbox_listener_notifications_total{job="iam",instance="nodrain:8080"}'
+        values: '0+0x40' # flat
+      - series: 'iam_outbox_relay_drained_total{job="iam",instance="nodrain:8080"}'
+        values: '0+0x40' # this replica drained NOTHING — it was not doing outbox work
+      - series: 'iam_outbox_notifying_enqueues_total{job="iam",instance="nodrain:8080"}'
+        values: '0+5x40' # nudges WERE emitted, but nothing committed
     alert_rule_test:
       - eval_time: 35m
         alertname: IamOutboxNotificationsAbsent
