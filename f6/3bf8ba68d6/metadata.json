@@ -3,7 +3,7 @@
   "checkpoint_id": "f63bf8ba68d6",
   "strategy": "manual-commit",
   "branch": "feature/sma-495-iam-count-committed-notifying-enqueues-so-the-nudge-absent",
-  "checkpoints_count": 2,
+  "checkpoints_count": 4,
   "files_touched": [
     "rs/crates/libs/paigasus-observability/src/names.rs",
     "rs/crates/services/paigasus-iam/src/adapters/persistence/pg_outbox.rs",
@@ -17,13 +17,20 @@
       "compact_transcript": "/f6/3bf8ba68d6/0/transcript.jsonl",
       "content_hash": "/f6/3bf8ba68d6/0/content_hash.txt",
       "prompt": "/f6/3bf8ba68d6/0/prompt.txt"
+    },
+    {
+      "metadata": "/f6/3bf8ba68d6/1/metadata.json",
+      "transcript": "/f6/3bf8ba68d6/1/full.jsonl",
+      "compact_transcript": "/f6/3bf8ba68d6/1/transcript.jsonl",
+      "content_hash": "/f6/3bf8ba68d6/1/content_hash.txt",
+      "prompt": ""
     }
   ],
   "token_usage": {
-    "input_tokens": 227,
-    "cache_creation_tokens": 19293,
-    "cache_read_tokens": 7129579,
-    "output_tokens": 10916,
-    "api_call_count": 24
+    "input_tokens": 237,
+    "cache_creation_tokens": 34695,
+    "cache_read_tokens": 8341934,
+    "output_tokens": 16302,
+    "api_call_count": 29
   }
 }
