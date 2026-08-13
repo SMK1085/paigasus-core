@@ -659,12 +659,21 @@ Expected: **no output from either**. Any hit is a site you missed. Note `RawPepp
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma496/rs
-cargo doc -p paigasus-iam --no-deps 2>&1 | tail -20
+# `cargo doc … | tail -20` would be worse than useless: a pipeline exits with the
+# LAST command's status, so tail's success masks cargo's failure. But cargo's own
+# status is not usable as the gate either — see below. So filter for the ONE thing
+# that would be a regression, and let the grep decide.
+cargo doc -p paigasus-iam --no-deps 2>&1 | tee /tmp/sma496-doc.log >/dev/null
+grep -c '^error' /tmp/sma496-doc.log            # expect 32 — the pre-existing baseline
+grep 'src/config.rs' /tmp/sma496-doc.log && echo 'REGRESSION' || echo 'ok: no config.rs doc errors'
+
 cargo clippy --workspace --all-targets -- -D warnings
 git diff --stat
 ```
 
-Expected: `cargo doc` reports no broken intra-doc links (a `[\`RedactedUrl\`]` typo shows up here, not in clippy); clippy clean; `git diff --stat` shows **only** `src/config.rs`.
+**`cargo doc` exits NON-ZERO on this repo, and that is not your fault.** The workspace lints imply `-D rustdoc::private_intra_doc_links`, and 32 pre-existing errors live in `hasher.rs`, `cedar_authorizer.rs`, `generation.rs` and `policy_snapshot.rs` — verified identical on unmodified `origin/main`. So neither the raw exit status nor a naive `tail` tells you anything. The meaningful assertion is the second grep: **zero hits for `src/config.rs`**, which is what proves this change introduced no broken intra-doc link (a `[\`RedactedUrl\`]` typo would surface here and nowhere else — clippy does not check doc links).
+
+Expected: `32`, then `ok: no config.rs doc errors`; clippy clean; `git diff --stat` shows **only** `src/config.rs`.
 
 - [ ] **Step 7: Commit**
 
@@ -688,8 +697,11 @@ git commit -m "docs(rs): correct the stale config-dump rationale and impl refere
 - [ ] **Step 1: Confirm Docker is running**
 
 ```bash
-docker info >/dev/null 2>&1 && echo "docker: RUNNING" || echo "docker: START IT"
+docker info >/dev/null 2>&1 || { echo "START DOCKER — the gated suites would no-op"; exit 1; }
+echo "docker: RUNNING"
 ```
+
+**Fails closed on purpose.** An advisory `|| echo "START IT"` exits 0, so the rest of the verification runs anyway and the Docker-gated suites quietly skip — which is precisely the failure mode this step exists to catch.
 
 `:nats-permissions` mints TLS certs and starts a broker; `api_key_cache_connection` and `authz_acceptance` need Redis and Postgres. Without Docker they skip silently and prove nothing.
 

@@ -11,10 +11,11 @@ All line references verified against `origin/main` at `42eb734`.
 
 ## 1. Problem
 
-`IamConfig` derives `Debug` and `Serialize`. Four of its fields are connection URLs that
-routinely embed credentials. Two of them are protected by the `RedactedUrl` newtype SMA-489
-introduced (`src/config.rs:50`); the other two are not, or are protected by a mechanism that
-does not travel with the type.
+`IamConfig` derives `Debug` and `Serialize`. **Six** of its fields are connection URLs that
+routinely embed credentials. Two are already protected by the `RedactedUrl` newtype SMA-489
+introduced (`src/config.rs:50`); the remaining **four** are the scope of this change — three
+carry no protection at all, and the fourth is protected by a mechanism that does not travel with
+the type (§1.2).
 
 | Field | Location | Today |
 |---|---|---|
@@ -567,10 +568,16 @@ required.
 
 ## 7. Rollout and residual risk
 
-Config-file compatible in both directions: `RedactedUrl`'s `Deserialize` delegates straight to
+**Inbound** config is fully compatible: `RedactedUrl`'s `Deserialize` delegates straight to
 `String` (`config.rs:66-73`), so every existing `iam.toml` and `IAM_*` env override parses
 identically. No migration, no operator action, no version coupling. Revertible by reverting the
 commit.
+
+**Outbound is deliberately lossy, and that is the feature.** A serialized `IamConfig` emits
+`"<redacted>"` for all six URL fields, so it cannot round-trip back into a working config — do
+not treat a config dump as a backup or as input to another process. Nothing does that today
+(§1.1), and `Deserialize` reading a dump would happily accept the literal `<redacted>` as a
+host, which is the same hazard D6 guards in figment's defaults layer.
 
 Residual risks:
 
@@ -624,9 +631,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 # targets must build, and a filtered run never touches them.
 cargo nextest run -p paigasus-iam --no-tests=pass
 
-# Docker-gated suites must RUN, not skip (§4.5). Confirm the daemon is up first;
-# then check the output does not contain "skipping".
-docker info >/dev/null || echo "START DOCKER — api_key_cache_connection will no-op"
+# Docker-gated suites must RUN, not skip (§4.5) — so this FAILS CLOSED. An advisory
+# `|| echo` would exit 0 and let the whole verification proceed against suites that
+# silently no-op, which is the exact failure mode §4.5 exists to prevent.
+docker info >/dev/null 2>&1 || { echo "START DOCKER — the gated suites would no-op"; exit 1; }
 
 # Full graph, as CI runs it. :nats-permissions is triggered by the config.rs edit
 # (moon.yml:160) and is Docker + TLS gated.
