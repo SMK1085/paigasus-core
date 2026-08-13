@@ -551,6 +551,35 @@ async fn wake_on_commit_false_emits_no_notification() {
     assert_eq!(rows.len(), 1, "the outbox row itself must be written regardless of the flag");
 }
 
+// --- SMA-495: the notifying-enqueue counter ---------------------------------------------------
+
+/// SMA-495 AC1: an enqueue that emitted `pg_notify` is counted.
+///
+/// The recorder is installed BEFORE the first enqueue — `counter!` against no installed recorder
+/// is a silent no-op, so an `init` after the fact would render an empty exposition and this would
+/// fail for the wrong reason.
+///
+/// Asserted as an exact `1.0`, never as "not absent": `support::sum_metric_from` sums the parsed
+/// sample lines and returns `0.0` for a family that does not exist at all, identically to one
+/// present at zero — so an absence-based assertion here would pass with the increment deleted.
+#[tokio::test]
+async fn a_notifying_enqueue_is_counted() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let handle = paigasus_observability::init("test-iam-notifying-enqueue");
+
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    let outbox = PgOutbox::new(true);
+    let tx = uow.begin().await.expect("begin");
+    outbox.enqueue(&*tx, &sample_event()).await.expect("enqueue");
+    tx.commit().await.expect("commit");
+
+    assert_eq!(
+        support::sum_metric_from(&handle.render(), "iam_outbox_notifying_enqueues_total"),
+        1.0,
+        "a committed notifying enqueue must increment iam_outbox_notifying_enqueues_total"
+    );
+}
+
 // --- D10: shutdown never cancels an in-flight tick -------------------------------------------
 
 /// AC9/D10: shutdown must NEVER cancel an in-flight tick. A publisher that blocks until

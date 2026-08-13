@@ -17,7 +17,9 @@ use super::entities::event_outbox;
 use super::map_err;
 use super::uow::recover_txn;
 use async_trait::async_trait;
+use metrics::counter;
 use paigasus_iam_core::{DomainEvent, Outbox, RepositoryError, Transaction};
+use paigasus_observability::names;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DbBackend, Set, Statement};
 
 /// `enqueue` never touches `&self` beyond reading [`Self::notify`] — all writes go to the
@@ -89,6 +91,16 @@ impl Outbox for PgOutbox {
             txn.execute(Statement::from_string(DbBackend::Postgres, format!("SELECT pg_notify('{WAKE_CHANNEL}', '')")))
                 .await
                 .map_err(map_err)?;
+            // SMA-495. AFTER the `?`, so a `pg_notify` that failed to execute is never counted.
+            // This is the control term `IamOutboxNotificationsAbsent` gates on: it means "a nudge
+            // was emitted", which `iam_outbox_relay_drained_total` only approximated — a drain
+            // also counts SMA-469 dead-letter replays, which emit no notification at all.
+            //
+            // Counted PRE-COMMIT: there is no post-commit hook on a recovered transaction, so a
+            // rolled-back mutation increments this while delivering nothing. That is absorbed by
+            // the alert's separate `drained` term. Do NOT move this increment out of the `notify`
+            // branch or below the transaction boundary without re-reading that rule.
+            counter!(names::IAM_OUTBOX_NOTIFYING_ENQUEUES_TOTAL).increment(1);
         }
         Ok(())
     }
