@@ -240,14 +240,26 @@ tests:
         alertname: IamOutboxNotificationsAbsent
         exp_alerts: []
 
-  # IamOutboxNotificationsAbsent (SMA-495): the LISTENER-ABSENT silence. Under
-  # `[outbox].wake_on_commit = false` no listener is spawned at all, so
-  # `iam_outbox_listener_notifications_total` is never registered; `increase()` over the absent
-  # series is an EMPTY vector and the alert is structurally silent rather than firing. Correct —
-  # a disabled nudge shows up in the boot log, not here. Pinned because this is the silence a
-  # future reader is most likely to "fix" by copying the `or (up{job="iam"} == 1) * 0` fallback
-  # from IamPolicySnapshotReloadsStalled below, which would page forever on every nudge-disabled
-  # deployment with nothing going red.
+  # IamOutboxNotificationsAbsent (SMA-495): the LISTENER-ABSENT silence — an absent left-hand
+  # series must silence the alert even when BOTH controls are fully satisfied.
+  #
+  # This is deliberately NOT the `[outbox].wake_on_commit = false` shape (CodeRabbit, PR 118).
+  # That config silences the alert twice over and so can prove nothing about either term: the
+  # listener is not spawned (`main.rs`, the `wake_on_commit` branch guarding `PgOutboxListener`)
+  # AND `iam_outbox_notifying_enqueues_total` is never primed (`main.rs`, the prime is gated on
+  # the same flag), so both series are absent and either one alone would account for the silence.
+  # The series below are the reachable case that isolates the left-hand term instead: a replica
+  # whose listener series has not appeared while the deployment is nudging and this replica is
+  # draining — `PgOutboxListener::run` primes the counter on entry, so the window between process
+  # start and that first prime (or a listener task that never got there) looks exactly like this.
+  #
+  # `up` is load-bearing, not scenery. Without it this block guards NOTHING: the silence a future
+  # reader is most likely to "fix" is copying the `or (up{job="iam"} == 1) * 0` fallback from
+  # IamPolicySnapshotReloadsStalled below onto this alert's left term, and that mutation can only
+  # be caught if the fixture supplies an `up` series for the fallback to key off. Verified by
+  # hand: with `up` present the mutation turns this block RED; without it the mutated rule passes
+  # and the guard is imaginary. That fallback would page forever on every replica whose listener
+  # series is briefly absent, with nothing going red — which is exactly why it must stay caught.
   - interval: 1m
     input_series:
       # deliberately NO iam_outbox_listener_notifications_total series
@@ -255,6 +267,8 @@ tests:
         values: '0+5x40'
       - series: 'iam_outbox_notifying_enqueues_total{job="iam",instance="nolisten:8080"}'
         values: '0+5x40'
+      - series: 'up{job="iam",instance="nolisten:8080"}'
+        values: '1x40'
     alert_rule_test:
       - eval_time: 35m
         alertname: IamOutboxNotificationsAbsent
