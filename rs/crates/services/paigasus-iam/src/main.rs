@@ -51,6 +51,19 @@ async fn main() -> anyhow::Result<()> {
     // no-op anyway.
     if metrics_handle.is_some() {
         describe_iam_metrics();
+        // SMA-495 / SMA-489 D12 priming. A metrics-rs series first appears already at its first
+        // increment's VALUE, and `increase()` baselines on that first sample — so without this an
+        // `increase(...) > 0` control could never fire on a replica's first notifying enqueue,
+        // blinding IamOutboxNotificationsAbsent for exactly the first window after a deploy.
+        //
+        // Gated on the config, NOT sited in `PgOutbox::new`: that is a `Copy` value type built at
+        // five composition-root sites, and priming there would put a process-global side effect in
+        // a value constructor AND make the prime depend on DI ordering rather than configuration
+        // (`tests/metrics.rs` builds `AppState` before installing a recorder). Gated here, the
+        // series exists iff this replica is configured to nudge.
+        if config.outbox.wake_on_commit {
+            metrics::counter!(names::IAM_OUTBOX_NOTIFYING_ENQUEUES_TOTAL).increment(0);
+        }
     }
 
     let db = Database::connect(config.database_url.as_str()).await?;
@@ -434,11 +447,11 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 37 metric families `paigasus-iam` emits
+/// Registers `# HELP`/`# TYPE` exposition text for the 38 metric families `paigasus-iam` emits
 /// directly (spec §4.1; includes the SMA-467 audit partition-maintenance families, the
 /// SMA-469 outbox retention/dead-letter families, the SMA-476 Redis circuit-breaker families,
 /// the SMA-481 system-row-retirement family, the SMA-471 NATS publisher families, and the
-/// SMA-489 commit-nudge/listener families), via the
+/// SMA-489 commit-nudge/listener families and the SMA-495 notifying-enqueue family), via the
 /// `names::` consts so the string used here can't drift from the one used at the increment/set
 /// call site, plus the 2 gRPC families via `paigasus_observability::describe_grpc()`. Mirrors
 /// the meanings documented in `docs/ops/RUNBOOK-observability.md` §2.1/§2.2.
@@ -550,6 +563,10 @@ fn describe_iam_metrics() {
     describe_counter!(
         names::IAM_OUTBOX_LISTENER_RECONNECTS_TOTAL,
         "Outbox-listener reconnects. Climbing means Postgres is churning the listener connection; notifications during each gap are dropped and picked up by the poll."
+    );
+    describe_counter!(
+        names::IAM_OUTBOX_NOTIFYING_ENQUEUES_TOTAL,
+        "Enqueues that emitted a pg_notify — the write-side twin of iam_outbox_listener_notifications_total and the control IamOutboxNotificationsAbsent gates on. NOT 1:1 with it: Postgres collapses identical channel+payload notifications within a transaction, so N enqueues in one transaction give N increments but ONE notification. Counted pre-commit, so a rolled-back mutation increments it without delivering anything. A dead-letter replay increments it not at all."
     );
 
     describe_counter!(

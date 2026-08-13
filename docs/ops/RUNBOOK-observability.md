@@ -114,6 +114,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 | `iam_outbox_relay_wakeups_total` | counter | `source` (`notify`/`poll`/`backlog`) | SMA-489: one increment per relay wakeup, labelled by what woke it — a Postgres `LISTEN` notification, the `[outbox].poll_interval_secs` timer, or a backlog continuation after a full batch made progress. **One increment per tick, not per wakeup**, so `sum without (source) (…)` equals `sum without (result) (iam_outbox_relay_ticks_total)`. All three label values are primed at zero at relay start, so `increase()` can fire on the first occurrence of any source. |
 | `iam_outbox_publish_lag_seconds` | histogram | — | SMA-489: end-to-end outbox latency (`now - occurred_at`) at the moment a row is successfully published. **This is the only signal that proves the SMA-489 nudge is working in production** — `iam_outbox_oldest_unpublished_age_seconds` cannot, because it resets to `0` on every empty tick and the nudge makes empty ticks far more frequent. |
 | `iam_outbox_listener_notifications_total` | counter | — | SMA-489: notifications the `PgOutboxListener` actually received. Distinguishes "Postgres never notified us" (e.g. a transaction-mode pooler silently swallowed `LISTEN`) from "the relay never observed the permit", which `iam_outbox_relay_wakeups_total{source="notify"}` alone cannot. See §4 "IamOutboxNotificationsAbsent". |
+| `iam_outbox_notifying_enqueues_total` | counter | — | SMA-495: enqueues that emitted a `pg_notify` — the write-side twin of `iam_outbox_listener_notifications_total`, and the control term `IamOutboxNotificationsAbsent` gates on. **Not 1:1 with the listener counter — do not build a delivery-loss ratio from the pair.** Postgres collapses notifications carrying an identical channel *and* payload within one transaction, and this payload is always empty, so a transaction enqueuing N events increments this N times while delivering exactly **one** notification. **Counted pre-commit**: the outbox writes on a transaction it recovers rather than owns, so there is no post-commit hook — a rolled-back mutation increments this while delivering no notification and draining no row (the alert absorbs that through its separate `drained` term, which is why that term is retained). A **dead-letter replay increments it not at all**, which is the property that makes the alert immune to a replay. Primed at zero iff `[outbox].wake_on_commit = true`, so the series existing means "this replica is configured to nudge"; `[outbox].relay_enabled = false` does not gate it. |
 | `iam_outbox_listener_connected` | gauge | — | SMA-489: `1` when the outbox listener holds a live `LISTEN` connection, `0` otherwise. **Per-replica, and the replicas do NOT agree** — use `min by (job)` to ask "are all replicas listening" (never `max` or `sum`), or keep `instance` to see which one is down. |
 | `iam_outbox_listener_reconnects_total` | counter | — | SMA-489: successful re-establishments of the outbox listener's `LISTEN` connection. **Counts recoveries, not failures** — a listener down through a long outage increments this once, on recovery, never per failed attempt, so a value that stops climbing mid-incident means "still down". A steadily climbing value means Postgres is churning the listener connection, and every cycle is a window in which notifications were dropped and delivery fell back to the poll. |
 | `iam_audit_partition_maintenance_ticks_total` | counter | `result` | One per audit partition-maintenance tick (create-ahead + prune). `result` ∈ `ok`/`error`. Liveness signal — see §4 "Audit partition maintenance stalled". |
@@ -217,7 +218,7 @@ below are **starting points** — tune `for:` durations and numeric thresholds p
 | `IamOutboxEventsParked` | `increase(iam_outbox_relay_parked_total[15m]) > 0` | warning |
 | `IamOutboxPublishFailures` | `increase(iam_outbox_relay_publish_failures_total[5m]) > 0` for 5m | warning |
 | `IamOutboxRelayStalled` | `rate(iam_outbox_relay_ticks_total[10m]) == 0` | critical |
-| `IamOutboxNotificationsAbsent` | `(sum by (job, instance) (increase(iam_outbox_listener_notifications_total[30m])) == 0) and (sum by (job, instance) (increase(iam_outbox_relay_drained_total[30m])) > 0)` for 15m | warning |
+| `IamOutboxNotificationsAbsent` | `(sum by (job, instance) (increase(iam_outbox_listener_notifications_total[30m])) == 0) and (sum by (job, instance) (increase(iam_outbox_relay_drained_total[30m])) > 0) and on (job) (sum by (job) (increase(iam_outbox_notifying_enqueues_total[30m])) > 0)` for 15m | warning |
 | `IamPolicySnapshotReloadsStalled` | `(sum by (job, instance) (increase(iam_authz_policy_snapshot_reloads_total{outcome="installed"}[10m])) or (up{job="iam"} == 1) * 0) == 0` for 5m | critical |
 | `IamAuditPartitionMaintenanceStalled` | `sum without (result) (increase(iam_audit_partition_maintenance_ticks_total[2d])) == 0` for 1h | warning |
 | `IamOutboxRetentionStalled` | `(sum by (job, instance) (increase(iam_outbox_retention_ticks_total[6h])) or (up{job="iam"} == 1) * 0) == 0` for 2h | warning |
@@ -651,8 +652,12 @@ Rows are being written and drained, but the listener has received no `iam_outbox
 notification for 30 minutes. Delivery has silently fallen back to `[outbox].poll_interval_secs`
 (~5 s), which is correct but not what this deployment is configured for.
 
-Both terms aggregate `by (job, instance)`, so this fires **per replica**. Start by checking how
-many replicas are alerting — that alone splits the two causes below.
+There are three terms. The two that describe *this replica* — the listener term and the `drained`
+term — aggregate `by (job, instance)`, so this fires **per replica**. The third,
+`iam_outbox_notifying_enqueues_total`, aggregates `by (job)`: a notifying enqueue lands on whichever
+replica served the mutation, so "was a nudge emitted at all" is a deployment-level question, not a
+per-replica one. Start by checking how many replicas are alerting — that alone splits the two causes
+below.
 
 Most likely causes, in order:
 
@@ -665,23 +670,33 @@ Most likely causes, in order:
    climbs regardless of what its neighbours do. Check `iam_outbox_listener_connected` (keep
    `instance`, or aggregate with `min by (job)` — never `max` or `sum`, the replicas do not
    agree) and `iam_outbox_listener_reconnects_total` for that instance.
-3. **A dead-letter replay is draining during a quiet period** — benign, and the one *false
-   positive* this alert has. Not every drained row was ever notified about: a replay (SMA-469,
-   `POST /v1/outbox/dead-letters/…/replay`) returns parked rows to the live queue with a direct
-   `UPDATE` that clears `parked`/`attempts` and emits **no** `pg_notify`, so replayed rows wait
-   for the poll by design. The alert's evidence term is
-   `increase(iam_outbox_relay_drained_total[30m]) > 0`, which counts those rows too — so a
-   sustained replay on a deployment taking no ordinary mutations satisfies both terms with a
-   perfectly healthy listener. Check `increase(iam_outbox_dead_letters_replayed_total[30m])` over
-   the same window: if it accounts for the drained rows, the alert is explained and there is
-   nothing to fix. Confirm by watching whether the counter resumes climbing once ordinary
-   mutations do.
+3. ~~A dead-letter replay draining during a quiet period.~~ **No longer possible (SMA-495).** This
+   used to be this alert's one false positive: not every drained row was ever notified about, because
+   a replay (SMA-469, `POST /v1/outbox/dead-letters/…/replay`) returns parked rows to the live queue
+   with a direct `UPDATE` that emits **no** `pg_notify`, so replayed rows wait for the poll by
+   design. The evidence term is now `iam_outbox_notifying_enqueues_total`, which a replay does not
+   increment, so a replay cannot satisfy this alert however quiet the deployment is. There is
+   nothing to rule out here any more.
+
+   The counterpart caveat: that counter is incremented **pre-commit** (the outbox has no post-commit
+   hook), so a window in which every mutation *rolls back* climbs it while delivering nothing. The
+   `iam_outbox_relay_drained_total` term is retained precisely to absorb that — nothing commits, so
+   nothing drains, and the alert stays silent. See also the full-notification-queue note below,
+   which is one way to reach exactly that state.
 
 `[outbox].wake_on_commit = false` is **not** a possible cause: with the flag off no listener is
 spawned at all, so `iam_outbox_listener_notifications_total` is never registered, `increase()`
 over the absent series returns an empty vector, and this alert is structurally silent rather than
-firing. (The service does log an `info` line at boot when the nudge is disabled — that, not this
-alert, is where a disabled nudge shows up.)
+firing. Since SMA-495 there is a second structural reason: with the flag off the writer never emits a
+notification, so `iam_outbox_notifying_enqueues_total` is never registered either, and the alert's
+third term is empty as well.
+
+**One deploy-ordering caveat.** `ops/` and the IAM binary ship separately. Until at least one
+replica per job runs a binary emitting `iam_outbox_notifying_enqueues_total`, that term is an empty
+vector and this alert is silent — correct once the binary lands, but a blind window if the rules go
+first. Deploy the binary before these rules, and roll the rules back together with it. (The service
+does log an `info` line at boot when the nudge is disabled — that, not this alert, is where a
+disabled nudge shows up.)
 
 **If IAM mutations are also failing at commit** with an opaque backend error, suspect a full
 async notification queue — a listening session that stopped consuming prevents Postgres from
