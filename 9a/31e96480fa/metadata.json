@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "9a31e96480fa",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-495-iam-count-committed-notifying-enqueues-so-the-nudge-absent",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/superpowers/specs/2026-08-13-sma-495-notifying-enqueue-counter-design.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9a/31e96480fa/0/metadata.json",
+      "transcript": "/9a/31e96480fa/0/full.jsonl",
+      "compact_transcript": "/9a/31e96480fa/0/transcript.jsonl",
+      "content_hash": "/9a/31e96480fa/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 9908,
+    "cache_creation_tokens": 172540,
+    "cache_read_tokens": 3942059,
+    "output_tokens": 63033,
+    "api_call_count": 33
+  }
+}
