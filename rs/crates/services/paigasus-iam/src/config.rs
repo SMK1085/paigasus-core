@@ -15,8 +15,9 @@ pub struct IamConfig {
     pub http_addr: SocketAddr,
     pub grpc_addr: SocketAddr,
     /// The main SeaORM connection string. A [`RedactedUrl`] because a Postgres DSN routinely
-    /// carries a password (`postgres://user:pass@host/db`) and this struct is dumped to logs and
-    /// `readyz`; read the real value with [`RedactedUrl::as_str`].
+    /// carries a password (`postgres://user:pass@host/db`) and this struct derives
+    /// `Debug`/`Serialize` (see [`RedactedUrl`]); read the real value with
+    /// [`RedactedUrl::as_str`].
     pub database_url: RedactedUrl,
     pub log_level: String,
     pub authn: AuthnConfig,
@@ -27,21 +28,31 @@ pub struct IamConfig {
     pub metrics: MetricsConfig,
 }
 
-/// A connection URL that may embed credentials (`postgres://user:pass@host/db`) — the redacting
-/// newtype worn by [`IamConfig::database_url`] and [`OutboxConfig::listen_database_url`].
+/// A connection URL that may embed credentials (`postgres://user:pass@host/db`,
+/// `redis://user:pass@host:6379/0`, `nats://user:pass@host`) — the redacting newtype worn by
+/// [`IamConfig::database_url`], [`OutboxConfig::listen_database_url`], all three cache
+/// `redis_url`s ([`JwksCacheConfig`], [`AuthzCacheConfig`], [`ApiKeyCacheConfig`]) and
+/// [`PublisherConfig::url`].
 ///
-/// `IamConfig` derives `Debug`/`Serialize` because it is dumped in logs/`readyz` (`main.rs`), so a
-/// DSN's password must never round-trip through either: both outbound directions emit a fixed
-/// `<redacted>` placeholder, while `Deserialize` is hand-rolled to delegate straight to `String`
-/// so figment still populates the REAL value from whichever layer (default/toml/env) supplied it.
-/// Exactly [`RawPepper`]'s idiom, and the same job `PublisherConfig`'s hand-rolled
-/// `Debug`/`Serialize` do for `nats://user:pass@host`.
+/// `IamConfig` derives `Debug`/`Serialize`, so a credential must never round-trip through
+/// either: both outbound directions emit a fixed `<redacted>` placeholder, while `Deserialize`
+/// is hand-rolled to delegate straight to `String` so figment still populates the REAL value
+/// from whichever layer (default/toml/env) supplied it. Exactly [`RawPepper`]'s idiom.
+///
+/// **Nothing dumps `IamConfig` today** (SMA-496) — `readyz` returns a bare status object, the one
+/// config-bearing log line prints two socket addresses, and `Serialize` is exercised only by this
+/// module's tests. The redaction is deliberate defense-in-depth: it makes the dump somebody
+/// eventually adds — a boot-time config log, a debug endpoint, a stray `{config:?}` in an error
+/// path — safe by construction, rather than a leak found in review. Choosing the type IS the
+/// mechanism; there is no runtime guard behind it.
 ///
 /// A newtype rather than per-container manual impls **because redaction then travels with the
 /// type**: a future credential-bearing URL field is protected by choosing this type, not by
-/// remembering to extend two hand-written impls that spell out every sibling field. (`RawPepper`
+/// remembering to extend two hand-written impls that spell out every sibling field. `RawPepper`
 /// can skip `Serialize` entirely — `ApiKeyConfig` marks its field `#[serde(skip_serializing)]` —
-/// but these two fields are genuinely serialized, so the impl has to exist and redact in place.)
+/// but these fields are genuinely serialized, so the impl has to exist and redact in place.
+/// `PublisherConfig` carried exactly those hand-written impls until SMA-496 and now simply wears
+/// this type instead.
 ///
 /// Deliberately implements neither `Display` nor `AsRef<str>`: the only way out is
 /// [`as_str`](RedactedUrl::as_str), which is greppable and cannot be reached by accident through a
@@ -203,7 +214,7 @@ pub struct ApiKeyConfig {
     /// The raw, still-`base64`-encoded pepper as configured (`[api_keys] pepper` /
     /// `IAM_API_KEYS__PEPPER`) — see [`RawPepper`]'s doc for why this isn't the decoded
     /// `adapters::api_keys::Pepper` directly. `#[serde(skip_serializing)]` so `IamConfig`'s
-    /// derived `Serialize` (used by log/`readyz` config dumps) omits it entirely; `RawPepper`'s
+    /// derived `Serialize` omits it entirely; `RawPepper`'s
     /// own hand-rolled `Debug` additionally redacts it for the derived `Debug` path. Call
     /// [`ApiKeyConfig::pepper`] to decode + validate it into the real key material.
     #[serde(skip_serializing)]
@@ -245,8 +256,9 @@ impl ApiKeyConfig {
 
 /// The raw (still-`base64`-encoded, undecoded) HMAC pepper exactly as figment read it from
 /// `iam.toml`/`IAM_API_KEYS__PEPPER` — a redacting newtype around a `String` (spec D12,
-/// challenge M6). `IamConfig` derives `Debug`/`Serialize` because it's dumped in logs/`readyz`
-/// (`main.rs`), so the configured secret must never round-trip through either: `Debug` is
+/// challenge M6). `IamConfig` derives `Debug`/`Serialize` — see [`RedactedUrl`]'s doc for why
+/// that alone is reason enough — so the configured secret must never round-trip through
+/// either: `Debug` is
 /// hand-rolled to print a fixed placeholder (mirrors `adapters::api_keys::Pepper`'s own
 /// redacted `Debug`, which this decodes into via [`ApiKeyConfig::pepper`]), and `Deserialize`
 /// is hand-rolled to delegate straight to `String` so figment can still populate the REAL
@@ -422,7 +434,7 @@ pub struct OutboxConfig {
     /// `IamOutboxNotificationsAbsent` is the alert that detects the misconfiguration.
     ///
     /// A [`RedactedUrl`] for the same reason `database_url` is: it is a full DSN, credentials
-    /// included, and this struct is dumped in logs/`readyz`.
+    /// included, and this struct derives `Debug`/`Serialize`.
     pub listen_database_url: Option<RedactedUrl>,
     /// Retention for the table the relay drains — see [`OutboxRetentionConfig`].
     #[serde(default)]
@@ -1151,9 +1163,12 @@ impl IamConfig {
                     // never the full raw url: a malformed url with no `://` but baked-in
                     // credentials (e.g. `user:hunter2@host:4222`) parses via `url::Url` as an
                     // opaque scheme "user" with EMPTY username/password, so the credentials
-                    // check above does not catch it — and `PublisherConfig`'s hand-rolled
-                    // `Debug`/`Serialize` impls redact this exact field specifically so it never
-                    // reaches a log line; interpolating `raw` here would bypass that redaction.
+                    // check above does not catch it — and `url` wears `RedactedUrl` specifically
+                    // so it never reaches a log line. THIS error string DOES reach the logs, so
+                    // interpolating `raw` would bypass that redaction entirely. Note `as_str()`
+                    // is called once above to obtain `raw` for PARSING, and deliberately does not
+                    // appear in the message: emit the scheme alone, never the url. Guarded by
+                    // `a_rejected_url_with_a_password_does_not_leak_it_into_the_error` below.
                     let scheme_hint = raw.split(':').next().unwrap_or(raw);
                     return Err(format!(
                         "outbox.publisher.url must use tls:// for the nats backend (got {scheme_hint:?}) — set outbox.publisher.allow_insecure_broker = true for a dev or CI broker, which also waives the credentials_file requirement"
@@ -2101,9 +2116,9 @@ mod tests {
     }
 
     /// Companion to `pepper_never_appears_in_debug_or_serialized_config`, for the two connection
-    /// DSNs (SMA-489 CodeRabbit round 1). Both routinely carry a password, and `IamConfig` is
-    /// dumped to logs and `readyz` — so `RedactedUrl` has to cover BOTH outbound directions for
-    /// BOTH fields. `database_url` is in here alongside the new `listen_database_url` on purpose:
+    /// DSNs (SMA-489 CodeRabbit round 1). Both routinely carry a password, and `IamConfig`
+    /// derives both `Debug` and `Serialize` — so `RedactedUrl` has to cover BOTH outbound
+    /// directions for BOTH fields. `database_url` is in here alongside `listen_database_url` on purpose:
     /// redacting one while its identically-sensitive neighbour two fields away leaked would be
     /// incoherent.
     #[test]
@@ -3143,9 +3158,10 @@ mod tests {
     /// `://` but baked-in credentials (`user:hunter2@host:4222`) parses via `url::Url` as an
     /// opaque scheme "user" with EMPTY username/password, so the unconditional embedded-
     /// credentials check above does NOT catch it — the raw string, password included, must not
-    /// then leak into the returned (and potentially logged) validation error. `PublisherConfig`'s
-    /// hand-rolled `Debug`/`Serialize` impls redact this exact field for the same reason (see
-    /// `the_publisher_url_is_redacted_in_serialize` above).
+    /// then leak into the returned (and potentially logged) validation error. `url` wears
+    /// `RedactedUrl` for the same reason (see `the_publisher_url_is_redacted_in_serialize`
+    /// above) — but a newtype cannot protect a string that validation interpolates by hand,
+    /// which is exactly what this test exists to catch.
     #[test]
     fn a_rejected_url_with_a_password_does_not_leak_it_into_the_error() {
         let err = validate_err(
