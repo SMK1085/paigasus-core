@@ -531,11 +531,25 @@ async fn a_killed_listener_backend_reconnects_and_still_delivers() {
 async fn wake_on_commit_false_emits_no_notification() {
     let Some((pg, db)) = support::start_migrated_postgres().await else { return };
     let url = support::connection_url(&pg).await;
+    let handle = paigasus_observability::init("test-iam-wake-on-commit-false");
 
     let mut listener = PgListener::connect(&url).await.expect("listener connects");
     listener.listen("iam_outbox_event").await.expect("listen");
 
     let uow = SeaOrmUnitOfWork::new(db.clone());
+
+    // SMA-495. A BASELINE through the notifying writer, before the gated one. `sum_metric_from`
+    // returns 0.0 for a family that does not exist at all, so a bare `assert_eq!(counter, 0.0)`
+    // below would be satisfied by the counter never having been registered — i.e. it would pass
+    // with the whole feature deleted. Counting from 1 makes the assertion prove a DIFFERENCE:
+    // an increment that ignored `notify` reads 2.0, a deleted increment reads 0.0, and only the
+    // correct behaviour reads 1.0.
+    let notifying = PgOutbox::new(true);
+    let tx = uow.begin().await.expect("begin");
+    notifying.enqueue(&*tx, &sample_event()).await.expect("enqueue");
+    tx.commit().await.expect("commit");
+    listener.recv().await.expect("the notifying writer's own notification");
+
     let outbox = PgOutbox::new(false); // the escape hatch
     let tx = uow.begin().await.expect("begin");
     outbox.enqueue(&*tx, &sample_event()).await.expect("enqueue");
@@ -546,9 +560,16 @@ async fn wake_on_commit_false_emits_no_notification() {
         "wake_on_commit = false still emitted a notification — the writer is not gated"
     );
 
-    // ...and the row is still there for the poll to drain.
+    assert_eq!(
+        support::sum_metric_from(&handle.render(), "iam_outbox_notifying_enqueues_total"),
+        1.0,
+        "wake_on_commit = false must not increment the notifying-enqueue counter (only the \
+         baseline enqueue may be counted)"
+    );
+
+    // ...and the row is still there for the poll to drain. Two rows now: the baseline and this one.
     let rows = event_outbox::Entity::find().all(&db).await.expect("query");
-    assert_eq!(rows.len(), 1, "the outbox row itself must be written regardless of the flag");
+    assert_eq!(rows.len(), 2, "the outbox row itself must be written regardless of the flag");
 }
 
 // --- SMA-495: the notifying-enqueue counter ---------------------------------------------------
