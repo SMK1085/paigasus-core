@@ -3,8 +3,10 @@
   "checkpoint_id": "18636c48baed",
   "strategy": "manual-commit",
   "branch": "feature/sma-495-iam-count-committed-notifying-enqueues-so-the-nudge-absent",
-  "checkpoints_count": 1,
-  "files_touched": null,
+  "checkpoints_count": 7,
+  "files_touched": [
+    "ops/observability/prometheus/rules/tests/iam.test.yml"
+  ],
   "sessions": [
     {
       "metadata": "/18/636c48baed/0/metadata.json",
@@ -12,13 +14,20 @@
       "compact_transcript": "/18/636c48baed/0/transcript.jsonl",
       "content_hash": "/18/636c48baed/0/content_hash.txt",
       "prompt": "/18/636c48baed/0/prompt.txt"
+    },
+    {
+      "metadata": "/18/636c48baed/1/metadata.json",
+      "transcript": "/18/636c48baed/1/full.jsonl",
+      "compact_transcript": "/18/636c48baed/1/transcript.jsonl",
+      "content_hash": "/18/636c48baed/1/content_hash.txt",
+      "prompt": "/18/636c48baed/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 10106,
-    "cache_creation_tokens": 374184,
-    "cache_read_tokens": 35094296,
-    "output_tokens": 181639,
-    "api_call_count": 134
+    "input_tokens": 10154,
+    "cache_creation_tokens": 489784,
+    "cache_read_tokens": 39493614,
+    "output_tokens": 256004,
+    "api_call_count": 160
   }
 }

@@ -1,0 +1,21 @@
+okay, but we need to make this dynamic, based on the backend services deployed
+
+---
+
+yes go ahead
+
+---
+
+we should introduce a proper error concept with codes, that way it's uniform from the get go
+
+---
+
+yes
+
+---
+
+add it to notion under paigasus > development, new separate page. then check the polyglot monorepo scoping page, it states somewhere that frontend is seperately scoped, link it appropriately. last but not least, check if we need to add new ADRs to the notion section for ADRs
+
+---
+
+write all five ADRs
