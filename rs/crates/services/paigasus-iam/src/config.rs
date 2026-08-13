@@ -2253,10 +2253,12 @@ mod tests {
             // issuer is `https://idp.example.com/...` and is deliberately NOT redacted, so a
             // blanket substring check would fail on it.
             for secret in [
+                "db_pw_secret",
                 "jwks_pw_secret",
                 "authz_pw_secret",
                 "apikey_pw_secret",
                 "nats_pw_secret",
+                "db.example.com",
                 "jwks.example.com",
                 "authz.example.com",
                 "apikey.example.com",
@@ -2271,9 +2273,13 @@ mod tests {
             // well as a redacted one does, which is why this is a count and not a `contains`.
             assert_eq!(serialized.matches(r#""redis_url":"<redacted>""#).count(), 3, "{serialized}");
             assert_eq!(debugged.matches(r#"redis_url: Some(RedactedUrl("<redacted>"))"#).count(), 3, "{debugged}");
-            // Cannot collide with the `redis_url` pattern above: matching `"url"` needs a quote
-            // immediately before `u`, and in `"redis_url"` the preceding character is `_`.
+            // The broker url, in both directions too. The DELIMITER in each pattern is what stops
+            // it also matching the three `redis_url` fields, which end in the same three letters:
+            // in JSON a quote must precede `url` (in `"redis_url"` a `_` does), and in `Debug` a
+            // SPACE must (`, url: Some(…)` vs `, redis_url: Some(…)`). Drop either delimiter and
+            // both counts silently become 4.
             assert_eq!(serialized.matches(r#""url":"<redacted>""#).count(), 1, "{serialized}");
+            assert_eq!(debugged.matches(r#" url: Some(RedactedUrl("<redacted>"))"#).count(), 1, "{debugged}");
 
             Ok(())
         });

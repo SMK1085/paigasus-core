@@ -352,16 +352,25 @@ Asserts, in order:
 
 1. **Non-vacuity.** Each of the four fields' `as_str()` yields the real configured URL back — so
    the negative assertions below cannot pass merely because figment failed to populate anything.
-2. **`Debug` carries no secret.** None of the four `*_pw_secret` values, and none of the four
-   hosts, in `format!("{cfg:?}")`.
-3. **Serialized form carries no secret.** The same eight substrings absent from
+2. **`Debug` carries no secret.** None of the five `*_pw_secret` values, and none of the five
+   hosts, in `format!("{cfg:?}")`. Five, not four: the fixture must set `database_url` for figment
+   to extract at all, so it necessarily plants `db_pw_secret@db.example.com` as well — and a
+   fixture that plants a credential asserts on it, even though `database_url`'s own coverage
+   lives in `connection_urls_never_appear_in_debug_or_serialized_config`.
+3. **Serialized form carries no secret.** The same ten substrings absent from
    `serde_json::to_string(&cfg)`.
-4. **The placeholder lands in place, in both directions.** `"redis_url":"<redacted>"` occurs
-   exactly three times and `"url":"<redacted>"` exactly once in the JSON; and
-   `redis_url: Some(RedactedUrl("<redacted>"))` occurs exactly three times in the `Debug` output.
-   Counts, not `contains` — a field silently dropped from either dump fails the test. Applying
-   this to `Debug` as well as to the serialized form is D7's own reasoning; an absence-only
-   `Debug` assertion has exactly the weakness D7 exists to close.
+4. **The placeholder lands in place, in both directions, for all four fields.** In the JSON,
+   `"redis_url":"<redacted>"` occurs exactly three times and `"url":"<redacted>"` exactly once;
+   in the `Debug` output, `redis_url: Some(RedactedUrl("<redacted>"))` exactly three times and
+   ` url: Some(RedactedUrl("<redacted>"))` exactly once. Counts, not `contains` — a field silently
+   dropped from either dump fails the test. Applying this to `Debug` as well as to the serialized
+   form is D7's own reasoning; an absence-only `Debug` assertion has exactly the weakness D7
+   exists to close.
+
+   **The delimiter in each broker-url pattern is load-bearing**, because `redis_url` ends in the
+   same three letters as `url`. In JSON a quote must precede `url` (in `"redis_url"` a `_` does);
+   in `Debug` a SPACE must (`, url: Some(…)` vs `, redis_url: Some(…)`). Drop either and the count
+   silently becomes 4 — confirmed by removing the space and observing `left: 4, right: 1`.
 
 **Host assertions must be exact.** The mandatory issuer is `https://idp.example.com/realms/acme`
 and is *not* redacted, so a blanket `!contains("example.com")` would fail. Assert the four

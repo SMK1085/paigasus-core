@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **Work in the worktree** `/Users/smaschek/dev/paigasus/paigasus-core-sma496` on branch `feature/sma-496-iam-redact-redis-url`. NOT the main checkout at `/Users/smaschek/dev/paigasus/paigasus-core` — a concurrent session owns that one. If you are a subagent, your cwd is pinned to the main checkout; your **first action** must be to enter the worktree and confirm `git branch --show-current` prints `feature/sma-496-iam-redact-redis-url`.
-- **PATH:** every shell command must be prefixed with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` — proto-managed CLIs (`moon`, `cargo-nextest`, `uv`, `buf`) are not on the default tool PATH, and shims must come first so the repo-pinned versions win.
+- **PATH:** every command that invokes a **proto-managed CLI** (`moon`, `cargo`/`cargo-nextest`, `uv`, `buf`) must be prefixed with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` — those are not on the default tool PATH, and shims must come first so the repo-pinned versions win. Plain `git`, `grep`, `docker` and `cd` steps need no prefix, which is why the `git`-only blocks below omit it.
 - **All `cargo` commands run from `rs/`.**
 - **`--all-targets` is mandatory** on every `cargo clippy` invocation. Without it, clippy skips test targets and seven `publisher.url` construction sites in the NATS suites are never compiled.
 - **The workspace is `warnings = deny`.** An unused import is a hard error. Never leave a `use` behind that a later step removes the last user of.
@@ -117,9 +117,13 @@ This version deliberately asserts only on the rendered strings, so it compiles a
             // issuer is `https://idp.example.com/...` and is deliberately NOT redacted, so a
             // blanket substring check would fail on it.
             for secret in [
+                // `db_*` too: the fixture must set `database_url` for figment to extract at all,
+                // so it plants this credential whether or not the field is under test here.
+                "db_pw_secret",
                 "jwks_pw_secret",
                 "authz_pw_secret",
                 "apikey_pw_secret",
+                "db.example.com",
                 "jwks.example.com",
                 "authz.example.com",
                 "apikey.example.com",
@@ -375,13 +379,14 @@ Add to the TOML fixture, directly above the `[[authn.issuers]]` block:
 
 `backend` is deliberately left at its `tracing` default: `url` is redacted regardless of backend, and selecting `nats` would drag SMA-493's TLS and credentials-file validation rules into a test that is about redaction.
 
-Add `"nats_pw_secret"` and `"nats.example.com"` to the `for secret in [...]` array, and add this assertion beside the existing serialized count:
+Add `"nats_pw_secret"` and `"nats.example.com"` to the `for secret in [...]` array, and add these two assertions beside the existing counts — the broker url has to be pinned in place in **both** directions, exactly as the three cache urls are:
 
 ```rust
             assert_eq!(serialized.matches(r#""url":"<redacted>""#).count(), 1, "{serialized}");
+            assert_eq!(debugged.matches(r#" url: Some(RedactedUrl("<redacted>"))"#).count(), 1, "{debugged}");
 ```
 
-That pattern cannot collide with `"redis_url":"<redacted>"` — matching `"url"` needs a quote immediately before `u`, and in `"redis_url"` the preceding character is `_`.
+**The delimiter in each pattern is load-bearing**, because `redis_url` ends in the same three letters as `url`. In JSON a quote must precede `url` (in `"redis_url"` the preceding character is `_`); in `Debug` a SPACE must (`, url: Some(…)` vs `, redis_url: Some(…)`). Drop either delimiter and the count silently becomes 4 rather than 1 — worth confirming once by removing the space and checking the failure reads `left: 4, right: 1`.
 
 Also extend the test's doc comment to say it now covers the broker URL as well as the three cache URLs.
 
@@ -739,7 +744,7 @@ Expected: the first grep shows four `Option<RedactedUrl>` and no `Option<String>
 ```bash
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma496
 git diff origin/main --stat
-git diff origin/main -- rs/
+git diff origin/main
 ```
 
 Confirm: seven source files touched plus the spec and this plan; no debug prints, no commented-out code, no leftover temporary edit from Task 2 Step 9, and no change to any `validate()` error string.
