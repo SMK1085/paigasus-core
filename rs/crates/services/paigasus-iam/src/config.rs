@@ -487,18 +487,19 @@ impl Default for OutboxRetentionConfig {
 /// Defaults to `tracing`, so an absent `[outbox.publisher]` block — and every existing config
 /// file — keeps working with no broker available (SMA-471 D12).
 ///
-/// `Debug`/`Serialize` are hand-rolled rather than derived (see the impls below `PublisherBackend`)
-/// so `url` — which may carry credentials (`nats://user:pass@host`) — never round-trips into a
-/// log line or a `readyz` config dump; mirrors `RawPepper`'s redaction idiom above. Unlike
-/// `RawPepper`, `Serialize` is still needed here (`OutboxConfig`/`IamConfig`'s derived
-/// `Serialize` does not skip this field the way `ApiKeyConfig` skips `pepper`), so both
-/// directions are hand-rolled instead of one being omitted entirely.
-#[derive(Clone, Deserialize, PartialEq, Eq)]
+/// `url` wears [`RedactedUrl`], so `Debug`/`Serialize` are ordinary derives: redaction travels
+/// with the field's type rather than with two hand-written impls that had to spell out every
+/// sibling field (and hand-maintain their own field count) to protect one of them.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PublisherConfig {
     pub backend: PublisherBackend,
-    /// Required when `backend = "nats"`. May carry credentials (`nats://user:pass@host`), so it
-    /// is redacted in `Debug`/`Serialize` — see the manual impls below.
-    pub url: Option<String>,
+    /// Required when `backend = "nats"`. A [`RedactedUrl`] because it may carry credentials
+    /// (`nats://user:pass@host`); read the real value with [`RedactedUrl::as_str`].
+    ///
+    /// The sibling `credentials_file`, `root_ca_bundle` and `inbox_prefix` stay plain `String`s
+    /// deliberately: the first two are filesystem paths and the third a subject prefix — none is
+    /// a secret, so none needs the newtype.
+    pub url: Option<RedactedUrl>,
     pub stream: String,
     /// CloudEvents `source`, copied verbatim into every published envelope. MUST stay stable for
     /// a stream's lifetime: consumers dedup on `id` alone while CloudEvents scopes identity to
@@ -572,46 +573,6 @@ impl Default for PublisherConfig {
             inbox_prefix: None,
             allow_insecure_broker: false,
         }
-    }
-}
-
-impl std::fmt::Debug for PublisherConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PublisherConfig")
-            .field("backend", &self.backend)
-            .field("url", &self.url.as_ref().map(|_| "<redacted>"))
-            .field("stream", &self.stream)
-            .field("source", &self.source)
-            .field("publish_timeout_secs", &self.publish_timeout_secs)
-            .field("duplicate_window_secs", &self.duplicate_window_secs)
-            .field("max_age_secs", &self.max_age_secs)
-            .field("credentials_file", &self.credentials_file)
-            .field("root_ca_bundle", &self.root_ca_bundle)
-            .field("inbox_prefix", &self.inbox_prefix)
-            .field("allow_insecure_broker", &self.allow_insecure_broker)
-            .finish()
-    }
-}
-
-impl Serialize for PublisherConfig {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("PublisherConfig", 11)?;
-        state.serialize_field("backend", &self.backend)?;
-        state.serialize_field("url", &self.url.as_ref().map(|_| "<redacted>"))?;
-        state.serialize_field("stream", &self.stream)?;
-        state.serialize_field("source", &self.source)?;
-        state.serialize_field("publish_timeout_secs", &self.publish_timeout_secs)?;
-        state.serialize_field("duplicate_window_secs", &self.duplicate_window_secs)?;
-        state.serialize_field("max_age_secs", &self.max_age_secs)?;
-        state.serialize_field("credentials_file", &self.credentials_file)?;
-        state.serialize_field("root_ca_bundle", &self.root_ca_bundle)?;
-        state.serialize_field("inbox_prefix", &self.inbox_prefix)?;
-        state.serialize_field("allow_insecure_broker", &self.allow_insecure_broker)?;
-        state.end()
     }
 }
 
@@ -1156,7 +1117,7 @@ impl IamConfig {
             // `url::Url` is already this function's dependency (the `source` check below). A
             // url that does not parse at all is left to `connect` to report, exactly as before
             // — this block tightens posture, it does not add a syntax gate.
-            if let Some(raw) = p.url.as_deref() {
+            if let Some(raw) = p.url.as_ref().map(RedactedUrl::as_str) {
                 // Unconditional, no escape hatch: async-nats never reads url userinfo
                 // (`ServerAddr::username`/`password` have no caller in the connect path), so a
                 // config carrying `nats://user:pass@host` connects ANONYMOUSLY while looking
@@ -2207,12 +2168,20 @@ mod tests {
 
     /// SMA-496. Companion to `connection_urls_never_appear_in_debug_or_serialized_config`
     /// above: a Redis connection string carries credentials exactly as a Postgres DSN does
-    /// (`redis://user:pass@host:6379/0`), and `IamConfig` derives `Debug`/`Serialize`, so
-    /// `RedactedUrl` has to cover BOTH outbound directions for all three cache URLs too.
+    /// (`redis://user:pass@host:6379/0`), and so does the NATS broker url
+    /// (`nats://user:pass@host`) — while `IamConfig` derives `Debug`/`Serialize`. So
+    /// `RedactedUrl` has to cover BOTH outbound directions for all four of them.
     ///
     /// Each URL gets its own password and host so a leak names its own source.
+    ///
+    /// `[outbox.publisher]` deliberately leaves `backend` at its `tracing` default: `url` is
+    /// redacted regardless of backend, and selecting `nats` would drag SMA-493's TLS and
+    /// credentials-file validation rules into a test that is about redaction. The broker
+    /// assertions here also passed BEFORE `url` became a `RedactedUrl` — they pinned the
+    /// behaviour the hand-rolled `Debug`/`Serialize` impls provided, so that deleting those
+    /// impls in favour of the derive had to preserve it exactly.
     #[test]
-    fn cache_urls_never_appear_in_debug_or_serialized_config() {
+    fn cache_and_broker_urls_never_appear_in_debug_or_serialized_config() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("IAM_DATABASE_URL", "postgres://db_user:db_pw_secret@db.example.com/iam");
             jail.create_file(
@@ -2233,6 +2202,9 @@ mod tests {
                         [api_keys.introspect_cache]
                         backend = "redis"
                         redis_url = "redis://apikey_user:apikey_pw_secret@apikey.example.com:6379/2"
+
+                        [outbox.publisher]
+                        url = "tls://nats_user:nats_pw_secret@nats.example.com:4222"
 
                         [[authn.issuers]]
                         issuer = "https://idp.example.com/realms/acme"
@@ -2265,7 +2237,16 @@ mod tests {
             // Hosts are asserted as EXACT names, never as a bare "example.com": the mandatory
             // issuer is `https://idp.example.com/...` and is deliberately NOT redacted, so a
             // blanket substring check would fail on it.
-            for secret in ["jwks_pw_secret", "authz_pw_secret", "apikey_pw_secret", "jwks.example.com", "authz.example.com", "apikey.example.com"] {
+            for secret in [
+                "jwks_pw_secret",
+                "authz_pw_secret",
+                "apikey_pw_secret",
+                "nats_pw_secret",
+                "jwks.example.com",
+                "authz.example.com",
+                "apikey.example.com",
+                "nats.example.com",
+            ] {
                 assert!(!debugged.contains(secret), "{secret} leaked into IamConfig's Debug output: {debugged}");
                 assert!(!serialized.contains(secret), "{secret} leaked into IamConfig's serialized form: {serialized}");
             }
@@ -2275,9 +2256,39 @@ mod tests {
             // well as a redacted one does, which is why this is a count and not a `contains`.
             assert_eq!(serialized.matches(r#""redis_url":"<redacted>""#).count(), 3, "{serialized}");
             assert_eq!(debugged.matches(r#"redis_url: Some(RedactedUrl("<redacted>"))"#).count(), 3, "{debugged}");
+            // Cannot collide with the `redis_url` pattern above: matching `"url"` needs a quote
+            // immediately before `u`, and in `"redis_url"` the preceding character is `_`.
+            assert_eq!(serialized.matches(r#""url":"<redacted>""#).count(), 1, "{serialized}");
 
             Ok(())
         });
+    }
+
+    /// SMA-496 D6. The `*Defaults` structs feed figment's default LAYER (`Serialized::defaults`,
+    /// see `IamConfig::figment`), and they mirror only their TOP-LEVEL struct — the nested ones
+    /// are the REAL config types (`AuthzDefaults.cache` is an `AuthzCacheConfig`,
+    /// `OutboxDefaults.publisher` a `PublisherConfig`). So a [`RedactedUrl`] whose default were
+    /// `Some(_)` would serialize the literal `"<redacted>"` INTO that layer, and figment would
+    /// then deserialize that string straight back out as the value: every deployment that did
+    /// not override it would boot pointed at a host named `<redacted>`.
+    ///
+    /// `OutboxDefaults::listen_database_url` dodges this by being a plain `String` (its own
+    /// comment says why); the four nested URLs are safe only because every default is `None`.
+    /// This test is what keeps it that way.
+    ///
+    /// Asserting over `serde_json` rather than figment's own `Value` tree is valid because
+    /// `RedactedUrl::serialize` is serializer-agnostic — it calls
+    /// `serializer.serialize_str("<redacted>")` unconditionally — so it emits the placeholder
+    /// into figment's tree exactly as it does into JSON. If that ever stops being true, this
+    /// guard silently decouples from the hazard it guards.
+    #[test]
+    fn defaults_never_serialize_a_redaction_placeholder() {
+        let layer = serde_json::to_string(&Defaults::default()).expect("Defaults serializes");
+        assert!(
+            !layer.contains("<redacted>"),
+            "a RedactedUrl with a non-None default leaked the placeholder INTO figment's default layer, \
+             which figment would then deserialize back out as the real value: {layer}"
+        );
     }
 
     // --- SMA-446 Task A12: `[audit]` config ------------------------------------------------
@@ -2988,28 +2999,31 @@ mod tests {
     #[test]
     fn the_publisher_url_is_redacted_in_debug() {
         let cfg = PublisherConfig {
-            url: Some("nats://user:hunter2@host:4222".to_string()),
+            url: Some("nats://user:hunter2@host:4222".into()),
             ..PublisherConfig::default()
         };
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("hunter2"), "credentials leaked into Debug: {rendered}");
-        assert!(rendered.contains("redacted"), "{rendered}");
+        // In place, not merely present: a `url` dropped from the output entirely would satisfy
+        // a bare `contains("redacted")` just as well as a redacted one does.
+        assert!(rendered.contains(r#"url: Some(RedactedUrl("<redacted>"))"#), "{rendered}");
     }
 
-    /// Companion to `the_publisher_url_is_redacted_in_debug`: `Serialize` is hand-rolled
-    /// SEPARATELY from `Debug` (see `PublisherConfig`'s doc), specifically so a credentialed
-    /// `url` cannot leak into a serialized config dump either — `serde_json` is already a
-    /// regular (non-dev) dependency of this crate (see `pepper_never_appears_in_debug_or_
+    /// Companion to `the_publisher_url_is_redacted_in_debug`, for the other outbound direction:
+    /// a credentialed `url` must not leak into a serialized config dump either. Both directions
+    /// are ordinary derives since SMA-496 — the redaction rides on `url`'s [`RedactedUrl`] type
+    /// rather than on the hand-rolled impls this struct used to carry (`serde_json` is already a
+    /// regular, non-dev dependency of this crate; see `pepper_never_appears_in_debug_or_
     /// serialized_config` above for the identical pattern applied to `api_keys.pepper`).
     #[test]
     fn the_publisher_url_is_redacted_in_serialize() {
         let cfg = PublisherConfig {
-            url: Some("nats://user:hunter2@host:4222".to_string()),
+            url: Some("nats://user:hunter2@host:4222".into()),
             ..PublisherConfig::default()
         };
         let serialized = serde_json::to_string(&cfg).expect("PublisherConfig serializes");
         assert!(!serialized.contains("hunter2"), "credentials leaked into Serialize: {serialized}");
-        assert!(serialized.contains("redacted"), "{serialized}");
+        assert!(serialized.contains(r#""url":"<redacted>""#), "{serialized}");
     }
 
     // --- SMA-493: transport + credential posture ---------------------------------------------

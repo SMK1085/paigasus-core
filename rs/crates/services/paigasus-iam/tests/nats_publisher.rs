@@ -104,7 +104,7 @@ async fn await_ready(url: &str) {
 fn cfg(url: &str) -> PublisherConfig {
     PublisherConfig {
         backend: PublisherBackend::Nats,
-        url: Some(url.to_string()),
+        url: Some(url.into()),
         ..PublisherConfig::default()
     }
 }
