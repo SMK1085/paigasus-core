@@ -41,6 +41,40 @@ groups:
       # proving delivery is actually happening and the left side isn't just quiet because there is
       # nothing to drain.
       #
+      # SMA-495. There are THREE terms, and the two control terms prove different things. The
+      # `drained` term proves THIS REPLICA was alive and doing outbox work — that is all it ever
+      # proved, and it is scoped per-instance for that reason. It does NOT prove a nudge was
+      # emitted: a drain counts every row the relay processes, including SMA-469 dead-letter
+      # replays, whose `REPLAY_ONE_SQL` un-parks a row with a direct UPDATE and emits no
+      # `pg_notify` at all (SMA-489 D2, "replayed dead letters wait for the poll"). An operator
+      # replaying dead letters during a quiet period therefore used to satisfy this alert with a
+      # perfectly healthy listener. `iam_outbox_notifying_enqueues_total` is the term that proves
+      # a nudge was emitted, and it is the ONLY term aggregated `by (job)`.
+      #
+      # That asymmetry is deliberate. `NOTIFY` is broadcast to every listening session, so
+      # "did anyone emit a nudge" is a DEPLOYMENT-level fact — but a notifying enqueue increments
+      # on whichever replica served the MUTATION, so scoping it per-instance would mean a replica
+      # taking no writes this window could never alert, however wedged its listener is, even while
+      # draining every row late off the poll. Conversely the `drained` term must NOT become
+      # `by (job)`: a replica born mid-window gets a NEW `instance` label, hence a fresh series
+      # whose notification counter is legitimately flat from birth, and job-scoped controls would
+      # license an alert against it from its neighbours' earlier traffic — a false page on every
+      # scale-up that lands in a lull. Its own `drained` being 0 is what excludes it.
+      #
+      # `and on (job)` matches on the shared label; set operators take no `group_left` (and forbid
+      # it), and `sum by (job)` yields exactly one right-hand series per job, so the many-to-one is
+      # unambiguous. The result carries the LEFT side's labels, so `{{ $labels.instance }}` in the
+      # annotation still names the wedged replica.
+      #
+      # This assumes every replica under one `job` shares a Postgres instance, and therefore one
+      # `NOTIFY` broadcast domain. If a job ever spans shards or regions, replica A's enqueues
+      # would license an alert against replica B.
+      #
+      # NOTE the deploy ordering this creates: until at least one replica per job runs a binary
+      # emitting `iam_outbox_notifying_enqueues_total`, that term is an EMPTY vector, `and on (job)`
+      # matches nothing, and this alert is structurally silent. Ship the binary before these rules,
+      # and roll the rules back with the binary.
+      #
       # BOTH terms aggregate `by (job, instance)`, not `by (job)` — per-REPLICA detection at
       # identical cost. `NOTIFY` is broadcast to EVERY listening session, so on a healthy
       # deployment every replica's notification counter climbs independently; a single replica
@@ -61,10 +95,10 @@ groups:
       # 30-minute window a 15-minute hold costs nothing in detection: the failure mode this alert
       # exists for (a pooler eating LISTEN) persists indefinitely, so it is caught either way.
       - alert: IamOutboxNotificationsAbsent
-        expr: (sum by (job, instance) (increase(iam_outbox_listener_notifications_total[30m])) == 0) and (sum by (job, instance) (increase(iam_outbox_relay_drained_total[30m])) > 0)
+        expr: (sum by (job, instance) (increase(iam_outbox_listener_notifications_total[30m])) == 0) and (sum by (job, instance) (increase(iam_outbox_relay_drained_total[30m])) > 0) and on (job) (sum by (job) (increase(iam_outbox_notifying_enqueues_total[30m])) > 0)
         for: 15m
         labels: { severity: warning }
-        annotations: { summary: "IAM outbox commit nudges are not arriving (LISTEN likely blocked by a pooler)", description: "No iam_outbox_listener_notifications_total notification has arrived on {{ $labels.job }}/{{ $labels.instance }} in the last 30 minutes, even though iam_outbox_relay_drained_total shows rows being written and drained in that same window — rows ARE flowing, but never via the LISTEN/NOTIFY nudge. Delivery has silently fallen back to [outbox].poll_interval_secs (~5s), which is correct but not what this deployment is configured for. Most likely cause: a transaction- or statement-mode connection pooler in front of Postgres (PgBouncer's defaults do not support LISTEN) — the writer's pg_notify still succeeds, so nothing else looks wrong. If only SOME replicas are alerting, the pooler is not the cause — look at that instance's own listener (iam_outbox_listener_connected, iam_outbox_listener_reconnects_total). See RUNBOOK section 4." }
+        annotations: { summary: "IAM outbox commit nudges are not arriving (LISTEN likely blocked by a pooler)", description: "No iam_outbox_listener_notifications_total notification has arrived on {{ $labels.job }}/{{ $labels.instance }} in the last 30 minutes, even though iam_outbox_notifying_enqueues_total shows nudges being emitted across this deployment and iam_outbox_relay_drained_total shows this replica draining rows in that same window — rows ARE flowing, but never via the LISTEN/NOTIFY nudge. Delivery has silently fallen back to [outbox].poll_interval_secs (~5s), which is correct but not what this deployment is configured for. Most likely cause: a transaction- or statement-mode connection pooler in front of Postgres (PgBouncer's defaults do not support LISTEN) — the writer's pg_notify still succeeds, so nothing else looks wrong. If only SOME replicas are alerting, the pooler is not the cause — look at that instance's own listener (iam_outbox_listener_connected, iam_outbox_listener_reconnects_total). See RUNBOOK section 4." }
       - alert: IamPolicySnapshotReloadsStalled
         # Three things this expression has to get right (SMA-470).
         #
