@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b8iu6rtfw</task-id>
+<tool-use-id>toolu_0189qtpaAkAhtmLR5BhoJ7ue</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/52b76c41-81af-4dc6-98e0-ad33fd654fb5/tasks/b8iu6rtfw.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for CodeRabbit and CI to finish" completed (exit code 0)</summary>
+</task-notification>
