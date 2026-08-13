@@ -41,8 +41,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use paigasus_iam::adapters::events::{OutboxRelay, TickMode};
 use paigasus_iam::adapters::persistence::entities::event_outbox;
-use paigasus_iam::adapters::persistence::{PgOutbox, PgOutboxListener, SeaOrmUnitOfWork};
-use paigasus_iam_core::{DomainEvent, EventPublisher, EventType, Outbox, PublishError, UnitOfWork};
+use paigasus_iam::adapters::persistence::{PgDeadLetters, PgOutbox, PgOutboxListener, SeaOrmUnitOfWork};
+use paigasus_iam_core::{DeadLetters, DomainEvent, EventPublisher, EventType, Outbox, PublishError, UnitOfWork};
 use sea_orm::sqlx::postgres::PgListener;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, EntityTrait, Set};
 use tokio::sync::{Notify, oneshot};
@@ -598,6 +598,80 @@ async fn a_notifying_enqueue_is_counted() {
         support::sum_metric_from(&handle.render(), "iam_outbox_notifying_enqueues_total"),
         1.0,
         "a committed notifying enqueue must increment iam_outbox_notifying_enqueues_total"
+    );
+}
+
+/// Inserts one PARKED `event_outbox` row — a dead letter awaiting an operator. Local rather than
+/// shared: `dead_letters_pg.rs::seed_parked` is private to that file, and this file already sets
+/// the precedent of copying a seeder in (`seed_row`, from `relay_pg.rs`).
+async fn seed_parked_row(db: &DatabaseConnection, id: Uuid) -> event_outbox::Model {
+    event_outbox::ActiveModel {
+        id: Set(id),
+        occurred_at: Set(Utc::now()),
+        event_type: Set(EventType::PrincipalCreated.as_wire().to_string()),
+        schema_version: Set(1),
+        aggregate_prn: Set(format!("prn:pgs:iam:::principal/{id}")),
+        actor_prn: Set(None),
+        payload: Set(serde_json::json!({"kind": "user"}).to_string()),
+        correlation_id: Set(None),
+        published_at: Set(None),
+        attempts: Set(5),
+        parked: Set(true),
+        parked_at: Set(Some(Utc::now())),
+        last_error: Set(Some("backend error: transport closed".to_string())),
+    }
+    .insert(db)
+    .await
+    .expect("seed parked event_outbox row")
+}
+
+/// SMA-495: a dead-letter replay must NOT increment the notifying-enqueue counter.
+///
+/// This is the premise `IamOutboxNotificationsAbsent` now rests on. `REPLAY_ONE_SQL` un-parks a
+/// row with a direct `UPDATE` and emits no `pg_notify` (SMA-489 D2, "replayed dead letters wait
+/// for the poll"), so a replay is drainable work that produced no nudge — exactly the shape that
+/// used to false-positive the alert.
+///
+/// BOTH halves are asserted. A counter that stayed put because the replay did nothing would prove
+/// nothing, so the relay tick must be shown to actually drain the replayed row. And the counter is
+/// compared against a nonzero BASELINE rather than against zero: `sum_metric_from` returns 0.0 for
+/// an absent family, so `assert_eq!(counter, 0.0)` would pass with the feature deleted.
+#[tokio::test]
+async fn a_dead_letter_replay_is_not_a_notifying_enqueue() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let handle = paigasus_observability::init("test-iam-replay-not-notifying");
+
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+
+    // Baseline: one real notifying enqueue, so the family exists with a known nonzero value.
+    let outbox = PgOutbox::new(true);
+    let tx = uow.begin().await.expect("begin");
+    outbox.enqueue(&*tx, &sample_event()).await.expect("enqueue");
+    tx.commit().await.expect("commit");
+
+    let publisher = Arc::new(CountingPublisher::default());
+    let relay = OutboxRelay::new(db.clone(), Duration::from_secs(60), 100, 5);
+    relay.tick(publisher.as_ref()).await.expect("drain the baseline row");
+
+    let baseline = support::sum_metric_from(&handle.render(), "iam_outbox_notifying_enqueues_total");
+    assert_eq!(baseline, 1.0, "the baseline enqueue must be counted, or this test proves nothing");
+
+    // Now the replay: park a row, return it to the live queue, and let the relay pick it up.
+    let parked = Uuid::from_u128(0xdead_1e77e7);
+    seed_parked_row(&db, parked).await;
+    let dead = PgDeadLetters::new(db.clone());
+    let tx = uow.begin().await.expect("begin");
+    dead.replay_in(&*tx, parked).await.expect("replay").expect("the parked row must be returned");
+    tx.commit().await.expect("commit");
+
+    let report = relay.tick(publisher.as_ref()).await.expect("tick after replay");
+    assert_eq!(report.drained, 1, "the replayed row must be visible to the relay's poll");
+
+    assert_eq!(
+        support::sum_metric_from(&handle.render(), "iam_outbox_notifying_enqueues_total"),
+        baseline,
+        "a dead-letter replay must not increment the notifying-enqueue counter — the whole point \
+         of SMA-495 is that replayed rows are drainable work that emitted no nudge"
     );
 }
 
