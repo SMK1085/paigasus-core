@@ -3,7 +3,7 @@
   "checkpoint_id": "f2976d500bba",
   "strategy": "manual-commit",
   "branch": "feature/sma-495-iam-count-committed-notifying-enqueues-so-the-nudge-absent",
-  "checkpoints_count": 2,
+  "checkpoints_count": 3,
   "files_touched": [
     "docs/superpowers/specs/2026-08-13-sma-496-redact-redis-url-design.md"
   ],
@@ -14,13 +14,20 @@
       "compact_transcript": "/f2/976d500bba/0/transcript.jsonl",
       "content_hash": "/f2/976d500bba/0/content_hash.txt",
       "prompt": "/f2/976d500bba/0/prompt.txt"
+    },
+    {
+      "metadata": "/f2/976d500bba/1/metadata.json",
+      "transcript": "/f2/976d500bba/1/full.jsonl",
+      "compact_transcript": "/f2/976d500bba/1/transcript.jsonl",
+      "content_hash": "/f2/976d500bba/1/content_hash.txt",
+      "prompt": "/f2/976d500bba/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 229,
-    "cache_creation_tokens": 151493,
-    "cache_read_tokens": 4810445,
-    "output_tokens": 45926,
-    "api_call_count": 40
+    "input_tokens": 10119,
+    "cache_creation_tokens": 280088,
+    "cache_read_tokens": 7281528,
+    "output_tokens": 75623,
+    "api_call_count": 64
   }
 }
