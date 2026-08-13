@@ -1,0 +1,1 @@
+yes, but what about better-auth instead of handrolling everything from scratch?
