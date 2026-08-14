@@ -28,6 +28,7 @@ package paigasus.common.v1;
 // it arithmetically:
 //   1-299    IAM only
 //   300-599  gateway only
+//   600-899  reserved for a future domain (e.g. ERROR_DOMAIN_MODEL_ROUTER)
 //   900-999  shared — any domain may emit
 // Sub-group banners below are documentation only and carry no numbering
 // meaning; a new IAM code takes the next free number in 1-299.
@@ -126,18 +127,13 @@ enum ErrorReason {
   // "authn-unavailable" — IAM's own authentication backend is unreachable.
   ERROR_REASON_AUTHN_UNAVAILABLE = 30;
 
-  // ---- IAM: request envelope (1-299) ---------------------------------------
-
-  // "request-too-large" — request body exceeded the configured byte limit.
-  ERROR_REASON_REQUEST_TOO_LARGE = 31;
-
   // ---- IAM: system-row retirement (1-299) ----------------------------------
   // Emitted verbatim today by system_retirement.rs.
 
   // "grants-survive" — surviving grants must be revoked before retirement.
-  ERROR_REASON_GRANTS_SURVIVE = 32;
+  ERROR_REASON_GRANTS_SURVIVE = 31;
   // "decision-change-unacknowledged" — retiring a static policy needs acknowledgement.
-  ERROR_REASON_DECISION_CHANGE_UNACKNOWLEDGED = 33;
+  ERROR_REASON_DECISION_CHANGE_UNACKNOWLEDGED = 32;
 
   // ---- Gateway (300-599) ---------------------------------------------------
   // Emitted snake_case today; SMA-504 recases them. `type` is untouched and
@@ -165,6 +161,9 @@ enum ErrorReason {
 
   // "internal" — an unexpected fault; detail stays in logs.
   ERROR_REASON_INTERNAL = 900;
-  // "invalid-request-body" — the request body could not be deserialized.
+  // "invalid-request-body" — the request body could not be deserialized; covers IAM's
+  // invalid_request extractor rejection and the gateway's invalid_request_body, merged.
   ERROR_REASON_INVALID_REQUEST_BODY = 901;
+  // "request-too-large" — request body exceeded the configured byte limit.
+  ERROR_REASON_REQUEST_TOO_LARGE = 902;
 }

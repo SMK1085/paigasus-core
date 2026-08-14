@@ -43,6 +43,7 @@ class ErrorDomain(betterproto2.Enum):
     it arithmetically:
       1-299    IAM only
       300-599  gateway only
+      600-899  reserved for a future domain (e.g. ERROR_DOMAIN_MODEL_ROUTER)
       900-999  shared — any domain may emit
     Sub-group banners below are documentation only and carry no numbering
     meaning; a new IAM code takes the next free number in 1-299.
@@ -253,14 +254,7 @@ class ErrorReason(betterproto2.Enum):
     "authn-unavailable" — IAM's own authentication backend is unreachable.
     """
 
-    REQUEST_TOO_LARGE = 31
-    """
-    ---- IAM: request envelope (1-299) ---------------------------------------
-
-    "request-too-large" — request body exceeded the configured byte limit.
-    """
-
-    GRANTS_SURVIVE = 32
+    GRANTS_SURVIVE = 31
     """
     ---- IAM: system-row retirement (1-299) ----------------------------------
     Emitted verbatim today by system_retirement.rs.
@@ -268,7 +262,7 @@ class ErrorReason(betterproto2.Enum):
     "grants-survive" — surviving grants must be revoked before retirement.
     """
 
-    DECISION_CHANGE_UNACKNOWLEDGED = 33
+    DECISION_CHANGE_UNACKNOWLEDGED = 32
     """
     "decision-change-unacknowledged" — retiring a static policy needs acknowledgement.
     """
@@ -327,7 +321,13 @@ class ErrorReason(betterproto2.Enum):
 
     INVALID_REQUEST_BODY = 901
     """
-    "invalid-request-body" — the request body could not be deserialized.
+    "invalid-request-body" — the request body could not be deserialized; covers IAM's
+    invalid_request extractor rejection and the gateway's invalid_request_body, merged.
+    """
+
+    REQUEST_TOO_LARGE = 902
+    """
+    "request-too-large" — request body exceeded the configured byte limit.
     """
 
     @classmethod
@@ -364,9 +364,8 @@ class ErrorReason(betterproto2.Enum):
             28: "ERROR_REASON_PROVISIONING_FAILED",
             29: "ERROR_REASON_PRINCIPAL_INACTIVE",
             30: "ERROR_REASON_AUTHN_UNAVAILABLE",
-            31: "ERROR_REASON_REQUEST_TOO_LARGE",
-            32: "ERROR_REASON_GRANTS_SURVIVE",
-            33: "ERROR_REASON_DECISION_CHANGE_UNACKNOWLEDGED",
+            31: "ERROR_REASON_GRANTS_SURVIVE",
+            32: "ERROR_REASON_DECISION_CHANGE_UNACKNOWLEDGED",
             300: "ERROR_REASON_MISSING_AUTHORIZATION",
             301: "ERROR_REASON_INVALID_API_KEY",
             302: "ERROR_REASON_INSUFFICIENT_PERMISSIONS",
@@ -377,6 +376,7 @@ class ErrorReason(betterproto2.Enum):
             307: "ERROR_REASON_UPSTREAM_ERROR",
             900: "ERROR_REASON_INTERNAL",
             901: "ERROR_REASON_INVALID_REQUEST_BODY",
+            902: "ERROR_REASON_REQUEST_TOO_LARGE",
         }
 
     @classmethod
@@ -413,9 +413,8 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_PROVISIONING_FAILED": 28,
             "ERROR_REASON_PRINCIPAL_INACTIVE": 29,
             "ERROR_REASON_AUTHN_UNAVAILABLE": 30,
-            "ERROR_REASON_REQUEST_TOO_LARGE": 31,
-            "ERROR_REASON_GRANTS_SURVIVE": 32,
-            "ERROR_REASON_DECISION_CHANGE_UNACKNOWLEDGED": 33,
+            "ERROR_REASON_GRANTS_SURVIVE": 31,
+            "ERROR_REASON_DECISION_CHANGE_UNACKNOWLEDGED": 32,
             "ERROR_REASON_MISSING_AUTHORIZATION": 300,
             "ERROR_REASON_INVALID_API_KEY": 301,
             "ERROR_REASON_INSUFFICIENT_PERMISSIONS": 302,
@@ -426,6 +425,7 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_UPSTREAM_ERROR": 307,
             "ERROR_REASON_INTERNAL": 900,
             "ERROR_REASON_INVALID_REQUEST_BODY": 901,
+            "ERROR_REASON_REQUEST_TOO_LARGE": 902,
         }
 
 

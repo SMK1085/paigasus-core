@@ -117,13 +117,16 @@ mod tests {
 
     /// Every `ErrorReason` the registry declares. `::prost::Enumeration` provides
     /// `TryFrom<i32>`, so scanning the numbering ranges enumerates the enum without a
-    /// hand-maintained list. 999 is the top of the shared range (see error.proto).
+    /// hand-maintained list. The scan bound (9999) must stay comfortably above the highest
+    /// declared number (999, the top of the shared range — see error.proto) or a value added
+    /// above the bound goes invisible to every test derived from `all_reasons`/`all_domains`,
+    /// including the `assert_eq!(actual.len(), 43)` anchor and the range-enforcement test.
     fn all_reasons() -> Vec<ErrorReason> {
-        (0..=999).filter_map(|i| ErrorReason::try_from(i).ok()).collect()
+        (0..=9999).filter_map(|i| ErrorReason::try_from(i).ok()).collect()
     }
 
     fn all_domains() -> Vec<ErrorDomain> {
-        (0..=999).filter_map(|i| ErrorDomain::try_from(i).ok()).collect()
+        (0..=9999).filter_map(|i| ErrorDomain::try_from(i).ok()).collect()
     }
 
     /// The registry, spelled out. This DELIBERATELY duplicates error.proto — in a test,
@@ -163,8 +166,6 @@ mod tests {
         "provisioning-failed",
         "principal-inactive",
         "authn-unavailable",
-        // IAM: request envelope
-        "request-too-large",
         // IAM: system-row retirement
         "grants-survive",
         "decision-change-unacknowledged",
@@ -180,6 +181,7 @@ mod tests {
         // Shared
         "internal",
         "invalid-request-body",
+        "request-too-large",
     ];
 
     #[test]
