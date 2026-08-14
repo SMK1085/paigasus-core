@@ -36,3 +36,6 @@ pub mod paigasus {
 
 /// Thin `Auditable` contract layered on the generated `common::v1::AuditMetadata`.
 pub mod audit;
+
+/// Wire-string helpers for the canonical error registry (`common::v1::ErrorReason`/`ErrorDomain`).
+pub mod error;
