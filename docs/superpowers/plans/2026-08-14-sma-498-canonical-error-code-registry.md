@@ -11,6 +11,13 @@
 **Spec:** `docs/superpowers/specs/2026-08-13-sma-498-canonical-error-code-registry-design.md`
 **ADR:** ADR-0019 + Amendment A1 (2026-08-14).
 
+> **This plan was executed and then amended to match what shipped.** Two things changed during
+> implementation: Task 4's original design (a hand-listed variant array guarded by a wildcard-free
+> `match`) was built and experimentally disproved twice, and `request-too-large` was renumbered from
+> the IAM range into the shared range. Both are reflected below. Where any embedded code block still
+> differs from the committed tree, **the committed code is authoritative** — do not copy from here
+> without checking. The spec carries the reasoning for both amendments.
+
 ## Global Constraints
 
 - Every source file opens with an SPDX header: `// SPDX-License-Identifier: Apache-2.0` (first line, before `syntax`).
@@ -192,6 +199,7 @@ package paigasus.common.v1;
 // it arithmetically:
 //   1-299    IAM only
 //   300-599  gateway only
+//   600-899  reserved for a future domain (e.g. ERROR_DOMAIN_MODEL_ROUTER)
 //   900-999  shared — any domain may emit
 // Sub-group banners below are documentation only and carry no numbering
 // meaning; a new IAM code takes the next free number in 1-299.
@@ -290,18 +298,13 @@ enum ErrorReason {
   // "authn-unavailable" — IAM's own authentication backend is unreachable.
   ERROR_REASON_AUTHN_UNAVAILABLE = 30;
 
-  // ---- IAM: request envelope (1-299) ---------------------------------------
-
-  // "request-too-large" — request body exceeded the configured byte limit.
-  ERROR_REASON_REQUEST_TOO_LARGE = 31;
-
   // ---- IAM: system-row retirement (1-299) ----------------------------------
   // Emitted verbatim today by system_retirement.rs.
 
   // "grants-survive" — surviving grants must be revoked before retirement.
-  ERROR_REASON_GRANTS_SURVIVE = 32;
+  ERROR_REASON_GRANTS_SURVIVE = 31;
   // "decision-change-unacknowledged" — retiring a static policy needs acknowledgement.
-  ERROR_REASON_DECISION_CHANGE_UNACKNOWLEDGED = 33;
+  ERROR_REASON_DECISION_CHANGE_UNACKNOWLEDGED = 32;
 
   // ---- Gateway (300-599) ---------------------------------------------------
   // Emitted snake_case today; SMA-504 recases them. `type` is untouched and
@@ -329,8 +332,11 @@ enum ErrorReason {
 
   // "internal" — an unexpected fault; detail stays in logs.
   ERROR_REASON_INTERNAL = 900;
-  // "invalid-request-body" — the request body could not be deserialized.
+  // "invalid-request-body" — the request body could not be deserialized; covers IAM's
+  // invalid_request extractor rejection and the gateway's invalid_request_body, merged.
   ERROR_REASON_INVALID_REQUEST_BODY = 901;
+  // "request-too-large" — request body exceeded the configured byte limit.
+  ERROR_REASON_REQUEST_TOO_LARGE = 902;
 }
 ```
 
@@ -436,14 +442,18 @@ mod tests {
     use crate::paigasus::common::v1::{ErrorDomain, ErrorReason};
 
     /// Every `ErrorReason` the registry declares. `::prost::Enumeration` provides
-    /// `TryFrom<i32>`, so scanning the numbering ranges enumerates the enum without a
-    /// hand-maintained list. 999 is the top of the shared range (see error.proto).
+    /// `TryFrom<i32>`, so scanning enumerates the enum without a hand-maintained list.
+    ///
+    /// The bound must stay comfortably above the highest declared number (999, the top of
+    /// the shared range) or a value added above it goes invisible to every test derived from
+    /// `all_reasons`/`all_domains` — including the `assert_eq!(actual.len(), 43)` anchor and
+    /// the range-enforcement test, both of which would then pass while covering nothing.
     fn all_reasons() -> Vec<ErrorReason> {
-        (0..=999).filter_map(|i| ErrorReason::try_from(i).ok()).collect()
+        (0..=9999).filter_map(|i| ErrorReason::try_from(i).ok()).collect()
     }
 
     fn all_domains() -> Vec<ErrorDomain> {
-        (0..=999).filter_map(|i| ErrorDomain::try_from(i).ok()).collect()
+        (0..=9999).filter_map(|i| ErrorDomain::try_from(i).ok()).collect()
     }
 
     /// The registry, spelled out. This DELIBERATELY duplicates error.proto — in a test,
@@ -483,8 +493,6 @@ mod tests {
         "provisioning-failed",
         "principal-inactive",
         "authn-unavailable",
-        // IAM: request envelope
-        "request-too-large",
         // IAM: system-row retirement
         "grants-survive",
         "decision-change-unacknowledged",
@@ -500,6 +508,7 @@ mod tests {
         // Shared
         "internal",
         "invalid-request-body",
+        "request-too-large",
     ];
 
     #[test]
