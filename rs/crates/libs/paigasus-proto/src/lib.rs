@@ -39,3 +39,6 @@ pub mod paigasus {
 
 /// Thin `Auditable` contract layered on the generated `common::v1::AuditMetadata`.
 pub mod audit;
+
+/// Wire-key transform for the `Capability` registry in `common::v1`.
+pub mod capability;
