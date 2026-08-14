@@ -36,6 +36,12 @@ impl Capability {
         if !is_wire_key(key) {
             return None;
         }
+        // Belt-and-braces: `is_wire_key` has already restricted `key` to ASCII
+        // lowercase/digits, so plain `to_uppercase` would behave identically
+        // today. Keep `to_ascii_uppercase` anyway — if the grammar check is
+        // ever loosened to admit non-ASCII, `to_uppercase` folds homoglyphs
+        // (e.g. U+0131 dotless i -> 'I') into real capability names, while
+        // `to_ascii_uppercase` cannot. Do not "simplify" this to `to_uppercase`.
         let name = format!("{PREFIX}{}", key.to_ascii_uppercase().replace('.', "_"));
         match Self::from_str_name(&name)? {
             // "unspecified" satisfies the grammar, so reject the sentinel here.
@@ -111,11 +117,32 @@ mod tests {
             "iam.audit.",  // trailing dot
             "iam..audit",  // empty segment
             "iam.unknown", // well-formed but unregistered
-            "ıam.audit",   // U+0131 dotless i: to_uppercase folds it to 'I'
-            "ſervice.x",   // U+017F long s: folds to 'S'
+            // Non-ASCII homoglyphs. Rejected by the grammar check
+            // (`is_wire_key`) before any case-folding runs — see
+            // `is_wire_key_rejects_non_ascii_homoglyphs` below for the test
+            // that pins the guard actually doing this work.
+            "ıam.audit", // U+0131 dotless i
+            "ſervice.x", // U+017F long s
         ] {
             assert_eq!(Capability::from_wire_key(bad), None, "{bad:?} must not resolve");
         }
+    }
+
+    #[test]
+    fn is_wire_key_rejects_non_ascii_homoglyphs() {
+        // This is the guard that actually keeps `from_wire_key` safe from
+        // Unicode case-folding surprises: `str::to_uppercase` (unlike
+        // `to_ascii_uppercase`) folds U+0131 (dotless i) to `I` and U+017F
+        // (long s) to `S`, which would let these resolve to real
+        // capabilities if the grammar check ever stopped rejecting them
+        // first. Pinning it here directly means loosening `is_wire_key` —
+        // e.g. to a negative filter, or to checking only the first
+        // character — fails this test, instead of silently reopening the
+        // homoglyph hole while `from_wire_key_rejects_malformed_input` keeps
+        // passing by accident.
+        assert!(!super::is_wire_key("ıam.audit"), "U+0131 dotless i must be rejected");
+        assert!(!super::is_wire_key("ſervice.x"), "U+017F long s must be rejected");
+        assert!(super::is_wire_key("iam.audit"), "a valid key must be accepted");
     }
 
     #[test]
