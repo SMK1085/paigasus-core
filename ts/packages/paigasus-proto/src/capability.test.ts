@@ -14,6 +14,30 @@ describe('capabilityWireKey', () => {
   it('has no wire key for the zero sentinel', () => {
     expect(capabilityWireKey(Capability.UNSPECIFIED)).toBeUndefined();
   });
+
+  it('has no wire key for a number the enum does not know', () => {
+    // Realistic, not just defensive: a newer service can advertise a
+    // capability this build's generated enum predates.
+    expect(capabilityWireKey(99 as Capability)).toBeUndefined();
+  });
+
+  it('covers exactly the registered capabilities', () => {
+    // Guards against a fifth capability being registered without a
+    // corresponding assertion above.
+    const members = Object.values(Capability).filter((v) => typeof v === 'number');
+    expect(members).toHaveLength(5);
+  });
+
+  it('produces keys matching the documented grammar for every non-sentinel capability', () => {
+    const members = Object.values(Capability).filter((v): v is Capability => typeof v === 'number');
+    for (const capability of members) {
+      if (capability === Capability.UNSPECIFIED) {
+        continue;
+      }
+      const key = capabilityWireKey(capability);
+      expect(key).toMatch(/^[a-z][a-z0-9]*(\.[a-z0-9]+)*$/);
+    }
+  });
 });
 
 describe('generated ServiceInfoService', () => {
