@@ -376,4 +376,91 @@ mod tests {
         let resp = to_introspect_api_key_response(&ctx);
         assert_eq!(resp.scope_prn, scope_prn, "the gRPC introspect response must carry the key's scope_prn (SMA-446, D11)");
     }
+
+    /// AC2: every code `TenancyError::code()` can return is declared in the canonical registry
+    /// (`contracts/proto/paigasus/common/v1/error.proto`, SMA-498).
+    ///
+    /// `assert_variant_is_known` is a wildcard-free match whose only job is to fail COMPILATION when
+    /// a variant is added to `TenancyError` without being added to `all` below — and therefore
+    /// without being registered. That closes the gap a plain hand-written list leaves open, without
+    /// waiting for SMA-507's drift gate. Assertions go through `code()` rather than string literals,
+    /// so a rename that is not registered fails too.
+    ///
+    /// It is CALLED in the loop rather than left as an unused `_`-prefixed helper: the workspace
+    /// lints are `warnings = deny`, so an uncalled function risks a hard `dead_code` failure.
+    #[test]
+    fn every_tenancy_code_is_declared_in_the_canonical_registry() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+
+        fn assert_variant_is_known(e: &TenancyError) {
+            match e {
+                TenancyError::SlugConflict
+                | TenancyError::DuplicateMembership
+                | TenancyError::EmailConflict
+                | TenancyError::ServiceAccountNameConflict
+                | TenancyError::InvalidEmail(_)
+                | TenancyError::InvalidSlug(_)
+                | TenancyError::InvalidName(_)
+                | TenancyError::InvalidPrn(_)
+                | TenancyError::PrnMismatch
+                | TenancyError::InvalidPagination
+                | TenancyError::NothingToRename
+                | TenancyError::NotFound
+                | TenancyError::ParentArchived
+                | TenancyError::NodeArchived
+                | TenancyError::MissingOrgMembership
+                | TenancyError::Forbidden
+                | TenancyError::UnknownRole(_)
+                | TenancyError::InvalidScope(_)
+                | TenancyError::SystemImmutable(_)
+                | TenancyError::PolicyInvalid(_)
+                | TenancyError::PolicyConflict(_)
+                | TenancyError::InvalidAction(_)
+                | TenancyError::InvalidBulkReplay
+                | TenancyError::NotSystemOwned(_)
+                | TenancyError::FleetNotConverged
+                | TenancyError::Internal => {}
+            }
+        }
+
+        let s = || "x".to_string();
+        let all = [
+            TenancyError::SlugConflict,
+            TenancyError::DuplicateMembership,
+            TenancyError::EmailConflict,
+            TenancyError::ServiceAccountNameConflict,
+            TenancyError::InvalidEmail(s()),
+            TenancyError::InvalidSlug(s()),
+            TenancyError::InvalidName(s()),
+            TenancyError::InvalidPrn(s()),
+            TenancyError::PrnMismatch,
+            TenancyError::InvalidPagination,
+            TenancyError::NothingToRename,
+            TenancyError::NotFound,
+            TenancyError::ParentArchived,
+            TenancyError::NodeArchived,
+            TenancyError::MissingOrgMembership,
+            TenancyError::Forbidden,
+            TenancyError::UnknownRole(s()),
+            TenancyError::InvalidScope(s()),
+            TenancyError::SystemImmutable(s()),
+            TenancyError::PolicyInvalid(s()),
+            TenancyError::PolicyConflict(s()),
+            TenancyError::InvalidAction(s()),
+            TenancyError::InvalidBulkReplay,
+            TenancyError::NotSystemOwned(s()),
+            TenancyError::FleetNotConverged,
+            TenancyError::Internal,
+        ];
+        assert_eq!(all.len(), 26, "TenancyError has 26 variants; update `all` and the match together");
+
+        for err in &all {
+            assert_variant_is_known(err);
+            let code = err.code();
+            assert!(
+                ErrorReason::from_wire_reason(code).is_some(),
+                "TenancyError::{err:?} emits {code:?}, which is not declared in common/v1/error.proto"
+            );
+        }
+    }
 }
