@@ -373,7 +373,7 @@ Expected: exit 0.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-moon run ts:typecheck
+moon run :typecheck
 ```
 
 Expected: exit 0. (If either fails with a missing `google/rpc` module, the proto has acquired an import it must not have — remove it; see spec §2.1.)
@@ -797,88 +797,64 @@ This lives in `convert.rs`, **not** `application/error.rs`: the application laye
 
 - [ ] **Step 1: Write the failing test**
 
-Append to the existing `#[cfg(test)] mod tests` block at the bottom of `rs/crates/services/paigasus-iam/src/adapters/grpc/convert.rs`:
+**This is what actually shipped, after two disproved attempts — do not build either of those
+attempts, even though a draft of this plan once presented one as the design.**
+
+**Disproved constructions (recorded so nobody copies one into SMA-507's drift gate):**
+
+1. A hand-listed array of variant instances guarded by a wildcard-free `match`
+   (`assert_variant_is_known`) intended to fail *compilation* when a new variant is added. This
+   does not close the gap it targets: the exhaustive match forces a developer to write a match
+   *arm* for the new variant, but nothing forces them to also add an *instance* of it to the
+   array being iterated. Adding a variant and making the minimal edit that clears the resulting
+   `E0004` leaves the test compiling, passing, and blind to the new variant's unregistered code
+   — the exact gap the test exists to close.
+2. A second attempt mapped each variant to a unique numeric "slot" and asserted the slots formed
+   a bijection. Disproved for the same underlying reason: the slot function is only ever
+   evaluated for members of the hand-written list, so an unlisted variant is invisible to it too.
+
+**What shipped instead:** enumerate variants from the type itself via `strum::EnumIter`, gated
+`#[cfg(test)]` so `strum_macros` never enters the shipped binary. This costs a dev-only
+dependency rather than being dependency-free (see Task 5 Step 3 and "Out of scope" below, both
+corrected to reflect this).
+
+In `rs/crates/services/paigasus-iam/src/application/error.rs`, add the derive to `TenancyError`:
 
 ```rust
-/// AC2: every code `TenancyError::code()` can return is declared in the canonical registry
-/// (`contracts/proto/paigasus/common/v1/error.proto`, SMA-498).
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(strum::EnumIter))]
+pub enum TenancyError {
+    // ...unchanged variants
+}
+```
+
+In `rs/crates/services/paigasus-iam/Cargo.toml`, under `[dev-dependencies]`:
+
+```toml
+# `adapters::grpc::convert`'s AC2 registry-coverage test enumerates every TenancyError
+# variant, which safe Rust cannot do without a derive. Dev-only: the derive is gated behind
+# cfg(test) so strum_macros never enters the shipped binary (SMA-498).
+strum = { version = "0.26", features = ["derive"] }
+```
+
+Append to the existing `#[cfg(test)] mod tests` block at the bottom of
+`rs/crates/services/paigasus-iam/src/adapters/grpc/convert.rs`:
+
+```rust
+/// AC2: every code `TenancyError::code()` value appears unchanged, kebab retained deliberately
 ///
-/// `assert_variant_is_known` is a wildcard-free match whose only job is to fail COMPILATION when
-/// a variant is added to `TenancyError` without being added to `all` below — and therefore
-/// without being registered. That closes the gap a plain hand-written list leaves open, without
-/// waiting for SMA-507's drift gate. Assertions go through `code()` rather than string literals,
-/// so a rename that is not registered fails too.
-///
-/// It is CALLED in the loop rather than left as an unused `_`-prefixed helper: the workspace
-/// lints are `warnings = deny`, so an uncalled function risks a hard `dead_code` failure.
+/// Coverage is checked by enumerating every `TenancyError` variant via `strum::EnumIter`
+/// (`#[cfg_attr(test, derive(strum::EnumIter))]` on the enum) rather than a hand-maintained
+/// list: `TenancyError::iter()` yields one instance per variant straight from the type
+/// itself, so a new variant is included automatically — there is no second list that can be
+/// left un-extended. Assertions run through `code()` rather than string literals, so an
+/// unregistered rename fails too.
 #[test]
 fn every_tenancy_code_is_declared_in_the_canonical_registry() {
     use paigasus_proto::paigasus::common::v1::ErrorReason;
+    use strum::IntoEnumIterator;
 
-    fn assert_variant_is_known(e: &TenancyError) {
-        match e {
-            TenancyError::SlugConflict
-            | TenancyError::DuplicateMembership
-            | TenancyError::EmailConflict
-            | TenancyError::ServiceAccountNameConflict
-            | TenancyError::InvalidEmail(_)
-            | TenancyError::InvalidSlug(_)
-            | TenancyError::InvalidName(_)
-            | TenancyError::InvalidPrn(_)
-            | TenancyError::PrnMismatch
-            | TenancyError::InvalidPagination
-            | TenancyError::NothingToRename
-            | TenancyError::NotFound
-            | TenancyError::ParentArchived
-            | TenancyError::NodeArchived
-            | TenancyError::MissingOrgMembership
-            | TenancyError::Forbidden
-            | TenancyError::UnknownRole(_)
-            | TenancyError::InvalidScope(_)
-            | TenancyError::SystemImmutable(_)
-            | TenancyError::PolicyInvalid(_)
-            | TenancyError::PolicyConflict(_)
-            | TenancyError::InvalidAction(_)
-            | TenancyError::InvalidBulkReplay
-            | TenancyError::NotSystemOwned(_)
-            | TenancyError::FleetNotConverged
-            | TenancyError::Internal => {}
-        }
-    }
-
-    let s = || "x".to_string();
-    let all = [
-        TenancyError::SlugConflict,
-        TenancyError::DuplicateMembership,
-        TenancyError::EmailConflict,
-        TenancyError::ServiceAccountNameConflict,
-        TenancyError::InvalidEmail(s()),
-        TenancyError::InvalidSlug(s()),
-        TenancyError::InvalidName(s()),
-        TenancyError::InvalidPrn(s()),
-        TenancyError::PrnMismatch,
-        TenancyError::InvalidPagination,
-        TenancyError::NothingToRename,
-        TenancyError::NotFound,
-        TenancyError::ParentArchived,
-        TenancyError::NodeArchived,
-        TenancyError::MissingOrgMembership,
-        TenancyError::Forbidden,
-        TenancyError::UnknownRole(s()),
-        TenancyError::InvalidScope(s()),
-        TenancyError::SystemImmutable(s()),
-        TenancyError::PolicyInvalid(s()),
-        TenancyError::PolicyConflict(s()),
-        TenancyError::InvalidAction(s()),
-        TenancyError::InvalidBulkReplay,
-        TenancyError::NotSystemOwned(s()),
-        TenancyError::FleetNotConverged,
-        TenancyError::Internal,
-    ];
-    assert_eq!(all.len(), 26, "TenancyError has 26 variants; update `all` and the match together");
-
-    for err in &all {
-        assert_variant_is_known(err);
+    for err in TenancyError::iter() {
         let code = err.code();
         assert!(
             ErrorReason::from_wire_reason(code).is_some(),
@@ -1007,7 +983,9 @@ Expected outcomes for the gates most likely to react to this change:
 - `contracts:fmt` — you skipped `buf format -w`. Run it, regenerate, commit.
 - `contracts:breaking` — should pass; Task 1 only widened what is tolerated.
 - `repo:affected-smoke` — should pass. Its `contracts->proto` case probes a hardcoded synthetic path (`contracts/proto/paigasus/gateway/v1/health.proto`), so adding a file does not change its strict-equality set.
-- `repo:deny` / `repo:machete` — should pass; this branch adds no dependency to any workspace.
+- `repo:deny` / `repo:machete` — should pass; `strum`/`strum_macros` landed as a `cfg(test)`-gated
+  dev-dependency (Task 4 Step 1), MIT-licensed and already covered by `rs/deny.toml`'s allow list,
+  so neither gate needs a waiver.
 
 - [ ] **Step 4: Confirm the working tree is clean**
 
@@ -1033,4 +1011,6 @@ Expected: no output. Any leftover probe file (`zz_probe.proto`, `zz_probe.rs`) o
 - Emitting `google.rpc.ErrorInfo`, removing the in-band `"{code}: {message}"` prefix, the 17 renames in spec D7, `retryable`/`correlation_id` — **SMA-504**.
 - The two-way drift gate — **SMA-507**.
 - TypeScript/Python `as_wire_reason` equivalents and the `@paigasus/proto` barrel export — the SDK issue.
-- Adding `tonic-types` to the workspace — SMA-504 needs it; this branch adds no dependency.
+- Adding `tonic-types` to the workspace — SMA-504 needs it. (This branch does add one dependency of
+  its own: `strum`, `cfg(test)`-gated, dev-only — see Task 4 Step 1. `tonic-types` would be a
+  *production* dependency, a different story.)

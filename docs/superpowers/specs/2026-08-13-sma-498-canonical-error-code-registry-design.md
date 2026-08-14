@@ -346,15 +346,13 @@ minus `internal` which is shared (D8):
 Authn (26–30): `invalid-token`, `identity-not-provisioned`, `provisioning-failed`,
 `principal-inactive`, `authn-unavailable`
 
-HTTP envelope (31): `request-too-large`
-
-System retirement (32–33), already kebab today: `grants-survive`, `decision-change-unacknowledged`
+System retirement (31–32), already kebab today: `grants-survive`, `decision-change-unacknowledged`
 
 **Gateway only, 300–599** (300–307): `missing-authorization`, `invalid-api-key`,
 `insufficient-permissions`, `missing-scope`, `iam-unavailable`, `upstream-unavailable`,
 `upstream-timeout`, `upstream-error`
 
-**Shared, 900–999** (900–901): `internal`, `invalid-request-body`
+**Shared, 900–999** (900–902): `internal`, `invalid-request-body`, `request-too-large`
 
 Plus the mandatory `ERROR_REASON_UNSPECIFIED = 0` sentinel — **44 declarations**.
 
