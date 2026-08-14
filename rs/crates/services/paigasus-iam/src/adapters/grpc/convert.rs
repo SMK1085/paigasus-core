@@ -376,4 +376,27 @@ mod tests {
         let resp = to_introspect_api_key_response(&ctx);
         assert_eq!(resp.scope_prn, scope_prn, "the gRPC introspect response must carry the key's scope_prn (SMA-446, D11)");
     }
+
+    /// AC2: every code `TenancyError::code()` can return is declared in the canonical registry
+    /// (`contracts/proto/paigasus/common/v1/error.proto`, SMA-498).
+    ///
+    /// Coverage is checked by enumerating every `TenancyError` variant via `strum::EnumIter`
+    /// (`#[cfg_attr(test, derive(strum::EnumIter))]` on the enum) rather than a hand-maintained
+    /// list: `TenancyError::iter()` yields one instance per variant straight from the type
+    /// itself, so a new variant is included automatically — there is no second list that can be
+    /// left un-extended. Assertions run through `code()` rather than string literals, so an
+    /// unregistered rename fails too.
+    #[test]
+    fn every_tenancy_code_is_declared_in_the_canonical_registry() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+        use strum::IntoEnumIterator;
+
+        for err in TenancyError::iter() {
+            let code = err.code();
+            assert!(
+                ErrorReason::from_wire_reason(code).is_some(),
+                "TenancyError::{err:?} emits {code:?}, which is not declared in common/v1/error.proto"
+            );
+        }
+    }
 }
