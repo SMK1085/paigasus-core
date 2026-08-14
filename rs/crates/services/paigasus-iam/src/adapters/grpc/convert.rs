@@ -380,46 +380,58 @@ mod tests {
     /// AC2: every code `TenancyError::code()` can return is declared in the canonical registry
     /// (`contracts/proto/paigasus/common/v1/error.proto`, SMA-498).
     ///
-    /// `assert_variant_is_known` is a wildcard-free match whose only job is to fail COMPILATION when
-    /// a variant is added to `TenancyError` without being added to `all` below — and therefore
-    /// without being registered. That closes the gap a plain hand-written list leaves open, without
-    /// waiting for SMA-507's drift gate. Assertions go through `code()` rather than string literals,
-    /// so a rename that is not registered fails too.
+    /// Coverage is checked via an index bijection: `index` is a wildcard-free match, so adding a
+    /// variant to `TenancyError` fails COMPILATION here (`E0004`) until it is given a slot —
+    /// that forces every new variant through this file at least once. The bijection assertion
+    /// below then catches an index MISTAKE for any variant that IS added to `all`: reusing an
+    /// existing slot leaves some other slot's count at 0, and an out-of-range slot panics the
+    /// indexing itself. Assertions run through `code()` rather than string literals, so an
+    /// unregistered rename fails too.
     ///
-    /// It is CALLED in the loop rather than left as an unused `_`-prefixed helper: the workspace
-    /// lints are `warnings = deny`, so an uncalled function risks a hard `dead_code` failure.
+    /// KNOWN LIMIT, proven by experiment in SMA-498 Task 4 fix round 1: this does NOT, by
+    /// itself, force `all` to be extended. `index` is only ever called on `all`'s own elements
+    /// (see the loop below), so a developer who silences the `E0004` by adding
+    /// `NewVariant => <any number>` WITHOUT also adding `TenancyError::NewVariant` to `all` gets
+    /// a test that still compiles AND still passes — the new arm is simply never exercised, no
+    /// matter what value it returns (confirmed for both an out-of-range value and a value that
+    /// collides with an existing slot). Closing that residual gap needs something that derives
+    /// `all` from the type itself rather than hand-listing it (e.g. SMA-507's drift gate, or a
+    /// variant-enumeration mechanism such as `strum::EnumIter`) — out of scope here.
     #[test]
     fn every_tenancy_code_is_declared_in_the_canonical_registry() {
         use paigasus_proto::paigasus::common::v1::ErrorReason;
 
-        fn assert_variant_is_known(e: &TenancyError) {
+        /// Maps each `TenancyError` variant to a unique slot. Wildcard-free ON PURPOSE: adding a
+        /// variant to `TenancyError` fails COMPILATION here until it is given a slot. See the
+        /// enclosing test's doc comment for what this does and does not guarantee.
+        fn index(e: &TenancyError) -> usize {
             match e {
-                TenancyError::SlugConflict
-                | TenancyError::DuplicateMembership
-                | TenancyError::EmailConflict
-                | TenancyError::ServiceAccountNameConflict
-                | TenancyError::InvalidEmail(_)
-                | TenancyError::InvalidSlug(_)
-                | TenancyError::InvalidName(_)
-                | TenancyError::InvalidPrn(_)
-                | TenancyError::PrnMismatch
-                | TenancyError::InvalidPagination
-                | TenancyError::NothingToRename
-                | TenancyError::NotFound
-                | TenancyError::ParentArchived
-                | TenancyError::NodeArchived
-                | TenancyError::MissingOrgMembership
-                | TenancyError::Forbidden
-                | TenancyError::UnknownRole(_)
-                | TenancyError::InvalidScope(_)
-                | TenancyError::SystemImmutable(_)
-                | TenancyError::PolicyInvalid(_)
-                | TenancyError::PolicyConflict(_)
-                | TenancyError::InvalidAction(_)
-                | TenancyError::InvalidBulkReplay
-                | TenancyError::NotSystemOwned(_)
-                | TenancyError::FleetNotConverged
-                | TenancyError::Internal => {}
+                TenancyError::SlugConflict => 0,
+                TenancyError::DuplicateMembership => 1,
+                TenancyError::EmailConflict => 2,
+                TenancyError::ServiceAccountNameConflict => 3,
+                TenancyError::InvalidEmail(_) => 4,
+                TenancyError::InvalidSlug(_) => 5,
+                TenancyError::InvalidName(_) => 6,
+                TenancyError::InvalidPrn(_) => 7,
+                TenancyError::PrnMismatch => 8,
+                TenancyError::InvalidPagination => 9,
+                TenancyError::NothingToRename => 10,
+                TenancyError::NotFound => 11,
+                TenancyError::ParentArchived => 12,
+                TenancyError::NodeArchived => 13,
+                TenancyError::MissingOrgMembership => 14,
+                TenancyError::Forbidden => 15,
+                TenancyError::UnknownRole(_) => 16,
+                TenancyError::InvalidScope(_) => 17,
+                TenancyError::SystemImmutable(_) => 18,
+                TenancyError::PolicyInvalid(_) => 19,
+                TenancyError::PolicyConflict(_) => 20,
+                TenancyError::InvalidAction(_) => 21,
+                TenancyError::InvalidBulkReplay => 22,
+                TenancyError::NotSystemOwned(_) => 23,
+                TenancyError::FleetNotConverged => 24,
+                TenancyError::Internal => 25,
             }
         }
 
@@ -454,8 +466,13 @@ mod tests {
         ];
         assert_eq!(all.len(), 26, "TenancyError has 26 variants; update `all` and the match together");
 
+        let mut counts = vec![0usize; all.len()];
         for err in &all {
-            assert_variant_is_known(err);
+            counts[index(err)] += 1;
+        }
+        assert!(counts.iter().all(|&c| c == 1), "every TenancyError variant must appear exactly once in `all`; slot counts: {counts:?}");
+
+        for err in &all {
             let code = err.code();
             assert!(
                 ErrorReason::from_wire_reason(code).is_some(),
