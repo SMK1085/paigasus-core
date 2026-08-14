@@ -1,0 +1,170 @@
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package paigasus.common.v1;
+
+// Canonical error registry (ADR-0019). Error identity is (domain, reason),
+// carried on the wire as google.rpc.ErrorInfo — which this file deliberately
+// does NOT import: referencing it emits Rust and TypeScript pointing at modules
+// buf never generates. See the SMA-498 design doc §2.1.
+//
+// These enums are REGISTRIES, never wire types. No field anywhere is of type
+// ErrorReason or ErrorDomain; the wire carries strings.
+//
+// Mapping rules (normative):
+//   reason: strip ERROR_REASON_, lowercase, '_' -> '-'
+//   domain: strip ERROR_DOMAIN_, lowercase, '_' -> '-', append '.paigasus.io'
+// Each value's comment repeats the resulting literal verbatim. Kebab casing is
+// a deliberate, documented deviation from Google's UPPER_SNAKE reason
+// convention (ADR-0019 decision 3).
+//
+// THE REGISTRY IS APPEND-ONLY. Removing a value is a breaking change. Retract
+// only by reserving both name and number. buf breaking is NOT what protects
+// this vocabulary — it cannot see the kebab strings, cannot tell whether a code
+// is still emitted or consumed, and does not run against Rust or TypeScript.
+// The two-way drift gate (SMA-507) is the real guard.
+//
+// Numbering encodes which domain may emit a code, so the drift gate can derive
+// it arithmetically:
+//   1-299    IAM only
+//   300-599  gateway only
+//   900-999  shared — any domain may emit
+// Sub-group banners below are documentation only and carry no numbering
+// meaning; a new IAM code takes the next free number in 1-299.
+//
+// ErrorInfo.metadata additionally carries two standard keys, populated by
+// SMA-504: `retryable` and `correlation_id`. They are prose here, not
+// enumerated: metadata is an open map, not a closed vocabulary consumers branch
+// on exhaustively. The append-only guarantee above covers reasons and domains
+// ONLY, not metadata keys.
+
+// The service that produced an error. Not emitted on the gateway's
+// OpenAI-compatible envelope, which has no domain field and carries only
+// `code`; it applies wherever ErrorInfo itself travels.
+enum ErrorDomain {
+  ERROR_DOMAIN_UNSPECIFIED = 0;
+
+  // "iam.paigasus.io"
+  ERROR_DOMAIN_IAM = 1;
+
+  // "gateway.paigasus.io"
+  ERROR_DOMAIN_GATEWAY = 2;
+}
+
+// The canonical error vocabulary. See the file comment for the mapping rule,
+// the append-only guarantee and the numbering ranges.
+enum ErrorReason {
+  ERROR_REASON_UNSPECIFIED = 0;
+
+  // ---- IAM: tenancy (1-299) ------------------------------------------------
+  // Emitted verbatim today by TenancyError::code().
+
+  // "slug-conflict" — slug already taken in this scope.
+  ERROR_REASON_SLUG_CONFLICT = 1;
+  // "duplicate-membership" — principal already a member of this scope.
+  ERROR_REASON_DUPLICATE_MEMBERSHIP = 2;
+  // "email-conflict" — email address already taken.
+  ERROR_REASON_EMAIL_CONFLICT = 3;
+  // "service-account-name-conflict" — name taken under this owner node.
+  ERROR_REASON_SERVICE_ACCOUNT_NAME_CONFLICT = 4;
+  // "invalid-email" — email address failed validation.
+  ERROR_REASON_INVALID_EMAIL = 5;
+  // "invalid-slug" — slug failed validation.
+  ERROR_REASON_INVALID_SLUG = 6;
+  // "invalid-name" — name failed validation.
+  ERROR_REASON_INVALID_NAME = 7;
+  // "invalid-prn" — resource PRN failed to parse.
+  ERROR_REASON_INVALID_PRN = 8;
+  // "prn-mismatch" — PRN does not match the stored resource.
+  ERROR_REASON_PRN_MISMATCH = 9;
+  // "invalid-pagination" — limit/offset outside the accepted range.
+  ERROR_REASON_INVALID_PAGINATION = 10;
+  // "nothing-to-rename" — rename carried no new slug or name.
+  ERROR_REASON_NOTHING_TO_RENAME = 11;
+  // "not-found" — resource does not exist.
+  ERROR_REASON_NOT_FOUND = 12;
+  // "parent-archived" — parent resource is archived.
+  ERROR_REASON_PARENT_ARCHIVED = 13;
+  // "node-archived" — resource is archived.
+  ERROR_REASON_NODE_ARCHIVED = 14;
+  // "missing-org-membership" — principal is not a member of the organization.
+  ERROR_REASON_MISSING_ORG_MEMBERSHIP = 15;
+  // "forbidden" — authorization denied the request.
+  ERROR_REASON_FORBIDDEN = 16;
+  // "unknown-role" — role key is not in the role catalog.
+  ERROR_REASON_UNKNOWN_ROLE = 17;
+  // "invalid-scope" — scope PRN's node kind is outside the role's allow-list.
+  ERROR_REASON_INVALID_SCOPE = 18;
+  // "system-immutable" — system-owned row is immutable via the CRUD API.
+  ERROR_REASON_SYSTEM_IMMUTABLE = 19;
+  // "policy-invalid" — policy failed Cedar parse, schema or template-link checks.
+  ERROR_REASON_POLICY_INVALID = 20;
+  // "policy-conflict" — lost a concurrent-create race for this policy id.
+  ERROR_REASON_POLICY_CONFLICT = 21;
+  // "invalid-action" — action does not name a known Action variant.
+  ERROR_REASON_INVALID_ACTION = 22;
+  // "invalid-bulk-replay" — bulk replay needs an explicit non-zero max_rows.
+  ERROR_REASON_INVALID_BULK_REPLAY = 23;
+  // "not-system-owned" — retirement refused: the row is not system-owned.
+  ERROR_REASON_NOT_SYSTEM_OWNED = 24;
+  // "fleet-not-converged" — fleet is behind this binary's starter-policy revision.
+  ERROR_REASON_FLEET_NOT_CONVERGED = 25;
+
+  // ---- IAM: authn (1-299) --------------------------------------------------
+  // Emitted snake_case today; SMA-504 recases the JSON body. The RFC 6750
+  // WWW-Authenticate challenge value `invalid_token` is standardised and stays
+  // snake_case — only the body's `code` becomes "invalid-token".
+
+  // "invalid-token" — bearer token was rejected.
+  ERROR_REASON_INVALID_TOKEN = 26;
+  // "identity-not-provisioned" — no principal is provisioned for this identity.
+  ERROR_REASON_IDENTITY_NOT_PROVISIONED = 27;
+  // "provisioning-failed" — just-in-time provisioning could not complete.
+  ERROR_REASON_PROVISIONING_FAILED = 28;
+  // "principal-inactive" — principal exists but is not active.
+  ERROR_REASON_PRINCIPAL_INACTIVE = 29;
+  // "authn-unavailable" — IAM's own authentication backend is unreachable.
+  ERROR_REASON_AUTHN_UNAVAILABLE = 30;
+
+  // ---- IAM: request envelope (1-299) ---------------------------------------
+
+  // "request-too-large" — request body exceeded the configured byte limit.
+  ERROR_REASON_REQUEST_TOO_LARGE = 31;
+
+  // ---- IAM: system-row retirement (1-299) ----------------------------------
+  // Emitted verbatim today by system_retirement.rs.
+
+  // "grants-survive" — surviving grants must be revoked before retirement.
+  ERROR_REASON_GRANTS_SURVIVE = 32;
+  // "decision-change-unacknowledged" — retiring a static policy needs acknowledgement.
+  ERROR_REASON_DECISION_CHANGE_UNACKNOWLEDGED = 33;
+
+  // ---- Gateway (300-599) ---------------------------------------------------
+  // Emitted snake_case today; SMA-504 recases them. `type` is untouched and
+  // keeps its OpenAI semantics.
+
+  // "missing-authorization" — no usable Authorization bearer credential.
+  ERROR_REASON_MISSING_AUTHORIZATION = 300;
+  // "invalid-api-key" — the credential was rejected by IAM.
+  ERROR_REASON_INVALID_API_KEY = 301;
+  // "insufficient-permissions" — identity is authenticated but not permitted.
+  ERROR_REASON_INSUFFICIENT_PERMISSIONS = 302;
+  // "missing-scope" — introspection returned no scope PRN.
+  ERROR_REASON_MISSING_SCOPE = 303;
+  // "iam-unavailable" — the gateway cannot reach IAM.
+  ERROR_REASON_IAM_UNAVAILABLE = 304;
+  // "upstream-unavailable" — the gateway cannot reach the model provider.
+  ERROR_REASON_UPSTREAM_UNAVAILABLE = 305;
+  // "upstream-timeout" — the model provider did not respond in time.
+  ERROR_REASON_UPSTREAM_TIMEOUT = 306;
+  // "upstream-error" — a streamed response failed mid-flight.
+  ERROR_REASON_UPSTREAM_ERROR = 307;
+
+  // ---- Shared (900-999) ----------------------------------------------------
+  // Any domain may emit these; `domain` is what distinguishes them.
+
+  // "internal" — an unexpected fault; detail stays in logs.
+  ERROR_REASON_INTERNAL = 900;
+  // "invalid-request-body" — the request body could not be deserialized.
+  ERROR_REASON_INVALID_REQUEST_BODY = 901;
+}
