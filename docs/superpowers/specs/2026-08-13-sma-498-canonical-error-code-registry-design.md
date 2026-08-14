@@ -393,13 +393,27 @@ Kept short (§2.4). It states:
 | `rs/.../paigasus-proto/src/error.rs` | new, hand-written (D4) — SPDX header first line |
 | `rs/.../paigasus-proto/src/lib.rs` | one line: `pub mod error;` |
 | `rs/.../paigasus-iam/src/adapters/grpc/convert.rs` | test module only (§6) |
+| `rs/.../paigasus-iam/src/application/error.rs` | one line: `#[cfg_attr(test, derive(strum::EnumIter))]` on `TenancyError` (§6) |
+| `rs/.../paigasus-iam/Cargo.toml` | `strum` with the `derive` feature, **dev-dependencies only** (§6) |
+| `rs/Cargo.lock` | `strum` gains a dependent; `strum_macros` is new |
 
 Named `error.rs`, not `error_reason.rs`, because it hosts both `ErrorReason` and `ErrorDomain`
 helpers.
 
-No `Cargo.toml`, `buf.gen.yaml` or `moon.yml` change, and **no new dependency in any workspace** — so
-`cargo-deny` needs no waiver and `cargo-machete` no allowlist entry. (SMA-504 is a different story:
-see R2.)
+No `buf.gen.yaml` or `moon.yml` change.
+
+**Amended during implementation.** This section originally claimed no new dependency in any
+workspace. That did not survive contact with §6's AC2 test: safe Rust cannot force a value
+collection to cover every variant of an enum, so proving "every `TenancyError` variant is
+registered" requires variant enumeration, which requires a derive macro. Two dependency-free
+attempts were built and both were experimentally disproved — an exhaustive `match` only forces a
+developer to *write an arm*, never to add an *instance* to the list being iterated, so a new
+variant slipped through both. `strum`'s `EnumIter`, gated behind `#[cfg_attr(test, ...)]`, closes
+it: `strum` and `strum_macros` are **dev-dependencies only** and never enter the shipped binary.
+Both are MIT, already covered by `rs/deny.toml`'s allow list, so `cargo-deny` needs no waiver and
+`cargo-machete` no allowlist entry — both verified green. One side effect: `heck` now resolves to
+two versions, which `deny.toml`'s `[bans] multiple-versions = "warn"` treats as non-blocking by
+explicit design. (SMA-504 adds a *production* dependency, `tonic-types` — a different story, see R2.)
 
 The TypeScript barrel (`ts/packages/paigasus-proto/src/index.ts`) is **not** touched. Re-exporting
 `ErrorReason` would hand consumers a symbol with no way to obtain its wire string until the SDK issue
@@ -429,11 +443,21 @@ so a half-export now would be four lines of surface that nothing can use.
 **In `paigasus-iam` (`adapters/grpc/convert.rs`):**
 
 - **AC2.** For each `TenancyError` variant, assert `ErrorReason::from_wire_reason(err.code()).is_some()`.
-  The variant list is produced by an **exhaustive, wildcard-free `match` over `&TenancyError`**, so
-  adding a variant to the enum is a *compile error* in this test until it is registered — closing the
-  "a hand-listed array cannot notice a new variant" gap without waiting for SMA-507. Going through
-  `code()` means the assertion exercises the real emitter, so a rename without registration also
-  fails.
+  Variants are enumerated **from the type itself** via `TenancyError::iter()`, backed by a
+  `#[cfg_attr(test, derive(strum::EnumIter))]`, so a new variant is checked automatically — closing
+  the "a hand-listed array cannot notice a new variant" gap without waiting for SMA-507. Going
+  through `code()` means the assertion exercises the real emitter, so a rename without registration
+  also fails.
+
+  **Amended during implementation.** This originally specified a hand-written list of variant values
+  guarded by an exhaustive, wildcard-free `match`. That construction was built and experimentally
+  disproved, twice: an exhaustive `match` forces a developer to write an *arm* for a new variant,
+  but nothing forces an *instance* of it into the list being iterated. Adding a variant and then
+  making the minimal edit that clears the resulting `E0004` left the test compiling, passing, and
+  blind to the new variant's unregistered code — the exact gap the test exists to close. A second
+  attempt (mapping each variant to a unique slot and asserting a bijection) failed for the same
+  reason: the slot function is only evaluated for members of the list. Enumerating from the type is
+  the only construction with no second list to forget, and it costs a dev-only dependency (§5).
 
 This test lives in `convert.rs`, not `application/error.rs`, because the application layer imports
 only `paigasus_iam_core` (`application/error.rs:5`) and must stay transport-agnostic per `CLAUDE.md`'s
