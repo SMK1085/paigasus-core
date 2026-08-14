@@ -15,8 +15,9 @@ pub struct IamConfig {
     pub http_addr: SocketAddr,
     pub grpc_addr: SocketAddr,
     /// The main SeaORM connection string. A [`RedactedUrl`] because a Postgres DSN routinely
-    /// carries a password (`postgres://user:pass@host/db`) and this struct is dumped to logs and
-    /// `readyz`; read the real value with [`RedactedUrl::as_str`].
+    /// carries a password (`postgres://user:pass@host/db`) and this struct derives
+    /// `Debug`/`Serialize` (see [`RedactedUrl`]); read the real value with
+    /// [`RedactedUrl::as_str`].
     pub database_url: RedactedUrl,
     pub log_level: String,
     pub authn: AuthnConfig,
@@ -27,21 +28,31 @@ pub struct IamConfig {
     pub metrics: MetricsConfig,
 }
 
-/// A connection URL that may embed credentials (`postgres://user:pass@host/db`) — the redacting
-/// newtype worn by [`IamConfig::database_url`] and [`OutboxConfig::listen_database_url`].
+/// A connection URL that may embed credentials (`postgres://user:pass@host/db`,
+/// `redis://user:pass@host:6379/0`, `nats://user:pass@host`) — the redacting newtype worn by
+/// [`IamConfig::database_url`], [`OutboxConfig::listen_database_url`], all three cache
+/// `redis_url`s ([`JwksCacheConfig`], [`AuthzCacheConfig`], [`ApiKeyCacheConfig`]) and
+/// [`PublisherConfig::url`].
 ///
-/// `IamConfig` derives `Debug`/`Serialize` because it is dumped in logs/`readyz` (`main.rs`), so a
-/// DSN's password must never round-trip through either: both outbound directions emit a fixed
-/// `<redacted>` placeholder, while `Deserialize` is hand-rolled to delegate straight to `String`
-/// so figment still populates the REAL value from whichever layer (default/toml/env) supplied it.
-/// Exactly [`RawPepper`]'s idiom, and the same job `PublisherConfig`'s hand-rolled
-/// `Debug`/`Serialize` do for `nats://user:pass@host`.
+/// `IamConfig` derives `Debug`/`Serialize`, so a credential must never round-trip through
+/// either: both outbound directions emit a fixed `<redacted>` placeholder, while `Deserialize`
+/// is hand-rolled to delegate straight to `String` so figment still populates the REAL value
+/// from whichever layer (default/toml/env) supplied it. Exactly [`RawPepper`]'s idiom.
+///
+/// **Nothing dumps `IamConfig` today** (SMA-496) — `readyz` returns a bare status object, the one
+/// config-bearing log line prints two socket addresses, and `Serialize` is exercised only by this
+/// module's tests. The redaction is deliberate defense-in-depth: it makes the dump somebody
+/// eventually adds — a boot-time config log, a debug endpoint, a stray `{config:?}` in an error
+/// path — safe by construction, rather than a leak found in review. Choosing the type IS the
+/// mechanism; there is no runtime guard behind it.
 ///
 /// A newtype rather than per-container manual impls **because redaction then travels with the
 /// type**: a future credential-bearing URL field is protected by choosing this type, not by
-/// remembering to extend two hand-written impls that spell out every sibling field. (`RawPepper`
+/// remembering to extend two hand-written impls that spell out every sibling field. `RawPepper`
 /// can skip `Serialize` entirely — `ApiKeyConfig` marks its field `#[serde(skip_serializing)]` —
-/// but these two fields are genuinely serialized, so the impl has to exist and redact in place.)
+/// but these fields are genuinely serialized, so the impl has to exist and redact in place.
+/// `PublisherConfig` carried exactly those hand-written impls until SMA-496 and now simply wears
+/// this type instead.
 ///
 /// Deliberately implements neither `Display` nor `AsRef<str>`: the only way out is
 /// [`as_str`](RedactedUrl::as_str), which is greppable and cannot be reached by accident through a
@@ -118,7 +129,10 @@ pub struct AuthnConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct JwksCacheConfig {
     pub backend: JwksCacheBackend,
-    pub redis_url: Option<String>,
+    /// Required when `backend = "redis"`. A [`RedactedUrl`] because a Redis connection string
+    /// carries credentials exactly as a Postgres DSN does (`redis://user:pass@host:6379/0`);
+    /// read the real value with [`RedactedUrl::as_str`].
+    pub redis_url: Option<RedactedUrl>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -164,7 +178,9 @@ pub struct AuthzConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AuthzCacheConfig {
     pub backend: AuthzCacheBackend,
-    pub redis_url: Option<String>,
+    /// Required when `backend = "redis"`. A [`RedactedUrl`], same reason as
+    /// [`JwksCacheConfig::redis_url`]; read the real value with [`RedactedUrl::as_str`].
+    pub redis_url: Option<RedactedUrl>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -198,7 +214,7 @@ pub struct ApiKeyConfig {
     /// The raw, still-`base64`-encoded pepper as configured (`[api_keys] pepper` /
     /// `IAM_API_KEYS__PEPPER`) — see [`RawPepper`]'s doc for why this isn't the decoded
     /// `adapters::api_keys::Pepper` directly. `#[serde(skip_serializing)]` so `IamConfig`'s
-    /// derived `Serialize` (used by log/`readyz` config dumps) omits it entirely; `RawPepper`'s
+    /// derived `Serialize` omits it entirely; `RawPepper`'s
     /// own hand-rolled `Debug` additionally redacts it for the derived `Debug` path. Call
     /// [`ApiKeyConfig::pepper`] to decode + validate it into the real key material.
     #[serde(skip_serializing)]
@@ -240,8 +256,9 @@ impl ApiKeyConfig {
 
 /// The raw (still-`base64`-encoded, undecoded) HMAC pepper exactly as figment read it from
 /// `iam.toml`/`IAM_API_KEYS__PEPPER` — a redacting newtype around a `String` (spec D12,
-/// challenge M6). `IamConfig` derives `Debug`/`Serialize` because it's dumped in logs/`readyz`
-/// (`main.rs`), so the configured secret must never round-trip through either: `Debug` is
+/// challenge M6). `IamConfig` derives `Debug`/`Serialize` — see [`RedactedUrl`]'s doc for why
+/// that alone is reason enough — so the configured secret must never round-trip through
+/// either: `Debug` is
 /// hand-rolled to print a fixed placeholder (mirrors `adapters::api_keys::Pepper`'s own
 /// redacted `Debug`, which this decodes into via [`ApiKeyConfig::pepper`]), and `Deserialize`
 /// is hand-rolled to delegate straight to `String` so figment can still populate the REAL
@@ -272,7 +289,9 @@ impl<'de> Deserialize<'de> for RawPepper {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ApiKeyCacheConfig {
     pub backend: ApiKeyCacheBackend,
-    pub redis_url: Option<String>,
+    /// Required when `backend = "redis"`. A [`RedactedUrl`], same reason as
+    /// [`JwksCacheConfig::redis_url`]; read the real value with [`RedactedUrl::as_str`].
+    pub redis_url: Option<RedactedUrl>,
     pub ttl_secs: u64,
 }
 
@@ -415,7 +434,7 @@ pub struct OutboxConfig {
     /// `IamOutboxNotificationsAbsent` is the alert that detects the misconfiguration.
     ///
     /// A [`RedactedUrl`] for the same reason `database_url` is: it is a full DSN, credentials
-    /// included, and this struct is dumped in logs/`readyz`.
+    /// included, and this struct derives `Debug`/`Serialize`.
     pub listen_database_url: Option<RedactedUrl>,
     /// Retention for the table the relay drains — see [`OutboxRetentionConfig`].
     #[serde(default)]
@@ -480,18 +499,19 @@ impl Default for OutboxRetentionConfig {
 /// Defaults to `tracing`, so an absent `[outbox.publisher]` block — and every existing config
 /// file — keeps working with no broker available (SMA-471 D12).
 ///
-/// `Debug`/`Serialize` are hand-rolled rather than derived (see the impls below `PublisherBackend`)
-/// so `url` — which may carry credentials (`nats://user:pass@host`) — never round-trips into a
-/// log line or a `readyz` config dump; mirrors `RawPepper`'s redaction idiom above. Unlike
-/// `RawPepper`, `Serialize` is still needed here (`OutboxConfig`/`IamConfig`'s derived
-/// `Serialize` does not skip this field the way `ApiKeyConfig` skips `pepper`), so both
-/// directions are hand-rolled instead of one being omitted entirely.
-#[derive(Clone, Deserialize, PartialEq, Eq)]
+/// `url` wears [`RedactedUrl`], so `Debug`/`Serialize` are ordinary derives: redaction travels
+/// with the field's type rather than with two hand-written impls that had to spell out every
+/// sibling field (and hand-maintain their own field count) to protect one of them.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PublisherConfig {
     pub backend: PublisherBackend,
-    /// Required when `backend = "nats"`. May carry credentials (`nats://user:pass@host`), so it
-    /// is redacted in `Debug`/`Serialize` — see the manual impls below.
-    pub url: Option<String>,
+    /// Required when `backend = "nats"`. A [`RedactedUrl`] because it may carry credentials
+    /// (`nats://user:pass@host`); read the real value with [`RedactedUrl::as_str`].
+    ///
+    /// The sibling `credentials_file`, `root_ca_bundle` and `inbox_prefix` stay plain `String`s
+    /// deliberately: the first two are filesystem paths and the third a subject prefix — none is
+    /// a secret, so none needs the newtype.
+    pub url: Option<RedactedUrl>,
     pub stream: String,
     /// CloudEvents `source`, copied verbatim into every published envelope. MUST stay stable for
     /// a stream's lifetime: consumers dedup on `id` alone while CloudEvents scopes identity to
@@ -565,46 +585,6 @@ impl Default for PublisherConfig {
             inbox_prefix: None,
             allow_insecure_broker: false,
         }
-    }
-}
-
-impl std::fmt::Debug for PublisherConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PublisherConfig")
-            .field("backend", &self.backend)
-            .field("url", &self.url.as_ref().map(|_| "<redacted>"))
-            .field("stream", &self.stream)
-            .field("source", &self.source)
-            .field("publish_timeout_secs", &self.publish_timeout_secs)
-            .field("duplicate_window_secs", &self.duplicate_window_secs)
-            .field("max_age_secs", &self.max_age_secs)
-            .field("credentials_file", &self.credentials_file)
-            .field("root_ca_bundle", &self.root_ca_bundle)
-            .field("inbox_prefix", &self.inbox_prefix)
-            .field("allow_insecure_broker", &self.allow_insecure_broker)
-            .finish()
-    }
-}
-
-impl Serialize for PublisherConfig {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("PublisherConfig", 11)?;
-        state.serialize_field("backend", &self.backend)?;
-        state.serialize_field("url", &self.url.as_ref().map(|_| "<redacted>"))?;
-        state.serialize_field("stream", &self.stream)?;
-        state.serialize_field("source", &self.source)?;
-        state.serialize_field("publish_timeout_secs", &self.publish_timeout_secs)?;
-        state.serialize_field("duplicate_window_secs", &self.duplicate_window_secs)?;
-        state.serialize_field("max_age_secs", &self.max_age_secs)?;
-        state.serialize_field("credentials_file", &self.credentials_file)?;
-        state.serialize_field("root_ca_bundle", &self.root_ca_bundle)?;
-        state.serialize_field("inbox_prefix", &self.inbox_prefix)?;
-        state.serialize_field("allow_insecure_broker", &self.allow_insecure_broker)?;
-        state.end()
     }
 }
 
@@ -1149,7 +1129,7 @@ impl IamConfig {
             // `url::Url` is already this function's dependency (the `source` check below). A
             // url that does not parse at all is left to `connect` to report, exactly as before
             // — this block tightens posture, it does not add a syntax gate.
-            if let Some(raw) = p.url.as_deref() {
+            if let Some(raw) = p.url.as_ref().map(RedactedUrl::as_str) {
                 // Unconditional, no escape hatch: async-nats never reads url userinfo
                 // (`ServerAddr::username`/`password` have no caller in the connect path), so a
                 // config carrying `nats://user:pass@host` connects ANONYMOUSLY while looking
@@ -1183,9 +1163,12 @@ impl IamConfig {
                     // never the full raw url: a malformed url with no `://` but baked-in
                     // credentials (e.g. `user:hunter2@host:4222`) parses via `url::Url` as an
                     // opaque scheme "user" with EMPTY username/password, so the credentials
-                    // check above does not catch it — and `PublisherConfig`'s hand-rolled
-                    // `Debug`/`Serialize` impls redact this exact field specifically so it never
-                    // reaches a log line; interpolating `raw` here would bypass that redaction.
+                    // check above does not catch it — and `url` wears `RedactedUrl` specifically
+                    // so it never reaches a log line. THIS error string DOES reach the logs, so
+                    // interpolating `raw` would bypass that redaction entirely. Note `as_str()`
+                    // is called once above to obtain `raw` for PARSING, and deliberately does not
+                    // appear in the message: emit the scheme alone, never the url. Guarded by
+                    // `a_rejected_url_with_a_password_does_not_leak_it_into_the_error` below.
                     let scheme_hint = raw.split(':').next().unwrap_or(raw);
                     return Err(format!(
                         "outbox.publisher.url must use tls:// for the nats backend (got {scheme_hint:?}) — set outbox.publisher.allow_insecure_broker = true for a dev or CI broker, which also waives the credentials_file requirement"
@@ -1528,7 +1511,7 @@ mod tests {
             )?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert_eq!(cfg.authn.jwks_cache.backend, JwksCacheBackend::Redis);
-            assert_eq!(cfg.authn.jwks_cache.redis_url.as_deref(), Some("redis://localhost:6379"));
+            assert_eq!(cfg.authn.jwks_cache.redis_url.as_ref().map(RedactedUrl::as_str), Some("redis://localhost:6379"));
             assert!(cfg.validate().is_ok(), "expected a redis backend with redis_url to pass validation");
             Ok(())
         });
@@ -1760,7 +1743,7 @@ mod tests {
             assert_eq!(cfg.authz.decision_cache_ttl_secs, 20);
             assert_eq!(cfg.authz.refresh_interval_secs, 2);
             assert_eq!(cfg.authz.cache.backend, AuthzCacheBackend::Redis);
-            assert_eq!(cfg.authz.cache.redis_url.as_deref(), Some("redis://localhost:6379"));
+            assert_eq!(cfg.authz.cache.redis_url.as_ref().map(RedactedUrl::as_str), Some("redis://localhost:6379"));
             assert_eq!(cfg.authz.bootstrap_admins.len(), 1);
             assert_eq!(cfg.authz.bootstrap_admins[0].issuer, "https://idp.example.com/realms/acme");
             assert_eq!(cfg.authz.bootstrap_admins[0].subject, "platform-admin-sub");
@@ -2065,7 +2048,7 @@ mod tests {
             assert_eq!(cfg.api_keys.default_expiry_days, Some(365));
             assert_eq!(cfg.api_keys.last_used_throttle_secs, 60);
             assert_eq!(cfg.api_keys.introspect_cache.backend, ApiKeyCacheBackend::Redis);
-            assert_eq!(cfg.api_keys.introspect_cache.redis_url.as_deref(), Some("redis://localhost:6379"));
+            assert_eq!(cfg.api_keys.introspect_cache.redis_url.as_ref().map(RedactedUrl::as_str), Some("redis://localhost:6379"));
             assert_eq!(cfg.api_keys.introspect_cache.ttl_secs, 30);
             assert!(cfg.api_keys.pepper().is_ok(), "a valid pepper must decode via ApiKeyConfig::pepper");
             assert!(cfg.validate().is_ok(), "expected a fully-populated, valid [api_keys] block to pass validation");
@@ -2133,9 +2116,9 @@ mod tests {
     }
 
     /// Companion to `pepper_never_appears_in_debug_or_serialized_config`, for the two connection
-    /// DSNs (SMA-489 CodeRabbit round 1). Both routinely carry a password, and `IamConfig` is
-    /// dumped to logs and `readyz` — so `RedactedUrl` has to cover BOTH outbound directions for
-    /// BOTH fields. `database_url` is in here alongside the new `listen_database_url` on purpose:
+    /// DSNs (SMA-489 CodeRabbit round 1). Both routinely carry a password, and `IamConfig`
+    /// derives both `Debug` and `Serialize` — so `RedactedUrl` has to cover BOTH outbound
+    /// directions for BOTH fields. `database_url` is in here alongside `listen_database_url` on purpose:
     /// redacting one while its identically-sensitive neighbour two fields away leaked would be
     /// incoherent.
     #[test]
@@ -2196,6 +2179,137 @@ mod tests {
         assert_eq!(format!("{url:?}"), r#"RedactedUrl("<redacted>")"#);
         assert_eq!(serde_json::to_string(&url).expect("RedactedUrl serializes"), r#""<redacted>""#);
         assert_eq!(url.as_str(), "postgres://u:p@localhost/db", "as_str must still yield the REAL url");
+    }
+
+    /// SMA-496. Companion to `connection_urls_never_appear_in_debug_or_serialized_config`
+    /// above: a Redis connection string carries credentials exactly as a Postgres DSN does
+    /// (`redis://user:pass@host:6379/0`), and so does the NATS broker url
+    /// (`nats://user:pass@host`) — while `IamConfig` derives `Debug`/`Serialize`. So
+    /// `RedactedUrl` has to cover BOTH outbound directions for all four of them.
+    ///
+    /// Each URL gets its own password and host so a leak names its own source.
+    ///
+    /// `[outbox.publisher]` deliberately leaves `backend` at its `tracing` default: `url` is
+    /// redacted regardless of backend, and selecting `nats` would drag SMA-493's TLS and
+    /// credentials-file validation rules into a test that is about redaction. The broker
+    /// assertions here also passed BEFORE `url` became a `RedactedUrl` — they pinned the
+    /// behaviour the hand-rolled `Debug`/`Serialize` impls provided, so that deleting those
+    /// impls in favour of the derive had to preserve it exactly.
+    #[test]
+    fn cache_and_broker_urls_never_appear_in_debug_or_serialized_config() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://db_user:db_pw_secret@db.example.com/iam");
+            jail.create_file(
+                "iam.toml",
+                &format!(
+                    r#"
+                        [api_keys]
+                        pepper = "{}"
+
+                        [authn.jwks_cache]
+                        backend = "redis"
+                        redis_url = "redis://jwks_user:jwks_pw_secret@jwks.example.com:6379/0"
+
+                        [authz.cache]
+                        backend = "redis"
+                        redis_url = "redis://authz_user:authz_pw_secret@authz.example.com:6379/1"
+
+                        [api_keys.introspect_cache]
+                        backend = "redis"
+                        redis_url = "redis://apikey_user:apikey_pw_secret@apikey.example.com:6379/2"
+
+                        [outbox.publisher]
+                        url = "tls://nats_user:nats_pw_secret@nats.example.com:4222"
+
+                        [[authn.issuers]]
+                        issuer = "https://idp.example.com/realms/acme"
+                        audiences = ["paigasus"]
+                    "#,
+                    valid_pepper_b64()
+                ),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+
+            // Sanity: all three REAL values round-tripped through figment, so the "must not
+            // contain" assertions below cannot pass merely because figment populated nothing —
+            // and `as_str` still yields something usable at the `connect_redis` call sites.
+            assert_eq!(
+                cfg.authn.jwks_cache.redis_url.as_ref().map(RedactedUrl::as_str),
+                Some("redis://jwks_user:jwks_pw_secret@jwks.example.com:6379/0")
+            );
+            assert_eq!(
+                cfg.authz.cache.redis_url.as_ref().map(RedactedUrl::as_str),
+                Some("redis://authz_user:authz_pw_secret@authz.example.com:6379/1")
+            );
+            assert_eq!(
+                cfg.api_keys.introspect_cache.redis_url.as_ref().map(RedactedUrl::as_str),
+                Some("redis://apikey_user:apikey_pw_secret@apikey.example.com:6379/2")
+            );
+
+            let debugged = format!("{cfg:?}");
+            let serialized = serde_json::to_string(&cfg).expect("IamConfig serializes");
+
+            // Hosts are asserted as EXACT names, never as a bare "example.com": the mandatory
+            // issuer is `https://idp.example.com/...` and is deliberately NOT redacted, so a
+            // blanket substring check would fail on it.
+            for secret in [
+                "db_pw_secret",
+                "jwks_pw_secret",
+                "authz_pw_secret",
+                "apikey_pw_secret",
+                "nats_pw_secret",
+                "db.example.com",
+                "jwks.example.com",
+                "authz.example.com",
+                "apikey.example.com",
+                "nats.example.com",
+            ] {
+                assert!(!debugged.contains(secret), "{secret} leaked into IamConfig's Debug output: {debugged}");
+                assert!(!serialized.contains(secret), "{secret} leaked into IamConfig's serialized form: {serialized}");
+            }
+
+            // The placeholder must land IN PLACE, and in the right NUMBER. A field silently
+            // dropped from the dump satisfies the "must not contain" assertions above just as
+            // well as a redacted one does, which is why this is a count and not a `contains`.
+            assert_eq!(serialized.matches(r#""redis_url":"<redacted>""#).count(), 3, "{serialized}");
+            assert_eq!(debugged.matches(r#"redis_url: Some(RedactedUrl("<redacted>"))"#).count(), 3, "{debugged}");
+            // The broker url, in both directions too. The DELIMITER in each pattern is what stops
+            // it also matching the three `redis_url` fields, which end in the same three letters:
+            // in JSON a quote must precede `url` (in `"redis_url"` a `_` does), and in `Debug` a
+            // SPACE must (`, url: Some(…)` vs `, redis_url: Some(…)`). Drop either delimiter and
+            // both counts silently become 4.
+            assert_eq!(serialized.matches(r#""url":"<redacted>""#).count(), 1, "{serialized}");
+            assert_eq!(debugged.matches(r#" url: Some(RedactedUrl("<redacted>"))"#).count(), 1, "{debugged}");
+
+            Ok(())
+        });
+    }
+
+    /// SMA-496 D6. The `*Defaults` structs feed figment's default LAYER (`Serialized::defaults`,
+    /// see `IamConfig::figment`), and they mirror only their TOP-LEVEL struct — the nested ones
+    /// are the REAL config types (`AuthzDefaults.cache` is an `AuthzCacheConfig`,
+    /// `OutboxDefaults.publisher` a `PublisherConfig`). So a [`RedactedUrl`] whose default were
+    /// `Some(_)` would serialize the literal `"<redacted>"` INTO that layer, and figment would
+    /// then deserialize that string straight back out as the value: every deployment that did
+    /// not override it would boot pointed at a host named `<redacted>`.
+    ///
+    /// `OutboxDefaults::listen_database_url` dodges this by being a plain `String` (its own
+    /// comment says why); the four nested URLs are safe only because every default is `None`.
+    /// This test is what keeps it that way.
+    ///
+    /// Asserting over `serde_json` rather than figment's own `Value` tree is valid because
+    /// `RedactedUrl::serialize` is serializer-agnostic — it calls
+    /// `serializer.serialize_str("<redacted>")` unconditionally — so it emits the placeholder
+    /// into figment's tree exactly as it does into JSON. If that ever stops being true, this
+    /// guard silently decouples from the hazard it guards.
+    #[test]
+    fn defaults_never_serialize_a_redaction_placeholder() {
+        let layer = serde_json::to_string(&Defaults::default()).expect("Defaults serializes");
+        assert!(
+            !layer.contains("<redacted>"),
+            "a RedactedUrl with a non-None default leaked the placeholder INTO figment's default layer, \
+             which figment would then deserialize back out as the real value: {layer}"
+        );
     }
 
     // --- SMA-446 Task A12: `[audit]` config ------------------------------------------------
@@ -2906,28 +3020,31 @@ mod tests {
     #[test]
     fn the_publisher_url_is_redacted_in_debug() {
         let cfg = PublisherConfig {
-            url: Some("nats://user:hunter2@host:4222".to_string()),
+            url: Some("nats://user:hunter2@host:4222".into()),
             ..PublisherConfig::default()
         };
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("hunter2"), "credentials leaked into Debug: {rendered}");
-        assert!(rendered.contains("redacted"), "{rendered}");
+        // In place, not merely present: a `url` dropped from the output entirely would satisfy
+        // a bare `contains("redacted")` just as well as a redacted one does.
+        assert!(rendered.contains(r#"url: Some(RedactedUrl("<redacted>"))"#), "{rendered}");
     }
 
-    /// Companion to `the_publisher_url_is_redacted_in_debug`: `Serialize` is hand-rolled
-    /// SEPARATELY from `Debug` (see `PublisherConfig`'s doc), specifically so a credentialed
-    /// `url` cannot leak into a serialized config dump either — `serde_json` is already a
-    /// regular (non-dev) dependency of this crate (see `pepper_never_appears_in_debug_or_
+    /// Companion to `the_publisher_url_is_redacted_in_debug`, for the other outbound direction:
+    /// a credentialed `url` must not leak into a serialized config dump either. Both directions
+    /// are ordinary derives since SMA-496 — the redaction rides on `url`'s [`RedactedUrl`] type
+    /// rather than on the hand-rolled impls this struct used to carry (`serde_json` is already a
+    /// regular, non-dev dependency of this crate; see `pepper_never_appears_in_debug_or_
     /// serialized_config` above for the identical pattern applied to `api_keys.pepper`).
     #[test]
     fn the_publisher_url_is_redacted_in_serialize() {
         let cfg = PublisherConfig {
-            url: Some("nats://user:hunter2@host:4222".to_string()),
+            url: Some("nats://user:hunter2@host:4222".into()),
             ..PublisherConfig::default()
         };
         let serialized = serde_json::to_string(&cfg).expect("PublisherConfig serializes");
         assert!(!serialized.contains("hunter2"), "credentials leaked into Serialize: {serialized}");
-        assert!(serialized.contains("redacted"), "{serialized}");
+        assert!(serialized.contains(r#""url":"<redacted>""#), "{serialized}");
     }
 
     // --- SMA-493: transport + credential posture ---------------------------------------------
@@ -3047,9 +3164,10 @@ mod tests {
     /// `://` but baked-in credentials (`user:hunter2@host:4222`) parses via `url::Url` as an
     /// opaque scheme "user" with EMPTY username/password, so the unconditional embedded-
     /// credentials check above does NOT catch it — the raw string, password included, must not
-    /// then leak into the returned (and potentially logged) validation error. `PublisherConfig`'s
-    /// hand-rolled `Debug`/`Serialize` impls redact this exact field for the same reason (see
-    /// `the_publisher_url_is_redacted_in_serialize` above).
+    /// then leak into the returned (and potentially logged) validation error. `url` wears
+    /// `RedactedUrl` for the same reason (see `the_publisher_url_is_redacted_in_serialize`
+    /// above) — but a newtype cannot protect a string that validation interpolates by hand,
+    /// which is exactly what this test exists to catch.
     #[test]
     fn a_rejected_url_with_a_password_does_not_leak_it_into_the_error() {
         let err = validate_err(

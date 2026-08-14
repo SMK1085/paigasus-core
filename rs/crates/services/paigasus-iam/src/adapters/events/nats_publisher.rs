@@ -47,7 +47,7 @@ use paigasus_observability::names;
 use tokio::task::JoinHandle;
 
 use crate::adapters::events::cloud_event::{CloudEvent, render_id};
-use crate::config::PublisherConfig;
+use crate::config::{PublisherConfig, RedactedUrl};
 
 /// The stream's subject filter. Every `EventType` wire string is `iam.`-prefixed
 /// (`domain_event.rs`), so one wildcard covers them all.
@@ -228,7 +228,7 @@ impl NatsEventPublisher {
     /// If `cfg.url` is `None`. `IamConfig::validate` rejects that combination at load time, so
     /// reaching this is a programming error, not an operator one.
     pub async fn connect(cfg: &PublisherConfig) -> Result<NatsEventPublisher, NatsPublisherError> {
-        let url = cfg.url.as_deref().expect("validate() guarantees url is Some for the nats backend");
+        let url = cfg.url.as_ref().map(RedactedUrl::as_str).expect("validate() guarantees url is Some for the nats backend");
 
         // D8: read and parse the credential EAGERLY, before any connection machinery exists, so a
         // missing or malformed file is a typed boot error naming the path — then install the
@@ -711,7 +711,7 @@ mod tests {
     async fn connect_reports_a_missing_credentials_file_by_path() {
         let cfg = PublisherConfig {
             backend: crate::config::PublisherBackend::Nats,
-            url: Some("nats://127.0.0.1:14222".to_string()),
+            url: Some("nats://127.0.0.1:14222".into()),
             credentials_file: Some("/nonexistent/iam.creds".to_string()),
             ..PublisherConfig::default()
         };
@@ -730,7 +730,7 @@ mod tests {
 
         let cfg = PublisherConfig {
             backend: crate::config::PublisherBackend::Nats,
-            url: Some("nats://127.0.0.1:14222".to_string()),
+            url: Some("nats://127.0.0.1:14222".into()),
             credentials_file: Some(path.to_string_lossy().to_string()),
             ..PublisherConfig::default()
         };

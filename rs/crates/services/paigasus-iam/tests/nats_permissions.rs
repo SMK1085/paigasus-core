@@ -167,7 +167,7 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
 fn cfg_for(fixture: &Fixture, identity: &Identity, inbox_prefix: &str) -> PublisherConfig {
     PublisherConfig {
         backend: PublisherBackend::Nats,
-        url: Some(fixture.url.clone()),
+        url: Some(fixture.url.clone().into()),
         credentials_file: Some(identity.seed_path.to_string_lossy().to_string()),
         inbox_prefix: Some(inbox_prefix.to_string()),
         allow_insecure_broker: true,
@@ -548,7 +548,7 @@ async fn the_publisher_connects_over_tls_with_a_named_ca_bundle() {
     let Some(fixture) = start_fixture("nats-server-tls.conf", extra).await else { return };
 
     let mut cfg = cfg_for(&fixture, &fixture.publisher, "_INBOX_IAM_PUB");
-    cfg.url = Some(fixture.url.replace("nats://", "tls://"));
+    cfg.url = Some(fixture.url.replace("nats://", "tls://").into());
     cfg.root_ca_bundle = Some(ca_path.to_string_lossy().to_string());
 
     let publisher = NatsEventPublisher::connect(&cfg).await.expect("a tls:// connection with a named CA must succeed");
@@ -566,7 +566,7 @@ async fn a_tls_connection_without_the_ca_bundle_fails_verification() {
     let Some(fixture) = start_fixture("nats-server-tls.conf", extra).await else { return };
 
     let mut cfg = cfg_for(&fixture, &fixture.publisher, "_INBOX_IAM_PUB");
-    cfg.url = Some(fixture.url.replace("nats://", "tls://"));
+    cfg.url = Some(fixture.url.replace("nats://", "tls://").into());
     // root_ca_bundle deliberately unset: the per-run CA is in no system trust store.
     let err = NatsEventPublisher::connect(&cfg).await.expect_err("a private CA must not verify against the system trust store");
     // `expect_err` alone would also pass for an unrelated connect failure (a dead container, a
@@ -592,7 +592,7 @@ async fn a_tls_connection_with_an_unrelated_ca_bundle_fails_verification() {
     let (_c, _k, unrelated_ca) = mint_tls(other.path());
 
     let mut cfg = cfg_for(&fixture, &fixture.publisher, "_INBOX_IAM_PUB");
-    cfg.url = Some(fixture.url.replace("nats://", "tls://"));
+    cfg.url = Some(fixture.url.replace("nats://", "tls://").into());
     cfg.root_ca_bundle = Some(unrelated_ca.to_string_lossy().to_string());
     let err = NatsEventPublisher::connect(&cfg).await.expect_err("an unrelated CA must not verify the broker's certificate");
     // Same reasoning as the no-bundle control above. Empirically this renders

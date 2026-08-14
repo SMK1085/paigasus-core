@@ -25,7 +25,7 @@
 mod support;
 
 use paigasus_iam::adapters::http::AppState;
-use paigasus_iam::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig};
+use paigasus_iam::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, RedactedUrl};
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::ContainerAsync;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -55,9 +55,9 @@ async fn start_redis() -> Option<(ContainerAsync<Redis>, String)> {
 fn split_config(base: &IamConfig, authz_url: &str, api_key_url: Option<&str>) -> IamConfig {
     let mut cfg = base.clone();
     cfg.authz.cache.backend = AuthzCacheBackend::Redis;
-    cfg.authz.cache.redis_url = Some(authz_url.to_string());
+    cfg.authz.cache.redis_url = Some(authz_url.into());
     cfg.api_keys.introspect_cache.backend = ApiKeyCacheBackend::Redis;
-    cfg.api_keys.introspect_cache.redis_url = api_key_url.map(str::to_string);
+    cfg.api_keys.introspect_cache.redis_url = api_key_url.map(RedactedUrl::from);
     cfg
 }
 
