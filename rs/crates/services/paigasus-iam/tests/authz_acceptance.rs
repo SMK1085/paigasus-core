@@ -463,7 +463,7 @@ async fn redis_cross_replica_grant_via_one_appstate_is_visible_to_another_sharin
     let mut cfg = support::test_config(&idp);
     cfg.authz.cache = AuthzCacheConfig {
         backend: AuthzCacheBackend::Redis,
-        redis_url: Some(redis_url),
+        redis_url: Some(redis_url.into()),
     };
 
     let (app_a, state_a) = app_with_config(db.clone(), &cfg).await;
@@ -550,7 +550,7 @@ async fn redis_cache_backend_fails_open_when_redis_becomes_unavailable_mid_fligh
     let mut cfg = support::test_config(&idp);
     cfg.authz.cache = AuthzCacheConfig {
         backend: AuthzCacheBackend::Redis,
-        redis_url: Some(redis_url),
+        redis_url: Some(redis_url.into()),
     };
     let (app, state) = app_with_config(db, &cfg).await;
 
@@ -634,7 +634,7 @@ async fn sma470_revoke_during_a_redis_outage_denies_once_the_snapshot_ttl_backst
     let mut cfg = support::test_config(&idp);
     cfg.authz.cache = AuthzCacheConfig {
         backend: AuthzCacheBackend::Redis,
-        redis_url: Some(redis_url),
+        redis_url: Some(redis_url.into()),
     };
     cfg.authz.policy_cache_ttl_secs = 1;
     cfg.authz.refresh_interval_secs = 1;
