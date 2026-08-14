@@ -10,8 +10,8 @@ pub mod service_info_service_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /** Implemented by every Paigasus service. See the file comment for the HTTP
- route a service with no gRPC server serves instead.
+    /** Implemented by every Paigasus service. See the file comment for the
+ equivalent HTTP route a service may also (or instead) serve this over.
 */
     #[derive(Debug, Clone)]
     pub struct ServiceInfoServiceClient<T> {
@@ -147,8 +147,8 @@ pub mod service_info_service_server {
             tonic::Status,
         >;
     }
-    /** Implemented by every Paigasus service. See the file comment for the HTTP
- route a service with no gRPC server serves instead.
+    /** Implemented by every Paigasus service. See the file comment for the
+ equivalent HTTP route a service may also (or instead) serve this over.
 */
     #[derive(Debug)]
     pub struct ServiceInfoServiceServer<T> {

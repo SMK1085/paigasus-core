@@ -77,6 +77,11 @@ export const GetServiceInfoRequestSchema: GenMessage<GetServiceInfoRequest> = /*
   messageDesc(file_paigasus_common_v1_service_info, 1);
 
 /**
+ * The server MUST populate `service_info`. It is `optional` only because
+ * proto3 message fields are inherently so; clients MUST treat an absent
+ * `service_info` as an error, not as "no capabilities" — a betterproto2
+ * client dereferencing it unchecked gets `None` and an `AttributeError`.
+ *
  * @generated from message paigasus.common.v1.GetServiceInfoResponse
  */
 export type GetServiceInfoResponse = Message<"paigasus.common.v1.GetServiceInfoResponse"> & {
@@ -147,8 +152,8 @@ export const CapabilitySchema: GenEnum<Capability> = /*@__PURE__*/
   enumDesc(file_paigasus_common_v1_service_info, 0);
 
 /**
- * Implemented by every Paigasus service. See the file comment for the HTTP
- * route a service with no gRPC server serves instead.
+ * Implemented by every Paigasus service. See the file comment for the
+ * equivalent HTTP route a service may also (or instead) serve this over.
  *
  * @generated from service paigasus.common.v1.ServiceInfoService
  */

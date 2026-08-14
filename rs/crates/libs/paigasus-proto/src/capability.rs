@@ -100,7 +100,7 @@ mod tests {
             assert!(key.starts_with(|c: char| c.is_ascii_lowercase()), "{key} must start with a letter");
             for segment in key.split('.') {
                 assert!(!segment.is_empty(), "{key} has an empty segment");
-                assert!(segment.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()), "segment {segment} of {key} is not [a-z0-9]",);
+                assert!(segment.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()), "segment {segment} of {key} is not [a-z0-9]");
             }
         }
     }

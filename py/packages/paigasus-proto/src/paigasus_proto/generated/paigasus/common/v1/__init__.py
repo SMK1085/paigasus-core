@@ -171,6 +171,13 @@ default_message_pool.register_message(
 
 @dataclass(eq=False, repr=False)
 class GetServiceInfoResponse(betterproto2.Message):
+    """
+    The server MUST populate `service_info`. It is `optional` only because
+    proto3 message fields are inherently so; clients MUST treat an absent
+    `service_info` as an error, not as "no capabilities" — a betterproto2
+    client dereferencing it unchecked gets `None` and an `AttributeError`.
+    """
+
     service_info: "ServiceInfo | None" = betterproto2.field(
         1, betterproto2.TYPE_MESSAGE, optional=True
     )
@@ -196,9 +203,10 @@ class ServiceInfo(betterproto2.Message):
     ── TRANSPORT ────────────────────────────────────────────────────────────────
 
     Services expose the descriptor over `ServiceInfoService.GetServiceInfo`
-    below, or — for a service with no gRPC server — over the equivalent HTTP
-    route. A service MUST offer at least one, and SHOULD offer the one its
-    clients already speak. Today IAM serves gRPC; the gateway serves HTTP.
+    below, or over the equivalent HTTP route. A service MUST offer at least
+    one and MAY offer both; it SHOULD offer the one its clients already speak.
+    SMA-505 assigns transports per service; the intent is gRPC for IAM, HTTP
+    for the gateway.
 
         GET /v1/service-info
         200, Content-Type: application/json
@@ -211,10 +219,12 @@ class ServiceInfo(betterproto2.Message):
     into a client-side type error rather than "every feature off". Clients MUST
     nonetheless treat an absent `capabilities` as an empty list.
 
-    The route MUST require authentication equivalent to any other authenticated
-    route of that service. Capability discovery introduces NO new unauthenticated
-    surface (ADR-0020 D4). Errors keep the service's existing error envelope and
-    status codes — envelopes are per-surface (ADR-0019).
+    The route MUST be no less protected than the service's other authenticated
+    routes, using whichever authentication its intended clients already
+    present; the mechanism is per service. Capability discovery introduces NO
+    new unauthenticated surface (ADR-0020 D4). Errors keep the service's
+    existing error envelope and status codes — envelopes are per-surface
+    (ADR-0019).
 
     ── CAPABILITY KEYS ──────────────────────────────────────────────────────────
 
@@ -229,6 +239,10 @@ class ServiceInfo(betterproto2.Message):
     alphanumeric segments separated by dots — `^[a-z][a-z0-9]*(\\.[a-z0-9]+)*$`.
     A key such as "gateway.chat-stream" is unreachable through the rule and MUST
     NOT be proposed.
+
+    Every registered value's doc comment MUST open with its literal wire key in
+    quotes, followed by what the capability means — see the existing values
+    below for the convention to follow when registering a new one.
 
     The registry is APPEND-ONLY. Removing a value is a breaking change.
     `buf breaking` catching a deleted enum value is a bonus, NOT the guard: it
@@ -295,8 +309,8 @@ default_message_pool.register_message("paigasus.common.v1", "ServiceInfo", Servi
 
 class ServiceInfoServiceStub(betterproto2_grpclib.ServiceStub):
     """
-    Implemented by every Paigasus service. See the file comment for the HTTP
-    route a service with no gRPC server serves instead.
+    Implemented by every Paigasus service. See the file comment for the
+    equivalent HTTP route a service may also (or instead) serve this over.
     """
 
     async def get_service_info(
