@@ -796,10 +796,12 @@ def test_capability_registry_keeps_the_proto_names() -> None:
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
-moon run paigasus-proto-py:test
+moon run py:test
 ```
 
 Expected: 3 passed (plus the pre-existing audit and health tests).
+
+Note the task id: Python `test`/`lint`/`fmt` are defined on the **root `py` project** (`.moon/tasks/python.yml`), not per package — `paigasus-proto-py` defines only `build`. `moon run paigasus-proto-py:test` does not exist.
 
 If `ServiceInfo().capabilities` is `None` rather than `[]`, do **not** change the assertion to match — report it. It would mean betterproto2 models a repeated field as nullable, which changes what the spec's client contract must say.
 
@@ -807,11 +809,11 @@ If `ServiceInfo().capabilities` is `None` rather than `[]`, do **not** change th
 
 ```bash
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
-moon run paigasus-proto-py:lint
-moon run paigasus-proto-py:format
+moon run py:lint
+moon run py:fmt
 ```
 
-Expected: clean. If either task does not exist for this project, skip it — `py:lint` at the workspace root covers the tree.
+Expected: clean. These are root-`py` tasks covering the whole tree, for the reason given in Step 2.
 
 - [ ] **Step 4: Commit**
 
