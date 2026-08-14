@@ -369,21 +369,13 @@ Expected, and this asymmetry is intentional:
 - **Python:** `warnings.warn("ServiceInfo is deprecated", DeprecationWarning)` inside `__post_init__`. Inert — no Python code constructs the type and the workspace sets no `filterwarnings = error`.
 - **Rust:** **nothing.** prost emits no `#[deprecated]`; the only Rust change is `FILE_DESCRIPTOR_SET` bytes. That is what makes AC4's "without breaking the generated Rust" hold.
 
-- [ ] **Step 4: Verify Rust still compiles and the drift gate passes**
+- [ ] **Step 4: Verify Rust still compiles**
 
 ```bash
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499/rs && cargo build -p paigasus-proto
-cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
-git add --intent-to-add -- rs/crates/libs/paigasus-proto/src/generated \
-    py/packages/paigasus-proto/src/paigasus_proto/generated \
-    ts/packages/paigasus-proto/src/generated
-git diff --exit-code -- rs/crates/libs/paigasus-proto/src/generated \
-    py/packages/paigasus-proto/src/paigasus_proto/generated \
-    ts/packages/paigasus-proto/src/generated
-echo "drift gate exit: $?"
 ```
 
-Expected: build `Finished`, `drift gate exit: 0`.
+Expected: `Finished` with no errors.
 
 - [ ] **Step 5: Commit**
 
@@ -395,6 +387,25 @@ git add contracts/proto/paigasus/iam/v1/iam.proto \
         py/packages/paigasus-proto/src/paigasus_proto/generated
 git commit -m "feat(contracts): supersede and deprecate the iam.v1.ServiceInfo placeholder (SMA-499)"
 ```
+
+- [ ] **Step 6: Verify the codegen-drift gate — AFTER committing, not before**
+
+The gate compares regenerated output against **committed** state. Run it on a clean tree; running it with uncommitted generated changes present compares against a stale index and reports a failure that is an artefact of the ordering, not real drift.
+
+```bash
+cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
+git status --short   # must be empty before proceeding
+moon run contracts:generate
+git add --intent-to-add -- rs/crates/libs/paigasus-proto/src/generated \
+    py/packages/paigasus-proto/src/paigasus_proto/generated \
+    ts/packages/paigasus-proto/src/generated
+git diff --exit-code -- rs/crates/libs/paigasus-proto/src/generated \
+    py/packages/paigasus-proto/src/paigasus_proto/generated \
+    ts/packages/paigasus-proto/src/generated
+echo "drift gate exit: $?"
+```
+
+Expected: `drift gate exit: 0`. Non-zero here, on a clean tree, is a genuine drift bug — stop and investigate rather than hand-editing the output.
 
 ---
 
