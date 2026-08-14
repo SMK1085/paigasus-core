@@ -5,6 +5,7 @@ from paigasus_proto.generated.paigasus.common.v1 import Capability, ServiceInfo
 def test_service_info_carries_a_capability_list() -> None:
     info = ServiceInfo(service="iam", version="1.4.0", capabilities=["iam.audit"])
     assert info.service == "iam"
+    assert info.version == "1.4.0"
     assert info.capabilities == ["iam.audit"]
 
 

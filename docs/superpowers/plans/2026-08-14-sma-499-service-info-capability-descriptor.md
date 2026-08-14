@@ -218,6 +218,7 @@ Expected: all three produce **no output**. `buf format -w` may rewrite the file;
 - [ ] **Step 3: Generate the bindings**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
 moon run contracts:generate
 ```
@@ -258,18 +259,35 @@ with:
 - [ ] **Step 5: Verify the crate compiles**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499/rs
 cargo build -p paigasus-proto
 ```
 
 Expected: `Finished` with no errors. (This was verified during planning — if it fails, the include path or the module block is wrong, not the generated code.)
 
-- [ ] **Step 6: Verify the codegen-drift gate is satisfied**
-
-Reproduce the CI step exactly. A plain `git diff` is **not** a substitute: two of the generated files are brand new and untracked, and `git diff` reports them clean.
+- [ ] **Step 6: Commit**
 
 ```bash
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
+git add contracts/proto/paigasus/common/v1/service_info.proto \
+        rs/crates/libs/paigasus-proto/src/lib.rs \
+        rs/crates/libs/paigasus-proto/src/generated \
+        ts/packages/paigasus-proto/src/generated \
+        py/packages/paigasus-proto/src/paigasus_proto/generated
+git commit -m "feat(contracts): define the ServiceInfo capability descriptor in common/v1 (SMA-499)"
+```
+
+- [ ] **Step 7: Verify the codegen-drift gate — AFTER committing, not before**
+
+The gate compares regenerated output against **committed** state, so it only means anything on a clean tree. Run it with Steps 1–5's changes still uncommitted and it compares against a stale index and fails for a reason that is an artefact of the ordering, not real drift.
+
+Reproduce the CI step exactly. Note `git add --intent-to-add`: a plain `git diff` is **not** a substitute, because two of the generated files are brand new and untracked, and `git diff` reports them clean.
+
+```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
+git status --short   # must be empty before proceeding
 moon run contracts:generate
 git add --intent-to-add -- \
     rs/crates/libs/paigasus-proto/src/generated \
@@ -282,19 +300,7 @@ git diff --exit-code -- \
 echo "drift gate exit: $?"
 ```
 
-Expected: `drift gate exit: 0`. A non-zero exit means generation is not idempotent — stop and investigate; do not hand-edit the output.
-
-- [ ] **Step 7: Commit**
-
-```bash
-cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
-git add contracts/proto/paigasus/common/v1/service_info.proto \
-        rs/crates/libs/paigasus-proto/src/lib.rs \
-        rs/crates/libs/paigasus-proto/src/generated \
-        ts/packages/paigasus-proto/src/generated \
-        py/packages/paigasus-proto/src/paigasus_proto/generated
-git commit -m "feat(contracts): define the ServiceInfo capability descriptor in common/v1 (SMA-499)"
-```
+Expected: `drift gate exit: 0`. Non-zero here, on a clean tree, means generation is not idempotent — stop and investigate; do not hand-edit the output.
 
 ---
 
@@ -356,6 +362,7 @@ Expected: no output from any of them. `option deprecated = true` is **not** a br
 - [ ] **Step 3: Regenerate and inspect what each language did**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
 moon run contracts:generate
 grep -rn -i "deprecated" \
@@ -393,6 +400,7 @@ git commit -m "feat(contracts): supersede and deprecate the iam.v1.ServiceInfo p
 The gate compares regenerated output against **committed** state. Run it on a clean tree; running it with uncommitted generated changes present compares against a stale index and reports a failure that is an artefact of the ordering, not real drift.
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
 git status --short   # must be empty before proceeding
 moon run contracts:generate
@@ -592,6 +600,7 @@ fn is_wire_key(key: &str) -> bool {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499/rs
 cargo test -p paigasus-proto --lib capability
 ```
@@ -601,6 +610,7 @@ Expected: `test result: ok. 6 passed; 0 failed`.
 - [ ] **Step 5: Check formatting and lints**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499/rs
 cargo fmt --check
 cargo clippy -p paigasus-proto -- -D warnings
@@ -710,6 +720,7 @@ export function capabilityWireKey(capability: Capability): string | undefined {
 - [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
 moon run paigasus-proto-ts:test
 ```
@@ -733,6 +744,7 @@ export type { ServiceInfo } from './generated/paigasus/common/v1/service_info_pb
 - [ ] **Step 6: Typecheck and format**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
 moon run paigasus-proto-ts:typecheck
 moon run ts:fmt
@@ -808,6 +820,7 @@ If `ServiceInfo().capabilities` is `None` rather than `[]`, do **not** change th
 - [ ] **Step 3: Lint and format the Python**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
 moon run py:lint
 moon run py:fmt
@@ -846,6 +859,7 @@ Expected: no output from `git status`; five feature commits plus the two spec/pl
 - [ ] **Step 2: Re-run the codegen-drift gate from a clean tree**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core-sma499
 moon run contracts:generate
 git add --intent-to-add -- rs/crates/libs/paigasus-proto/src/generated \
