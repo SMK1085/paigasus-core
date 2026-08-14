@@ -380,99 +380,18 @@ mod tests {
     /// AC2: every code `TenancyError::code()` can return is declared in the canonical registry
     /// (`contracts/proto/paigasus/common/v1/error.proto`, SMA-498).
     ///
-    /// Coverage is checked via an index bijection: `index` is a wildcard-free match, so adding a
-    /// variant to `TenancyError` fails COMPILATION here (`E0004`) until it is given a slot —
-    /// that forces every new variant through this file at least once. The bijection assertion
-    /// below then catches an index MISTAKE for any variant that IS added to `all`: reusing an
-    /// existing slot leaves some other slot's count at 0, and an out-of-range slot panics the
-    /// indexing itself. Assertions run through `code()` rather than string literals, so an
+    /// Coverage is checked by enumerating every `TenancyError` variant via `strum::EnumIter`
+    /// (`#[cfg_attr(test, derive(strum::EnumIter))]` on the enum) rather than a hand-maintained
+    /// list: `TenancyError::iter()` yields one instance per variant straight from the type
+    /// itself, so a new variant is included automatically — there is no second list that can be
+    /// left un-extended. Assertions run through `code()` rather than string literals, so an
     /// unregistered rename fails too.
-    ///
-    /// KNOWN LIMIT, proven by experiment in SMA-498 Task 4 fix round 1: this does NOT, by
-    /// itself, force `all` to be extended. `index` is only ever called on `all`'s own elements
-    /// (see the loop below), so a developer who silences the `E0004` by adding
-    /// `NewVariant => <any number>` WITHOUT also adding `TenancyError::NewVariant` to `all` gets
-    /// a test that still compiles AND still passes — the new arm is simply never exercised, no
-    /// matter what value it returns (confirmed for both an out-of-range value and a value that
-    /// collides with an existing slot). Closing that residual gap needs something that derives
-    /// `all` from the type itself rather than hand-listing it (e.g. SMA-507's drift gate, or a
-    /// variant-enumeration mechanism such as `strum::EnumIter`) — out of scope here.
     #[test]
     fn every_tenancy_code_is_declared_in_the_canonical_registry() {
         use paigasus_proto::paigasus::common::v1::ErrorReason;
+        use strum::IntoEnumIterator;
 
-        /// Maps each `TenancyError` variant to a unique slot. Wildcard-free ON PURPOSE: adding a
-        /// variant to `TenancyError` fails COMPILATION here until it is given a slot. See the
-        /// enclosing test's doc comment for what this does and does not guarantee.
-        fn index(e: &TenancyError) -> usize {
-            match e {
-                TenancyError::SlugConflict => 0,
-                TenancyError::DuplicateMembership => 1,
-                TenancyError::EmailConflict => 2,
-                TenancyError::ServiceAccountNameConflict => 3,
-                TenancyError::InvalidEmail(_) => 4,
-                TenancyError::InvalidSlug(_) => 5,
-                TenancyError::InvalidName(_) => 6,
-                TenancyError::InvalidPrn(_) => 7,
-                TenancyError::PrnMismatch => 8,
-                TenancyError::InvalidPagination => 9,
-                TenancyError::NothingToRename => 10,
-                TenancyError::NotFound => 11,
-                TenancyError::ParentArchived => 12,
-                TenancyError::NodeArchived => 13,
-                TenancyError::MissingOrgMembership => 14,
-                TenancyError::Forbidden => 15,
-                TenancyError::UnknownRole(_) => 16,
-                TenancyError::InvalidScope(_) => 17,
-                TenancyError::SystemImmutable(_) => 18,
-                TenancyError::PolicyInvalid(_) => 19,
-                TenancyError::PolicyConflict(_) => 20,
-                TenancyError::InvalidAction(_) => 21,
-                TenancyError::InvalidBulkReplay => 22,
-                TenancyError::NotSystemOwned(_) => 23,
-                TenancyError::FleetNotConverged => 24,
-                TenancyError::Internal => 25,
-            }
-        }
-
-        let s = || "x".to_string();
-        let all = [
-            TenancyError::SlugConflict,
-            TenancyError::DuplicateMembership,
-            TenancyError::EmailConflict,
-            TenancyError::ServiceAccountNameConflict,
-            TenancyError::InvalidEmail(s()),
-            TenancyError::InvalidSlug(s()),
-            TenancyError::InvalidName(s()),
-            TenancyError::InvalidPrn(s()),
-            TenancyError::PrnMismatch,
-            TenancyError::InvalidPagination,
-            TenancyError::NothingToRename,
-            TenancyError::NotFound,
-            TenancyError::ParentArchived,
-            TenancyError::NodeArchived,
-            TenancyError::MissingOrgMembership,
-            TenancyError::Forbidden,
-            TenancyError::UnknownRole(s()),
-            TenancyError::InvalidScope(s()),
-            TenancyError::SystemImmutable(s()),
-            TenancyError::PolicyInvalid(s()),
-            TenancyError::PolicyConflict(s()),
-            TenancyError::InvalidAction(s()),
-            TenancyError::InvalidBulkReplay,
-            TenancyError::NotSystemOwned(s()),
-            TenancyError::FleetNotConverged,
-            TenancyError::Internal,
-        ];
-        assert_eq!(all.len(), 26, "TenancyError has 26 variants; update `all` and the match together");
-
-        let mut counts = vec![0usize; all.len()];
-        for err in &all {
-            counts[index(err)] += 1;
-        }
-        assert!(counts.iter().all(|&c| c == 1), "every TenancyError variant must appear exactly once in `all`; slot counts: {counts:?}");
-
-        for err in &all {
+        for err in TenancyError::iter() {
             let code = err.code();
             assert!(
                 ErrorReason::from_wire_reason(code).is_some(),

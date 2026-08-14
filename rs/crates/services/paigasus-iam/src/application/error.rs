@@ -17,6 +17,7 @@ pub enum ErrorClass {
 
 /// Service-layer error taxonomy, combining domain and repository failures.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(strum::EnumIter))]
 pub enum TenancyError {
     #[error("slug is already taken in this scope")]
     SlugConflict,
