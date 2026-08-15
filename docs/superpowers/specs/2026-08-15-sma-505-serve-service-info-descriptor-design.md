@@ -1,7 +1,9 @@
 # SMA-505 — `paigasus-iam` + `paigasus-gateway` serve the `ServiceInfo` descriptor
 
 Linear: [SMA-505](https://linear.app/smaschek/issue/SMA-505/iamgateway-serve-the-serviceinfo-capability-descriptor)
-ADR: [ADR-0020 — Service capability discovery](https://app.notion.com/p/3bb830e8fbaa8113b9f3da910893aaa8) (accepted 2026-08-13)
+ADR: [ADR-0020 — Service capability discovery](https://app.notion.com/p/3bb830e8fbaa8113b9f3da910893aaa8) (accepted 2026-08-13;
+amended 2026-08-15 by this issue — A1–A5 record D1/D2/D3/D5/D8 below, plus the inert-skew and
+404-vs-401 consequences)
 Blocked by: [SMA-499](https://linear.app/smaschek/issue/SMA-499) — merged as PR 119, `ce0dc28`
 Blocks: [SMA-509](https://linear.app/smaschek/issue/SMA-509) (TypeScript capability-discovery client)
 Predecessor spec: `docs/superpowers/specs/2026-08-14-sma-499-service-info-capability-descriptor-design.md`
