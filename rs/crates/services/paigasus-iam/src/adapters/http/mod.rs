@@ -68,7 +68,7 @@ use crate::application::roles::{RoleService, RoleServiceDeps};
 use crate::application::service_accounts::{ServiceAccountService, ServiceAccountServiceDeps};
 use crate::application::system_retirement::{SystemRetirementDeps, SystemRetirementService};
 use crate::application::teams::TeamService;
-use crate::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, JwksCacheBackend};
+use crate::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, JwksCacheBackend, RedactedUrl};
 use paigasus_iam_core::{
     ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore, SystemPolicyReconciler,
     SystemRoleReconciler, TeamRepository, UnitOfWork,
@@ -322,7 +322,8 @@ impl AppState {
                 let redis_url = authz_cfg
                     .cache
                     .redis_url
-                    .as_deref()
+                    .as_ref()
+                    .map(RedactedUrl::as_str)
                     .ok_or_else(|| AuthnError::Backend("authz.cache.backend = \"redis\" without redis_url (IamConfig::validate must run first)".into()))?;
                 let conn = connect_redis(redis_url, RedisRole::Authz).await?;
                 (Generations::from_connection(conn.clone()), Some((conn, redis_url)))
@@ -580,7 +581,8 @@ impl AppState {
                     .api_keys
                     .introspect_cache
                     .redis_url
-                    .as_deref()
+                    .as_ref()
+                    .map(RedactedUrl::as_str)
                     .ok_or_else(|| AuthnError::Backend("api_keys.introspect_cache.backend = \"redis\" without redis_url (IamConfig::validate must run first)".into()))?;
                 //
                 // The dial failure is re-wrapped with the config key that caused it. Before
@@ -673,7 +675,8 @@ impl AppState {
                 let redis_url = authn_cfg
                     .jwks_cache
                     .redis_url
-                    .as_deref()
+                    .as_ref()
+                    .map(RedactedUrl::as_str)
                     .ok_or_else(|| AuthnError::Backend("jwks_cache.backend = \"redis\" without redis_url (IamConfig::validate must run first)".into()))?;
                 let cache = RedisJwksCache::connect(redis_url, authn_cfg.jwks_ttl_secs).await?;
                 WiredAuthenticator::Redis(Arc::new(OidcAuthenticator::new(

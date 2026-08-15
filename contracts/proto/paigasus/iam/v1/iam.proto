@@ -15,9 +15,16 @@ import "paigasus/common/v1/audit.proto";
 // AuthorizationService's originally-planned Introspect rpc is not duplicated
 // there: it folds into AuthnService.Introspect below (spec D4).
 
-// Placeholder so the package generates a concrete type in all three languages.
-// Replaced by real messages in M1; carries a service PRN string for now.
+// DEPRECATED — superseded by `paigasus.common.v1.ServiceInfo`, the real
+// capability descriptor (ADR-0020, SMA-499). Do not use: nothing serves this
+// message, and no RPC accepts or returns it.
+//
+// It is retained, rather than removed, only because buf's MESSAGE_NO_DELETE
+// forbids deleting a published message — removal would red `contracts:breaking`.
+// This deprecation is PERMANENT; there is no follow-up that retires it.
 message ServiceInfo {
+  option deprecated = true;
+
   string prn = 1;
 }
 

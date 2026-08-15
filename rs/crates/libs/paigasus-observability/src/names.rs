@@ -139,6 +139,34 @@ pub const IAM_OUTBOX_PUBLISH_LAG_SECONDS: &str = "iam_outbox_publish_lag_seconds
 /// never observed the permit", which `iam_outbox_relay_wakeups_total{source="notify"}` alone
 /// cannot (SMA-489 §1.5).
 pub const IAM_OUTBOX_LISTENER_NOTIFICATIONS_TOTAL: &str = "iam_outbox_listener_notifications_total";
+/// Enqueues that emitted a `pg_notify` — the write-side twin of
+/// [`IAM_OUTBOX_LISTENER_NOTIFICATIONS_TOTAL`], and the control term
+/// `IamOutboxNotificationsAbsent` gates on (SMA-495). It answers "was a nudge emitted at all in
+/// this window", which `IAM_OUTBOX_RELAY_DRAINED_TOTAL` only ever approximated: a drain counts
+/// every row the relay processes, including SMA-469 dead-letter replays, whose `REPLAY_ONE_SQL`
+/// un-parks a row with a direct `UPDATE` and emits NO notification (SMA-489 D2). A replay during a
+/// quiet period therefore used to satisfy that alert with a perfectly healthy listener.
+///
+/// **NOT 1:1 with [`IAM_OUTBOX_LISTENER_NOTIFICATIONS_TOTAL`] — do not build a ratio from the
+/// pair.** Postgres collapses notifications carrying an identical channel AND payload within one
+/// transaction, and this payload is always empty (SMA-489 D3), so a transaction enqueuing N events
+/// increments this counter N times while delivering exactly ONE notification. The alert is
+/// unaffected: it asks only `> 0` of this counter and `== 0` of the listener's, never a rate
+/// comparison.
+///
+/// **Counted pre-commit.** The outbox writes on a transaction it RECOVERS rather than owns, so
+/// there is no post-commit hook to count from; this counts *attempted* notifying enqueues and can
+/// only ever over-count delivered notifications, never under-count. A rolled-back mutation
+/// increments it while delivering no notification and draining no row —
+/// `IamOutboxNotificationsAbsent` absorbs that through its separate `drained` term, which is why
+/// that term is retained rather than replaced.
+///
+/// Primed at zero in `main.rs` iff `[outbox].wake_on_commit = true`, so the series means "this
+/// replica is configured to nudge" and an `increase()` control can fire on the very first
+/// enqueue. `[outbox].relay_enabled = false` does NOT gate it: that deployment emits and primes
+/// this counter while running no relay and no listener, and the alert stays silent there anyway
+/// because the listener series is absent.
+pub const IAM_OUTBOX_NOTIFYING_ENQUEUES_TOTAL: &str = "iam_outbox_notifying_enqueues_total";
 /// 1 when the outbox listener holds a live `LISTEN` connection, 0 otherwise.
 ///
 /// **Per-replica, and the replicas do NOT agree** — the same caveat [`IAM_NATS_CONNECTED`]
@@ -243,6 +271,7 @@ pub const ALL: &[&str] = &[
     IAM_OUTBOX_RELAY_WAKEUPS_TOTAL,
     IAM_OUTBOX_PUBLISH_LAG_SECONDS,
     IAM_OUTBOX_LISTENER_NOTIFICATIONS_TOTAL,
+    IAM_OUTBOX_NOTIFYING_ENQUEUES_TOTAL,
     IAM_OUTBOX_LISTENER_CONNECTED,
     IAM_OUTBOX_LISTENER_RECONNECTS_TOTAL,
     IAM_AUDIT_PARTITION_MAINTENANCE_TICKS_TOTAL,

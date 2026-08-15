@@ -94,14 +94,31 @@ tests:
   # catches that regression. `iam-healthy` must NEVER appear in exp_alerts at any eval_time.
   #
   # `iam-idle` is a SECOND, independently necessary control, added after the first review round:
-  # both its counters are flat at zero — a deployment with nothing to notify about because
+  # every one of its counters is flat at zero — a deployment with nothing to notify about because
   # nothing is being written. The left-hand `== 0` term is true for it (same as the real `iam`
-  # target), so ONLY the right-hand `(drained[30m]) > 0` term keeps it silent. Dropping that
-  # right-hand clause (verified by hand: `promtool test rules` goes from SUCCESS to FAILED on
-  # exactly this series when the clause is removed, and back to SUCCESS when restored) would
-  # page on every idle deployment — `iam-healthy` cannot catch that regression, because
-  # `iam-healthy`'s own notifications are non-flat and already fail the left-hand term on their
-  # own. `iam-idle` must NEVER appear in exp_alerts at any eval_time either.
+  # target), so ONLY the two control terms keep it silent, and it must NEVER appear in exp_alerts.
+  #
+  # NOTE (SMA-495): this block no longer discriminates WHICH control keeps `iam-idle` silent —
+  # both its drained and its enqueues series are flat, so deleting either clause leaves it silent.
+  # The `replay only` block below is what pins the enqueues clause; the `nodrain` block pins the
+  # drained clause, whose justification is the pre-commit rollback case (the counter is
+  # incremented before COMMIT, so a window where every mutation rolls back climbs enqueues while
+  # draining nothing) — documented at the increment site,
+  # rs/crates/services/paigasus-iam/src/adapters/persistence/pg_outbox.rs:99, NOT on the rule.
+  # Do not read this block as proof of either.
+  #
+  # The `iam-healthy` enqueues series MUST climb (`0+5x40`). With no series for that job, a rule
+  # regressed from `== 0` to `>= 0` makes its left-hand term true, but `sum by (job)` over an
+  # ABSENT series is empty, `and on (job)` drops it, no alert is produced — this block stops
+  # discriminating that mutant. The masked-replica block below still catches it (its `healthy:8080`
+  # instance carries its own enqueues series), so this series is redundancy, not this block's sole
+  # guard against that regression.
+  #
+  # The `iam` enqueues series MUST start climbing at t=0 (`0+5x40`). The `eval_time: 10m` empty
+  # assertion below is the only thing pinning `for: 15m`, and it discriminates only because the
+  # condition is true from t=1m; a series that starts climbing after ~t=9m destroys that guard
+  # without failing anything (a series starting at t=6m still makes the condition true by t=7m, so
+  # a `for: 0m` mutant would still fire at the 10m assertion).
   #
   # The `eval_time: 10m` assertion is what pins `for: 15m`. The condition is true from t=1m
   # onward (the first evaluation at which `increase()` has two samples to work with), so a rule
@@ -121,6 +138,12 @@ tests:
         values: '0+0x40' # control: nothing to notify about
       - series: 'iam_outbox_relay_drained_total{job="iam-idle",instance="c"}'
         values: '0+0x40' # control: nothing being drained either
+      - series: 'iam_outbox_notifying_enqueues_total{job="iam",instance="a"}'
+        values: '0+5x40' # nudges ARE being emitted — the control that makes the alert fire
+      - series: 'iam_outbox_notifying_enqueues_total{job="iam-healthy",instance="b"}'
+        values: '0+5x40' # MUST climb — see the comment above
+      - series: 'iam_outbox_notifying_enqueues_total{job="iam-idle",instance="c"}'
+        values: '0+0x40' # control: nothing to notify about
     alert_rule_test:
       # Condition already true (since t=1m), but the 15m hold has not elapsed — pending, not
       # firing. This is the assertion that discriminates `for: 15m` from `for: 0m`.
@@ -131,7 +154,7 @@ tests:
         alertname: IamOutboxNotificationsAbsent
         exp_alerts:
           - exp_labels: { severity: warning, job: iam, instance: "a" }
-            exp_annotations: { summary: "IAM outbox commit nudges are not arriving (LISTEN likely blocked by a pooler)", description: "No iam_outbox_listener_notifications_total notification has arrived on iam/a in the last 30 minutes, even though iam_outbox_relay_drained_total shows rows being written and drained in that same window — rows ARE flowing, but never via the LISTEN/NOTIFY nudge. Delivery has silently fallen back to [outbox].poll_interval_secs (~5s), which is correct but not what this deployment is configured for. Most likely cause: a transaction- or statement-mode connection pooler in front of Postgres (PgBouncer's defaults do not support LISTEN) — the writer's pg_notify still succeeds, so nothing else looks wrong. If only SOME replicas are alerting, the pooler is not the cause — look at that instance's own listener (iam_outbox_listener_connected, iam_outbox_listener_reconnects_total). See RUNBOOK section 4." }
+            exp_annotations: { summary: "IAM outbox commit nudges are not arriving (LISTEN likely blocked by a pooler)", description: "No iam_outbox_listener_notifications_total notification has arrived on iam/a in the last 30 minutes, even though iam_outbox_notifying_enqueues_total shows nudges being emitted across this deployment and iam_outbox_relay_drained_total shows this replica draining rows in that same window — rows ARE flowing, but never via the LISTEN/NOTIFY nudge. Delivery has silently fallen back to [outbox].poll_interval_secs (~5s), which is correct but not what this deployment is configured for. Most likely cause: a transaction- or statement-mode connection pooler in front of Postgres (PgBouncer's defaults do not support LISTEN) — the writer's pg_notify still succeeds, so nothing else looks wrong. If only SOME replicas are alerting, the pooler is not the cause — look at that instance's own listener (iam_outbox_listener_connected, iam_outbox_listener_reconnects_total). See RUNBOOK section 4." }
 
   # IamOutboxNotificationsAbsent: a MASKED replica — the case `sum by (job, instance)` exists for,
   # and the one no series in the block above can reach (each job there has exactly one instance,
@@ -151,12 +174,105 @@ tests:
         values: '0+5x40'
       - series: 'iam_outbox_relay_drained_total{job="iam",instance="healthy:8080"}'
         values: '0+5x40'
+      - series: 'iam_outbox_notifying_enqueues_total{job="iam",instance="healthy:8080"}'
+        values: '0+5x40' # only the healthy replica serves writes — `wedged` must STILL alert
     alert_rule_test:
       - eval_time: 35m
         alertname: IamOutboxNotificationsAbsent
         exp_alerts:
           - exp_labels: { severity: warning, job: iam, instance: "wedged:8080" }
-            exp_annotations: { summary: "IAM outbox commit nudges are not arriving (LISTEN likely blocked by a pooler)", description: "No iam_outbox_listener_notifications_total notification has arrived on iam/wedged:8080 in the last 30 minutes, even though iam_outbox_relay_drained_total shows rows being written and drained in that same window — rows ARE flowing, but never via the LISTEN/NOTIFY nudge. Delivery has silently fallen back to [outbox].poll_interval_secs (~5s), which is correct but not what this deployment is configured for. Most likely cause: a transaction- or statement-mode connection pooler in front of Postgres (PgBouncer's defaults do not support LISTEN) — the writer's pg_notify still succeeds, so nothing else looks wrong. If only SOME replicas are alerting, the pooler is not the cause — look at that instance's own listener (iam_outbox_listener_connected, iam_outbox_listener_reconnects_total). See RUNBOOK section 4." }
+            exp_annotations: { summary: "IAM outbox commit nudges are not arriving (LISTEN likely blocked by a pooler)", description: "No iam_outbox_listener_notifications_total notification has arrived on iam/wedged:8080 in the last 30 minutes, even though iam_outbox_notifying_enqueues_total shows nudges being emitted across this deployment and iam_outbox_relay_drained_total shows this replica draining rows in that same window — rows ARE flowing, but never via the LISTEN/NOTIFY nudge. Delivery has silently fallen back to [outbox].poll_interval_secs (~5s), which is correct but not what this deployment is configured for. Most likely cause: a transaction- or statement-mode connection pooler in front of Postgres (PgBouncer's defaults do not support LISTEN) — the writer's pg_notify still succeeds, so nothing else looks wrong. If only SOME replicas are alerting, the pooler is not the cause — look at that instance's own listener (iam_outbox_listener_connected, iam_outbox_listener_reconnects_total). See RUNBOOK section 4." }
+
+  # IamOutboxNotificationsAbsent (SMA-495): REPLAY ONLY — the false positive this change exists to
+  # remove, and the block that pins the enqueues control. An operator replays dead letters during a
+  # quiet period: rows drain (SMA-469's `REPLAY_ONE_SQL` un-parks them) but NO nudge was ever
+  # emitted, because replay writes a direct UPDATE with no `pg_notify` (SMA-489 D2). Before
+  # SMA-495 both terms held and this paged with a perfectly healthy listener. Delete the
+  # `iam_outbox_notifying_enqueues_total` conjunct from the rule and this block FIRES — that is
+  # the proof it is a guard and not just a passing series.
+  - interval: 1m
+    input_series:
+      - series: 'iam_outbox_listener_notifications_total{job="iam",instance="replay:8080"}'
+        values: '0+0x40' # flat: nothing nudged, because nothing was mutated
+      - series: 'iam_outbox_relay_drained_total{job="iam",instance="replay:8080"}'
+        values: '0+5x40' # replayed rows ARE draining
+      - series: 'iam_outbox_notifying_enqueues_total{job="iam",instance="replay:8080"}'
+        values: '0+0x40' # ...but no enqueue emitted a nudge
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: IamOutboxNotificationsAbsent
+        exp_alerts: []
+
+  # IamOutboxNotificationsAbsent (SMA-495): the PRE-DEPLOY / ROLLBACK state. `ops/` and the IAM
+  # binary ship on different cadences, so until a replica runs a binary emitting the new counter
+  # the series does not exist at all — `sum by (job)` over it is an EMPTY vector, `and on (job)`
+  # matches nothing, and this alert is structurally SILENT even though the left-hand and drained
+  # terms both hold. That is accepted rather than engineered around (an `or` fallback would make
+  # the rule permanently carry the bug it fixes), so it is pinned here as a KNOWN property rather
+  # than left to be rediscovered as a regression. Deploy the binary first; roll the rules back
+  # with it.
+  - interval: 1m
+    input_series:
+      - series: 'iam_outbox_listener_notifications_total{job="iam",instance="predeploy:8080"}'
+        values: '0+0x40'
+      - series: 'iam_outbox_relay_drained_total{job="iam",instance="predeploy:8080"}'
+        values: '0+5x40'
+      # deliberately NO iam_outbox_notifying_enqueues_total series
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: IamOutboxNotificationsAbsent
+        exp_alerts: []
+
+  # IamOutboxNotificationsAbsent (SMA-495): nudges emitted, but THIS replica drained nothing — the
+  # pre-commit rollback window of pg_outbox.rs:99, and what now pins the `drained` conjunct.
+  # `iam-idle` no longer discriminates it (all of iam-idle's series are flat). Mutation: delete the
+  # `drained` conjunct from the rule and this block FIRES.
+  - interval: 1m
+    input_series:
+      - series: 'iam_outbox_listener_notifications_total{job="iam",instance="nodrain:8080"}'
+        values: '0+0x40' # flat
+      - series: 'iam_outbox_relay_drained_total{job="iam",instance="nodrain:8080"}'
+        values: '0+0x40' # this replica drained NOTHING — it was not doing outbox work
+      - series: 'iam_outbox_notifying_enqueues_total{job="iam",instance="nodrain:8080"}'
+        values: '0+5x40' # nudges WERE emitted, but nothing committed
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: IamOutboxNotificationsAbsent
+        exp_alerts: []
+
+  # IamOutboxNotificationsAbsent (SMA-495): the LISTENER-ABSENT silence — an absent left-hand
+  # series must silence the alert even when BOTH controls are fully satisfied.
+  #
+  # This is deliberately NOT the `[outbox].wake_on_commit = false` shape (CodeRabbit, PR 118).
+  # That config silences the alert twice over and so can prove nothing about either term: the
+  # listener is not spawned (`main.rs`, the `wake_on_commit` branch guarding `PgOutboxListener`)
+  # AND `iam_outbox_notifying_enqueues_total` is never primed (`main.rs`, the prime is gated on
+  # the same flag), so both series are absent and either one alone would account for the silence.
+  # The series below are the reachable case that isolates the left-hand term instead: a replica
+  # whose listener series has not appeared while the deployment is nudging and this replica is
+  # draining — `PgOutboxListener::run` primes the counter on entry, so the window between process
+  # start and that first prime (or a listener task that never got there) looks exactly like this.
+  #
+  # `up` is load-bearing, not scenery. Without it this block guards NOTHING: the silence a future
+  # reader is most likely to "fix" is copying the `or (up{job="iam"} == 1) * 0` fallback from
+  # IamPolicySnapshotReloadsStalled below onto this alert's left term, and that mutation can only
+  # be caught if the fixture supplies an `up` series for the fallback to key off. Verified by
+  # hand: with `up` present the mutation turns this block RED; without it the mutated rule passes
+  # and the guard is imaginary. That fallback would page forever on every replica whose listener
+  # series is briefly absent, with nothing going red — which is exactly why it must stay caught.
+  - interval: 1m
+    input_series:
+      # deliberately NO iam_outbox_listener_notifications_total series
+      - series: 'iam_outbox_relay_drained_total{job="iam",instance="nolisten:8080"}'
+        values: '0+5x40'
+      - series: 'iam_outbox_notifying_enqueues_total{job="iam",instance="nolisten:8080"}'
+        values: '0+5x40'
+      - series: 'up{job="iam",instance="nolisten:8080"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: IamOutboxNotificationsAbsent
+        exp_alerts: []
 
   # IamPolicySnapshotReloadsStalled: healthy fleet — every backstop cycle installs, so
   # sum by (job, instance) (increase(...{outcome="installed"}[10m])) stays well above 0 and the

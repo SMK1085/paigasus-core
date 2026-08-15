@@ -23,6 +23,23 @@ pub enum EventType {
 }
 
 impl EventType {
+    /// Every variant, in declaration order. Public because consumers outside this crate need to
+    /// enumerate the event surface: `tests/nats_permissions.rs` (SMA-493) asserts the NATS
+    /// publisher's `pub` grant covers every subject this service can emit, and an integration
+    /// test cannot see a `#[cfg(test)]` constant. Kept exhaustive by
+    /// `all_lists_every_event_type`, whose wildcard-free match stops compiling when a variant is
+    /// added.
+    pub const ALL: [EventType; 8] = [
+        Self::PrincipalCreated,
+        Self::PrincipalArchived,
+        Self::RoleGranted,
+        Self::RoleRevoked,
+        Self::ApiKeyIssued,
+        Self::ApiKeyRevoked,
+        Self::PolicyPut,
+        Self::PolicyDeleted,
+    ];
+
     pub fn as_wire(&self) -> &'static str {
         match self {
             Self::PrincipalCreated => "iam.principal.created",
@@ -70,20 +87,9 @@ pub struct DomainEvent {
 mod tests {
     use super::*;
 
-    const ALL: [EventType; 8] = [
-        EventType::PrincipalCreated,
-        EventType::PrincipalArchived,
-        EventType::RoleGranted,
-        EventType::RoleRevoked,
-        EventType::ApiKeyIssued,
-        EventType::ApiKeyRevoked,
-        EventType::PolicyPut,
-        EventType::PolicyDeleted,
-    ];
-
     #[test]
     fn event_type_roundtrips_through_wire_strings() {
-        for et in ALL {
+        for et in EventType::ALL {
             assert_eq!(EventType::parse(et.as_wire()), Some(et));
         }
         assert_eq!(EventType::parse("nope"), None);
@@ -91,7 +97,7 @@ mod tests {
 
     #[test]
     fn wire_strings_are_namespaced_and_distinct() {
-        let wires: Vec<&str> = ALL.iter().map(EventType::as_wire).collect();
+        let wires: Vec<&str> = EventType::ALL.iter().map(EventType::as_wire).collect();
         for w in &wires {
             assert!(w.starts_with("iam."), "unexpected wire string: {w}");
         }
@@ -99,6 +105,27 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), wires.len(), "duplicate wire string in {wires:?}");
+    }
+
+    /// `ALL` must stay exhaustive: this match has no wildcard arm, so a new variant fails to
+    /// compile here rather than silently shrinking every consumer's coverage (SMA-493 §3.4 —
+    /// `tests/nats_permissions.rs` iterates `ALL` to prove the publisher's grant covers every
+    /// subject the service can emit).
+    #[test]
+    fn all_lists_every_event_type() {
+        for et in EventType::ALL {
+            match et {
+                EventType::PrincipalCreated
+                | EventType::PrincipalArchived
+                | EventType::RoleGranted
+                | EventType::RoleRevoked
+                | EventType::ApiKeyIssued
+                | EventType::ApiKeyRevoked
+                | EventType::PolicyPut
+                | EventType::PolicyDeleted => {}
+            }
+        }
+        assert_eq!(EventType::ALL.len(), 8);
     }
 
     #[test]

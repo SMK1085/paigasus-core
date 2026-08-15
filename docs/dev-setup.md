@@ -80,7 +80,15 @@ then set:
 [outbox.publisher]
 backend = "nats"
 url     = "nats://127.0.0.1:4222"
+# Required for a local broker: the nats backend otherwise demands tls:// AND a credentials_file
+# (SMA-493). This one flag waives both — it legalises an unauthenticated broker as well as an
+# unencrypted one, which is why it is not called `allow_plaintext`. Never set it in a deployment.
+allow_insecure_broker = true
 ```
+
+For the production shape — a dedicated account, least-privilege subject permissions, TLS and
+`.creds` — see [`ops/nats/README.md`](../ops/nats/README.md) and
+[`docs/ops/RUNBOOK-nats.md`](./ops/RUNBOOK-nats.md).
 
 The service creates `IAM_EVENTS` if it is absent. If it already exists it is **adopted, never
 reshaped** — `get_or_create_stream` does not reconcile, deliberately, so the service can never
@@ -95,9 +103,12 @@ fails unless the live stream satisfies all five checks, naming the offending fie
 | `subjects` | must contain `iam.>`. |
 | `max_age` | `0` (unlimited), or greater than `duplicate_window` — JetStream's own constraint. |
 
-`retention`, `storage` and `duplicate_window` are **not editable in place** on a live JetStream
-stream. Fixing drift in any of those means draining or accepting the loss of the messages the
-stream holds, deleting it, and letting the service recreate it — plan that as a maintenance
-window, not a config tweak. `subjects` and `max_age` can be edited with `nats stream edit`.
+`storage` is **never editable in place** on a live JetStream stream, and `retention` cannot be
+changed to or from `workqueue` either — both rejected outright by JetStream's Stream Update API.
+Since the table above only ever flags a live `retention` of `interest` or `workqueue` as invalid,
+a `workqueue` drift needs the same treatment as `storage`: draining or accepting the loss of the
+messages the stream holds, deleting it, and letting the service recreate it — plan that as a
+maintenance window, not a config tweak. `duplicate_window`, an `interest`-retention drift,
+`subjects`, and `max_age` can all be edited in place with `nats stream edit`.
 
 Integration tests need no local server — they start their own container.

@@ -184,6 +184,13 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false }
 async-nats = { version = "0.50", default-features = false, features = [
   "jetstream", "ring", "server_2_10", "server_2_11", "nkeys",
 ] }
+# nkeys — NATS ed25519 key handling, a DIRECT dependency of `paigasus-iam` since SMA-493.
+# Already in the tree transitively (async-nats' own `auth_utils` under the `nkeys` feature this
+# workspace enables), so this pins no new build weight. It is needed directly because
+# async-nats' `.creds` parser is `pub(crate)`: rotation-safe auth re-reads and re-signs on every
+# connection attempt via `ConnectOptions::with_auth_callback`, which hands us a raw nonce and
+# expects a signature back (SMA-493 D8). Version tracks what async-nats 0.50 resolves.
+nkeys = "0.4.5"
 
 # Lint posture: rustc warnings deny in-source; clippy warns in-source and is denied in CI
 # via the Moon `lint` task's `-D warnings`.

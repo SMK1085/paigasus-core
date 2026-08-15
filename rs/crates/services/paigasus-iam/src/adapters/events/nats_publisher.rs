@@ -19,6 +19,20 @@
 //! The window itself IS durable within its span: `file`-storage JetStream rebuilds its dedup map
 //! from the stored messages' `Nats-Msg-Id` headers after a broker restart, which
 //! `tests/nats_publisher.rs::dedup_survives_a_broker_restart` asserts against a real broker.
+//!
+//! **Both the credential and the CA bundle are re-read from disk on every connection attempt**
+//! (SMA-493 D7/D8), not just the first — this is why `connect` installs an auth *callback*
+//! (`creds::auth_from_credentials`) instead of `ConnectOptions::with_credentials_file`, which
+//! reads once and caches. `add_root_certificates` stores only the path at options-build time;
+//! the file itself is loaded fresh inside `try_connect_to_server`'s TLS setup on each attempt
+//! (`tls.rs::config_tls`, called from `connector.rs:501`/`544`), same as the auth callback is
+//! invoked fresh each attempt (`connector.rs:681`). A rotated `.creds` or CA bundle therefore
+//! takes effect on the next reconnect, with no process restart. **`event_callback` is what makes
+//! a NATS permissions violation visible at all**: a denied publish or subscribe comes back from
+//! the broker as an asynchronous `-ERR 'Permissions Violation …'` on the connection, not as an
+//! error on the request that triggered it — without a callback logging `Event::ServerError` /
+//! `Event::ClientError`, a subject-permission misconfiguration (D9) is indistinguishable from a
+//! broker that is merely slow to ack.
 
 use std::future::Future;
 use std::time::Duration;
@@ -33,7 +47,7 @@ use paigasus_observability::names;
 use tokio::task::JoinHandle;
 
 use crate::adapters::events::cloud_event::{CloudEvent, render_id};
-use crate::config::PublisherConfig;
+use crate::config::{PublisherConfig, RedactedUrl};
 
 /// The stream's subject filter. Every `EventType` wire string is `iam.`-prefixed
 /// (`domain_event.rs`), so one wildcard covers them all.
@@ -130,15 +144,26 @@ impl Breaker {
 /// operator far more than the repetition does.
 #[derive(Debug, thiserror::Error)]
 pub enum NatsPublisherError {
-    /// The configured `credentials_file` could not be read or parsed. Split out from
-    /// [`Self::Connect`] because `ConnectOptions::with_credentials_file` fails with a bare
-    /// `io::Error` that names neither NATS nor the path — "No such file or directory" alone is
-    /// not an actionable boot error.
+    /// The configured `credentials_file` could not be read. Split out from [`Self::Connect`] so
+    /// a missing/unreadable file surfaces a typed boot error naming the path — a bare
+    /// `io::Error` alone ("No such file or directory") is not an actionable boot error without
+    /// it. A file that reads fine but is not a valid credential is [`Self::CredentialsParse`],
+    /// not this variant.
     #[error("nats credentials file {path} could not be loaded")]
     Credentials {
         path: String,
         #[source]
         source: std::io::Error,
+    },
+    /// The `credentials_file` was read but is not a NATS credential. Split from
+    /// [`Self::Credentials`] because "the file is missing" and "the file is not what you think it
+    /// is" have different remediations, and an `io::Error` for a file that plainly exists reads
+    /// as a filesystem problem.
+    #[error("nats credentials file {path} could not be parsed")]
+    CredentialsParse {
+        path: String,
+        #[source]
+        source: crate::adapters::events::creds::CredsError,
     },
     #[error("nats connect failed")]
     Connect(#[source] async_nats::ConnectError),
@@ -191,24 +216,72 @@ impl NatsEventPublisher {
     ///
     /// # Errors
     ///
-    /// [`NatsPublisherError::Credentials`] / [`NatsPublisherError::Connect`] when the broker
-    /// cannot be reached or authenticated against, [`NatsPublisherError::Ensure`] when the
-    /// stream can neither be fetched nor created, and [`NatsPublisherError::StreamConfigDrift`]
-    /// when an existing stream is weaker than this service requires.
+    /// [`NatsPublisherError::Credentials`] when the credentials file cannot be read,
+    /// [`NatsPublisherError::CredentialsParse`] when it can be read but is not a valid NATS
+    /// credential, [`NatsPublisherError::Connect`] when the broker cannot be reached or
+    /// authenticated against, [`NatsPublisherError::Ensure`] when the stream can neither be
+    /// fetched nor created, and [`NatsPublisherError::StreamConfigDrift`] when an existing
+    /// stream is weaker than this service requires.
     ///
     /// # Panics
     ///
     /// If `cfg.url` is `None`. `IamConfig::validate` rejects that combination at load time, so
     /// reaching this is a programming error, not an operator one.
     pub async fn connect(cfg: &PublisherConfig) -> Result<NatsEventPublisher, NatsPublisherError> {
-        let url = cfg.url.as_deref().expect("validate() guarantees url is Some for the nats backend");
+        let url = cfg.url.as_ref().map(RedactedUrl::as_str).expect("validate() guarantees url is Some for the nats backend");
 
-        let opts = match &cfg.credentials_file {
-            Some(path) => async_nats::ConnectOptions::with_credentials_file(path)
-                .await
-                .map_err(|source| NatsPublisherError::Credentials { path: path.clone(), source })?,
+        // D8: read and parse the credential EAGERLY, before any connection machinery exists, so a
+        // missing or malformed file is a typed boot error naming the path — then install the
+        // callback that re-reads it on every subsequent attempt. `with_auth_callback` is a
+        // CONSTRUCTOR (`options.rs:204`), so it has to start the chain rather than join it.
+        let mut opts = match &cfg.credentials_file {
+            Some(path) => {
+                let raw = tokio::fs::read_to_string(path).await.map_err(|source| NatsPublisherError::Credentials { path: path.clone(), source })?;
+                crate::adapters::events::creds::parse_credentials(&raw).map_err(|source| NatsPublisherError::CredentialsParse { path: path.clone(), source })?;
+
+                let path = path.clone();
+                async_nats::ConnectOptions::with_auth_callback(move |nonce| {
+                    let path = path.clone();
+                    // Nothing non-`Sync` is held across the await inside: the callback's future
+                    // must be `Send + Sync + 'static` (`options.rs:207`).
+                    async move { crate::adapters::events::creds::auth_from_credentials(&path, &nonce).await }
+                })
+            }
             None => async_nats::ConnectOptions::new(),
         };
+
+        // D4: the client's inbox prefix must match the account's `subscribe` grant. A mismatch is
+        // not an error anywhere — it presents as every publish timing out on an ack the broker
+        // refuses to deliver — which is why the event callback below matters so much.
+        if let Some(prefix) = &cfg.inbox_prefix {
+            opts = opts.custom_inbox_prefix(prefix.clone());
+        } else if cfg.credentials_file.is_some() {
+            // Belt-and-braces (SMA-493 review): a credentialed deployment on a least-privilege
+            // account almost always grants `subscribe` on a per-user inbox prefix, not the
+            // async-nats default `_INBOX`. Not a `validate()` error — an account that grants
+            // `sub _INBOX.>` is a legitimate (if wider) deployment shape — but the failure mode
+            // when it's wrong is a silent hang (every publish times out waiting for an ack the
+            // broker refuses to deliver), so warn instead of staying silent.
+            tracing::warn!(
+                "outbox.publisher.credentials_file is set but outbox.publisher.inbox_prefix is not — using the default `_INBOX` prefix, which will make every publish time out if the account grants only a per-user prefix (see ops/nats/permissions.md §7)"
+            );
+        }
+        // D7: REPLACES the system trust store (see the field's doc). Re-read per attempt.
+        if let Some(bundle) = &cfg.root_ca_bundle {
+            opts = opts.add_root_certificates(std::path::PathBuf::from(bundle));
+        }
+        // D9: a denied publish is answered with an ASYNCHRONOUS `-ERR 'Permissions Violation …'`
+        // and the request itself simply times out. Without this callback the single most likely
+        // misconfiguration in a permissioned deployment is indistinguishable from a slow broker.
+        opts = opts.event_callback(|event| async move {
+            match event {
+                async_nats::Event::ServerError(ref e) => tracing::error!(event = %event, "nats server error: {e}"),
+                async_nats::Event::ClientError(ref e) => tracing::error!(event = %event, "nats client error: {e}"),
+                async_nats::Event::Disconnected | async_nats::Event::LameDuckMode => tracing::warn!(event = %event, "nats connection event"),
+                _ => tracing::info!(event = %event, "nats connection event"),
+            }
+        });
+
         let client = opts.connect(url).await.map_err(NatsPublisherError::Connect)?;
 
         let mut js = jetstream::new(client);
@@ -630,5 +703,39 @@ mod tests {
         assert!(!b.admit());
         std::thread::sleep(Duration::from_millis(40));
         assert!(b.admit(), "one probe must be admitted after the open window");
+    }
+
+    /// The D8 pre-flight: a bad credential path fails boot with a typed error naming the path,
+    /// rather than surfacing as an authentication failure on the first connection attempt.
+    #[tokio::test]
+    async fn connect_reports_a_missing_credentials_file_by_path() {
+        let cfg = PublisherConfig {
+            backend: crate::config::PublisherBackend::Nats,
+            url: Some("nats://127.0.0.1:14222".into()),
+            credentials_file: Some("/nonexistent/iam.creds".to_string()),
+            ..PublisherConfig::default()
+        };
+        let err = NatsEventPublisher::connect(&cfg).await.expect_err("a missing creds file must fail boot");
+        assert!(matches!(err, NatsPublisherError::Credentials { .. }), "got {err}");
+        assert!(format!("{err}").contains("/nonexistent/iam.creds"), "{err}");
+    }
+
+    /// A file that reads but is not a credential gets its own variant: an operator seeing
+    /// "No such file or directory" for a file that plainly exists learns nothing.
+    #[tokio::test]
+    async fn connect_reports_a_malformed_credentials_file_distinctly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("iam.creds");
+        std::fs::write(&path, "this is not a creds file").unwrap();
+
+        let cfg = PublisherConfig {
+            backend: crate::config::PublisherBackend::Nats,
+            url: Some("nats://127.0.0.1:14222".into()),
+            credentials_file: Some(path.to_string_lossy().to_string()),
+            ..PublisherConfig::default()
+        };
+        let err = NatsEventPublisher::connect(&cfg).await.expect_err("a malformed creds file must fail boot");
+        assert!(matches!(err, NatsPublisherError::CredentialsParse { .. }), "got {err}");
+        assert!(format!("{err}").contains(&path.to_string_lossy().to_string()), "{err}");
     }
 }

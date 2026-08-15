@@ -19,9 +19,12 @@ pub mod paigasus {
         pub mod v1 {
             // Generated code is excluded from the strict lint gate.
             #![allow(clippy::all, warnings)]
-            // Only the prost file: audit.proto declares no service, so
-            // neoeinstein-tonic emits no `.tonic.rs` for this package.
+            // service_info.proto declares ServiceInfoService, so neoeinstein-tonic
+            // now emits a `.tonic.rs` for this package alongside the prost file
+            // (SMA-499). Before that, audit.proto declared no service and this
+            // package was prost-only.
             include!("generated/paigasus/common/v1/paigasus.common.v1.rs");
+            include!("generated/paigasus/common/v1/paigasus.common.v1.tonic.rs");
         }
     }
     pub mod iam {
@@ -36,3 +39,9 @@ pub mod paigasus {
 
 /// Thin `Auditable` contract layered on the generated `common::v1::AuditMetadata`.
 pub mod audit;
+
+/// Wire-key transform for the `Capability` registry in `common::v1`.
+pub mod capability;
+
+/// Wire-string helpers for the canonical error registry (`common::v1::ErrorReason`/`ErrorDomain`).
+pub mod error;
