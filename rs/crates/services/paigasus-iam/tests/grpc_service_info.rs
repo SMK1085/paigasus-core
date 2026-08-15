@@ -149,6 +149,51 @@ async fn the_grpc_and_http_transports_describe_the_same_build() {
     assert_eq!(http_caps, grpc_caps, "the capability SET must agree across transports");
 
     server.abort();
+
+    // Repeat with `iam.audit` off: the block above alone runs ONLY against the all-enabled
+    // default, so a `get_service_info` hardcoded to `["iam.authz.cedar","iam.apikeys",
+    // "iam.audit"]` would pass it unchanged — this is the drift this test exists to catch
+    // (spec § 6.5). Re-running the same HTTP-vs-gRPC comparison here also exercises the
+    // parity claim itself under a non-default config, not just the gRPC side alone.
+    {
+        let Some((_node, db)) = support::start_migrated_postgres().await else {
+            return;
+        };
+        let idp = support::start_mock_idp().await;
+        let mut cfg = support::test_config(&idp);
+        cfg.audit.query_enabled = false;
+        let state = AppState::new(db, &cfg).await.unwrap();
+        let token = idp.bearer("grpc-http-parity-audit-off", Some("grpc-http-parity-audit-off@example.com"), "paigasus", 3600);
+        support::provision(&state, &token).await;
+
+        let http = http_router(state.clone());
+        let (status, http_body) = support::send(&http, "GET", "/v1/service-info", None, Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::OK, "{http_body}");
+
+        let (addr, server) = spawn_server(state).await;
+        let ch = channel(addr).await;
+        let mut client = ServiceInfoServiceClient::new(ch);
+        let grpc_info = client
+            .get_service_info(authed(GetServiceInfoRequest {}, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .service_info
+            .expect("service_info must always be populated, never None");
+        let grpc_caps: HashSet<String> = grpc_info.capabilities.into_iter().collect();
+        assert!(!grpc_caps.contains("iam.audit"), "the disabled key must be absent from gRPC: {grpc_caps:?}");
+        assert!(grpc_caps.contains("iam.authz.cedar") && grpc_caps.contains("iam.apikeys"), "siblings must survive: {grpc_caps:?}");
+
+        let http_caps: HashSet<String> = http_body["capabilities"]
+            .as_array()
+            .expect("capabilities must be an array")
+            .iter()
+            .map(|v| v.as_str().expect("capability keys are strings").to_string())
+            .collect();
+        assert_eq!(http_caps, grpc_caps, "the capability SET must agree across transports even with a flag flipped");
+
+        server.abort();
+    }
 }
 
 #[tokio::test]

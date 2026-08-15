@@ -3,7 +3,8 @@
 //! tonic gRPC surface: the well-known `grpc.health.v1.Health` service (via tonic-health), the
 //! IAM `TenancyService` (task-16 brief, SMA-442), the `AuthnService` + bearer-enforcement
 //! layer (SMA-443 Task 12), the `AuthorizationService` (SMA-444 Task 19), the
-//! `ServiceAccountService` (SMA-445 Task 21), and the `AuditService` (SMA-446 Task A10).
+//! `ServiceAccountService` (SMA-445 Task 21), the `ServiceInfoService` (SMA-505, always
+//! mounted), and — when `iam.audit` is enabled — the `AuditService` (SMA-446 Task A10).
 
 pub mod audit;
 pub mod authn;

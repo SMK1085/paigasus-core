@@ -96,6 +96,18 @@ async fn disabling_authz_admin_removes_policy_role_grant_and_retirement_routes()
         let (status, _) = send(&app, "GET", path, None, Some(token.as_str())).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{path} must be unmounted");
     }
+    // The system-policy retirement route is mounted by the SAME `if caps.authz_admin` branch
+    // as the two routes above (`adapters/http/mod.rs::app_routes`'s `.merge(system_retirement::
+    // router())`), and the spec singles it out as the most privileged route this flag gates —
+    // but nothing previously requested it, so a refactor moving that merge out of the branch
+    // would leave it mounted with this test's name still claiming otherwise. `SystemRetirementService::retire`
+    // authorizes FIRST, before any lookup (root-only) — so a MOUNTED route answers 403 for this
+    // non-root token, never 404, which is what makes 404 here proof the route is actually gone
+    // rather than an artifact of the made-up id or empty body. `send_raw`, not `send`: the
+    // rejection body here is not guaranteed to be the crate's JSON envelope.
+    let retire_path = "/v1/authz/system-policies/does-not-exist/retire";
+    let response = send_raw(&app, "POST", retire_path, Some(serde_json::json!({})), Some(token.as_str())).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND, "{retire_path} must be unmounted");
     // is-authorized is a service-to-service primitive and stays mounted regardless — anything
     // other than 404 proves it is still routed. An empty `{}` body fails `IsAuthorizedBody`'s
     // required-field deserialization, and axum's own `Json` extractor rejection renders as
