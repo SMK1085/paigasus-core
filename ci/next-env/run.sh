@@ -31,6 +31,19 @@ if [ ! -f "$FILE" ]; then
   exit 2
 fi
 
+# Present is not the same as TRACKED, and only tracked is meaningful here. `git diff`
+# ignores untracked paths, so after a `git rm --cached` (a plausible "it's generated, stop
+# tracking it" move) typegen would recreate the file, the diff would compare nothing, and
+# this gate would report a clean pass forever while guarding an untracked file. Verified by
+# reproducing exactly that before adding this check. (CodeRabbit review, SMA-519)
+if ! git ls-files --error-unmatch -- "$FILE" >/dev/null 2>&1; then
+  echo "next-env gate: '$FILE' exists but is NOT tracked by git." >&2
+  echo "  This gate compares generated output against the committed copy; with nothing" >&2
+  echo "  committed that comparison is vacuous and would pass unconditionally." >&2
+  echo "  Re-track the file, or remove this gate deliberately rather than leaving it inert." >&2
+  exit 2
+fi
+
 # If typegen dies before writing the file, restore it rather than leaving the tree broken.
 # A DRIFTING file is deliberately left in place: it is the corrected content, ready to commit.
 restore_if_absent() {
