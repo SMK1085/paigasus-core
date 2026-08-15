@@ -1,0 +1,41 @@
+# Vendored proto TOML plugin for osv-scanner (SMA-518).
+#
+# Resolves official, checksummed google/osv-scanner GitHub release binaries. Same
+# vendoring rationale as buf/cargo-deny: a static schema over official release assets —
+# nothing upstream to maintain.
+#
+# Assets are BARE binaries (not archives), like buf and unlike cargo-deny's nested
+# cargo-dist tarballs — so no `exe-path` is needed on any platform.
+#
+# osv-scanner names assets with Go's GOOS/GOARCH: osv-scanner_{linux,darwin,windows}_
+# {amd64,arm64}. proto's default {arch} tokens are Rust triples (x86_64/aarch64), so BOTH
+# arches need remapping — unlike buf, which only remaps aarch64 because its amd64 asset is
+# already named x86_64. There is no per-OS naming divergence here, so a single global
+# [install.arch] covers every platform and no [platform.*.arch] override is required.
+
+name = "osv-scanner"
+type = "cli"
+
+[platform.linux]
+download-file = "osv-scanner_linux_{arch}"
+checksum-file = "osv-scanner_SHA256SUMS"
+
+[platform.macos]
+download-file = "osv-scanner_darwin_{arch}"
+checksum-file = "osv-scanner_SHA256SUMS"
+
+[platform.windows]
+download-file = "osv-scanner_windows_{arch}.exe"
+checksum-file = "osv-scanner_SHA256SUMS"
+
+[install]
+checksum-url = "https://github.com/google/osv-scanner/releases/download/v{version}/{checksum_file}"
+download-url = "https://github.com/google/osv-scanner/releases/download/v{version}/{download_file}"
+
+# Go GOARCH naming; uniform across all three OSes.
+[install.arch]
+x86_64 = "amd64"
+aarch64 = "arm64"
+
+[resolve]
+git-url = "https://github.com/google/osv-scanner"

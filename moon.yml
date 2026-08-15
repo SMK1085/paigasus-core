@@ -23,6 +23,29 @@ tasks:
       - 'rs/Cargo.lock'
       - 'rs/deny.toml'
 
+  osv:
+    description: 'osv-scanner advisory gate over the npm + pip lockfiles — the ts/py counterpart to :deny (SMA-518).'
+    # rs/ is deliberately excluded: :deny already gates it AND enforces license + yanked-crate
+    # policy that OSV does not, so folding Rust in here would lose coverage, not add it.
+    #
+    # Wrapped in a script because osv-scanner's exit codes alone are not a sufficient gate: its
+    # "no package sources found" error (128) is evaluated IN AGGREGATE, so one lockfile silently
+    # parsing to zero packages while the other is healthy exits 0 and reads as clean. run.sh
+    # asserts a per-lockfile package count as a control. See the header there.
+    script: 'ci/osv/run.sh'
+    toolchain: 'system'
+    # Narrow inputs — `repo` owns the whole tree, so without these the gate runs on every change.
+    # NOTE these only re-key the gate when dependencies actually MOVE. The scheduled workflow
+    # (.github/workflows/security-scan.yml) is what catches an advisory published against an
+    # unchanged lockfile — which is how the SMA-517 backlog accumulated in the first place.
+    inputs:
+      - 'ci/osv/**/*'
+      - 'osv-scanner.toml'
+      - 'ts/pnpm-lock.yaml'
+      - 'py/uv.lock'
+      - '.prototools'
+      - '.proto/plugins/osv-scanner.toml'
+
   machete:
     description: 'cargo-machete unused-dependency check over the rs/ workspace (SMA-375).'
     command: 'cargo machete rs'

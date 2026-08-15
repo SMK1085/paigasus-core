@@ -1,0 +1,19 @@
+# osv-scanner waivers for the npm + pip lockfiles (SMA-518).
+#
+# This is the JS/Python counterpart to the `[advisories] ignore` list in rs/deny.toml, and
+# it is held to the same standard: an entry must explain why the vulnerable code path is
+# unreachable in this repo, or why no upgrade exists — not merely that the finding is
+# inconvenient. `rs/deny.toml`'s RUSTSEC-2023-0071 entry is the model. An unjustified
+# waiver is worse than the alert backlog it replaces, because it is invisible.
+#
+# Prefer fixing over waiving. For a pinned npm transitive, add a range-scoped selector to
+# the `overrides:` block in ts/pnpm-workspace.yaml; for pip, `uv lock --upgrade-package`.
+#
+# Format (osv-scanner 2.x):
+#
+#   [[IgnoredVulns]]
+#   id = "GHSA-xxxx-xxxx-xxxx"
+#   # ignoreUntil = 2026-01-01   # optional — the waiver re-fires after this date
+#   reason = "Why the vulnerable path is unreachable here, or why no fix exists."
+#
+# There are currently no waivers. Every finding to date has been fixed by upgrading.
