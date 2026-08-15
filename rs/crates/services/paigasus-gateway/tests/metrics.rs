@@ -86,6 +86,7 @@ fn unused_state() -> AppState {
         iam: Arc::new(UnusedIam),
         openai: Arc::new(unused_openai()),
         max_request_bytes: 1_048_576,
+        stream_enabled: true,
     }
 }
 
@@ -136,6 +137,7 @@ async fn successful_proxied_request_records_iam_and_upstream_metrics() {
         iam: Arc::new(AllowedIam),
         openai: Arc::new(openai),
         max_request_bytes: 1_048_576,
+        stream_enabled: true,
     };
     let app: Router = router(state).merge(paigasus_observability::metrics_router(handle.clone()));
 

@@ -43,6 +43,9 @@ pub struct AppState {
     pub openai: Arc<OpenAiClient>,
     /// Max inbound request-body size in bytes; an over-limit body is rejected with `413`.
     pub max_request_bytes: usize,
+    /// SMA-505: whether streamed completions are served. `false` makes `chat` reject
+    /// `stream: true` with `400` and withdraws `gateway.chat.stream` from the descriptor.
+    pub stream_enabled: bool,
 }
 
 /// The gateway's HTTP surface. `/healthz` + `/readyz` are public (no auth, no body limit); the
@@ -208,6 +211,7 @@ mod tests {
             iam,
             openai: Arc::new(unused_openai()),
             max_request_bytes: 1_048_576,
+            stream_enabled: true,
         }
     }
 

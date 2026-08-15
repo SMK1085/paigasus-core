@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         iam: Arc::new(iam),
         openai: Arc::new(openai),
         max_request_bytes: config.max_request_bytes,
+        stream_enabled: config.stream_enabled,
     };
 
     let app = router(state);
