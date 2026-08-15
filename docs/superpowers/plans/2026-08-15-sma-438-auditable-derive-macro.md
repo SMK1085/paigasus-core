@@ -743,8 +743,15 @@ In `rs/crates/libs/paigasus-proto/Cargo.toml`, add after `[dependencies]`:
 # Parsing (not regex) is what makes that check immune to comments, oneofs, nested messages and
 # the several legal spellings of a cross-package type reference.
 syn.workspace = true
-quote.workspace = true
 ```
+
+**Do not add `quote` here.** The drift test never calls `quote!` — it compares path segments as
+strings — and an unused dev-dep reds `:machete` in Task 5.
+
+**Do not add `syn`'s `extra-traits` feature here either.** It gates `Debug`/`PartialEq`/`Hash` for
+the whole `syn` AST, and this test only ever formats its own `Finding` struct (which derives
+`Debug`). Task 1 needed that feature solely because one test's panic message formatted a
+`syn::ImplItem` with `{:?}`; nothing below does.
 
 - [ ] **Step 2: Write the drift test**
 
