@@ -80,6 +80,18 @@ fn parse_policy_kind(raw: &str) -> Result<PolicyKind, TenancyError> {
     }
 }
 
+/// SMA-505: policy/role-grant ADMINISTRATION is gated by `authz.admin_enabled`. `IsAuthorized`
+/// is deliberately not — it is the gateway's per-request primitive, and no capability toggle
+/// may break it. `UNIMPLEMENTED` is what a client would get from a server that never registered
+/// the RPC, so a disabled capability is indistinguishable from a build that never had it.
+fn require_authz_admin(state: &AppState) -> Result<(), Status> {
+    if state.capabilities.authz_admin {
+        Ok(())
+    } else {
+        Err(Status::unimplemented("capability iam.authz.cedar is not enabled on this service"))
+    }
+}
+
 #[tonic::async_trait]
 impl AuthorizationService for AuthzGrpc {
     /// `IsAuthorized`: see the module docs for the self/admin exposure rule.
@@ -117,6 +129,7 @@ impl AuthorizationService for AuthzGrpc {
     /// `adapters::http::authz::put_policy`) — the store itself separately rejects mutating an
     /// already-persisted system row.
     async fn put_policy(&self, request: Request<PutPolicyRequest>) -> Result<Response<PutPolicyResponse>, Status> {
+        require_authz_admin(&self.state)?;
         let started = Instant::now();
         let result: Result<Response<PutPolicyResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
@@ -144,6 +157,7 @@ impl AuthorizationService for AuthzGrpc {
     }
 
     async fn delete_policy(&self, request: Request<DeletePolicyRequest>) -> Result<Response<DeletePolicyResponse>, Status> {
+        require_authz_admin(&self.state)?;
         let started = Instant::now();
         let result: Result<Response<DeletePolicyResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
@@ -157,6 +171,7 @@ impl AuthorizationService for AuthzGrpc {
     }
 
     async fn list_policies(&self, request: Request<ListPoliciesRequest>) -> Result<Response<ListPoliciesResponse>, Status> {
+        require_authz_admin(&self.state)?;
         let started = Instant::now();
         let result: Result<Response<ListPoliciesResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
@@ -173,6 +188,7 @@ impl AuthorizationService for AuthzGrpc {
     }
 
     async fn grant_role(&self, request: Request<GrantRoleRequest>) -> Result<Response<GrantRoleResponse>, Status> {
+        require_authz_admin(&self.state)?;
         let started = Instant::now();
         let result: Result<Response<GrantRoleResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
@@ -193,6 +209,7 @@ impl AuthorizationService for AuthzGrpc {
     }
 
     async fn revoke_role(&self, request: Request<RevokeRoleRequest>) -> Result<Response<RevokeRoleResponse>, Status> {
+        require_authz_admin(&self.state)?;
         let started = Instant::now();
         let result: Result<Response<RevokeRoleResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
@@ -210,6 +227,7 @@ impl AuthorizationService for AuthzGrpc {
     }
 
     async fn list_role_grants(&self, request: Request<ListRoleGrantsRequest>) -> Result<Response<ListRoleGrantsResponse>, Status> {
+        require_authz_admin(&self.state)?;
         let started = Instant::now();
         let result: Result<Response<ListRoleGrantsResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
