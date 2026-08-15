@@ -5,10 +5,16 @@
 //! mirrors `memberships.rs`'s thin extract -> service call -> map shape, except every
 //! handler here ALSO extracts the caller's [`AuthContext`] (the acting principal), since
 //! everything beneath these routes (`Authorize::decide`, `RoleService`, `PolicyService`)
-//! needs an actor to authorize against. Management routes (policies/role-grants) are
-//! doubly gated: bearer-enforced (this module sits behind `auth_middleware::require_bearer`,
-//! same as every other route merged into `router()`'s `protected` sub-router) AND
-//! self-authorized by the application services themselves (`PutPolicy`/`GrantRole` etc.).
+//! needs an actor to authorize against.
+//!
+//! [`decision_router`] (`POST /v1/authz/is-authorized`) and [`admin_router`] (the four
+//! policy/role-grant routes) are two separate `Router<AppState>`s, not one (SMA-505): both
+//! sit behind `auth_middleware::require_bearer` in `mod.rs`'s `app_routes`, but only
+//! `admin_router` is additionally conditional on `authz.admin_enabled` — `is-authorized` is
+//! the gateway's per-request authorization primitive and stays mounted regardless. The
+//! management routes `admin_router` carries are therefore TRIPLY gated: bearer-enforced,
+//! `authz.admin_enabled`-gated at the router level, AND self-authorized by the application
+//! services themselves (`PutPolicy`/`GrantRole` etc.).
 //!
 //! **`IsAuthorized` self/admin exposure rule (spec §9.2, challenge M6, as scoped for this
 //! task):** enforced by [`Authorize::decide_gated`] — a caller may always ask about their

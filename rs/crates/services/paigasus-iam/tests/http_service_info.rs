@@ -124,7 +124,14 @@ async fn disabling_apikey_management_removes_management_but_keeps_introspection(
     provision(&state, &token).await;
 
     let sa = "00000000-0000-0000-0000-000000000001";
-    let (status, _) = send(&app, "GET", &format!("/v1/service-accounts/{sa}/api-keys"), None, Some(token.as_str())).await;
+    // A GET here would 404 from `ApiKeyService::list` itself (it looks the service account up
+    // BEFORE authorizing, and no such account exists in a freshly migrated DB), so it cannot
+    // distinguish "route unmounted" from "no such service account" — a mounted route would 404
+    // too, making the assertion vacuous. A POST with an empty body instead reaches the HANDLER's
+    // own `scope_prn is required` check (`adapters::http::api_keys::issue`) before any
+    // application-layer lookup, which is a 400 whenever the route IS mounted — so 404 here
+    // genuinely proves unmounting.
+    let (status, _) = send(&app, "POST", &format!("/v1/service-accounts/{sa}/api-keys"), Some(serde_json::json!({})), Some(token.as_str())).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "key management must be unmounted");
 
     // Introspection is a service-to-service primitive the gateway calls per request.
