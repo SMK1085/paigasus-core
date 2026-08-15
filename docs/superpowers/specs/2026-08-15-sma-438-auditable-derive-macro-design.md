@@ -238,7 +238,7 @@ first draft told.
 | Named struct with zero fields (`struct S {}`) | E-field at the type name |
 | Tuple struct / unit struct | E-shape at the type name |
 | Enum / union | E-shape at the type name |
-| Raw-ident field `r#audit` | impl emitted (`Ident` comparison is raw-insensitive) |
+| Raw-ident field `r#audit` | impl emitted — **but only because** the derive compares `syn::ext::IdentExt::unraw()`, not the `Ident` itself. Probed: `ident == "audit"` is `false` for `r#audit` (it stringifies as `"r#audit"`), so a naive comparison would reject it. Unreachable from prost today (`audit` is not a Rust keyword) but cheap to get right. |
 | `audit` field of the wrong type | a rustc type error at the generated impl — `E0308`, `E0599`, or `E0283` depending on the type |
 | Derive where a manual `impl Auditable` exists | rustc `E0119`; the one known instance is removed in §4.4 |
 | Derive from a crate not depending on `paigasus-proto` | rustc `E0433: could not find paigasus_proto`; documented on the derive |
