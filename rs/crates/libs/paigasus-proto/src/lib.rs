@@ -42,3 +42,6 @@ pub mod audit;
 
 /// Wire-key transform for the `Capability` registry in `common::v1`.
 pub mod capability;
+
+/// Wire-string helpers for the canonical error registry (`common::v1::ErrorReason`/`ErrorDomain`).
+pub mod error;

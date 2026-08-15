@@ -22,5 +22,12 @@ breaking:
     # FILE-category check.
     - FIELD_NO_DELETE_UNLESS_NAME_RESERVED
     - FIELD_NO_DELETE_UNLESS_NUMBER_RESERVED
+    # Same asymmetry, same fix, for enum values (SMA-498). The canonical error
+    # registry in common/v1/error.proto declares codes ahead of their emitters,
+    # so a mis-spelled value must be retractable via reserve+add rather than
+    # permanent from first commit. ADR-0019 amendment A1.2.
+    - ENUM_VALUE_NO_DELETE_UNLESS_NAME_RESERVED
+    - ENUM_VALUE_NO_DELETE_UNLESS_NUMBER_RESERVED
   except:
     - FIELD_NO_DELETE
+    - ENUM_VALUE_NO_DELETE
