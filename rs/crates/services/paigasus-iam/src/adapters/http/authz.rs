@@ -39,9 +39,17 @@ use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
 
-pub fn router() -> Router<AppState> {
+/// `POST /v1/authz/is-authorized` — the authorization DECISION endpoint. Always mounted: it is
+/// the service-to-service primitive the gateway calls per request, not policy administration,
+/// so no `authz.admin_enabled` setting removes it (SMA-505 D8).
+pub fn decision_router() -> Router<AppState> {
+    Router::new().route("/v1/authz/is-authorized", post(is_authorized))
+}
+
+/// Policy and role-grant ADMINISTRATION — gated by `authz.admin_enabled`, and the surface the
+/// `iam.authz.cedar` capability key describes.
+pub fn admin_router() -> Router<AppState> {
     Router::new()
-        .route("/v1/authz/is-authorized", post(is_authorized))
         .route("/v1/authz/policies", post(put_policy).get(list_policies))
         .route("/v1/authz/policies/{policy_id}", delete(delete_policy))
         .route("/v1/authz/role-grants", post(create_role_grant).get(list_role_grants))
