@@ -10,5 +10,8 @@
   },
   "dependencies": {
     "@commitlint/config-conventional": "catalog:"
+  },
+  "engines": {
+    "node": ">=24"
   }
 }
