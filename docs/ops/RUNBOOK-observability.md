@@ -131,7 +131,7 @@ own bounded `route` template) so scrape/health traffic doesn't dominate the RED 
 
 | metric | type | labels | meaning / expected range |
 |---|---|---|---|
-| `gateway_iam_calls_total` | counter | `operation`, `result` | Every call the gateway's `require_iam_auth` middleware makes to IAM. `operation` ∈ `introspect` (`IntrospectApiKey`) / `authorize` (`IsAuthorized`, issued as a self-query — §4 gateway-M0 design §4.3). `result` ∈ `ok` / `denied` (authz `allowed == false`, or `Unauthenticated` from introspect) / `unavailable` (IAM transport/connection failure — maps to a `503` to the caller) / `error` (any other IAM-side error, maps to `500`). |
+| `gateway_iam_calls_total` | counter | `operation`, `result` | Every call the gateway's auth middleware makes to IAM — from **either** `require_iam_auth` (the chat path: `introspect` + `authorize`) **or** `require_authenticated` (SMA-505's capability-discovery path: `introspect`, then `introspect_token` on failure; never `authorize` — that path performs no authorization). `operation` ∈ `introspect` (`IntrospectApiKey`, either middleware) / `introspect_token` (`Introspect`, `require_authenticated` only) / `authorize` (`IsAuthorized` self-query, `require_iam_auth` only — §4 gateway-M0 design §4.3). `result` ∈ `ok` / `denied` (authz `allowed == false`; `Unauthenticated` from either introspect call; OR, on `introspect_token` only, a VALIDATED OIDC identity IAM reports as unprovisioned — `require_authenticated` deliberately accepts that case, SMA-505 D5) / `unavailable` (IAM transport/connection failure — maps to a `503` to the caller) / `error` (any other IAM-side error, maps to `500` on the chat path or `401`/`503` on the discovery path). **`{operation="introspect", result="denied"}` is expected-non-zero, not a symptom:** `require_authenticated` always tries the API-key introspect first, so every legitimate OIDC discovery call increments it once before its `introspect_token` call succeeds — normal traffic. No alert reads `result="denied"` for either operation (see `GatewayIamDependencyUnavailable` below, `result="unavailable"` only). |
 | `gateway_iam_call_duration_seconds` | histogram | `operation` | Latency of each IAM call, from the same middleware call sites. |
 | `gateway_upstream_requests_total` | counter | `status_class` | One increment per OpenAI upstream call, `status_class` derived from the upstream HTTP status (`2xx`/`4xx`/`5xx`). **Streaming caveat (TTFB):** for `stream: true` this only covers the initial POST/headers exchange — `OpenAiClient::chat_completion` returns as soon as the response head arrives, and the SSE body streams lazily afterward. A mid-stream terminal SSE error (emitted as a `data: {"error":…}` event, §5 gateway-m0 spec) happens **past** this measured boundary and is **not** counted here. |
 | `gateway_upstream_request_duration_seconds` | histogram | — | Upstream call latency — same TTFB caveat as above; do not read this as end-to-end stream duration. |
@@ -1404,11 +1404,12 @@ not a gateway bug.
 
 ### `GatewayIamDependencyUnavailable` — gateway can't reach IAM (critical)
 
-**Meaning.** `gateway_iam_calls_total{result="unavailable"}` is incrementing — the gateway's
-`require_iam_auth` middleware is getting transport-level failures calling IAM's
-`IntrospectApiKey`/`IsAuthorized` gRPC endpoints, which the gateway maps to a `503` (retryable) to
-its own callers, deliberately distinct from `401`/`403` so client SDKs don't treat it as a fatal
-auth failure.
+**Meaning.** `gateway_iam_calls_total{result="unavailable"}` is incrementing — the gateway's auth
+middleware (`require_iam_auth` on the chat path, or `require_authenticated` on the SMA-505
+capability-discovery path) is getting transport-level failures calling IAM's
+`IntrospectApiKey`/`IsAuthorized`/`Introspect` gRPC endpoints, which the gateway maps to a `503`
+(retryable) to its own callers, deliberately distinct from `401`/`403` so client SDKs don't treat
+it as a fatal auth failure.
 
 **Confirm:** is IAM up (`up{job="iam"} == 1`)? Is the gateway's `iam.grpc_addr` correct and
 network-reachable from wherever the gateway is running? Check IAM's own health

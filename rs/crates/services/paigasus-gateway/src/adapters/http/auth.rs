@@ -143,6 +143,35 @@ pub async fn require_iam_auth(State(iam): State<Arc<dyn Iam>>, mut req: Request,
 /// in-user-request flow ADR-0020 D4 specifies. The descriptor is byte-identical for every
 /// caller and exposes no per-principal data, so accepting widens nothing. This relaxation is
 /// scoped to THIS middleware; `require_iam_auth` is unchanged.
+///
+/// ### Why accepting the WHOLE `PermissionDenied` code is safe today (and when it stops being so)
+/// IAM's gRPC layer collapses THREE `AuthnError` variants onto `Code::PermissionDenied`, with no
+/// structured reason on the wire to tell them apart (`paigasus-iam`'s
+/// `adapters/grpc/convert.rs:56-58`): `IdentityNotProvisioned` (the case this relaxation targets),
+/// `ProvisioningFailed`, and `PrincipalInactive`. Accepting the whole code is correct only because
+/// the other two are UNREACHABLE via `Introspect` as the code stands today (verified against
+/// `paigasus-iam`'s source, not assumed):
+/// - `ProvisioningFailed` can only be returned by `jit_provision`
+///   (`application/authenticate_token.rs`), which `AuthenticateToken::resolve` calls ONLY on the
+///   `Provisioning::Enabled` arm (`:106-112`, `self.jit_provision(&claims).await?`). The
+///   `Provisioning::Disabled` arm `Introspect` always uses returns `IdentityNotProvisioned`
+///   immediately instead (`:104-105`) — `jit_provision` is never reached.
+/// - `PrincipalInactive` requires resolving to a principal whose `PrincipalStatus` is `Disabled`
+///   (`:127-129`). Production code sets that status in exactly one call site,
+///   `ServiceAccountService::archive` (`application/service_accounts.rs:205,222`) — which disables
+///   a SERVICE-ACCOUNT principal. Service accounts authenticate by API key, never by OIDC token,
+///   so they have no `(issuer, subject)` row in `external_identity` for `resolve`'s
+///   `find_by_issuer_subject` lookup to ever match. A disabled SA can therefore never be the
+///   principal an OIDC `Introspect` call resolves to.
+///
+/// **If either of those becomes reachable through `Introspect`** — a future "disable a user"
+/// use case, or any change that lets `ProvisioningFailed` surface from a read-only resolve — **this
+/// match arm must narrow**, not stay a blanket `PermissionDenied` accept. Matching on the `Status`
+/// MESSAGE STRING instead is deliberately not done: those strings
+/// (`adapters/grpc/convert.rs:56-58`) are bare literals with no test pinning their text, so an IAM
+/// copy-edit would silently flip this middleware to rejecting every unprovisioned caller. The
+/// durable fix — a structured `ErrorInfo` reason on IAM's authn gRPC surface — is IAM-side and out
+/// of scope for this task; tracked as a follow-up.
 pub async fn require_authenticated(State(iam): State<Arc<dyn Iam>>, req: Request, next: Next) -> Response {
     let Some(token) = bearer(req.headers()) else {
         return GatewayError::MissingBearer.into_response();
@@ -160,9 +189,19 @@ pub async fn require_authenticated(State(iam): State<Arc<dyn Iam>>, req: Request
 
     let started = Instant::now();
     match iam.introspect_token(&token).await {
-        Ok(_) => {
+        Ok(resp) if resp.status == "active" => {
             record_iam_call("introspect_token", "ok", started);
             next.run(req).await
+        }
+        // Belt-and-braces, symmetric with the API-key leg above: a success carrying a non-active
+        // status is a rejected credential, not a pass. Currently a dead branch in production (IAM
+        // resolve fails closed on anything but `Active`, so a success response never carries a
+        // non-active status — see `PrincipalStatus` in `paigasus-iam-core`), but keeping this
+        // fail-closed rather than trusting the field is unset costs nothing and guards exactly the
+        // kind of future IAM change the doc comment above calls out.
+        Ok(_) => {
+            record_iam_call("introspect_token", "denied", started);
+            GatewayError::InvalidCredential.into_response()
         }
         // A validated-but-unprovisioned identity — see the doc comment above. Recorded as
         // "denied" rather than "ok": IAM did reject the RPC, and conflating it with success would
@@ -690,5 +729,32 @@ mod tests {
     async fn require_authenticated_maps_an_unreachable_iam_to_503() {
         let fake = FakeIam::new(IntrospectOutcome::Connect, AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Connect);
         assert_eq!(discovery_status_of(fake, req_with_auth("Bearer any-token")).await, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Review finding (Important 1): the most important negative case for a new authentication
+    /// middleware was missing — neither leg accepts, and neither is a transport failure. Both
+    /// introspections come back a plain `Unauthenticated` (a garbage credential that is neither a
+    /// valid API key nor a valid OIDC token), so the `Err(err) => introspect_error(err)` catch-all
+    /// must map it to `401`, not silently let it through.
+    #[tokio::test]
+    async fn require_authenticated_rejects_an_invalid_credential_with_401() {
+        let fake = FakeIam::new(IntrospectOutcome::Rpc(Code::Unauthenticated), AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(Code::Unauthenticated));
+        assert_eq!(discovery_status_of(fake, req_with_auth("Bearer garbage")).await, StatusCode::UNAUTHORIZED);
+    }
+
+    /// Review finding (Minor 3): pins the symmetric active-status check added to the
+    /// `introspect_token` leg. A dead branch in production today (IAM's `resolve` fails closed on
+    /// anything but `Active`, so a success response never carries a non-active status), but the
+    /// belt-and-braces check exists precisely so a future IAM change can't silently let a
+    /// non-active OIDC identity through — this test proves that guard actually rejects, not just
+    /// that it compiles.
+    #[tokio::test]
+    async fn require_authenticated_rejects_a_non_active_oidc_token_with_401() {
+        let non_active = IntrospectResponse {
+            status: "disabled".to_owned(),
+            ..active_token_response()
+        };
+        let fake = FakeIam::new(IntrospectOutcome::Rpc(Code::Unauthenticated), AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Ok(non_active));
+        assert_eq!(discovery_status_of(fake, req_with_auth(&format!("Bearer {CONSOLE_TOKEN}"))).await, StatusCode::UNAUTHORIZED);
     }
 }
