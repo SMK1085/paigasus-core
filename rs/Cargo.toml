@@ -99,6 +99,20 @@ wasm-bindgen = "0.2"
 # Rust impl" half of the ADR-0005 parity harness, SMA-433). Dev-dependency only — never enters a
 # published artifact.
 proptest = "1"
+# syn / quote / proc-macro2 — the proc-macro toolchain for `paigasus-proto-derive` (SMA-438's
+# #[derive(Auditable)]). All three are ALREADY in Cargo.lock as transitive deps of async-trait
+# and thiserror-impl (proc-macro2 1.0.106, quote 1.0.45, syn 2.0.117 AND syn 3.0.3), so this
+# pins what is already resolved rather than adding to the build. `full` is needed by
+# paigasus-proto's drift test, which calls `syn::parse_file` over the generated sources; the
+# derive crate itself needs only the default features.
+syn = { version = "3", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+# In-tree path dep: the derive crate that generates `impl Auditable` for DTOs embedding
+# AuditMetadata. `paigasus-proto` re-exports it, and buf injects it onto the generated
+# messages — same in-tree-freshness rationale as paigasus-kernel/paigasus-proto above.
+# PUBLISH ORDER (SMA-388): this crate must publish BEFORE paigasus-proto, which depends on it.
+paigasus-proto-derive = { path = "crates/libs/paigasus-proto-derive", version = "0.0.0" }
 # In-tree path dep: the bindings (and future consumers) build against the live kernel, so a
 # kernel edit rebuilds them. This is also the cargo-side half of the affected-graph edge.
 paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.0.0" }

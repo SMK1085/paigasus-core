@@ -2647,6 +2647,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "paigasus-proto-derive"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "paigasus-py-bindings"
 version = "0.0.0"
 dependencies = [
