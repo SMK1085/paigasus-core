@@ -60,15 +60,18 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   and reds `main` after merge (SMA-448: `prn.rs` → `resource_name.rs`). An underscore/hyphen
   suffix (`prn_canonical`, `prn-fields`) is fine.
 - Per-project Moon tasks (`<proj>:build/test/lint/fmt`) do NOT run the repo-level gates
-  (`:deny`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing new
-  crates/deps/proto, run the full graph like CI does: `moon ci :build :test :lint :fmt :deny
-  :machete :typecheck :breaking :affected-smoke :parity-corpus-drift :wasm-getrandom-free
-  :redis-connect-single-site :promtool :observability-drift :nats-permissions :release-parity
-  :release-parity-py :release-parity-ts --base origin/main --include-relations`.
+  (`:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
+  new crates/deps/proto, run the full graph like CI does: `moon ci :build :test :lint :fmt
+  :deny :osv :machete :typecheck :breaking :affected-smoke :parity-corpus-drift
+  :wasm-getrandom-free :redis-connect-single-site :promtool :observability-drift
+  :nats-permissions :release-parity :release-parity-py :release-parity-ts --base origin/main
+  --include-relations`.
 - A new crate that `dependsOn` `paigasus-kernel-rs` reds `:affected-smoke` until it's added to
   the `kernel->bindings` expected set in `ci/affected-graph/run.sh` (strict-equality guard,
   SMA-409). New workspace deps may need `rs/deny.toml` `[licenses] exceptions` or a dev-only
-  `[advisories] ignore`; a dep consumed only by a later commit needs a temporary
+  `[advisories] ignore` (Rust); an npm/pip advisory needs a version bump — a pnpm-workspace
+  `overrides:` selector or `uv lock --upgrade-package` — or a justified `osv-scanner.toml`
+  waiver; a dep consumed only by a later commit needs a temporary
   `[package.metadata.cargo-machete] ignored` allowlist (prune once consumed).
 - Bash tool PATH lacks the proto-managed CLIs; prefix commands with
   `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so moon/uv/buf/nextest resolve to

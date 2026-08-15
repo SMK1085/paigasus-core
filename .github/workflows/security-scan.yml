@@ -1,0 +1,66 @@
+name: security-scan
+
+# Scheduled advisory scan of the npm + pip lockfiles (SMA-518).
+#
+# WHY A SCHEDULE AND NOT JUST THE PR GATE — `repo:osv` runs inside `moon ci`, but Moon keys it
+# on the lockfiles, so it only fires when dependencies actually MOVE. Advisories are published
+# against code that is not changing: the 40-alert backlog cleared in SMA-517 accumulated over
+# weeks with no lockfile edit to trigger anything, and would have surfaced only on the next
+# dependency PR — landing 40 unrelated findings on Dependabot's own bump. This job decouples
+# detection from dependency churn. It is the piece that would actually have caught that.
+#
+# Runs against the default branch. A red run here means an advisory landed on shipped code:
+# triage it, do not let it queue — a scheduled job nobody reads is just the alerts tab again.
+
+on:
+  schedule:
+    # 07:17 UTC daily. Deliberately NOT a round minute — GitHub delays or silently drops
+    # scheduled runs under load, and :00 is where most crons pile up.
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+  # Also validate the gate itself whenever its own wiring changes, so a broken scanner
+  # pin/plugin is caught on the PR that breaks it rather than at 07:17 the next morning.
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/security-scan.yml'
+      - 'ci/osv/**'
+      - 'osv-scanner.toml'
+      - '.proto/plugins/osv-scanner.toml'
+      - '.prototools'
+
+# Least privilege: the job only reads the tree and runs a scanner.
+permissions:
+  contents: read
+
+concurrency:
+  group: security-scan-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  osv:
+    name: osv advisory scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      # Install the proto-pinned osv-scanner directly rather than via `moon setup`: this job
+      # needs no language toolchains (no node/uv/rust), only the scanner and python3 (present
+      # on the runner) for run.sh's report rendering.
+      - name: Install pinned osv-scanner
+        run: proto install osv-scanner
+
+      # Invoked directly, NOT through `moon run repo:osv`: Moon would report the task as cached
+      # whenever the lockfiles are unchanged, which is the normal case here and exactly the
+      # state this job exists to re-check against a freshly published advisory.
+      - name: OSV advisory gate (npm + pip lockfiles)
+        run: ci/osv/run.sh
