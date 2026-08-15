@@ -2640,6 +2640,7 @@ dependencies = [
 name = "paigasus-proto"
 version = "0.0.0"
 dependencies = [
+ "paigasus-proto-derive",
  "prost",
  "prost-types",
  "tonic",

@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-use crate::paigasus::common::v1::AuditMetadata;
+// Re-exported so the derive's generated code has ONE stable anchor to name
+// (`::paigasus_proto::audit::AuditMetadata`) instead of the codegen module layout, which
+// `clean: true` regenerates (SMA-438 D5).
+pub use crate::paigasus::common::v1::AuditMetadata;
+// The derive and the trait below deliberately share a name: macros live in the macro namespace,
+// traits in the type namespace, so `use paigasus_proto::audit::Auditable;` imports BOTH. This is
+// the `serde::Serialize` pattern (SMA-438 F3).
+pub use paigasus_proto_derive::Auditable;
 
 /// Implemented by any DTO/entity that carries [`AuditMetadata`].
 pub trait Auditable {

@@ -6,6 +6,13 @@
 //! `src/generated/` and committed (ADR-0004). Regenerate via
 //! `moon run contracts:generate`.
 
+// Lets the ABSOLUTE path `::paigasus_proto::…` resolve INSIDE this crate. The Auditable derive
+// is injected onto generated messages here (contracts/buf.gen.yaml), and a derive crate cannot
+// depend on paigasus-proto — that is the cycle — so its output must name the trait absolutely.
+// Same trick serde uses. THIS LINE LOOKS REMOVABLE AND IS NOT: deleting it breaks every
+// generated `#[derive(::paigasus_proto::audit::Auditable)]` (SMA-438 F2).
+extern crate self as paigasus_proto;
+
 pub mod paigasus {
     pub mod gateway {
         pub mod v1 {

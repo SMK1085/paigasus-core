@@ -14,6 +14,10 @@ prost.workspace = true
 prost-types.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
+# paigasus-proto-derive: #[derive(Auditable)], re-exported from `audit` and injected onto the
+# generated audit-bearing messages by contracts/buf.gen.yaml (SMA-438). NOT optional — the
+# generated code names it unconditionally, so a feature gate would break codegen.
+paigasus-proto-derive.workspace = true
 
 [lints]
 workspace = true
