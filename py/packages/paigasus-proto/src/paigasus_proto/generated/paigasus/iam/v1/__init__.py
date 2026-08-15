@@ -101,6 +101,7 @@ __all__ = (
 )
 
 import datetime
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -1470,11 +1471,20 @@ class ServiceInfo(betterproto2.Message):
     AuthorizationService's originally-planned Introspect rpc is not duplicated
     there: it folds into AuthnService.Introspect below (spec D4).
 
-    Placeholder so the package generates a concrete type in all three languages.
-    Replaced by real messages in M1; carries a service PRN string for now.
+    DEPRECATED — superseded by `paigasus.common.v1.ServiceInfo`, the real
+    capability descriptor (ADR-0020, SMA-499). Do not use: nothing serves this
+    message, and no RPC accepts or returns it.
+
+    It is retained, rather than removed, only because buf's MESSAGE_NO_DELETE
+    forbids deleting a published message — removal would red `contracts:breaking`.
+    This deprecation is PERMANENT; there is no follow-up that retires it.
     """
 
     prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    def __post_init__(self) -> None:
+        warnings.warn("ServiceInfo is deprecated", DeprecationWarning)
+        super().__post_init__()
 
 
 default_message_pool.register_message("paigasus.iam.v1", "ServiceInfo", ServiceInfo)
