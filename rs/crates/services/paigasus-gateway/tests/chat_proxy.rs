@@ -37,7 +37,7 @@ use paigasus_gateway::adapters::http::{AppState, router};
 use paigasus_gateway::adapters::iam::{Iam, IamError};
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::OpenAiConfig;
-use paigasus_proto::paigasus::iam::v1::IntrospectApiKeyResponse;
+use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse};
 use support::MockOpenAi;
 
 /// The real OpenAI key the gateway is configured with — what the upstream MUST see.
@@ -96,6 +96,10 @@ impl Iam for FakeIam {
 
     async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         Ok(self.allow)
+    }
+
+    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+        unreachable!("the chat path (require_iam_auth) never calls introspect_token")
     }
 }
 

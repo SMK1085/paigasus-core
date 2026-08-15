@@ -26,7 +26,7 @@ use paigasus_gateway::adapters::http::{AppState, router};
 use paigasus_gateway::adapters::iam::{Iam, IamError};
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::OpenAiConfig;
-use paigasus_proto::paigasus::iam::v1::IntrospectApiKeyResponse;
+use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse};
 use support::MockOpenAi;
 
 const CALLER_KEY: &str = "sk-caller-secret";
@@ -45,6 +45,9 @@ impl Iam for UnusedIam {
         unreachable!("these tests never drive the protected route")
     }
     async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+        unreachable!("these tests never drive the protected route")
+    }
+    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
         unreachable!("these tests never drive the protected route")
     }
 }
@@ -69,6 +72,18 @@ impl Iam for AllowedIam {
 
     async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         Ok(true)
+    }
+
+    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+        Ok(IntrospectResponse {
+            principal_prn: CALLER_SA.to_owned(),
+            status: "active".to_owned(),
+            issuer: "https://issuer.example.com".to_owned(),
+            subject: "console-user".to_owned(),
+            expires_at: None,
+            memberships: Vec::new(),
+            role_grants: Vec::new(),
+        })
     }
 }
 

@@ -12,7 +12,7 @@ pub mod chat;
 pub mod dto;
 pub mod error;
 
-pub use auth::require_iam_auth;
+pub use auth::{require_authenticated, require_iam_auth};
 pub use dto::ChatCompletionRequest;
 pub use error::GatewayError;
 
@@ -158,6 +158,9 @@ mod tests {
         async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
             unreachable!("this route must never call IAM")
         }
+        async fn introspect_token(&self, _token: &str) -> Result<paigasus_proto::paigasus::iam::v1::IntrospectResponse, IamError> {
+            unreachable!("this route must never call IAM")
+        }
     }
 
     /// The introspect outcome a [`ProbeIam`] returns for the `/readyz` sentinel probe — either a
@@ -192,6 +195,9 @@ mod tests {
         }
         async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
             unreachable!("the readiness probe never authorizes")
+        }
+        async fn introspect_token(&self, _token: &str) -> Result<paigasus_proto::paigasus::iam::v1::IntrospectResponse, IamError> {
+            unreachable!("the readiness probe never introspects a token")
         }
     }
 

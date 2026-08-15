@@ -150,7 +150,7 @@ fn describe_gateway_metrics() {
     describe_gauge!(names::GATEWAY_HTTP_INFLIGHT_REQUESTS, "Requests currently being handled on the gateway HTTP router.");
     describe_counter!(
         names::GATEWAY_IAM_CALLS_TOTAL,
-        "Calls the gateway's auth middleware makes to IAM (introspect/authorize), labeled by operation and result."
+        "Calls the gateway's auth middleware makes to IAM (introspect/introspect_token/authorize), labeled by operation and result."
     );
     describe_histogram!(names::GATEWAY_IAM_CALL_DURATION_SECONDS, "Latency of gateway-to-IAM calls in seconds.");
     describe_counter!(
