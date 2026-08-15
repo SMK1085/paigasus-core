@@ -10,35 +10,51 @@ packages:
 allowBuilds:
   sharp: true
 
+# Make the `engines.node` floor a hard error instead of a warning. Every workspace
+# package declares `engines.node: >=24` (Active LTS, matching the 24.16.0 pin in
+# .prototools); without this, pnpm only warns and a developer on Node 20/22 installs
+# happily, then hits failures CI never reproduces. NOTE: the .npmrc `engine-strict=true`
+# form is IGNORED by pnpm 11 — it downgrades to a plain "[WARN] Unsupported engine"
+# (verified against pnpm 11.3.0); only this key produces ERR_PNPM_UNSUPPORTED_ENGINE.
+engineStrict: true
+
 # Security overrides for transitive deps that parents pin to vulnerable versions
 # (Dependabot can't auto-PR these — they're not in any manifest). Selectors only
-# touch the vulnerable range, so a patched parent later resolves normally. Each
-# replacement is capped to the selector's own major, so a consumer of an older
-# major is never silently jumped onto a newer one.
+# touch the vulnerable range, so a patched parent later resolves normally.
+#
+# Selectors are bounded on BOTH ends and the replacement is capped to the selector's
+# own major, so a consumer of some other major is never silently dragged across a
+# major boundary. The one deliberate exception is brace-expansion 4.x (see below).
 overrides:
   # GHSA-3jxr-9vmj-r5cp / GHSA-mh99-v99m-4gvg / GHSA-rgw5-rvv9-x895 — brace-expansion ReDoS.
   # Two majors are in the graph (1.x under minimatch@3, 5.x under minimatch@10), so each
   # line needs its own floor.
-  'brace-expansion@<1.1.18': '>=1.1.18 <2'
+  'brace-expansion@>=1.0.0 <1.1.18': '>=1.1.18 <2'
+  # Deliberate cross-major rewrite, and the only one in this block. The advisories model
+  # 4.x and 5.x as a single vulnerable range fixed in 5.0.9: upstream published just 4.0.0
+  # and 4.0.1, never backported the fix, and ships no maintenance-v4 tag — so no secure
+  # 4.x target exists. 5.0.9 requires node "20 || >=22", which this workspace satisfies
+  # (root engines node >=24, .prototools pins 24.16.0). Nothing resolves to 4.x today; this
+  # selector exists so a future 4.x consumer is migrated rather than left unpatched.
   'brace-expansion@>=4.0.0 <5.0.9': '>=5.0.9 <6'
   # GHSA-v2hh-gcrm-f6hx / GHSA-7p8r-x3mc-p8w7 — fast-uri. Transitive via ajv@8.
-  'fast-uri@<3.1.5': '>=3.1.5 <4'
+  'fast-uri@>=3.0.0 <3.1.5': '>=3.1.5 <4'
   # GHSA-h67p-54hq-rp68 / GHSA-52cp-r559-cp3m / GHSA-5p4m-2wfm-xmqj — js-yaml
   # quadratic-complexity DoS in merge-key handling, plus two later parser advisories.
   # Reaches the graph via cosmiconfig (under @commitlint/cli + semantic-release) and
   # @napi-rs/cli.
-  'js-yaml@<4.3.1': '>=4.3.1 <5'
+  'js-yaml@>=4.0.0 <4.3.1': '>=4.3.1 <5'
   # GHSA-28wg-ghj8-5hjv / GHSA-2v37-7h3g-55p8 — nanoid. Pulled in by postcss, so it needs
   # its own floor even after postcss is bumped: postcss@8.5.23 still ships nanoid@3.3.17.
-  'nanoid@<3.3.18': '>=3.3.18 <4'
+  'nanoid@>=3.0.0 <3.3.18': '>=3.3.18 <4'
   # GHSA-r28c-9q8g-f849 / GHSA-fxqj-rqcc-2cmp — postcss XSS via unescaped </style> in
   # stringify output, plus a later advisory. next@16.3.0 already pins a patched 8.5.23;
   # the vulnerable copy now comes from vite@8.
-  'postcss@<8.5.23': '>=8.5.23 <9'
+  'postcss@>=8.0.0 <8.5.23': '>=8.5.23 <9'
   # GHSA-4cwx-7wf7-3272 / GHSA-8xcm-r25x-g524 / GHSA-v3r7-h72x-cjcm / GHSA-jr45-8vmc-qm54 /
   # GHSA-m8rv-5g2x-5cg5 — undici. Two majors in the graph (6.x under @actions/http-client,
   # 7.x under @semantic-release/github).
-  'undici@<6.28.0': '>=6.28.0 <7'
+  'undici@>=6.0.0 <6.28.0': '>=6.28.0 <7'
   'undici@>=7.0.0 <7.29.0': '>=7.29.0 <8'
   # conventional-commits-parser 7.0.1 (pulled in by @commitlint/parse@21.2.0) reads
   # dependabot's `updated-dependencies:` YAML block as a git footer, so the footer starts

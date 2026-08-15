@@ -5,6 +5,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "license": "Apache-2.0",
   "description": "Cross-language Paigasus kernel for Node and the browser (napi + wasm bindings).",
   "keywords": [
