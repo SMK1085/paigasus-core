@@ -14,6 +14,7 @@ use paigasus_gateway::adapters::iam::IamClient;
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::GatewayConfig;
 use paigasus_gateway::runtime;
+use paigasus_gateway::service_info::Capabilities;
 use paigasus_observability::names;
 use tokio::task::JoinSet;
 
@@ -50,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
         iam: Arc::new(iam),
         openai: Arc::new(openai),
         max_request_bytes: config.max_request_bytes,
-        stream_enabled: config.stream_enabled,
+        capabilities: Capabilities::from_config(&config),
     };
 
     let app = router(state);

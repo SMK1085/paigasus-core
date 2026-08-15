@@ -46,9 +46,11 @@ pub struct AppState {
     pub openai: Arc<OpenAiClient>,
     /// Max inbound request-body size in bytes; an over-limit body is rejected with `413`.
     pub max_request_bytes: usize,
-    /// SMA-505: whether streamed completions are served. `false` makes `chat` reject
-    /// `stream: true` with `400` and withdraws `gateway.chat.stream` from the descriptor.
-    pub stream_enabled: bool,
+    /// The capability toggles this build was configured with (SMA-505), projected once via
+    /// `Capabilities::from_config` in `main.rs` (mirrors `paigasus-iam`'s `AppState.capabilities`
+    /// — one source of truth, read by both the `chat` streaming guard and the `service_info`
+    /// descriptor handler, rather than each holding/re-deriving its own bare bool).
+    pub capabilities: crate::service_info::Capabilities,
 }
 
 /// The gateway's HTTP surface. `/healthz` + `/readyz` are public (no auth, no body limit); the
@@ -236,7 +238,7 @@ mod tests {
             iam,
             openai: Arc::new(unused_openai()),
             max_request_bytes: 1_048_576,
-            stream_enabled: true,
+            capabilities: crate::service_info::Capabilities { chat_stream: true },
         }
     }
 

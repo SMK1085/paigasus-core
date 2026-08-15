@@ -136,7 +136,7 @@ fn app_for_with_streaming(fake: FakeIam, base_url: String, max_request_bytes: us
         iam: Arc::new(fake),
         openai: Arc::new(openai),
         max_request_bytes,
-        stream_enabled,
+        capabilities: paigasus_gateway::service_info::Capabilities { chat_stream: stream_enabled },
     };
     router(state)
 }

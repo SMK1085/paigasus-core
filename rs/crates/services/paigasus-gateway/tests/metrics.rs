@@ -26,6 +26,7 @@ use paigasus_gateway::adapters::http::{AppState, router};
 use paigasus_gateway::adapters::iam::{Iam, IamError};
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::OpenAiConfig;
+use paigasus_gateway::service_info::Capabilities;
 use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse};
 use support::MockOpenAi;
 
@@ -101,7 +102,7 @@ fn unused_state() -> AppState {
         iam: Arc::new(UnusedIam),
         openai: Arc::new(unused_openai()),
         max_request_bytes: 1_048_576,
-        stream_enabled: true,
+        capabilities: Capabilities { chat_stream: true },
     }
 }
 
@@ -152,7 +153,7 @@ async fn successful_proxied_request_records_iam_and_upstream_metrics() {
         iam: Arc::new(AllowedIam),
         openai: Arc::new(openai),
         max_request_bytes: 1_048_576,
-        stream_enabled: true,
+        capabilities: Capabilities { chat_stream: true },
     };
     let app: Router = router(state).merge(paigasus_observability::metrics_router(handle.clone()));
 

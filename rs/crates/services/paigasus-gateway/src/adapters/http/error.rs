@@ -177,6 +177,7 @@ mod tests {
         assert_eq!(GatewayError::BadRequestBody.into_response().status(), StatusCode::BAD_REQUEST);
         assert_eq!(GatewayError::UpstreamUnavailable.into_response().status(), StatusCode::BAD_GATEWAY);
         assert_eq!(GatewayError::UpstreamTimeout.into_response().status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(GatewayError::StreamingDisabled.into_response().status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -208,7 +209,10 @@ mod tests {
         assert!(err.get("message").and_then(|m| m.as_str()).is_some_and(|m| !m.is_empty()));
         assert_eq!(err["type"], "invalid_request_error");
         assert_eq!(err["code"], "invalid_api_key");
-        assert!(err["param"].is_null(), "param is always null for gateway-originated errors");
+        assert!(
+            err["param"].is_null(),
+            "InvalidCredential names no request field at fault, so param is null (StreamingDisabled is the one case that sets it, SMA-505 D9)"
+        );
     }
 
     #[tokio::test]

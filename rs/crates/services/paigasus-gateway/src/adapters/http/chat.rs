@@ -79,7 +79,7 @@ pub async fn chat_completions(State(state): State<AppState>, caller: Option<Exte
     // SMA-505 D9: streaming is a request PARAMETER, not a route, so a disabled capability is
     // enforced here rather than by unmounting. Checked before any egress call, so a refused
     // request never reaches the upstream or its rate limit.
-    if stream && !state.stream_enabled {
+    if stream && !state.capabilities.chat_stream {
         return GatewayError::StreamingDisabled.into_response();
     }
 

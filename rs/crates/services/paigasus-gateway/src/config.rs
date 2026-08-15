@@ -346,6 +346,7 @@ mod tests {
             );
             assert_eq!(cfg.upstream.openai.base_url, "https://api.openai.com");
             assert_eq!(cfg.upstream.openai.api_key.expose_secret(), "sk-test-key");
+            assert!(cfg.stream_enabled, "stream_enabled must default to true");
             assert!(cfg.validate().is_ok(), "a valid config should pass validation");
             Ok(())
         });

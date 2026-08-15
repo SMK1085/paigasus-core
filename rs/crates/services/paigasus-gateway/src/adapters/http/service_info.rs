@@ -11,9 +11,7 @@ use axum::{Json, extract::State};
 use paigasus_service_info::ServiceInfoDto;
 
 use super::AppState;
-use crate::service_info::Capabilities;
 
 pub async fn get_service_info(State(state): State<AppState>) -> Json<ServiceInfoDto> {
-    let caps = Capabilities { chat_stream: state.stream_enabled };
-    Json(ServiceInfoDto::from(&caps.descriptor()))
+    Json(ServiceInfoDto::from(&state.capabilities.descriptor()))
 }

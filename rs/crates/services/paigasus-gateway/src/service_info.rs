@@ -81,4 +81,37 @@ mod tests {
             assert!(Capability::from_wire_key(key).is_some(), "{key} is not in the registry");
         }
     }
+
+    /// `Capabilities::from_config` has no caller anywhere else in this crate — production
+    /// copies `cfg.stream_enabled` onto `AppState.capabilities` in `main.rs` and everything
+    /// downstream reads that ONE value, but nothing previously pinned that the projection
+    /// itself tracks the config flag. Checked in BOTH directions so a constant-`true` (or
+    /// constant-`false`) stub would fail this, not just an inverted one.
+    #[test]
+    fn from_config_tracks_stream_enabled_in_both_directions() {
+        use crate::config::{GatewayConfig, IamClientConfig, MetricsConfig, OpenAiConfig, UpstreamConfig};
+
+        fn cfg(stream_enabled: bool) -> GatewayConfig {
+            GatewayConfig {
+                http_addr: "127.0.0.1:0".parse().expect("valid addr"),
+                connect_timeout_secs: 10,
+                first_byte_timeout_secs: 30,
+                stream_idle_timeout_secs: 300,
+                max_request_bytes: 1_048_576,
+                iam: IamClientConfig::default(),
+                upstream: UpstreamConfig {
+                    openai: OpenAiConfig {
+                        base_url: "https://api.openai.com".to_string(),
+                        api_key: secrecy::SecretString::from("sk-test".to_string()),
+                    },
+                },
+                log_level: "info".to_string(),
+                metrics: MetricsConfig::default(),
+                stream_enabled,
+            }
+        }
+
+        assert!(Capabilities::from_config(&cfg(true)).chat_stream, "true must track true");
+        assert!(!Capabilities::from_config(&cfg(false)).chat_stream, "false must track false");
+    }
 }
