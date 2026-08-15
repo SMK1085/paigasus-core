@@ -24,7 +24,11 @@ Every task's requirements implicitly include this section.
 - **Commits:** conventional, workspace-scoped, subject **starts lowercase**, header ≤100 chars, body lines ≤100 chars. Never write `#NNN` in a commit body (it breaks `footer-leading-blank`); write "owner/repo PR NNN". Never `--no-verify`.
 - **Capability wire keys** are exactly: `iam.authz.cedar`, `iam.apikeys`, `iam.audit`, `gateway.chat.stream`. Never hand-write these strings in service code — always go through `Capability::as_wire_key`.
 - **All four config flags default to `true`.** Existing tests must keep passing untouched.
-- **Tests assert capability sets, never sequences** — the proto declares the list unordered.
+- **Service-level tests assert capability SETS, never sequences** — the proto declares the list
+  unordered and tells clients to build a set from it, so a service test that pins an order encodes a
+  property the contract disclaims. The **shared crate's own** tests are the one exception: ordering
+  determinism is the guarantee `descriptor()` makes, so Task 1's tests assert `Vec` equality
+  deliberately. Nothing outside `paigasus-service-info` may do so.
 
 ---
 
@@ -559,11 +563,23 @@ mod tests {
     fn the_descriptor_names_this_service_and_this_crates_build_version() {
         let info = Capabilities { authz_admin: true, apikeys_management: true, audit_query: true }.descriptor();
         assert_eq!(info.service, "iam");
-        // Pinned to the module `const` by path, so replacing its `env!` with a literal is a
-        // visible change in the module this test names. While every crate is version "0.0.0"
-        // this cannot distinguish the service's version from the library's — see the spec § 6.4.
-        assert_eq!(info.version, VERSION);
-        assert!(!info.version.is_empty(), "version must never be empty");
+        // `env!` is expanded HERE, in the test, NOT read back from the module's `VERSION` const.
+        // That is the whole point: replacing the const with a literal (`"1.0.0"`) makes the
+        // served value diverge from this crate's real `Cargo.toml` version and fails the
+        // assertion, where comparing against the const itself would pass trivially.
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+        // SemVer-shaped: `major.minor.patch`, all numeric, ignoring any pre-release/build
+        // suffix. An empty or malformed version fails loudly instead of being served.
+        let core = info.version.split(['-', '+']).next().expect("a version always has a core");
+        let parts: Vec<&str> = core.split('.').collect();
+        assert_eq!(parts.len(), 3, "version core must be major.minor.patch: {}", info.version);
+        assert!(
+            parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())),
+            "version core must be numeric: {}",
+            info.version
+        );
+        // Still NOT proven while every crate is "0.0.0": that this is the SERVICE's version
+        // rather than the shared library's. Both strings are identical today (spec § 6.4).
     }
 
     #[test]
@@ -1371,8 +1387,18 @@ mod tests {
     #[test]
     fn the_descriptor_names_this_crates_build_version() {
         let info = Capabilities { chat_stream: true }.descriptor();
-        assert_eq!(info.version, VERSION);
-        assert!(!info.version.is_empty(), "version must never be empty");
+        // `env!` expanded HERE, not read back from the module's `VERSION` const — see the
+        // identical assertion in paigasus-iam's `service_info` tests for why that distinction
+        // is what gives this test content.
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+        let core = info.version.split(['-', '+']).next().expect("a version always has a core");
+        let parts: Vec<&str> = core.split('.').collect();
+        assert_eq!(parts.len(), 3, "version core must be major.minor.patch: {}", info.version);
+        assert!(
+            parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())),
+            "version core must be numeric: {}",
+            info.version
+        );
     }
 
     #[test]

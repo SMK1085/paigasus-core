@@ -709,9 +709,10 @@ Three assertions replace it:
    that can actually fail today, and it pins the one thing the library controls: it neither rewrites
    nor substitutes the caller's version.
 2. **Wiring, in each service.** The service exposes `const VERSION: &str = env!("CARGO_PKG_VERSION");`
-   in its `service_info` module and the handler is required to use it; the test asserts the served
-   value equals that `const` **by path**, so replacing the `env!` with a literal is a visible source
-   change in the module the test names rather than an invisible drift.
+   in its `service_info` module and the handler is required to use it. The test asserts the served
+   value equals `env!("CARGO_PKG_VERSION")` **expanded in the test itself**, not read back from that
+   const — so substituting a literal for the const makes the served value diverge from the crate's
+   real `Cargo.toml` version and fails, where comparing against the const would pass trivially.
 3. **Non-empty and SemVer-shaped**, so an empty or malformed value fails loudly.
 
 The spec states plainly what is *not* proven: while every crate is `0.0.0`, no test can distinguish
