@@ -467,22 +467,39 @@ if stubs:
     try:
         with open(rp_path, "rb") as fh:
             release_plz = tomllib.load(fh)
+    except FileNotFoundError:
+        # A missing config removes the release block entirely — that IS the repo defect
+        # Check 3 exists to catch, not an infrastructure problem. Route it into errors so
+        # it exits 1, same as any other unblocked-0.0.0 finding.
+        for name in stubs:
+            errors.append(
+                f"{name}: publishable at 0.0.0 but {rp_path} does not exist, so its "
+                "release cannot be blocked. Releasing 0.0.0 permanently burns that "
+                "version on crates.io."
+            )
+        release_plz = None
     except Exception as exc:
         print(f"FATAL: cannot parse {rp_path}: {exc}", file=sys.stderr)
         sys.exit(2)
-    blocked_workspace = release_plz.get("workspace", {}).get("release") is False
-    blocked_packages = {
-        entry.get("name")
-        for entry in release_plz.get("package", [])
-        if entry.get("release") is False
-    }
-    for name in stubs:
-        if not blocked_workspace and name not in blocked_packages:
-            errors.append(
-                f"{name}: publishable at 0.0.0 but rs/release-plz.toml does not block its "
-                "release. Releasing 0.0.0 permanently burns that version on crates.io — "
-                "keep `[workspace] release = false` until SMA-407 moves the floor to 0.1.0."
-            )
+    if release_plz is not None:
+        workspace_release = release_plz.get("workspace", {}).get("release")
+        package_release = {
+            entry["name"]: entry.get("release")
+            for entry in release_plz.get("package", [])
+            if "name" in entry
+        }
+        for name in stubs:
+            # A [[package]] entry OVERRIDES [workspace] for that package, so the effective
+            # value is the package's when present. Anything other than an explicit False —
+            # including release = true and an unset value — leaves the crate releasable.
+            effective = package_release.get(name, workspace_release)
+            if effective is not False:
+                errors.append(
+                    f"{name}: publishable at 0.0.0 but rs/release-plz.toml does not block "
+                    "its release. Releasing 0.0.0 permanently burns that version on "
+                    "crates.io — keep `[workspace] release = false` (and no `[[package]] "
+                    "release = true` override) until SMA-407 moves the floor to 0.1.0."
+                )
 
 if errors:
     print(
@@ -518,7 +535,15 @@ assert_package_list() { # $1 listing file  $2 package name
 # cargo has no distinct exit code for "the registry is down" vs "your crate is broken",
 # so classify on stderr. Returns 2 for infrastructure, 1 for a real assertion failure.
 classify_cargo_failure() { # $1 captured-output file
-  if grep -qiE 'network|failed to fetch|spurious|could not connect|timed out|rate limit|failed to download' "$1"; then
+  # A real compile/packaging failure always wins. rustc diagnostics quote source lines,
+  # which can contain words like "network" — matching those flipped genuine defects into
+  # the retryable bucket.
+  if grep -qE '^error\[E[0-9]+\]|could not compile|failed to verify package tarball' "$1"; then
+    return 1
+  fi
+  # Transient conditions only. A permanent 4xx (a dependency that does not exist on the
+  # registry) is a REAL publishability failure, so it must NOT land here.
+  if grep -qiE 'spurious network error|could not connect|connection timed out|network failure|rate limit|HTTP status 50[234]' "$1"; then
     return 2
   fi
   return 1
