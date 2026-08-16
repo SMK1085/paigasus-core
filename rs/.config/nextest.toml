@@ -21,17 +21,32 @@ nextest-version = { required = "0.9.136" }
 # MEASURED 2026-08-16 on an 18-logical-CPU Apple M5 Max macOS host with an 8-CPU / ~7.8 GB
 # Docker VM (Docker 29.6.2), `CI=1 cargo nextest run -p paigasus-iam`, two runs each (wall clock
 # via `time`, all runs 873 passed / 0 skipped):
-#   uncapped (test-group commented out): 55.8s (clean) / 123.4s (1 flaky: postgres conn timeout)
+#   uncapped (test-group commented out): 55.8s (1 leaky) / 123.4s (1 flaky: postgres conn timeout)
 #   max-threads = 8: 84.7s (clean) / 84.0s (clean)
-#   max-threads = 6: 99.5s (2 flaky)  / 126.6s (1 flaky)
+#   max-threads = 6: 99.5s (2 flaky) / 126.6s (1 flaky)
 #   max-threads = 4: 109.0s (clean, matches the prior 108.4s reference) / 145.0s (1 flaky, 1 leaky)
-# Chose 8, NOT the floor of 4: the data inverts the assumption behind "pick the lowest safe cap"
-# — lower caps here are both SLOWER (4's own average, 127s, exceeds even the noisy uncapped run,
-# 123.4s) and, in this small sample, no less flaky (4 and 6 each hit the same postgres
-# connection-timeout flake that uncapped hit; 8 hit it in neither run). 8 was the fastest,
-# lowest-variance, and only zero-flake configuration tested, and it is not a coincidence that it
-# equals the Docker VM's own CPU count — that is the natural concurrency ceiling, not the floor.
-# Re-derive by repeating the above; the optimum tracks Docker VM capacity, not host CPU count.
+#
+# CAVEAT: n=2 per config, run SEQUENTIALLY in increasing-cap order (uncapped, 4, 6, 8 — never
+# randomized/interleaved), so a warm-up effect (Docker layer cache, connection pools, OS file
+# cache) favoring later-tested configs cannot be excluded. Partial cross-session corroboration
+# exists for 4 (Task 3, a separate earlier session, independently measured 108.4s, matching this
+# run's 109.0s) but NOT for 8, which has no such replicate.
+#
+# Chose 8, NOT the floor of 4 — on VARIANCE, not raw speed. Read literally against the table
+# above, "8 is fastest" is FALSE: uncapped's single best run (55.8s) beats every capped run
+# tested, including both cap=8 runs. What 8 has is PREDICTABILITY and the best average: its two
+# runs span only 84.0-84.7s (a 0.7s range) against uncapped's 55.8-123.4s (a 68s range), and its
+# 84.3s average beats uncapped's 89.6s, cap=6's 113.1s, and cap=4's 127.0s. cap=4 and cap=6 each
+# hit the same postgres connection-timeout flake uncapped hit; cap=8 hit it in neither run.
+#
+# The brief's literal "within ~30% of the uncapped baseline" rule is ambiguous on this data:
+# against uncapped's AVERAGE (89.6s) both 6 (+26%) and 8 (-6%) qualify, which by "lowest cap
+# that qualifies" would pick 6; against uncapped's CLEAN run (55.8s) nothing qualifies. Neither
+# reading is stable given the spreads above, so variance — not the 30% rule — is what actually
+# drove this choice.
+#
+# Re-derive by repeating the above, ideally randomizing/interleaving run order across configs to
+# rule out the warm-up confound; the optimum tracks Docker VM capacity, not host CPU count.
 [test-groups.docker-containers]
 max-threads = 8
 
