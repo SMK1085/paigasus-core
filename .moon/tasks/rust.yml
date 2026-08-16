@@ -24,6 +24,13 @@ tasks:
     inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml']
   lint:
     command: 'cargo clippy --all-targets -- -D warnings'
+    # `^:build` is what makes a task AFFECTED when an upstream changes. Without it clippy
+    # propagated across no edge at all, so an upstream change that tripped `-D warnings` in a
+    # CONSUMER shipped green and redded main later (SMA-526). Declared here rather than per-crate
+    # on purpose: build/test declare theirs in each moon.yml, which is exactly how SMA-505 shipped
+    # a crate with three missing edges. One site means a new crate has nothing to forget.
+    # `repo:affected-smoke` asserts this expansion for every crate (cargo_moon_parity.py A3).
+    deps: ['^:build']
     inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml']
   fmt:
     command: 'cargo fmt --check'
