@@ -178,13 +178,31 @@ pub async fn require_authenticated(State(iam): State<Arc<dyn Iam>>, req: Request
     };
 
     let started = Instant::now();
+    // Whether the API-key leg failed to reach a VERDICT, as opposed to reaching a rejection.
+    // An outage here must not be laundered into a `401` by the fallback below: an API key is
+    // never a valid JWT, so the OIDC leg answers `Unauthenticated` for an API-key caller no
+    // matter how valid the key is. Without this flag the ORDINARY outcome of a transient
+    // API-key-leg failure is a definitive-looking `401` telling the client to stop retrying —
+    // during exactly the outage it should be backing off through.
+    let mut api_key_inconclusive = false;
     match iam.introspect_api_key(&token).await {
         Ok(resp) if resp.status == "active" => {
             record_iam_call("introspect", "ok", started);
             return next.run(req).await;
         }
+        // IAM answered, and the answer was "not active" — a verdict, not an outage.
         Ok(_) => record_iam_call("introspect", "denied", started),
-        Err(err) => record_iam_call("introspect", iam_result(&err), started),
+        Err(err) => {
+            // `IamError` is not `Clone`, so compute the bounded metric label before
+            // `introspect_error` consumes `err`.
+            let label = iam_result(&err);
+            // Reuse `introspect_error`'s own mapping as the predicate rather than re-listing
+            // status codes here: everything it calls `IamUnavailable` is a failure to reach a
+            // verdict, and everything else (`Unauthenticated`/`PermissionDenied`) is a real
+            // rejection. One definition, so the two cannot drift apart.
+            api_key_inconclusive = introspect_error(err) == GatewayError::IamUnavailable;
+            record_iam_call("introspect", label, started);
+        }
     }
 
     let started = Instant::now();
@@ -201,7 +219,7 @@ pub async fn require_authenticated(State(iam): State<Arc<dyn Iam>>, req: Request
         // kind of future IAM change the doc comment above calls out.
         Ok(_) => {
             record_iam_call("introspect_token", "denied", started);
-            GatewayError::InvalidCredential.into_response()
+            preserve_outage(api_key_inconclusive, GatewayError::InvalidCredential).into_response()
         }
         // A validated-but-unprovisioned identity — see the doc comment above. Recorded as
         // "denied" rather than "ok": IAM did reject the RPC, and conflating it with success would
@@ -216,8 +234,24 @@ pub async fn require_authenticated(State(iam): State<Arc<dyn Iam>>, req: Request
             let label = iam_result(&err);
             let mapped = introspect_error(err);
             record_iam_call("introspect_token", label, started);
-            mapped.into_response()
+            preserve_outage(api_key_inconclusive, mapped).into_response()
         }
+    }
+}
+
+/// Keep an IAM outage visible across [`require_authenticated`]'s two-leg fallback.
+///
+/// When the API-key leg never reached a verdict, a `401` from the OIDC leg is not trustworthy:
+/// the caller may hold a perfectly valid API key that IAM was simply unreachable to check, and
+/// the OIDC leg rejects every API key anyway. Report the outage (`503`, retryable) instead of a
+/// credential rejection (`401`, permanent) so a client backs off rather than giving up.
+///
+/// Only ever widens `InvalidCredential` to `IamUnavailable`. An accepted caller is untouched,
+/// and an outcome that is already `IamUnavailable` is unchanged.
+fn preserve_outage(api_key_inconclusive: bool, mapped: GatewayError) -> GatewayError {
+    match mapped {
+        GatewayError::InvalidCredential if api_key_inconclusive => GatewayError::IamUnavailable,
+        other => other,
     }
 }
 
@@ -434,6 +468,16 @@ mod tests {
             memberships: Vec::new(),
             role_grants: Vec::new(),
             scope_prn: CALLER_SCOPE.to_owned(),
+        }
+    }
+
+    /// An API-key introspection that SUCCEEDED but reports a non-active principal — IAM reached
+    /// a verdict, so it is a rejection rather than an outage. Distinguishing the two is what
+    /// `preserve_outage` turns on.
+    fn inactive_response() -> IntrospectApiKeyResponse {
+        IntrospectApiKeyResponse {
+            status: "inactive".to_owned(),
+            ..active_response()
         }
     }
 
@@ -740,6 +784,50 @@ mod tests {
     async fn require_authenticated_rejects_an_invalid_credential_with_401() {
         let fake = FakeIam::new(IntrospectOutcome::Rpc(Code::Unauthenticated), AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(Code::Unauthenticated));
         assert_eq!(discovery_status_of(fake, req_with_auth("Bearer garbage")).await, StatusCode::UNAUTHORIZED);
+    }
+
+    /// CodeRabbit, PR 124: an IAM outage on the API-key leg must survive the OIDC fallback.
+    ///
+    /// This is not a corner case — it is the ORDINARY shape of a transient failure for an
+    /// API-key caller. An API key is never a valid JWT, so `introspect_token` answers
+    /// `Unauthenticated` regardless of how valid the key is; without `preserve_outage` the
+    /// middleware would report `401` (permanent, stop retrying) for a caller whose credential
+    /// IAM merely failed to check. Every retryable API-key-leg failure is covered, because
+    /// `introspect_error` maps each of them to `IamUnavailable`.
+    #[tokio::test]
+    async fn an_inconclusive_api_key_leg_reports_the_outage_rather_than_a_401() {
+        for outcome in [
+            IntrospectOutcome::Connect,
+            IntrospectOutcome::Rpc(Code::Unavailable),
+            IntrospectOutcome::Rpc(Code::DeadlineExceeded),
+            IntrospectOutcome::Rpc(Code::Internal),
+        ] {
+            let fake = FakeIam::new(outcome, AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(Code::Unauthenticated));
+            assert_eq!(
+                discovery_status_of(fake, req_with_auth("Bearer pgs_sk_a-real-key-iam-could-not-check")).await,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "a retryable API-key-leg failure must not become a 401 via the OIDC fallback"
+            );
+        }
+    }
+
+    /// The control for the test above, and what stops it from being a blanket "always 503":
+    /// when the API-key leg reaches a real VERDICT, the `401` must survive. Without this pair,
+    /// `preserve_outage` could widen every rejection to `503` and both tests would still pass.
+    #[tokio::test]
+    async fn a_conclusive_api_key_rejection_still_yields_401_not_503() {
+        for outcome in [
+            IntrospectOutcome::Rpc(Code::Unauthenticated),
+            IntrospectOutcome::Rpc(Code::PermissionDenied),
+            IntrospectOutcome::Ok(inactive_response()),
+        ] {
+            let fake = FakeIam::new(outcome, AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(Code::Unauthenticated));
+            assert_eq!(
+                discovery_status_of(fake, req_with_auth("Bearer garbage")).await,
+                StatusCode::UNAUTHORIZED,
+                "a definitive API-key rejection must stay a 401 — the outage widening is not unconditional"
+            );
+        }
     }
 
     /// Review finding (Minor 3): pins the symmetric active-status check added to the
