@@ -4,8 +4,19 @@ id: 'paigasus-service-info-rs'
 layer: 'library'
 language: 'rust'
 
+# This crate depends on paigasus-proto via `workspace = true` (Cargo.toml:13). Moon 2.3.2's Rust
+# toolchain resolves `path = "..."` deps into the project graph automatically but does NOT resolve
+# workspace-inherited ones, so a `workspace = true` dep MUST be hand-declared here (SMA-524).
+#
+# BOTH declarations are required, and they do different jobs:
+#   * `dependsOn`      creates the project-graph edge (what `moon query projects --affected` follows);
+#   * task `^:build`   schedules the upstream's build (what `moon ci --include-relations` runs).
+# Neither implies the other. `repo:affected-smoke` asserts both (SMA-524 A1/A3).
+dependsOn:
+  - 'paigasus-proto-rs'
+
 tasks:
   build:
-    deps: ['contracts:generate']
+    deps: ['contracts:generate', '^:build']
   test:
-    deps: ['contracts:generate']
+    deps: ['contracts:generate', '^:build']
