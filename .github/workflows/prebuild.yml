@@ -2,8 +2,36 @@ name: prebuild
 
 on:
   workflow_dispatch:
+
+  # POST-merge verification of Rust changes. Deliberately excludes every `ts/` path:
+  # dependabot.yml emits a grouped npm PR every Monday that always touches
+  # ts/pnpm-lock.yaml, and listing it here would fire the full matrix weekly for a change
+  # that cannot affect the addon's Rust source (SMA-520 AC-3).
   push:
     branches: [main]
+    paths:
+      - 'rs/**'                              # includes rs/Cargo.lock + rs/rust-toolchain.toml
+      - '.github/workflows/prebuild.yml'
+      - '.prototools'
+      - '.moon/**'                           # `moon setup` needs workspace.yml as well as toolchains.yml
+
+  # PRE-merge verification of the BUILD INPUTS, which all live in ts/. @napi-rs/cli is
+  # `catalog:` in the kernel package.json, resolved from ts/pnpm-workspace.yaml and pinned in
+  # ts/pnpm-lock.yaml — a napi CLI bump is the change most likely to break a cross-build, so
+  # it is verified before it merges rather than after. `rs/**` is deliberately absent: most
+  # PRs here touch it, and a macOS job on every one of them would raise the bill. Not a
+  # required check (the `Protect main` ruleset requires only `moon ci`), so a skipped run
+  # cannot wedge a merge.
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/prebuild.yml'
+      - '.prototools'
+      - '.moon/**'
+      - 'ts/pnpm-lock.yaml'
+      - 'ts/pnpm-workspace.yaml'
+      - 'ts/packages/paigasus-kernel/package.json'
+      - 'ts/.npmrc'                          # pins the registry for `pnpm install` (steps 83 + 116)
 
 # Build-only verification: read the repo, build addons, run dry-run packaging. No publish, and no
 # GitHub release is created (the assemble job omits napi's opt-in --gh-release flag), so no
@@ -12,8 +40,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: prebuild-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+  # `event_name` is in the GROUP so a manual dispatch cannot cancel a running push-to-main
+  # job — without it both resolve to refs/heads/main and share a group.
+  group: prebuild-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  # Never cancel a push run: this workflow's actions/cache step is the ONLY writer to main's
+  # cache scope, and a cancelled job does not run cache's post-step save. PR and dispatch runs
+  # carry no such value, so superseded ones are cancelled (mirrors ci.yml).
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   build:
