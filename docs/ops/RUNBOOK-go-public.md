@@ -35,7 +35,15 @@ only rotation.
 
 ## 2. Pre-flight A — credential scan
 
-**Status: executed 2026-08-16 — 0 findings across 777 commits on all standard refs.**
+**Status: executed 2026-08-16 — CLEAN.** Two passes, both with zero findings:
+>
+> | Pass | Scope | Result |
+> | -- | -- | -- |
+> | 1 | 777 commits, standard refs only | 0 findings |
+> | 2 | **1,824 commits incl. `refs/pull/*`** (2.06 GB, 24m43s) | **0 findings — `no leaks found`** |
+>
+> Pass 2 is the one that counts; §2's `refs/pull/*` note explains why pass 1 alone would have
+> left most of the disclosure surface unscanned.
 
 Scan the whole history, not the working tree: a credential that was ever committed is exposed even
 if a later commit removed it.
@@ -61,7 +69,8 @@ git --git-dir=core-mirror.git fetch gh '+refs/pull/*:refs/pull/*'
 ```
 
 On this repo that step more than doubled the reachable history — **777 → 1,845 commits** — so
-skipping it would have left the majority of commits unscanned.
+skipping it would have left the majority of commits unscanned. Budget ~25 minutes for the second
+pass; the 2026-08-16 run scanned 2.06 GB in 24m43s.
 
 **A clean scan does not prove absence.** Objects orphaned by force-push and rebase cannot be
 enumerated locally; GitHub retains them and serves them by SHA on public repos. Therefore:
