@@ -64,8 +64,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   new crates/deps/proto, run the full graph like CI does: `moon ci :build :test :lint :fmt
   :deny :osv :machete :typecheck :breaking :affected-smoke :parity-corpus-drift
   :next-env-drift :wasm-getrandom-free :redis-connect-single-site :promtool :observability-drift
-  :nats-permissions :release-parity :release-parity-py :release-parity-ts --base origin/main
-  --include-relations`.
+  :nats-permissions :release-parity :release-parity-py :release-parity-ts :publish-metadata
+  --base origin/main --include-relations`.
 - A new crate that `dependsOn` `paigasus-kernel-rs` reds `:affected-smoke` until it's added to
   the `kernel->bindings` expected set in `ci/affected-graph/run.sh` (strict-equality guard,
   SMA-409). New workspace deps may need `rs/deny.toml` `[licenses] exceptions` or a dev-only

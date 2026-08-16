@@ -340,8 +340,12 @@ would have re-keyed a cold cargo build on every unrelated CI tweak.
 **Cost is not yet measured.** The `~4s` figure in the first draft was a warm local
 `cargo publish --dry-run`; the real cost in CI is a *cold* verify build in
 `rs/target/package/<crate>-<ver>/target`, which shares nothing with the workspace
-`rs/target` cache, plus a crates.io index fetch. Measure it on the implementation PR
-and record the number. If it proves material against the job's 30-minute budget and
+`rs/target` cache, plus a crates.io index fetch. Measured with a cold
+`rs/target/package` (`rm -rf rs/target/package`) on the implementation PR's local
+machine: `time moon run repo:publish-metadata --force` took **2.832s** wall-clock
+(only `paigasus-kernel` is publishable today, so this is a one-crate verify build;
+the CI figure may differ with a shared-runner disk and network path to the crates.io
+index). If it proves material against the job's 30-minute budget and
 the documented disk pressure (`ci.yml:23-43`), the mitigation is to split Check 3
 into its own `publish-version-floor` task (a ~50 ms TOML read) and narrow this task's
 inputs to `rs/**/Cargo.toml` plus per-publishable-crate globs, with a script-side
