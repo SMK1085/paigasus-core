@@ -206,8 +206,12 @@ done
 # rather than a vacuous pass) applies ONLY to the auto-discovery path — an explicit glob that
 # expands to nothing would exit 0 as "no errors found".
 # ---------------------------------------------------------------------------------------------
-if ! actionlint "${ARGS[@]}"; then
-  rc=$?
+# Capture the status BEFORE testing it. Inside `if ! cmd; then`, `$?` is the status of the
+# negation (always 0), which would make the exit-3 branch below dead code and print the wrong
+# code in the message. Verified: `if ! f; then rc=$?` yields 0 for a function returning 3.
+actionlint "${ARGS[@]}"
+rc=$?
+if [ "$rc" -ne 0 ]; then
   if [ "$rc" -eq 3 ]; then
     infra "actionlint found no workflow files to lint (exit 3)"
   fi
@@ -1131,26 +1135,31 @@ unaffected relative to the base, so the mutation must be committed for the check
 
 For each of the three AC-1 classes, run:
 
+**Safety:** capture the pre-mutation SHA and reset to *that literal SHA*, never `HEAD~1`. A
+miscount with `--hard` destroys real work, and this branch's commits are the only copy.
+
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+SAFE=$(git rev-parse HEAD); echo "SAFE=$SAFE"
+git status --porcelain   # MUST be empty before starting; stop if it is not
 
 # (a) invalid syntax
 perl -0pi -e 's/^on:\n/on:\n  workflow_dispatch:\n    paths:\n      - "rs\/**"\n/' .github/workflows/ci.yml
 git add -A && git commit -q -m "test(repo): temporary ac-1 syntax mutation (SMA-525)"
 moon run repo:actionlint --force; echo "exit=$?"
-git reset --hard HEAD~1
+git reset --hard "$SAFE"
 
 # (b) unknown runner label
 sed -i '' 's/^    runs-on: ubuntu-latest$/    runs-on: ubunut-latest/' .github/workflows/ci.yml
 git add -A && git commit -q -m "test(repo): temporary ac-1 runner-label mutation (SMA-525)"
 moon run repo:actionlint --force; echo "exit=$?"
-git reset --hard HEAD~1
+git reset --hard "$SAFE"
 
 # (c) bad expression
 perl -0pi -e 's/      - name: Checkout \(full history/      - run: echo \$\{\{ steps.nope.outputs.x \}\}\n      - name: Checkout (full history/' .github/workflows/ci.yml
 git add -A && git commit -q -m "test(repo): temporary ac-1 expression mutation (SMA-525)"
 moon run repo:actionlint --force; echo "exit=$?"
-git reset --hard HEAD~1
+git reset --hard "$SAFE"
 ```
 
 Expected for each: the task fails, `exit=1`, and the output names the rule (`[syntax-check]`,
