@@ -88,9 +88,14 @@ jobs:
           # `line-tables-only` segment so a cache written before the CARGO_PROFILE_*_DEBUG trim
           # above can't restore a stale full-debuginfo rs/target and reintroduce the disk
           # pressure that trim exists to fix.
-          key: rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-${{ hashFiles('rs/Cargo.lock') }}
+          # `lint-deps` segment (SMA-526): giving lint `^:build` makes downstream crates run clippy,
+          # which writes clippy-driver artifacts `cargo build` never produces. Neither
+          # rust-toolchain.toml nor Cargo.lock changed, so without a new literal segment the primary
+          # key still hits the pre-change entry — and actions/cache SKIPS its save on a primary-key
+          # hit, so the enlarged target would never be written. Cold rebuild every run, forever.
+          key: rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-lint-deps-${{ hashFiles('rs/Cargo.lock') }}
           restore-keys: |
-            rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-
+            rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-lint-deps-
 
       - name: Cache Moon task cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
