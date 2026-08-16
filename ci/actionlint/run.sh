@@ -559,6 +559,154 @@ if ! printf '%s' "$healthy" | actionlint "${ARGS[@]}" -stdin-filename .github/wo
 fi
 
 # ---------------------------------------------------------------------------------------------
+# Check 5 — every `paths:` glob must be expressible AND must match the tree.
+#
+# THIS is the check that closes the failure this gate was filed for; actionlint cannot see it.
+#
+# `git ls-files ':(glob)P'` is NOT a sound model of GitHub filter patterns, in both directions:
+#
+#   - Wildcard-free patterns take DIRECTORY-PREFIX semantics under git. ':(glob)rs' matches 320
+#     tracked files; GitHub matches NOTHING (no file is named `rs`). A dropped '/**' is among the
+#     likeliest hand-edits, so literals are required to be an EXACT tracked path, never a prefix.
+#   - '**' differs. GitHub: "zero or more of any character", slash-crossing anywhere. git: only
+#     crosses '/' as a whole path component. GitHub documents '**.js' as "all .js files in the
+#     repository"; ':(glob)**.js' yields 0 — a false red on the ONLY required check.
+#
+# Hence a restricted vocabulary where both matchers provably agree, and a LOUD rejection
+# otherwise. Never a silently-wrong verdict in either direction.
+#
+# `paths-ignore:` is deliberately EXCLUDED. For `paths:`, matching nothing kills the workflow;
+# for `paths-ignore:`, matching nothing is a no-op and the dangerous direction is matching
+# EVERYTHING. Requiring paths-ignore globs to match would add false-red surface while guarding
+# the wrong end (spec §7, non-goal).
+#
+# SKIP_PATTERNS is the escape hatch of spec §6: a GitHub-valid pattern outside the vocabulary.
+# Every entry needs a comment justifying it, same shape as deny.toml's license exceptions.
+# ---------------------------------------------------------------------------------------------
+SKIP_PATTERNS=(
+  # (empty — add entries as "pattern"  # why, and what verifies it instead)
+)
+
+is_skipped() {
+  local p="$1" s
+  for s in ${SKIP_PATTERNS+"${SKIP_PATTERNS[@]}"}; do
+    [ "$s" = "$p" ] && return 0
+  done
+  return 1
+}
+
+# 0 if every '**' in the pattern is a whole path component ('a/**', '**/b'), 1 if any '**' is
+# embedded in a larger segment ('**.js', 'a**b') — where git and GitHub disagree.
+globstars_are_components() {
+  local seg
+  while IFS= read -r seg; do
+    case "$seg" in
+      '**') ;;
+      *'**'*) return 1 ;;
+    esac
+  done <<< "${1//\//$'\n'}"
+  return 0
+}
+
+# 0 if $1 names an exactly-tracked file (NOT a directory prefix).
+tracked_exact() {
+  local p="$1" f
+  while IFS= read -r -d '' f; do
+    [ "$f" = "$p" ] && return 0
+  done < <(git -c core.quotePath=false ls-files -z -- "$p" 2>/dev/null)
+  return 1
+}
+
+check_pattern() {
+  local file="$1" p="$2" n
+
+  is_skipped "$p" && return
+
+  # Negated entries are exclusions — requiring them to match a file would be wrong. They are
+  # still COUNTED by check 6, which counts raw sequence items before any filtering, so an
+  # all-negated block cannot hard-fail as "key with no items".
+  case "$p" in '!'*) return ;; esac
+
+  # Pathspec-injection guard: a pattern starting with ':' would be read by git as pathspec
+  # magic. The '--' separator and quoting are necessary but not sufficient. Anything outside
+  # this conservative class is rejected rather than passed to git.
+  if ! printf '%s' "$p" | grep -qE '^[A-Za-z0-9._/*-]+$'; then
+    fail "$file: pattern '$p' contains characters this gate will not pass to git.
+      Supported: letters, digits, '.', '_', '/', '*', '-'. If GitHub accepts it, add it to
+      SKIP_PATTERNS in $0 with a justification."
+    return
+  fi
+
+  # '?' is "zero or one of the PRECEDING character" on GitHub but "any single character" in git;
+  # '+' is "one or more of the preceding" on GitHub but a literal in git; '[]' is one alphanumeric
+  # on GitHub but ranges/negation in git. All three would give a wrong verdict, so reject.
+  case "$p" in
+    *'?'*|*'+'*|*'['*|*']'*)
+      fail "$file: pattern '$p' uses '?', '+' or '[]', whose meaning differs between GitHub
+      filter patterns and git pathspecs, so this gate cannot verify it. Rewrite it, or add it to
+      SKIP_PATTERNS in $0 with a justification."
+      return ;;
+  esac
+
+  if ! globstars_are_components "$p"; then
+    fail "$file: pattern '$p' uses '**' inside a path segment. GitHub treats that as
+      slash-crossing ('**.js' = every .js file); git does not, so this gate cannot verify it.
+      Write '**/*.js' instead, or add it to SKIP_PATTERNS in $0 with a justification."
+    return
+  fi
+
+  case "$p" in
+    *'*'*)
+      n="$(git -c core.quotePath=false ls-files -- ":(glob)$p" 2>/dev/null | wc -l | tr -d ' ')"
+      if [ "${n:-0}" -eq 0 ]; then
+        fail "$file: paths glob '$p' matches NO tracked file. The workflow's trigger is
+      (or will become) dead — GitHub reports nothing when a filter matches nothing."
+      fi ;;
+    *)
+      if ! tracked_exact "$p"; then
+        fail "$file: paths entry '$p' is not an exact tracked file path. GitHub filter patterns
+      match FILE paths — a bare directory name matches nothing. Did you mean '$p/**'?"
+      fi ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------------------------
+# Check 6 — every extracted KEY must carry at least one sequence item.
+#
+# Counts RAW items, before the '!' filtering in check_pattern, so a legal all-negated block does
+# not hard-fail. This is what converts an unsupported YAML form — the inline flow `paths: [a, b]`,
+# which the extractor deliberately does not parse — from a silent skip into a loud failure that
+# names the file. The difference between a limitation and a hole.
+# ---------------------------------------------------------------------------------------------
+for wf in "${WORKFLOW_FILES[@]}"; do
+  records="$(extract_paths_keys "$wf")" || infra "extractor failed on $wf"
+  [ -n "$records" ] || continue
+
+  key_kind=""; key_line=""; key_items=0
+
+  flush_key() {
+    if [ -n "$key_kind" ] && [ "$key_items" -eq 0 ]; then
+      fail "$wf:$key_line: '$key_kind:' has no sequence entries this gate could read. If it uses
+      the inline form (paths: [a, b]), rewrite it as a block sequence — the extractor parses only
+      block sequences, and skipping it silently is exactly the failure this gate exists to prevent."
+    fi
+  }
+
+  while IFS=$'\t' read -r rec kind value; do
+    case "$rec" in
+      KEY)
+        flush_key
+        key_kind="$kind"; key_line="$value"; key_items=0 ;;
+      ITEM)
+        key_items=$((key_items + 1))
+        [ "$kind" = "paths" ] && check_pattern "$wf" "$value" ;;
+    esac
+  done <<< "$records"
+
+  flush_key
+done
+
+# ---------------------------------------------------------------------------------------------
 # Check 7 — extractor self-test, invoked for real.
 #
 # The function is defined earlier (immediately after extract_paths_keys) so the `--self-test`
