@@ -478,7 +478,7 @@ git commit -m "feat(repo): add rule-tagged actionlint self-tests and a healthy c
 **Contract:**
 1. Only `paths:`/`paths-ignore:` keys **inside the top-level `on:` mapping** are considered. This makes a `paths:` line inside a `run:` block structurally impossible to mis-extract.
 2. A key emits `KEY` **whether or not** a block follows. If the value after the colon is empty, a block sequence opens. If it is non-empty (the inline flow form `paths: [a, b]`), no block opens and zero `ITEM`s follow — which is exactly what makes check 6 fire loudly instead of silently skipping.
-3. A block ends at the first content line whose indentation is **≤ the key's** (dedent), **not** at the first line that is not a `- ` item.
+3. A block ends at the first **non-item** line whose indentation is **≤ the key's**, **not** at the first line that is not a `- ` item. The "non-item" qualifier is load-bearing: a *flush* block sequence, whose `- ` items sit at the same indentation as their key, is valid YAML, is what Prettier's YAML printer emits, and is accepted by GitHub and actionlint. An earlier draft of this clause said plain "dedent", which read a flush sequence as a closed block and produced a KEY with zero items — a false red inside the repo's only required check.
 4. Blank lines and whole-line comments inside a block are skipped **without** closing it.
 5. A trailing ` #` comment outside quotes is stripped; a `#` inside a quoted scalar is not.
 6. Unquoted, single-quoted and double-quoted scalars are all accepted; surrounding quotes are stripped.
