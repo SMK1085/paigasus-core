@@ -50,15 +50,19 @@ concurrency:
 
 jobs:
   build:
-    name: build ${{ matrix.platform }}
+    name: build ${{ matrix.platform }}${{ matrix.extra_platform && format(' + {0}', matrix.extra_platform) || '' }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    # The darwin leg does two full --release builds; 30 was sized for one.
+    timeout-minutes: ${{ matrix.extra_target && 45 || 30 }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { platform: darwin-x64,       target: x86_64-apple-darwin,        runner: macos-15-intel,   zig: false }
-          - { platform: darwin-arm64,     target: aarch64-apple-darwin,       runner: macos-latest,     zig: false }
+          # Both darwin targets build in ONE macos-latest (arm64) job. The Intel macOS image was
+          # the last x86_64 runner on Actions and retires in August 2027; napi-rs's own generated
+          # CI uses macos-latest for both apple triples with no cross flag, because the macOS SDK
+          # ships both slices. Merging also drops the duplicated proto/Moon/pnpm setup. (SMA-520)
+          - { platform: darwin-arm64,     target: aarch64-apple-darwin,       runner: macos-latest,     zig: false, extra_platform: darwin-x64, extra_target: x86_64-apple-darwin }
           - { platform: win32-x64-msvc,   target: x86_64-pc-windows-msvc,     runner: windows-latest,   zig: false }
           - { platform: linux-x64-gnu,    target: x86_64-unknown-linux-gnu,   runner: ubuntu-latest,    zig: false }
           - { platform: linux-arm64-gnu,  target: aarch64-unknown-linux-gnu,  runner: ubuntu-24.04-arm, zig: false }
@@ -91,15 +95,22 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             rs/target
-          key: prebuild-rust-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('rs/rust-toolchain.toml') }}-${{ hashFiles('rs/Cargo.lock') }}
+          # `dual` segment: the darwin leg now populates TWO target triples under one key.
+          # Without a new literal the merged job would hit the pre-change arm64 key, and
+          # actions/cache skips its post-job save on an exact primary-key hit — so
+          # rs/target/x86_64-apple-darwin/ would be restored-never and saved-never, recompiling
+          # cold on every run. Precedent: ci.yml's `-line-tables-only-` segment, same reason.
+          key: prebuild-rust-${{ runner.os }}-${{ matrix.target }}-dual-${{ hashFiles('rs/rust-toolchain.toml') }}-${{ hashFiles('rs/Cargo.lock') }}
           restore-keys: |
-            prebuild-rust-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('rs/rust-toolchain.toml') }}-
+            prebuild-rust-${{ runner.os }}-${{ matrix.target }}-dual-${{ hashFiles('rs/rust-toolchain.toml') }}-
 
       # Attach the cross target to the pinned 1.95.0 toolchain — run from rs/ so rust-toolchain.toml's
       # override selects 1.95.0, not the runner default (mirrors ci.yml's serial pre-install; spec §2).
-      - name: Add Rust target (pinned toolchain)
+      - name: Add Rust target(s) (pinned toolchain)
         working-directory: rs
-        run: rustup target add ${{ matrix.target }}
+        # rustup accepts several triples at once; matrix.extra_target expands to nothing on the
+        # five single-target legs, leaving the original one-target command.
+        run: rustup target add ${{ matrix.target }} ${{ matrix.extra_target }}
 
       # musl targets cross-compile with cargo-zigbuild (zig supplies the musl libc) on a glibc host,
       # instead of a job-level Alpine container (decision #6 revised — SMA-428 CI). ziglang via pip is
@@ -119,11 +130,55 @@ jobs:
         working-directory: ts/packages/paigasus-kernel
         run: pnpm exec napi build --platform --release --target ${{ matrix.target }} ${{ matrix.zig && '-x' || '' }} --cwd ../../../rs/crates/bindings/paigasus-node-bindings
 
+      # Exact copy of the step above with only --target changed. No `-x`: darwin never
+      # cross-compiles via zig (that is musl-only), and on a macOS host no cross flag is needed
+      # for either apple arch. --cwd is load-bearing — it is how cargo discovers
+      # rs/.cargo/config.toml and therefore the -undefined dynamic_lookup link flags that the
+      # napi cdylib needs on macOS (declared there for BOTH apple triples).
+      - name: Build the addon (second darwin target)
+        if: ${{ matrix.extra_target }}
+        working-directory: ts/packages/paigasus-kernel
+        run: pnpm exec napi build --platform --release --target ${{ matrix.extra_target }} --cwd ../../../rs/crates/bindings/paigasus-node-bindings
+
+      # Nothing in this workflow ever EXECUTES a macOS binary (the only runtime check is
+      # linux-x64-gnu resolution in `assemble`, on ubuntu), so a cross-built darwin artifact is
+      # otherwise unverified. Exact equality, NOT a substring match: `lipo -archs` prints
+      # "x86_64 arm64" for a universal binary, so `grep -q x86_64` would pass for a fat file —
+      # vacuously green in precisely the case worth catching.
+      - name: Verify Mach-O architecture (darwin only)
+        if: runner.os == 'macOS'
+        working-directory: rs/crates/bindings/paigasus-node-bindings
+        run: |
+          set -euo pipefail
+          arm="$(lipo -archs paigasus-node-bindings.darwin-arm64.node)"
+          x64="$(lipo -archs paigasus-node-bindings.darwin-x64.node)"
+          echo "darwin-arm64 archs: [$arm]"
+          echo "darwin-x64   archs: [$x64]"
+          [ "$arm" = "arm64" ]  || { echo "::error::darwin-arm64 is not pure arm64: [$arm]"; exit 1; }
+          [ "$x64" = "x86_64" ] || { echo "::error::darwin-x64 is not pure x86_64: [$x64]"; exit 1; }
+          # Record the minimum-OS stamp rather than assume it. Rust pins the deployment target
+          # per TARGET not per host, so this should match what the old Intel runner produced — but
+          # napi's own generated CI sets MACOSX_DEPLOYMENT_TARGET=10.13 and this workflow does
+          # not. If it regresses, set MACOSX_DEPLOYMENT_TARGET on this job.
+          echo "== LC_BUILD_VERSION =="
+          otool -l paigasus-node-bindings.darwin-x64.node   | grep -A3 LC_BUILD_VERSION || true
+          otool -l paigasus-node-bindings.darwin-arm64.node | grep -A3 LC_BUILD_VERSION || true
+
       - name: Upload prebuild artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: prebuild-${{ matrix.platform }}
           path: rs/crates/bindings/paigasus-node-bindings/paigasus-node-bindings.${{ matrix.platform }}.node
+          if-no-files-found: error
+
+      # Separate upload (not a glob) so the artifact keeps the prebuild-<platform> name that
+      # `assemble`'s `pattern: prebuild-*` + merge-multiple download depends on.
+      - name: Upload prebuild artifact (second darwin target)
+        if: ${{ matrix.extra_platform }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: prebuild-${{ matrix.extra_platform }}
+          path: rs/crates/bindings/paigasus-node-bindings/paigasus-node-bindings.${{ matrix.extra_platform }}.node
           if-no-files-found: error
 
   assemble:
