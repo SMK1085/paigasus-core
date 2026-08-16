@@ -32,7 +32,7 @@ Widen A3 to cover `lint`, repair the self-test fixtures the widening breaks, and
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `check(projects, crates, allow=None) -> (a1, a2, a3)` — unchanged signature. A3 rows now use two distinct message shapes: `f"{mid}:{task} does not schedule {upstream}:build"` (dep missing) and `f"{mid} has no `{task}` task (cannot schedule its upstream builds)"` (task key absent). Task 3 relies on neither string; only `self_test()` matches on them.
+- Produces: `check(projects, crates, allow=None) -> (a1, a2, a3)` — unchanged signature. A3 rows now use two distinct message shapes: `f"{mid}:{task} does not schedule {upstream}:build"` (dep missing) and ``f"{mid} has no `{task}` task (cannot schedule its upstream builds)"`` (task key absent). Task 3 relies on neither string; only `self_test()` matches on them.
 
 - [ ] **Step 1: Update the self-test fixtures so the clean fixture stays clean**
 
@@ -649,7 +649,7 @@ No gaps.
 
 **Placeholder scan:** none — every step carries the literal code, the exact command, and the expected output.
 
-**Type consistency:** `check()` keeps its `(a1, a2, a3)` return across Tasks 1 and 4. The two A3 message shapes introduced in Task 1 Step 5 are matched only by the self-test added in Task 1 Step 3 (`"has no \`lint\` task"`), and that substring is present in the emitted string. Task 3's expected-set strings are `project:task` targets produced by `moon query tasks`, independent of the Python messages.
+**Type consistency:** `check()` keeps its `(a1, a2, a3)` return across Tasks 1 and 4. The two A3 message shapes introduced in Task 1 Step 5 are matched only by the self-test added in Task 1 Step 3 (``"has no `lint` task"``), and that substring is present in the emitted string. Task 3's expected-set strings are `project:task` targets produced by `moon query tasks`, independent of the Python messages.
 
 **Ordering:** Task 1 is deliberately red against the real graph and Task 2 turns it green — the plan's red/green cycle. Task 3 must follow Task 2, because the expected set can only be re-baselined once propagation exists. Task 4 must follow Task 2, because its merge check asserts the inherited `^:build` survived. Tasks 5 and 6 are independent of each other but 6 must run last.
 
@@ -658,7 +658,7 @@ No gaps.
 ## Corrections found during execution
 
 This plan is a historical record of what was planned; the task steps above are left as written.
-Execution surfaced three predictions that did not hold:
+Execution surfaced four predictions that did not hold:
 
 - **Task 3, Step 1** predicted `ci/affected-graph/run.sh` would FAIL before any edit. It PASSES
   instead: the pre-edit task-name filter strips `lint` rows before the comparison runs, so the
@@ -673,3 +673,17 @@ Execution surfaced three predictions that did not hold:
   `grep -n 'lint-deps' .github/workflows/ci.yml`. The correct count is three: the Step 2 comment
   text itself contains the literal string `lint-deps` (in "`lint-deps` segment (SMA-526): ..."),
   in addition to the two structural lines (`key:` and `restore-keys:`) that actually matter.
+  The count rose to four once the final review added a second `restore-keys` fallback whose
+  comment also names the segment — another reason to assert the structural lines, not a count.
+
+- **Task 5, Step 3** also prescribes `python3 -c "import yaml; yaml.safe_load(...)"`, which
+  contradicts this plan's own "Python 3 (stdlib only)" tech-stack line: `yaml` is PyYAML, a
+  third-party package this repo does not declare in `py/pyproject.toml` or anywhere else. It
+  happened to be importable in the development environment, so the step passed, but it is not
+  reproducible on a clean checkout. Nothing this PR ships depends on PyYAML — the gate scripts use
+  only `tomllib`/`json`/`subprocess` — so this is a defect in the verification step, not in the
+  deliverable. A dependency-free equivalent is to assert the structural lines directly —
+  `grep -cE '^[[:space:]]+(key:[[:space:]]+)?rust-.*lint-deps' .github/workflows/ci.yml`, which
+  returns 2 (the `key:` line and the first `restore-keys` entry) and skips the prose comments —
+  and to let GitHub Actions itself be the authoritative YAML validator, since a malformed
+  workflow fails the run.
