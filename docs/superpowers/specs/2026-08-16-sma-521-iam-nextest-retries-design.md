@@ -90,7 +90,7 @@ satisfy any of SMA-521's acceptance criteria, and it is not independently revert
 | D3 | Scope: `package(=paigasus-iam) and kind(test)` | Exactly the Docker-backed integration binaries; every other crate keeps `retries = 0`. |
 | D4 | Backoff sized against the **measured** 33s contention window, not a guess | A 6-second retry window does not clear a 33-second burst. |
 | D4a | Fix the fast class at source: a retrying `mapped_port` helper for the 11 unguarded sites | Retries alone cannot fix a failure that recurs in milliseconds. Generalizes what `nats_publisher.rs:61-72` already does locally. |
-| D5 | Cap value chosen by measurement, ≤ ~30% wall-clock regression locally | The optimum depends on Docker VM capacity. |
+| D5 | Cap value chosen by measurement. **Landed on 8 = the Docker VM's CPU count**, on bounded variance rather than the "lowest affordable cap" rule §5 originally proposed — that rule's premise was measured and falsified (§5). | The optimum depends on Docker VM capacity, and the benefit turned out to be predictability, not reduced flakiness. |
 | D5a | **Cap floored at ≥ 4** | CI is 4-way already, so a cap ≥4 is provably a no-op there, removing any risk of serializing CI into the 30-minute job timeout. The cap is a local-only win, stated plainly. |
 | D9 | Wire the profile into Moon `inputs` for **both** affected nextest tasks | `paigasus-iam-rs:test` and `repo:nats-permissions` (§4). |
 | D10 | Emit JUnit from `profile.default` and upload it in CI | Without it the `FLAKY` signal this design's safety argument rests on is invisible (§6). |
@@ -266,6 +266,38 @@ panic and the timing reflects a run that genuinely ran:
 
 The chosen number, its measurements, and the machine they came from are recorded in a comment
 beside the setting, so a future reader can re-derive it instead of guessing.
+
+### What the measurement actually found — the rule above was wrong
+
+Step 4's rule assumes a monotonic trade: a lower cap costs wall-clock and buys reliability, so
+take the lowest one you can afford. **The measured data falsified that premise.** On the dev
+machine (18 logical CPUs, 8-CPU / 8 GB Docker VM), `CI=1 cargo nextest run -p paigasus-iam`,
+873 tests, two runs per configuration:
+
+| Config | Run 1 | Run 2 |
+|---|---|---|
+| uncapped (18-way) | 55.8s | 123.4s, 1 flaky |
+| **max-threads = 8** | **84.7s** | **84.0s** |
+| max-threads = 6 | 99.5s, 2 flaky | 126.6s, 1 flaky |
+| max-threads = 4 | 109.0s | 145.0s, 1 flaky |
+
+Lower caps were **both slower and no less flaky**. Tightening toward 4 bought nothing it was
+supposed to buy. The value that stands out is 8 — not for speed (uncapped's best single run,
+55.8s, beat every capped run) but for **predictability**: a 0.7s spread against uncapped's 68s.
+That also has a physical reading: 8 is the Docker VM's CPU count, i.e. one container startup
+per available Docker core, which is the resource the startup actually contends for.
+
+So the selection criterion that survives contact with data is **"cap at the Docker VM's CPU
+count"**, and the operative benefit of the cap is bounded variance rather than reduced
+flakiness. D5a's floor still holds — 8 ≥ 4, so the cap remains a provable no-op on CI's 4-way
+runner and cannot serialize the 30-minute job.
+
+**Honest limits of this evidence.** Two runs per configuration, executed sequentially in
+increasing-cap order and never randomized, so a warm-up effect favouring later-tested
+configurations cannot be excluded — and 8 was tested last. Only the cap=4 figure has an
+independent cross-session replicate (108.4s during the migration task vs 109.0s here). The
+claim this supports is "8 is a defensible, measured choice", not "8 is proven optimal". Anyone
+re-deriving it should randomize run order and take more than two samples.
 
 **CI cost is measured too, not assumed.** The implementation PR records the `moon ci`
 wall-clock delta against `origin/main`. D5a makes the cap a CI no-op by construction, so the
