@@ -34,10 +34,13 @@ deep` and asserts the affected project set **equals** an exact expected set per 
 
 It also runs two checks that the per-case project sets structurally **cannot** make:
 
-- **`proto->service-info-tasks`** asserts the affected *task* set (`moon query tasks --affected`).
-  `moon query projects --affected` follows `dependsOn` only and is blind to a task-level `^:build`, so
-  deleting a `^:build` keeps every project case **green** while `moon ci --include-relations` silently
-  under-builds (SMA-429 F3, closed by SMA-524).
+- **`proto->service-info-tasks`** asserts the affected *task* set (`moon query tasks --affected`),
+  scoped to `build`, `test` and `lint` — the three tasks that carry `^:build`. `moon query projects
+  --affected` follows `dependsOn` only and is blind to a task-level `^:build`, so deleting one keeps
+  every project case **green** while `moon ci --include-relations` silently under-builds (SMA-429
+  F3, closed for build/test by SMA-524 and for lint by SMA-526). `lint`'s `^:build` is declared once,
+  in `.moon/tasks/rust.yml`, rather than per-crate the way build/test declare theirs — so this case
+  is also what catches a regression in that shared declaration.
 - **`cargo-moon-parity`** (`cargo_moon_parity.py`) compares every crate's Cargo deps against Moon's own
   resolved graph, asserting each edge exists *and* schedules the upstream's build. The per-case sets
   assert only edges someone remembered to write a case for; this catches a crate added with **no**
