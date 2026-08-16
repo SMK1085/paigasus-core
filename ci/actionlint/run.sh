@@ -572,8 +572,12 @@ fi
 #     crosses '/' as a whole path component. GitHub documents '**.js' as "all .js files in the
 #     repository"; ':(glob)**.js' yields 0 — a false red on the ONLY required check.
 #
-# Hence a restricted vocabulary where both matchers provably agree, and a LOUD rejection
-# otherwise. Never a silently-wrong verdict in either direction.
+# Hence a restricted vocabulary where both matchers agree for the forms in use here, and a
+# LOUD rejection otherwise. Never a silently-wrong verdict in either direction. (One vocabulary
+# form is NOT provably general: git collapses a leading '**/' to zero directories, so
+# ':(glob)**/README.md' matches a root-level README.md, where GitHub's literal "zero or more of
+# any character" reading of '**/' would not obviously agree. Nothing in this repo uses that
+# form; flagged here rather than silently assumed sound.)
 #
 # `paths-ignore:` is deliberately EXCLUDED. For `paths:`, matching nothing kills the workflow;
 # for `paths-ignore:`, matching nothing is a no-op and the dangerous direction is matching
@@ -617,6 +621,21 @@ tracked_exact() {
   return 1
 }
 
+# 0 if the pattern contains a '.', '..', or empty path segment: a leading './', an interior
+# '/./' or '/../', or a doubled '//'. git's :(glob)/ls-files normalizes these away when
+# resolving a pathspec (measured: './rs/**', 'rs/../rs/**' and 'rs//**' all match the same 320
+# files as plain 'rs/**'); GitHub filter patterns match the literal path text and do not, so
+# each of those forms is dead on GitHub while this gate would otherwise wave it through.
+has_dotty_segment() {
+  local seg
+  while IFS= read -r seg; do
+    case "$seg" in
+      ''|'.'|'..') return 0 ;;
+    esac
+  done <<< "${1//\//$'\n'}"
+  return 1
+}
+
 check_pattern() {
   local file="$1" p="$2" n
 
@@ -624,22 +643,19 @@ check_pattern() {
 
   # Negated entries are exclusions — requiring them to match a file would be wrong. They are
   # still COUNTED by check 6, which counts raw sequence items before any filtering, so an
-  # all-negated block cannot hard-fail as "key with no items".
+  # all-negated block cannot hard-fail as "key with no items" — check 6 instead fails it as
+  # "no positive pattern", a distinct and more specific verdict.
   case "$p" in '!'*) return ;; esac
-
-  # Pathspec-injection guard: a pattern starting with ':' would be read by git as pathspec
-  # magic. The '--' separator and quoting are necessary but not sufficient. Anything outside
-  # this conservative class is rejected rather than passed to git.
-  if ! printf '%s' "$p" | grep -qE '^[A-Za-z0-9._/*-]+$'; then
-    fail "$file: pattern '$p' contains characters this gate will not pass to git.
-      Supported: letters, digits, '.', '_', '/', '*', '-'. If GitHub accepts it, add it to
-      SKIP_PATTERNS in $0 with a justification."
-    return
-  fi
 
   # '?' is "zero or one of the PRECEDING character" on GitHub but "any single character" in git;
   # '+' is "one or more of the preceding" on GitHub but a literal in git; '[]' is one alphanumeric
   # on GitHub but ranges/negation in git. All three would give a wrong verdict, so reject.
+  #
+  # Deliberately ABOVE the pathspec-injection guard below: that guard's character class also
+  # rejects all four characters, so if it ran first this specific, actionable message would be
+  # unreachable dead code and a pattern like GitHub's own documented '*.jsx?' would be told it
+  # "contains characters this gate will not pass to git" — true, but not the actual reason, and
+  # it gives the author nothing to act on.
   case "$p" in
     *'?'*|*'+'*|*'['*|*']'*)
       fail "$file: pattern '$p' uses '?', '+' or '[]', whose meaning differs between GitHub
@@ -647,6 +663,26 @@ check_pattern() {
       SKIP_PATTERNS in $0 with a justification."
       return ;;
   esac
+
+  # Pathspec-injection guard: a pattern starting with ':' would be read by git as pathspec
+  # magic. The '--' separator and quoting are necessary but not sufficient. Anything outside
+  # this conservative class is rejected rather than passed to git. Acts as the catch-all for
+  # every remaining unsupported character, now that '?'/'+'/'[]' are handled above with their
+  # own message.
+  if ! printf '%s' "$p" | grep -qE '^[A-Za-z0-9._/*-]+$'; then
+    fail "$file: pattern '$p' contains characters this gate will not pass to git.
+      Supported: letters, digits, '.', '_', '/', '*', '-'. If GitHub accepts it, add it to
+      SKIP_PATTERNS in $0 with a justification."
+    return
+  fi
+
+  if has_dotty_segment "$p"; then
+    fail "$file: pattern '$p' contains a '.', '..', or empty path segment ('./', '/./', '/../',
+      or '//'). git's :(glob) matcher normalizes these away when resolving the pattern; GitHub
+      filter patterns match the literal path text and do not, so this gate cannot verify it.
+      Rewrite the pattern without them, or add it to SKIP_PATTERNS in $0 with a justification."
+    return
+  fi
 
   if ! globstars_are_components "$p"; then
     fail "$file: pattern '$p' uses '**' inside a path segment. GitHub treats that as
@@ -671,24 +707,40 @@ check_pattern() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Check 6 — every extracted KEY must carry at least one sequence item.
+# Check 6 — every extracted `paths:` KEY must carry at least one sequence item, and at least
+# one of those items must be a POSITIVE (non-'!') pattern.
 #
-# Counts RAW items, before the '!' filtering in check_pattern, so a legal all-negated block does
-# not hard-fail. This is what converts an unsupported YAML form — the inline flow `paths: [a, b]`,
-# which the extractor deliberately does not parse — from a silent skip into a loud failure that
-# names the file. The difference between a limitation and a hole.
+# Two distinct failures, two distinct messages, both keyed off the RAW item count (before the
+# '!' filtering in check_pattern):
+#
+#   - RAW count is 0: the extractor found nothing to read. This is what converts an unsupported
+#     YAML form — the inline flow `paths: [a, b]`, which the extractor deliberately does not
+#     parse — from a silent skip into a loud failure that names the file. The difference between
+#     a limitation and a hole.
+#   - RAW count is >0 but every item is '!'-negated: GitHub includes a changed file only when it
+#     matches at least one POSITIVE pattern, so an all-negated `paths:` block can never match
+#     anything — the trigger it guards is dead, silently, forever. Same failure class the gate
+#     exists to catch, just spelled with '!' instead of a typo (round-1 finding 1).
+#
+# `paths-ignore:` is exempt from the second failure: an all-negated paths-ignore is a no-op, not
+# a dead trigger — mirrors check 5's header, which excludes paths-ignore from matching entirely.
 # ---------------------------------------------------------------------------------------------
 for wf in "${WORKFLOW_FILES[@]}"; do
   records="$(extract_paths_keys "$wf")" || infra "extractor failed on $wf"
   [ -n "$records" ] || continue
 
-  key_kind=""; key_line=""; key_items=0
+  key_kind=""; key_line=""; key_items=0; key_positive=0
 
   flush_key() {
     if [ -n "$key_kind" ] && [ "$key_items" -eq 0 ]; then
       fail "$wf:$key_line: '$key_kind:' has no sequence entries this gate could read. If it uses
       the inline form (paths: [a, b]), rewrite it as a block sequence — the extractor parses only
       block sequences, and skipping it silently is exactly the failure this gate exists to prevent."
+    elif [ "$key_kind" = "paths" ] && [ "$key_items" -gt 0 ] && [ "$key_positive" -eq 0 ]; then
+      fail "$wf:$key_line: 'paths:' has $key_items entries but every one is a '!'-negated
+      exclusion. GitHub includes a changed file only when it matches at least one POSITIVE
+      pattern, so this filter can never match anything and the trigger it guards is dead. Add at
+      least one non-'!' pattern."
     fi
   }
 
@@ -696,10 +748,13 @@ for wf in "${WORKFLOW_FILES[@]}"; do
     case "$rec" in
       KEY)
         flush_key
-        key_kind="$kind"; key_line="$value"; key_items=0 ;;
+        key_kind="$kind"; key_line="$value"; key_items=0; key_positive=0 ;;
       ITEM)
         key_items=$((key_items + 1))
-        [ "$kind" = "paths" ] && check_pattern "$wf" "$value" ;;
+        if [ "$kind" = "paths" ]; then
+          check_pattern "$wf" "$value"
+          case "$value" in '!'*) ;; *) key_positive=$((key_positive + 1)) ;; esac
+        fi ;;
     esac
   done <<< "$records"
 
