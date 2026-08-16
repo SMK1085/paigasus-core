@@ -26,6 +26,7 @@ pub struct AuditMetadata {
 /// embedding path generates correctly and to back the per-language Auditable
 /// conformance tests against a *generated* type. Not a domain type — real auditable
 /// aggregates embed AuditMetadata exactly this way.
+#[derive(::paigasus_proto::audit::Auditable)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuditableExample {
     #[prost(string, tag="1")]

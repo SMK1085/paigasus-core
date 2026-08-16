@@ -2642,10 +2642,21 @@ dependencies = [
 name = "paigasus-proto"
 version = "0.0.0"
 dependencies = [
+ "paigasus-proto-derive",
  "prost",
  "prost-types",
+ "syn 3.0.3",
  "tonic",
  "tonic-prost",
+]
+
+[[package]]
+name = "paigasus-proto-derive"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]

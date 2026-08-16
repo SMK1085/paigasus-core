@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-use crate::paigasus::common::v1::AuditMetadata;
+// Re-exported so the derive's generated code has ONE stable anchor to name
+// (`::paigasus_proto::audit::AuditMetadata`) instead of the codegen module layout, which
+// `clean: true` regenerates (SMA-438 D5).
+pub use crate::paigasus::common::v1::AuditMetadata;
+// The derive and the trait below deliberately share a name: macros live in the macro namespace,
+// traits in the type namespace, so `use paigasus_proto::audit::Auditable;` imports BOTH. This is
+// the `serde::Serialize` pattern (SMA-438 F3).
+pub use paigasus_proto_derive::Auditable;
 
 /// Implemented by any DTO/entity that carries [`AuditMetadata`].
 pub trait Auditable {
@@ -25,15 +32,10 @@ mod tests {
     use super::Auditable;
     use crate::paigasus::common::v1::{AuditMetadata, AuditableExample};
 
-    // Conformance impl on the *generated* embedding fixture — proves the trait works
-    // over `AuditableExample.audit: Option<AuditMetadata>` produced by codegen. The
-    // orphan rule blocks this from an integration test crate (neither item is local
-    // there), so it lives in-crate under cfg(test).
-    impl Auditable for AuditableExample {
-        fn audit(&self) -> Option<&AuditMetadata> {
-            self.audit.as_ref()
-        }
-    }
+    // No manual impl here any more: `AuditableExample` now carries #[derive(Auditable)] via
+    // codegen (SMA-438), so the two tests below exercise the DERIVED impl. Re-adding a manual
+    // one is an E0119 conflict. Note this makes the fixture's impl public API, reversing
+    // SMA-425's decision to keep it test-only — deliberate, see SMA-438 spec D8.
 
     #[test]
     fn accessors_read_through_embedded_metadata() {

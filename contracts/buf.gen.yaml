@@ -10,6 +10,30 @@ plugins:
     opt:
       - bytes=.
       - file_descriptor_set
+      # SMA-438 — inject #[derive(Auditable)] onto every message embedding AuditMetadata, so
+      # paigasus-proto ships the impl instead of each consumer hand-writing it.
+      #
+      # `message_attribute`, NOT `type_attribute`: prost's path matching is prefix-based over
+      # SUB-paths, so a type_attribute on a message also hits types nested inside it — including
+      # the enum prost synthesizes for a `oneof`. Probed on ListMembershipsRequest: type_attribute
+      # landed the derive on both the struct and its `Filter` oneof enum, which would then fail
+      # the derive's own shape check inside generated code. message_attribute hits structs only.
+      #
+      # Each entry MUST be quoted: unquoted, `#[` starts a YAML comment unless `#` is immediately
+      # preceded by `=`, so one stray space silently truncates the opt. And the attribute must
+      # contain NO comma — buf joins these entries into one comma-separated plugin parameter, so
+      # a future `#[derive(A, B)]` needs two separate lines for the same message.
+      #
+      # Keep in sync with the biconditional asserted by paigasus-proto's
+      # tests/auditable_derive_drift.rs, which fails if a message gains an `audit` field without
+      # a line here (or keeps a line here after losing the field).
+      - 'message_attribute=.paigasus.common.v1.AuditableExample=#[derive(::paigasus_proto::audit::Auditable)]'
+      - 'message_attribute=.paigasus.iam.v1.Organization=#[derive(::paigasus_proto::audit::Auditable)]'
+      - 'message_attribute=.paigasus.iam.v1.Team=#[derive(::paigasus_proto::audit::Auditable)]'
+      - 'message_attribute=.paigasus.iam.v1.Project=#[derive(::paigasus_proto::audit::Auditable)]'
+      - 'message_attribute=.paigasus.iam.v1.Membership=#[derive(::paigasus_proto::audit::Auditable)]'
+      - 'message_attribute=.paigasus.iam.v1.ServiceAccount=#[derive(::paigasus_proto::audit::Auditable)]'
+      - 'message_attribute=.paigasus.iam.v1.ApiKey=#[derive(::paigasus_proto::audit::Auditable)]'
   - remote: buf.build/community/neoeinstein-tonic:v0.5.0
     out: ../rs/crates/libs/paigasus-proto/src/generated
     opt:

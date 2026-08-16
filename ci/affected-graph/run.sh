@@ -106,6 +106,19 @@ run_suite() {
   # shared descriptor crate that consumes the generated ServiceInfo/Capability types (SMA-505).
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
     "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs"
+  # derive-crate edit -> the derive crate + paigasus-proto and everything downstream of it
+  # (SMA-438). One-directional w.r.t. contracts: the derive crate is strictly UPSTREAM of
+  # paigasus-proto, so a proto edit must NOT reach it — enforced implicitly by the strict
+  # equality of the contracts->proto case above, which lists no derive crate.
+  #
+  # paigasus-service-info-rs is deliberately ABSENT, and the asymmetry against the
+  # contracts->proto case above is NOT an oversight: that crate depends on paigasus-proto in
+  # Cargo, but its moon.yml declares no `dependsOn` and no task-level `^:build`, so nothing
+  # propagates `affected` to it from paigasus-proto (SMA-389 D3). It appears in the contracts
+  # case only through its own `contracts:generate` task dep. Wiring that edge is SMA-505's to
+  # make; when it lands, this expected set gains paigasus-service-info-rs and this note goes.
+  run_case "proto-derive->proto" "rs/crates/libs/paigasus-proto-derive/src/lib.rs" \
+    "paigasus-proto-derive-rs,paigasus-proto-rs,paigasus-gateway-rs,paigasus-iam-rs"
   # kernel edit -> kernel + all three bindings (py/node/wasm) + gateway + both language wrappers (SMA-419/420/427)
   # + the IAM crates that consume the kernel's PRN/UUIDv7 (paigasus-iam-core-rs & the paigasus-iam-rs
   # service, SMA-441). paigasus-logging-rs is deliberately ABSENT — it has no kernel edge.
