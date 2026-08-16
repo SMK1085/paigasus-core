@@ -45,7 +45,7 @@ async fn start_redis() -> Option<(ContainerAsync<Redis>, String)> {
         }
     };
 
-    let port = node.get_host_port_ipv4(6379).await.unwrap();
+    let port = support::docker::mapped_port(&node, 6379, "redis").await;
     let url = format!("redis://127.0.0.1:{port}");
     Some((node, url))
 }
