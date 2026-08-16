@@ -156,13 +156,21 @@ jobs:
           echo "darwin-x64   archs: [$x64]"
           [ "$arm" = "arm64" ]  || { echo "::error::darwin-arm64 is not pure arm64: [$arm]"; exit 1; }
           [ "$x64" = "x86_64" ] || { echo "::error::darwin-x64 is not pure x86_64: [$x64]"; exit 1; }
-          # Record the minimum-OS stamp rather than assume it. Rust pins the deployment target
-          # per TARGET not per host, so this should match what the old Intel runner produced — but
-          # napi's own generated CI sets MACOSX_DEPLOYMENT_TARGET=10.13 and this workflow does
-          # not. If it regresses, set MACOSX_DEPLOYMENT_TARGET on this job.
-          echo "== LC_BUILD_VERSION =="
-          otool -l paigasus-node-bindings.darwin-x64.node   | grep -A3 LC_BUILD_VERSION || true
-          otool -l paigasus-node-bindings.darwin-arm64.node | grep -A3 LC_BUILD_VERSION || true
+          # Record the minimum-OS stamp rather than assume it, and FAIL if the x86_64 slice ever
+          # rises above 10.12 — cross-building on an arm64 host could otherwise silently inherit
+          # the host SDK's floor and drop macOS 10.13-10.15 Intel users. Verified 2026-08-16: the
+          # cross-built x64 matches the old Intel runner exactly (10.12), because Rust pins the
+          # deployment target per TARGET, not per host.
+          #
+          # BOTH load commands must be matched: x86_64 emits the legacy LC_VERSION_MIN_MACOSX
+          # while arm64 emits LC_BUILD_VERSION. Grepping only the latter prints nothing at all for
+          # the x64 binary — the one this job actually migrated.
+          echo "== minimum macOS version =="
+          otool -l paigasus-node-bindings.darwin-x64.node   | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+          otool -l paigasus-node-bindings.darwin-arm64.node | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+          x64min="$(otool -l paigasus-node-bindings.darwin-x64.node | awk '/LC_VERSION_MIN_MACOSX/{getline; getline; print $2; exit}')"
+          [ "$x64min" = "10.12" ] || { echo "::error::darwin-x64 minimum macOS moved from 10.12 to [$x64min] — set MACOSX_DEPLOYMENT_TARGET"; exit 1; }
+          echo "darwin-x64 minimum macOS: [$x64min] (unchanged from the Intel-runner build)"
 
       - name: Upload prebuild artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
