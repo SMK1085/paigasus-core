@@ -100,7 +100,10 @@ max-threads = 4
 [[profile.default.overrides]]
 # keycloak_e2e starts a Keycloak with a 240s startup timeout (tests/keycloak_e2e.rs:79). Three
 # attempts of a genuinely failing run would be ~18 minutes against ci.yml's 30-minute budget.
-filter = 'package(=paigasus-iam) and test(keycloak)'
+# Keyed on the BINARY, not a test name: the 240s startup is a property of the binary, so a new
+# test added to that file without "keycloak" in its name would otherwise silently fall through
+# to the general block's retries = 2.
+filter = 'package(=paigasus-iam) and binary(keycloak_e2e)'
 retries = 1
 
 [[profile.default.overrides]]
