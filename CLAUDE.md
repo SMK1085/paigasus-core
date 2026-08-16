@@ -62,7 +62,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - Per-project Moon tasks (`<proj>:build/test/lint/fmt`) do NOT run the repo-level gates
   (`:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
   new crates/deps/proto, run the full graph like CI does: `moon ci :build :test :lint :fmt
-  :deny :osv :machete :typecheck :breaking :affected-smoke :parity-corpus-drift
+  :deny :osv :machete :actionlint :typecheck :breaking :affected-smoke :parity-corpus-drift
   :next-env-drift :wasm-getrandom-free :redis-connect-single-site :promtool :observability-drift
   :nats-permissions :release-parity :release-parity-py :release-parity-ts :publish-metadata
   --base origin/main --include-relations`.
@@ -106,6 +106,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   The tell is a fast run made *without* `CI=1`: a genuine Docker-backed pass takes just over a
   second (measured ~1.1s), never under. Always verify with `CI=1 cargo nextest run -p
   paigasus-iam`, which makes a missing daemon a hard failure. SMA-538 tracks fixing this properly.
+- Broad `inputs: ['**/*']` Moon tasks (e.g. `repo:actionlint`) stay cheap only because
+  `.moon/workspace.yml`'s `hasher.ignorePatterns` filters gitignored trees out of the hash walk.
 
 ## Workflow
 

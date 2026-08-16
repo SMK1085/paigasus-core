@@ -368,3 +368,21 @@ tasks:
       - 'rs/.cargo/config.toml'
       - 'rs/release-plz.toml'
       - '.gitignore'
+
+  actionlint:
+    description: 'actionlint over .github/workflows/**, plus a control that every paths: filter glob still matches the tree (SMA-525).'
+    # WHY `inputs: **/*` AND NOT THE NARROW LIST THE OTHER repo:* GATES USE — this gate makes an
+    # assertion about the WHOLE FILE TREE, not about the workflow files. A directory rename is the
+    # dominant real-world way a paths: glob comes to match nothing (a typo is at least made by
+    # someone looking at the file), and keying on .github/workflows/** would let Moon serve a
+    # cached pass indefinitely — reproducing the "silent and permanent" failure this gate exists
+    # to prevent. Concretely: security-scan.yml filters on 'ci/osv/**', and this change adds a
+    # sibling ci/actionlint/, so a future ci/ reshuffle is plausible.
+    #
+    # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
+    # (cargo nextest, next typegen). This one is ~109 ms: actionlint over three workflows plus a
+    # dozen `git ls-files` calls.
+    script: 'ci/actionlint/run.sh'
+    toolchain: 'system'
+    inputs:
+      - '**/*'

@@ -30,3 +30,22 @@ codeowners:
 generator:
   templates:
     - './.moon/templates'
+
+hasher:
+  # Gitignored dependency/build trees are not an input to any task here — verified: no moon.yml
+  # lists them under `inputs:`. Hashing them anyway dominated the cost of any task with a broad
+  # `inputs:` glob and emitted hundreds of "only files can be hashed" warnings walking pnpm's
+  # symlinked content-addressable store.
+  #
+  # Measured on SMA-525 (`moon run repo:actionlint --force`, macOS): with `inputs: ['**/*']`,
+  # 19s without these patterns vs ~11.5s with them. For reference the same task with a NARROW
+  # input list is ~10.6s, and `repo:promtool` — an existing narrow-input task — is ~9s, so ~9s
+  # is simply Moon's per-task floor in this repo. Net: broad inputs cost ~1s over narrow once
+  # these are filtered, instead of ~8.5s.
+  #
+  # Deliberately NOT listing '**/.next/**': it is a declared `outputs:` of paigasus-console-ts:build
+  # (ts/apps/paigasus-console/moon.yml), and it is not a meaningful part of the cost.
+  ignorePatterns:
+    - '**/node_modules/**'
+    - '**/target/**'
+    - '**/.venv/**'
