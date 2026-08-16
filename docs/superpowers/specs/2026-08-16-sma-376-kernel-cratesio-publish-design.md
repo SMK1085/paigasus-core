@@ -339,8 +339,18 @@ would have re-keyed a cold cargo build on every unrelated CI tweak.
 
 **Cost: 2.832s cold, measured locally.** The `~4s` figure in the first draft was a
 warm local `cargo publish --dry-run` and undercounted what actually dominates: a
-*cold* verify build in `rs/target/package/<crate>-<ver>/target`, which shares
-nothing with the workspace `rs/target` cache, plus a crates.io index fetch. Measured
+*cold* verify build of the extracted copy at `rs/target/package/<crate>-<ver>/`.
+Verified on disk (`rm -rf rs/target/package` then a dry run): there is no nested
+`target/` under that extracted copy — Cargo resolves the build's target directory the
+same way it resolves `rs/.cargo/config.toml`, by walking up from the invoking CWD
+(`main()`'s `cd "$RS_DIR"` pins that to `rs/`), so the verify build compiles into the
+*shared* workspace `rs/target` cache, same as any other `cargo build`. Already-built
+dependencies (`uuid`, `thiserror`) are therefore reused from that shared cache — the
+build output shows a single `Compiling paigasus-kernel` line, nothing for its deps —
+but `paigasus-kernel` itself gets a fresh fingerprint because the extracted copy's path
+differs from the normal workspace source path, so it always recompiles here regardless
+of what else is warm. The cold cost is that one-crate recompile plus a crates.io index
+fetch (`rm -rf rs/target/package` forces both). Measured
 with a cold `rs/target/package` (`rm -rf rs/target/package`) on the implementation
 PR's local machine: `time moon run repo:publish-metadata --force` took **2.832s** wall-clock
 (only `paigasus-kernel` is publishable today, so this is a one-crate verify build;
@@ -408,7 +418,8 @@ cargo inlines the resolved lint table into the packaged manifest
 package, on nightly — exactly where new rustc warnings surface first. The workspace
 chose `deny` for an unpublished workspace; publishing changes that calculus. CI
 strictness is preserved by the Moon `lint` task's explicit `-D warnings`, which is
-already the documented arrangement for clippy (`rs/Cargo.toml:200-201`).
+already the documented arrangement for clippy (`rs/Cargo.toml`'s `[workspace.lints]`
+posture comment).
 
 **D8 — Two of SMA-376's four bullets move to SMA-407, as a tracked deliverable.**
 The version bullet is D1. The "set up release tooling (release-plz) / crates.io
@@ -437,8 +448,11 @@ Run from the repo root with the proto shims on `PATH`.
    - `readme = "NOPE.md"` → Check 2, exit 1. Verified empirically that cargo
      hard-errors here (``readme `NOPE.md` does not appear to exist``), so Check 1
      needs no file-existence assertion of its own;
-   - revert the kernel to `publish = false` → **Check 0**, exit 1 (this is the
-     vacuity control; without Check 0 the whole gate would go green);
+   - revert the kernel to `publish = false` → **Check 0**, exit **2** — an empty
+     publishable set hits `if not found: sys.exit(2)` before the `found != expected`
+     branch, so this is the non-vacuity control's infrastructure-failure path, not the
+     mismatch path (exit 1 is reserved for a publishable set that is non-empty but
+     different from `EXPECTED_PUBLISHABLE`, e.g. a wrong or extra crate name);
    - drop `release = false` from `rs/release-plz.toml` → Check 3, exit 1 naming
      `paigasus-kernel` and `0.0.0`;
    - remove `LICENSE` from `include` → Check 2b, exit 1.

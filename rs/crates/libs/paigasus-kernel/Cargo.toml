@@ -35,7 +35,8 @@ proptest.workspace = true
 # cargo's `--cap-lints allow` does not apply. Inheriting the workspace's
 # `warnings = "deny"` would let the first new rustc warning silently kill docs.rs builds
 # of a released crate. CI strictness is unaffected: the Moon `lint` task passes
-# `-D warnings` explicitly, which is already how clippy is handled (rs/Cargo.toml:200-201).
+# `-D warnings` explicitly, which is already how clippy is handled (see `rs/Cargo.toml`'s
+# `[workspace.lints]` posture comment).
 [lints.rust]
 warnings = "warn"
 

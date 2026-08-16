@@ -329,15 +329,26 @@ tasks:
 
   publish-metadata:
     description: 'Assert every publishable crate carries crates.io-valid metadata, packages exactly the intended files, and cannot be released by release-plz while still at the 0.0.0 stub floor (SMA-376).'
-    script: 'bash ci/publish-metadata/run.sh'
+    # The self-test runs FIRST: a gate that cannot report red is worse than no gate, and it
+    # is sub-second, so paying for it before the real (network + compile) checks is free.
+    # Moon does not enable errexit for `script:` blocks — same latent defect as the
+    # nats-permissions/promtool tasks document — hence the explicit `set -euo pipefail`.
+    script: |
+      set -euo pipefail
+      bash ci/publish-metadata/run.sh --negative-control
+      bash ci/publish-metadata/run.sh
     toolchain: 'system'
     # DELIBERATELY BROAD on rs/crates/**: the publishable set is discovered at RUNTIME from
     # `cargo metadata`, so per-crate globs would go stale the day a new crate flips
     # publish = true and Moon would serve a cached pass over sources it never tracked. A
     # vacuous gate is worse than a slow one. The rest of the list is every input that
     # DETERMINES the answer: the toolchain pin and cargo config (they drive the verify
-    # build), release-plz.toml (Check 3), and .gitignore (it drives cargo's file
-    # enumeration). Omitting those is the exact staleness ci/next-env/run.sh documents.
+    # build) and release-plz.toml (Check 3). `.gitignore` is kept too even though today's
+    # `include` allowlist makes cargo ignore it entirely (the other git-sensitive path,
+    # the `--allow-dirty` dirty check, is skipped whenever `CI` is set) — it earns its
+    # place as a forward guard for a future publishable crate that ships without an
+    # `include` list. Omitting an input that DOES determine the answer is the exact
+    # staleness ci/next-env/run.sh documents.
     inputs:
       - 'ci/publish-metadata/run.sh'
       - 'rs/Cargo.toml'

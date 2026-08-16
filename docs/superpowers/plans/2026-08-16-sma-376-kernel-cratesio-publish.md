@@ -489,10 +489,19 @@ if stubs:
             if "name" in entry
         }
         for name in stubs:
-            # A [[package]] entry OVERRIDES [workspace] for that package, so the effective
-            # value is the package's when present. Anything other than an explicit False —
-            # including release = true and an unset value — leaves the crate releasable.
-            effective = package_release.get(name, workspace_release)
+            # A [[package]] entry OVERRIDES [workspace] for that package — but release-plz
+            # treats an OMITTED `release` key inside `[[package]]` as "inherit the workspace
+            # value", not as an explicit unset-is-releasable override. dict.get()'s default
+            # only fires when the KEY is absent, so a `[[package]]` block that names the
+            # package but never sets `release =` (key present, value None) must still fall
+            # through to workspace_release, same as if there were no `[[package]]` entry at
+            # all. Anything other than an explicit False — including release = true and a
+            # workspace-inherited None — leaves the crate releasable.
+            effective = (
+                package_release[name]
+                if package_release.get(name) is not None
+                else workspace_release
+            )
             if effective is not False:
                 errors.append(
                     f"{name}: publishable at 0.0.0 but rs/release-plz.toml does not block "
@@ -517,6 +526,15 @@ PY
 # --negative-control can feed it a synthetic one.
 assert_package_list() { # $1 listing file  $2 package name
   local listing="$1" pkg="$2" entry rc=0
+
+  # Non-vacuity control, same reason Check 0 has one: an empty rule set would make this
+  # function return 0 on ANY listing, including one that both misses LICENSE and leaks
+  # moon.yml. Infrastructure failure, not an assertion failure.
+  if [ "${#REQUIRED_PACKAGED[@]}" -eq 0 ] || [ "${#FORBIDDEN_PACKAGED[@]}" -eq 0 ]; then
+    echo "FATAL: Check 2b rule lists are empty — this check would pass vacuously" >&2
+    return 2
+  fi
+
   for entry in "${REQUIRED_PACKAGED[@]}"; do
     if ! grep -qxF "$entry" "$listing"; then
       echo "Check 2b FAILED: $pkg does not package $entry" >&2
@@ -571,9 +589,11 @@ check_package() { # $1 name  $2 manifest dir
     rm -f "$out" "$listing"
     exit "$status"
   fi
-  if ! assert_package_list "$listing" "$pkg"; then
+  status=0
+  assert_package_list "$listing" "$pkg" || status=$?
+  if [ "$status" -ne 0 ]; then
     rm -f "$out" "$listing"
-    exit 1
+    exit "$status"
   fi
 
   # Check 2: --locked so the verify build resolves against the packaged lockfile rather
@@ -614,10 +634,14 @@ main() {
   [ "$status" -eq 0 ] || exit "$status"
 
   local name dir
-  while IFS=$'\t' read -r name dir; do
+  # Read on FD 3, not stdin (the ci/release-parity/run.sh idiom): a loop-body subprocess
+  # that reads stdin can swallow rows silently, and a silent skip reads as a false green.
+  # Not a live bug today — cargo never touches stdin here, all 3/3 iterations verified —
+  # but it becomes one the day SMA-388 adds a second publishable crate.
+  while IFS=$'\t' read -r -u 3 name dir; do
     [ -n "$name" ] || continue
     check_package "$name" "$dir"
-  done <<<"$publishable"
+  done 3<<<"$publishable"
 
   echo "publish-metadata: all checks passed"
 }
@@ -871,11 +895,16 @@ PY
 Change the last line of the script from `main "$@"` to:
 
 ```bash
-if [ "${1:-}" = "--negative-control" ]; then
-  negative_control
-else
-  main "$@"
-fi
+# Explicit dispatch (ci/release-parity/run.sh's style): an unrecognized argument must
+# exit 2 with a usage message, never fall through to the normal run — a typo'd
+# `--negativecontrol` silently running the full gate and printing a pass is exactly the
+# kind of broken invocation this script's exit-code contract exists to rule out.
+case "${1:-}" in
+  '') main "$@" ;;
+  --negative-control) negative_control ;;
+  -h|--help) echo "usage: run.sh [--negative-control] [-h|--help]"; exit 0 ;;
+  *) echo "unknown arg: $1" >&2; exit 2 ;;
+esac
 ```
 
 - [ ] **Step 4: Run the negative control — it must pass**
