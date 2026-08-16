@@ -18,12 +18,18 @@ so a valid-but-never-matching glob (`rz/**`) passes it cleanly. Checks 5–7 clo
 | # | Check |
 |---|---|
 | 1 | `actionlint` over the auto-discovered workflow set |
-| 2 | No `.github/actionlint.{yaml,yml}` carrying an `ignore:` key (it would neuter check 1 invisibly) |
+| 2 | `.github/actionlint.{yaml,yml}` declares nothing but `self-hosted-runner`, and no `ignore` key in any style (either would neuter check 1 invisibly) |
 | 3 | Four stdin fixtures, one per defect class, each must fail **with its expected rule tag** |
 | 4 | A healthy stdin fixture must pass — the control for check 3 |
 | 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree |
-| 6 | Every extracted `paths:` key carries at least one sequence entry |
-| 7 | Extractor self-test against a fixture table (`run.sh --self-test`) |
+| 6 | Every extracted `paths:` key carries at least one sequence entry, at least one of them positive |
+| 7 | Three self-tests against fixture tables — extractor, path-filter verdicts, config allowlist (`run.sh --self-test`) |
+
+Only a `paths:`/`paths-ignore:` **two levels deep** inside `on:` — `on.<event>.paths` — is a path
+filter. A workflow input may legitimately be *named* `paths`, and it sits one level deeper, under
+`on.workflow_dispatch.inputs`; checks 5 and 6 ignore it. Conversely a flow-mapping event value,
+`push: { paths: [...] }`, is not parsed for entries, so it is reported by check 6 as a key with no
+entries rather than skipped in silence.
 
 ## Supported glob vocabulary
 
@@ -40,8 +46,8 @@ Rejected loudly, never guessed at: `?`, `+`, `[]`, and `**` embedded in a segmen
 ## Escape hatches
 
 - A **new GitHub runner label** the pinned actionlint does not know: add it to
-  `self-hosted-runner.labels` in `.github/actionlint.yaml`. Check 2 permits that file; it bans
-  only `ignore:`.
+  `self-hosted-runner.labels` in `.github/actionlint.yaml`. Check 2 permits that file, and
+  `self-hosted-runner` is the one top-level key it allows there.
 - A **GitHub-valid pattern outside the vocabulary**: add it to `SKIP_PATTERNS` in `run.sh` with
   a comment justifying it and saying what verifies it instead.
 - **Anything worse**: drop `:actionlint` from `T=(…)` in `.github/workflows/ci.yml`. One line.
@@ -49,7 +55,7 @@ Rejected loudly, never guessed at: `?`, `+`, `[]`, and `**` embedded in a segmen
 ## Cost
 
 `inputs: ['**/*']` is deliberate (see the WHY comment on the `actionlint:` task in `moon.yml`),
-and it was benchmarked before being accepted (SMA-525): the gate itself runs in ~1.4s standalone
+and it was benchmarked before being accepted (SMA-525): the gate itself runs in ~1.0s standalone
 (`ci/actionlint/run.sh`, bypassing Moon), but Moon's own per-task floor in this repo is ~9s
 regardless of what a task does — an existing narrow-input task (`repo:promtool`) measures about
 the same. Once `.moon/workspace.yml`'s `hasher.ignorePatterns` excludes gitignored dependency
@@ -79,7 +85,10 @@ hashing that follows. Judge it by the wall time above, not by the warnings.
 ```bash
 moon run repo:actionlint      # via Moon, as CI does
 ci/actionlint/run.sh          # directly, bypassing the Moon cache
-ci/actionlint/run.sh --self-test   # extractor fixtures only, for fast iteration
+ci/actionlint/run.sh --self-test   # the three fixture tables only, for fast iteration
 ```
+
+Any other argument exits 2 with a usage line — a typo'd `--selftest` must not run the full gate
+and report a pass for something you did not ask for.
 
 Exit codes: `1` = assertion failure, `2` = infrastructure error.

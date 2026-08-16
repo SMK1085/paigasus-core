@@ -10,13 +10,16 @@
 #
 # actionlint alone is NOT sufficient: it validates syntax and has no view of the file tree, so
 # a syntactically valid glob that matches nothing (`rz/**`) passes it cleanly. Checks 5-7 below
-# are what actually close the failure this gate was filed for.
+# are what actually close the failure this gate was filed for — and because they are, they carry
+# their own standing control: `path_filter_self_test` (part of check 7) asserts the verdict of
+# every vocabulary rule against a fixture table, so neutering one of them reds the gate.
 #
 # EXIT CODES (ci/ convention): 1 = assertion failure, 2 = infrastructure error. Without the
 # split, a broken tool reads as a lint failure — or, if anyone wraps this in `|| true`, as a pass.
 #
-# NOT `set -e`: check 3 deliberately EXPECTS non-zero exits, and grep-based extraction
-# legitimately finds nothing. Each check captures status explicitly and sets FAILED instead.
+# NOT `set -e`: several checks deliberately expect and inspect non-zero exits — check 3 requires
+# actionlint to FAIL on each fixture, and the verdict helpers of checks 5/6 signal through their
+# status. Each check captures status explicitly and sets FAILED instead.
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 2
@@ -30,6 +33,13 @@ fail() {
 
 infra() {
   echo "actionlint gate: INFRASTRUCTURE ERROR: $*" >&2
+  exit 2
+}
+
+usage() {
+  echo "usage: $(basename "$0") [--self-test]" >&2
+  echo "  (no argument)  run the full gate" >&2
+  echo "  --self-test    run the fixture tables only (extractor, path filters, config allowlist)" >&2
   exit 2
 }
 
@@ -75,6 +85,16 @@ extract_paths_keys() {
       return s
     }
 
+    # A flow mapping (`{ branches: [main], paths: [a] }`) is deliberately NOT parsed for entries.
+    # Print a KEY with no ITEMs for any path filter it declares, so check 6 fails loudly instead
+    # of the whole event being skipped in silence. Returns nothing when v is not a flow mapping.
+    function flow_keys(v, lineno) {
+      if (v !~ /^[{]/) return
+      sub(/[}][^}]*$/, "}", v)     # drop a trailing comment after the closing brace
+      if (v ~ /[{, \t]["\047]?paths-ignore["\047]?[ \t]*:/) print "KEY\tpaths-ignore\t" lineno
+      if (v ~ /[{, \t]["\047]?paths["\047]?[ \t]*:/)        print "KEY\tpaths\t" lineno
+    }
+
     {
       line = $0
       sub(/\r$/, "", line)                       # tolerate CRLF
@@ -111,13 +131,51 @@ extract_paths_keys() {
       if (ind == 0) {
         key0 = stripped
         sub(/[ \t]+#.*$/, "", key0)
+        depth = 0                                # a column-0 key closes every nested level
         if (key0 ~ /^["\047]?on["\047]?:[ \t]*$/)      { in_on = 1; next }
-        if (key0 ~ /^["\047]?on["\047]?:/)             { in_on = 0; next }  # inline `on: [push]`
+        if (key0 ~ /^["\047]?on["\047]?:/) {
+          # Inline `on: [push]` — nothing to extract. But `on: {push: {paths: [a]}}` is the same
+          # silently-guards-nothing hole as a flow-mapping EVENT value, one level up, so it gets
+          # the same treatment.
+          in_on = 0
+          val = key0
+          sub(/^[^:]*:[ \t]*/, "", val)
+          flow_keys(val, NR)
+          next
+        }
         in_on = 0
         next
       }
 
       if (!in_on) next
+
+      # A sequence entry outside a paths block (a `branches:` or `schedule:` list) introduces no
+      # mapping level, so it must not perturb the depth stack below.
+      if (stripped ~ /^-([ \t]|$)/) next
+
+      # DEPTH INSIDE `on:`. `on:` is level 0; an event key (push:, pull_request:,
+      # workflow_dispatch:, ...) is level 1; a key belonging to that event is level 2. Only a
+      # level-2 `paths:`/`paths-ignore:` is a real path filter.
+      #
+      # Depth, not "anywhere under on:", because a workflow input may legitimately be NAMED
+      # `paths` — `on.workflow_dispatch.inputs.paths` sits at level 3. Emitting a KEY for it made
+      # check 6 fail with advice its author could not act on (there is no block sequence to write),
+      # inside the only required check in this repo, with no escape hatch: SKIP_PATTERNS filters
+      # patterns, not keys.
+      while (depth > 0 && indstack[depth] >= ind) depth--
+      depth++
+      indstack[depth] = ind
+
+      if (depth == 1) {
+        # A flow-mapping event value — `push: { branches: [main], paths: [a] }` — is valid YAML
+        # that actionlint accepts, and its `paths:` never reaches the level-2 branch below. Left
+        # alone it would make checks 5 and 6 silently guard nothing at all.
+        val = stripped
+        sub(/^[^:]*:[ \t]*/, "", val)
+        flow_keys(val, NR)
+        next
+      }
+      if (depth != 2) next
 
       if (stripped ~ /^paths:/)        { kind = "paths" }
       else if (stripped ~ /^paths-ignore:/) { kind = "paths-ignore" }
@@ -144,9 +202,9 @@ extract_paths_keys() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Extractor self-test (definition only — actually invoked, unconditionally, as check 7 near the
-# end of this script, so the fixture table guards the parser on every real gate run, not only
-# under --self-test). Defined here, ahead of check 1, purely so the `--self-test` early exit
+# Extractor self-test (definition only — actually invoked, unconditionally, as part of check 7
+# near the end of this script, so the fixture table guards the parser on every real gate run, not
+# only under --self-test). Defined here, ahead of check 1, purely so the `--self-test` early exit
 # below can run it standalone and return fast while editing the awk.
 #
 # The extractor is hand-rolled YAML parsing, which is exactly the kind of thing that silently
@@ -410,13 +468,528 @@ jobs:
       - run: echo hi
 '
 
+  # --- Final-review additions. The two comment fixtures below make the `stripped ~ /^#/` clause
+  # load-bearing: every comment in the fixtures above is indented DEEPER than its key, so the
+  # "deeper non-item line" branch already retained it and deleting the comment clause changed
+  # nothing (round-3 finding M6). These two are not deeper. ---
+
+  check_fixture 'a column-0 comment does not close the on: mapping' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**\nKEY\tpaths\t8\nITEM\tpaths\tb/**')" \
+'name: t
+on:
+  push:
+    paths:
+      - "a/**"
+# a column-0 comment, halfway through the on: mapping
+  pull_request:
+    paths:
+      - "b/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a comment dedented to the key indent does not close the block' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**\nITEM\tpaths\tb/**')" \
+'name: t
+on:
+  push:
+    paths:
+      - "a/**"
+    # dedented to the key indent, still inside the sequence
+      - "b/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  # --- Final-review additions for the level rule (round-3 findings F1 and F2). ---
+
+  check_fixture 'a workflow input NAMED paths yields no records' \
+"" \
+'name: t
+on:
+  workflow_dispatch:
+    inputs:
+      paths:
+        description: which paths to build
+        required: false
+        type: string
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a level-2 paths: alongside a level-3 input named paths still parses' \
+"$(printf 'KEY\tpaths\t9\nITEM\tpaths\ta/**')" \
+'name: t
+on:
+  workflow_dispatch:
+    inputs:
+      paths:
+        description: which paths to build
+        type: string
+  push:
+    paths:
+      - "a/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a flow-mapping event with paths emits KEY with no ITEMs' \
+"$(printf 'KEY\tpaths\t3')" \
+'name: t
+on:
+  push: { branches: [main], paths: ["rz/**"] }
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a flow-mapping event with paths-ignore emits KEY with no ITEMs' \
+"$(printf 'KEY\tpaths-ignore\t3')" \
+'name: t
+on:
+  push: {branches: [main], paths-ignore: ["docs/**"]}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a flow-mapping event without a path filter is not a KEY' \
+"" \
+'name: t
+on:
+  push: { branches: [main] }   # no paths filter here
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a flow mapping on on: itself emits KEY with no ITEMs' \
+"$(printf 'KEY\tpaths\t2')" \
+'name: t
+on: {push: {branches: [main], paths: ["rz/**"]}}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
   return $rc
 }
 
-if [ "${1:-}" = "--self-test" ]; then
-  extractor_self_test
-  exit "$FAILED"
-fi
+# ---------------------------------------------------------------------------------------------
+# Check 5 (definitions) — every `paths:` glob must be expressible AND must match the tree.
+#
+# THIS is the check that closes the failure this gate was filed for; actionlint cannot see it.
+# The verdict function is defined here, ahead of check 1, so `path_filter_self_test` below and
+# the `--self-test` early exit can exercise it without running the linter. The production call
+# site — which turns a non-`ok` verdict into a `fail` — is checks 5/6, further down.
+#
+# `git ls-files ':(glob)P'` is NOT a sound model of GitHub filter patterns, in both directions:
+#
+#   - Wildcard-free patterns take DIRECTORY-PREFIX semantics under git. ':(glob)rs' matches 320
+#     tracked files; GitHub matches NOTHING (no file is named `rs`). A dropped '/**' is among the
+#     likeliest hand-edits, so literals are required to be an EXACT tracked path, never a prefix.
+#   - '**' differs. GitHub: "zero or more of any character", slash-crossing anywhere. git: only
+#     crosses '/' as a whole path component. GitHub documents '**.js' as "all .js files in the
+#     repository"; ':(glob)**.js' yields 0 — a false red on the ONLY required check.
+#
+# Hence a restricted vocabulary where both matchers agree for the forms in use here, and a
+# LOUD rejection otherwise. Never a silently-wrong verdict in either direction. (One vocabulary
+# form is NOT provably general: git collapses a leading '**/' to zero directories, so
+# ':(glob)**/README.md' matches a root-level README.md, where GitHub's literal "zero or more of
+# any character" reading of '**/' would not obviously agree. Nothing in this repo uses that
+# form; flagged here rather than silently assumed sound.)
+#
+# `paths-ignore:` is deliberately EXCLUDED. For `paths:`, matching nothing kills the workflow;
+# for `paths-ignore:`, matching nothing is a no-op and the dangerous direction is matching
+# EVERYTHING. Requiring paths-ignore globs to match would add false-red surface while guarding
+# the wrong end (spec §7, non-goal).
+#
+# SKIP_PATTERNS is the escape hatch of spec §6: a GitHub-valid pattern outside the vocabulary.
+# Every entry needs a comment justifying it, same shape as deny.toml's license exceptions.
+# ---------------------------------------------------------------------------------------------
+SKIP_PATTERNS=(
+  # (empty — add entries as "pattern"  # why, and what verifies it instead)
+)
+
+is_skipped() {
+  local p="$1" s
+  for s in ${SKIP_PATTERNS+"${SKIP_PATTERNS[@]}"}; do
+    [ "$s" = "$p" ] && return 0
+  done
+  return 1
+}
+
+# 0 if every '**' in the pattern is a whole path component ('a/**', '**/b'), 1 if any '**' is
+# embedded in a larger segment ('**.js', 'a**b') — where git and GitHub disagree.
+globstars_are_components() {
+  local seg
+  while IFS= read -r seg; do
+    case "$seg" in
+      '**') ;;
+      *'**'*) return 1 ;;
+    esac
+  done <<< "${1//\//$'\n'}"
+  return 0
+}
+
+# 0 if $1 names an exactly-tracked file (NOT a directory prefix).
+tracked_exact() {
+  local p="$1" f
+  while IFS= read -r -d '' f; do
+    [ "$f" = "$p" ] && return 0
+  done < <(git -c core.quotePath=false ls-files -z -- "$p" 2>/dev/null)
+  return 1
+}
+
+# 0 if the pattern contains a '.', '..', or empty path segment: a leading './', an interior
+# '/./' or '/../', or a doubled '//'. git's :(glob)/ls-files normalizes these away when
+# resolving a pathspec (measured: './rs/**', 'rs/../rs/**' and 'rs//**' all match the same 320
+# files as plain 'rs/**'); GitHub filter patterns match the literal path text and do not, so
+# each of those forms is dead on GitHub while this gate would otherwise wave it through.
+has_dotty_segment() {
+  local seg
+  while IFS= read -r seg; do
+    case "$seg" in
+      ''|'.'|'..') return 0 ;;
+    esac
+  done <<< "${1//\//$'\n'}"
+  return 1
+}
+
+# The single source of truth for check 5's verdict on one pattern. Echoes exactly one stable
+# token; every non-'ok' token has a user-facing message at the production call site, and every
+# token has a fixture in path_filter_self_test:
+#
+#   ok | skipped | negated | rejected-charclass | rejected-charset | rejected-dotty
+#   rejected-globstar | dead | not-exact
+#
+# Separated from the messages ON PURPOSE. As one function that both decided and printed, nothing
+# could assert what it decides, and a mutation battery showed the whole of checks 5/6 could be
+# neutered with the gate still exiting 0 (round-3 finding F4).
+pattern_verdict() {
+  local p="$1" n
+
+  is_skipped "$p" && { echo 'skipped'; return; }
+
+  # Negated entries are exclusions — requiring them to match a file would be wrong. They are
+  # still COUNTED by check 6, which counts raw sequence items before any filtering, so an
+  # all-negated block cannot hard-fail as "key with no items" — check 6 instead fails it as
+  # "no positive pattern", a distinct and more specific verdict.
+  case "$p" in '!'*) echo 'negated'; return ;; esac
+
+  # '?' is "zero or one of the PRECEDING character" on GitHub but "any single character" in git;
+  # '+' is "one or more of the preceding" on GitHub but a literal in git; '[]' is one alphanumeric
+  # on GitHub but ranges/negation in git. All three would give a wrong verdict, so reject.
+  #
+  # Deliberately ABOVE the pathspec-injection guard below: that guard's character class also
+  # rejects all four characters, so if it ran first this specific, actionable message would be
+  # unreachable dead code and a pattern like GitHub's own documented '*.jsx?' would be told it
+  # "contains characters this gate will not pass to git" — true, but not the actual reason, and
+  # it gives the author nothing to act on.
+  case "$p" in
+    *'?'*|*'+'*|*'['*|*']'*) echo 'rejected-charclass'; return ;;
+  esac
+
+  # Pathspec-injection guard: a pattern starting with ':' would be read by git as pathspec
+  # magic. The '--' separator and quoting are necessary but not sufficient. Anything outside
+  # this conservative class is rejected rather than passed to git. Acts as the catch-all for
+  # every remaining unsupported character, now that '?'/'+'/'[]' are handled above with their
+  # own message.
+  if ! printf '%s' "$p" | grep -qE '^[A-Za-z0-9._/*-]+$'; then
+    echo 'rejected-charset'; return
+  fi
+
+  if has_dotty_segment "$p"; then
+    echo 'rejected-dotty'; return
+  fi
+
+  if ! globstars_are_components "$p"; then
+    echo 'rejected-globstar'; return
+  fi
+
+  case "$p" in
+    *'*'*)
+      n="$(git -c core.quotePath=false ls-files -- ":(glob)$p" 2>/dev/null | wc -l | tr -d ' ')"
+      if [ "${n:-0}" -eq 0 ]; then
+        echo 'dead'; return
+      fi ;;
+    *)
+      if ! tracked_exact "$p"; then
+        echo 'not-exact'; return
+      fi ;;
+  esac
+
+  echo 'ok'
+}
+
+# ---------------------------------------------------------------------------------------------
+# Check 6 (definitions) — every extracted `paths:` KEY must carry at least one sequence item, and
+# at least one of those items must be a POSITIVE (non-'!') pattern.
+#
+# Two distinct failures, two distinct messages, both keyed off the RAW item count (before the
+# '!' filtering in pattern_verdict):
+#
+#   - RAW count is 0: the extractor found nothing to read. This is what converts an unsupported
+#     YAML form — the inline flow `paths: [a, b]`, and the flow-mapping event `push: { paths: … }`
+#     that the extractor deliberately does not parse — from a silent skip into a loud failure that
+#     names the file. The difference between a limitation and a hole.
+#   - RAW count is >0 but every item is '!'-negated: GitHub includes a changed file only when it
+#     matches at least one POSITIVE pattern, so an all-negated `paths:` block can never match
+#     anything — the trigger it guards is dead, silently, forever. Same failure class the gate
+#     exists to catch, just spelled with '!' instead of a typo (round-1 finding 1).
+#
+# `paths-ignore:` is exempt from the second failure: an all-negated paths-ignore is a no-op, not
+# a dead trigger — mirrors check 5's header, which excludes paths-ignore from matching entirely.
+#
+# scan_workflow_records consumes extractor records and emits one FINDING record per problem,
+# TAB-separated, and NOTHING for a clean file:
+#   PATTERN\t<verdict>\t<pattern>
+#   KEY\t<no-items|all-negated>\t<kind>\t<lineno>\t<raw item count>
+# Deciding here and printing at the call site is what lets path_filter_self_test assert the whole
+# of checks 5 and 6 against a fixture table.
+# ---------------------------------------------------------------------------------------------
+scan_workflow_records() {
+  local rec kind value verdict
+  local key_kind='' key_line='' key_items=0 key_positive=0
+
+  flush_key() {
+    if [ -n "$key_kind" ] && [ "$key_items" -eq 0 ]; then
+      printf 'KEY\tno-items\t%s\t%s\t%s\n' "$key_kind" "$key_line" "$key_items"
+    elif [ "$key_kind" = 'paths' ] && [ "$key_items" -gt 0 ] && [ "$key_positive" -eq 0 ]; then
+      printf 'KEY\tall-negated\t%s\t%s\t%s\n' "$key_kind" "$key_line" "$key_items"
+    fi
+  }
+
+  while IFS=$'\t' read -r rec kind value; do
+    case "$rec" in
+      KEY)
+        flush_key
+        key_kind="$kind"; key_line="$value"; key_items=0; key_positive=0 ;;
+      ITEM)
+        key_items=$((key_items + 1))
+        if [ "$kind" = 'paths' ]; then
+          verdict="$(pattern_verdict "$value")"
+          case "$verdict" in
+            ok|skipped|negated) ;;
+            *) printf 'PATTERN\t%s\t%s\n' "$verdict" "$value" ;;
+          esac
+          case "$value" in '!'*) ;; *) key_positive=$((key_positive + 1)) ;; esac
+        fi ;;
+    esac
+  done <<< "$1"
+
+  flush_key
+}
+
+# ---------------------------------------------------------------------------------------------
+# Path-filter self-test (definition only — invoked unconditionally as part of check 7).
+#
+# The standing control for checks 5 and 6, the two that actually close the failure this gate was
+# filed for. Before it existed, a mutation battery neutered pattern matching, exact-path
+# checking, the dead-glob branch and the key flush one at a time and the gate still exited 0:
+# the only thing exercising those code paths was the repo's own three workflow files, all of
+# which are clean. Every vocabulary rule and both check-6 verdicts now have a fixture.
+# ---------------------------------------------------------------------------------------------
+path_filter_self_test() {
+  local rc=0
+
+  expect_pattern() {
+    local pattern="$1" expected="$2" got
+    got="$(pattern_verdict "$pattern")"
+    if [ "$got" != "$expected" ]; then
+      fail "path-filter self-test: pattern_verdict '$pattern' returned '$got', expected
+      '$expected'. Check 5 is not deciding what it is documented to decide."
+      rc=1
+    fi
+  }
+
+  expect_scan() {
+    local name="$1" expected="$2" records="$3" got
+    got="$(scan_workflow_records "$records")"
+    if [ "$got" != "$expected" ]; then
+      fail "path-filter self-test '$name' mismatch.
+--- expected ---
+$expected
+--- actual ---
+$got"
+      rc=1
+    fi
+  }
+
+  # Vocabulary and tree-matching verdicts. The 'ok'/'dead' pairs are asserted against the REAL
+  # tracked tree, so they also prove `git ls-files` is being consulted at all.
+  expect_pattern 'rs/**'          'ok'                  # a live directory glob
+  expect_pattern 'rz/**'          'dead'                # the headline failure: matches nothing
+  expect_pattern 'rs/Cargo.toml'  'ok'                  # an exact tracked literal
+  expect_pattern 'rs'             'not-exact'           # a dropped '/**' — 320 files under git,
+                                                        # nothing at all on GitHub
+  expect_pattern '**.js'          'rejected-globstar'   # '**' embedded in a segment
+  expect_pattern './rs/**'        'rejected-dotty'      # git normalizes './' away, GitHub does not
+  expect_pattern '*.jsx?'         'rejected-charclass'  # '?' means different things
+  expect_pattern 'a+/**'          'rejected-charclass'
+  expect_pattern 'a[0-9]/**'      'rejected-charclass'
+  expect_pattern ':(glob)rs/**'   'rejected-charset'    # pathspec-injection guard
+  expect_pattern '!rs/docs/**'    'negated'             # exclusions are not required to match
+
+  # Check 6: the two key-level verdicts, plus the clean cases that keep them honest.
+  expect_scan 'an all-negated paths: block is a dead trigger' \
+"$(printf 'KEY\tall-negated\tpaths\t7\t2')" \
+"$(printf 'KEY\tpaths\t7\nITEM\tpaths\t!a/**\nITEM\tpaths\t!b/**')"
+
+  expect_scan 'a mixed positive and negated block is clean' \
+"" \
+"$(printf 'KEY\tpaths\t7\nITEM\tpaths\trs/**\nITEM\tpaths\t!rs/docs/**')"
+
+  expect_scan 'a KEY with no items (inline flow or flow mapping) is a failure' \
+"$(printf 'KEY\tno-items\tpaths\t7\t0')" \
+"$(printf 'KEY\tpaths\t7')"
+
+  expect_scan 'a paths-ignore KEY with no items is also a failure' \
+"$(printf 'KEY\tno-items\tpaths-ignore\t7\t0')" \
+"$(printf 'KEY\tpaths-ignore\t7')"
+
+  expect_scan 'an all-negated paths-ignore is a no-op, not a finding' \
+"" \
+"$(printf 'KEY\tpaths-ignore\t7\nITEM\tpaths-ignore\t!docs/**')"
+
+  expect_scan 'a dead glob is reported per pattern, naming the pattern' \
+"$(printf 'PATTERN\tdead\trz/**')" \
+"$(printf 'KEY\tpaths\t7\nITEM\tpaths\trs/**\nITEM\tpaths\trz/**')"
+
+  expect_scan 'every key in a file is flushed, not just the last' \
+"$(printf 'KEY\tno-items\tpaths\t7\t0\nPATTERN\tdead\trz/**')" \
+"$(printf 'KEY\tpaths\t7\nKEY\tpaths\t11\nITEM\tpaths\trz/**')"
+
+  return $rc
+}
+
+# ---------------------------------------------------------------------------------------------
+# Check 2 (definitions) — no actionlint config may neuter check 1.
+#
+# actionlint reads .github/actionlint.yaml, whose `paths:` map takes per-path `ignore:` regexes.
+# A blanket `ignore: [".*"]` makes check 1 exit 0 on a workflow with an unknown runner label —
+# VERIFIED. And the stdin fixtures of checks 3/4 are NOT suppressed by that config even when
+# -stdin-filename names a matching path (also verified), so those self-tests cannot detect it.
+# An explicit assertion is the only thing that can.
+#
+# An ALLOWLIST, not a blocklist. The earlier `grep '^[[:space:]]*ignore:'` was block-style only,
+# so the whole linter could be switched off by a single flow-style line —
+# `paths: {".github/workflows/**": {ignore: [".*"]}}` — with the gate still exiting 0 (round-3
+# finding F3). `self-hosted-runner` is the one key this repo permits: the documented escape hatch
+# (spec §6) for a new GitHub runner label the pinned binary does not know.
+# ---------------------------------------------------------------------------------------------
+CONFIG_ALLOWED_KEYS='self-hosted-runner'
+
+# Echoes one verdict token per problem, and nothing for an acceptable config:
+#   banned-ignore          an `ignore` key in ANY style (block, flow, sequence entry)
+#   unknown-key <key>      a top-level key outside CONFIG_ALLOWED_KEYS
+config_verdict() {
+  local cfg="$1" q='["'"'"']?'
+
+  if grep -qE "(^|[[:space:]{,-])${q}ignore${q}[[:space:]]*:" "$cfg"; then
+    echo 'banned-ignore'
+  fi
+
+  awk -v allowed="$CONFIG_ALLOWED_KEYS" '
+    { line = $0; sub(/\r$/, "", line) }
+    line ~ /^[ \t]*$/             { next }
+    line ~ /^[ \t]*#/             { next }
+    line ~ /^(---|\.\.\.)[ \t]*$/ { next }
+    line ~ /^[^ \t]/ {
+      key = line
+      sub(/:.*$/, "", key)
+      gsub(/^["\047]|["\047]$/, "", key)
+      if (key != allowed) print "unknown-key " key
+    }
+  ' "$cfg" | sort -u
+}
+
+config_self_test() {
+  local rc=0
+
+  expect_config() {
+    local name="$1" expected="$2" body="$3" tmp got
+    tmp="$(mktemp)"
+    printf '%s' "$body" > "$tmp"
+    got="$(config_verdict "$tmp")"
+    rm -f "$tmp"
+    if [ "$got" != "$expected" ]; then
+      fail "actionlint-config self-test '$name' mismatch.
+--- expected ---
+$expected
+--- actual ---
+$got"
+      rc=1
+    fi
+  }
+
+  expect_config 'the documented escape hatch is permitted' "" \
+'self-hosted-runner:
+  labels:
+    - my-new-label
+'
+
+  expect_config 'a block-style ignore: is rejected' \
+"$(printf 'banned-ignore\nunknown-key paths')" \
+'paths:
+  ".github/workflows/**":
+    ignore:
+      - ".*"
+'
+
+  expect_config 'a one-line flow-style ignore is rejected' \
+"$(printf 'banned-ignore\nunknown-key paths')" \
+'paths: {".github/workflows/**": {ignore: [".*"]}}
+'
+
+  expect_config 'a quoted ignore key is rejected' \
+"$(printf 'banned-ignore\nunknown-key paths')" \
+'paths: {"x": {"ignore": [".*"]}}
+'
+
+  expect_config 'an unknown top-level key is rejected even without ignore' \
+'unknown-key paths' \
+'paths:
+  ".github/workflows/**":
+    something-else: true
+'
+
+  return $rc
+}
+
+case "$#:${1:-}" in
+  '0:')
+    ;;
+  '1:--self-test')
+    # --self-test never shells out to actionlint, so it runs everything that does not need the
+    # binary and exits before the PATH guard below.
+    extractor_self_test
+    path_filter_self_test
+    config_self_test
+    exit "$FAILED" ;;
+  *)
+    usage ;;
+esac
 
 # Guard lives here, AFTER the --self-test early exit: --self-test never shells out to actionlint,
 # so it must not infra-exit on a machine that simply doesn't have the binary on PATH yet.
@@ -441,23 +1014,25 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------------------------
-# Check 2 — no actionlint config may neuter check 1.
-#
-# actionlint reads .github/actionlint.yaml, whose `paths:` map takes per-path `ignore:` regexes.
-# A blanket `ignore: [".*"]` makes check 1 exit 0 on a workflow with an unknown runner label —
-# VERIFIED. And the stdin fixtures of checks 3/4 are NOT suppressed by that config even when
-# -stdin-filename names a matching path (also verified), so the self-tests cannot detect it.
-# An explicit assertion is the only thing that can.
-#
-# The file itself is permitted: `self-hosted-runner.labels` is the documented escape hatch for a
-# new GitHub runner label the pinned binary does not know (spec §6). Only `ignore:` is banned.
+# Check 2 — the allowlist assertion itself. Rationale and fixtures are with config_verdict above.
 # ---------------------------------------------------------------------------------------------
 for cfg in .github/actionlint.yaml .github/actionlint.yml; do
   [ -e "$cfg" ] || continue
-  if grep -qE '^[[:space:]]*ignore:' "$cfg"; then
-    fail "$cfg contains an 'ignore:' key, which can silently suppress every finding in check 1.
-      Remove it. To teach actionlint a new runner label, use self-hosted-runner.labels instead."
-  fi
+  while IFS= read -r verdict; do
+    case "$verdict" in
+      '') ;;
+      banned-ignore)
+        fail "$cfg contains an 'ignore' key, which can silently suppress every finding in check 1.
+      Remove it. To teach actionlint a new runner label, use self-hosted-runner.labels instead." ;;
+      'unknown-key '*)
+        fail "$cfg declares top-level key '${verdict#unknown-key }'. The only key permitted here is
+      '$CONFIG_ALLOWED_KEYS' — the documented escape hatch for a runner label the pinned actionlint
+      does not know. Every other key in this file can weaken check 1, so it is rejected rather
+      than reasoned about." ;;
+      *)
+        infra "unhandled actionlint-config verdict '$verdict' for $cfg" ;;
+    esac
+  done < <(config_verdict "$cfg")
 done
 
 # ---------------------------------------------------------------------------------------------
@@ -559,216 +1134,77 @@ if ! printf '%s' "$healthy" | actionlint "${ARGS[@]}" -stdin-filename .github/wo
 fi
 
 # ---------------------------------------------------------------------------------------------
-# Check 5 — every `paths:` glob must be expressible AND must match the tree.
-#
-# THIS is the check that closes the failure this gate was filed for; actionlint cannot see it.
-#
-# `git ls-files ':(glob)P'` is NOT a sound model of GitHub filter patterns, in both directions:
-#
-#   - Wildcard-free patterns take DIRECTORY-PREFIX semantics under git. ':(glob)rs' matches 320
-#     tracked files; GitHub matches NOTHING (no file is named `rs`). A dropped '/**' is among the
-#     likeliest hand-edits, so literals are required to be an EXACT tracked path, never a prefix.
-#   - '**' differs. GitHub: "zero or more of any character", slash-crossing anywhere. git: only
-#     crosses '/' as a whole path component. GitHub documents '**.js' as "all .js files in the
-#     repository"; ':(glob)**.js' yields 0 — a false red on the ONLY required check.
-#
-# Hence a restricted vocabulary where both matchers agree for the forms in use here, and a
-# LOUD rejection otherwise. Never a silently-wrong verdict in either direction. (One vocabulary
-# form is NOT provably general: git collapses a leading '**/' to zero directories, so
-# ':(glob)**/README.md' matches a root-level README.md, where GitHub's literal "zero or more of
-# any character" reading of '**/' would not obviously agree. Nothing in this repo uses that
-# form; flagged here rather than silently assumed sound.)
-#
-# `paths-ignore:` is deliberately EXCLUDED. For `paths:`, matching nothing kills the workflow;
-# for `paths-ignore:`, matching nothing is a no-op and the dangerous direction is matching
-# EVERYTHING. Requiring paths-ignore globs to match would add false-red surface while guarding
-# the wrong end (spec §7, non-goal).
-#
-# SKIP_PATTERNS is the escape hatch of spec §6: a GitHub-valid pattern outside the vocabulary.
-# Every entry needs a comment justifying it, same shape as deny.toml's license exceptions.
-# ---------------------------------------------------------------------------------------------
-SKIP_PATTERNS=(
-  # (empty — add entries as "pattern"  # why, and what verifies it instead)
-)
-
-is_skipped() {
-  local p="$1" s
-  for s in ${SKIP_PATTERNS+"${SKIP_PATTERNS[@]}"}; do
-    [ "$s" = "$p" ] && return 0
-  done
-  return 1
-}
-
-# 0 if every '**' in the pattern is a whole path component ('a/**', '**/b'), 1 if any '**' is
-# embedded in a larger segment ('**.js', 'a**b') — where git and GitHub disagree.
-globstars_are_components() {
-  local seg
-  while IFS= read -r seg; do
-    case "$seg" in
-      '**') ;;
-      *'**'*) return 1 ;;
-    esac
-  done <<< "${1//\//$'\n'}"
-  return 0
-}
-
-# 0 if $1 names an exactly-tracked file (NOT a directory prefix).
-tracked_exact() {
-  local p="$1" f
-  while IFS= read -r -d '' f; do
-    [ "$f" = "$p" ] && return 0
-  done < <(git -c core.quotePath=false ls-files -z -- "$p" 2>/dev/null)
-  return 1
-}
-
-# 0 if the pattern contains a '.', '..', or empty path segment: a leading './', an interior
-# '/./' or '/../', or a doubled '//'. git's :(glob)/ls-files normalizes these away when
-# resolving a pathspec (measured: './rs/**', 'rs/../rs/**' and 'rs//**' all match the same 320
-# files as plain 'rs/**'); GitHub filter patterns match the literal path text and do not, so
-# each of those forms is dead on GitHub while this gate would otherwise wave it through.
-has_dotty_segment() {
-  local seg
-  while IFS= read -r seg; do
-    case "$seg" in
-      ''|'.'|'..') return 0 ;;
-    esac
-  done <<< "${1//\//$'\n'}"
-  return 1
-}
-
-check_pattern() {
-  local file="$1" p="$2" n
-
-  is_skipped "$p" && return
-
-  # Negated entries are exclusions — requiring them to match a file would be wrong. They are
-  # still COUNTED by check 6, which counts raw sequence items before any filtering, so an
-  # all-negated block cannot hard-fail as "key with no items" — check 6 instead fails it as
-  # "no positive pattern", a distinct and more specific verdict.
-  case "$p" in '!'*) return ;; esac
-
-  # '?' is "zero or one of the PRECEDING character" on GitHub but "any single character" in git;
-  # '+' is "one or more of the preceding" on GitHub but a literal in git; '[]' is one alphanumeric
-  # on GitHub but ranges/negation in git. All three would give a wrong verdict, so reject.
-  #
-  # Deliberately ABOVE the pathspec-injection guard below: that guard's character class also
-  # rejects all four characters, so if it ran first this specific, actionable message would be
-  # unreachable dead code and a pattern like GitHub's own documented '*.jsx?' would be told it
-  # "contains characters this gate will not pass to git" — true, but not the actual reason, and
-  # it gives the author nothing to act on.
-  case "$p" in
-    *'?'*|*'+'*|*'['*|*']'*)
-      fail "$file: pattern '$p' uses '?', '+' or '[]', whose meaning differs between GitHub
-      filter patterns and git pathspecs, so this gate cannot verify it. Rewrite it, or add it to
-      SKIP_PATTERNS in $0 with a justification."
-      return ;;
-  esac
-
-  # Pathspec-injection guard: a pattern starting with ':' would be read by git as pathspec
-  # magic. The '--' separator and quoting are necessary but not sufficient. Anything outside
-  # this conservative class is rejected rather than passed to git. Acts as the catch-all for
-  # every remaining unsupported character, now that '?'/'+'/'[]' are handled above with their
-  # own message.
-  if ! printf '%s' "$p" | grep -qE '^[A-Za-z0-9._/*-]+$'; then
-    fail "$file: pattern '$p' contains characters this gate will not pass to git.
-      Supported: letters, digits, '.', '_', '/', '*', '-'. If GitHub accepts it, add it to
-      SKIP_PATTERNS in $0 with a justification."
-    return
-  fi
-
-  if has_dotty_segment "$p"; then
-    fail "$file: pattern '$p' contains a '.', '..', or empty path segment ('./', '/./', '/../',
-      or '//'). git's :(glob) matcher normalizes these away when resolving the pattern; GitHub
-      filter patterns match the literal path text and do not, so this gate cannot verify it.
-      Rewrite the pattern without them, or add it to SKIP_PATTERNS in $0 with a justification."
-    return
-  fi
-
-  if ! globstars_are_components "$p"; then
-    fail "$file: pattern '$p' uses '**' inside a path segment. GitHub treats that as
-      slash-crossing ('**.js' = every .js file); git does not, so this gate cannot verify it.
-      Write '**/*.js' instead, or add it to SKIP_PATTERNS in $0 with a justification."
-    return
-  fi
-
-  case "$p" in
-    *'*'*)
-      n="$(git -c core.quotePath=false ls-files -- ":(glob)$p" 2>/dev/null | wc -l | tr -d ' ')"
-      if [ "${n:-0}" -eq 0 ]; then
-        fail "$file: paths glob '$p' matches NO tracked file. The workflow's trigger is
-      (or will become) dead — GitHub reports nothing when a filter matches nothing."
-      fi ;;
-    *)
-      if ! tracked_exact "$p"; then
-        fail "$file: paths entry '$p' is not an exact tracked file path. GitHub filter patterns
-      match FILE paths — a bare directory name matches nothing. Did you mean '$p/**'?"
-      fi ;;
-  esac
-}
-
-# ---------------------------------------------------------------------------------------------
-# Check 6 — every extracted `paths:` KEY must carry at least one sequence item, and at least
-# one of those items must be a POSITIVE (non-'!') pattern.
-#
-# Two distinct failures, two distinct messages, both keyed off the RAW item count (before the
-# '!' filtering in check_pattern):
-#
-#   - RAW count is 0: the extractor found nothing to read. This is what converts an unsupported
-#     YAML form — the inline flow `paths: [a, b]`, which the extractor deliberately does not
-#     parse — from a silent skip into a loud failure that names the file. The difference between
-#     a limitation and a hole.
-#   - RAW count is >0 but every item is '!'-negated: GitHub includes a changed file only when it
-#     matches at least one POSITIVE pattern, so an all-negated `paths:` block can never match
-#     anything — the trigger it guards is dead, silently, forever. Same failure class the gate
-#     exists to catch, just spelled with '!' instead of a typo (round-1 finding 1).
-#
-# `paths-ignore:` is exempt from the second failure: an all-negated paths-ignore is a no-op, not
-# a dead trigger — mirrors check 5's header, which excludes paths-ignore from matching entirely.
+# Checks 5 and 6 — the real files. Rationale and fixtures are with pattern_verdict and
+# scan_workflow_records above; this is the production call site that turns each finding record
+# into the message its author has to act on.
 # ---------------------------------------------------------------------------------------------
 for wf in "${WORKFLOW_FILES[@]}"; do
   records="$(extract_paths_keys "$wf")" || infra "extractor failed on $wf"
   [ -n "$records" ] || continue
 
-  key_kind=""; key_line=""; key_items=0; key_positive=0
+  findings="$(scan_workflow_records "$records")"
+  [ -n "$findings" ] || continue
 
-  flush_key() {
-    if [ -n "$key_kind" ] && [ "$key_items" -eq 0 ]; then
-      fail "$wf:$key_line: '$key_kind:' has no sequence entries this gate could read. If it uses
-      the inline form (paths: [a, b]), rewrite it as a block sequence — the extractor parses only
-      block sequences, and skipping it silently is exactly the failure this gate exists to prevent."
-    elif [ "$key_kind" = "paths" ] && [ "$key_items" -gt 0 ] && [ "$key_positive" -eq 0 ]; then
-      fail "$wf:$key_line: 'paths:' has $key_items entries but every one is a '!'-negated
+  while IFS=$'\t' read -r rec verdict f1 f2 f3; do
+    case "$rec" in
+      PATTERN)
+        p="$f1"
+        case "$verdict" in
+          rejected-charclass)
+            fail "$wf: pattern '$p' uses '?', '+' or '[]', whose meaning differs between GitHub
+      filter patterns and git pathspecs, so this gate cannot verify it. Rewrite it, or add it to
+      SKIP_PATTERNS in $0 with a justification." ;;
+          rejected-charset)
+            fail "$wf: pattern '$p' contains characters this gate will not pass to git.
+      Supported: letters, digits, '.', '_', '/', '*', '-'. If GitHub accepts it, add it to
+      SKIP_PATTERNS in $0 with a justification." ;;
+          rejected-dotty)
+            fail "$wf: pattern '$p' contains a '.', '..', or empty path segment ('./', '/./', '/../',
+      or '//'). git's :(glob) matcher normalizes these away when resolving the pattern; GitHub
+      filter patterns match the literal path text and do not, so this gate cannot verify it.
+      Rewrite the pattern without them, or add it to SKIP_PATTERNS in $0 with a justification." ;;
+          rejected-globstar)
+            fail "$wf: pattern '$p' uses '**' inside a path segment. GitHub treats that as
+      slash-crossing ('**.js' = every .js file); git does not, so this gate cannot verify it.
+      Write '**/*.js' instead, or add it to SKIP_PATTERNS in $0 with a justification." ;;
+          dead)
+            fail "$wf: paths glob '$p' matches NO tracked file. The workflow's trigger is
+      (or will become) dead — GitHub reports nothing when a filter matches nothing." ;;
+          not-exact)
+            fail "$wf: paths entry '$p' is not an exact tracked file path. GitHub filter patterns
+      match FILE paths — a bare directory name matches nothing. Did you mean '$p/**'?" ;;
+          *)
+            infra "unhandled pattern verdict '$verdict' for '$p' in $wf" ;;
+        esac ;;
+      KEY)
+        case "$verdict" in
+          no-items)
+            fail "$wf:$f2: '$f1:' has no sequence entries this gate could read. Two forms produce
+      that and neither is parsed: an inline sequence (paths: [a, b]) and a flow mapping on the
+      event itself (push: { paths: [a, b] }). Rewrite the event and its filter in block style —
+      skipping either one silently is exactly the failure this gate exists to prevent." ;;
+          all-negated)
+            fail "$wf:$f2: 'paths:' has $f3 entries but every one is a '!'-negated
       exclusion. GitHub includes a changed file only when it matches at least one POSITIVE
       pattern, so this filter can never match anything and the trigger it guards is dead. Add at
-      least one non-'!' pattern."
-    fi
-  }
-
-  while IFS=$'\t' read -r rec kind value; do
-    case "$rec" in
-      KEY)
-        flush_key
-        key_kind="$kind"; key_line="$value"; key_items=0; key_positive=0 ;;
-      ITEM)
-        key_items=$((key_items + 1))
-        if [ "$kind" = "paths" ]; then
-          check_pattern "$wf" "$value"
-          case "$value" in '!'*) ;; *) key_positive=$((key_positive + 1)) ;; esac
-        fi ;;
+      least one non-'!' pattern." ;;
+          *)
+            infra "unhandled key verdict '$verdict' in $wf" ;;
+        esac ;;
     esac
-  done <<< "$records"
-
-  flush_key
+  done <<< "$findings"
 done
 
 # ---------------------------------------------------------------------------------------------
-# Check 7 — extractor self-test, invoked for real.
+# Check 7 — the self-tests, invoked for real.
 #
-# The function is defined earlier (immediately after extract_paths_keys) so the `--self-test`
-# early exit near the top of this script can run it standalone for fast iteration. This is the
-# unconditional invocation that actually makes the fixture table guard the parser on every real
-# gate run — without it the whole table is dead code in CI.
+# All three are defined earlier so the `--self-test` early exit near the top of this script can
+# run them standalone for fast iteration. These are the unconditional invocations that actually
+# make the fixture tables guard the gate on every real run — without them the tables are dead
+# code in CI.
 # ---------------------------------------------------------------------------------------------
 extractor_self_test
+path_filter_self_test
+config_self_test
 
 exit "$FAILED"
