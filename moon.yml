@@ -198,6 +198,11 @@ tasks:
     #     the cheaper failure mode versus a missed gate on an actual `PublisherConfig` change.
     #   - 'Cargo.toml', 'rs/Cargo.lock' — dependency/version changes that could alter broker
     #     client behavior (e.g. the NATS crate itself).
+    #   - 'rs/.config/nextest.toml' — this task runs its own `cargo nextest` against
+    #     -p paigasus-iam, which the SMA-521 retry/test-group override matches. Without this
+    #     input a profile edit would leave this gate serving a cached PASS. (It is NOT
+    #     inherited from .moon/tasks/rust.yml: that file is `inheritedBy: languages: ['rust']`
+    #     and this task is `language: 'bash'` on the root `repo` project.)
     # NOT included: 'tests/support/**/*' (~748 lines of shared auth/tenancy/audit/API-key test
     # infra) — nats_permissions.rs has no `mod support;` and never references it (unlike ~30
     # other test files in this crate that do), so it is not a real dependency; including it
@@ -209,6 +214,12 @@ tasks:
       - 'rs/crates/services/paigasus-iam/src/config.rs'
       - 'rs/crates/services/paigasus-iam/Cargo.toml'
       - 'rs/Cargo.lock'
+      #   - 'rs/.config/nextest.toml' — this task runs its own `cargo nextest` against
+      #     -p paigasus-iam, which the SMA-521 retry/test-group override matches. Without this
+      #     input a profile edit would leave this gate serving a cached PASS. (It is NOT
+      #     inherited from .moon/tasks/rust.yml: that file is `inheritedBy: languages: ['rust']`
+      #     and this task is `language: 'bash'` on the root `repo` project.)
+      - 'rs/.config/nextest.toml'
 
   wasm-getrandom-free:
     description: 'Assert the wasm binding pulls no `getrandom` — the kernel mints UUIDv7 from injected bytes, so wasm32-unknown-unknown stays buildable (SMA-448).'

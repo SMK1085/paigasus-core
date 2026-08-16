@@ -1,0 +1,47 @@
+# The retry/concurrency policy for paigasus-iam's Docker-backed integration tests (SMA-521).
+#
+# Deliberately on `profile.default`, NOT a `[profile.ci]`: a `ci` profile only applies with
+# `--profile ci`, which the inherited `.moon/tasks/rust.yml` command
+# (`cargo nextest run --no-tests=pass`) does not pass. Putting it on the default profile is what
+# makes Moon, the manual command, and a developer's bare `cargo nextest` all read ONE definition.
+# Note `cargo test` picks up none of this — nextest config is nextest-only.
+nextest-version = { required = "0.9.136" }
+
+# Bounds how many tests in this group start containers concurrently, ON TOP OF the global
+# `test-threads` (left at its default so non-container crates keep full parallelism).
+#
+# Floored at 4 on purpose: CI (`ubuntu-latest`, 4 vCPU on this public repo) already runs only
+# ~4-way, so a cap >= 4 is provably a no-op there and cannot serialize the graph into ci.yml's
+# 30-minute job timeout. The win is local, where a bare `cargo nextest` otherwise fires 18
+# concurrent container startups at an 8-CPU Docker VM.
+#
+# NOTE this cap is per nextest PROCESS, not global: `moon ci` runs `paigasus-iam-rs:test` and
+# `repo:nats-permissions` as separate tasks, each with its own budget.
+#
+# MEASUREMENTS: see Task 4 — replace this line with the recorded numbers.
+[test-groups.docker-containers]
+max-threads = 4
+
+[[profile.default.overrides]]
+# `=` is an exact-match matcher. Verified that the bare form does NOT match `paigasus-iam-core`
+# either, but the explicit form means no reader has to know the matcher's semantics.
+# `kind(test)` selects integration-test targets only, so paigasus-iam's own --lib unit tests and
+# every other crate keep retries = 0 — a flaky pure-logic test must still red immediately.
+filter = 'package(=paigasus-iam) and kind(test)'
+# Attempts land at roughly t, t+15s, t+45s. Sized against a MEASURED contention window: see
+# tests/nats_publisher.rs:51-58, where a full-suite run that normally takes 3.7s took 33s under
+# load. A flat 2s backoff would put all three attempts inside that window and absorb nothing.
+retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
+test-group = 'docker-containers'
+
+[[profile.default.overrides]]
+# keycloak_e2e starts a Keycloak with a 240s startup timeout (tests/keycloak_e2e.rs:79). Three
+# attempts of a genuinely failing run would be ~18 minutes against ci.yml's 30-minute budget.
+filter = 'package(=paigasus-iam) and test(keycloak)'
+retries = 1
+
+# `.moon/tasks.yml` sets `taskOptions.outputStyle: 'buffer-only-failure'`, so a task that goes
+# green-with-flakes prints NOTHING — the FLAKY signal this design's safety argument depends on is
+# otherwise invisible in CI. ci.yml uploads this file as an artifact.
+[profile.default.junit]
+path = 'junit.xml'
