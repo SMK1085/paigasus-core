@@ -18,9 +18,22 @@ nextest-version = { required = "0.9.136" }
 # NOTE this cap is per nextest PROCESS, not global: `moon ci` runs `paigasus-iam-rs:test` and
 # `repo:nats-permissions` as separate tasks, each with its own budget.
 #
-# MEASUREMENTS: see Task 4 — replace this line with the recorded numbers.
+# MEASURED 2026-08-16 on an 18-logical-CPU Apple M5 Max macOS host with an 8-CPU / ~7.8 GB
+# Docker VM (Docker 29.6.2), `CI=1 cargo nextest run -p paigasus-iam`, two runs each (wall clock
+# via `time`, all runs 873 passed / 0 skipped):
+#   uncapped (test-group commented out): 55.8s (clean) / 123.4s (1 flaky: postgres conn timeout)
+#   max-threads = 8: 84.7s (clean) / 84.0s (clean)
+#   max-threads = 6: 99.5s (2 flaky)  / 126.6s (1 flaky)
+#   max-threads = 4: 109.0s (clean, matches the prior 108.4s reference) / 145.0s (1 flaky, 1 leaky)
+# Chose 8, NOT the floor of 4: the data inverts the assumption behind "pick the lowest safe cap"
+# — lower caps here are both SLOWER (4's own average, 127s, exceeds even the noisy uncapped run,
+# 123.4s) and, in this small sample, no less flaky (4 and 6 each hit the same postgres
+# connection-timeout flake that uncapped hit; 8 hit it in neither run). 8 was the fastest,
+# lowest-variance, and only zero-flake configuration tested, and it is not a coincidence that it
+# equals the Docker VM's own CPU count — that is the natural concurrency ceiling, not the floor.
+# Re-derive by repeating the above; the optimum tracks Docker VM capacity, not host CPU count.
 [test-groups.docker-containers]
-max-threads = 4
+max-threads = 8
 
 # ORDER IS LOAD-BEARING. nextest applies "the first override that matches the test and
 # configures the setting" — first-match-wins PER SETTING, evaluated top-to-bottom. The general
