@@ -2,8 +2,8 @@
 
 //! End-to-end coverage for `#[derive(Auditable)]` (SMA-438).
 //!
-//! Task 2 covers a hand-written struct — proving the re-export, the absolute paths, and
-//! `extern crate self` all line up. Task 3 extends this file to the generated messages.
+//! A hand-written struct proves the re-export, the absolute paths, and `extern crate self`
+//! all line up; the rest of the file exercises the derive against the generated messages.
 
 use paigasus_proto::audit::{AuditMetadata, Auditable};
 

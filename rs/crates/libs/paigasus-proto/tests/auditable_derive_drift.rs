@@ -72,21 +72,39 @@ fn carries_expected_derive(attrs: &[syn::Attribute]) -> bool {
 
 fn audit(src: &str) -> Vec<Finding> {
     let file = syn::parse_file(src).expect("generated source must parse");
-    file.items
-        .iter()
-        .filter_map(|item| {
-            let syn::Item::Struct(s) = item else { return None };
-            let syn::Fields::Named(named) = &s.fields else { return None };
-            let has_audit_field = named.named.iter().any(|f| f.ident.as_ref().is_some_and(|i| i == "audit") && is_option_of_audit_metadata(&f.ty));
-            let has_derive = carries_expected_derive(&s.attrs);
-            // Only structs that are interesting in EITHER direction.
-            (has_audit_field || has_derive).then(|| Finding {
-                ty: s.ident.to_string(),
-                has_audit_field,
-                has_derive,
-            })
-        })
-        .collect()
+    let mut findings = Vec::new();
+    audit_items(&file.items, &mut findings);
+    findings
+}
+
+/// Walks `items` looking for audit-bearing/derive-carrying structs, recursing into `pub mod`
+/// blocks. prost emits a message's oneof companion types inside `pub mod <snake_case_name>`
+/// (see `list_memberships_request` in the generated iam sources) — a nested MESSAGE embedding
+/// AuditMetadata would take that same shape, so a top-level-only walk would silently miss it.
+fn audit_items(items: &[syn::Item], findings: &mut Vec<Finding>) {
+    for item in items {
+        match item {
+            syn::Item::Struct(s) => {
+                let syn::Fields::Named(named) = &s.fields else { continue };
+                let has_audit_field = named.named.iter().any(|f| f.ident.as_ref().is_some_and(|i| i == "audit") && is_option_of_audit_metadata(&f.ty));
+                let has_derive = carries_expected_derive(&s.attrs);
+                // Only structs that are interesting in EITHER direction.
+                if has_audit_field || has_derive {
+                    findings.push(Finding {
+                        ty: s.ident.to_string(),
+                        has_audit_field,
+                        has_derive,
+                    });
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, nested_items)) = &m.content {
+                    audit_items(nested_items, findings);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn generated_sources() -> Vec<PathBuf> {
@@ -123,8 +141,9 @@ fn every_audit_bearing_generated_struct_carries_the_derive() {
     }
     assert!(
         inconsistent.is_empty(),
-        "generated code and contracts/buf.gen.yaml disagree.\n\
-         An `audit` field without the derive means a message_attribute= line is MISSING;\n\
+        "committed generated code has structs where the `audit` field and the derive disagree.\n\
+         This usually means contracts/buf.gen.yaml's message_attribute= lines are out of sync:\n\
+         an `audit` field without the derive means a line is MISSING;\n\
          the derive without an `audit` field means a line is STALE.\n{}",
         inconsistent.join("\n")
     );
@@ -157,6 +176,16 @@ const DERIVE_WITHOUT_FIELD: &str = r#"
     pub struct StaleLine { pub prn: ::prost::alloc::string::String }
 "#;
 
+// prost nests a message's oneof companion types inside a `pub mod <snake_case_name>` block
+// (see `list_memberships_request` in the generated iam sources) — that shape is already in the
+// tree, so a message embedded the same way is not hypothetical. `audit()` must look inside it.
+const NESTED_FIELD_WITHOUT_DERIVE: &str = r#"
+    pub mod nested {
+        #[derive(Clone, ::prost::Message)]
+        pub struct MissingLine { pub audit: ::core::option::Option<super::AuditMetadata> }
+    }
+"#;
+
 #[test]
 fn control_accepts_a_correctly_injected_struct() {
     let found = audit(WITH_BOTH);
@@ -176,6 +205,17 @@ fn control_rejects_a_derive_with_no_audit_field() {
     let found = audit(DERIVE_WITHOUT_FIELD);
     assert_eq!(found.len(), 1);
     assert!(!found[0].is_consistent(), "a stale message_attribute= line must be detected");
+}
+
+#[test]
+fn control_rejects_an_audit_field_with_no_derive_when_nested_in_a_module() {
+    // A top-level-only walk would silently miss this struct: `total` would stay unchanged and
+    // the missing message_attribute= line would never be flagged. This is the exact failure the
+    // guard exists to catch — proven by running this test BEFORE `audit()` recurses into
+    // `syn::Item::Mod` and confirming it fails.
+    let found = audit(NESTED_FIELD_WITHOUT_DERIVE);
+    assert_eq!(found.len(), 1, "a struct nested inside `pub mod` must still be visited");
+    assert!(!found[0].is_consistent(), "a missing message_attribute= line must be detected even when nested");
 }
 
 #[test]

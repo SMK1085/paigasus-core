@@ -7,6 +7,10 @@ rust-version.workspace = true
 authors.workspace = true
 # TODO(SMA-388): flip publish = true + choose a real 0.x version once generated
 # code lands (paigasus-proto is crates.io-bound per the open-core release strategy).
+# paigasus-proto-derive must publish FIRST — this crate depends on it. And note
+# AuditableExample's derived Auditable impl is public API as of SMA-438 (not cfg(test), a
+# deliberate reversal of an SMA-425 decision — spec D8), so it becomes semver-locked once
+# this crate publishes.
 publish = false
 
 [dependencies]
