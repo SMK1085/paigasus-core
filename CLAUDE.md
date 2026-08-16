@@ -98,13 +98,14 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   dedicated `[profile.iam]` instead, selected only by `paigasus-iam-rs:test`'s `args: ['--profile',
   'iam']` — CI uploads it as the `nextest-junit` artifact, but a bare `cargo nextest run -p
   paigasus-iam` writes no report at all.
-- The iam suite **silently skips** without Docker: `support::start_migrated_postgres()` returns
-  `None` and each test `return`s, reporting a PASS in under a second having run nothing (nextest's
-  skip count does not reveal it, because stderr from a *passing* test is discarded —
-  `success-output` defaults to `never`). The tell is a fast run made *without* `CI=1`; with Docker
-  present a small `paigasus-iam` suite legitimately finishes in a couple of seconds, so speed alone
-  is not the signal. Always verify with `CI=1 cargo nextest run -p paigasus-iam`, which makes a
-  missing daemon a hard failure. SMA-538 tracks fixing this properly.
+- `paigasus-iam`'s **Docker-backed** suites silently skip without Docker:
+  `support::start_migrated_postgres()` returns `None` and each test `return`s, reporting a PASS in
+  under a second having run nothing (nextest's skip count does not reveal it, because stderr from
+  a *passing* test is discarded — `success-output` defaults to `never`). Speed alone isn't the
+  tell — a handful of suites in the crate touch no container and are legitimately fast either way.
+  The tell is a fast run made *without* `CI=1`: a genuine Docker-backed pass takes just over a
+  second (measured ~1.1s), never under. Always verify with `CI=1 cargo nextest run -p
+  paigasus-iam`, which makes a missing daemon a hard failure. SMA-538 tracks fixing this properly.
 
 ## Workflow
 
