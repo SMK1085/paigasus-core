@@ -1,13 +1,27 @@
 [package]
 name = "paigasus-kernel"
+# 0.0.0 is the pre-release stub floor. SMA-407 moves every package to the 0.1.0 floor
+# together (crates.io/PyPI/npm in lockstep) and lets release-plz cut the first tag;
+# publishing THIS version would permanently burn it on crates.io. `rs/release-plz.toml`
+# therefore carries `release = false`, and `moon run repo:publish-metadata` fails if that
+# block is removed while a publishable crate is still at 0.0.0.
 version = "0.0.0"
+description = "Pure-logic behavioral kernel for Paigasus — resource names (PRN), UUIDv7 minting, and Cedar entity UIDs."
+repository = "https://github.com/SMK1085/paigasus-core"
+homepage = "https://github.com/SMK1085/paigasus-core#readme"
+readme = "README.md"
+keywords = ["paigasus", "kernel", "prn", "uuid7", "cedar"]
+categories = ["data-structures", "parser-implementations"]
+# ALLOWLIST, not a denylist. Cargo's default include is "every non-ignored file in the
+# package dir", which shipped the monorepo's `moon.yml` to crates.io consumers and would
+# ship whatever the dir gains next. Enumerating what belongs is the version that cannot
+# leak. The proptest files are kept deliberately: a vendoring consumer can run the suite.
+include = ["src/**/*.rs", "tests/**/*.rs", "Cargo.toml", "README.md", "LICENSE"]
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-# TODO(SMA-376): flip publish = true + choose a real 0.x version once the kernel has
-# release-worthy logic (kernel is crates.io-bound per ADR-0005).
-publish = false
+publish = true
 
 [dependencies]
 uuid = { workspace = true }
@@ -16,5 +30,15 @@ thiserror = { workspace = true }
 [dev-dependencies]
 proptest.workspace = true
 
-[lints]
-workspace = true
+# NOT `workspace = true`. Cargo INLINES the resolved lint table into the published
+# manifest, and docs.rs builds a published crate as the ROOT package on nightly, where
+# cargo's `--cap-lints allow` does not apply. Inheriting the workspace's
+# `warnings = "deny"` would let the first new rustc warning silently kill docs.rs builds
+# of a released crate. CI strictness is unaffected: the Moon `lint` task passes
+# `-D warnings` explicitly, which is already how clippy is handled (see `rs/Cargo.toml`'s
+# `[workspace.lints]` posture comment).
+[lints.rust]
+warnings = "warn"
+
+[lints.clippy]
+all = "warn"

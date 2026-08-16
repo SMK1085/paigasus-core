@@ -2,8 +2,14 @@
 
 //! Pure-logic behavioral kernel for Paigasus.
 //!
-//! Bound to Python / Node / WASM via the crates under `rs/crates/bindings/`. No FFI or
-//! adapter dependencies live here (ADR-0005). Empty until real logic lands.
+//! The cross-language primitives that must behave identically in every runtime:
+//! [`Prn`] (Paigasus Resource Names), [`mint_uuid7`] (UUIDv7 from injected bytes — no
+//! ambient entropy, so the crate builds for `wasm32-unknown-unknown`), and
+//! [`to_cedar_uid`] (Cedar entity UIDs).
+//!
+//! No I/O, no FFI, and no adapter dependencies live here. The Python, Node and browser
+//! bindings under `rs/crates/bindings/` call into this crate rather than reimplementing
+//! it (ADR-0005).
 
 pub mod cedar;
 // The PRN value type lives in `resource_name`, NOT `prn`: `prn` (PRN) is a Windows reserved device

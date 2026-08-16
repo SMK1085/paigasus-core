@@ -7,6 +7,11 @@
 # state and cuts no tags.
 
 [workspace]
+# Publishing is BLOCKED while packages sit at the 0.0.0 stub floor: releasing 0.0.0
+# would permanently burn that version on crates.io. SMA-407 removes this line as part of
+# moving every package to the 0.1.0 floor. `repo:publish-metadata` asserts the pairing —
+# this block cannot be removed while a publishable crate is still at 0.0.0.
+release = false
 # Conventional-Commit -> semver classification (the contract SMA-398 asserts).
 # In 0.x: fix -> patch, feat -> minor, breaking (! or BREAKING CHANGE) -> minor.
 # features_always_increment_minor keeps feat distinguishable from fix in 0.x.
