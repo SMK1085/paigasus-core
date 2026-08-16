@@ -59,8 +59,9 @@ done
 # rather than a vacuous pass) applies ONLY to the auto-discovery path — an explicit glob that
 # expands to nothing would exit 0 as "no errors found".
 # ---------------------------------------------------------------------------------------------
-if ! actionlint "${ARGS[@]}"; then
-  rc=$?
+actionlint "${ARGS[@]}"
+rc=$?
+if [ "$rc" -ne 0 ]; then
   if [ "$rc" -eq 3 ]; then
     infra "actionlint found no workflow files to lint (exit 3)"
   fi
