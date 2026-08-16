@@ -98,3 +98,15 @@ test-group = 'docker-containers'
 
 [profile.iam.junit]
 path = 'junit.xml'
+
+# `repo:nats-permissions` (moon.yml) runs a SECOND nextest process against this same crate —
+# `-p paigasus-iam --test nats_permissions` — because an ops-only change must still re-run that
+# gate. It gets its own profile rather than reusing `iam`: the two tasks can run concurrently in
+# one `moon ci`, so sharing a store dir would reintroduce exactly the clobbering that moving off
+# `default` was meant to end. Without a profile of its own it wrote no report at all, leaving the
+# crate's most container-heavy suite (12 containers, TLS certs) as the one with no flaky signal.
+# `ci.yml` uploads `target/nextest/iam*/junit.xml`, which matches both this and `iam`.
+[profile.iam-nats]
+
+[profile.iam-nats.junit]
+path = 'junit.xml'

@@ -180,7 +180,11 @@ tasks:
     script: |
       set -euo pipefail
       bash ops/nats/check-subjects.sh
-      ( cd rs && cargo nextest run --no-tests=pass -p paigasus-iam --test nats_permissions )
+      # `--profile iam-nats` only sets where the JUnit report is written; the retry budget and the
+      # docker-containers group still come from `profile.default`, which custom profiles inherit.
+      # Its own profile, not `iam`: this task and paigasus-iam-rs:test can run concurrently, and a
+      # shared store dir would clobber one report with the other (SMA-521).
+      ( cd rs && cargo nextest run --no-tests=pass -p paigasus-iam --test nats_permissions --profile iam-nats )
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
     # Per entry:

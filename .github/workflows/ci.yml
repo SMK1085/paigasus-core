@@ -194,8 +194,11 @@ jobs:
       # frozen for dozens of commits. `moon ci` is affected-only, so a PR touching no Rust never
       # regenerates it, and the upload below would publish a stale report as if it were this run's.
       # Delete it first: the artifact is then either genuinely from this run, or absent.
-      - name: Drop any cached nextest JUnit report (stale-artifact guard)
-        run: rm -f rs/target/nextest/iam/junit.xml
+      # The glob must cover EVERY profile that writes a report (`iam`, `iam-nats`), not just the
+      # first — a path added here without a matching delete gets exactly the stale-report bug
+      # this step exists to prevent.
+      - name: Drop any cached nextest JUnit reports (stale-artifact guard)
+        run: rm -f rs/target/nextest/iam*/junit.xml
 
       - name: moon ci (affected graph)
         env:
@@ -231,7 +234,10 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: nextest-junit
-          path: rs/target/nextest/iam/junit.xml
+          # Glob, because two tasks write reports: paigasus-iam-rs:test under `iam`, and
+          # repo:nats-permissions under `iam-nats`. Separate store dirs so concurrent runs can't
+          # clobber each other; the artifact keeps them apart as iam/ and iam-nats/.
+          path: rs/target/nextest/iam*/junit.xml
           if-no-files-found: ignore
           retention-days: 14
 
