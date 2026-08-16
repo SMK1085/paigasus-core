@@ -122,10 +122,145 @@ pub async fn require_iam_auth(State(iam): State<Arc<dyn Iam>>, mut req: Request,
     next.run(req).await
 }
 
+/// Authenticate a capability-discovery request. Unlike [`require_iam_auth`] this performs NO
+/// authorization: discovery must not be gated on a permission, or a caller who legitimately
+/// cannot invoke models could never learn that streaming exists — and ADR-0020 D4 forbids
+/// provisioning a service credential for the console.
+///
+/// ## Why both introspections are tried, rather than branching on the token prefix
+/// IAM's API-key prefix is an operator knob (`api_keys.key_prefix`), and the gateway has no
+/// visibility of its value. Branching on a hardcoded `pgs_sk_` would silently route every
+/// service-account key to the OIDC path — and reject it — for any operator who changed that
+/// setting, with no boot error. Mirroring the prefix into `GatewayConfig` would instead create a
+/// must-match-or-break coupling between two services' configs. Trying both costs one extra RPC
+/// on the OIDC path of a low-frequency, client-cached call, and cannot drift.
+///
+/// ## Why an unprovisioned identity is accepted
+/// IAM's `Introspect` resolves with `Provisioning::Disabled`, so a VALIDATED token whose
+/// `(issuer, subject)` has no local principal comes back `PermissionDenied`. IAM's own HTTP
+/// middleware JIT-provisions instead, so rejecting here would make gateway discovery succeed or
+/// fail purely on whether the console happened to call IAM first — breaking exactly the lazy
+/// in-user-request flow ADR-0020 D4 specifies. The descriptor is byte-identical for every
+/// caller and exposes no per-principal data, so accepting widens nothing. This relaxation is
+/// scoped to THIS middleware; `require_iam_auth` is unchanged.
+///
+/// ### Why accepting the WHOLE `PermissionDenied` code is safe today (and when it stops being so)
+/// IAM's gRPC layer collapses THREE `AuthnError` variants onto `Code::PermissionDenied`, with no
+/// structured reason on the wire to tell them apart (`paigasus-iam`'s
+/// `adapters/grpc/convert.rs:56-58`): `IdentityNotProvisioned` (the case this relaxation targets),
+/// `ProvisioningFailed`, and `PrincipalInactive`. Accepting the whole code is correct only because
+/// the other two are UNREACHABLE via `Introspect` as the code stands today (verified against
+/// `paigasus-iam`'s source, not assumed):
+/// - `ProvisioningFailed` can only be returned by `jit_provision`
+///   (`application/authenticate_token.rs`), which `AuthenticateToken::resolve` calls ONLY on the
+///   `Provisioning::Enabled` arm (`:106-112`, `self.jit_provision(&claims).await?`). The
+///   `Provisioning::Disabled` arm `Introspect` always uses returns `IdentityNotProvisioned`
+///   immediately instead (`:104-105`) — `jit_provision` is never reached.
+/// - `PrincipalInactive` requires resolving to a principal whose `PrincipalStatus` is `Disabled`
+///   (`:127-129`). Production code sets that status in exactly one call site,
+///   `ServiceAccountService::archive` (`application/service_accounts.rs:205,222`) — which disables
+///   a SERVICE-ACCOUNT principal. Service accounts authenticate by API key, never by OIDC token,
+///   so they have no `(issuer, subject)` row in `external_identity` for `resolve`'s
+///   `find_by_issuer_subject` lookup to ever match. A disabled SA can therefore never be the
+///   principal an OIDC `Introspect` call resolves to.
+///
+/// **If either of those becomes reachable through `Introspect`** — a future "disable a user"
+/// use case, or any change that lets `ProvisioningFailed` surface from a read-only resolve — **this
+/// match arm must narrow**, not stay a blanket `PermissionDenied` accept. Matching on the `Status`
+/// MESSAGE STRING instead is deliberately not done: those strings
+/// (`adapters/grpc/convert.rs:56-58`) are bare literals with no test pinning their text, so an IAM
+/// copy-edit would silently flip this middleware to rejecting every unprovisioned caller. The
+/// durable fix — a structured `ErrorInfo` reason on IAM's authn gRPC surface — is IAM-side and out
+/// of scope for this task; tracked as a follow-up.
+pub async fn require_authenticated(State(iam): State<Arc<dyn Iam>>, req: Request, next: Next) -> Response {
+    let Some(token) = bearer(req.headers()) else {
+        return GatewayError::MissingBearer.into_response();
+    };
+
+    let started = Instant::now();
+    // Whether the API-key leg failed to reach a VERDICT, as opposed to reaching a rejection.
+    // An outage here must not be laundered into a `401` by the fallback below: an API key is
+    // never a valid JWT, so the OIDC leg answers `Unauthenticated` for an API-key caller no
+    // matter how valid the key is. Without this flag the ORDINARY outcome of a transient
+    // API-key-leg failure is a definitive-looking `401` telling the client to stop retrying —
+    // during exactly the outage it should be backing off through.
+    let mut api_key_inconclusive = false;
+    match iam.introspect_api_key(&token).await {
+        Ok(resp) if resp.status == "active" => {
+            record_iam_call("introspect", "ok", started);
+            return next.run(req).await;
+        }
+        // IAM answered, and the answer was "not active" — a verdict, not an outage.
+        Ok(_) => record_iam_call("introspect", "denied", started),
+        Err(err) => {
+            // `IamError` is not `Clone`, so compute the bounded metric label before
+            // `introspect_error` consumes `err`.
+            let label = iam_result(&err);
+            // Reuse `introspect_error`'s own mapping as the predicate rather than re-listing
+            // status codes here: everything it calls `IamUnavailable` is a failure to reach a
+            // verdict, and everything else (`Unauthenticated`/`PermissionDenied`) is a real
+            // rejection. One definition, so the two cannot drift apart.
+            api_key_inconclusive = introspect_error(err) == GatewayError::IamUnavailable;
+            record_iam_call("introspect", label, started);
+        }
+    }
+
+    let started = Instant::now();
+    match iam.introspect_token(&token).await {
+        Ok(resp) if resp.status == "active" => {
+            record_iam_call("introspect_token", "ok", started);
+            next.run(req).await
+        }
+        // Belt-and-braces, symmetric with the API-key leg above: a success carrying a non-active
+        // status is a rejected credential, not a pass. Currently a dead branch in production (IAM
+        // resolve fails closed on anything but `Active`, so a success response never carries a
+        // non-active status — see `PrincipalStatus` in `paigasus-iam-core`), but keeping this
+        // fail-closed rather than trusting the field is unset costs nothing and guards exactly the
+        // kind of future IAM change the doc comment above calls out.
+        Ok(_) => {
+            record_iam_call("introspect_token", "denied", started);
+            preserve_outage(api_key_inconclusive, GatewayError::InvalidCredential).into_response()
+        }
+        // A validated-but-unprovisioned identity — see the doc comment above. Recorded as
+        // "denied" rather than "ok": IAM did reject the RPC, and conflating it with success would
+        // hide a genuine provisioning problem from the dashboard.
+        Err(IamError::Rpc(ref status)) if status.code() == Code::PermissionDenied => {
+            record_iam_call("introspect_token", "denied", started);
+            next.run(req).await
+        }
+        Err(err) => {
+            // `IamError` is not `Clone` (and does not get a `Clone` impl just for this): compute
+            // the bounded metric label BEFORE `introspect_error` consumes `err`.
+            let label = iam_result(&err);
+            let mapped = introspect_error(err);
+            record_iam_call("introspect_token", label, started);
+            preserve_outage(api_key_inconclusive, mapped).into_response()
+        }
+    }
+}
+
+/// Keep an IAM outage visible across [`require_authenticated`]'s two-leg fallback.
+///
+/// When the API-key leg never reached a verdict, a `401` from the OIDC leg is not trustworthy:
+/// the caller may hold a perfectly valid API key that IAM was simply unreachable to check, and
+/// the OIDC leg rejects every API key anyway. Report the outage (`503`, retryable) instead of a
+/// credential rejection (`401`, permanent) so a client backs off rather than giving up.
+///
+/// Only ever widens `InvalidCredential` to `IamUnavailable`. An accepted caller is untouched,
+/// and an outcome that is already `IamUnavailable` is unchanged.
+fn preserve_outage(api_key_inconclusive: bool, mapped: GatewayError) -> GatewayError {
+    match mapped {
+        GatewayError::InvalidCredential if api_key_inconclusive => GatewayError::IamUnavailable,
+        other => other,
+    }
+}
+
 /// Record an outbound IAM call's outcome for `gateway_iam_calls_total`/`_duration_seconds`.
-/// `operation` is `"introspect"` or `"authorize"`; `result` is the bounded label
-/// [`iam_result`]/the call sites above produce (`"ok"`/`"denied"`/`"unavailable"`/`"error"`) —
-/// never a raw gRPC status string (bounded-cardinality labels only, see the global constraints).
+/// `operation` is `"introspect"` (API-key path, both middlewares), `"introspect_token"` (OIDC
+/// token path, [`require_authenticated`] only), or `"authorize"` ([`require_iam_auth`] only);
+/// `result` is the bounded label [`iam_result`]/the call sites above produce
+/// (`"ok"`/`"denied"`/`"unavailable"`/`"error"`) — never a raw gRPC status string (bounded-
+/// cardinality labels only, see the global constraints).
 fn record_iam_call(operation: &'static str, result: &'static str, started: Instant) {
     counter!(names::GATEWAY_IAM_CALLS_TOTAL, "operation" => operation, "result" => result).increment(1);
     histogram!(names::GATEWAY_IAM_CALL_DURATION_SECONDS, "operation" => operation).record(started.elapsed().as_secs_f64());
@@ -203,7 +338,7 @@ mod tests {
     use axum::http::{Request as HttpRequest, StatusCode};
     use axum::middleware::from_fn_with_state;
     use axum::routing::get;
-    use paigasus_proto::paigasus::iam::v1::IntrospectApiKeyResponse;
+    use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse};
     use std::sync::Mutex;
     use tower::ServiceExt; // for `oneshot`
 
@@ -221,11 +356,27 @@ mod tests {
         Connect,
     }
 
+    /// What the OIDC-token introspect (`Iam::introspect_token`) call should return for a test
+    /// case — a separate outcome type from [`IntrospectOutcome`] because `IntrospectResponse`
+    /// (issuer/subject) is a different message from `IntrospectApiKeyResponse`
+    /// (scope_prn/key_id). Exercised only by [`require_authenticated`]'s tests.
+    enum TokenIntrospectOutcome {
+        Ok(IntrospectResponse),
+        /// An IAM gRPC error Status with this code.
+        Rpc(Code),
+        /// A channel/connect-time failure.
+        Connect,
+    }
+
     /// What the self-query authz call should return for a test case.
     enum AuthzOutcome {
         Ok(bool),
         Rpc(Code),
         Connect,
+        /// The middleware under test must never reach `is_authorized_self` at all — a hit is a
+        /// test bug (or a real regression), not a scenario to model, so it panics loudly. Used by
+        /// every `require_authenticated` test: that middleware performs NO authorization.
+        Unreachable,
     }
 
     /// The args recorded from a call to `is_authorized_self` — the self-query proof.
@@ -242,6 +393,11 @@ mod tests {
     /// assert them.
     struct FakeIam {
         introspect: IntrospectOutcome,
+        /// The `introspect_token` outcome — `None` unless a `require_authenticated` test
+        /// configures one via [`FakeIam::with_token_introspect`]; calling `introspect_token`
+        /// without configuring it is a test-setup bug, so it panics with a clear message rather
+        /// than silently returning something.
+        token_introspect: Option<TokenIntrospectOutcome>,
         authz: AuthzOutcome,
         recorded: Arc<Mutex<Option<RecordedAuthz>>>,
     }
@@ -250,9 +406,17 @@ mod tests {
         fn new(introspect: IntrospectOutcome, authz: AuthzOutcome) -> Self {
             Self {
                 introspect,
+                token_introspect: None,
                 authz,
                 recorded: Arc::new(Mutex::new(None)),
             }
+        }
+
+        /// Configure the `introspect_token` outcome — used by the `require_authenticated` tests
+        /// to drive the OIDC-token introspection path (a separate call from `introspect_api_key`).
+        fn with_token_introspect(mut self, outcome: TokenIntrospectOutcome) -> Self {
+            self.token_introspect = Some(outcome);
+            self
         }
     }
 
@@ -277,6 +441,19 @@ mod tests {
                 AuthzOutcome::Ok(allowed) => Ok(*allowed),
                 AuthzOutcome::Rpc(code) => Err(IamError::Rpc(tonic::Status::new(*code, ""))),
                 AuthzOutcome::Connect => Err(IamError::Connect("test connect failure".to_owned())),
+                AuthzOutcome::Unreachable => panic!("is_authorized_self must not be called by require_authenticated — it performs no authorization"),
+            }
+        }
+
+        async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+            match self
+                .token_introspect
+                .as_ref()
+                .expect("test did not configure a token-introspect outcome via FakeIam::with_token_introspect")
+            {
+                TokenIntrospectOutcome::Ok(resp) => Ok(resp.clone()),
+                TokenIntrospectOutcome::Rpc(code) => Err(IamError::Rpc(tonic::Status::new(*code, ""))),
+                TokenIntrospectOutcome::Connect => Err(IamError::Connect("test connect failure".to_owned())),
             }
         }
     }
@@ -291,6 +468,16 @@ mod tests {
             memberships: Vec::new(),
             role_grants: Vec::new(),
             scope_prn: CALLER_SCOPE.to_owned(),
+        }
+    }
+
+    /// An API-key introspection that SUCCEEDED but reports a non-active principal — IAM reached
+    /// a verdict, so it is a rejection rather than an outage. Distinguishing the two is what
+    /// `preserve_outage` turns on.
+    fn inactive_response() -> IntrospectApiKeyResponse {
+        IntrospectApiKeyResponse {
+            status: "inactive".to_owned(),
+            ..active_response()
         }
     }
 
@@ -325,6 +512,49 @@ mod tests {
     /// interesting variable is elsewhere (e.g. the bearer parse, which runs before IAM).
     fn happy_fake() -> FakeIam {
         FakeIam::new(IntrospectOutcome::Ok(active_response()), AuthzOutcome::Ok(true))
+    }
+
+    // ---- `require_authenticated` (SMA-505 discovery auth) test helpers -----------------------
+
+    const CONSOLE_TOKEN: &str = "console-oidc-token";
+    const CONSOLE_PRINCIPAL: &str = "prn:paigasus:iam:default:user/console-user";
+
+    /// An `active` OIDC-token introspect response for the console-user case (the happy path of
+    /// [`Iam::introspect_token`]).
+    fn active_token_response() -> IntrospectResponse {
+        IntrospectResponse {
+            principal_prn: CONSOLE_PRINCIPAL.to_owned(),
+            status: "active".to_owned(),
+            issuer: "https://issuer.example.com".to_owned(),
+            subject: "console-user".to_owned(),
+            expires_at: None,
+            memberships: Vec::new(),
+            role_grants: Vec::new(),
+        }
+    }
+
+    /// The discovery-path probe handler. Unlike [`probe`], `require_authenticated` attaches no
+    /// `CallerContext` (it authenticates without resolving or authorizing an identity), so this
+    /// just proves the request reached the handler.
+    async fn discovery_probe() -> StatusCode {
+        StatusCode::OK
+    }
+
+    fn build_discovery_app(fake: FakeIam) -> Router {
+        Router::new()
+            .route("/x", get(discovery_probe))
+            .layer(from_fn_with_state(Arc::new(fake) as Arc<dyn Iam>, require_authenticated))
+    }
+
+    async fn discovery_status_of(fake: FakeIam, req: HttpRequest<Body>) -> StatusCode {
+        build_discovery_app(fake).oneshot(req).await.unwrap().status()
+    }
+
+    /// A fake whose API-key introspect succeeds and whose authz panics if reached at all —
+    /// `require_authenticated` must never authorize. Used where the interesting variable is
+    /// elsewhere (e.g. the bearer parse, which runs before IAM).
+    fn discovery_happy_fake() -> FakeIam {
+        FakeIam::new(IntrospectOutcome::Ok(active_response()), AuthzOutcome::Unreachable)
     }
 
     // ---- `iam_result` bounded-label mapping --------------------------------------------------
@@ -493,5 +723,126 @@ mod tests {
         assert_eq!(err["code"], "insufficient_permissions");
         assert!(err["param"].is_null());
         assert!(err["message"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+
+    // ---- `require_authenticated` (SMA-505 discovery auth) -------------------------------------
+
+    /// AC 2: an API key works on the discovery path, and NO authorization call is made — the
+    /// fake's `is_authorized_self` panics, so reaching it fails the test loudly.
+    #[tokio::test]
+    async fn require_authenticated_accepts_an_api_key_without_authorizing() {
+        assert_eq!(discovery_status_of(discovery_happy_fake(), req_with_auth(&format!("Bearer {CALLER_KEY}"))).await, StatusCode::OK);
+    }
+
+    /// AC 2 + ADR-0020 D4: a console user's OIDC token works. The API-key introspect is tried
+    /// first and fails; the token introspect then succeeds.
+    #[tokio::test]
+    async fn require_authenticated_accepts_an_oidc_token() {
+        let fake = FakeIam::new(IntrospectOutcome::Rpc(Code::Unauthenticated), AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Ok(active_token_response()));
+        assert_eq!(discovery_status_of(fake, req_with_auth(&format!("Bearer {CONSOLE_TOKEN}"))).await, StatusCode::OK);
+    }
+
+    /// D5's deliberate relaxation, and the one most likely to be "fixed" back into a 401 by a
+    /// later reader. IAM returns `PermissionDenied` for a VALIDATED token whose identity has no
+    /// local principal; on the discovery path that still counts as authenticated, because the
+    /// descriptor is byte-identical for every caller and carries no per-principal data.
+    #[tokio::test]
+    async fn require_authenticated_accepts_a_validated_but_unprovisioned_identity() {
+        let fake = FakeIam::new(IntrospectOutcome::Rpc(Code::Unauthenticated), AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(Code::PermissionDenied));
+        assert_eq!(discovery_status_of(fake, req_with_auth("Bearer validated-but-unprovisioned-token")).await, StatusCode::OK);
+    }
+
+    /// The relaxation must NOT leak onto the chat path.
+    #[tokio::test]
+    async fn require_iam_auth_still_rejects_an_unprovisioned_identity() {
+        // The same IAM outcome D5 accepts on the discovery path (a VALIDATED credential IAM
+        // surfaces as `PermissionDenied`) must still 401 here — `require_iam_auth` is untouched
+        // by this task's relaxation and never even calls `introspect_token`.
+        let fake = FakeIam::new(IntrospectOutcome::Rpc(Code::PermissionDenied), AuthzOutcome::Unreachable);
+        assert_eq!(status_of(fake, req_with_auth("Bearer validated-but-unprovisioned-token")).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn require_authenticated_rejects_a_missing_bearer_with_401() {
+        assert_eq!(discovery_status_of(discovery_happy_fake(), req_no_auth()).await, StatusCode::UNAUTHORIZED);
+    }
+
+    /// Both introspections failing with a transport error is an IAM outage → 503, and the call
+    /// is recorded so the `result="unavailable"` alert can see it.
+    #[tokio::test]
+    async fn require_authenticated_maps_an_unreachable_iam_to_503() {
+        let fake = FakeIam::new(IntrospectOutcome::Connect, AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Connect);
+        assert_eq!(discovery_status_of(fake, req_with_auth("Bearer any-token")).await, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Review finding (Important 1): the most important negative case for a new authentication
+    /// middleware was missing — neither leg accepts, and neither is a transport failure. Both
+    /// introspections come back a plain `Unauthenticated` (a garbage credential that is neither a
+    /// valid API key nor a valid OIDC token), so the `Err(err) => introspect_error(err)` catch-all
+    /// must map it to `401`, not silently let it through.
+    #[tokio::test]
+    async fn require_authenticated_rejects_an_invalid_credential_with_401() {
+        let fake = FakeIam::new(IntrospectOutcome::Rpc(Code::Unauthenticated), AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(Code::Unauthenticated));
+        assert_eq!(discovery_status_of(fake, req_with_auth("Bearer garbage")).await, StatusCode::UNAUTHORIZED);
+    }
+
+    /// CodeRabbit, PR 124: an IAM outage on the API-key leg must survive the OIDC fallback.
+    ///
+    /// This is not a corner case — it is the ORDINARY shape of a transient failure for an
+    /// API-key caller. An API key is never a valid JWT, so `introspect_token` answers
+    /// `Unauthenticated` regardless of how valid the key is; without `preserve_outage` the
+    /// middleware would report `401` (permanent, stop retrying) for a caller whose credential
+    /// IAM merely failed to check. Every retryable API-key-leg failure is covered, because
+    /// `introspect_error` maps each of them to `IamUnavailable`.
+    #[tokio::test]
+    async fn an_inconclusive_api_key_leg_reports_the_outage_rather_than_a_401() {
+        for outcome in [
+            IntrospectOutcome::Connect,
+            IntrospectOutcome::Rpc(Code::Unavailable),
+            IntrospectOutcome::Rpc(Code::DeadlineExceeded),
+            IntrospectOutcome::Rpc(Code::Internal),
+        ] {
+            let fake = FakeIam::new(outcome, AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(Code::Unauthenticated));
+            assert_eq!(
+                discovery_status_of(fake, req_with_auth("Bearer pgs_sk_a-real-key-iam-could-not-check")).await,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "a retryable API-key-leg failure must not become a 401 via the OIDC fallback"
+            );
+        }
+    }
+
+    /// The control for the test above, and what stops it from being a blanket "always 503":
+    /// when the API-key leg reaches a real VERDICT, the `401` must survive. Without this pair,
+    /// `preserve_outage` could widen every rejection to `503` and both tests would still pass.
+    #[tokio::test]
+    async fn a_conclusive_api_key_rejection_still_yields_401_not_503() {
+        for outcome in [
+            IntrospectOutcome::Rpc(Code::Unauthenticated),
+            IntrospectOutcome::Rpc(Code::PermissionDenied),
+            IntrospectOutcome::Ok(inactive_response()),
+        ] {
+            let fake = FakeIam::new(outcome, AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Rpc(Code::Unauthenticated));
+            assert_eq!(
+                discovery_status_of(fake, req_with_auth("Bearer garbage")).await,
+                StatusCode::UNAUTHORIZED,
+                "a definitive API-key rejection must stay a 401 — the outage widening is not unconditional"
+            );
+        }
+    }
+
+    /// Review finding (Minor 3): pins the symmetric active-status check added to the
+    /// `introspect_token` leg. A dead branch in production today (IAM's `resolve` fails closed on
+    /// anything but `Active`, so a success response never carries a non-active status), but the
+    /// belt-and-braces check exists precisely so a future IAM change can't silently let a
+    /// non-active OIDC identity through — this test proves that guard actually rejects, not just
+    /// that it compiles.
+    #[tokio::test]
+    async fn require_authenticated_rejects_a_non_active_oidc_token_with_401() {
+        let non_active = IntrospectResponse {
+            status: "disabled".to_owned(),
+            ..active_token_response()
+        };
+        let fake = FakeIam::new(IntrospectOutcome::Rpc(Code::Unauthenticated), AuthzOutcome::Unreachable).with_token_introspect(TokenIntrospectOutcome::Ok(non_active));
+        assert_eq!(discovery_status_of(fake, req_with_auth(&format!("Bearer {CONSOLE_TOKEN}"))).await, StatusCode::UNAUTHORIZED);
     }
 }

@@ -90,6 +90,21 @@ fn service_account_id(raw: &str) -> Result<PrincipalId, TenancyError> {
     Ok(PrincipalId::from_prn(parsed))
 }
 
+/// SMA-505: API-KEY management (`IssueApiKey`/`RevokeApiKey`/`ListApiKeys`) is gated by
+/// `api_keys.management_enabled`. The four service-account lifecycle RPCs
+/// (`CreateServiceAccount`/`GetServiceAccount`/`ListServiceAccounts`/`ArchiveServiceAccount`)
+/// are deliberately not — they are tenancy management, not an API-key concern, and no capability
+/// toggle here may touch them. `UNIMPLEMENTED` is what a client would get from a server that
+/// never registered the RPC, so a disabled capability is indistinguishable from a build that
+/// never had it.
+fn require_apikey_management(state: &AppState) -> Result<(), Status> {
+    if state.capabilities.apikeys_management {
+        Ok(())
+    } else {
+        Err(Status::unimplemented("capability iam.apikeys is not enabled on this service"))
+    }
+}
+
 #[tonic::async_trait]
 impl ServiceAccountService for ServiceAccountGrpc {
     async fn create_service_account(&self, request: Request<CreateServiceAccountRequest>) -> Result<Response<CreateServiceAccountResponse>, Status> {
@@ -157,6 +172,7 @@ impl ServiceAccountService for ServiceAccountGrpc {
     }
 
     async fn issue_api_key(&self, request: Request<IssueApiKeyRequest>) -> Result<Response<IssueApiKeyResponse>, Status> {
+        require_apikey_management(&self.state)?;
         let started = Instant::now();
         let result: Result<Response<IssueApiKeyResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
@@ -193,6 +209,7 @@ impl ServiceAccountService for ServiceAccountGrpc {
     }
 
     async fn revoke_api_key(&self, request: Request<RevokeApiKeyRequest>) -> Result<Response<RevokeApiKeyResponse>, Status> {
+        require_apikey_management(&self.state)?;
         let started = Instant::now();
         let result: Result<Response<RevokeApiKeyResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
@@ -210,6 +227,7 @@ impl ServiceAccountService for ServiceAccountGrpc {
     }
 
     async fn list_api_keys(&self, request: Request<ListApiKeysRequest>) -> Result<Response<ListApiKeysResponse>, Status> {
+        require_apikey_management(&self.state)?;
         let started = Instant::now();
         let result: Result<Response<ListApiKeysResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();

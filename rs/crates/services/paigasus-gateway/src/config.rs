@@ -25,6 +25,13 @@ pub struct GatewayConfig {
     pub upstream: UpstreamConfig,
     pub log_level: String,
     pub metrics: MetricsConfig,
+    /// SMA-505: whether streamed (SSE) chat completions are served. `false` rejects a request
+    /// carrying `stream: true` with `400` and `param: "stream"` — the OpenAI idiom for an
+    /// unsupported request parameter — and withdraws the `gateway.chat.stream` capability.
+    /// Non-streaming requests are unaffected. `400` rather than `501` because OpenAI-compatible
+    /// SDKs commonly retry 5xx, which would turn a deliberate configuration choice into
+    /// repeated load.
+    pub stream_enabled: bool,
 }
 
 /// The IAM gRPC client endpoint G4 dials (`Introspect`/authorization calls). `tls` governs
@@ -134,6 +141,7 @@ struct Defaults {
     upstream: UpstreamDefaults,
     log_level: String,
     metrics: MetricsConfig,
+    stream_enabled: bool,
 }
 
 #[derive(Serialize, Default)]
@@ -166,6 +174,7 @@ impl Default for Defaults {
             upstream: UpstreamDefaults::default(),
             log_level: "info".to_string(),
             metrics: MetricsConfig::default(),
+            stream_enabled: true,
         }
     }
 }
@@ -337,6 +346,7 @@ mod tests {
             );
             assert_eq!(cfg.upstream.openai.base_url, "https://api.openai.com");
             assert_eq!(cfg.upstream.openai.api_key.expose_secret(), "sk-test-key");
+            assert!(cfg.stream_enabled, "stream_enabled must default to true");
             assert!(cfg.validate().is_ok(), "a valid config should pass validation");
             Ok(())
         });

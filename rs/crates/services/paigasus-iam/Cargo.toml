@@ -116,6 +116,9 @@ async-nats = { workspace = true }
 # `adapters::events::creds` signs the server nonce on every connection attempt so a rotated
 # `.creds` is picked up without a restart (SMA-493 D8).
 nkeys = { workspace = true }
+# `service_info` — the shared ServiceInfo builder + HTTP DTO (SMA-505). This crate supplies
+# only the wire invariants; the config -> capability projection lives in `src/service_info.rs`.
+paigasus-service-info = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated (`#[cfg(any(test, feature = "test"))]`);
 # the workspace baseline only carries `toml`/`env`, so the "test" feature is added here as

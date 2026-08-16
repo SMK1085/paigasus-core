@@ -358,6 +358,12 @@ async fn main() -> anyhow::Result<()> {
                 "audit.retention.enabled = false — no partition create-ahead or pruning will run; the DEFAULT partitions will fill over time and can block create-ahead until manually reattached (see RUNBOOK)"
             );
         }
+        if !config.audit.query_enabled {
+            tracing::warn!(
+                "audit.query_enabled = false: entries are still written but GET /v1/audit and the \
+                 AuditService gRPC are not served, so nothing can read them in-product"
+            );
+        }
     }
     {
         // Outbox retention (SMA-469): bounded, batched deletes of aged published rows and —

@@ -427,8 +427,8 @@ Verbatim from ADR-0020 decision 2; nothing invented.
 
 | Proto value | Wire key | Meaning |
 | --- | --- | --- |
-| `CAPABILITY_IAM_AUTHZ_CEDAR` | `iam.authz.cedar` | Cedar policy evaluation is available |
-| `CAPABILITY_IAM_APIKEYS` | `iam.apikeys` | Service-account API key issuance is available |
+| `CAPABILITY_IAM_AUTHZ_CEDAR` | `iam.authz.cedar` | Cedar policy **administration** is available (narrowed by SMA-505; `IsAuthorized` stays mounted regardless) |
+| `CAPABILITY_IAM_APIKEYS` | `iam.apikeys` | API key **management** is available (narrowed by SMA-505; introspection stays mounted regardless) |
 | `CAPABILITY_IAM_AUDIT` | `iam.audit` | The audit log is queryable |
 | `CAPABILITY_GATEWAY_CHAT_STREAM` | `gateway.chat.stream` | Streaming chat completions are available |
 

@@ -27,9 +27,10 @@ pub struct ErrorEnvelope {
     pub error: ErrorBody,
 }
 
-/// The body of the OpenAI error envelope. `param` is always `null` for gateway-originated errors
-/// (no request field is ever at fault in the auth path); `code` is a stable machine-readable
-/// diagnostic or `null`. `r#type` serializes as `"type"` (serde strips the raw-identifier prefix).
+/// The body of the OpenAI error envelope. `param` names the request field at fault when there is
+/// one — only `StreamingDisabled` sets it today (SMA-505 D9); every auth- and egress-path error
+/// leaves it `null`, because no request field is at fault in those. `code` is a stable
+/// machine-readable diagnostic or `null`. `r#type` serializes as `"type"`.
 #[derive(Debug, Serialize)]
 pub struct ErrorBody {
     pub message: String,
@@ -66,6 +67,9 @@ pub enum GatewayError {
     UpstreamUnavailable,
     /// The OpenAI upstream did not respond within a configured timeout → 504.
     UpstreamTimeout,
+    /// Streaming is disabled by configuration and the request asked for it → 400. Carries
+    /// `param: "stream"` so the client sees exactly which field was refused (SMA-505 D9).
+    StreamingDisabled,
 }
 
 /// Map an [`OpenAiError`] (egress send/connect/timeout/build failure) to its client-facing
@@ -82,52 +86,69 @@ impl From<OpenAiError> for GatewayError {
 }
 
 impl GatewayError {
-    /// The bound `(status, type, code)` triple plus a static, caller-safe message for each case.
+    /// The bound `(status, type, code, param)` plus a static, caller-safe message for each case.
     /// `type` is one of OpenAI's coarse error kinds (SDKs read it); `code` is a finer stable
-    /// diagnostic or `None` (→ `null`).
-    fn parts(self) -> (StatusCode, &'static str, Option<&'static str>, &'static str) {
+    /// diagnostic or `None` (→ `null`); `param` names the request field at fault, or `None`.
+    fn parts(self) -> (StatusCode, &'static str, Option<&'static str>, Option<&'static str>, &'static str) {
         match self {
             GatewayError::MissingBearer => (
                 StatusCode::UNAUTHORIZED,
                 "invalid_request_error",
                 Some("missing_authorization"),
+                None,
                 "Missing bearer credentials in the Authorization header.",
             ),
-            GatewayError::InvalidCredential => (StatusCode::UNAUTHORIZED, "invalid_request_error", Some("invalid_api_key"), "Invalid API key."),
+            GatewayError::InvalidCredential => (StatusCode::UNAUTHORIZED, "invalid_request_error", Some("invalid_api_key"), None, "Invalid API key."),
             GatewayError::AuthzDenied => (
                 StatusCode::FORBIDDEN,
                 "invalid_request_error",
                 Some("insufficient_permissions"),
+                None,
                 "The caller is not permitted to perform this action.",
             ),
-            GatewayError::MissingScope => (StatusCode::INTERNAL_SERVER_ERROR, "api_error", Some("missing_scope"), "Internal error."),
+            GatewayError::MissingScope => (StatusCode::INTERNAL_SERVER_ERROR, "api_error", Some("missing_scope"), None, "Internal error."),
             GatewayError::IamUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "api_error",
                 Some("iam_unavailable"),
+                None,
                 "The authorization service is temporarily unavailable.",
             ),
-            GatewayError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "api_error", None, "Internal error."),
-            GatewayError::BadRequestBody => (StatusCode::BAD_REQUEST, "invalid_request_error", Some("invalid_request_body"), "The request body is not valid JSON."),
+            GatewayError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "api_error", None, None, "Internal error."),
+            GatewayError::BadRequestBody => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                Some("invalid_request_body"),
+                None,
+                "The request body is not valid JSON.",
+            ),
             GatewayError::UpstreamUnavailable => (
                 StatusCode::BAD_GATEWAY,
                 "api_error",
                 Some("upstream_unavailable"),
+                None,
                 "The upstream model provider is temporarily unavailable.",
             ),
-            GatewayError::UpstreamTimeout => (StatusCode::GATEWAY_TIMEOUT, "api_error", Some("upstream_timeout"), "The upstream model provider timed out."),
+            GatewayError::UpstreamTimeout => (StatusCode::GATEWAY_TIMEOUT, "api_error", Some("upstream_timeout"), None, "The upstream model provider timed out."),
+            GatewayError::StreamingDisabled => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                Some("streaming_disabled"),
+                Some("stream"),
+                "Streamed completions are not enabled on this deployment.",
+            ),
         }
     }
 }
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
-        let (status, r#type, code, message) = self.parts();
+        let (status, r#type, code, param, message) = self.parts();
         let envelope = ErrorEnvelope {
             error: ErrorBody {
                 message: message.to_owned(),
                 r#type: r#type.to_owned(),
-                param: None,
+                param: param.map(str::to_owned),
                 code: code.map(str::to_owned),
             },
         };
@@ -156,6 +177,7 @@ mod tests {
         assert_eq!(GatewayError::BadRequestBody.into_response().status(), StatusCode::BAD_REQUEST);
         assert_eq!(GatewayError::UpstreamUnavailable.into_response().status(), StatusCode::BAD_GATEWAY);
         assert_eq!(GatewayError::UpstreamTimeout.into_response().status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(GatewayError::StreamingDisabled.into_response().status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -187,7 +209,10 @@ mod tests {
         assert!(err.get("message").and_then(|m| m.as_str()).is_some_and(|m| !m.is_empty()));
         assert_eq!(err["type"], "invalid_request_error");
         assert_eq!(err["code"], "invalid_api_key");
-        assert!(err["param"].is_null(), "param is always null for gateway-originated errors");
+        assert!(
+            err["param"].is_null(),
+            "InvalidCredential names no request field at fault, so param is null (StreamingDisabled is the one case that sets it, SMA-505 D9)"
+        );
     }
 
     #[tokio::test]

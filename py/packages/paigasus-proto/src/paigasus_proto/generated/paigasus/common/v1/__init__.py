@@ -47,14 +47,26 @@ class Capability(betterproto2.Enum):
 
     IAM_AUTHZ_CEDAR = 1
     """
-    "iam.authz.cedar" — Cedar policy evaluation is enabled: authorization
-    decisions, policy administration and role grants are available.
+    "iam.authz.cedar" — Cedar policy ADMINISTRATION is available: policies and
+    role grants can be created, listed and deleted.
+
+    Scoped to administration deliberately. Authorization DECISIONS are a
+    service-to-service primitive every Paigasus service depends on per request,
+    so `IsAuthorized` and `POST /v1/authz/is-authorized` stay available even
+    when this capability is absent — as does internal tenancy enforcement.
+    A client must not read the absence of this key as "authorization is off".
     """
 
     IAM_APIKEYS = 2
     """
-    "iam.apikeys" — service-account API key issuance and introspection are
-    available.
+    "iam.apikeys" — service-account API key MANAGEMENT is available: keys can be
+    issued, listed and revoked.
+
+    Scoped to management deliberately. Key INTROSPECTION is a service-to-service
+    primitive the gateway calls on every request, so `IntrospectApiKey` and
+    `POST /v1/authn/api-keys/introspect` stay available even when this capability
+    is absent, and previously issued keys keep authenticating. A client must not
+    read the absence of this key as "API keys do not work here".
     """
 
     IAM_AUDIT = 3

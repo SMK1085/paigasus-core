@@ -5,14 +5,17 @@
 //! config-presence at boot) stay public; the protected `/v1/chat/completions` proxy ([`chat`]) is
 //! fronted by the auth middleware ([`auth`]) plus a request-body size limit and renders failures
 //! through the OpenAI-compatible error envelope ([`error`]). The inbound chat-completion request
-//! DTO ([`dto`]) is parsed only to read `model`/`stream`.
+//! DTO ([`dto`]) is parsed only to read `model`/`stream`. `GET /v1/service-info` ([`service_info`],
+//! SMA-505) is a THIRD, separately-protected group: it authenticates via [`auth::require_authenticated`]
+//! but never authorizes, and carries no body limit.
 
 pub mod auth;
 pub mod chat;
 pub mod dto;
 pub mod error;
+pub mod service_info;
 
-pub use auth::require_iam_auth;
+pub use auth::{require_authenticated, require_iam_auth};
 pub use dto::ChatCompletionRequest;
 pub use error::GatewayError;
 
@@ -43,18 +46,32 @@ pub struct AppState {
     pub openai: Arc<OpenAiClient>,
     /// Max inbound request-body size in bytes; an over-limit body is rejected with `413`.
     pub max_request_bytes: usize,
+    /// The capability toggles this build was configured with (SMA-505), projected once via
+    /// `Capabilities::from_config` in `main.rs` (mirrors `paigasus-iam`'s `AppState.capabilities`
+    /// — one source of truth, read by both the `chat` streaming guard and the `service_info`
+    /// descriptor handler, rather than each holding/re-deriving its own bare bool).
+    pub capabilities: crate::service_info::Capabilities,
 }
 
 /// The gateway's HTTP surface. `/healthz` + `/readyz` are public (no auth, no body limit); the
 /// `/v1/chat/completions` proxy is protected by the G5 auth middleware and a
-/// [`DefaultBodyLimit`] cap. The auth + body-limit are applied via [`Router::route_layer`], which
-/// runs the layers ONLY for the matched protected route — so the health probes stay outside auth
-/// AND the body limit, and an unmatched path still 404s without first being challenged for a
-/// credential.
+/// [`DefaultBodyLimit`] cap; `GET /v1/service-info` (SMA-505) is protected by
+/// [`require_authenticated`] alone, in its OWN `route_layer` group. Each protected group's
+/// middleware is applied via [`Router::route_layer`], which runs the layers ONLY for the matched
+/// route in THAT group — so the health probes stay outside auth AND the body limit, the
+/// descriptor never inherits the chat group's authorization check or body limit, and an
+/// unmatched path still 404s without first being challenged for a credential.
 ///
-/// The shared [`AppState`] is applied ONCE, at the end, over the whole tree so both the stateful
-/// `readyz` (it probes IAM) and the protected chat handler read the same state. `healthz` takes no
-/// state — a stateless handler is still valid inside a stateful router.
+/// The discovery route deliberately does NOT join `protected`: `require_iam_auth` runs a D9
+/// self-query authorization on top of authentication, and discovery must authenticate but never
+/// authorize (a caller who legitimately cannot invoke the model must still be able to learn that
+/// streaming exists). It also needs no [`DefaultBodyLimit`] — it is a GET with no body. Merging
+/// it into `protected` would silently saddle it with both.
+///
+/// The shared [`AppState`] is applied ONCE, at the end, over the whole tree so the stateful
+/// `readyz` (it probes IAM), the protected chat handler, and the descriptor handler all read the
+/// same state. `healthz` takes no state — a stateless handler is still valid inside a stateful
+/// router.
 ///
 /// [`paigasus_observability::http_metrics_layer`] is applied over the whole tree (health routes
 /// included — they get a bounded `route` label, which is acceptable). `/metrics` itself is
@@ -72,10 +89,17 @@ pub fn router(state: AppState) -> Router {
 
     let protected = Router::new().route("/v1/chat/completions", post(chat::chat_completions)).route_layer(auth).route_layer(body_limit);
 
+    // SMA-505: its own group, because discovery authenticates but does not authorize, and needs
+    // no body limit (it is a GET). `route_layer` keeps the middleware off unmatched paths, so a
+    // 404 is still a 404 rather than a credential challenge.
+    let discovery_auth = axum::middleware::from_fn_with_state(state.iam.clone(), require_authenticated);
+    let discovery = Router::new().route(paigasus_service_info::ROUTE, get(service_info::get_service_info)).route_layer(discovery_auth);
+
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .merge(protected)
+        .merge(discovery)
         .layer(paigasus_observability::http_metrics_layer("gateway"))
         .with_state(state)
 }
@@ -155,6 +179,9 @@ mod tests {
         async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
             unreachable!("this route must never call IAM")
         }
+        async fn introspect_token(&self, _token: &str) -> Result<paigasus_proto::paigasus::iam::v1::IntrospectResponse, IamError> {
+            unreachable!("this route must never call IAM")
+        }
     }
 
     /// The introspect outcome a [`ProbeIam`] returns for the `/readyz` sentinel probe — either a
@@ -190,6 +217,9 @@ mod tests {
         async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
             unreachable!("the readiness probe never authorizes")
         }
+        async fn introspect_token(&self, _token: &str) -> Result<paigasus_proto::paigasus::iam::v1::IntrospectResponse, IamError> {
+            unreachable!("the readiness probe never introspects a token")
+        }
     }
 
     /// An OpenAI client that points nowhere in particular — the health/readiness routes never call
@@ -208,6 +238,7 @@ mod tests {
             iam,
             openai: Arc::new(unused_openai()),
             max_request_bytes: 1_048_576,
+            capabilities: crate::service_info::Capabilities { chat_stream: true },
         }
     }
 

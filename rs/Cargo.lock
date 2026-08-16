@@ -2504,6 +2504,7 @@ dependencies = [
  "paigasus-logging",
  "paigasus-observability",
  "paigasus-proto",
+ "paigasus-service-info",
  "reqwest",
  "secrecy",
  "serde",
@@ -2540,6 +2541,7 @@ dependencies = [
  "paigasus-logging",
  "paigasus-observability",
  "paigasus-proto",
+ "paigasus-service-info",
  "prost-types",
  "rand 0.9.5",
  "rcgen",
@@ -2652,6 +2654,15 @@ version = "0.0.0"
 dependencies = [
  "paigasus-kernel",
  "pyo3",
+]
+
+[[package]]
+name = "paigasus-service-info"
+version = "0.0.0"
+dependencies = [
+ "paigasus-proto",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
