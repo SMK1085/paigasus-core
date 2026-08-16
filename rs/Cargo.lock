@@ -2643,6 +2643,7 @@ dependencies = [
  "paigasus-proto-derive",
  "prost",
  "prost-types",
+ "syn 3.0.3",
  "tonic",
  "tonic-prost",
 ]

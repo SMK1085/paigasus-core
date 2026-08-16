@@ -19,5 +19,12 @@ tonic-prost.workspace = true
 # generated code names it unconditionally, so a feature gate would break codegen.
 paigasus-proto-derive.workspace = true
 
+[dev-dependencies]
+# syn: used ONLY by tests/auditable_derive_drift.rs, which parses the committed generated
+# sources to assert that every message embedding AuditMetadata carries #[derive(Auditable)].
+# Parsing (not regex) is what makes that check immune to comments, oneofs, nested messages and
+# the several legal spellings of a cross-package type reference.
+syn.workspace = true
+
 [lints]
 workspace = true
