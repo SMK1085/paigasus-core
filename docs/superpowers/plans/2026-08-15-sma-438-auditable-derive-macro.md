@@ -1092,7 +1092,7 @@ Known things to watch, each with its remedy:
 
 ```bash
 git add ci/affected-graph/run.sh .github/CODEOWNERS
-git commit -m "ci: assert the paigasus-proto-derive affected-graph edge (SMA-438)"
+git commit -m "test(ci): assert the paigasus-proto-derive affected-graph edge (SMA-438)"
 ```
 
 - [ ] **Step 6: Final sanity check**
