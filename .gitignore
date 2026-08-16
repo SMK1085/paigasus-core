@@ -57,3 +57,16 @@ build/
 .DS_Store
 Thumbs.db
 .directory
+
+# ─── Agent scratch state ─────────────────────────────────────────────────
+# Per-machine runtime state, never publishable: `.claude/worktrees/` holds entire
+# repository checkouts and `scheduled_tasks.lock` is session state (it was tracked by
+# accident until SMA-520 and is untracked in that same commit). Without this, a stray
+# `git add -A` before the SMA-520 visibility flip publishes it all to a public repo.
+#
+# `.claude/*` rather than `.claude/` on purpose: excluding the DIRECTORY stops git
+# descending into it, which would make the negation below inert. Shared project config
+# stays deliberately committable.
+.claude/*
+!.claude/settings.json
+.entire/
