@@ -4,10 +4,11 @@ id: 'paigasus-proto-rs'
 layer: 'library'
 language: 'rust'
 
-# Cargo path deps are NOT auto-synced into Moon's graph — every in-tree edge is hand-declared.
-# The task-level `^:build` is what propagates `affected` under `moon ci --include-relations`;
-# a project `dependsOn` alone does not (SMA-389 D3). Without both, a paigasus-proto-derive edit
-# would not rebuild this crate and `:affected-smoke` would red on the SMA-438 case.
+# paigasus-proto-derive is a `workspace = true` dep (Cargo.toml:24), and Moon 2.3.2 does not resolve
+# workspace-inherited deps into the project graph — only `path = "..."` ones — so this edge must be
+# hand-declared. `dependsOn` creates the project edge; the task-level `^:build` is what schedules the
+# derive crate's build under `moon ci --include-relations`. Both are required; neither implies the
+# other, and `repo:affected-smoke` asserts both (SMA-389, corrected by SMA-524).
 dependsOn:
   - 'paigasus-proto-derive-rs'
 
