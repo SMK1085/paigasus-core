@@ -20,3 +20,7 @@ tasks:
     deps: ['contracts:generate', '^:build']
   test:
     deps: ['contracts:generate', '^:build']
+  # Mirrors build/test: this crate consumes paigasus-proto's generated types, so its lint must not
+  # race `buf generate` either (SMA-526).
+  lint:
+    deps: ['contracts:generate']

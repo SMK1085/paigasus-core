@@ -17,3 +17,10 @@ tasks:
     deps: ['contracts:generate', '^:build']
   test:
     deps: ['contracts:generate', '^:build']
+  # `contracts:generate` declares no `outputs:` but writes this crate's src/generated/**, so
+  # without this dep Moon may run `buf generate` concurrently with the clippy that is compiling
+  # those very files. build and test already order against it; lint must too, now that SMA-526
+  # gives lint `^:build` and puts more Rust tasks in flight at once. Mirrors the ts sibling,
+  # which wires contracts:generate into build, typecheck and test.
+  lint:
+    deps: ['contracts:generate']
