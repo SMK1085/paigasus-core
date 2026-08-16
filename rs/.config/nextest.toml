@@ -36,14 +36,16 @@ nextest-version = { required = "0.9.136" }
 # above, "8 is fastest" is FALSE: uncapped's single best run (55.8s) beats every capped run
 # tested, including both cap=8 runs. What 8 has is PREDICTABILITY and the best average: its two
 # runs span only 84.0-84.7s (a 0.7s range) against uncapped's 55.8-123.4s (a 68s range), and its
-# 84.3s average beats uncapped's 89.6s, cap=6's 113.1s, and cap=4's 127.0s. cap=4 and cap=6 each
-# hit the same postgres connection-timeout flake uncapped hit; cap=8 hit it in neither run.
+# 84.3s average beats uncapped's 89.6s, cap=6's 113.1s, and cap=4's 127.0s. cap=4 hit the same
+# postgres connection-timeout mode uncapped hit; cap=6 also flaked (twice in one run, once in the
+# other) but its captured output does not record the failure mode, so that comparison is not
+# claimed; cap=8 hit no failure of any kind in either run.
 #
 # The brief's literal "within ~30% of the uncapped baseline" rule is ambiguous on this data:
 # against uncapped's AVERAGE (89.6s) both 6 (+26%) and 8 (-6%) qualify, which by "lowest cap
-# that qualifies" would pick 6; against uncapped's CLEAN run (55.8s) nothing qualifies. Neither
-# reading is stable given the spreads above, so variance — not the 30% rule — is what actually
-# drove this choice.
+# that qualifies" would pick 6; against uncapped's fastest single run (55.8s) nothing qualifies.
+# Neither reading is stable given the spreads above, so variance — not the 30% rule — is what
+# actually drove this choice.
 #
 # Re-derive by repeating the above, ideally randomizing/interleaving run order across configs to
 # rule out the warm-up confound; the optimum tracks Docker VM capacity, not host CPU count.
