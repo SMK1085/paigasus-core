@@ -380,8 +380,11 @@ tasks:
     # sibling ci/actionlint/, so a future ci/ reshuffle is plausible.
     #
     # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
-    # (cargo nextest, next typegen). This one is ~109 ms: actionlint over three workflows plus a
-    # dozen `git ls-files` calls.
+    # (cargo nextest, next typegen). This one is ~1.0s standalone and warm (measured): six
+    # actionlint invocations — one over the real workflows, five stdin fixtures — 26
+    # `git ls-files` calls, and three fixture tables (extractor, path filters, config allowlist).
+    # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
+    # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
     script: 'ci/actionlint/run.sh'
     toolchain: 'system'
     inputs:

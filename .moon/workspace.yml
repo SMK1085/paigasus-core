@@ -38,6 +38,10 @@ hasher:
   # lists them under `inputs:`. Hashing them anyway dominates the cost of any task with a broad
   # `inputs:` glob, because the walk descends into pnpm's symlinked content-addressable store.
   #
+  # AND DO NOT ADD ONE EITHER: no task may declare an `inputs:` path under these trees. A path
+  # excluded here contributes nothing to any cache key, so the task that names it would never be
+  # invalidated by a change to it — a permanently stale cached pass, with nothing red to notice.
+  #
   # Measured on SMA-525, alternating `moon run repo:actionlint --force` (macOS, warm, 3 runs each):
   #
   #     inputs ['**/*'] WITH these patterns      ~11.6s

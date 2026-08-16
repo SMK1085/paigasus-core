@@ -10,6 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-16-sma-525-actionlint-gate-design.md` — read it before starting. Every decision below traces to a D-number or §-number there.
 
+> **Amended after the final whole-branch review.** The shell excerpts below are the code **as planned**; three findings changed it after they were written, and `ci/actionlint/run.sh` is the authority:
+>
+> - The extractor emits a `KEY` only for a `paths:`/`paths-ignore:` **two levels deep** inside `on:` (`on.<event>.paths`). A workflow input legitimately *named* `paths` sits one level deeper and is ignored; a flow-mapping event value (`push: { paths: [...] }`) emits a `KEY` with no items so check 6 fails loudly instead of skipping the event in silence.
+> - Check 2 is an **allowlist**: `self-hosted-runner` is the only top-level key permitted in an actionlint config, and an `ignore` key is rejected in any style. The block-style-only `grep` shown below could be bypassed by a single flow-style line.
+> - `check_pattern` was split into a pure `pattern_verdict` (echoes a stable token) plus a production call site that turns a non-`ok` verdict into `fail`, and the check-6 loop into `scan_workflow_records`. That is what makes `path_filter_self_test` possible — the standing control for checks 5 and 6, without which a mutation battery neutered both and the gate still exited 0.
+
 ## Global Constraints
 
 - Every source file opens with an SPDX header: `# SPDX-License-Identifier: Apache-2.0` for shell (line 2, after the shebang — see `ci/osv/run.sh`).
@@ -140,7 +146,7 @@ git commit -m "build(repo): pin actionlint 1.7.12 via a vendored proto plugin (S
 - Consumes: the `actionlint` binary from Task 1.
 - Produces: `ci/actionlint/run.sh`, executable, accepting no arguments (Task 4 adds `--self-test`). Exposes to later tasks: the `ARGS` array, the `fail()` helper, the `FAILED` flag, and the `WORKFLOW_FILES` array.
 
-**Why `set -uo pipefail` and not `set -e`:** check 3 (Task 3) deliberately expects non-zero exits and grep-based extraction legitimately finds nothing. Under `-e` both abort the script with an opaque status. Instead every check captures status explicitly and sets `FAILED`, so a failing check cannot be masked by a later passing one. This mirrors `ci/osv/run.sh`.
+**Why `set -uo pipefail` and not `set -e`:** several checks deliberately expect and inspect non-zero exits — check 3 (Task 3) requires actionlint to *fail* on each fixture, and the verdict helpers of checks 5/6 signal through their status. Under `-e` those abort the script with an opaque status. Instead every check captures status explicitly and sets `FAILED`, so a failing check cannot be masked by a later passing one. This mirrors `ci/osv/run.sh`.
 
 - [ ] **Step 1: Write the skeleton with checks 1 and 2**
 
@@ -162,8 +168,9 @@ git commit -m "build(repo): pin actionlint 1.7.12 via a vendored proto plugin (S
 # EXIT CODES (ci/ convention): 1 = assertion failure, 2 = infrastructure error. Without the
 # split, a broken tool reads as a lint failure — or, if anyone wraps this in `|| true`, as a pass.
 #
-# NOT `set -e`: check 3 deliberately EXPECTS non-zero exits, and grep-based extraction
-# legitimately finds nothing. Each check captures status explicitly and sets FAILED instead.
+# NOT `set -e`: several checks deliberately expect and inspect non-zero exits — check 3 requires
+# actionlint to FAIL on each fixture, and the verdict helpers of checks 5/6 signal through their
+# status. Each check captures status explicitly and sets FAILED instead.
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 2
@@ -904,12 +911,21 @@ check_pattern() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Check 6 — every extracted KEY must carry at least one sequence item.
+# Check 6 — every extracted KEY must carry at least one sequence item, and at least one of those
+# items must be a POSITIVE (non-'!') pattern.
 #
-# Counts RAW items, before the '!' filtering in check_pattern, so a legal all-negated block does
-# not hard-fail. This is what converts an unsupported YAML form — the inline flow `paths: [a, b]`,
-# which the extractor deliberately does not parse — from a silent skip into a loud failure that
-# names the file. The difference between a limitation and a hole.
+# Counts RAW items, before the '!' filtering in the pattern check, so that an all-negated block
+# cannot produce the WRONG failure: post-filter it has zero globs, and counting post-filter would
+# report it as "no sequence entries this gate could read" — a claim about the extractor, sending
+# the author after a YAML problem that is not there. A zero raw count is what converts an
+# unsupported YAML form — the inline flow `paths: [a, b]`, and the flow-mapping event
+# `push: { paths: … }`, neither of which the extractor parses — from a silent skip into a loud
+# failure that names the file. The difference between a limitation and a hole.
+#
+# An all-negated block DOES hard-fail, under the second, more specific rule: GitHub includes a
+# changed file only when it matches at least one POSITIVE pattern, so such a filter can never match
+# anything and the trigger it guards is permanently dead. `paths-ignore:` is exempt — an
+# all-negated paths-ignore is a no-op, not a dead trigger.
 # ---------------------------------------------------------------------------------------------
 for wf in "${WORKFLOW_FILES[@]}"; do
   records="$(extract_paths_keys "$wf")" || infra "extractor failed on $wf"
@@ -1023,8 +1039,11 @@ Append to `moon.yml`'s `tasks:` map, after `promtool:`:
     # sibling ci/actionlint/, so a future ci/ reshuffle is plausible.
     #
     # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
-    # (cargo nextest, next typegen). This one is ~109 ms: actionlint over three workflows plus a
-    # dozen `git ls-files` calls.
+    # (cargo nextest, next typegen). This one is ~1.0s standalone and warm (measured): six
+    # actionlint invocations — one over the real workflows, five stdin fixtures — 26
+    # `git ls-files` calls, and three fixture tables (extractor, path filters, config allowlist).
+    # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
+    # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
     script: 'ci/actionlint/run.sh'
     toolchain: 'system'
     inputs:
@@ -1041,9 +1060,9 @@ moon run repo:actionlint --force
 time moon run repo:actionlint --force
 ```
 
-Expected: total wall time comfortably under **2 s**.
+Compare against **Moon's own per-task floor**, not against an absolute wall-time number: run `repo:promtool` (an existing narrow-input task) the same way and use its time as the baseline. Measured on SMA-525: floor ~8.7s, this gate with a narrow input list ~10.4s, with `inputs: ['**/*']` ~11.6s, and with `inputs: ['**/*']` but no `hasher.ignorePatterns` ~98.6s.
 
-**If it exceeds ~2 s:** stop and split the task per spec §4.2 — keep `repo:actionlint` with narrow inputs (`.github/workflows/**/*`, `.github/actionlint.*`, `ci/actionlint/**/*`, `.prototools`, `.proto/plugins/actionlint.toml`) running only checks 1–4, and add `repo:workflow-path-filters` with `inputs: ['**/*']` running checks 5–7 via a `--path-filters-only` flag. Both targets then go into `T=(…)` and into the CLAUDE.md command. Report the measurement either way.
+**If broad `inputs:` costs materially more than a narrow list on the same floor:** stop and split the task per spec §4.2 — keep `repo:actionlint` with narrow inputs (`.github/workflows/**/*`, `.github/actionlint.*`, `ci/actionlint/**/*`, `.prototools`, `.proto/plugins/actionlint.toml`) running only checks 1–4, and add `repo:workflow-path-filters` with `inputs: ['**/*']` running checks 5–7 via a `--path-filters-only` flag. Both targets then go into `T=(…)` and into the CLAUDE.md command. On the numbers above the difference is ~1s, so it was **not** split; what the decision actually turns on is `hasher.ignorePatterns`, not the input glob. Report the measurement either way.
 
 - [ ] **Step 3: Wire into CI**
 

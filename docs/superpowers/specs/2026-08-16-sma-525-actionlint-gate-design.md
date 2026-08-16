@@ -126,8 +126,9 @@ a directory rename is the *dominant* real-world way a glob comes to match nothin
 have kept serving a cached pass indefinitely — reproducing §1's "silent and permanent" inside the
 fix. Concretely, `security-scan.yml` filters on `ci/osv/**`, and this very PR adds a sibling
 `ci/actionlint/`, making a future `ci/` reshuffle plausible. The trade was asserted but never
-quantified; measured, the whole gate — actionlint over three workflows plus 14 `git ls-files`
-calls — runs in **109 ms**. There is no trade. See §4.2 for the one open cost.
+quantified; measured on the gate as shipped — six actionlint invocations, 26 `git ls-files` calls
+and three fixture tables — it runs in **~1.0s** standalone and warm. There is no trade. See §4.2
+for the one open cost.
 
 ## 4. Architecture
 
@@ -176,19 +177,33 @@ the SPDX header (`ci/osv/run.sh` precedent).
 `inputs:` is deliberately broad — `**/*` — per D6, because check 5 is a statement about the whole
 file tree, not about the workflow files. The narrow-inputs convention used by the other `repo:*`
 gates exists because those gates are expensive (`cargo nextest`, `next typegen`); this one is
-109 ms.
+~1.0s.
 
-**Open cost, to be measured in implementation:** broad `inputs:` makes Moon hash the whole tree for
-this task's cache key, and that hashing cost — unlike the runtime — has not been measured. If total
-wall time (hash + run) exceeds ~2 s, split into `repo:actionlint` (narrow inputs, the linter) and
-`repo:workflow-path-filters` (broad inputs, checks 5–7), which isolates the hashing to the cheap
-half. Both targets then go into `T=(…)`. The fallback is defined now so the decision is not made
-under pressure later.
+**Cost, as measured in implementation.** Broad `inputs:` makes Moon hash the whole tree for this
+task's cache key, and that hashing cost — unlike the runtime — had not been measured when this
+section was written. Measured (macOS, warm, alternating `moon run repo:actionlint --force`):
+
+| Configuration | Time |
+|---|---|
+| `repo:promtool` — existing narrow-input task, i.e. Moon's floor | ~8.7s |
+| this gate, narrow input list | ~10.4s |
+| this gate, `inputs: ['**/*']` **with** `hasher.ignorePatterns` | ~11.6s |
+| this gate, `inputs: ['**/*']` **without** it | ~98.6s |
+
+This section originally pre-committed to splitting the task if total wall time exceeded ~2 s. That
+threshold was simply wrong and the task was correctly **not** split: it budgeted for the script and
+ignored Moon's fixed per-task overhead, which is ~8.7s in this repo for a task doing almost nothing.
+Against the only meaningful baseline — Moon's floor — broad `inputs:` costs ~1s more than a narrow
+input list, and only once `.moon/workspace.yml`'s `hasher.ignorePatterns` excludes the gitignored
+dependency trees. That filter, not the input glob, is what the decision actually turns on; narrowing
+this task's inputs without revisiting it would not meaningfully help. Same table, with the caveats
+about reading it from the log, lives in `ci/actionlint/README.md`.
 
 **Shell settings.** `set -uo pipefail`, *not* `set -e` — matching `ci/osv/run.sh`. Moon does not
 enable errexit for `script:` blocks, which is why several gates here need explicit care, but `-e`
-is the wrong cure for *this* script: check 3 deliberately *expects* non-zero exits and grep-based
-extraction legitimately finds nothing. Every check therefore captures status explicitly
+is the wrong cure for *this* script: several checks deliberately expect and inspect non-zero exits
+— check 3 requires actionlint to *fail* on each fixture, and the verdict helpers of checks 5/6
+signal through their status. Every check therefore captures status explicitly
 (`if ! cmd`, `rc=$?`, `|| true`) and the script tracks a failure flag, so one failing check cannot
 be masked by a later passing one.
 
@@ -201,12 +216,12 @@ Without the split, a broken tool reads as a lint failure — or worse, as a pass
 | # | Check | Catches |
 |---|---|---|
 | 1 | `actionlint "${ARGS[@]}"` over the auto-discovered workflow set | syntax, wrong key, malformed glob, unknown runner label, bad expressions |
-| 2 | No `.github/actionlint.{yaml,yml}` carrying an `ignore:` key | a config that neuters check 1 invisibly (§2) |
+| 2 | `.github/actionlint.{yaml,yml}` declares no top-level key but `self-hosted-runner`, and no `ignore` key in any style | a config that neuters check 1 invisibly (§2) |
 | 3 | One malformed fixture per AC-1 class via `actionlint -`, each **must fail with its expected rule tag** | the gate having been neutered by a targeted `-ignore` or a narrowed rule set |
 | 4 | A healthy fixture via `actionlint -` **must pass** | control for 3: a globally broken invocation would otherwise read as "malformed input correctly rejected" |
 | 5 | Every `paths:` glob is in the supported vocabulary and matches the tree (D4) | the typo'd-but-valid glob of §2; a dropped `/**` |
-| 6 | Any workflow containing a `paths:`/`paths-ignore:` key yields ≥1 extracted sequence item | an unsupported YAML form becoming a silent skip |
-| 7 | Extractor self-test against a fixture table | the extractor silently mis-parsing real files |
+| 6 | Any workflow containing a `paths:`/`paths-ignore:` key yields ≥1 extracted sequence item, at least one of them positive | an unsupported YAML form becoming a silent skip; an all-negated, permanently dead filter |
+| 7 | Three self-tests against fixture tables — extractor, path-filter verdicts, config allowlist | the extractor silently mis-parsing real files; checks 2, 5 and 6 being neutered while the gate still exits 0 |
 
 Check 1 invokes `actionlint` **bare**, with no file arguments, relying on repository
 auto-discovery. A `*.yml` argument list would silently miss a `.yaml`-suffixed workflow, and the
@@ -230,8 +245,18 @@ would add false-red surface while guarding the wrong end; the real invariant the
 
 Entries beginning with `!` are excluded from check 5's matching — they are exclusions, so
 requiring them to match is wrong — but are still **counted by check 6**, which counts raw sequence
-items *before* any filtering. Otherwise a legal all-negated block would grep positive, yield zero
-post-filter globs, and hard-fail the required check.
+items *before* any filtering. The raw count exists so that an all-negated block cannot produce the
+*wrong* failure: post-filter it has zero globs, and counting post-filter would report it as "a key
+with no sequence entries this gate could read", which is a claim about the extractor and sends the
+author looking for a YAML problem that is not there.
+
+An all-negated `paths:` block does still **hard-fail**, under a separate and more specific rule:
+GitHub includes a changed file only when it matches at least one *positive* pattern, so a block of
+nothing but `!` exclusions can never match anything and the trigger it guards is permanently dead —
+the same failure this gate exists to catch, spelled with `!` instead of a typo. Check 6 therefore
+has two verdicts: raw count of 0 (unsupported YAML form, the extractor read nothing) and raw count
+> 0 with no positive entry (a dead filter). `paths-ignore:` is exempt from the second: an
+all-negated `paths-ignore` is a no-op, not a dead trigger.
 
 The first draft carried an additional "total globs > 0" control. It is dropped: check 6 already
 covers the real vacuity risk per-file, while a repo-wide count would false-red the legitimate
@@ -251,16 +276,28 @@ Specified rather than left to the implementer, because the naive reading breaks 
 committed here — `prebuild.yml`'s `pull_request.paths` block has three interior comment lines
 mid-sequence and trailing `#` comments on four entries:
 
-- A `paths:`/`paths-ignore:` key at any indentation opens a block; the block ends at the first
-  content line whose indentation is **≤ the key's** (dedent), **not** at the first line that is not
-  a `- ` item. Terminating early extracts 7 of 9 globs from `prebuild.yml` — and check 6 still
-  passes, 7 being ≥ 1. That is exactly the silent partial extraction check 6 exists to prevent, so
-  the contract, not the control, has to carry it.
-- Whole-line comments inside a block are skipped **without** closing it.
+- Only a `paths:`/`paths-ignore:` key **two levels deep** inside `on:` is a path filter: `on:` is
+  level 0, an event key (`push:`, `workflow_dispatch:`, …) is level 1, and the filter is level 2.
+  Depth, not "anywhere under `on:`" — a workflow input may legitimately be *named* `paths`, and
+  `on.workflow_dispatch.inputs.paths` sits at level 3. Treating that as a filter false-reds the only
+  required check with advice its author cannot act on (there is no block sequence to write) and no
+  escape hatch, because the skip list filters patterns, not keys.
+- Such a key opens a block; the block ends at the first **non-item** content line whose indentation
+  is **≤ the key's**, **not** at the first line that is not a `- ` item. The "non-item" qualifier is
+  load-bearing: a *flush* block sequence, whose `- ` items sit at the same indentation as their key,
+  is valid YAML, is what Prettier's YAML printer emits, and is accepted by GitHub and actionlint —
+  read as a plain "dedent" the rule closes the block immediately and produces a key with zero items,
+  a false red. Terminating early on the first non-item line instead extracts 7 of 9 globs from
+  `prebuild.yml` — and check 6 still passes, 7 being ≥ 1. That is exactly the silent partial
+  extraction check 6 exists to prevent, so the contract, not the control, has to carry it.
+- Whole-line comments inside a block are skipped **without** closing it, at any column — including
+  column 0, which must not be read as a new top-level key closing the whole `on:` mapping.
 - A trailing ` #` comment outside quotes is stripped; a `#` inside a quoted scalar is not.
 - Unquoted, single-quoted and double-quoted scalars are all accepted; surrounding quotes stripped.
-- The inline flow form (`paths: [a, b]`) is **not** parsed. Check 6 turns it into a loud failure
-  naming the file, which is the difference between a limitation and a hole.
+- The inline flow form (`paths: [a, b]`) is **not** parsed, and neither is a flow-mapping event
+  value (`push: { paths: [a, b] }`). Both emit a key with no items, which check 6 turns into a loud
+  failure naming the file — the difference between a limitation and a hole. Without the second one,
+  a single flow-style line silently switches checks 5 and 6 off for that event.
 
 Check 7 tests each clause above against a fixture table of YAML strings with expected glob sets,
 run on every invocation — the `--negative-control` pattern from `ci/affected-graph/run.sh`.
@@ -293,7 +330,15 @@ AC-2 ("runs on every PR touching `.github/workflows/**`") is satisfied a fortior
 - **AC-3 for the path-existence control specifically.** Break a real `paths:` glob in
   `prebuild.yml` two ways — a typo (`rz/**`) and a dropped suffix (`rs`, the D4 false-green case) —
   confirm check 5 fails and names the pattern in both, then revert. Output recorded in the PR body.
-- Confirm the §4.2 hashing cost against the ~2 s threshold, and split the task if it is exceeded.
+- Measure the §4.2 hashing cost against **Moon's own per-task floor** (`repo:promtool`, ~8.7s), not
+  against an absolute wall-time number. Split the task only if broad `inputs:` costs materially more
+  than a narrow input list does on the same floor. Measured result and the numbers it turned on are
+  in §4.2.
+- **A standing control for checks 5 and 6, not just for the extractor.** A mutation battery is the
+  acceptance test: neuter each vocabulary rule, the exact-path check, the dead-glob branch and the
+  key flush one at a time, on a scratch copy, and confirm every one of them reds the gate. Checks
+  5–7 are the half of this gate actionlint cannot provide, and the repo's own three workflow files
+  are all clean, so nothing else exercises those code paths.
 
 ## 6. Rollout and rollback
 
@@ -334,6 +379,11 @@ Stated deliberately, so nothing reads as a stronger guarantee than it is.
 - **L6 — Meta, out of scope.** Nothing asserts that a `repo:*` gate is actually wired into
   `ci.yml`'s `T=(…)`; a future gate could be added and never run. Same silent-omission class one
   level up. Follow-up.
+- **L7 — `!`-negated entries skip vocabulary validation.** Check 5 returns early on them, so a
+  malformed exclusion (`!**.js`, `!rz/**`) is never rejected or matched against the tree. Accepted:
+  a broken exclusion can only fail to exclude, which makes the workflow run more often — the
+  fail-safe direction — whereas a broken *inclusion* silently stops it running at all. An
+  all-negated block is still caught, by check 6.
 
 ## 8. Non-goals
 
