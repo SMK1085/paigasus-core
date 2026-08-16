@@ -112,7 +112,7 @@ max-threads = N            # measured (§5); floored at 4 per D5a
 # keycloak_e2e starts a 240s-startup-timeout Keycloak; three attempts of a genuinely failing
 # run would be ~18 minutes against ci.yml's 30-minute job budget. One retry, not two.
 [[profile.default.overrides]]
-filter  = 'package(=paigasus-iam) and test(keycloak)'
+filter  = 'package(=paigasus-iam) and binary(keycloak_e2e)'
 retries = 1
 
 [[profile.default.overrides]]
@@ -122,7 +122,9 @@ retries    = { backoff = "exponential", count = 2, delay = "15s", max-delay = "6
 # above names only `retries`.
 test-group = 'docker-containers'
 
-[profile.default.junit]
+[profile.iam]
+
+[profile.iam.junit]
 path = 'junit.xml'
 ```
 
@@ -196,7 +198,7 @@ budget. Generalize it into a small shared helper:
 
 ```rust
 #[allow(dead_code)]
-pub async fn mapped_port(node: &ContainerAsync<impl Image>, port: u16) -> u16
+pub async fn mapped_port(src: &impl PortSource, port: u16, what: &str) -> u16
 ```
 
 It retries until the mapping is published or a load budget expires, then panics with a
@@ -314,6 +316,7 @@ Each check targets a specific way this change could silently do nothing.
 | `paigasus-iam-rs:test` serves a stale cached pass | Touch only `rs/.config/nextest.toml`; `moon query tasks --affected` must list it. |
 | `repo:nats-permissions` serves a stale cached pass | Same touch; the same query must list `repo:nats-permissions` too. |
 | `mapped_port` doesn't actually retry | Unit-test the loop against a stub that fails N times then succeeds — the assertion must fail if the retry is removed. |
+| Retries never engage | D10's JUnit artifact records flaky reruns; §5's measurement runs surface them directly. |
 
 The retry test lives in its own small integration binary, `tests/support_docker_retry.rs`, which
 includes `docker.rs` via `#[path]`. **Not** a `#[cfg(test)]` module inside `docker.rs`: `cfg(test)`
@@ -322,7 +325,6 @@ compiled out and never run — a vacuous test. Nor plain `#[tokio::test]` functi
 `docker.rs`, which would duplicate across every binary that includes it. To keep the stub
 Docker-free, `mapped_port` is generic over a tiny `PortSource` trait implemented for
 `ContainerAsync<I>` in production and by a fail-N-times counter in the test.
-| Retries never engage | D10's JUnit artifact records flaky reruns; §5's measurement runs surface them directly. |
 
 **Observability (D10).** `.moon/tasks.yml:25-26` sets `taskOptions.outputStyle:
 'buffer-only-failure'`, so a task that goes green-with-flakes prints **nothing** — the FLAKY

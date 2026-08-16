@@ -61,7 +61,7 @@ Lands the policy and makes both dependent Moon tasks re-key on it. No Rust chang
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: a `docker-containers` test group and a `profile.default` override matching `package(=paigasus-iam) and kind(test)`; a JUnit report at `rs/target/nextest/default/junit.xml` (consumed by Task 5).
+- Produces: a `docker-containers` test group and a `profile.default` override matching `package(=paigasus-iam) and kind(test)`; a dedicated `[profile.iam]` (inheriting `default`'s overrides) whose JUnit report lands at `rs/target/nextest/iam/junit.xml` once `paigasus-iam-rs:test` selects it via `--profile iam` (consumed by Task 5).
 
 - [ ] **Step 1: Create the profile**
 
@@ -118,10 +118,19 @@ retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s"
 # the settings it names.
 test-group = 'docker-containers'
 
-# `.moon/tasks.yml` sets `taskOptions.outputStyle: 'buffer-only-failure'`, so a task that goes
-# green-with-flakes prints NOTHING — the FLAKY signal this design's safety argument depends on is
-# otherwise invisible in CI. Task 5 adds the ci.yml step that uploads this report as an artifact.
-[profile.default.junit]
+# JUnit lives on a DEDICATED profile, not `default`: nextest resolves the report path relative to
+# the workspace `target/`, so every concurrent `cargo nextest` in the workspace would otherwise
+# write and clobber the same `target/nextest/default/junit.xml`. A custom profile gets its own
+# store dir, `target/nextest/iam/`, and INHERITS `default`'s overrides, so the retry budget and
+# the docker-containers group still apply. `paigasus-iam-rs:test` selects it by adding
+# `args: ['--profile', 'iam']` in `rs/crates/services/paigasus-iam/moon.yml` — deliberately
+# `args:`, not `command:`: Moon's default `mergeArgs: append` strategy appends a project task's
+# args onto the inherited task's args regardless of what `command:` says, so redeclaring the full
+# `cargo nextest run --no-tests=pass --profile iam` string there would double the command. Task 5
+# adds the ci.yml step that uploads this report as an artifact.
+[profile.iam]
+
+[profile.iam.junit]
 path = 'junit.xml'
 ```
 
@@ -614,7 +623,7 @@ Without this the `FLAKY` signal is invisible: `.moon/tasks.yml:25-26` sets `outp
 - Modify: `.github/workflows/ci.yml` (after the `moon ci (affected graph)` step, around line 192)
 
 **Interfaces:**
-- Consumes: the `[profile.default.junit]` setting from Task 1, which writes `rs/target/nextest/default/junit.xml`.
+- Consumes: the `[profile.iam.junit]` setting from Task 1, which writes `rs/target/nextest/iam/junit.xml` when `paigasus-iam-rs:test` runs with `--profile iam`.
 - Produces: a CI artifact named `nextest-junit`.
 
 - [ ] **Step 1: Add the upload step**
@@ -632,7 +641,7 @@ In `.github/workflows/ci.yml`, immediately after the `moon ci (affected graph)` 
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: nextest-junit
-          path: rs/target/nextest/default/junit.xml
+          path: rs/target/nextest/iam/junit.xml
           if-no-files-found: ignore
           retention-days: 14
 ```
@@ -644,8 +653,8 @@ In `.github/workflows/ci.yml`, immediately after the `moon ci (affected graph)` 
 Run:
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cd rs && CI=1 cargo nextest run -p paigasus-iam --test support_docker_retry
-ls -l target/nextest/default/junit.xml
+cd rs && CI=1 cargo nextest run -p paigasus-iam --test support_docker_retry --profile iam
+ls -l target/nextest/iam/junit.xml
 ```
 Expected: the file exists. If the path differs, correct the workflow's `path:` to match what nextest actually wrote — do not assume.
 
