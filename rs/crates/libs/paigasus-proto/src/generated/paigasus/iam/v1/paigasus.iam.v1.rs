@@ -21,6 +21,7 @@ pub struct ServiceInfo {
     #[prost(string, tag="1")]
     pub prn: ::prost::alloc::string::String,
 }
+#[derive(::paigasus_proto::audit::Auditable)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Organization {
     #[prost(string, tag="1")]
@@ -36,6 +37,7 @@ pub struct Organization {
     #[prost(message, optional, tag="6")]
     pub audit: ::core::option::Option<super::super::common::v1::AuditMetadata>,
 }
+#[derive(::paigasus_proto::audit::Auditable)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Team {
     #[prost(string, tag="1")]
@@ -53,6 +55,7 @@ pub struct Team {
     #[prost(message, optional, tag="7")]
     pub audit: ::core::option::Option<super::super::common::v1::AuditMetadata>,
 }
+#[derive(::paigasus_proto::audit::Auditable)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Project {
     #[prost(string, tag="1")]
@@ -72,6 +75,7 @@ pub struct Project {
     #[prost(message, optional, tag="8")]
     pub audit: ::core::option::Option<super::super::common::v1::AuditMetadata>,
 }
+#[derive(::paigasus_proto::audit::Auditable)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Membership {
     #[prost(string, tag="1")]
@@ -517,6 +521,7 @@ pub struct ListRoleGrantsResponse {
 /// (M3 D1) — status lives on the principal row, not here — so `status` mirrors
 /// IntrospectResponse.status (a free-form principal-status string) rather than
 /// a dedicated enum.
+#[derive(::paigasus_proto::audit::Auditable)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ServiceAccount {
     #[prost(string, tag="1")]
@@ -534,6 +539,7 @@ pub struct ServiceAccount {
 /// ApiKey never carries the secret or its hash — only display/lifecycle
 /// metadata. The plaintext token is returned exactly once, in
 /// IssueApiKeyResponse.token.
+#[derive(::paigasus_proto::audit::Auditable)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ApiKey {
     #[prost(string, tag="1")]

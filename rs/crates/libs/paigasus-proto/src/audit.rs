@@ -32,15 +32,10 @@ mod tests {
     use super::Auditable;
     use crate::paigasus::common::v1::{AuditMetadata, AuditableExample};
 
-    // Conformance impl on the *generated* embedding fixture — proves the trait works
-    // over `AuditableExample.audit: Option<AuditMetadata>` produced by codegen. The
-    // orphan rule blocks this from an integration test crate (neither item is local
-    // there), so it lives in-crate under cfg(test).
-    impl Auditable for AuditableExample {
-        fn audit(&self) -> Option<&AuditMetadata> {
-            self.audit.as_ref()
-        }
-    }
+    // No manual impl here any more: `AuditableExample` now carries #[derive(Auditable)] via
+    // codegen (SMA-438), so the two tests below exercise the DERIVED impl. Re-adding a manual
+    // one is an E0119 conflict. Note this makes the fixture's impl public API, reversing
+    // SMA-425's decision to keep it test-only — deliberate, see SMA-438 spec D8.
 
     #[test]
     fn accessors_read_through_embedded_metadata() {
