@@ -95,8 +95,20 @@ constants, and the self-test — no detection logic yet.
 import json
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
+
+# Exceptions meaning "the inputs or environment are broken", NOT "the graph regressed". main() maps
+# these to rc 2 so run.sh aborts, instead of folding them into SUITE_RC as an assertion failure.
+# tomllib.TOMLDecodeError subclasses ValueError, not OSError, so it has to be named explicitly — the
+# self-test pins that by asserting cargo_crates' real failure is a member of this tuple.
+INFRA_ERRORS = (
+    subprocess.CalledProcessError,
+    json.JSONDecodeError,
+    tomllib.TOMLDecodeError,
+    OSError,
+)
 
 # (consumer, upstream) -> why this hand-declared Moon edge has no Cargo backing.
 # An allowlisted edge is a RECORDED DECISION, not a silent exemption: the reason string is required.
@@ -133,7 +145,7 @@ def check(projects, crates, allow=None):
     allow = ALLOW_NO_CARGO_BACKING if allow is None else allow
     by_dir = {p["source_dir"]: mid for mid, p in projects.items()}
     a1, a2, a3 = [], [], []
-    for crate, info in sorted(crates.items()):
+    for _crate, info in sorted(crates.items()):
         mid = by_dir.get(info["source_dir"])
         if mid is None:
             continue
@@ -332,16 +344,9 @@ def main():
     try:
         projects = moon_projects()
         crates = cargo_crates(root)
-    except (
-        subprocess.CalledProcessError,
-        json.JSONDecodeError,
-        tomllib.TOMLDecodeError,
-        OSError,
-    ) as exc:
+    except INFRA_ERRORS as exc:
         # Mirror run.sh's infra-vs-assertion split: a broken `moon` — or an unparseable Cargo.toml —
-        # must never be mistaken for a graph regression. TOMLDecodeError subclasses ValueError, not
-        # OSError, so without naming it a malformed manifest escapes as a traceback with status 1,
-        # which run.sh would fold into SUITE_RC as an assertion failure instead of aborting on rc 2.
+        # must never be mistaken for a graph regression. See INFRA_ERRORS.
         print(f"FATAL [parity] could not build the graphs: {exc}", file=sys.stderr)
         return 2
 

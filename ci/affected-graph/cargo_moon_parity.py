@@ -16,8 +16,20 @@
 import json
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
+
+# Exceptions meaning "the inputs or environment are broken", NOT "the graph regressed". main() maps
+# these to rc 2 so run.sh aborts, instead of folding them into SUITE_RC as an assertion failure.
+# tomllib.TOMLDecodeError subclasses ValueError, not OSError, so it has to be named explicitly — the
+# self-test pins that by asserting cargo_crates' real failure is a member of this tuple.
+INFRA_ERRORS = (
+    subprocess.CalledProcessError,
+    json.JSONDecodeError,
+    tomllib.TOMLDecodeError,
+    OSError,
+)
 
 # (consumer, upstream) -> why this hand-declared Moon edge has no Cargo backing.
 # An allowlisted edge is a RECORDED DECISION, not a silent exemption: the reason string is required.
@@ -54,7 +66,7 @@ def check(projects, crates, allow=None):
     allow = ALLOW_NO_CARGO_BACKING if allow is None else allow
     by_dir = {p["source_dir"]: mid for mid, p in projects.items()}
     a1, a2, a3 = [], [], []
-    for crate, info in sorted(crates.items()):
+    for _crate, info in sorted(crates.items()):
         mid = by_dir.get(info["source_dir"])
         if mid is None:
             continue
@@ -197,16 +209,21 @@ def self_test():
     if check(broken, crates, allow={("a-rs", "ghost-rs"): "a documented reason"})[1]:
         failures.append("A2 fired despite a properly-reasoned allowlist entry")
 
-    # A malformed Cargo.toml must surface as INFRA (rc 2), not as an assertion failure. tomllib's
-    # TOMLDecodeError subclasses ValueError, not OSError, so main() has to name it explicitly.
-    try:
-        tomllib.loads("[dependencies\nbroken =")
-    except tomllib.TOMLDecodeError:
-        pass
-    except Exception as exc:  # pragma: no cover - guards an upstream behaviour change
-        failures.append(f"malformed TOML raised {type(exc).__name__}, not TOMLDecodeError")
-    else:
-        failures.append("malformed TOML did not raise at all")
+    # A malformed Cargo.toml must surface as INFRA (rc 2), not as an assertion failure. Exercise the
+    # whole chain on a throwaway workspace — parser raises, cargo_crates propagates, INFRA_ERRORS
+    # catches — so narrowing that tuple fails here instead of silently relabelling a broken manifest
+    # as a graph regression. Done without Moon on purpose: `moon query projects` parses Cargo.toml
+    # too and fails first, which masks this path end-to-end.
+    with tempfile.TemporaryDirectory() as tmp:
+        bad = Path(tmp) / "rs" / "crates" / "bad"
+        bad.mkdir(parents=True)
+        (bad / "Cargo.toml").write_text("[package\nname = ")
+        try:
+            cargo_crates(Path(tmp))
+        except INFRA_ERRORS:
+            pass
+        else:
+            failures.append("a malformed Cargo.toml did not raise out of cargo_crates()")
 
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
@@ -222,16 +239,9 @@ def main():
     try:
         projects = moon_projects()
         crates = cargo_crates(root)
-    except (
-        subprocess.CalledProcessError,
-        json.JSONDecodeError,
-        tomllib.TOMLDecodeError,
-        OSError,
-    ) as exc:
+    except INFRA_ERRORS as exc:
         # Mirror run.sh's infra-vs-assertion split: a broken `moon` — or an unparseable Cargo.toml —
-        # must never be mistaken for a graph regression. TOMLDecodeError subclasses ValueError, not
-        # OSError, so without naming it a malformed manifest escapes as a traceback with status 1,
-        # which run.sh would fold into SUITE_RC as an assertion failure instead of aborting on rc 2.
+        # must never be mistaken for a graph regression. See INFRA_ERRORS.
         print(f"FATAL [parity] could not build the graphs: {exc}", file=sys.stderr)
         return 2
 
