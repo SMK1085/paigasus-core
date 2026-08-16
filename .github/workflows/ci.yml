@@ -189,6 +189,14 @@ jobs:
           set -euo pipefail
           moon run ts:check-config-only
 
+      # The Rust cache above restores `rs/target`, which can carry a `junit.xml` written by a
+      # previous run — and `actions/cache` skips saving on a primary-key hit, so that file can be
+      # frozen for dozens of commits. `moon ci` is affected-only, so a PR touching no Rust never
+      # regenerates it, and the upload below would publish a stale report as if it were this run's.
+      # Delete it first: the artifact is then either genuinely from this run, or absent.
+      - name: Drop any cached nextest JUnit report (stale-artifact guard)
+        run: rm -f rs/target/nextest/iam/junit.xml
+
       - name: moon ci (affected graph)
         env:
           EVENT: ${{ github.event_name }}
@@ -220,7 +228,7 @@ jobs:
       # report lands in its own store dir and survives every other crate's concurrent run.
       - name: Upload nextest JUnit report (flaky-test visibility)
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: nextest-junit
           path: rs/target/nextest/iam/junit.xml

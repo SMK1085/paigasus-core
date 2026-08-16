@@ -60,7 +60,14 @@ max-threads = 8
 [[profile.default.overrides]]
 # keycloak_e2e starts a Keycloak with a 240s startup timeout (tests/keycloak_e2e.rs:79). Three
 # attempts of a genuinely failing run would be ~18 minutes against ci.yml's 30-minute budget.
-filter = 'package(=paigasus-iam) and test(keycloak)'
+# Scoped to the whole BINARY (`binary(keycloak_e2e)`), not a test name: the safeguard exists
+# because of the container this binary starts, not because of what any one test is called. A
+# `test(keycloak)` filter would silently stop covering a second test added to this file under a
+# different name, falling through to the general kind(test) override's count=2 retries — three
+# 240s startups (~12 minutes) against ci.yml's 30-minute budget. Verified the match set is
+# unchanged: `cargo nextest list -E 'package(=paigasus-iam) and binary(keycloak_e2e)'` lists the
+# same single test as the old `test(keycloak)` filter did.
+filter = 'package(=paigasus-iam) and binary(keycloak_e2e)'
 retries = 1
 
 [[profile.default.overrides]]

@@ -214,11 +214,6 @@ tasks:
       - 'rs/crates/services/paigasus-iam/src/config.rs'
       - 'rs/crates/services/paigasus-iam/Cargo.toml'
       - 'rs/Cargo.lock'
-      #   - 'rs/.config/nextest.toml' — this task runs its own `cargo nextest` against
-      #     -p paigasus-iam, which the SMA-521 retry/test-group override matches. Without this
-      #     input a profile edit would leave this gate serving a cached PASS. (It is NOT
-      #     inherited from .moon/tasks/rust.yml: that file is `inheritedBy: languages: ['rust']`
-      #     and this task is `language: 'bash'` on the root `repo` project.)
       - 'rs/.config/nextest.toml'
 
   wasm-getrandom-free:
