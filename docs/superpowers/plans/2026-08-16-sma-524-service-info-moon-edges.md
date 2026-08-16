@@ -112,14 +112,25 @@ ALLOW_NO_CARGO_BACKING = {
 NON_CARGO_PARENTS = {"contracts"}
 
 
-def check(projects, crates):
+def _allowlisted(allow, consumer, upstream):
+    """True only if the entry exists AND carries a non-empty reason.
+
+    Bare membership would let `("a", "b"): ""` silence A2 unreviewably, which defeats the point of
+    the table: an allowlisted edge is a recorded decision, so the record is what earns the exemption.
+    """
+    return bool(allow.get((consumer, upstream), "").strip())
+
+
+def check(projects, crates, allow=None):
     """Return (a1, a2, a3) violation lists.
 
     projects: {moon_id: {"source_dir": str,
                          "deps": {dep_id: "explicit"|"implicit"},
                          "tasks": {task_name: [resolved dep target, ...]}}}
     crates:   {crate_name: {"source_dir": str, "deps": {crate_name, ...}}}
+    allow:    allowlist table; defaults to ALLOW_NO_CARGO_BACKING (injectable for the self-test).
     """
+    allow = ALLOW_NO_CARGO_BACKING if allow is None else allow
     by_dir = {p["source_dir"]: mid for mid, p in projects.items()}
     a1, a2, a3 = [], [], []
     for crate, info in sorted(crates.items()):
@@ -141,7 +152,7 @@ def check(projects, crates):
                 src == "explicit"
                 and dep not in want
                 and dep not in NON_CARGO_PARENTS
-                and (mid, dep) not in ALLOW_NO_CARGO_BACKING
+                and not _allowlisted(allow, mid, dep)
             ):
                 a2.append(f"{mid} -> {dep}")
         for upstream in sorted(want):
@@ -198,6 +209,26 @@ def self_test():
     broken["a-rs"]["deps"] = {"b-rs": "implicit"}
     if check(broken, crates)[1]:
         failures.append("A2 wrongly flagged an implicit (toolchain-inferred) edge")
+
+    # The allowlist exempts on the strength of its REASON, not on bare membership: a blank reason is
+    # an unreviewable exemption and must not silence A2.
+    broken = json.loads(json.dumps(ok))
+    broken["a-rs"]["deps"]["ghost-rs"] = "explicit"
+    if not check(broken, crates, allow={("a-rs", "ghost-rs"): "   "})[1]:
+        failures.append("A2 did not fire on an allowlist entry with a blank reason")
+    if check(broken, crates, allow={("a-rs", "ghost-rs"): "a documented reason"})[1]:
+        failures.append("A2 fired despite a properly-reasoned allowlist entry")
+
+    # A malformed Cargo.toml must surface as INFRA (rc 2), not as an assertion failure. tomllib's
+    # TOMLDecodeError subclasses ValueError, not OSError, so main() has to name it explicitly.
+    try:
+        tomllib.loads("[dependencies\nbroken =")
+    except tomllib.TOMLDecodeError:
+        pass
+    except Exception as exc:  # pragma: no cover - guards an upstream behaviour change
+        failures.append(f"malformed TOML raised {type(exc).__name__}, not TOMLDecodeError")
+    else:
+        failures.append("malformed TOML did not raise at all")
 
     for f in failures:
         print(f"  FAIL {f}", file=sys.stderr)
@@ -301,9 +332,16 @@ def main():
     try:
         projects = moon_projects()
         crates = cargo_crates(root)
-    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError) as exc:
-        # Mirror run.sh's infra-vs-assertion split: a broken `moon` must never be mistaken for a
-        # graph regression.
+    except (
+        subprocess.CalledProcessError,
+        json.JSONDecodeError,
+        tomllib.TOMLDecodeError,
+        OSError,
+    ) as exc:
+        # Mirror run.sh's infra-vs-assertion split: a broken `moon` — or an unparseable Cargo.toml —
+        # must never be mistaken for a graph regression. TOMLDecodeError subclasses ValueError, not
+        # OSError, so without naming it a malformed manifest escapes as a traceback with status 1,
+        # which run.sh would fold into SUITE_RC as an assertion failure instead of aborting on rc 2.
         print(f"FATAL [parity] could not build the graphs: {exc}", file=sys.stderr)
         return 2
 
@@ -339,6 +377,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the self-test to verify it passes**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 ci/affected-graph/cargo_moon_parity.py --self-test
 ```
 Expected: `OK   [parity] all three assertions fire on synthetic violations`, exit 0.
@@ -346,6 +385,7 @@ Expected: `OK   [parity] all three assertions fire on synthetic violations`, exi
 - [ ] **Step 6: Run the gate against the real repo — it MUST fail with exactly the baseline set**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 ci/affected-graph/cargo_moon_parity.py; echo "exit=$?"
 ```
 
@@ -381,6 +421,7 @@ reports the three missing paigasus-service-info edges, fixed in the next commit.
 - [ ] **Step 1: Confirm the gate is red (this is the failing test)**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 ci/affected-graph/cargo_moon_parity.py; echo "exit=$?"
 ```
 Expected: exit 1, 3 A1 rows + 6 A3 rows.
@@ -450,6 +491,7 @@ dependsOn:
 - [ ] **Step 5: Run the gate — it must now be green**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 ci/affected-graph/cargo_moon_parity.py; echo "exit=$?"
 ```
 Expected: exit 0, `PASS  cargo-moon-parity  -> 13 crates: …`.
@@ -820,7 +862,7 @@ jq '.actions[] | select(.status=="failed") | {label, status}' .moon/cache/ciRepo
 git diff --stat origin/main
 ```
 
-Expected exactly 8 files: `cargo_moon_parity.py`, `run.sh`, `README.md` (affected-graph),
+Expected exactly 11 files: `cargo_moon_parity.py`, `run.sh`, `README.md` (affected-graph),
 3 × service/lib `moon.yml` wired, 2 × `moon.yml` comment-corrected, `CLAUDE.md`, plus the spec and
 this plan. Verify no stray debug code:
 

@@ -41,6 +41,7 @@ moon 2.3.2
 Reproduce a project row with:
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"   # repo-pinned moon, shims FIRST
 printf '%s\n' <touched-file> \
   | moon query projects --affected --downstream deep \
   | python3 -c 'import sys,json; print(", ".join(sorted(p["id"] for p in json.load(sys.stdin)["projects"] if p["id"]!="repo")))'
@@ -116,13 +117,13 @@ Produced by a prototype of the parity gate (§ 6) run against `origin/main`:
 | Assertion | Count | Rows |
 | --- | --- | --- |
 | **A1** Cargo dep absent from Moon graph | 3 | `gateway → service-info`, `iam → service-info`, `service-info → proto` |
-| **A2** explicit Moon edge with no Cargo backing | 1 | `gateway → kernel` |
+| **A2** explicit Moon edge with no Cargo backing | 1 (allowlisted → gate reports **0**) | `gateway → kernel` |
 | **A3** in-tree deps but no `^:build` | 2 | `service-info-rs:build`, `service-info-rs:test` |
 
 A1 rows under-build (silent correctness hole). The A2 row over-builds — a cost, never a correctness
 risk. That asymmetry is why A2 gets an allowlist rather than a fix (D4).
 
-### 5.1 The gate must use `cargo metadata`, not a regex
+### 5.1 The gate must use a real TOML parser, not a regex
 
 A first prototype regex-matched `^paigasus-\S+\s*=` in `Cargo.toml` and reported **6** A2 rows. Five
 were false positives: the repo also uses TOML **dotted keys** —
@@ -134,7 +135,7 @@ paigasus-kernel.workspace = true            # rs/crates/bindings/paigasus-py-bin
 
 — which that pattern cannot see. A hand-rolled parser would have shipped a gate that flagged five real
 edges as phantom. The gate parses `Cargo.toml` with **`tomllib`** (Python 3.11+ stdlib; the repo pins
-3.12.13), which handles every declaration form in use — dotted keys, inline tables, and `package = `
+3.12.13), which handles every declaration form in use — dotted keys, inline tables, and `package =`
 renames. **No regex** (D5).
 
 `cargo metadata` was the first choice and was rejected: `repo:affected-smoke` is `toolchain: 'system'`,
@@ -145,7 +146,7 @@ declares an in-tree `dev-dependency` or `build-dependency`, so both resolvers re
 ## 6. The parity gate
 
 `assert_cargo_moon_parity`, added to `ci/affected-graph/run.sh`. It compares Cargo's dependency graph
-(`cargo metadata`) against Moon's *own resolved* graph (`moon query projects`) — it never parses
+(`tomllib`, § 5.1) against Moon's *own resolved* graph (`moon query projects`) — it never parses
 `moon.yml` for edges, so it is immune to formatting and inherits Moon's `implicit`/`explicit`
 resolution for free.
 
