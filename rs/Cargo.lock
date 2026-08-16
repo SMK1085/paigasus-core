@@ -2504,6 +2504,7 @@ dependencies = [
  "paigasus-logging",
  "paigasus-observability",
  "paigasus-proto",
+ "paigasus-service-info",
  "reqwest",
  "secrecy",
  "serde",
@@ -2540,6 +2541,7 @@ dependencies = [
  "paigasus-logging",
  "paigasus-observability",
  "paigasus-proto",
+ "paigasus-service-info",
  "prost-types",
  "rand 0.9.5",
  "rcgen",
@@ -2640,10 +2642,21 @@ dependencies = [
 name = "paigasus-proto"
 version = "0.0.0"
 dependencies = [
+ "paigasus-proto-derive",
  "prost",
  "prost-types",
+ "syn 3.0.3",
  "tonic",
  "tonic-prost",
+]
+
+[[package]]
+name = "paigasus-proto-derive"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -2652,6 +2665,15 @@ version = "0.0.0"
 dependencies = [
  "paigasus-kernel",
  "pyo3",
+]
+
+[[package]]
+name = "paigasus-service-info"
+version = "0.0.0"
+dependencies = [
+ "paigasus-proto",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

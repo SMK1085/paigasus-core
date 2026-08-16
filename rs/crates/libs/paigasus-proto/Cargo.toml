@@ -7,6 +7,10 @@ rust-version.workspace = true
 authors.workspace = true
 # TODO(SMA-388): flip publish = true + choose a real 0.x version once generated
 # code lands (paigasus-proto is crates.io-bound per the open-core release strategy).
+# paigasus-proto-derive must publish FIRST — this crate depends on it. And note
+# AuditableExample's derived Auditable impl is public API as of SMA-438 (not cfg(test), a
+# deliberate reversal of an SMA-425 decision — spec D8), so it becomes semver-locked once
+# this crate publishes.
 publish = false
 
 [dependencies]
@@ -14,6 +18,17 @@ prost.workspace = true
 prost-types.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
+# paigasus-proto-derive: #[derive(Auditable)], re-exported from `audit` and injected onto the
+# generated audit-bearing messages by contracts/buf.gen.yaml (SMA-438). NOT optional — the
+# generated code names it unconditionally, so a feature gate would break codegen.
+paigasus-proto-derive.workspace = true
+
+[dev-dependencies]
+# syn: used ONLY by tests/auditable_derive_drift.rs, which parses the committed generated
+# sources to assert that every message embedding AuditMetadata carries #[derive(Auditable)].
+# Parsing (not regex) is what makes that check immune to comments, oneofs, nested messages and
+# the several legal spellings of a cross-package type reference.
+syn.workspace = true
 
 [lints]
 workspace = true

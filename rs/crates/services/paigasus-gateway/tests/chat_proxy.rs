@@ -37,7 +37,7 @@ use paigasus_gateway::adapters::http::{AppState, router};
 use paigasus_gateway::adapters::iam::{Iam, IamError};
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::OpenAiConfig;
-use paigasus_proto::paigasus::iam::v1::IntrospectApiKeyResponse;
+use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse};
 use support::MockOpenAi;
 
 /// The real OpenAI key the gateway is configured with — what the upstream MUST see.
@@ -97,6 +97,10 @@ impl Iam for FakeIam {
     async fn is_authorized_self(&self, _caller_key: &str, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
         Ok(self.allow)
     }
+
+    async fn introspect_token(&self, _token: &str) -> Result<IntrospectResponse, IamError> {
+        unreachable!("the chat path (require_iam_auth) never calls introspect_token")
+    }
 }
 
 /// An `active` introspect response for the canonical caller.
@@ -117,6 +121,12 @@ fn active_response() -> IntrospectApiKeyResponse {
 /// Assemble the real router over a fake IAM and a real `OpenAiClient` pointed at `base_url`, holding
 /// [`REAL_KEY`].
 fn app_for(fake: FakeIam, base_url: String, max_request_bytes: usize) -> Router {
+    app_for_with_streaming(fake, base_url, max_request_bytes, true)
+}
+
+/// As [`app_for`], but with `stream_enabled` set explicitly — used by the streaming-rejection
+/// test (SMA-505 AC 3) to build a router with streaming disabled.
+fn app_for_with_streaming(fake: FakeIam, base_url: String, max_request_bytes: usize, stream_enabled: bool) -> Router {
     let cfg = OpenAiConfig {
         base_url,
         api_key: SecretString::from(REAL_KEY.to_string()),
@@ -126,6 +136,7 @@ fn app_for(fake: FakeIam, base_url: String, max_request_bytes: usize) -> Router 
         iam: Arc::new(fake),
         openai: Arc::new(openai),
         max_request_bytes,
+        capabilities: paigasus_gateway::service_info::Capabilities { chat_stream: stream_enabled },
     };
     router(state)
 }
@@ -288,6 +299,31 @@ async fn mid_stream_error_emits_terminal_sse_event() {
     assert!(text.starts_with("data: first\n\ndata: second\n\n"), "the pre-error frames are forwarded in order: {text}");
     assert!(text.contains(r#""code":"upstream_error""#), "the stream ends with the terminal SSE error event: {text}");
     assert!(text.trim_end().ends_with("}}"), "the terminal error event is the last frame on the wire: {text}");
+}
+
+// ---- streaming toggle (SMA-505) ----------------------------------------------------------------
+
+/// SMA-505 AC 3, gateway side: with streaming disabled a `stream: true` request is refused with
+/// `400` and `param: "stream"`, and the upstream is never called. Needs no database — this
+/// crate's harness drives the router via `oneshot` against a fake IAM and a fake upstream.
+#[tokio::test]
+async fn a_stream_request_is_refused_when_streaming_is_disabled() {
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, "{}").await;
+    let app = app_for_with_streaming(FakeIam::allowed(), mock.base_url.clone(), ONE_MIB, false);
+
+    let resp = app.clone().oneshot(chat_request(STREAM_BODY, Some(CALLER_KEY))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["param"], "stream", "the refused field must be named: {json}");
+    assert_eq!(json["error"]["code"], "streaming_disabled");
+    assert!(mock.recorded().is_none(), "a refused streaming request must never reach the upstream");
+
+    // Then repeat with `"stream": false` and assert the request still reaches the upstream —
+    // otherwise this would pass against an implementation that broke chat completions entirely.
+    let resp = app.oneshot(chat_request(NON_STREAM_BODY, Some(CALLER_KEY))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "a non-streaming request must be unaffected by streaming being disabled");
+    assert!(mock.recorded().is_some(), "a non-streaming request must still reach the upstream when streaming is disabled");
 }
 
 // ---- egress hygiene (load-bearing) ------------------------------------------------------------

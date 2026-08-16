@@ -14,6 +14,7 @@ use paigasus_gateway::adapters::iam::IamClient;
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::GatewayConfig;
 use paigasus_gateway::runtime;
+use paigasus_gateway::service_info::Capabilities;
 use paigasus_observability::names;
 use tokio::task::JoinSet;
 
@@ -50,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         iam: Arc::new(iam),
         openai: Arc::new(openai),
         max_request_bytes: config.max_request_bytes,
+        capabilities: Capabilities::from_config(&config),
     };
 
     let app = router(state);
@@ -149,7 +151,7 @@ fn describe_gateway_metrics() {
     describe_gauge!(names::GATEWAY_HTTP_INFLIGHT_REQUESTS, "Requests currently being handled on the gateway HTTP router.");
     describe_counter!(
         names::GATEWAY_IAM_CALLS_TOTAL,
-        "Calls the gateway's auth middleware makes to IAM (introspect/authorize), labeled by operation and result."
+        "Calls the gateway's auth middleware makes to IAM (introspect/introspect_token/authorize), labeled by operation and result."
     );
     describe_histogram!(names::GATEWAY_IAM_CALL_DURATION_SECONDS, "Latency of gateway-to-IAM calls in seconds.");
     describe_counter!(

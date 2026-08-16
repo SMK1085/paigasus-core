@@ -2,8 +2,9 @@
 
 //! The gRPC authn surface (spec §7.3/§7.4, D12/D14): `AuthnGrpc` implements the generated
 //! `AuthnService.Introspect`/`IntrospectApiKey` (the latter since SMA-445 Task 21), and
-//! `AuthLayer` is the bearer-enforcement tower layer wrapping the whole `grpc::router` (health
-//! + tenancy + authn + authz + service-accounts) via `Server::builder().layer(..)`.
+//! `AuthLayer` is the bearer-enforcement tower layer wrapping the whole `grpc::router` (health +
+//! tenancy + authn + authz + service-accounts + service-info + audit) via
+//! `Server::builder().layer(..)`.
 //!
 //! Interceptors in tonic are sync-only, but `resolve` is async (a JWKS fetch may await), so
 //! enforcement is a small tower `Service` rather than an interceptor. The layer wraps ALL
