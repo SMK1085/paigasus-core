@@ -64,17 +64,22 @@ assert_case() {
 }
 
 # assert_task_case LABEL FILE EXPECTED_CSV
-#   Same strict-equality contract as assert_case, but over the TASK graph: the set of `build` and
-#   `test` targets scheduled by the touched file must EQUAL the expected set.
+#   Same strict-equality contract as assert_case, but over the TASK graph: the set of `build`,
+#   `test` and `lint` targets scheduled by the touched file must EQUAL the expected set.
 #
 #   Why a second query: `moon query projects --affected` follows `dependsOn` ONLY and is structurally
 #   blind to a task-level `^:build` (SMA-429 F3). Delete the `^:build` from a moon.yml and every
 #   project case above stays GREEN while `moon ci --include-relations` silently under-builds — the
 #   exact hole SMA-524 exists to close. This case sees it.
 #
-#   Scoped to build/test because those are the two tasks that carry `^:build`. Including
-#   fmt/lint/build-release/repo:* would couple the case to unrelated task config without adding any
-#   assurance about the invariant under test.
+#   Scoped to build/test/lint — the three tasks that carry `^:build` (lint joined them in
+#   SMA-526). fmt and build-release are excluded because they carry no `^:build`: fmt is
+#   crate-local by construction, and build-release does not run in CI at all.
+#
+#   NOTE: the filter matches task NAMES across every project, not just Rust ones, so a
+#   same-named task in another stack could enter a case's observed set. `contracts:lint` exists
+#   and does not appear here — contracts is UPSTREAM of paigasus-proto-rs and `--downstream deep`
+#   walks dependents — but a future case with a different touched file must re-check that.
 # returns 0 pass / 1 assertion fail / 2 infrastructure error
 assert_task_case() {
   local label="$1" file="$2" expected_csv="$3" got want missing unexpected
@@ -87,7 +92,7 @@ d = json.load(sys.stdin)
 out = []
 for pid, tasks in (d.get("tasks") or {}).items():
     for name in tasks:
-        if name in ("build", "test"):
+        if name in ("build", "test", "lint"):
             out.append(f"{pid}:{name}")
 print("\n".join(sorted(out)))')" \
     || { echo "FATAL [$label]: moon query tasks failed" >&2; return 2; }
@@ -100,7 +105,8 @@ print("\n".join(sorted(out)))')" \
   unexpected="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))"
   echo "FAIL  [$label] affected TASK set != expected set" >&2
   if [ -n "$missing" ]; then
-    echo "  missing  (expected but not scheduled — likely a dropped task-level '^:build'):" >&2
+    echo "  missing  (expected but not scheduled — likely a dropped task-level '^:build'; for" >&2
+    echo "  \`lint\` that dep lives once in .moon/tasks/rust.yml, not per-crate):" >&2
     sed 's/^/    /' <<<"$missing" >&2
   fi
   if [ -n "$unexpected" ]; then
@@ -215,11 +221,11 @@ run_suite() {
   # as task-hash keys, NOT as project-affected edges (so py/ts do not appear here) — SMA-433.
   run_case "parity-oneway" "rs/crates/libs/paigasus-kernel-parity/src/lib.rs" \
     "paigasus-kernel-parity-rs"
-  # A proto edit must SCHEDULE paigasus-service-info's build and test, not merely mark the project
-  # affected. This is the behavioral half of SMA-524: the parity gate asserts `^:build` is DECLARED,
-  # this asserts it takes EFFECT.
+  # A proto edit must SCHEDULE paigasus-service-info's build, test AND lint, not merely mark the
+  # project affected. This is the behavioral half of SMA-524 (build/test) and SMA-526 (lint): the
+  # parity gate asserts `^:build` is DECLARED, this asserts it takes EFFECT.
   run_task_case "proto->service-info-tasks" "rs/crates/libs/paigasus-proto/src/lib.rs" \
-    "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-gateway-rs:build,paigasus-gateway-rs:test"
+    "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint"
   # Generic Cargo<->Moon parity: catches a MISSING case, which is how SMA-524's bug survived review.
   assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.

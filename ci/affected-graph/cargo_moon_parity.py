@@ -88,9 +88,17 @@ def check(projects, crates, allow=None):
                 and not _allowlisted(allow, mid, dep)
             ):
                 a2.append(f"{mid} -> {dep}")
+        # `lint` joined build/test in SMA-526: clippy propagates across a Moon edge only if the
+        # task carries `^:build`, so a consumer's lint must schedule its upstreams' builds exactly
+        # as its build and test do. Unlike build/test, lint's dep is declared ONCE for every crate
+        # in .moon/tasks/rust.yml, so this row fires for all crates at once or not at all.
+        for task in ("build", "test", "lint"):
+            if want and tasks.get(task) is None:
+                a3.append(f"{mid} has no `{task}` task (cannot schedule its upstream builds)")
         for upstream in sorted(want):
-            for task in ("build", "test"):
-                if f"{upstream}:build" not in tasks.get(task, []):
+            for task in ("build", "test", "lint"):
+                deps = tasks.get(task)
+                if deps is not None and f"{upstream}:build" not in deps:
                     a3.append(f"{mid}:{task} does not schedule {upstream}:build")
     return a1, a2, a3
 
@@ -161,9 +169,17 @@ def self_test():
         "a-rs": {
             "source_dir": "rs/crates/libs/a",
             "deps": {"b-rs": "explicit"},
-            "tasks": {"build": ["b-rs:build"], "test": ["b-rs:build"]},
+            "tasks": {
+                "build": ["b-rs:build"],
+                "test": ["b-rs:build"],
+                "lint": ["b-rs:build"],
+            },
         },
-        "b-rs": {"source_dir": "rs/crates/libs/b", "deps": {}, "tasks": {"build": [], "test": []}},
+        "b-rs": {
+            "source_dir": "rs/crates/libs/b",
+            "deps": {},
+            "tasks": {"build": [], "test": [], "lint": []},
+        },
     }
     crates = {
         "a": {"source_dir": "rs/crates/libs/a", "deps": {"b"}},
@@ -190,9 +206,17 @@ def self_test():
     # A3: the edge exists but the upstream build is not scheduled — the exact hole the
     # project-level affected-graph guard is structurally blind to (SMA-429 F3).
     broken = json.loads(json.dumps(ok))
-    broken["a-rs"]["tasks"] = {"build": [], "test": []}
+    broken["a-rs"]["tasks"] = {"build": [], "test": [], "lint": []}
     if not check(broken, crates)[2]:
         failures.append("A3 did not fire on an unscheduled upstream build")
+
+    # An ABSENT task key is a different defect from a task that exists but omits the dep, and the
+    # violation text has to say which — otherwise the first crate to drop or rename `lint` is told
+    # to "add '^:build'" to a task it does not have (SMA-526).
+    broken = json.loads(json.dumps(ok))
+    del broken["a-rs"]["tasks"]["lint"]
+    if not any("has no `lint` task" in row for row in check(broken, crates)[2]):
+        failures.append("A3 did not distinguish an absent task from a missing dep")
 
     # An implicit edge is just as valid as an explicit one — A2 must not flag it.
     broken = json.loads(json.dumps(ok))
@@ -261,7 +285,9 @@ def main():
              "    Fix: delete it, or add it to ALLOW_NO_CARGO_BACKING with a reason."),
         (a3, "Moon edge exists but the upstream's build is NOT scheduled — the affected-graph\n"
              "    guard CANNOT see this (SMA-429 F3).\n"
-             "    Fix: add '^:build' to the task's `deps` in the consumer's moon.yml."),
+             "    Fix: for `build`/`test`, add '^:build' to the task's `deps` in the consumer's\n"
+             "    moon.yml. For `lint` the dep is declared once for ALL crates in\n"
+             "    .moon/tasks/rust.yml — restore it there, not per-crate (SMA-526)."),
     ):
         if rows:
             print(f"  {title}", file=sys.stderr)

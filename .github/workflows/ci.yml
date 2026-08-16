@@ -88,8 +88,22 @@ jobs:
           # `line-tables-only` segment so a cache written before the CARGO_PROFILE_*_DEBUG trim
           # above can't restore a stale full-debuginfo rs/target and reintroduce the disk
           # pressure that trim exists to fix.
-          key: rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-${{ hashFiles('rs/Cargo.lock') }}
+          # `lint-deps` segment (SMA-526): giving lint `^:build` makes downstream crates run clippy,
+          # which writes clippy-driver artifacts `cargo build` never produces. Neither
+          # rust-toolchain.toml nor Cargo.lock changed, so without a new literal segment the primary
+          # key still hits the pre-change entry — and actions/cache SKIPS its save on a primary-key
+          # hit, so the enlarged target would never be written. Cold rebuild every run, forever.
+          key: rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-lint-deps-${{ hashFiles('rs/Cargo.lock') }}
+          # Two-tier fallback: the new `lint-deps` prefix is tried first, and only goes warm once
+          # the first post-merge run saves under it. The old prefix is kept as a second fallback so
+          # that very first run — which also runs ~70 tasks including the Docker-gated IAM suite
+          # against `timeout-minutes: 30` — still restores a warm ~/.cargo + rs/target instead of
+          # starting fully cold. actions/cache only skips its save on a primary-key HIT, which can
+          # no longer happen, so the new key still gets written. Both prefixes keep the toolchain
+          # hash and `-line-tables-only-`, so neither the SMA-389 cross-version guard nor the
+          # debuginfo-bloat guard is weakened.
           restore-keys: |
+            rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-lint-deps-
             rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-
 
       - name: Cache Moon task cache

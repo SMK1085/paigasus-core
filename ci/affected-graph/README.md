@@ -34,10 +34,13 @@ deep` and asserts the affected project set **equals** an exact expected set per 
 
 It also runs two checks that the per-case project sets structurally **cannot** make:
 
-- **`proto->service-info-tasks`** asserts the affected *task* set (`moon query tasks --affected`).
-  `moon query projects --affected` follows `dependsOn` only and is blind to a task-level `^:build`, so
-  deleting a `^:build` keeps every project case **green** while `moon ci --include-relations` silently
-  under-builds (SMA-429 F3, closed by SMA-524).
+- **`proto->service-info-tasks`** asserts the affected *task* set (`moon query tasks --affected`),
+  scoped to `build`, `test` and `lint` — the three tasks that carry `^:build`. `moon query projects
+  --affected` follows `dependsOn` only and is blind to a task-level `^:build`, so deleting one keeps
+  every project case **green** while `moon ci --include-relations` silently under-builds (SMA-429
+  F3, closed for build/test by SMA-524 and for lint by SMA-526). `lint`'s `^:build` is declared once,
+  in `.moon/tasks/rust.yml`, rather than per-crate the way build/test declare theirs — so this case
+  is also what catches a regression in that shared declaration.
 - **`cargo-moon-parity`** (`cargo_moon_parity.py`) compares every crate's Cargo deps against Moon's own
   resolved graph, asserting each edge exists *and* schedules the upstream's build. The per-case sets
   assert only edges someone remembered to write a case for; this catches a crate added with **no**
@@ -61,6 +64,11 @@ implicitly: any project that appears but isn't in the expected set fails the cas
 - A project that **legitimately** becomes a new dependent (e.g. a future wasm kernel binding)
   makes the case fail with an `unexpected` entry → confirm the new edge is intended, then add the
   one project to that case's expected set.
+- A **task** case (`assert_task_case`, e.g. `proto->service-info-tasks`) works at `pid:task`
+  granularity, not project granularity, so its set can also grow without any new dependent
+  project: widening the task-name filter itself (e.g. `lint` joining `build`/`test` in SMA-526)
+  makes every already-listed project pick up a new `pid:task` row at once → same fix, confirm
+  the new rows are intended, then add them to the case's expected set.
 
 The expected sets are a snapshot of `moon query --affected --downstream deep` output at the
 **pinned moon version** (currently 2.3.2). A moon upgrade that changes the affected-set output —
