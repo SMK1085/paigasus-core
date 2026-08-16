@@ -88,4 +88,100 @@ for cfg in .github/actionlint.yaml .github/actionlint.yml; do
   fi
 done
 
+# ---------------------------------------------------------------------------------------------
+# Check 3 — the linter must still REJECT each class of defect the issue names (AC-1).
+#
+# One fixture per class, asserting the RULE TAG appears — not merely that the exit was non-zero.
+# A status-only assertion is satisfied by a YAML parse error and proves nothing about runner
+# labels or expressions, and it stays green under a targeted `-ignore` on check 1.
+#
+# Fixtures go through stdin (`actionlint -`), so nothing broken ever lands in .github/workflows/
+# where GitHub itself would try to parse it. The workflow schema applies regardless of
+# -stdin-filename (verified).
+# ---------------------------------------------------------------------------------------------
+selftest_expect_tag() {
+  local label="$1" tag="$2" yaml="$3" out rc
+  out="$(printf '%s' "$yaml" | actionlint "${ARGS[@]}" -stdin-filename .github/workflows/selftest.yml - 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    fail "self-test '$label': actionlint ACCEPTED a deliberately broken workflow. The gate is not
+      guarding anything — check for an -ignore flag or a narrowed rule set."
+    return
+  fi
+  if ! printf '%s' "$out" | grep -qF "[$tag]"; then
+    fail "self-test '$label': actionlint failed, but not with the expected [$tag] rule. Got:
+$out"
+  fi
+}
+
+selftest_expect_tag 'paths nested under workflow_dispatch' 'syntax-check' 'name: selftest
+on:
+  workflow_dispatch:
+    paths:
+      - "rs/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+selftest_expect_tag 'malformed glob' 'glob' 'name: selftest
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rs/[**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+selftest_expect_tag 'unknown runner label' 'runner-label' 'name: selftest
+on: [push]
+jobs:
+  j:
+    runs-on: ubunut-latest
+    steps:
+      - run: echo hi
+'
+
+selftest_expect_tag 'undefined step output' 'expression' 'name: selftest
+on: [push]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ steps.nope.outputs.x }}
+'
+
+# ---------------------------------------------------------------------------------------------
+# Check 4 — control for check 3.
+#
+# A globally broken invocation (bad flag, missing binary, unreadable stdin) makes EVERY fixture
+# "fail", which would read as "malformed input correctly rejected" four times over. This healthy
+# fixture must pass, which is what distinguishes a working linter from a broken one.
+#
+# Keep this fixture MINIMAL. Anything schema-adjacent risks becoming a false red on an actionlint
+# pin bump, and this gate sits inside the only required check.
+# ---------------------------------------------------------------------------------------------
+healthy='name: selftest
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rs/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+if ! printf '%s' "$healthy" | actionlint "${ARGS[@]}" -stdin-filename .github/workflows/selftest.yml -; then
+  fail "self-test control: actionlint REJECTED a known-good workflow. The invocation itself is
+    broken, so the check-3 rejections above prove nothing."
+fi
+
 exit "$FAILED"
