@@ -235,10 +235,15 @@ main() {
 
   # NOTE: declare and assign on SEPARATE lines. `local x="$(cmd)"` masks the command's
   # exit status, which would swallow the 1-vs-2 distinction these checks depend on.
+  # NOTE: capture the status BEFORE cleanup. `|| { rm -f ...; exit $?; }` would evaluate
+  # $? AFTER rm succeeds, exiting 0 and turning every metadata assertion failure into a
+  # silent pass — the exact vacuous-gate failure this script exists to prevent.
+  local status=0
   local publishable
   publishable="$(metadata_checks "$meta_json" "$RS_DIR/release-plz.toml" "$expected_csv")" \
-    || { rm -f "$meta_json"; exit $?; }
+    || status=$?
   rm -f "$meta_json"
+  [ "$status" -eq 0 ] || exit "$status"
 
   local name dir
   while IFS=$'\t' read -r name dir; do
