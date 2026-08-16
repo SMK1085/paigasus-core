@@ -50,6 +50,237 @@ for f in .github/workflows/*.yml .github/workflows/*.yaml; do
 done
 [ ${#WORKFLOW_FILES[@]} -gt 0 ] || infra "no workflow files found under .github/workflows/"
 
+# Extract paths:/paths-ignore: keys and their sequence entries from one workflow file.
+# Output records, TAB-separated, in file order:
+#   KEY\t<paths|paths-ignore>\t<lineno>
+#   ITEM\t<paths|paths-ignore>\t<pattern>
+# See the contract in docs/superpowers/plans/2026-08-16-sma-525-actionlint-gate.md (Task 4) and
+# ci/actionlint/README.md. Every clause below has a fixture in extractor_self_test.
+extract_paths_keys() {
+  awk '
+    # Strip a quoted scalar to its contents; strip an unquoted one to its pre-comment text.
+    function scalar(s,   q, i, c, out) {
+      q = substr(s, 1, 1)
+      if (q == "\"" || q == "\047") {
+        out = ""
+        for (i = 2; i <= length(s); i++) {
+          c = substr(s, i, 1)
+          if (c == q) break
+          out = out c
+        }
+        return out
+      }
+      sub(/[ \t]+#.*$/, "", s)     # trailing comment, only when preceded by whitespace
+      sub(/[ \t]+$/, "", s)
+      return s
+    }
+
+    {
+      line = $0
+      sub(/\r$/, "", line)                       # tolerate CRLF
+      match(line, /^[ ]*/); ind = RLENGTH
+      stripped = line
+      sub(/^[ ]*/, "", stripped)
+
+      if (stripped == "")   next                 # blank lines never close a block
+      if (stripped ~ /^#/)  next                 # whole-line comments never close a block
+
+      if (in_block) {
+        if (ind <= key_ind) {
+          in_block = 0                           # dedent closes; fall through to key handling
+        } else if (stripped ~ /^-([ \t]|$)/) {
+          item = stripped
+          sub(/^-[ \t]*/, "", item)
+          item = scalar(item)
+          if (item != "") print "ITEM\t" kind "\t" item
+          next
+        } else {
+          next                                   # deeper non-item line: not ours, keep the block
+        }
+      }
+
+      # Track the top-level `on:` mapping. A quoted "on": is accepted (a common YAML 1.1
+      # truthiness workaround). Any other column-0 key closes it.
+      if (ind == 0) {
+        if (stripped ~ /^["\047]?on["\047]?:[ \t]*$/)      { in_on = 1; next }
+        if (stripped ~ /^["\047]?on["\047]?:/)             { in_on = 0; next }  # inline `on: [push]`
+        in_on = 0
+        next
+      }
+
+      if (!in_on) next
+
+      if (stripped ~ /^paths:/)        { kind = "paths" }
+      else if (stripped ~ /^paths-ignore:/) { kind = "paths-ignore" }
+      else next
+
+      print "KEY\t" kind "\t" NR
+
+      # A block opens only when the value after the colon is empty. A non-empty value is the
+      # inline flow form, which is deliberately not parsed — the KEY above, with no ITEMs
+      # following, is what makes check 6 fail loudly instead of skipping silently.
+      rest = stripped
+      sub(/^paths(-ignore)?:[ \t]*/, "", rest)
+      sub(/[ \t]+#.*$/, "", rest)
+      if (rest == "") { in_block = 1; key_ind = ind }
+    }
+  ' "$1"
+}
+
+# ---------------------------------------------------------------------------------------------
+# Check 7 — extractor self-test.
+#
+# The extractor is hand-rolled YAML parsing, which is exactly the kind of thing that silently
+# does the wrong thing. Each clause of the documented contract gets a fixture. Runs on every
+# invocation; `--self-test` runs ONLY this, for fast iteration while editing the awk.
+# ---------------------------------------------------------------------------------------------
+extractor_self_test() {
+  local name expected actual tmp rc=0
+
+  check_fixture() {
+    name="$1"; expected="$2"; yaml="$3"
+    tmp="$(mktemp)"
+    printf '%s' "$yaml" > "$tmp"
+    actual="$(extract_paths_keys "$tmp")"
+    rm -f "$tmp"
+    if [ "$actual" != "$expected" ]; then
+      fail "extractor self-test '$name' mismatch.
+--- expected ---
+$expected
+--- actual ---
+$actual"
+      rc=1
+    fi
+  }
+
+  check_fixture 'simple block' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\trs/**\nITEM\tpaths\t.prototools')" \
+'name: t
+on:
+  push:
+    paths:
+      - "rs/**"
+      - ".prototools"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'interior comments do not close the block' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**\nITEM\tpaths\tb/**')" \
+'name: t
+on:
+  push:
+    paths:
+      - "a/**"
+      # a comment in the middle of the sequence
+      #
+      - "b/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'trailing comments stripped, quotes stripped' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\trs/**\nITEM\tpaths\tts/x.json\nITEM\tpaths\tbare/path')" \
+'name: t
+on:
+  push:
+    paths:
+      - "rs/**"                 # includes rs/Cargo.lock
+      - '"'"'ts/x.json'"'"'
+      - bare/path
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'dedent closes the block' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**')" \
+'name: t
+on:
+  push:
+    paths:
+      - "a/**"
+    branches: [main]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'paths-ignore is tagged distinctly' \
+"$(printf 'KEY\tpaths-ignore\t4\nITEM\tpaths-ignore\tdocs/**')" \
+'name: t
+on:
+  push:
+    paths-ignore:
+      - "docs/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'inline flow form emits KEY with no ITEMs' \
+"$(printf 'KEY\tpaths\t4')" \
+'name: t
+on:
+  push:
+    paths: ["a/**", "b/**"]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a paths: line inside a run block is ignored' \
+"" \
+'name: t
+on:
+  push:
+    branches: [main]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          paths:
+            - "not/a/filter"
+'
+
+  check_fixture 'negated entries are extracted, not dropped' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**\nITEM\tpaths\t!a/docs/**')" \
+'name: t
+on:
+  push:
+    paths:
+      - "a/**"
+      - "!a/docs/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  return $rc
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  extractor_self_test
+  exit "$FAILED"
+fi
+
 # ---------------------------------------------------------------------------------------------
 # Check 1 — lint every workflow.
 #
