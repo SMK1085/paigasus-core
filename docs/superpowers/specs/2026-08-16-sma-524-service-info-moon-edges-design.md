@@ -133,8 +133,14 @@ paigasus-kernel.workspace = true            # rs/crates/bindings/paigasus-py-bin
 ```
 
 — which that pattern cannot see. A hand-rolled parser would have shipped a gate that flagged five real
-edges as phantom. The gate resolves dependencies with `cargo metadata --no-deps --format-version 1`,
-which is authoritative across every declaration form. **Non-negotiable** (D5).
+edges as phantom. The gate parses `Cargo.toml` with **`tomllib`** (Python 3.11+ stdlib; the repo pins
+3.12.13), which handles every declaration form in use — dotted keys, inline tables, and `package = `
+renames. **No regex** (D5).
+
+`cargo metadata` was the first choice and was rejected: `repo:affected-smoke` is `toolchain: 'system'`,
+so shelling out to `cargo` would add a toolchain requirement `run.sh` does not currently have — its
+only dependencies are `moon`, `python3`, and standard Unix tools. Verified equivalent: no crate
+declares an in-tree `dev-dependency` or `build-dependency`, so both resolvers return the same 17 edges.
 
 ## 6. The parity gate
 
@@ -148,8 +154,16 @@ resolution for free.
 - **A2** — every `explicit` Moon edge must have Cargo backing, unless allowlisted. Catches phantom
   edges and stale hand-declarations. `contracts` is exempt: it is a build-scope parent from
   `contracts:generate`, not a Cargo dep.
-- **A3** — every crate with in-tree Cargo deps must carry `^:build` on `build` **and** `test`. This is
-  the generic form of § 4's fix, and the only assertion in the repo that can see the `^:build` half.
+- **A3** — for every in-tree Cargo dep, the consumer's `build` **and** `test` task deps must contain
+  `<upstream-moon-id>:build`. This is the generic form of § 4's fix, and the only assertion in the repo
+  that can see the `^:build` half.
+
+  A3 asserts the **resolved effect**, not the syntax. `moon query projects` expands `^:build` into
+  concrete targets — `paigasus-iam-rs:build` reports
+  `deps=['paigasus-iam-core-rs:build', 'paigasus-proto-rs:build', …]` while
+  `paigasus-service-info-rs:build` reports only `deps=['contracts:generate']`. Asserting the expansion
+  rather than grepping for the literal `^:build` is strictly stronger: it also catches a hand-written
+  per-dependency list that omits one upstream, and it needs no YAML parser.
 
 The allowlist is a single explicit table with a required reason string, so an entry is a recorded
 decision rather than a silent exemption:
@@ -215,8 +229,11 @@ direction. Removing it changes the `kernel->bindings` expected set — an unrela
 this issue declares out of scope. Allowlisting it with a reason string makes it a recorded decision;
 an undocumented phantom edge is what made the first audit pass wrong.
 
-**D5 — Resolve Cargo deps with `cargo metadata`, never a regex** (§ 5.1). A regex prototype produced
-five false phantoms.
+**D5 — Parse Cargo with `tomllib`, never a regex; read Moon's own resolved graph for everything
+else** (§ 5.1, § 6). A regex prototype produced five false phantoms. `cargo metadata` was rejected
+because `repo:affected-smoke` is `toolchain: 'system'` and shelling out to `cargo` would add a
+toolchain dependency the script does not have. The gate therefore never parses `moon.yml` at all —
+both the edges and the task expansion come from `moon query projects`.
 
 **D6 — Every assertion gets a negative control.** The gate's whole value is catching a silent hole; a
 gate that passes vacuously reproduces the bug it exists to prevent.
