@@ -539,15 +539,26 @@ git commit -m "feat(rs): retry container port lookups at all 11 unguarded call s
 - Consumes: the profile from Task 1.
 - Produces: a final `max-threads` value with its evidence recorded in-file.
 
-- [ ] **Step 1: Establish the uncapped baseline on unmodified main**
+- [ ] **Step 1: Establish the uncapped baseline**
 
-From a separate checkout or after stashing (see Task 1 Step 6 for safe stash usage in a shared worktree), on unmodified `origin/main`:
+Do **not** check out `main` to get this baseline. This is a git worktree sharing one `.git` with the primary checkout and other active sessions; switching branches here can reparent another session's work.
+
+Get the uncapped number on this branch instead, by temporarily commenting out the group assignment in `rs/.config/nextest.toml`:
+
+```toml
+# test-group = 'docker-containers'
+```
+
+With that line commented, the retry budget still applies but no concurrency cap does — which is exactly the "uncapped" baseline. Then:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd rs && time CI=1 cargo nextest run -p paigasus-iam
 ```
-Record wall-clock and any failures. Run it **twice** and keep both numbers — this suite is known to fail a different random subset each run.
+
+Record wall-clock and any failures. Run it **twice** and keep both numbers — this suite is known to fail a different random subset each run, so a single sample is noise.
+
+**Restore the `test-group` line before Step 2.**
 
 - [ ] **Step 2: Time the capped configurations**
 
