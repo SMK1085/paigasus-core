@@ -1,5 +1,14 @@
 # SMA-428 — napi-rs cross-platform `.node` prebuild matrix (infra-only, publish deferred)
 
+> **Superseded in part by [SMA-520](https://linear.app/smaschek/issue/SMA-520) (2026-08-16).**
+> The `darwin-x64 → macos-15-intel` mapping below (§1, and the run record at the end) is
+> obsolete: that image was the last x86_64 macOS runner on Actions and retires in **August 2027**
+> (§1's "Fall 2027" was the earlier, vaguer estimate; `actions/runner-images#13045` since fixed the
+> window — the two dates below are not a contradiction, just different vintages).
+> Both darwin targets now build in a single `macos-latest` (arm64) job — what §1 calls a
+> *"fallback if `macos-15-intel` is constrained"* is now the design, and napi-rs's own generated
+> CI does the same. The rest of this document is left as the historical record.
+
 **Status:** approved design (brainstorm + staff review incorporated, ready for plan)
 **Linear:** [SMA-428](https://linear.app/smaschek/issue/SMA-428/napi-rs-cross-platform-node-prebuild-matrix-npm-publish-for)
 **Date:** 2026-06-17
