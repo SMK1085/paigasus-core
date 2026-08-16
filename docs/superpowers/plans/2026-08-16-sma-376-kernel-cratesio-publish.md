@@ -831,6 +831,14 @@ PY
   _expect_red "Check 3 (0.0.0 crate not release-blocked)" \
     metadata_checks "$tmp/stub.json" "$bad_rp" "paigasus-kernel"
 
+  # The per-package override hole: [[package]] beats [workspace], so a `release = true`
+  # entry leaves the crate releasable even with the workspace block in place. This is the
+  # edit a maintainer makes when activating release-plz for one crate.
+  local override_rp="$tmp/override-release-plz.toml"
+  printf '[workspace]\nrelease = false\n\n[[package]]\nname = "paigasus-kernel"\nrelease = true\n' >"$override_rp"
+  _expect_red "Check 3 (per-package release = true override)" \
+    metadata_checks "$tmp/stub.json" "$override_rp" "paigasus-kernel"
+
   # Check 2b — a listing missing LICENSE, and one containing moon.yml.
   printf 'Cargo.toml\nREADME.md\nsrc/lib.rs\n' >"$tmp/missing-license.txt"
   _expect_red "Check 2b (LICENSE not packaged)" \

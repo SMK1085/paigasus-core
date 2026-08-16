@@ -246,6 +246,112 @@ check_package() { # $1 name  $2 manifest dir
   echo "publish-metadata: $pkg OK"
 }
 
+# --negative-control — drive the SAME check code with deliberately broken fixtures and
+# assert each reports red. Without this, a refactor can quietly turn the gate vacuous and
+# every CI run stays green. Uses fixtures rather than mutating the repo, so it is fast,
+# deterministic, and cannot leave the tree dirty.
+negative_control() {
+  local tmp failures=0
+  tmp="$(mktemp -d)"
+
+  _meta() { # $1 out-file, $2 JSON object for the single package
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+pkg = json.loads(sys.argv[2])
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump({"packages": [pkg]}, fh)
+PY
+  }
+
+  _expect_red() { # $1 label, rest = command
+    local label="$1"; shift
+    if "$@" >/dev/null 2>&1; then
+      echo "NEGATIVE CONTROL FAILED: $label did not report red" >&2
+      failures=$((failures + 1))
+    else
+      echo "  ok — $label reports red"
+    fi
+  }
+
+  local good_rp="$tmp/good-release-plz.toml" bad_rp="$tmp/bad-release-plz.toml"
+  printf '[workspace]\nrelease = false\n' >"$good_rp"
+  printf '[workspace]\n' >"$bad_rp"
+
+  local base='{"name":"paigasus-kernel","version":"0.0.0","publish":null,
+    "manifest_path":"/nowhere/Cargo.toml","description":"d","license":"Apache-2.0",
+    "repository":"r","readme":"README.md","keywords":["k"],"categories":["c"]}'
+
+  # Check 0 — empty publishable set.
+  printf '{"packages":[{"name":"x","version":"0.0.0","publish":[],"manifest_path":"/x"}]}' \
+    >"$tmp/empty.json"
+  _expect_red "Check 0 (empty publishable set)" \
+    metadata_checks "$tmp/empty.json" "$good_rp" "paigasus-kernel"
+
+  # Check 0 — set differs from expected.
+  _meta "$tmp/wrong-name.json" "$(printf '%s' "$base" | sed 's/paigasus-kernel/some-other-crate/')"
+  _expect_red "Check 0 (unexpected publishable crate)" \
+    metadata_checks "$tmp/wrong-name.json" "$good_rp" "paigasus-kernel"
+
+  # Check 1 — each rule, one fixture apiece.
+  _meta "$tmp/no-desc.json" "$(printf '%s' "$base" | sed 's/"description":"d"/"description":""/')"
+  _expect_red "Check 1 (empty description)" \
+    metadata_checks "$tmp/no-desc.json" "$good_rp" "paigasus-kernel"
+
+  _meta "$tmp/six-kw.json" "$(printf '%s' "$base" | sed 's/"keywords":\["k"\]/"keywords":["a","b","c","d","e","f"]/')"
+  _expect_red "Check 1 (six keywords)" \
+    metadata_checks "$tmp/six-kw.json" "$good_rp" "paigasus-kernel"
+
+  _meta "$tmp/long-kw.json" "$(printf '%s' "$base" | sed 's/"keywords":\["k"\]/"keywords":["aaaaaaaaaaaaaaaaaaaaa"]/')"
+  _expect_red "Check 1 (21-char keyword)" \
+    metadata_checks "$tmp/long-kw.json" "$good_rp" "paigasus-kernel"
+
+  _meta "$tmp/bad-kw.json" "$(printf '%s' "$base" | sed 's/"keywords":\["k"\]/"keywords":["-nope"]/')"
+  _expect_red "Check 1 (keyword with a leading hyphen)" \
+    metadata_checks "$tmp/bad-kw.json" "$good_rp" "paigasus-kernel"
+
+  _meta "$tmp/no-cat.json" "$(printf '%s' "$base" | sed 's/"categories":\["c"\]/"categories":[]/')"
+  _expect_red "Check 1 (no categories)" \
+    metadata_checks "$tmp/no-cat.json" "$good_rp" "paigasus-kernel"
+
+  # Check 3 — a 0.0.0 crate with no release block.
+  _meta "$tmp/stub.json" "$base"
+  _expect_red "Check 3 (0.0.0 crate not release-blocked)" \
+    metadata_checks "$tmp/stub.json" "$bad_rp" "paigasus-kernel"
+
+  # The per-package override hole: [[package]] beats [workspace], so a `release = true`
+  # entry leaves the crate releasable even with the workspace block in place. This is the
+  # edit a maintainer makes when activating release-plz for one crate.
+  local override_rp="$tmp/override-release-plz.toml"
+  printf '[workspace]\nrelease = false\n\n[[package]]\nname = "paigasus-kernel"\nrelease = true\n' >"$override_rp"
+  _expect_red "Check 3 (per-package release = true override)" \
+    metadata_checks "$tmp/stub.json" "$override_rp" "paigasus-kernel"
+
+  # Check 2b — a listing missing LICENSE, and one containing moon.yml.
+  printf 'Cargo.toml\nREADME.md\nsrc/lib.rs\n' >"$tmp/missing-license.txt"
+  _expect_red "Check 2b (LICENSE not packaged)" \
+    assert_package_list "$tmp/missing-license.txt" "fixture"
+
+  printf 'Cargo.toml\nREADME.md\nLICENSE\nmoon.yml\n' >"$tmp/leaks-moon.txt"
+  _expect_red "Check 2b (moon.yml packaged)" \
+    assert_package_list "$tmp/leaks-moon.txt" "fixture"
+
+  # Positive control: a clean fixture must pass, or every "red" above is meaningless.
+  _meta "$tmp/good.json" "$(printf '%s' "$base" | sed 's/"version":"0.0.0"/"version":"0.1.0"/')"
+  if ! metadata_checks "$tmp/good.json" "$bad_rp" "paigasus-kernel" >/dev/null 2>&1; then
+    echo "NEGATIVE CONTROL FAILED: the clean fixture did not pass — the checks reject everything" >&2
+    failures=$((failures + 1))
+  else
+    echo "  ok — clean fixture passes (checks are not vacuously red)"
+  fi
+
+  rm -rf "$tmp"
+  if [ "$failures" -gt 0 ]; then
+    echo "negative control: $failures check(s) failed to bite" >&2
+    return 1
+  fi
+  echo "negative control: every check reports red on a broken fixture"
+}
+
 main() {
   cd "$RS_DIR"
 
@@ -279,4 +385,8 @@ main() {
   echo "publish-metadata: all checks passed"
 }
 
-main "$@"
+if [ "${1:-}" = "--negative-control" ]; then
+  negative_control
+else
+  main "$@"
+fi
