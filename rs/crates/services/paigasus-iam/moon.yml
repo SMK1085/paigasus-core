@@ -10,6 +10,7 @@ dependsOn:
   - 'paigasus-observability-rs'
   - 'paigasus-kernel-rs'
   - 'paigasus-proto-rs'
+  - 'paigasus-service-info-rs'
 
 tasks:
   build:

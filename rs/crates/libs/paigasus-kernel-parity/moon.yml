@@ -5,9 +5,12 @@ layer: 'library'
 language: 'rust'
 
 # Cross-language edge to the kernel (ADR-0005): a kernel change must rebuild this crate so its
-# replay/drift tests re-run against the new kernel. The task-level `^:build` is what propagates
-# `affected` under `moon ci --include-relations` — a project dependsOn alone does not (SMA-389 D3).
-# Mirrors the binding crates.
+# replay/drift tests re-run against the new kernel. paigasus-kernel is a `workspace = true` dep
+# (Cargo.toml:12), and Moon 2.3.2 does not resolve workspace-inherited deps into the project graph —
+# only `path = "..."` ones — so this edge must be hand-declared. `dependsOn` creates the project edge;
+# the task-level `^:build` is what schedules the kernel's build under `moon ci --include-relations`.
+# Both are required; neither implies the other, and `repo:affected-smoke` asserts both
+# (SMA-389, corrected by SMA-524). Mirrors the binding crates.
 dependsOn:
   - 'paigasus-kernel-rs'
 

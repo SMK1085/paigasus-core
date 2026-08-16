@@ -73,6 +73,17 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `overrides:` selector or `uv lock --upgrade-package` — or a justified `osv-scanner.toml`
   waiver; a dep consumed only by a later commit needs a temporary
   `[package.metadata.cargo-machete] ignored` allowlist (prune once consumed).
+- Moon 2.3.2's Rust toolchain resolves `path = "…"` Cargo deps into the project graph **automatically**
+  (`moon query projects` labels them `source=implicit`), but does **not** resolve `workspace = true`
+  inheritance. So a `{ workspace = true }` in-tree dep — the repo's default form — **must** be
+  hand-declared in `dependsOn`, while a `path` dep needs nothing. This is why the drift was scattered
+  rather than systematic, and it is the opposite of the "Cargo path deps are NOT auto-synced" claim
+  that SMA-389 recorded and SMA-524 disproved. Either way the project edge alone is **not enough**:
+  `dependsOn` is what `moon query projects --affected` follows, and a task-level `^:build` is what
+  actually schedules the upstream's build under `moon ci --include-relations` — neither implies the
+  other. `repo:affected-smoke` now asserts both generically for every crate
+  (`ci/affected-graph/cargo_moon_parity.py`), so a new in-tree dep that forgets either one reds CI
+  instead of silently under-building (SMA-524).
 - Bash tool PATH lacks the proto-managed CLIs; prefix commands with
   `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so moon/uv/buf/nextest resolve to
   the repo-pinned versions (shims first).

@@ -8,10 +8,17 @@ silently shrink, so CI under-builds and stays **green**. This guard closes that 
 deep` and asserts the affected project set **equals** an exact expected set per known case
 (default-deny; `repo`, which owns the whole tree as its source, is filtered out):
 
-- **contracts edit** → `contracts` + `paigasus-proto-{rs,py,ts}` + `paigasus-gateway-rs`.
+- **contracts edit** → `contracts` + `paigasus-proto-{rs,py,ts}` + `paigasus-gateway-rs`
+  + `paigasus-iam-rs` (SMA-442) + `paigasus-service-info-rs` (SMA-505).
+- **derive-crate edit** → `paigasus-proto-derive-rs` + `paigasus-proto-rs` + `paigasus-gateway-rs`
+  + `paigasus-iam-rs` + `paigasus-service-info-rs` (SMA-438/SMA-524). One-directional w.r.t.
+  contracts: the derive crate is strictly upstream of `paigasus-proto`.
+- **service-info edit** → `paigasus-service-info-rs` + `paigasus-iam-rs` + `paigasus-gateway-rs`
+  (SMA-524). One-directional w.r.t. `paigasus-proto`.
 - **kernel edit** → `paigasus-kernel-rs` + `paigasus-py-bindings-rs` + `paigasus-node-bindings-rs`
   + `paigasus-wasm-rs` + `paigasus-gateway-rs` + `paigasus-kernel-py` + `paigasus-kernel-ts`
-  + `paigasus-kernel-parity-rs` (both language wrappers wrap their bindings, SMA-419/420/427).
+  + `paigasus-kernel-parity-rs` (both language wrappers wrap their bindings, SMA-419/420/427)
+  + `paigasus-iam-core-rs` + `paigasus-iam-rs` (SMA-441).
   Strict equality rejects any other project implicitly.
 - **py binding edit** → `paigasus-py-bindings-rs` + `paigasus-kernel-py`; one-directional w.r.t.
   the kernel.
@@ -24,6 +31,18 @@ deep` and asserts the affected project set **equals** an exact expected set per 
 - **parity-crate edit** → `paigasus-kernel-parity-rs`; one-directional w.r.t. the kernel (a parity
   edit must not rebuild the kernel). The py/ts parity tests list the corpus as a task `input`
   (cache-keying), which does not make them project-affected by a corpus-only edit.
+
+It also runs two checks that the per-case project sets structurally **cannot** make:
+
+- **`proto->service-info-tasks`** asserts the affected *task* set (`moon query tasks --affected`).
+  `moon query projects --affected` follows `dependsOn` only and is blind to a task-level `^:build`, so
+  deleting a `^:build` keeps every project case **green** while `moon ci --include-relations` silently
+  under-builds (SMA-429 F3, closed by SMA-524).
+- **`cargo-moon-parity`** (`cargo_moon_parity.py`) compares every crate's Cargo deps against Moon's own
+  resolved graph, asserting each edge exists *and* schedules the upstream's build. The per-case sets
+  assert only edges someone remembered to write a case for; this catches a crate added with **no**
+  case — which is how SMA-524's bug survived a full review cycle. Edges intentionally declared without
+  Cargo backing live in its `ALLOW_NO_CARGO_BACKING` table with a required reason string.
 
 It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
 `--include-relations` (the edges are inert without it).

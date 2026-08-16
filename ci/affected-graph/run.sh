@@ -63,6 +63,53 @@ assert_case() {
   return 1
 }
 
+# assert_task_case LABEL FILE EXPECTED_CSV
+#   Same strict-equality contract as assert_case, but over the TASK graph: the set of `build` and
+#   `test` targets scheduled by the touched file must EQUAL the expected set.
+#
+#   Why a second query: `moon query projects --affected` follows `dependsOn` ONLY and is structurally
+#   blind to a task-level `^:build` (SMA-429 F3). Delete the `^:build` from a moon.yml and every
+#   project case above stays GREEN while `moon ci --include-relations` silently under-builds — the
+#   exact hole SMA-524 exists to close. This case sees it.
+#
+#   Scoped to build/test because those are the two tasks that carry `^:build`. Including
+#   fmt/lint/build-release/repo:* would couple the case to unrelated task config without adding any
+#   assurance about the invariant under test.
+# returns 0 pass / 1 assertion fail / 2 infrastructure error
+assert_task_case() {
+  local label="$1" file="$2" expected_csv="$3" got want missing unexpected
+  [ -n "$expected_csv" ] || { echo "FATAL [$label]: EXPECTED_CSV is empty (harness bug)" >&2; return 2; }
+  got="$(printf '%s\n' "$file" \
+    | moon query tasks --affected --downstream deep \
+    | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+out = []
+for pid, tasks in (d.get("tasks") or {}).items():
+    for name in tasks:
+        if name in ("build", "test"):
+            out.append(f"{pid}:{name}")
+print("\n".join(sorted(out)))')" \
+    || { echo "FATAL [$label]: moon query tasks failed" >&2; return 2; }
+  want="$(tr ',' '\n' <<<"$expected_csv" | sort)"
+  if [ "$got" = "$want" ]; then
+    printf 'PASS  %-18s -> %s\n' "$label" "$(tr '\n' ' ' <<<"$got")"
+    return 0
+  fi
+  missing="$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))"
+  unexpected="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))"
+  echo "FAIL  [$label] affected TASK set != expected set" >&2
+  if [ -n "$missing" ]; then
+    echo "  missing  (expected but not scheduled — likely a dropped task-level '^:build'):" >&2
+    sed 's/^/    /' <<<"$missing" >&2
+  fi
+  if [ -n "$unexpected" ]; then
+    echo "  unexpected (scheduled but not expected — if the new edge is intended, add it here):" >&2
+    sed 's/^/    /' <<<"$unexpected" >&2
+  fi
+  return 1
+}
+
 # Every real `moon ci` shell invocation in ci.yml must carry --include-relations: it is the
 # flag that activates relation/dependent rebuilds. The edges are inert without it, so guarding
 # the edges but not the flag would leave a hole (SMA-409 review F1). Match only the actual
@@ -99,6 +146,28 @@ run_case() {
   esac
 }
 
+# Task-graph twin of run_case — same 3-way return-code folding.
+run_task_case() {
+  local ec=0
+  assert_task_case "$@" || ec=$?
+  case "$ec" in
+    0) ;;
+    1) SUITE_RC=1 ;;
+    *) echo "== affected-graph guard ABORTED: infrastructure error (rc=$ec) ==" >&2; exit 2 ;;
+  esac
+}
+
+# Generic Cargo<->Moon parity gate. rc 2 (infra) aborts, mirroring run_case.
+assert_cargo_moon_parity() {
+  local ec=0
+  python3 "$HERE/cargo_moon_parity.py" || ec=$?
+  case "$ec" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) echo "== affected-graph guard ABORTED: parity gate infrastructure error (rc=$ec) ==" >&2; exit 2 ;;
+  esac
+}
+
 run_suite() {
   SUITE_RC=0
   # contracts proto edit -> proto packages in all three languages + the gateway rebuild + the
@@ -110,15 +179,16 @@ run_suite() {
   # (SMA-438). One-directional w.r.t. contracts: the derive crate is strictly UPSTREAM of
   # paigasus-proto, so a proto edit must NOT reach it — enforced implicitly by the strict
   # equality of the contracts->proto case above, which lists no derive crate.
-  #
-  # paigasus-service-info-rs is deliberately ABSENT, and the asymmetry against the
-  # contracts->proto case above is NOT an oversight: that crate depends on paigasus-proto in
-  # Cargo, but its moon.yml declares no `dependsOn` and no task-level `^:build`, so nothing
-  # propagates `affected` to it from paigasus-proto (SMA-389 D3). It appears in the contracts
-  # case only through its own `contracts:generate` task dep. Wiring that edge is SMA-505's to
-  # make; when it lands, this expected set gains paigasus-service-info-rs and this note goes.
+  # paigasus-service-info-rs is here via its paigasus-proto edge, wired in SMA-524.
   run_case "proto-derive->proto" "rs/crates/libs/paigasus-proto-derive/src/lib.rs" \
-    "paigasus-proto-derive-rs,paigasus-proto-rs,paigasus-gateway-rs,paigasus-iam-rs"
+    "paigasus-proto-derive-rs,paigasus-proto-rs,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs"
+  # service-info edit -> the crate + both services that serve the descriptor (SMA-524). Guards the
+  # DOWNSTREAM direction, which no case covered before: paigasus-service-info was a graph LEAF, so an
+  # edit to ServiceInfoDto — the wire body both services return — retested nothing.
+  # One-directional: paigasus-proto-rs is deliberately absent (a consumer edit must not rebuild the
+  # contract crate), enforced implicitly by strict equality.
+  run_case "service-info->services" "rs/crates/libs/paigasus-service-info/src/lib.rs" \
+    "paigasus-service-info-rs,paigasus-iam-rs,paigasus-gateway-rs"
   # kernel edit -> kernel + all three bindings (py/node/wasm) + gateway + both language wrappers (SMA-419/420/427)
   # + the IAM crates that consume the kernel's PRN/UUIDv7 (paigasus-iam-core-rs & the paigasus-iam-rs
   # service, SMA-441). paigasus-logging-rs is deliberately ABSENT — it has no kernel edge.
@@ -145,6 +215,13 @@ run_suite() {
   # as task-hash keys, NOT as project-affected edges (so py/ts do not appear here) — SMA-433.
   run_case "parity-oneway" "rs/crates/libs/paigasus-kernel-parity/src/lib.rs" \
     "paigasus-kernel-parity-rs"
+  # A proto edit must SCHEDULE paigasus-service-info's build and test, not merely mark the project
+  # affected. This is the behavioral half of SMA-524: the parity gate asserts `^:build` is DECLARED,
+  # this asserts it takes EFFECT.
+  run_task_case "proto->service-info-tasks" "rs/crates/libs/paigasus-proto/src/lib.rs" \
+    "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-gateway-rs:build,paigasus-gateway-rs:test"
+  # Generic Cargo<->Moon parity: catches a MISSING case, which is how SMA-524's bug survived review.
+  assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
   assert_include_relations || SUITE_RC=1
   return "$SUITE_RC"
@@ -170,6 +247,9 @@ if [ "$NEGATIVE" = 1 ]; then
   #    Under the old positive-superset model this PASSED (a subset satisfied the must-include check),
   #    silently unasserting every project left out — the exact gap strict equality closes.
   expect_red "neg-incomplete-expect" "rs/crates/libs/paigasus-kernel/src/lib.rs" "paigasus-kernel-rs"
+  # 3) the parity gate must fire on synthetic violations of each of its three assertions — a gate
+  #    that can pass vacuously reproduces the very bug it exists to prevent (SMA-524 D6).
+  python3 "$HERE/cargo_moon_parity.py" --self-test || NEG_RC=1
   if [ "$NEG_RC" = 0 ]; then
     echo "negative-control OK: harness reported red on all wrong expectations"; exit 0
   else
