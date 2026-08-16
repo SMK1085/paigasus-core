@@ -64,8 +64,8 @@ assert_case() {
 }
 
 # assert_task_case LABEL FILE EXPECTED_CSV
-#   Same strict-equality contract as assert_case, but over the TASK graph: the set of `build` and
-#   `test` targets scheduled by the touched file must EQUAL the expected set.
+#   Same strict-equality contract as assert_case, but over the TASK graph: the set of `build`,
+#   `test` and `lint` targets scheduled by the touched file must EQUAL the expected set.
 #
 #   Why a second query: `moon query projects --affected` follows `dependsOn` ONLY and is structurally
 #   blind to a task-level `^:build` (SMA-429 F3). Delete the `^:build` from a moon.yml and every

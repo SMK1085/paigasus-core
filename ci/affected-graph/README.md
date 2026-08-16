@@ -64,6 +64,11 @@ implicitly: any project that appears but isn't in the expected set fails the cas
 - A project that **legitimately** becomes a new dependent (e.g. a future wasm kernel binding)
   makes the case fail with an `unexpected` entry → confirm the new edge is intended, then add the
   one project to that case's expected set.
+- A **task** case (`assert_task_case`, e.g. `proto->service-info-tasks`) works at `pid:task`
+  granularity, not project granularity, so its set can also grow without any new dependent
+  project: widening the task-name filter itself (e.g. `lint` joining `build`/`test` in SMA-526)
+  makes every already-listed project pick up a new `pid:task` row at once → same fix, confirm
+  the new rows are intended, then add them to the case's expected set.
 
 The expected sets are a snapshot of `moon query --affected --downstream deep` output at the
 **pinned moon version** (currently 2.3.2). A moon upgrade that changes the affected-set output —
