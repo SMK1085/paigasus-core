@@ -53,10 +53,26 @@ and it was benchmarked before being accepted (SMA-525): the gate itself runs in 
 (`ci/actionlint/run.sh`, bypassing Moon), but Moon's own per-task floor in this repo is ~9s
 regardless of what a task does — an existing narrow-input task (`repo:promtool`) measures about
 the same. Once `.moon/workspace.yml`'s `hasher.ignorePatterns` excludes gitignored dependency
-trees (`node_modules`, `target`, `.venv`) from the hash walk, broad `inputs: ['**/*']` costs
-only ~1s over a narrow input list — not the ~8.5s it costs without that filter. Narrowing this
-task's inputs would not meaningfully help; do not do it without also revisiting
+trees (`node_modules`, `target`, `.venv`) from the hash walk, broad `inputs: ['**/*']` costs only
+~1s over a narrow input list.
+
+Without that filter it costs **~87s**. Alternating `moon run repo:actionlint --force` runs
+(macOS, warm):
+
+| Configuration | Time |
+|---|---|
+| `repo:promtool` — existing narrow-input task, i.e. Moon's floor | ~8.7s |
+| this gate, narrow input list | ~10.4s |
+| this gate, `inputs: ['**/*']` **with** `hasher.ignorePatterns` | ~11.6s |
+| this gate, `inputs: ['**/*']` **without** it | ~98.6s |
+
+Narrowing this task's inputs would not meaningfully help; do not do it without also revisiting
 `hasher.ignorePatterns`.
+
+**Do not conclude `hasher.ignorePatterns` is inert from the log.** It does *not* silence the
+~2000 `only files can be hashed` warnings about pnpm's symlinked store — those appear identically
+with and without it (verified). The warnings come from input collection; the filter skips the
+hashing that follows. Judge it by the wall time above, not by the warnings.
 
 ## Running it
 
