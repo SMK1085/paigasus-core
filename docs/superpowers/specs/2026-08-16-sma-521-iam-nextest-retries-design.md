@@ -93,7 +93,7 @@ satisfy any of SMA-521's acceptance criteria, and it is not independently revert
 | D5 | Cap value chosen by measurement. **Landed on 8 = the Docker VM's CPU count**, on bounded variance rather than the "lowest affordable cap" rule §5 originally proposed — that rule's premise was measured and falsified (§5). | The optimum depends on Docker VM capacity, and the benefit turned out to be predictability, not reduced flakiness. |
 | D5a | **Cap floored at ≥ 4** | CI is 4-way already, so a cap ≥4 is provably a no-op there, removing any risk of serializing CI into the 30-minute job timeout. The cap is a local-only win, stated plainly. |
 | D9 | Wire the profile into Moon `inputs` for **both** affected nextest tasks | `paigasus-iam-rs:test` and `repo:nats-permissions` (§4). |
-| D10 | Emit JUnit from `profile.default` and upload it in CI | Without it the `FLAKY` signal this design's safety argument rests on is invisible (§6). |
+| D10 | Emit JUnit from a **dedicated `iam` profile** (not `profile.default`) and upload it in CI | Without a report the `FLAKY` signal this design's safety argument rests on is invisible (§6). It must not be on `default`: nextest resolves the report path relative to the workspace `target/`, so all 15+ concurrent nextest invocations in one `moon ci` run would write and clobber one file. A custom profile gets its own store dir and inherits `default`'s overrides, so the retry policy stays on `default` for AC2 while only the report destination is scoped. |
 
 ## 1. The nextest profile
 
@@ -330,6 +330,27 @@ signal the safety argument in §1 depends on is invisible in the one environment
 The profile therefore emits JUnit and `ci.yml` uploads it as an artifact on the `moon ci` job.
 Escalation threshold: if a single test appears as flaky in more than half the runs of a week,
 it stops being a container-contention flake and gets its own issue rather than a retry.
+
+**The report must not live on `profile.default`** — a defect caught in review and verified
+empirically. nextest resolves `junit.path` relative to the Cargo workspace `target/`, so every
+`cargo nextest` in the workspace writes the same `target/nextest/default/junit.xml`, overwriting
+the last. One `moon ci` run invokes nextest **15+ times concurrently** — a `:test` per Rust crate
+(13 of them) plus `repo:nats-permissions` and `repo:observability-drift` — with no ordering
+between them, so an artifact on `default` would carry whichever process finished last and would
+almost never be iam's. Worse, it would fail *silently*: a file exists, the step succeeds, and
+`if-no-files-found: ignore` never triggers. Shipping that would manufacture exactly the false
+confidence this issue exists to eliminate.
+
+The fix is a dedicated `[profile.iam]`, whose store dir is `target/nextest/iam/`, selected by
+`paigasus-iam`'s Moon task via `--profile iam`. Verified: a custom profile **inherits**
+`profile.default`'s per-test overrides — `cargo nextest show-config test-groups -P iam` shows the
+same `docker-containers` group and the same override — so the retry policy stays on `default`
+where a bare `cargo nextest` still picks it up. AC2 is untouched; only the report destination is
+profile-scoped.
+
+Confirmed separately during review that nextest's JUnit writer emits a `<flakyFailure>` element
+carrying the failed attempt's panic message for a test that passes on retry — so the report
+contains real flaky signal, not merely pass/fail counts.
 
 Full-graph gates, per `CLAUDE.md` (new files plus `.moon/tasks/rust.yml` and `moon.yml` edits
 mean per-project tasks are not sufficient):
