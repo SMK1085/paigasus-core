@@ -16,6 +16,11 @@
 # max_request_bytes        = 1048576  # reject larger request bodies before parsing (1 MiB) —
 #                                      # default shown
 
+# Serve streamed (SSE) chat completions (default true). When false, a request carrying
+# `stream: true` is rejected with 400 and `param: "stream"`, and the gateway.chat.stream
+# capability is not advertised. Non-streaming completions are unaffected.
+# stream_enabled = true
+
 # --- IAM gRPC client (G4 dials this for auth/introspection) ---
 
 # [iam]

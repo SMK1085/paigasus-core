@@ -16,7 +16,7 @@
 use async_trait::async_trait;
 use paigasus_proto::paigasus::iam::v1::authn_service_client::AuthnServiceClient;
 use paigasus_proto::paigasus::iam::v1::authorization_service_client::AuthorizationServiceClient;
-use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyRequest, IntrospectApiKeyResponse, IsAuthorizedRequest};
+use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyRequest, IntrospectApiKeyResponse, IntrospectRequest, IntrospectResponse, IsAuthorizedRequest};
 use tonic::Request;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
@@ -44,8 +44,8 @@ pub enum IamError {
     Rpc(#[from] tonic::Status),
 }
 
-/// Port trait for the two IAM calls the gateway's auth middleware makes. Deliberately minimal —
-/// exactly the operations G5 needs — so it can be faked in G5's decision-table unit tests (an
+/// Port trait for the IAM calls the gateway's auth middleware makes. Deliberately minimal —
+/// exactly the operations G5/G7 need — so it can be faked in the decision-table unit tests (an
 /// `Arc<dyn Iam>`), while G7 injects the real [`IamClient`]. `#[async_trait]` (rather than a
 /// native async-fn-in-trait) because the trait is consumed as a trait object (`dyn Iam`), which
 /// AFIT does not yet support object-safely.
@@ -63,6 +63,14 @@ pub trait Iam: Send + Sync {
     /// introspected caller (never an attacker-chosen principal) is enforced by G5's call site,
     /// which sources both `caller_key` and `principal_prn` from the same inbound request.
     async fn is_authorized_self(&self, caller_key: &str, principal_prn: &str, action: &str, resource_prn: &str) -> Result<bool, IamError>;
+
+    /// Introspect a caller-presented OIDC token (IAM's `AuthnService.Introspect`). **Bearer-
+    /// EXEMPT**, exactly like [`Iam::introspect_api_key`]: the token is the request body, so no
+    /// `authorization` metadata is attached.
+    ///
+    /// Used ONLY by the capability-discovery middleware, which must accept a console user's own
+    /// session (ADR-0020 D4). The chat path never calls this.
+    async fn introspect_token(&self, token: &str) -> Result<IntrospectResponse, IamError>;
 }
 
 /// The real IAM adapter: one lazily-connected `tonic` [`Channel`] shared by both generated
@@ -102,6 +110,11 @@ impl Iam for IamClient {
         let req = self_authorize_request(caller_key, principal_prn, action, resource_prn)?;
         let resp = self.authz.clone().is_authorized(req).await?;
         Ok(resp.into_inner().allowed)
+    }
+
+    async fn introspect_token(&self, token: &str) -> Result<IntrospectResponse, IamError> {
+        let resp = self.authn.clone().introspect(Request::new(IntrospectRequest { token: token.to_owned() })).await?;
+        Ok(resp.into_inner())
     }
 }
 

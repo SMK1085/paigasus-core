@@ -21,6 +21,7 @@ mod memberships;
 mod organizations;
 mod projects;
 mod service_accounts;
+mod service_info;
 mod system_retirement;
 mod teams;
 mod users;
@@ -242,6 +243,11 @@ pub struct AppState {
     /// `PolicyStore::delete_in`'s `SystemImmutable` guard and must stay unreachable from
     /// ordinary policy CRUD.
     pub retirement: SystemRetirementSvc,
+    /// The capability toggles this build was configured with (SMA-505), projected once in
+    /// `AppState::new`. Read by `app_routes` to decide which sub-routers to merge, by the gRPC
+    /// guards, and by both descriptor handlers — one source of truth, derived on demand rather
+    /// than cached as a pre-computed key list.
+    pub capabilities: crate::service_info::Capabilities,
     /// The persistent audit-log sink (`PgAuditLog`) the denial-audit [`DenialAuditDrain`]
     /// drains buffered denials into (SMA-446 Task A12) — the SAME `Arc<dyn AuditLog>` handle
     /// `audit_query` reads through. Exposed via [`AppState::audit_sink`] so `main.rs` (or a
@@ -729,6 +735,7 @@ impl AppState {
             audit_query,
             dead_letters,
             retirement,
+            capabilities: crate::service_info::Capabilities::from_config(cfg),
             audit_log,
             denial_drain: Arc::new(Mutex::new(Some(denial_drain))),
         })
@@ -801,18 +808,31 @@ fn readyz_router(state: AppState) -> Router {
 /// `paigasus-gateway::adapters::http::router`, minus the health-route inclusion that router
 /// deliberately keeps and this one deliberately excludes).
 fn app_routes(state: AppState) -> Router {
-    let protected = Router::new()
+    let caps = state.capabilities;
+    let mut protected = Router::new()
         .merge(organizations::router())
         .merge(teams::router())
         .merge(projects::router())
         .merge(memberships::router())
         .merge(users::router())
-        .merge(authz::router())
         .merge(service_accounts::router())
-        .merge(api_keys::router())
-        .merge(audit::router())
         .merge(dead_letters::router())
-        .merge(system_retirement::router())
+        // The descriptor itself is always mounted and always inside the bearer layer (SMA-505).
+        .merge(service_info::router());
+    // SMA-505: a disabled capability's routes are NOT REGISTERED, so they 404 exactly as they
+    // would on a build predating the feature. `is-authorized` is deliberately outside this
+    // branch — it is the gateway's per-request primitive, not policy administration.
+    if caps.authz_admin {
+        protected = protected.merge(authz::admin_router()).merge(system_retirement::router());
+    }
+    protected = protected.merge(authz::decision_router());
+    if caps.apikeys_management {
+        protected = protected.merge(api_keys::router());
+    }
+    if caps.audit_query {
+        protected = protected.merge(audit::router());
+    }
+    let protected = protected
         // `route_layer` (not `layer`): the enforcement covers exactly the routes defined
         // above and never the merged-in `/healthz`/`/readyz`/introspect or the 404 fallback.
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware::require_bearer))
@@ -887,30 +907,44 @@ pub async fn serve_http(
 mod tests {
     use super::*;
 
-    /// SMA-469: axum's router panics AT REGISTRATION time (inside `.route`/`.merge`, not
+    /// SMA-469 + SMA-505: axum panics AT REGISTRATION time (inside `.route`/`.merge`, not
     /// later at request time) when two patterns conflict — never a compile error. This
     /// reproduces `app_routes`'s exact `protected` merge chain (sans `route_layer`/
     /// `with_state`, which attach a `Service` layer / a state value and never touch routing)
-    /// so a conflict panics THIS test rather than surfacing only when `AppState::new` first
-    /// runs against a real database. The specific risk this guards: the literal
+    /// for all EIGHT capability combinations, so a conflict panics THIS test rather than
+    /// surfacing only when `AppState::new` first runs against a real database — whether it is
+    /// reachable unconditionally (the specific risk SMA-469 guards: the literal
     /// `/v1/outbox/dead-letters/replay` vs. the parameterized `/v1/outbox/dead-letters/{id}/
     /// replay` differ in segment count, so axum's `matchit` router has no ambiguity between
-    /// them — but "should coexist" is exactly the kind of claim that deserves a runtime
-    /// proof, not just a doc comment.
+    /// them) or only under one particular flag combination.
     #[test]
-    fn protected_router_merge_has_no_path_conflicts() {
-        let _: Router<AppState> = Router::new()
-            .merge(organizations::router())
-            .merge(teams::router())
-            .merge(projects::router())
-            .merge(memberships::router())
-            .merge(users::router())
-            .merge(authz::router())
-            .merge(service_accounts::router())
-            .merge(api_keys::router())
-            .merge(audit::router())
-            .merge(dead_letters::router())
-            .merge(system_retirement::router());
+    fn protected_router_merge_has_no_path_conflicts_in_any_capability_combination() {
+        for authz_admin in [false, true] {
+            for apikeys_management in [false, true] {
+                for audit_query in [false, true] {
+                    let mut r: Router<AppState> = Router::new()
+                        .merge(organizations::router())
+                        .merge(teams::router())
+                        .merge(projects::router())
+                        .merge(memberships::router())
+                        .merge(users::router())
+                        .merge(service_accounts::router())
+                        .merge(dead_letters::router())
+                        .merge(service_info::router())
+                        .merge(authz::decision_router());
+                    if authz_admin {
+                        r = r.merge(authz::admin_router()).merge(system_retirement::router());
+                    }
+                    if apikeys_management {
+                        r = r.merge(api_keys::router());
+                    }
+                    if audit_query {
+                        r = r.merge(audit::router());
+                    }
+                    let _ = r;
+                }
+            }
+        }
     }
 
     /// SMA-485 D1: the API-key introspect cache reuses the authz connection on TEXTUAL equality

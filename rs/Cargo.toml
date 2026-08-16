@@ -124,6 +124,11 @@ paigasus-proto = { path = "crates/libs/paigasus-proto", version = "0.0.0" }
 # their hot paths through it (Unit 2 — `paigasus-gateway` is the first consumer); same
 # in-tree-freshness rationale as paigasus-kernel/paigasus-proto above.
 paigasus-observability = { path = "crates/libs/paigasus-observability", version = "0.0.0" }
+# paigasus-service-info — the shared `ServiceInfo` builder + HTTP DTO (SMA-505). Owns the wire
+# invariants both services must not re-derive: the UNSPECIFIED sentinel is never advertised,
+# ordering is deterministic, and `capabilities` is always emitted (as `[]` when empty) so a
+# client doing `info.capabilities.includes(k)` cannot throw.
+paigasus-service-info = { path = "crates/libs/paigasus-service-info", version = "0.0.0" }
 # sea-orm — async ORM for service persistence adapters (paigasus-iam's AppState/readyz ping,
 # later the Postgres repository). `runtime-tokio-rustls` keeps the TLS posture on rustls/ring
 # (see reqwest above) instead of native-tls/openssl; `sqlx-postgres` is the only backend we run.

@@ -166,6 +166,17 @@ fn default_jit_provisioning() -> bool {
 /// below), so an absent `[authz]` block entirely is valid config.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AuthzConfig {
+    /// SMA-505: whether the policy/role-grant ADMINISTRATION surface is served —
+    /// `/v1/authz/policies*`, `/v1/authz/role-grants*` and `/v1/authz/system-policies/{id}/retire`
+    /// on HTTP, and the six administration RPCs on `AuthorizationService`. Governs the
+    /// `iam.authz.cedar` capability key.
+    ///
+    /// `false` UNMOUNTS those surfaces (404 / `UNIMPLEMENTED`); it does NOT tear down Cedar.
+    /// `IsAuthorized`, `POST /v1/authz/is-authorized`, the policy snapshot, its reload task and
+    /// `Authorize::check` under `enforce_tenancy` all keep working — so no setting here can
+    /// break the gateway. Intended for a deployment whose policies are applied as code at boot
+    /// and which wants the runtime mutation surface closed.
+    pub admin_enabled: bool,
     pub enforce_tenancy: bool,
     pub policy_cache_ttl_secs: u64,
     pub slice_cache_ttl_secs: u64,
@@ -211,6 +222,16 @@ pub struct BootstrapAdmin {
 /// to seed a well-typed field.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ApiKeyConfig {
+    /// SMA-505: whether the API-key MANAGEMENT surface is served —
+    /// `/v1/service-accounts/{sa}/api-keys*` on HTTP, and `IssueApiKey`/`RevokeApiKey`/
+    /// `ListApiKeys` on `ServiceAccountService`. Governs the `iam.apikeys` capability key.
+    ///
+    /// `false` UNMOUNTS those surfaces only. Introspection stays mounted
+    /// (`/v1/authn/api-keys/introspect`, gRPC `IntrospectApiKey`), `require_bearer`'s API-key
+    /// credential path keeps working, and previously issued keys keep authenticating — so the
+    /// gateway is unaffected. Service-account lifecycle routes are also untouched: they are
+    /// tenancy management, not an API-key concern.
+    pub management_enabled: bool,
     /// The raw, still-`base64`-encoded pepper as configured (`[api_keys] pepper` /
     /// `IAM_API_KEYS__PEPPER`) — see [`RawPepper`]'s doc for why this isn't the decoded
     /// `adapters::api_keys::Pepper` directly. `#[serde(skip_serializing)]` so `IamConfig`'s
@@ -309,6 +330,15 @@ pub enum ApiKeyCacheBackend {
 /// absent `[audit]` block entirely is valid config.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AuditConfig {
+    /// SMA-505: whether the audit-log READ surface is served — `GET /v1/audit` on HTTP and the
+    /// whole `AuditService` on gRPC. Governs the `iam.audit` capability key.
+    ///
+    /// `false` unmounts reading only. Every WRITE path continues: the denial audit sink,
+    /// `PgAuditLog`, partition maintenance and retention. Intended for a deployment shipping
+    /// audit to an external SIEM, where the in-product reader is redundant and its query load on
+    /// the partitioned table is unwanted. Logs a startup warning, since writing entries nobody
+    /// can read in-product is a misconfiguration in every other case.
+    pub query_enabled: bool,
     /// Ring-buffer capacity for denial [`AuditEntry`](paigasus_iam_core::AuditEntry)s awaiting
     /// out-of-band persistence. When full, the OLDEST queued entry is dropped (favoring
     /// recency) and `DenialAuditBuffer::dropped()` is bumped — see that type's doc. Validated
@@ -640,6 +670,7 @@ struct AuthnDefaults {
 // `AuthzConfig` field has a sensible default (see `AuthzConfig`'s doc).
 #[derive(Serialize)]
 struct AuthzDefaults {
+    admin_enabled: bool,
     enforce_tenancy: bool,
     policy_cache_ttl_secs: u64,
     slice_cache_ttl_secs: u64,
@@ -658,6 +689,7 @@ struct AuthzDefaults {
 // caught at `validate()` rather than at figment extraction.
 #[derive(Serialize)]
 struct ApiKeyDefaults {
+    management_enabled: bool,
     pepper: String,
     key_prefix: String,
     max_token_bytes: usize,
@@ -673,6 +705,7 @@ struct ApiKeyDefaults {
 // and this struct's own `Default` below for the rationale of each).
 #[derive(Serialize)]
 struct AuditDefaults {
+    query_enabled: bool,
     denial_buffer_capacity: usize,
     retention: RetentionConfig,
     query_default_window_days: u32,
@@ -742,6 +775,7 @@ impl Default for AuthnDefaults {
 impl Default for AuthzDefaults {
     fn default() -> Self {
         AuthzDefaults {
+            admin_enabled: true,
             enforce_tenancy: true,
             policy_cache_ttl_secs: 30,
             slice_cache_ttl_secs: 60,
@@ -763,6 +797,7 @@ impl Default for AuthzDefaults {
 impl Default for ApiKeyDefaults {
     fn default() -> Self {
         ApiKeyDefaults {
+            management_enabled: true,
             pepper: String::new(),
             key_prefix: "pgs_sk_".to_string(),
             max_token_bytes: 512,
@@ -780,6 +815,7 @@ impl Default for ApiKeyDefaults {
 impl Default for AuditDefaults {
     fn default() -> Self {
         AuditDefaults {
+            query_enabled: true,
             denial_buffer_capacity: 4096,
             retention: RetentionConfig::default(),
             query_default_window_days: 90,
@@ -812,6 +848,7 @@ impl Default for AuthzConfig {
     fn default() -> Self {
         let d = AuthzDefaults::default();
         AuthzConfig {
+            admin_enabled: d.admin_enabled,
             enforce_tenancy: d.enforce_tenancy,
             policy_cache_ttl_secs: d.policy_cache_ttl_secs,
             slice_cache_ttl_secs: d.slice_cache_ttl_secs,
@@ -831,6 +868,7 @@ impl Default for ApiKeyConfig {
     fn default() -> Self {
         let d = ApiKeyDefaults::default();
         ApiKeyConfig {
+            management_enabled: d.management_enabled,
             pepper: RawPepper(d.pepper),
             key_prefix: d.key_prefix,
             max_token_bytes: d.max_token_bytes,
@@ -848,6 +886,7 @@ impl Default for AuditConfig {
     fn default() -> Self {
         let d = AuditDefaults::default();
         AuditConfig {
+            query_enabled: d.query_enabled,
             denial_buffer_capacity: d.denial_buffer_capacity,
             retention: d.retention,
             query_default_window_days: d.query_default_window_days,

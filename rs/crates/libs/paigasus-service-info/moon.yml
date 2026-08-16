@@ -1,0 +1,11 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-service-info-rs'
+layer: 'library'
+language: 'rust'
+
+tasks:
+  build:
+    deps: ['contracts:generate']
+  test:
+    deps: ['contracts:generate']

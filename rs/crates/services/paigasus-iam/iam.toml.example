@@ -40,9 +40,34 @@
 # audiences = ["paigasus"]
 # jit_provisioning = true             # default shown
 
+# --- Cedar authorization (M3) ---
+
+# [authz]
+# admin_enabled = true                # Serve the policy / role-grant administration surface
+#                                      # (default true). When false, /v1/authz/policies*,
+#                                      # /v1/authz/role-grants* and
+#                                      # /v1/authz/system-policies/{id}/retire are not registered
+#                                      # and the six AuthorizationService administration RPCs
+#                                      # return UNIMPLEMENTED, and the iam.authz.cedar capability
+#                                      # is not advertised (SMA-505). Authorization DECISIONS are
+#                                      # unaffected: is-authorized, gRPC IsAuthorized and internal
+#                                      # tenancy enforcement all keep working, so this cannot break
+#                                      # the gateway.
+
 # --- API keys & service accounts (M4) ---
 
 # [api_keys]
+#
+# management_enabled = true           # Serve the API-key MANAGEMENT surface (default true). When
+#                                      # false, /v1/service-accounts/{sa}/api-keys* is not
+#                                      # registered and IssueApiKey/RevokeApiKey/ListApiKeys
+#                                      # return UNIMPLEMENTED, and the iam.apikeys capability is
+#                                      # not advertised (SMA-505). Introspection is unaffected:
+#                                      # /v1/authn/api-keys/introspect, gRPC IntrospectApiKey, and
+#                                      # already-issued keys keep authenticating — so the gateway
+#                                      # cannot break. Service-account lifecycle routes are also
+#                                      # untouched: they are tenancy management, not an API-key
+#                                      # concern.
 #
 # REQUIRED — no valid default (the empty-string default fails `IamConfig::validate`, not
 # figment extraction — an unset pepper loads fine but boots refuse to start). >=32 decoded
@@ -65,6 +90,16 @@
 # --- Persistent denial audit (M5, SMA-446) ---
 
 # [audit]
+# query_enabled = true                # Serve the audit-log READ surface (default true). When
+#                                      # false, GET /v1/audit and the AuditService gRPC are not
+#                                      # served, and the iam.audit capability is not advertised
+#                                      # (SMA-505). Every WRITE path keeps running (the denial
+#                                      # audit sink, PgAuditLog, partition maintenance, retention)
+#                                      # — intended for a deployment shipping audit to an external
+#                                      # SIEM, where the in-product reader is redundant. Logs a
+#                                      # startup warning when false, since writing entries nobody
+#                                      # can read in-product is a misconfiguration otherwise.
+#
 # denial_buffer_capacity = 4096       # bounded, non-blocking ring buffer for authz-denial
 #                                      # audit entries awaiting out-of-band persistence to
 #                                      # Postgres — default shown; must be >= 1. Denial auditing
