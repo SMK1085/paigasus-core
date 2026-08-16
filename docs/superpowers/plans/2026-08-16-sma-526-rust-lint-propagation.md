@@ -652,3 +652,24 @@ No gaps.
 **Type consistency:** `check()` keeps its `(a1, a2, a3)` return across Tasks 1 and 4. The two A3 message shapes introduced in Task 1 Step 5 are matched only by the self-test added in Task 1 Step 3 (`"has no \`lint\` task"`), and that substring is present in the emitted string. Task 3's expected-set strings are `project:task` targets produced by `moon query tasks`, independent of the Python messages.
 
 **Ordering:** Task 1 is deliberately red against the real graph and Task 2 turns it green — the plan's red/green cycle. Task 3 must follow Task 2, because the expected set can only be re-baselined once propagation exists. Task 4 must follow Task 2, because its merge check asserts the inherited `^:build` survived. Tasks 5 and 6 are independent of each other but 6 must run last.
+
+---
+
+## Corrections found during execution
+
+This plan is a historical record of what was planned; the task steps above are left as written.
+Execution surfaced three predictions that did not hold:
+
+- **Task 3, Step 1** predicted `ci/affected-graph/run.sh` would FAIL before any edit. It PASSES
+  instead: the pre-edit task-name filter strips `lint` rows before the comparison runs, so the
+  four new lint targets never reach the diff as `unexpected`. The filter has to be widened
+  (Step 2) before the guard can even see them, let alone fail on them.
+
+- **Task 4, Steps 1 and 4** give `moon query projects --json`. On Moon 2.3.2 this errors —
+  `unexpected argument '--json' found` — because `moon query projects` already emits JSON
+  unconditionally and the flag does not exist. Drop `--json` from both commands.
+
+- **Task 5, Step 3** expects "exactly two" matching lines for
+  `grep -n 'lint-deps' .github/workflows/ci.yml`. The correct count is three: the Step 2 comment
+  text itself contains the literal string `lint-deps` (in "`lint-deps` segment (SMA-526): ..."),
+  in addition to the two structural lines (`key:` and `restore-keys:`) that actually matter.
