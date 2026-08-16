@@ -33,13 +33,13 @@ infra() {
   exit 2
 }
 
-command -v actionlint >/dev/null 2>&1 || infra "actionlint not on PATH — run 'proto install actionlint'"
-
 # ONE shared flag array for checks 1, 3 and 4. Written twice, an `-ignore` added to check 1
 # would be invisible to check 3 BY CONSTRUCTION and the self-test would be decorative.
 #
-# shellcheck/pyflakes are disabled DELIBERATELY (spec D2): actionlint shells out to them when
+# ShellCheck/pyflakes are disabled DELIBERATELY (spec D2): actionlint shells out to them when
 # it finds them on PATH, which would make this gate's strictness a property of the host.
+# (Capital "ShellCheck" above is intentional — a lowercase "# shellcheck/..." comment is parsed
+# by ShellCheck itself as a malformed inline directive and aborts analysis of this whole file.)
 ARGS=(-shellcheck= -pyflakes=)
 
 # Workflow discovery for checks 5-7. Non-recursive, both extensions — matching GitHub's own
@@ -86,24 +86,33 @@ extract_paths_keys() {
       if (stripped ~ /^#/)  next                 # whole-line comments never close a block
 
       if (in_block) {
-        if (ind <= key_ind) {
-          in_block = 0                           # dedent closes; fall through to key handling
-        } else if (stripped ~ /^-([ \t]|$)/) {
+        is_item = (stripped ~ /^-([ \t]|$)/)
+        if (ind >= key_ind && is_item) {
           item = stripped
           sub(/^-[ \t]*/, "", item)
           item = scalar(item)
           if (item != "") print "ITEM\t" kind "\t" item
           next
+        } else if (ind <= key_ind) {
+          # A non-item line at or below key_ind closes the block — this is NOT simply "dedent":
+          # items at exactly key_ind (a flush sequence, no extra indent — valid YAML, emitted by
+          # e.g. Prettier) must stay ITEMs, which the `ind >= key_ind && is_item` branch above
+          # already caught. Only a non-item line at/below key_ind reaches this branch.
+          in_block = 0                           # closes; fall through to key handling below
         } else {
           next                                   # deeper non-item line: not ours, keep the block
         }
       }
 
       # Track the top-level `on:` mapping. A quoted "on": is accepted (a common YAML 1.1
-      # truthiness workaround). Any other column-0 key closes it.
+      # truthiness workaround). Any other column-0 key closes it. Strip a trailing comment before
+      # classifying: `on:  # comment` must still be recognized as the block form, not misread as
+      # the inline-flow form (which would silently drop every paths: key in the whole file).
       if (ind == 0) {
-        if (stripped ~ /^["\047]?on["\047]?:[ \t]*$/)      { in_on = 1; next }
-        if (stripped ~ /^["\047]?on["\047]?:/)             { in_on = 0; next }  # inline `on: [push]`
+        key0 = stripped
+        sub(/[ \t]+#.*$/, "", key0)
+        if (key0 ~ /^["\047]?on["\047]?:[ \t]*$/)      { in_on = 1; next }
+        if (key0 ~ /^["\047]?on["\047]?:/)             { in_on = 0; next }  # inline `on: [push]`
         in_on = 0
         next
       }
@@ -119,23 +128,32 @@ extract_paths_keys() {
       # A block opens only when the value after the colon is empty. A non-empty value is the
       # inline flow form, which is deliberately not parsed — the KEY above, with no ITEMs
       # following, is what makes check 6 fail loudly instead of skipping silently.
+      #
+      # Strip the key label FIRST, then the comment, then surrounding blanks — in that order.
+      # Stripping the label with a greedy `[ \t]*` (consuming the whitespace right after the
+      # colon) would eat the whitespace a trailing `#comment` needs to match on, leaving a
+      # `paths:   # the filter` line looking non-empty and silently skipping the block.
       rest = stripped
-      sub(/^paths(-ignore)?:[ \t]*/, "", rest)
+      sub(/^paths(-ignore)?:/, "", rest)
       sub(/[ \t]+#.*$/, "", rest)
+      sub(/^[ \t]+/, "", rest)
+      sub(/[ \t]+$/, "", rest)
       if (rest == "") { in_block = 1; key_ind = ind }
     }
   ' "$1"
 }
 
 # ---------------------------------------------------------------------------------------------
-# Check 7 — extractor self-test.
+# Extractor self-test (definition only — actually invoked, unconditionally, as check 7 near the
+# end of this script, so the fixture table guards the parser on every real gate run, not only
+# under --self-test). Defined here, ahead of check 1, purely so the `--self-test` early exit
+# below can run it standalone and return fast while editing the awk.
 #
 # The extractor is hand-rolled YAML parsing, which is exactly the kind of thing that silently
-# does the wrong thing. Each clause of the documented contract gets a fixture. Runs on every
-# invocation; `--self-test` runs ONLY this, for fast iteration while editing the awk.
+# does the wrong thing. Each clause of the documented contract gets a fixture.
 # ---------------------------------------------------------------------------------------------
 extractor_self_test() {
-  local name expected actual tmp rc=0
+  local name expected actual tmp yaml rc=0
 
   check_fixture() {
     name="$1"; expected="$2"; yaml="$3"
@@ -273,6 +291,125 @@ jobs:
       - run: echo hi
 '
 
+  # --- Round-1 review additions below: each kills a specific mutant that survived the table
+  # above (findings 1, 2, 3 and 5 of the round-1 review). ---
+
+  check_fixture 'blank line inside a sequence does not close the block' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**\nITEM\tpaths\tb/**')" \
+'name: t
+on:
+  push:
+    paths:
+      - "a/**"
+
+      - "b/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'CRLF line endings are tolerated' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**\nITEM\tpaths\tb/**')" \
+"$(printf 'name: t\r\non:\r\n  push:\r\n    paths:\r\n      - "a/**"\r\n      - "b/**"\r\njobs:\r\n  j:\r\n    runs-on: ubuntu-latest\r\n    steps:\r\n      - run: echo hi\r\n')"
+
+  check_fixture '"on": quoted form is recognized' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**')" \
+'name: t
+"on":
+  push:
+    paths:
+      - "a/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'on: [push] inline form yields no records' \
+"" \
+'name: t
+on: [push]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'unquoted item keeps a trailing comment stripped' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\tbare/path')" \
+'name: t
+on:
+  push:
+    paths:
+      - bare/path   # a note
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a # inside a quoted scalar is not stripped' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/b#c')" \
+'name: t
+on:
+  push:
+    paths:
+      - "a/b#c"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'on: with a trailing comment still opens the block' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**')" \
+'name: t
+on:  # yamllint disable-line rule:truthy
+  push:
+    paths:
+      - "a/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'paths: with a trailing comment still opens the block' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**')" \
+'name: t
+on:
+  push:
+    paths:   # the filter
+      - "a/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a flush block sequence (items at key indent) is still parsed' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**\nITEM\tpaths\tb/**')" \
+'name: t
+on:
+  push:
+    paths:
+    - "a/**"
+    - "b/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
   return $rc
 }
 
@@ -280,6 +417,10 @@ if [ "${1:-}" = "--self-test" ]; then
   extractor_self_test
   exit "$FAILED"
 fi
+
+# Guard lives here, AFTER the --self-test early exit: --self-test never shells out to actionlint,
+# so it must not infra-exit on a machine that simply doesn't have the binary on PATH yet.
+command -v actionlint >/dev/null 2>&1 || infra "actionlint not on PATH — run 'proto install actionlint'"
 
 # ---------------------------------------------------------------------------------------------
 # Check 1 — lint every workflow.
@@ -379,6 +520,8 @@ jobs:
       - run: echo hi
 '
 
+# shellcheck disable=SC2016  # the ${{ }} below is deliberate GHA expression syntax inside a
+                              # single-quoted fixture, not an un-expanded shell variable.
 selftest_expect_tag 'undefined step output' 'expression' 'name: selftest
 on: [push]
 jobs:
@@ -414,5 +557,15 @@ if ! printf '%s' "$healthy" | actionlint "${ARGS[@]}" -stdin-filename .github/wo
   fail "self-test control: actionlint REJECTED a known-good workflow. The invocation itself is
     broken, so the check-3 rejections above prove nothing."
 fi
+
+# ---------------------------------------------------------------------------------------------
+# Check 7 — extractor self-test, invoked for real.
+#
+# The function is defined earlier (immediately after extract_paths_keys) so the `--self-test`
+# early exit near the top of this script can run it standalone for fast iteration. This is the
+# unconditional invocation that actually makes the fixture table guard the parser on every real
+# gate run — without it the whole table is dead code in CI.
+# ---------------------------------------------------------------------------------------------
+extractor_self_test
 
 exit "$FAILED"
