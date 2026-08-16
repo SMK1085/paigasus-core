@@ -263,12 +263,18 @@ only event that ever writes to `main`'s cache scope. Combined with the re-keying
 above, cancelling push runs is precisely the thing that would stop the newly-keyed cache
 from ever being populated.
 
-So: **keep** `cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}`, and
-fix the group collision instead:
+So: **never cancel a push run, cancel every other kind**, and fix the group collision too:
 
 ```yaml
 group: prebuild-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+cancel-in-progress: ${{ github.event_name != 'push' }}
 ```
+
+`!= 'push'` rather than `== 'workflow_dispatch'`: this revision also adds a `pull_request`
+trigger, and the narrower expression would leave superseded PR runs to run to completion for no
+benefit — their cache scope is the PR's own and is discarded on merge. `!= 'push'` states the
+actual rule (protect the only writer to `main`'s cache scope, cancel everything else) and matches
+`ci.yml:16`.
 
 Without `event_name` in the group, a manually dispatched run (which evaluates
 `cancel-in-progress` to `true`) would cancel a running push-to-`main` job, since both

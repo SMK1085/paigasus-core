@@ -48,7 +48,13 @@ only rotation.
 Scan the whole history, not the working tree: a credential that was ever committed is exposed even
 if a later commit removed it.
 
+**The repository is still private at this point**, so the HTTPS clone needs credentials — an
+unauthenticated `git clone` here fails with a 403 that reads like a missing repository. Set Git up
+to use your `gh` token and prove access before the long clone:
+
 ```bash
+gh auth setup-git
+git ls-remote https://github.com/SMK1085/paigasus-core.git HEAD >/dev/null   # preflight
 git clone --mirror https://github.com/SMK1085/paigasus-core.git core-mirror.git
 docker run --rm -v "$PWD/core-mirror.git:/repo:ro" -v "$PWD:/out" \
   ghcr.io/gitleaks/gitleaks:latest detect \
@@ -148,9 +154,20 @@ control is strictly better placed.
 
 **4.7 — Confirm nothing was lost in the transition.**
 
+A name-only check is not enough — a ruleset can survive the transition by name while sitting at
+`disabled`/`evaluate` enforcement, or no longer scoped to the default branch. Assert the substance:
+
 ```bash
-gh api repos/SMK1085/paigasus-core/rulesets --jq '.[].name'          # expect: Protect main
 gh api repos/SMK1085/paigasus-core --jq '{visibility, private}'      # expect: public / false
+
+id=$(gh api repos/SMK1085/paigasus-core/rulesets --jq '.[] | select(.name=="Protect main") | .id')
+gh api "repos/SMK1085/paigasus-core/rulesets/$id" --jq '{
+  enforcement,                                    # expect: active
+  branches: .conditions.ref_name.include,         # expect: ["~DEFAULT_BRANCH"]
+  checks: [.rules[] | select(.type=="required_status_checks")
+           | .parameters.required_status_checks[].context],   # expect: ["moon ci"]
+  rules: [.rules[].type] | sort                   # expect: deletion, non_fast_forward, required_status_checks
+}'
 ```
 
 Also confirm `.github/dependabot.yml` still shows scheduled updates in the Insights tab.
@@ -212,5 +229,12 @@ AC-1 ("spend is $0/month") is then permanently unmet, and SMA-520's workflow cha
 
 On public repositories GitHub **disables scheduled workflows after 60 days of repository
 inactivity**. `security-scan.yml` runs a daily `17 7 * * *` cron whose entire purpose is to fire
-on days when nothing changes (SMA-518). A quiet stretch is precisely when it silently stops. If
-the repo goes quiet, re-enable it manually or trigger it with `workflow_dispatch`.
+on days when nothing changes (SMA-518). A quiet stretch is precisely when it silently stops.
+
+A disabled workflow rejects **every** trigger, `workflow_dispatch` included — so dispatching it is
+not a way around the disabled state. Re-enable first, then dispatch:
+
+```bash
+gh workflow enable security-scan.yml
+gh workflow run    security-scan.yml
+```

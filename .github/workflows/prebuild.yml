@@ -32,6 +32,11 @@ on:
       - 'ts/pnpm-workspace.yaml'
       - 'ts/packages/paigasus-kernel/package.json'
       - 'ts/.npmrc'                          # pins the registry for `pnpm install` (steps 83 + 116)
+      # Two NARROW rs/ inputs, deliberately not the whole `rs/**`. Both are load-bearing for the
+      # darwin build and both are rarely touched, so listing them costs almost nothing while
+      # `rs/**` on this trigger would put a macOS job on most PRs in the repo:
+      - 'rs/.cargo/config.toml'              # the -undefined dynamic_lookup flags the cdylib needs
+      - 'rs/crates/bindings/paigasus-node-bindings/package.json'   # napi binaryName + target list
 
 # Build-only verification: read the repo, build addons, run dry-run packaging. No publish, and no
 # GitHub release is created (the assemble job omits napi's opt-in --gh-release flag), so no
