@@ -64,6 +64,18 @@ that CI absorbs via `actions/cache`.
   "Materialize main ref" step.
 - GUI git clients often strip `PATH`; add `~/.proto/shims` to their environment if
   hooks fail with "command not found".
+- **The `paigasus-iam` integration suites need Docker, and say nothing when they don't have it.**
+  Without a daemon each test returns early and reports a pass in under a second. With Docker
+  present, small suites legitimately finish in a couple of seconds too, so speed alone isn't the
+  tell — a fast *local* run made without `CI=1` is. Run them as `CI=1 cargo nextest run -p
+  paigasus-iam` — `CI=1` turns a missing daemon into a hard failure, so you find out immediately
+  instead of trusting a green run that executed nothing.
+- Retries and the container-concurrency cap for those suites live in `rs/.config/nextest.toml`
+  (`profile.default`), so they apply to `moon run`, to `cargo nextest` typed by hand, and to
+  anything else that shells out to nextest. `cargo test` bypasses them entirely — prefer `cargo
+  nextest` in this repo. The JUnit report nextest writes lives on a separate `profile.iam`, which
+  only `paigasus-iam`'s Moon task selects (`--profile iam`); a bare `cargo nextest run -p
+  paigasus-iam` still runs under the same retry/concurrency policy but writes no report.
 
 ## NATS (optional — outbox publisher, SMA-471)
 
