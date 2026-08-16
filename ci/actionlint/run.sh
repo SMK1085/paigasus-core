@@ -125,15 +125,18 @@ extract_paths_keys() {
       }
 
       # Track the top-level `on:` mapping. A quoted "on": is accepted (a common YAML 1.1
-      # truthiness workaround). Any other column-0 key closes it. Strip a trailing comment before
-      # classifying: `on:  # comment` must still be recognized as the block form, not misread as
-      # the inline-flow form (which would silently drop every paths: key in the whole file).
+      # truthiness workaround), and so is whitespace before the colon (`on :`) — both are valid
+      # YAML that actionlint accepts, and the regex not accepting them was a silent skip of the
+      # WHOLE file, not just one filter (SMA-525 round-2 review finding B). Any other column-0
+      # key closes it. Strip a trailing comment before classifying: `on:  # comment` must still be
+      # recognized as the block form, not misread as the inline-flow form (which would silently
+      # drop every paths: key in the whole file).
       if (ind == 0) {
         key0 = stripped
         sub(/[ \t]+#.*$/, "", key0)
         depth = 0                                # a column-0 key closes every nested level
-        if (key0 ~ /^["\047]?on["\047]?:[ \t]*$/)      { in_on = 1; next }
-        if (key0 ~ /^["\047]?on["\047]?:/) {
+        if (key0 ~ /^["\047]?on["\047]?[ \t]*:[ \t]*$/)      { in_on = 1; next }
+        if (key0 ~ /^["\047]?on["\047]?[ \t]*:/) {
           # Inline `on: [push]` — nothing to extract. But `on: {push: {paths: [a]}}` is the same
           # silently-guards-nothing hole as a flow-mapping EVENT value, one level up, so it gets
           # the same treatment.
@@ -177,8 +180,12 @@ extract_paths_keys() {
       }
       if (depth != 2) next
 
-      if (stripped ~ /^paths:/)        { kind = "paths" }
-      else if (stripped ~ /^paths-ignore:/) { kind = "paths-ignore" }
+      # A quoted key ("paths":, 'paths-ignore':) is valid YAML actionlint accepts; the bare-only
+      # regex silently dropped it — no KEY record, so checks 5/6 skipped the filter with no
+      # message (SMA-525 round-2 review finding A). Whitespace before the colon (`paths :`) gets
+      # the same tolerance as `on :` above, for the same reason.
+      if (stripped ~ /^["\047]?paths["\047]?[ \t]*:/)        { kind = "paths" }
+      else if (stripped ~ /^["\047]?paths-ignore["\047]?[ \t]*:/) { kind = "paths-ignore" }
       else next
 
       print "KEY\t" kind "\t" NR
@@ -190,9 +197,11 @@ extract_paths_keys() {
       # Strip the key label FIRST, then the comment, then surrounding blanks — in that order.
       # Stripping the label with a greedy `[ \t]*` (consuming the whitespace right after the
       # colon) would eat the whitespace a trailing `#comment` needs to match on, leaving a
-      # `paths:   # the filter` line looking non-empty and silently skipping the block.
+      # `paths:   # the filter` line looking non-empty and silently skipping the block. The label
+      # pattern mirrors the KEY match above (quotes and pre-colon whitespace optional) so a
+      # quoted inline `"paths": [a, b]` strips down to its flow value, not a still-quoted label.
       rest = stripped
-      sub(/^paths(-ignore)?:/, "", rest)
+      sub(/^["\047]?paths(-ignore)?["\047]?[ \t]*:/, "", rest)
       sub(/[ \t]+#.*$/, "", rest)
       sub(/^[ \t]+/, "", rest)
       sub(/[ \t]+$/, "", rest)
@@ -592,6 +601,92 @@ jobs:
       - run: echo hi
 '
 
+  # --- Round-2 review additions: a quoted paths:/paths-ignore: key and a spaced `on :` are both
+  # valid YAML actionlint accepts, and the bare-only regexes silently dropped them — no KEY
+  # record, so checks 5/6 skipped the filter with no message at all (findings A and B). ---
+
+  check_fixture 'a double-quoted "paths": key is recognized' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**')" \
+'name: t
+on:
+  push:
+    "paths":
+      - "a/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture "a single-quoted 'paths-ignore': key is recognized" \
+"$(printf 'KEY\tpaths-ignore\t4\nITEM\tpaths-ignore\tdocs/**')" \
+'name: t
+on:
+  push:
+    '"'"'paths-ignore'"'"':
+      - "docs/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'on : with a space before the colon still opens the block' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**')" \
+'name: t
+on :
+  push:
+    paths:
+      - "a/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture '"on" : quoted with a space before the colon still opens the block' \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**')" \
+'name: t
+"on" :
+  push:
+    paths:
+      - "a/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a quoted inline-flow "paths": [a, b] emits KEY with no ITEMs' \
+"$(printf 'KEY\tpaths\t4')" \
+'name: t
+on:
+  push:
+    "paths": ["a/**", "b/**"]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a quoted key at input depth (inputs: { "paths": ... }) yields no records' \
+"" \
+'name: t
+on:
+  workflow_dispatch:
+    inputs: { "paths": { type: string } }
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
   return $rc
 }
 
@@ -811,7 +906,7 @@ scan_workflow_records() {
 # which are clean. Every vocabulary rule and both check-6 verdicts now have a fixture.
 # ---------------------------------------------------------------------------------------------
 path_filter_self_test() {
-  local rc=0
+  local rc=0 quoted_key_tmp
 
   expect_pattern() {
     local pattern="$1" expected="$2" got
@@ -879,6 +974,27 @@ $got"
   expect_scan 'every key in a file is flushed, not just the last' \
 "$(printf 'KEY\tno-items\tpaths\t7\t0\nPATTERN\tdead\trz/**')" \
 "$(printf 'KEY\tpaths\t7\nKEY\tpaths\t11\nITEM\tpaths\trz/**')"
+
+  # Round-2 review addition: runs the REAL extractor (not a hand-built records table) against a
+  # quoted "paths": key, then feeds its output through scan_workflow_records — proving the full
+  # check-5/6 pipeline, not just pattern_verdict in isolation, now reports a dead glob that a
+  # quoted key previously hid completely (finding A).
+  quoted_key_tmp="$(mktemp)"
+  printf '%s' 'name: t
+on:
+  push:
+    "paths":
+      - "rz/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+' > "$quoted_key_tmp"
+  expect_scan 'a dead glob under a quoted "paths": key is reported end-to-end' \
+"$(printf 'PATTERN\tdead\trz/**')" \
+"$(extract_paths_keys "$quoted_key_tmp")"
+  rm -f "$quoted_key_tmp"
 
   return $rc
 }

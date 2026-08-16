@@ -83,6 +83,8 @@ hashing that follows. Judge it by the wall time above, not by the warnings.
 ## Running it
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"   # proto CLIs (moon, actionlint) aren't
+                                                            # on a default shell PATH
 moon run repo:actionlint      # via Moon, as CI does
 ci/actionlint/run.sh          # directly, bypassing the Moon cache
 ci/actionlint/run.sh --self-test   # the three fixture tables only, for fast iteration
