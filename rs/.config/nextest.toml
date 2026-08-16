@@ -78,8 +78,16 @@ retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s"
 # the settings it names.
 test-group = 'docker-containers'
 
-# `.moon/tasks.yml` sets `taskOptions.outputStyle: 'buffer-only-failure'`, so a task that goes
-# green-with-flakes prints NOTHING — the FLAKY signal this design's safety argument depends on is
-# otherwise invisible in CI. Task 5 adds the ci.yml step that uploads this report as an artifact.
-[profile.default.junit]
+# JUnit lives on a DEDICATED profile, not on `default`, because nextest resolves the report path
+# relative to the workspace `target/` — so every `cargo nextest` in the workspace would otherwise
+# write the same `target/nextest/default/junit.xml` and clobber the others. One `moon ci` run
+# invokes nextest 15+ times concurrently (a `:test` per Rust crate, plus repo:nats-permissions and
+# repo:observability-drift), so a report on `default` would be whichever process finished last —
+# almost never the one we care about. A custom profile gets its own store dir,
+# `target/nextest/iam/`, and INHERITS profile.default's overrides, so the retry budget and the
+# docker-containers group still apply. The policy stays on `default` so a bare `cargo nextest`
+# still gets it (AC2); only the report destination is profile-scoped.
+[profile.iam]
+
+[profile.iam.junit]
 path = 'junit.xml'

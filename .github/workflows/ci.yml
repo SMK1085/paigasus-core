@@ -210,12 +210,20 @@ jobs:
       # absorbed something. Without this artifact there is no way to notice a test degrading from
       # "rare container-startup flake" into a genuine ~50%-failure regression. `if: always()` so
       # it also uploads when the graph fails, which is exactly when it matters most.
+      #
+      # The path is `nextest/iam/`, NOT `nextest/default/`: nextest resolves a profile's JUnit
+      # path relative to the workspace `target/`, so a report on `default` would be clobbered —
+      # one `moon ci` run invokes nextest 15+ times concurrently (a `:test` per Rust crate, plus
+      # repo:nats-permissions and repo:observability-drift), all writing `nextest/default/` if
+      # they all used the default profile. paigasus-iam's `test` task runs under a dedicated
+      # `iam` profile (rs/.config/nextest.toml, rs/crates/services/paigasus-iam/moon.yml) so its
+      # report lands in its own store dir and survives every other crate's concurrent run.
       - name: Upload nextest JUnit report (flaky-test visibility)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: nextest-junit
-          path: rs/target/nextest/default/junit.xml
+          path: rs/target/nextest/iam/junit.xml
           if-no-files-found: ignore
           retention-days: 14
 
