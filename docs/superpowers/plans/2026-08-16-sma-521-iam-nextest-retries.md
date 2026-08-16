@@ -92,6 +92,17 @@ nextest-version = { required = "0.9.136" }
 [test-groups.docker-containers]
 max-threads = 4
 
+# ORDER IS LOad-BEARING. nextest applies "the first override that matches the test and
+# configures the setting" — first-match-wins PER SETTING, evaluated top-to-bottom. The general
+# `kind(test)` override below also matches keycloak_e2e and also sets `retries`, so if it came
+# first this narrower block would never apply and the safeguard would exist only as a comment.
+# Specific before general.
+[[profile.default.overrides]]
+# keycloak_e2e starts a Keycloak with a 240s startup timeout (tests/keycloak_e2e.rs:79). Three
+# attempts of a genuinely failing run would be ~18 minutes against ci.yml's 30-minute budget.
+filter = 'package(=paigasus-iam) and test(keycloak)'
+retries = 1
+
 [[profile.default.overrides]]
 # `=` is an exact-match matcher. Verified that the bare form does NOT match `paigasus-iam-core`
 # either, but the explicit form means no reader has to know the matcher's semantics.
@@ -102,17 +113,14 @@ filter = 'package(=paigasus-iam) and kind(test)'
 # tests/nats_publisher.rs:51-58, where a full-suite run that normally takes 3.7s took 33s under
 # load. A flat 2s backoff would put all three attempts inside that window and absorb nothing.
 retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
+# The keycloak override above deliberately does NOT set `test-group`, so keycloak_e2e still
+# picks up the group from here — precedence is per-setting, so a narrower block only overrides
+# the settings it names.
 test-group = 'docker-containers'
-
-[[profile.default.overrides]]
-# keycloak_e2e starts a Keycloak with a 240s startup timeout (tests/keycloak_e2e.rs:79). Three
-# attempts of a genuinely failing run would be ~18 minutes against ci.yml's 30-minute budget.
-filter = 'package(=paigasus-iam) and test(keycloak)'
-retries = 1
 
 # `.moon/tasks.yml` sets `taskOptions.outputStyle: 'buffer-only-failure'`, so a task that goes
 # green-with-flakes prints NOTHING — the FLAKY signal this design's safety argument depends on is
-# otherwise invisible in CI. ci.yml uploads this file as an artifact.
+# otherwise invisible in CI. Task 5 adds the ci.yml step that uploads this report as an artifact.
 [profile.default.junit]
 path = 'junit.xml'
 ```

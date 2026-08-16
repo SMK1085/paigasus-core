@@ -105,16 +105,22 @@ nextest-version = { required = "0.9.136" }
 [test-groups.docker-containers]
 max-threads = N            # measured (§5); floored at 4 per D5a
 
-[[profile.default.overrides]]
-filter     = 'package(=paigasus-iam) and kind(test)'
-retries    = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
-test-group = 'docker-containers'
-
+# Specific before general — ORDER IS LOAD-BEARING. nextest applies the first override that
+# matches a test AND configures a given setting, evaluated top-to-bottom, per setting. The
+# general block below also matches keycloak_e2e and also sets `retries`, so listing it first
+# would shadow this one entirely and leave the safeguard as a comment with no effect.
 # keycloak_e2e starts a 240s-startup-timeout Keycloak; three attempts of a genuinely failing
 # run would be ~18 minutes against ci.yml's 30-minute job budget. One retry, not two.
 [[profile.default.overrides]]
 filter  = 'package(=paigasus-iam) and test(keycloak)'
 retries = 1
+
+[[profile.default.overrides]]
+filter     = 'package(=paigasus-iam) and kind(test)'
+retries    = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
+# Per-setting precedence means keycloak_e2e still inherits this group — the narrower block
+# above names only `retries`.
+test-group = 'docker-containers'
 
 [profile.default.junit]
 path = 'junit.xml'
