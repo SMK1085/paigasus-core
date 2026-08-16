@@ -337,12 +337,12 @@ cargo's file enumeration). Omitting those is the precise failure
 `release-plz.toml`, workflow edits no longer affect the result, and keeping them
 would have re-keyed a cold cargo build on every unrelated CI tweak.
 
-**Cost is not yet measured.** The `~4s` figure in the first draft was a warm local
-`cargo publish --dry-run`; the real cost in CI is a *cold* verify build in
-`rs/target/package/<crate>-<ver>/target`, which shares nothing with the workspace
-`rs/target` cache, plus a crates.io index fetch. Measured with a cold
-`rs/target/package` (`rm -rf rs/target/package`) on the implementation PR's local
-machine: `time moon run repo:publish-metadata --force` took **2.832s** wall-clock
+**Cost: 2.832s cold, measured locally.** The `~4s` figure in the first draft was a
+warm local `cargo publish --dry-run` and undercounted what actually dominates: a
+*cold* verify build in `rs/target/package/<crate>-<ver>/target`, which shares
+nothing with the workspace `rs/target` cache, plus a crates.io index fetch. Measured
+with a cold `rs/target/package` (`rm -rf rs/target/package`) on the implementation
+PR's local machine: `time moon run repo:publish-metadata --force` took **2.832s** wall-clock
 (only `paigasus-kernel` is publishable today, so this is a one-crate verify build;
 the CI figure may differ with a shared-runner disk and network path to the crates.io
 index). If it proves material against the job's 30-minute budget and
@@ -455,6 +455,15 @@ Run from the repo root with the proto shims on `PATH`.
    :release-parity :release-parity-py :release-parity-ts :publish-metadata
    --base origin/main --include-relations`. `:release-parity` in particular must stay
    green across the `release-plz.toml` edit.
+7. **Executed (Task 6, 2026-08-16), after rebasing onto `origin/main` post-SMA-438**
+   (which added `paigasus-proto-derive` at `publish = false` — Check 0 stayed green,
+   no `EXPECTED_PUBLISHABLE` edit needed). Result: green. `ciReport.json` shows 21
+   actions passed, 5 cached, 9 skipped as not-affected (the requested 21 targets
+   resolved to 14 actual tasks under the moon-ci affected-files model — no crate
+   outside the kernel's dependency edge was touched by this diff), 0 failed.
+   `:release-parity` passed (cached) and `:publish-metadata` passed; the
+   `--negative-control` run separately reported every check red on the mutated
+   fixture and exit 0.
 
 ## Forward notes for SMA-407
 
