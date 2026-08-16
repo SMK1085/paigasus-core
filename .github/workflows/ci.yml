@@ -205,6 +205,20 @@ jobs:
             moon run "${T[@]}"
           fi
 
+      # `.moon/tasks.yml` sets outputStyle: 'buffer-only-failure', so a test task that goes
+      # green-WITH-FLAKES prints nothing at all — the only signal that the SMA-521 retry budget
+      # absorbed something. Without this artifact there is no way to notice a test degrading from
+      # "rare container-startup flake" into a genuine ~50%-failure regression. `if: always()` so
+      # it also uploads when the graph fails, which is exactly when it matters most.
+      - name: Upload nextest JUnit report (flaky-test visibility)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: nextest-junit
+          path: rs/target/nextest/default/junit.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Codegen drift gate (committed generated code matches protos)
         run: |
           moon run contracts:generate
