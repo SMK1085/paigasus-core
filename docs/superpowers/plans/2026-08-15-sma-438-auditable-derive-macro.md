@@ -1100,11 +1100,18 @@ git commit -m "test(ci): assert the paigasus-proto-derive affected-graph edge (S
 ```bash
 git log --oneline origin/main..HEAD
 git diff origin/main --stat
-grep -rn "impl Auditable for" rs/ --include="*.rs"
+grep -rn "impl .*Auditable for" rs/ --include="*.rs" --exclude-dir=paigasus-proto-derive
 ```
 
-Expected: five commits; the diff touches only the files this plan lists; and the `grep` returns
-**no results** — every impl now comes from the derive (spec AC4).
+Expected: the diff touches only the files this plan lists, and the `grep` returns **no results** —
+every impl now comes from the derive (spec AC4).
+
+`--exclude-dir=paigasus-proto-derive` is required, not a convenience: that crate necessarily
+contains `impl … Auditable for …` as literal text — once in the `quote!` template `expand()`
+emits, once in its test's `parse_quote!` reference, and once in a rustdoc line. Anchoring the
+pattern does not help, because the two macro-template occurrences sit at the start of their
+lines. Excluding the crate still covers the rest of the workspace, which is where a hand-written
+impl would actually be the defect this check is looking for.
 
 ---
 
