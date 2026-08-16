@@ -22,5 +22,9 @@ tasks:
   # those very files. build and test already order against it; lint must too, now that SMA-526
   # gives lint `^:build` and puts more Rust tasks in flight at once. Mirrors the ts sibling,
   # which wires contracts:generate into build, typecheck and test.
+  #
+  # Unlike build/test above, this doesn't also spell out `^:build`: it's inherited from
+  # `.moon/tasks/rust.yml`'s lint task and merges in via Moon's append-merge, so the resolved
+  # deps still carry both (asserted by repo:affected-smoke).
   lint:
     deps: ['contracts:generate']

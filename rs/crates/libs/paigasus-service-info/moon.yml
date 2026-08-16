@@ -20,7 +20,12 @@ tasks:
     deps: ['contracts:generate', '^:build']
   test:
     deps: ['contracts:generate', '^:build']
-  # Mirrors build/test: this crate consumes paigasus-proto's generated types, so its lint must not
-  # race `buf generate` either (SMA-526).
+  # Redundant today — `^:build` already orders this behind `paigasus-proto-rs:build`, which
+  # itself depends on `contracts:generate`. Kept to mirror this file's build/test, which carry
+  # the same redundant edge, and to stay correct if that transitive path changes.
+  #
+  # Unlike build/test above, this doesn't also spell out `^:build`: it's inherited from
+  # `.moon/tasks/rust.yml`'s lint task and merges in via Moon's append-merge, so the resolved
+  # deps still carry both (asserted by repo:affected-smoke).
   lint:
     deps: ['contracts:generate']
