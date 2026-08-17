@@ -708,10 +708,16 @@ and add to its `inputs:`:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cd rs && DOCKER_HOST=tcp://127.0.0.1:1 cargo nextest run -p paigasus-iam --test docker_preflight 2>&1 | grep -c "TRY 2"
+cd rs && DOCKER_HOST=tcp://127.0.0.1:1 cargo nextest run -p paigasus-iam --test docker_preflight 2>&1 | grep -c "TRY 3"
 ```
 
-Expected: `1` — exactly one retry, not two.
+Expected: `0` — two attempts only, so there is no third.
+
+Count `TRY 3`, not `TRY 2`: nextest reprints the FINAL attempt's status line in its end-of-run
+summary, so under a correct `retries = 1` the string `TRY 2` legitimately appears twice. `TRY 3`
+is the unambiguous discriminator — it appears only if the general block's `retries = 2` won.
+A second confirmation: a bare `retries = 1` has no backoff, so a correct run prints no `DELAY`
+lines at all, while the general block's exponential backoff always does.
 
 ```bash
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-538
