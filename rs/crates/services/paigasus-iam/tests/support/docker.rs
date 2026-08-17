@@ -118,6 +118,14 @@ pub fn require_docker() -> bool {
 /// It also removes any need to know that `client.rs:259` mis-maps a container-START failure to
 /// `ClientError::Init`: that error carries a daemon RESPONSE, so it lands on the `false` side
 /// structurally.
+///
+/// **The split, plainly:** `true` means "the daemon never answered" (a raw transport error —
+/// socket absent, connection refused/reset/aborted); `false` means "the daemon answered, or we
+/// are misconfigured" — including a request timeout. A timeout is deliberately on the `false`
+/// (failure) side: it cannot distinguish a daemon that is stalled-but-alive under load from one
+/// that never answered at all, and treating it as unreachable would silently skip a real,
+/// diagnosable problem. `PAIGASUS_SKIP_DOCKER` is the escape hatch for a genuinely dead
+/// `DOCKER_HOST`, not this classifier.
 #[allow(dead_code)]
 pub fn is_daemon_unreachable(e: &TestcontainersError) -> bool {
     let TestcontainersError::Client(client) = e else {
@@ -160,15 +168,28 @@ pub fn is_daemon_unreachable(e: &TestcontainersError) -> bool {
         | ClientError::CopyFromContainerError(_) => return false,
     };
 
+    // The split below is "the daemon never answered" (`true`) vs "the daemon answered, or we
+    // are misconfigured" (`false`) — never message text.
     match bollard {
         BollardError::SocketNotFoundError(_) => true,
         // `is_connect()` separates a genuine connect failure from a post-connect protocol error.
         BollardError::HyperLegacyError { err } => err.is_connect(),
-        BollardError::IOError { err } => matches!(
-            err.kind(),
-            ErrorKind::NotFound | ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
-        ),
-        BollardError::RequestTimeoutError => true,
+        // `NotFound` is deliberately absent here. The genuine missing-socket case is
+        // `SocketNotFoundError` above (empirically: a missing unix socket yields "Socket not
+        // found", not an io `NotFound`). What `IOError { NotFound }` actually reaches is the TLS
+        // path: with `DOCKER_TLS_VERIFY` set, a missing `key.pem`/`cert.pem`/`ca.pem` surfaces as
+        // `fs::File::open(path)?` inside `ClientError::Init` — a client misconfiguration against a
+        // healthy daemon, structurally identical to the `PermissionDenied` case below, which this
+        // design already hard-fails deliberately.
+        BollardError::IOError { err } => matches!(err.kind(), ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted),
+        // Deliberately `false`, not `true`. testcontainers sets a 120s per-request timeout
+        // (testcontainers' `bollard_client.rs`) and bollard raises this from a `tokio::time::timeout`
+        // wrapped around the whole request — so it fires on a LIVE daemon whose `create_container`
+        // merely stalled past 120s under load (`rs/.config/nextest.toml` documents runs stretching
+        // to 123.4s under contention). A timeout cannot distinguish "stalled but alive" from "never
+        // answered", so it goes on the failure side: `PAIGASUS_SKIP_DOCKER` is the recourse for a
+        // genuinely blackholed `DOCKER_HOST`, not a silent skip that hides a real slowdown.
+        BollardError::RequestTimeoutError => false,
         // NOT exhaustive here, unlike the match above: several bollard variants are
         // `#[cfg(feature = ...)]`-gated (ssl_providerless, websocket, http, ssh, pipe), so an
         // exhaustive match would stop compiling whenever a feature toggles anywhere in the

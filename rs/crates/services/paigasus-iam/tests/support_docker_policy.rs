@@ -109,3 +109,26 @@ fn copy_to_container_failure_is_not_unreachable() {
     ))));
     assert!(!is_daemon_unreachable(&e));
 }
+
+/// A live but heavily loaded daemon whose `create_container` stalls past testcontainers' 120s
+/// per-request timeout must be a hard failure, not a skip — the timeout cannot tell "stalled but
+/// alive" apart from "never answered", and `rs/.config/nextest.toml` documents container-startup
+/// runs stretching to 123.4s under contention, which is exactly this case, not a dead daemon.
+#[test]
+fn request_timeout_is_not_unreachable() {
+    let e = TestcontainersError::Client(ClientError::CreateContainer(BollardError::RequestTimeoutError));
+    assert!(!is_daemon_unreachable(&e), "a request timeout against a live daemon must never be classified as unreachable");
+}
+
+/// With `DOCKER_TLS_VERIFY` set, a missing `key.pem`/`cert.pem`/`ca.pem` surfaces as
+/// `fs::File::open(path)?` inside `ClientError::Init`, which bollard reports as `IOError { err:
+/// NotFound }` — a client TLS misconfiguration against a healthy daemon, not an absent socket
+/// (the genuine missing-socket case is `SocketNotFoundError`, covered separately). Structurally
+/// identical to the `PermissionDenied` case above: a real, diagnosable failure, not a skip.
+#[test]
+fn missing_tls_cert_file_is_not_unreachable() {
+    let e = TestcontainersError::Client(ClientError::Init(BollardError::IOError {
+        err: IoError::new(ErrorKind::NotFound, "No such file or directory (os error 2)"),
+    }));
+    assert!(!is_daemon_unreachable(&e), "a missing TLS cert file against a healthy daemon must never be classified as unreachable");
+}
