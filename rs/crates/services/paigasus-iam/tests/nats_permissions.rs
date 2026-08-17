@@ -38,10 +38,6 @@ use uuid::Uuid;
 #[path = "support/docker.rs"]
 mod docker;
 
-/// See `tests/nats_publisher.rs` — same load budget, same reasoning: a ceiling on Docker being
-/// slow under contention, not an expectation of how long anything takes.
-const CONTAINER_READY_BUDGET: Duration = Duration::from_secs(90);
-
 /// How long a denial assertion waits for the server's asynchronous refusal. Generous, because the
 /// cost of it being too short is a flake and the cost of it being too long is a slow failure —
 /// the happy path returns as soon as the violation lands.
@@ -138,15 +134,7 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
     }
 
     let node = docker::start_or_skip(image, "nats_permissions").await?;
-
-    let deadline = std::time::Instant::now() + CONTAINER_READY_BUDGET;
-    let port = loop {
-        match node.get_host_port_ipv4(4222).await {
-            Ok(p) => break p,
-            Err(e) if std::time::Instant::now() >= deadline => panic!("nats port was never published within {CONTAINER_READY_BUDGET:?}: {e}"),
-            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-        }
-    };
+    let port = docker::mapped_port(&node, 4222, "nats_permissions").await;
 
     Some(Fixture {
         _node: node,
