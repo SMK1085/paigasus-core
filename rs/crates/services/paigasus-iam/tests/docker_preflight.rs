@@ -11,15 +11,18 @@
 //! So this test FAILS instead. A failure is shown by both. One red, named for the actual
 //! problem, in place of 57 silent greens.
 //!
-//! **These counts are derived, not typed by hand.** Re-derive them from `tests/` before editing
-//! this file, and update all four sites this figure appears at (this doc comment twice, the
-//! assertion message below, and `CLAUDE.md`/`docs/dev-setup.md`'s Docker gotchas):
+//! **These counts are derived, not typed by hand.** Before editing this file, re-derive them
+//! and grep for the NUMBERS themselves, not a fixed word list — a "56 silent" search once
+//! missed this file's own "56 quiet" wording. Update every hit: this doc comment's two
+//! sentences, the assertion message below, `tests/support/docker.rs`'s `start_or_skip` doc
+//! comment (it restates the same fact in the one file that owns the policy), and the
+//! Docker-backed-suites bullets in `CLAUDE.md` and `docs/dev-setup.md`.
 //! `ls *.rs | wc -l` for the total (62); `grep -Ln "start_or_skip\|start_redis_or_skip\|
 //! start_migrated_postgres\|start_raw_postgres" *.rs` for the binaries that never start a
 //! container (currently `grpc_health.rs`, `health.rs`, `support_docker_policy.rs`,
-//! `support_docker_retry.rs` — 4 of them). Docker-backed = total minus that count (58). The
-//! assertion message below subtracts one more, for this binary itself, since when THIS test is
-//! the one reporting red it is not among the suites silently passing (57).
+//! `support_docker_retry.rs` — 4 of them). Docker-backed = total minus that count (58); every
+//! "N silently/quietly pass" occurrence subtracts one more, for whichever binary is the one
+//! reporting red, since it is not among the suites that would otherwise pass unnoticed (57).
 //!
 //! It starts a real Redis rather than pinging the daemon: testcontainers exposes no ping, and
 //! merely constructing a client is not a probe — that succeeds when the endpoint exists with

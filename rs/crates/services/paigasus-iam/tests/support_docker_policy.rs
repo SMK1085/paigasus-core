@@ -6,7 +6,8 @@
 //! `support_docker_retry.rs` does: a `#[cfg(test)]` module inside `docker.rs` would be
 //! silently compiled out (`cfg(test)` is not set when rustc builds an integration-test
 //! binary), and bare `#[tokio::test]` functions inside `docker.rs` would run once per
-//! including binary, duplicating these assertions ~57 times.
+//! including binary — currently 60 of them, `mod support;` or a direct `#[path]` alike —
+//! duplicating these assertions instead of asserting them once, here.
 
 #[path = "support/docker.rs"]
 mod docker;

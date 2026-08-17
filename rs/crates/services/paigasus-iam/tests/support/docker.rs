@@ -194,7 +194,7 @@ pub fn is_daemon_unreachable(e: &TestcontainersError) -> bool {
 /// A skip emits `SKIP[docker-unavailable] {what}: {e}` on stderr. That line is discarded by
 /// nextest on the passing path (`success-output` defaults to `never`) and again by Moon
 /// (`buffer-only-failure`), which is exactly why `tests/docker_preflight.rs` exists: it turns a
-/// Docker-less run into one loud red instead of 56 quiet passes.
+/// Docker-less run into one loud red instead of 57 quiet passes.
 #[allow(dead_code)]
 pub async fn start_or_skip<T, I>(image: T, what: &str) -> Option<ContainerAsync<I>>
 where
