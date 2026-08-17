@@ -17,7 +17,10 @@ use std::time::Duration;
 use testcontainers::Image;
 use testcontainers::bollard::errors::Error as BollardError;
 use testcontainers::core::ContainerAsync;
+use testcontainers::core::ContainerRequest;
 use testcontainers::core::error::{ClientError, TestcontainersError};
+use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::redis::Redis;
 
 /// How long [`mapped_port`] waits for the container runtime to publish a host-side port mapping.
 /// A LOAD BUDGET, not an expectation — it returns on the first success, which on an idle machine
@@ -173,4 +176,57 @@ pub fn is_daemon_unreachable(e: &TestcontainersError) -> bool {
         // Notably this is where `DockerResponseServerError` lands.
         _ => false,
     }
+}
+
+/// The SINGLE definition of what happens when a container will not start (SMA-538).
+///
+/// Ordered rules, first match wins:
+///   1. `Ok` -> `Some(node)`
+///   2. `CI` present -> panic. Docker is mandatory in CI, and `CI` outranks
+///      `PAIGASUS_SKIP_DOCKER` so no workflow-file env var can green a run that tested nothing.
+///   3. `PAIGASUS_SKIP_DOCKER` on -> skip. The escape hatch for a Docker Hub rate limit or a
+///      daemon restart; it outranks REQUIRE because it is the recourse of last resort.
+///   4. `PAIGASUS_REQUIRE_DOCKER` on -> panic.
+///   5. daemon unreachable -> skip.
+///   6. otherwise -> panic. A container that failed with a REACHABLE daemon is a real failure,
+///      not a reason to skip (AC 2).
+///
+/// A skip emits `SKIP[docker-unavailable] {what}: {e}` on stderr. That line is discarded by
+/// nextest on the passing path (`success-output` defaults to `never`) and again by Moon
+/// (`buffer-only-failure`), which is exactly why `tests/docker_preflight.rs` exists: it turns a
+/// Docker-less run into one loud red instead of 56 quiet passes.
+#[allow(dead_code)]
+pub async fn start_or_skip<T, I>(image: T, what: &str) -> Option<ContainerAsync<I>>
+where
+    T: Into<ContainerRequest<I>> + Send,
+    I: Image,
+{
+    match image.start().await {
+        Ok(node) => Some(node),
+        Err(e) => {
+            if std::env::var_os("CI").is_some() {
+                panic!("{what}: Docker is required in CI: {e}");
+            }
+            if skip_docker() {
+                eprintln!("SKIP[docker-unavailable] {what}: {e}");
+                return None;
+            }
+            if require_docker() {
+                panic!("{what}: PAIGASUS_REQUIRE_DOCKER is set and Docker is unusable: {e}");
+            }
+            if is_daemon_unreachable(&e) {
+                eprintln!("SKIP[docker-unavailable] {what}: {e}");
+                return None;
+            }
+            panic!("{what}: the Docker daemon is reachable but the container failed to start, which is a real failure, not a reason to skip. Set PAIGASUS_SKIP_DOCKER=1 to skip anyway: {e}");
+        }
+    }
+}
+
+/// An ephemeral Redis plus its connection URL — the shape six suites each hand-rolled.
+#[allow(dead_code)]
+pub async fn start_redis_or_skip(what: &str) -> Option<(ContainerAsync<Redis>, String)> {
+    let node = start_or_skip(Redis::default(), what).await?;
+    let port = mapped_port(&node, 6379, "redis").await;
+    Some((node, format!("redis://127.0.0.1:{port}")))
 }
