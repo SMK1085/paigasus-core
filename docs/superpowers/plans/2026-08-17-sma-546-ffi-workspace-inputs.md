@@ -802,7 +802,7 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-546
 # A no-op whitespace touch is enough — the file's CONTENT hash is what Moon keys on.
 printf '\n' >> rs/Cargo.lock
-git add rs/Cargo.lock && git commit -m "chore(repo): temporary lockfile touch for SMA-546 verification" --no-verify
+git add rs/Cargo.lock && git commit -m "chore(repo): temporary lockfile touch for SMA-546 verification"
 moon ci :build :test :lint --base HEAD~1 --include-relations
 python3 -c '
 import json
@@ -871,7 +871,7 @@ The spec's `+21s` is a sequential lower bound. Measure the real thing, cold:
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 rm -rf .moon/cache && (cd rs && cargo clean)
 printf '\n' >> rs/Cargo.lock
-git add rs/Cargo.lock && git commit -m "chore(repo): temporary lockfile touch for SMA-546 cost measurement" --no-verify
+git add rs/Cargo.lock && git commit -m "chore(repo): temporary lockfile touch for SMA-546 cost measurement"
 /usr/bin/time -l moon ci :build :test :lint --base HEAD~1 --include-relations 2>&1 | tail -20
 du -sh rs/target
 du -sh rs/target/wasm32-unknown-unknown 2>/dev/null || echo "no wasm32 dir"
