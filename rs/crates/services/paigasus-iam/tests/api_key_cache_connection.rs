@@ -18,10 +18,11 @@
 //! pins the predicate; `AppState::new` passes the dialled handle straight into
 //! `RedisApiKeyCache::from_connection` on the next line.
 //!
-//! Runs against ephemeral Postgres + Redis in Docker. Postgres's CI-hard-fail/local-skip
-//! gating is `support::start_migrated_postgres`'s own; Redis's lives once in
-//! `tests/support/docker.rs` (SMA-538): a container failure with a reachable daemon is a hard
-//! failure, an unreachable daemon skips locally and reds in CI.
+//! Runs against ephemeral Postgres + Redis in Docker. Both Postgres's and Redis's
+//! CI-hard-fail/local-skip gating go through the same policy, `tests/support/docker.rs`'s
+//! `start_or_skip` (SMA-538) — `support::start_migrated_postgres` calls it too, it does not
+//! restate it: a container failure with a reachable daemon is a hard failure, an unreachable
+//! daemon skips locally and reds in CI.
 
 mod support;
 
