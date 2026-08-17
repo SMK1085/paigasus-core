@@ -337,35 +337,47 @@ tasks:
 
   iam-docker-policy-single-site:
     description: 'Assert the Docker-unavailable decision exists exactly once, in tests/support/docker.rs, so a new container-backed suite cannot hand-roll copy #12 (SMA-538).'
-    # WHAT IS GATED: reading the `CI` environment variable anywhere under this crate's tests/
-    # except in the one file that owns the policy. That read is the tell — every one of the 11
-    # copies SMA-538 removed was `if std::env::var_os("CI").is_some() { panic!(..) }` followed by
-    # an `eprintln!` and a `return None`.
+    # WHAT IS GATED — two independent tells, both under this crate's tests/, both expected to
+    # appear ONLY in the one file that owns the policy:
     #
-    # Three alternatives are matched: `var_os("CI")` and `env::var("CI")` are the runtime reads
-    # the removed copies used; `option_env!("CI")` is a compile-time read of the same variable —
-    # not a perfect substitute (baked in at build time, not read per-process) but standard and
-    # discoverable enough that a well-meaning author reaching for "check if CI is set" could land
-    # on it instead of the neighbouring `std::env::var_os` idiom. Covering it costs one
-    # alternation; not covering it would let copy #12 through under a different macro name, which
-    # defeats the point of a durability gate. A whitespace-padded call, e.g.
-    # `std::env::var_os( "CI" )`, is a KNOWN, deliberately-uncovered gap — not missed, just not
-    # worth chasing here, because `cargo fmt --check` is a separate mandatory gate on the same PR
-    # and would reject that spacing regardless.
+    #   1. Reading the `CI` environment variable. Every one of the 11 copies SMA-538 removed was
+    #      `if std::env::var_os("CI").is_some() { panic!(..) }` followed by an `eprintln!` and a
+    #      `return None`. Three alternatives are matched: `var_os("CI")` and `var("CI")` are the
+    #      runtime reads the removed copies used — `var\("CI"\)` is unprefixed on purpose so it
+    #      also catches a bare `use std::env::var; var("CI")` import, not only the fully
+    #      qualified `env::var("CI")` form; `option_env!("CI")` is a compile-time read of the
+    #      same variable — not a perfect substitute (baked in at build time, not read per-process)
+    #      but standard and discoverable enough that a well-meaning author reaching for "check if
+    #      CI is set" could land on it instead of the neighbouring `std::env::var_os` idiom.
+    #      Covering it costs one alternation; not covering it would let copy #12 through under a
+    #      different macro name, which defeats the point of a durability gate. A whitespace-padded
+    #      call, e.g. `std::env::var_os( "CI" )`, is a KNOWN, deliberately-uncovered gap — not
+    #      missed, just not worth chasing here, because `cargo fmt --check` is a separate
+    #      mandatory gate on the same PR and would reject that spacing regardless.
+    #   2. Importing `AsyncRunner`. Reading `CI` is only how the 11 original copies happened to be
+    #      written — the actual decision is "does this suite skip on its own instead of calling
+    #      `start_or_skip`", and a new suite could do that unconditionally
+    #      (`let Ok(node) = image.start().await else { return; };`) without ever touching `CI`,
+    #      evading term 1 and passing in CI too. The consolidation made a tighter term possible:
+    #      `AsyncRunner` (which `.start()` needs to be in scope) now appears in exactly one place.
+    #      Matched as `use .*runners::AsyncRunner` — the IMPORT, not `.start()` itself:
+    #      `nats_publisher.rs` legitimately calls `ContainerAsync::start` to restart an
+    #      already-created container, and gating bare `.start()` would collide with that.
     #
     # Modelled on repo:redis-connect-single-site, including its two portability lessons: do NOT
     # anchor paths on `^\./` (GNU grep emits the prefix, ugrep strips it), and filter comment
-    # lines by CONTENT (`:[0-9]+:[[:space:]]*//`) so prose may still name the variable.
+    # lines by CONTENT (`:[0-9]+:[[:space:]]*//`) so prose may still name the variable or the API
+    # (e.g. `nats_publisher.rs`'s two `AsyncRunner::start` doc-comment mentions).
     #
     # The control — `expected` must be non-empty — is what catches a pattern typo or a rename:
-    # without it both greps could go empty and the gate would pass while guarding nothing.
+    # without it all greps could go empty and the gate would pass while guarding nothing.
     script: |
       cd rs/crates/services/paigasus-iam
-      hits="$(grep -rnE 'var_os\("CI"\)|env::var\("CI"\)|option_env!\("CI"\)' tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      hits="$(grep -rnE 'var_os\("CI"\)|var\("CI"\)|option_env!\("CI"\)|use .*runners::AsyncRunner' tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
       expected="$(printf '%s\n' "$hits" | grep -E '^tests/support/docker\.rs:' || true)"
       offenders="$(printf '%s\n' "$hits" | grep -vE '^tests/support/docker\.rs:' | grep -v '^$' || true)"
       if [ -z "$expected" ]; then
-        echo "no CI check found in tests/support/docker.rs — the guard is not guarding anything (moved? renamed?)" >&2
+        echo "no CI check or AsyncRunner import found in tests/support/docker.rs — the guard is not guarding anything (moved? renamed?)" >&2
         exit 2
       fi
       if [ -n "$offenders" ]; then
