@@ -53,3 +53,11 @@ tasks:
       # input only — it does NOT make this project affected by a corpus-only edit (see affected-smoke
       # parity-oneway).
       - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
+      #
+      # Workspace-level Rust files (SMA-546) — see ts/packages/paigasus-kernel/moon.yml's `build`
+      # for the full rationale. `--reinstall-package` forces maturin to relink the cdylib, so this
+      # task's result depends on the resolution these files pin.
+      - '/rs/Cargo.lock'
+      - '/rs/Cargo.toml'
+      - '/rs/rust-toolchain.toml'
+      - '/.prototools'
