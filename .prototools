@@ -2,6 +2,7 @@
 # 0.18.0, moonrepo/plugins#151) supports [platform.*.arch] overrides — without this floor
 # the Linux-aarch64 fix in .proto/plugins/{buf,lefthook}.toml is silently inert. (SMA-411)
 proto = "0.58.1"
+actionlint = "1.7.12"
 buf = "1.70.0"
 cargo-deny = "0.19.8"
 cargo-machete = "0.9.2"
@@ -24,6 +25,7 @@ pnpm = "11.3.0"
 uv = "0.11.16"
 
 [plugins]
+actionlint = "file://./.proto/plugins/actionlint.toml"
 buf = "file://./.proto/plugins/buf.toml"
 cargo-deny = "file://./.proto/plugins/cargo-deny.toml"
 cargo-machete = "file://./.proto/plugins/cargo-machete.toml"

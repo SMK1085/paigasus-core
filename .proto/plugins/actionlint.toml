@@ -1,0 +1,46 @@
+# Vendored proto TOML plugin for actionlint (SMA-525).
+#
+# Resolves official, checksummed rhysd/actionlint GitHub release assets. Same vendoring
+# rationale as buf/cargo-deny/promtool: a static schema over official release assets —
+# nothing upstream to maintain.
+#
+# Assets are tarballs (zip on Windows) whose binary sits at the ARCHIVE ROOT, so unlike
+# promtool and cargo-deny — whose binaries nest one directory deep — NO `exe-path` is needed
+# on any platform. Closest shape here is osv-scanner (bare payload, global arch remap).
+#
+# actionlint names assets with Go's GOOS/GOARCH: actionlint_{version}_{linux,darwin,windows}_
+# {amd64,arm64}. proto's default {arch} tokens are Rust triples (x86_64/aarch64), so BOTH
+# arches need remapping. There is no per-OS naming divergence, so a single global
+# [install.arch] covers every platform and no [platform.*.arch] override is required (which
+# is what the SMA-411 proto floor exists for — irrelevant here).
+#
+# Tags are "v"-prefixed (v1.7.12) while asset filenames embed the BARE version — the promtool
+# shape. The checksum filename interpolates {version} (precedent: cargo-deny, cargo-machete,
+# cargo-nextest), unlike promtool/osv-scanner whose checksum assets have static names.
+
+name = "actionlint"
+type = "cli"
+
+[platform.linux]
+download-file = "actionlint_{version}_linux_{arch}.tar.gz"
+checksum-file = "actionlint_{version}_checksums.txt"
+
+[platform.macos]
+download-file = "actionlint_{version}_darwin_{arch}.tar.gz"
+checksum-file = "actionlint_{version}_checksums.txt"
+
+[platform.windows]
+download-file = "actionlint_{version}_windows_{arch}.zip"
+checksum-file = "actionlint_{version}_checksums.txt"
+
+[install]
+download-url = "https://github.com/rhysd/actionlint/releases/download/v{version}/{download_file}"
+checksum-url = "https://github.com/rhysd/actionlint/releases/download/v{version}/{checksum_file}"
+
+# Go GOARCH naming; uniform across all three OSes.
+[install.arch]
+x86_64 = "amd64"
+aarch64 = "arm64"
+
+[resolve]
+git-url = "https://github.com/rhysd/actionlint"
