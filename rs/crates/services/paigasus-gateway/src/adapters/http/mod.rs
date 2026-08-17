@@ -101,6 +101,11 @@ pub fn router(state: AppState) -> Router {
         .merge(protected)
         .merge(discovery)
         .layer(paigasus_observability::http_metrics_layer("gateway"))
+        // SMA-504 D10: mirrors IAM's placement exactly — outermost, so an auth rejection is
+        // attributable. Note this router DOES include /healthz and /readyz (unlike IAM's, which
+        // merges them above `app_routes`), so they carry ids here; harmless and not worth
+        // diverging the two services' composition for.
+        .layer(paigasus_observability::CorrelationLayer)
         .with_state(state)
 }
 
@@ -293,5 +298,23 @@ mod tests {
         let req = Request::builder().method("POST").uri("/v1/chat/completions").body(Body::from("{}")).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// SMA-504 D10: the correlation layer attaches where `http_metrics_layer` attaches, so every
+    /// API response carries both ids — including a 401 from the auth middleware.
+    #[tokio::test]
+    async fn every_api_response_carries_both_ids() {
+        // `UnusedIam` panics if reached — the missing-bearer 401 rejects before any IAM call, so
+        // this also proves the correlation layer sits OUTSIDE the auth middleware (not inside it).
+        let app = router(state_with_iam(Arc::new(UnusedIam)));
+        // No credential: `require_iam_auth` rejects at the middleware, before any handler.
+        let resp = app
+            .oneshot(axum::http::Request::builder().method("POST").uri("/v1/chat/completions").body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+        assert!(resp.headers().contains_key("paigasus-request-id"));
+        assert!(resp.headers().contains_key("paigasus-correlation-id"));
+        assert_eq!(resp.headers()["paigasus-retryable"], "false", "a 401 is not retryable");
     }
 }
