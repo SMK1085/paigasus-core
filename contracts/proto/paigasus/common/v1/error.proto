@@ -33,11 +33,13 @@ package paigasus.common.v1;
 // Sub-group banners below are documentation only and carry no numbering
 // meaning; a new IAM code takes the next free number in 1-299.
 //
-// ErrorInfo.metadata additionally carries two standard keys, populated by
-// SMA-504: `retryable` and `correlation_id`. They are prose here, not
-// enumerated: metadata is an open map, not a closed vocabulary consumers branch
-// on exhaustively. The append-only guarantee above covers reasons and domains
-// ONLY, not metadata keys.
+// ErrorInfo.metadata carries these standard keys, populated by SMA-504:
+// `retryable` (exactly "true" | "false" | "unknown"), `correlation_id` and
+// `request_id` (present only when the error was produced inside a request
+// scope), and `capability` (only on ERROR_REASON_CAPABILITY_DISABLED). They
+// are prose here, not enumerated: metadata is an open map, not a closed
+// vocabulary consumers branch on exhaustively. The append-only guarantee
+// above covers reasons and domains ONLY, not metadata keys.
 
 // The service that produced an error. Not emitted on the gateway's
 // OpenAI-compatible envelope, which has no domain field and carries only
@@ -155,6 +157,10 @@ enum ErrorReason {
   ERROR_REASON_UPSTREAM_TIMEOUT = 306;
   // "upstream-error" — a streamed response failed mid-flight.
   ERROR_REASON_UPSTREAM_ERROR = 307;
+  // "streaming-disabled" — streamed completions are refused by configuration.
+  // A request-PARAMETER refusal (400, param "stream"), not a route-level
+  // capability gate — see ERROR_REASON_CAPABILITY_DISABLED for that.
+  ERROR_REASON_STREAMING_DISABLED = 308;
 
   // ---- Shared (900-999) ----------------------------------------------------
   // Any domain may emit these; `domain` is what distinguishes them.
@@ -166,4 +172,12 @@ enum ErrorReason {
   ERROR_REASON_INVALID_REQUEST_BODY = 901;
   // "request-too-large" — request body exceeded the configured byte limit.
   ERROR_REASON_REQUEST_TOO_LARGE = 902;
+  // "missing-auth-context" — the enforcement layer admitted a request without
+  // attaching an authenticated context. An internal invariant violation,
+  // surfaced as a distinct diagnostic rather than a bare unauthenticated.
+  ERROR_REASON_MISSING_AUTH_CONTEXT = 903;
+  // "capability-disabled" — the RPC belongs to a capability this deployment
+  // has switched off. The capability name rides in
+  // ErrorInfo.metadata["capability"], so a new capability needs no new reason.
+  ERROR_REASON_CAPABILITY_DISABLED = 904;
 }
