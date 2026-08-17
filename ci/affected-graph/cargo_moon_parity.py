@@ -25,6 +25,17 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+class MoonOutputError(RuntimeError):
+    """Moon's query output did not have the shape this gate requires.
+
+    Raised — never returned as a violation row — when moon reports a task with neither a `command`
+    nor a `script`. That is "moon told us nothing", which must abort as an infrastructure error
+    (rc 2) rather than be folded into an assertion failure, exactly as A4 treats an absent
+    `inputFiles` key. A moon upgrade that reshapes the task object must fail loudly, not quietly
+    stop asserting.
+    """
+
+
 # Exceptions meaning "the inputs or environment are broken", NOT "the graph regressed". main() maps
 # these to rc 2 so run.sh aborts, instead of folding them into SUITE_RC as an assertion failure.
 # tomllib.TOMLDecodeError subclasses ValueError, not OSError, so it has to be named explicitly — the
@@ -34,6 +45,7 @@ INFRA_ERRORS = (
     json.JSONDecodeError,
     tomllib.TOMLDecodeError,
     OSError,
+    MoonOutputError,
 )
 
 # (consumer, upstream) -> why this hand-declared Moon edge has no Cargo backing.
@@ -54,6 +66,38 @@ NON_CARGO_PARENTS = {"contracts"}
 # schedules no crate task at all. Paths are workspace-relative, exactly as Moon RESOLVES them:
 # the YAML says `/rs/Cargo.lock`, `moon query projects` reports `rs/Cargo.lock`.
 WORKSPACE_LINT_INPUTS = ("rs/Cargo.lock", "rs/Cargo.toml", "rs/rust-toolchain.toml")
+
+# SMA-546 — A5. The tasks that COMPILE the FFI cdylibs live in the ts/py stacks, so A4's
+# per-crate loop cannot reach them: `moon query projects` lists them under their own project ids,
+# not under any Rust crate. They must key on the same workspace files as `lint`, plus `.prototools`
+# — which pins `wasm-pack` and is therefore the OTHER half of the rs/Cargo.toml:90-97 invariant
+# ("the pinned wasm-pack must support that 0.2.z — bump the two together").
+FFI_TASK_INPUTS = WORKSPACE_LINT_INPUTS + (".prototools",)
+
+# Substrings that mean "this task shells out to a Rust build". Matched against the task's resolved
+# `command` + `args` + `script` joined — NOT `command` alone: measured on moon 2.3.2, a
+# command-form task reports command='cargo' with the verb in args (paigasus-kernel-rs:lint ->
+# args=['clippy', '--locked', ...], script=None), so a `command: 'napi'` + `args: ['build', ...]`
+# task would be invisible to a command-only scan.
+#
+# `maturin` is FORWARD-LOOKING and matches nothing today: the string appears only in
+# py/packages/paigasus-kernel/moon.yml COMMENTS, and the resolved script is
+# `uv sync --reinstall-package paigasus-py-bindings`. It is kept so a future direct maturin
+# invocation is covered on day one. Do not mistake it for measured coverage.
+FFI_MARKERS = ("napi build", "wasm-pack", "maturin", "--reinstall-package")
+
+# The floor. A5's derived set is its strength (a fourth FFI task is covered the day it is added —
+# SMA-524's "a MISSING case is how the bug survived" lesson) and also its weakness: a derived set
+# that shrinks to EMPTY asserts nothing while still printing PASS. Moving an invocation behind a
+# package.json script, `--reinstall-package` becoming `--refresh-package`, or a moon upgrade
+# renaming the `script` key would each do that silently. A4's "absent inputFiles is a violation"
+# rule does NOT protect against it — when nothing matches, inputFiles is never consulted.
+# So: every task named here MUST be in the derived set, or A5 fails.
+REQUIRED_FFI_TASKS = (
+    "paigasus-kernel-py:test",
+    "paigasus-kernel-ts:build",
+    "paigasus-kernel-ts:test",
+)
 
 
 def _allowlisted(allow, consumer, upstream):
@@ -149,6 +193,52 @@ def check_lint_inputs(projects, crates, required=WORKSPACE_LINT_INPUTS):
     return a4
 
 
+def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASKS):
+    """Return the A5 violation list: FFI-compiling tasks that do not key on the workspace files.
+
+    Two halves, and both are load-bearing:
+
+    * DERIVED — any task whose resolved invocation matches an FFI marker must declare `required`.
+      This is what covers a future fourth binding task on the day it is added.
+    * FLOOR — every task in `floor` must appear in the derived set. Without this a derivation that
+      silently stops matching (a renamed flag, an invocation moved behind a wrapper script, a moon
+      upgrade dropping `script`) degrades to an empty set and a vacuous PASS.
+
+    Raises MoonOutputError if a task exposes neither a command nor a script.
+    """
+    matched, a5 = set(), []
+    for pid in sorted(projects):
+        invocations = projects[pid].get("invocations") or {}
+        declared = projects[pid].get("task_inputs") or {}
+        for name in sorted(invocations):
+            blob = invocations[name]
+            if blob is None:
+                raise MoonOutputError(
+                    f"{pid}:{name} reported neither a `command` nor a `script` — moon's output "
+                    f"shape changed, so A5 cannot be evaluated"
+                )
+            if not any(marker in blob for marker in FFI_MARKERS):
+                continue
+            target = f"{pid}:{name}"
+            matched.add(target)
+            resolved = declared.get(name)
+            if resolved is None:
+                a5.append(
+                    f"{target} reported no `inputFiles` — moon's output shape changed, so this "
+                    f"assertion cannot be evaluated (treated as a violation, never skipped)"
+                )
+                continue
+            missing = [f for f in required if f not in resolved]
+            if missing:
+                a5.append(f"{target} inputs omit {', '.join(missing)}")
+    for target in sorted(set(floor) - matched):
+        a5.append(
+            f"{target} is not matched by any FFI marker — the derived set no longer covers it, "
+            f"so A5 would assert nothing about it (see FFI_MARKERS)"
+        )
+    return a5
+
+
 def moon_projects():
     """Moon's own resolved graph. Never parse moon.yml — Moon already resolved it.
 
@@ -164,6 +254,7 @@ def moon_projects():
     for p in json.loads(out)["projects"]:
         tasks = {}
         task_inputs = {}
+        invocations = {}
         for name, task in (p.get("tasks") or {}).items():
             tasks[name] = [
                 d if isinstance(d, str) else d.get("target")
@@ -176,11 +267,21 @@ def moon_projects():
             # self_test()'s json round-trip deep-copy keeps working.
             raw = task.get("inputFiles")
             task_inputs[name] = None if raw is None else sorted(raw.keys())
+            # A5 (SMA-546): the text A5 marker-matches against. Joined from all three fields
+            # because moon splits an invocation differently per task form — command-form puts the
+            # verb in `args` (command='cargo', args=['clippy', ...]), script-form puts it in
+            # `script` (command='touch', script='touch ... && napi build ...'). None when moon
+            # reported neither, which check_ffi_inputs escalates to an infra error.
+            parts = [task.get("command") or "", task.get("script") or ""]
+            parts += [str(a) for a in (task.get("args") or [])]
+            joined = " ".join(p for p in parts if p)
+            invocations[name] = joined or None
         projects[p["id"]] = {
             "source_dir": p["source"],
             "deps": {d["id"]: d.get("source") for d in (p.get("dependencies") or [])},
             "tasks": tasks,
             "task_inputs": task_inputs,
+            "invocations": invocations,
         }
     return projects
 
@@ -327,6 +428,80 @@ def self_test():
     if not any("inputFiles" in row for row in check_lint_inputs(broken, crates)):
         failures.append("A4 did not fire when moon reported no inputFiles")
 
+    # A5 (SMA-546): the FFI build tasks must key on the workspace files. Fixture mirrors the real
+    # shape — a ts project whose `build` shells out to napi + wasm-pack.
+    ffi_ok = {
+        "paigasus-kernel-ts": {
+            "source_dir": "ts/packages/paigasus-kernel",
+            "deps": {},
+            "tasks": {"build": [], "test": []},
+            "task_inputs": {
+                "build": list(FFI_TASK_INPUTS),
+                "test": list(FFI_TASK_INPUTS),
+            },
+            "invocations": {
+                "build": "touch ... && napi build --platform && wasm-pack build .",
+                "test": "touch ... && napi build --platform && wasm-pack build .",
+            },
+        },
+        "paigasus-kernel-py": {
+            "source_dir": "py/packages/paigasus-kernel",
+            "deps": {},
+            "tasks": {"test": []},
+            "task_inputs": {"test": list(FFI_TASK_INPUTS)},
+            "invocations": {"test": "uv sync --reinstall-package paigasus-py-bindings"},
+        },
+        "unrelated-ts": {
+            "source_dir": "ts/packages/unrelated",
+            "deps": {},
+            "tasks": {"build": []},
+            "task_inputs": {"build": []},
+            "invocations": {"build": "tsc --noEmit"},
+        },
+    }
+    ffi_floor = ("paigasus-kernel-py:test", "paigasus-kernel-ts:build", "paigasus-kernel-ts:test")
+
+    if check_ffi_inputs(ffi_ok, floor=ffi_floor):
+        failures.append("A5 reported violations on the clean fixture")
+
+    # Fires when a matched task omits one of the required files.
+    broken = json.loads(json.dumps(ffi_ok))
+    broken["paigasus-kernel-ts"]["task_inputs"]["build"] = [
+        "rs/Cargo.lock", "rs/Cargo.toml", "rs/rust-toolchain.toml"
+    ]
+    rows = check_ffi_inputs(broken, floor=ffi_floor)
+    if not rows:
+        failures.append("A5 did not fire on a missing FFI workspace input")
+    elif not any(".prototools" in row for row in rows):
+        failures.append("A5 fired but did not name the missing file")
+
+    # THE ANTI-VACUITY ROW. Neuter the marker match (as a package.json indirection or a renamed
+    # uv flag would) and A5's derived set empties. Without the floor this reports PASS while
+    # asserting nothing — the exact silent-degradation mode the floor exists to stop.
+    broken = json.loads(json.dumps(ffi_ok))
+    for task in ("build", "test"):
+        broken["paigasus-kernel-ts"]["invocations"][task] = "pnpm run build:native"
+    rows = check_ffi_inputs(broken, floor=ffi_floor)
+    if not any("not matched by any FFI marker" in row for row in rows):
+        failures.append("A5 did not fire when a required FFI task stopped matching the markers")
+
+    # A task exposing NEITHER a command NOR a script is moon telling us nothing — infra (rc 2),
+    # not an assertion failure. Mirrors A4's absent-inputFiles rule.
+    broken = json.loads(json.dumps(ffi_ok))
+    broken["paigasus-kernel-ts"]["invocations"]["build"] = None
+    try:
+        check_ffi_inputs(broken, floor=ffi_floor)
+    except MoonOutputError:
+        pass
+    else:
+        failures.append("A5 did not raise infra on a task with no command and no script")
+
+    # A matched task that is NOT in the floor is still asserted — this is the derived half.
+    broken = json.loads(json.dumps(ffi_ok))
+    broken["unrelated-ts"]["invocations"]["build"] = "wasm-pack build ."
+    if not any("unrelated-ts:build" in row for row in check_ffi_inputs(broken, floor=ffi_floor)):
+        failures.append("A5 did not assert a newly-matched task outside the floor")
+
     # A malformed Cargo.toml must surface as INFRA (rc 2), not as an assertion failure. Exercise the
     # whole chain on a throwaway workspace — parser raises, cargo_crates propagates, INFRA_ERRORS
     # catches — so narrowing that tuple fails here instead of silently relabelling a broken manifest
@@ -348,7 +523,7 @@ def self_test():
     if failures:
         print("negative-control FAILED: the parity gate can pass vacuously", file=sys.stderr)
         return 1
-    print("  OK   [parity] all four assertions fire on synthetic violations")
+    print("  OK   [parity] all five assertions fire on synthetic violations")
     return 0
 
 
@@ -365,11 +540,12 @@ def main():
 
     a1, a2, a3 = check(projects, crates)
     a4 = check_lint_inputs(projects, crates)
-    if not (a1 or a2 or a3 or a4):
+    a5 = check_ffi_inputs(projects)
+    if not (a1 or a2 or a3 or a4 or a5):
         print(
             f"PASS  {'cargo-moon-parity':<18} -> "
             f"{len(crates)} crates: every Cargo dep has a Moon edge that schedules its build, "
-            f"and every lint keys on the workspace files"
+            f"every lint keys on the workspace files, and every FFI build task does too"
         )
         return 0
 
@@ -390,6 +566,13 @@ def main():
              "    Fix: the inputs are declared once for ALL crates in .moon/tasks/rust.yml —\n"
              "    restore them there, not per-crate. Expected: /rs/Cargo.lock, /rs/Cargo.toml,\n"
              "    /rs/rust-toolchain.toml."),
+        (a5, "an FFI build task does not key on the workspace-level files, so a dependency bump\n"
+             "    replays a CACHED artifact built from a different resolution — and clippy cannot\n"
+             "    cover it, because it never links a cdylib and never targets wasm32 (SMA-546).\n"
+             "    Fix: add /rs/Cargo.lock, /rs/Cargo.toml, /rs/rust-toolchain.toml and\n"
+             "    /.prototools to that task's `inputs`. A `not matched by any FFI marker` row\n"
+             "    means the opposite — the task stopped looking like a Rust build to A5; either\n"
+             "    restore the invocation or update FFI_MARKERS."),
     ):
         if rows:
             print(f"  {title}", file=sys.stderr)
