@@ -12,6 +12,11 @@
 # (`paigasus-kernel.workspace = true`), inline tables, and `package =` renames. That regex reported
 # five sound edges as phantom.
 #
+# It also carries A4 (SMA-534), which is about task INPUTS rather than edges: every crate's `lint`
+# must key on the workspace-level files (Cargo.lock, Cargo.toml, rust-toolchain.toml), since `rs/`
+# has no Moon project for a dependency edge to point at. A4 reads moon's RESOLVED `inputFiles`, so
+# it stays inside the "never parse YAML" rule above.
+#
 # usage: cargo_moon_parity.py [--self-test]
 import json
 import subprocess
@@ -43,6 +48,12 @@ ALLOW_NO_CARGO_BACKING = {
 
 # Build-scope parents injected by a task dep (e.g. `contracts:generate`), never Cargo deps.
 NON_CARGO_PARENTS = {"contracts"}
+
+# SMA-534 — the workspace-level files `lint` must key on. `rs/` has no Moon project, so without
+# these declared on the inherited lint task a Cargo.lock-only change (every Dependabot Cargo PR)
+# schedules no crate task at all. Paths are workspace-relative, exactly as Moon RESOLVES them:
+# the YAML says `/rs/Cargo.lock`, `moon query projects` reports `rs/Cargo.lock`.
+WORKSPACE_LINT_INPUTS = ("rs/Cargo.lock", "rs/Cargo.toml", "rs/rust-toolchain.toml")
 
 
 def _allowlisted(allow, consumer, upstream):
@@ -103,6 +114,41 @@ def check(projects, crates, allow=None):
     return a1, a2, a3
 
 
+def check_lint_inputs(projects, crates, required=WORKSPACE_LINT_INPUTS):
+    """Return the A4 violation list: crates whose `lint` does not key on the workspace files.
+
+    A1-A3 are about dependency EDGES. A4 is about task INPUTS, and the two are independent: a crate
+    can have a flawless edge set and still be structurally blind to a `rs/Cargo.lock` bump, because
+    `rs/` has no Moon project for an edge to point at (SMA-534).
+
+    Iterates EVERY crate unconditionally. It deliberately does not reuse `check()`'s `if want:`
+    guard, which is only reached by crates that have in-tree dependencies: paigasus-kernel,
+    paigasus-logging, paigasus-observability and paigasus-proto-derive have none, so copying that
+    shape would leave four of thirteen unasserted with a green negative control.
+    """
+    by_dir = {p["source_dir"]: mid for mid, p in projects.items()}
+    a4 = []
+    for _crate, info in sorted(crates.items()):
+        mid = by_dir.get(info["source_dir"])
+        if mid is None:
+            continue
+        declared = projects[mid].get("task_inputs") or {}
+        if "lint" not in declared:
+            a4.append(f"{mid} has no `lint` task (nothing can key on the workspace files)")
+            continue
+        resolved = declared["lint"]
+        if resolved is None:
+            a4.append(
+                f"{mid}:lint reported no `inputFiles` — moon's output shape changed, so this "
+                f"assertion cannot be evaluated (treated as a violation, never skipped)"
+            )
+            continue
+        missing = [f for f in required if f not in resolved]
+        if missing:
+            a4.append(f"{mid}:lint inputs omit {', '.join(missing)}")
+    return a4
+
+
 def moon_projects():
     """Moon's own resolved graph. Never parse moon.yml — Moon already resolved it.
 
@@ -117,15 +163,24 @@ def moon_projects():
     projects = {}
     for p in json.loads(out)["projects"]:
         tasks = {}
+        task_inputs = {}
         for name, task in (p.get("tasks") or {}).items():
             tasks[name] = [
                 d if isinstance(d, str) else d.get("target")
                 for d in (task.get("deps") or [])
             ]
+            # `inputFiles` is a path-keyed OBJECT of resolved workspace-relative paths. Preserve the
+            # absent-key case as None rather than collapsing it to []: "moon told us nothing" and
+            # "moon told us there are none" are different defects, and A4 must fire loudly on the
+            # first instead of reporting a confusing missing-file list. Sorted list, not a set, so
+            # self_test()'s json round-trip deep-copy keeps working.
+            raw = task.get("inputFiles")
+            task_inputs[name] = None if raw is None else sorted(raw.keys())
         projects[p["id"]] = {
             "source_dir": p["source"],
             "deps": {d["id"]: d.get("source") for d in (p.get("dependencies") or [])},
             "tasks": tasks,
+            "task_inputs": task_inputs,
         }
     return projects
 
@@ -165,6 +220,7 @@ def self_test():
 
     A gate whose whole value is catching a silent hole must not be able to pass vacuously.
     """
+    complete_inputs = ["rs/Cargo.lock", "rs/Cargo.toml", "rs/rust-toolchain.toml"]
     ok = {
         "a-rs": {
             "source_dir": "rs/crates/libs/a",
@@ -174,11 +230,13 @@ def self_test():
                 "test": ["b-rs:build"],
                 "lint": ["b-rs:build"],
             },
+            "task_inputs": {"build": [], "test": [], "lint": list(complete_inputs)},
         },
         "b-rs": {
             "source_dir": "rs/crates/libs/b",
             "deps": {},
             "tasks": {"build": [], "test": [], "lint": []},
+            "task_inputs": {"build": [], "test": [], "lint": list(complete_inputs)},
         },
     }
     crates = {
@@ -233,6 +291,42 @@ def self_test():
     if check(broken, crates, allow={("a-rs", "ghost-rs"): "a documented reason"})[1]:
         failures.append("A2 fired despite a properly-reasoned allowlist entry")
 
+    # A4 (SMA-534): the workspace-level lint inputs must be DECLARED for every crate. Distinct from
+    # A1-A3, which are about dependency edges — a crate can have a perfect edge set and still be
+    # blind to a Cargo.lock bump.
+    if check_lint_inputs(ok, crates):
+        failures.append("A4 reported violations on the clean fixture")
+
+    # Fires when a required file is missing from the declared inputs.
+    broken = json.loads(json.dumps(ok))
+    broken["a-rs"]["task_inputs"]["lint"] = ["rs/Cargo.lock", "rs/Cargo.toml"]
+    rows = check_lint_inputs(broken, crates)
+    if not rows:
+        failures.append("A4 did not fire on a missing workspace lint input")
+    elif not any("rs/rust-toolchain.toml" in row for row in rows):
+        failures.append("A4 fired but did not name the missing file")
+
+    # Fires for a crate with NO in-tree deps. A3 is guarded by `if want:` and never reaches such a
+    # crate; A4 must not copy that shape, or four of the thirteen real crates go unasserted while
+    # the negative control stays green.
+    broken = json.loads(json.dumps(ok))
+    broken["b-rs"]["task_inputs"]["lint"] = []
+    if not any(row.startswith("b-rs") for row in check_lint_inputs(broken, crates)):
+        failures.append("A4 did not fire for a dep-free crate (it inherited A3's `if want:` guard)")
+
+    # An ABSENT lint task is a different defect from a lint task with incomplete inputs.
+    broken = json.loads(json.dumps(ok))
+    del broken["a-rs"]["task_inputs"]["lint"]
+    if not any("has no `lint` task" in row for row in check_lint_inputs(broken, crates)):
+        failures.append("A4 did not distinguish an absent lint task from incomplete inputs")
+
+    # Moon emitting no `inputFiles` for the task must FIRE, never silently skip: a skip would turn a
+    # moon-version change into a vacuous pass, which is the failure mode this whole gate exists for.
+    broken = json.loads(json.dumps(ok))
+    broken["a-rs"]["task_inputs"]["lint"] = None
+    if not any("inputFiles" in row for row in check_lint_inputs(broken, crates)):
+        failures.append("A4 did not fire when moon reported no inputFiles")
+
     # A malformed Cargo.toml must surface as INFRA (rc 2), not as an assertion failure. Exercise the
     # whole chain on a throwaway workspace — parser raises, cargo_crates propagates, INFRA_ERRORS
     # catches — so narrowing that tuple fails here instead of silently relabelling a broken manifest
@@ -254,7 +348,7 @@ def self_test():
     if failures:
         print("negative-control FAILED: the parity gate can pass vacuously", file=sys.stderr)
         return 1
-    print("  OK   [parity] all three assertions fire on synthetic violations")
+    print("  OK   [parity] all four assertions fire on synthetic violations")
     return 0
 
 
@@ -270,10 +364,12 @@ def main():
         return 2
 
     a1, a2, a3 = check(projects, crates)
-    if not (a1 or a2 or a3):
+    a4 = check_lint_inputs(projects, crates)
+    if not (a1 or a2 or a3 or a4):
         print(
             f"PASS  {'cargo-moon-parity':<18} -> "
-            f"{len(crates)} crates: every Cargo dep has a Moon edge that schedules its build"
+            f"{len(crates)} crates: every Cargo dep has a Moon edge that schedules its build, "
+            f"and every lint keys on the workspace files"
         )
         return 0
 
@@ -288,6 +384,12 @@ def main():
              "    Fix: for `build`/`test`, add '^:build' to the task's `deps` in the consumer's\n"
              "    moon.yml. For `lint` the dep is declared once for ALL crates in\n"
              "    .moon/tasks/rust.yml — restore it there, not per-crate (SMA-526)."),
+        (a4, "`lint` does not key on the workspace-level files, so a dependency bump, a\n"
+             "    [workspace.lints] edit or a toolchain drift schedules NOTHING for this crate\n"
+             "    (SMA-534).\n"
+             "    Fix: the inputs are declared once for ALL crates in .moon/tasks/rust.yml —\n"
+             "    restore them there, not per-crate. Expected: /rs/Cargo.lock, /rs/Cargo.toml,\n"
+             "    /rs/rust-toolchain.toml."),
     ):
         if rows:
             print(f"  {title}", file=sys.stderr)

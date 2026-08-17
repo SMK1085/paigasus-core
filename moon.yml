@@ -116,7 +116,16 @@ tasks:
 
   affected-smoke:
     description: 'Assert the cross-language affected graph still cascades; fail red on a deleted edge or a dropped --include-relations (SMA-409).'
-    script: 'ci/affected-graph/run.sh'
+    # Run the negative control FIRST, mirroring repo:publish-metadata. Without this CI runs only the
+    # real suite, so the self-tests that prove these assertions can FIRE are never executed — a
+    # rotted self-test ships green, taking the repo's only proof-that-the-gate-bites with it
+    # (SMA-526 hit this; SMA-534 adds A4's rows, which are worth exactly nothing unexecuted).
+    # Moon does not enable errexit for `script:` blocks — same latent defect the nats-permissions,
+    # promtool and publish-metadata tasks document — hence the explicit `set -euo pipefail`.
+    script: |
+      set -euo pipefail
+      ci/affected-graph/run.sh --negative-control
+      ci/affected-graph/run.sh
     toolchain: 'system'
     inputs:
       - 'ci/affected-graph/**/*'

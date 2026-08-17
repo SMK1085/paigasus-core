@@ -66,9 +66,12 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   :next-env-drift :wasm-getrandom-free :redis-connect-single-site :promtool :observability-drift
   :nats-permissions :release-parity :release-parity-py :release-parity-ts :publish-metadata
   --base origin/main --include-relations`.
-- A new crate that `dependsOn` `paigasus-kernel-rs` reds `:affected-smoke` until it's added to
-  the `kernel->bindings` expected set in `ci/affected-graph/run.sh` (strict-equality guard,
-  SMA-409). New workspace deps may need `rs/deny.toml` `[licenses] exceptions` or a dev-only
+- A new Rust crate reds `:affected-smoke` until it's added to the `lockfile->all-lint` expected set
+  in `ci/affected-graph/run.sh` — that case lists **every** crate, so **every** new crate changes it
+  (SMA-534) — and, if it `dependsOn` `paigasus-kernel-rs`, to the `kernel->bindings` set as well
+  (strict-equality guard, SMA-409). The parity gate's A4 needs no update: a new crate inherits
+  `lint`'s workspace inputs from `.moon/tasks/rust.yml`. New workspace deps may need
+  `rs/deny.toml` `[licenses] exceptions` or a dev-only
   `[advisories] ignore` (Rust); an npm/pip advisory needs a version bump — a pnpm-workspace
   `overrides:` selector or `uv lock --upgrade-package` — or a justified `osv-scanner.toml`
   waiver; a dep consumed only by a later commit needs a temporary
