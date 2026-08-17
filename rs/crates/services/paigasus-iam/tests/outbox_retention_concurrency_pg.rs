@@ -67,7 +67,7 @@ async fn a_sweep_neither_blocks_on_nor_deletes_a_row_the_relay_holds_locked() {
     // connection borrowed from `db`'s own pool, mirroring `tests/relay_pg.rs`'s hold-open
     // technique but against a distinct connection so there is no ambiguity about which session
     // the lock lives on.
-    let port = node.get_host_port_ipv4(5432).await.unwrap();
+    let port = support::docker::mapped_port(&node, 5432, "postgres (lock holder)").await;
     let holder = Database::connect(format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")).await.unwrap();
     let held = holder.begin().await.unwrap();
     held.execute(Statement::from_string(DbBackend::Postgres, format!(r#"SELECT id FROM "event_outbox" WHERE id = '{live}' FOR UPDATE"#)))
@@ -157,7 +157,7 @@ async fn a_tick_does_not_hang_when_an_access_exclusive_lock_blocks_the_gauge_que
     // A SECOND, independent connection (own pool, own physical session — not one borrowed from
     // `db`'s own pool) takes the SAME lock mode m0009's migration body holds, and keeps it open
     // for the whole tick.
-    let port = node.get_host_port_ipv4(5432).await.unwrap();
+    let port = support::docker::mapped_port(&node, 5432, "postgres (lock holder)").await;
     let holder = Database::connect(format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")).await.unwrap();
     let held = holder.begin().await.unwrap();
     held.execute_unprepared(r#"LOCK TABLE "event_outbox" IN ACCESS EXCLUSIVE MODE"#).await.unwrap();

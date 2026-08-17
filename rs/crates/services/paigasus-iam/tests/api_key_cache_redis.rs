@@ -19,6 +19,11 @@ use testcontainers_modules::testcontainers::ContainerAsync;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use uuid::Uuid;
 
+// This file has no `mod support;` — including `support/docker.rs` directly keeps it that way,
+// pulling in one small standalone file rather than the whole support surface (SMA-521).
+#[path = "support/docker.rs"]
+mod docker;
+
 /// Starts an ephemeral Redis container, returning its connection URL. Same CI-hard-fail /
 /// local-skip gating as `tests/authz_cache_redis.rs`; self-contained here since this file has
 /// no other Redis consumer.
@@ -34,7 +39,7 @@ async fn start_redis() -> Option<(ContainerAsync<Redis>, String)> {
         }
     };
 
-    let port = node.get_host_port_ipv4(6379).await.unwrap();
+    let port = docker::mapped_port(&node, 6379, "redis").await;
     let url = format!("redis://127.0.0.1:{port}");
     Some((node, url))
 }

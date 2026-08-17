@@ -87,6 +87,25 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - Bash tool PATH lacks the proto-managed CLIs; prefix commands with
   `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so moon/uv/buf/nextest resolve to
   the repo-pinned versions (shims first).
+- `paigasus-iam`'s Docker-backed suites get their retry budget and container-concurrency cap from
+  `rs/.config/nextest.toml` (`profile.default`), so **Moon, `moon run …:test`, and a bare
+  `cargo nextest` all pick it up** — but `cargo test` does NOT, since nextest config is
+  nextest-only. Don't add `--retries` to a Moon task or a doc: that recreates the
+  documented-vs-executed split SMA-521 closed. A test that fails every attempt still reds; one
+  that passes on a retry is reported FLAKY. The JUnit report itself is NOT on `profile.default` —
+  nextest resolves a profile's report path relative to the shared workspace `target/`, so `moon
+  ci`'s 15+ concurrent nextest runs would clobber a report left on `default`. It lives on a
+  dedicated `[profile.iam]` instead, selected only by `paigasus-iam-rs:test`'s `args: ['--profile',
+  'iam']` — CI uploads it as the `nextest-junit` artifact, but a bare `cargo nextest run -p
+  paigasus-iam` writes no report at all.
+- `paigasus-iam`'s **Docker-backed** suites silently skip without Docker:
+  `support::start_migrated_postgres()` returns `None` and each test `return`s, reporting a PASS in
+  under a second having run nothing (nextest's skip count does not reveal it, because stderr from
+  a *passing* test is discarded — `success-output` defaults to `never`). Speed alone isn't the
+  tell — a handful of suites in the crate touch no container and are legitimately fast either way.
+  The tell is a fast run made *without* `CI=1`: a genuine Docker-backed pass takes just over a
+  second (measured ~1.1s), never under. Always verify with `CI=1 cargo nextest run -p
+  paigasus-iam`, which makes a missing daemon a hard failure. SMA-538 tracks fixing this properly.
 
 ## Workflow
 

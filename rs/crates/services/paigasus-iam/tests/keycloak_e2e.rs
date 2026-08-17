@@ -91,7 +91,7 @@ async fn keycloak_end_to_end_config_only_oidc() {
 
     // Keycloak issues `iss` from the request host in dev mode, so the config issuer and every
     // call below share this exact `127.0.0.1:{mapped}` form.
-    let https_port = keycloak.get_host_port_ipv4(HTTPS_PORT).await.expect("mapped https port");
+    let https_port = support::docker::mapped_port(&keycloak, HTTPS_PORT, "keycloak https").await;
     let issuer = format!("https://127.0.0.1:{https_port}/realms/{REALM}");
 
     // One reqwest client for the test's own IdP calls, trusting the self-signed cert (the test

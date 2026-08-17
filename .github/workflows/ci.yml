@@ -189,6 +189,17 @@ jobs:
           set -euo pipefail
           moon run ts:check-config-only
 
+      # The Rust cache above restores `rs/target`, which can carry a `junit.xml` written by a
+      # previous run — and `actions/cache` skips saving on a primary-key hit, so that file can be
+      # frozen for dozens of commits. `moon ci` is affected-only, so a PR touching no Rust never
+      # regenerates it, and the upload below would publish a stale report as if it were this run's.
+      # Delete it first: the artifact is then either genuinely from this run, or absent.
+      # The glob must cover EVERY profile that writes a report (`iam`, `iam-nats`), not just the
+      # first — a path added here without a matching delete gets exactly the stale-report bug
+      # this step exists to prevent.
+      - name: Drop any cached nextest JUnit reports (stale-artifact guard)
+        run: rm -f rs/target/nextest/iam*/junit.xml
+
       - name: moon ci (affected graph)
         env:
           EVENT: ${{ github.event_name }}
@@ -204,6 +215,31 @@ jobs:
             # Initial push with no usable base — run the whole graph to warm caches.
             moon run "${T[@]}"
           fi
+
+      # `.moon/tasks.yml` sets outputStyle: 'buffer-only-failure', so a test task that goes
+      # green-WITH-FLAKES prints nothing at all — the only signal that the SMA-521 retry budget
+      # absorbed something. Without this artifact there is no way to notice a test degrading from
+      # "rare container-startup flake" into a genuine ~50%-failure regression. `if: always()` so
+      # it also uploads when the graph fails, which is exactly when it matters most.
+      #
+      # The path is `nextest/iam/`, NOT `nextest/default/`: nextest resolves a profile's JUnit
+      # path relative to the workspace `target/`, so a report on `default` would be clobbered —
+      # one `moon ci` run invokes nextest 15+ times concurrently (a `:test` per Rust crate, plus
+      # repo:nats-permissions and repo:observability-drift), all writing `nextest/default/` if
+      # they all used the default profile. paigasus-iam's `test` task runs under a dedicated
+      # `iam` profile (rs/.config/nextest.toml, rs/crates/services/paigasus-iam/moon.yml) so its
+      # report lands in its own store dir and survives every other crate's concurrent run.
+      - name: Upload nextest JUnit report (flaky-test visibility)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nextest-junit
+          # Glob, because two tasks write reports: paigasus-iam-rs:test under `iam`, and
+          # repo:nats-permissions under `iam-nats`. Separate store dirs so concurrent runs can't
+          # clobber each other; the artifact keeps them apart as iam/ and iam-nats/.
+          path: rs/target/nextest/iam*/junit.xml
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Codegen drift gate (committed generated code matches protos)
         run: |

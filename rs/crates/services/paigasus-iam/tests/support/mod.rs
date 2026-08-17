@@ -58,6 +58,11 @@ use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// Standalone container helpers — see `support/docker.rs`. Declared `pub` so the ~52 files that
+/// carry `mod support;` reach it as `support::docker::*`; the four Redis-only files that have no
+/// `mod support;` include the same file directly via `#[path = "support/docker.rs"]`.
+pub mod docker;
+
 /// Starts an ephemeral Postgres container, connects, and runs migrations.
 ///
 /// Returns `None` when Docker is unavailable and `CI` is unset (local skip path). Panics
@@ -91,7 +96,7 @@ pub async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, Data
 /// handle — `PgOutboxListener::new(url, ..)` and a bare `sqlx::PgListener::connect(&url)` used as
 /// an independent observer of `pg_notify`. Both must reach the SAME database as `db`.
 pub async fn connection_url(pg: &ContainerAsync<Postgres>) -> String {
-    let port = pg.get_host_port_ipv4(5432).await.expect("mapped postgres port");
+    let port = docker::mapped_port(pg, 5432, "postgres").await;
     format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")
 }
 

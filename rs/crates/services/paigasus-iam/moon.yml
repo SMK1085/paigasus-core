@@ -16,4 +16,15 @@ tasks:
   build:
     deps: ['^:build']
   test:
+    # `--profile iam` only changes where the JUnit report is written (target/nextest/iam/), not
+    # the retry or concurrency policy — a custom profile inherits profile.default's overrides.
+    # Without it this crate's report is clobbered by the other crates' concurrent nextest runs.
+    #
+    # Deliberately `args:`, NOT `command:` — Moon's default `mergeArgs: append` strategy appends
+    # a project task's args onto the inherited task's args regardless of what `command:` says, so
+    # redeclaring the full `cargo nextest run --no-tests=pass --profile iam` string here produces
+    # a doubled, broken command (`nextest run --no-tests=pass nextest run --no-tests=pass
+    # --profile iam`) — verified via `moon task paigasus-iam-rs:test --json`. Appending only the
+    # new flags is correct BECAUSE of that same append behavior.
+    args: ['--profile', 'iam']
     deps: ['^:build']
