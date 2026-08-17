@@ -175,8 +175,15 @@ already broken at those six sites today, and fixing it is not this issue's job.
 
 ### 3. The classifier — by type, never by text
 
-Two nested exhaustive matches, no `_` arm at either level (F4 makes this legal and makes
-upstream drift a compile error).
+Two nested matches. The **outer** one over `ClientError` is exhaustive with no `_` arm — F4
+makes this legal, and it is what turns an upstream variant addition into a compile error at the
+one decision that matters (transport versus daemon-answered).
+
+The **inner** one over `bollard::errors::Error` deliberately keeps a `_ => false` arm. Several
+of its ~31 variants are `#[cfg(feature = ...)]`-gated (`ssl_providerless`, `websocket`, `http`,
+`ssh`, `pipe`), so an exhaustive match there would stop compiling whenever a feature flag
+toggles anywhere in the workspace — a brittleness with no safety payoff, because `_ => false`
+already fails **closed**: an unrecognised bollard error becomes a hard failure, never a skip.
 
 ```rust
 pub fn is_daemon_unreachable(e: &TestcontainersError) -> bool {
@@ -212,8 +219,9 @@ pub fn is_daemon_unreachable(e: &TestcontainersError) -> bool {
         ),
         BollardError::RequestTimeoutError => true,
         // DockerResponseServerError, Json*, Str*, Uri*, UnsupportedURIScheme, … — the daemon
-        // spoke, or we are misconfigured. Hard failure.
-        _other_variants_enumerated_explicitly => false,
+        // spoke, or we are misconfigured. Hard failure. Fails CLOSED, so a bollard variant we
+        // have never seen reds rather than skips.
+        _ => false,
     }
 }
 ```
