@@ -36,7 +36,6 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use support::{provision_platform_admin, send, start_migrated_postgres};
 use testcontainers_modules::testcontainers::core::IntoContainerPort;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use uuid::Uuid;
 
@@ -78,15 +77,8 @@ async fn keycloak_end_to_end_config_only_oidc() {
         .with_cmd(["start-dev", "--import-realm", "--https-port=8443"])
         .with_startup_timeout(Duration::from_secs(240));
 
-    let keycloak = match image.start().await {
-        Ok(container) => container,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker/Keycloak is required for the keycloak e2e test in CI: {e}");
-            }
-            eprintln!("skipping keycloak e2e: container unavailable ({e})");
-            return;
-        }
+    let Some(keycloak) = support::docker::start_or_skip(image, "keycloak_e2e").await else {
+        return;
     };
 
     // Keycloak issues `iss` from the request host in dev mode, so the config issuer and every

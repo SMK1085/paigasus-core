@@ -14,7 +14,6 @@ use paigasus_iam::adapters::events::NatsEventPublisher;
 use paigasus_iam::config::{PublisherBackend, PublisherConfig};
 use paigasus_iam_core::{DomainEvent, EventPublisher, EventType};
 use testcontainers_modules::nats::{Nats, NatsServerCmd};
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 use uuid::Uuid;
 
@@ -25,16 +24,7 @@ use uuid::Uuid;
 /// problem, not ours.
 async fn start_nats() -> Option<(ContainerAsync<Nats>, String)> {
     let cmd = NatsServerCmd::default().with_jetstream();
-    let node = match Nats::default().with_cmd(&cmd).start().await {
-        Ok(n) => n,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker is required for the nats publisher tests in CI: {e}");
-            }
-            eprintln!("skipping nats_publisher: Docker unavailable ({e})");
-            return None;
-        }
-    };
+    let node = support::docker::start_or_skip(Nats::default().with_cmd(&cmd), "nats_publisher").await?;
     let url = url_of(&node).await;
     Some((node, url))
 }

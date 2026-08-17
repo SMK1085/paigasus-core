@@ -28,11 +28,15 @@ use paigasus_iam::adapters::events::{NatsEventPublisher, NatsPublisherError};
 use paigasus_iam::config::{PublisherBackend, PublisherConfig};
 use paigasus_iam_core::{DomainEvent, EventPublisher, EventType};
 use testcontainers::core::WaitFor;
-use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
+
+// This file has no `mod support;` — including `support/docker.rs` directly keeps it that way,
+// pulling in one small standalone file rather than the whole support surface (SMA-538).
+#[path = "support/docker.rs"]
+mod docker;
 
 /// See `tests/nats_publisher.rs` — same load budget, same reasoning: a ceiling on Docker being
 /// slow under contention, not an expectation of how long anything takes.
@@ -133,16 +137,7 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
         image = image.with_copy_to(target, bytes);
     }
 
-    let node = match image.start().await {
-        Ok(n) => n,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker is required for the nats permission tests in CI: {e}");
-            }
-            eprintln!("skipping nats_permissions: Docker unavailable ({e})");
-            return None;
-        }
-    };
+    let node = docker::start_or_skip(image, "nats_permissions").await?;
 
     let deadline = std::time::Instant::now() + CONTAINER_READY_BUDGET;
     let port = loop {

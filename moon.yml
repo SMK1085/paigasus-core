@@ -217,12 +217,16 @@ tasks:
     #     inherited from .moon/tasks/rust.yml: that file is `inheritedBy: languages: ['rust']`
     #     and this task is `language: 'bash'` on the root `repo` project.)
     # NOT included: 'tests/support/**/*' (~748 lines of shared auth/tenancy/audit/API-key test
-    # infra) — nats_permissions.rs has no `mod support;` and never references it (unlike ~30
-    # other test files in this crate that do), so it is not a real dependency; including it
-    # would trigger this Docker-backed, TLS-cert-minting suite on unrelated test-fixture changes.
+    # infra) — nats_permissions.rs still has no `mod support;`, so that surface is not a
+    # dependency and including it would trigger this Docker-backed, TLS-cert-minting suite on
+    # unrelated test-fixture changes. Its ONE standalone file IS a dependency since SMA-538
+    # (`#[path = "support/docker.rs"] mod docker;` for the shared skip policy) and is listed
+    # below individually — without it a policy edit would change this binary while leaving the
+    # gate that proves the committed permission set has not been loosened on a cached PASS.
     inputs:
       - 'ops/nats/**/*'
       - 'rs/crates/services/paigasus-iam/tests/nats_permissions.rs'
+      - 'rs/crates/services/paigasus-iam/tests/support/docker.rs'
       - 'rs/crates/services/paigasus-iam/src/adapters/events/**/*'
       - 'rs/crates/services/paigasus-iam/src/config.rs'
       - 'rs/crates/services/paigasus-iam/Cargo.toml'
