@@ -63,9 +63,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (`:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
   new crates/deps/proto, run the full graph like CI does: `moon ci :build :test :lint :fmt
   :deny :osv :machete :actionlint :typecheck :breaking :affected-smoke :parity-corpus-drift
-  :next-env-drift :wasm-getrandom-free :redis-connect-single-site :promtool :observability-drift
-  :nats-permissions :release-parity :release-parity-py :release-parity-ts :publish-metadata
-  --base origin/main --include-relations`.
+  :next-env-drift :wasm-getrandom-free :redis-connect-single-site :iam-docker-policy-single-site
+  :promtool :observability-drift :nats-permissions :release-parity :release-parity-py
+  :release-parity-ts :publish-metadata --base origin/main --include-relations`.
 - A new Rust crate reds `:affected-smoke` until it's added to the `lockfile->all-lint` expected set
   in `ci/affected-graph/run.sh` — that case lists **every** crate, so **every** new crate changes it
   (SMA-534) — and, if it `dependsOn` `paigasus-kernel-rs`, to the `kernel->bindings` set as well

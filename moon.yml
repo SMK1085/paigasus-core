@@ -335,6 +335,38 @@ tasks:
       - 'rs/crates/services/paigasus-iam/src/**/*'
       - 'rs/crates/services/paigasus-iam/tests/**/*'
 
+  iam-docker-policy-single-site:
+    description: 'Assert the Docker-unavailable decision exists exactly once, in tests/support/docker.rs, so a new container-backed suite cannot hand-roll copy #12 (SMA-538).'
+    # WHAT IS GATED: reading the `CI` environment variable anywhere under this crate's tests/
+    # except in the one file that owns the policy. That read is the tell — every one of the 11
+    # copies SMA-538 removed was `if std::env::var_os("CI").is_some() { panic!(..) }` followed by
+    # an `eprintln!` and a `return None`.
+    #
+    # Modelled on repo:redis-connect-single-site, including its two portability lessons: do NOT
+    # anchor paths on `^\./` (GNU grep emits the prefix, ugrep strips it), and filter comment
+    # lines by CONTENT (`:[0-9]+:[[:space:]]*//`) so prose may still name the variable.
+    #
+    # The control — `expected` must be non-empty — is what catches a pattern typo or a rename:
+    # without it both greps could go empty and the gate would pass while guarding nothing.
+    script: |
+      cd rs/crates/services/paigasus-iam
+      hits="$(grep -rnE 'var_os\("CI"\)|env::var\("CI"\)' tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      expected="$(printf '%s\n' "$hits" | grep -E '^tests/support/docker\.rs:' || true)"
+      offenders="$(printf '%s\n' "$hits" | grep -vE '^tests/support/docker\.rs:' | grep -v '^$' || true)"
+      if [ -z "$expected" ]; then
+        echo "no CI check found in tests/support/docker.rs — the guard is not guarding anything (moved? renamed?)" >&2
+        exit 2
+      fi
+      if [ -n "$offenders" ]; then
+        echo "Docker-skip policy hand-rolled outside tests/support/docker.rs (SMA-538 — call start_or_skip):" >&2
+        printf '%s\n' "$offenders" >&2
+        exit 1
+      fi
+    toolchain: 'system'
+    # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
+    inputs:
+      - 'rs/crates/services/paigasus-iam/tests/**/*'
+
   promtool:
     description: 'promtool validates the Prometheus scrape config + alert rules + rule unit tests under ops/observability/prometheus/ (SMA-446).'
     # Moon does not enable errexit for `script:` blocks — same latent defect as nats-permissions
