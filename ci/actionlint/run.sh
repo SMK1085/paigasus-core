@@ -86,13 +86,56 @@ extract_paths_keys() {
     }
 
     # A flow mapping (`{ branches: [main], paths: [a] }`) is deliberately NOT parsed for entries.
-    # Print a KEY with no ITEMs for any path filter it declares, so check 6 fails loudly instead
-    # of the whole event being skipped in silence. Returns nothing when v is not a flow mapping.
-    function flow_keys(v, lineno) {
+    # Print a KEY with no ITEMs for any path filter it declares AT THE CALLER TARGET DEPTH, so
+    # check 6 fails loudly instead of the whole event being skipped in silence. `target` mirrors
+    # the block-form depth rule above: 2 when v is the top-level `on: { ... }` scalar (on -> event
+    # -> paths), 1 when v is one event own flow value (event -> paths). A `paths` key one level
+    # DEEPER than target is a workflow input legitimately NAMED `paths` —
+    # `on: { workflow_dispatch: { inputs: { paths: {...} } } }` (depth 3, target 2) or
+    # `push: { inputs: { paths: x } }` (depth 2, target 1) — and must be ignored, exactly like
+    # `on.workflow_dispatch.inputs.paths` is ignored in block style. Grepping for the `paths`
+    # token at ANY depth (the previous implementation) is what let a flow-style `inputs.paths`
+    # false-red check 6 (SMA-525 round-2 review). So this tracks brace depth and quoted-string
+    # spans char by char instead of a single depth-blind regex. Returns nothing when v is not a
+    # flow mapping.
+    function flow_keys(v, lineno, target,    depth, i, n, c, instr, qc, prevc, rest) {
       if (v !~ /^[{]/) return
       sub(/[}][^}]*$/, "}", v)     # drop a trailing comment after the closing brace
-      if (v ~ /[{, \t]["\047]?paths-ignore["\047]?[ \t]*:/) print "KEY\tpaths-ignore\t" lineno
-      if (v ~ /[{, \t]["\047]?paths["\047]?[ \t]*:/)        print "KEY\tpaths\t" lineno
+      depth = 0
+      instr = 0                    # 1 while scanning inside a quoted VALUE we chose not to parse
+      qc = ""                      # the quote character (double or single) that will close it
+      n = length(v)
+      for (i = 1; i <= n; i++) {
+        c = substr(v, i, 1)
+
+        if (instr) {
+          if (c == qc) instr = 0
+          continue
+        }
+
+        # A key can only start right after `{`, `,` or whitespace — same boundary the old regex
+        # required. Tried BEFORE the generic brace/quote handling below so a quoted key
+        # ("paths": ...) is matched here, by the optional leading quote in the pattern itself,
+        # rather than being swallowed as an opaque quoted string first.
+        prevc = (i > 1) ? substr(v, i - 1, 1) : ""
+        if (prevc == "{" || prevc == "," || prevc == " " || prevc == "\t") {
+          rest = substr(v, i)
+          if (match(rest, /^["\047]?paths-ignore["\047]?[ \t]*:/)) {
+            if (depth == target) print "KEY\tpaths-ignore\t" lineno
+            i += RLENGTH - 1   # the for loop own i++ then makes the net advance RLENGTH
+            continue
+          }
+          if (match(rest, /^["\047]?paths["\047]?[ \t]*:/)) {
+            if (depth == target) print "KEY\tpaths\t" lineno
+            i += RLENGTH - 1
+            continue
+          }
+        }
+
+        if (c == "{") { depth++; continue }
+        if (c == "}") { depth--; continue }
+        if (c == "\"" || c == "\047") { instr = 1; qc = c; continue }
+      }
     }
 
     {
@@ -139,11 +182,12 @@ extract_paths_keys() {
         if (key0 ~ /^["\047]?on["\047]?[ \t]*:/) {
           # Inline `on: [push]` — nothing to extract. But `on: {push: {paths: [a]}}` is the same
           # silently-guards-nothing hole as a flow-mapping EVENT value, one level up, so it gets
-          # the same treatment.
+          # the same treatment. Target depth 2: on -> event -> paths, matching the block-form
+          # depth rule below (a `paths` at depth 3, e.g. an `inputs.paths` input, is ignored).
           in_on = 0
           val = key0
           sub(/^[^:]*:[ \t]*/, "", val)
-          flow_keys(val, NR)
+          flow_keys(val, NR, 2)
           next
         }
         in_on = 0
@@ -172,10 +216,12 @@ extract_paths_keys() {
       if (depth == 1) {
         # A flow-mapping event value — `push: { branches: [main], paths: [a] }` — is valid YAML
         # that actionlint accepts, and its `paths:` never reaches the level-2 branch below. Left
-        # alone it would make checks 5 and 6 silently guard nothing at all.
+        # alone it would make checks 5 and 6 silently guard nothing at all. Target depth 1: event
+        # -> paths (an `inputs.paths` here, e.g. `push: { inputs: { paths: x } }`, is at depth 2
+        # and must be ignored, same rule as above).
         val = stripped
         sub(/^[^:]*:[ \t]*/, "", val)
-        flow_keys(val, NR)
+        flow_keys(val, NR, 1)
         next
       }
       if (depth != 2) next
@@ -680,6 +726,95 @@ jobs:
 on:
   workflow_dispatch:
     inputs: { "paths": { type: string } }
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  # --- Round-2 (second pass) review addition: flow_keys() scanned a flow scalar for a `paths`
+  # token at ANY brace depth, unlike the depth-aware block-form rule above. A workflow input
+  # legitimately named `paths` sitting under `inputs:` inside a flow-style `on: {...}` or a
+  # flow-style event value therefore false-red check 6. Fixed by having flow_keys() track brace
+  # depth and only count a `paths`/`paths-ignore` key at the caller's target depth (2 for the
+  # top-level `on: {...}` scalar, 1 for a single event's own flow value) — mirroring, in flow
+  # style, exactly the depth rule already enforced above for block style. ---
+
+  check_fixture 'a workflow input NAMED paths inside a top-level on: flow mapping (unquoted key) yields no records' \
+"" \
+'name: t
+on: { workflow_dispatch: { inputs: { paths: { type: string } } } }
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a workflow input NAMED paths inside a top-level on: flow mapping (quoted key) yields no records' \
+"" \
+'name: t
+on: { workflow_dispatch: { inputs: { "paths": { type: string } } } }
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a genuine paths: filter inside a top-level on: flow mapping still emits KEY with no ITEMs' \
+"$(printf 'KEY\tpaths\t2')" \
+'name: t
+on: { push: { paths: ["rz/**"] } }
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a workflow input NAMED paths inside a level-1 event flow mapping (unquoted key) yields no records' \
+"" \
+'name: t
+on:
+  push: { inputs: { paths: x } }
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a workflow input NAMED paths inside a level-1 event flow mapping (quoted key) yields no records' \
+"" \
+'name: t
+on:
+  push: { inputs: { "paths": x } }
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a genuine paths: filter inside a level-1 event flow mapping still emits KEY with no ITEMs' \
+"$(printf 'KEY\tpaths\t3')" \
+'name: t
+on:
+  push: { paths: ["a/**"] }
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a genuine quoted "paths": filter inside a level-1 event flow mapping is still recognized' \
+"$(printf 'KEY\tpaths\t3')" \
+'name: t
+on:
+  push: { "paths": ["a/**"] }
 jobs:
   j:
     runs-on: ubuntu-latest

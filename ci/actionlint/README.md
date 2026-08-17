@@ -27,9 +27,13 @@ so a valid-but-never-matching glob (`rz/**`) passes it cleanly. Checks 5–7 clo
 
 Only a `paths:`/`paths-ignore:` **two levels deep** inside `on:` — `on.<event>.paths` — is a path
 filter. A workflow input may legitimately be *named* `paths`, and it sits one level deeper, under
-`on.workflow_dispatch.inputs`; checks 5 and 6 ignore it. Conversely a flow-mapping event value,
-`push: { paths: [...] }`, is not parsed for entries, so it is reported by check 6 as a key with no
-entries rather than skipped in silence.
+`on.workflow_dispatch.inputs`; checks 5 and 6 ignore it. This depth rule holds in flow style too,
+not just block style: a top-level flow `on: { workflow_dispatch: { inputs: { paths: {...} } } }`
+or an event's own flow value `push: { inputs: { paths: x } }` both correctly ignore the nested
+`inputs.paths`, quoted or not — the extractor tracks brace depth rather than matching a `paths`
+token at any nesting level. Conversely a flow-mapping event value, `push: { paths: [...] }`, is
+not parsed for entries, so it is reported by check 6 as a key with no entries rather than skipped
+in silence — same for the equivalent depth in a fully flow-style `on: { push: { paths: [...] } }`.
 
 ## Supported glob vocabulary
 
