@@ -524,14 +524,17 @@ where
         let mut inner = std::mem::replace(&mut self.inner, clone);
         Box::pin(async move {
             let mut resp = IDS.scope(ids, inner.call(req)).await?;
+            let status = resp.status();
             let headers = resp.headers_mut();
             // Unconditional: a downstream value for either id is not authoritative.
             headers.insert(REQUEST_ID_HEADER, header_value(ids.request_id));
             headers.insert(CORRELATION_ID_HEADER, header_value(ids.correlation_id));
-            // Retryable: only fill in a default the renderers did not supply, and only on errors.
-            if !headers.contains_key(RETRYABLE_HEADER) && resp.status().is_client_error() || !headers.contains_key(RETRYABLE_HEADER) && resp.status().is_server_error() {
-                let value = Retryable::from_status(resp.status());
-                resp.headers_mut().insert(RETRYABLE_HEADER, HeaderValue::from_static_str_infallible(value.as_wire()));
+            // Retryable: fill in a default ONLY where a renderer supplied none, and only on an
+            // error — `Retryable::as_wire` returns `&'static str`, which is what `from_static`
+            // wants, so this allocates nothing.
+            let is_error = status.is_client_error() || status.is_server_error();
+            if is_error && !headers.contains_key(RETRYABLE_HEADER) {
+                headers.insert(RETRYABLE_HEADER, HeaderValue::from_static(Retryable::from_status(status).as_wire()));
             }
             Ok(resp)
         })
@@ -542,19 +545,13 @@ where
 fn header_value(id: Uuid) -> HeaderValue {
     HeaderValue::from_str(&id.to_string()).expect("a hyphenated UUID is a valid header value")
 }
-```
 
-Two corrections to make while typing it, because the sketch above contains deliberate traps a careless copy would keep:
-
-1. `HeaderValue::from_static_str_infallible` does not exist. Use `HeaderValue::from_static(value.as_wire())` — `as_wire` returns `&'static str`, which is exactly what `from_static` wants.
-2. The `if` condition binds as `(a && b) || (c && d)`, which happens to be correct but is unreadable. Write it as:
-
-```rust
-            let is_error = resp.status().is_client_error() || resp.status().is_server_error();
-            if is_error && !headers.contains_key(RETRYABLE_HEADER) {
-                let value = Retryable::from_status(resp.status());
-                headers.insert(RETRYABLE_HEADER, HeaderValue::from_static(value.as_wire()));
-            }
+/// Enters an id scope directly. Production code enters it via [`CorrelationLayer`]; this exists
+/// for tests, which must be able to assert what a renderer emits INSIDE a request scope without
+/// standing up a server. Tasks 7 and 8 both depend on it.
+pub async fn scope_for_test<F: Future>(ids: RequestIds, f: F) -> F::Output {
+    IDS.scope(ids, f).await
+}
 ```
 
 - [ ] **Step 5: Export from the crate root**
@@ -1775,16 +1772,7 @@ Add to `.../adapters/iam/client.rs`'s test module:
     }
 ```
 
-This needs a test-only scope entry point. Add to `correlation.rs`:
-
-```rust
-/// Enters an id scope directly, for tests and for any caller that legitimately originates work
-/// outside a request (there are none today). Production code enters the scope via
-/// [`CorrelationLayer`].
-pub async fn scope_for_test<F: Future>(ids: RequestIds, f: F) -> F::Output {
-    IDS.scope(ids, f).await
-}
-```
+`paigasus_observability::correlation::scope_for_test` already exists — Task 2 Step 4 added it. Do not re-add it.
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
@@ -2057,4 +2045,4 @@ Skip this step if the tree is clean.
 
 **Numbering deviation from the spec.** The spec put `missing-auth-context` at 33 in the IAM range; Task 1 puts it at 903 in the shared range alongside `capability-disabled` at 904, with the reasoning inline. Neither condition is IAM-specific.
 
-**Type consistency.** `Retryable::as_wire` returns `&'static str` at every use, which is what `HeaderValue::from_static` requires. `current_ids() -> Option<RequestIds>` is consumed identically in Tasks 4, 7 and 8. `iam_status`'s signature gained a `retryable: Retryable` parameter relative to the spec's sketch, and every call site in Task 4 passes it. `scope_for_test` is introduced in Task 7 Step 2 and reused in Task 8 Step 1 — Task 7 must land first, or Task 8 adds it.
+**Type consistency.** `Retryable::as_wire` returns `&'static str` at every use, which is what `HeaderValue::from_static` requires. `current_ids() -> Option<RequestIds>` is consumed identically in Tasks 4, 7 and 8. `iam_status`'s signature gained a `retryable: Retryable` parameter relative to the spec's sketch, and every call site in Task 4 passes it. `scope_for_test` is introduced in Task 2 Step 4, where the module is created, and consumed by Tasks 7 and 8 — no task adds it twice.
