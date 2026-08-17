@@ -136,10 +136,11 @@ fn permission_denied_on_the_socket_is_not_unreachable() {
     assert!(!is_daemon_unreachable(&e));
 }
 
-/// `WaitContainer` carries container LOG output, which can contain anything the server logged
-/// — including the words a naive classifier looks for. It is not a `Client(_)` error at all.
+/// `WaitContainer` is the variant that carries container LOG output, which can contain
+/// anything the server logged — including the words a naive classifier looks for. It is not a
+/// `Client(_)` error at all, so it can never reach the transport check.
 #[test]
-fn container_logs_cannot_impersonate_a_dead_daemon() {
+fn wait_container_errors_are_never_unreachable() {
     let e = TestcontainersError::WaitContainer(testcontainers::core::error::WaitContainerError::StartupTimeout);
     assert!(!is_daemon_unreachable(&e));
 }
