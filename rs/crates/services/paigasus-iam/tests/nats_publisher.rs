@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `NatsEventPublisher` integration tests (SMA-471). Runs against an ephemeral JetStream-enabled
-//! NATS in Docker, with the house gating: a missing Docker daemon is a HARD FAILURE in CI and a
-//! skip on a Docker-less laptop (mirrors `tests/redis_jwks_cache.rs`).
+//! NATS in Docker; the skip-versus-panic decision lives once, in `tests/support/docker.rs`'s
+//! `start_or_skip` (SMA-538), rather than being restated here.
 
 mod support;
 

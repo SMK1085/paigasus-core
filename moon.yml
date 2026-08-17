@@ -216,7 +216,7 @@ tasks:
     #     input a profile edit would leave this gate serving a cached PASS. (It is NOT
     #     inherited from .moon/tasks/rust.yml: that file is `inheritedBy: languages: ['rust']`
     #     and this task is `language: 'bash'` on the root `repo` project.)
-    # NOT included: 'tests/support/**/*' (~748 lines of shared auth/tenancy/audit/API-key test
+    # NOT included: 'tests/support/**/*' (~776 lines of shared auth/tenancy/audit/API-key test
     # infra) — nats_permissions.rs still has no `mod support;`, so that surface is not a
     # dependency and including it would trigger this Docker-backed, TLS-cert-minting suite on
     # unrelated test-fixture changes. Its ONE standalone file IS a dependency since SMA-538

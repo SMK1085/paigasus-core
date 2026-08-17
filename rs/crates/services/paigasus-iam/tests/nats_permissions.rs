@@ -16,8 +16,8 @@
 //! negative case here asserts on the server's asynchronous `Permissions Violation` text naming the
 //! exact subject (D9), captured through the connection's `event_callback`.
 //!
-//! Docker gating matches the rest of the suite: a missing daemon is a HARD FAILURE in CI (`CI`
-//! set) and a skip on a Docker-less laptop.
+//! Docker gating is the single policy owned by `tests/support/docker.rs`'s `start_or_skip`
+//! (SMA-538), not restated here.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

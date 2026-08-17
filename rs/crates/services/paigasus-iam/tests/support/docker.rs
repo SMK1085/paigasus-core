@@ -4,7 +4,7 @@
 //!
 //! Deliberately depends on nothing else in `support/`, so the test files that have no
 //! `mod support;` can pull it in with `#[path = "support/docker.rs"] mod docker;`
-//! without dragging in the 791-line support surface (axum, rcgen, the mock IdP) — and without
+//! without dragging in the 776-line support surface (axum, rcgen, the mock IdP) — and without
 //! tripping the `dead_code` hard error that `[workspace.lints.rust] warnings = "deny"` makes of
 //! `support/mod.rs`'s two non-`#[allow(dead_code)]` items.
 //!

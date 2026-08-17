@@ -101,14 +101,25 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   dedicated `[profile.iam]` instead, selected only by `paigasus-iam-rs:test`'s `args: ['--profile',
   'iam']` — CI uploads it as the `nextest-junit` artifact, but a bare `cargo nextest run -p
   paigasus-iam` writes no report at all.
-- `paigasus-iam`'s **Docker-backed** suites silently skip without Docker:
-  `support::start_migrated_postgres()` returns `None` and each test `return`s, reporting a PASS in
-  under a second having run nothing (nextest's skip count does not reveal it, because stderr from
-  a *passing* test is discarded — `success-output` defaults to `never`). Speed alone isn't the
-  tell — a handful of suites in the crate touch no container and are legitimately fast either way.
-  The tell is a fast run made *without* `CI=1`: a genuine Docker-backed pass takes just over a
-  second (measured ~1.1s), never under. Always verify with `CI=1 cargo nextest run -p
-  paigasus-iam`, which makes a missing daemon a hard failure. SMA-538 tracks fixing this properly.
+- `paigasus-iam`'s **Docker-backed** suites (57 of its 60 integration binaries) skip when the
+  daemon is unreachable, and that skip is deliberately quiet — nextest discards a passing test's
+  stderr and Moon discards a passing task's output, so no message can surface there. What makes
+  it visible is `tests/docker_preflight.rs`, a canary that FAILS when Docker is unreachable: a
+  Docker-less run yields exactly one red instead of 56 silent passes (SMA-538). The policy itself
+  lives once, in `tests/support/docker.rs`, and `repo:iam-docker-policy-single-site` fails if a
+  new suite hand-rolls its own copy. Two env vars, both parsing `1`/`true`/`yes` (anything else,
+  including `0`, is off — unlike `CI`, which is presence-based):
+  `PAIGASUS_REQUIRE_DOCKER=1` turns every suite's skip into a panic, which is what a FILTERED run
+  (`--test relay_pg`, `-E 'test(foo)'`) needs, since the canary is not in that filter.
+  `PAIGASUS_SKIP_DOCKER=1` restores skipping everywhere including the canary — it is a
+  per-invocation escape hatch for a Docker Hub rate limit or a daemon restart, **not** a
+  shell-profile setting, and a `moon run` that greened under it leaves a cached PASS that replays
+  after Docker returns, so follow it with `moon run … --force`. `CI` outranks both, so no
+  workflow-file env var can green a CI run that tested nothing. A container that fails with a
+  REACHABLE daemon is now a hard failure everywhere — including `keycloak_e2e`'s 240s startup
+  timeout, which used to be a fast local skip. A stray `CI=false` still counts as "CI present" (the
+  check is presence-based, not value-based) — clear it with `env -u CI cargo nextest run -p
+  paigasus-iam`.
 - Broad `inputs: ['**/*']` Moon tasks (e.g. `repo:actionlint`) stay cheap only because
   `.moon/workspace.yml`'s `hasher.ignorePatterns` filters gitignored trees out of the hash walk.
 

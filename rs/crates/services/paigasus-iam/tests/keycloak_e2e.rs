@@ -11,7 +11,11 @@
 //! the RS256 accept-path coverage the ES256-only in-process mock IdP could not exercise
 //! (spec §8).
 //!
-//! Docker gating mirrors `support::start_migrated_postgres`: a CI hard-fail, a local skip.
+//! Docker gating is the single policy owned by `tests/support/docker.rs`'s `start_or_skip`
+//! (SMA-538), not restated here — notably, this suite's 240-second Keycloak startup timeout is
+//! now a hard failure locally too, not the fast skip it used to be: a container failure against
+//! a reachable daemon is never a skip.
+//!
 //! Keycloak's HTTPS listener uses a runtime self-signed cert, so both the test's own token
 //! fetch (`danger_accept_invalid_certs`) and the service's JWKS fetch (`accept_invalid_tls`)
 //! trust it — the latter is still config-only. Because Keycloak derives a token's `iss` from
