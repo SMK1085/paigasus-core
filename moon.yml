@@ -342,6 +342,17 @@ tasks:
     # copies SMA-538 removed was `if std::env::var_os("CI").is_some() { panic!(..) }` followed by
     # an `eprintln!` and a `return None`.
     #
+    # Three alternatives are matched: `var_os("CI")` and `env::var("CI")` are the runtime reads
+    # the removed copies used; `option_env!("CI")` is a compile-time read of the same variable —
+    # not a perfect substitute (baked in at build time, not read per-process) but standard and
+    # discoverable enough that a well-meaning author reaching for "check if CI is set" could land
+    # on it instead of the neighbouring `std::env::var_os` idiom. Covering it costs one
+    # alternation; not covering it would let copy #12 through under a different macro name, which
+    # defeats the point of a durability gate. A whitespace-padded call, e.g.
+    # `std::env::var_os( "CI" )`, is a KNOWN, deliberately-uncovered gap — not missed, just not
+    # worth chasing here, because `cargo fmt --check` is a separate mandatory gate on the same PR
+    # and would reject that spacing regardless.
+    #
     # Modelled on repo:redis-connect-single-site, including its two portability lessons: do NOT
     # anchor paths on `^\./` (GNU grep emits the prefix, ugrep strips it), and filter comment
     # lines by CONTENT (`:[0-9]+:[[:space:]]*//`) so prose may still name the variable.
@@ -350,7 +361,7 @@ tasks:
     # without it both greps could go empty and the gate would pass while guarding nothing.
     script: |
       cd rs/crates/services/paigasus-iam
-      hits="$(grep -rnE 'var_os\("CI"\)|env::var\("CI"\)' tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      hits="$(grep -rnE 'var_os\("CI"\)|env::var\("CI"\)|option_env!\("CI"\)' tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
       expected="$(printf '%s\n' "$hits" | grep -E '^tests/support/docker\.rs:' || true)"
       offenders="$(printf '%s\n' "$hits" | grep -vE '^tests/support/docker\.rs:' | grep -v '^$' || true)"
       if [ -z "$expected" ]; then
