@@ -15,19 +15,28 @@ metrics-exporter-prometheus.workspace = true
 axum.workspace = true
 tonic.workspace = true
 tracing.workspace = true
-# SMA-504: the shared correlation layer. `tower` for the Layer/Service impl (was dev-only),
-# `http` for the header types the layer manipulates on both the axum and tonic sides,
-# `tokio` with `rt` for `task_local!` (LocalKey lives behind that feature; `macros` stays for the
-# crate's `#[tokio::test]`s), and `paigasus-kernel` + `rand` to mint UUIDv7 the one way this repo
-# mints it.
-tower.workspace = true
+# SMA-504: the shared correlation layer. `tower` with `util` for the Layer/Service impl PLUS
+# `ServiceExt`/`service_fn` (the layer's own tests build a bare `Service` with `service_fn` and
+# drive it with `ServiceExt::oneshot` — otherwise those arrive only via tonic's default `channel`
+# feature, which is not a dependency any consumer of this crate should have to pull in just to
+# get them), `http` for the header types the layer manipulates on both the axum and tonic sides,
+# `tokio` with `rt` for `task_local!` (LocalKey lives behind that feature — `macros` stays
+# dev-only; see `[dev-dependencies]`), and `paigasus-kernel` + `rand` to mint UUIDv7 the one way
+# this repo mints it.
+tower = { workspace = true, features = ["util"] }
 http.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt"] }
 paigasus-kernel = { workspace = true }
 rand.workspace = true
 uuid = { workspace = true }
 
 [dev-dependencies]
+# macros: `#[tokio::test]` for this crate's own tests (correlation.rs, drift.rs). Workspace
+# convention (rs/Cargo.toml:27-28) — libraries avoid `macros` in `[dependencies]` (it pulls in
+# `#[tokio::main]`/`#[tokio::test]`, which a library has no business enabling for its
+# consumers); Cargo unions `[dependencies]` + `[dev-dependencies]` features for the test build,
+# so `rt` above plus `macros` here together give the test target everything it needs.
+tokio = { workspace = true, features = ["macros"] }
 # serde_json: already a transitive dep (axum/tonic/tracing-subscriber pull it in) — pulled in
 # explicitly here for the drift test (tests/drift.rs, Task B4), which parses the committed
 # Grafana dashboard JSON.

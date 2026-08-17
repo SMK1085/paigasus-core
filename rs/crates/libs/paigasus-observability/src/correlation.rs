@@ -151,7 +151,14 @@ where
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
         Box::pin(async move {
-            let mut resp = IDS.scope(ids, inner.call(req)).await?;
+            // Scope an async BLOCK, not the bare `inner.call(req)` future: `Service::call`
+            // returns immediately after doing its synchronous setup (for `TraceLayer`, that's
+            // where its span is created), and `Future`s in Rust do nothing until polled. Scoping
+            // `inner.call(req)` directly would construct that future — running the synchronous
+            // part — BEFORE `IDS.scope` ever runs, so anything synchronous an inner layer does
+            // sees `current_ids() == None`. Wrapping in `async move { .await }` defers the call
+            // itself into the scoped future.
+            let mut resp = IDS.scope(ids, async move { inner.call(req).await }).await?;
             let status = resp.status();
             let headers = resp.headers_mut();
             // Unconditional: a downstream value for either id is not authoritative.
@@ -177,6 +184,10 @@ fn header_value(id: Uuid) -> HeaderValue {
 /// Enters an id scope directly. Production code enters it via [`CorrelationLayer`]; this exists
 /// for tests, which must be able to assert what a renderer emits INSIDE a request scope without
 /// standing up a server. Tasks 7 and 8 both depend on it.
+///
+/// `pub` (not `pub(crate)`) because those tasks live in other crates, but `#[doc(hidden)]` — it
+/// is test-only scaffolding, not part of the crate's ordinary API surface.
+#[doc(hidden)]
 pub async fn scope_for_test<F: Future>(ids: RequestIds, f: F) -> F::Output {
     IDS.scope(ids, f).await
 }
@@ -250,6 +261,26 @@ mod tests {
         let supplied = "0198f2c1-2222-7000-8000-000000000042";
         let resp = through_layer(get(&[(REQUEST_ID_HEADER, supplied)])).await;
         assert_ne!(resp.headers()[REQUEST_ID_HEADER], supplied, "a client-sent request id must be overwritten");
+    }
+
+    /// An inner service that ALSO sets `paigasus-request-id` on the response (e.g. a
+    /// misbehaving handler, or a layer composed the wrong way round) must not end up with two
+    /// values on the wire — `HeaderMap::insert` replaces, but only if the layer uses `insert`
+    /// rather than `append`; this pins that choice against a regression to `append`.
+    #[tokio::test]
+    async fn overwrites_rather_than_appends_when_the_inner_service_also_sets_the_response_request_id() {
+        let bogus = "not-a-real-request-id";
+        let inner = service_fn(move |_req: Request<Body>| async move {
+            let mut resp = Response::new(Body::empty());
+            resp.headers_mut().insert(REQUEST_ID_HEADER, HeaderValue::from_static(bogus));
+            Ok::<_, std::convert::Infallible>(resp)
+        });
+        let resp = tower::Layer::layer(&CorrelationLayer, inner).oneshot(get(&[])).await.unwrap();
+        let values: Vec<_> = resp.headers().get_all(REQUEST_ID_HEADER).iter().collect();
+        assert_eq!(values.len(), 1, "the inner service's value must be REPLACED, not appended alongside the layer's");
+        let surviving = values[0].to_str().unwrap();
+        assert_ne!(surviving, bogus, "the surviving value must be the layer's own, not the inner service's");
+        assert!(Uuid::parse_str(surviving).is_ok(), "the surviving value must be a real UUID: {surviving}");
     }
 
     #[test]
