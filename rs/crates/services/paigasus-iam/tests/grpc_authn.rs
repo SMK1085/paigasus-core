@@ -172,6 +172,39 @@ async fn tenancy_rpc_with_invalid_bearer_is_unauthenticated() {
     server.abort();
 }
 
+/// SMA-504: the trailers-only rejection path must carry ErrorInfo too. `Status::into_http`
+/// serializes differently from a handler-returned Status, so the unit tests in `convert.rs`
+/// cannot prove this — only a real client/server round trip can.
+#[tokio::test]
+async fn a_bearer_rejection_carries_error_info_over_the_wire() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
+    let (addr, server) = spawn_server(state).await;
+    let mut tenancy = TenancyServiceClient::new(channel(addr).await);
+
+    // No `authorization` metadata: AuthLayer rejects before the handler, via `Status::into_http`.
+    let err = tenancy
+        .create_organization(CreateOrganizationRequest {
+            slug: "acme".into(),
+            name: "Acme".into(),
+        })
+        .await
+        .expect_err("a bearer-less tenancy call must be rejected");
+    let details = tonic_types::StatusExt::get_error_details(&err);
+    let info = details.error_info().expect("the trailers-only path must carry ErrorInfo");
+    assert_eq!(info.domain, *paigasus_proto::error::IAM_DOMAIN);
+    assert!(
+        paigasus_proto::paigasus::common::v1::ErrorReason::from_wire_reason(&info.reason).is_some(),
+        "{} is not in the registry",
+        info.reason
+    );
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn grpc_health_serves_without_bearer_through_the_layered_router() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {

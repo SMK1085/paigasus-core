@@ -68,15 +68,11 @@ impl TenancyGrpc {
 /// Extracts the bearer-resolved [`AuthContext`] from a gRPC request's extensions — mirrors
 /// `adapters::grpc::authz::actor_context` exactly (duplicated rather than shared across a
 /// transport-internal module boundary, the same posture as `parse_prn`/`parse_policy_kind`
-/// there). `Status::unauthenticated` rather than a panic: this "shouldn't happen" for a
-/// non-exempt RPC (the `AuthLayer` in `grpc::mod` always resolves one first), but a
+/// there). `convert::missing_auth_context()` rather than a panic: this "shouldn't happen" for
+/// a non-exempt RPC (the `AuthLayer` in `grpc::mod` always resolves one first), but a
 /// defensive error beats a 500/panic if it ever does.
 fn actor_context<T>(request: &Request<T>) -> Result<AuthContext, Status> {
-    request
-        .extensions()
-        .get::<AuthContext>()
-        .cloned()
-        .ok_or_else(|| Status::unauthenticated("missing authentication context"))
+    request.extensions().get::<AuthContext>().cloned().ok_or_else(convert::missing_auth_context)
 }
 
 /// Parses a raw tenancy-node PRN string into a typed node ref — mirrors

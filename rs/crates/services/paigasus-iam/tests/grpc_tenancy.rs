@@ -96,7 +96,7 @@ async fn organization_lifecycle_over_grpc() {
     assert_eq!(got_org.prn, org.prn);
     assert_eq!(got_org.slug, "acme");
 
-    // Duplicate slug -> AlreadyExists, message starts with the stable `slug-conflict:` code.
+    // Duplicate slug -> AlreadyExists, `ErrorInfo.reason` carries the stable `slug-conflict` code.
     let err = client
         .create_organization(authed(
             CreateOrganizationRequest {
@@ -108,7 +108,12 @@ async fn organization_lifecycle_over_grpc() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), Code::AlreadyExists);
-    assert!(err.message().starts_with("slug-conflict:"), "unexpected message: {}", err.message());
+    // SMA-504: the code is no longer in the message. Read it from ErrorInfo instead — asserting
+    // the reason, not a prefix, is what the wire change actually moved.
+    let details = tonic_types::StatusExt::get_error_details(&err);
+    let info = details.error_info().expect("every IAM status carries ErrorInfo");
+    assert_eq!(info.reason, "slug-conflict", "unexpected reason: {info:?}");
+    assert_eq!(info.domain, *paigasus_proto::error::IAM_DOMAIN);
 
     // Unknown org -> NotFound (well-formed PRN, but never created).
     let unknown_prn = Prn::build("iam", "", None, "organization", Uuid::from_u128(999_999)).unwrap().canonical();
@@ -181,7 +186,7 @@ async fn team_membership_flow_over_grpc() {
     assert_eq!(team.org_prn, org_prn);
 
     // Attaching to the team before the org membership exists -> FailedPrecondition,
-    // `missing-org-membership:` prefix (the org-membership invariant).
+    // `ErrorInfo.reason` carries `missing-org-membership` (the org-membership invariant).
     let err = client
         .attach_membership(authed(
             AttachMembershipRequest {
@@ -193,7 +198,12 @@ async fn team_membership_flow_over_grpc() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), Code::FailedPrecondition);
-    assert!(err.message().starts_with("missing-org-membership:"), "unexpected message: {}", err.message());
+    // SMA-504: the code is no longer in the message. Read it from ErrorInfo instead — asserting
+    // the reason, not a prefix, is what the wire change actually moved.
+    let details = tonic_types::StatusExt::get_error_details(&err);
+    let info = details.error_info().expect("every IAM status carries ErrorInfo");
+    assert_eq!(info.reason, "missing-org-membership", "unexpected reason: {info:?}");
+    assert_eq!(info.domain, *paigasus_proto::error::IAM_DOMAIN);
 
     // Attach to the org first, satisfying the invariant; the team attach then succeeds.
     client
@@ -223,13 +233,18 @@ async fn team_membership_flow_over_grpc() {
     assert_eq!(membership.principal_prn, principal_prn);
 
     // GetTeam with a forged org slot (correct team uuid, wrong org uuid) -> InvalidArgument,
-    // `prn-mismatch:` prefix (the forged-org-slot defense, brief rule 8).
+    // `ErrorInfo.reason` carries `prn-mismatch` (the forged-org-slot defense, brief rule 8).
     let team_uuid = team.prn.rsplit('/').next().unwrap();
     let wrong_org = Uuid::from_u128(9_999);
     let forged_prn = format!("prn:pgs:iam::{wrong_org}:team/{team_uuid}");
     let err = client.get_team(authed(GetTeamRequest { prn: forged_prn }, &token)).await.unwrap_err();
     assert_eq!(err.code(), Code::InvalidArgument);
-    assert!(err.message().starts_with("prn-mismatch:"), "unexpected message: {}", err.message());
+    // SMA-504: the code is no longer in the message. Read it from ErrorInfo instead — asserting
+    // the reason, not a prefix, is what the wire change actually moved.
+    let details = tonic_types::StatusExt::get_error_details(&err);
+    let info = details.error_info().expect("every IAM status carries ErrorInfo");
+    assert_eq!(info.reason, "prn-mismatch", "unexpected reason: {info:?}");
+    assert_eq!(info.domain, *paigasus_proto::error::IAM_DOMAIN);
 
     server.abort();
 }

@@ -14,7 +14,7 @@
 //! the wire message, so [`actor_context`] reading `request.extensions().get::<AuthContext>()`
 //! sees exactly what the layer inserted. Its absence would mean the layer didn't run — it
 //! shouldn't happen for a non-exempt RPC, but is handled defensively as
-//! `Status::unauthenticated` rather than a panic.
+//! `convert::missing_auth_context()` rather than a panic.
 //!
 //! **`IsAuthorized` self/admin exposure rule (spec §9.2):** enforced by
 //! [`Authorize::decide_gated`](crate::application::authorize::Authorize::decide_gated) —
@@ -54,14 +54,10 @@ impl AuthzGrpc {
 }
 
 /// Extracts the bearer-resolved [`AuthContext`] from a gRPC request's extensions (see the
-/// module docs). `Status::unauthenticated` rather than a panic — this "shouldn't happen" for
-/// a non-exempt RPC, but a defensive error beats a 500/panic if it ever does.
+/// module docs). `convert::missing_auth_context()` rather than a panic — this "shouldn't
+/// happen" for a non-exempt RPC, but a defensive error beats a 500/panic if it ever does.
 fn actor_context<T>(request: &Request<T>) -> Result<AuthContext, Status> {
-    request
-        .extensions()
-        .get::<AuthContext>()
-        .cloned()
-        .ok_or_else(|| Status::unauthenticated("missing authentication context"))
+    request.extensions().get::<AuthContext>().cloned().ok_or_else(convert::missing_auth_context)
 }
 
 /// Mirrors `adapters::http::authz::parse_prn` (duplicated rather than shared across a
@@ -88,7 +84,7 @@ fn require_authz_admin(state: &AppState) -> Result<(), Status> {
     if state.capabilities.authz_admin {
         Ok(())
     } else {
-        Err(Status::unimplemented("capability iam.authz.cedar is not enabled on this service"))
+        Err(convert::capability_disabled("iam.authz.cedar"))
     }
 }
 

@@ -44,11 +44,7 @@ impl AuditGrpc {
 /// `grpc::tenancy::actor_context` exactly (duplicated rather than shared across a
 /// transport-internal module boundary, the same posture as those).
 fn actor_context<T>(request: &Request<T>) -> Result<AuthContext, Status> {
-    request
-        .extensions()
-        .get::<AuthContext>()
-        .cloned()
-        .ok_or_else(|| Status::unauthenticated("missing authentication context"))
+    request.extensions().get::<AuthContext>().cloned().ok_or_else(convert::missing_auth_context)
 }
 
 /// An empty wire string means "unfiltered" on that field (proto doc on

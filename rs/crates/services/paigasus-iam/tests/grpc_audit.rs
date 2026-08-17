@@ -104,7 +104,12 @@ async fn list_audit_entries_over_grpc_is_permission_denied_for_a_non_admin() {
     // A trailers-only `PermissionDenied` — nothing about the audit log's contents ever
     // reached the wire (there is no response message on an error status at all).
     assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
-    assert!(err.message().starts_with("forbidden:"), "unexpected message: {}", err.message());
+    // SMA-504: the code is no longer in the message. Read it from ErrorInfo instead — asserting
+    // the reason, not a prefix, is what the wire change actually moved.
+    let details = tonic_types::StatusExt::get_error_details(&err);
+    let info = details.error_info().expect("every IAM status carries ErrorInfo");
+    assert_eq!(info.reason, "forbidden", "unexpected reason: {info:?}");
+    assert_eq!(info.domain, *paigasus_proto::error::IAM_DOMAIN);
 
     server.abort();
 }
