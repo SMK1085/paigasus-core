@@ -2628,14 +2628,18 @@ name = "paigasus-observability"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "http",
  "metrics",
  "metrics-exporter-prometheus",
+ "paigasus-kernel",
+ "rand 0.9.5",
  "serde_json",
  "serde_norway",
  "tokio",
  "tonic",
  "tower",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

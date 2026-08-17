@@ -16,6 +16,11 @@ authors      = ["Paigasus contributors"]
 [workspace.dependencies]
 axum = "0.8"
 tower = "0.5"
+# http: the protocol-agnostic `Request`/`Response`/`HeaderValue`/`StatusCode` types axum and tonic
+# both build on. `paigasus-observability`'s correlation layer (SMA-504) is written against these
+# rather than axum's re-exports, which is what lets ONE `tower::Layer` wrap an axum router and a
+# tonic server alike. Already in Cargo.lock transitively (axum/hyper/tonic); this only promotes it.
+http = "1"
 # tower-http: TraceLayer (request/response spans) + TimeoutLayer for `paigasus-iam`'s
 # `serve_http` helper (SMA-441 Task 11 — the first consumer).
 tower-http = { version = "0.6", features = ["trace", "timeout"] }

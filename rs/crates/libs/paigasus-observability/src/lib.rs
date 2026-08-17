@@ -4,10 +4,12 @@
 //! recorder, a `GET /metrics` router, an axum request-metrics layer, a gRPC handler helper, and
 //! the canonical metric-name registry. Mirrors `paigasus-logging`'s role for tracing.
 
+pub mod correlation;
 pub mod grpc;
 pub mod http;
 pub mod names;
 
+pub use correlation::{CorrelationLayer, RequestIds, Retryable, current_ids};
 pub use grpc::{describe_grpc, record_grpc};
 pub use http::http_metrics_layer;
 
