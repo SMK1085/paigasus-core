@@ -80,6 +80,8 @@ that CI absorbs via `actions/cache`.
     means CI) and outranks both. If you carry a stray `CI=false`, use
     `env -u CI cargo nextest run -p paigasus-iam`.
   - A container that fails to start while the daemon IS reachable is a hard failure, not a skip.
+  - Setting both at once: `PAIGASUS_SKIP_DOCKER` wins over `PAIGASUS_REQUIRE_DOCKER`. It is the
+    escape hatch of last resort, so it is checked first — you get a skip, not a panic.
 - Retries and the container-concurrency cap for those suites live in `rs/.config/nextest.toml`
   (`profile.default`), so they apply to `moon run`, to `cargo nextest` typed by hand, and to
   anything else that shells out to nextest. `cargo test` bypasses them entirely — prefer `cargo
