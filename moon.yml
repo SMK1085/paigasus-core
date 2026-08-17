@@ -193,7 +193,7 @@ tasks:
       # docker-containers group still come from `profile.default`, which custom profiles inherit.
       # Its own profile, not `iam`: this task and paigasus-iam-rs:test can run concurrently, and a
       # shared store dir would clobber one report with the other (SMA-521).
-      ( cd rs && cargo nextest run --no-tests=pass -p paigasus-iam --test nats_permissions --profile iam-nats )
+      ( cd rs && cargo nextest run --no-tests=pass -p paigasus-iam --test nats_permissions --test docker_preflight --profile iam-nats )
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
     # Per entry:
@@ -226,6 +226,7 @@ tasks:
     inputs:
       - 'ops/nats/**/*'
       - 'rs/crates/services/paigasus-iam/tests/nats_permissions.rs'
+      - 'rs/crates/services/paigasus-iam/tests/docker_preflight.rs'
       - 'rs/crates/services/paigasus-iam/tests/support/docker.rs'
       - 'rs/crates/services/paigasus-iam/src/adapters/events/**/*'
       - 'rs/crates/services/paigasus-iam/src/config.rs'
