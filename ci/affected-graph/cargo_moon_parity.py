@@ -25,6 +25,7 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+
 class MoonOutputError(RuntimeError):
     """Moon's query output did not have the shape this gate requires.
 
@@ -80,8 +81,9 @@ FFI_TASK_INPUTS = WORKSPACE_LINT_INPUTS + (".prototools",)
 # args=['clippy', '--locked', ...], script=None), so a `command: 'napi'` + `args: ['build', ...]`
 # task would be invisible to a command-only scan.
 #
-# `maturin` is FORWARD-LOOKING and matches nothing today: the string appears only in
-# py/packages/paigasus-kernel/moon.yml COMMENTS, and the resolved script is
+# `maturin` is FORWARD-LOOKING and matches no RESOLVED moon task invocation today: the string
+# shows up elsewhere in the tree (pyproject.toml, moon.yml comments, the python template), but
+# paigasus-kernel-py:test's actual resolved script is
 # `uv sync --reinstall-package paigasus-py-bindings`. It is kept so a future direct maturin
 # invocation is covered on day one. Do not mistake it for measured coverage.
 FFI_MARKERS = ("napi build", "wasm-pack", "maturin", "--reinstall-package")
@@ -459,9 +461,8 @@ def self_test():
             "invocations": {"build": "tsc --noEmit"},
         },
     }
-    ffi_floor = ("paigasus-kernel-py:test", "paigasus-kernel-ts:build", "paigasus-kernel-ts:test")
 
-    if check_ffi_inputs(ffi_ok, floor=ffi_floor):
+    if check_ffi_inputs(ffi_ok):
         failures.append("A5 reported violations on the clean fixture")
 
     # Fires when a matched task omits one of the required files.
@@ -469,11 +470,17 @@ def self_test():
     broken["paigasus-kernel-ts"]["task_inputs"]["build"] = [
         "rs/Cargo.lock", "rs/Cargo.toml", "rs/rust-toolchain.toml"
     ]
-    rows = check_ffi_inputs(broken, floor=ffi_floor)
+    rows = check_ffi_inputs(broken)
     if not rows:
         failures.append("A5 did not fire on a missing FFI workspace input")
     elif not any(".prototools" in row for row in rows):
         failures.append("A5 fired but did not name the missing file")
+
+    # Moon emitting no `inputFiles` for a MATCHED FFI task must FIRE, never silently skip.
+    broken = json.loads(json.dumps(ffi_ok))
+    broken["paigasus-kernel-ts"]["task_inputs"]["build"] = None
+    if not any("inputFiles" in row for row in check_ffi_inputs(broken)):
+        failures.append("A5 did not fire when moon reported no inputFiles")
 
     # THE ANTI-VACUITY ROW. Neuter the marker match (as a package.json indirection or a renamed
     # uv flag would) and A5's derived set empties. Without the floor this reports PASS while
@@ -481,7 +488,7 @@ def self_test():
     broken = json.loads(json.dumps(ffi_ok))
     for task in ("build", "test"):
         broken["paigasus-kernel-ts"]["invocations"][task] = "pnpm run build:native"
-    rows = check_ffi_inputs(broken, floor=ffi_floor)
+    rows = check_ffi_inputs(broken)
     if not any("not matched by any FFI marker" in row for row in rows):
         failures.append("A5 did not fire when a required FFI task stopped matching the markers")
 
@@ -490,7 +497,7 @@ def self_test():
     broken = json.loads(json.dumps(ffi_ok))
     broken["paigasus-kernel-ts"]["invocations"]["build"] = None
     try:
-        check_ffi_inputs(broken, floor=ffi_floor)
+        check_ffi_inputs(broken)
     except MoonOutputError:
         pass
     else:
@@ -499,7 +506,7 @@ def self_test():
     # A matched task that is NOT in the floor is still asserted — this is the derived half.
     broken = json.loads(json.dumps(ffi_ok))
     broken["unrelated-ts"]["invocations"]["build"] = "wasm-pack build ."
-    if not any("unrelated-ts:build" in row for row in check_ffi_inputs(broken, floor=ffi_floor)):
+    if not any("unrelated-ts:build" in row for row in check_ffi_inputs(broken)):
         failures.append("A5 did not assert a newly-matched task outside the floor")
 
     # A malformed Cargo.toml must surface as INFRA (rc 2), not as an assertion failure. Exercise the
@@ -532,6 +539,7 @@ def main():
     try:
         projects = moon_projects()
         crates = cargo_crates(root)
+        a5 = check_ffi_inputs(projects)
     except INFRA_ERRORS as exc:
         # Mirror run.sh's infra-vs-assertion split: a broken `moon` — or an unparseable Cargo.toml —
         # must never be mistaken for a graph regression. See INFRA_ERRORS.
@@ -540,7 +548,6 @@ def main():
 
     a1, a2, a3 = check(projects, crates)
     a4 = check_lint_inputs(projects, crates)
-    a5 = check_ffi_inputs(projects)
     if not (a1 or a2 or a3 or a4 or a5):
         print(
             f"PASS  {'cargo-moon-parity':<18} -> "
