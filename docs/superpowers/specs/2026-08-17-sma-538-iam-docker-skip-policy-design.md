@@ -5,6 +5,11 @@
 **Status:** revised after adversarial challenge (round 1). Supersedes three mechanisms proposed
 in the issue and one proposed in this spec's own first draft — see "Departures".
 
+Four open questions raised at GATE 1 were decided as specced: `CI` keeps presence semantics
+(§5); the single-site gate is **in** scope (§7); `PAIGASUS_SKIP_DOCKER` does silence the canary,
+with the stickiness and Moon-cache caveats documented (§6, §8); and a Docker Hub 429 reds rather
+than skips (§4).
+
 ## Problem
 
 `paigasus-iam` has 339 integration tests across 60 binaries; **57 of those binaries start a
@@ -272,7 +277,16 @@ but it is the most user-visible consequence of the design and is recorded here d
 `env_flag` accepts `1`, `true`, `yes` case-insensitively; everything else — including `0`, the
 empty string, and unset — is off. Deliberately **not** the presence-based form `CI` uses: `CI`
 is set by a platform, whereas these are typed by a human for whom `PAIGASUS_REQUIRE_DOCKER=0`
-meaning "on" would be a footgun. `CI` keeps presence semantics, matching all 11 existing sites.
+meaning "on" would be a footgun.
+
+`CI` keeps **presence** semantics, matching all 11 existing sites. The alternative — reusing
+`env_flag` so that `CI=false` reads as not-CI — was considered and rejected: presence fails
+**closed** (anything CI-ish gets the hard failure), whereas value-matching fails **open** if any
+platform ever sets `CI` to an empty or falsy value, losing the hard failure in the one place it
+must never be lost. The cost is that a developer with `export CI=false` in their profile — a
+lingering Create React App idiom — cannot reach rule 3, since rule 2 outranks it. That is not a
+regression (those 11 sites already panic for them today, with no escape hatch at all), and the
+one-line workaround `env -u CI cargo nextest run -p paigasus-iam` is documented in §8.
 
 ### 6. The canary
 
@@ -366,7 +380,11 @@ Cargo/Moon parity gate are untouched.
 `CLAUDE.md`'s gotcha and `docs/dev-setup.md`'s bullet both currently describe the silent skip as
 an unavoidable hazard and prescribe `CI=1` as the only defence. Both are rewritten around the
 canary and the two env vars, and must carry the three §6 limitations — especially that
-`PAIGASUS_SKIP_DOCKER` is a per-invocation escape hatch, not a shell-profile setting.
+`PAIGASUS_SKIP_DOCKER` is a per-invocation escape hatch, not a shell-profile setting, and that
+a `moon run` which greened under it needs `moon run … --force` afterwards.
+
+`docs/dev-setup.md` also documents `env -u CI cargo nextest run -p paigasus-iam` for anyone
+carrying a stray `CI=false`, per §5.
 
 ### 9. Testing
 
