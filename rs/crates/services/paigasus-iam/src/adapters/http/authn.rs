@@ -91,7 +91,10 @@ fn envelope_rejection(rejection: JsonRejection) -> Response {
         ("invalid-request-body", "invalid request body")
     };
     let mut response = (rejection.status(), Json(json!({ "error": { "code": code, "message": message } }))).into_response();
-    response.headers_mut().insert(paigasus_observability::correlation::RETRYABLE_HEADER, HeaderValue::from_static("false"));
+    response.headers_mut().insert(
+        paigasus_observability::correlation::RETRYABLE_HEADER,
+        HeaderValue::from_static(paigasus_observability::Retryable::No.as_wire()),
+    );
     response
 }
 

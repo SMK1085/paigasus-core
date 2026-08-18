@@ -125,8 +125,14 @@ The trade-off, stated rather than hidden: because a caller may supply the correl
 `CorrelationLayer` attaches at precisely the composition point `paigasus_observability::http_metrics_layer` already uses: `app_routes` in IAM (`adapters/http/mod.rs:849`) and `router` in the gateway (`adapters/http/mod.rs:103`). Consequences, all of them deliberate and all of them precedented by that layer's own documented placement:
 
 - The `oneshot` test harness exercises it, because `app_routes` is inside `router()`. Attaching in `serve_http` instead would leave every existing integration test blind to it — the bearer layer's own doc comment records that exact reasoning.
-- `/healthz`, `/readyz` and `/metrics` are **outside** it and carry no ids and no retryable header. They are operational endpoints, not a client API; a 15-second Prometheus scrape minting two UUIDv7s per tick would be pure waste, and `readyz_router` is deliberately outside every layer today.
-- §2 goal 3 and D1's "Mandatory" are therefore scoped to the API surface. This is a narrowing of the guideline and is called out as such.
+- **IAM.** `/healthz`, `/readyz` and `/metrics` are **outside** it and carry no ids and no retryable header. They are operational endpoints, not a client API; a 15-second Prometheus scrape minting two UUIDv7s per tick would be pure waste, and `readyz_router` is deliberately outside every layer today.
+- §2 goal 3 and D1's "Mandatory" are therefore scoped to the API surface for IAM. This is a narrowing of the guideline and is called out as such.
+
+**Amendment (final whole-branch review, finding #4).** The gateway does the opposite: its `/healthz` and `/readyz` sit **inside** `CorrelationLayer` and carry both ids. This is not an inconsistency between the two services worth reconciling — it is a second, independently-justified decision, and both should be recorded rather than only one:
+
+- The gateway's router is flatter than IAM's — `router()` builds one merged tree in a single function (`adapters/http/mod.rs`), with no analogue of IAM's separate `health_router()`/`readyz_router()`/`app_routes()` split that `CorrelationLayer` could attach below. Carving the two health routes out into their own pre-`CorrelationLayer` merge, purely to withhold two headers, is not worth diverging the gateway's simpler composition from IAM's.
+- The cost is genuinely nil where IAM's avoidance reasoning does not transfer: the gateway's `/readyz` already does live work every poll (a real IAM introspect RPC, `adapters/http/mod.rs::readyz`), so the marginal cost of two more UUIDv7 mints on top of that RPC is immaterial — unlike IAM's `/readyz`, which is otherwise a bare `SELECT 1`.
+- So: both services made a real decision, in opposite directions, each defensible on its own composition and its own operational endpoint's cost. `correlation_headers.rs`'s `the_operational_endpoints_carry_no_ids` test pins IAM's narrowing; `adapters/http/mod.rs`'s `healthz_and_readyz_carry_ids_too` test (gateway) pins the opposite. Neither is a bug.
 
 ## 4. Architecture
 

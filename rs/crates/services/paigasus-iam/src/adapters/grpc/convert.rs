@@ -3,6 +3,11 @@
 //! Domain <-> proto conversions and the shared gRPC helpers (`status_to_grpc`, `node_uuid`,
 //! `to_page`) every `TenancyGrpc` method uses: parse -> service call -> convert, no business
 //! logic in this layer (task-16 brief).
+//!
+//! `iam_status` (SMA-504) is the single construction point every IAM gRPC error must go
+//! through: it is the only place that builds `ErrorDetails::with_error_info`, so no call site
+//! can forget the machine-readable `(domain, reason, metadata)` triple. `status_to_grpc` and
+//! `authn_status` are themselves thin `iam_status` callers, not independent constructors.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -52,13 +57,17 @@ static AUTHN_INTERNAL: LazyLock<String> = LazyLock::new(|| ErrorReason::Internal
 /// and response-body streaming) rather than filled with a nil UUID that would read as a real id.
 fn error_metadata(retryable: Retryable, extra: &[(&str, &str)]) -> HashMap<String, String> {
     let mut metadata = HashMap::new();
+    // `extra` inserts FIRST: the canonical keys below (`retryable`/`correlation_id`/
+    // `request_id`) are authoritative and must win a collision, never be silently overwritten by
+    // a future caller that happens to pass one of those names in `extra` (review finding #9 —
+    // only `("capability", ...)` is passed today, so this ordering is free to fix now).
+    for (k, v) in extra {
+        metadata.insert((*k).to_owned(), (*v).to_owned());
+    }
     metadata.insert("retryable".to_owned(), retryable.as_wire().to_owned());
     if let Some(ids) = current_ids() {
         metadata.insert("correlation_id".to_owned(), ids.correlation_id.to_string());
         metadata.insert("request_id".to_owned(), ids.request_id.to_string());
-    }
-    for (k, v) in extra {
-        metadata.insert((*k).to_owned(), (*v).to_owned());
     }
     metadata
 }
@@ -533,6 +542,23 @@ mod tests {
         assert_eq!(info.reason, "capability-disabled");
         assert_eq!(info.metadata.get("capability").map(String::as_str), Some("iam.apikeys"));
         assert!(ErrorReason::from_wire_reason("capability-disabled").is_some());
+    }
+
+    /// Review finding #9: `extra` is inserted BEFORE the canonical `retryable`/`correlation_id`/
+    /// `request_id` keys, so a caller that (accidentally or otherwise) passes one of those names
+    /// in `extra` can never silently overwrite the authoritative value.
+    #[test]
+    fn extra_metadata_can_never_override_the_canonical_retryable_key() {
+        use tonic_types::StatusExt;
+
+        let status = iam_status(Code::Internal, "internal", "internal error", Retryable::Unknown, &[("retryable", "true")]);
+        let details = status.get_error_details();
+        let info = details.error_info().expect("ErrorInfo");
+        assert_eq!(
+            info.metadata.get("retryable").map(String::as_str),
+            Some("unknown"),
+            "the canonical retryable value must win over a same-named extra entry"
+        );
     }
 
     /// SMA-446: `to_introspect_api_key_response` surfaces the credential's `scope_prn` on the

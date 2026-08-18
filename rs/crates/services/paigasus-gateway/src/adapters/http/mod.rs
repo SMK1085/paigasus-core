@@ -317,4 +317,25 @@ mod tests {
         assert!(resp.headers().contains_key("paigasus-correlation-id"));
         assert_eq!(resp.headers()["paigasus-retryable"], "false", "a 401 is not retryable");
     }
+
+    /// SMA-504 D10 amendment (final whole-branch review, finding #4): unlike IAM, the gateway's
+    /// `/healthz` and `/readyz` sit INSIDE `CorrelationLayer` and DO carry both ids — the router
+    /// is flatter than IAM's (no pre-layer health/readyz split to carve them out of), and
+    /// `/readyz` already does a real IAM RPC every poll, so two more UUIDv7 mints cost nothing
+    /// extra. Pinned so this narrowing is a decision, not an accident a later reader "fixes" to
+    /// match IAM's opposite choice.
+    #[tokio::test]
+    async fn healthz_and_readyz_carry_ids_too() {
+        let app = router(state_with_iam(Arc::new(ProbeIam(Probe::ReachableOk))));
+
+        let resp = app.clone().oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().contains_key("paigasus-request-id"), "the gateway's /healthz carries ids, unlike IAM's");
+        assert!(resp.headers().contains_key("paigasus-correlation-id"));
+
+        let resp = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().contains_key("paigasus-request-id"), "the gateway's /readyz carries ids, unlike IAM's");
+        assert!(resp.headers().contains_key("paigasus-correlation-id"));
+    }
 }

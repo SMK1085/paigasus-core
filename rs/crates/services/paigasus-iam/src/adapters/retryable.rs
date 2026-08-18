@@ -37,8 +37,11 @@ pub(crate) mod tests_support {
     use paigasus_iam_core::AuthnError;
 
     /// `AuthnError` lives in `paigasus-iam-core`, so a `cfg(test)` `EnumIter` derive there would
-    /// NOT be visible when THIS crate's tests compile. The exhaustive `match` below is the
-    /// dependency-free equivalent: adding a variant upstream fails this file to compile.
+    /// NOT be visible when THIS crate's tests compile. The exhaustive `match` below is NOT the
+    /// dependency-free equivalent of `EnumIter` — it only guarantees a compile error when a new
+    /// variant is added upstream (the wildcard-free match below forces every arm to be named
+    /// here); nothing forces that new variant into the `all` vec itself, so a variant added and
+    /// matched but never pushed onto `all` would compile clean and silently escape this list.
     pub(crate) fn all_authn_errors() -> Vec<AuthnError> {
         use paigasus_iam_core::{ProvisioningDefect, TokenDefect};
         let all = vec![

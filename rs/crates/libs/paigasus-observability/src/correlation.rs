@@ -19,6 +19,15 @@ use uuid::Uuid;
 /// Server-minted, never read from the request (the guideline marks it Forbidden inbound).
 pub const REQUEST_ID_HEADER: &str = "paigasus-request-id";
 /// Adopted from the caller when it parses as a UUID, else minted.
+///
+/// "Parses as a UUID" accepts any of the four RFC 4122 textual forms `Uuid::parse_str` accepts —
+/// hyphenated, simple (32 hex digits, no hyphens), braced (`{…}`), and `urn:uuid:…` — and the
+/// value that is adopted, logged, echoed in response headers, and (per D9) persisted is always
+/// the CANONICAL hyphenated form, not the caller's original bytes. So an inbound
+/// `urn:uuid:0198f2c1-…` is adopted, not rejected, but the response header carries
+/// `0198f2c1-…` — adopted, but not verbatim. This is deliberate: a client that round-trips its
+/// own id in a non-hyphenated form should not be rejected, and normalizing to one canonical
+/// spelling is simpler for every downstream reader than accepting four.
 pub const CORRELATION_ID_HEADER: &str = "paigasus-correlation-id";
 /// `"true"` | `"false"` | `"unknown"` — set by an error renderer, or defaulted by the layer.
 pub const RETRYABLE_HEADER: &str = "paigasus-retryable";
@@ -240,6 +249,24 @@ mod tests {
         let resp = through_layer(get(&[(CORRELATION_ID_HEADER, supplied)])).await;
         assert_eq!(resp.headers()[CORRELATION_ID_HEADER], supplied);
         assert_eq!(resp.headers()["x-observed-correlation-id"], supplied);
+    }
+
+    /// Review finding #6: `Uuid::parse_str` accepts four RFC 4122 textual forms, and all four
+    /// are ADOPTED — but the value that comes back is always the canonical hyphenated spelling,
+    /// never the caller's original bytes. A non-hyphenated inbound id is therefore adopted (same
+    /// logical id), not rejected (which would mint an unrelated fresh one) — pinned here so the
+    /// normalizing behavior `CORRELATION_ID_HEADER`'s doc comment now states stays intentional.
+    #[tokio::test]
+    async fn adopts_a_non_hyphenated_inbound_correlation_id_but_echoes_the_canonical_form() {
+        let hyphenated = "0198f2c1-1111-7000-8000-000000000042";
+        let simple = "0198f2c1111170008000000000000042"; // same id, 32 hex digits, no hyphens
+        let resp = through_layer(get(&[(CORRELATION_ID_HEADER, simple)])).await;
+        assert_eq!(
+            resp.headers()[CORRELATION_ID_HEADER],
+            hyphenated,
+            "a non-hyphenated but valid UUID is adopted (not replaced with a fresh one) and echoed in its canonical form"
+        );
+        assert_eq!(resp.headers()["x-observed-correlation-id"], hyphenated);
     }
 
     /// D6: an adopted value reaches logs, two response headers, outbound gRPC metadata and

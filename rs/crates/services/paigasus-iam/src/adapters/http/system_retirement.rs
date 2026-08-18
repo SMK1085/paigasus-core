@@ -147,9 +147,10 @@ fn conflict(code: &str, message: &str, mut extra: serde_json::Value) -> Response
     obj.insert("error".to_string(), json!({ "code": code, "message": message }));
     let mut response = (StatusCode::CONFLICT, Json(extra)).into_response();
     // Both refusals below are 409 conflicts the caller cannot retry as-is: `Retryable::No`.
-    response
-        .headers_mut()
-        .insert(paigasus_observability::correlation::RETRYABLE_HEADER, axum::http::HeaderValue::from_static("false"));
+    response.headers_mut().insert(
+        paigasus_observability::correlation::RETRYABLE_HEADER,
+        axum::http::HeaderValue::from_static(paigasus_observability::Retryable::No.as_wire()),
+    );
     response
 }
 

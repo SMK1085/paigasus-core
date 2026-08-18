@@ -23,6 +23,10 @@ pub static IAM_DOMAIN: LazyLock<String> = LazyLock::new(|| ErrorDomain::Iam.as_w
 
 /// The canonical wire `domain` for gateway-produced errors, `"gateway.paigasus.io"`. See
 /// [`IAM_DOMAIN`].
+///
+/// Only [`IAM_DOMAIN`] is load-bearing today — the gateway never emits a `Status` carrying its
+/// own domain, so this is referenced solely by its own test below. Defensible as symmetry:
+/// SMA-507's two-way drift gate and SMA-508's TS SDK are both expected to consume it.
 pub static GATEWAY_DOMAIN: LazyLock<String> = LazyLock::new(|| ErrorDomain::Gateway.as_wire_domain().expect("ErrorDomain::Gateway is not the Unspecified sentinel"));
 
 /// The suffix every canonical error domain carries.

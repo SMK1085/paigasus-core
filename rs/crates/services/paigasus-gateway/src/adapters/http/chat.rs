@@ -114,6 +114,13 @@ pub async fn chat_completions(State(state): State<AppState>, caller: Option<Exte
             record_upstream_call(status, started);
             let resp = if status.is_success() {
                 // Success stream: SSE passthrough with the mid-stream terminal-error adapter.
+                //
+                // SMA-504 spec §4.3, situation 3: `current_ids() == None` from here on. The
+                // `CorrelationLayer`'s task-local scope covers the request-HEAD future only, and
+                // that future already resolved to this `Response<Body>` the moment this line
+                // runs — hyper polls the `Body::from_stream` future (and therefore
+                // `terminal_sse_error_stream` below) AFTERWARDS, outside the scope. Anything
+                // added inside the stream adapter — a log line, a metric — will see no ids.
                 (status, [(header::CONTENT_TYPE, "text/event-stream")], Body::from_stream(terminal_sse_error_stream(stream))).into_response()
             } else {
                 // Non-2xx `stream:true` request: OpenAI answers with a JSON error body (NOT SSE), so
@@ -178,6 +185,11 @@ enum StreamState {
 /// failure becomes a data event, not a transport error), which keeps `Body::from_stream` from
 /// aborting the response body. The inner stream is owned by the unfold state and dropped when this
 /// stream is dropped — preserving reqwest's cancel-on-drop of the upstream request.
+///
+/// Runs with `paigasus_observability::current_ids() == None` (SMA-504 spec §4.3, situation 3):
+/// this function is polled by hyper after the request-head future — the one the
+/// `CorrelationLayer` task-local scope covers — has already resolved. See the call site's
+/// comment in `chat_completions`.
 fn terminal_sse_error_stream(inner: OpenAiByteStream) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
     futures::stream::unfold(StreamState::Streaming(inner), |state| async move {
         match state {

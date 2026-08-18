@@ -30,14 +30,25 @@ async fn an_auth_rejected_request_still_carries_both_ids() {
 
 /// D10: `/healthz` and `/readyz` are operational endpoints, deliberately outside every layer
 /// (`readyz_router` is merged at the top level). Pinned so the narrowing is a decision rather
-/// than an accident someone later "fixes".
+/// than an accident someone later "fixes". `/readyz` is the more interesting of the two — it is
+/// merged in via its OWN `readyz_router`, a separate function from `/healthz`'s, so this is not
+/// just re-testing the same code path under a different path string.
 #[tokio::test]
 async fn the_operational_endpoints_carry_no_ids() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
     let (app, _idp) = support::app(db).await;
-    let resp = app.oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap()).await.unwrap();
+    let resp = app.clone().oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(!resp.headers().contains_key(REQUEST_ID), "/healthz is outside the API surface (D10)");
+    assert!(!resp.headers().contains_key(CORRELATION_ID), "/healthz is outside the API surface (D10)");
+
+    let resp = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "readyz_router's DB ping must succeed against the migrated test database");
+    assert!(!resp.headers().contains_key(REQUEST_ID), "/readyz is merged via its own readyz_router, outside the API surface (D10)");
+    assert!(
+        !resp.headers().contains_key(CORRELATION_ID),
+        "/readyz is merged via its own readyz_router, outside the API surface (D10)"
+    );
 }

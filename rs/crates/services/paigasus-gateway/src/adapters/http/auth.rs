@@ -219,8 +219,16 @@ pub async fn require_authenticated(State(iam): State<Arc<dyn Iam>>, req: Request
 
 /// The reason IAM sends for a VALIDATED token whose `(issuer, subject)` has no local principal.
 /// Hoisted into a `LazyLock` because `as_wire_reason` allocates and this runs on every rejected
-/// discovery request.
-static IDENTITY_NOT_PROVISIONED: LazyLock<Option<String>> = LazyLock::new(|| paigasus_proto::paigasus::common::v1::ErrorReason::IdentityNotProvisioned.as_wire_reason());
+/// discovery request. `LazyLock<String>` + `.expect(...)`, matching the eight identical
+/// registry-derived statics in `paigasus-iam`'s `adapters/grpc/convert.rs:33-49` — not
+/// `LazyLock<Option<String>>`: if the registry ever stopped declaring this reason, an `Option`
+/// here would make the `==` comparison below permanently false with no signal at all, silently
+/// widening the fail-closed 401 with nothing to explain why (review finding #8).
+static IDENTITY_NOT_PROVISIONED: LazyLock<String> = LazyLock::new(|| {
+    paigasus_proto::paigasus::common::v1::ErrorReason::IdentityNotProvisioned
+        .as_wire_reason()
+        .expect("a declared reason is never the sentinel")
+});
 
 /// Is this IAM `Status` specifically "validated, but not yet provisioned"?
 ///
@@ -244,7 +252,7 @@ fn is_identity_not_provisioned(status: &Status) -> bool {
         tracing::warn!("IAM returned a PermissionDenied with no ErrorInfo — rolling-upgrade skew? (SMA-504)");
         return false;
     };
-    info.domain == *paigasus_proto::error::IAM_DOMAIN && Some(info.reason.as_str()) == IDENTITY_NOT_PROVISIONED.as_deref()
+    info.domain == *paigasus_proto::error::IAM_DOMAIN && info.reason.as_str() == IDENTITY_NOT_PROVISIONED.as_str()
 }
 
 /// Keep an IAM outage visible across [`require_authenticated`]'s two-leg fallback.
