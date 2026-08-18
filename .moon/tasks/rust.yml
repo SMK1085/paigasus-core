@@ -32,8 +32,10 @@ tasks:
     # `--locked` so clippy lints the resolution the PR actually SHIPS. Without it cargo silently
     # re-resolves and rewrites an inconsistent Cargo.lock, and the thirteen lints below would
     # compile against newest-compatible versions instead — which would make the whole point of the
-    # workspace inputs unprovable. No other gate in the repo passes `--locked`, and a Dependabot
-    # Cargo PR has already shipped a lockfile resolved from 3 of 11 workspace members here (SMA-534).
+    # workspace inputs unprovable. Among the compile gates, only `lint` passes `--locked`;
+    # `repo:publish-metadata` also uses it, for its packaging checks
+    # (`ci/publish-metadata/run.sh:243,258`). A Dependabot Cargo PR has already shipped a lockfile
+    # resolved from 3 of 11 workspace members here (SMA-534).
     command: 'cargo clippy --locked --all-targets -- -D warnings'
     # `^:build` is what makes a task AFFECTED when an upstream changes. Without it clippy
     # propagated across no edge at all, so an upstream change that tripped `-D warnings` in a
@@ -56,8 +58,11 @@ tasks:
     #                           rust-toolchain.toml's own lockstep comment warns about.
     # Deliberately NOT on build/test/fmt: `clippy --all-targets` is a superset of
     # `check --all-targets`, so it already type-checks libs, bins and tests; adding `test` would put
-    # the Docker-gated IAM container suites on every Dependabot PR. See the spec for the residual
-    # risk this leaves open (clippy neither links the cdylibs nor compiles wasm32).
+    # the Docker-gated IAM container suites on every Dependabot PR. Clippy still neither links the
+    # cdylibs nor compiles wasm32 — but that gap is CLOSED for the FFI cdylibs by SMA-546, which puts
+    # these same three workspace inputs on `paigasus-kernel-ts:{build,test}` and
+    # `paigasus-kernel-py:test` instead, since those are the tasks that actually link and compile
+    # them. See `ci/affected-graph/README.md`'s A5 bullet for the guard that keeps it that way.
     inputs:
       - '@group(sources)'
       - '@group(tests)'

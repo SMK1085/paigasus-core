@@ -226,25 +226,36 @@ run_suite() {
   # parity gate asserts `^:build` is DECLARED, this asserts it takes EFFECT.
   run_task_case "proto->service-info-tasks" "rs/crates/libs/paigasus-proto/src/lib.rs" \
     "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint"
-  # A workspace-level change must schedule EVERY crate's lint. `rs/` has no Moon project, so these
-  # files belong to `repo`; affectedness reaches the crates through `lint`'s task INPUTS, not
-  # through `dependsOn` — which is why no project case above changes. Before SMA-534 a
-  # Cargo.lock-only touch (i.e. every Dependabot Cargo PR) scheduled no crate task at all, so a
-  # dependency bump that tripped `-D warnings` merged green and redded main later.
+  # A workspace-level change must schedule EVERY crate's lint, AND the three tasks that compile the
+  # FFI cdylibs. `rs/` has no Moon project, so these files belong to `repo`; affectedness reaches
+  # both sets through task INPUTS, not through `dependsOn` — which is why no project case above
+  # changes. Before SMA-534 a Cargo.lock-only touch (i.e. every Dependabot Cargo PR) scheduled no
+  # crate task at all, so a dependency bump that tripped `-D warnings` merged green and redded main
+  # later.
   #
-  # No `build`/`test` row is expected: the workspace files are inputs to `lint` ONLY (SMA-534
-  # weighed and rejected build/test on cost — see the spec).
+  # The three build/test rows are SMA-546. `cargo clippy` emits metadata and never LINKS, and runs
+  # on the host target only — so the thirteen lints cannot cover the three `crate-type = ["cdylib"]`
+  # bindings, for which linking IS the failure mode, nor wasm32-unknown-unknown, which they never
+  # compile. paigasus-kernel-ts:{build,test} and paigasus-kernel-py:test are the tasks that do.
+  #
+  # The case name still says `all-lint`. It is now a slight misnomer, kept deliberately: it is
+  # referenced by CLAUDE.md and ci/affected-graph/README.md, and renaming it would break those
+  # greps for no functional gain.
   #
   # SAFETY OF THE NAME FILTER: `assert_task_case` matches the task NAMES build/test/lint across
-  # every project. Two things make that safe here, and only these two — state them narrowly:
-  #   1. `repo` declares no task named build/test/lint (verify: `moon query tasks`).
-  #   2. No py/ts task lists `rs/Cargo.lock` TODAY. It is NOT true that py/ts are unreachable from
-  #      `rs/` paths: ts/packages/paigasus-kernel:build, ts/packages/paigasus-kernel:test and
-  #      py/packages/paigasus-kernel:test all declare `/rs/crates/**` inputs. Adding the lockfile
-  #      to any of those three — a legitimate cache-input-completeness fix — puts a `build`/`test`
-  #      row into THIS case's observed set. Add it here when that happens; do not widen the filter.
+  # every project, so a same-named task elsewhere would enter this set. One premise makes that safe
+  # and it must be stated narrowly: `repo` declares no task named build/test/lint (verify:
+  # `moon query tasks`). The py/ts side is no longer a premise but an ASSERTION — the three tasks
+  # that key on `rs/Cargo.lock` are listed below, so a fourth one appearing shows up here as an
+  # `unexpected` row rather than passing silently. Add it if intended; do not widen the filter.
+  #
+  # The py CONFIGURATION ROOT's tasks (py:test/lint/fmt/typecheck) are deliberately absent. They do
+  # not key on these files: `uv run` alone serves a CACHED wheel and cannot observe a Rust change
+  # (measured for SMA-546 — a kernel edit that made `--reinstall-package` fail 67 tests left plain
+  # `uv run pytest` reporting 124 passed), so giving them these inputs would buy cost with no
+  # coverage.
   run_task_case "lockfile->all-lint" "rs/Cargo.lock" \
-    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-rs:lint,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint"
+    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint"
   # Generic Cargo<->Moon parity: catches a MISSING case, which is how SMA-524's bug survived review.
   assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.

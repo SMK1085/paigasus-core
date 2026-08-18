@@ -70,7 +70,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   in `ci/affected-graph/run.sh` — that case lists **every** crate, so **every** new crate changes it
   (SMA-534) — and, if it `dependsOn` `paigasus-kernel-rs`, to the `kernel->bindings` set as well
   (strict-equality guard, SMA-409). The parity gate's A4 needs no update: a new crate inherits
-  `lint`'s workspace inputs from `.moon/tasks/rust.yml`. New workspace deps may need
+  `lint`'s workspace inputs from `.moon/tasks/rust.yml`. That case now also carries three non-lint
+  rows — `paigasus-kernel-ts:{build,test}` and `paigasus-kernel-py:test`, the tasks that link the
+  cdylibs and compile `wasm32` (SMA-546) — so keep them when re-baselining; a new Rust crate does
+  not change them. New workspace deps may need
   `rs/deny.toml` `[licenses] exceptions` or a dev-only
   `[advisories] ignore` (Rust); an npm/pip advisory needs a version bump — a pnpm-workspace
   `overrides:` selector or `uv lock --upgrade-package` — or a justified `osv-scanner.toml`

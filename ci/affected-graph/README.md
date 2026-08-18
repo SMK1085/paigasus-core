@@ -32,7 +32,7 @@ deep` and asserts the affected project set **equals** an exact expected set per 
   edit must not rebuild the kernel). The py/ts parity tests list the corpus as a task `input`
   (cache-keying), which does not make them project-affected by a corpus-only edit.
 
-It also runs four checks that the per-case project sets structurally **cannot** make:
+It also runs five checks that the per-case project sets structurally **cannot** make:
 
 - **`proto->service-info-tasks`** asserts the affected *task* set (`moon query tasks --affected`),
   scoped to `build`, `test` and `lint` — the three tasks that carry `^:build`. `moon query projects
@@ -41,12 +41,14 @@ It also runs four checks that the per-case project sets structurally **cannot** 
   F3, closed for build/test by SMA-524 and for lint by SMA-526). `lint`'s `^:build` is declared once,
   in `.moon/tasks/rust.yml`, rather than per-crate the way build/test declare theirs — so this case
   is also what catches a regression in that shared declaration.
-- **`lockfile->all-lint`** asserts that a `rs/Cargo.lock` touch schedules **every** crate's `lint`.
-  `rs/` has no Moon project, so the workspace files belong to `repo` and affectedness reaches the
-  crates through `lint`'s task **inputs**, not through `dependsOn` — which is why no *project* case
-  changes and this one is needed at all. Before SMA-534 that touch scheduled no crate task
-  whatsoever, so every Dependabot Cargo PR was unlinted. The case's comment names the three py/ts
-  tasks that are one input line away from entering its observed set.
+- **`lockfile->all-lint`** asserts that a `rs/Cargo.lock` touch schedules **every** crate's `lint`
+  **and** the three tasks that compile the FFI cdylibs (`paigasus-kernel-ts:{build,test}`,
+  `paigasus-kernel-py:test`). `rs/` has no Moon project, so the workspace files belong to `repo`
+  and affectedness reaches both sets through task **inputs**, not through `dependsOn` — which is
+  why no *project* case changes and this one is needed at all. Before SMA-534 that touch scheduled
+  no crate task whatsoever, so every Dependabot Cargo PR was unlinted; before SMA-546 it still
+  scheduled nothing that LINKS a cdylib or compiles `wasm32`, which clippy never does. The name is
+  a deliberate misnomer — renaming it would break the `CLAUDE.md` procedure that greps for it.
 - **`cargo-moon-parity`** (`cargo_moon_parity.py`) compares every crate's Cargo deps against Moon's own
   resolved graph, asserting each edge exists *and* schedules the upstream's build. The per-case sets
   assert only edges someone remembered to write a case for; this catches a crate added with **no**
@@ -57,6 +59,14 @@ It also runs four checks that the per-case project sets structurally **cannot** 
   `rs/rust-toolchain.toml`. The behavioural case proves the inputs take effect; A4 proves they are
   declared for crates no case names. It iterates every crate unconditionally — unlike A1-A3, which
   are guarded by `if want:` and so never reach the four crates with no in-tree dependencies.
+- **A5** (in `cargo_moon_parity.py`) is A4's cross-stack twin (SMA-546): the tasks that COMPILE the
+  FFI cdylibs live in the ts/py stacks, where A4's per-crate loop cannot reach them. A5 **derives**
+  its targets — any task whose resolved `command` + `args` + `script` mentions `napi build`,
+  `wasm-pack`, `maturin` or `--reinstall-package` — and requires each to declare `rs/Cargo.lock`,
+  `rs/Cargo.toml`, `rs/rust-toolchain.toml` and `.prototools`. Deriving covers a future fourth
+  binding task on day one; a `REQUIRED_FFI_TASKS` **floor** stops the derivation degrading to a
+  vacuous PASS if a task ever stops matching the markers. A task with none of a `command`, a
+  `script`, or any `args` aborts as infra (rc 2), never as a silent skip.
 
 It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
 `--include-relations` (the edges are inert without it).
@@ -85,11 +95,14 @@ implicitly: any project that appears but isn't in the expected set fails the cas
 - `lockfile->all-lint` lists **every** Rust crate, so **adding a Rust crate always changes it** —
   unlike the project cases, which only change when the new crate joins a specific dependency chain.
   A4 needs no update in that situation: the new crate inherits `lint`'s inputs from
-  `.moon/tasks/rust.yml`, which is the point of declaring them there.
+  `.moon/tasks/rust.yml`, which is the point of declaring them there. The case's three
+  `build`/`test` rows are the FFI tasks (SMA-546) and are unaffected by adding a Rust crate; A5
+  covers them, and likewise needs no update unless a *new* FFI-compiling task appears.
 
 The expected sets are a snapshot of `moon query --affected --downstream deep` output at the
-**pinned moon version** (currently 2.3.2), and A4 additionally depends on `moon query projects`
-emitting per-task `inputFiles` as a path-keyed object. A moon upgrade that changes either — even
-benignly — will fail the guard, so re-grounding is a known step of any moon bump. A4 treats an
-absent `inputFiles` key as a violation rather than skipping, precisely so such a change cannot
-turn into a silent pass.
+**pinned moon version** (currently 2.3.2). A4 additionally depends on `moon query projects`
+emitting per-task `inputFiles` as a path-keyed object, and A5 on it emitting per-task `command`,
+`args` and `script`. A moon upgrade that changes either — even benignly — will fail the guard, so
+re-grounding is a known step of any moon bump. Both treat a missing key as a violation or an
+infrastructure error rather than skipping, precisely so such a change cannot turn into a silent
+pass.
