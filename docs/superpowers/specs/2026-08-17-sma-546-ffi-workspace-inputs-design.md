@@ -389,7 +389,10 @@ Note the mtime hazard when reverting an experimental edit: restoring a file via 
 rolls its mtime *backwards*, and cargo then reuses the artifact built from the temporary edit. Revert
 with an editor write followed by `touch`, never a `.bak` move.
 
-**V6 — price the real interleaving.** The Cost figures above are sequential and are a lower bound.
+**V6 — price the real interleaving.** *(Completed — see Cost above, which now records the result:
+2m 06s wall, 3.5 GB `rs/target` with a 7.7 MB wasm32 subtotal, and a ~8.2s wasm-bindgen-cli fetch per
+wasm-pack invocation. The procedure below is retained as the method that produced those figures.)*
+The Cost figures were originally sequential and a lower bound.
 Measure a **synthetic lockfile-only commit** end to end (`moon ci … --base <that commit>
 --include-relations`), not this PR's own CI run — this PR edits the two `moon.yml` files and
 therefore schedules a different task set. Record wall time under real concurrency and split the

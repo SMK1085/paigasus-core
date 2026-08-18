@@ -516,8 +516,15 @@ Run:
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 moon run paigasus-kernel-ts:build paigasus-kernel-ts:test paigasus-kernel-py:test
 ```
-Expected: all tasks succeed. This is what proves `--locked` did not break the three builds —
-`napi build`, `wasm-pack` and maturin each reach cargo with the flag.
+Expected: all tasks succeed.
+
+> **SUPERSEDED.** The original rationale here was "this proves `--locked` did not break the three
+> builds". `--locked` was dropped during execution (see the Task 2 amendment above), so this step
+> shipped as a plain regression check that the four new inputs did not break the builds. The command
+> is unchanged and was run as written.
+
+~~This is what proves `--locked` did not break the three builds — `napi build`, `wasm-pack` and
+maturin each reach cargo with the flag.~~
 
 - [ ] **Step 7: Confirm the behavioural case now reds — Task 3's failing test**
 
@@ -531,6 +538,11 @@ Expected: **FAIL** on `lockfile->all-lint` with exactly three `unexpected` rows:
 still passes.
 
 - [ ] **Step 8: Commit**
+
+> **SUPERSEDED.** The commit message below still claims the builds are locked. What actually shipped
+> is `fix(repo): key the FFI build tasks on the workspace files (SMA-546)`, whose body carries no
+> `--locked` claim — the flag was dropped during execution (Task 2 amendment above). The message
+> below is retained as the original instruction, not as a description of the shipped commit.
 
 ```bash
 git add ts/packages/paigasus-kernel/moon.yml py/packages/paigasus-kernel/moon.yml
