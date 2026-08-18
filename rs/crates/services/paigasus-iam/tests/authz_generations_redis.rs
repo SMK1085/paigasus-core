@@ -14,39 +14,24 @@
 //! carries the exact label values Grafana/alerting hard-code — for BOTH outcomes a live Redis can
 //! produce, `repaired` and `repair_failed`.
 //!
-//! Runs against an ephemeral Redis in Docker. In CI (`CI` env set) a missing Docker daemon
-//! is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note — same
-//! gating pattern as `tests/redis_jwks_cache.rs`.
+//! Runs against an ephemeral Redis in Docker. The Docker-unavailable policy lives once in
+//! `tests/support/docker.rs` (SMA-538): a container failure with a reachable daemon is a hard
+//! failure, an unreachable daemon skips locally and reds in CI.
 
 use paigasus_iam::adapters::authz::Generations;
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::ContainerAsync;
 use testcontainers_modules::testcontainers::core::ExecCommand;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 // This file has no `mod support;` — including `support/docker.rs` directly keeps it that way,
 // pulling in one small standalone file rather than the whole support surface (SMA-521).
 #[path = "support/docker.rs"]
 mod docker;
 
-/// Starts an ephemeral Redis container, returning its connection URL. Same CI-hard-fail /
-/// local-skip gating as `support::start_migrated_postgres`/`tests/redis_jwks_cache.rs`;
-/// self-contained here since this file has no other Redis consumer.
+/// Starts an ephemeral Redis container, returning its connection URL. The skip-versus-fail
+/// decision lives once, in `support/docker.rs` (SMA-538).
 async fn start_redis() -> Option<(ContainerAsync<Redis>, String)> {
-    let node = match Redis::default().start().await {
-        Ok(n) => n,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker is required for the authz generations redis test in CI: {e}");
-            }
-            eprintln!("skipping authz_generations_redis: Docker unavailable ({e})");
-            return None;
-        }
-    };
-
-    let port = docker::mapped_port(&node, 6379, "redis").await;
-    let url = format!("redis://127.0.0.1:{port}");
-    Some((node, url))
+    docker::start_redis_or_skip("authz_generations_redis").await
 }
 
 #[tokio::test]

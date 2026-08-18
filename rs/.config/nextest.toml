@@ -71,6 +71,17 @@ filter = 'package(=paigasus-iam) and binary(keycloak_e2e)'
 retries = 1
 
 [[profile.default.overrides]]
+# The SMA-538 canary. `retries = 1`, not the general block's 2: when Docker is genuinely
+# unreachable every attempt fails identically, so the extra attempt only adds ~45s of backoff to
+# a run that is already going to red. One retry is still kept, because the policy now hard-fails
+# a container that could not start with a REACHABLE daemon — exactly the transient class
+# SMA-521's retry budget exists to absorb — and this test is a mandatory gate.
+# Deliberately does NOT set `test-group`; it inherits `docker-containers` from the block below,
+# the same per-setting precedence keycloak_e2e relies on.
+filter = 'package(=paigasus-iam) and binary(docker_preflight)'
+retries = 1
+
+[[profile.default.overrides]]
 # `=` is an exact-match matcher. Verified that the bare form does NOT match `paigasus-iam-core`
 # either, but the explicit form means no reader has to know the matcher's semantics.
 # `kind(test)` selects integration-test targets only, so paigasus-iam's own --lib unit tests and
