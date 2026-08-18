@@ -49,8 +49,7 @@ affectedness.
 ## Decision
 
 Add the workspace-level files that determine what these tasks compile, to the three tasks that
-compile the FFI cdylibs, and make those three builds `--locked` so the artifact provably comes from
-the resolution the PR ships.
+compile the FFI cdylibs.
 
 | task | what it compiles |
 |---|---|
@@ -78,37 +77,40 @@ This is also why the issue's cheaper alternative (`/rs/Cargo.lock` on the three 
 `build`) is not a partial version of this decision: it leaves the cache-correctness bug fully
 intact *and* misses wasm32, the motivating case. See Rejected alternatives.
 
-### `--locked`, and why it is not a drive-by
+### `--locked` was investigated and deliberately deferred
 
-SMA-534 made `--locked` part of its fix rather than a separate cleanup: without it cargo silently
-re-resolves and rewrites an inconsistent `Cargo.lock`, so the gate no longer proves anything about
-the resolution the PR ships. This repo has already shipped a Dependabot lockfile resolved from
-3 of 11 workspace members.
+An earlier draft of this spec added `--locked` to all three builds, reasoning from SMA-534: without
+it cargo silently re-resolves and rewrites an inconsistent `Cargo.lock`, so nothing proves the
+artifact came from the resolution the PR ships — and `rs/Cargo.lock` is now a *declared input* of
+these tasks, so a mid-run rewrite would both invalidate the hash Moon recorded before execution and
+race `repo:deny` (`moon.yml:23`), `repo:wasm-getrandom-free` (`moon.yml:250`) and
+`repo:nats-permissions` (`moon.yml:229`), which read that same file in the same `moon ci` graph.
 
-`napi build`, `wasm-pack build` and maturin all shell out to cargo **without** `--locked` today.
-Inheriting SMA-534's premise while dropping its mechanism would leave two defects:
+The reasoning was sound; the mechanism was not. Measured on this worktree, `--locked` on these
+tasks **cannot deliver that guarantee**, for two independent reasons:
 
-1. The new inputs would not establish that the FFI artifacts are built from the shipped
-   resolution — the exact guarantee the cache-correctness framing rests on.
-2. `rs/Cargo.lock` becomes a *declared input* of tasks that may **rewrite it mid-run**. Moon hashes
-   inputs before execution, so the recorded hash would describe a tree that no longer exists, and
-   the rewrite races `repo:deny` (`moon.yml:23`), `repo:wasm-getrandom-free` (`moon.yml:250`) and
-   `repo:nats-permissions` (`moon.yml:229`), which read `rs/Cargo.lock` concurrently in the same
-   `moon ci` graph.
+1. **The tools pre-resolve.** `napi build` and `wasm-pack build` each run an **un-flagged
+   `cargo metadata`** before their `cargo build`. That call re-resolves and rewrites the lockfile,
+   so the subsequent `cargo build --locked` always finds it fresh and can never fail. Proof: with
+   the lock made genuinely stale, the real `wasm-pack build … -- --locked` invocation **exited 0 and
+   rewrote `rs/Cargo.lock`**, while a plain `cargo build --locked` control correctly refused with
+   `cannot update the lock file … because --locked was passed`. Sending a bogus flag through the
+   same channel *does* prove the arguments reach cargo — but reaching cargo is not the same as
+   biting, and only the staleness experiment distinguishes them.
+2. **The graph pre-resolves.** Even with a task-local `cargo metadata --locked` fail-fast guard
+   (which does work in isolation — verified in both directions), the shared `build` task in
+   `.moon/tasks/rust.yml` is a plain unflagged `cargo build`, inherited by all thirteen crates and
+   scheduled **ahead** of these tasks by `deps: ['^:build']`. It rewrites a stale lock itself, so
+   whether any task-local guard fires is order-dependent.
 
-All three passthrough paths were **verified on this worktree**, each proved by sending a bogus flag
-and observing it reach cargo (rather than being silently dropped), then confirming the real flag
-builds:
+The root cause is therefore repo-wide, not a property of these three task scripts. Closing it means
+`--locked` on the shared Rust `build` task — and arguably on `test`, which is `cargo nextest run` —
+which is a change to all thirteen crates with its own cost, ergonomics and guard questions.
 
-| tool | invocation | proof |
-|---|---|---|
-| wasm-pack | `wasm-pack build … -- --locked` | `-- --this-flag-does-not-exist` → `Usage: cargo build --lib --release` |
-| napi | `napi build … -- --locked` | `-- --this-flag-does-not-exist` → `Usage: cargo build --target [<TRIPLE>]` |
-| maturin | `MATURIN_PEP517_ARGS=--locked uv sync --reinstall-package …` | bogus flag → `command ['maturin', 'pep517', 'build-wheel', …, '--this-flag-does-not-exist'] returned non-zero exit status 2` |
-
-Consequence to accept knowingly: a PR whose lockfile is inconsistent with its manifests now reds on
-these tasks as well as on `lint`. That is the intended behaviour, and `lint --locked` already reds
-first on such a PR.
+**Deferred to a follow-up issue**, carrying the measurements above. This spec claims only what it
+delivers: the four inputs, which fix the cache-correctness bug and the scheduling gap. Shipping a
+half-mechanism under a comment asserting the hazard was closed would recreate exactly the
+documented-vs-executed split SMA-521 closed.
 
 ### Why `rs/rust-toolchain.toml` and `.prototools`, when the issue names only two files
 
@@ -395,10 +397,8 @@ is the gate that carries Layers 1 and 2.
 
 ## Scope
 
-1. `ts/packages/paigasus-kernel/moon.yml` — four inputs on `build` and `test`; `-- --locked` on both
-   `napi build` and `wasm-pack build` in both scripts.
-2. `py/packages/paigasus-kernel/moon.yml` — four inputs on `test`; `MATURIN_PEP517_ARGS=--locked` on
-   the `uv sync --reinstall-package` step.
+1. `ts/packages/paigasus-kernel/moon.yml` — four inputs on `build` and on `test`.
+2. `py/packages/paigasus-kernel/moon.yml` — four inputs on `test`.
 3. `ci/affected-graph/run.sh` — the `lockfile->all-lint` expected set (+3 rows) and its comment.
 4. `ci/affected-graph/cargo_moon_parity.py` — A5. This is more than one function, and SMA-534
    recorded the trap: `moon_projects()` must carry per-task `command`/`args`/`script` (a third
@@ -445,6 +445,6 @@ answer is the same and is still unwritten; this spec does not invent one.
 
 ## Rollback
 
-Revert the two `moon.yml` input/`--locked` edits, the `run.sh` expected set, A5 and the three
+Revert the two `moon.yml` input edits, the `run.sh` expected set, A5 and the three
 documentation touch-ups. Nothing depends on them beyond those files; there is no data migration and
 no published artifact. The pre-change state is the SMA-534 state, whose residual risk is documented.

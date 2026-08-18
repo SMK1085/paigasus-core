@@ -7,8 +7,7 @@ schedule the three Moon tasks that actually link the FFI cdylibs and compile `wa
 wiring so it cannot silently regress.
 
 **Architecture:** Four workspace-level files become `inputs` of
-`paigasus-kernel-ts:{build,test}` and `paigasus-kernel-py:test`; the same three builds gain
-`--locked` so the artifact provably comes from the resolution the PR ships. Two guard layers follow
+`paigasus-kernel-ts:{build,test}` and `paigasus-kernel-py:test`. Two guard layers follow
 the repo's existing split — a behavioural strict-equality case in `ci/affected-graph/run.sh`, and a
 new generic assertion **A5** in `ci/affected-graph/cargo_moon_parity.py` that derives its own target
 list from each task's resolved invocation but is anchored by a required floor so it cannot pass
@@ -375,7 +374,16 @@ EOF
 
 ---
 
-### Task 2: Declare the inputs and make the FFI builds `--locked`
+### Task 2: Declare the inputs
+
+> **AMENDED DURING EXECUTION.** This task originally also added `--locked` to all three builds.
+> That was removed after measurement proved it cannot work at this level: `napi build` and
+> `wasm-pack build` each run an un-flagged `cargo metadata` first (the real `wasm-pack … -- --locked`
+> invocation exited 0 and *rewrote* a stale lockfile), and the shared `build` task in
+> `.moon/tasks/rust.yml` — plain `cargo build`, scheduled ahead of these tasks by `deps: ['^:build']`
+> — rewrites a stale lock too. The root cause is repo-wide and is deferred to a follow-up issue; see
+> the spec's "`--locked` was investigated and deliberately deferred". Steps 3 and 4's `--locked`
+> instructions below are superseded: apply **only** the input lists.
 
 Turns Task 1's A5 red green, and reds the behavioural case — which is Task 3's failing test.
 
