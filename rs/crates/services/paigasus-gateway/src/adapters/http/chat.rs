@@ -48,8 +48,17 @@ use crate::domain::CallerContext;
 
 /// The single terminal SSE event emitted when a stream fails mid-flight. Static, caller-safe (no
 /// upstream detail), and shaped like the OpenAI error envelope wrapped in an SSE `data:` frame so
-/// SDKs that parse the stream see a well-formed terminal error.
-const TERMINAL_SSE_ERROR: &str = "data: {\"error\":{\"message\":\"upstream stream error\",\"type\":\"api_error\",\"param\":null,\"code\":\"upstream_error\"}}\n\n";
+/// SDKs that parse the stream see a well-formed terminal error. `code` is the registry's kebab
+/// `upstream-error` (SMA-504).
+///
+/// This frame carries NO `paigasus-retryable` header: by the time it is emitted, the `200 OK`
+/// head is already committed, so no header can change at this point. Nor does its JSON gain a
+/// `retryable` key — that would add a field the OpenAI envelope shape (AC 3) does not have, on
+/// this one frame only. Retryability is derivable anyway without either mechanism: `upstream-error`
+/// is by construction the transient mid-stream case (the request already reached the upstream and
+/// was streaming successfully before it failed), so a client that recognizes this code already
+/// knows it may retry.
+const TERMINAL_SSE_ERROR: &str = "data: {\"error\":{\"message\":\"upstream stream error\",\"type\":\"api_error\",\"param\":null,\"code\":\"upstream-error\"}}\n\n";
 
 /// Proxy a chat-completion request to the OpenAI upstream.
 ///
@@ -210,7 +219,21 @@ mod tests {
         let text = String::from_utf8(assembled).unwrap();
         assert!(text.starts_with("data: a\n\n"), "the pre-error chunk is forwarded: {text}");
         assert!(text.ends_with(TERMINAL_SSE_ERROR), "the stream ends with exactly the terminal SSE error event: {text}");
-        assert_eq!(text.matches("\"code\":\"upstream_error\"").count(), 1, "exactly one terminal error event");
+        assert_eq!(text.matches("\"code\":\"upstream-error\"").count(), 1, "exactly one terminal error event");
+    }
+
+    /// AC 6 for the terminal SSE frame. Parses the frame's JSON and resolves the `code` field
+    /// rather than string-comparing the same literal the constant is built from — a comparison
+    /// against the literal would pass even if the code were never registered.
+    #[test]
+    fn the_terminal_sse_frame_carries_a_registered_code() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+
+        let payload = TERMINAL_SSE_ERROR.strip_prefix("data: ").expect("an SSE data frame").trim_end();
+        let parsed: serde_json::Value = serde_json::from_str(payload).expect("the frame must be valid JSON");
+        let code = parsed["error"]["code"].as_str().expect("a code");
+        assert!(ErrorReason::from_wire_reason(code).is_some(), "{code} is not declared in common/v1/error.proto");
+        assert_eq!(parsed["error"]["type"], "api_error", "the frame keeps the OpenAI envelope shape");
     }
 
     /// Produce a real `reqwest::Error` (there is no public constructor) by forcing a connection

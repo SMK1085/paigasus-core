@@ -14,8 +14,10 @@
 //! `type`/`code` strings are stable diagnostics.
 
 use axum::Json;
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use paigasus_observability::Retryable;
+use paigasus_observability::correlation::RETRYABLE_HEADER;
 use serde::Serialize;
 
 use crate::adapters::openai::OpenAiError;
@@ -30,7 +32,10 @@ pub struct ErrorEnvelope {
 /// The body of the OpenAI error envelope. `param` names the request field at fault when there is
 /// one — only `StreamingDisabled` sets it today (SMA-505 D9); every auth- and egress-path error
 /// leaves it `null`, because no request field is at fault in those. `code` is a stable
-/// machine-readable diagnostic or `null`. `r#type` serializes as `"type"`.
+/// machine-readable diagnostic drawn from the canonical registry (`common/v1/error.proto`,
+/// SMA-504) — every [`GatewayError`] case emits one, so `code` is no longer `null` in practice;
+/// the field stays `Option` because [`ErrorEnvelope`] has no other case that omits it today.
+/// `r#type` serializes as `"type"`.
 #[derive(Debug, Serialize)]
 pub struct ErrorBody {
     pub message: String,
@@ -43,6 +48,7 @@ pub struct ErrorBody {
 /// G6/G7 extend this enum with egress cases (upstream unavailable, bad gateway, …). The HTTP
 /// status each maps to is a binding part of the contract (see [`GatewayError::into_response`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(strum::EnumIter))]
 pub enum GatewayError {
     /// No usable `Authorization: Bearer <key>` credential on the request → 401.
     MissingBearer,
@@ -87,56 +93,69 @@ impl From<OpenAiError> for GatewayError {
 
 impl GatewayError {
     /// The bound `(status, type, code, param)` plus a static, caller-safe message for each case.
-    /// `type` is one of OpenAI's coarse error kinds (SDKs read it); `code` is a finer stable
-    /// diagnostic or `None` (→ `null`); `param` names the request field at fault, or `None`.
+    /// `type` is one of OpenAI's coarse error kinds (SDKs read it); `code` is the canonical
+    /// registry spelling every case now emits (SMA-504 — `Internal` no longer emits `None`);
+    /// `param` names the request field at fault, or `None`.
     fn parts(self) -> (StatusCode, &'static str, Option<&'static str>, Option<&'static str>, &'static str) {
         match self {
             GatewayError::MissingBearer => (
                 StatusCode::UNAUTHORIZED,
                 "invalid_request_error",
-                Some("missing_authorization"),
+                Some("missing-authorization"),
                 None,
                 "Missing bearer credentials in the Authorization header.",
             ),
-            GatewayError::InvalidCredential => (StatusCode::UNAUTHORIZED, "invalid_request_error", Some("invalid_api_key"), None, "Invalid API key."),
+            GatewayError::InvalidCredential => (StatusCode::UNAUTHORIZED, "invalid_request_error", Some("invalid-api-key"), None, "Invalid API key."),
             GatewayError::AuthzDenied => (
                 StatusCode::FORBIDDEN,
                 "invalid_request_error",
-                Some("insufficient_permissions"),
+                Some("insufficient-permissions"),
                 None,
                 "The caller is not permitted to perform this action.",
             ),
-            GatewayError::MissingScope => (StatusCode::INTERNAL_SERVER_ERROR, "api_error", Some("missing_scope"), None, "Internal error."),
+            GatewayError::MissingScope => (StatusCode::INTERNAL_SERVER_ERROR, "api_error", Some("missing-scope"), None, "Internal error."),
             GatewayError::IamUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "api_error",
-                Some("iam_unavailable"),
+                Some("iam-unavailable"),
                 None,
                 "The authorization service is temporarily unavailable.",
             ),
-            GatewayError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "api_error", None, None, "Internal error."),
+            GatewayError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "api_error", Some("internal"), None, "Internal error."),
             GatewayError::BadRequestBody => (
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
-                Some("invalid_request_body"),
+                Some("invalid-request-body"),
                 None,
                 "The request body is not valid JSON.",
             ),
             GatewayError::UpstreamUnavailable => (
                 StatusCode::BAD_GATEWAY,
                 "api_error",
-                Some("upstream_unavailable"),
+                Some("upstream-unavailable"),
                 None,
                 "The upstream model provider is temporarily unavailable.",
             ),
-            GatewayError::UpstreamTimeout => (StatusCode::GATEWAY_TIMEOUT, "api_error", Some("upstream_timeout"), None, "The upstream model provider timed out."),
+            GatewayError::UpstreamTimeout => (StatusCode::GATEWAY_TIMEOUT, "api_error", Some("upstream-timeout"), None, "The upstream model provider timed out."),
             GatewayError::StreamingDisabled => (
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
-                Some("streaming_disabled"),
+                Some("streaming-disabled"),
                 Some("stream"),
                 "Streamed completions are not enabled on this deployment.",
             ),
+        }
+    }
+
+    /// Whether a client should retry (spec D4). `true` ONLY for transient dependency failures.
+    /// The two internal cases are `Unknown` rather than `false`: the gateway cannot tell a
+    /// transient fault from a bug, and a confident `false` there would be worse than the
+    /// status-class guess this replaces.
+    pub fn retryable(self) -> Retryable {
+        match self {
+            Self::IamUnavailable | Self::UpstreamUnavailable | Self::UpstreamTimeout => Retryable::Yes,
+            Self::Internal | Self::MissingScope => Retryable::Unknown,
+            Self::MissingBearer | Self::InvalidCredential | Self::AuthzDenied | Self::BadRequestBody | Self::StreamingDisabled => Retryable::No,
         }
     }
 }
@@ -152,7 +171,9 @@ impl IntoResponse for GatewayError {
                 code: code.map(str::to_owned),
             },
         };
-        (status, Json(envelope)).into_response()
+        let mut response = (status, Json(envelope)).into_response();
+        response.headers_mut().insert(RETRYABLE_HEADER, HeaderValue::from_static(self.retryable().as_wire()));
+        response
     }
 }
 
@@ -208,18 +229,20 @@ mod tests {
         let err = body.get("error").expect("envelope has a top-level `error` object");
         assert!(err.get("message").and_then(|m| m.as_str()).is_some_and(|m| !m.is_empty()));
         assert_eq!(err["type"], "invalid_request_error");
-        assert_eq!(err["code"], "invalid_api_key");
+        assert_eq!(err["code"], "invalid-api-key");
         assert!(
             err["param"].is_null(),
             "InvalidCredential names no request field at fault, so param is null (StreamingDisabled is the one case that sets it, SMA-505 D9)"
         );
     }
 
+    /// SMA-504 rename 16: `Internal` emitted a NULL code, so a client could not distinguish it
+    /// from any other `api_error`. It now emits the registry's `internal`.
     #[tokio::test]
-    async fn internal_case_serializes_a_null_code() {
+    async fn internal_case_serializes_the_canonical_internal_code() {
         let body = body_json(GatewayError::Internal.into_response()).await;
         assert_eq!(body["error"]["type"], "api_error");
-        assert!(body["error"]["code"].is_null(), "the Internal case carries a null code");
+        assert_eq!(body["error"]["code"], "internal");
     }
 
     #[tokio::test]
@@ -230,5 +253,53 @@ mod tests {
             let body = body_json(err.into_response()).await;
             assert_eq!(body["error"]["message"], "Internal error.");
         }
+    }
+
+    /// AC 6: every code `GatewayError` can emit is declared in the canonical registry.
+    /// Enumerated via `strum::EnumIter` off the type itself, so a variant added later is
+    /// included automatically — there is no second list that can be left un-extended.
+    #[test]
+    fn every_gateway_code_is_declared_in_the_canonical_registry() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+        use strum::IntoEnumIterator;
+
+        for err in GatewayError::iter() {
+            let (_, _, code, _, _) = err.parts();
+            let code = code.expect("SMA-504: the Internal case no longer emits a null code");
+            assert!(ErrorReason::from_wire_reason(code).is_some(), "GatewayError::{err:?} emits {code:?}, absent from common/v1/error.proto");
+        }
+    }
+
+    /// D4's table, asserted exhaustively so a new variant must state its retryability.
+    #[test]
+    fn retryability_matches_the_documented_table() {
+        use paigasus_observability::Retryable;
+        use strum::IntoEnumIterator;
+
+        for err in GatewayError::iter() {
+            let want = match err {
+                GatewayError::IamUnavailable | GatewayError::UpstreamUnavailable | GatewayError::UpstreamTimeout => Retryable::Yes,
+                GatewayError::Internal | GatewayError::MissingScope => Retryable::Unknown,
+                _ => Retryable::No,
+            };
+            assert_eq!(err.retryable(), want, "{err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_error_response_carries_a_retryable_header() {
+        assert_eq!(GatewayError::IamUnavailable.into_response().headers()["paigasus-retryable"], "true");
+        assert_eq!(GatewayError::InvalidCredential.into_response().headers()["paigasus-retryable"], "false");
+        assert_eq!(GatewayError::Internal.into_response().headers()["paigasus-retryable"], "unknown");
+    }
+
+    /// AC 3: the OpenAI envelope's key set is EXACTLY message/type/param/code. SDKs branch on
+    /// `type`, so this shape is a binding external contract — the ids ride in headers precisely
+    /// so this assertion keeps holding.
+    #[tokio::test]
+    async fn the_openai_error_object_key_set_is_unchanged() {
+        let body = body_json(GatewayError::InvalidCredential.into_response()).await;
+        let keys: std::collections::BTreeSet<&str> = body["error"].as_object().expect("an object").keys().map(String::as_str).collect();
+        assert_eq!(keys, ["code", "message", "param", "type"].into_iter().collect::<std::collections::BTreeSet<_>>());
     }
 }

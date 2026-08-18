@@ -720,7 +720,7 @@ mod tests {
         let body = body_json(resp).await;
         let err = body.get("error").expect("OpenAI envelope has a top-level `error` object");
         assert_eq!(err["type"], "invalid_request_error", "SDKs branch on error.type");
-        assert_eq!(err["code"], "insufficient_permissions");
+        assert_eq!(err["code"], "insufficient-permissions");
         assert!(err["param"].is_null());
         assert!(err["message"].as_str().is_some_and(|m| !m.is_empty()));
     }

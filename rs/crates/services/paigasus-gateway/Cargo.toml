@@ -80,6 +80,9 @@ figment = { workspace = true, features = ["test"] }
 # `src/adapters/http/mod.rs`'s health unit tests and `tests/chat_proxy.rs`'s integration tests
 # both drive the router via `ServiceExt::oneshot` (no real listener).
 tower = { workspace = true, features = ["util"] }
+# cfg(test) so strum_macros never enters the shipped binary, exactly as paigasus-iam does it
+# (SMA-498). Drives the AC 6 exhaustive registry test over `GatewayError` (SMA-504).
+strum = { version = "0.26", features = ["derive"] }
 
 [lints]
 workspace = true
