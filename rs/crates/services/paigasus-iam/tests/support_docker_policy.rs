@@ -132,3 +132,46 @@ fn missing_tls_cert_file_is_not_unreachable() {
     }));
     assert!(!is_daemon_unreachable(&e), "a missing TLS cert file against a healthy daemon must never be classified as unreachable");
 }
+
+// --------------------------------------- source_chain_is_permission_denied
+
+/// A two-level chain, so the walk has to recurse rather than only inspect the head.
+#[derive(Debug)]
+struct Wrapper(IoError);
+
+impl std::fmt::Display for Wrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "wrapper")
+    }
+}
+
+impl std::error::Error for Wrapper {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+/// EACCES on the docker socket is a CONNECT-phase failure, so `is_connect()` is true for it and
+/// it would otherwise skip. It is a misconfiguration against a daemon that may be perfectly
+/// healthy — the same case the `IOError` arm hard-fails — so it has to red instead.
+///
+/// This covers the chain-walking logic only. `hyper_util::client::legacy::Error` has no public
+/// constructor, so the wrapper this guard actually runs against cannot be built in a test; that
+/// gap is why the logic is factored out into a `&dyn Error` helper rather than inlined.
+#[test]
+fn permission_denied_is_found_through_the_source_chain() {
+    let e = Wrapper(IoError::new(ErrorKind::PermissionDenied, "permission denied"));
+    assert!(docker::source_chain_is_permission_denied(&e));
+}
+
+#[test]
+fn a_refused_connection_is_not_permission_denied() {
+    let e = Wrapper(IoError::new(ErrorKind::ConnectionRefused, "connection refused"));
+    assert!(!docker::source_chain_is_permission_denied(&e));
+}
+
+#[test]
+fn an_error_chain_without_a_permission_error_is_not_flagged() {
+    let e = IoError::other("nothing permission-related in here");
+    assert!(!docker::source_chain_is_permission_denied(&e));
+}

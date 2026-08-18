@@ -116,8 +116,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   shell-profile setting, and a `moon run` that greened under it leaves a cached PASS that replays
   after Docker returns, so follow it with `moon run … --force`. `CI` outranks both, so no
   workflow-file env var can green a CI run that tested nothing. A container that fails with a
-  REACHABLE daemon is now a hard failure everywhere — including `keycloak_e2e`'s 240s startup
-  timeout, which used to be a fast local skip. A stray `CI=false` still counts as "CI present" (the
+  REACHABLE daemon is a hard failure by default — including `keycloak_e2e`'s 240s startup
+  timeout, which used to be a fast local skip — though `PAIGASUS_SKIP_DOCKER=1` still downgrades
+  it to a skip, since that hatch is checked before any classification happens. A stray `CI=false` still counts as "CI present" (the
   check is presence-based, not value-based) — clear it with `env -u CI cargo nextest run -p
   paigasus-iam`.
 - Broad `inputs: ['**/*']` Moon tasks (e.g. `repo:actionlint`) stay cheap only because

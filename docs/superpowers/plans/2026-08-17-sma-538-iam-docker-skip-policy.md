@@ -590,6 +590,7 @@ Expected: clippy clean; all five PASS. (`roundtrip` exercises `start_migrated_po
 Then confirm the gate actually re-keys on the new input:
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd .. && moon query tasks --affected --base origin/main | grep nats-permissions
 ```
 
@@ -720,6 +721,7 @@ A second confirmation: a bare `retries = 1` has no backoff, so a correct run pri
 lines at all, while the general block's exponential backoff always does.
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-538
 moon run repo:nats-permissions
 ```
@@ -800,6 +802,7 @@ Expected: PASS.
 Temporarily add `let _ = std::env::var_os("CI");` to `rs/crates/services/paigasus-iam/tests/health.rs`, then:
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 moon run repo:iam-docker-policy-single-site
 ```
 

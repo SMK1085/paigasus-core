@@ -79,7 +79,8 @@ that CI absorbs via `actions/cache`.
   - Both parse `1`/`true`/`yes` only; `0` and unset are off. `CI` is presence-based (any value
     means CI) and outranks both. If you carry a stray `CI=false`, use
     `env -u CI cargo nextest run -p paigasus-iam`.
-  - A container that fails to start while the daemon IS reachable is a hard failure, not a skip.
+  - A container that fails to start while the daemon IS reachable is a hard failure, not a skip —
+    unless `PAIGASUS_SKIP_DOCKER` is set, which is checked first (see the next bullet).
   - Setting both at once: `PAIGASUS_SKIP_DOCKER` wins over `PAIGASUS_REQUIRE_DOCKER`. It is the
     escape hatch of last resort, so it is checked first — you get a skip, not a panic.
 - Retries and the container-concurrency cap for those suites live in `rs/.config/nextest.toml`

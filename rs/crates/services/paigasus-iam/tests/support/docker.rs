@@ -105,6 +105,32 @@ pub fn require_docker() -> bool {
     std::env::var_os("CI").is_some() || env_flag(std::env::var_os("PAIGASUS_REQUIRE_DOCKER").as_deref())
 }
 
+/// Whether `e` or anything in its `source()` chain is an [`std::io::Error`] with
+/// [`ErrorKind::PermissionDenied`].
+///
+/// Exists because `hyper_util`'s error keeps the real cause behind `source()` and exposes no
+/// accessor for it: `is_connect()` reports only that the failure happened during connect. A
+/// docker socket we are not permitted to open fails during connect, and must NOT be treated as
+/// "no daemon there" — it is a misconfiguration a developer needs to see.
+///
+/// Takes `&dyn Error` rather than a concrete type so it is testable:
+/// `hyper_util::client::legacy::Error` has no public constructor, so the hyper path itself cannot
+/// be unit-tested, but the chain-walking logic can be, and is
+/// (`tests/support_docker_policy.rs`).
+#[allow(dead_code)]
+pub fn source_chain_is_permission_denied(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = cur {
+        if let Some(io) = err.downcast_ref::<std::io::Error>()
+            && io.kind() == ErrorKind::PermissionDenied
+        {
+            return true;
+        }
+        cur = err.source();
+    }
+    false
+}
+
 /// Whether a failed `start()` means the Docker daemon could not be reached at all, as opposed
 /// to a container that genuinely failed with a healthy daemon.
 ///
@@ -172,8 +198,15 @@ pub fn is_daemon_unreachable(e: &TestcontainersError) -> bool {
     // are misconfigured" (`false`) — never message text.
     match bollard {
         BollardError::SocketNotFoundError(_) => true,
-        // `is_connect()` separates a genuine connect failure from a post-connect protocol error.
-        BollardError::HyperLegacyError { err } => err.is_connect(),
+        // `is_connect()` separates a genuine connect failure from a post-connect protocol error —
+        // but it is only `matches!(self.kind, ErrorKind::Connect)` (hyper-util 0.1.20), so it says
+        // NOTHING about why the connect failed. EACCES on the docker socket is a connect-phase
+        // failure, so `is_connect()` alone would skip on it. That is the same misconfiguration the
+        // `IOError` arm below deliberately hard-fails, and this is the path it actually travels:
+        // `connect_with_unix` goes through the hyper-util client, not through `IOError`. Hence the
+        // source-chain check — without it, "permission denied fails closed" would be true only on
+        // a variant nothing reaches (CodeRabbit, SMA-538).
+        BollardError::HyperLegacyError { err } => err.is_connect() && !source_chain_is_permission_denied(err),
         // `NotFound` is deliberately absent here, and so is `PermissionDenied`. The genuine
         // missing-socket case is `SocketNotFoundError` above — bollard checks the path first and
         // returns that, never an io `NotFound` (verified empirically, and in bollard 0.20.2's
