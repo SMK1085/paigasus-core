@@ -360,9 +360,17 @@ tasks:
     #      (`let Ok(node) = image.start().await else { return; };`) without ever touching `CI`,
     #      evading term 1 and passing in CI too. The consolidation made a tighter term possible:
     #      `AsyncRunner` (which `.start()` needs to be in scope) now appears in exactly one place.
-    #      Matched as `use .*runners::AsyncRunner` — the IMPORT, not `.start()` itself:
+    #      Matched as `use .*runners::.*AsyncRunner` — the IMPORT, not `.start()` itself:
     #      `nats_publisher.rs` legitimately calls `ContainerAsync::start` to restart an
     #      already-created container, and gating bare `.start()` would collide with that.
+    #      The `.*` between `runners::` and `AsyncRunner` is load-bearing: it catches the BRACED
+    #      form `use testcontainers::runners::{AsyncRunner, ..}`, which an anchored
+    #      `runners::AsyncRunner` misses. rustfmt here sets only `max_width`, so import
+    #      granularity survives exactly as an author typed it — the braced form is ordinary, not
+    #      exotic. STILL uncovered, and knowingly so: a glob (`use ..::runners::*;`) and a
+    #      fully-qualified inline path with no import at all. Both are unusual enough, and this
+    #      gate is defence-in-depth behind the canary, that chasing them would cost more in
+    #      false-positive surface than it buys.
     #
     # Modelled on repo:redis-connect-single-site, including its two portability lessons: do NOT
     # anchor paths on `^\./` (GNU grep emits the prefix, ugrep strips it), and filter comment
@@ -373,7 +381,7 @@ tasks:
     # without it all greps could go empty and the gate would pass while guarding nothing.
     script: |
       cd rs/crates/services/paigasus-iam
-      hits="$(grep -rnE 'var_os\("CI"\)|var\("CI"\)|option_env!\("CI"\)|use .*runners::AsyncRunner' tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      hits="$(grep -rnE 'var_os\("CI"\)|var\("CI"\)|option_env!\("CI"\)|use .*runners::.*AsyncRunner' tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
       expected="$(printf '%s\n' "$hits" | grep -E '^tests/support/docker\.rs:' || true)"
       offenders="$(printf '%s\n' "$hits" | grep -vE '^tests/support/docker\.rs:' | grep -v '^$' || true)"
       if [ -z "$expected" ]; then

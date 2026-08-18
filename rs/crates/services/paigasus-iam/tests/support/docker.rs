@@ -174,13 +174,17 @@ pub fn is_daemon_unreachable(e: &TestcontainersError) -> bool {
         BollardError::SocketNotFoundError(_) => true,
         // `is_connect()` separates a genuine connect failure from a post-connect protocol error.
         BollardError::HyperLegacyError { err } => err.is_connect(),
-        // `NotFound` is deliberately absent here. The genuine missing-socket case is
-        // `SocketNotFoundError` above (empirically: a missing unix socket yields "Socket not
-        // found", not an io `NotFound`). What `IOError { NotFound }` actually reaches is the TLS
-        // path: with `DOCKER_TLS_VERIFY` set, a missing `key.pem`/`cert.pem`/`ca.pem` surfaces as
-        // `fs::File::open(path)?` inside `ClientError::Init` — a client misconfiguration against a
-        // healthy daemon, structurally identical to the `PermissionDenied` case below, which this
-        // design already hard-fails deliberately.
+        // `NotFound` is deliberately absent here, and so is `PermissionDenied`. The genuine
+        // missing-socket case is `SocketNotFoundError` above — bollard checks the path first and
+        // returns that, never an io `NotFound` (verified empirically, and in bollard 0.20.2's
+        // `connect_with_unix`). So an io error reaching this arm did NOT come from an absent
+        // socket, and the only kinds that mean "nobody answered" are the connection ones.
+        //
+        // No producer of `IOError { NotFound }` is known on the reachable paths in bollard 0.20.2
+        // — a missing TLS `ca.pem` maps to `CertPathError`, not to this variant, and falls to the
+        // catch-all below. That is a reason this arm is right, not a reason to widen it: anything
+        // unrecognised must red rather than skip, exactly like the `PermissionDenied` case, which
+        // is a client misconfiguration against a perfectly healthy daemon.
         BollardError::IOError { err } => matches!(err.kind(), ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted),
         // Deliberately `false`, not `true`. testcontainers sets a 120s per-request timeout
         // (testcontainers' `bollard_client.rs`) and bollard raises this from a `tokio::time::timeout`
