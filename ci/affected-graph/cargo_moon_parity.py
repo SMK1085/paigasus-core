@@ -74,7 +74,7 @@ WORKSPACE_LINT_INPUTS = ("rs/Cargo.lock", "rs/Cargo.toml", "rs/rust-toolchain.to
 # not under any Rust crate. They must key on the same workspace files as `lint`, plus `.prototools`
 # — which pins `wasm-pack` and is therefore the OTHER half of the rs/Cargo.toml:90-97 invariant
 # ("the pinned wasm-pack must support that 0.2.z — bump the two together").
-FFI_TASK_INPUTS = WORKSPACE_LINT_INPUTS + (".prototools",)
+FFI_TASK_INPUTS = (*WORKSPACE_LINT_INPUTS, ".prototools")
 
 # Substrings that mean "this task shells out to a Rust build". Matched against the task's resolved
 # `command` + `args` + `script` joined — NOT `command` alone: measured on moon 2.3.2, a
