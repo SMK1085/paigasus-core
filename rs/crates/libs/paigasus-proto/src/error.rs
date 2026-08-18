@@ -9,7 +9,25 @@
 //! place — `contracts/proto/paigasus/common/v1/error.proto`. A table here would be a second
 //! copy of the registry, which is the "three unlinked places" drift ADR-0019 cites.
 
+use std::sync::LazyLock;
+
 use crate::paigasus::common::v1::{ErrorDomain, ErrorReason};
+
+/// The canonical wire `domain` for IAM-produced errors, `"iam.paigasus.io"`.
+///
+/// Derived from the registry rather than written as a literal, and living here rather than in
+/// either service, because BOTH sides need it: IAM to emit, the gateway to match on. A literal
+/// in the gateway would be a second hand-maintained copy of the vocabulary (ADR-0019 D8).
+/// `as_wire_domain` returns `None` only for the zero sentinel, which `Iam` is not.
+pub static IAM_DOMAIN: LazyLock<String> = LazyLock::new(|| ErrorDomain::Iam.as_wire_domain().expect("ErrorDomain::Iam is not the Unspecified sentinel"));
+
+/// The canonical wire `domain` for gateway-produced errors, `"gateway.paigasus.io"`. See
+/// [`IAM_DOMAIN`].
+///
+/// Only [`IAM_DOMAIN`] is load-bearing today — the gateway never emits a `Status` carrying its
+/// own domain, so this is referenced solely by its own test below. Defensible as symmetry:
+/// SMA-507's two-way drift gate and SMA-508's TS SDK are both expected to consume it.
+pub static GATEWAY_DOMAIN: LazyLock<String> = LazyLock::new(|| ErrorDomain::Gateway.as_wire_domain().expect("ErrorDomain::Gateway is not the Unspecified sentinel"));
 
 /// The suffix every canonical error domain carries.
 const DOMAIN_SUFFIX: &str = ".paigasus.io";
@@ -120,7 +138,7 @@ mod tests {
     /// hand-maintained list. The scan bound (9999) must stay comfortably above the highest
     /// declared number (999, the top of the shared range — see error.proto) or a value added
     /// above the bound goes invisible to every test derived from `all_reasons`/`all_domains`,
-    /// including the `assert_eq!(actual.len(), 43)` anchor and the range-enforcement test.
+    /// including the `assert_eq!(actual.len(), 46)` anchor and the range-enforcement test.
     fn all_reasons() -> Vec<ErrorReason> {
         (0..=9999).filter_map(|i| ErrorReason::try_from(i).ok()).collect()
     }
@@ -178,10 +196,13 @@ mod tests {
         "upstream-unavailable",
         "upstream-timeout",
         "upstream-error",
+        "streaming-disabled",
         // Shared
         "internal",
         "invalid-request-body",
         "request-too-large",
+        "missing-auth-context",
+        "capability-disabled",
     ];
 
     #[test]
@@ -193,7 +214,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 43, "the registry should hold 43 reasons");
+        assert_eq!(actual.len(), 46, "the registry should hold 46 reasons");
     }
 
     #[test]
@@ -297,5 +318,15 @@ mod tests {
         assert_eq!(ErrorReason::ParentArchived.as_wire_reason().as_deref(), Some("parent-archived"));
         assert_eq!(ErrorReason::NothingToRename.as_wire_reason().as_deref(), Some("nothing-to-rename"));
         assert_eq!(ErrorDomain::Iam.as_wire_domain().as_deref(), Some("iam.paigasus.io"));
+    }
+
+    /// The domain strings live HERE, next to `as_wire_domain` they are derived from, because the
+    /// gateway must compare `ErrorInfo.domain` against IAM's domain and cannot see a constant
+    /// private to the IAM crate. A hardcoded copy in the gateway is exactly the second
+    /// hand-maintained vocabulary ADR-0019's registry exists to prevent.
+    #[test]
+    fn the_domain_constants_match_the_registry() {
+        assert_eq!(&*crate::error::IAM_DOMAIN, "iam.paigasus.io");
+        assert_eq!(&*crate::error::GATEWAY_DOMAIN, "gateway.paigasus.io");
     }
 }

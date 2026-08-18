@@ -292,7 +292,7 @@ async fn api_key_bearer_authenticates_via_the_router() {
 }
 
 /// AC (Task 19) — a bearer carrying the configured `pgs_sk_` prefix but structurally garbage
-/// content (no valid keyid/secret shape) is denied 401 `invalid_token` through the SAME funnel
+/// content (no valid keyid/secret shape) is denied 401 `invalid-token` through the SAME funnel
 /// every other rejected credential renders through (`AuthnApiError`) — and the response body
 /// never echoes the presented (bogus) token material.
 #[tokio::test]
@@ -303,7 +303,7 @@ async fn garbage_api_key_bearer_is_401() {
     let garbage = format!("{PREFIX}deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
     let (status, body) = support::send(&app, "GET", "/v1/organizations", None, Some(&garbage)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
-    assert_eq!(body["error"]["code"], "invalid_token");
+    assert_eq!(body["error"]["code"], "invalid-token");
     assert_eq!(body["error"]["message"], "invalid bearer token");
     assert!(!body.to_string().contains("deadbeef"), "the presented garbage token must never be echoed in the response: {body}");
 }
@@ -514,7 +514,7 @@ async fn issuance_escalation_denied() {
 /// critical step) AND disables the underlying `Principal` (D16). Presenting the SAME key again
 /// is now a genuine cache MISS (the entry was evicted, not merely stale) that reads Postgres
 /// fresh and hits the unconditional D16 SA-status check in `AuthenticateApiKey::resolve_uncached`
-/// -- denied `403 principal_inactive`, a status/code distinct from an ordinary authorization
+/// -- denied `403 principal-inactive`, a status/code distinct from an ordinary authorization
 /// `403 forbidden`, proving the deny happens at AUTHENTICATION (the credential router), not
 /// merely a subsequent authorization check.
 #[tokio::test]
@@ -580,9 +580,9 @@ async fn cached_key_denied_after_archive() {
     let (status, archived) = support::send(&app, "DELETE", &format!("/v1/service-accounts/{sa_id}"), None, Some(admin_token.as_str())).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{archived}");
 
-    // The SAME key, presented again: denied `principal_inactive`, never the stale-cache 200 the
+    // The SAME key, presented again: denied `principal-inactive`, never the stale-cache 200 the
     // archive's cache-eviction step exists to prevent.
     let (status, second) = support::send(&app, "GET", &format!("/v1/organizations/{org_id}"), None, Some(plaintext.as_str())).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{second}");
-    assert_eq!(second["error"]["code"], "principal_inactive", "{second}");
+    assert_eq!(second["error"]["code"], "principal-inactive", "{second}");
 }

@@ -132,11 +132,13 @@ class ErrorDomain(betterproto2.Enum):
     Sub-group banners below are documentation only and carry no numbering
     meaning; a new IAM code takes the next free number in 1-299.
 
-    ErrorInfo.metadata additionally carries two standard keys, populated by
-    SMA-504: `retryable` and `correlation_id`. They are prose here, not
-    enumerated: metadata is an open map, not a closed vocabulary consumers branch
-    on exhaustively. The append-only guarantee above covers reasons and domains
-    ONLY, not metadata keys.
+    ErrorInfo.metadata carries these standard keys, populated by SMA-504:
+    `retryable` (exactly "true" | "false" | "unknown"), `correlation_id` and
+    `request_id` (present only when the error was produced inside a request
+    scope), and `capability` (only on ERROR_REASON_CAPABILITY_DISABLED). They
+    are prose here, not enumerated: metadata is an open map, not a closed
+    vocabulary consumers branch on exhaustively. The append-only guarantee
+    above covers reasons and domains ONLY, not metadata keys.
 
     The service that produced an error. Not emitted on the gateway's
     OpenAI-compatible envelope, which has no domain field and carries only
@@ -395,6 +397,13 @@ class ErrorReason(betterproto2.Enum):
     "upstream-error" — a streamed response failed mid-flight.
     """
 
+    STREAMING_DISABLED = 308
+    """
+    "streaming-disabled" — streamed completions are refused by configuration.
+    A request-PARAMETER refusal (400, param "stream"), not a route-level
+    capability gate — see ERROR_REASON_CAPABILITY_DISABLED for that.
+    """
+
     INTERNAL = 900
     """
     ---- Shared (900-999) ----------------------------------------------------
@@ -412,6 +421,20 @@ class ErrorReason(betterproto2.Enum):
     REQUEST_TOO_LARGE = 902
     """
     "request-too-large" — request body exceeded the configured byte limit.
+    """
+
+    MISSING_AUTH_CONTEXT = 903
+    """
+    "missing-auth-context" — the enforcement layer admitted a request without
+    attaching an authenticated context. An internal invariant violation,
+    surfaced as a distinct diagnostic rather than a bare unauthenticated.
+    """
+
+    CAPABILITY_DISABLED = 904
+    """
+    "capability-disabled" — the RPC belongs to a capability this deployment
+    has switched off. The capability name rides in
+    ErrorInfo.metadata["capability"], so a new capability needs no new reason.
     """
 
     @classmethod
@@ -458,9 +481,12 @@ class ErrorReason(betterproto2.Enum):
             305: "ERROR_REASON_UPSTREAM_UNAVAILABLE",
             306: "ERROR_REASON_UPSTREAM_TIMEOUT",
             307: "ERROR_REASON_UPSTREAM_ERROR",
+            308: "ERROR_REASON_STREAMING_DISABLED",
             900: "ERROR_REASON_INTERNAL",
             901: "ERROR_REASON_INVALID_REQUEST_BODY",
             902: "ERROR_REASON_REQUEST_TOO_LARGE",
+            903: "ERROR_REASON_MISSING_AUTH_CONTEXT",
+            904: "ERROR_REASON_CAPABILITY_DISABLED",
         }
 
     @classmethod
@@ -507,9 +533,12 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_UPSTREAM_UNAVAILABLE": 305,
             "ERROR_REASON_UPSTREAM_TIMEOUT": 306,
             "ERROR_REASON_UPSTREAM_ERROR": 307,
+            "ERROR_REASON_STREAMING_DISABLED": 308,
             "ERROR_REASON_INTERNAL": 900,
             "ERROR_REASON_INVALID_REQUEST_BODY": 901,
             "ERROR_REASON_REQUEST_TOO_LARGE": 902,
+            "ERROR_REASON_MISSING_AUTH_CONTEXT": 903,
+            "ERROR_REASON_CAPABILITY_DISABLED": 904,
         }
 
 

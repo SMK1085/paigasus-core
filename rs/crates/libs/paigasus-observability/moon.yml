@@ -3,3 +3,23 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 id: 'paigasus-observability-rs'
 layer: 'library'
 language: 'rust'
+
+# This crate depends on paigasus-kernel via `workspace = true` (Cargo.toml). Moon 2.3.2's Rust
+# toolchain resolves `path = "..."` deps into the project graph automatically but does NOT resolve
+# workspace-inherited ones, so a `workspace = true` dep MUST be hand-declared here (SMA-524).
+#
+# BOTH declarations are required, and they do different jobs:
+#   * `dependsOn`      creates the project-graph edge (what `moon query projects --affected` follows);
+#   * task `^:build`   schedules the upstream's build (what `moon ci --include-relations` runs).
+# Neither implies the other. `repo:affected-smoke` asserts both (SMA-524 A1/A3).
+dependsOn:
+  # SMA-504: the correlation layer mints UUIDv7 via paigasus_kernel::mint_uuid7.
+  - 'paigasus-kernel-rs'
+
+tasks:
+  build:
+    deps: ['^:build']
+  test:
+    deps: ['^:build']
+  # `lint` needs no declaration here: `.moon/tasks/rust.yml` already gives it `^:build`, which
+  # merges in for every Rust project. cargo_moon_parity.py checks build, test and lint independently.

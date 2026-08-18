@@ -26,6 +26,7 @@ use axum::response::Response;
 use secrecy::SecretString;
 use serde_json::Value;
 use tonic::Status;
+use tonic_types::{ErrorDetails, StatusExt};
 use tower::ServiceExt; // for `oneshot`
 
 use paigasus_gateway::adapters::http::{AppState, router};
@@ -119,7 +120,19 @@ impl Iam for FakeIam {
                 memberships: Vec::new(),
                 role_grants: Vec::new(),
             }),
-            TokenOutcome::PermissionDenied => Err(IamError::Rpc(Status::permission_denied("not provisioned"))),
+            // SMA-504: `require_authenticated` now narrows to `ErrorInfo`'s
+            // `identity-not-provisioned` reason, not the bare code — so the fake must carry the
+            // same details IAM's `authn_status` (Task 4) actually attaches, or this relaxation
+            // (ADR-0020 D4) would fail closed.
+            TokenOutcome::PermissionDenied => Err(IamError::Rpc(Status::with_error_details(
+                tonic::Code::PermissionDenied,
+                "not provisioned",
+                ErrorDetails::with_error_info(
+                    paigasus_proto::paigasus::common::v1::ErrorReason::IdentityNotProvisioned.as_wire_reason().expect("a declared reason"),
+                    &*paigasus_proto::error::IAM_DOMAIN,
+                    std::collections::HashMap::new(),
+                ),
+            ))),
             TokenOutcome::Connect => Err(IamError::Connect("test connect failure".to_owned())),
             TokenOutcome::Unreachable => panic!("introspect_token must not be called in this scenario"),
         }

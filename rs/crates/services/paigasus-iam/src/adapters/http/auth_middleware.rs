@@ -9,7 +9,7 @@
 //! paths yield the same `AuthnPrincipal` shape, so the rest of this middleware treats them
 //! identically — on success, inserts an [`AuthContext`] request extension for downstream
 //! handlers. Every rejection short-circuits through the shared `AuthnApiError` funnel
-//! (D12): status and body are always 401 `invalid_token`; only the `WWW-Authenticate`
+//! (D12): status and body are always 401 `invalid-token`; only the `WWW-Authenticate`
 //! challenge distinguishes a fully-absent `Authorization` header (bare `Bearer`, RFC 6750
 //! §3.1) from a present-but-rejected credential (`Bearer error="invalid_token"`). The token
 //! itself is never logged (nothing here logs it, and `AuthnError`'s own contract keeps
@@ -33,7 +33,7 @@ use crate::application::authenticate_token::Provisioning;
 pub async fn require_bearer(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
     let header_present = request.headers().contains_key(header::AUTHORIZATION);
     let Some(token) = bearer_from_headers(request.headers()) else {
-        // Absent or unusable credentials get the SAME 401 status and `invalid_token` body
+        // Absent or unusable credentials get the SAME 401 status and `invalid-token` body
         // (the error contract stays uniform, D12); only the challenge header distinguishes
         // a client that sent NO credentials at all (bare `Bearer`, RFC 6750 §3.1 — no error
         // attribute when the request lacks authentication information) from one whose

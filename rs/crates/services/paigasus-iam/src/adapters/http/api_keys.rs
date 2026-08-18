@@ -119,7 +119,7 @@ async fn revoke(State(s): State<AppState>, Extension(ctx): Extension<AuthContext
 /// `POST /v1/authn/api-keys/introspect` (spec §10.2): the full `PrincipalContext` for a
 /// presented API-key token. Unauthenticated by design (the credential travels in the body) —
 /// mirrors `http/authn.rs::introspect` field-for-field, funneling through the SAME
-/// `AuthnApiError` (401 `invalid_token`, 403 `principal_inactive`, 503 `unavailable`) and
+/// `AuthnApiError` (401 `invalid-token`, 403 `principal-inactive`, 503 `authn-unavailable`) and
 /// `EnvelopeJson` (oversized/malformed body -> the same `{"error":{code,message}}` envelope,
 /// never axum's default plain-text rejection). Never logs the token.
 async fn introspect(State(state): State<AppState>, EnvelopeJson(body): EnvelopeJson<IntrospectApiKeyRequestBody>) -> Result<Json<IntrospectApiKeyResponseDto>, AuthnApiError> {

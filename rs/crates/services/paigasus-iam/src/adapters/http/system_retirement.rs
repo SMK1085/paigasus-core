@@ -145,7 +145,13 @@ fn grants_json(grants: &[GrantRef]) -> serde_json::Value {
 fn conflict(code: &str, message: &str, mut extra: serde_json::Value) -> Response {
     let obj = extra.as_object_mut().expect("extra is always a json object — every call site above passes a json!({...})");
     obj.insert("error".to_string(), json!({ "code": code, "message": message }));
-    (StatusCode::CONFLICT, Json(extra)).into_response()
+    let mut response = (StatusCode::CONFLICT, Json(extra)).into_response();
+    // Both refusals below are 409 conflicts the caller cannot retry as-is: `Retryable::No`.
+    response.headers_mut().insert(
+        paigasus_observability::correlation::RETRYABLE_HEADER,
+        axum::http::HeaderValue::from_static(paigasus_observability::Retryable::No.as_wire()),
+    );
+    response
 }
 
 #[cfg(test)]
@@ -232,7 +238,7 @@ mod tests {
         // stable envelope would still leave an `expect_err`-only test green.
         assert_eq!(rejection.status(), StatusCode::BAD_REQUEST, "the runbook documents a 400 for this exact request");
         let body = body_json(rejection).await;
-        assert_eq!(body["error"]["code"], json!("invalid_request"));
+        assert_eq!(body["error"]["code"], json!("invalid-request-body"));
         assert_eq!(body["error"]["message"], json!("invalid request body"));
     }
 
@@ -253,7 +259,7 @@ mod tests {
             .expect_err("malformed JSON must be rejected");
         assert_eq!(rejection.status(), StatusCode::BAD_REQUEST);
         let body = body_json(rejection).await;
-        assert_eq!(body["error"]["code"], json!("invalid_request"));
+        assert_eq!(body["error"]["code"], json!("invalid-request-body"));
         assert_eq!(body["error"]["message"], json!("invalid request body"));
     }
 
@@ -290,6 +296,8 @@ mod tests {
     async fn conflict_keeps_the_stable_error_envelope_and_adds_sibling_fields() {
         let resp = conflict("grants-survive", "boom", json!({ "total_surviving": 3, "truncated": false }));
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+        // D4: a 409 conflict is never retryable as-is — the caller must change the request.
+        assert_eq!(resp.headers()["paigasus-retryable"], "false");
         let body = body_json(resp).await;
         assert_eq!(body["error"]["code"], json!("grants-survive"));
         assert_eq!(body["error"]["message"], json!("boom"));
