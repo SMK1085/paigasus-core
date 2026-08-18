@@ -164,32 +164,35 @@ Measured on the development machine (Apple silicon, warm `~/.cargo/registry`, `r
 with `cargo clean` run from `rs/`, Moon state cache cleared), following SMA-534's method: the
 **actual scheduled workload**, not a synthetic single-crate build.
 
+The decisive figure is the last row — a real `moon ci` over a **synthetic lockfile-only commit**,
+which is exactly the Dependabot Cargo PR shape this issue is about, with the whole graph
+interleaved rather than run in sequence:
+
 | | wall | CPU | `rs/target` | Moon actions |
 |---|---|---|---|---|
-| today — `moon run :lint` (what a Dependabot Cargo PR schedules after SMA-534) | 1m 40s | 4m 44s user + 41s sys | 3.1 GB | 24 |
-| **added by this change** | **+21s** | **+14s user + 2s sys** | **+0.4 GB** | +7 |
+| today — `moon run :lint` (what such a PR schedules after SMA-534) | 1m 40s | 4m 44s user + 41s sys | 3.1 GB | 24 |
+| sequential estimate of the addition | +21s | +14s user + 2s sys | +0.4 GB | +7 |
+| **after — cold `moon ci :build :test :lint --base <lockfile-only commit> --include-relations`** | **2m 06s** | **5m 10s user + 47s sys** | **3.5 GB** | **27** |
 
 The baseline reproduces SMA-534's recorded figure (1m 47s wall, 3.1 GB) closely enough that the two
-are comparable — the delta is measured against the same workload that spec priced.
+are comparable. **The real interleaved cost is +26s wall and +0.4 GB** — close to the sequential
+estimate, so the three concerns raised while pricing this all resolved benignly:
 
-**This delta is a lower bound, not a budget.** It was taken with `:lint` fully finished first, and
-CI does not work that way. Three reasons it under-reads there, all of which V6 must settle:
+1. **Concurrency** did not bite. The interleaved run came in 5s above the sequential estimate, not
+   at CPU-time. The two `wasm-pack` invocations do serialize on cargo's target-dir lock
+   (`ts/packages/paigasus-kernel/moon.yml:92-93`), and that is already inside the 2m 06s.
+2. **`touch` interference** did not materialise as a measurable rebuild penalty, even though all
+   three scripts `touch` the kernel and binding sources while the clippy runs build the same crates
+   via `^:build`.
+3. **The profile split is a non-issue on disk.** `CARGO_PROFILE_{DEV,TEST}_DEBUG: line-tables-only`
+   (`ci.yml:28-29`) does not apply to `wasm-pack build --release`, so that portion does not shrink
+   on CI — but measured, the entire `rs/target/wasm32-unknown-unknown` tree is **7.7 MB**. Against
+   SMA-444's disk-exhaustion history this is noise; the +0.4 GB is host-target artifacts, which CI's
+   debuginfo trim does shrink.
 
-1. **Concurrency.** `+21s` wall against `+16s` CPU means the tasks were essentially unparallelised
-   on a many-core dev box. A hosted runner already saturated by thirteen clippy processes will see
-   wall closer to CPU. The two `wasm-pack` invocations additionally serialize on cargo's target-dir
-   lock (`ts/packages/paigasus-kernel/moon.yml:92-93`).
-2. **`touch` interference.** All three scripts begin by `touch`-ing the kernel and binding sources
-   to defeat cargo's mtime incrementality. Under `moon ci` they run *concurrently* with the twelve
-   clippy runs that build the kernel's rmeta via `^:build`; a `touch` landing mid-graph dirties the
-   kernel for any invocation that has not yet fingerprinted it. The sequential measurement is
-   structurally blind to this.
-3. **Profile split.** `CARGO_PROFILE_{DEV,TEST}_DEBUG: line-tables-only` (`ci.yml:28-29`) shrinks
-   the dev-profile baseline but does **not** apply to `wasm-pack build --release`. The `+0.4 GB`
-   therefore does not shrink on CI the way the 3.1 GB does — which matters against SMA-444's
-   disk-exhaustion history, so V6 must break it into dev/host vs release/wasm32.
-
-`ci.yml:22` sets `timeout-minutes: 30`; the figures above are the no-restore worst case.
+`ci.yml:22` sets `timeout-minutes: 30`, so 2m 06s cold leaves ample headroom. These are no-restore
+worst-case figures: a real Dependabot PR misses the exact cache key and restores the most recent
+`main` entry via `restore-keys`, so only the bumped dependency and its dependents recompile.
 
 ### A cost that lands on precisely the motivating PR
 
@@ -198,11 +201,13 @@ this caret resolves to". This change puts that fetch on the critical path of eve
 that moves wasm-bindgen — the one PR shape this issue exists to cover. `ci.yml:82-85` caches
 `~/.cargo/registry`, `~/.cargo/git` and `rs/target`; wasm-pack's own cache dir is cached by nothing.
 
-Observed here: the fetch is a **prebuilt-binary download**, not a `cargo install` compile
-(`⬇️ Installing wasm-bindgen...` inside a 5.33s cold wasm-pack run). The multi-minute
-`cargo install wasm-bindgen-cli` fallback exists only when no prebuilt binary matches. V6 records
-the real number on a version-changing run; adding wasm-pack's cache dir to `actions/cache` is out of
-scope here and would need its own key discriminator per SMA-520.
+Measured: the fetch is a **prebuilt-binary download**, not a `cargo install` compile. On the cold
+`moon ci` run above, each of the two wasm-pack invocations spent about **8.2s** total including the
+`⬇️ Installing wasm-bindgen...` step, against sub-second once warm — so roughly 16s of the 2m 06s,
+already inside the figure quoted in Cost. The multi-minute `cargo install wasm-bindgen-cli` fallback
+exists only when no prebuilt binary matches that 0.2.z, which is the case worth watching on a
+genuine version bump. Adding wasm-pack's cache dir to `actions/cache` is out of scope here and would
+need its own key discriminator per SMA-520.
 
 ### The CI cache key needs no change
 
