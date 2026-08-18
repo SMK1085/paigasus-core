@@ -29,11 +29,12 @@ from pathlib import Path
 class MoonOutputError(RuntimeError):
     """Moon's query output did not have the shape this gate requires.
 
-    Raised — never returned as a violation row — when moon reports a task with neither a `command`
-    nor a `script`. That is "moon told us nothing", which must abort as an infrastructure error
-    (rc 2) rather than be folded into an assertion failure, exactly as A4 treats an absent
-    `inputFiles` key. A moon upgrade that reshapes the task object must fail loudly, not quietly
-    stop asserting.
+    Raised — never returned as a violation row — when moon reports a task with none of a `command`,
+    a `script`, or any `args` (moon_projects() joins all three into the text A5 marker-matches
+    against, so only the absence of all three counts). That is "moon told us nothing", which must
+    abort as an infrastructure error (rc 2) rather than be folded into an assertion failure, exactly
+    as A4 treats an absent `inputFiles` key. A moon upgrade that reshapes the task object must fail
+    loudly, not quietly stop asserting.
     """
 
 
@@ -206,7 +207,7 @@ def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASK
       silently stops matching (a renamed flag, an invocation moved behind a wrapper script, a moon
       upgrade dropping `script`) degrades to an empty set and a vacuous PASS.
 
-    Raises MoonOutputError if a task exposes neither a command nor a script.
+    Raises MoonOutputError if a task exposes none of a command, a script, or any args.
     """
     matched, a5 = set(), []
     for pid in sorted(projects):
@@ -216,8 +217,8 @@ def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASK
             blob = invocations[name]
             if blob is None:
                 raise MoonOutputError(
-                    f"{pid}:{name} reported neither a `command` nor a `script` — moon's output "
-                    f"shape changed, so A5 cannot be evaluated"
+                    f"{pid}:{name} reported none of a `command`, a `script`, or any `args` — "
+                    f"moon's output shape changed, so A5 cannot be evaluated"
                 )
             if not any(marker in blob for marker in FFI_MARKERS):
                 continue
@@ -573,7 +574,7 @@ def main():
              "    Fix: the inputs are declared once for ALL crates in .moon/tasks/rust.yml —\n"
              "    restore them there, not per-crate. Expected: /rs/Cargo.lock, /rs/Cargo.toml,\n"
              "    /rs/rust-toolchain.toml."),
-        (a5, "an FFI build task does not key on the workspace-level files, so a dependency bump\n"
+        (a5, "An FFI build task does not key on the workspace-level files, so a dependency bump\n"
              "    replays a CACHED artifact built from a different resolution — and clippy cannot\n"
              "    cover it, because it never links a cdylib and never targets wasm32 (SMA-546).\n"
              "    Fix: add /rs/Cargo.lock, /rs/Cargo.toml, /rs/rust-toolchain.toml and\n"

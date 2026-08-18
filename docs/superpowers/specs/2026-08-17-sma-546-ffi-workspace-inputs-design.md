@@ -180,7 +180,7 @@ estimate, so the three concerns raised while pricing this all resolved benignly:
 
 1. **Concurrency** did not bite. The interleaved run came in 5s above the sequential estimate, not
    at CPU-time. The two `wasm-pack` invocations do serialize on cargo's target-dir lock
-   (`ts/packages/paigasus-kernel/moon.yml:92-93`), and that is already inside the 2m 06s.
+   (`ts/packages/paigasus-kernel/moon.yml:109-110`), and that is already inside the 2m 06s.
 2. **`touch` interference** did not materialise as a measurable rebuild penalty, even though all
    three scripts `touch` the kernel and binding sources while the clippy runs build the same crates
    via `^:build`.
@@ -246,7 +246,7 @@ existing split — `run.sh` holds hand-written *behavioural* cases, `cargo_moon_
 
 ### Layer 1 — behavioural: re-baseline `lockfile->all-lint`
 
-The existing case in `ci/affected-graph/run.sh:246` is strict-equality, default-deny over tasks named
+The existing case in `ci/affected-graph/run.sh:257` is strict-equality, default-deny over tasks named
 `build`/`test`/`lint`. These three tasks are named `build` and `test`, so they enter its observed set
 the moment the inputs land. Its expected set gains exactly three rows:
 

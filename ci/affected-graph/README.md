@@ -65,8 +65,8 @@ It also runs five checks that the per-case project sets structurally **cannot** 
   `wasm-pack`, `maturin` or `--reinstall-package` — and requires each to declare `rs/Cargo.lock`,
   `rs/Cargo.toml`, `rs/rust-toolchain.toml` and `.prototools`. Deriving covers a future fourth
   binding task on day one; a `REQUIRED_FFI_TASKS` **floor** stops the derivation degrading to a
-  vacuous PASS if a task ever stops matching the markers. A task with neither a `command` nor a
-  `script` aborts as infra (rc 2), never as a silent skip.
+  vacuous PASS if a task ever stops matching the markers. A task with none of a `command`, a
+  `script`, or any `args` aborts as infra (rc 2), never as a silent skip.
 
 It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
 `--include-relations` (the edges are inert without it).

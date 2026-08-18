@@ -56,7 +56,8 @@ tasks:
       #
       # Workspace-level Rust files (SMA-546) — see ts/packages/paigasus-kernel/moon.yml's `build`
       # for the full rationale. `--reinstall-package` forces maturin to relink the cdylib, so this
-      # task's result depends on the resolution these files pin.
+      # task's result depends on the resolution these files pin. `/.prototools` on THIS path pins
+      # `uv` (which drives maturin) rather than wasm-pack — nothing on the py path invokes wasm-pack.
       - '/rs/Cargo.lock'
       - '/rs/Cargo.toml'
       - '/rs/rust-toolchain.toml'

@@ -923,7 +923,8 @@ survive — if one does, `git reset --hard` back to the last real commit.
 
 ## Self-Review
 
-**Spec coverage.** Decision §inputs → Task 2 Steps 1/2/4. §`--locked` → Task 2 Steps 3/4.
+**Spec coverage.** Decision §inputs → Task 2 Steps 1/2/4. §`--locked` was DEFERRED, not
+implemented — see Task 2's "AMENDED DURING EXECUTION" banner; Steps 3/4 below it are superseded.
 §`rust-toolchain.toml`+`.prototools` → Task 2, and asserted by A5's `FFI_TASK_INPUTS` (Task 1
 Step 1). §py-root exemption → recorded in Task 3 Step 2's comment; enforced by the behavioural
 case's strict equality. Guard Layer 1 → Task 3. Layer 2 (A5, derived ∪ floor, three self-test
