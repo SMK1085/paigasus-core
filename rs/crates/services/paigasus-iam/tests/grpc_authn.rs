@@ -175,6 +175,13 @@ async fn tenancy_rpc_with_invalid_bearer_is_unauthenticated() {
 /// SMA-504: the trailers-only rejection path must carry ErrorInfo too. `Status::into_http`
 /// serializes differently from a handler-returned Status, so the unit tests in `convert.rs`
 /// cannot prove this — only a real client/server round trip can.
+///
+/// A bearer-less call hits `AuthEnforce::call`'s missing-token branch
+/// (`grpc/authn.rs::call` -> `reject(&AuthnError::InvalidToken(TokenDefect::Malformed))` ->
+/// `convert::authn_status`), NOT `convert::missing_auth_context()` — that helper is for the
+/// disjoint case where `AuthContext` extraction fails on an ALREADY-authenticated request
+/// (`grpc::{tenancy,authz,service_accounts,audit}::actor_context`). So the expected code is
+/// `Unauthenticated` and the expected reason is `invalid-token` (review finding #3).
 #[tokio::test]
 async fn a_bearer_rejection_carries_error_info_over_the_wire() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -193,14 +200,24 @@ async fn a_bearer_rejection_carries_error_info_over_the_wire() {
         })
         .await
         .expect_err("a bearer-less tenancy call must be rejected");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
     let details = tonic_types::StatusExt::get_error_details(&err);
     let info = details.error_info().expect("the trailers-only path must carry ErrorInfo");
     assert_eq!(info.domain, *paigasus_proto::error::IAM_DOMAIN);
+    assert_eq!(info.reason, "invalid-token");
     assert!(
         paigasus_proto::paigasus::common::v1::ErrorReason::from_wire_reason(&info.reason).is_some(),
         "{} is not in the registry",
         info.reason
     );
+    // Review finding #1: this call runs inside a real `CorrelationLayer` scope (it wraps
+    // `AuthLayer` outermost, `grpc/mod.rs::router`), so — unlike the `convert.rs` unit tests,
+    // which run outside any scope — both id keys must be present and survive the
+    // `Status::into_http` trailers-only serialization, not just in-process construction.
+    let correlation_id = info.metadata.get("correlation_id").expect("correlation_id must survive the trailers-only wire round trip");
+    let request_id = info.metadata.get("request_id").expect("request_id must survive the trailers-only wire round trip");
+    assert!(uuid::Uuid::parse_str(correlation_id).is_ok(), "correlation_id must be a UUID: {correlation_id}");
+    assert!(uuid::Uuid::parse_str(request_id).is_ok(), "request_id must be a UUID: {request_id}");
 
     server.abort();
 }

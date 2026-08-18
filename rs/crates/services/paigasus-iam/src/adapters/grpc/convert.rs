@@ -35,6 +35,17 @@ use crate::application::pagination::Page;
 static MISSING_AUTH_CONTEXT: LazyLock<String> = LazyLock::new(|| ErrorReason::MissingAuthContext.as_wire_reason().expect("a declared reason is never the sentinel"));
 static CAPABILITY_DISABLED: LazyLock<String> = LazyLock::new(|| ErrorReason::CapabilityDisabled.as_wire_reason().expect("a declared reason is never the sentinel"));
 
+/// `authn_status`'s six reasons, same registry-derived pattern as the two statics above
+/// (D8): every one of these already exists in the registry (spec §6.3), so — per the human's
+/// ruling on review finding #2 — they are derived, not hardcoded, even though the brief handed
+/// them to us as string literals.
+static INVALID_TOKEN: LazyLock<String> = LazyLock::new(|| ErrorReason::InvalidToken.as_wire_reason().expect("a declared reason is never the sentinel"));
+static IDENTITY_NOT_PROVISIONED: LazyLock<String> = LazyLock::new(|| ErrorReason::IdentityNotProvisioned.as_wire_reason().expect("a declared reason is never the sentinel"));
+static PROVISIONING_FAILED: LazyLock<String> = LazyLock::new(|| ErrorReason::ProvisioningFailed.as_wire_reason().expect("a declared reason is never the sentinel"));
+static PRINCIPAL_INACTIVE: LazyLock<String> = LazyLock::new(|| ErrorReason::PrincipalInactive.as_wire_reason().expect("a declared reason is never the sentinel"));
+static AUTHN_UNAVAILABLE: LazyLock<String> = LazyLock::new(|| ErrorReason::AuthnUnavailable.as_wire_reason().expect("a declared reason is never the sentinel"));
+static AUTHN_INTERNAL: LazyLock<String> = LazyLock::new(|| ErrorReason::Internal.as_wire_reason().expect("a declared reason is never the sentinel"));
+
 /// The `ErrorInfo.metadata` every IAM gRPC error carries.
 ///
 /// The id keys are OMITTED when there is no request scope (§4.3 — unit tests, background tasks
@@ -61,9 +72,13 @@ pub fn iam_status(code: Code, reason: &str, message: impl Into<String>, retryabl
 
 /// The enforcement layer admitted a request without attaching an authenticated context — an
 /// internal invariant violation, surfaced as a distinct diagnostic rather than a bare
-/// unauthenticated with no machine code at all.
+/// unauthenticated with no machine code at all. `Retryable::No`, not `Unknown` (review finding
+/// #4): D4's `Unknown` is for a source ERASED at conversion (a Postgres blip and a logic bug
+/// arriving as the same `Internal` variant, indistinguishable to the caller) — that reasoning
+/// doesn't apply here. We know exactly what happened (the layer never attached a context), and
+/// retrying the identical request cannot resolve it.
 pub fn missing_auth_context() -> Status {
-    iam_status(Code::Unauthenticated, &MISSING_AUTH_CONTEXT, "missing authentication context", Retryable::Unknown, &[])
+    iam_status(Code::Unauthenticated, &MISSING_AUTH_CONTEXT, "missing authentication context", Retryable::No, &[])
 }
 
 /// An RPC belonging to a capability this deployment has switched off. The capability NAME rides
@@ -108,16 +123,16 @@ pub fn status_to_grpc(e: TenancyError) -> Status {
 /// to accept a bare `PermissionDenied`, which collapsed three variants (ADR-0020 D4's tripwire).
 pub fn authn_status(err: &AuthnError) -> Status {
     let (code, reason, message) = match err {
-        AuthnError::InvalidToken(_) => (Code::Unauthenticated, "invalid-token", "invalid bearer token"),
-        AuthnError::IdentityNotProvisioned => (Code::PermissionDenied, "identity-not-provisioned", "identity not provisioned"),
-        AuthnError::ProvisioningFailed(_) => (Code::PermissionDenied, "provisioning-failed", "provisioning failed"),
-        AuthnError::PrincipalInactive => (Code::PermissionDenied, "principal-inactive", "principal inactive"),
-        AuthnError::Unavailable => (Code::Unavailable, "authn-unavailable", "authentication backend unavailable"),
+        AuthnError::InvalidToken(_) => (Code::Unauthenticated, INVALID_TOKEN.as_str(), "invalid bearer token"),
+        AuthnError::IdentityNotProvisioned => (Code::PermissionDenied, IDENTITY_NOT_PROVISIONED.as_str(), "identity not provisioned"),
+        AuthnError::ProvisioningFailed(_) => (Code::PermissionDenied, PROVISIONING_FAILED.as_str(), "provisioning failed"),
+        AuthnError::PrincipalInactive => (Code::PermissionDenied, PRINCIPAL_INACTIVE.as_str(), "principal inactive"),
+        AuthnError::Unavailable => (Code::Unavailable, AUTHN_UNAVAILABLE.as_str(), "authentication backend unavailable"),
         AuthnError::Backend(_) => {
             // `Debug` carries the boxed repository/infra source (never token or claim
             // material, by `AuthnError`'s own contract) — logged here, never surfaced.
             tracing::error!(error = ?err, "internal error handling a gRPC authn request");
-            (Code::Internal, "internal", "internal error")
+            (Code::Internal, AUTHN_INTERNAL.as_str(), "internal error")
         }
     };
     iam_status(code, reason, message, authn_retryable(err), &[])
@@ -426,6 +441,27 @@ mod tests {
         assert!(!info.metadata.contains_key("request_id"));
     }
 
+    /// The positive half of the contract the test above only pins the negative of (review
+    /// finding #1): INSIDE a request scope, both id keys are present and equal exactly the
+    /// scope's own ids — not just "present", which `contains_key` alone couldn't distinguish
+    /// from a scope leaking someone else's ids. `scope_for_test` (Task 2/3) enters the same
+    /// task-local `error_metadata`'s `current_ids()` reads.
+    #[tokio::test]
+    async fn the_id_metadata_keys_match_the_request_scope_when_present() {
+        use paigasus_observability::correlation::{RequestIds, scope_for_test};
+        use tonic_types::StatusExt;
+
+        let ids = RequestIds {
+            request_id: Uuid::parse_str("0198f2c1-7777-7000-8000-000000000042").unwrap(),
+            correlation_id: Uuid::parse_str("0198f2c1-8888-7000-8000-000000000042").unwrap(),
+        };
+        let status = scope_for_test(ids, async { status_to_grpc(TenancyError::NotFound) }).await;
+        let details = status.get_error_details();
+        let info = details.error_info().expect("ErrorInfo");
+        assert_eq!(info.metadata.get("correlation_id"), Some(&ids.correlation_id.to_string()));
+        assert_eq!(info.metadata.get("request_id"), Some(&ids.request_id.to_string()));
+    }
+
     /// AC 4: an internal error's gRPC message is the static generic one, and nothing in the
     /// metadata carries backend text.
     #[test]
@@ -483,7 +519,11 @@ mod tests {
         let missing = missing_auth_context();
         assert_eq!(missing.code(), Code::Unauthenticated);
         let details = missing.get_error_details();
-        assert_eq!(details.error_info().expect("ErrorInfo").reason, "missing-auth-context");
+        let missing_info = details.error_info().expect("ErrorInfo");
+        assert_eq!(missing_info.reason, "missing-auth-context");
+        // Review finding #4: `No`, not `Unknown` — the cause is known (the layer never attached
+        // a context) and retrying the identical request cannot resolve it.
+        assert_eq!(missing_info.metadata.get("retryable").map(String::as_str), Some("false"));
         assert!(ErrorReason::from_wire_reason("missing-auth-context").is_some());
 
         let disabled = capability_disabled("iam.apikeys");
