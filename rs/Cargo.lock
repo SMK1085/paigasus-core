@@ -2513,8 +2513,10 @@ dependencies = [
  "thiserror",
  "tokio",
  "tonic",
+ "tonic-types",
  "tower",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

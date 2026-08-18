@@ -113,16 +113,29 @@ impl Iam for IamClient {
     }
 
     async fn introspect_token(&self, token: &str) -> Result<IntrospectResponse, IamError> {
-        let resp = self.authn.clone().introspect(Request::new(IntrospectRequest { token: token.to_owned() })).await?;
+        let resp = self.authn.clone().introspect(with_correlation(Request::new(IntrospectRequest { token: token.to_owned() }))).await?;
         Ok(resp.into_inner())
     }
+}
+
+/// Attach the ambient correlation id to an outbound IAM call, so one id spans both services'
+/// logs and IAM's audit rows (§4.4). A `None` scope (background work) attaches nothing rather
+/// than a nil UUID — IAM then mints its own. The request id is deliberately NOT forwarded: IAM
+/// mints its own per hop, which is what keeps the two distinguishable in a stitched trace.
+fn with_correlation<T>(mut req: Request<T>) -> Request<T> {
+    if let Some(ids) = paigasus_observability::current_ids()
+        && let Ok(value) = ids.correlation_id.to_string().parse()
+    {
+        req.metadata_mut().insert(paigasus_observability::correlation::CORRELATION_ID_HEADER, value);
+    }
+    req
 }
 
 /// Build the `IntrospectApiKey` request. **No `authorization` metadata** — the introspect call is
 /// bearer-exempt (the token is the body). Extracted so its bearer-exemption is unit-testable
 /// without a live server.
 fn introspect_request(token: &str) -> Request<IntrospectApiKeyRequest> {
-    Request::new(IntrospectApiKeyRequest { token: token.to_owned() })
+    with_correlation(Request::new(IntrospectApiKeyRequest { token: token.to_owned() }))
 }
 
 /// Build the self-query `IsAuthorized` request: the message carries the caller's own SA PRN as
@@ -135,12 +148,12 @@ fn introspect_request(token: &str) -> Request<IntrospectApiKeyRequest> {
 /// inbound bearer parse). Extracted so the D9 wiring — metadata AND body — is unit-testable
 /// without a live server.
 fn self_authorize_request(caller_key: &str, principal_prn: &str, action: &str, resource_prn: &str) -> Result<Request<IsAuthorizedRequest>, IamError> {
-    let mut req = Request::new(IsAuthorizedRequest {
+    let mut req = with_correlation(Request::new(IsAuthorizedRequest {
         principal_prn: principal_prn.to_owned(),
         action: action.to_owned(),
         resource_prn: resource_prn.to_owned(),
         context: Default::default(),
-    });
+    }));
     let bearer = MetadataValue::try_from(format!("Bearer {caller_key}")).map_err(|e| IamError::Connect(format!("caller key is not a valid `authorization` metadata value: {e}")))?;
     req.metadata_mut().insert("authorization", bearer);
     Ok(req)
@@ -247,6 +260,20 @@ mod tests {
         let req = introspect_request("some-opaque-token");
         assert!(req.metadata().get("authorization").is_none(), "introspect must NOT carry authorization metadata (it is bearer-exempt)");
         assert_eq!(req.get_ref().token, "some-opaque-token");
+    }
+
+    /// §4.4: the correlation id crosses the gateway→IAM hop, so ONE id stitches both services'
+    /// logs and (via D9) IAM's audit rows. The request id is deliberately NOT forwarded — IAM
+    /// mints its own for its own hop, which is what keeps the two distinguishable.
+    #[tokio::test]
+    async fn outbound_requests_carry_the_ambient_correlation_id() {
+        let ids = paigasus_observability::RequestIds {
+            request_id: uuid::Uuid::from_u128(1),
+            correlation_id: uuid::Uuid::from_u128(2),
+        };
+        let req = paigasus_observability::correlation::scope_for_test(ids, async { introspect_request("tok") }).await;
+        assert_eq!(req.metadata().get("paigasus-correlation-id").unwrap().to_str().unwrap(), ids.correlation_id.to_string());
+        assert!(req.metadata().get("paigasus-request-id").is_none(), "the request id is per-hop and is not forwarded");
     }
 
     // ---- channel / TLS-config construction (lazy — no network) -------------------------------
