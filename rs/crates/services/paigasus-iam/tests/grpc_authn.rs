@@ -258,14 +258,15 @@ async fn a_bearer_rejection_carries_error_info_over_the_wire() {
 /// it FIRST — either alone comfortably exceeds 1ms; both together make hitting the deadline the
 /// deterministic outcome, not a race.
 ///
-/// The resulting code is `Code::Cancelled`, not `Code::DeadlineExceeded` — read from tonic
-/// 0.14.6's own source (`transport/service/grpc_timeout.rs`'s `GrpcTimeout` raises a private
+/// The code tonic 0.14.6 produces here is `Code::Cancelled`, not `Code::DeadlineExceeded` — read
+/// from its own source (`transport/service/grpc_timeout.rs`'s `GrpcTimeout` raises a private
 /// `TimeoutExpired` on expiry; `status.rs`'s `find_status_in_source_chain`, which the
 /// `RecoverError` layer wrapping `GrpcTimeout` calls to turn that raw error into a `Status`,
 /// maps `TimeoutExpired` to `Status::cancelled(..)`, never `Status::deadline_exceeded(..)`) and
-/// confirmed empirically against this exact server. Whichever code a future tonic version picks,
-/// the actual gap this test pins is narrower and more durable: no `Status` a
-/// `Server::builder().timeout(..)`-triggered expiry produces carries `ErrorInfo`.
+/// confirmed empirically against this exact server. That mapping is an implementation detail
+/// tonic does not guarantee across versions, so the assertion accepts either code — the gap this
+/// test exists to pin is narrower and more durable: no `Status` a
+/// `Server::builder().timeout(..)`-triggered expiry produces carries `ErrorInfo` or our ids.
 #[tokio::test]
 async fn a_server_side_timeout_status_carries_no_error_info_or_ids() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
@@ -297,7 +298,12 @@ async fn a_server_side_timeout_status_carries_no_error_info_or_ids() {
         .await
         .expect_err("a 1ms server timeout must fail a real DB-backed, JIT-provisioning RPC");
 
-    assert_eq!(err.code(), Code::Cancelled, "{err:?}");
+    // Either code is accepted deliberately: tonic 0.14.6 produces `Cancelled` (see the doc
+    // comment), but that mapping is an implementation detail it has changed before and does not
+    // guarantee across versions. Pinning it exactly would red this test on a tonic bump that
+    // altered nothing we care about. What IS stable — and what the assertions below pin — is that
+    // a timeout Status carries no ErrorInfo and no ids.
+    assert!(matches!(err.code(), Code::Cancelled | Code::DeadlineExceeded), "{err:?}");
     let details = tonic_types::StatusExt::get_error_details(&err);
     assert!(
         details.error_info().is_none(),

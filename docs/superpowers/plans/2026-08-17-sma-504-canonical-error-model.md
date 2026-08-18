@@ -15,7 +15,7 @@
 - Every source file opens with `// SPDX-License-Identifier: Apache-2.0`.
 - Rust crates are **edition 2024 + rust-version 1.95**. Workspace lints are `warnings = deny`, so dead code is a hard compile error — every item you add must be `pub` or used in the same task.
 - Conventional commits with a workspace scope. Subject must **start lowercase** and be **≤100 chars**. Never write a bare `#NNN` in a commit body (breaks `footer-leading-blank`); write "owner/repo PR NNN".
-- Prefix every shell command with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` — moon/uv/buf/nextest are proto-managed and off the default PATH. Shims **first**.
+- Prefix any command that invokes a **repo-pinned tool** — `moon`, `buf`, `uv`, `cargo`/`nextest` — with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"`. Those are proto-managed and off the default PATH, and shims must come **first** or a global pin wins. Plain `git`, `grep`, `jq`, `docker` and `cd` need no prefix.
 - Work in the worktree `/Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-504` on branch `feature/sma-504-errorinfo-correlation-retryable`. Never `cd` to the main checkout.
 - **Docker-gated IAM suites silently skip without Docker**, reporting PASS in ~1s having run nothing. Any task that touches `paigasus-iam`'s integration tests MUST verify with `CI=1 cargo nextest run -p paigasus-iam`, which makes a missing daemon a hard failure.
 - `cargo nextest` exits non-zero on a crate with no tests — use `--no-tests=pass` where that applies.
@@ -2041,7 +2041,7 @@ Skip this step if the tree is clean.
 
 **Spec coverage.** D1 → Tasks 2, 3. D2 → Tasks 5, 6 (key-set assertions) and Task 4 (metadata). D3 → Task 2. D4 → Tasks 2 (layer default, `Retryable`), 4 (IAM mappings), 6 (gateway mapping). D5 → Task 6 (`missing-scope` retained in the rename table). D6 → Task 2. D7 → Task 2, Steps 1/7/8. D8 → Task 1 (domain statics), Tasks 4 and 7 (registry-derived comparisons). D9 → Task 8. D10 → Task 3. §5.1.3 → Task 4, Steps 5–6. §5.2's 18 renames → Tasks 5 (1–7) and 6 (8–18). §5.3 → Task 7. §6 → Tasks 1, 2, 4, 9. §7's test list → distributed across Tasks 2–8, with the six prefix conversions in Task 4 Step 7 and the wire-crossing test in Task 4 Step 8.
 
-**Known gaps, deliberate.** The spec's §4.1 tonic-timeout assertion is documented in Task 3 Step 5's comment but is not a separate test — driving a real `Server::timeout` to fire requires a deliberately slow handler and adds a multi-second integration test for a gap that is accepted rather than fixed. If the implementer wants it, it belongs in Task 3.
+**Known gaps, deliberate — superseded.** This plan originally deferred the spec's §4.1 tonic-timeout assertion, on the grounds that driving a real `Server::timeout` needs a deliberately slow handler for a gap that is accepted rather than fixed. The final whole-branch review rejected that: §8's risk table lists "asserted so it cannot widen silently" as the mitigation, and an unasserted mitigation is not one. The test shipped as `a_server_side_timeout_status_carries_no_error_info_or_ids` in `tests/grpc_authn.rs`, driving the existing `router(state, timeout)` parameter at 1ms against a DB-backed, JIT-provisioning RPC so the deadline is the deterministic outcome rather than a race. No gap remains.
 
 **Numbering deviation from the spec.** The spec put `missing-auth-context` at 33 in the IAM range; Task 1 puts it at 903 in the shared range alongside `capability-disabled` at 904, with the reasoning inline. Neither condition is IAM-specific.
 
