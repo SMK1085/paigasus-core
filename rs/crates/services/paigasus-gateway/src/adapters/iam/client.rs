@@ -113,6 +113,14 @@ impl Iam for IamClient {
     }
 
     async fn introspect_token(&self, token: &str) -> Result<IntrospectResponse, IamError> {
+        // THIRD `with_correlation` site (SMA-504). Unlike `introspect_request` and
+        // `self_authorize_request`, this one is inline rather than a separately-testable free
+        // function — extracting it would require returning a `Request` out of a method whose
+        // whole job is to also dispatch it. It is legitimately out of unit-test reach: proving
+        // the header lands would need a live channel (`authn.clone().introspect(..)` immediately
+        // makes the RPC), which is G7's integration-test territory, not a unit test here.
+        // Covered by construction: it is the same one-line `with_correlation(Request::new(..))`
+        // shape as the other two sites, which unit tests DO cover directly.
         let resp = self.authn.clone().introspect(with_correlation(Request::new(IntrospectRequest { token: token.to_owned() }))).await?;
         Ok(resp.into_inner())
     }
@@ -235,13 +243,23 @@ mod tests {
 
     // ---- request-builder unit tests (no live IAM server; that's G7's mock) -------------------
 
-    #[test]
-    fn self_authorize_request_sets_bearer_and_body() {
+    #[tokio::test]
+    async fn self_authorize_request_sets_bearer_and_body() {
         // The D9 self-query wiring proof at the unit level: the caller's OWN key becomes the
         // `authorization: Bearer <key>` metadata AND the message body carries exactly the args
-        // (principal/action/resource) G5 passes — never a substituted principal.
+        // (principal/action/resource) G5 passes — never a substituted principal. Also covers the
+        // SECOND of `with_correlation`'s three call sites (SMA-504): entered inside a correlation
+        // scope so the same assertions `outbound_requests_carry_the_ambient_correlation_id` makes
+        // for `introspect_request` are proven here too, rather than assumed from symmetry.
         let caller_key = "sk-caller-abc123";
-        let req = self_authorize_request(caller_key, "prn:paigasus:iam:default:sa/gw-caller", "InvokeModel", "prn:paigasus:iam:default:scope/team-a").expect("valid metadata");
+        let ids = paigasus_observability::RequestIds {
+            request_id: uuid::Uuid::from_u128(3),
+            correlation_id: uuid::Uuid::from_u128(4),
+        };
+        let req = paigasus_observability::correlation::scope_for_test(ids, async {
+            self_authorize_request(caller_key, "prn:paigasus:iam:default:sa/gw-caller", "InvokeModel", "prn:paigasus:iam:default:scope/team-a").expect("valid metadata")
+        })
+        .await;
 
         let bearer = req.metadata().get("authorization").expect("authorization metadata must be present").to_str().expect("ascii metadata");
         assert_eq!(bearer, format!("Bearer {caller_key}"));
@@ -251,6 +269,9 @@ mod tests {
         assert_eq!(body.action, "InvokeModel");
         assert_eq!(body.resource_prn, "prn:paigasus:iam:default:scope/team-a");
         assert!(body.context.is_empty(), "M0 sends no ABAC context attributes");
+
+        assert_eq!(req.metadata().get("paigasus-correlation-id").unwrap().to_str().unwrap(), ids.correlation_id.to_string());
+        assert!(req.metadata().get("paigasus-request-id").is_none(), "the request id is per-hop and is not forwarded");
     }
 
     #[test]

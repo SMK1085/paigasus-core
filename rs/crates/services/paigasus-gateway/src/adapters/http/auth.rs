@@ -855,13 +855,18 @@ mod tests {
         );
     }
 
-    /// The relaxation must NOT leak onto the chat path.
+    /// The relaxation must NOT leak onto the chat path. Drives the SAME details `require_authenticated`
+    /// now accepts on the discovery path — `identity-not-provisioned` `ErrorInfo`, not a bare
+    /// code — so this guard stays meaningful against a future regression that wires
+    /// `is_identity_not_provisioned` into `require_iam_auth`'s introspect arm too: a detail-less
+    /// `PermissionDenied` fails closed everywhere already, so it could NOT catch that leak, and a
+    /// test that always passes for the wrong reason is worse than no test.
     #[tokio::test]
     async fn require_iam_auth_still_rejects_an_unprovisioned_identity() {
-        // The same IAM outcome D5 accepts on the discovery path (a VALIDATED credential IAM
-        // surfaces as `PermissionDenied`) must still 401 here — `require_iam_auth` is untouched
-        // by this task's relaxation and never even calls `introspect_token`.
-        let fake = FakeIam::new(IntrospectOutcome::Rpc(Code::PermissionDenied, None), AuthzOutcome::Unreachable);
+        // `require_iam_auth` is untouched by this task's relaxation and never even calls
+        // `introspect_token` — so even the exact details the discovery path accepts must still
+        // 401 here.
+        let fake = FakeIam::new(IntrospectOutcome::Rpc(Code::PermissionDenied, Some(identity_not_provisioned_details())), AuthzOutcome::Unreachable);
         assert_eq!(status_of(fake, req_with_auth("Bearer validated-but-unprovisioned-token")).await, StatusCode::UNAUTHORIZED);
     }
 
