@@ -51,7 +51,9 @@ Both are implemented. The guideline's other three headers (`paigasus-idempotency
 
 ### D2 — Ids surface in headers, never in a JSON body
 
-Both JSON error bodies stay **byte-identical** to today. This satisfies AC 3 and ADR-0019's "all four envelopes stay exactly as they are" literally, keeps the gateway's OpenAI-compatible envelope untouched (SDKs branch on `error.type`), and means no existing body assertion changes for this reason. A console reads the header.
+Both JSON error bodies keep their **exact shape and key set** — IAM's `error` object stays `{code, message}`, the gateway's stays `{message, type, param, code}`. No key is added, removed or renamed, and no id ever appears in a body. That is what AC 3 and ADR-0019's "all four envelopes stay exactly as they are" require, and it is what keeps the gateway's OpenAI-compatible envelope safe for SDKs that branch on `error.type`.
+
+The bodies are **not** byte-identical, and saying so would contradict this document's own rename inventory (§5.2): the `code` *values* change on 18 sites — snake_case to kebab, plus `GatewayError::Internal`'s `null` becoming `"internal"` — and every assertion pinning one of them changes with it. What does not change is the envelope: shape, keys, and `type`'s OpenAI semantics. A console reads the ids off the headers.
 
 On gRPC the ids ride in `ErrorInfo.metadata` as `correlation_id` and `request_id`, which is where ADR-0019 decision 6 puts them. On a gRPC error they therefore appear twice — once as response headers set by the layer, once in the metadata map. A test pins that the two agree; clients may read either.
 
@@ -172,11 +174,13 @@ The test that pins placement therefore has two parts: headers present on an **au
 
 | Header | Set by | Present on |
 | -- | -- | -- |
-| `paigasus-request-id` | `CorrelationLayer` | every API-surface response |
-| `paigasus-correlation-id` | `CorrelationLayer` | every API-surface response |
-| `paigasus-retryable` | `CorrelationLayer` default, overridden by the renderers | every API-surface **error** response |
+| `paigasus-request-id` | `CorrelationLayer` | every API-surface response **the layer covers** |
+| `paigasus-correlation-id` | `CorrelationLayer` | every API-surface response **the layer covers** |
+| `paigasus-retryable` | `CorrelationLayer` default, overridden by the renderers | every API-surface **error** response the layer covers |
 
-The four overriding renderers are `iam::http::error::ApiError`, `iam::http::authn::{AuthnApiError, envelope_rejection}`, `iam::http::system_retirement::conflict`, and `gateway::http::error::GatewayError`.
+"The layer covers" is doing real work in that column, and it excludes exactly two things, both documented rather than incidental: the operational endpoints, which sit outside the layer on IAM by D10; and any `Status` tonic produces from its own outer stack, notably a `Server::timeout` expiry (§4.1), which carries no ids and no retryability because it is generated outside every layer we control.
+
+Five renderers override the layer's `retryable` default — `iam::http::error::ApiError`, `iam::http::authn::AuthnApiError`, `iam::http::authn::envelope_rejection`, `iam::http::system_retirement::conflict`, and `gateway::http::error::GatewayError`. The two in `authn` are separate paths that happen to share a module: one renders the `AuthnError` funnel, the other the extractor's rejections.
 
 The gateway's terminal SSE frame is the one unavoidable exception: by the time it is emitted the `200 OK` head is already sent and no header can change. It carries the canonical `code` only — see §9 for why the frame's JSON is not extended instead.
 
@@ -322,7 +326,7 @@ The SMA-505 tripwire paragraph in `require_authenticated`'s doc comment is delet
 
 **RFC 6750 (AC 7).** One test asserting `WWW-Authenticate` still carries `invalid_token` while the same response's body carries `invalid-token`.
 
-**The layer.** Id headers on a successful response; id headers on an **auth-rejected** response (proves outside `AuthLayer`); the documented tonic-timeout gap asserted explicitly (§4.1); a well-formed inbound `paigasus-correlation-id` adopted verbatim; a malformed one replaced and never echoed anywhere in the response; a client-sent `paigasus-request-id` overwritten; `/healthz` and `/readyz` carrying **no** id headers (D10, so the narrowing is pinned rather than accidental); `paigasus-retryable` matching D4's table enum-exhaustively, including the layer's status-class default on a 404 and a 413 that no renderer owns; and on a gRPC error, the header ids equal to the `ErrorInfo.metadata` ids.
+**The layer.** Id headers on a successful response; id headers on an **auth-rejected** response (proves outside `AuthLayer`); the documented tonic-timeout gap asserted explicitly (§4.1); a well-formed inbound `paigasus-correlation-id` adopted verbatim; a malformed one replaced and never echoed anywhere in the response; a client-sent `paigasus-request-id` overwritten; the operational endpoints pinned **per service**, because D10 records deliberately different answers — on IAM, `/healthz` and `/readyz` carry **no** id headers (they are merged above `app_routes`, outside the layer), while on the gateway both carry ids (its router is one flat function and separating them was judged not worth diverging the two services' composition). Each is asserted on its own service, so neither reads as a bug to a future reader of the other. Then: `paigasus-retryable` matching D4's table enum-exhaustively, including the layer's status-class default on a 404 and a 413 that no renderer owns; and on a gRPC error, the header ids equal to the `ErrorInfo.metadata` ids.
 
 **Propagation and linkage.** `IamClient` attaches the current correlation id to outbound metadata (recording fake). `KernelIdGenerator::new_correlation_id` returns the ambient correlation id inside a scope and a fresh one outside it (D9).
 
