@@ -18,9 +18,11 @@
 //! pins the predicate; `AppState::new` passes the dialled handle straight into
 //! `RedisApiKeyCache::from_connection` on the next line.
 //!
-//! Runs against ephemeral Postgres + Redis in Docker. In CI (`CI` env set) a missing Docker
-//! daemon is a HARD FAILURE; on a Docker-less laptop the test returns with a note — the same
-//! gating pattern as `tests/authz_cache_redis.rs` / `tests/redis_jwks_cache.rs`.
+//! Runs against ephemeral Postgres + Redis in Docker. Both Postgres's and Redis's
+//! CI-hard-fail/local-skip gating go through the same policy, `tests/support/docker.rs`'s
+//! `start_or_skip` (SMA-538) — `support::start_migrated_postgres` calls it too, it does not
+//! restate it: a container failure with a reachable daemon is a hard failure, an unreachable
+//! daemon skips locally and reds in CI.
 
 mod support;
 
@@ -28,26 +30,11 @@ use paigasus_iam::adapters::http::AppState;
 use paigasus_iam::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, RedactedUrl};
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::ContainerAsync;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
-/// Starts an ephemeral Redis container, returning its connection URL. Same CI-hard-fail /
-/// local-skip gating as `support::start_migrated_postgres`; self-contained here, mirroring
-/// `tests/authz_cache_redis.rs`.
+/// Starts an ephemeral Redis container, returning its connection URL. The skip-versus-fail
+/// decision lives once, in `support/docker.rs` (SMA-538).
 async fn start_redis() -> Option<(ContainerAsync<Redis>, String)> {
-    let node = match Redis::default().start().await {
-        Ok(n) => n,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker is required for the api-key cache connection test in CI: {e}");
-            }
-            eprintln!("skipping api_key_cache_connection: Docker unavailable ({e})");
-            return None;
-        }
-    };
-
-    let port = support::docker::mapped_port(&node, 6379, "redis").await;
-    let url = format!("redis://127.0.0.1:{port}");
-    Some((node, url))
+    support::docker::start_redis_or_skip("api_key_cache_connection").await
 }
 
 /// `authz.cache` on redis at `authz_url`, `api_keys.introspect_cache` on redis at
