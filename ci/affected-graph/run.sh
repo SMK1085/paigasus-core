@@ -63,29 +63,16 @@ assert_case() {
   return 1
 }
 
-# assert_task_case LABEL FILE EXPECTED_CSV
-#   Same strict-equality contract as assert_case, but over the TASK graph: the set of `build`,
-#   `test` and `lint` targets scheduled by the touched file must EQUAL the expected set.
-#
-#   Why a second query: `moon query projects --affected` follows `dependsOn` ONLY and is structurally
-#   blind to a task-level `^:build` (SMA-429 F3). Delete the `^:build` from a moon.yml and every
-#   project case above stays GREEN while `moon ci --include-relations` silently under-builds — the
-#   exact hole SMA-524 exists to close. This case sees it.
-#
-#   Scoped to build/test/lint — the three tasks that carry `^:build` (lint joined them in
-#   SMA-526). fmt and build-release are excluded because they carry no `^:build`: fmt is
-#   crate-local by construction, and build-release does not run in CI at all.
-#
-#   NOTE: the filter matches task NAMES across every project, not just Rust ones, so a
-#   same-named task in another stack could enter a case's observed set. `contracts:lint` exists
-#   and does not appear here — contracts is UPSTREAM of paigasus-proto-rs and `--downstream deep`
-#   walks dependents — but a future case with a different touched file must re-check that.
+# _assert_task_case_impl LABEL FILE EXPECTED_CSV HINT [QUERY_FLAGS...]
+#   Shared body of the two task-case helpers below, which differ ONLY in the flags handed to
+#   `moon query tasks`. HINT is the traversal-specific sentence printed under a `missing` list.
 # returns 0 pass / 1 assertion fail / 2 infrastructure error
-assert_task_case() {
-  local label="$1" file="$2" expected_csv="$3" got want missing unexpected
+_assert_task_case_impl() {
+  local label="$1" file="$2" expected_csv="$3" hint="$4"; shift 4
+  local got want missing unexpected
   [ -n "$expected_csv" ] || { echo "FATAL [$label]: EXPECTED_CSV is empty (harness bug)" >&2; return 2; }
   got="$(printf '%s\n' "$file" \
-    | moon query tasks --affected --downstream deep \
+    | moon query tasks --affected "$@" \
     | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
@@ -98,22 +85,55 @@ print("\n".join(sorted(out)))')" \
     || { echo "FATAL [$label]: moon query tasks failed" >&2; return 2; }
   want="$(tr ',' '\n' <<<"$expected_csv" | sort)"
   if [ "$got" = "$want" ]; then
-    printf 'PASS  %-18s -> %s\n' "$label" "$(tr '\n' ' ' <<<"$got")"
+    printf 'PASS  %-22s -> %s\n' "$label" "$(tr '\n' ' ' <<<"$got")"
     return 0
   fi
   missing="$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))"
   unexpected="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))"
   echo "FAIL  [$label] affected TASK set != expected set" >&2
   if [ -n "$missing" ]; then
-    echo "  missing  (expected but not scheduled — likely a dropped task-level '^:build'; for" >&2
-    echo "  \`lint\` that dep lives once in .moon/tasks/rust.yml, not per-crate):" >&2
+    echo "  missing  (expected but absent):" >&2
+    echo "    $hint" >&2
     sed 's/^/    /' <<<"$missing" >&2
   fi
   if [ -n "$unexpected" ]; then
-    echo "  unexpected (scheduled but not expected — if the new edge is intended, add it here):" >&2
+    echo "  unexpected (present but not expected — if the new edge is intended, add it here):" >&2
     sed 's/^/    /' <<<"$unexpected" >&2
   fi
   return 1
+}
+
+# assert_task_case LABEL FILE EXPECTED_CSV — the `--downstream deep` traversal: what the TASK GRAPH
+# would cascade. Retained after SMA-528 because it is the only BEHAVIOURAL detector of a deleted
+# `^:build`: affectedness now comes from task inputs, so removing a `^:build` would not change any
+# *_ci case's output, leaving only cargo_moon_parity.py's A3, which asserts the declaration and
+# never its effect. SMA-524 exists because a declaration-only assertion was not enough.
+assert_task_case() {
+  _assert_task_case_impl "$1" "$2" "$3" \
+    "likely a dropped task-level '^:build'; for \`lint\` that dep lives once in .moon/tasks/rust.yml, not per-crate." \
+    --downstream deep
+}
+
+# assert_task_case_ci LABEL FILE EXPECTED_CSV — the traversal `moon ci` ACTUALLY USES: no graph
+# flags at all.
+#
+# Why this exists (SMA-528). Moon 2.3.2 confers affectedness ONLY through a task's own `inputs`.
+# `--downstream deep` walks dependents in the QUERY, but `moon ci` never does — measured at the full
+# 24-target ci.yml shape, `moon ci "${T[@]}" --stdin --include-relations` and the same command plus
+# `--downstream deep` produce byte-identical action sets. So `assert_task_case` asserts what the
+# task graph WOULD cascade, and this asserts what CI actually selects. Before SMA-528 only the
+# former existed, and it was green for years while no consumer test ran.
+#
+# This traversal is a CHARACTERIZED proxy, not `moon ci` itself. Measured relationship:
+#     moon ci RunTask set = (query-affected ∩ ci.yml's T array ∩ runInCI) ∪ upstream-dep closure
+# Both differences are benign here — the T filter only REMOVES tasks these cases do not assert
+# (`build-release`), and the upstream-dep closure only ADDS builds. Moon has no dry-run (`--plan`,
+# `--no-actions` and `--cache` all still execute), so grounding a per-run gate in a real `moon ci`
+# would mean running tasks on a cold CI cache. RE-MEASURE THIS ON A MOON BUMP, alongside A4's
+# `inputFiles` shape, A5's command/args/script shape and A6's `inputGlobs` shape.
+assert_task_case_ci() {
+  _assert_task_case_impl "$1" "$2" "$3" \
+    "the consumer's build/test/lint does not key on this upstream's sources; check its fileGroups.upstreams and that .moon/tasks/rust.yml still references @group(upstreams)."
 }
 
 # Every real `moon ci` shell invocation in ci.yml must carry --include-relations: it is the
@@ -156,6 +176,17 @@ run_case() {
 run_task_case() {
   local ec=0
   assert_task_case "$@" || ec=$?
+  case "$ec" in
+    0) ;;
+    1) SUITE_RC=1 ;;
+    *) echo "== affected-graph guard ABORTED: infrastructure error (rc=$ec) ==" >&2; exit 2 ;;
+  esac
+}
+
+# CI-traversal twin of run_task_case — same 3-way return-code folding.
+run_task_case_ci() {
+  local ec=0
+  assert_task_case_ci "$@" || ec=$?
   case "$ec" in
     0) ;;
     1) SUITE_RC=1 ;;
@@ -268,6 +299,14 @@ run_suite() {
   # coverage.
   run_task_case "lockfile->all-lint" "rs/Cargo.lock" \
     "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint"
+  # SMA-528 — a kernel SOURCE edit must select every consumer's build/test/lint under the traversal
+  # `moon ci` uses. This is the case the issue exists for: before SMA-528 a kernel behavioural
+  # change ran the kernel's own tests and NOT ONE consumer's, including paigasus-kernel-parity-rs,
+  # the ADR-0005 cross-binding harness that exists precisely to catch kernel drift.
+  # kernel-ts:{build,test} and kernel-py:test are the FFI tasks; they key on the kernel's sources by
+  # hand (SMA-420/546) rather than through @group(upstreams), which is Rust-only.
+  run_task_case_ci "kernel->consumer-tasks" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
+    "paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,paigasus-iam-core-rs:build,paigasus-iam-core-rs:test,paigasus-iam-core-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:build,paigasus-kernel-parity-rs:test,paigasus-kernel-parity-rs:lint,paigasus-node-bindings-rs:build,paigasus-node-bindings-rs:test,paigasus-node-bindings-rs:lint,paigasus-observability-rs:build,paigasus-observability-rs:test,paigasus-observability-rs:lint,paigasus-py-bindings-rs:build,paigasus-py-bindings-rs:test,paigasus-py-bindings-rs:lint,paigasus-wasm-rs:build,paigasus-wasm-rs:test,paigasus-wasm-rs:lint,paigasus-kernel-rs:build,paigasus-kernel-rs:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-kernel-py:test"
   # Generic Cargo<->Moon parity: catches a MISSING case, which is how SMA-524's bug survived review.
   assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
