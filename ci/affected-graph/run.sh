@@ -3,8 +3,11 @@
 # SMA-409 / SMA-429 — affected-graph regression guard (strict-equality, default-deny).
 #
 # `moon ci` USES the affected graph but never ASSERTS it is correct, so a deleted
-# dependsOn edge (or a dropped `moon ci --include-relations`) silently under-builds and
-# stays green. This guard feeds a synthetic touched-file to `moon query projects
+# dependsOn edge — or a crate's `fileGroups.upstreams` drifting from Moon's own dependsOn
+# closure, since `@group(upstreams)` is what confers affectedness in Moon 2.3.2, not
+# `--include-relations` (SMA-528 measured the flag to change nothing in every probe,
+# including the full 24-target ci.yml shape) — silently under-builds and stays green. This
+# guard feeds a synthetic touched-file to `moon query projects
 # --affected --downstream deep` and asserts the resulting project set EQUALS a known
 # expected set per case (default-deny — any unlisted project present fails the case), so
 # such a regression fails red. See
@@ -52,7 +55,9 @@ assert_case() {
   unexpected="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))"
   echo "FAIL  [$label] affected set != expected set" >&2
   if [ -n "$missing" ]; then
-    echo "  missing  (expected but absent — likely a dropped dependsOn edge or a lost --include-relations):" >&2
+    echo "  missing  (expected but absent — likely a dropped dependsOn edge or a missing/wrong" >&2
+    echo "  fileGroups.upstreams (@group(upstreams) is what confers affectedness, SMA-528 — not" >&2
+    echo "  --include-relations, measured to change nothing):" >&2
     sed 's/^/    /' <<<"$missing" >&2
   fi
   if [ -n "$unexpected" ]; then

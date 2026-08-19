@@ -1,7 +1,9 @@
 # affected-graph regression guard (SMA-409 / SMA-429)
 
 `moon ci` *uses* the affected graph but never *asserts* it is correct: a deleted
-`dependsOn` edge — or a dropped `moon ci --include-relations` — makes the affected set
+`dependsOn` edge — or a dropped `@group(upstreams)` reference, the fileGroup that actually
+confers affectedness in Moon 2.3.2 (not `--include-relations`, which SMA-528 measured to
+change nothing in any probe, including the full 24-target CI shape) — makes the affected set
 silently shrink, so CI under-builds and stays **green**. This guard closes that gap.
 
 `run.sh` feeds a synthetic touched-file to `moon query projects --affected --downstream
@@ -95,7 +97,8 @@ It also runs several checks that the per-case project sets structurally **cannot
 - **A6** (in `cargo_moon_parity.py`, SMA-528) asserts every crate's `build`/`test`/`lint` keys on its
   TRANSITIVE `dependsOn` closure's sources — `fileGroups.upstreams`, strict equality against moon's
   own Rust-restricted closure (`rust_closure()`, which excludes non-Rust build-scope parents like
-  `contracts` and walks past `^:build` rather than stopping at it). No per-case task set can make
+  `contracts` and walks the transitive `dependsOn` closure rather than stopping at direct
+  dependencies). No per-case task set can make
   this assertion: the `_ci` cases above only prove the specific pairs someone wrote a case for are
   wired, exactly the "no case at all" gap that let SMA-524's bug through, so A6 is the generic twin
   that iterates every crate. It is also the ONLY guard on `fileGroups.upstreams` at all — F5: a

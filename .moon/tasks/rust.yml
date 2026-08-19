@@ -46,12 +46,12 @@ tasks:
     # (`ci/publish-metadata/run.sh:243,258`). A Dependabot Cargo PR has already shipped a lockfile
     # resolved from 3 of 11 workspace members here (SMA-534).
     command: 'cargo clippy --locked --all-targets -- -D warnings'
-    # `^:build` is what makes a task AFFECTED when an upstream changes. Without it clippy
-    # propagated across no edge at all, so an upstream change that tripped `-D warnings` in a
-    # CONSUMER shipped green and redded main later (SMA-526). Declared here rather than per-crate
-    # so a new crate has no per-crate `lint` declaration to forget. A `workspace = true` in-tree
-    # dep still needs its own hand-written `dependsOn` (SMA-524) — the parity gate's A1 catches
-    # that separately.
+    # `^:build` schedules each upstream's build before this crate's clippy runs (and orders
+    # `contracts:generate` on the proto chain); it does NOT confer affectedness —
+    # `@group(upstreams)` does (SMA-528). Without it clippy compiled against a stale upstream
+    # artifact (SMA-526). Declared here rather than per-crate so a new crate has no per-crate
+    # `lint` declaration to forget. A `workspace = true` in-tree dep still needs its own
+    # hand-written `dependsOn` (SMA-524) — the parity gate's A1 catches that separately.
     # `repo:affected-smoke` asserts this expansion for every crate (cargo_moon_parity.py A3).
     deps: ['^:build']
     # The three WORKSPACE-level inputs (SMA-534). `rs/` has no Moon project, so without these a

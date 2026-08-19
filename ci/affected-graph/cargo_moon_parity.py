@@ -379,6 +379,18 @@ def check_upstream_inputs(
             resolved = set(declared_files or []) | set(declared_globs or [])
             # Observed = every entry pointing INTO another crate's tree. The crate's own
             # `src/**/*` and `Cargo.toml` come from .moon/tasks/rust.yml and are not upstreams.
+            #
+            # What this filter deliberately CANNOT see: an entry outside the `rs/crates/**` +
+            # `/src/**/*`-or-`/Cargo.toml` shape — e.g. a stray `contracts/**/*`, or an
+            # over-broad `.../paigasus-kernel/**/*` sitting beside the correct pair — never enters
+            # `observed`, so it can never surface in the `observed - want` diff either. That diff
+            # is what strict equality relies on to catch over-declaration, so an extra entry of
+            # this shape silently widens what a crate's build/test/lint keys on — the exact
+            # direction strict equality was chosen to catch (SMA-429). Under-declaration is still
+            # caught: a missing correct-shaped pair still fails `want - observed`. This also means
+            # a future Rust crate living outside `rs/crates/` would red A6 with no waiver path —
+            # `ALLOW_OVER_APPROXIMATION`'s reason-string escape hatch is unreachable for an entry
+            # this filter never surfaces. Documentation only: do not change the logic below.
             observed = {
                 e
                 for e in resolved
@@ -526,6 +538,22 @@ def self_test():
         "b": {"source_dir": "rs/crates/libs/b", "deps": set()},
     }
     failures = []
+
+    # Floor the floor: REQUIRED_CLOSURE_EDGES, UPSTREAM_INPUT_TASKS and REQUIRED_FFI_TASKS are
+    # themselves module constants that can be silently emptied (a bad merge, an over-eager
+    # refactor). Every A6 self-test call below passes an explicit `floor=`, so the real
+    # REQUIRED_CLOSURE_EDGES is never exercised by anything else here — `REQUIRED_CLOSURE_EDGES =
+    # {}` unasserts A6's floor entirely with `--self-test` still exiting 0 (measured). Every A6
+    # call also relies on the default `tasks=UPSTREAM_INPUT_TASKS`, and A5's calls rely on the
+    # default `floor=REQUIRED_FFI_TASKS`; emptying either is caught TODAY only incidentally, by
+    # unrelated row-text assertions elsewhere in this function, which is not a guarantee — so all
+    # three get a direct, explicit non-emptiness check here instead.
+    if not REQUIRED_CLOSURE_EDGES:
+        failures.append("REQUIRED_CLOSURE_EDGES is empty — A6's floor would assert nothing")
+    if not UPSTREAM_INPUT_TASKS:
+        failures.append("UPSTREAM_INPUT_TASKS is empty — A6's per-crate loop would assert nothing")
+    if not REQUIRED_FFI_TASKS:
+        failures.append("REQUIRED_FFI_TASKS is empty — A5's floor would assert nothing")
 
     a1, a2, a3 = check(ok, crates)
     if (a1, a2, a3) != ([], [], []):
