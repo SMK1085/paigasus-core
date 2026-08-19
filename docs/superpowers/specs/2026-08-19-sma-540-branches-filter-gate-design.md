@@ -244,6 +244,16 @@ all-negated `branches:` block would be reported as a `paths:` problem at a line 
 key exists. D1 depends on the `no-items` message naming the right remedy, so this is load-bearing
 for D1 as well as cosmetic.
 
+**D10 — The branch assertion extends check 5; nothing is renumbered.** An earlier draft made it a
+new numbered check and moved the self-test bundle from 7 to 8 so that "the self-tests run last"
+stayed true. That was churn in payment for a distinction that does not exist: the branch assertion
+executes *inside* the existing check-5/6 per-file loop, and it is per-entry verdict logic — exactly
+what check 5 already is, one kind over. So check 5 becomes "every `paths:` glob matches the tree and
+every `branches:` entry resolves", check 6 stays the key/entry counting rule for all four kinds, and
+check 7 stays the self-test bundle, now four tables instead of three. Zero comment-reference churn,
+no ordering oddity to explain, and review attention stays on the logic rather than on renumbered
+headers.
+
 ## 4. Architecture
 
 `run.sh` already has the five layers this needs; nothing new is stacked beside them.
@@ -342,8 +352,9 @@ new gate to wire.
 
 - **New standing controls, not just a mutation battery.** SMA-525's F4 finding was that checks 5/6
   could be neutered one path at a time with the gate still exiting 0, because a one-off battery is
-  not a standing control. So `branch_filter_self_test` specifies both per-entry and end-to-end
-  fixtures:
+  not a standing control. So `branch_filter_self_test` — the fourth table under check 7, invoked
+  unconditionally there and from the `--self-test` early exit — specifies both per-entry and
+  end-to-end fixtures:
   - a `branch_verdict` fixture per token, including **both** directions of the control pair —
     `main → ok` and a synthetic non-existent name → `unresolved`. An all-firing table cannot
     distinguish a working check from a stuck one (the SMA-466 trap).
@@ -375,9 +386,10 @@ Ships in one PR: the workflow rewrite, `ci/actionlint/run.sh`, `ci/actionlint/RE
 `moon.yml` (the `repo:actionlint` `description:` says "every paths: filter glob" and goes stale),
 a CLAUDE.md gotcha, and this spec. No Moon task, `T=(…)` or `.prototools` change.
 
-The README edit is larger than a check-table renumber: its subtitle, its intro, its depth-rule
-paragraph, its "Supported glob vocabulary" section and its "Escape hatches" list all describe a
-paths-only gate.
+The README edit touches more than the check table. Per D10 no row is renumbered — rows 5, 6 and 7
+are reworded in place (5 gains branch resolution, 6 covers all four kinds, 7 becomes four tables) —
+but its subtitle, its intro, its depth-rule paragraph, its "Supported glob vocabulary" section and
+its "Escape hatches" list all describe a paths-only gate and need a branch counterpart.
 
 **This PR fires the full 7-platform `prebuild` matrix** — `prebuild.yml` lists its own path in
 `pull_request.paths`, and D1 edits it. Unavoidable, and expected rather than a regression against
