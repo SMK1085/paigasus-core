@@ -1180,6 +1180,7 @@ Expected: **rc=1**, a `missing` section naming `sma541-throwaway`.
 - [ ] **Step 2: C1 unexpected — the blocker case, a gate switched off but left in `T`**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 - <<'PY'
 import pathlib, re
 p = pathlib.Path("moon.yml"); t = p.read_text()
@@ -1196,6 +1197,7 @@ Expected: **rc=1**, an `unexpected` section naming `promtool`. **This is the cas
 - [ ] **Step 3: C2 dead entry — a typo'd target**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 sed -i.bak 's/:affected-smoke :parity-corpus-drift/:afected-smoke :parity-corpus-drift/' \
   .github/workflows/ci.yml
 python3 ci/affected-graph/ci_targets.py ; echo "rc=$?"
@@ -1207,6 +1209,7 @@ Expected: **rc=1**, reporting **both** a `missing` row for `affected-smoke` (C1)
 - [ ] **Step 4: C3 docs drift — a target dropped from CLAUDE.md**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 sed -i.bak 's/:promtool :observability-drift/:observability-drift/' CLAUDE.md
 python3 ci/affected-graph/ci_targets.py ; echo "rc=$?"
 mv CLAUDE.md.bak CLAUDE.md
@@ -1217,6 +1220,7 @@ Expected: **rc=1**, a `doc_problems` section naming the first divergence positio
 - [ ] **Step 5: Parser guards — a marker removed, and a second `T` assignment**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 sed -i.bak 's|<!-- ci-targets:end -->||' CLAUDE.md
 python3 ci/affected-graph/ci_targets.py ; echo "marker rc=$?"
 mv CLAUDE.md.bak CLAUDE.md

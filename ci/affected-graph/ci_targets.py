@@ -238,14 +238,38 @@ def _eligibility(projects):
     `options` object, means ELIGIBLE. Defaulting toward inclusion means a moon output change
     cannot silently exempt a gate — it can only over-require, which is a loud red.
     """
+    # Shape-check every level before walking it. Without these, a moon upgrade that turned any of
+    # them into a list or a scalar would raise AttributeError out of this function; `main()` does
+    # not catch that, so Python would exit 1 — read as an ASSERTION failure when it is in fact
+    # "moon told us something we do not understand", which D2 reserves rc 2 for. The whole point of
+    # the split is that a shape change is loud and correctly classified (CodeRabbit, SMA-541).
+    if not isinstance(projects, dict):
+        raise MoonOutputError(
+            f"`moon query tasks` reported `tasks` as {type(projects).__name__}, expected an object"
+        )
     if not projects:
         raise MoonOutputError("`moon query tasks` reported no projects at all")
     saw_options = False
     result = {}
     for pid, tasks in projects.items():
+        if tasks is not None and not isinstance(tasks, dict):
+            raise MoonOutputError(
+                f"`moon query tasks` reported project {pid!r}'s tasks as "
+                f"{type(tasks).__name__}, expected an object"
+            )
         row = {}
         for name, task in (tasks or {}).items():
+            if not isinstance(task, dict):
+                raise MoonOutputError(
+                    f"`moon query tasks` reported task {pid}:{name} as "
+                    f"{type(task).__name__}, expected an object"
+                )
             options = task.get("options")
+            if options is not None and not isinstance(options, dict):
+                raise MoonOutputError(
+                    f"`moon query tasks` reported {pid}:{name}'s `options` as "
+                    f"{type(options).__name__}, expected an object"
+                )
             if options is not None:
                 saw_options = True
             row[name] = (options or {}).get("runInCI") is not False
@@ -273,7 +297,15 @@ def moon_tasks():
     out = subprocess.run(
         ["moon", "query", "tasks"], capture_output=True, text=True, check=True
     ).stdout
-    return _eligibility(json.loads(out).get("tasks") or {})
+    payload = json.loads(out)
+    # The one shape check the subprocess boundary keeps out of the fixture table: everything below
+    # `tasks` is validated inside _eligibility(), which --self-test drives directly. Guarded anyway
+    # so a top-level shape change lands on rc 2 like the rest, rather than as a bare AttributeError.
+    if not isinstance(payload, dict):
+        raise MoonOutputError(
+            f"`moon query tasks` returned {type(payload).__name__}, expected a JSON object"
+        )
+    return _eligibility(payload.get("tasks") or {})
 
 
 def check_floor(tasks, floor=REQUIRED_REPO_TASKS):
@@ -471,6 +503,16 @@ def self_test():
     # from an absent one, which is the drift class this gate exists to close.
     expect_infra("_eligibility[no-projects]", lambda: _eligibility({}))
     expect_infra("_eligibility[no-options-anywhere]", lambda: _eligibility({"repo": {"deny": {}}}))
+    # ...and every level's SHAPE. Each of these would otherwise raise AttributeError out of
+    # _eligibility, which main() does not catch — Python would exit 1, misreporting "moon's output
+    # changed" as an assertion failure (CodeRabbit, SMA-541).
+    expect_infra("_eligibility[projects-not-a-map]", lambda: _eligibility(["repo"]))
+    expect_infra("_eligibility[task-group-not-a-map]", lambda: _eligibility({"repo": ["deny"]}))
+    expect_infra("_eligibility[task-not-a-map]", lambda: _eligibility({"repo": {"deny": "yes"}}))
+    expect_infra(
+        "_eligibility[options-not-a-map]",
+        lambda: _eligibility({"repo": {"deny": {"options": "runInCI=true"}}}),
+    )
 
     # ...and the POLARITY itself, pinned in both directions so the default-toward-inclusion rule
     # (D8) is asserted rather than assumed: only an explicit `runInCI: false` is ineligible.
