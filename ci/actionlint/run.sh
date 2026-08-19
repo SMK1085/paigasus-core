@@ -60,13 +60,13 @@ for f in .github/workflows/*.yml .github/workflows/*.yaml; do
 done
 [ ${#WORKFLOW_FILES[@]} -gt 0 ] || infra "no workflow files found under .github/workflows/"
 
-# Extract paths:/paths-ignore: keys and their sequence entries from one workflow file.
-# Output records, TAB-separated, in file order:
-#   KEY\t<paths|paths-ignore>\t<lineno>
-#   ITEM\t<paths|paths-ignore>\t<pattern>
+# Extract the four filter keys — paths:, paths-ignore:, branches:, branches-ignore: — and their
+# sequence entries from one workflow file. Output records, TAB-separated, in file order:
+#   KEY\t<kind>\t<lineno>
+#   ITEM\t<kind>\t<pattern-or-branch>
 # See the contract in docs/superpowers/plans/2026-08-16-sma-525-actionlint-gate.md (Task 4) and
 # ci/actionlint/README.md. Every clause below has a fixture in extractor_self_test.
-extract_paths_keys() {
+extract_filter_keys() {
   awk '
     # Strip a quoted scalar to its contents; strip an unquoted one to its pre-comment text.
     function scalar(s,   q, i, c, out) {
@@ -98,7 +98,7 @@ extract_paths_keys() {
     # false-red check 6 (SMA-525 round-2 review). So this tracks brace depth and quoted-string
     # spans char by char instead of a single depth-blind regex. Returns nothing when v is not a
     # flow mapping.
-    function flow_keys(v, lineno, target,    depth, i, n, c, instr, qc, prevc, rest) {
+    function flow_keys(v, lineno, target,    depth, i, n, c, instr, qc, prevc, rest, fkey) {
       if (v !~ /^[{]/) return
       sub(/[}][^}]*$/, "}", v)     # drop a trailing comment after the closing brace
       depth = 0
@@ -120,14 +120,12 @@ extract_paths_keys() {
         prevc = (i > 1) ? substr(v, i - 1, 1) : ""
         if (prevc == "{" || prevc == "," || prevc == " " || prevc == "\t") {
           rest = substr(v, i)
-          if (match(rest, /^["\047]?paths-ignore["\047]?[ \t]*:/)) {
-            if (depth == target) print "KEY\tpaths-ignore\t" lineno
+          if (match(rest, /^["\047]?(paths|branches)(-ignore)?["\047]?[ \t]*:/)) {
+            fkey = substr(rest, 1, RLENGTH)
+            sub(/["\047]?[ \t]*:$/, "", fkey)
+            sub(/^["\047]/, "", fkey)
+            if (depth == target) print "KEY\t" fkey "\t" lineno
             i += RLENGTH - 1   # the for loop own i++ then makes the net advance RLENGTH
-            continue
-          }
-          if (match(rest, /^["\047]?paths["\047]?[ \t]*:/)) {
-            if (depth == target) print "KEY\tpaths\t" lineno
-            i += RLENGTH - 1
             continue
           }
         }
@@ -230,9 +228,15 @@ extract_paths_keys() {
       # regex silently dropped it — no KEY record, so checks 5/6 skipped the filter with no
       # message (SMA-525 round-2 review finding A). Whitespace before the colon (`paths :`) gets
       # the same tolerance as `on :` above, for the same reason.
-      if (stripped ~ /^["\047]?paths["\047]?[ \t]*:/)        { kind = "paths" }
-      else if (stripped ~ /^["\047]?paths-ignore["\047]?[ \t]*:/) { kind = "paths-ignore" }
-      else next
+      # Four filter keys, matched by one pattern and then read back out of the line, rather than
+      # four near-identical regexes. A quoted key ("paths":, 'branches-ignore':) is valid YAML
+      # actionlint accepts; the bare-only regex silently dropped it — no KEY record, so the checks
+      # skipped the filter with no message (SMA-525 round-2 review finding A). Whitespace before
+      # the colon (`paths :`) gets the same tolerance as `on :` above, for the same reason.
+      if (stripped !~ /^["\047]?(paths|branches)(-ignore)?["\047]?[ \t]*:/) next
+      kind = stripped
+      sub(/["\047]?[ \t]*:.*$/, "", kind)   # drop the colon, any value, any trailing comment
+      sub(/^["\047]/, "", kind)             # drop a leading quote
 
       print "KEY\t" kind "\t" NR
 
@@ -247,7 +251,7 @@ extract_paths_keys() {
       # pattern mirrors the KEY match above (quotes and pre-colon whitespace optional) so a
       # quoted inline `"paths": [a, b]` strips down to its flow value, not a still-quoted label.
       rest = stripped
-      sub(/^["\047]?paths(-ignore)?["\047]?[ \t]*:/, "", rest)
+      sub(/^["\047]?(paths|branches)(-ignore)?["\047]?[ \t]*:/, "", rest)
       sub(/[ \t]+#.*$/, "", rest)
       sub(/^[ \t]+/, "", rest)
       sub(/[ \t]+$/, "", rest)
@@ -272,7 +276,7 @@ extractor_self_test() {
     name="$1"; expected="$2"; yaml="$3"
     tmp="$(mktemp)"
     printf '%s' "$yaml" > "$tmp"
-    actual="$(extract_paths_keys "$tmp")"
+    actual="$(extract_filter_keys "$tmp")"
     rm -f "$tmp"
     if [ "$actual" != "$expected" ]; then
       fail "extractor self-test '$name' mismatch.
@@ -292,6 +296,79 @@ on:
     paths:
       - "rs/**"
       - ".prototools"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a branches block is extracted' \
+"$(printf 'KEY\tbranches\t4\nITEM\tbranches\tmain')" \
+'name: t
+on:
+  push:
+    branches:
+      - main
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a branches block followed by a sibling paths block keeps both' \
+"$(printf 'KEY\tbranches\t4\nITEM\tbranches\tmain\nKEY\tpaths\t6\nITEM\tpaths\trs/**')" \
+'name: t
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "rs/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a branches flow sequence emits KEY with no ITEMs' \
+"$(printf 'KEY\tbranches\t4')" \
+'name: t
+on:
+  push:
+    branches: [main]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a branches-ignore block is extracted' \
+"$(printf 'KEY\tbranches-ignore\t4\nITEM\tbranches-ignore\tdev')" \
+'name: t
+on:
+  push:
+    branches-ignore:
+      - dev
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a workflow_dispatch input named branches is not a filter' \
+"" \
+'name: t
+on:
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: which branches
+        required: false
 jobs:
   j:
     runs-on: ubuntu-latest
@@ -333,7 +410,7 @@ jobs:
 '
 
   check_fixture 'dedent closes the block' \
-"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**')" \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**\nKEY\tbranches\t6')" \
 'name: t
 on:
   push:
@@ -375,7 +452,7 @@ jobs:
 '
 
   check_fixture 'a paths: line inside a run block is ignored' \
-"" \
+"$(printf 'KEY\tbranches\t4')" \
 'name: t
 on:
   push:
@@ -601,7 +678,7 @@ jobs:
 '
 
   check_fixture 'a flow-mapping event with paths emits KEY with no ITEMs' \
-"$(printf 'KEY\tpaths\t3')" \
+"$(printf 'KEY\tbranches\t3\nKEY\tpaths\t3')" \
 'name: t
 on:
   push: { branches: [main], paths: ["rz/**"] }
@@ -613,7 +690,7 @@ jobs:
 '
 
   check_fixture 'a flow-mapping event with paths-ignore emits KEY with no ITEMs' \
-"$(printf 'KEY\tpaths-ignore\t3')" \
+"$(printf 'KEY\tbranches\t3\nKEY\tpaths-ignore\t3')" \
 'name: t
 on:
   push: {branches: [main], paths-ignore: ["docs/**"]}
@@ -624,8 +701,8 @@ jobs:
       - run: echo hi
 '
 
-  check_fixture 'a flow-mapping event without a path filter is not a KEY' \
-"" \
+  check_fixture 'a flow-mapping event with only a branch filter still emits a KEY' \
+"$(printf 'KEY\tbranches\t3')" \
 'name: t
 on:
   push: { branches: [main] }   # no paths filter here
@@ -637,7 +714,7 @@ jobs:
 '
 
   check_fixture 'a flow mapping on on: itself emits KEY with no ITEMs' \
-"$(printf 'KEY\tpaths\t2')" \
+"$(printf 'KEY\tbranches\t2\nKEY\tpaths\t2')" \
 'name: t
 on: {push: {branches: [main], paths: ["rz/**"]}}
 jobs:
@@ -1128,7 +1205,7 @@ jobs:
 ' > "$quoted_key_tmp"
   expect_scan 'a dead glob under a quoted "paths": key is reported end-to-end' \
 "$(printf 'PATTERN\tdead\trz/**')" \
-"$(extract_paths_keys "$quoted_key_tmp")"
+"$(extract_filter_keys "$quoted_key_tmp")"
   rm -f "$quoted_key_tmp"
 
   return $rc
@@ -1390,7 +1467,7 @@ fi
 # into the message its author has to act on.
 # ---------------------------------------------------------------------------------------------
 for wf in "${WORKFLOW_FILES[@]}"; do
-  records="$(extract_paths_keys "$wf")" || infra "extractor failed on $wf"
+  records="$(extract_filter_keys "$wf")" || infra "extractor failed on $wf"
   [ -n "$records" ] || continue
 
   findings="$(scan_workflow_records "$records")"
