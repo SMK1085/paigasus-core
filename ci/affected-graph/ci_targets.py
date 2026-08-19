@@ -548,7 +548,7 @@ def check_gate_inputs(projects):
         # moon injects the workspace-config glob into EVERY task, so it is not authored drift.
         # Hardcoded rather than imported from task_inputs.INJECTED_GLOB, which is the source of
         # truth: these two gates stay independently runnable. Divergence fails SAFE — task_inputs'
-        # D4 composition guard raises rc 2 with the accurate message first, and the worst this
+        # D4 composition guard raises rc 2 with the accurate message, and the worst this
         # copy can do is red with a misleading "authored inputs changed".
         got = tuple(g for g in sorted(entry.get("inputGlobs") or {})
                     if g != ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}")

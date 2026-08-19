@@ -433,10 +433,15 @@ def self_test():
             failures.append(f"classify({pattern!r}) -> {got!r}, expected {want!r}")
 
     # --- _repo_tasks shape rules and the D4 composition guard (rc 2) --------------------------
-    def raises_moon(label, projects):
+    def raises_moon(label, projects, match=None):
+        # `match` asserts WHICH guard fired, not merely that one did. Without it a fixture aimed at
+        # an early guard is satisfied by the D4 composition guard downstream — which raises on any
+        # malformed payload — so it cannot detect its own target guard being deleted.
         try:
             _repo_tasks(projects)
-        except MoonOutputError:
+        except MoonOutputError as exc:
+            if match and match not in str(exc):
+                failures.append(f"_repo_tasks: {label} raised the WRONG guard: {exc}")
             return
         failures.append(f"_repo_tasks: no MoonOutputError for {label}")
 
@@ -464,8 +469,10 @@ def self_test():
     raises_moon("no repo project", {"ts": {"lint": {"inputGlobs": {INJECTED_GLOB: {}}}}})
     raises_moon("an empty repo project", {"repo": {}})
     raises_moon("a non-dict task", {"repo": {"promtool": "nope"}})
-    raises_moon("a non-dict inputGlobs", {"repo": {"promtool": {"inputGlobs": ["x"]}}})
-    raises_moon("a non-dict inputFiles", {"repo": {"promtool": {"inputFiles": ["x"]}}})
+    raises_moon("a non-dict inputGlobs", {"repo": {"promtool": {"inputGlobs": ["x"]}}},
+                match="expected objects")
+    raises_moon("a non-dict inputFiles", {"repo": {"promtool": {"inputFiles": ["x"]}}},
+                match="expected objects")
     # D4: the guard is on COMPOSITION, not presence. A second shared input means "authored" no
     # longer means what this gate thinks it means — and if that second member were LIVE, every task
     # would satisfy I3 with zero real inputs while a presence check still passed. That is a false
