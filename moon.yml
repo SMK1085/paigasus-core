@@ -143,6 +143,16 @@ tasks:
       - 'rs/crates/*/*/package.json'
       - 'ts/packages/*/package.json'
       - 'ts/apps/*/package.json'
+      # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
+      # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
+      # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
+      # CLAUDE.md, but that is a different task and cannot green this one.)
+      - 'CLAUDE.md'
+      # The guard shells out to the proto-pinned `moon` for its query output, and this file's own
+      # README states the expected sets are "a snapshot ... at the pinned moon version" — which is
+      # only true if a version bump re-runs it. Every other repo gate that shells out to a
+      # proto-pinned binary lists this (repo:osv, repo:promtool, the three release-parity*).
+      - '.prototools'
 
   parity-corpus-drift:
     description: 'Regenerate the parity corpus from the kernel; assert it matches the committed vectors (SMA-433).'

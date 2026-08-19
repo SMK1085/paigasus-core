@@ -32,7 +32,7 @@ deep` and asserts the affected project set **equals** an exact expected set per 
   edit must not rebuild the kernel). The py/ts parity tests list the corpus as a task `input`
   (cache-keying), which does not make them project-affected by a corpus-only edit.
 
-It also runs five checks that the per-case project sets structurally **cannot** make:
+It also runs several checks that the per-case project sets structurally **cannot** make:
 
 - **`proto->service-info-tasks`** asserts the affected *task* set (`moon query tasks --affected`),
   scoped to `build`, `test` and `lint` — the three tasks that carry `^:build`. `moon query projects
@@ -67,6 +67,34 @@ It also runs five checks that the per-case project sets structurally **cannot** 
   binding task on day one; a `REQUIRED_FFI_TASKS` **floor** stops the derivation degrading to a
   vacuous PASS if a task ever stops matching the markers. A task with none of a `command`, a
   `script`, or any `args` aborts as infra (rc 2), never as a silent skip.
+- **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
+  is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
+  equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
+  entry resolves to a CI-eligible task somewhere in the graph; **C3** CLAUDE.md's marker-delimited
+  command mirrors `T` token-for-token in order and keeps its `--base origin/main
+  --include-relations` tail; **C4** both of this gate's own call sites are still present in
+  `run.sh`; **C5** every `moon ci` invocation in `ci.yml` is handed the WHOLE array —
+  C1-C4 assert what is *in* `T`, and a subsetted `"${T[@]:0:5}"` leaves all four green while
+  switching most of the graph off. C5's line matcher is deliberately BROADER than
+  `assert_include_relations`' `moon ci +"` grep: mirroring it left both blind to a subsetted array
+  behind a leading flag (`moon ci --base origin/main "${T[@]:0:5}"`). `moon ci` exits **0** on a target that resolves to nothing —
+  measured, including the mixed case — so without C2 a renamed or mistyped entry is a silent no-op
+  on every PR. Standalone cost is ~2.5s wall-clock (measured, mostly `moon query` subprocess
+  startup, not CPU) — cheap enough to run inline inside `repo:affected-smoke` rather than justify a
+  dedicated Moon task.
+
+  Maintenance: adding a `repo:*` task means adding `:<name>` to `T` **and** to the command between
+  `<!-- ci-targets:begin -->` / `<!-- ci-targets:end -->` in CLAUDE.md. A task that must stay out of
+  `T` goes in `T_EXEMPT` with a required non-empty reason naming where it runs instead — an entry
+  matching no `repo` task is itself reported, so exemptions cannot outlive their tasks.
+  `runInCI: false` is not a general escape, because Moon then also drops the task from `moon run`
+  under `CI=true` (`ts/moon.yml`). `REQUIRED_REPO_TASKS` is the floor that stops the comparison
+  degrading to two empty sets. **`:affected-smoke` is load-bearing for every assertion in this
+  file**: this gate runs *inside* it, so removing that one entry from `T` (and from CLAUDE.md)
+  passes C1-C5 by never executing them, and takes the eight cascade cases, A1-A5 and
+  `assert_include_relations` with it. Never exempt or drop it — see the design doc's L6.
+  Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
+  design doc's L3.
 
 It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
 `--include-relations` (the edges are inert without it).

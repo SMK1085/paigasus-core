@@ -60,12 +60,26 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   and reds `main` after merge (SMA-448: `prn.rs` → `resource_name.rs`). An underscore/hyphen
   suffix (`prn_canonical`, `prn-fields`) is fine.
 - Per-project Moon tasks (`<proj>:build/test/lint/fmt`) do NOT run the repo-level gates
-  (`:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
-  new crates/deps/proto, run the full graph like CI does: `moon ci :build :test :lint :fmt
-  :deny :osv :machete :actionlint :typecheck :breaking :affected-smoke :parity-corpus-drift
-  :next-env-drift :wasm-getrandom-free :redis-connect-single-site :iam-docker-policy-single-site
-  :promtool :observability-drift :nats-permissions :release-parity :release-parity-py
-  :release-parity-ts :publish-metadata --base origin/main --include-relations`.
+  (e.g. `:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
+  new crates/deps/proto, run the full graph like CI does. The command between the markers below is
+  gated against `ci.yml`'s `T=(…)` array by `repo:affected-smoke` — keep the two identical, and do
+  not remove **or quote** the markers: a second copy of either one anywhere in this file, even
+  inside backticks in prose, makes the count 2 and reds the gate (SMA-541):
+  <!-- ci-targets:begin -->
+  `moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking
+  :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free
+  :redis-connect-single-site :iam-docker-policy-single-site :promtool :observability-drift
+  :nats-permissions :release-parity :release-parity-py :release-parity-ts :publish-metadata
+  --base origin/main --include-relations`
+  <!-- ci-targets:end -->
+- A new `repo:*` gate reds `:affected-smoke` until it is in **both** `ci.yml`'s `T=(…)` array and
+  the marker-delimited command above — `ci/affected-graph/ci_targets.py` asserts the two agree, and
+  that every `T` entry still resolves to a CI-eligible task. That last half matters because
+  `moon ci` exits **0** on a target that resolves to nothing (even with real targets around it), so
+  a typo is otherwise a silent no-op on every PR. A gate that must stay out of `T` needs a
+  `T_EXEMPT` entry with a reason — `runInCI: false` is NOT a general escape, since Moon then drops
+  the task from `moon run` under `CI=true` too (see the comments in `ts/moon.yml`). `T` must also
+  stay a single-line bash array (SMA-541).
 - A new Rust crate reds `:affected-smoke` until it's added to the `lockfile->all-lint` expected set
   in `ci/affected-graph/run.sh` — that case lists **every** crate, so **every** new crate changes it
   (SMA-534) — and, if it `dependsOn` `paigasus-kernel-rs`, to the `kernel->bindings` set as well
