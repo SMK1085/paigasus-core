@@ -30,6 +30,7 @@ declare `test: deps: ['^:build']` in their own `moon.yml`, so a `contracts/` cha
 schedules `paigasus-iam-rs:test` and `paigasus-gateway-rs:test`, and the membership tests run.
 Verify with:
 
+    export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
     printf 'contracts/proto/paigasus/common/v1/error.proto\n' | moon query tasks --affected --downstream deep
 
 ## Adding a row

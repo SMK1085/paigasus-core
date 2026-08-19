@@ -142,12 +142,53 @@ def guard_exists(guard):
     `application/error.rs` row names `every_tenancy_code_is_declared_in_the_canonical_registry`,
     which is defined over in `adapters/grpc/convert.rs`; scoping this lookup to the row's own path
     would red the gate on correct code. Do not "fix" it into a per-row search.
+
+    The match must be a real TEST function, not merely the text `fn <guard>(`. A bare substring
+    search also matched a comment mentioning the name, and — worse — still passed after someone
+    deleted the `#[test]` attribute, leaving a function nothing runs while this gate reported the
+    guard alive (CodeRabbit, owner/repo PR 142).
     """
     needle = f"fn {guard}("
-    return any(needle in p.read_text(encoding="utf-8") for p in SCAN_ROOT.glob(SCAN_GLOB))
+    for path in SCAN_ROOT.glob(SCAN_GLOB):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if needle not in stripped or stripped.startswith("//"):
+                continue
+            if _is_test_fn(lines, idx):
+                return True
+    return False
+
+
+# The two attributes that make a function something the test runner executes. `#[tokio::test]`
+# covers the async guards; three of the five membership tests are async.
+_TEST_ATTRS = ("#[test]", "#[tokio::test]")
+
+
+def _is_test_fn(lines, idx):
+    """Is the `fn` on `lines[idx]` attributed `#[test]` / `#[tokio::test]`?
+
+    Walks backwards over the attribute block directly above the signature. Only attribute lines
+    and blank lines may intervene — a doc comment or any code ends the walk, which is what makes
+    this a statement about THIS function rather than about a stray attribute higher up the file.
+    """
+    for prev in range(idx - 1, -1, -1):
+        line = lines[prev].strip()
+        if not line:
+            continue
+        if line in _TEST_ATTRS:
+            return True
+        if line.startswith("#["):
+            continue
+        return False
+    return False
 
 
 _GLOB_CHARS = "*?["
+
+# The only tree a MANIFEST glob may cover: prost's committed output, which nobody here authors
+# and whose filenames follow the proto package rather than a reviewer's choice.
+_GENERATED_SEGMENT = "/src/generated/"
 
 
 def _is_glob(entry):
@@ -275,11 +316,41 @@ def self_test():
             if role != "excluded":
                 print(f"  FAIL [manifest] {path}: only an `excluded` row may use a glob", file=sys.stderr)
                 rc = 1
+            # ...and a glob may cover ONLY machine-generated output. Anything authored is named
+            # literally. Without this rule an `excluded` row such as
+            # `rs/crates/services/paigasus-gateway/**` silences every unreviewed gateway emission
+            # site AND still matches a hit — so the offender check and the stale-row check fail
+            # open together, and nothing is left to notice (CodeRabbit, owner/repo PR 142). The
+            # sentinel check below cannot catch that one: it is scoped to a single IAM path.
+            if _GENERATED_SEGMENT not in path:
+                print(f"  FAIL [manifest] glob {path}: a glob may cover only generated output, so its "
+                      f"path must contain {_GENERATED_SEGMENT!r} — name authored files literally", file=sys.stderr)
+                rc = 1
             # ...and no glob may reach far enough to swallow a real emission site.
             if _matches(sentinel, path):
                 print(f"  FAIL [manifest] glob {path} also matches {sentinel} — it is broad enough "
                       "to hide every unlisted emission site", file=sys.stderr)
                 rc = 1
+
+    # `_is_test_fn` is what stops `guard_exists` reporting a guard alive after someone deleted its
+    # `#[test]`. Exercised against fixtures rather than the tree, so the check keeps biting even
+    # once every real guard is correct.
+    attributed = ["#[tokio::test]", "async fn every_x() {"]
+    if not _is_test_fn(attributed, 1):
+        print("  FAIL [_is_test_fn] an attributed async test was not recognised", file=sys.stderr)
+        rc = 1
+    documented = ["/// doc", "#[tokio::test]", "async fn every_x() {"]
+    if not _is_test_fn(documented, 2):
+        print("  FAIL [_is_test_fn] a doc comment above the attribute broke recognition", file=sys.stderr)
+        rc = 1
+    stripped_attr = ["/// doc", "async fn every_x() {"]
+    if _is_test_fn(stripped_attr, 1):
+        print("  FAIL [_is_test_fn] a fn with its #[test] deleted was still called a test", file=sys.stderr)
+        rc = 1
+    distant = ["#[test]", "fn unrelated() {}", "", "fn every_x() {"]
+    if _is_test_fn(distant, 3):
+        print("  FAIL [_is_test_fn] an attribute belonging to another fn was credited", file=sys.stderr)
+        rc = 1
 
     if not code_pattern({"upstream-error"}).search(r'\"code\":\"upstream-error\"'):
         print("  FAIL [code_pattern] the escaped-quote form is not matched (E5 regression)", file=sys.stderr)
