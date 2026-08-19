@@ -188,9 +188,16 @@ def _repo_tasks(projects):
                 f"`moon query tasks` reported task repo:{name} as {type(task).__name__}, "
                 "expected an object"
             )
-        globs, files = task.get("inputGlobs") or {}, task.get("inputFiles") or {}
-        # An ABSENT key is fine (spec E8 — five repo tasks declare globs only). A key present with
-        # the WRONG TYPE is a shape change and must be loud.
+        globs = task.get("inputGlobs")
+        files = task.get("inputFiles")
+        # `or {}` would substitute for ANY falsy value, including a malformed `[]`, which would then
+        # never reach the isinstance guard below — silently reading as "no globs" instead of failing
+        # loudly as the shape change it is. An ABSENT key is legitimate (spec E8: five repo tasks
+        # declare globs only); a present-but-wrong-typed one is not.
+        if globs is None:
+            globs = {}
+        if files is None:
+            files = {}
         if not isinstance(globs, dict) or not isinstance(files, dict):
             raise MoonOutputError(
                 f"`moon query tasks` reported repo:{name}'s inputGlobs/inputFiles as "
@@ -490,6 +497,13 @@ def self_test():
     raises_moon("a non-dict inputGlobs", {"repo": {"promtool": {"inputGlobs": ["x"]}}},
                 match="expected objects")
     raises_moon("a non-dict inputFiles", {"repo": {"promtool": {"inputFiles": ["x"]}}},
+                match="expected objects")
+    # `or {}` substitutes for ANY falsy value, not only an absent key — an empty LIST is falsy too,
+    # so without the `is None` guard above these would never reach the isinstance check and would
+    # silently parse as "no globs"/"no files" instead of failing loudly (review finding 1).
+    raises_moon("an empty-list inputGlobs", {"repo": {"promtool": {"inputGlobs": []}}},
+                match="expected objects")
+    raises_moon("an empty-list inputFiles", {"repo": {"promtool": {"inputFiles": []}}},
                 match="expected objects")
     # D4: the guard is on COMPOSITION, not presence. A second shared input means "authored" no
     # longer means what this gate thinks it means — and if that second member were LIVE, every task

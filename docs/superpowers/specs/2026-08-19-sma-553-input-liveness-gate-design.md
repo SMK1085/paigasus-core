@@ -391,7 +391,7 @@ Three corrections to the first draft, all confirmed against the code:
   `row[name] = (options or {}).get("runInCI") is not False`. It discards `script`. Reshaping its
   return would break eight self-test fixtures including the exact-equality `want_polarity`
   (`:597-608`). So C4's new half is fed by a **second pure extractor**, `_scripts(projects)`, reading
-  the same raw JSON `moon_tasks()` already fetches. `_eligibility` and its fixtures are untouched.
+  the same raw JSON `moon_payload()` already fetches. `_eligibility` and its fixtures are untouched.
 - **The two new call sites are prefix-contained.** `python3 ci/affected-graph/task_inputs.py` is a
   substring of `python3 ci/affected-graph/task_inputs.py --self-test`, and `check_self_invocation`
   (`:474-476`) is a plain `site in text` test — so deleting the real run would leave C4 green. Each
@@ -400,7 +400,10 @@ Three corrections to the first draft, all confirmed against the code:
   the prefix alone left `--self-test || true` looking identical to a wired call site").
 - **The two texts are checked separately.** `run.sh`'s sites are looked for in `run.sh`; the task's
   sites in the resolved `script`. Concatenating them would let a call site in the wrong file satisfy
-  the check. The constant is renamed accordingly, since it no longer describes `run.sh` alone.
+  the check. `RUN_SH_CALL_SITES` keeps its existing two `run.sh` entries, unrenamed; the task-script
+  sites live in a separate `SELF_SCHEDULED_GATES` constant, which also pins `set -euo pipefail` as a
+  third required line, since Moon's `script:` blocks do not enable errexit and the script's exit
+  status is otherwise only its last command's.
 
 **The claim that this closes L6 is withdrawn.** The first draft said "Neither can suppress the other,
 so this has none of L6's circularity". That is false in one direction: C1 lives in `ci_targets.py`,
@@ -513,11 +516,14 @@ A new `repo:input-liveness` task, written out here because D10 pins its script t
 
 ### `ci/affected-graph/ci_targets.py`
 
-`RUN_SH_CALL_SITES` grows from two entries to four and is renamed, since it no longer describes
-`run.sh` alone; the two texts are matched separately and by whole line (D10). A new `_scripts`
-extractor feeds the task-script half. The D13 assertion on `repo:input-liveness`'s inputs is added
-here as well as in `task_inputs.py`. Its existing C4 fixture row is extended to cover the two new
-entries, including a row proving the prefix-contained pair is distinguished.
+`RUN_SH_CALL_SITES` keeps its existing two `run.sh` entries unchanged; the `repo:input-liveness`
+task's script sites live in a separate `SELF_SCHEDULED_GATES` constant, matched separately and by
+whole line (D10), which also pins `set -euo pipefail` as a third required line since Moon's
+`script:` blocks do not enable errexit. A new `_scripts` extractor feeds the task-script half,
+reading the same raw JSON `moon_payload()` (not `moon_tasks()`, which this file no longer has)
+already fetches. The D13 assertion on `repo:input-liveness`'s inputs is added here as well as in
+`task_inputs.py`. Its existing C4 fixture row is extended to cover the two new registries, including
+a row proving the prefix-contained pair is distinguished.
 
 ### `.github/workflows/ci.yml`
 

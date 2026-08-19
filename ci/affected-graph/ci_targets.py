@@ -512,14 +512,28 @@ def _scripts(projects):
     `{pid: {task: bool}}` shape is pinned by eight self-test fixtures, including an exact-equality
     polarity check, and reshaping it to carry `script` would break all of them for no gain.
 
-    Shape faults are tolerated here rather than escalated to rc 2, because _eligibility() walks
-    the very same payload first and has already raised MoonOutputError on anything malformed.
+    Non-dict `repo`/task shapes are tolerated here rather than escalated to rc 2, because
+    _eligibility() walks the very same payload first and has already raised MoonOutputError on
+    those. A malformed `script` FIELD is not something _eligibility looks at, so it is checked
+    here: check_self_invocation calls `.splitlines()` on the returned value, and a non-string
+    `script` would otherwise surface as a bare AttributeError -> rc 1, misreporting a moon output
+    shape change as an authorial mistake (SMA-553 review finding 3).
     """
     repo = projects.get("repo") or {}
     if not isinstance(repo, dict):
         return {}
-    return {name: (task.get("script") or "") for name, task in repo.items()
-            if isinstance(task, dict)}
+    scripts = {}
+    for name, task in repo.items():
+        if not isinstance(task, dict):
+            continue
+        script = task.get("script")
+        if script is not None and not isinstance(script, str):
+            raise MoonOutputError(
+                f"`moon query tasks` reported repo:{name}'s `script` as "
+                f"{type(script).__name__}, expected a string"
+            )
+        scripts[name] = script or ""
+    return scripts
 
 
 def check_self_invocation(run_sh_text, scripts):
@@ -553,18 +567,33 @@ def check_gate_inputs(projects):
         if not isinstance(entry, dict):
             rows.append(f"repo:{task} is absent from the graph, so its inputs cannot be checked")
             continue
+        # A present-but-wrong-typed inputGlobs/inputFiles is a moon output shape change, not an
+        # authored drift the rows below know how to describe — escalate it loudly to rc 2 instead
+        # of letting `sorted(...)` either misread it or raise a bare, misclassified exception
+        # (SMA-553 review finding 3). An ABSENT key is fine — it means no globs/files were declared.
+        globs_raw, files_raw = entry.get("inputGlobs"), entry.get("inputFiles")
+        if globs_raw is not None and not isinstance(globs_raw, dict):
+            raise MoonOutputError(
+                f"`moon query tasks` reported repo:{task}'s `inputGlobs` as "
+                f"{type(globs_raw).__name__}, expected an object"
+            )
+        if files_raw is not None and not isinstance(files_raw, dict):
+            raise MoonOutputError(
+                f"`moon query tasks` reported repo:{task}'s `inputFiles` as "
+                f"{type(files_raw).__name__}, expected an object"
+            )
         # moon injects the workspace-config glob into EVERY task, so it is not authored drift.
         # Hardcoded rather than imported from task_inputs.INJECTED_GLOB, which is the source of
         # truth: these two gates stay independently runnable. Divergence fails SAFE — task_inputs'
         # D4 composition guard raises rc 2 with the accurate message, and the worst this
         # copy can do is red with a misleading "authored inputs changed".
-        got = tuple(g for g in sorted(entry.get("inputGlobs") or {})
+        got = tuple(g for g in sorted(globs_raw or {})
                     if g != ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}")
         # moon resolves a LITERAL path in `inputs:` into inputFiles, not inputGlobs, so the
         # glob tuple alone can still read as wired while the input set has in fact changed.
         # Printed alongside the globs because otherwise this branch reports two identical
         # lists and blames "narrowing", leaving the reader unable to see what moved.
-        files = sorted(entry.get("inputFiles") or {})
+        files = sorted(files_raw or {})
         if got != expected or files:
             rows.append(
                 f"repo:{task}'s authored inputs are {list(got) + files}, "
@@ -961,6 +990,10 @@ def self_test():
         failures.append(f"_scripts: returned {got_scripts!r}")
     if _scripts({"repo": {"a": {"command": "true"}}}) != {"a": ""}:
         failures.append("_scripts: a task with no script must map to an empty string, not raise")
+    # Review finding 3 — a non-string `script` must be routed to rc 2 (MoonOutputError), not left
+    # to reach check_self_invocation's `.splitlines()` and raise a bare, misclassified AttributeError.
+    expect_infra("_scripts[non-string-script]",
+                 lambda: _scripts({"repo": {"input-liveness": {"script": ["not", "a", "string"]}}}))
 
     # Two registries keyed by the same task names, so a gate added to one but not the other is
     # guarded on only half of what makes it work — its script but not its inputs, or vice versa.
@@ -994,6 +1027,19 @@ def self_test():
     # `continue`: a task that cannot be found cannot be checked, so skipping it asserts nothing.
     if not check_gate_inputs({"repo": {}}):
         failures.append("check_gate_inputs: missed input-liveness being absent from the graph")
+    # Review finding 3 — a present-but-wrong-typed inputGlobs/inputFiles is a moon output shape
+    # change, not authored drift; it must be routed to rc 2 (MoonOutputError) rather than silently
+    # misread by `sorted(...)` or raising an uncaught, misclassified exception.
+    expect_infra(
+        "check_gate_inputs[non-dict-inputGlobs]",
+        lambda: check_gate_inputs({"repo": {"input-liveness": {"inputGlobs": ["**/*"]}}}),
+    )
+    expect_infra(
+        "check_gate_inputs[non-dict-inputFiles]",
+        lambda: check_gate_inputs(
+            {"repo": {"input-liveness": {"inputGlobs": {"**/*": {}}, "inputFiles": ["x"]}}}
+        ),
+    )
 
     if failures:
         print("ci-targets self-test FAILED:", file=sys.stderr)
