@@ -91,6 +91,90 @@ def classify(pattern):
     return "ok"
 
 
+def authored(globs):
+    """The globs a human wrote, i.e. everything but Moon's injected one (D4).
+
+    MUST run before classify(): the injected glob contains braces, so classifying first would give
+    every repo task a rejected-braces violation.
+    """
+    return [g for g in globs if g != INJECTED_GLOB]
+
+
+def _repo_tasks(projects):
+    """moon's parsed `{pid: {task: {...}}}` -> `{task: (inputGlobs, inputFiles)}` for `repo`.
+
+    A PURE function, split out of moon_tasks() so --self-test can drive every MoonOutputError
+    without a subprocess. The rc-2 paths are the ones a fixture table most needs: they are what a
+    moon upgrade trips, and an unexercised raise is indistinguishable from an absent one.
+
+    Keyed by EXACT project id rather than `moon query tasks --project repo`: moon's query filters
+    are unanchored regexes — measured, `--id epo` returns `repo` and `--id paigasus-kernel` returns
+    four projects (spec E7) — so a future project named e.g. `paigasus-repo-ts` would silently join
+    this set.
+    """
+    if not isinstance(projects, dict):
+        raise MoonOutputError(
+            f"`moon query tasks` reported `tasks` as {type(projects).__name__}, expected an object"
+        )
+    repo = projects.get("repo")
+    if not isinstance(repo, dict) or not repo:
+        raise MoonOutputError(
+            "`moon query tasks` reported no tasks for the `repo` project. Either moon's output "
+            "shape changed or the root moon.yml lost its tasks — either way this gate would "
+            "compare empty sets and assert nothing."
+        )
+    rows = {}
+    for name, task in repo.items():
+        if not isinstance(task, dict):
+            raise MoonOutputError(
+                f"`moon query tasks` reported task repo:{name} as {type(task).__name__}, "
+                "expected an object"
+            )
+        globs, files = task.get("inputGlobs") or {}, task.get("inputFiles") or {}
+        # An ABSENT key is fine (spec E8 — five repo tasks declare globs only). A key present with
+        # the WRONG TYPE is a shape change and must be loud.
+        if not isinstance(globs, dict) or not isinstance(files, dict):
+            raise MoonOutputError(
+                f"`moon query tasks` reported repo:{name}'s inputGlobs/inputFiles as "
+                f"{type(globs).__name__}/{type(files).__name__}, expected objects"
+            )
+        rows[name] = (sorted(globs), sorted(files))
+
+    # D4 — the composition guard. Presence alone is the weaker half: it catches the injected glob
+    # disappearing or being renamed, but NOT a second member appearing, which would leave every
+    # task with zero authored inputs and I3 passing vacuously forever.
+    common = None
+    for globs, files in rows.values():
+        combined = set(globs) | set(files)
+        common = combined if common is None else (common & combined)
+    if common != {INJECTED_GLOB}:
+        raise MoonOutputError(
+            f"the inputs common to every `repo` task are {sorted(common)}, expected exactly "
+            f"[{INJECTED_GLOB!r}]. Moon's injected input set has changed shape, so subtracting it "
+            "to find the AUTHORED inputs no longer means what this gate assumes (SMA-553 D4). "
+            "Check .moon/tasks.yml's implicitInputs and moon's release notes before adjusting "
+            "INJECTED_GLOB."
+        )
+    return rows
+
+
+def moon_tasks():
+    """Moon's own resolved task graph, for the `repo` project only.
+
+    ONE subprocess call. The subprocess + json.loads shell around _repo_tasks(), which holds every
+    shape rule — the same split ci_targets.py uses (`moon_tasks`/`_eligibility`).
+    """
+    out = subprocess.run(
+        ["moon", "query", "tasks"], capture_output=True, text=True, check=True
+    ).stdout
+    payload = json.loads(out)
+    if not isinstance(payload, dict):
+        raise MoonOutputError(
+            f"`moon query tasks` returned {type(payload).__name__}, expected a JSON object"
+        )
+    return _repo_tasks(payload.get("tasks") or {})
+
+
 def self_test():
     """Negative control: every assertion must FIRE on a synthetic violation.
 
@@ -126,6 +210,62 @@ def self_test():
         got = classify(pattern)
         if got != want:
             failures.append(f"classify({pattern!r}) -> {got!r}, expected {want!r}")
+
+    # --- _repo_tasks shape rules and the D4 composition guard (rc 2) --------------------------
+    def raises_moon(label, projects):
+        try:
+            _repo_tasks(projects)
+        except MoonOutputError:
+            return
+        failures.append(f"_repo_tasks: no MoonOutputError for {label}")
+
+    good = {
+        "repo": {
+            "promtool": {
+                "inputGlobs": {"ops/observability/prometheus/**/*": {}, INJECTED_GLOB: {}},
+                "inputFiles": {".prototools": {}},
+            },
+            "actionlint": {"inputGlobs": {"**/*": {}, INJECTED_GLOB: {}}},
+        }
+    }
+    rows = _repo_tasks(good)
+    if sorted(rows) != ["actionlint", "promtool"]:
+        failures.append(f"_repo_tasks: parsed {sorted(rows)}, expected both repo tasks")
+    if rows["actionlint"] != (["**/*", INJECTED_GLOB], []):
+        failures.append(f"_repo_tasks: actionlint row is {rows['actionlint']!r}")
+    # An ABSENT inputFiles key is legitimate, not a violation (spec E8). Five repo tasks declare
+    # globs only; A4's "absent key is a violation" rule in cargo_moon_parity.py does NOT transfer,
+    # and copying it verbatim would red five clean gates on day one.
+    if rows["actionlint"][1] != []:
+        failures.append("_repo_tasks: an absent inputFiles key must parse as empty, not raise")
+
+    raises_moon("a non-dict payload", [])
+    raises_moon("no repo project", {"ts": {"lint": {"inputGlobs": {INJECTED_GLOB: {}}}}})
+    raises_moon("an empty repo project", {"repo": {}})
+    raises_moon("a non-dict task", {"repo": {"promtool": "nope"}})
+    raises_moon("a non-dict inputGlobs", {"repo": {"promtool": {"inputGlobs": []}}})
+    # D4: the guard is on COMPOSITION, not presence. A second shared input means "authored" no
+    # longer means what this gate thinks it means — and if that second member were LIVE, every task
+    # would satisfy I3 with zero real inputs while a presence check still passed. That is a false
+    # green, the one outcome worse than nothing. .moon/tasks.yml already carries a seven-entry
+    # implicitInputs block (spec E13) that is one Moon-behaviour change away from doing this.
+    raises_moon("a second shared input", {
+        "repo": {
+            "a": {"inputGlobs": {"x/**": {}, INJECTED_GLOB: {}, ".moon/**/*": {}}},
+            "b": {"inputGlobs": {"y/**": {}, INJECTED_GLOB: {}, ".moon/**/*": {}}},
+        }
+    })
+    raises_moon("the injected glob missing from one task", {
+        "repo": {
+            "a": {"inputGlobs": {"x/**": {}, INJECTED_GLOB: {}}},
+            "b": {"inputGlobs": {"y/**": {}}},
+        }
+    })
+
+    if authored(["**/*", INJECTED_GLOB]) != ["**/*"]:
+        failures.append("authored: did not subtract the injected glob")
+    if authored([INJECTED_GLOB]) != []:
+        failures.append("authored: a task with only the injected glob must have no authored inputs")
 
     if failures:
         print("task-inputs self-test FAILED:", file=sys.stderr)
