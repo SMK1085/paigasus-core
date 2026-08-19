@@ -2,9 +2,11 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches:
+      - main
   push:
-    branches: [main]
+    branches:
+      - main
 
 # Least privilege on a public repo: the job only reads and runs checks.
 permissions:
