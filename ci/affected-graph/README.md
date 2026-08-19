@@ -74,7 +74,9 @@ It also runs several checks that the per-case project sets structurally **cannot
   command mirrors `T` token-for-token in order and keeps its `--base origin/main
   --include-relations` tail; **C4** both of this gate's own call sites are still present in
   `run.sh`. `moon ci` exits **0** on a target that resolves to nothing — measured, including the
-  mixed case — so without C2 a renamed or mistyped entry is a silent no-op on every PR.
+  mixed case — so without C2 a renamed or mistyped entry is a silent no-op on every PR. Standalone
+  cost is ~2.5s wall-clock (measured, mostly `moon query` subprocess startup, not CPU) — cheap
+  enough to run inline inside `repo:affected-smoke` rather than justify a dedicated Moon task.
 
   Maintenance: adding a `repo:*` task means adding `:<name>` to `T` **and** to the command between
   `<!-- ci-targets:begin -->` / `<!-- ci-targets:end -->` in CLAUDE.md. A task that must stay out of
