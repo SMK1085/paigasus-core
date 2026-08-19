@@ -39,7 +39,10 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the fixture tables only (extractor, path filters, config allowlist)" >&2
+  echo "  --self-test    run the four fixture tables only — extractor, path-filter verdicts," >&2
+  echo "                 branch-filter verdicts, config allowlist. No actionlint binary is" >&2
+  echo "                 required, but the branch-filter table needs a git repo carrying" >&2
+  echo "                 refs/remotes/origin/main" >&2
   exit 2
 }
 
@@ -86,7 +89,7 @@ extract_filter_keys() {
     }
 
     # A flow mapping (`{ branches: [main], paths: [a] }`) is deliberately NOT parsed for entries.
-    # Print a KEY with no ITEMs for any path filter it declares AT THE CALLER TARGET DEPTH, so
+    # Print a KEY with no ITEMs for any filter key it declares AT THE CALLER TARGET DEPTH, so
     # check 6 fails loudly instead of the whole event being skipped in silence. `target` mirrors
     # the block-form depth rule above: 2 when v is the top-level `on: { ... }` scalar (on -> event
     # -> paths), 1 when v is one event own flow value (event -> paths). A `paths` key one level
@@ -194,13 +197,15 @@ extract_filter_keys() {
 
       if (!in_on) next
 
-      # A sequence entry outside a paths block (a `branches:` or `schedule:` list) introduces no
-      # mapping level, so it must not perturb the depth stack below.
+      # A sequence entry outside a recognized filter block (a `schedule:` list, say) introduces no
+      # mapping level, so it must not perturb the depth stack below. A `branches:`/`paths:`/etc.
+      # entry never reaches here — it is consumed as an ITEM one clause earlier, by the `in_block`
+      # handling above, while its block is still open.
       if (stripped ~ /^-([ \t]|$)/) next
 
       # DEPTH INSIDE `on:`. `on:` is level 0; an event key (push:, pull_request:,
       # workflow_dispatch:, ...) is level 1; a key belonging to that event is level 2. Only a
-      # level-2 `paths:`/`paths-ignore:` is a real path filter.
+      # level-2 `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` is a real filter key.
       #
       # Depth, not "anywhere under on:", because a workflow input may legitimately be NAMED
       # `paths` — `on.workflow_dispatch.inputs.paths` sits at level 3. Emitting a KEY for it made
@@ -213,10 +218,10 @@ extract_filter_keys() {
 
       if (depth == 1) {
         # A flow-mapping event value — `push: { branches: [main], paths: [a] }` — is valid YAML
-        # that actionlint accepts, and its `paths:` never reaches the level-2 branch below. Left
-        # alone it would make checks 5 and 6 silently guard nothing at all. Target depth 1: event
-        # -> paths (an `inputs.paths` here, e.g. `push: { inputs: { paths: x } }`, is at depth 2
-        # and must be ignored, same rule as above).
+        # that actionlint accepts, and its `paths:`/`branches:` never reach the level-2 branch
+        # below. Left alone it would make checks 5 and 6 silently guard nothing at all. Target
+        # depth 1: event -> paths/branches (an `inputs.paths` here, e.g.
+        # `push: { inputs: { paths: x } }`, is at depth 2 and must be ignored, same rule as above).
         val = stripped
         sub(/^[^:]*:[ \t]*/, "", val)
         flow_keys(val, NR, 1)
@@ -224,10 +229,6 @@ extract_filter_keys() {
       }
       if (depth != 2) next
 
-      # A quoted key ("paths":, 'paths-ignore':) is valid YAML actionlint accepts; the bare-only
-      # regex silently dropped it — no KEY record, so checks 5/6 skipped the filter with no
-      # message (SMA-525 round-2 review finding A). Whitespace before the colon (`paths :`) gets
-      # the same tolerance as `on :` above, for the same reason.
       # Four filter keys, matched by one pattern and then read back out of the line, rather than
       # four near-identical regexes. A quoted key ("paths":, 'branches-ignore':) is valid YAML
       # actionlint accepts; the bare-only regex silently dropped it — no KEY record, so the checks
@@ -451,7 +452,7 @@ jobs:
       - run: echo hi
 '
 
-  check_fixture 'a paths: line inside a run block is ignored' \
+  check_fixture 'a paths: line inside a run block is ignored, while a sibling branches: flow sequence still emits KEY' \
 "$(printf 'KEY\tbranches\t4')" \
 'name: t
 on:
@@ -1189,8 +1190,9 @@ branch_verdict() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Check 6 (definitions) — every extracted `paths:` KEY must carry at least one sequence item, and
-# at least one of those items must be a POSITIVE (non-'!') pattern.
+# Check 6 (definitions) — every extracted filter KEY (`paths:`, `paths-ignore:`, `branches:`,
+# `branches-ignore:`) must carry at least one sequence item, and a `paths:`/`branches:` KEY must
+# also have at least one of those items be a POSITIVE (non-'!') pattern.
 #
 # Two distinct failures, two distinct messages, both keyed off the RAW item count (before the
 # '!' filtering in pattern_verdict):
@@ -1804,9 +1806,10 @@ for wf in "${WORKFLOW_FILES[@]}"; do
         case "$verdict" in
           unverifiable)
             fail "$wf:$bline: branches entry '$b' contains a glob metacharacter ('*', '?', '+' or
-      '[]'), so it names a pattern rather than a branch and cannot be resolved against a ref.
-      Rewrite it as a literal branch name, or add it to BRANCH_SKIP in $0 with a justification
-      saying what verifies it instead." ;;
+      '[]'), so it names a pattern rather than a branch and cannot be resolved against a ref. Add
+      it to BRANCH_SKIP in $0 with a justification saying what verifies it instead — wildcard
+      branch filters ('release/*', 'dependabot/**') are idiomatic GitHub. Or, if a literal branch
+      name was intended, rewrite it as one." ;;
           invalid-name)
             fail "$wf:$bline: branches entry '$b' is not a legal git branch name — git
       check-ref-format rejects it. No branch can ever carry that name, so the trigger it guards is
@@ -1828,8 +1831,9 @@ for wf in "${WORKFLOW_FILES[@]}"; do
           no-items)
             fail "$wf:$f2: '$f1:' has no sequence entries this gate could read. Two forms produce
       that and neither is parsed: an inline sequence ($f1: [a, b]) and a flow mapping on the
-      event itself (push: { $f1: [a, b] }). Rewrite the event and its filter in block style —
-      skipping either one silently is exactly the failure this gate exists to prevent." ;;
+      triggering event itself (an 'event: { $f1: [a, b] }' shape). Rewrite the event and its
+      filter in block style — skipping either one silently is exactly the failure this gate exists
+      to prevent." ;;
           all-negated)
             fail "$wf:$f2: '$f1:' has $f3 entries but every one is a '!'-negated exclusion. GitHub
       requires at least one non-'!' entry — a filter made only of exclusions can never match, so
@@ -1849,7 +1853,7 @@ done
 # ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, invoked for real.
 #
-# All three are defined earlier so the `--self-test` early exit near the top of this script can
+# All four are defined earlier so the `--self-test` early exit near the top of this script can
 # run them standalone for fast iteration. These are the unconditional invocations that actually
 # make the fixture tables guard the gate on every real run — without them the tables are dead
 # code in CI.

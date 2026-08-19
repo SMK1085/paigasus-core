@@ -457,7 +457,7 @@ tasks:
       - '.gitignore'
 
   actionlint:
-    description: 'actionlint over .github/workflows/**, plus a control that every paths: filter glob still matches the tree (SMA-525).'
+    description: 'actionlint over .github/workflows/**, plus controls that every paths: glob still matches the tree and every branches: entry names a real branch (SMA-525, SMA-540).'
     # WHY `inputs: **/*` AND NOT THE NARROW LIST THE OTHER repo:* GATES USE — this gate makes an
     # assertion about the WHOLE FILE TREE, not about the workflow files. A directory rename is the
     # dominant real-world way a paths: glob comes to match nothing (a typo is at least made by
@@ -469,7 +469,8 @@ tasks:
     # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
     # (cargo nextest, next typegen). This one is ~1.0s standalone and warm (measured): six
     # actionlint invocations — one over the real workflows, five stdin fixtures — 26
-    # `git ls-files` calls, and three fixture tables (extractor, path filters, config allowlist).
+    # `git ls-files` calls, and four fixture tables (extractor, path-filter verdicts,
+    # branch-filter verdicts, config allowlist).
     # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
     # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
     script: 'ci/actionlint/run.sh'

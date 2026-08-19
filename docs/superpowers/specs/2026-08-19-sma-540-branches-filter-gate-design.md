@@ -207,6 +207,15 @@ has **zero** ref dependency, since `pattern_verdict` uses only `git ls-files`. `
 Moon task exactly as hard as `exit 1`; the infrastructure/assertion split is a message
 distinction, not a blast-radius one.
 
+Laziness buys checks 1–6 the chance to run and report their own findings first; it does not buy
+the overall run a pass. `branch_filter_self_test` is invoked unconditionally as part of check 7,
+and its own precondition calls `origin_has 'main' || no_origin_main_infra` before a single real
+workflow's `branches:` entries are even considered. So a checkout without `origin/main` still
+exits 2 at the end of a full (non-`--self-test`) run — whether or not any workflow in the tree
+declares a `branches:` key at all. What laziness actually preserves is diagnostic order: checks
+1–6 run to completion and surface their own findings first, rather than the whole run being
+pre-empted by a preflight ref check before check 1 even starts.
+
 The canary is placed after `cd "$(git rev-parse --show-toplevel)"` and after the `--self-test`
 early exit, inside the verdict path both modes share, so the three placements the reviewer asked
 about collapse to one.
