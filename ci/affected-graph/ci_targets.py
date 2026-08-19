@@ -61,6 +61,21 @@ T_ASSIGN_RE = re.compile(r"^[ \t]*T[ \t]*\+?=", re.MULTILINE)
 # the rest of this parser is not written for.
 T_ARRAY_RE = re.compile(r"^[ \t]*T=\((.*?)\)[ \t]*$", re.MULTILINE)
 
+# The literal invocation `T` must actually be fed to. C1-C3 assert the array's CONTENTS; nothing
+# asserted the array is what `moon ci` is HANDED. Rewriting the call to `moon ci "${T[@]:0:5}"`
+# leaves every entry of `T` correct (C1/C2/C3 green), keeps `assert_include_relations` matching —
+# its grep is `moon ci +"`, and the flag is still there — and stops eighteen gates from running,
+# all green. Deliberately fixed HERE and not by narrowing that grep: its job is "EVERY `moon ci`
+# invocation carries the flag", so narrowing it would blind it to a future second invocation.
+MOON_CI_INVOCATION = 'moon ci "${T[@]}"'
+
+# Which lines count as an invocation, matching assert_include_relations' `moon ci +"` (run.sh:126)
+# so the two agree on what they are looking at: a quote after the spaces excludes the step `name:`
+# field and the comments that also read "moon ci". Checked per LINE, not once over the whole file,
+# because ci.yml carries TWO invocations (the PR path and the push path) — a whole-file substring
+# test would pass with the PR one, the one every gate actually runs under, subsetted.
+MOON_CI_LINE_RE = re.compile(r"^.*moon ci +\".*$", re.MULTILINE)
+
 # The docs command is delimited EXPLICITLY, not recognised by prose shape. Prose-shape matching was
 # fragile in both directions against ordinary doc edits: converting the command to a fenced code
 # block zero-matches it, and CLAUDE.md already carries two neighbouring `moon ci …` spans that a
@@ -109,6 +124,25 @@ RUN_SH_CALL_SITES = (
     "assert_ci_targets || SUITE_RC=1",
     '"$HERE/ci_targets.py" --self-test',
 )
+
+
+def read_input(path, label):
+    """One of the gate's file inputs, with a MISSING file routed to rc 1 rather than rc 2.
+
+    `OSError` is in INFRA_ERRORS, so an unhandled FileNotFoundError would abort the WHOLE
+    affected-graph guard with `exit 2` and destroy every other assertion's diagnostics — for what
+    is unambiguously an authorial mistake (someone deleted or renamed a tracked file), and would
+    triage as "re-run the job" (D2). Every OTHER OSError — permissions, I/O — stays on the rc-2
+    path, because those genuinely are environmental.
+    """
+    try:
+        return path.read_text()
+    except FileNotFoundError as exc:
+        raise GateAssertionError(
+            f"{label} does not exist, so this gate cannot read it. If the file was renamed or "
+            "moved deliberately, update the paths in ci/affected-graph/ci_targets.py's main(); "
+            "otherwise restore it."
+        ) from exc
 
 
 def parse_t(text):
@@ -240,11 +274,15 @@ def check_floor(tasks, floor=REQUIRED_REPO_TASKS):
 
 
 def check_forward(tasks, t_targets, exempt=None):
-    """(missing, unexpected, bad_exempt) — strict equality over `T`'s repo-owned partition.
+    """(missing, unexpected, bad_exempt, stale_exempt) — strict equality over `T`'s repo partition.
 
     `got` deliberately counts every `T` entry that names ANY `repo` task, eligible or not. That is
     what makes flipping a gate to `runInCI: false` while leaving it in `T` show up as `unexpected`
     instead of passing three green checks (D3).
+
+    `stale_exempt` names exemptions that match no `repo` task at all. A TYPO in the table is
+    already loud — the real task shows up as `missing` — but an entry left behind after its task
+    was renamed or deleted is silent, and stays dead weight forever.
     """
     exempt = T_EXEMPT if exempt is None else exempt
     repo = tasks.get("repo")
@@ -254,7 +292,8 @@ def check_forward(tasks, t_targets, exempt=None):
     want = eligible - set(exempt)
     got = {name for name in t_targets if name in repo}
     bad_exempt = sorted(name for name, reason in exempt.items() if not (reason or "").strip())
-    return sorted(want - got), sorted(got - want), bad_exempt
+    stale_exempt = sorted(set(exempt) - set(repo))
+    return sorted(want - got), sorted(got - want), bad_exempt, stale_exempt
 
 
 def check_reverse(tasks, t_targets):
@@ -286,6 +325,30 @@ def check_docs(t_targets, doc_targets, region):
         if flag not in region:
             problems.append(f"the documented command is missing `{flag}`")
     return problems
+
+
+def check_invocation(ci_yml_text):
+    """`moon ci` invocations in ci.yml that do not hand it the whole `T` array.
+
+    Pins the invocation's SHAPE, which C1-C3 do not: they assert what is in `T`, not that `T` is
+    what runs. Full deletion of the line is already caught by `assert_include_relations` (run.sh) —
+    its grep finds nothing and it reds — but subsetting or rewriting the expansion is not, by
+    either check.
+
+    EVERY matched line must carry the exact expansion, not merely one of them: a future second
+    `moon ci` reading a different array reds here and the author extends this gate deliberately,
+    the same default-deny stance D10 takes on a project-scoped `T` entry.
+    """
+    rows = [
+        line.strip()
+        for line in MOON_CI_LINE_RE.findall(ci_yml_text)
+        if MOON_CI_INVOCATION not in line
+    ]
+    if MOON_CI_INVOCATION not in ci_yml_text:
+        # Zero good invocations. Reported separately because the rows above are DERIVED from the
+        # matched lines, so they are silent when there is no `moon ci "` line left to match.
+        rows.append(f"(no `{MOON_CI_INVOCATION}` invocation anywhere in the file)")
+    return rows
 
 
 def check_self_invocation(run_sh_text):
@@ -415,13 +478,13 @@ def self_test():
     }
     aligned_t = ["build", "test", "deny", "promtool", "affected-smoke", "publish-metadata"]
 
-    def forward(label, tasks, t, exempt, want_missing, want_unexpected, want_bad_exempt=()):
-        missing, unexpected, bad = check_forward(tasks, t, exempt)
-        if (missing, unexpected, bad) != (list(want_missing), list(want_unexpected), list(want_bad_exempt)):
-            failures.append(
-                f"check_forward[{label}]: got {missing}/{unexpected}/{bad}, want "
-                f"{list(want_missing)}/{list(want_unexpected)}/{list(want_bad_exempt)}"
-            )
+    def forward(label, tasks, t, exempt, want_missing, want_unexpected, want_bad_exempt=(),
+                want_stale_exempt=()):
+        got = check_forward(tasks, t, exempt)
+        want = (list(want_missing), list(want_unexpected), list(want_bad_exempt),
+                list(want_stale_exempt))
+        if got != want:
+            failures.append(f"check_forward[{label}]: got {list(got)}, want {list(want)}")
 
     forward("aligned", tasks_fixture, aligned_t, {}, [], [])
     # AC #3: a runInCI:false task absent from T must not trip the gate — asserted with SEVERAL of
@@ -446,6 +509,11 @@ def self_test():
     # A bare-membership exemption with no reason is unreviewable — reject it.
     forward("exempt-without-reason", tasks_fixture,
             [t for t in aligned_t if t != "promtool"], {"promtool": "  "}, [], [], ["promtool"])
+    # An exemption naming no `repo` task — the entry its task outlived. Reported on its own row: a
+    # typo would ALSO show the real task as `missing`, but a leftover after a deletion shows
+    # nothing at all.
+    forward("exempt-names-no-task", tasks_fixture, aligned_t,
+            {"ghost-gate": "kept after the task was deleted"}, [], [], [], ["ghost-gate"])
     # An output with no `repo` project at all is moon telling us nothing -> infra, never a
     # comparison against an empty set.
     expect_infra("check_forward[no-repo-project]",
@@ -483,6 +551,60 @@ def self_test():
          "moon ci --base origin/main", False)
     docs("doc-missing-base", aligned_t, list(aligned_t), "moon ci --include-relations", False)
 
+    # The invocation shape. The subsetted variant is the one that keeps EVERY other check green
+    # while stopping eighteen gates from running. Mirrors ci.yml's real two-branch shape, because
+    # "one of the two lines was rewritten" is the case a whole-file substring test would miss.
+    invoked = (
+        "      - name: moon ci (affected graph)\n"
+        "        run: |\n"
+        '          if [ "$EVENT" = "pull_request" ]; then\n'
+        '            moon ci "${T[@]}" --base origin/main --include-relations\n'
+        "          else\n"
+        '            moon ci "${T[@]}" --base "$BEFORE" --include-relations\n'
+        "          fi\n"
+    )
+    if check_invocation(invoked):
+        failures.append(
+            f"check_invocation: fired on the canonical call: {check_invocation(invoked)}"
+        )
+    subsetted = invoked.replace('"${T[@]}" --base origin/main', '"${T[@]:0:5}" --base origin/main')
+    if not check_invocation(subsetted):
+        failures.append("check_invocation: missed a subsetted `${T[@]:0:5}` on ONE of two lines")
+    if not check_invocation(invoked.replace('moon ci "${T[@]}"', "moon ci $T")):
+        failures.append("check_invocation: missed an unquoted `$T` expansion")
+    if not check_invocation(invoked.replace('moon ci "${T[@]}"', "moon ci :build")):
+        failures.append("check_invocation: missed a `moon ci` that bypasses `T` entirely")
+
+    # A DELETED input file is an authorial mistake (rc 1), not a broken tool (rc 2). Driven with
+    # stubs rather than real paths so the control needs no filesystem state at all.
+    class _Raises:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def read_text(self):
+            raise self.exc
+
+    class _Present:
+        def read_text(self):
+            return "content"
+
+    try:
+        read_input(_Raises(FileNotFoundError(2, "No such file or directory")), "CLAUDE.md")
+    except GateAssertionError:
+        pass
+    except OSError as exc:
+        failures.append(f"read_input: a missing input stayed on the rc-2 infra path: {exc}")
+    else:
+        failures.append("read_input: accepted a missing input")
+    try:
+        read_input(_Raises(PermissionError(13, "Permission denied")), "CLAUDE.md")
+    except GateAssertionError:
+        failures.append("read_input: routed a PermissionError to rc 1; only a missing file is rc 1")
+    except PermissionError:
+        pass
+    if read_input(_Present(), "CLAUDE.md") != "content":
+        failures.append("read_input: did not return the file's text")
+
     wired = (
         'assert_ci_targets() {\n  :\n}\n'
         '  assert_ci_targets || SUITE_RC=1\n'
@@ -510,11 +632,16 @@ def main():
     root = Path(__file__).resolve().parents[2]
     try:
         tasks = moon_tasks()
-        t_targets = parse_t((root / ".github" / "workflows" / "ci.yml").read_text())
-        doc_targets, region = parse_doc_targets((root / "CLAUDE.md").read_text())
-        run_sh = (root / "ci" / "affected-graph" / "run.sh").read_text()
+        ci_yml = read_input(root / ".github" / "workflows" / "ci.yml", ".github/workflows/ci.yml")
+        t_targets = parse_t(ci_yml)
+        doc_targets, region = parse_doc_targets(
+            read_input(root / "CLAUDE.md", "CLAUDE.md")
+        )
+        run_sh = read_input(
+            root / "ci" / "affected-graph" / "run.sh", "ci/affected-graph/run.sh"
+        )
         floor = check_floor(tasks)
-        missing, unexpected, bad_exempt = check_forward(tasks, t_targets)
+        missing, unexpected, bad_exempt, stale_exempt = check_forward(tasks, t_targets)
     except GateAssertionError as exc:
         # An authorial mistake, NOT a broken tool: rc 1 so run.sh records a red suite instead of
         # aborting the whole affected-graph guard and losing every other assertion's output (D2).
@@ -527,8 +654,10 @@ def main():
     dead = check_reverse(tasks, t_targets)
     doc_problems = check_docs(t_targets, doc_targets, region)
     missing_sites = check_self_invocation(run_sh)
+    bad_invocation = check_invocation(ci_yml)
 
-    if not (floor or missing or unexpected or bad_exempt or dead or doc_problems or missing_sites):
+    if not (floor or missing or unexpected or bad_exempt or stale_exempt or dead or doc_problems
+            or missing_sites or bad_invocation):
         print(
             f"PASS  {'ci-targets':<18} -> {len(t_targets)} targets: every CI-eligible repo task is "
             "in ci.yml's T, every entry resolves, CLAUDE.md mirrors it"
@@ -558,6 +687,12 @@ def main():
          "A T_EXEMPT entry has no reason string. An exemption is a recorded decision, so the\n"
          "    record is what earns it.\n"
          "    Fix: give it a non-empty reason in ci/affected-graph/ci_targets.py, or delete it."),
+        (stale_exempt,
+         "A T_EXEMPT entry names no `repo` task at all — the task it exempted was renamed or\n"
+         "    deleted and the exemption outlived it. A typo is loud (the real task shows up under\n"
+         "    `missing` above); a leftover is silent, and exempts nothing forever.\n"
+         "    Fix: delete the entry from T_EXEMPT in ci/affected-graph/ci_targets.py, or correct\n"
+         "    its name."),
         (dead,
          "A `T` entry resolves to no CI-eligible task anywhere in the graph — a typo, or a task\n"
          "    that was renamed, deleted or turned off. `moon ci` exits 0 on such a target, even\n"
@@ -571,7 +706,17 @@ def main():
         (missing_sites,
          "This gate's own call site is missing from ci/affected-graph/run.sh, so it (or its\n"
          "    negative control) would not run at all.\n"
-         "    Fix: restore the exact line; see RUN_SH_CALL_SITES in this file."),
+         "    Fix: restore the exact line; see RUN_SH_CALL_SITES in\n"
+         "    ci/affected-graph/ci_targets.py."),
+        (bad_invocation,
+         "A `moon ci` invocation in .github/workflows/ci.yml does not hand it the WHOLE `T`\n"
+         "    array. Every check above asserts what is IN `T`; this one asserts `T` is what runs.\n"
+         "    A subsetted or rewritten expansion (`\"${T[@]:0:5}\"`, an unquoted `$T`) leaves the\n"
+         "    array perfectly correct, keeps run.sh's --include-relations grep matching, and\n"
+         "    silently stops most of the graph from running.\n"
+         "    Fix: use `" + MOON_CI_INVOCATION + "` verbatim on each line below. If a second,\n"
+         "    deliberately-different invocation is genuinely wanted, extend check_invocation in\n"
+         "    ci/affected-graph/ci_targets.py rather than loosening it."),
     ):
         if rows:
             print(f"  {title}", file=sys.stderr)
