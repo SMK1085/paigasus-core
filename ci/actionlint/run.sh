@@ -1134,8 +1134,11 @@ branch_verdict() {
   # Glob metacharacters, tried FIRST and deliberately above check-ref-format (D4). GitHub reads
   # '*', '**', '?', '+' and '[]' as patterns, so the entry names a set rather than a branch and
   # cannot be resolved. Ordering is load-bearing twice over: check-ref-format would reject '*' and
-  # '?' as illegal ref characters and report a true but useless reason; and it is what makes the
-  # show-ref lookup below safe without pattern_verdict's explicit charset allowlist.
+  # '?' as illegal ref characters and report a true but useless reason; and it keeps a glob-shaped
+  # entry from ever reaching the for-each-ref/grep -qxF lookup below. Unlike pattern_verdict, which
+  # relies on an explicit charset allowlist because it hands the pattern to git ls-files ':(glob)',
+  # that lookup does a fixed-string match (grep -F) — already immune to being misread as a pattern
+  # — so this ordering is belt-and-braces there, not the sole guarantee.
   #
   # '+' counts as a glob even though it is LEGAL in a git ref name: GitHub reads it as "one or
   # more of the preceding character", so 'foo+' matches the branch 'foo', and a branch literally
@@ -1332,7 +1335,7 @@ jobs:
 # battery is not a standing control.
 # ---------------------------------------------------------------------------------------------
 branch_filter_self_test() {
-  local rc=0 saved_skip
+  local rc=0 saved_skip saved_origin_refs saved_origin_refs_loaded
 
   # This table asserts a real ref resolves, so it shares the canary's precondition. Asserted here
   # rather than left to a confusing per-fixture mismatch: --self-test still needs no actionlint
@@ -1375,6 +1378,22 @@ branch_filter_self_test() {
   BRANCH_SKIP=('release/**')
   expect_branch 'release/**'                  'skipped'
   BRANCH_SKIP=(${saved_skip+"${saved_skip[@]}"})
+
+  # 'no-origin-main' is the one token this table cannot exercise under real refs — the table's
+  # own precondition above already asserts origin/main resolves. Simulated instead by swapping
+  # ORIGIN_REFS for a main-free list and forcing ORIGIN_REFS_LOADED so load_origin_refs treats the
+  # cache as already populated and will not overwrite it. 'dev' is in that fake list — it would
+  # otherwise resolve to 'ok' — so this proves the lazy canary still fires ahead of the per-entry
+  # lookup, not merely that a name absent from everywhere reports something non-'ok'. Placed LAST
+  # and restored immediately: a failure mid-fixture must not leave the cache poisoned for a row
+  # above, which is why every other row in this table runs first.
+  saved_origin_refs="$ORIGIN_REFS"
+  saved_origin_refs_loaded="$ORIGIN_REFS_LOADED"
+  ORIGIN_REFS="$(printf 'dev\nrelease/1.0')"
+  ORIGIN_REFS_LOADED=1
+  expect_branch 'dev'                         'no-origin-main'
+  ORIGIN_REFS="$saved_origin_refs"
+  ORIGIN_REFS_LOADED="$saved_origin_refs_loaded"
 
   return $rc
 }
