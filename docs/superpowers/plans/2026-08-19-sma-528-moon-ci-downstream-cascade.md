@@ -314,36 +314,27 @@ case is written from the closure **first** and must fail on the current tree.
   `run_task_case_ci LABEL FILE EXPECTED_CSV` (3-way rc folding, mirroring `run_task_case`), plus
   `expect_red_task LABEL FILE EXPECTED_CSV` for the negative-control block. Task 4 reuses all three.
 
-- [ ] **Step 1: Add the CI-traversal helper**
+- [ ] **Step 1: Factor the shared task-case body, then add the CI-traversal wrapper**
 
-Insert into `ci/affected-graph/run.sh` immediately after the existing `assert_task_case`:
+`assert_task_case` and the new CI-traversal case differ **only** in the flags passed to
+`moon query tasks`. Copying its ~35-line body would duplicate the extractor and the
+missing/unexpected reporting verbatim; factor instead.
+
+Replace the existing `assert_task_case` with an implementation that takes the traversal, plus two
+thin wrappers. Keep the existing header comment on `assert_task_case` and extend it per Task 4
+Step 1.
 
 ```bash
-# assert_task_case_ci LABEL FILE EXPECTED_CSV
-#   Same strict-equality contract as assert_task_case, but over the traversal `moon ci` ACTUALLY
-#   USES: `moon query tasks --affected` with NO graph flags.
-#
-#   Why both exist (SMA-528). Moon 2.3.2 confers affectedness ONLY through a task's own `inputs`.
-#   `--downstream deep` walks dependents in the QUERY, but `moon ci` never does — measured at the
-#   full 24-target ci.yml shape, `moon ci "${T[@]}" --stdin --include-relations` and the same
-#   command plus `--downstream deep` produce byte-identical action sets. So the `_deep` cases
-#   assert what the task graph WOULD cascade (which is what catches a deleted `^:build`), and these
-#   `_ci` cases assert what CI actually selects. Before SMA-528 only the former existed, and it was
-#   green for years while no consumer test ran.
-#
-#   This traversal is a CHARACTERIZED proxy, not `moon ci` itself. Measured relationship:
-#       moon ci RunTask set = (query-affected ∩ ci.yml's T array ∩ runInCI) ∪ upstream-dep closure
-#   Both differences are benign here — the T filter only REMOVES tasks these cases do not assert
-#   (`build-release`), and the upstream-dep closure only ADDS builds. Moon has no dry-run
-#   (`--plan`, `--no-actions` and `--cache` all still execute), so grounding a per-run gate in a
-#   real `moon ci` would mean running tasks on a cold CI cache. RE-MEASURE THIS ON A MOON BUMP,
-#   alongside A4's `inputFiles` shape and A5's command/args/script shape.
+# _assert_task_case_impl LABEL FILE EXPECTED_CSV HINT [QUERY_FLAGS...]
+#   Shared body of the two task-case helpers below, which differ ONLY in the flags handed to
+#   `moon query tasks`. HINT is the traversal-specific sentence printed under a `missing` list.
 # returns 0 pass / 1 assertion fail / 2 infrastructure error
-assert_task_case_ci() {
-  local label="$1" file="$2" expected_csv="$3" got want missing unexpected
+_assert_task_case_impl() {
+  local label="$1" file="$2" expected_csv="$3" hint="$4"; shift 4
+  local got want missing unexpected
   [ -n "$expected_csv" ] || { echo "FATAL [$label]: EXPECTED_CSV is empty (harness bug)" >&2; return 2; }
   got="$(printf '%s\n' "$file" \
-    | moon query tasks --affected \
+    | moon query tasks --affected "$@" \
     | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
@@ -361,20 +352,55 @@ print("\n".join(sorted(out)))')" \
   fi
   missing="$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))"
   unexpected="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))"
-  echo "FAIL  [$label] CI-traversal TASK set != expected set" >&2
+  echo "FAIL  [$label] affected TASK set != expected set" >&2
   if [ -n "$missing" ]; then
-    echo "  missing  (expected but NOT selected by the traversal moon ci uses — the consumer's" >&2
-    echo "  build/test/lint does not key on this upstream's sources; check its fileGroups.upstreams" >&2
-    echo "  and that .moon/tasks/rust.yml still references @group(upstreams)):" >&2
+    echo "  missing  (expected but absent):" >&2
+    echo "    $hint" >&2
     sed 's/^/    /' <<<"$missing" >&2
   fi
   if [ -n "$unexpected" ]; then
-    echo "  unexpected (selected but not expected — if the new edge is intended, add it here):" >&2
+    echo "  unexpected (present but not expected — if the new edge is intended, add it here):" >&2
     sed 's/^/    /' <<<"$unexpected" >&2
   fi
   return 1
 }
+
+# assert_task_case LABEL FILE EXPECTED_CSV — the `--downstream deep` traversal: what the TASK GRAPH
+# would cascade. Retained after SMA-528 because it is the only BEHAVIOURAL detector of a deleted
+# `^:build`: affectedness now comes from task inputs, so removing a `^:build` would not change any
+# *_ci case's output, leaving only cargo_moon_parity.py's A3, which asserts the declaration and
+# never its effect. SMA-524 exists because a declaration-only assertion was not enough.
+assert_task_case() {
+  _assert_task_case_impl "$1" "$2" "$3" \
+    "likely a dropped task-level '^:build'; for \`lint\` that dep lives once in .moon/tasks/rust.yml, not per-crate." \
+    --downstream deep
+}
+
+# assert_task_case_ci LABEL FILE EXPECTED_CSV — the traversal `moon ci` ACTUALLY USES: no graph
+# flags at all.
+#
+# Why this exists (SMA-528). Moon 2.3.2 confers affectedness ONLY through a task's own `inputs`.
+# `--downstream deep` walks dependents in the QUERY, but `moon ci` never does — measured at the full
+# 24-target ci.yml shape, `moon ci "${T[@]}" --stdin --include-relations` and the same command plus
+# `--downstream deep` produce byte-identical action sets. So `assert_task_case` asserts what the
+# task graph WOULD cascade, and this asserts what CI actually selects. Before SMA-528 only the
+# former existed, and it was green for years while no consumer test ran.
+#
+# This traversal is a CHARACTERIZED proxy, not `moon ci` itself. Measured relationship:
+#     moon ci RunTask set = (query-affected ∩ ci.yml's T array ∩ runInCI) ∪ upstream-dep closure
+# Both differences are benign here — the T filter only REMOVES tasks these cases do not assert
+# (`build-release`), and the upstream-dep closure only ADDS builds. Moon has no dry-run (`--plan`,
+# `--no-actions` and `--cache` all still execute), so grounding a per-run gate in a real `moon ci`
+# would mean running tasks on a cold CI cache. RE-MEASURE THIS ON A MOON BUMP, alongside A4's
+# `inputFiles` shape, A5's command/args/script shape and A6's `inputGlobs` shape.
+assert_task_case_ci() {
+  _assert_task_case_impl "$1" "$2" "$3" \
+    "the consumer's build/test/lint does not key on this upstream's sources; check its fileGroups.upstreams and that .moon/tasks/rust.yml still references @group(upstreams)."
+}
 ```
+
+Note the two wrappers pass no `--downstream`/`--include-relations` beyond what is shown: the `_ci`
+variant deliberately passes **no** extra flags.
 
 - [ ] **Step 2: Add the rc-folding wrapper**
 
@@ -557,10 +583,11 @@ two labels only — not the expected sets:
   `ci/affected-graph/README.md` grep for it and the README already documents it as a deliberate
   misnomer; renaming it breaks a documented procedure for no functional gain.
 
-Update the header comment of `assert_task_case` to say it asserts the `--downstream deep`
-traversal — *what the task graph would cascade* — and that it remains the only behavioural detector
-of a deleted `^:build`, since after SMA-528 affectedness comes from inputs and a missing `^:build`
-would not change any `_ci` case's output.
+`assert_task_case`'s header comment already carries this framing from Task 2 Step 1 — do not
+duplicate it here.
+
+`ci/affected-graph/README.md` names `proto->service-info-tasks` in its assertion list; Task 7
+Step 2 must update that reference to the new label. Note it in the report so it is not lost.
 
 - [ ] **Step 2: Add CI-traversal twins**
 
