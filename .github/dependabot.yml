@@ -86,3 +86,12 @@ updates:
         update-types:
           - minor
           - patch
+
+  # SMA-500: the container images pin `rust:` and `ubuntu:` by digest. A pinned-and-never-updated
+  # base on a security-audited product is the mirror image of the floating-tag risk the design
+  # rejected Chainguard over, so the pins are kept fresh here. NOTE the chisel version and its two
+  # sha384 checksums in rs/Dockerfile are NOT covered by any updater and are bumped by hand.
+  - package-ecosystem: docker
+    directory: /rs
+    schedule:
+      interval: weekly
