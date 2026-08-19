@@ -6,6 +6,7 @@
 
 pub mod correlation;
 pub mod grpc;
+pub mod health;
 pub mod http;
 pub mod names;
 
