@@ -48,6 +48,14 @@ INJECTED_GLOB = ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}"
 # the `--` separator plus quoting is necessary but NOT sufficient.
 SAFE_CHARS_RE = re.compile(r"[A-Za-z0-9._/*-]+")
 
+# D7 — live-fire canaries, run on EVERY real invocation, not only under --self-test. This is the
+# one failure the fixture table cannot catch: a matcher stuck returning "live" passes I1, I2 and I4
+# vacuously while every check still prints PASS. Following ci/actionlint/run.sh:1449-1459 ("the
+# self-tests, invoked for real"), which calls its fixture tables unconditionally so they are not
+# dead code in CI. Costs one extra `git` call each.
+CANARY_DEAD = "zz-no-such-directory-sma553/**/*"
+CANARY_LIVE = "ci/affected-graph/*.py"
+
 
 def classify(pattern):
     """One pattern's syntactic verdict. PURE — no filesystem, no subprocess.
@@ -175,6 +183,69 @@ def moon_tasks():
     return _repo_tasks(payload.get("tasks") or {})
 
 
+def _git(args, root):
+    """One git invocation, with the two settings that make its output trustworthy.
+
+    `cwd=root` is load-bearing: `ls-files` only lists paths BELOW its working directory, so running
+    this script from inside ci/affected-graph/ would make every pattern in the repo read `dead`.
+    `core.quotePath=false` keeps a non-ASCII path from being returned C-quoted, which would miss an
+    exact match and report a false `not-exact`.
+
+    A non-zero rc is rc 2 (infrastructure), never "no matches" and never a skip. Note this fires
+    only when git is genuinely broken: a MALFORMED pattern exits 0 with no output (measured), which
+    reads as `dead` — a false red, the safe direction. classify() is the real defense there.
+    """
+    proc = subprocess.run(
+        ["git", "-c", "core.quotePath=false", *args],
+        cwd=root, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise MoonOutputError(
+            f"`git {' '.join(args)}` failed with rc {proc.returncode}: {proc.stderr.strip()}"
+        )
+    return [line for line in proc.stdout.splitlines() if line]
+
+
+def tracked_files(root):
+    """Every git-tracked path, as an exact-membership set.
+
+    TRACKED rather than on-disk, deliberately. Moon's input collection does not honour .gitignore —
+    that is the entire reason .moon/workspace.yml carries `hasher.ignorePatterns`, which records
+    that removing it makes repo:actionlint ~8x slower "because the walk descends into pnpm's
+    symlinked content-addressable store". A path under an ignored tree is therefore collected but
+    never HASHED: it contributes nothing to any cache key, so it can never invalidate the task.
+    git's tracked set is the cheapest available proxy for "can this path ever schedule this task".
+    """
+    files = set(_git(["ls-files"], root))
+    if not files:
+        raise MoonOutputError(
+            "`git ls-files` reported no tracked files at all — this gate would call every declared "
+            "input dead. Check that it is running inside the repository."
+        )
+    return files
+
+
+def git_matcher(root):
+    """pattern -> number of tracked files it matches."""
+    return lambda pattern: len(_git(["ls-files", "--", f":(glob){pattern}"], root))
+
+
+def check_canaries(matcher):
+    """D7. Rows describing a matcher that is not actually discriminating."""
+    rows = []
+    if matcher(CANARY_DEAD) != 0:
+        rows.append(
+            f"the dead canary {CANARY_DEAD!r} reported matches — the matcher is not "
+            "discriminating, so every liveness verdict below is meaningless"
+        )
+    if matcher(CANARY_LIVE) == 0:
+        rows.append(
+            f"the live canary {CANARY_LIVE!r} reported no matches — the matcher cannot see the "
+            "tree, so every input would be reported dead"
+        )
+    return rows
+
+
 def self_test():
     """Negative control: every assertion must FIRE on a synthetic violation.
 
@@ -266,6 +337,16 @@ def self_test():
         failures.append("authored: did not subtract the injected glob")
     if authored([INJECTED_GLOB]) != []:
         failures.append("authored: a task with only the injected glob must have no authored inputs")
+
+    # --- canaries (D7) ------------------------------------------------------------------------
+    if check_canaries(lambda p: 0 if p == CANARY_DEAD else 3):
+        failures.append("check_canaries: fired on a healthy matcher")
+    # The failure this exists for: a matcher that says everything is live. Every other check passes
+    # vacuously under it.
+    if not check_canaries(lambda p: 3):
+        failures.append("check_canaries: missed a matcher stuck returning live")
+    if not check_canaries(lambda p: 0):
+        failures.append("check_canaries: missed a matcher stuck returning dead")
 
     if failures:
         print("task-inputs self-test FAILED:", file=sys.stderr)
