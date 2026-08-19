@@ -77,8 +77,9 @@ SELF_EXPECTED_GLOBS = ("**/*",)
 # (task, pattern) -> why this dead input is tolerated. SHIPS EMPTY, and unlike SMA-541's T_EXEMPT
 # there is not even a hypothetical entry: the repo project is measured 100% clean (spec E3).
 # `pattern` may name an inputGlobs OR an inputFiles entry — the allowlist covers I1 and I2 alike.
-# An entry is a RECORDED DECISION: the reason string is required, and a blank one is itself an
-# assertion failure. Mirrors cargo_moon_parity.py's ALLOW_NO_CARGO_BACKING.
+# An entry is a RECORDED DECISION: the reason string is required to be non-blank AFTER STRIPPING
+# whitespace — "" and "   " are both an assertion failure, not merely "". Mirrors
+# cargo_moon_parity.py's ALLOW_NO_CARGO_BACKING, which uses the same `.strip()` test.
 ALLOW_DEAD_INPUT = {}
 
 
@@ -306,12 +307,11 @@ def check(tasks, tracked, matcher, allow=ALLOW_DEAD_INPUT):
     for name in sorted(tasks):
         globs, files = tasks[name]
         for pattern in authored(globs):
-            # TRUTHINESS, not membership: an entry with a blank reason must NOT exempt anything.
-            # Bare membership would let `("a", "b"): ""` silence a violation unreviewably, which is
-            # the hole cargo_moon_parity.py's _allowlisted helper exists to close. The blank reason
-            # is reported separately below, and the underlying violation still fires.
-            if allow.get((name, pattern)):
-                continue
+            # classify() runs BEFORE the allowlist: ALLOW_DEAD_INPUT is documented as "why this
+            # dead INPUT is tolerated", not a third door around classify()'s "fix it or extend the
+            # validator deliberately". An allowlisted-but-unevaluable pattern must still be
+            # reported rejected — the gate never looked at it, so there is nothing for the
+            # allowlist to have exempted.
             verdict = classify(pattern)
             if verdict == "negated":
                 continue
@@ -324,6 +324,14 @@ def check(tasks, tracked, matcher, allow=ALLOW_DEAD_INPUT):
                     "ci/affected-graph/task_inputs.py deliberately (SMA-553 D6)."
                 ))
                 continue
+            # TRUTHINESS after STRIPPING, not membership and not bare truthiness: an entry with a
+            # blank OR whitespace-only reason must NOT exempt anything. Bare membership would let
+            # `("a", "b"): ""` silence a violation unreviewably, which is the hole
+            # cargo_moon_parity.py's _allowlisted helper exists to close — and that helper strips,
+            # so `"   "` must be treated the same as `""` here too. The blank/blank-after-strip
+            # reason is reported separately below, and the underlying violation still fires.
+            if (allow.get((name, pattern)) or "").strip():
+                continue
             if matcher(pattern) == 0:
                 rows.append((
                     "dead",
@@ -333,7 +341,7 @@ def check(tasks, tracked, matcher, allow=ALLOW_DEAD_INPUT):
                     "meant to match nothing, add an ALLOW_DEAD_INPUT entry with a reason."
                 ))
         for path in files:
-            if allow.get((name, path)):  # truthiness, per the note above
+            if (allow.get((name, path)) or "").strip():  # truthiness-after-strip, per the note above
                 continue
             if path not in tracked:
                 rows.append((
@@ -354,7 +362,7 @@ def check(tasks, tracked, matcher, allow=ALLOW_DEAD_INPUT):
 
     # D11 — the allowlist's own staleness rules.
     for (name, pattern), reason in sorted(allow.items()):
-        if not reason:
+        if not (reason or "").strip():  # blank OR whitespace-only, matching the loops above
             rows.append((
                 "allowlist",
                 f"ALLOW_DEAD_INPUT[{(name, pattern)!r}] has no reason string. An exemption is a "
@@ -368,7 +376,12 @@ def check(tasks, tracked, matcher, allow=ALLOW_DEAD_INPUT):
                 "(the real pattern shows up as a violation); a leftover is silent, and exempts "
                 "nothing forever."
             ))
-        elif pattern not in tasks[name][0] and pattern not in tasks[name][1]:
+        # `authored(tasks[name][0])`, NOT the raw glob list: INJECTED_GLOB is present in every
+        # task's raw inputGlobs, so comparing against the raw list would treat an entry keyed on
+        # INJECTED_GLOB itself as "declared" — it is never iterated in the loops above (which walk
+        # authored() output), so such an entry would exempt nothing and never be reported. Same
+        # staleness class this rule exists to catch, just via a different door.
+        elif pattern not in authored(tasks[name][0]) and pattern not in tasks[name][1]:
             rows.append((
                 "allowlist",
                 f"ALLOW_DEAD_INPUT exempts {pattern!r} on repo:{name}, which declares no such "
@@ -532,6 +545,16 @@ def self_test():
     # ...and widened with an extra glob, which is equally a change to a load-bearing input set.
     if "self-inputs" not in kinds(task_set(**{SELF_TASK: (["**/*", "ops/**/*", INJECTED_GLOB], [])})):
         failures.append("check: D13 missed an extra glob on input-liveness")
+    # ...and a file input, which :295's `or tasks[SELF_TASK][1]` clause exists solely to catch —
+    # deleting that clause keeps every other fixture in this file green.
+    narrowed_by_file = task_set(**{SELF_TASK: (["**/*", INJECTED_GLOB], [".prototools"])})
+    if kinds(narrowed_by_file) != ["self-inputs"]:
+        failures.append("check: D13 missed a file input on input-liveness")
+    # Message text (review round 1, minor 6): kinds() discards messages, so a fixture must read
+    # one directly at least once or blanking all seven diagnostics stays invisible.
+    self_inputs_rows = check(narrowed_by_file, tracked, matcher, {})
+    if not any(k == "self-inputs" and "SMA-553 D13" in m for k, m in self_inputs_rows):
+        failures.append("check: the self-inputs message must reference SMA-553 D13")
 
     # Allowlist (D11).
     dead_globs = task_set(promtool=(["ops-moved/**/*", INJECTED_GLOB], [".prototools"]))
@@ -542,10 +565,31 @@ def self_test():
         failures.append("check: the allowlist does not cover inputFiles")
     if kinds(dead_globs, allow={("promtool", "ops-moved/**/*"): ""}) != ["allowlist", "dead"]:
         failures.append("check: an allowlist entry with a blank reason must itself be a violation")
+    # Review round 1, minor 4: ALLOW_DEAD_INPUT is documented as exempting LIVENESS only — it must
+    # not double as a third way to silence an unevaluable pattern (fix it, or extend classify()
+    # deliberately). Allowlisting a brace glob must not swallow its "rejected" row.
+    rejected_glob = task_set(promtool=(["ops/**/*.{a,b}", INJECTED_GLOB], [".prototools"]))
+    if kinds(rejected_glob, allow={("promtool", "ops/**/*.{a,b}"): "reason"}) != ["rejected"]:
+        failures.append("check: allowlisting a rejected glob must not suppress the rejected row")
+    # Review round 1, important 1: a WHITESPACE-ONLY reason is blank after stripping and must be
+    # treated identically to "" — strictly worse than the "" case above, since a naive `not reason`
+    # check finds "   " truthy and suppresses BOTH the allowlist row and the underlying violation.
+    if kinds(dead_globs, allow={("promtool", "ops-moved/**/*"): "   "}) != ["allowlist", "dead"]:
+        failures.append("check: a whitespace-only reason must not suppress the underlying violation")
+    # Review round 1, important 2: the files loop's truthiness-after-strip is unexercised by the
+    # glob-loop fixture above. An implementation that wrote `in allow` here instead of `.get()`
+    # would ship green without this.
+    if kinds(dead_file, allow={("promtool", "gone.toml"): ""}) != ["allowlist", "not-exact"]:
+        failures.append("check: a blank-reason allowlist entry on inputFiles must not suppress not-exact")
     if "allowlist" not in kinds(task_set(), allow={("ghost", "x/**"): "reason"}):
         failures.append("check: an allowlist entry naming no repo task must fire")
     if "allowlist" not in kinds(task_set(), allow={("promtool", "never-declared/**"): "reason"}):
         failures.append("check: an allowlist entry naming an undeclared pattern must fire")
+    # Review round 1, minor 5: INJECTED_GLOB is present in every task's RAW inputGlobs but is never
+    # iterated by the per-pattern loop above (which walks authored() output) — so an entry keyed on
+    # it is not really "declared" and must still be reported stale, not treated as legitimate.
+    if "allowlist" not in kinds(task_set(), allow={("promtool", INJECTED_GLOB): "reason"}):
+        failures.append("check: an allowlist entry keyed on the injected glob must still be stale")
 
     if failures:
         print("task-inputs self-test FAILED:", file=sys.stderr)
