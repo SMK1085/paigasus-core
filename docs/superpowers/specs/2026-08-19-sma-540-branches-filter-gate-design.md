@@ -463,6 +463,18 @@ SMA-525 §7.
 - **L8 — A stale local checkout reds where CI passes.** The reverse of the divergence the earlier
   draft feared: a branch created on the remote since your last fetch does not resolve locally.
   Remedy is `git fetch`; CI is unaffected.
+- **L9 — A cached PASS can replay after the branch it validated is deleted.** The branch half of
+  check 5 reads git ref state, and `.git/` is in no Moon input hash, so two runs over an identical
+  tree hash identically — while `ci.yml` restores `.moon/cache` across runs. A PASS recorded while
+  a branch existed can therefore be replayed once that branch is deleted upstream, which is a
+  silent pass in a gate whose premise is that it never silently passes. It is the cache-replay
+  counterpart of L2, and the same class as the `moon run … --force` caveat SMA-538 documents for
+  the Docker-skip hatch. Narrow today, because every filter here names `main` and `main` is never
+  deleted, and it fails safe in the other direction: a genuinely typo'd name is an edit to the
+  workflow file, which changes the hash. Bypass with `ci/actionlint/run.sh` directly or
+  `moon run repo:actionlint --force`. Not designed around, because the only hermetic fix is to
+  stop caching the task at all, which would cost every run for a case that cannot arise until a
+  workflow filters on a deletable branch.
 
 ## 8. Non-goals
 

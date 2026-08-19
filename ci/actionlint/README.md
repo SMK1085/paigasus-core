@@ -125,6 +125,11 @@ ci/actionlint/run.sh          # directly, bypassing the Moon cache
 ci/actionlint/run.sh --self-test   # the four fixture tables only, for fast iteration
 ```
 
+`--self-test` still needs no `actionlint` binary — that is the point of it — but since SMA-540 it
+does need a git checkout carrying `refs/remotes/origin/main`, because the branch-filter table's
+control pair asserts that a real ref resolves. In a `--single-branch` or `--depth 1` clone it
+exits 2 with the canary message instead of running the tables. `git fetch origin main` fixes it.
+
 Any other argument exits 2 with a usage line — a typo'd `--selftest` must not run the full gate
 and report a pass for something you did not ask for.
 
