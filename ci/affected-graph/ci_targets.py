@@ -61,6 +61,14 @@ T_ASSIGN_RE = re.compile(r"^[ \t]*T[ \t]*\+?=", re.MULTILINE)
 # the rest of this parser is not written for.
 T_ARRAY_RE = re.compile(r"^[ \t]*T=\((.*?)\)[ \t]*$", re.MULTILINE)
 
+# The docs command is delimited EXPLICITLY, not recognised by prose shape. Prose-shape matching was
+# fragile in both directions against ordinary doc edits: converting the command to a fenced code
+# block zero-matches it, and CLAUDE.md already carries two neighbouring `moon ci …` spans that a
+# reword could turn into a second match (D7). Markers also make the contract visible to whoever
+# edits the file, and keep the illustrative gate list in the same bullet safely outside.
+MARKER_BEGIN = "<!-- ci-targets:begin -->"
+MARKER_END = "<!-- ci-targets:end -->"
+
 
 def parse_t(text):
     """The `T=(...)` array from ci.yml, as BARE task names (no leading colon).
@@ -97,6 +105,40 @@ def parse_t(text):
             "`T=()` is empty — `moon ci` would run nothing at all."
         )
     return targets
+
+
+def parse_doc_targets(text):
+    """CLAUDE.md's documented full-graph command: (bare task names, normalised region text).
+
+    Deliberately ASYMMETRIC with parse_t: a non-`:` token here is ignored, not fatal. The region
+    legitimately contains prose punctuation, backticks, `moon`, `ci` and the flag tail, whereas
+    every token of `T` is a target and an unrecognised one there means the array holds something
+    unexamined (D10).
+    """
+    begins, ends = text.count(MARKER_BEGIN), text.count(MARKER_END)
+    if begins != 1 or ends != 1:
+        raise GateAssertionError(
+            f"CLAUDE.md must contain exactly one {MARKER_BEGIN} and one {MARKER_END} "
+            f"(found {begins} and {ends}). They delimit the documented full-graph command that this "
+            "gate compares against ci.yml's `T=(...)` array (SMA-541 D7)."
+        )
+    start = text.index(MARKER_BEGIN) + len(MARKER_BEGIN)
+    end = text.index(MARKER_END)
+    if end < start:
+        raise GateAssertionError(
+            f"CLAUDE.md's markers are inverted — {MARKER_END} appears before {MARKER_BEGIN}."
+        )
+    region = " ".join(text[start:end].split())
+    if not region:
+        raise GateAssertionError(
+            "CLAUDE.md's ci-targets region is empty — the documented full-graph command is gone."
+        )
+    targets = []
+    for token in region.split():
+        token = token.strip("`.,")
+        if token.startswith(":"):
+            targets.append(token[1:])
+    return targets, region
 
 
 def self_test():
@@ -139,6 +181,46 @@ def self_test():
     expect_red("trailing-comment", "T=(:a :b)  # note\n")
     expect_red("project-scoped-entry", "T=(:a repo:promtool)\n")
     expect_red("bare-token", "T=(:a build)\n")
+
+    def expect_doc(label, text, want_targets, want_region_contains=()):
+        try:
+            got, region = parse_doc_targets(text)
+        except GateAssertionError as exc:
+            failures.append(f"parse_doc_targets[{label}]: unexpected red: {exc}")
+            return
+        if got != want_targets:
+            failures.append(f"parse_doc_targets[{label}]: got {got}, want {want_targets}")
+        for needle in want_region_contains:
+            if needle not in region:
+                failures.append(f"parse_doc_targets[{label}]: region lost {needle!r}")
+
+    def expect_doc_red(label, text):
+        try:
+            parse_doc_targets(text)
+        except GateAssertionError:
+            return
+        failures.append(f"parse_doc_targets[{label}]: accepted input that should have been rejected")
+
+    wrapped = (
+        "intro (e.g. `:deny`, `:osv`) prose\n"
+        f"  {MARKER_BEGIN}\n"
+        "  `moon ci :build :test\n"
+        "  :deny :promtool\n"
+        "  --base origin/main --include-relations`\n"
+        f"  {MARKER_END}\n"
+        "trailing prose with `moon ci :other --include-relations`\n"
+    )
+    expect_doc(
+        "wrapped-span",
+        wrapped,
+        ["build", "test", "deny", "promtool"],
+        ("--base origin/main", "--include-relations"),
+    )
+    expect_doc_red("no-markers", "`moon ci :build --include-relations`\n")
+    expect_doc_red("only-begin", f"{MARKER_BEGIN}\n`moon ci :build`\n")
+    expect_doc_red("duplicate-begin", f"{MARKER_BEGIN}\n{MARKER_BEGIN}\nx\n{MARKER_END}\n")
+    expect_doc_red("inverted", f"{MARKER_END}\n`moon ci :build`\n{MARKER_BEGIN}\n")
+    expect_doc_red("empty-region", f"{MARKER_BEGIN}\n\n{MARKER_END}\n")
 
     if failures:
         print("ci-targets self-test FAILED:", file=sys.stderr)

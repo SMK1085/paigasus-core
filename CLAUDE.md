@@ -60,12 +60,17 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   and reds `main` after merge (SMA-448: `prn.rs` → `resource_name.rs`). An underscore/hyphen
   suffix (`prn_canonical`, `prn-fields`) is fine.
 - Per-project Moon tasks (`<proj>:build/test/lint/fmt`) do NOT run the repo-level gates
-  (`:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
-  new crates/deps/proto, run the full graph like CI does: `moon ci :build :test :lint :fmt
-  :deny :osv :machete :actionlint :typecheck :breaking :affected-smoke :parity-corpus-drift
-  :next-env-drift :wasm-getrandom-free :redis-connect-single-site :iam-docker-policy-single-site
-  :promtool :observability-drift :nats-permissions :release-parity :release-parity-py
-  :release-parity-ts :publish-metadata --base origin/main --include-relations`.
+  (e.g. `:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
+  new crates/deps/proto, run the full graph like CI does. The command between the markers below is
+  gated against `ci.yml`'s `T=(…)` array by `repo:affected-smoke` — keep the two identical, and do
+  not remove the markers (SMA-541):
+  <!-- ci-targets:begin -->
+  `moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking
+  :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free
+  :redis-connect-single-site :iam-docker-policy-single-site :promtool :observability-drift
+  :nats-permissions :release-parity :release-parity-py :release-parity-ts :publish-metadata
+  --base origin/main --include-relations`
+  <!-- ci-targets:end -->
 - A new Rust crate reds `:affected-smoke` until it's added to the `lockfile->all-lint` expected set
   in `ci/affected-graph/run.sh` — that case lists **every** crate, so **every** new crate changes it
   (SMA-534) — and, if it `dependsOn` `paigasus-kernel-rs`, to the `kernel->bindings` set as well
