@@ -149,8 +149,8 @@ on `repo`: `actionlint`, `iam-docker-policy-single-site`, `machete`, `observabil
 can hold that rule because it asserts specific named files must be present on a `lint` task; this
 gate iterates whatever is declared, so absence means "no file inputs", not "Moon told us nothing".
 
-**E9 — timings**, on this machine, warm. The first four are measured; the last two are SMA-525's
-figures for *other* tasks, quoted as **order-of-magnitude reference points, not measurements of the
+**E9 — timings**, on this machine, warm. The first five are measured; the last is SMA-525's figure
+for a *different* task, quoted as an **order-of-magnitude reference point, not a measurement of the
 task this spec adds** (see D2).
 
 | | wall | |
@@ -159,7 +159,7 @@ task this spec adds** (see D2).
 | `ci/affected-graph/run.sh --negative-control` | 5.2s | measured |
 | ⇒ `repo:affected-smoke` | ~35s + Moon's per-task floor | derived from the two above |
 | `moon query projects` (one call) | ~2.5s | measured |
-| `repo:actionlint` — `inputs: ['**/*']` + script | ~11.6s | SMA-525's figure, different script |
+| `repo:input-liveness` — `inputs: ['**/*']` + script | ~6.0s | measured (median of 3 alternating `moon run repo:input-liveness --force` runs, warm — Task 7) |
 | `repo:promtool` — Moon's narrow per-task floor | ~8.7s | SMA-525's figure |
 
 **E10 — `.moon/workspace.yml` states this issue's invariant in prose, unguarded.** Lines 41-43,
@@ -240,13 +240,11 @@ acceptance criterion silently does not hold. That is the same vacuity trap SMA-5
 
 The only honest input for this check is `inputs: ['**/*']` — the conclusion `repo:actionlint`
 already reached, and which the issue cites. E11 confirms `**/*` reaches dot-paths, so the input is
-genuinely whole-tree. Of the two ways to get there, one is measured and one is estimated: broadening
-`affected-smoke` to `**/*` makes its **measured ~35s** suite run on every PR, while the standalone
-task is **estimated** at roughly Moon's ~8.7s floor plus the `**/*` hash walk plus one nested
-`moon query tasks` (~2.5s), ~60 `git ls-files` calls and the `--self-test` pass. `repo:actionlint`'s
-~11.6s is the nearest comparable shape, not a measurement of this task. The estimate is an order of
-magnitude below the alternative, which is enough to decide; §5 makes measuring the real figure a
-deliverable, and if it lands anywhere near 35s the decision should be revisited.
+genuinely whole-tree. Of the two ways to get there, both are now measured: broadening `affected-smoke`
+to `**/*` makes its **measured ~35s** suite run on every PR, while the standalone task is **measured**
+at **~6.0s** — the median of three alternating `moon run repo:input-liveness --force` runs, warm
+(Task 7, §5 Step 2; recorded alongside the mutation battery in the README). That is comfortably below
+the ~35s alternative, an order of magnitude down, confirming the decision this section makes.
 
 Being independently scheduled is the other reason: it is the vehicle SMA-541's L6 names for
 eventually closing the gate-inside-the-thing-it-guards hole. Cost: the task must be added to `T` and

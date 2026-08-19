@@ -38,8 +38,10 @@ INFRA_ERRORS = (
     MoonOutputError,
 )
 
-# Moon injects this onto EVERY task in the graph — all 119 across all 28 projects, including a task
-# declaring literally `inputs: []` (spec E2). So a "resolved input set" is never empty, and the
+# Moon injects this onto EVERY task in the graph, across all 28 projects — including a task
+# declaring literally `inputs: []` (spec E2; the task count there, 119, predates this file's own
+# `repo:input-liveness`, which makes it 120 — deliberately not restated here as a number that would
+# just go stale again). So a "resolved input set" is never empty, and the
 # empty-inputs check (I3) asserts nothing until this is subtracted. D4.
 INJECTED_GLOB = ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}"
 
@@ -196,7 +198,7 @@ def moon_tasks():
     """Moon's own resolved task graph, for the `repo` project only.
 
     ONE subprocess call. The subprocess + json.loads shell around _repo_tasks(), which holds every
-    shape rule — the same split ci_targets.py uses (`moon_tasks`/`_eligibility`).
+    shape rule — the same split ci_targets.py uses (`moon_payload`/`_eligibility`).
     """
     out = subprocess.run(
         ["moon", "query", "tasks"], capture_output=True, text=True, check=True
