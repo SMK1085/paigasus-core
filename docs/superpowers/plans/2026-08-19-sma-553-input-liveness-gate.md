@@ -910,7 +910,7 @@ python3 ci/affected-graph/task_inputs.py; echo "rc=$?"
 ```
 Expected: **rc=0**, `PASS  task-inputs        -> 19 repo tasks: every declared input still matches a tracked file (714 tracked)`.
 
-Run: `time moon run repo:input-liveness --force`
+Run: `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"; time moon run repo:input-liveness --force`
 Expected: PASS. **Record the wall time** — it replaces the estimate in the spec's E9 and goes in the README (Task 7).
 
 - [ ] **Step 5: Wire it into CI and the docs**

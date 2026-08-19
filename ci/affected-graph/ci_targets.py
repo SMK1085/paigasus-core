@@ -1065,6 +1065,13 @@ def main():
         )
         floor = check_floor(tasks)
         missing, unexpected, bad_exempt, stale_exempt = check_forward(tasks, t_targets)
+        # SMA-553 review finding 1 — these two also raise MoonOutputError (INFRA_ERRORS), so their
+        # call sites belong inside this same try: called from the validation flow below it, a raise
+        # would escape main() uncaught and exit 1, misreporting an infrastructure fault (a moon
+        # output shape change) as the rc-1 authorial-mistake path. Bound to locals here and reused
+        # below so the try block stays the single place these two extractors are invoked.
+        scripts = _scripts(raw_tasks)
+        bad_gate_inputs = check_gate_inputs(raw_tasks)
     except GateAssertionError as exc:
         # An authorial mistake, NOT a broken tool: rc 1 so run.sh records a red suite instead of
         # aborting the whole affected-graph guard and losing every other assertion's output (D2).
@@ -1076,9 +1083,8 @@ def main():
 
     dead = check_reverse(tasks, t_targets)
     doc_problems = check_docs(t_targets, doc_targets, region)
-    missing_sites = check_self_invocation(run_sh, _scripts(raw_tasks))
+    missing_sites = check_self_invocation(run_sh, scripts)
     bad_invocation = check_invocation(ci_yml)
-    bad_gate_inputs = check_gate_inputs(raw_tasks)
 
     if not (floor or missing or unexpected or bad_exempt or stale_exempt or dead or doc_problems
             or missing_sites or bad_invocation or bad_gate_inputs):

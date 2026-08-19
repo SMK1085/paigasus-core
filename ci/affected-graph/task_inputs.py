@@ -553,7 +553,9 @@ def self_test():
 
     tracked = {".prototools", "rs/Cargo.toml"}
     live = {"ci/affected-graph/**/*", "**/*", "ops/**/*"}
-    matcher = lambda p: 1 if p in live else 0
+
+    def matcher(p):
+        return 1 if p in live else 0
 
     def kinds(tasks, tracked=tracked, matcher=matcher, allow=None):
         return sorted({k for k, _ in check(tasks, tracked, matcher, allow or {})})
