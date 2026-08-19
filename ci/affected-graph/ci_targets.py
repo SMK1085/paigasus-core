@@ -166,7 +166,12 @@ REQUIRED_DOC_FLAGS = ("--base origin/main", "--include-relations")
 # it. SMA-542 is the general fix for this class (spec L6).
 RUN_SH_CALL_SITES = (
     "assert_ci_targets || SUITE_RC=1",
-    '"$HERE/ci_targets.py" --self-test',
+    # The `|| NEG_RC=1` suffix is as load-bearing as the command. Matching the prefix alone left
+    # `--self-test || true` looking identical to a wired call site: the self-test still RUNS, its
+    # failure is simply swallowed, and the negative control silently stops being able to report red
+    # — the rotted-self-test outcome moon.yml's affected-smoke comment was written about. Both
+    # entries now pin their propagation, symmetrically (CodeRabbit round 3).
+    '"$HERE/ci_targets.py" --self-test || NEG_RC=1',
 )
 
 
@@ -775,6 +780,12 @@ def self_test():
     no_selftest = wired.replace('  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n', "")
     if not check_self_invocation(no_selftest):
         failures.append("check_self_invocation: missed a deleted --self-test call")
+    # ...and the same call site left in place with its failure SILENCED. The self-test runs, reports
+    # red, and nothing acts on it — indistinguishable from a wired call site until the suffix is
+    # pinned too.
+    silenced = wired.replace("--self-test || NEG_RC=1", "--self-test || true")
+    if not check_self_invocation(silenced):
+        failures.append("check_self_invocation: missed a --self-test whose failure is swallowed")
 
     if failures:
         print("ci-targets self-test FAILED:", file=sys.stderr)
