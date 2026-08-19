@@ -79,17 +79,43 @@ impl IntoResponse for AuthnApiError {
 #[derive(Debug)]
 pub(crate) struct EnvelopeJson<T>(pub(crate) T);
 
+/// Every `(code, message)` pair [`envelope_rejection`] can put on the wire.
+///
+/// Extracted from the `if` that used to inline both literals so the membership test can enumerate
+/// them rather than restate them. The test previously hand-copied `"request-too-large"` and
+/// `"invalid-request-body"`, so a third branch here would have escaped both it and
+/// `repo:error-code-single-site` (SMA-507 E3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(strum::EnumIter))]
+enum RejectionKind {
+    /// The body exceeded the configured byte limit.
+    TooLarge,
+    /// The body could not be deserialized.
+    Invalid,
+}
+
+impl RejectionKind {
+    /// This kind's canonical registry code and its static, caller-safe message.
+    fn parts(self) -> (&'static str, &'static str) {
+        match self {
+            // `invalid-request-body` is merged with the gateway's identical case: one code for one
+            // condition across both services (ADR-0019 A1.3).
+            RejectionKind::Invalid => ("invalid-request-body", "invalid request body"),
+            RejectionKind::TooLarge => ("request-too-large", "request body too large"),
+        }
+    }
+}
+
 /// Maps a `JsonRejection` into the stable `{"error":{code,message}}` envelope — shared by both
 /// `EnvelopeJson`'s required (`FromRequest`) and optional (`OptionalFromRequest`) extraction
 /// paths below so the two can never drift apart on status/code/message.
 fn envelope_rejection(rejection: JsonRejection) -> Response {
-    let (code, message) = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        ("request-too-large", "request body too large")
+    let kind = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        RejectionKind::TooLarge
     } else {
-        // `invalid-request-body`, merged with the gateway's identical case: one code for one
-        // condition across both services (ADR-0019 A1.3).
-        ("invalid-request-body", "invalid request body")
+        RejectionKind::Invalid
     };
+    let (code, message) = kind.parts();
     let mut response = (rejection.status(), Json(json!({ "error": { "code": code, "message": message } }))).into_response();
     response.headers_mut().insert(
         paigasus_observability::correlation::RETRYABLE_HEADER,
@@ -267,14 +293,20 @@ mod tests {
         assert_eq!(body["error"]["message"], "authentication backend unavailable");
     }
 
-    /// AC 6: every code this funnel and its extractor can emit is in the canonical registry.
-    /// Driven off the same `all_authn_errors()` exhaustiveness pattern the retryable test uses,
-    /// so a new `AuthnError` variant fails to compile rather than escaping the registry.
+    /// AC 1: every code this funnel and its extractor can emit is in the canonical registry.
+    ///
+    /// The `AuthnError` half is driven off `all_authn_errors()`, so a new variant is covered
+    /// automatically. The extractor half used to hand-restate `envelope_rejection`'s two literals
+    /// here, which meant a third branch there would have escaped this test AND
+    /// `repo:error-code-single-site` (this file is on the manifest) — SMA-507 E3. It now
+    /// enumerates `RejectionKind`, so a new kind must state its parts or fail to compile.
     #[tokio::test]
     async fn every_authn_http_code_is_in_the_registry() {
         use paigasus_proto::paigasus::common::v1::ErrorReason;
+        use strum::IntoEnumIterator;
 
-        let mut codes = vec!["request-too-large".to_owned(), "invalid-request-body".to_owned()];
+        let mut codes: Vec<String> = RejectionKind::iter().map(|kind| kind.parts().0.to_owned()).collect();
+        assert!(!codes.is_empty(), "RejectionKind must yield at least one code, or this half asserts nothing");
         for err in crate::adapters::retryable::tests_support::all_authn_errors() {
             let (_, _, body) = rendered(err).await;
             codes.push(body["error"]["code"].as_str().expect("a code").to_owned());
