@@ -267,7 +267,12 @@ run_suite() {
   # A proto edit must SCHEDULE paigasus-service-info's build, test AND lint, not merely mark the
   # project affected. This is the behavioral half of SMA-524 (build/test) and SMA-526 (lint): the
   # parity gate asserts `^:build` is DECLARED, this asserts it takes EFFECT.
-  run_task_case "proto->service-info-tasks" "rs/crates/libs/paigasus-proto/src/lib.rs" \
+  run_task_case "proto->svc-info-deep" "rs/crates/libs/paigasus-proto/src/lib.rs" \
+    "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint"
+  # CI-traversal twin of proto->svc-info-deep: a proto edit must SELECT the consumers under the
+  # traversal moon ci uses, not merely cascade in the task graph. Expected to equal the deep set:
+  # every consumer reaches paigasus-proto through @group(upstreams) now.
+  run_task_case_ci "proto->svc-info-ci" "rs/crates/libs/paigasus-proto/src/lib.rs" \
     "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint"
   # A workspace-level change must schedule EVERY crate's lint, AND the three tasks that compile the
   # FFI cdylibs. `rs/` has no Moon project, so these files belong to `repo`; affectedness reaches
@@ -298,6 +303,11 @@ run_suite() {
   # `uv run pytest` reporting 124 passed), so giving them these inputs would buy cost with no
   # coverage.
   run_task_case "lockfile->all-lint" "rs/Cargo.lock" \
+    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint"
+  # CI-traversal twin of lockfile->all-lint. A Cargo.lock touch reaches every crate through `lint`'s
+  # workspace inputs (SMA-534) and the three FFI tasks through theirs (SMA-546) — through INPUTS,
+  # not dependsOn — so this set is expected to equal the deep one.
+  run_task_case_ci "lockfile->all-lint-ci" "rs/Cargo.lock" \
     "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint"
   # SMA-528 — a kernel SOURCE edit must select every consumer's build/test/lint under the traversal
   # `moon ci` uses. This is the case the issue exists for: before SMA-528 a kernel behavioural
@@ -334,16 +344,37 @@ if [ "$NEGATIVE" = 1 ]; then
       *) echo "  INCONCLUSIVE [$1] infrastructure error (rc=$rc)" >&2; exit 2 ;;
     esac
   }
+  # expect_red_task LABEL FILE EXPECTED_CSV — task-case twin of expect_red. Until SMA-528 the task
+  # cases had NO negative control at all: expect_red calls assert_case, the project helper, so the
+  # proof that a task case can report red was never executed.
+  expect_red_task() {
+    local rc=0
+    assert_task_case_ci "$1" "$2" "$3" || rc=$?
+    case "$rc" in
+      1) echo "  OK   [$1] task harness reported red as expected" ;;
+      0) echo "  FAIL [$1] task harness accepted a wrong expectation" >&2; NEG_RC=1 ;;
+      *) echo "  INCONCLUSIVE [$1] infrastructure error (rc=$rc)" >&2; exit 2 ;;
+    esac
+  }
   # 1) wrong project: a kernel edit does NOT affect paigasus-proto-py, so requiring it must fail.
   expect_red "neg-wrong-expect"     "rs/crates/libs/paigasus-kernel/src/lib.rs" "paigasus-proto-py"
   # 2) default-deny direction (NEW in SMA-429): an INCOMPLETE expected set must fail on the extras.
   #    Under the old positive-superset model this PASSED (a subset satisfied the must-include check),
   #    silently unasserting every project left out — the exact gap strict equality closes.
   expect_red "neg-incomplete-expect" "rs/crates/libs/paigasus-kernel/src/lib.rs" "paigasus-kernel-rs"
-  # 3) the parity gate must fire on synthetic violations of each of its three assertions — a gate
+  # 3) a task case must reject a WRONG task: a kernel edit does not select paigasus-proto-rs:lint.
+  expect_red_task "neg-task-wrong"      "rs/crates/libs/paigasus-kernel/src/lib.rs" "paigasus-proto-rs:lint"
+  # 4) default-deny for task cases: an INCOMPLETE expected set must fail on the extras, exactly as
+  #    the project cases do. This is the direction that silently unasserts everything left out.
+  expect_red_task "neg-task-incomplete" "rs/crates/libs/paigasus-kernel/src/lib.rs" "paigasus-kernel-rs:build"
+  # 5) the regression this issue is about: an expectation that OMITS the consumers must not pass.
+  #    If this ever goes green, the cascade is broken again and every other case is lying.
+  expect_red_task "neg-task-no-cascade" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
+    "paigasus-kernel-rs:build,paigasus-kernel-rs:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-kernel-py:test"
+  # 6) the parity gate must fire on synthetic violations of each of its three assertions — a gate
   #    that can pass vacuously reproduces the very bug it exists to prevent (SMA-524 D6).
   python3 "$HERE/cargo_moon_parity.py" --self-test || NEG_RC=1
-  # 4) the ci-target coverage gate must fire on synthetic violations of each of its five checks —
+  # 7) the ci-target coverage gate must fire on synthetic violations of each of its five checks —
   #    including its two hand-rolled parsers, which are the part it cannot self-detect a fault in.
   python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
   if [ "$NEG_RC" = 0 ]; then
