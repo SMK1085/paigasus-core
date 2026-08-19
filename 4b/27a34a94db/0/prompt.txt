@@ -1,0 +1,17 @@
+<task-notification>
+<task-id>bl03bwbxb</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a19cb7d1-7551-4054-ba7a-9e80a3de0013/tasks/bl03bwbxb.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for PR checks to settle" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b3gg5h7cw</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a19cb7d1-7551-4054-ba7a-9e80a3de0013/tasks/b3gg5h7cw.output</output-file>
+<status>completed</status>
+<summary>Background command "Poll CodeRabbit check-runs on the new commit" completed (exit code 0)</summary>
+</task-notification>
