@@ -601,7 +601,39 @@ def self_test():
 
 
 def main():
-    raise NotImplementedError
+    root = Path(__file__).resolve().parents[2]
+    try:
+        tasks = moon_tasks()
+        tracked = tracked_files(root)
+        matcher = git_matcher(root)
+        # D7 — BEFORE the checks. A stuck matcher makes every verdict below meaningless, so
+        # reporting "3 dead globs" from one would be actively misleading.
+        canaries = check_canaries(matcher)
+        rows = check(tasks, tracked, matcher)
+    except GateAssertionError as exc:
+        print(f"FAIL  [task-inputs] {exc}", file=sys.stderr)
+        return 1
+    except INFRA_ERRORS as exc:
+        print(f"FATAL [task-inputs] could not read the inputs: {exc}", file=sys.stderr)
+        return 2
+
+    if canaries:
+        print("FATAL [task-inputs] the liveness matcher is not working", file=sys.stderr)
+        for row in canaries:
+            print(f"    {row}", file=sys.stderr)
+        return 2
+
+    if not rows:
+        print(
+            f"PASS  {'task-inputs':<18} -> {len(tasks)} repo tasks: every declared input still "
+            f"matches a tracked file ({len(tracked)} tracked)"
+        )
+        return 0
+
+    print("FAIL  [task-inputs] a repo:* task declares an input that matches nothing", file=sys.stderr)
+    for _, message in rows:
+        print(f"  - {message}", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

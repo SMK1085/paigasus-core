@@ -69,8 +69,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking
   :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free
   :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site
-  :promtool :observability-drift :nats-permissions :release-parity :release-parity-py
-  :release-parity-ts :publish-metadata --base origin/main --include-relations`
+  :input-liveness :promtool :observability-drift :nats-permissions :release-parity
+  :release-parity-py :release-parity-ts :publish-metadata --base origin/main --include-relations`
   <!-- ci-targets:end -->
 - A new `repo:*` gate reds `:affected-smoke` until it is in **both** `ci.yml`'s `T=(…)` array and
   the marker-delimited command above — `ci/affected-graph/ci_targets.py` asserts the two agree, and
@@ -80,6 +80,12 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `T_EXEMPT` entry with a reason — `runInCI: false` is NOT a general escape, since Moon then drops
   the task from `moon run` under `CI=true` too (see the comments in `ts/moon.yml`). `T` must also
   stay a single-line bash array (SMA-541).
+- A `repo:*` task's `inputs` are now asserted **live**: `repo:input-liveness`
+  (`ci/affected-graph/task_inputs.py`) fails if a declared glob matches zero tracked files or a
+  declared file is untracked, so moving a directory a gate keys on reds CI instead of silently
+  switching that gate off. It also asserts its OWN `inputs: ['**/*']` is unchanged — narrowing it
+  for cost would make it stop noticing exactly the renames it exists to catch. A genuinely dead
+  input needs an `ALLOW_DEAD_INPUT` entry with a reason (SMA-553).
 - A new Rust crate reds `:affected-smoke` until it's added to the `lockfile->all-lint` expected set
   in `ci/affected-graph/run.sh` — that case lists **every** crate, so **every** new crate changes it
   (SMA-534) — and, if it `dependsOn` `paigasus-kernel-rs`, to the `kernel->bindings` set as well

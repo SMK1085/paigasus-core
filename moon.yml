@@ -408,6 +408,28 @@ tasks:
     inputs:
       - 'rs/crates/services/paigasus-iam/tests/**/*'
 
+  input-liveness:
+    description: 'Assert every repo:* task input still matches a tracked file, so a wired gate cannot silently stop firing (SMA-553).'
+    # inputs MUST stay ['**/*'] — asserted by this gate's own D13 floor AND by ci_targets.py, so
+    # neither is the sole judge of its own configuration. The verdict depends on the WHOLE tracked
+    # tree because a glob dies when files MOVE, and no narrow input list can observe that. This is
+    # also why the check is not folded into ci/affected-graph/run.sh: repo:affected-smoke's narrow
+    # inputs list no `ops/` path, so renaming ops/ would leave it serving a cached PASS on exactly
+    # the change that kills repo:promtool (SMA-553 D2). Same reasoning repo:actionlint records.
+    #
+    # Negative control FIRST, mirroring repo:affected-smoke and repo:publish-metadata: without it
+    # CI runs only the real check, so the self-test that proves these assertions can FIRE never
+    # executes and a rotted control ships green (SMA-526). Moon does not enable errexit for
+    # `script:` blocks — a failing command followed by a succeeding one still exits 0 — so
+    # `set -euo pipefail` is required explicitly.
+    script: |
+      set -euo pipefail
+      python3 ci/affected-graph/task_inputs.py --self-test
+      python3 ci/affected-graph/task_inputs.py
+    toolchain: 'system'
+    inputs:
+      - '**/*'
+
   promtool:
     description: 'promtool validates the Prometheus scrape config + alert rules + rule unit tests under ops/observability/prometheus/ (SMA-446).'
     # Moon does not enable errexit for `script:` blocks — same latent defect as nats-permissions
