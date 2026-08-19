@@ -97,6 +97,19 @@ REQUIRED_REPO_TASKS = ("affected-smoke", "promtool", "publish-metadata")
 # checking the docs worth doing (D6).
 REQUIRED_DOC_FLAGS = ("--base origin/main", "--include-relations")
 
+# C4 — this gate's own two call sites in run.sh. Placing the gate inside repo:affected-smoke rather
+# than making it a repo:* task of its own (D1) means C1 does NOT cover it: its execution depends on
+# these two lines, and deleting either leaves everything green. Matched WITH their bash suffixes
+# because the bare name `assert_ci_targets` also appears in the function definition, so a
+# name-only match would survive deleting the call.
+#
+# A PARTIAL mitigation, not a closure: deleting the `assert_ci_targets` call removes C4 along with
+# it. SMA-542 is the general fix for this class (spec L6).
+RUN_SH_CALL_SITES = (
+    "assert_ci_targets || SUITE_RC=1",
+    '"$HERE/ci_targets.py" --self-test',
+)
+
 
 def parse_t(text):
     """The `T=(...)` array from ci.yml, as BARE task names (no leading colon).
@@ -263,6 +276,11 @@ def check_docs(t_targets, doc_targets, region):
     return problems
 
 
+def check_self_invocation(run_sh_text):
+    """Call sites of this gate that are missing from run.sh."""
+    return [site for site in RUN_SH_CALL_SITES if site not in run_sh_text]
+
+
 def self_test():
     """Negative control: every assertion must FIRE on a synthetic violation.
 
@@ -416,6 +434,20 @@ def self_test():
          "moon ci --base origin/main", False)
     docs("doc-missing-base", aligned_t, list(aligned_t), "moon ci --include-relations", False)
 
+    wired = (
+        'assert_ci_targets() {\n  :\n}\n'
+        '  assert_ci_targets || SUITE_RC=1\n'
+        '  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n'
+    )
+    if check_self_invocation(wired):
+        failures.append(f"check_self_invocation: fired on wired run.sh: {check_self_invocation(wired)}")
+    no_call = wired.replace("  assert_ci_targets || SUITE_RC=1\n", "")
+    if not check_self_invocation(no_call):
+        failures.append("check_self_invocation: missed a deleted run_suite call")
+    no_selftest = wired.replace('  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n', "")
+    if not check_self_invocation(no_selftest):
+        failures.append("check_self_invocation: missed a deleted --self-test call")
+
     if failures:
         print("ci-targets self-test FAILED:", file=sys.stderr)
         for f in failures:
@@ -426,7 +458,77 @@ def self_test():
 
 
 def main():
-    raise NotImplementedError
+    root = Path(__file__).resolve().parents[2]
+    try:
+        tasks = moon_tasks()
+        t_targets = parse_t((root / ".github" / "workflows" / "ci.yml").read_text())
+        doc_targets, region = parse_doc_targets((root / "CLAUDE.md").read_text())
+        run_sh = (root / "ci" / "affected-graph" / "run.sh").read_text()
+        floor = check_floor(tasks)
+        missing, unexpected, bad_exempt = check_forward(tasks, t_targets)
+    except GateAssertionError as exc:
+        # An authorial mistake, NOT a broken tool: rc 1 so run.sh records a red suite instead of
+        # aborting the whole affected-graph guard and losing every other assertion's output (D2).
+        print(f"FAIL  [ci-targets] {exc}", file=sys.stderr)
+        return 1
+    except INFRA_ERRORS as exc:
+        print(f"FATAL [ci-targets] could not read the inputs: {exc}", file=sys.stderr)
+        return 2
+
+    dead = check_reverse(tasks, t_targets)
+    doc_problems = check_docs(t_targets, doc_targets, region)
+    missing_sites = check_self_invocation(run_sh)
+
+    if not (floor or missing or unexpected or bad_exempt or dead or doc_problems or missing_sites):
+        print(
+            f"PASS  {'ci-targets':<18} -> {len(t_targets)} targets: every CI-eligible repo task is "
+            "in ci.yml's T, every entry resolves, CLAUDE.md mirrors it"
+        )
+        return 0
+
+    print("FAIL  [ci-targets] ci.yml's moon ci target array is out of sync", file=sys.stderr)
+    for rows, title in (
+        (floor,
+         "A task this gate REQUIRES to be present is absent from the parsed `repo` set, so the\n"
+         "    comparison below may be between two empty sets and assert nothing.\n"
+         "    Fix: if the task was genuinely renamed or removed, update REQUIRED_REPO_TASKS in\n"
+         "    ci/affected-graph/ci_targets.py. Otherwise the project filter or moon's output\n"
+         "    shape has changed — investigate before touching anything else."),
+        (missing,
+         "A CI-eligible `repo:*` task is NOT in ci.yml's `T=(...)` array, so it does not run in\n"
+         "    CI at all — it passes locally and silently does not exist on any PR (SMA-541).\n"
+         "    Fix: append `:<name>` to `T` in .github/workflows/ci.yml AND to the command\n"
+         "    between the <!-- ci-targets:begin/end --> markers in CLAUDE.md."),
+        (unexpected,
+         "`T` contains a `repo` task that is NOT CI-eligible (runInCI: false) or is listed in\n"
+         "    T_EXEMPT. `moon ci` will resolve nothing for it and still exit 0, so the gate reads\n"
+         "    as running while it is off.\n"
+         "    Fix: remove the entry from `T` and from CLAUDE.md, or drop the `runInCI: false` /\n"
+         "    the T_EXEMPT entry if the task is meant to run."),
+        (bad_exempt,
+         "A T_EXEMPT entry has no reason string. An exemption is a recorded decision, so the\n"
+         "    record is what earns it.\n"
+         "    Fix: give it a non-empty reason in ci/affected-graph/ci_targets.py, or delete it."),
+        (dead,
+         "A `T` entry resolves to no CI-eligible task anywhere in the graph — a typo, or a task\n"
+         "    that was renamed, deleted or turned off. `moon ci` exits 0 on such a target, even\n"
+         "    when real targets surround it, so nothing else in CI reports this.\n"
+         "    Fix: correct the entry in .github/workflows/ci.yml and CLAUDE.md, or delete it."),
+        (doc_problems,
+         "CLAUDE.md's documented full-graph command no longer mirrors `T`, so the documented way\n"
+         "    to reproduce CI locally does not reproduce it.\n"
+         "    Fix: copy `T` verbatim between the <!-- ci-targets:begin/end --> markers, keeping\n"
+         "    the `--base origin/main --include-relations` tail."),
+        (missing_sites,
+         "This gate's own call site is missing from ci/affected-graph/run.sh, so it (or its\n"
+         "    negative control) would not run at all.\n"
+         "    Fix: restore the exact line; see RUN_SH_CALL_SITES in this file."),
+    ):
+        if rows:
+            print(f"  {title}", file=sys.stderr)
+            for row in rows:
+                print(f"      {row}", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
