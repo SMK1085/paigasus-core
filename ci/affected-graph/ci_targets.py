@@ -591,9 +591,9 @@ def self_test():
 
     # A generic target owned by another project resolves — it must NOT be reported.
     reverse("generic-resolves", tasks_fixture, aligned_t, [])
-    reverse("dead-entry", tasks_fixture, aligned_t + ["ghost"], ["ghost"])
+    reverse("dead-entry", tasks_fixture, [*aligned_t, "ghost"], ["ghost"])
     # A name whose every task is runInCI:false is present but would run NOTHING (D4).
-    reverse("resolves-only-to-disabled", tasks_fixture, aligned_t + ["install-hooks"],
+    reverse("resolves-only-to-disabled", tasks_fixture, [*aligned_t, "install-hooks"],
             ["install-hooks"])
 
     def docs(label, t, doc, region, want_empty):
@@ -604,7 +604,7 @@ def self_test():
     full_flags = "moon ci --base origin/main --include-relations"
     docs("aligned", aligned_t, list(aligned_t), full_flags, True)
     docs("doc-missing-target", aligned_t, aligned_t[:-1], full_flags, False)
-    docs("doc-extra-target", aligned_t, aligned_t + ["extra"], full_flags, False)
+    docs("doc-extra-target", aligned_t, [*aligned_t, "extra"], full_flags, False)
     docs("doc-reordered", aligned_t, list(reversed(aligned_t)), full_flags, False)
     docs("doc-missing-include-relations", aligned_t, list(aligned_t),
          "moon ci --base origin/main", False)
