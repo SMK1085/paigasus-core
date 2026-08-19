@@ -79,9 +79,7 @@ pub fn probe(addr: SocketAddr, path: &str, deadline: Duration) -> io::Result<boo
     // `deadline` is a TOTAL budget, not a connect timeout. A server that has accepted but
     // wedged (a saturated axum, a blocked handler) would otherwise block this call forever.
     stream.set_write_timeout(Some(remaining(deadline, started)?))?;
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {target}\r\nUser-Agent: paigasus-healthcheck\r\nConnection: close\r\n\r\n"
-    );
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {target}\r\nUser-Agent: paigasus-healthcheck\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes())?;
     stream.flush()?;
 
@@ -115,9 +113,7 @@ fn status_is_success(status_line: &str) -> io::Result<bool> {
         .split_whitespace()
         .nth(1)
         .and_then(|code| code.parse().ok())
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("malformed HTTP status line: {status_line:?}"))
-        })?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("malformed HTTP status line: {status_line:?}")))?;
     Ok((200..300).contains(&code))
 }
 
@@ -201,18 +197,12 @@ mod tests {
 
     #[test]
     fn bare_healthcheck_defaults_to_healthz() {
-        assert_eq!(
-            dispatch(["healthcheck"]).expect("valid"),
-            Mode::Healthcheck { path: "/healthz".to_string() }
-        );
+        assert_eq!(dispatch(["healthcheck"]).expect("valid"), Mode::Healthcheck { path: "/healthz".to_string() });
     }
 
     #[test]
     fn path_flag_selects_readyz() {
-        assert_eq!(
-            dispatch(["healthcheck", "--path", "/readyz"]).expect("valid"),
-            Mode::Healthcheck { path: "/readyz".to_string() }
-        );
+        assert_eq!(dispatch(["healthcheck", "--path", "/readyz"]).expect("valid"), Mode::Healthcheck { path: "/readyz".to_string() });
     }
 
     #[test]

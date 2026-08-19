@@ -514,11 +514,17 @@ Expected: `healthcheck exit=1` returning promptly (well under 5s), and `typo exi
 - [ ] **Step 4: Verify the whole Rust graph still builds and lints**
 
 ```bash
-cd rs && cargo clippy --locked --all-targets -- -D warnings 2>&1 | tail -20
-cargo nextest run --no-tests=pass -p paigasus-observability 2>&1 | tail -10
+cd rs && cargo fmt --check 2>&1 | tail -20
+cargo clippy --locked --all-targets -- -D warnings 2>&1 | tail -20
+cargo nextest run --no-tests=pass -p paigasus-observability -p paigasus-iam -p paigasus-gateway 2>&1 | tail -10
 ```
 
-Expected: clippy clean, observability tests pass.
+Expected: fmt clean (it prints nothing), clippy clean, tests pass.
+
+`cargo fmt --check` is a **separate CI gate** (`moon ci :fmt`) from clippy, and clippy passing says
+nothing about it. Tasks 1-2 learned this the hard way: their verification listed only test + clippy,
+and rustfmt wanted the multi-line `assert_eq!` calls collapsed, so the branch carried a red `:fmt`
+until a fix round caught it.
 
 - [ ] **Step 5: Commit**
 
