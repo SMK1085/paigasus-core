@@ -300,6 +300,15 @@ mod tests {
     /// here, which meant a third branch there would have escaped this test AND
     /// `repo:error-code-single-site` (this file is on the manifest) — SMA-507 E3. It now
     /// enumerates `RejectionKind`, so a new kind must state its parts or fail to compile.
+    ///
+    /// What this does NOT close, stated so the comment above is not read as more than it is: the
+    /// codes come from `RejectionKind::parts()`, not from a rendered `envelope_rejection`
+    /// response. A future branch that returns a literal WITHOUT routing through `RejectionKind`
+    /// escapes both this test and `repo:error-code-single-site` — the gate reports no offender
+    /// because this file is already on its manifest. That is the residual the gate's README calls
+    /// "a code added to an already-listed file but outside the enum its guard enumerates".
+    /// `system_retirement.rs`'s guard reads its code back out of the body precisely because it
+    /// could; here the two rejection kinds are not reachable without a real `JsonRejection`.
     #[tokio::test]
     async fn every_authn_http_code_is_in_the_registry() {
         use paigasus_proto::paigasus::common::v1::ErrorReason;

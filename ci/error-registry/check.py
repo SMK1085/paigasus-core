@@ -37,7 +37,11 @@ class InfraError(RuntimeError):
 # Matches a declaration line inside `enum ErrorReason`, e.g. `  ERROR_REASON_SLUG_CONFLICT = 1;`.
 # Anchored on the `= N;` tail on purpose: a bare ERROR_REASON_[A-Z0-9_]+ scan also matches the
 # prefix and the value names error.proto mentions in its own prose comments.
-_DECL = re.compile(r"^\s*ERROR_REASON_([A-Z0-9_]+)\s*=\s*\d+\s*;\s*$", re.MULTILINE)
+# The trailing `;` is required but need not end the line: a field option (`[deprecated = true]`)
+# or a trailing `// comment` is legal proto and must not drop the value from the derived set. It
+# would not go unnoticed — the mirror still carries it, so the cross-check reds with "the proto
+# registry and its rust mirror disagree" when in fact both are right and only this regex is wrong.
+_DECL = re.compile(r"^\s*ERROR_REASON_([A-Z0-9_]+)\s*=\s*\d+\s*(?:\[[^\]]*\])?\s*;", re.MULTILINE)
 
 # The `const EXPECTED_REASONS: &[&str] = &[ … ];` block in paigasus-proto's test module.
 _MIRROR_BLOCK = re.compile(r"const EXPECTED_REASONS:\s*&\[&str\]\s*=\s*&\[(.*?)\];", re.DOTALL)
@@ -65,7 +69,12 @@ def mirror_codes(text):
     return set(_MIRROR_ITEM.findall(block.group(1)))
 
 
-SCAN_GLOB = "*/*/src/**/*.rs"
+# Every `.rs` under any `src/` tree below `rs/crates`, at ANY crate depth. Deliberately NOT
+# `*/*/src/**/*.rs`: that pins crates to exactly `{libs,bindings,services}/<crate>/`, so a crate
+# added one level up would be scheduled by the Moon task (whose `inputs` are the broader
+# `rs/crates/**/src/**/*.rs`) yet never scanned — its emission sites invisible and the gate green.
+# A gate that fails OPEN is worse than no gate. `self_test` asserts the two scopes still agree.
+SCAN_GLOB = "**/src/**/*.rs"
 SCAN_ROOT = REPO / "rs/crates"
 
 # Files permitted to spell a registry code.
@@ -98,7 +107,10 @@ MANIFEST = (
     ("rs/crates/libs/paigasus-observability/src/grpc.rs", "excluded", None,
      "grpc_code_name maps tonic::Code to a METRIC LABEL; its \"internal\" collides with the "
      "registry's reason by spelling only. Single-word codes are ordinary English."),
-    ("rs/crates/libs/paigasus-proto/src/generated/**/*.rs", "excluded", None,
+    # No `/*.rs` tail: under fnmatch `**/` still needs a literal `/`, so a file emitted DIRECTLY
+    # into `src/generated/` would miss this row and be reported as an offender needing a manifest
+    # entry. `…/generated/**` covers both shapes and still contains `_GENERATED_SEGMENT`.
+    ("rs/crates/libs/paigasus-proto/src/generated/**", "excluded", None,
      "prost output, not authored here. Its hits are all /// doc comments carried over from "
      "error.proto. Excluded by PATH rather than by a comment filter so a prost change to "
      "#[doc = \"…\"] cannot turn 47 generated lines into offenders overnight."),
@@ -183,9 +195,16 @@ def _fn_decl_pattern(guard):
     )
 
 
-# The two attributes that make a function something the test runner executes. `#[tokio::test]`
-# covers the async guards; three of the five membership tests are async.
-_TEST_ATTRS = ("#[test]", "#[tokio::test]")
+# The attribute forms that make a function something the test runner executes. Matched as
+# PREFIXES, not exact strings: this repo already writes `#[tokio::test(start_paused = true)]`
+# (`adapters/authz/{policy_snapshot,denial_audit}.rs`), and a trailing `// why` comment is
+# ordinary. Exact matching would red the gate on a guard that exists and passes — a false alarm on
+# correct code, which erodes trust in the gate faster than a missed defect.
+_TEST_ATTR_PREFIXES = ("#[test]", "#[test(", "#[tokio::test]", "#[tokio::test(")
+
+# An `#[ignore]`d test never runs, so a guard carrying it is as absent as a deleted one — the exact
+# failure `_is_test_fn` exists to close. Prefix, to cover `#[ignore = "reason"]`.
+_IGNORE_ATTR_PREFIX = "#[ignore"
 
 
 def _is_test_fn(lines, idx):
@@ -194,17 +213,22 @@ def _is_test_fn(lines, idx):
     Walks backwards over the attribute block directly above the signature. Only attribute lines
     and blank lines may intervene — a doc comment or any code ends the walk, which is what makes
     this a statement about THIS function rather than about a stray attribute higher up the file.
+
+    The WHOLE block is read rather than stopping at the first `#[test]`, because `#[ignore]` may
+    sit on either side of it and must veto regardless of order.
     """
+    saw_test = False
     for prev in range(idx - 1, -1, -1):
         line = lines[prev].strip()
         if not line:
             continue
-        if line in _TEST_ATTRS:
-            return True
-        if line.startswith("#["):
-            continue
-        return False
-    return False
+        if not line.startswith("#["):
+            break
+        if line.startswith(_IGNORE_ATTR_PREFIX):
+            return False
+        if line.startswith(_TEST_ATTR_PREFIXES):
+            saw_test = True
+    return saw_test
 
 
 _GLOB_CHARS = "*?["
@@ -370,6 +394,18 @@ def self_test():
     if _is_test_fn(stripped_attr, 1):
         print("  FAIL [_is_test_fn] a fn with its #[test] deleted was still called a test", file=sys.stderr)
         rc = 1
+    # This repo really does write the parameterised form; rejecting it would red the gate on a
+    # guard that exists and passes.
+    for form in ("#[tokio::test(start_paused = true)]", "#[test] // why", '#[test(flavor = "multi_thread")]'):
+        if not _is_test_fn([form, "async fn every_x() {"], 1):
+            print(f"  FAIL [_is_test_fn] a real test attribute was rejected: {form!r}", file=sys.stderr)
+            rc = 1
+    # An ignored test never runs, so it must not count — on either side of the attribute.
+    for ignored in (["#[test]", "#[ignore]", "fn every_x() {"],
+                    ["#[ignore = \"flaky\"]", "#[test]", "fn every_x() {"]):
+        if _is_test_fn(ignored, 2):
+            print(f"  FAIL [_is_test_fn] an #[ignore]d guard was counted as alive: {ignored[:2]}", file=sys.stderr)
+            rc = 1
     distant = ["#[test]", "fn unrelated() {}", "", "fn every_x() {"]
     if _is_test_fn(distant, 3):
         print("  FAIL [_is_test_fn] an attribute belonging to another fn was credited", file=sys.stderr)
@@ -387,6 +423,16 @@ def self_test():
         if decl.match(bad):
             print(f"  FAIL [_fn_decl_pattern] a non-declaration was accepted: {bad!r}", file=sys.stderr)
             rc = 1
+
+    # The scan must reach EVERY `.rs` under a `src/` tree below rs/crates. A narrower glob leaves
+    # a crate scheduled-but-unscanned, which is the one failure mode worse than a red: silent.
+    reachable = set(SCAN_ROOT.glob(SCAN_GLOB))
+    every_src = {p for p in SCAN_ROOT.rglob("*.rs") if "/src/" in p.as_posix()}
+    unreachable = sorted(p.relative_to(REPO).as_posix() for p in every_src - reachable)
+    if unreachable:
+        print(f"  FAIL [scan scope] {len(unreachable)} .rs file(s) under a src/ tree are unreachable "
+              f"by SCAN_GLOB, so their emission sites are invisible: {unreachable[:3]}", file=sys.stderr)
+        rc = 1
 
     if not code_pattern({"upstream-error"}).search(r'\"code\":\"upstream-error\"'):
         print("  FAIL [code_pattern] the escaped-quote form is not matched (E5 regression)", file=sys.stderr)
