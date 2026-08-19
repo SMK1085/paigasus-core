@@ -1,0 +1,31 @@
+<task-notification>
+<task-id>ac9e81b47f40473c8</task-id>
+<tool-use-id>toolu_01PBhwmvGVF5xCM911kdf5Pm</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a19cb7d1-7551-4054-ba7a-9e80a3de0013/tasks/ac9e81b47f40473c8.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement Task 6: run.sh wiring" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+Commits: 3588bcc feat(repo): run the ci-targets gate from the affected-graph guard (SMA-541); ffb7c35 docs(repo): correct the ci-targets ordering rationale (SMA-541)
+Test summary: all three covering checks re-run clean after the comment fix — `ci_targets.py` rc=0 (`PASS ci-targets`), `run.sh --negative-control` rc=0, `run.sh` rc=0 ending `== affected-graph cascade intact ==`
+Concerns: none
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.superpowers/sdd/2026-08-19-sma-541-ci-target-coverage-gate/task-6-report.md`</result>
+<usage><subagent_tokens>71517</subagent_tokens><tool_uses>11</tool_uses><duration_ms>107036</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ad9d7aacfd4ef826a</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a19cb7d1-7551-4054-ba7a-9e80a3de0013/tasks/ad9d7aacfd4ef826a.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement Task 7: inputs and docs" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+Commits: a9d0906 (docs(repo): document the ci-targets gate and key it on its inputs (SMA-541)), d1cd733 (docs(repo): drop the stale check count from the affected-graph readme (SMA-541))
+Test summary: gate rc=0 (`PASS ci-targets`) and guard rc=0 (negative control + full suite, all PASS) re-run clean after the wording fix
+Concerns: none — scanned the whole README for other stale counts, found none besides the fixed line
+Report: `/Users/smaschek/dev/paigasus/paigasus-core/.superpowers/sdd/2026-08-19-sma-541-ci-target-coverage-gate/task-7-report.md`</result>
+<usage><subagent_tokens>82196</subagent_tokens><tool_uses>8</tool_uses><duration_ms>96714</duration_ms></usage>
+</task-notification>
