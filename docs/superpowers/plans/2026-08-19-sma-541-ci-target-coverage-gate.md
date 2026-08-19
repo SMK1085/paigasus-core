@@ -483,8 +483,12 @@ Add to `self_test()`, before the `if failures:` block:
             )
 
     forward("aligned", tasks_fixture, aligned_t, {}, [], [])
-    # install-hooks is runInCI:false and absent from T -> must NOT trip the gate (issue AC #3).
-    forward("runInCI-false-absent", tasks_fixture, aligned_t, {}, [], [])
+    # AC #3: a runInCI:false task absent from T must not trip the gate — asserted with SEVERAL of
+    # them, so the exclusion is a rule and not an accident of install-hooks happening to be alone.
+    # (A fixture identical to "aligned" would restate that case without testing anything new.)
+    two_disabled = {**tasks_fixture,
+                    "repo": {**tasks_fixture["repo"], "install-hooks": False, "second-hook": False}}
+    forward("runInCI-false-absent", two_disabled, aligned_t, {}, [], [])
     # A new repo gate that nobody added to T.
     forward("missing-gate", {**tasks_fixture, "repo": {**tasks_fixture["repo"], "new-gate": True}},
             aligned_t, {}, ["new-gate"], [])
