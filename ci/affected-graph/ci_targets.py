@@ -94,13 +94,27 @@ T_ARRAY_EXPANSION = '"${T[@]}"'
 # green because `T` itself is still correct, and the flag grep matches nothing so it does not red
 # either (measured; CodeRabbit CLI). Matching the command rather than its first argument closes it.
 #
-# The two exclusions are what the quote used to buy: `#` drops the six prose comments in ci.yml
-# that discuss `moon ci`, and `name:` drops the job and step title fields (`name: moon ci`), which
-# must keep saying that — the `CI / moon ci` required status check is keyed on it. Verified against
-# the real ci.yml: this matches the same two invocation lines the old pattern did, and nothing else.
-MOON_CI_LINE_RE = re.compile(
-    r"^(?![ \t]*#)(?![ \t]*-?[ \t]*name:).*\bmoon ci\b.*$", re.MULTILINE
-)
+# Anchored at COMMAND POSITION — `moon` must be the line's first token — with `[ \t]+` between the
+# two words. Two more holes, both measured, drove this (CodeRabbit round 2):
+#
+#   echo moon ci "${T[@]}" …     a substring match accepts it; nothing runs, and the line even
+#                                carries the expansion, so it looked canonical
+#   moon    ci "${T[@]:0:5}" …   a literal single space misses it entirely, so the subsetted array
+#                                was never examined
+#
+# The anchor also makes the old `#`/`name:` lookaheads unnecessary: a comment starts with `#` and
+# the job/step titles start with `name:`/`- name:`, so none of them is at command position. Verified
+# against the real ci.yml — matches exactly the two invocation lines, and none of the six prose
+# comments or two `name:` fields (the `CI / moon ci` required check is keyed on those titles).
+MOON_CI_LINE_RE = re.compile(r"^[ \t]*moon[ \t]+ci\b.*$", re.MULTILINE)
+
+# ...and a FLOOR on how many there are, which is the half that actually closes the `echo` case. A
+# form this regex stops recognising drops out of `lines` silently, and a per-line rule can say
+# nothing about a line it never matched — the derived-set-shrinks-to-empty failure that
+# cargo_moon_parity.py's REQUIRED_FFI_TASKS exists to prevent, in miniature. Pinning the count turns
+# "the gate no longer understands the invocation" into a red. A genuinely new third invocation reds
+# too, which is intended: it must be reviewed, the same default-deny stance D10 takes.
+EXPECTED_MOON_CI_INVOCATIONS = 2
 
 # The docs command is delimited EXPLICITLY, not recognised by prose shape. Prose-shape matching was
 # fragile in both directions against ordinary doc edits: converting the command to a fenced code
@@ -274,13 +288,17 @@ def _eligibility(projects):
     saw_options = False
     result = {}
     for pid, tasks in projects.items():
-        if tasks is not None and not isinstance(tasks, dict):
+        # `None` is rejected too, not tolerated as "no tasks": moon emits neither a null nor an
+        # empty task group for any of its 28 projects (measured), so a null is malformed output —
+        # and letting it through parsed `repo` to an empty row, which the FLOOR then reported as
+        # rc 1 (an assertion failure) instead of rc 2 (CodeRabbit round 2).
+        if not isinstance(tasks, dict):
             raise MoonOutputError(
                 f"`moon query tasks` reported project {pid!r}'s tasks as "
                 f"{type(tasks).__name__}, expected an object"
             )
         row = {}
-        for name, task in (tasks or {}).items():
+        for name, task in tasks.items():
             if not isinstance(task, dict):
                 raise MoonOutputError(
                     f"`moon query tasks` reported task {pid}:{name} as "
@@ -418,12 +436,16 @@ def check_invocation(ci_yml_text):
     """
     lines = MOON_CI_LINE_RE.findall(ci_yml_text)
     rows = [line.strip() for line in lines if T_ARRAY_EXPANSION not in line]
-    if not any(T_ARRAY_EXPANSION in line for line in lines):
-        # No invocation hands over the array at all — including the case where there is no `moon
-        # ci` line left to match, where `rows` above is silent because it is DERIVED from them.
-        # Keyed on the matched lines rather than the whole file so a canonical invocation quoted
-        # inside a COMMENT cannot satisfy it.
-        rows.append(f"(no `moon ci` invocation passes the whole `{T_ARRAY_EXPANSION}` array)")
+    if len(lines) != EXPECTED_MOON_CI_INVOCATIONS:
+        # The count floor. `rows` is DERIVED from the matched lines, so it is silent about a line
+        # the regex never matched — which is exactly how `echo moon ci …` slipped through before.
+        rows.append(
+            f"(found {len(lines)} executable `moon ci` invocation(s), expected "
+            f"{EXPECTED_MOON_CI_INVOCATIONS}: either a branch was deleted, or one is written in a "
+            f"form this gate does not recognise as executable — it must be `moon ci` at the start "
+            f"of the line. A deliberate new invocation means updating "
+            f"EXPECTED_MOON_CI_INVOCATIONS.)"
+        )
     return rows
 
 
@@ -535,6 +557,13 @@ def self_test():
     # changed" as an assertion failure (CodeRabbit, SMA-541).
     expect_infra("_eligibility[projects-not-a-map]", lambda: _eligibility(["repo"]))
     expect_infra("_eligibility[task-group-not-a-map]", lambda: _eligibility({"repo": ["deny"]}))
+    # A NULL task group specifically: it used to parse to an empty row, so the floor reported rc 1
+    # rather than this raising rc 2. The sibling project carries `options` so `saw_options` cannot
+    # be what fires here.
+    expect_infra(
+        "_eligibility[task-group-null]",
+        lambda: _eligibility({"repo": None, "other": {"build": {"options": {"runInCI": True}}}}),
+    )
     expect_infra("_eligibility[task-not-a-map]", lambda: _eligibility({"repo": {"deny": "yes"}}))
     expect_infra(
         "_eligibility[options-not-a-map]",
@@ -669,6 +698,24 @@ def self_test():
     )
     if not check_invocation(reordered):
         failures.append("check_invocation: missed a subsetted array behind a leading flag")
+    # NOT executed: the line carries the expansion and reads canonical, but nothing runs. Caught by
+    # the count floor, not by the per-line rule — the regex never matches it (CodeRabbit round 2).
+    if not check_invocation(
+        invoked.replace('moon ci "${T[@]}" --base origin/main', 'echo moon ci "${T[@]}" --base origin/main')
+    ):
+        failures.append("check_invocation: missed an `echo`-prefixed, non-executing invocation")
+    # Multiple spaces between the two words: a literal single space missed this entirely, so the
+    # subsetted array was never examined.
+    if not check_invocation(
+        invoked.replace('moon ci "${T[@]}" --base origin/main', 'moon    ci "${T[@]:0:5}" --base origin/main')
+    ):
+        failures.append("check_invocation: missed a subsetted array behind multiple spaces")
+    # ...and multiple spaces with the array INTACT must stay clean, so the whitespace tolerance is
+    # a real tolerance rather than a blanket rejection of the spacing.
+    if check_invocation(
+        invoked.replace('moon ci "${T[@]}" --base origin/main', 'moon    ci "${T[@]}" --base origin/main')
+    ):
+        failures.append("check_invocation: fired on multiple spaces with the array intact")
     # ...and the same shape with the array INTACT must stay clean, so the fix above did not simply
     # start rejecting every line that fails to put the array first.
     if check_invocation(

@@ -274,6 +274,17 @@ mitigation, not a closure — deleting the `assert_ci_targets` call removes C4 a
   contiguous `moon ci "${T[@]}"` form, since argument order is not the property worth pinning and
   contiguity would red a correct `moon ci --base origin/main "${T[@]}"` — both directions fixtured.
 
+  **Two further holes closed after the web re-review**, both measured: a substring match accepted
+  `echo moon ci "${T[@]}"` (nothing executes, yet the line carries the expansion and reads
+  canonical), and a literal single space missed `moon    ci "${T[@]:0:5}"` entirely. The matcher is
+  now anchored at **command position** (`^[ \t]*moon[ \t]+ci\b`), which also makes the `#` and
+  `name:` exclusions unnecessary — neither a comment nor a job/step title is at command position.
+  Anchoring alone is not enough, because a per-line rule is silent about a line it never matches:
+  `EXPECTED_MOON_CI_INVOCATIONS` pins the **count** of executable invocations at 2, so a form this
+  gate stops recognising reds instead of vanishing from the derived set. That is
+  `REQUIRED_FFI_TASKS`' floor argument in miniature. A deliberate third invocation reds too, and
+  must be reviewed — the same default-deny stance as D10.
+
 **Anti-vacuity floors**, all rc 1 unless noted:
 
 - the parsed CI-eligible `repo` set must contain a hardcoded minimum — `affected-smoke`,
