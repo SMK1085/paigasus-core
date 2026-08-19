@@ -341,9 +341,16 @@ def check_invocation(ci_yml_text):
     """`moon ci` invocations in ci.yml that do not hand it the whole `T` array.
 
     Pins the invocation's SHAPE, which C1-C3 do not: they assert what is in `T`, not that `T` is
-    what runs. Full deletion of the line is already caught by `assert_include_relations` (run.sh) —
-    its grep finds nothing and it reds — but subsetting or rewriting the expansion is not, by
-    either check.
+    what runs. Subsetting or rewriting the expansion is not caught by either check.
+
+    Deletion is weaker ground than that suggests. ci.yml carries TWO `moon ci "${T[@]}"`
+    invocations (the PR path and the push path — see MOON_CI_LINE_RE above). Deleting BOTH is
+    caught by `assert_include_relations` (run.sh): its grep matches nothing and it reds. Deleting
+    ONLY ONE is caught by NEITHER check — `assert_include_relations`'s grep still matches the
+    surviving line, and this function's own file-wide fallback (`MOON_CI_INVOCATION not in
+    ci_yml_text`) is satisfied by that same surviving line. Today a lone deletion still reds, but
+    only incidentally: it leaves an empty `then`/`elif` branch in ci.yml's shell block, which bash
+    itself rejects — not because either gate caught it.
 
     EVERY matched line must carry the exact expansion, not merely one of them: a future second
     `moon ci` reading a different array reds here and the author extends this gate deliberately,
@@ -612,6 +619,8 @@ def self_test():
         failures.append("read_input: routed a PermissionError to rc 1; only a missing file is rc 1")
     except PermissionError:
         pass
+    else:
+        failures.append("read_input: swallowed a PermissionError instead of propagating it")
     if read_input(_Present(), "CLAUDE.md") != "content":
         failures.append("read_input: did not return the file's text")
 
@@ -730,7 +739,11 @@ def main():
          "    A subsetted or rewritten expansion (`\"${T[@]:0:5}\"`, an unquoted `$T`) leaves the\n"
          "    array perfectly correct, keeps run.sh's --include-relations grep matching, and\n"
          "    silently stops most of the graph from running.\n"
-         "    Fix: use `" + MOON_CI_INVOCATION + "` verbatim on each line below. If a second,\n"
+         "    Fix depends on which row this is. A line below that IS a real invocation: make it\n"
+         "    read `" + MOON_CI_INVOCATION + "` verbatim. A `(no ... invocation anywhere in the\n"
+         "    file)` line: nothing below names a line to fix — restore one. A line below that is\n"
+         "    actually a YAML comment matched by the quote-gated regex, not a real invocation:\n"
+         "    that is a false positive, so reword the COMMENT instead. If a second,\n"
          "    deliberately-different invocation is genuinely wanted, extend check_invocation in\n"
          "    ci/affected-graph/ci_targets.py rather than loosening it."),
     ):

@@ -26,11 +26,11 @@
 
 | File | Responsibility |
 |---|---|
-| `ci/affected-graph/ci_targets.py` | **Create.** All parsing and all four checks, plus `--self-test`. One file, mirroring `cargo_moon_parity.py`'s single-module shape. |
+| `ci/affected-graph/ci_targets.py` | **Create.** All parsing and every check, plus `--self-test`. One file, mirroring `cargo_moon_parity.py`'s single-module shape. |
 | `ci/affected-graph/run.sh` | **Modify.** Add `assert_ci_targets()`; call it last in `run_suite`; add the `--self-test` line to the `--negative-control` branch. |
 | `CLAUDE.md` | **Modify.** Wrap the full-graph command in `<!-- ci-targets:begin/end -->` markers; reword the illustrative gate list to lead with "e.g."; add a gotcha bullet. |
 | `moon.yml` | **Modify.** Add `CLAUDE.md` and `.prototools` to `repo:affected-smoke`'s `inputs`. |
-| `ci/affected-graph/README.md` | **Modify.** Document C1-C4, the `T_EXEMPT` contract and the marker contract. |
+| `ci/affected-graph/README.md` | **Modify.** Document each check, the `T_EXEMPT` contract and the marker contract. |
 
 **Reference facts, measured — do not re-derive:**
 - `moon query tasks` emits JSON natively. `--json` is **not** a valid flag (`error: unexpected argument '--json' found`).
@@ -1268,7 +1268,8 @@ git commit -m "docs(repo): record the measured ci-targets gate cost (SMA-541)"
 
 ## Self-Review
 
-**Spec coverage.** Every design decision maps to a task: D1 → Tasks 1/6; D2 → Task 5 (`main()` exception split) + Task 6 (`assert_ci_targets` rc handling); D3 → Task 3; D4 → Task 4; D5 → Task 3 (`T_EXEMPT`); D6 → Task 4 (`REQUIRED_DOC_FLAGS`); D7 → Task 2; D8 → Task 3 (`moon_tasks`); D9 → Task 7; D10 → Task 1 (`parse_t` token classification); D11 → Tasks 1/2 (parsers as pure functions with fixtures); D12 → Task 1 (both regexes); D13 → Task 5 (C4). Checks C1-C4 → Tasks 3, 4, 4, 5. §5's mutation battery → Task 8. §5's cost measurement → Task 8 Step 6. §6 limitations need no code.
+**Spec coverage.** Every design decision maps to a task: D1 → Tasks 1/6; D2 → Task 5 (`main()` exception split) + Task 6 (`assert_ci_targets` rc handling); D3 → Task 3; D4 → Task 4; D5 → Task 3 (`T_EXEMPT`); D6 → Task 4 (`REQUIRED_DOC_FLAGS`); D7 → Task 2; D8 → Task 3 (`moon_tasks`); D9 → Task 7; D10 → Task 1 (`parse_t` token classification); D11 → Tasks 1/2 (parsers as pure functions with fixtures); D12 → Task 1 (both regexes); D13 → Task 5 (C4). Checks C1-C4 → Tasks 3, 4, 4, 5; C5 (`check_invocation`) was added later, in
+the final whole-branch review, not by a numbered task here. §5's mutation battery → Task 8. §5's cost measurement → Task 8 Step 6. §6 limitations need no code.
 
 **Placeholder scan.** No TBD/TODO. Every code step carries the actual code. Every verification step carries the exact command and its expected output.
 
