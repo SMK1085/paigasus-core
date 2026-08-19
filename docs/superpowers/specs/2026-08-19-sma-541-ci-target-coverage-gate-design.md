@@ -1,6 +1,6 @@
 # SMA-541 — Assert every `repo:*` gate is wired into `ci.yml`'s `moon ci` target array
 
-**Status:** revised after adversarial review (2026-08-19)
+**Status:** revised after adversarial review, then after the final whole-branch review (2026-08-19)
 **Linear:** [SMA-541](https://linear.app/smaschek/issue/SMA-541/repo-assert-every-repo-gate-is-actually-wired-into-ciymls-moon-ci)
 **Related:** SMA-525 (limitation L6, which filed this), SMA-524 / SMA-534 / SMA-546 (the sibling
 assertions in `ci/affected-graph/`), SMA-542 (guards the actionlint gate's self-test invocations —
@@ -24,7 +24,7 @@ the tree, believed to be running, and is not.
 `ci/affected-graph/run.sh` already parses `ci.yml`, but only to assert every `moon ci` invocation
 carries `--include-relations` (`assert_include_relations`). It never looks at the array's contents.
 
-CLAUDE.md's "run the full graph like CI does" procedure (`CLAUDE.md:64-68`) enumerates the same
+CLAUDE.md's "run the full graph like CI does" procedure (`CLAUDE.md:62-74`) enumerates the same
 targets by hand a second time and can drift from `T` in either direction.
 
 ## 2. Evidence
@@ -60,8 +60,15 @@ project has **18** tasks. `install-hooks` is the only one with `runInCI: false`.
 all present in `T` today, alongside 6 targets owned by other projects (`:build :test :lint :fmt
 :typecheck :breaking`). `T` holds 23 entries and is currently correct — no cleanup wave.
 
-**E3 — no task anywhere in the graph is `internal: true`.** The only task excluded from CI by its
-own options is `repo:install-hooks`.
+**E3 — no task anywhere in the graph is `internal: true`** — and `internal` is a *second*,
+quieter switch than `runInCI`. Measured by adding a throwaway `repo` task with
+`options: { internal: true }`: `moon query tasks` omits it **entirely** (while `install-hooks`,
+`runInCI: false`, is still listed with its options), and `moon ci` on it executes nothing. Because
+the task vanishes from the query output, C1 cannot see it at all — the forward comparison simply
+never considers it, and a gate switched off this way would pass C1 silently. What catches it is
+C2, and only incidentally: with the task gone from the graph, its `T` entry resolves to nothing
+and is reported as dead. Recorded as L11. The only task excluded from CI by its own options today
+is `repo:install-hooks`.
 
 **E4 — CI-eligible tasks deliberately absent from `T` already exist — outside the `repo` project.**
 `build-release` on all 13 Rust crates (`.moon/tasks/rust.yml:18-20`, no `runInCI: false`;
@@ -111,6 +118,13 @@ key the gate needs. Every *authorial* mistake — no `T=(…)` line, two of them
 duplicated CLAUDE.md marker, an empty `repo` task set — is an **assertion failure (rc 1)** carrying
 a message that says what to edit. A second full-graph example in the docs must not triage as
 "re-run the job".
+
+A **deleted or renamed input file** falls on the same side of that line, which the first
+implementation got wrong: `OSError` is in `INFRA_ERRORS`, so renaming `CLAUDE.md` or `ci.yml`
+produced rc 2 and destroyed every other assertion's diagnostics for what is unambiguously an
+authorial mistake. `read_input()` re-raises `FileNotFoundError` as an assertion failure naming the
+path; every other `OSError` — permissions, I/O — stays on the rc-2 path, because those genuinely
+are environmental.
 
 **D3 — the forward check (C1) is strict equality over the repo-owned partition, not a subset
 test.** Partition `T`'s entries into those naming a `repo` task and those that do not; the first
@@ -197,8 +211,14 @@ wrong thing" — backed there by ~35 extractor fixtures. A parser bug is the one
 cannot self-detect: a total match failure hits the rc-1 path, but a *partial* mis-parse is silent.
 
 **D12 — `T` is matched with `^[ \t]*T=\((.*?)\)[ \t]*$` under `re.MULTILINE`, and any other
-`T`-assignment line is an assertion failure.** `\s` matches newlines in Python, so `\)\s*$` could
-anchor at a later line's end and quietly accept a multi-line array; `[ \t]` cannot. Separately, a
+`T`-assignment line is an assertion failure.** The `[ \t]*$` anchor is **defensive, not
+load-bearing** *(corrected after the final branch review; the first version of this decision
+claimed `\)\s*$` "could anchor at a later line's end and quietly accept a multi-line array" — it
+could not: `(.*?)` never crosses a newline without `re.DOTALL`, whatever the anchor)*. The one real
+divergence is CRLF: on a checkout with CRLF endings — this repo ships no `.gitattributes` —
+`T=(…)\r\n` matches `\s*$` but not `[ \t]*$`, so the stricter anchor reds the gate with the
+"must stay on one line" message. Misleading wording, but a red rather than a silently-unexamined
+array, and the alternative is a parser that has to reason about line endings. Separately, a
 future `T+=(:new-gate)` append (or a second conditional array) would leave its entries unexamined
 by C2 while C1 still passed — so any line matching `^[ \t]*T[ \t]*\+?=` that is not the single
 canonical assignment reds the gate.
@@ -234,6 +254,15 @@ mitigation, not a closure — deleting the `assert_ci_targets` call removes C4 a
   the first divergence by position and prints both lists.
 - **C4 — self-invocation (D13).** `run.sh` contains both the `assert_ci_targets` call and the
   `--self-test` call.
+- **C5 — invocation shape.** Every `moon ci` invocation in `ci.yml` is handed the whole array,
+  verbatim (`moon ci "${T[@]}"`). C1-C4 assert `T`'s *contents*; none of them asserts `T` is what
+  `moon ci` actually receives. Rewriting the call to `moon ci "${T[@]:0:5}"` keeps `T` perfectly
+  correct, keeps `assert_include_relations` matching (its grep is `moon ci +"`) with its flag
+  intact, and switches eighteen gates off — all green. Checked per LINE, because `ci.yml` carries
+  two invocations (the PR path and the push path) and a whole-file substring test would pass with
+  the PR one — the one every gate actually runs under — subsetted. `assert_include_relations` is
+  deliberately **not** narrowed to do this job instead: its contract is "every `moon ci` invocation
+  carries the flag", and narrowing it would blind it to a future second invocation.
 
 **Anti-vacuity floors**, all rc 1 unless noted:
 
@@ -243,7 +272,10 @@ mitigation, not a closure — deleting the `assert_ci_targets` call removes C4 a
   `REQUIRED_FFI_TASKS` precedent, `cargo_moon_parity.py:95-103`)
 - `T=(…)` must match exactly one line; no other `T`-assignment line may exist (D12)
 - the CLAUDE.md marker pair must appear exactly once, in order, non-empty (D7)
-- every `T_EXEMPT` entry must carry a non-empty reason (D5)
+- every `T_EXEMPT` entry must carry a non-empty reason (D5), and must name a `repo` task that
+  exists: an entry left behind after its task was renamed or deleted is silent otherwise (a typo is
+  loud — the real task shows up under `missing` — but a leftover exempts nothing, forever)
+- an input file that does not exist is rc 1, naming it, not rc 2 (D2)
 - `moon` failing, non-JSON output, or an output in which no task carries `options` → **rc 2** (D8)
 
 ### `ci/affected-graph/run.sh`
@@ -267,7 +299,7 @@ documented command — mirroring the existing "a new Rust crate reds `:affected-
 
 ### `ci/affected-graph/README.md`
 
-A bullet describing C1-C4, the `T_EXEMPT` contract, and the marker contract.
+A bullet describing C1-C5, the `T_EXEMPT` contract, and the marker contract.
 
 ## 5. Testing
 
@@ -282,6 +314,10 @@ tail.
 
 **Check fixtures:**
 
+Every row below names a fixture that **exists** in `self_test()`; the table and the code are kept
+in step deliberately, since a documented-but-absent control is the same drift class this issue
+exists to close (the first implementation shipped an `options`/rc-2 row with no fixture behind it).
+
 | Fixture | Expected |
 |---|---|
 | a `repo` task absent from `T` | C1 **red** (`missing`), naming it |
@@ -289,15 +325,29 @@ tail.
 | a task flipped to `runInCI: false` but left in `T` | C1 **red** (`unexpected`) — the D3 hole |
 | a task in `T_EXEMPT` with a reason, absent from `T` | **green** |
 | a `T_EXEMPT` entry with an empty reason | **red** |
+| a `T_EXEMPT` entry naming no `repo` task | **red** — the exemption outlived its task |
 | a dead `:ghost` entry in `T` | C2 **red**, naming it |
 | a `:name` resolving only to `runInCI: false` tasks | C2 **red** — the D4 hole |
 | a project-scoped `repo:promtool` entry in `T` | **red** (D10) — never silently ignored |
 | doc missing a target / doc in the wrong order | C3 **red** on each |
 | doc missing `--include-relations` | C3 **red** (D6) |
 | `run.sh` text missing either call site | C4 **red** |
+| the canonical two-branch `moon ci "${T[@]}"` step | **green** (C5) |
+| one of the two invocations subsetted to `"${T[@]:0:5}"` | C5 **red** — the whole-file-substring hole |
+| an unquoted `$T`, or a `moon ci` that bypasses `T` | C5 **red** on each |
 | a repo task set that omits a floor member | **red** |
+| an empty project set (`_eligibility({})`) | **rc 2** |
 | a task set in which no task carries `options` | **rc 2** |
+| an output with no `repo` project (`check_forward`) | **rc 2** |
+| `runInCI: false` → ineligible, absent `options` → eligible | **green** — pins the D8 polarity itself |
+| an input file that does not exist (`read_input`) | **rc 1**, not rc 2 (D2) |
+| an input file that raises `PermissionError` | **rc 2** — the other half of that split |
 | everything aligned | **green** — catches a permanently-red harness |
+
+The three `MoonOutputError` raises are reachable from fixtures because the shape rules live in a
+pure `_eligibility(projects)` that `moon_tasks()` wraps with the subprocess and `json.loads` — the
+same split `cargo_moon_parity.py` uses to fixture its own infra raise. The two `read_input` rows
+are driven with stub objects, so the control needs no filesystem state at all.
 
 Beyond the table, verification is by mutation against the real tree, run and recorded rather than
 assumed: add a throwaway `repo:` task and confirm the gate names it; flip an existing gate to
@@ -326,15 +376,48 @@ README, since D1 rejects a standalone task partly on cost grounds.
   `ci.yml` separately runs `ts:commitlint`, `ts:check-config-only`, `contracts:generate` plus its
   drift diff, and the CODEOWNERS sync. The documented command never covered those and still does
   not.
-- **L6 — this gate's own invocation is only partially guarded.** C4 catches deleting one of the two
-  call sites; deleting the `assert_ci_targets` call removes C4 with it. SMA-542 is the general fix
-  for this class and should be extended to cover `ci/affected-graph/run.sh`'s call sites. It is
-  **not** a hard dependency — this spec ships C4 and does not block on it.
+- **L6 — this gate's own invocation is only partially guarded, and the self-reference is larger
+  than C4.** Two nested cases, smallest first:
+  - C4 catches deleting one of the two call sites in `run.sh`; deleting the `assert_ci_targets`
+    call removes C4 with it.
+  - **The strictly larger case: `:affected-smoke` is the one entry of `T` that guards `T`.** Delete
+    that token from `ci.yml`'s array and from CLAUDE.md's marker region — two edits, each of which
+    every check here would happily accept as consistent — and `moon ci` never schedules
+    `repo:affected-smoke`, so `ci_targets.py` never runs. C1's `missing` row for `affected-smoke`
+    is never computed, the `REQUIRED_REPO_TASKS` floor is never evaluated, and C2/C3/C4/C5 go with
+    them, as do the eight cascade cases, A1-A5 and `assert_include_relations`. Every check is
+    green; the repo's entire affected-graph guard is off. This is inherent to D1's placement (a
+    gate that runs *inside* the thing it guards) and is **recorded, not closed** — closing it needs
+    an assertion in a different, independently-scheduled gate, which is a design change beyond this
+    issue.
+
+  The natural closure, should it ever be wanted, is `repo:actionlint`: it already declares
+  `inputs: ['**/*']`, already parses every workflow file, and is scheduled independently of
+  `repo:affected-smoke`, so it can assert `:affected-smoke ∈ T` on a run this gate cannot suppress.
+  SMA-542 is the general fix for the call-site half of this class and should be extended to cover
+  `ci/affected-graph/run.sh`'s call sites. Neither is a hard dependency — this spec ships C4 and
+  does not block on them.
 - **L7 — `CLAUDE.md` is the only doc checked.** `CONTRIBUTING.md` and the READMEs could grow their
   own copy of the command uncaught.
 - **L8 — break-glass.** The fix path for a red is always "edit `T` and/or CLAUDE.md", with one
   exception: a parser break (L1, a marker edit) reds without any target being wrong. There is no
   warn-only mode by design; the escape for a legitimately-exempt task is `T_EXEMPT` (D5).
+- **L9 — a gate defined outside the `repo` project is invisible to C1.** D3/E4 scope the forward
+  check to `repo`, so a future `ci/newgate/moon.yml` declaring its own project would reproduce §1's
+  failure exactly: a correct gate, passing locally, absent from `T`, with no red check. C2 does not
+  help — it only looks at entries that *are* in `T`. Widening C1 to the whole graph is not the fix
+  (E4: `build-release` and friends would red on day one); the fix, if `ci/` ever grows a second
+  project, is to widen the forward partition to an explicit list of gate-owning project ids.
+- **L10 — C5 pins the invocation's shape, not that nothing replaces it.** Every `moon ci` line in
+  `ci.yml` must hand over the whole array, but nothing asserts that the *step* still runs, or that
+  some other command has not been added alongside it that does the real work. The workflow's own
+  structure — `if` branches, `continue-on-error`, a step-level `if: false` — is outside this gate;
+  `repo:actionlint` is the gate that reads workflow structure.
+- **L11 — `internal: true` is a second way to switch a gate off, and C1 is blind to it.** Per E3,
+  `moon query tasks` omits an internal task entirely, so the forward comparison never considers it
+  and reports nothing. C2 catches the resulting dead `T` entry, but only incidentally — the entry is
+  reported as unresolvable, not as "someone made this gate internal". A gate turned internal *and*
+  removed from `T` in the same commit passes everything.
 
 ## 7. Acceptance criteria
 
@@ -362,3 +445,21 @@ a resolved-inputs check.
 Not folded in: a fourth check asserting every `repo` task's inputs match ≥1 tracked file. Real and
 uncovered, but an inputs assertion rather than a wiring one, and materially wider than this issue —
 recorded as L3 with a follow-up instead.
+
+## 9. Changelog — final whole-branch review (2026-08-19)
+
+Folded in: C5, after the review showed C1-C4 assert `T`'s contents and never that `T` is what
+`moon ci` is handed — a subsetted expansion passed all four plus `assert_include_relations`;
+`_eligibility()` extracted from `moon_tasks()` so all three `MoonOutputError` raises are driven by
+fixtures, since §5's table claimed an rc-2 control that did not exist; a stale-`T_EXEMPT` row; a
+missing input file reclassified from rc 2 to rc 1 (D2); colon-prefixed target rows in the failure
+output, so a row reads as what the fix line tells you to type; the reason string in `T_EXEMPT` now
+required to name where the exempted task runs instead; D12's `\s`-vs-`[ \t]` rationale corrected
+(it was false — the real divergence is CRLF); the `run_suite` ordering comment corrected in both
+`run.sh` and the plan (`run_case`, `run_task_case` and `assert_cargo_moon_parity` can all abort the
+same way); E3 extended with the measured `internal: true` behaviour; L6 extended with the
+`:affected-smoke` self-reference; L9-L11 added.
+
+Not folded in — recorded instead: closing L6's `:affected-smoke` case, which needs an assertion in
+an independently-scheduled gate (`repo:actionlint` is the natural host); widening C1 past the
+`repo` project (L9); asserting `internal: true` directly (L11).

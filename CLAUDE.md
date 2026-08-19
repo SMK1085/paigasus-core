@@ -63,7 +63,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (e.g. `:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
   new crates/deps/proto, run the full graph like CI does. The command between the markers below is
   gated against `ci.yml`'s `T=(…)` array by `repo:affected-smoke` — keep the two identical, and do
-  not remove the markers (SMA-541):
+  not remove **or quote** the markers: a second copy of either one anywhere in this file, even
+  inside backticks in prose, makes the count 2 and reds the gate (SMA-541):
   <!-- ci-targets:begin -->
   `moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking
   :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free

@@ -73,16 +73,24 @@ It also runs several checks that the per-case project sets structurally **cannot
   entry resolves to a CI-eligible task somewhere in the graph; **C3** CLAUDE.md's marker-delimited
   command mirrors `T` token-for-token in order and keeps its `--base origin/main
   --include-relations` tail; **C4** both of this gate's own call sites are still present in
-  `run.sh`. `moon ci` exits **0** on a target that resolves to nothing — measured, including the
-  mixed case — so without C2 a renamed or mistyped entry is a silent no-op on every PR. Standalone
-  cost is ~2.5s wall-clock (measured, mostly `moon query` subprocess startup, not CPU) — cheap
-  enough to run inline inside `repo:affected-smoke` rather than justify a dedicated Moon task.
+  `run.sh`; **C5** every `moon ci` invocation in `ci.yml` is handed the WHOLE array, verbatim —
+  C1-C4 assert what is *in* `T`, and a subsetted `"${T[@]:0:5}"` leaves all four green while
+  switching most of the graph off. `moon ci` exits **0** on a target that resolves to nothing —
+  measured, including the mixed case — so without C2 a renamed or mistyped entry is a silent no-op
+  on every PR. Standalone cost is ~2.5s wall-clock (measured, mostly `moon query` subprocess
+  startup, not CPU) — cheap enough to run inline inside `repo:affected-smoke` rather than justify a
+  dedicated Moon task.
 
   Maintenance: adding a `repo:*` task means adding `:<name>` to `T` **and** to the command between
   `<!-- ci-targets:begin -->` / `<!-- ci-targets:end -->` in CLAUDE.md. A task that must stay out of
-  `T` goes in `T_EXEMPT` with a required non-empty reason — `runInCI: false` is not a general
-  escape, because Moon then also drops the task from `moon run` under `CI=true` (`ts/moon.yml`).
-  `REQUIRED_REPO_TASKS` is the floor that stops the comparison degrading to two empty sets.
+  `T` goes in `T_EXEMPT` with a required non-empty reason naming where it runs instead — an entry
+  matching no `repo` task is itself reported, so exemptions cannot outlive their tasks.
+  `runInCI: false` is not a general escape, because Moon then also drops the task from `moon run`
+  under `CI=true` (`ts/moon.yml`). `REQUIRED_REPO_TASKS` is the floor that stops the comparison
+  degrading to two empty sets. **`:affected-smoke` is load-bearing for every assertion in this
+  file**: this gate runs *inside* it, so removing that one entry from `T` (and from CLAUDE.md)
+  passes C1-C5 by never executing them, and takes the eight cascade cases, A1-A5 and
+  `assert_include_relations` with it. Never exempt or drop it — see the design doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
   design doc's L3.
 

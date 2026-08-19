@@ -274,8 +274,9 @@ run_suite() {
   assert_include_relations || SUITE_RC=1
   # LAST deliberately: assert_ci_targets can exit 2 on a broken `moon query`, and an rc-2 abort
   # kills the script — so anything ordered after it would lose its diagnostics on exactly the
-  # runs where they are most useful. assert_cargo_moon_parity can abort the same way, which is
-  # harmless only because it already runs first (SMA-541 D2).
+  # runs where they are most useful. `run_case`, `run_task_case` and `assert_cargo_moon_parity`
+  # can all abort this way too, so ordering does NOT make the suite abort-proof; putting
+  # assert_ci_targets last simply means its own abort costs nothing (SMA-541 D2).
   assert_ci_targets || SUITE_RC=1
   return "$SUITE_RC"
 }
@@ -303,7 +304,7 @@ if [ "$NEGATIVE" = 1 ]; then
   # 3) the parity gate must fire on synthetic violations of each of its three assertions — a gate
   #    that can pass vacuously reproduces the very bug it exists to prevent (SMA-524 D6).
   python3 "$HERE/cargo_moon_parity.py" --self-test || NEG_RC=1
-  # 4) the ci-target coverage gate must fire on synthetic violations of each of its four checks —
+  # 4) the ci-target coverage gate must fire on synthetic violations of each of its five checks —
   #    including its two hand-rolled parsers, which are the part it cannot self-detect a fault in.
   python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
   if [ "$NEG_RC" = 0 ]; then

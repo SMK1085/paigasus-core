@@ -291,7 +291,8 @@ with — note the illustrative list now leads with `e.g.` and sits **outside** t
   (e.g. `:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
   new crates/deps/proto, run the full graph like CI does. The command between the markers below is
   gated against `ci.yml`'s `T=(…)` array by `repo:affected-smoke` — keep the two identical, and do
-  not remove the markers (SMA-541):
+  not remove **or quote** the markers: a second copy of either one anywhere in this file, even
+  inside backticks in prose, makes the count 2 and reds the gate (SMA-541):
   <!-- ci-targets:begin -->
   `moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking
   :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free
@@ -989,8 +990,9 @@ Replace with:
   assert_include_relations || SUITE_RC=1
   # LAST deliberately: assert_ci_targets can exit 2 on a broken `moon query`, and an rc-2 abort
   # kills the script — so anything ordered after it would lose its diagnostics on exactly the
-  # runs where they are most useful. assert_cargo_moon_parity can abort the same way, which is
-  # harmless only because it already runs first (SMA-541 D2).
+  # runs where they are most useful. `run_case`, `run_task_case` and `assert_cargo_moon_parity`
+  # can all abort this way too, so ordering does NOT make the suite abort-proof; putting
+  # assert_ci_targets last simply means its own abort costs nothing (SMA-541 D2).
   assert_ci_targets || SUITE_RC=1
   return "$SUITE_RC"
 ```
@@ -1006,7 +1008,7 @@ Find, in the `--negative-control` block:
 and add directly beneath it:
 
 ```bash
-  # 4) the ci-target coverage gate must fire on synthetic violations of each of its four checks —
+  # 4) the ci-target coverage gate must fire on synthetic violations of each of its five checks —
   #    including its two hand-rolled parsers, which are the part it cannot self-detect a fault in.
   python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
 ```

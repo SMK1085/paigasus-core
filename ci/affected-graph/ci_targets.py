@@ -56,9 +56,13 @@ INFRA_ERRORS = (
 # C1 would still pass while C2 never saw the appended entries.
 T_ASSIGN_RE = re.compile(r"^[ \t]*T[ \t]*\+?=", re.MULTILINE)
 
-# The canonical single-line array. `[ \t]*$` and NOT `\s*$`: in Python `\s` matches newlines, so
-# `\)\s*$` can consume one and anchor at a later line's end, quietly accepting a multi-line array
-# the rest of this parser is not written for.
+# The canonical single-line array. `[ \t]*$` rather than `\s*$` is DEFENSIVE, not load-bearing:
+# `(.*?)` cannot cross a newline without re.DOTALL, so `\s*$` would not in fact accept a multi-line
+# array either. The one behaviour the stricter anchor really changes is CRLF — on a checkout with
+# CRLF endings (this repo ships no .gitattributes) `T=(…)\r\n` matches `\s*$` but NOT `[ \t]*$`, so
+# the gate reds with the "must stay on one line" message, which is misleading but red rather than
+# silently unexamined. Kept as-is: the alternative to a misleading red is a parser that has to
+# reason about line endings.
 T_ARRAY_RE = re.compile(r"^[ \t]*T=\((.*?)\)[ \t]*$", re.MULTILINE)
 
 # The literal invocation `T` must actually be fed to. C1-C3 assert the array's CONTENTS; nothing
@@ -97,6 +101,10 @@ MARKER_END = "<!-- ci-targets:end -->"
 #
 # An entry is a RECORDED DECISION, not a silent exemption: the reason string is required and a
 # blank one is itself an assertion failure, mirroring cargo_moon_parity.py's ALLOW_NO_CARGO_BACKING.
+# The reason must NAME WHERE THE TASK RUNS INSTEAD — the workflow file and step, or the job — not
+# merely why it is out of `T`. Nothing here asserts an exempted task is invoked anywhere at all, so
+# an exemption reopens this gate's own problem statement for that one task by construction, and the
+# reason string is the only record a reviewer can check it against.
 T_EXEMPT = {}
 
 # The floor. C1 compares two derived sets, and two EMPTY sets compare equal — so a project-id
