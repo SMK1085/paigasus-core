@@ -254,15 +254,25 @@ mitigation, not a closure — deleting the `assert_ci_targets` call removes C4 a
   the first divergence by position and prints both lists.
 - **C4 — self-invocation (D13).** `run.sh` contains both the `assert_ci_targets` call and the
   `--self-test` call.
-- **C5 — invocation shape.** Every `moon ci` invocation in `ci.yml` is handed the whole array,
-  verbatim (`moon ci "${T[@]}"`). C1-C4 assert `T`'s *contents*; none of them asserts `T` is what
+- **C5 — invocation shape.** Every `moon ci` invocation in `ci.yml` is handed the whole array
+  (`"${T[@]}"` appears on the line). C1-C4 assert `T`'s *contents*; none of them asserts `T` is what
   `moon ci` actually receives. Rewriting the call to `moon ci "${T[@]:0:5}"` keeps `T` perfectly
-  correct, keeps `assert_include_relations` matching (its grep is `moon ci +"`) with its flag
-  intact, and switches eighteen gates off — all green. Checked per LINE, because `ci.yml` carries
-  two invocations (the PR path and the push path) and a whole-file substring test would pass with
-  the PR one — the one every gate actually runs under — subsetted. `assert_include_relations` is
-  deliberately **not** narrowed to do this job instead: its contract is "every `moon ci` invocation
-  carries the flag", and narrowing it would blind it to a future second invocation.
+  correct, keeps `assert_include_relations` matching with its flag intact, and switches eighteen
+  gates off — all green. Checked per LINE, because `ci.yml` carries two invocations (the PR path and
+  the push path) and a whole-file substring test would pass with the PR one — the one every gate
+  actually runs under — subsetted. `assert_include_relations` is deliberately **not** narrowed to do
+  this job instead: its contract is "every `moon ci` invocation carries the flag", and narrowing it
+  would blind it to a future second invocation.
+
+  **The line matcher is deliberately broader than that grep** *(corrected after the CodeRabbit CLI
+  review; the first version mirrored `moon ci +"` so the two checks would "agree on what they are
+  looking at")*. That agreement was a shared **blind spot**: `moon ci +"` requires the quote to
+  follow `moon ci` immediately, so moving a flag in front —
+  `moon ci --base origin/main "${T[@]:0:5}" --include-relations` — was seen by **neither** check
+  (measured). C5 now matches the command and excludes only `#` comments and `name:` fields, which is
+  all the quote ever bought. It requires the expansion **anywhere on the line** rather than the
+  contiguous `moon ci "${T[@]}"` form, since argument order is not the property worth pinning and
+  contiguity would red a correct `moon ci --base origin/main "${T[@]}"` — both directions fixtured.
 
 **Anti-vacuity floors**, all rc 1 unless noted:
 

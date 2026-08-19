@@ -73,9 +73,11 @@ It also runs several checks that the per-case project sets structurally **cannot
   entry resolves to a CI-eligible task somewhere in the graph; **C3** CLAUDE.md's marker-delimited
   command mirrors `T` token-for-token in order and keeps its `--base origin/main
   --include-relations` tail; **C4** both of this gate's own call sites are still present in
-  `run.sh`; **C5** every `moon ci` invocation in `ci.yml` is handed the WHOLE array, verbatim —
+  `run.sh`; **C5** every `moon ci` invocation in `ci.yml` is handed the WHOLE array —
   C1-C4 assert what is *in* `T`, and a subsetted `"${T[@]:0:5}"` leaves all four green while
-  switching most of the graph off. `moon ci` exits **0** on a target that resolves to nothing —
+  switching most of the graph off. C5's line matcher is deliberately BROADER than
+  `assert_include_relations`' `moon ci +"` grep: mirroring it left both blind to a subsetted array
+  behind a leading flag (`moon ci --base origin/main "${T[@]:0:5}"`). `moon ci` exits **0** on a target that resolves to nothing —
   measured, including the mixed case — so without C2 a renamed or mistyped entry is a silent no-op
   on every PR. Standalone cost is ~2.5s wall-clock (measured, mostly `moon query` subprocess
   startup, not CPU) — cheap enough to run inline inside `repo:affected-smoke` rather than justify a

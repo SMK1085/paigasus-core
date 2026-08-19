@@ -73,12 +73,34 @@ T_ARRAY_RE = re.compile(r"^[ \t]*T=\((.*?)\)[ \t]*$", re.MULTILINE)
 # invocation carries the flag", so narrowing it would blind it to a future second invocation.
 MOON_CI_INVOCATION = 'moon ci "${T[@]}"'
 
-# Which lines count as an invocation, matching assert_include_relations' `moon ci +"` (run.sh:126)
-# so the two agree on what they are looking at: a quote after the spaces excludes the step `name:`
-# field and the comments that also read "moon ci". Checked per LINE, not once over the whole file,
-# because ci.yml carries TWO invocations (the PR path and the push path) — a whole-file substring
-# test would pass with the PR one, the one every gate actually runs under, subsetted.
-MOON_CI_LINE_RE = re.compile(r"^.*moon ci +\".*$", re.MULTILINE)
+# What each invocation must actually HAND OVER. Checked instead of the contiguous
+# MOON_CI_INVOCATION form above, which is kept only for the fix message: requiring contiguity
+# would red `moon ci --base origin/main "${T[@]}"`, which is correct — argument order is not
+# the property worth pinning, passing the whole array is.
+T_ARRAY_EXPANSION = '"${T[@]}"'
+
+# Which lines count as an invocation. Checked per LINE, not once over the whole file, because
+# ci.yml carries TWO invocations (the PR path and the push path) — a whole-file substring test
+# would pass with the PR one, the one every gate actually runs under, subsetted.
+#
+# This is DELIBERATELY BROADER than assert_include_relations' `moon ci +"` grep (run.sh:126), which
+# an earlier version of this constant mirrored so the two would "agree on what they are looking
+# at". That agreement was a shared BLIND SPOT, not a feature: `moon ci +"` requires the quote to
+# follow `moon ci` immediately, so simply putting a flag first —
+#
+#     moon ci --base origin/main "${T[@]:0:5}" --include-relations
+#
+# — is seen by NEITHER check. The array is subsetted, eighteen gates stop running, C1/C2/C3 stay
+# green because `T` itself is still correct, and the flag grep matches nothing so it does not red
+# either (measured; CodeRabbit CLI). Matching the command rather than its first argument closes it.
+#
+# The two exclusions are what the quote used to buy: `#` drops the six prose comments in ci.yml
+# that discuss `moon ci`, and `name:` drops the job and step title fields (`name: moon ci`), which
+# must keep saying that — the `CI / moon ci` required status check is keyed on it. Verified against
+# the real ci.yml: this matches the same two invocation lines the old pattern did, and nothing else.
+MOON_CI_LINE_RE = re.compile(
+    r"^(?![ \t]*#)(?![ \t]*-?[ \t]*name:).*\bmoon ci\b.*$", re.MULTILINE
+)
 
 # The docs command is delimited EXPLICITLY, not recognised by prose shape. Prose-shape matching was
 # fragile in both directions against ordinary doc edits: converting the command to a fenced code
@@ -384,19 +406,24 @@ def check_invocation(ci_yml_text):
     only incidentally: it leaves an empty `then`/`elif` branch in ci.yml's shell block, which bash
     itself rejects — not because either gate caught it.
 
-    EVERY matched line must carry the exact expansion, not merely one of them: a future second
+    EVERY matched line must carry the expansion, not merely one of them: a future second
     `moon ci` reading a different array reds here and the author extends this gate deliberately,
     the same default-deny stance D10 takes on a project-scoped `T` entry.
+
+    What is required is `T_ARRAY_EXPANSION` ANYWHERE on the line, not the contiguous
+    `MOON_CI_INVOCATION` form. Argument ORDER is not the property worth pinning — handing over the
+    whole array is — and requiring contiguity reds a perfectly correct
+    `moon ci --base origin/main "${T[@]}"`. Both fixtures are kept below so the distinction cannot
+    quietly regress in either direction.
     """
-    rows = [
-        line.strip()
-        for line in MOON_CI_LINE_RE.findall(ci_yml_text)
-        if MOON_CI_INVOCATION not in line
-    ]
-    if MOON_CI_INVOCATION not in ci_yml_text:
-        # Zero good invocations. Reported separately because the rows above are DERIVED from the
-        # matched lines, so they are silent when there is no `moon ci "` line left to match.
-        rows.append(f"(no `{MOON_CI_INVOCATION}` invocation anywhere in the file)")
+    lines = MOON_CI_LINE_RE.findall(ci_yml_text)
+    rows = [line.strip() for line in lines if T_ARRAY_EXPANSION not in line]
+    if not any(T_ARRAY_EXPANSION in line for line in lines):
+        # No invocation hands over the array at all — including the case where there is no `moon
+        # ci` line left to match, where `rows` above is silent because it is DERIVED from them.
+        # Keyed on the matched lines rather than the whole file so a canonical invocation quoted
+        # inside a COMMENT cannot satisfy it.
+        rows.append(f"(no `moon ci` invocation passes the whole `{T_ARRAY_EXPANSION}` array)")
     return rows
 
 
@@ -633,6 +660,28 @@ def self_test():
         failures.append("check_invocation: missed an unquoted `$T` expansion")
     if not check_invocation(invoked.replace('moon ci "${T[@]}"', "moon ci :build")):
         failures.append("check_invocation: missed a `moon ci` that bypasses `T` entirely")
+    # Flag FIRST, array subsetted after it. The old `moon ci +"` shape — shared with
+    # assert_include_relations — matched neither this line nor anything else, so the file-wide
+    # fallback was satisfied by the sibling invocation and the whole thing passed (CodeRabbit CLI).
+    reordered = invoked.replace(
+        'moon ci "${T[@]}" --base origin/main',
+        'moon ci --base origin/main "${T[@]:0:5}"',
+    )
+    if not check_invocation(reordered):
+        failures.append("check_invocation: missed a subsetted array behind a leading flag")
+    # ...and the same shape with the array INTACT must stay clean, so the fix above did not simply
+    # start rejecting every line that fails to put the array first.
+    if check_invocation(
+        invoked.replace('moon ci "${T[@]}" --base origin/main', 'moon ci --base origin/main "${T[@]}"')
+    ):
+        failures.append("check_invocation: fired on a reordered but CANONICAL invocation")
+    # A prose comment and the step `name:` field both mention `moon ci` in the real ci.yml and must
+    # not be mistaken for invocations — that exclusion is all the old quote-gate actually bought.
+    if check_invocation(
+        invoked + "          # `moon ci` is affected-only, so a PR touching no Rust never rebuilds\n"
+        "      - name: moon ci (affected graph)\n"
+    ):
+        failures.append("check_invocation: fired on a comment or a `name:` field")
 
     # A DELETED input file is an authorial mistake (rc 1), not a broken tool (rc 2). Driven with
     # stubs rather than real paths so the control needs no filesystem state at all.
