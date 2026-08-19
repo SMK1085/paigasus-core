@@ -1102,10 +1102,34 @@ origin_has() {
 }
 
 # A sample of what DOES exist, for the unresolved message. A bare "did not resolve" is the same
-# unhelpful-message problem the canary exists to avoid, one level down.
+# unhelpful-message problem the canary exists to avoid, one level down. $1, if given, is the
+# unresolved entry itself.
+#
+# Two failure modes of a naive `head -8` on ORIGIN_REFS, fixed here:
+#   - An empty ref list: `printf '%s\n' ""` emits a blank line, so a bare `head -8 | tr '\n' ' '`
+#     would return a single space and the message would read "include: ." — printf '(none)'
+#     instead, so an empty cache reads as empty, not as a truncated list.
+#   - `head -8` on an alphabetically-sorted ORIGIN_REFS can, in a repo with many branches, omit
+#     'main' — the one name a reader chasing an unresolved entry most needs to see — and has no
+#     reason to prefer a near-match over an arbitrary alphabetical one. Ranked instead: 'main'
+#     first (group 0), then anything sharing the entry's slash-prefix (group 1, the likeliest
+#     near-match for a typo like 'release/1.x' vs 'release/1.0'), then everything else (group 2);
+#     alphabetical within each group; capped at 8 total.
 origin_candidates() {
+  local entry="${1:-}" prefix
   load_origin_refs
-  printf '%s\n' "$ORIGIN_REFS" | head -8 | tr '\n' ' '
+  [ -n "$ORIGIN_REFS" ] || { printf '(none)'; return; }
+
+  case "$entry" in
+    */*) prefix="${entry%%/*}/" ;;
+    *) prefix='' ;;
+  esac
+
+  printf '%s\n' "$ORIGIN_REFS" | awk -v prefix="$prefix" '
+    $0 == "main"                           { print "0\t" $0; next }
+    prefix != "" && index($0, prefix) == 1 { print "1\t" $0; next }
+                                            { print "2\t" $0 }
+  ' | sort -t $'\t' -k1,1 -k2,2 | cut -f2- | head -8 | tr '\n' ' ' | sed 's/ *$//'
 }
 
 # Exits 2. MAIN SHELL ONLY — called from the production call site and from
@@ -1775,21 +1799,49 @@ for wf in "${WORKFLOW_FILES[@]}"; do
           *)
             infra "unhandled pattern verdict '$verdict' for '$p' in $wf" ;;
         esac ;;
+      BRANCH)
+        b="$f1"; bline="$f2"
+        case "$verdict" in
+          unverifiable)
+            fail "$wf:$bline: branches entry '$b' contains a glob metacharacter ('*', '?', '+' or
+      '[]'), so it names a pattern rather than a branch and cannot be resolved against a ref.
+      Rewrite it as a literal branch name, or add it to BRANCH_SKIP in $0 with a justification
+      saying what verifies it instead." ;;
+          invalid-name)
+            fail "$wf:$bline: branches entry '$b' is not a legal git branch name — git
+      check-ref-format rejects it. No branch can ever carry that name, so the trigger it guards is
+      dead." ;;
+          unresolved)
+            fail "$wf:$bline: branches entry '$b' does not resolve as refs/remotes/origin/$b. The
+      trigger it guards is (or will become) dead — GitHub reports nothing when a branch filter
+      matches nothing. This checkout's view of origin can be stale — verdicts read .git state,
+      which sits outside Moon's input hash — so run 'git fetch --prune origin' before concluding
+      this is a typo. Existing branches include: $(origin_candidates "$b"). If the branch does not
+      exist yet, add '$b' to BRANCH_SKIP in $0 with a justification." ;;
+          no-origin-main)
+            no_origin_main_infra ;;
+          *)
+            infra "unhandled branch verdict '$verdict' for '$b' in $wf" ;;
+        esac ;;
       KEY)
         case "$verdict" in
           no-items)
             fail "$wf:$f2: '$f1:' has no sequence entries this gate could read. Two forms produce
-      that and neither is parsed: an inline sequence (paths: [a, b]) and a flow mapping on the
-      event itself (push: { paths: [a, b] }). Rewrite the event and its filter in block style —
+      that and neither is parsed: an inline sequence ($f1: [a, b]) and a flow mapping on the
+      event itself (push: { $f1: [a, b] }). Rewrite the event and its filter in block style —
       skipping either one silently is exactly the failure this gate exists to prevent." ;;
           all-negated)
-            fail "$wf:$f2: 'paths:' has $f3 entries but every one is a '!'-negated
-      exclusion. GitHub includes a changed file only when it matches at least one POSITIVE
-      pattern, so this filter can never match anything and the trigger it guards is dead. Add at
-      least one non-'!' pattern." ;;
+            fail "$wf:$f2: '$f1:' has $f3 entries but every one is a '!'-negated exclusion. GitHub
+      requires at least one non-'!' entry — a filter made only of exclusions can never match, so
+      the trigger it guards is dead. Add at least one positive entry." ;;
           *)
             infra "unhandled key verdict '$verdict' in $wf" ;;
         esac ;;
+      *)
+        # A finding record whose type nothing handles must not read as "nothing to report" —
+        # that is the silent pass this whole gate exists to prevent, one layer up. Before
+        # SMA-540 added BRANCH, an unknown record type fell out of this case with no action.
+        infra "unhandled finding record type '$rec' in $wf" ;;
     esac
   done <<< "$findings"
 done
