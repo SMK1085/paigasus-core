@@ -17,8 +17,47 @@ use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use tokio::task::JoinSet;
 
+/// Dispatch before any runtime is built. `healthcheck` is what the image's `HEALTHCHECK` runs:
+/// the images are shell-less, so the binary probes itself (SMA-500 D4).
+///
+/// Exit codes: 0 healthy, 1 unhealthy, 2 usage error.
+fn main() -> std::process::ExitCode {
+    match paigasus_observability::health::dispatch(std::env::args().skip(1)) {
+        Ok(paigasus_observability::health::Mode::Serve) => match serve() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Error: {error:?}");
+                std::process::ExitCode::FAILURE
+            }
+        },
+        Ok(paigasus_observability::health::Mode::Healthcheck { path }) => healthcheck(&path),
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::ExitCode::from(2)
+        }
+    }
+}
+
+/// `load()` but deliberately NOT `validate()`: the probe needs only `http_addr`, and
+/// `IamConfig::validate` rejects a config with no configured issuers — which would fail the
+/// healthcheck for a reason that has nothing to do with health.
+///
+/// The error text is never printed. Docker retains the last five health-check outputs in
+/// `State.Health.Log`, and a `figment::Error` names config keys and can carry values from the
+/// `IAM_*` env layer.
+fn healthcheck(path: &str) -> std::process::ExitCode {
+    let Ok(config) = IamConfig::load() else {
+        eprintln!("healthcheck: config load failed");
+        return std::process::ExitCode::FAILURE;
+    };
+    match paigasus_observability::health::probe(config.http_addr, path, std::time::Duration::from_secs(2)) {
+        Ok(true) => std::process::ExitCode::SUCCESS,
+        Ok(false) | Err(_) => std::process::ExitCode::FAILURE,
+    }
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn serve() -> anyhow::Result<()> {
     let config = IamConfig::load()?;
     config.validate().map_err(|e| anyhow::anyhow!(e))?;
     paigasus_logging::init("paigasus-iam", &config.log_level);
