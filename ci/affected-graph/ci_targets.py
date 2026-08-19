@@ -414,6 +414,23 @@ def check_docs(t_targets, doc_targets, region):
     return problems
 
 
+def _strip_comment(line):
+    """`line` with any trailing shell comment removed, for the expansion check only.
+
+    A comment on the invocation line otherwise satisfies that check while the command runs
+    something else entirely (measured):
+
+        moon ci "${T[@]:0:5}" --base origin/main --include-relations  # restore "${T[@]}" later
+
+    Cuts at the first `#` preceded by whitespace or line start. That is NOT shell-aware — a `#`
+    inside a quoted argument truncates early — but the error direction is safe by construction:
+    truncating only REMOVES text, so it can turn a clean line into a reported one (a false red the
+    author can see and fix), never a violating line into a clean one.
+    """
+    m = re.search(r"(?:^|[ \t])#", line)
+    return line[: m.start()] if m else line
+
+
 def check_invocation(ci_yml_text):
     """`moon ci` invocations in ci.yml that do not hand it the whole `T` array.
 
@@ -440,7 +457,7 @@ def check_invocation(ci_yml_text):
     quietly regress in either direction.
     """
     lines = MOON_CI_LINE_RE.findall(ci_yml_text)
-    rows = [line.strip() for line in lines if T_ARRAY_EXPANSION not in line]
+    rows = [line.strip() for line in lines if T_ARRAY_EXPANSION not in _strip_comment(line)]
     if len(lines) != EXPECTED_MOON_CI_INVOCATIONS:
         # The count floor. `rows` is DERIVED from the matched lines, so it is silent about a line
         # the regex never matched — which is exactly how `echo moon ci …` slipped through before.
@@ -721,6 +738,22 @@ def self_test():
         invoked.replace('moon ci "${T[@]}" --base origin/main', 'moon    ci "${T[@]}" --base origin/main')
     ):
         failures.append("check_invocation: fired on multiple spaces with the array intact")
+    # A trailing comment carrying the expansion must not satisfy the per-line check while the
+    # command itself runs a subset (CodeRabbit round 4).
+    commented_subset = invoked.replace(
+        'moon ci "${T[@]}" --base origin/main --include-relations',
+        'moon ci "${T[@]:0:5}" --base origin/main --include-relations  # restore "${T[@]}" later',
+    )
+    if not check_invocation(commented_subset):
+        failures.append("check_invocation: let a trailing comment satisfy the expansion check")
+    # ...and a trailing comment on an otherwise CORRECT line must stay clean, so comment-stripping
+    # is not simply rejecting every commented invocation.
+    commented_ok = invoked.replace(
+        'moon ci "${T[@]}" --base origin/main --include-relations',
+        'moon ci "${T[@]}" --base origin/main --include-relations  # PR path',
+    )
+    if check_invocation(commented_ok):
+        failures.append("check_invocation: fired on a correct invocation carrying a comment")
     # ...and the same shape with the array INTACT must stay clean, so the fix above did not simply
     # start rejecting every line that fails to put the array first.
     if check_invocation(
