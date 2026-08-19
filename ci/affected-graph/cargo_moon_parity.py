@@ -111,6 +111,12 @@ UPSTREAM_INPUT_TASKS = ("build", "test", "lint")
 # Consumer -> upstream pairs deliberately declared in `fileGroups.upstreams` WITHOUT being in the
 # crate's Moon closure. A6 is strict-equality (SMA-429's default-deny model), so an intentional
 # over-approximation needs an entry here with a non-empty reason. Empty today.
+#
+# MIND THE KEY SHAPE: it is (moon id, upstream SOURCE DIR) — e.g.
+# ("paigasus-iam-rs", "rs/crates/libs/paigasus-kernel") — NOT the (moon id, moon id) shape
+# ALLOW_NO_CARGO_BACKING uses twelve lines above. A6 recovers the upstream half by stripping the
+# suffix off a resolved input path, and a moon id never appears in one. A waiver written in the
+# neighbouring shape is silently inert.
 ALLOW_OVER_APPROXIMATION = {}
 
 # A6's anti-vacuity floor, mirroring REQUIRED_FFI_TASKS. A6 DERIVES each crate's closure from
@@ -120,6 +126,11 @@ REQUIRED_CLOSURE_EDGES = {
     "paigasus-iam-rs": {"paigasus-kernel-rs", "paigasus-proto-rs"},
     "paigasus-kernel-parity-rs": {"paigasus-kernel-rs"},
 }
+
+# "moon reported no such task key at all", distinct from both None and []. A unique object, never a
+# string: a string default flows into `set(declared or [])` and is iterated CHARACTER-WISE, turning
+# a half-reported task into eight bogus single-letter entries instead of one honest violation.
+_ABSENT = object()
 
 
 def _allowlisted(allow, consumer, upstream):
@@ -261,7 +272,7 @@ def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASK
     return a5
 
 
-def rust_closure(projects, pid, seen=None):
+def rust_closure(projects, pid, seen=None, origin=None):
     """Transitive dependsOn closure of `pid`, restricted to Rust projects.
 
     Restricted because Moon injects non-Rust build-scope parents into `dependencies`: `contracts`
@@ -271,15 +282,22 @@ def rust_closure(projects, pid, seen=None):
 
     Transitive, not direct: affectedness does NOT propagate through `^:build` (SMA-528 F1), so with
     A -> B -> C an edit to C would otherwise reach B and stop.
+
+    `origin` is the crate the walk started from and is excluded at EVERY depth, not just the first.
+    Comparing against `pid` instead would only skip a direct self-edge: in a cycle A -> B -> A the
+    walk from A would return {B, A}, putting A's own pair in `want` while `observed` deliberately
+    excludes it — an `inputs omit <own>/src/**/*` row no declaration could ever satisfy. A self-edge
+    deeper in is already covered by `dep in seen`, since `seen` gains `dep` before the recursion.
     """
     seen = set() if seen is None else seen
+    origin = pid if origin is None else origin
     for dep in sorted((projects.get(pid) or {}).get("deps") or {}):
-        if dep == pid or dep in NON_CARGO_PARENTS or dep not in projects:
+        if dep == origin or dep in NON_CARGO_PARENTS or dep not in projects:
             continue
         if projects[dep].get("language") != "rust" or dep in seen:
             continue
         seen.add(dep)
-        rust_closure(projects, dep, seen)
+        rust_closure(projects, dep, seen, origin)
     return seen
 
 
@@ -301,10 +319,24 @@ def check_upstream_inputs(
     allow = ALLOW_OVER_APPROXIMATION if allow is None else allow
     a6 = []
 
-    # FLOOR first: if the derivation broke, every per-crate check below is vacuous.
+    # The crates the per-crate loop below will actually examine. Computed here because the floor
+    # has to assert MEMBERSHIP as well as derivation: `rust_closure` filters on each DEPENDENCY's
+    # language but never on the ROOT's, so a crate that stopped reporting `language: rust` — a moon
+    # toolchain reshuffle, a hand-edited `language:` — drops silently out of the loop while its
+    # closure still derives perfectly and the floor still passes.
+    examined = {pid for pid, proj in projects.items() if proj.get("language") == "rust"}
+
+    # FLOOR first: if the derivation broke, every per-crate check below is vacuous. Every row here
+    # is prefixed `FLOOR:` so the negative control can tell a floor failure from a per-crate one.
     for consumer, required in sorted((floor or {}).items()):
         if consumer not in projects:
-            a6.append(f"floor names {consumer}, which is not in the graph")
+            a6.append(f"FLOOR: {consumer} is not in the graph at all")
+            continue
+        if consumer not in examined:
+            a6.append(
+                f"FLOOR: {consumer} is not among the {len(examined)} crates A6 examines — it "
+                f"stopped reporting `language: rust`, so the per-crate loop skips it entirely"
+            )
             continue
         derived = rust_closure(projects, consumer)
         for upstream in sorted(set(required) - derived):
@@ -314,7 +346,7 @@ def check_upstream_inputs(
             )
 
     for pid, proj in sorted(projects.items()):
-        if proj.get("language") != "rust":
+        if pid not in examined:
             continue
         own = proj["source_dir"]
         want = set()
@@ -323,12 +355,19 @@ def check_upstream_inputs(
             want.add(f"{src}/src/**/*")
             want.add(f"{src}/Cargo.toml")
         for task in tasks:
-            declared_files = (proj.get("task_inputs") or {}).get(task, "absent")
-            declared_globs = (proj.get("task_input_globs") or {}).get(task, "absent")
-            if declared_files == "absent" and declared_globs == "absent":
+            declared_files = (proj.get("task_inputs") or {}).get(task, _ABSENT)
+            declared_globs = (proj.get("task_input_globs") or {}).get(task, _ABSENT)
+            if declared_files is _ABSENT and declared_globs is _ABSENT:
                 a6.append(f"{pid} has no `{task}` task (nothing can key on its upstreams)")
                 continue
-            if declared_files is None or declared_globs is None:
+            # One bucket present and the other missing entirely is moon half-reporting the task —
+            # folded in with the None case, since both mean "this assertion cannot be evaluated".
+            # Never fall through: `_ABSENT` in the union below would be a TypeError at best, and a
+            # string sentinel there would silently iterate character-wise.
+            if _ABSENT in (declared_files, declared_globs) or None in (
+                declared_files,
+                declared_globs,
+            ):
                 a6.append(
                     f"{pid}:{task} reported no inputFiles/inputGlobs — moon's output shape "
                     f"changed, so this assertion cannot be evaluated (treated as a violation, "
@@ -651,50 +690,122 @@ def self_test():
     # Independent of A1-A5 again — and uniquely unprotected elsewhere, because a crate's own
     # moon.yml is not an input to its own tasks, so a wrong `fileGroups.upstreams` reds nothing.
     #
-    # A6 clean baseline.
-    if check_upstream_inputs(ok, allow={}, floor={}):
-        failures.append(
-            f"clean fixture reported A6 violations: {check_upstream_inputs(ok, allow={}, floor={})}"
-        )
+    # EVERY control below matches a row KIND, never mere non-emptiness. A6 emits five distinct
+    # kinds and most mutations trip several at once, so a bare `if not check_upstream_inputs(...)`
+    # passes on a row from a DIFFERENT sub-assertion than the one it claims to prove. Measured, not
+    # theorised: with the floor's derivation rows deleted, the first draft of these controls still
+    # printed `all six assertions fire` and exited 0 — emptying `deps` also empties `want`, so the
+    # per-crate loop supplied six `inputs include ...` rows and the floor control read them as its
+    # own. Same discipline as A5's `unrelated-ts:build` case.
+    #
+    # A6 clean baseline — and it is a REAL control, not a smoke test. A6-a/A6-b below prove a row
+    # appears when the DECLARATION lacks an entry; only this proves no row appears when it has one.
+    # Neither alone pins a bucket: drop the `inputFiles` half of `resolved` entirely and A6-b still
+    # passes (its Cargo.toml row shows up for the wrong reason) while THIS reds, because the clean
+    # fixture declares that manifest in `inputFiles`. The pair is what holds both buckets wired.
+    rows = check_upstream_inputs(ok, allow={}, floor={})
+    if rows:
+        failures.append(f"clean fixture reported A6 violations: {rows}")
 
-    # A6-a: the GLOB half missing (upstream src not keyed on).
+    # A6-a: the GLOB half missing. Must name the upstream SRC entry on the task that lost it.
     broken = json.loads(json.dumps(ok))
     broken["a-rs"]["task_input_globs"]["test"] = []
-    if not check_upstream_inputs(broken, allow={}, floor={}):
+    if "a-rs:test inputs omit rs/crates/libs/b/src/**/*" not in check_upstream_inputs(
+        broken, allow={}, floor={}
+    ):
         failures.append("A6 did not fire on a missing upstream src glob")
 
     # A6-b: the MANIFEST half missing. This is the half an inputGlobs-only A6 could never see —
-    # the exact defect the pre-review draft of the SMA-528 spec shipped.
+    # the exact defect the pre-review draft of the SMA-528 spec shipped. Naming the entry pins
+    # WHICH row fired, so the control cannot be satisfied by an unrelated one. Note what it still
+    # cannot do alone: dropping the `inputFiles` bucket from `resolved` produces this same row, so
+    # A6-b passes and it is the CLEAN BASELINE above that reds. Do not weaken either one.
     broken = json.loads(json.dumps(ok))
     broken["a-rs"]["task_inputs"]["build"] = []
-    if not check_upstream_inputs(broken, allow={}, floor={}):
+    if "a-rs:build inputs omit rs/crates/libs/b/Cargo.toml" not in check_upstream_inputs(
+        broken, allow={}, floor={}
+    ):
         failures.append("A6 did not fire on a missing upstream Cargo.toml")
 
     # A6-c: over-approximation with no allowlist entry — the direction a subset check cannot see.
+    ghost = "rs/crates/libs/ghost/src/**/*"
     broken = json.loads(json.dumps(ok))
-    broken["a-rs"]["task_input_globs"]["lint"].append("rs/crates/libs/ghost/src/**/*")
-    if not check_upstream_inputs(broken, allow={}, floor={}):
+    broken["a-rs"]["task_input_globs"]["lint"].append(ghost)
+    if f"a-rs:lint inputs include {ghost}, which is not in its closure" not in (
+        check_upstream_inputs(broken, allow={}, floor={})
+    ):
         failures.append("A6 did not fire on an upstream outside the closure")
 
-    # A6-d: an allowlisted over-approximation must be accepted, and only WITH a reason.
+    # A6-d: an allowlisted over-approximation must be accepted, and only WITH a reason. `broken`
+    # carries exactly one defect, so a working allowlist empties the list outright.
     if check_upstream_inputs(
         broken, allow={("a-rs", "rs/crates/libs/ghost"): "deliberate"}, floor={}
     ):
         failures.append("A6 rejected an allowlisted over-approximation")
-    if not check_upstream_inputs(broken, allow={("a-rs", "rs/crates/libs/ghost"): ""}, floor={}):
+    if not any(
+        ghost in row
+        for row in check_upstream_inputs(
+            broken, allow={("a-rs", "rs/crates/libs/ghost"): ""}, floor={}
+        )
+    ):
         failures.append("A6 accepted an allowlist entry with an empty reason")
 
-    # A6-e: the FLOOR must fire when the derivation degrades to empty.
+    # A6-e: the FLOOR must fire when the derivation degrades to empty. Emptying `deps` also empties
+    # `want`, which makes the per-crate loop emit six `inputs include ...` rows all by itself — so
+    # this MUST match the `FLOOR:` prefix, or it passes with the entire floor block deleted.
     broken = json.loads(json.dumps(ok))
     broken["a-rs"]["deps"] = {}
-    if not check_upstream_inputs(broken, allow={}, floor={"a-rs": {"b-rs"}}):
+    if not any(
+        row.startswith("FLOOR:")
+        for row in check_upstream_inputs(broken, allow={}, floor={"a-rs": {"b-rs"}})
+    ):
         failures.append("A6 floor did not fire on a neutered closure derivation")
+
+    # The floor's OTHER half: a crate that stops reporting `language: rust` drops out of the
+    # per-crate loop entirely. Its closure still derives, so the derivation half of the floor is
+    # blind to it and the whole run goes green with that crate asserted about nothing.
+    broken = json.loads(json.dumps(ok))
+    broken["a-rs"]["language"] = "unknown"
+    if not any(
+        "A6 examines" in row
+        for row in check_upstream_inputs(broken, allow={}, floor={"a-rs": {"b-rs"}})
+    ):
+        failures.append("A6 floor did not fire on a crate that dropped out of the examined set")
 
     # A6-f: an absent inputGlobs key is an infra-shaped violation, never a silent skip.
     broken = json.loads(json.dumps(ok))
     broken["a-rs"]["task_input_globs"]["build"] = None
-    if not check_upstream_inputs(broken, allow={}, floor={}):
+    if not any(
+        "a-rs:build reported no inputFiles/inputGlobs" in row
+        for row in check_upstream_inputs(broken, allow={}, floor={})
+    ):
         failures.append("A6 did not fire on an absent inputGlobs key")
+
+    # ...and so is ONE bucket missing the task key while the other has it. Unreachable from
+    # moon_projects() today, which writes both keys together. With a STRING sentinel this fell
+    # through to `set("absent") | set(globs)`: the single letters are filtered out by the
+    # `rs/crates/` prefix test, so the visible symptom is not junk rows but a CONFIDENT WRONG one —
+    # `inputs omit .../Cargo.toml`, blaming the declaration for moon's half-report. Both halves are
+    # asserted: the honest row present, the misleading row absent.
+    broken = json.loads(json.dumps(ok))
+    del broken["a-rs"]["task_input_globs"]["build"]
+    rows = check_upstream_inputs(broken, allow={}, floor={})
+    if not any("a-rs:build reported no inputFiles/inputGlobs" in row for row in rows):
+        failures.append("A6 did not fire on a half-reported task (one bucket missing its key)")
+    if any(row.startswith("a-rs:build inputs omit") for row in rows):
+        failures.append("A6 blamed the declaration for a half-reported task")
+
+    # A CYCLE must not make a crate its own upstream. `rust_closure` excludes the ORIGIN at every
+    # depth; comparing against the current node instead would return {b-rs, a-rs} here, and `want`
+    # would demand a-rs's own pair that `observed` deliberately excludes — an unsatisfiable row.
+    broken = json.loads(json.dumps(ok))
+    broken["b-rs"]["deps"] = {"a-rs": "explicit"}
+    if any(
+        row.startswith("a-rs:") and "rs/crates/libs/a/" in row
+        for row in check_upstream_inputs(broken, allow={}, floor={})
+    ):
+        failures.append("A6 made a crate its own upstream on a dependency cycle")
+
 
     # A malformed Cargo.toml must surface as INFRA (rc 2), not as an assertion failure. Exercise the
     # whole chain on a throwaway workspace — parser raises, cargo_crates propagates, INFRA_ERRORS
