@@ -476,3 +476,30 @@ tasks:
     toolchain: 'system'
     inputs:
       - '**/*'
+
+  error-code-single-site:
+    description: 'Assert every file spelling a canonical error code is on a reviewed manifest, so a new emission site cannot ship without a registry membership test (SMA-507).'
+    # WHY `inputs: rs/crates/**/src/**/*.rs` AND NOT A NARROW LIST — this gate's whole job is to
+    # notice a NEW emission site in a NEW file. Narrow inputs would schedule it only when an
+    # already-listed file changed, so the one case it exists for would be the one case it never
+    # runs on. Cheap for the same reason repo:actionlint is: .moon/workspace.yml's
+    # hasher.ignorePatterns keeps gitignored trees out of the hash walk, and the check is a
+    # pure-python regex scan of ~200 files with no cargo invocation.
+    #
+    # `--self-test` runs FIRST and in the SAME script block, per repo:affected-smoke and
+    # repo:publish-metadata: a rotted checker must red rather than ship green. `set -euo pipefail`
+    # is REQUIRED — Moon does not enable errexit for `script:` blocks, so without it a failing
+    # --self-test would be masked by a passing --single-site.
+    #
+    # This gate does NOT guard code REMOVAL. It does not need to: both service crates declare
+    # `test: deps: ['^:build']` in their own moon.yml, so a contracts change already schedules
+    # paigasus-{iam,gateway}-rs:test and the membership tests run. See ci/error-registry/README.md.
+    script: |
+      set -euo pipefail
+      python3 ci/error-registry/check.py --self-test
+      python3 ci/error-registry/check.py --single-site
+    toolchain: 'system'
+    inputs:
+      - 'rs/crates/**/src/**/*.rs'
+      - 'contracts/proto/paigasus/common/v1/error.proto'
+      - 'ci/error-registry/**/*'

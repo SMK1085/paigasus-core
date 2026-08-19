@@ -212,7 +212,7 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          T=(:build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free :redis-connect-single-site :iam-docker-policy-single-site :promtool :observability-drift :nats-permissions :release-parity :release-parity-py :release-parity-ts :publish-metadata)
+          T=(:build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site :promtool :observability-drift :nats-permissions :release-parity :release-parity-py :release-parity-ts :publish-metadata)
           if [ "$EVENT" = "pull_request" ]; then
             moon ci "${T[@]}" --base origin/main --include-relations
           elif [ -n "${BEFORE:-}" ] && ! printf '%s' "$BEFORE" | grep -qE '^0+$'; then
