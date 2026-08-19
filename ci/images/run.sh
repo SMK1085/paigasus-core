@@ -45,8 +45,13 @@ assert_pins() {
     return 1
   fi
   # AC-2: nothing deployment-varying may be baked. Config reaches the container through
-  # IAM_*/GATEWAY_* env at RUNTIME only.
-  if grep -nE '^[[:space:]]*ENV[[:space:]]+(IAM_|GATEWAY_)' "$dockerfile"; then
+  # IAM_*/GATEWAY_* env at RUNTIME only. Join `\`-continued lines first: an ENV instruction can
+  # spread its assignments across multiple physical lines, and IAM_/GATEWAY_ can appear as the
+  # 2nd+ token on either the first or a continuation line, not only as the token right after
+  # `ENV` — a naive single-line "starts with ENV IAM_/GATEWAY_" match misses both.
+  local joined_env
+  joined_env="$(awk '/\\[[:space:]]*$/ { sub(/\\[[:space:]]*$/, " "); printf "%s", $0; next } { print }' "$dockerfile")"
+  if grep -nE '^[[:space:]]*ENV[[:space:]]+.*(IAM_|GATEWAY_)' <<<"$joined_env"; then
     echo "::error::rs/Dockerfile bakes service config into the image; configure at runtime via env instead." >&2
     return 1
   fi
@@ -61,8 +66,16 @@ build_one() {
   # --progress=plain so chisel's `Fetching pool/...` lines are capturable below: they name the
   # exact archive package versions this image resolved, which `chisel cut` re-resolves against
   # the LIVE archive on every build (SMA-500 limitation 2).
+  # --no-cache-filter=rootfs: the `rootfs` stage never references ARG BIN, so it is
+  # byte-identical between the iam and gateway builds — BuildKit would otherwise cache-hit it
+  # for whichever service builds SECOND in a `build all` run, leaving that service's manifest
+  # silently empty even on a stone-cold runner (SMA-500 fix-round 1). Forcing this one stage to
+  # always re-execute is what the comment above already assumed ("re-resolves ... on every
+  # build") and costs one small apt/chisel fetch, not a rebuild of the (cache-mounted) Rust
+  # compile.
   docker build \
     --progress=plain \
+    --no-cache-filter=rootfs \
     -f "$ROOT/rs/Dockerfile" \
     --build-arg "BIN=${crate}" \
     --label "org.opencontainers.image.title=${crate}" \
@@ -73,6 +86,14 @@ build_one() {
     -t "$tag" -t "${crate}:dev" \
     "$ROOT/rs" 2>&1 | tee "/tmp/paigasus-build-${service}.log"
   grep -oE 'Fetching pool/[^ ]+\.deb' "/tmp/paigasus-build-${service}.log" | sort -u > "$ROOT/chisel-manifest-${service}.txt" || true
+  # Defense in depth on top of --no-cache-filter=rootfs above: if the manifest is EVER empty
+  # (a future chisel version changing its log wording, buildkit changing --progress=plain
+  # formatting, etc.), fail loudly instead of shipping a 0-byte file that silently answers
+  # nothing when someone asks "which libc did this image ship?" (SMA-500 fix-round 1).
+  if [ ! -s "$ROOT/chisel-manifest-${service}.txt" ]; then
+    echo "::error::chisel-manifest-${service}.txt is empty; the package-fetch log format may have changed — update the grep pattern in ci/images/run.sh." >&2
+    return 1
+  fi
   echo "  built ${tag}"
 }
 
