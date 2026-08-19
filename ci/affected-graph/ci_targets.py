@@ -535,6 +535,9 @@ def check_self_invocation(run_sh_text, scripts):
 
 def check_gate_inputs(projects):
     """SMA-553 D13, mirrored. Rows for a self-scheduled gate whose own inputs have drifted."""
+    # Unlike _scripts(), no isinstance guard: main() runs _eligibility(raw_tasks) on this same
+    # payload first, which raises MoonOutputError on any non-dict project value before this is
+    # reached. Calling this standalone on malformed input will AttributeError.
     repo = projects.get("repo") or {}
     rows = []
     for task, expected in sorted(SELF_TASK_EXPECTED_GLOBS.items()):
@@ -543,6 +546,10 @@ def check_gate_inputs(projects):
             rows.append(f"repo:{task} is absent from the graph, so its inputs cannot be checked")
             continue
         # moon injects the workspace-config glob into EVERY task, so it is not authored drift.
+        # Hardcoded rather than imported from task_inputs.INJECTED_GLOB, which is the source of
+        # truth: these two gates stay independently runnable. Divergence fails SAFE — task_inputs'
+        # D4 composition guard raises rc 2 with the accurate message first, and the worst this
+        # copy can do is red with a misleading "authored inputs changed".
         got = tuple(g for g in sorted(entry.get("inputGlobs") or {})
                     if g != ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}")
         # moon resolves a LITERAL path in `inputs:` into inputFiles, not inputGlobs, so the
@@ -927,6 +934,10 @@ def self_test():
     # other's requirement, which a concatenated haystack would allow.
     if not check_self_invocation(wired_script, {"input-liveness": wired}):
         failures.append("check_self_invocation: accepted the two texts swapped")
+    # ...and the reverse direction, which the swap fixture above does not reach: script text must
+    # not satisfy a run.sh requirement either.
+    if not check_self_invocation(no_call, {"input-liveness": wired + wired_script}):
+        failures.append("check_self_invocation: a run.sh call site was satisfied by script text")
 
     # _scripts (SMA-553 D10) — a second pure extractor, so _eligibility's shape is untouched.
     got_scripts = _scripts({"repo": {"input-liveness": {"script": "hi"}}, "ts": {"lint": {}}})

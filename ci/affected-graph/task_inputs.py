@@ -20,6 +20,10 @@ class GateAssertionError(RuntimeError):
 
     Kept distinct from MoonOutputError so a dead glob (someone moved a directory) can never be
     reported as "re-run the job", which is how a reader triages rc 2 (SMA-541 D2).
+
+    Currently UNRAISED in this file: every violation is returned as a row by check() rather than
+    thrown, and every error path raises MoonOutputError. Kept for symmetry with ci_targets.py, which
+    does raise it, so the rc-1/rc-2 split reads the same way in both.
     """
 
 
@@ -460,7 +464,8 @@ def self_test():
     raises_moon("no repo project", {"ts": {"lint": {"inputGlobs": {INJECTED_GLOB: {}}}}})
     raises_moon("an empty repo project", {"repo": {}})
     raises_moon("a non-dict task", {"repo": {"promtool": "nope"}})
-    raises_moon("a non-dict inputGlobs", {"repo": {"promtool": {"inputGlobs": []}}})
+    raises_moon("a non-dict inputGlobs", {"repo": {"promtool": {"inputGlobs": ["x"]}}})
+    raises_moon("a non-dict inputFiles", {"repo": {"promtool": {"inputFiles": ["x"]}}})
     # D4: the guard is on COMPOSITION, not presence. A second shared input means "authored" no
     # longer means what this gate thinks it means — and if that second member were LIVE, every task
     # would satisfy I3 with zero real inputs while a presence check still passed. That is a false

@@ -243,7 +243,7 @@ already reached, and which the issue cites. E11 confirms `**/*` reaches dot-path
 genuinely whole-tree. Of the two ways to get there, both are now measured: broadening `affected-smoke`
 to `**/*` makes its **measured ~35s** suite run on every PR, while the standalone task is **measured**
 at **~6.0s** — the median of three alternating `moon run repo:input-liveness --force` runs, warm
-(Task 7, §5 Step 2; recorded alongside the mutation battery in the README). That is comfortably below
+(Task 7, §5 Step 2; the figure is recorded in ci/affected-graph/README.md, the mutation results in §5 above). That is comfortably below
 the ~35s alternative, an order of magnitude down, confirming the decision this section makes.
 
 Being independently scheduled is the other reason: it is the vehicle SMA-541's L6 names for
@@ -569,7 +569,9 @@ are therefore §5 mutations instead:
   against a *stub* matcher proves nothing about the real task. The control is the D7 live canary plus
   the unmutated real run being green, with `actionlint`'s row confirmed present in the real output.
 - **D7's canaries are actually wired.** The fixture proves the canary function works; it does not
-  prove `main()` calls it. Mutation 8 below covers that.
+  prove `main()` calls it. Mutation 8 below covers that, as a one-time verification — like the other
+  eight it is not a standing control, so a later edit that de-fangs the call is caught by nothing
+  (the unguarded-entry-point class SMA-542 is filed to close; see L8).
 
 Verification by **mutation against the real tree**, run and recorded rather than assumed:
 
@@ -582,7 +584,13 @@ Verification by **mutation against the real tree**, run and recorded rather than
 6. delete the real-run line from the task's script, leaving `--self-test` → C4 fires (the
    prefix-containment case)
 7. remove `:input-liveness` from `T` → C1 fires; remove it from CLAUDE.md → C3 fires
-8. delete a canary call from `main()` → the run must red
+8. two stages, on the real tree, proving the canary call in `main()` is load-bearing: (a) stub
+   `git_matcher` to return a constant 1 with `canaries = check_canaries(matcher)` INTACT → **rc 2**,
+   the dead-canary FATAL; (b) the same stub with that line replaced by `canaries = []` → **rc 0**,
+   green. (b) going green is the point: it is what shows (a)'s red came from the canary call and not
+   from a neighbouring check. Deleting the line outright instead of replacing it is NOT a valid
+   stage (b) — it reds with a `NameError` at `if canaries:`, which passes the mutation for the wrong
+   reason.
 9. the unmutated tree is green
 
 The real wall-clock cost of `repo:input-liveness` is measured and recorded in the README and in E9,
@@ -607,7 +615,7 @@ replacing D2's estimate.
   under `hasher.ignorePatterns` genuinely cannot invalidate the task, so a red there is right.
 - **L4 — E10's invariant is enforced incidentally, and only for `repo`.** Two separate gaps. The
   invariant says "**no task** may declare an `inputs:` path under these trees"; this gate scopes to
-  `repo`'s 18 of 119 tasks. And the enforcement is a coincidence of those trees being gitignored —
+  `repo`'s tasks alone, a sixth of the graph. And the enforcement is a coincidence of those trees being gitignored —
   `.gitignore:15` for `node_modules/` — rather than of anything asserting the `hasher.ignorePatterns`
   list itself. Asserting it directly means reading `.moon/workspace.yml`, which is YAML parsing this
   file avoids. *(The first draft said removing an entry from `.gitignore` would end the coverage;
