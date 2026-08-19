@@ -174,6 +174,17 @@ assert_cargo_moon_parity() {
   esac
 }
 
+# SMA-541 — CI target-array coverage. rc 2 (infra) aborts, mirroring run_case.
+assert_ci_targets() {
+  local ec=0
+  python3 "$HERE/ci_targets.py" || ec=$?
+  case "$ec" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) echo "== affected-graph guard ABORTED: ci-targets infrastructure error (rc=$ec) ==" >&2; exit 2 ;;
+  esac
+}
+
 run_suite() {
   SUITE_RC=0
   # contracts proto edit -> proto packages in all three languages + the gateway rebuild + the
@@ -261,6 +272,10 @@ run_suite() {
   assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
   assert_include_relations || SUITE_RC=1
+  # LAST deliberately: assert_ci_targets is the only assertion that can still exit 2 (a broken
+  # `moon query`), and an rc-2 abort kills the script — so anything ordered after it would lose
+  # its diagnostics on exactly the runs where they are most useful (SMA-541 D2).
+  assert_ci_targets || SUITE_RC=1
   return "$SUITE_RC"
 }
 
@@ -287,6 +302,9 @@ if [ "$NEGATIVE" = 1 ]; then
   # 3) the parity gate must fire on synthetic violations of each of its three assertions — a gate
   #    that can pass vacuously reproduces the very bug it exists to prevent (SMA-524 D6).
   python3 "$HERE/cargo_moon_parity.py" --self-test || NEG_RC=1
+  # 4) the ci-target coverage gate must fire on synthetic violations of each of its four checks —
+  #    including its two hand-rolled parsers, which are the part it cannot self-detect a fault in.
+  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
   if [ "$NEG_RC" = 0 ]; then
     echo "negative-control OK: harness reported red on all wrong expectations"; exit 0
   else
