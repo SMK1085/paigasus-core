@@ -54,9 +54,11 @@ INFRA_ERRORS = (
 # An allowlisted edge is a RECORDED DECISION, not a silent exemption: the reason string is required.
 ALLOW_NO_CARGO_BACKING = {
     ("paigasus-gateway-rs", "paigasus-kernel-rs"): (
-        "Over-approximation, not a defect: the gateway has no Cargo dep on the kernel. Over-building "
-        "costs CI time but can never under-build, and removing the edge would change the "
-        "kernel->bindings expected set that SMA-409 owns (SMA-524 D4)."
+        "Over-approximation, not a defect: the gateway has no Cargo dep on the kernel. Removing the "
+        "edge would change the kernel->bindings expected set that SMA-409 owns (SMA-524 D4). NOTE "
+        "(SMA-528): this is no longer free. The edge now feeds @group(upstreams), so every kernel "
+        "edit runs the gateway's full build+test+lint for a dependency that does not exist. Revisit "
+        "if kernel PRs approach the CI budget — that is the first thing to drop."
     ),
 }
 
@@ -806,7 +808,6 @@ def self_test():
     ):
         failures.append("A6 made a crate its own upstream on a dependency cycle")
 
-
     # A malformed Cargo.toml must surface as INFRA (rc 2), not as an assertion failure. Exercise the
     # whole chain on a throwaway workspace — parser raises, cargo_crates propagates, INFRA_ERRORS
     # catches — so narrowing that tuple fails here instead of silently relabelling a broken manifest
@@ -887,8 +888,10 @@ def main():
              "    two entries per upstream, `/<src_dir>/src/**/*` and `/<src_dir>/Cargo.toml`,\n"
              "    for its TRANSITIVE dependsOn closure. A `not in its closure` row is the\n"
              "    opposite: delete the entry, or add it to ALLOW_OVER_APPROXIMATION with a reason.\n"
-             "    A `FLOOR:` row means the derivation itself broke — fix that first, every other\n"
-             "    A6 row is meaningless until it passes."),
+             "    A `FLOOR:` row means the check itself cannot be trusted — the crate is missing\n"
+             "    from the graph, it dropped out of A6's examined set (e.g. stopped reporting\n"
+             "    `language: rust`), or its dependsOn closure derivation is broken — fix that\n"
+             "    first, every other A6 row is meaningless until it passes."),
     ):
         if rows:
             print(f"  {title}", file=sys.stderr)

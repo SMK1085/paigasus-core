@@ -110,6 +110,19 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   other. `repo:affected-smoke` now asserts both generically for every crate
   (`ci/affected-graph/cargo_moon_parity.py`), so a new in-tree dep that forgets either one reds CI
   instead of silently under-building (SMA-524).
+  Neither is enough on its own either: task `inputs` are the **only** thing that confers
+  affectedness in Moon 2.3.2. `dependsOn` and `^:build` schedule an upstream's build but never
+  **select** a downstream — a dependent runs only if independently affected, and neither
+  `--include-relations` nor `--downstream` changes that for `moon ci` (measured at the full
+  24-target shape: identical action sets with and without both, SMA-528). Every Rust crate therefore
+  declares its transitive upstream sources in `fileGroups.upstreams`, consumed by build/test/lint via
+  `@group(upstreams)` in `.moon/tasks/rust.yml`. Omitting the group is a hard graph-load error
+  (`project::unknown_file_group`) for every moon command; mis-declaring it reds
+  `repo:affected-smoke`'s A6 — and **nothing else can**, because a crate's own `moon.yml` is not an
+  input to its tasks, so a wrong group otherwise serves a cached PASS. `^:build` has a second job
+  here: it orders `contracts:generate` before a downstream that keys on
+  `paigasus-proto/src/generated/**`, so removing it as "vestigial" would make those cache keys
+  nondeterministic.
 - Bash tool PATH lacks the proto-managed CLIs; prefix commands with
   `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so moon/uv/buf/nextest resolve to
   the repo-pinned versions (shims first).
@@ -154,6 +167,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `contracts/proto/paigasus/common/v1/error.proto`; adding the code there is what makes it
   resolvable on any consumer. Code **removal** needs no gate — both service crates carry
   `test: deps: ['^:build']`, so a contracts change already runs their membership tests.
+  (Until SMA-528 this was aspirational: `^:build` schedules an upstream's build, it does not make a
+  crate affected. What makes it true is `@group(upstreams)` — both service crates' `test` now key on
+  `paigasus-proto`'s sources, so a contracts change that regenerates them selects the test.)
 - Workflow trigger filters are gated by `repo:actionlint`. Write `branches:`, `paths:` **and their
   `-ignore` variants** as **block sequences**, never the inline `branches: [main]` form — the
   gate's extractor does not parse inline flow and fails all four keys loudly rather than skipping

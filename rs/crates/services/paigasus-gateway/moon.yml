@@ -7,9 +7,10 @@ language: 'rust'
 dependsOn:
   - 'paigasus-proto-rs'
   # No Cargo dep backs this edge — the gateway does not use the kernel. Kept deliberately as an
-  # over-approximation: over-building costs CI time but can never under-build, and removing it would
-  # change the `kernel->bindings` expected set that SMA-409 owns. Allowlisted in
-  # ci/affected-graph/cargo_moon_parity.py (SMA-524 D4).
+  # over-approximation: removing it would change the `kernel->bindings` expected set that SMA-409
+  # owns. Allowlisted in ci/affected-graph/cargo_moon_parity.py (SMA-524 D4). NOTE (SMA-528): no
+  # longer free — this edge now feeds `fileGroups.upstreams` below, so every kernel edit runs this
+  # crate's full build+test+lint for a dependency that does not exist. See the allowlist entry.
   - 'paigasus-kernel-rs'
   - 'paigasus-logging-rs'
   - 'paigasus-observability-rs'

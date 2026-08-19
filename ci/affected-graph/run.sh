@@ -66,6 +66,15 @@ assert_case() {
 # _assert_task_case_impl LABEL FILE EXPECTED_CSV HINT [QUERY_FLAGS...]
 #   Shared body of the two task-case helpers below, which differ ONLY in the flags handed to
 #   `moon query tasks`. HINT is the traversal-specific sentence printed under a `missing` list.
+#
+#   Scoped to build/test/lint — the three tasks that carry `^:build` (lint joined them in
+#   SMA-526). fmt and build-release are excluded because they carry no `^:build`: fmt is
+#   crate-local by construction, and build-release does not run in CI at all.
+#
+#   NOTE: the filter matches task NAMES across every project, not just Rust ones, so a
+#   same-named task in another stack could enter a case's observed set. `contracts:lint` exists
+#   and does not appear here — contracts is UPSTREAM of paigasus-proto-rs and `--downstream deep`
+#   walks dependents — but a future case with a different touched file must re-check that.
 # returns 0 pass / 1 assertion fail / 2 infrastructure error
 _assert_task_case_impl() {
   local label="$1" file="$2" expected_csv="$3" hint="$4"; shift 4
@@ -137,11 +146,20 @@ assert_task_case_ci() {
 }
 
 # Every real `moon ci` shell invocation in ci.yml must carry --include-relations: it is the
-# flag that activates relation/dependent rebuilds. The edges are inert without it, so guarding
-# the edges but not the flag would leave a hole (SMA-409 review F1). Match only the actual
-# command invocations — `moon ci "${T[@]}" ...` — NOT the job/step `name:` fields or the
-# comments that also contain the words "moon ci" (matching those would false-FAIL; renaming
-# the job away from "moon ci" would also break the `CI / moon ci` required status check).
+# flag that activates relation/dependent rebuilds.
+#
+# NOTE (SMA-528): `--include-relations` was measured to change NOTHING in every probe run —
+# including the full 24-target ci.yml shape, where `moon ci "${T[@]}" --stdin --include-relations`
+# and the same command WITHOUT it produce identical action sets, and where adding
+# `--downstream deep` also changes nothing. No probe was found in which it alters the RunTask set.
+# The flag is kept and still asserted because removing it on that evidence is an unforced risk and
+# it remains the documented mechanism should moonrepo fix the dependent traversal upstream — but do
+# NOT read this gate as evidence that the cascade works. What carries the cascade is
+# `@group(upstreams)`, asserted by the *_ci task cases and by cargo_moon_parity.py's A6.
+#
+# Match only the actual command invocations — `moon ci "${T[@]}" ...` — NOT the job/step `name:`
+# fields or the comments that also contain the words "moon ci" (matching those would false-FAIL;
+# renaming the job away from "moon ci" would also break the `CI / moon ci` required status check).
 assert_include_relations() {
   local invocations bad
   invocations="$(grep -nE 'moon ci +"' "$CI_YML" || true)"
