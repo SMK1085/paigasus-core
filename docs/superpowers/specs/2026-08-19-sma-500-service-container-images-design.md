@@ -203,11 +203,11 @@ limitation rather than pretending otherwise.
 
 Design choices in § 3 are made to require **no change** to any of these. That is not the same as
 "no gate re-runs", and an earlier draft blurred the two. Several existing gates legitimately re-key
-and re-run on this change — all expected to pass, but the implementer should know which:
+and re-run on this change (note D9's single `rs/Dockerfile` sits OUTSIDE `rs/crates/`, so
+`repo:publish-metadata` is not among them) — all expected to pass, but the implementer should know which:
 
 | Gate | Why it re-keys |
 | --- | --- |
-| `repo:publish-metadata` | `inputs: rs/crates/**/*` — the two Dockerfiles land under it (both services are `publish = false`, so its file-list check never inspects them) |
 | `repo:observability-drift` | `inputs: rs/crates/libs/paigasus-observability/**/*` — the new `health.rs` |
 | `repo:error-code-single-site` | `inputs: rs/crates/**/src/**/*.rs` — the two `main.rs` edits |
 | `repo:machete` | `inputs: rs/**/*.rs` |
@@ -395,8 +395,7 @@ RUN set -eux; \
     mkdir -p /rootfs; \
     chisel cut --release ubuntu-24.04 --root /rootfs \
       base-files_base base-files_release-info \
-      libc6_libs libgcc-s1_libs ca-certificates_data; \
-    chisel find --release ubuntu-24.04 libc6 > /rootfs/.chisel-manifest || true
+      libc6_libs libgcc-s1_libs ca-certificates_data
 
 FROM scratch
 ARG BIN
@@ -526,9 +525,12 @@ guards that are cheaper here than as prose:
 - `FROM rust:<X.Y.Z>` equals `rust-toolchain.toml`'s `channel` (D3);
 - the builder base is a `bookworm` tag, i.e. the glibc ordering invariant (D3).
 
-`build` also writes the resolved package versions that `chisel cut` selected into a
+`build` also captures the resolved package versions that `chisel cut` selected into a
 `chisel-manifest.txt` build artifact, so "which libc did this image ship?" is answerable after the
-fact — the cheap half of limitation 2.
+fact — the cheap half of limitation 2. It reads them from `chisel cut`'s own build output
+(`--progress=plain`, whose `Fetching pool/main/g/glibc/libc6_2.39-0ubuntu8.8_amd64.deb` lines carry
+the exact versions) rather than writing a manifest file into `/rootfs`, which would ship the
+manifest inside every image.
 
 ### 4.6 The probe contract the console must inherit
 
