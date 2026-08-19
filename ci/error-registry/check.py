@@ -148,16 +148,39 @@ def guard_exists(guard):
     deleted the `#[test]` attribute, leaving a function nothing runs while this gate reported the
     guard alive (CodeRabbit, owner/repo PR 142).
     """
-    needle = f"fn {guard}("
+    decl = _fn_decl_pattern(guard)
     for path in SCAN_ROOT.glob(SCAN_GLOB):
         lines = path.read_text(encoding="utf-8").splitlines()
         for idx, line in enumerate(lines):
-            stripped = line.strip()
-            if needle not in stripped or stripped.startswith("//"):
-                continue
-            if _is_test_fn(lines, idx):
+            if decl.match(line.strip()) and _is_test_fn(lines, idx):
                 return True
     return False
+
+
+def _fn_decl_pattern(guard):
+    """A regex matching a real Rust declaration of `fn <guard>`, anchored at the line start.
+
+    Anchored rather than a `fn <guard>(` substring search, because a substring also matches inside
+    a BLOCK comment — and a block comment is invisible to rustc, so
+
+        #[test]
+        /* fn every_tenancy_code_is_declared_in_the_canonical_registry( */
+        fn unrelated() {}
+
+    applies the attribute to `unrelated`, deletes the real guard, and still reported it alive
+    (CodeRabbit, owner/repo PR 142). A line-comment filter did not cover this; anchoring does,
+    since `/*` cannot start a declaration.
+
+    Known, accepted false NEGATIVE: a signature preceded on the same line by a closing `*/`, or
+    split across lines, is not matched. Both fail SAFE — the gate reds rather than hiding a
+    deletion — and `cargo fmt --check` is a mandatory gate on the same PR, so neither survives
+    review anyway.
+    """
+    return re.compile(
+        r"^(?:pub(?:\([^)]*\))?\s+)?"
+        r"(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+\"[^\"]*\"\s+)?"
+        r"fn\s+" + re.escape(guard) + r"\s*[(<]"
+    )
 
 
 # The two attributes that make a function something the test runner executes. `#[tokio::test]`
@@ -351,6 +374,19 @@ def self_test():
     if _is_test_fn(distant, 3):
         print("  FAIL [_is_test_fn] an attribute belonging to another fn was credited", file=sys.stderr)
         rc = 1
+
+    # `_fn_decl_pattern` is what stops a BLOCK comment counting as a declaration. rustc ignores
+    # `/* … */`, so the commented line below is not a guard at all and the `#[test]` above it lands
+    # on `unrelated` — the real guard is gone while the gate would call it alive.
+    decl = _fn_decl_pattern("every_x")
+    for good in ("fn every_x() {", "async fn every_x() {", "pub fn every_x() {", "pub(crate) async fn every_x() {"):
+        if not decl.match(good):
+            print(f"  FAIL [_fn_decl_pattern] a real declaration was not matched: {good!r}", file=sys.stderr)
+            rc = 1
+    for bad in ("/* fn every_x( */", "// fn every_x() {", "let _ = fn_every_x();", "*/ fn every_x() {"):
+        if decl.match(bad):
+            print(f"  FAIL [_fn_decl_pattern] a non-declaration was accepted: {bad!r}", file=sys.stderr)
+            rc = 1
 
     if not code_pattern({"upstream-error"}).search(r'\"code\":\"upstream-error\"'):
         print("  FAIL [code_pattern] the escaped-quote form is not matched (E5 regression)", file=sys.stderr)
