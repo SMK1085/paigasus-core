@@ -1197,7 +1197,8 @@ scan_workflow_records() {
   flush_key() {
     if [ -n "$key_kind" ] && [ "$key_items" -eq 0 ]; then
       printf 'KEY\tno-items\t%s\t%s\t%s\n' "$key_kind" "$key_line" "$key_items"
-    elif [ "$key_kind" = 'paths' ] && [ "$key_items" -gt 0 ] && [ "$key_positive" -eq 0 ]; then
+    elif { [ "$key_kind" = 'paths' ] || [ "$key_kind" = 'branches' ]; } \
+      && [ "$key_items" -gt 0 ] && [ "$key_positive" -eq 0 ]; then
       printf 'KEY\tall-negated\t%s\t%s\t%s\n' "$key_kind" "$key_line" "$key_items"
     fi
   }
@@ -1209,14 +1210,28 @@ scan_workflow_records() {
         key_kind="$kind"; key_line="$value"; key_items=0; key_positive=0 ;;
       ITEM)
         key_items=$((key_items + 1))
-        if [ "$kind" = 'paths' ]; then
-          verdict="$(pattern_verdict "$value")"
-          case "$verdict" in
-            ok|skipped|negated) ;;
-            *) printf 'PATTERN\t%s\t%s\n' "$verdict" "$value" ;;
-          esac
-          case "$value" in '!'*) ;; *) key_positive=$((key_positive + 1)) ;; esac
-        fi ;;
+        # COUNTING IS KIND-GENERIC; only the verdict dispatch below is kind-specific. This
+        # increment used to live inside the paths-only guard, where a branches: block would
+        # report key_positive=0 and fire 'all-negated' on all five real filters — redding the
+        # only required check on a clean tree (SMA-540 D5).
+        case "$value" in '!'*) ;; *) key_positive=$((key_positive + 1)) ;; esac
+        case "$kind" in
+          paths)
+            verdict="$(pattern_verdict "$value")"
+            case "$verdict" in
+              ok|skipped|negated) ;;
+              *) printf 'PATTERN\t%s\t%s\n' "$verdict" "$value" ;;
+            esac ;;
+          branches)
+            # A separate record type, carrying the key's line number: PATTERN's shape stays
+            # byte-identical for AC-3, the two verdict vocabularies cannot collide into the wrong
+            # message, and a message can name WHICH of two identical `branches:` entries is wrong.
+            verdict="$(branch_verdict "$value")"
+            case "$verdict" in
+              ok|skipped|negated) ;;
+              *) printf 'BRANCH\t%s\t%s\t%s\n' "$verdict" "$value" "$key_line" ;;
+            esac ;;
+        esac ;;
     esac
   done <<< "$1"
 
@@ -1335,7 +1350,7 @@ jobs:
 # battery is not a standing control.
 # ---------------------------------------------------------------------------------------------
 branch_filter_self_test() {
-  local rc=0 saved_skip saved_origin_refs saved_origin_refs_loaded
+  local rc=0 saved_skip saved_origin_refs saved_origin_refs_loaded tmp
 
   # This table asserts a real ref resolves, so it shares the canary's precondition. Asserted here
   # rather than left to a confusing per-fixture mismatch: --self-test still needs no actionlint
@@ -1394,6 +1409,67 @@ branch_filter_self_test() {
   expect_branch 'dev'                         'no-origin-main'
   ORIGIN_REFS="$saved_origin_refs"
   ORIGIN_REFS_LOADED="$saved_origin_refs_loaded"
+
+  expect_branch_scan() {
+    local name="$1" expected="$2" records="$3" got
+    got="$(scan_workflow_records "$records")"
+    if [ "$got" != "$expected" ]; then
+      fail "branch-filter self-test '$name' mismatch.
+--- expected ---
+$expected
+--- actual ---
+$got"
+      rc=1
+    fi
+  }
+
+  # Check 6, branch half. Without this fixture the all-negated widening has no standing control
+  # and could be reverted silently — SMA-525 finding F4.
+  expect_branch_scan 'an all-negated branches: block is a dead trigger' \
+"$(printf 'KEY\tall-negated\tbranches\t5\t2')" \
+"$(printf 'KEY\tbranches\t5\nITEM\tbranches\t!main\nITEM\tbranches\t!dev')"
+
+  # The control that keeps the one above honest: a normal block must produce NOTHING. This is the
+  # fixture that catches key_positive being left inside a paths-only guard, which would fire
+  # all-negated on all five real filters.
+  expect_branch_scan 'a branches block with a positive entry is clean' \
+"" \
+"$(printf 'KEY\tbranches\t5\nITEM\tbranches\tmain')"
+
+  # Proves scan_workflow_records actually DISPATCHES branch items to branch_verdict, and that the
+  # finding carries the key's line number so the message can say which filter.
+  expect_branch_scan 'an unresolvable branch is reported with its key line' \
+"$(printf 'BRANCH\tunresolved\tmian-sma540-absent\t5')" \
+"$(printf 'KEY\tbranches\t5\nITEM\tbranches\tmain\nITEM\tbranches\tmian-sma540-absent')"
+
+  # branches-ignore is counted but never resolved (D6) — a nonexistent branch here is a no-op.
+  expect_branch_scan 'a branches-ignore entry is never resolved' \
+"" \
+"$(printf 'KEY\tbranches-ignore\t5\nITEM\tbranches-ignore\tmian-sma540-absent')"
+
+  # ...but an unreadable branches-ignore is still a loud failure, not a silent skip.
+  expect_branch_scan 'a branches-ignore KEY with no items is a failure' \
+"$(printf 'KEY\tno-items\tbranches-ignore\t5\t0')" \
+"$(printf 'KEY\tbranches-ignore\t5')"
+
+  # End-to-end through the REAL extractor, not a hand-built records table — the only fixture that
+  # proves the whole extractor -> scanner -> verdict pipeline reports a typo'd branch.
+  tmp="$(mktemp)"
+  printf '%s' 'name: t
+on:
+  push:
+    branches:
+      - mian-sma540-absent
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+' > "$tmp"
+  expect_branch_scan 'a typod branch is reported end-to-end through the extractor' \
+"$(printf 'BRANCH\tunresolved\tmian-sma540-absent\t4')" \
+"$(extract_filter_keys "$tmp")"
+  rm -f "$tmp"
 
   return $rc
 }
