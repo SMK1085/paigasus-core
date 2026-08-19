@@ -19,6 +19,7 @@
 # usage: check.py [--self-test | --single-site]
 import re
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -64,6 +65,128 @@ def mirror_codes(text):
     return set(_MIRROR_ITEM.findall(block.group(1)))
 
 
+SCAN_GLOB = "*/*/src/**/*.rs"
+SCAN_ROOT = REPO / "rs/crates"
+
+# Files permitted to spell a registry code.
+#   emits    — puts a code on the wire. `guard` names the membership test proving its codes are
+#              all declared; check.py asserts that test still exists.
+#   asserts  — test code only; it checks codes rather than emitting them.
+#   excluded — the string is not a registry code here at all. `why` must say why.
+# A path may be a literal repo-relative path or a glob.
+MANIFEST = (
+    ("rs/crates/services/paigasus-iam/src/application/error.rs", "emits",
+     "every_tenancy_code_is_declared_in_the_canonical_registry", "TenancyError::code()"),
+    ("rs/crates/services/paigasus-gateway/src/adapters/http/error.rs", "emits",
+     "every_gateway_code_is_declared_in_the_canonical_registry", "GatewayError::parts()"),
+    ("rs/crates/services/paigasus-iam/src/adapters/http/authn.rs", "emits",
+     "every_authn_http_code_is_in_the_registry", "the authn funnel and envelope_rejection"),
+    ("rs/crates/services/paigasus-iam/src/adapters/http/system_retirement.rs", "emits",
+     "every_system_retirement_code_is_declared_in_the_canonical_registry", "the two 409 refusals"),
+    ("rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs", "emits",
+     "the_terminal_sse_frame_carries_a_registered_code", "the terminal SSE error frame"),
+    ("rs/crates/services/paigasus-iam/src/adapters/grpc/convert.rs", "asserts", None,
+     "hosts three membership tests; emits its codes via ErrorReason LazyLock statics, not literals"),
+    ("rs/crates/libs/paigasus-proto/src/error.rs", "asserts", None,
+     "EXPECTED_REASONS — the registry's own mirror, which this gate cross-checks against"),
+    ("rs/crates/services/paigasus-iam/src/adapters/http/error.rs", "asserts", None, "test assertions only"),
+    ("rs/crates/services/paigasus-gateway/src/adapters/http/auth.rs", "asserts", None, "test assertion only"),
+    ("rs/crates/services/paigasus-iam/src/application/create_user.rs", "asserts", None, "test assertion only"),
+    ("rs/crates/libs/paigasus-observability/src/grpc.rs", "excluded", None,
+     "grpc_code_name maps tonic::Code to a METRIC LABEL; its \"internal\" collides with the "
+     "registry's reason by spelling only. Single-word codes are ordinary English."),
+    ("rs/crates/libs/paigasus-proto/src/generated/**/*.rs", "excluded", None,
+     "prost output, not authored here. Its hits are all /// doc comments carried over from "
+     "error.proto. Excluded by PATH rather than by a comment filter so a prost change to "
+     "#[doc = \"…\"] cannot turn 47 generated lines into offenders overnight."),
+)
+
+
+def code_pattern(codes):
+    """Match a code wrapped in either `"…"` or `\\"…\\"`.
+
+    The escaped form is load-bearing: chat.rs builds its terminal SSE frame as one big string
+    literal, so its `upstream-error` is surrounded by `\\"`, and a plain-quote anchor misses it
+    entirely (SMA-507 E5).
+    """
+    return re.compile("|".join(r'\\?"' + re.escape(c) + r'\\?"' for c in sorted(codes)))
+
+
+def scan(codes):
+    """{repo-relative path: hit count} for every scanned .rs file that spells a code.
+
+    The WHOLE file is scanned — there is no production/test split. Cutting each file at its first
+    column-0 `#[cfg(test)]` was tried and rejected: seven files in this scope open one that is not
+    a test module (paigasus-iam/src/config.rs at line 1316 of 3318), which would have silently
+    exempted ~4560 production lines (SMA-507 E6).
+    """
+    pattern = code_pattern(codes)
+    hits = {}
+    for path in sorted(SCAN_ROOT.glob(SCAN_GLOB)):
+        found = len(pattern.findall(path.read_text(encoding="utf-8")))
+        if found:
+            hits[path.relative_to(REPO).as_posix()] = found
+    return hits
+
+
+def guard_exists(guard):
+    """Is `guard` still a test function somewhere under rs/crates?
+
+    Cheap, and it recovers the only load-bearing part of the scheduling task this design dropped:
+    deleting a membership test now reds THIS gate, even though nothing here runs it.
+    """
+    needle = f"fn {guard}("
+    return any(needle in p.read_text(encoding="utf-8") for p in SCAN_ROOT.glob(SCAN_GLOB))
+
+
+def _matches(path, entry):
+    """Does repo-relative `path` match a MANIFEST entry (a literal path or a glob)?
+
+    fnmatch, not PurePosixPath.full_match: the latter is 3.13+, and this runs on the CI runner's
+    system python3 (the Moon task is toolchain: 'system'). fnmatch's `*` crosses `/`, which is
+    what the generated-output glob wants anyway.
+    """
+    return path == entry or fnmatch(path, entry)
+
+
+def check_single_site():
+    proto = derive_codes(REGISTRY_PROTO.read_text(encoding="utf-8"))
+    mirror = mirror_codes(REGISTRY_MIRROR.read_text(encoding="utf-8"))
+    if not proto:
+        raise InfraError(f"no codes derived from {REGISTRY_PROTO} — the gate would scan for nothing")
+    if proto != mirror:
+        print("the proto registry and its rust mirror disagree — one of them is wrong:", file=sys.stderr)
+        for c in sorted(proto - mirror):
+            print(f"    only in error.proto:      {c}", file=sys.stderr)
+        for c in sorted(mirror - proto):
+            print(f"    only in EXPECTED_REASONS: {c}", file=sys.stderr)
+        return 1
+
+    hits = scan(proto)
+    if not hits:
+        raise InfraError("no code literal found anywhere under rs/crates — pattern or scan root is wrong")
+
+    listed = {path for path, *_ in MANIFEST}
+    rc = 0
+
+    offenders = sorted(p for p in hits if not any(_matches(p, entry) for entry in listed))
+    if offenders:
+        print("file spells a canonical error code but is not on ci/error-registry/check.py's MANIFEST:", file=sys.stderr)
+        for p in offenders:
+            print(f"    {p}  ({hits[p]} hit(s))", file=sys.stderr)
+        print("  add a row (emits/asserts/excluded). An `emits` row needs a membership test.", file=sys.stderr)
+        rc = 1
+
+    for path, role, guard, why in MANIFEST:
+        if not any(_matches(hit, path) for hit in hits):
+            print(f"stale MANIFEST row: {path} no longer spells any code ({why})", file=sys.stderr)
+            rc = 1
+        if role == "emits" and not guard_exists(guard):
+            print(f"MANIFEST names guard `{guard}` for {path}, but no `fn {guard}(` exists", file=sys.stderr)
+            rc = 1
+    return rc
+
+
 def self_test():
     """Exercise both parsers against in-process fixtures, so a rotted parser reds even if the real
     tree happens to be clean. Runs FIRST in the Moon task, per moon.yml's affected-smoke and
@@ -76,6 +199,9 @@ def self_test():
       // "slug-conflict" — mentioned in prose, must not be double-counted
       ERROR_REASON_SLUG_CONFLICT = 1;
         ERROR_REASON_NOT_FOUND = 12;
+      // metadata carries `capability` (only on ERROR_REASON_CAPABILITY_DISABLED) — a bare
+      // constant mention with no `= N;` tail, same shape as the real error.proto at lines 39/162.
+      // A de-anchored ERROR_REASON_([A-Z0-9_]+) scan would pick this up as a phantom 4th code.
       ERROR_REASON_INTERNAL = 900;
     }
     """
@@ -106,14 +232,42 @@ def self_test():
         print("  FAIL [mirror_codes] a missing EXPECTED_REASONS block did not raise", file=sys.stderr)
         rc = 1
 
+    seen = [path for path, *_ in MANIFEST]
+    if len(seen) != len(set(seen)):
+        print("  FAIL [manifest] duplicate path rows", file=sys.stderr)
+        rc = 1
+    for path, role, guard, why in MANIFEST:
+        if role not in ("emits", "asserts", "excluded"):
+            print(f"  FAIL [manifest] {path} has unknown role {role!r}", file=sys.stderr)
+            rc = 1
+        if (role == "emits") != (guard is not None):
+            print(f"  FAIL [manifest] {path}: exactly the `emits` rows must name a guard", file=sys.stderr)
+            rc = 1
+        if not why:
+            print(f"  FAIL [manifest] {path} has no stated reason", file=sys.stderr)
+            rc = 1
+
+    if not code_pattern({"upstream-error"}).search(r'\"code\":\"upstream-error\"'):
+        print("  FAIL [code_pattern] the escaped-quote form is not matched (E5 regression)", file=sys.stderr)
+        rc = 1
+
     print("self-test: OK" if rc == 0 else "self-test: FAILED", file=sys.stderr)
     return rc
 
 
 def main():
     args = sys.argv[1:]
-    if args == ["--self-test"]:
-        return self_test()
+    try:
+        if args == ["--self-test"]:
+            return self_test()
+        if args == ["--single-site"]:
+            return check_single_site()
+    except InfraError as exc:
+        print(f"INFRASTRUCTURE ERROR: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"INFRASTRUCTURE ERROR: {exc}", file=sys.stderr)
+        return 2
     print(f"usage: {Path(__file__).name} [--self-test | --single-site]", file=sys.stderr)
     return 2
 
