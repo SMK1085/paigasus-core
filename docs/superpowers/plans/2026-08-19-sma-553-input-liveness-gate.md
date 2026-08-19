@@ -710,7 +710,11 @@ def check(tasks, tracked, matcher, allow=ALLOW_DEAD_INPUT):
     for name in sorted(tasks):
         globs, files = tasks[name]
         for pattern in authored(globs):
-            if (name, pattern) in allow:
+            # TRUTHINESS, not membership: an entry with a blank reason must NOT exempt anything.
+            # Bare membership would let `("a", "b"): ""` silence a violation unreviewably, which is
+            # the hole cargo_moon_parity.py's _allowlisted helper exists to close. The blank reason
+            # is reported separately below, and the underlying violation still fires.
+            if allow.get((name, pattern)):
                 continue
             verdict = classify(pattern)
             if verdict == "negated":
@@ -733,7 +737,7 @@ def check(tasks, tracked, matcher, allow=ALLOW_DEAD_INPUT):
                     "meant to match nothing, add an ALLOW_DEAD_INPUT entry with a reason."
                 ))
         for path in files:
-            if (name, path) in allow:
+            if allow.get((name, path)):  # truthiness, per the note above
                 continue
             if path not in tracked:
                 rows.append((
