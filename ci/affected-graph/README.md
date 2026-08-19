@@ -67,6 +67,22 @@ It also runs five checks that the per-case project sets structurally **cannot** 
   binding task on day one; a `REQUIRED_FFI_TASKS` **floor** stops the derivation degrading to a
   vacuous PASS if a task ever stops matching the markers. A task with none of a `command`, a
   `script`, or any `args` aborts as infra (rc 2), never as a silent skip.
+- **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
+  is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
+  equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
+  entry resolves to a CI-eligible task somewhere in the graph; **C3** CLAUDE.md's marker-delimited
+  command mirrors `T` token-for-token in order and keeps its `--base origin/main
+  --include-relations` tail; **C4** both of this gate's own call sites are still present in
+  `run.sh`. `moon ci` exits **0** on a target that resolves to nothing — measured, including the
+  mixed case — so without C2 a renamed or mistyped entry is a silent no-op on every PR.
+
+  Maintenance: adding a `repo:*` task means adding `:<name>` to `T` **and** to the command between
+  `<!-- ci-targets:begin -->` / `<!-- ci-targets:end -->` in CLAUDE.md. A task that must stay out of
+  `T` goes in `T_EXEMPT` with a required non-empty reason — `runInCI: false` is not a general
+  escape, because Moon then also drops the task from `moon run` under `CI=true` (`ts/moon.yml`).
+  `REQUIRED_REPO_TASKS` is the floor that stops the comparison degrading to two empty sets.
+  Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
+  design doc's L3.
 
 It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
 `--include-relations` (the edges are inert without it).

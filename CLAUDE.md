@@ -71,6 +71,14 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   :nats-permissions :release-parity :release-parity-py :release-parity-ts :publish-metadata
   --base origin/main --include-relations`
   <!-- ci-targets:end -->
+- A new `repo:*` gate reds `:affected-smoke` until it is in **both** `ci.yml`'s `T=(…)` array and
+  the marker-delimited command above — `ci/affected-graph/ci_targets.py` asserts the two agree, and
+  that every `T` entry still resolves to a CI-eligible task. That last half matters because
+  `moon ci` exits **0** on a target that resolves to nothing (even with real targets around it), so
+  a typo is otherwise a silent no-op on every PR. A gate that must stay out of `T` needs a
+  `T_EXEMPT` entry with a reason — `runInCI: false` is NOT a general escape, since Moon then drops
+  the task from `moon run` under `CI=true` too (see the comments in `ts/moon.yml`). `T` must also
+  stay a single-line bash array (SMA-541).
 - A new Rust crate reds `:affected-smoke` until it's added to the `lockfile->all-lint` expected set
   in `ci/affected-graph/run.sh` — that case lists **every** crate, so **every** new crate changes it
   (SMA-534) — and, if it `dependsOn` `paigasus-kernel-rs`, to the `kernel->bindings` set as well
