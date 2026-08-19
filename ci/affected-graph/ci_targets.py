@@ -180,10 +180,17 @@ RUN_SH_CALL_SITES = (
     '"$HERE/ci_targets.py" --self-test || NEG_RC=1',
 )
 
-# repo:input-liveness's resolved script must run BOTH its negative control and the real check.
-# Deleting either line leaves a task that still schedules, still exits 0, and asserts half (or
-# none) of what its name claims. Its `inputs: ['**/*']` is asserted separately, by
-# SELF_TASK_EXPECTED_GLOBS above.
+# repo:input-liveness's resolved script must run BOTH its negative control and the real check —
+# UNDER `set -euo pipefail`, which is pinned here as a THIRD required line and is as load-bearing
+# as either invocation. Moon's `script:` blocks do not enable errexit, so a script's exit status is
+# simply its LAST command's; deleting the pipefail line touches neither python3 line's TEXT, so a
+# check that pinned only the two invocations would stay green while a failing `--self-test` is
+# silently swallowed and only the real check's result is reported — the exact SMA-526
+# rotted-negative-control failure moon.yml's own comment on this task cites (measured: with the
+# line removed and a deliberately-failing first line, `moon run repo:input-liveness --force`
+# reported "Tasks: 1 completed"). Deleting either python3 line leaves a task that still schedules,
+# still exits 0, and asserts half (or none) of what its name claims. Its `inputs: ['**/*']` is
+# asserted separately, by SELF_TASK_EXPECTED_GLOBS above.
 #
 # Unlike RUN_SH_CALL_SITES these are matched as WHOLE LINES, and the asymmetry is deliberate:
 # `python3 ci/affected-graph/task_inputs.py` is a strict PREFIX of the same line plus
@@ -193,6 +200,7 @@ RUN_SH_CALL_SITES = (
 # already carries its `|| RC=1` propagation suffix, which makes it unambiguous (SMA-553 D10).
 SELF_SCHEDULED_GATES = {
     "input-liveness": (
+        "set -euo pipefail",
         "python3 ci/affected-graph/task_inputs.py --self-test",
         "python3 ci/affected-graph/task_inputs.py",
     ),
@@ -928,6 +936,14 @@ def self_test():
         "python3 ci/affected-graph/task_inputs.py --self-test\n", ""
     )}):
         failures.append("check_self_invocation: missed a deleted task_inputs --self-test")
+    # SMA-553 review finding 1 — the errexit line itself. Moon's `script:` blocks have no
+    # errexit, so the script's exit status is its LAST command's; deleting `set -euo pipefail`
+    # leaves both python3 lines' TEXT untouched, so a check that pinned only the invocations would
+    # stay green while a failing --self-test is silently swallowed (SMA-526).
+    if not check_self_invocation(wired, {"input-liveness": wired_script.replace(
+        "set -euo pipefail\n", ""
+    )}):
+        failures.append("check_self_invocation: missed a deleted errexit line ahead of the invocations")
     if not check_self_invocation(wired, {}):
         failures.append("check_self_invocation: missed an absent input-liveness script entirely")
     # The two texts are checked SEPARATELY: a call site in the wrong file must not satisfy the

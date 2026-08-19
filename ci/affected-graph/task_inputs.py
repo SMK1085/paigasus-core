@@ -60,7 +60,25 @@ SAFE_CHARS_RE = re.compile(r"[A-Za-z0-9._/*-]+")
 # self-tests, invoked for real"), which calls its fixture tables unconditionally so they are not
 # dead code in CI. Costs one extra `git` call each.
 CANARY_DEAD = "zz-no-such-directory-sma553/**/*"
-CANARY_LIVE = "ci/affected-graph/*.py"
+
+
+def _canary_live_glob():
+    """The live-fire canary glob (D7), derived from this file's OWN location.
+
+    A hardcoded `"ci/affected-graph/*.py"` dies on exactly the event this gate polices — a
+    directory rename of ci/affected-graph/ itself, which would silently retarget the canary at a
+    tree that no longer exists and make every liveness verdict vacuous. Deriving it from
+    `__file__` means it cannot go stale (review finding 2a). `root` mirrors main()'s own
+    `Path(__file__).resolve().parents[2]`. Kept a plain glob STRING, not a Path, so it still
+    exercises the same matcher path (`git_matcher`'s `:(glob)` pathspec) as every other pattern
+    this gate evaluates. `.as_posix()` keeps the separator '/' even if this ever runs on Windows,
+    which is what git pathspecs and this gate's other globs both expect.
+    """
+    root = Path(__file__).resolve().parents[2]
+    return (Path(__file__).resolve().parent.relative_to(root) / "*.py").as_posix()
+
+
+CANARY_LIVE = _canary_live_glob()
 
 # The floor. check() compares derived sets, and an empty set violates nothing — so a project key
 # that stops matching, or a moon output shape change, would print PASS while asserting nothing.
@@ -635,6 +653,21 @@ def main():
         print("FATAL [task-inputs] the liveness matcher is not working", file=sys.stderr)
         for row in canaries:
             print(f"    {row}", file=sys.stderr)
+        # Printed ALONGSIDE the canary FATAL, not swallowed by it (review finding 2b): a renamed
+        # ci/affected-graph/ directory presents as BOTH at once — the live canary goes dark AND
+        # every glob under the renamed tree reports dead — so returning early here would hide the
+        # actually-actionable `rows` behind an rc reserved for "moon/git is broken, re-run the
+        # job", leaving the operator with no diagnosis at all. rc stays 2: the matcher genuinely
+        # cannot be trusted, so these rows may include spurious ones — but a possibly-noisy row
+        # beats none.
+        if rows:
+            print(
+                "      (rows below may be spurious, since the matcher above is not trustworthy, "
+                "but are printed so a genuine rename is not hidden behind rc 2):",
+                file=sys.stderr,
+            )
+            for _, message in rows:
+                print(f"      - {message}", file=sys.stderr)
         return 2
 
     if not rows:
@@ -644,7 +677,7 @@ def main():
         )
         return 0
 
-    print("FAIL  [task-inputs] a repo:* task declares an input that matches nothing", file=sys.stderr)
+    print("FAIL  [task-inputs] a repo:* task's inputs are not what this gate requires", file=sys.stderr)
     for _, message in rows:
         print(f"  - {message}", file=sys.stderr)
     return 1
