@@ -182,21 +182,18 @@ def parse_doc_targets(text):
     return targets, region
 
 
-def moon_tasks():
-    """Moon's own resolved task graph: project id -> task name -> CI-eligible.
+def _eligibility(projects):
+    """moon's parsed `{pid: {task: {...}}}` -> `{pid: {task: CI-eligible}}`.
 
-    ONE subprocess call, filtered by project id in Python rather than with `--project repo`:
-    moon's query filters are regex-based and unanchored, so a future project named e.g.
-    `paigasus-repo-ts` would silently join the "repo task set" and false-red C1 (D8).
+    A PURE function, split out of moon_tasks() so `--self-test` can drive both of its
+    MoonOutputError raises without a subprocess. The rc-2 paths are the ones a fixture table most
+    needs: they are what a moon upgrade trips, and an unexercised raise is indistinguishable from
+    an absent one — which is the drift class this whole gate exists to close.
 
     Eligibility polarity is deliberately `is not False`: an absent `runInCI`, or an absent
     `options` object, means ELIGIBLE. Defaulting toward inclusion means a moon output change
     cannot silently exempt a gate — it can only over-require, which is a loud red.
     """
-    out = subprocess.run(
-        ["moon", "query", "tasks"], capture_output=True, text=True, check=True
-    ).stdout
-    projects = json.loads(out).get("tasks") or {}
     if not projects:
         raise MoonOutputError("`moon query tasks` reported no projects at all")
     saw_options = False
@@ -218,6 +215,21 @@ def moon_tasks():
             "changed, so `runInCI` can no longer be read (SMA-541 D8)"
         )
     return result
+
+
+def moon_tasks():
+    """Moon's own resolved task graph: project id -> task name -> CI-eligible.
+
+    ONE subprocess call, filtered by project id in Python rather than with `--project repo`:
+    moon's query filters are regex-based and unanchored, so a future project named e.g.
+    `paigasus-repo-ts` would silently join the "repo task set" and false-red C1 (D8).
+
+    The subprocess + `json.loads` shell around _eligibility(), which holds the shape rules.
+    """
+    out = subprocess.run(
+        ["moon", "query", "tasks"], capture_output=True, text=True, check=True
+    ).stdout
+    return _eligibility(json.loads(out).get("tasks") or {})
 
 
 def check_floor(tasks, floor=REQUIRED_REPO_TASKS):
@@ -362,6 +374,39 @@ def self_test():
     expect_doc_red("inverted", f"{MARKER_END}\n`moon ci :build`\n{MARKER_BEGIN}\n")
     expect_doc_red("empty-region", f"{MARKER_BEGIN}\n\n{MARKER_END}\n")
 
+    def expect_infra(label, call):
+        try:
+            call()
+        except MoonOutputError:
+            return
+        except Exception as exc:  # any other exception type is itself the failure
+            failures.append(
+                f"{label}: raised {type(exc).__name__} instead of MoonOutputError: {exc}"
+            )
+            return
+        failures.append(f"{label}: accepted an output shape that must abort as infrastructure")
+
+    # The rc-2 raises, driven directly. moon_tasks() is a subprocess shell around _eligibility()
+    # precisely so these are reachable from a fixture: an unexercised raise is indistinguishable
+    # from an absent one, which is the drift class this gate exists to close.
+    expect_infra("_eligibility[no-projects]", lambda: _eligibility({}))
+    expect_infra("_eligibility[no-options-anywhere]", lambda: _eligibility({"repo": {"deny": {}}}))
+
+    # ...and the POLARITY itself, pinned in both directions so the default-toward-inclusion rule
+    # (D8) is asserted rather than assumed: only an explicit `runInCI: false` is ineligible.
+    polarity = _eligibility(
+        {
+            "repo": {
+                "install-hooks": {"options": {"runInCI": False}},
+                "deny": {"options": {}},
+                "promtool": {},
+            }
+        }
+    )
+    want_polarity = {"repo": {"install-hooks": False, "deny": True, "promtool": True}}
+    if polarity != want_polarity:
+        failures.append(f"_eligibility[polarity]: got {polarity}, want {want_polarity}")
+
     # project id -> task name -> CI-eligible. Mirrors moon_tasks()'s return shape.
     tasks_fixture = {
         "repo": {"deny": True, "promtool": True, "affected-smoke": True,
@@ -401,6 +446,10 @@ def self_test():
     # A bare-membership exemption with no reason is unreviewable — reject it.
     forward("exempt-without-reason", tasks_fixture,
             [t for t in aligned_t if t != "promtool"], {"promtool": "  "}, [], [], ["promtool"])
+    # An output with no `repo` project at all is moon telling us nothing -> infra, never a
+    # comparison against an empty set.
+    expect_infra("check_forward[no-repo-project]",
+                 lambda: check_forward({"other-project": {"build": True}}, aligned_t, {}))
 
     if check_floor(tasks_fixture) != []:
         failures.append("check_floor: fired on a fixture containing every floor member")
