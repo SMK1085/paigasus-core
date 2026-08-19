@@ -68,9 +68,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   <!-- ci-targets:begin -->
   `moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking
   :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free
-  :redis-connect-single-site :iam-docker-policy-single-site :promtool :observability-drift
-  :nats-permissions :release-parity :release-parity-py :release-parity-ts :publish-metadata
-  --base origin/main --include-relations`
+  :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site
+  :promtool :observability-drift :nats-permissions :release-parity :release-parity-py
+  :release-parity-ts :publish-metadata --base origin/main --include-relations`
   <!-- ci-targets:end -->
 - A new `repo:*` gate reds `:affected-smoke` until it is in **both** `ci.yml`'s `T=(…)` array and
   the marker-delimited command above — `ci/affected-graph/ci_targets.py` asserts the two agree, and
@@ -140,6 +140,14 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   paigasus-iam`.
 - Broad `inputs: ['**/*']` Moon tasks (e.g. `repo:actionlint`) stay cheap only because
   `.moon/workspace.yml`'s `hasher.ignorePatterns` filters gitignored trees out of the hash walk.
+- Adding a **new error-code emission site** in Rust reds `repo:error-code-single-site` until the file
+  is added to `ci/error-registry/check.py`'s `MANIFEST` — as `emits` (which also requires a
+  membership test asserting every code it emits resolves via `ErrorReason::from_wire_reason`),
+  `asserts`, or `excluded` with a stated reason. The gate matches the registry's **declared**
+  vocabulary, so it cannot see a code you invented and never added to
+  `contracts/proto/paigasus/common/v1/error.proto`; adding the code there is what makes it
+  resolvable on any consumer. Code **removal** needs no gate — both service crates carry
+  `test: deps: ['^:build']`, so a contracts change already runs their membership tests.
 
 ## Workflow
 
