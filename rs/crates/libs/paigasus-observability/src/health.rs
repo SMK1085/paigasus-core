@@ -11,6 +11,57 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
+/// The default liveness path. `/readyz` is reachable via `healthcheck --path /readyz`, which is
+/// what a Kubernetes `exec` readiness probe uses — the image has no shell to curl with.
+pub const DEFAULT_PROBE_PATH: &str = "/healthz";
+
+/// Printed on a usage error, which exits 2 (0 = healthy, 1 = unhealthy, 2 = usage).
+pub const USAGE: &str = "usage: <service> [healthcheck [--path <path>]]";
+
+/// What the argv dispatch selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mode {
+    /// Probe `path` and exit with the health verdict.
+    Healthcheck { path: String },
+    /// Normal service startup.
+    Serve,
+}
+
+/// Parse the arguments after the binary name.
+///
+/// Anything unrecognised is an ERROR rather than a fall-through to [`Mode::Serve`]: a typo'd
+/// `healthchek` in a `HEALTHCHECK`, a compose file or a Kubernetes exec probe would otherwise
+/// silently start a second full service on every probe interval (SMA-500 D4).
+pub fn dispatch<I, S>(args: I) -> Result<Mode, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let Some(command) = args.next() else {
+        return Ok(Mode::Serve);
+    };
+    if command.as_ref() != "healthcheck" {
+        return Err(format!("unknown argument {:?}\n{USAGE}", command.as_ref()));
+    }
+
+    let mut path = DEFAULT_PROBE_PATH.to_string();
+    while let Some(flag) = args.next() {
+        match flag.as_ref() {
+            "--path" => {
+                let value = args.next().ok_or_else(|| format!("--path requires a value\n{USAGE}"))?;
+                let value = value.as_ref();
+                if !value.starts_with('/') {
+                    return Err(format!("--path must start with '/', got {value:?}\n{USAGE}"));
+                }
+                path = value.to_string();
+            }
+            other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
+        }
+    }
+    Ok(Mode::Healthcheck { path })
+}
+
 /// Probe `path` on `addr` over plaintext HTTP/1.1, within a TOTAL `deadline`.
 ///
 /// `Ok(true)` iff the response status is 2xx; `Ok(false)` for any other status (a 503 from
@@ -141,5 +192,46 @@ mod tests {
     fn a_malformed_status_line_is_an_error() {
         let addr = serve_once("NOT-HTTP");
         assert!(probe(addr, "/healthz", Duration::from_secs(2)).is_err());
+    }
+
+    #[test]
+    fn no_arguments_means_serve() {
+        assert_eq!(dispatch(Vec::<String>::new()).expect("valid"), Mode::Serve);
+    }
+
+    #[test]
+    fn bare_healthcheck_defaults_to_healthz() {
+        assert_eq!(
+            dispatch(["healthcheck"]).expect("valid"),
+            Mode::Healthcheck { path: "/healthz".to_string() }
+        );
+    }
+
+    #[test]
+    fn path_flag_selects_readyz() {
+        assert_eq!(
+            dispatch(["healthcheck", "--path", "/readyz"]).expect("valid"),
+            Mode::Healthcheck { path: "/readyz".to_string() }
+        );
+    }
+
+    #[test]
+    fn path_flag_without_a_value_is_a_usage_error() {
+        assert!(dispatch(["healthcheck", "--path"]).is_err());
+    }
+
+    #[test]
+    fn a_path_without_a_leading_slash_is_a_usage_error() {
+        assert!(dispatch(["healthcheck", "--path", "healthz"]).is_err());
+    }
+
+    #[test]
+    fn an_unknown_argument_never_falls_through_to_serve() {
+        // The regression this pins: a typo'd `healthchek` in a HEALTHCHECK or a k8s exec probe
+        // must NOT boot a second full service. For IAM that would run Database::connect and
+        // Migrator::up on every probe interval.
+        assert!(dispatch(["healthchek"]).is_err());
+        assert!(dispatch(["serve"]).is_err());
+        assert!(dispatch(["healthcheck", "--nope"]).is_err());
     }
 }
