@@ -149,7 +149,9 @@ def parse_t(text):
     """The `T=(...)` array from ci.yml, as BARE task names (no leading colon).
 
     Bare names because that is what they are compared against: moon's task-name keys (C1/C2) and
-    the doc's tokens (C3). Messages re-add the colon so they name what the reader sees in the file.
+    the doc's tokens (C3). Messages that name a `T` entry re-add the colon — at the print site in
+    main() — so they name what the reader sees in ci.yml and CLAUDE.md; rows naming a
+    REQUIRED_REPO_TASKS or T_EXEMPT key stay bare, because that is how they are written there.
     """
     arrays = T_ARRAY_RE.findall(text)
     if len(arrays) != 1:
@@ -665,6 +667,12 @@ def main():
         return 0
 
     print("FAIL  [ci-targets] ci.yml's moon ci target array is out of sync", file=sys.stderr)
+    # Rows that name a `T` ENTRY are printed WITH the leading colon, so they read as what the
+    # reader sees in ci.yml and CLAUDE.md and as what the fix line tells them to type — a forgotten
+    # gate printed bare `new-gate` under "append `:<name>`" made the reader do the translation.
+    # `floor` and `bad_exempt`/`stale_exempt` stay BARE deliberately: their fix sites are
+    # REQUIRED_REPO_TASKS and T_EXEMPT in this file, where the names are written without a colon.
+    # `doc_problems`, `missing_sites` and `bad_invocation` are sentences and command text, not names.
     for rows, title in (
         (floor,
          "A task this gate REQUIRES to be present is absent from the parsed `repo` set, so the\n"
@@ -672,12 +680,12 @@ def main():
          "    Fix: if the task was genuinely renamed or removed, update REQUIRED_REPO_TASKS in\n"
          "    ci/affected-graph/ci_targets.py. Otherwise the project filter or moon's output\n"
          "    shape has changed — investigate before touching anything else."),
-        (missing,
+        ([":" + name for name in missing],
          "A CI-eligible `repo:*` task is NOT in ci.yml's `T=(...)` array, so it does not run in\n"
          "    CI at all — it passes locally and silently does not exist on any PR (SMA-541).\n"
          "    Fix: append `:<name>` to `T` in .github/workflows/ci.yml AND to the command\n"
          "    between the <!-- ci-targets:begin/end --> markers in CLAUDE.md."),
-        (unexpected,
+        ([":" + name for name in unexpected],
          "`T` contains a `repo` task that is NOT CI-eligible (runInCI: false) or is listed in\n"
          "    T_EXEMPT. `moon ci` will resolve nothing for it and still exit 0, so the gate reads\n"
          "    as running while it is off.\n"
@@ -693,7 +701,7 @@ def main():
          "    `missing` above); a leftover is silent, and exempts nothing forever.\n"
          "    Fix: delete the entry from T_EXEMPT in ci/affected-graph/ci_targets.py, or correct\n"
          "    its name."),
-        (dead,
+        ([":" + name for name in dead],
          "A `T` entry resolves to no CI-eligible task anywhere in the graph — a typo, or a task\n"
          "    that was renamed, deleted or turned off. `moon ci` exits 0 on such a target, even\n"
          "    when real targets surround it, so nothing else in CI reports this.\n"
