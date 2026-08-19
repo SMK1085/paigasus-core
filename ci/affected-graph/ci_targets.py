@@ -149,6 +149,11 @@ T_EXEMPT = {}
 # Same role as cargo_moon_parity.py's REQUIRED_FFI_TASKS.
 REQUIRED_REPO_TASKS = ("affected-smoke", "promtool", "publish-metadata")
 
+# SMA-553 D13 — repo:input-liveness's `inputs: ['**/*']` is load-bearing, and asserting it ONLY
+# inside that gate would make it the sole judge of its own configuration. This is the second,
+# independently-scheduled copy: it runs inside repo:affected-smoke.
+SELF_TASK_EXPECTED_GLOBS = {"input-liveness": ("**/*",)}
+
 # C3 checks the flag tail too. The first spec draft omitted it on the stated grounds that
 # assert_include_relations "already owns the flag question" — it does not: that function greps
 # ci.yml only (run.sh:126) and never opens CLAUDE.md. Without this, the documented command could
@@ -156,11 +161,12 @@ REQUIRED_REPO_TASKS = ("affected-smoke", "promtool", "publish-metadata")
 # checking the docs worth doing (D6).
 REQUIRED_DOC_FLAGS = ("--base origin/main", "--include-relations")
 
-# C4 — this gate's own two call sites in run.sh. Placing the gate inside repo:affected-smoke rather
-# than making it a repo:* task of its own (D1) means C1 does NOT cover it: its execution depends on
-# these two lines, and deleting either leaves everything green. Matched WITH their bash suffixes
-# because the bare name `assert_ci_targets` also appears in the function definition, so a
-# name-only match would survive deleting the call.
+# C4 — this gate's own call sites in run.sh, and (SMA-553) repo:input-liveness's inside its own
+# task script. Placing a gate inside repo:affected-smoke rather than making it a repo:* task of its
+# own (D1) means C1 does NOT cover it: its execution depends on these lines, and deleting one
+# leaves everything green. Matched WITH their bash suffixes because the bare name
+# `assert_ci_targets` also appears in the function definition, so a name-only match would survive
+# deleting the call.
 #
 # A PARTIAL mitigation, not a closure: deleting the `assert_ci_targets` call removes C4 along with
 # it. SMA-542 is the general fix for this class (spec L6).
@@ -173,6 +179,24 @@ RUN_SH_CALL_SITES = (
     # entries now pin their propagation, symmetrically (CodeRabbit round 3).
     '"$HERE/ci_targets.py" --self-test || NEG_RC=1',
 )
+
+# repo:input-liveness's resolved script must run BOTH its negative control and the real check.
+# Deleting either line leaves a task that still schedules, still exits 0, and asserts half (or
+# none) of what its name claims. Its `inputs: ['**/*']` is asserted separately, by
+# SELF_TASK_EXPECTED_GLOBS above.
+#
+# Unlike RUN_SH_CALL_SITES these are matched as WHOLE LINES, and the asymmetry is deliberate:
+# `python3 ci/affected-graph/task_inputs.py` is a strict PREFIX of the same line plus
+# ` --self-test`, so under a substring test deleting the REAL RUN would leave C4 green while the
+# gate no longer ran at all. The run.sh entries cannot be whole-line matched in return — they are
+# indented in the file and the second is a mid-line fragment — but they do not need to be: each
+# already carries its `|| RC=1` propagation suffix, which makes it unambiguous (SMA-553 D10).
+SELF_SCHEDULED_GATES = {
+    "input-liveness": (
+        "python3 ci/affected-graph/task_inputs.py --self-test",
+        "python3 ci/affected-graph/task_inputs.py",
+    ),
+}
 
 
 def read_input(path, label):
@@ -330,14 +354,16 @@ def _eligibility(projects):
     return result
 
 
-def moon_tasks():
-    """Moon's own resolved task graph: project id -> task name -> CI-eligible.
+def moon_payload():
+    """The raw `tasks` object from ONE `moon query tasks` call.
 
-    ONE subprocess call, filtered by project id in Python rather than with `--project repo`:
-    moon's query filters are regex-based and unanchored, so a future project named e.g.
-    `paigasus-repo-ts` would silently join the "repo task set" and false-red C1 (D8).
+    Split out of moon_tasks() so main() can feed the SAME payload to two independent extractors
+    — _eligibility() for CI-eligibility and _scripts() for resolved task scripts — without a
+    second subprocess and without widening _eligibility's return shape (SMA-553 D10).
 
-    The subprocess + `json.loads` shell around _eligibility(), which holds the shape rules.
+    Filtered by project id in Python rather than with `--project repo`: moon's query filters are
+    regex-based and unanchored, so a future project named e.g. `paigasus-repo-ts` would silently
+    join the "repo task set" and false-red C1 (D8).
     """
     out = subprocess.run(
         ["moon", "query", "tasks"], capture_output=True, text=True, check=True
@@ -350,7 +376,12 @@ def moon_tasks():
         raise MoonOutputError(
             f"`moon query tasks` returned {type(payload).__name__}, expected a JSON object"
         )
-    return _eligibility(payload.get("tasks") or {})
+    return payload.get("tasks") or {}
+
+
+def moon_tasks():
+    """Moon's own resolved task graph: project id -> task name -> CI-eligible."""
+    return _eligibility(moon_payload())
 
 
 def check_floor(tasks, floor=REQUIRED_REPO_TASKS):
@@ -471,9 +502,61 @@ def check_invocation(ci_yml_text):
     return rows
 
 
-def check_self_invocation(run_sh_text):
-    """Call sites of this gate that are missing from run.sh."""
-    return [site for site in RUN_SH_CALL_SITES if site not in run_sh_text]
+def _scripts(projects):
+    """`{task: resolved script}` for the `repo` project. PURE.
+
+    A SEPARATE extractor rather than a wider _eligibility return: that function's
+    `{pid: {task: bool}}` shape is pinned by eight self-test fixtures, including an exact-equality
+    polarity check, and reshaping it to carry `script` would break all of them for no gain.
+
+    Shape faults are tolerated here rather than escalated to rc 2, because _eligibility() walks
+    the very same payload first and has already raised MoonOutputError on anything malformed.
+    """
+    repo = projects.get("repo") or {}
+    if not isinstance(repo, dict):
+        return {}
+    return {name: (task.get("script") or "") for name, task in repo.items()
+            if isinstance(task, dict)}
+
+
+def check_self_invocation(run_sh_text, scripts):
+    """Call sites of the affected-graph gates that are missing from where they must appear.
+
+    The two halves match DIFFERENTLY, on purpose (see SELF_SCHEDULED_GATES): run.sh sites are
+    substrings, because they are indented and one is a mid-line fragment, and their `|| RC=1`
+    suffixes already make them unambiguous; task-script sites are whole stripped LINES, because
+    one required line is a strict prefix of the other and a substring test would report a script
+    as fully wired after its real run had been deleted.
+
+    The two texts are checked SEPARATELY rather than against one concatenated haystack, so a call
+    site living in the wrong file cannot satisfy the other's requirement.
+    """
+    missing = [site for site in RUN_SH_CALL_SITES if site not in run_sh_text]
+    for task, required in sorted(SELF_SCHEDULED_GATES.items()):
+        present = {line.strip() for line in scripts.get(task, "").splitlines()}
+        missing.extend(f"{task} script: {site}" for site in required if site not in present)
+    return missing
+
+
+def check_gate_inputs(projects):
+    """SMA-553 D13, mirrored. Rows for a self-scheduled gate whose own inputs have drifted."""
+    repo = projects.get("repo") or {}
+    rows = []
+    for task, expected in sorted(SELF_TASK_EXPECTED_GLOBS.items()):
+        entry = repo.get(task)
+        if not isinstance(entry, dict):
+            rows.append(f"repo:{task} is absent from the graph, so its inputs cannot be checked")
+            continue
+        # moon injects the workspace-config glob into EVERY task, so it is not authored drift.
+        got = tuple(g for g in sorted(entry.get("inputGlobs") or {})
+                    if g != ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}")
+        if got != expected or (entry.get("inputFiles") or {}):
+            rows.append(
+                f"repo:{task}'s authored inputs are {list(got)}, expected {list(expected)} — "
+                "narrowing them makes that gate stop noticing the renames it exists to catch "
+                "(SMA-553 D13)"
+            )
+    return rows
 
 
 def self_test():
@@ -801,24 +884,62 @@ def self_test():
         failures.append("read_input: did not return the file's text")
 
     wired = (
-        'assert_ci_targets() {\n  :\n}\n'
         '  assert_ci_targets || SUITE_RC=1\n'
         '  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n'
     )
-    if check_self_invocation(wired):
-        failures.append(f"check_self_invocation: fired on wired run.sh: {check_self_invocation(wired)}")
+    wired_script = (
+        "set -euo pipefail\n"
+        "python3 ci/affected-graph/task_inputs.py --self-test\n"
+        "python3 ci/affected-graph/task_inputs.py\n"
+    )
+    scripts = {"input-liveness": wired_script}
+    if check_self_invocation(wired, scripts):
+        failures.append(
+            f"check_self_invocation: fired on a wired tree: {check_self_invocation(wired, scripts)}"
+        )
     no_call = wired.replace("  assert_ci_targets || SUITE_RC=1\n", "")
-    if not check_self_invocation(no_call):
+    if not check_self_invocation(no_call, scripts):
         failures.append("check_self_invocation: missed a deleted run_suite call")
     no_selftest = wired.replace('  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n', "")
-    if not check_self_invocation(no_selftest):
+    if not check_self_invocation(no_selftest, scripts):
         failures.append("check_self_invocation: missed a deleted --self-test call")
-    # ...and the same call site left in place with its failure SILENCED. The self-test runs, reports
-    # red, and nothing acts on it — indistinguishable from a wired call site until the suffix is
-    # pinned too.
     silenced = wired.replace("--self-test || NEG_RC=1", "--self-test || true")
-    if not check_self_invocation(silenced):
+    if not check_self_invocation(silenced, scripts):
         failures.append("check_self_invocation: missed a --self-test whose failure is swallowed")
+    # SMA-553 D10 — the task-script half. The REAL-RUN line is a strict PREFIX of the --self-test
+    # line, so a substring test would report the script below as fully wired while the gate no
+    # longer runs at all. Whole-line matching is what distinguishes them.
+    if not check_self_invocation(wired, {"input-liveness": wired_script.replace(
+        "python3 ci/affected-graph/task_inputs.py\n", ""
+    )}):
+        failures.append("check_self_invocation: missed a deleted task_inputs real run (prefix hole)")
+    if not check_self_invocation(wired, {"input-liveness": wired_script.replace(
+        "python3 ci/affected-graph/task_inputs.py --self-test\n", ""
+    )}):
+        failures.append("check_self_invocation: missed a deleted task_inputs --self-test")
+    if not check_self_invocation(wired, {}):
+        failures.append("check_self_invocation: missed an absent input-liveness script entirely")
+    # The two texts are checked SEPARATELY: a call site in the wrong file must not satisfy the
+    # other's requirement, which a concatenated haystack would allow.
+    if not check_self_invocation(wired_script, {"input-liveness": wired}):
+        failures.append("check_self_invocation: accepted the two texts swapped")
+
+    # _scripts (SMA-553 D10) — a second pure extractor, so _eligibility's shape is untouched.
+    got_scripts = _scripts({"repo": {"input-liveness": {"script": "hi"}}, "ts": {"lint": {}}})
+    if got_scripts != {"input-liveness": "hi"}:
+        failures.append(f"_scripts: returned {got_scripts!r}")
+    if _scripts({"repo": {"a": {"command": "true"}}}) != {"a": ""}:
+        failures.append("_scripts: a task with no script must map to an empty string, not raise")
+
+    # SMA-553 D13, mirrored here so repo:input-liveness is not the sole judge of its own inputs.
+    # The wired row carries the implicit .moon glob moon injects into every task, which must be
+    # tolerated rather than counted as drift.
+    if check_gate_inputs({"repo": {"input-liveness": {"inputGlobs": {
+        "**/*": {}, ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {}
+    }}}}):
+        failures.append("check_gate_inputs: fired on a wired inputs declaration")
+    if not check_gate_inputs({"repo": {"input-liveness": {"inputGlobs": {"ops/**/*": {}}}}}):
+        failures.append("check_gate_inputs: missed inputs narrowed away from **/*")
 
     if failures:
         print("ci-targets self-test FAILED:", file=sys.stderr)
@@ -832,7 +953,8 @@ def self_test():
 def main():
     root = Path(__file__).resolve().parents[2]
     try:
-        tasks = moon_tasks()
+        raw_tasks = moon_payload()
+        tasks = _eligibility(raw_tasks)
         ci_yml = read_input(root / ".github" / "workflows" / "ci.yml", ".github/workflows/ci.yml")
         t_targets = parse_t(ci_yml)
         doc_targets, region = parse_doc_targets(
@@ -854,11 +976,12 @@ def main():
 
     dead = check_reverse(tasks, t_targets)
     doc_problems = check_docs(t_targets, doc_targets, region)
-    missing_sites = check_self_invocation(run_sh)
+    missing_sites = check_self_invocation(run_sh, _scripts(raw_tasks))
     bad_invocation = check_invocation(ci_yml)
+    bad_gate_inputs = check_gate_inputs(raw_tasks)
 
     if not (floor or missing or unexpected or bad_exempt or stale_exempt or dead or doc_problems
-            or missing_sites or bad_invocation):
+            or missing_sites or bad_invocation or bad_gate_inputs):
         print(
             f"PASS  {'ci-targets':<18} -> {len(t_targets)} targets: every CI-eligible repo task is "
             "in ci.yml's T, every entry resolves, CLAUDE.md mirrors it"
@@ -911,9 +1034,10 @@ def main():
          "    Fix: copy `T` verbatim between the <!-- ci-targets:begin/end --> markers, keeping\n"
          "    the `--base origin/main --include-relations` tail."),
         (missing_sites,
-         "This gate's own call site is missing from ci/affected-graph/run.sh, so it (or its\n"
-         "    negative control) would not run at all.\n"
-         "    Fix: restore the exact line; see RUN_SH_CALL_SITES in\n"
+         "A gate's own call site is missing: either this gate's, from\n"
+         "    ci/affected-graph/run.sh, or a self-scheduled gate's own invocation from inside its\n"
+         "    moon.yml task script — so that gate (or its negative control) would not run at all.\n"
+         "    Fix: restore the exact line; see RUN_SH_CALL_SITES and SELF_SCHEDULED_GATES in\n"
          "    ci/affected-graph/ci_targets.py."),
         (bad_invocation,
          "A `moon ci` invocation in .github/workflows/ci.yml does not hand it the WHOLE `T`\n"
@@ -928,6 +1052,11 @@ def main():
          "    that is a false positive, so reword the COMMENT instead. If a second,\n"
          "    deliberately-different invocation is genuinely wanted, extend check_invocation in\n"
          "    ci/affected-graph/ci_targets.py rather than loosening it."),
+        (bad_gate_inputs,
+         "A self-scheduled gate's own `inputs` no longer match what it needs to see. This is the\n"
+         "    second, independently-scheduled copy of an assertion that gate also makes about\n"
+         "    itself — it exists so the gate is not the sole judge of its own configuration.\n"
+         "    Fix: restore `inputs: ['**/*']` on the task in moon.yml."),
     ):
         if rows:
             print(f"  {title}", file=sys.stderr)
