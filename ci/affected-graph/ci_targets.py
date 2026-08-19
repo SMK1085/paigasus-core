@@ -90,6 +90,13 @@ T_EXEMPT = {}
 # Same role as cargo_moon_parity.py's REQUIRED_FFI_TASKS.
 REQUIRED_REPO_TASKS = ("affected-smoke", "promtool", "publish-metadata")
 
+# C3 checks the flag tail too. The first spec draft omitted it on the stated grounds that
+# assert_include_relations "already owns the flag question" — it does not: that function greps
+# ci.yml only (run.sh:126) and never opens CLAUDE.md. Without this, the documented command could
+# lose --include-relations and silently under-build, which is the very behaviour that makes
+# checking the docs worth doing (D6).
+REQUIRED_DOC_FLAGS = ("--base origin/main", "--include-relations")
+
 
 def parse_t(text):
     """The `T=(...)` array from ci.yml, as BARE task names (no leading colon).
@@ -225,6 +232,37 @@ def check_forward(tasks, t_targets, exempt=None):
     return sorted(want - got), sorted(got - want), bad_exempt
 
 
+def check_reverse(tasks, t_targets):
+    """`T` entries that resolve to no CI-ELIGIBLE task anywhere in the graph.
+
+    Eligibility, not mere existence: plain resolvability would let `:typecheck` pass while every
+    task it names had been turned off. `moon ci` exits 0 on an unresolvable target — including in
+    the mixed case — so nothing else in CI reports this (D4).
+    """
+    live = {name for row in tasks.values() for name, ok in row.items() if ok}
+    return sorted(name for name in t_targets if name not in live)
+
+
+def check_docs(t_targets, doc_targets, region):
+    """Problems with CLAUDE.md's documented command: ordered mirror of `T`, plus the flag tail."""
+    problems = []
+    if doc_targets != t_targets:
+        for i, (doc, want) in enumerate(zip_longest(doc_targets, t_targets)):
+            if doc != want:
+                problems.append(
+                    f"first divergence at position {i}: CLAUDE.md has "
+                    f"{':' + doc if doc else '<end of list>'}, ci.yml's T has "
+                    f"{':' + want if want else '<end of list>'}"
+                )
+                break
+        problems.append("CLAUDE.md: " + " ".join(":" + name for name in doc_targets))
+        problems.append("ci.yml  T: " + " ".join(":" + name for name in t_targets))
+    for flag in REQUIRED_DOC_FLAGS:
+        if flag not in region:
+            problems.append(f"the documented command is missing `{flag}`")
+    return problems
+
+
 def self_test():
     """Negative control: every assertion must FIRE on a synthetic violation.
 
@@ -351,6 +389,32 @@ def self_test():
     thin = {"repo": {"deny": True}}
     if check_floor(thin) != ["affected-smoke", "promtool", "publish-metadata"]:
         failures.append(f"check_floor: did not name every absent floor member: {check_floor(thin)}")
+
+    def reverse(label, tasks, t, want):
+        got = check_reverse(tasks, t)
+        if got != list(want):
+            failures.append(f"check_reverse[{label}]: got {got}, want {list(want)}")
+
+    # A generic target owned by another project resolves — it must NOT be reported.
+    reverse("generic-resolves", tasks_fixture, aligned_t, [])
+    reverse("dead-entry", tasks_fixture, aligned_t + ["ghost"], ["ghost"])
+    # A name whose every task is runInCI:false is present but would run NOTHING (D4).
+    reverse("resolves-only-to-disabled", tasks_fixture, aligned_t + ["install-hooks"],
+            ["install-hooks"])
+
+    def docs(label, t, doc, region, want_empty):
+        got = check_docs(t, doc, region)
+        if bool(got) == want_empty:
+            failures.append(f"check_docs[{label}]: got {got}, want_empty={want_empty}")
+
+    full_flags = "moon ci --base origin/main --include-relations"
+    docs("aligned", aligned_t, list(aligned_t), full_flags, True)
+    docs("doc-missing-target", aligned_t, aligned_t[:-1], full_flags, False)
+    docs("doc-extra-target", aligned_t, aligned_t + ["extra"], full_flags, False)
+    docs("doc-reordered", aligned_t, list(reversed(aligned_t)), full_flags, False)
+    docs("doc-missing-include-relations", aligned_t, list(aligned_t),
+         "moon ci --base origin/main", False)
+    docs("doc-missing-base", aligned_t, list(aligned_t), "moon ci --include-relations", False)
 
     if failures:
         print("ci-targets self-test FAILED:", file=sys.stderr)
