@@ -4,7 +4,7 @@
 
 ## What it gates
 
-Every file under `rs/crates/*/*/src/**/*.rs` that spells one of the 46 codes declared in
+Every file under `rs/crates/*/*/src/**/*.rs` that spells one of the codes declared in
 `contracts/proto/paigasus/common/v1/error.proto` must be on `check.py`'s `MANIFEST`.
 
 That forces a **new emission site** to be registered and given a membership test. It is the

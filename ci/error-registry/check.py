@@ -56,8 +56,8 @@ def mirror_codes(text):
 
     Parsed rather than trusted: this and derive_codes are INDEPENDENT transcriptions of the same
     proto, so they can only agree if both are right. That mutual check is what makes this file's
-    re-implementation of the mapping rule safe — without it, a parser returning 3 of 46 codes would
-    silently scan for almost nothing and the gate would pass while guarding nothing.
+    re-implementation of the mapping rule safe — without it, a parser returning 3 of the registry's
+    codes would silently scan for almost nothing and the gate would pass while guarding nothing.
     """
     block = _MIRROR_BLOCK.search(text)
     if block is None:
@@ -71,7 +71,8 @@ SCAN_ROOT = REPO / "rs/crates"
 # Files permitted to spell a registry code.
 #   emits    — puts a code on the wire. `guard` names the membership test proving its codes are
 #              all declared; check.py asserts that test still exists.
-#   asserts  — test code only; it checks codes rather than emitting them.
+#   asserts  — spells codes without ever putting a literal on the wire: test assertions, or a
+#              conversion path that routes every code through an ErrorReason registry static.
 #   excluded — the string is not a registry code here at all. `why` must say why.
 # A path may be a literal repo-relative path or a glob.
 MANIFEST = (
@@ -86,7 +87,9 @@ MANIFEST = (
     ("rs/crates/services/paigasus-gateway/src/adapters/http/chat.rs", "emits",
      "the_terminal_sse_frame_carries_a_registered_code", "the terminal SSE error frame"),
     ("rs/crates/services/paigasus-iam/src/adapters/grpc/convert.rs", "asserts", None,
-     "hosts three membership tests; emits its codes via ErrorReason LazyLock statics, not literals"),
+     "NOT test-only — a production conversion path. Safe because every code leaves it through an "
+     "ErrorReason LazyLock static, never through a literal, so a code absent from the registry is "
+     "unrepresentable here. It also hosts three membership tests."),
     ("rs/crates/libs/paigasus-proto/src/error.rs", "asserts", None,
      "EXPECTED_REASONS — the registry's own mirror, which this gate cross-checks against"),
     ("rs/crates/services/paigasus-iam/src/adapters/http/error.rs", "asserts", None, "test assertions only"),
@@ -134,9 +137,22 @@ def guard_exists(guard):
 
     Cheap, and it recovers the only load-bearing part of the scheduling task this design dropped:
     deleting a membership test now reds THIS gate, even though nothing here runs it.
+
+    The search is tree-wide ON PURPOSE — a row's guard need not live in that row's file. The
+    `application/error.rs` row names `every_tenancy_code_is_declared_in_the_canonical_registry`,
+    which is defined over in `adapters/grpc/convert.rs`; scoping this lookup to the row's own path
+    would red the gate on correct code. Do not "fix" it into a per-row search.
     """
     needle = f"fn {guard}("
     return any(needle in p.read_text(encoding="utf-8") for p in SCAN_ROOT.glob(SCAN_GLOB))
+
+
+_GLOB_CHARS = "*?["
+
+
+def _is_glob(entry):
+    """Does this MANIFEST path use fnmatch metacharacters, rather than being a literal path?"""
+    return any(ch in entry for ch in _GLOB_CHARS)
 
 
 def _matches(path, entry):
@@ -236,6 +252,14 @@ def self_test():
     if len(seen) != len(set(seen)):
         print("  FAIL [manifest] duplicate path rows", file=sys.stderr)
         rc = 1
+    # A glob row is the one structural way a later edit could defeat this whole gate. fnmatch's
+    # `*` crosses `/`, so a row as innocuous-looking as ("rs/crates/**", "excluded", None, "…")
+    # would match EVERY offender — and, because it also matches a hit, would keep every stale-row
+    # check green too. Both of check_single_site()'s controls fail open together and it reports
+    # nothing, so nothing downstream would ever notice. Bound globs here instead, twice over.
+    # The sentinel is a real in-scope emission site AND a literal MANIFEST row, so it cannot drift
+    # into an unrepresentative path shape without check_single_site()'s stale-row check saying so.
+    sentinel = "rs/crates/services/paigasus-iam/src/adapters/http/authn.rs"
     for path, role, guard, why in MANIFEST:
         if role not in ("emits", "asserts", "excluded"):
             print(f"  FAIL [manifest] {path} has unknown role {role!r}", file=sys.stderr)
@@ -246,6 +270,16 @@ def self_test():
         if not why:
             print(f"  FAIL [manifest] {path} has no stated reason", file=sys.stderr)
             rc = 1
+        if _is_glob(path):
+            # An authored file is named literally; only machine-generated output earns a glob.
+            if role != "excluded":
+                print(f"  FAIL [manifest] {path}: only an `excluded` row may use a glob", file=sys.stderr)
+                rc = 1
+            # ...and no glob may reach far enough to swallow a real emission site.
+            if _matches(sentinel, path):
+                print(f"  FAIL [manifest] glob {path} also matches {sentinel} — it is broad enough "
+                      "to hide every unlisted emission site", file=sys.stderr)
+                rc = 1
 
     if not code_pattern({"upstream-error"}).search(r'\"code\":\"upstream-error\"'):
         print("  FAIL [code_pattern] the escaped-quote form is not matched (E5 regression)", file=sys.stderr)
