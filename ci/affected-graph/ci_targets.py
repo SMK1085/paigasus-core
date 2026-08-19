@@ -294,7 +294,7 @@ def parse_doc_targets(text):
 def _eligibility(projects):
     """moon's parsed `{pid: {task: {...}}}` -> `{pid: {task: CI-eligible}}`.
 
-    A PURE function, split out of moon_tasks() so `--self-test` can drive both of its
+    A PURE function, split out of the subprocess so `--self-test` can drive both of its
     MoonOutputError raises without a subprocess. The rc-2 paths are the ones a fixture table most
     needs: they are what a moon upgrade trips, and an unexercised raise is indistinguishable from
     an absent one — which is the drift class this whole gate exists to close.
@@ -357,9 +357,9 @@ def _eligibility(projects):
 def moon_payload():
     """The raw `tasks` object from ONE `moon query tasks` call.
 
-    Split out of moon_tasks() so main() can feed the SAME payload to two independent extractors
-    — _eligibility() for CI-eligibility and _scripts() for resolved task scripts — without a
-    second subprocess and without widening _eligibility's return shape (SMA-553 D10).
+    The subprocess is isolated here so main() can feed the SAME payload to two independent PURE
+    extractors — _eligibility() for CI-eligibility and _scripts() for resolved task scripts —
+    without a second `moon` call and without widening _eligibility's return shape (SMA-553 D10).
 
     Filtered by project id in Python rather than with `--project repo`: moon's query filters are
     regex-based and unanchored, so a future project named e.g. `paigasus-repo-ts` would silently
@@ -377,11 +377,6 @@ def moon_payload():
             f"`moon query tasks` returned {type(payload).__name__}, expected a JSON object"
         )
     return payload.get("tasks") or {}
-
-
-def moon_tasks():
-    """Moon's own resolved task graph: project id -> task name -> CI-eligible."""
-    return _eligibility(moon_payload())
 
 
 def check_floor(tasks, floor=REQUIRED_REPO_TASKS):
@@ -550,11 +545,16 @@ def check_gate_inputs(projects):
         # moon injects the workspace-config glob into EVERY task, so it is not authored drift.
         got = tuple(g for g in sorted(entry.get("inputGlobs") or {})
                     if g != ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}")
-        if got != expected or (entry.get("inputFiles") or {}):
+        # moon resolves a LITERAL path in `inputs:` into inputFiles, not inputGlobs, so the
+        # glob tuple alone can still read as wired while the input set has in fact changed.
+        # Printed alongside the globs because otherwise this branch reports two identical
+        # lists and blames "narrowing", leaving the reader unable to see what moved.
+        files = sorted(entry.get("inputFiles") or {})
+        if got != expected or files:
             rows.append(
-                f"repo:{task}'s authored inputs are {list(got)}, expected {list(expected)} — "
-                "narrowing them makes that gate stop noticing the renames it exists to catch "
-                "(SMA-553 D13)"
+                f"repo:{task}'s authored inputs are {list(got) + files}, "
+                f"expected exactly {list(expected)} — changing them makes that gate stop "
+                "noticing the renames it exists to catch (SMA-553 D13)"
             )
     return rows
 
@@ -652,9 +652,9 @@ def self_test():
             return
         failures.append(f"{label}: accepted an output shape that must abort as infrastructure")
 
-    # The rc-2 raises, driven directly. moon_tasks() is a subprocess shell around _eligibility()
-    # precisely so these are reachable from a fixture: an unexercised raise is indistinguishable
-    # from an absent one, which is the drift class this gate exists to close.
+    # The rc-2 raises, driven directly. moon_payload() holds the subprocess and _eligibility()
+    # stays pure precisely so these are reachable from a fixture: an unexercised raise is
+    # indistinguishable from an absent one, which is the drift class this gate exists to close.
     expect_infra("_eligibility[no-projects]", lambda: _eligibility({}))
     expect_infra("_eligibility[no-options-anywhere]", lambda: _eligibility({"repo": {"deny": {}}}))
     # ...and every level's SHAPE. Each of these would otherwise raise AttributeError out of
@@ -690,7 +690,7 @@ def self_test():
     if polarity != want_polarity:
         failures.append(f"_eligibility[polarity]: got {polarity}, want {want_polarity}")
 
-    # project id -> task name -> CI-eligible. Mirrors moon_tasks()'s return shape.
+    # project id -> task name -> CI-eligible. Mirrors _eligibility()'s return shape.
     tasks_fixture = {
         "repo": {"deny": True, "promtool": True, "affected-smoke": True,
                  "publish-metadata": True, "install-hooks": False},
@@ -884,6 +884,10 @@ def self_test():
         failures.append("read_input: did not return the file's text")
 
     wired = (
+        # Load-bearing: with the function DEFINITION present, `no_call` below still contains
+        # the bare name `assert_ci_targets`, so a name-only RUN_SH_CALL_SITES entry would
+        # survive deleting the call. Dropping this line silently de-fangs that assertion.
+        'assert_ci_targets() {\n  :\n}\n'
         '  assert_ci_targets || SUITE_RC=1\n'
         '  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n'
     )
@@ -931,6 +935,14 @@ def self_test():
     if _scripts({"repo": {"a": {"command": "true"}}}) != {"a": ""}:
         failures.append("_scripts: a task with no script must map to an empty string, not raise")
 
+    # Two registries keyed by the same task names, so a gate added to one but not the other is
+    # guarded on only half of what makes it work — its script but not its inputs, or vice versa.
+    if set(SELF_SCHEDULED_GATES) != set(SELF_TASK_EXPECTED_GLOBS):
+        failures.append(
+            "SELF_SCHEDULED_GATES and SELF_TASK_EXPECTED_GLOBS disagree on which gates are "
+            f"self-scheduled: {sorted(set(SELF_SCHEDULED_GATES) ^ set(SELF_TASK_EXPECTED_GLOBS))}"
+        )
+
     # SMA-553 D13, mirrored here so repo:input-liveness is not the sole judge of its own inputs.
     # The wired row carries the implicit .moon glob moon injects into every task, which must be
     # tolerated rather than counted as drift.
@@ -940,6 +952,21 @@ def self_test():
         failures.append("check_gate_inputs: fired on a wired inputs declaration")
     if not check_gate_inputs({"repo": {"input-liveness": {"inputGlobs": {"ops/**/*": {}}}}}):
         failures.append("check_gate_inputs: missed inputs narrowed away from **/*")
+    # ...and WIDENED with an extra glob, which is equally a change to a load-bearing input set.
+    # Relaxing the exact `!=` to a subset test keeps every other row here green.
+    if not check_gate_inputs(
+        {"repo": {"input-liveness": {"inputGlobs": {"**/*": {}, "ops/**/*": {}}}}}
+    ):
+        failures.append("check_gate_inputs: missed an extra glob alongside **/*")
+    # ...and a file input, which the `or files` clause exists SOLELY to catch: the glob tuple
+    # is untouched here, so deleting that clause leaves every other row green.
+    if not check_gate_inputs({"repo": {"input-liveness": {
+            "inputGlobs": {"**/*": {}}, "inputFiles": {".prototools": {}}}}}):
+        failures.append("check_gate_inputs: missed a file input")
+    # ...and the task vanishing from the graph, which must be a LOUD row rather than a silent
+    # `continue`: a task that cannot be found cannot be checked, so skipping it asserts nothing.
+    if not check_gate_inputs({"repo": {}}):
+        failures.append("check_gate_inputs: missed input-liveness being absent from the graph")
 
     if failures:
         print("ci-targets self-test FAILED:", file=sys.stderr)
