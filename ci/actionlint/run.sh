@@ -39,7 +39,10 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the fixture tables only (extractor, path filters, config allowlist)" >&2
+  echo "  --self-test    run the four fixture tables only — extractor, path-filter verdicts," >&2
+  echo "                 branch-filter verdicts, config allowlist. No actionlint binary is" >&2
+  echo "                 required, but the branch-filter table needs a git repo carrying" >&2
+  echo "                 refs/remotes/origin/main" >&2
   exit 2
 }
 
@@ -60,13 +63,13 @@ for f in .github/workflows/*.yml .github/workflows/*.yaml; do
 done
 [ ${#WORKFLOW_FILES[@]} -gt 0 ] || infra "no workflow files found under .github/workflows/"
 
-# Extract paths:/paths-ignore: keys and their sequence entries from one workflow file.
-# Output records, TAB-separated, in file order:
-#   KEY\t<paths|paths-ignore>\t<lineno>
-#   ITEM\t<paths|paths-ignore>\t<pattern>
+# Extract the four filter keys — paths:, paths-ignore:, branches:, branches-ignore: — and their
+# sequence entries from one workflow file. Output records, TAB-separated, in file order:
+#   KEY\t<kind>\t<lineno>
+#   ITEM\t<kind>\t<pattern-or-branch>
 # See the contract in docs/superpowers/plans/2026-08-16-sma-525-actionlint-gate.md (Task 4) and
 # ci/actionlint/README.md. Every clause below has a fixture in extractor_self_test.
-extract_paths_keys() {
+extract_filter_keys() {
   awk '
     # Strip a quoted scalar to its contents; strip an unquoted one to its pre-comment text.
     function scalar(s,   q, i, c, out) {
@@ -86,7 +89,7 @@ extract_paths_keys() {
     }
 
     # A flow mapping (`{ branches: [main], paths: [a] }`) is deliberately NOT parsed for entries.
-    # Print a KEY with no ITEMs for any path filter it declares AT THE CALLER TARGET DEPTH, so
+    # Print a KEY with no ITEMs for any filter key it declares AT THE CALLER TARGET DEPTH, so
     # check 6 fails loudly instead of the whole event being skipped in silence. `target` mirrors
     # the block-form depth rule above: 2 when v is the top-level `on: { ... }` scalar (on -> event
     # -> paths), 1 when v is one event own flow value (event -> paths). A `paths` key one level
@@ -98,7 +101,7 @@ extract_paths_keys() {
     # false-red check 6 (SMA-525 round-2 review). So this tracks brace depth and quoted-string
     # spans char by char instead of a single depth-blind regex. Returns nothing when v is not a
     # flow mapping.
-    function flow_keys(v, lineno, target,    depth, i, n, c, instr, qc, prevc, rest) {
+    function flow_keys(v, lineno, target,    depth, i, n, c, instr, qc, prevc, rest, fkey) {
       if (v !~ /^[{]/) return
       sub(/[}][^}]*$/, "}", v)     # drop a trailing comment after the closing brace
       depth = 0
@@ -120,14 +123,12 @@ extract_paths_keys() {
         prevc = (i > 1) ? substr(v, i - 1, 1) : ""
         if (prevc == "{" || prevc == "," || prevc == " " || prevc == "\t") {
           rest = substr(v, i)
-          if (match(rest, /^["\047]?paths-ignore["\047]?[ \t]*:/)) {
-            if (depth == target) print "KEY\tpaths-ignore\t" lineno
+          if (match(rest, /^["\047]?(paths|branches)(-ignore)?["\047]?[ \t]*:/)) {
+            fkey = substr(rest, 1, RLENGTH)
+            sub(/["\047]?[ \t]*:$/, "", fkey)
+            sub(/^["\047]/, "", fkey)
+            if (depth == target) print "KEY\t" fkey "\t" lineno
             i += RLENGTH - 1   # the for loop own i++ then makes the net advance RLENGTH
-            continue
-          }
-          if (match(rest, /^["\047]?paths["\047]?[ \t]*:/)) {
-            if (depth == target) print "KEY\tpaths\t" lineno
-            i += RLENGTH - 1
             continue
           }
         }
@@ -196,13 +197,15 @@ extract_paths_keys() {
 
       if (!in_on) next
 
-      # A sequence entry outside a paths block (a `branches:` or `schedule:` list) introduces no
-      # mapping level, so it must not perturb the depth stack below.
+      # A sequence entry outside a recognized filter block (a `schedule:` list, say) introduces no
+      # mapping level, so it must not perturb the depth stack below. A `branches:`/`paths:`/etc.
+      # entry never reaches here — it is consumed as an ITEM one clause earlier, by the `in_block`
+      # handling above, while its block is still open.
       if (stripped ~ /^-([ \t]|$)/) next
 
       # DEPTH INSIDE `on:`. `on:` is level 0; an event key (push:, pull_request:,
       # workflow_dispatch:, ...) is level 1; a key belonging to that event is level 2. Only a
-      # level-2 `paths:`/`paths-ignore:` is a real path filter.
+      # level-2 `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` is a real filter key.
       #
       # Depth, not "anywhere under on:", because a workflow input may legitimately be NAMED
       # `paths` — `on.workflow_dispatch.inputs.paths` sits at level 3. Emitting a KEY for it made
@@ -215,10 +218,10 @@ extract_paths_keys() {
 
       if (depth == 1) {
         # A flow-mapping event value — `push: { branches: [main], paths: [a] }` — is valid YAML
-        # that actionlint accepts, and its `paths:` never reaches the level-2 branch below. Left
-        # alone it would make checks 5 and 6 silently guard nothing at all. Target depth 1: event
-        # -> paths (an `inputs.paths` here, e.g. `push: { inputs: { paths: x } }`, is at depth 2
-        # and must be ignored, same rule as above).
+        # that actionlint accepts, and its `paths:`/`branches:` never reach the level-2 branch
+        # below. Left alone it would make checks 5 and 6 silently guard nothing at all. Target
+        # depth 1: event -> paths/branches (an `inputs.paths` here, e.g.
+        # `push: { inputs: { paths: x } }`, is at depth 2 and must be ignored, same rule as above).
         val = stripped
         sub(/^[^:]*:[ \t]*/, "", val)
         flow_keys(val, NR, 1)
@@ -226,13 +229,15 @@ extract_paths_keys() {
       }
       if (depth != 2) next
 
-      # A quoted key ("paths":, 'paths-ignore':) is valid YAML actionlint accepts; the bare-only
-      # regex silently dropped it — no KEY record, so checks 5/6 skipped the filter with no
-      # message (SMA-525 round-2 review finding A). Whitespace before the colon (`paths :`) gets
-      # the same tolerance as `on :` above, for the same reason.
-      if (stripped ~ /^["\047]?paths["\047]?[ \t]*:/)        { kind = "paths" }
-      else if (stripped ~ /^["\047]?paths-ignore["\047]?[ \t]*:/) { kind = "paths-ignore" }
-      else next
+      # Four filter keys, matched by one pattern and then read back out of the line, rather than
+      # four near-identical regexes. A quoted key ("paths":, 'branches-ignore':) is valid YAML
+      # actionlint accepts; the bare-only regex silently dropped it — no KEY record, so the checks
+      # skipped the filter with no message (SMA-525 round-2 review finding A). Whitespace before
+      # the colon (`paths :`) gets the same tolerance as `on :` above, for the same reason.
+      if (stripped !~ /^["\047]?(paths|branches)(-ignore)?["\047]?[ \t]*:/) next
+      kind = stripped
+      sub(/["\047]?[ \t]*:.*$/, "", kind)   # drop the colon, any value, any trailing comment
+      sub(/^["\047]/, "", kind)             # drop a leading quote
 
       print "KEY\t" kind "\t" NR
 
@@ -247,7 +252,7 @@ extract_paths_keys() {
       # pattern mirrors the KEY match above (quotes and pre-colon whitespace optional) so a
       # quoted inline `"paths": [a, b]` strips down to its flow value, not a still-quoted label.
       rest = stripped
-      sub(/^["\047]?paths(-ignore)?["\047]?[ \t]*:/, "", rest)
+      sub(/^["\047]?(paths|branches)(-ignore)?["\047]?[ \t]*:/, "", rest)
       sub(/[ \t]+#.*$/, "", rest)
       sub(/^[ \t]+/, "", rest)
       sub(/[ \t]+$/, "", rest)
@@ -272,7 +277,7 @@ extractor_self_test() {
     name="$1"; expected="$2"; yaml="$3"
     tmp="$(mktemp)"
     printf '%s' "$yaml" > "$tmp"
-    actual="$(extract_paths_keys "$tmp")"
+    actual="$(extract_filter_keys "$tmp")"
     rm -f "$tmp"
     if [ "$actual" != "$expected" ]; then
       fail "extractor self-test '$name' mismatch.
@@ -292,6 +297,79 @@ on:
     paths:
       - "rs/**"
       - ".prototools"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a branches block is extracted' \
+"$(printf 'KEY\tbranches\t4\nITEM\tbranches\tmain')" \
+'name: t
+on:
+  push:
+    branches:
+      - main
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a branches block followed by a sibling paths block keeps both' \
+"$(printf 'KEY\tbranches\t4\nITEM\tbranches\tmain\nKEY\tpaths\t6\nITEM\tpaths\trs/**')" \
+'name: t
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "rs/**"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a branches flow sequence emits KEY with no ITEMs' \
+"$(printf 'KEY\tbranches\t4')" \
+'name: t
+on:
+  push:
+    branches: [main]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a branches-ignore block is extracted' \
+"$(printf 'KEY\tbranches-ignore\t4\nITEM\tbranches-ignore\tdev')" \
+'name: t
+on:
+  push:
+    branches-ignore:
+      - dev
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+'
+
+  check_fixture 'a workflow_dispatch input named branches is not a filter' \
+"" \
+'name: t
+on:
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: which branches
+        required: false
 jobs:
   j:
     runs-on: ubuntu-latest
@@ -333,7 +411,7 @@ jobs:
 '
 
   check_fixture 'dedent closes the block' \
-"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**')" \
+"$(printf 'KEY\tpaths\t4\nITEM\tpaths\ta/**\nKEY\tbranches\t6')" \
 'name: t
 on:
   push:
@@ -374,8 +452,8 @@ jobs:
       - run: echo hi
 '
 
-  check_fixture 'a paths: line inside a run block is ignored' \
-"" \
+  check_fixture 'a paths: line inside a run block is ignored, while a sibling branches: flow sequence still emits KEY' \
+"$(printf 'KEY\tbranches\t4')" \
 'name: t
 on:
   push:
@@ -601,7 +679,7 @@ jobs:
 '
 
   check_fixture 'a flow-mapping event with paths emits KEY with no ITEMs' \
-"$(printf 'KEY\tpaths\t3')" \
+"$(printf 'KEY\tbranches\t3\nKEY\tpaths\t3')" \
 'name: t
 on:
   push: { branches: [main], paths: ["rz/**"] }
@@ -613,7 +691,7 @@ jobs:
 '
 
   check_fixture 'a flow-mapping event with paths-ignore emits KEY with no ITEMs' \
-"$(printf 'KEY\tpaths-ignore\t3')" \
+"$(printf 'KEY\tbranches\t3\nKEY\tpaths-ignore\t3')" \
 'name: t
 on:
   push: {branches: [main], paths-ignore: ["docs/**"]}
@@ -624,8 +702,8 @@ jobs:
       - run: echo hi
 '
 
-  check_fixture 'a flow-mapping event without a path filter is not a KEY' \
-"" \
+  check_fixture 'a flow-mapping event with only a branch filter still emits a KEY' \
+"$(printf 'KEY\tbranches\t3')" \
 'name: t
 on:
   push: { branches: [main] }   # no paths filter here
@@ -637,7 +715,7 @@ jobs:
 '
 
   check_fixture 'a flow mapping on on: itself emits KEY with no ITEMs' \
-"$(printf 'KEY\tpaths\t2')" \
+"$(printf 'KEY\tbranches\t2\nKEY\tpaths\t2')" \
 'name: t
 on: {push: {branches: [main], paths: ["rz/**"]}}
 jobs:
@@ -973,8 +1051,155 @@ pattern_verdict() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Check 6 (definitions) — every extracted `paths:` KEY must carry at least one sequence item, and
-# at least one of those items must be a POSITIVE (non-'!') pattern.
+# Check 5, branch half (definitions) — every `branches:` entry must resolve as a ref, or be
+# skip-listed (SMA-540 D2).
+#
+# `branches: [mian]` is a valid glob that actionlint accepts, so the workflow simply stops
+# running — the same silent, permanent failure `paths:` had, one key over.
+#
+# The ref namespace is refs/remotes/origin/* ONLY (D3). A workflow triggers on branches as they
+# exist on GitHub, which is exactly that set; refs/heads/* is a developer's private branch set
+# locally and just `main` (push) or nothing (PR) in CI — the one namespace guaranteed to disagree.
+# Measured: actions/checkout at fetch-depth 0 fetches +refs/heads/*:refs/remotes/origin/* on both
+# the push and pull_request paths, so CI and a fetched local checkout see the same set.
+#
+# `branches-ignore:` is deliberately EXCLUDED from resolution (D6), mirroring paths-ignore: a
+# typo'd exclusion makes the workflow run MORE often, which is the fail-safe direction.
+# ---------------------------------------------------------------------------------------------
+BRANCH_SKIP=(
+  # (empty — add entries as "branch-or-pattern"  # why, and what verifies it instead)
+)
+
+is_branch_skipped() {
+  local b="$1" s
+  for s in ${BRANCH_SKIP+"${BRANCH_SKIP[@]}"}; do
+    [ "$s" = "$b" ] && return 0
+  done
+  return 1
+}
+
+# The remote-tracking branch names, read ONCE. `refname:lstrip=3` drops `refs/remotes/origin/`, so
+# a nested name (feature/x) survives intact where `refname:short` would prefix it with `origin/`.
+# origin/HEAD is a symref to the default branch, not a branch, and is filtered out so it cannot
+# make a literal entry named `HEAD` resolve.
+#
+# Loaded from the two MAIN-SHELL entry points below rather than lazily inside branch_verdict:
+# verdicts are computed in nested command substitutions, so a cache populated there would be
+# discarded with the subshell and re-run git once per entry.
+ORIGIN_REFS=''
+ORIGIN_REFS_LOADED=0
+
+load_origin_refs() {
+  [ "$ORIGIN_REFS_LOADED" -eq 1 ] && return 0
+  ORIGIN_REFS="$(git for-each-ref --format='%(refname:lstrip=3)' refs/remotes/origin/ 2>/dev/null \
+    | grep -vx 'HEAD')"
+  ORIGIN_REFS_LOADED=1
+  return 0
+}
+
+origin_has() {
+  load_origin_refs
+  printf '%s\n' "$ORIGIN_REFS" | grep -qxF -- "$1"
+}
+
+# A sample of what DOES exist, for the unresolved message. A bare "did not resolve" is the same
+# unhelpful-message problem the canary exists to avoid, one level down. $1, if given, is the
+# unresolved entry itself.
+#
+# Two failure modes of a naive `head -8` on ORIGIN_REFS, fixed here:
+#   - An empty ref list: `printf '%s\n' ""` emits a blank line, so a bare `head -8 | tr '\n' ' '`
+#     would return a single space and the message would read "include: ." — printf '(none)'
+#     instead, so an empty cache reads as empty, not as a truncated list.
+#   - `head -8` on an alphabetically-sorted ORIGIN_REFS can, in a repo with many branches, omit
+#     'main' — the one name a reader chasing an unresolved entry most needs to see — and has no
+#     reason to prefer a near-match over an arbitrary alphabetical one. Ranked instead: 'main'
+#     first (group 0), then anything sharing the entry's slash-prefix (group 1, the likeliest
+#     near-match for a typo like 'release/1.x' vs 'release/1.0'), then everything else (group 2);
+#     alphabetical within each group; capped at 8 total.
+origin_candidates() {
+  local entry="${1:-}" prefix
+  load_origin_refs
+  [ -n "$ORIGIN_REFS" ] || { printf '(none)'; return; }
+
+  case "$entry" in
+    */*) prefix="${entry%%/*}/" ;;
+    *) prefix='' ;;
+  esac
+
+  printf '%s\n' "$ORIGIN_REFS" | awk -v prefix="$prefix" '
+    $0 == "main"                           { print "0\t" $0; next }
+    prefix != "" && index($0, prefix) == 1 { print "1\t" $0; next }
+                                            { print "2\t" $0 }
+  ' | sort -t $'\t' -k1,1 -k2,2 | cut -f2- | head -8 | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# Exits 2. MAIN SHELL ONLY — called from the production call site and from
+# branch_filter_self_test, never from inside a $( ), where it would exit only the subshell.
+no_origin_main_infra() {
+  infra "refs/remotes/origin/main does not resolve in this checkout, so no 'branches:' entry can
+      be verified. This is an environment problem, not a workflow defect. Recover with the EXPLICIT
+      refspec:
+          git fetch origin +refs/heads/main:refs/remotes/origin/main
+      A bare 'git fetch origin' is NOT enough and neither is 'git fetch origin main' — the case
+      that lands you here is usually a --single-branch clone, whose remote.origin.fetch names only
+      the branch it was cloned for, and the two-argument form updates FETCH_HEAD without ever
+      writing a remote-tracking ref (both measured). If main was genuinely RENAMED, every
+      branches: filter in this repo is now dead — update them and this canary together."
+}
+
+# The single source of truth for check 5's verdict on one branch entry. Echoes exactly one stable
+# token; every non-'ok' token has a user-facing message at the production call site, and every
+# token has a fixture in branch_filter_self_test. The vocabulary is deliberately DISJOINT from
+# pattern_verdict's: PATTERN and BRANCH findings are separate record types and the call site
+# dispatches on the record type, so a shared token would print the wrong message (D8).
+branch_verdict() {
+  local b="$1"
+
+  is_branch_skipped "$b" && { echo 'skipped'; return; }
+
+  # Exclusions are not resolved — requiring them to name a live branch would be wrong. They are
+  # still COUNTED by check 6, so an all-negated block fails there with a specific verdict (L3).
+  case "$b" in '!'*) echo 'negated'; return ;; esac
+
+  # Glob metacharacters, tried FIRST and deliberately above check-ref-format (D4). GitHub reads
+  # '*', '**', '?', '+' and '[]' as patterns, so the entry names a set rather than a branch and
+  # cannot be resolved. Ordering is load-bearing twice over: check-ref-format would reject '*' and
+  # '?' as illegal ref characters and report a true but useless reason; and it keeps a glob-shaped
+  # entry from ever reaching the for-each-ref/grep -qxF lookup below. Unlike pattern_verdict, which
+  # relies on an explicit charset allowlist because it hands the pattern to git ls-files ':(glob)',
+  # that lookup does a fixed-string match (grep -F) — already immune to being misread as a pattern
+  # — so this ordering is belt-and-braces there, not the sole guarantee.
+  #
+  # '+' counts as a glob even though it is LEGAL in a git ref name: GitHub reads it as "one or
+  # more of the preceding character", so 'foo+' matches the branch 'foo', and a branch literally
+  # named 'foo+' would otherwise resolve and yield a confidently wrong 'ok'.
+  case "$b" in
+    *'*'*|*'?'*|*'+'*|*'['*|*']'*) echo 'unverifiable'; return ;;
+  esac
+
+  # git's own validity rule, so this gate does not enumerate one: it catches '..', '~', '^', ':',
+  # control characters and a trailing '.lock'.
+  if ! git check-ref-format "refs/heads/$b" 2>/dev/null; then
+    echo 'invalid-name'; return
+  fi
+
+  # The canary is LAZY (D7) — only an entry that has survived every filter above actually needs a
+  # ref, so checks 1-6 still run to completion and report their own findings before this canary
+  # ever fires. That laziness does NOT make a full run ref-free: branch_filter_self_test (check 7)
+  # asserts the same 'origin/main' precondition unconditionally, so a checkout without it still
+  # exits 2. Returned as a TOKEN, not an infra call: this function always runs inside $( ), where
+  # exit 2 would kill only the subshell.
+  origin_has 'main' || { echo 'no-origin-main'; return; }
+
+  origin_has "$b" && { echo 'ok'; return; }
+
+  echo 'unresolved'
+}
+
+# ---------------------------------------------------------------------------------------------
+# Check 6 (definitions) — every extracted filter KEY (`paths:`, `paths-ignore:`, `branches:`,
+# `branches-ignore:`) must carry at least one sequence item, and a `paths:`/`branches:` KEY must
+# also have at least one of those items be a POSITIVE (non-'!') pattern.
 #
 # Two distinct failures, two distinct messages, both keyed off the RAW item count (before the
 # '!' filtering in pattern_verdict):
@@ -1005,7 +1230,8 @@ scan_workflow_records() {
   flush_key() {
     if [ -n "$key_kind" ] && [ "$key_items" -eq 0 ]; then
       printf 'KEY\tno-items\t%s\t%s\t%s\n' "$key_kind" "$key_line" "$key_items"
-    elif [ "$key_kind" = 'paths' ] && [ "$key_items" -gt 0 ] && [ "$key_positive" -eq 0 ]; then
+    elif { [ "$key_kind" = 'paths' ] || [ "$key_kind" = 'branches' ]; } \
+      && [ "$key_items" -gt 0 ] && [ "$key_positive" -eq 0 ]; then
       printf 'KEY\tall-negated\t%s\t%s\t%s\n' "$key_kind" "$key_line" "$key_items"
     fi
   }
@@ -1017,14 +1243,28 @@ scan_workflow_records() {
         key_kind="$kind"; key_line="$value"; key_items=0; key_positive=0 ;;
       ITEM)
         key_items=$((key_items + 1))
-        if [ "$kind" = 'paths' ]; then
-          verdict="$(pattern_verdict "$value")"
-          case "$verdict" in
-            ok|skipped|negated) ;;
-            *) printf 'PATTERN\t%s\t%s\n' "$verdict" "$value" ;;
-          esac
-          case "$value" in '!'*) ;; *) key_positive=$((key_positive + 1)) ;; esac
-        fi ;;
+        # COUNTING IS KIND-GENERIC; only the verdict dispatch below is kind-specific. This
+        # increment used to live inside the paths-only guard, where a branches: block would
+        # report key_positive=0 and fire 'all-negated' on all five real filters — redding the
+        # only required check on a clean tree (SMA-540 D5).
+        case "$value" in '!'*) ;; *) key_positive=$((key_positive + 1)) ;; esac
+        case "$kind" in
+          paths)
+            verdict="$(pattern_verdict "$value")"
+            case "$verdict" in
+              ok|skipped|negated) ;;
+              *) printf 'PATTERN\t%s\t%s\n' "$verdict" "$value" ;;
+            esac ;;
+          branches)
+            # A separate record type, carrying the key's line number: PATTERN's shape stays
+            # byte-identical for AC-3, the two verdict vocabularies cannot collide into the wrong
+            # message, and a message can name WHICH of two identical `branches:` entries is wrong.
+            verdict="$(branch_verdict "$value")"
+            case "$verdict" in
+              ok|skipped|negated) ;;
+              *) printf 'BRANCH\t%s\t%s\t%s\n' "$verdict" "$value" "$key_line" ;;
+            esac ;;
+        esac ;;
     esac
   done <<< "$1"
 
@@ -1128,8 +1368,141 @@ jobs:
 ' > "$quoted_key_tmp"
   expect_scan 'a dead glob under a quoted "paths": key is reported end-to-end' \
 "$(printf 'PATTERN\tdead\trz/**')" \
-"$(extract_paths_keys "$quoted_key_tmp")"
+"$(extract_filter_keys "$quoted_key_tmp")"
   rm -f "$quoted_key_tmp"
+
+  return $rc
+}
+
+# ---------------------------------------------------------------------------------------------
+# Branch-filter self-test (definition only — invoked unconditionally as part of check 7).
+#
+# The standing control for check 5's branch half. It carries BOTH directions of the control pair:
+# a name that must resolve and one that must not. A table whose verdicts all fire cannot tell a
+# working check from a stuck one (SMA-466), and SMA-525's finding F4 was that a one-off mutation
+# battery is not a standing control.
+# ---------------------------------------------------------------------------------------------
+branch_filter_self_test() {
+  local rc=0 saved_skip saved_origin_refs saved_origin_refs_loaded tmp
+
+  # This table asserts a real ref resolves, so it shares the canary's precondition. Asserted here
+  # rather than left to a confusing per-fixture mismatch: --self-test still needs no actionlint
+  # binary, but it does now need a git repo carrying origin/main.
+  load_origin_refs
+  origin_has 'main' || no_origin_main_infra
+
+  expect_branch() {
+    local entry="$1" expected="$2" got
+    got="$(branch_verdict "$entry")"
+    if [ "$got" != "$expected" ]; then
+      fail "branch-filter self-test: branch_verdict '$entry' returned '$got', expected
+      '$expected'. Check 5's branch half is not deciding what it is documented to decide."
+      rc=1
+    fi
+  }
+
+  # The control pair. 'main' is asserted against the REAL ref store, so it also proves the lookup
+  # is being consulted at all rather than short-circuiting to 'ok'.
+  expect_branch 'main'                        'ok'
+  expect_branch 'mian-sma540-absent'          'unresolved'
+
+  # Glob metacharacters — rejected BEFORE check-ref-format so the message names the real reason.
+  expect_branch 'release/**'                  'unverifiable'
+  expect_branch 'v1.?'                        'unverifiable'
+  expect_branch 'a+b'                         'unverifiable'
+  expect_branch 'rel[0-9]'                    'unverifiable'
+
+  # git's own ref-name rule, for everything the glob test lets through.
+  expect_branch 'has space'                   'invalid-name'
+  expect_branch 'a..b'                        'invalid-name'
+
+  # Exclusions are never resolved (L3).
+  expect_branch '!main'                       'negated'
+
+  # The documented escape hatch actually silences an entry. BRANCH_SKIP ships empty, so this
+  # overrides it for one assertion and restores it — the ${arr+"${arr[@]}"} idiom is required
+  # because a bare "${arr[@]}" on an empty array is an unbound-variable error under `set -u`.
+  saved_skip=(${BRANCH_SKIP+"${BRANCH_SKIP[@]}"})
+  BRANCH_SKIP=('release/**')
+  expect_branch 'release/**'                  'skipped'
+  BRANCH_SKIP=(${saved_skip+"${saved_skip[@]}"})
+
+  # 'no-origin-main' is the one token this table cannot exercise under real refs — the table's
+  # own precondition above already asserts origin/main resolves. Simulated instead by swapping
+  # ORIGIN_REFS for a main-free list and forcing ORIGIN_REFS_LOADED so load_origin_refs treats the
+  # cache as already populated and will not overwrite it. 'dev' is in that fake list — it would
+  # otherwise resolve to 'ok' — so this proves the lazy canary still fires ahead of the per-entry
+  # lookup, not merely that a name absent from everywhere reports something non-'ok'. Placed LAST
+  # and restored immediately: a failure mid-fixture must not leave the cache poisoned for a row
+  # above, which is why every other row in this table runs first.
+  saved_origin_refs="$ORIGIN_REFS"
+  saved_origin_refs_loaded="$ORIGIN_REFS_LOADED"
+  ORIGIN_REFS="$(printf 'dev\nrelease/1.0')"
+  ORIGIN_REFS_LOADED=1
+  expect_branch 'dev'                         'no-origin-main'
+  ORIGIN_REFS="$saved_origin_refs"
+  ORIGIN_REFS_LOADED="$saved_origin_refs_loaded"
+
+  expect_branch_scan() {
+    local name="$1" expected="$2" records="$3" got
+    got="$(scan_workflow_records "$records")"
+    if [ "$got" != "$expected" ]; then
+      fail "branch-filter self-test '$name' mismatch.
+--- expected ---
+$expected
+--- actual ---
+$got"
+      rc=1
+    fi
+  }
+
+  # Check 6, branch half. Without this fixture the all-negated widening has no standing control
+  # and could be reverted silently — SMA-525 finding F4.
+  expect_branch_scan 'an all-negated branches: block is a dead trigger' \
+"$(printf 'KEY\tall-negated\tbranches\t5\t2')" \
+"$(printf 'KEY\tbranches\t5\nITEM\tbranches\t!main\nITEM\tbranches\t!dev')"
+
+  # The control that keeps the one above honest: a normal block must produce NOTHING. This is the
+  # fixture that catches key_positive being left inside a paths-only guard, which would fire
+  # all-negated on all five real filters.
+  expect_branch_scan 'a branches block with a positive entry is clean' \
+"" \
+"$(printf 'KEY\tbranches\t5\nITEM\tbranches\tmain')"
+
+  # Proves scan_workflow_records actually DISPATCHES branch items to branch_verdict, and that the
+  # finding carries the key's line number so the message can say which filter.
+  expect_branch_scan 'an unresolvable branch is reported with its key line' \
+"$(printf 'BRANCH\tunresolved\tmian-sma540-absent\t5')" \
+"$(printf 'KEY\tbranches\t5\nITEM\tbranches\tmain\nITEM\tbranches\tmian-sma540-absent')"
+
+  # branches-ignore is counted but never resolved (D6) — a nonexistent branch here is a no-op.
+  expect_branch_scan 'a branches-ignore entry is never resolved' \
+"" \
+"$(printf 'KEY\tbranches-ignore\t5\nITEM\tbranches-ignore\tmian-sma540-absent')"
+
+  # ...but an unreadable branches-ignore is still a loud failure, not a silent skip.
+  expect_branch_scan 'a branches-ignore KEY with no items is a failure' \
+"$(printf 'KEY\tno-items\tbranches-ignore\t5\t0')" \
+"$(printf 'KEY\tbranches-ignore\t5')"
+
+  # End-to-end through the REAL extractor, not a hand-built records table — the only fixture that
+  # proves the whole extractor -> scanner -> verdict pipeline reports a typo'd branch.
+  tmp="$(mktemp)"
+  printf '%s' 'name: t
+on:
+  push:
+    branches:
+      - mian-sma540-absent
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+' > "$tmp"
+  expect_branch_scan 'a typod branch is reported end-to-end through the extractor' \
+"$(printf 'BRANCH\tunresolved\tmian-sma540-absent\t4')" \
+"$(extract_filter_keys "$tmp")"
+  rm -f "$tmp"
 
   return $rc
 }
@@ -1233,9 +1606,11 @@ case "$#:${1:-}" in
     ;;
   '1:--self-test')
     # --self-test never shells out to actionlint, so it runs everything that does not need the
-    # binary and exits before the PATH guard below.
+    # binary and exits before the PATH guard below. It DOES need a git repo carrying origin/main,
+    # since branch_filter_self_test's control pair asserts a real ref resolves (SMA-540 D7).
     extractor_self_test
     path_filter_self_test
+    branch_filter_self_test
     config_self_test
     exit "$FAILED" ;;
   *)
@@ -1389,8 +1764,14 @@ fi
 # scan_workflow_records above; this is the production call site that turns each finding record
 # into the message its author has to act on.
 # ---------------------------------------------------------------------------------------------
+
+# Populate the ref cache in the MAIN SHELL. Verdicts are computed in nested command
+# substitutions, so a cache first populated there would be thrown away with the subshell and
+# git would run once per entry instead of once per gate run.
+load_origin_refs
+
 for wf in "${WORKFLOW_FILES[@]}"; do
-  records="$(extract_paths_keys "$wf")" || infra "extractor failed on $wf"
+  records="$(extract_filter_keys "$wf")" || infra "extractor failed on $wf"
   [ -n "$records" ] || continue
 
   findings="$(scan_workflow_records "$records")"
@@ -1427,21 +1808,51 @@ for wf in "${WORKFLOW_FILES[@]}"; do
           *)
             infra "unhandled pattern verdict '$verdict' for '$p' in $wf" ;;
         esac ;;
+      BRANCH)
+        b="$f1"; bline="$f2"
+        case "$verdict" in
+          unverifiable)
+            fail "$wf:$bline: branches entry '$b' contains a glob metacharacter ('*', '?', '+' or
+      '[]'), so it names a pattern rather than a branch and cannot be resolved against a ref. Add
+      it to BRANCH_SKIP in $0 with a justification saying what verifies it instead — wildcard
+      branch filters ('release/*', 'dependabot/**') are idiomatic GitHub. Or, if a literal branch
+      name was intended, rewrite it as one." ;;
+          invalid-name)
+            fail "$wf:$bline: branches entry '$b' is not a legal git branch name — git
+      check-ref-format rejects it. No branch can ever carry that name, so the trigger it guards is
+      dead." ;;
+          unresolved)
+            fail "$wf:$bline: branches entry '$b' does not resolve as refs/remotes/origin/$b. The
+      trigger it guards is (or will become) dead — GitHub reports nothing when a branch filter
+      matches nothing. This checkout's view of origin can be stale — verdicts read .git state,
+      which sits outside Moon's input hash — so run 'git fetch --prune origin' before concluding
+      this is a typo. Existing branches include: $(origin_candidates "$b"). If the branch does not
+      exist yet, add '$b' to BRANCH_SKIP in $0 with a justification." ;;
+          no-origin-main)
+            no_origin_main_infra ;;
+          *)
+            infra "unhandled branch verdict '$verdict' for '$b' in $wf" ;;
+        esac ;;
       KEY)
         case "$verdict" in
           no-items)
             fail "$wf:$f2: '$f1:' has no sequence entries this gate could read. Two forms produce
-      that and neither is parsed: an inline sequence (paths: [a, b]) and a flow mapping on the
-      event itself (push: { paths: [a, b] }). Rewrite the event and its filter in block style —
-      skipping either one silently is exactly the failure this gate exists to prevent." ;;
+      that and neither is parsed: an inline sequence ($f1: [a, b]) and a flow mapping on the
+      triggering event itself (an 'event: { $f1: [a, b] }' shape). Rewrite the event and its
+      filter in block style — skipping either one silently is exactly the failure this gate exists
+      to prevent." ;;
           all-negated)
-            fail "$wf:$f2: 'paths:' has $f3 entries but every one is a '!'-negated
-      exclusion. GitHub includes a changed file only when it matches at least one POSITIVE
-      pattern, so this filter can never match anything and the trigger it guards is dead. Add at
-      least one non-'!' pattern." ;;
+            fail "$wf:$f2: '$f1:' has $f3 entries but every one is a '!'-negated exclusion. GitHub
+      requires at least one non-'!' entry — a filter made only of exclusions can never match, so
+      the trigger it guards is dead. Add at least one positive entry." ;;
           *)
             infra "unhandled key verdict '$verdict' in $wf" ;;
         esac ;;
+      *)
+        # A finding record whose type nothing handles must not read as "nothing to report" —
+        # that is the silent pass this whole gate exists to prevent, one layer up. Before
+        # SMA-540 added BRANCH, an unknown record type fell out of this case with no action.
+        infra "unhandled finding record type '$rec' in $wf" ;;
     esac
   done <<< "$findings"
 done
@@ -1449,13 +1860,14 @@ done
 # ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, invoked for real.
 #
-# All three are defined earlier so the `--self-test` early exit near the top of this script can
+# All four are defined earlier so the `--self-test` early exit near the top of this script can
 # run them standalone for fast iteration. These are the unconditional invocations that actually
 # make the fixture tables guard the gate on every real run — without them the tables are dead
 # code in CI.
 # ---------------------------------------------------------------------------------------------
 extractor_self_test
 path_filter_self_test
+branch_filter_self_test
 config_self_test
 
 exit "$FAILED"

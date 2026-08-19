@@ -148,6 +148,14 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `contracts/proto/paigasus/common/v1/error.proto`; adding the code there is what makes it
   resolvable on any consumer. Code **removal** needs no gate — both service crates carry
   `test: deps: ['^:build']`, so a contracts change already runs their membership tests.
+- Workflow trigger filters are gated by `repo:actionlint`. Write `branches:`, `paths:` **and their
+  `-ignore` variants** as **block sequences**, never the inline `branches: [main]` form — the
+  gate's extractor does not parse inline flow and fails all four keys loudly rather than skipping
+  them in silence. Every wildcard-free
+  `branches:` entry must resolve as `refs/remotes/origin/<name>`; a branch that does not exist yet,
+  or any entry carrying a glob character (`*`, `?`, `+`, `[]` — `+` included, since GitHub reads it
+  as a quantifier), needs a justified `BRANCH_SKIP` entry in `ci/actionlint/run.sh`. A typo'd
+  branch name otherwise disables a workflow silently and permanently (SMA-540).
 
 ## Workflow
 
