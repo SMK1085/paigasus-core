@@ -97,9 +97,17 @@ build_one() {
   echo "  built ${tag}"
 }
 
-NET="paigasus-smoke-$$"
+# Every container/network name carries the same $$ suffix so two concurrent
+# `run.sh smoke` invocations against one daemon (this repo genuinely runs concurrent sessions
+# against one checkout) never collide on a fixed literal name.
+RUN_ID="$$"
+NET="paigasus-smoke-${RUN_ID}"
+GW_NAME="smoke-gw-${RUN_ID}"
+IAM_NAME="smoke-iam-${RUN_ID}"
+PG_NAME="smoke-pg-${RUN_ID}"
+CERTPROBE_NAME="certprobe-${RUN_ID}"
 cleanup() {
-  docker rm -f smoke-iam smoke-gw smoke-pg >/dev/null 2>&1 || true
+  docker rm -f "$IAM_NAME" "$GW_NAME" "$PG_NAME" "$CERTPROBE_NAME" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 
@@ -137,9 +145,9 @@ assert_base_intact() {
     echo "::error::${image} has a shell; the runtime base must stay chiseled/scratch." >&2
     return 1
   fi
-  docker create --name certprobe "$image" >/dev/null
-  certs="$(docker cp certprobe:/etc/ssl/certs/ca-certificates.crt - 2>/dev/null | tar -xO 2>/dev/null | grep -c 'BEGIN CERTIFICATE' || true)"
-  docker rm -f certprobe >/dev/null
+  docker create --name "$CERTPROBE_NAME" "$image" >/dev/null
+  certs="$(docker cp "$CERTPROBE_NAME":/etc/ssl/certs/ca-certificates.crt - 2>/dev/null | tar -xO 2>/dev/null | grep -c 'BEGIN CERTIFICATE' || true)"
+  docker rm -f "$CERTPROBE_NAME" >/dev/null
   if [ "${certs:-0}" -lt 100 ]; then
     echo "::error::${image} carries ${certs} CA certificates; the trust bundle is missing or truncated." >&2
     return 1
@@ -160,16 +168,16 @@ smoke() {
   echo "== gateway: standalone =="
   # Runtime-only config (AC-2): env vars ONLY, no mounted file, no --env-file. Success IS the
   # proof. The key is a literal dummy and must never be a real one.
-  docker run -d --name smoke-gw --network "$NET" \
+  docker run -d --name "$GW_NAME" --network "$NET" \
     -e GATEWAY_UPSTREAM__OPENAI__API_KEY=sk-smoke-not-a-real-key \
     paigasus-gateway:dev >/dev/null
-  wait_healthy smoke-gw
-  expect_status "gateway /healthz" "http://smoke-gw:8088/healthz" 200
+  wait_healthy "$GW_NAME"
+  expect_status "gateway /healthz" "http://${GW_NAME}:8088/healthz" 200
   # The NEGATIVE case is the point: no IAM is reachable, so a /readyz returning 200 is lying.
-  expect_status "gateway /readyz (no IAM)" "http://smoke-gw:8088/readyz" 503
+  expect_status "gateway /readyz (no IAM)" "http://${GW_NAME}:8088/readyz" 503
   # `if !` rather than `cmd; [ $? -eq 1 ]`: under `set -e` a bare non-zero command aborts the
   # script, and exiting 1 here is the EXPECTED result (the gateway is unready without IAM).
-  if docker exec smoke-gw /usr/local/bin/paigasus-service healthcheck --path /readyz; then
+  if docker exec "$GW_NAME" /usr/local/bin/paigasus-service healthcheck --path /readyz; then
     echo "::error::gateway readyz probe reported healthy with no IAM reachable" >&2
     return 1
   fi
@@ -177,33 +185,37 @@ smoke() {
   assert_base_intact paigasus-gateway:dev
 
   echo "== iam: with postgres, reached BY HOSTNAME =="
-  docker run -d --name smoke-pg --network "$NET" \
+  docker run -d --name "$PG_NAME" --network "$NET" \
     -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=iam postgres:16-alpine >/dev/null
   sleep 8
-  # `smoke-pg`, never 127.0.0.1: this is what exercises glibc name resolution inside the
+  # `$PG_NAME`, never 127.0.0.1: this is what exercises glibc name resolution inside the
   # chiseled rootfs. An IP literal would bypass NSS entirely and the assertion would go vacuous.
   # IAM_API_KEYS__PEPPER: IamConfig::validate requires a base64 pepper decoding to >=32 bytes
   # (ApiKeyConfig::pepper / Pepper::from_config) — boot fails without it. A literal dummy, never
   # a real secret; decodes to 43 bytes.
-  docker run -d --name smoke-iam --network "$NET" \
-    -e IAM_DATABASE_URL="postgres://postgres:smoke@smoke-pg:5432/iam" \
+  docker run -d --name "$IAM_NAME" --network "$NET" \
+    -e IAM_DATABASE_URL="postgres://postgres:smoke@${PG_NAME}:5432/iam" \
     -e IAM_AUTHN__ISSUERS='[{issuer="https://idp.example.com",audiences=["paigasus"]}]' \
     -e IAM_API_KEYS__PEPPER="cGFpZ2FzdXMtc21va2UtcGVwcGVyLW5vdC1hLXJlYWwtc2VjcmV0LTAwMA==" \
     paigasus-iam:dev >/dev/null
-  wait_healthy smoke-iam
-  expect_status "iam /healthz" "http://smoke-iam:8080/healthz" 200
-  expect_status "iam /readyz"  "http://smoke-iam:8080/readyz"  200
+  wait_healthy "$IAM_NAME"
+  expect_status "iam /healthz" "http://${IAM_NAME}:8080/healthz" 200
+  expect_status "iam /readyz"  "http://${IAM_NAME}:8080/readyz"  200
   assert_base_intact paigasus-iam:dev
 
   echo "== runs as the non-root uid it claims =="
   # `docker top`, not `docker inspect .Config.User`: the latter reads IMAGE config, so a
   # `--user 0` invocation would still pass it.
-  # `-o pid,user`, not `-o user` alone: some docker engines (observed on Docker Desktop 29.6.2)
-  # require the ps format to include `pid` to correlate host processes back to the container and
-  # error `Couldn't find PID field in ps output` otherwise. `awk '{print $NF}'` takes the last
-  # column so the field order doesn't matter.
-  for c in smoke-gw smoke-iam; do
-    uid="$(docker top "$c" -o pid,user 2>/dev/null | tail -1 | awk '{print $NF}')"
+  # `-o pid,uid`, not `-o pid,user` or `-o user` alone: `pid` stays required — some docker
+  # engines (observed on Docker Desktop 29.6.2) need it present in the ps format to correlate
+  # host processes back to the container and error `Couldn't find PID field in ps output`
+  # otherwise — but `user` is resolved through NSS, so on a Linux runner where uid 65532
+  # resolves to a synthesized name (e.g. nss-systemd on GitHub-hosted ubuntu-latest) this would
+  # print a username instead of "65532" and false-negative CI on a correct image. `uid` is the
+  # raw numeric column and is never name-resolved. Do NOT "simplify" this back to `-o user`.
+  # `awk '{print $NF}'` takes the last column so the field order doesn't matter.
+  for c in "$GW_NAME" "$IAM_NAME"; do
+    uid="$(docker top "$c" -o pid,uid 2>/dev/null | tail -1 | awk '{print $NF}')"
     [ "$uid" = "65532" ] || { echo "::error::$c runs as ${uid}, expected 65532" >&2; return 1; }
     echo "  $c runs as uid ${uid}"
   done
