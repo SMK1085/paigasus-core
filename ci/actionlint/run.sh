@@ -1050,6 +1050,118 @@ pattern_verdict() {
 }
 
 # ---------------------------------------------------------------------------------------------
+# Check 5, branch half (definitions) — every `branches:` entry must resolve as a ref, or be
+# skip-listed (SMA-540 D2).
+#
+# `branches: [mian]` is a valid glob that actionlint accepts, so the workflow simply stops
+# running — the same silent, permanent failure `paths:` had, one key over.
+#
+# The ref namespace is refs/remotes/origin/* ONLY (D3). A workflow triggers on branches as they
+# exist on GitHub, which is exactly that set; refs/heads/* is a developer's private branch set
+# locally and just `main` (push) or nothing (PR) in CI — the one namespace guaranteed to disagree.
+# Measured: actions/checkout at fetch-depth 0 fetches +refs/heads/*:refs/remotes/origin/* on both
+# the push and pull_request paths, so CI and a fetched local checkout see the same set.
+#
+# `branches-ignore:` is deliberately EXCLUDED from resolution (D6), mirroring paths-ignore: a
+# typo'd exclusion makes the workflow run MORE often, which is the fail-safe direction.
+# ---------------------------------------------------------------------------------------------
+BRANCH_SKIP=(
+  # (empty — add entries as "branch-or-pattern"  # why, and what verifies it instead)
+)
+
+is_branch_skipped() {
+  local b="$1" s
+  for s in ${BRANCH_SKIP+"${BRANCH_SKIP[@]}"}; do
+    [ "$s" = "$b" ] && return 0
+  done
+  return 1
+}
+
+# The remote-tracking branch names, read ONCE. `refname:lstrip=3` drops `refs/remotes/origin/`, so
+# a nested name (feature/x) survives intact where `refname:short` would prefix it with `origin/`.
+# origin/HEAD is a symref to the default branch, not a branch, and is filtered out so it cannot
+# make a literal entry named `HEAD` resolve.
+#
+# Loaded from the two MAIN-SHELL entry points below rather than lazily inside branch_verdict:
+# verdicts are computed in nested command substitutions, so a cache populated there would be
+# discarded with the subshell and re-run git once per entry.
+ORIGIN_REFS=''
+ORIGIN_REFS_LOADED=0
+
+load_origin_refs() {
+  [ "$ORIGIN_REFS_LOADED" -eq 1 ] && return 0
+  ORIGIN_REFS="$(git for-each-ref --format='%(refname:lstrip=3)' refs/remotes/origin/ 2>/dev/null \
+    | grep -vx 'HEAD')"
+  ORIGIN_REFS_LOADED=1
+  return 0
+}
+
+origin_has() {
+  load_origin_refs
+  printf '%s\n' "$ORIGIN_REFS" | grep -qxF -- "$1"
+}
+
+# A sample of what DOES exist, for the unresolved message. A bare "did not resolve" is the same
+# unhelpful-message problem the canary exists to avoid, one level down.
+origin_candidates() {
+  load_origin_refs
+  printf '%s\n' "$ORIGIN_REFS" | head -8 | tr '\n' ' '
+}
+
+# Exits 2. MAIN SHELL ONLY — called from the production call site and from
+# branch_filter_self_test, never from inside a $( ), where it would exit only the subshell.
+no_origin_main_infra() {
+  infra "refs/remotes/origin/main does not resolve in this checkout, so no 'branches:' entry can
+      be verified. This is an environment problem, not a workflow defect: run 'git fetch origin',
+      or re-clone without --single-branch. If main was genuinely RENAMED, every branches: filter
+      in this repo is now dead — update them and this canary together."
+}
+
+# The single source of truth for check 5's verdict on one branch entry. Echoes exactly one stable
+# token; every non-'ok' token has a user-facing message at the production call site, and every
+# token has a fixture in branch_filter_self_test. The vocabulary is deliberately DISJOINT from
+# pattern_verdict's: PATTERN and BRANCH findings are separate record types and the call site
+# dispatches on the record type, so a shared token would print the wrong message (D8).
+branch_verdict() {
+  local b="$1"
+
+  is_branch_skipped "$b" && { echo 'skipped'; return; }
+
+  # Exclusions are not resolved — requiring them to name a live branch would be wrong. They are
+  # still COUNTED by check 6, so an all-negated block fails there with a specific verdict (L3).
+  case "$b" in '!'*) echo 'negated'; return ;; esac
+
+  # Glob metacharacters, tried FIRST and deliberately above check-ref-format (D4). GitHub reads
+  # '*', '**', '?', '+' and '[]' as patterns, so the entry names a set rather than a branch and
+  # cannot be resolved. Ordering is load-bearing twice over: check-ref-format would reject '*' and
+  # '?' as illegal ref characters and report a true but useless reason; and it is what makes the
+  # show-ref lookup below safe without pattern_verdict's explicit charset allowlist.
+  #
+  # '+' counts as a glob even though it is LEGAL in a git ref name: GitHub reads it as "one or
+  # more of the preceding character", so 'foo+' matches the branch 'foo', and a branch literally
+  # named 'foo+' would otherwise resolve and yield a confidently wrong 'ok'.
+  case "$b" in
+    *'*'*|*'?'*|*'+'*|*'['*|*']'*) echo 'unverifiable'; return ;;
+  esac
+
+  # git's own validity rule, so this gate does not enumerate one: it catches '..', '~', '^', ':',
+  # control characters and a trailing '.lock'.
+  if ! git check-ref-format "refs/heads/$b" 2>/dev/null; then
+    echo 'invalid-name'; return
+  fi
+
+  # The canary is LAZY (D7) — only an entry that has survived every filter above actually needs a
+  # ref, so a repo whose branch filters are all wildcards or skip-listed never pays it, and a
+  # checkout without origin/main does not lose checks 1-6 as well. Returned as a TOKEN, not an
+  # infra call: this function always runs inside $( ), where exit 2 would kill only the subshell.
+  origin_has 'main' || { echo 'no-origin-main'; return; }
+
+  origin_has "$b" && { echo 'ok'; return; }
+
+  echo 'unresolved'
+}
+
+# ---------------------------------------------------------------------------------------------
 # Check 6 (definitions) — every extracted `paths:` KEY must carry at least one sequence item, and
 # at least one of those items must be a POSITIVE (non-'!') pattern.
 #
@@ -1212,6 +1324,62 @@ jobs:
 }
 
 # ---------------------------------------------------------------------------------------------
+# Branch-filter self-test (definition only — invoked unconditionally as part of check 7).
+#
+# The standing control for check 5's branch half. It carries BOTH directions of the control pair:
+# a name that must resolve and one that must not. A table whose verdicts all fire cannot tell a
+# working check from a stuck one (SMA-466), and SMA-525's finding F4 was that a one-off mutation
+# battery is not a standing control.
+# ---------------------------------------------------------------------------------------------
+branch_filter_self_test() {
+  local rc=0 saved_skip
+
+  # This table asserts a real ref resolves, so it shares the canary's precondition. Asserted here
+  # rather than left to a confusing per-fixture mismatch: --self-test still needs no actionlint
+  # binary, but it does now need a git repo carrying origin/main.
+  load_origin_refs
+  origin_has 'main' || no_origin_main_infra
+
+  expect_branch() {
+    local entry="$1" expected="$2" got
+    got="$(branch_verdict "$entry")"
+    if [ "$got" != "$expected" ]; then
+      fail "branch-filter self-test: branch_verdict '$entry' returned '$got', expected
+      '$expected'. Check 5's branch half is not deciding what it is documented to decide."
+      rc=1
+    fi
+  }
+
+  # The control pair. 'main' is asserted against the REAL ref store, so it also proves the lookup
+  # is being consulted at all rather than short-circuiting to 'ok'.
+  expect_branch 'main'                        'ok'
+  expect_branch 'mian-sma540-absent'          'unresolved'
+
+  # Glob metacharacters — rejected BEFORE check-ref-format so the message names the real reason.
+  expect_branch 'release/**'                  'unverifiable'
+  expect_branch 'v1.?'                        'unverifiable'
+  expect_branch 'a+b'                         'unverifiable'
+  expect_branch 'rel[0-9]'                    'unverifiable'
+
+  # git's own ref-name rule, for everything the glob test lets through.
+  expect_branch 'has space'                   'invalid-name'
+  expect_branch 'a..b'                        'invalid-name'
+
+  # Exclusions are never resolved (L3).
+  expect_branch '!main'                       'negated'
+
+  # The documented escape hatch actually silences an entry. BRANCH_SKIP ships empty, so this
+  # overrides it for one assertion and restores it — the ${arr+"${arr[@]}"} idiom is required
+  # because a bare "${arr[@]}" on an empty array is an unbound-variable error under `set -u`.
+  saved_skip=(${BRANCH_SKIP+"${BRANCH_SKIP[@]}"})
+  BRANCH_SKIP=('release/**')
+  expect_branch 'release/**'                  'skipped'
+  BRANCH_SKIP=(${saved_skip+"${saved_skip[@]}"})
+
+  return $rc
+}
+
+# ---------------------------------------------------------------------------------------------
 # Check 2 (definitions) — no actionlint config may neuter check 1.
 #
 # actionlint reads .github/actionlint.yaml, whose `paths:` map takes per-path `ignore:` regexes.
@@ -1310,9 +1478,11 @@ case "$#:${1:-}" in
     ;;
   '1:--self-test')
     # --self-test never shells out to actionlint, so it runs everything that does not need the
-    # binary and exits before the PATH guard below.
+    # binary and exits before the PATH guard below. It DOES need a git repo carrying origin/main,
+    # since branch_filter_self_test's control pair asserts a real ref resolves (SMA-540 D7).
     extractor_self_test
     path_filter_self_test
+    branch_filter_self_test
     config_self_test
     exit "$FAILED" ;;
   *)
@@ -1466,6 +1636,12 @@ fi
 # scan_workflow_records above; this is the production call site that turns each finding record
 # into the message its author has to act on.
 # ---------------------------------------------------------------------------------------------
+
+# Populate the ref cache in the MAIN SHELL. Verdicts are computed in nested command
+# substitutions, so a cache first populated there would be thrown away with the subshell and
+# git would run once per entry instead of once per gate run.
+load_origin_refs
+
 for wf in "${WORKFLOW_FILES[@]}"; do
   records="$(extract_filter_keys "$wf")" || infra "extractor failed on $wf"
   [ -n "$records" ] || continue
@@ -1533,6 +1709,7 @@ done
 # ---------------------------------------------------------------------------------------------
 extractor_self_test
 path_filter_self_test
+branch_filter_self_test
 config_self_test
 
 exit "$FAILED"
