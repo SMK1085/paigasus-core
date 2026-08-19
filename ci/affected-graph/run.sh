@@ -272,9 +272,10 @@ run_suite() {
   assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
   assert_include_relations || SUITE_RC=1
-  # LAST deliberately: assert_ci_targets is the only assertion that can still exit 2 (a broken
-  # `moon query`), and an rc-2 abort kills the script — so anything ordered after it would lose
-  # its diagnostics on exactly the runs where they are most useful (SMA-541 D2).
+  # LAST deliberately: assert_ci_targets can exit 2 on a broken `moon query`, and an rc-2 abort
+  # kills the script — so anything ordered after it would lose its diagnostics on exactly the
+  # runs where they are most useful. assert_cargo_moon_parity can abort the same way, which is
+  # harmless only because it already runs first (SMA-541 D2).
   assert_ci_targets || SUITE_RC=1
   return "$SUITE_RC"
 }
