@@ -56,6 +56,31 @@ SAFE_CHARS_RE = re.compile(r"[A-Za-z0-9._/*-]+")
 CANARY_DEAD = "zz-no-such-directory-sma553/**/*"
 CANARY_LIVE = "ci/affected-graph/*.py"
 
+# The floor. check() compares derived sets, and an empty set violates nothing — so a project key
+# that stops matching, or a moon output shape change, would print PASS while asserting nothing.
+# Same role as cargo_moon_parity.py's REQUIRED_FFI_TASKS and ci_targets.py's REQUIRED_REPO_TASKS.
+#
+# HONEST SCOPE: this catches a task RENAMED or made `internal: true` while the gate still runs. It
+# does NOT catch repo:input-liveness itself vanishing — if that task is gone, nothing executes this
+# file at all. SMA-541's C1 is what makes a deleted repo:* task red.
+REQUIRED_TASKS = ("affected-smoke", "input-liveness", "promtool", "publish-metadata")
+
+# D13 — this gate's OWN inputs. `inputs: ['**/*']` is load-bearing: the verdict depends on the whole
+# tracked tree, because a glob dies when files MOVE, and no narrow input list can observe that.
+# Narrowed to e.g. 'ops/**/*' "for cost", this task is still live under I1, still has authored
+# inputs under I3, and still passes all of SMA-541's C1-C5 — while silently no longer firing on the
+# renames it exists to catch. That is this issue's own failure class, reproduced inside its fix.
+# Asserted here AND in ci_targets.py, so a gate is not the sole judge of its own configuration.
+SELF_TASK = "input-liveness"
+SELF_EXPECTED_GLOBS = ("**/*",)
+
+# (task, pattern) -> why this dead input is tolerated. SHIPS EMPTY, and unlike SMA-541's T_EXEMPT
+# there is not even a hypothetical entry: the repo project is measured 100% clean (spec E3).
+# `pattern` may name an inputGlobs OR an inputFiles entry — the allowlist covers I1 and I2 alike.
+# An entry is a RECORDED DECISION: the reason string is required, and a blank one is itself an
+# assertion failure. Mirrors cargo_moon_parity.py's ALLOW_NO_CARGO_BACKING.
+ALLOW_DEAD_INPUT = {}
+
 
 def classify(pattern):
     """One pattern's syntactic verdict. PURE — no filesystem, no subprocess.
@@ -246,6 +271,112 @@ def check_canaries(matcher):
     return rows
 
 
+def check(tasks, tracked, matcher, allow=ALLOW_DEAD_INPUT):
+    """I1-I5. PURE apart from `matcher`, which is injected so fixtures need no tree.
+
+    Returns `(kind, message)` rows. An empty list is a pass.
+    """
+    rows = []
+
+    # I5 floor, first: if the parsed set is wrong, every row below is about the wrong thing.
+    for name in sorted(set(REQUIRED_TASKS) - set(tasks)):
+        rows.append((
+            "floor",
+            f"repo:{name} is REQUIRED to be present but is absent from the parsed task set. Either "
+            "it was renamed or removed (update REQUIRED_TASKS), or it was made `internal: true` "
+            "(moon omits such tasks from `moon query tasks` entirely), or moon's output shape "
+            "changed. Investigate before touching anything else — the checks below may be "
+            "comparing empty sets."
+        ))
+
+    # I5 / D13 — this gate's own inputs.
+    if SELF_TASK in tasks:
+        got = tuple(authored(tasks[SELF_TASK][0]))
+        if got != SELF_EXPECTED_GLOBS or tasks[SELF_TASK][1]:
+            rows.append((
+                "self-inputs",
+                f"repo:{SELF_TASK}'s authored inputs are {list(got) + tasks[SELF_TASK][1]}, "
+                f"expected exactly {list(SELF_EXPECTED_GLOBS)}. This gate's verdict depends on the "
+                "WHOLE tracked tree — a glob dies when files move — so a narrower input set makes "
+                "it serve a cached PASS on exactly the rename that kills another gate, with "
+                "nothing red. Restore `inputs: ['**/*']` in moon.yml (SMA-553 D13)."
+            ))
+
+    # I1 / I2 / I4 — per task, per pattern.
+    for name in sorted(tasks):
+        globs, files = tasks[name]
+        for pattern in authored(globs):
+            # TRUTHINESS, not membership: an entry with a blank reason must NOT exempt anything.
+            # Bare membership would let `("a", "b"): ""` silence a violation unreviewably, which is
+            # the hole cargo_moon_parity.py's _allowlisted helper exists to close. The blank reason
+            # is reported separately below, and the underlying violation still fires.
+            if allow.get((name, pattern)):
+                continue
+            verdict = classify(pattern)
+            if verdict == "negated":
+                continue
+            if verdict != "ok":
+                rows.append((
+                    "rejected",
+                    f"repo:{name} declares the glob {pattern!r}, which this gate will not evaluate "
+                    f"({verdict}). It is NOT reported as dead — the gate did not look. Either use a "
+                    "form the validator accepts, or extend classify() in "
+                    "ci/affected-graph/task_inputs.py deliberately (SMA-553 D6)."
+                ))
+                continue
+            if matcher(pattern) == 0:
+                rows.append((
+                    "dead",
+                    f"repo:{name}'s input glob {pattern!r} matches no tracked file, so Moon will "
+                    "never schedule that task on a change to what it is meant to guard. Usually a "
+                    "moved or renamed directory: update the glob in moon.yml. If it is genuinely "
+                    "meant to match nothing, add an ALLOW_DEAD_INPUT entry with a reason."
+                ))
+        for path in files:
+            if allow.get((name, path)):  # truthiness, per the note above
+                continue
+            if path not in tracked:
+                rows.append((
+                    "not-exact",
+                    f"repo:{name}'s input file {path!r} is not tracked by git, so it can never "
+                    "invalidate that task. Update the path in moon.yml, or add an ALLOW_DEAD_INPUT "
+                    "entry with a reason."
+                ))
+
+        # I3 — after the subtraction, not before (spec E2: the resolved set is never empty).
+        if not authored(globs) and not files:
+            rows.append((
+                "no-inputs",
+                f"repo:{name} declares no inputs of its own — only Moon's injected "
+                f"{INJECTED_GLOB!r}. It would be scheduled solely by a .moon/ config edit, which "
+                "means it never runs on a change to its own subject. Give it an `inputs:` list."
+            ))
+
+    # D11 — the allowlist's own staleness rules.
+    for (name, pattern), reason in sorted(allow.items()):
+        if not reason:
+            rows.append((
+                "allowlist",
+                f"ALLOW_DEAD_INPUT[{(name, pattern)!r}] has no reason string. An exemption is a "
+                "recorded decision, so the record is what earns it."
+            ))
+        if name not in tasks:
+            rows.append((
+                "allowlist",
+                f"ALLOW_DEAD_INPUT names repo:{name}, which is not a repo task — the task it "
+                "exempted was renamed or deleted and the exemption outlived it. A typo is loud "
+                "(the real pattern shows up as a violation); a leftover is silent, and exempts "
+                "nothing forever."
+            ))
+        elif pattern not in tasks[name][0] and pattern not in tasks[name][1]:
+            rows.append((
+                "allowlist",
+                f"ALLOW_DEAD_INPUT exempts {pattern!r} on repo:{name}, which declares no such "
+                "input in either inputGlobs or inputFiles. Same staleness class as above."
+            ))
+    return rows
+
+
 def self_test():
     """Negative control: every assertion must FIRE on a synthetic violation.
 
@@ -347,6 +478,74 @@ def self_test():
         failures.append("check_canaries: missed a matcher stuck returning live")
     if not check_canaries(lambda p: 0):
         failures.append("check_canaries: missed a matcher stuck returning dead")
+
+    # --- check (I1-I5) ------------------------------------------------------------------------
+    # A minimal well-formed task set. Every fixture below mutates ONE thing away from it, so a row
+    # that fires proves the specific rule fired and not a neighbour.
+    def task_set(**overrides):
+        base = {
+            "affected-smoke": (["ci/affected-graph/**/*", INJECTED_GLOB], []),
+            "input-liveness": (["**/*", INJECTED_GLOB], []),
+            "promtool": (["ops/**/*", INJECTED_GLOB], [".prototools"]),
+            "publish-metadata": ([INJECTED_GLOB], ["rs/Cargo.toml"]),
+        }
+        base.update(overrides)
+        return base
+
+    tracked = {".prototools", "rs/Cargo.toml"}
+    live = {"ci/affected-graph/**/*", "**/*", "ops/**/*"}
+    matcher = lambda p: 1 if p in live else 0
+
+    def kinds(tasks, tracked=tracked, matcher=matcher, allow=None):
+        return sorted({k for k, _ in check(tasks, tracked, matcher, allow or {})})
+
+    if kinds(task_set()) != []:
+        failures.append(f"check: fired on a clean task set: {check(task_set(), tracked, matcher, {})}")
+
+    # I1 — a glob matching nothing.
+    if kinds(task_set(promtool=(["ops-moved/**/*", INJECTED_GLOB], [".prototools"]))) != ["dead"]:
+        failures.append("check: I1 missed a dead glob")
+    # I2 — a file input that is not tracked.
+    if kinds(task_set(promtool=(["ops/**/*", INJECTED_GLOB], ["gone.toml"]))) != ["not-exact"]:
+        failures.append("check: I2 missed an untracked file input")
+    # I2 — EXACT membership, not a prefix match. `git ls-files -- rs` returns 330 files (spec E14),
+    # so an implementation that asked git instead of the tracked SET would pass for any directory.
+    if kinds(task_set(promtool=(["ops/**/*", INJECTED_GLOB], ["rs"]))) != ["not-exact"]:
+        failures.append("check: I2 accepted a directory path as a tracked file")
+    # I3 — nothing but the injected glob.
+    if kinds(task_set(promtool=([INJECTED_GLOB], []))) != ["no-inputs"]:
+        failures.append("check: I3 missed a task with no authored inputs")
+    # I4 — an unevaluable pattern. NOT reported as dead: the gate did not evaluate it at all.
+    if kinds(task_set(promtool=(["ops/**/*.{a,b}", INJECTED_GLOB], [".prototools"]))) != ["rejected"]:
+        failures.append("check: I4 missed a brace glob")
+    # A negated glob is SKIPPED, not failed.
+    if kinds(task_set(promtool=(["ops/**/*", "!ops/scratch/**", INJECTED_GLOB], [".prototools"]))) != []:
+        failures.append("check: a negated glob must be skipped, not reported")
+    # I5 floor.
+    missing_floor = task_set()
+    del missing_floor["promtool"]
+    if "floor" not in kinds(missing_floor):
+        failures.append("check: I5 missed an absent REQUIRED_TASKS member")
+    # D13 — this gate's own inputs narrowed.
+    if kinds(task_set(**{SELF_TASK: (["ops/**/*", INJECTED_GLOB], [])})) != ["self-inputs"]:
+        failures.append("check: D13 missed input-liveness narrowed away from '**/*'")
+    # ...and widened with an extra glob, which is equally a change to a load-bearing input set.
+    if "self-inputs" not in kinds(task_set(**{SELF_TASK: (["**/*", "ops/**/*", INJECTED_GLOB], [])})):
+        failures.append("check: D13 missed an extra glob on input-liveness")
+
+    # Allowlist (D11).
+    dead_globs = task_set(promtool=(["ops-moved/**/*", INJECTED_GLOB], [".prototools"]))
+    if kinds(dead_globs, allow={("promtool", "ops-moved/**/*"): "reason"}) != []:
+        failures.append("check: an allowlisted dead glob still fired")
+    dead_file = task_set(promtool=(["ops/**/*", INJECTED_GLOB], ["gone.toml"]))
+    if kinds(dead_file, allow={("promtool", "gone.toml"): "reason"}) != []:
+        failures.append("check: the allowlist does not cover inputFiles")
+    if kinds(dead_globs, allow={("promtool", "ops-moved/**/*"): ""}) != ["allowlist", "dead"]:
+        failures.append("check: an allowlist entry with a blank reason must itself be a violation")
+    if "allowlist" not in kinds(task_set(), allow={("ghost", "x/**"): "reason"}):
+        failures.append("check: an allowlist entry naming no repo task must fire")
+    if "allowlist" not in kinds(task_set(), allow={("promtool", "never-declared/**"): "reason"}):
+        failures.append("check: an allowlist entry naming an undeclared pattern must fire")
 
     if failures:
         print("task-inputs self-test FAILED:", file=sys.stderr)
