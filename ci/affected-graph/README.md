@@ -32,7 +32,7 @@ deep` and asserts the affected project set **equals** an exact expected set per 
   edit must not rebuild the kernel). The py/ts parity tests list the corpus as a task `input`
   (cache-keying), which does not make them project-affected by a corpus-only edit.
 
-It also runs five checks that the per-case project sets structurally **cannot** make:
+It also runs several checks that the per-case project sets structurally **cannot** make:
 
 - **`proto->service-info-tasks`** asserts the affected *task* set (`moon query tasks --affected`),
   scoped to `build`, `test` and `lint` — the three tasks that carry `^:build`. `moon query projects
