@@ -3,10 +3,8 @@
 **Issue:** [SMA-507](https://linear.app/smaschek/issue/SMA-507/repo-two-way-drift-gate-for-the-canonical-error-code-registry)
 **ADR:** ADR-0019 — decision E7
 **Date:** 2026-08-19
-**Status:** draft for GATE 1.
-
-Two of the issue's four acceptance criteria are re-scoped by this design, both deliberately and
-both with the issue's own permission or a named successor. See "Departures".
+**Status:** revised after adversarial challenge (round 1). The first draft's central premise was
+measured to be false and its main deliverable has been deleted — see "Departures".
 
 ## Problem
 
@@ -15,75 +13,102 @@ enum, so a new code in one service does not force a bindings regen everywhere. `
 therefore cannot see the vocabulary at all: it does not read kebab strings, cannot tell whether a
 code is still emitted, and never runs against Rust.
 
-SMA-504 shipped five exhaustive membership tests over that vocabulary. The gap is not that the
-assertions are missing — it is **when they run** and **what forces a new site to have one**.
+The issue assumes two things are unguarded — new codes and removed codes. Measurement says only
+one is. This design guards that one and records why the other needs nothing.
 
 ## Evidence
 
-Six findings shaped this design. Each was verified against the tree at `d7a2ccd`, not assumed.
+Seven findings. Each was verified against the tree at `d7a2ccd` by running the command shown, not
+by reading configuration and inferring.
 
-### E1 — a contracts-only change never schedules the tests that would catch it
+### E1 — the scheduling gap does not exist; the membership tests already run
 
-`.moon/tasks/rust.yml` gives `test` project-relative inputs and **no `deps: ['^:build']`**. Only
-`lint` carries that edge (added by SMA-526). So a PR that edits `error.proto` and regenerates
-`paigasus-proto/src/generated/**`:
+The first draft claimed `test` carries no `^:build`, citing `.moon/tasks/rust.yml`. That file is
+not the whole story: **both service crates declare the edge per-crate** —
+`rs/crates/services/paigasus-iam/moon.yml:30` and
+`rs/crates/services/paigasus-gateway/moon.yml:22` each carry `test: deps: ['^:build']`. Measured:
 
-| Task | Scheduled? | Consequence |
-|---|---|---|
-| `paigasus-iam-rs:lint` | yes, via `^:build` | *compiles* the tests |
-| `paigasus-iam-rs:test` | **no** | never *runs* them |
+```
+$ printf 'contracts/proto/paigasus/common/v1/error.proto\n' \
+    | moon query tasks --affected --downstream deep
+contracts:                ['breaking', 'fmt', 'generate', 'lint']
+paigasus-gateway-rs:      ['build', 'lint', 'test']
+paigasus-iam-rs:          ['build', 'lint', 'test']
+paigasus-proto-rs:        ['build', 'lint', 'test']
+paigasus-proto-ts:        ['build', 'test', 'typecheck']
+paigasus-service-info-rs: ['build', 'lint', 'test']
+repo:                     ['actionlint']
+```
 
-Compilation catches a removed code only where it is referenced as `ErrorReason::Variant`. Every
-literal site — all 26 of `TenancyError::code()`, both of `system_retirement.rs` — compiles
-happily against a registry that no longer declares the code. **AC 3 is unguarded for exactly the
-sites that carry the most codes.**
+A contracts-only change schedules `paigasus-iam-rs:test` and `paigasus-gateway-rs:test`. All six
+membership tests therefore run on exactly the PRs that could remove a code. **AC 3 is already
+satisfied by machinery that exists**, and the first draft's `repo:error-registry-drift` task — a
+nextest filter, a count control, a manifest of test names — would have been pure duplication.
 
-The one-line fix (give `test` a `^:build`) is rejected by name in that file's own comment: it
-would put IAM's Docker-gated container suites on every Dependabot PR.
+This is also why the structure is guaranteed rather than incidental:
+`ci/affected-graph/cargo_moon_parity.py` (A3) fails any crate whose `build`/`test`/`lint` does not
+schedule every upstream's `:build`, and `ci/affected-graph/run.sh`'s `proto->service-info-tasks`
+case asserts these exact task rows. The edge cannot silently disappear.
 
-### E2 — `system_retirement.rs` is already an uncovered emission site
+### E2 — `system_retirement.rs` is an uncovered emission site, today
 
 `rs/crates/services/paigasus-iam/src/adapters/http/system_retirement.rs:110,118` emit
-`"grants-survive"` and `"decision-change-unacknowledged"` as bare literals in production code,
-with **no** membership assertion anywhere. SMA-504's rename inventory noted both were already
-canonical and needed no rename — and, having no rename, they got no test either.
+`"grants-survive"` and `"decision-change-unacknowledged"` as bare literals, with **no** membership
+assertion anywhere. SMA-504's rename inventory noted both were already canonical and needed no
+rename — and, having no rename, they got no test.
 
-This is not hypothetical drift risk. It is the failure mode already present in the tree, and it
-is what "a new site relies on its author remembering" looks like in practice.
+This is not hypothetical. It is what "a new site relies on its author remembering" already looks
+like in this tree, and it is the gap that justifies this issue.
 
-### E3 — the literal census
+### E3 — a second uncovered branch, inside a file that *is* covered
+
+`adapters/http/authn.rs:87,91` — `envelope_rejection` — emits `"request-too-large"` and
+`"invalid-request-body"` as literals chosen by an `if`, not by an enum. Its membership test
+(`authn.rs:274-285`) enumerates `AuthnError` variants and then **hand-restates those same two
+strings** at `:277`:
+
+```rust
+let mut codes = vec!["request-too-large".to_owned(), "invalid-request-body".to_owned()];
+```
+
+Add a third branch to `envelope_rejection` and nothing catches it: the file is covered, and the
+test enumerates an enum the branch is not in. Per-file coverage is therefore weaker than
+"every code this file emits is checked", and the design must not claim otherwise.
+
+### E4 — the literal census
 
 46 declared codes (excluding the `UNSPECIFIED` sentinel). Matching a code wrapped in either
-`"…"` or `\"…\"`, over production regions only (everything above the first column-0
-`#[cfg(test)]`), comment lines filtered:
+`"…"` or `\"…\"` across `rs/crates/*/*/src/**/*.rs`. Complete — every file with a hit is listed:
 
-| prod | comment | test | File |
+| emits | asserts | File | Note |
 |---|---|---|---|
-| 26 | 0 | 8 | `paigasus-iam/src/application/error.rs` |
-| 10 | 0 | 2 | `paigasus-gateway/src/adapters/http/error.rs` |
-| 8 | 0 | 9 | `paigasus-iam/src/adapters/http/authn.rs` |
-| 2 | 0 | 6 | `paigasus-iam/src/adapters/http/system_retirement.rs` |
-| 1 | 0 | 1 | `paigasus-gateway/src/adapters/http/chat.rs` |
-| 1 | 0 | 0 | `paigasus-observability/src/grpc.rs` — **false positive** |
-| 0 | 47 | 0 | `paigasus-proto/src/generated/…/paigasus.common.v1.rs` |
-| 0 | 1 | 49 | `paigasus-proto/src/error.rs` |
-
-Three things follow.
-
-**The comment filter is load-bearing, not cosmetic.** The generated registry module repeats every
-kebab spelling in a doc comment carried over from `error.proto`. Without the filter it alone
-contributes 47 offenders and the gate is unusable.
+| 26 | 8 | `paigasus-iam/src/application/error.rs` | `TenancyError::code()` |
+| 10 | 2 | `paigasus-gateway/src/adapters/http/error.rs` | `GatewayError::parts()` |
+| 8 | 9 | `paigasus-iam/src/adapters/http/authn.rs` | authn funnel + `envelope_rejection` (E3) |
+| 2 | 6 | `paigasus-iam/src/adapters/http/system_retirement.rs` | uncovered (E2) |
+| 1 | 1 | `paigasus-gateway/src/adapters/http/chat.rs` | terminal SSE frame (E5) |
+| 1 | 0 | `paigasus-observability/src/grpc.rs` | **false positive** |
+| 0 | 13 | `paigasus-iam/src/adapters/grpc/convert.rs` | hosts three membership tests |
+| 0 | 49 | `paigasus-proto/src/error.rs` | `EXPECTED_REASONS` |
+| 0 | 3 | `paigasus-iam/src/adapters/http/error.rs` | test assertions only |
+| 0 | 1 | `paigasus-gateway/src/adapters/http/auth.rs` | test assertion only |
+| 0 | 1 | `paigasus-iam/src/application/create_user.rs` | test assertion only |
+| 0 | 47 comments | `paigasus-proto/src/generated/…/paigasus.common.v1.rs` | generated |
 
 **The false positive is real and unavoidable.** `paigasus-observability/src/grpc.rs:62` is
-`Internal => "internal"` inside `grpc_code_name`, mapping `tonic::Code` to a **metric label**. It
-has nothing to do with the registry; the collision exists because single-word codes (`internal`,
-`forbidden`, `not-found`) are ordinary English. It needs one documented exclusion.
+`Internal => "internal"` inside `grpc_code_name`, mapping `tonic::Code` to a **metric label**. The
+collision exists because single-word codes (`internal`, `forbidden`, `not-found`) are ordinary
+English.
 
-**Files hosting a membership test need not contain literals.** `convert.rs` has 13 test-region
-hits and zero production hits, yet hosts three of the six tests. The allowlist axis (which files
-may spell a code) and the test axis (which assertions must run) are genuinely different.
+**The generated module needs a path exclusion, not a comment filter.** Its 47 hits are all `///`
+doc comments carried over from `error.proto`, and it contains no `#[cfg(test)]` at all. Relying on
+a comment filter makes the gate hostage to prost's doc style: were prost to emit `#[doc = "…"]`,
+those 47 lines become offenders overnight in a file nobody here authors.
 
-### E4 — the escaped-quote form, and why one arm cannot be enough
+**Files hosting a membership test need not emit.** `convert.rs` has zero emissions and hosts three
+of the six tests. Emission and assertion are different axes.
+
+### E5 — the escaped-quote form
 
 `chat.rs:61` is
 
@@ -91,263 +116,267 @@ may spell a code) and the test axis (which assertions must run) are genuinely di
 const TERMINAL_SSE_ERROR: &str = "data: {\"error\":{…,\"code\":\"upstream-error\"}}\n\n";
 ```
 
-The code is embedded in a larger string, so the characters around it are `\"`, not `"`. A grep
-anchored on plain quotes does not match it. Widening the anchor to `\\?"<code>\\?"` does, and
-this design uses the widened form — but the general lesson stands: **a code composed into a
-larger string can evade a literal scan**, and only a membership test covers that site. The two
-arms are complementary by construction, not redundant.
+The code sits inside a larger string, so the surrounding characters are `\"`, not `"`. An anchor
+on plain quotes misses it; `\\?"<code>\\?"` catches it, with zero additional false positives
+across the scan scope (independently reproduced during the challenge: 187 hits → 189, both new
+ones in `chat.rs`). The general lesson stands — a code composed into a larger string can evade a
+literal scan.
 
-### E5 — the exact-name nextest filter works, and its control has a hole
+### E6 — "everything above the first `#[cfg(test)]`" is an unsound production/test split
 
-Measured on this worktree:
+The first draft proposed cutting each file at its first column-0 `#[cfg(test)]`. Audited across
+the scan scope, **seven files** have a first column-0 `#[cfg(test)]` that is not a test module:
 
-```
-cargo nextest run -p paigasus-iam -p paigasus-gateway --lib \
-  -E 'test(=…) or test(=…) or …'
-  → Starting 6 tests across 2 binaries (630 tests skipped)
-  → Summary [0.013s] 6 tests run: 6 passed
-```
+| File | cut at | of | production lines lost |
+|---|---|---|---|
+| `paigasus-iam/src/config.rs` | 1316 | 3318 | 2002 |
+| `paigasus-iam/src/adapters/redis_conn.rs` | 138 | 1197 | 1059 |
+| `paigasus-iam-core/src/authz/roles.rs` | 84 | 749 | 665 |
+| `paigasus-iam/src/adapters/events/relay.rs` | 33 | 539 | 506 |
+| `paigasus-gateway/src/config.rs` | 284 | 538 | 254 |
+| `paigasus-iam/src/adapters/retryable.rs` | 35 | 100 | 65 |
+| `paigasus-iam/src/application/mod.rs` | 15 | 25 | 10 |
 
-Test execution costs **13 milliseconds**. Compiling the two crates under the test profile is the
-entire real cost.
+Roughly **4,560 production lines** would be silently exempt — including `relay.rs`, an adapter and
+a plausible future emission site. The heuristic is deleted from this design (§2).
 
-The zero-match control fires:
+### E7 — there is a console, but nothing consumes the vocabulary
 
-```
--E 'test(=…::this_test_does_not_exist)'
-  → error: no tests to run   (rc=4)
-```
+Correcting the first draft, which claimed the console did not exist. It does:
+`ts/apps/paigasus-console/` is a Moon project (`.moon/workspace.yml`) with `next.config.ts`,
+`app/layout.tsx` and `app/page.tsx` — a scaffold with no error handling. `@paigasus/sdk` is
+`export {};`. `ErrorReason` **is** generated into TypeScript
+(`ts/packages/paigasus-proto/src/generated/paigasus/common/v1/error_pb.ts`) but is imported
+nowhere.
 
-So this task must **not** pass `--no-tests=pass` — inverting the advice in CLAUDE.md, which
-exists for whole-workspace runs. But the control only fires at *zero* matches: rename one of
-seven and the other six still run, exit 0, and coverage silently drops. A count assertion is
-required on top.
-
-### E6 — `:affected-smoke` does not need re-baselining
-
-`ci/affected-graph/run.sh`'s `assert_case` compares "the affected set **minus `repo`**", and
-`assert_task_case` filters to task names `build`/`test`/`lint`. Two new `repo` tasks named
-`error-registry-drift` and `error-code-single-site` enter neither set. No expected-set edits.
-
-### E7 — there is no consumer to check
-
-`ts/packages/paigasus-console` and `paigasus-docs` do not exist. `@paigasus/sdk` is
-`export {};`. `ErrorReason` *is* generated into TypeScript
-(`ts/packages/paigasus-proto/src/generated/paigasus/common/v1/error_pb.ts`), but nothing branches
-on it. SMA-508 (`@paigasus/sdk`, Backlog, Frontend milestone) already carries the consumed-side
-check as its own **AC 3**: *"Error mapping is a table test driven off the registry, so an unmapped
-code fails a test rather than rendering an empty toast."*
+So there is no error-copy map to check. SMA-508 (`@paigasus/sdk`, Backlog, Frontend milestone)
+already carries the consumed-side check as its own **AC 3**: *"Error mapping is a table test
+driven off the registry, so an unmapped code fails a test rather than rendering an empty toast."*
 
 ## Design
 
-### 1. Two Moon tasks on the root `repo` project
+### 1. One Moon task: `repo:error-code-single-site`
 
-The arms want opposite input scopes, so they are separate tasks with separate names — mirroring
-the split the repo already draws between drift gates (`:observability-drift`,
-`:parity-corpus-drift`) and single-site gates (`:redis-connect-single-site`,
-`:iam-docker-policy-single-site`).
+The scheduling arm is gone (E1). What remains is discovery: **a file that spells registry
+vocabulary must be on a reviewed list.** That is the shape of `repo:redis-connect-single-site` and
+`repo:iam-docker-policy-single-site`, and the name says so.
 
-| Task | Arm | Cost | Inputs |
-|---|---|---|---|
-| `repo:error-registry-drift` | runs the membership tests | compiles 2 crates | narrow: `error.proto`, the covered files, the script, `rs/.config/nextest.toml` |
-| `repo:error-code-single-site` | greps for unlisted code literals | a grep | broad: `rs/crates/**/src/**/*.rs`, `error.proto`, the script |
-
-Arm 2's inputs **must** be broad. Narrow inputs would schedule it only when an already-covered
-file changes, so a brand-new emission site in a brand-new file would be invisible to the arm whose
-entire purpose is finding brand-new emission sites. It stays cheap for the same reason
-`repo:actionlint` does: `.moon/workspace.yml`'s `hasher.ignorePatterns` keeps gitignored trees out
-of the hash walk.
-
-### 2. `ci/error-registry/check.py` — one script, two modes
-
-Modelled on `ci/affected-graph/cargo_moon_parity.py`: stdlib only, `toolchain: 'system'`, a
-`--self-test` mode, and exit codes `0` pass / `1` assertion failure / `2` infrastructure error, so
-a broken script aborts rather than folding into a green.
-
-```
-check.py --drift        # emit the nextest filter + assert the run count
-check.py --single-site  # derive codes, scan, compare against the manifest
-check.py --self-test    # exercise the manifest invariants and the parser
-```
-
-Codes are derived from `contracts/proto/paigasus/common/v1/error.proto` by the mapping rule that
-file states normatively: strip `ERROR_REASON_`, lowercase, `_` → `-`, drop `UNSPECIFIED`. Parsing
-the proto rather than the generated Rust keeps the source of truth singular.
-
-### 3. The manifest
-
-Lives in `check.py` as reviewed module-level data — no second file, no TOML parser, and it
-diffs legibly. Three tables:
-
-**`SITES`** — production files permitted to spell a code, each naming the test that proves the
-site's codes are all declared. Drives arm 2's allowlist *and* contributes to arm 1's filter.
-
-| Site | Guarding test |
+| | |
 |---|---|
-| `paigasus-iam/src/application/error.rs` | `adapters::grpc::convert::tests::every_tenancy_code_is_declared_in_the_canonical_registry` |
-| `paigasus-gateway/src/adapters/http/error.rs` | `adapters::http::error::tests::every_gateway_code_is_declared_in_the_canonical_registry` |
-| `paigasus-iam/src/adapters/http/authn.rs` | `adapters::http::authn::tests::every_authn_http_code_is_in_the_registry` |
-| `paigasus-iam/src/adapters/http/system_retirement.rs` | *(new — see §5)* |
-| `paigasus-gateway/src/adapters/http/chat.rs` | `adapters::http::chat::tests::the_terminal_sse_frame_carries_a_registered_code` |
+| Script | `set -euo pipefail`; `python3 ci/error-registry/check.py --self-test`; then `--single-site` |
+| Toolchain | `system` (no cargo, no `cd rs` needed — this task never invokes cargo) |
+| Inputs | `rs/crates/**/src/**/*.rs`, `contracts/proto/paigasus/common/v1/error.proto`, `ci/error-registry/**` |
 
-**`EXTRA_TESTS`** — membership tests guarding sites that carry no literal, so have no `SITES` row,
-but must still run:
+Inputs **must** be broad. Narrow inputs would schedule the gate only when an already-listed file
+changes, so a new emission site in a new file would be invisible to the one gate whose purpose is
+finding new emission sites. It stays cheap for the same reason `repo:actionlint` does:
+`.moon/workspace.yml`'s `hasher.ignorePatterns` keeps gitignored trees out of the hash walk.
 
-- `adapters::grpc::convert::tests::the_bare_status_sites_carry_registered_reasons`
-- `adapters::grpc::convert::tests::every_authn_status_carries_a_registered_reason_and_its_original_message`
+`--self-test` runs **first, in the same script block**, following `moon.yml`'s `affected-smoke`
+and `publish-metadata` precedent, so a rotted checker cannot ship green. `set -euo pipefail` is
+mandatory: Moon does not enable errexit for `script:` blocks, so without it a failing `--self-test`
+would be masked by a passing `--single-site`.
 
-Both guard sites that already route through `ErrorReason` via `LazyLock` statics (SMA-504).
+### 2. No production/test split
 
-**`EXCLUSIONS`** — file → reason. One entry today:
-`paigasus-observability/src/grpc.rs`, because `grpc_code_name` maps `tonic::Code` to a metric
-label and its `"internal"` is not a registry code (E3).
+E6 kills the heuristic, and nothing replaces it: **the whole file is scanned, and every file that
+spells a code is listed.** This is simpler and strictly sounder — there is no region logic left to
+be wrong.
 
-A single manifest, rather than a list per arm, is what stops the two arms drifting: arm 2 asserts
-a file is covered, arm 1 proves the covering test actually ran and passed.
+The cost is that files containing only *test* assertions are on the list too. That is acceptable
+and arguably right: adding a code literal to a new file becomes a conscious act either way, and
+the manifest's `role` field records which kind each file is.
 
-### 4. Scanning rules for arm 2
+### 3. `ci/error-registry/check.py`
 
-- **Pattern:** each code anchored as `\\?"<code>\\?"`, matching both the plain and escaped-quote
-  forms (E4).
-- **Scope:** `rs/crates/*/*/src/**/*.rs`.
-- **Production region:** everything above the first column-0 `#[cfg(test)]`. Inline test modules
-  legitimately assert literal wire values — those assertions are the point, and banning them
-  would make the tests tautological.
-- **Comment lines** (`^\s*//`, which covers `///`) are filtered (E3).
-- Paths are passed explicitly and never anchored on `^\./` — GNU grep emits that prefix and ugrep
-  strips it, the portability trap `redis-connect-single-site` documents.
+Modelled on `ci/affected-graph/cargo_moon_parity.py`: stdlib only, never shells out to cargo, and
+exit codes `0` pass / `1` assertion failure / `2` infrastructure error. The Moon script does not
+interpret `1` vs `2` (Moon reds on any non-zero); the distinction exists so a future caller can,
+and so the failure text is unambiguous.
 
-### 5. The seventh test
+**Code derivation.** Anchored on `^\s*ERROR_REASON_([A-Z0-9_]+)\s*=\s*\d+;\s*$` within the
+`enum ErrorReason` block, dropping `UNSPECIFIED`, then applying the rule `error.proto` states
+normatively: lowercase, `_` → `-`. The anchor matters: a bare `ERROR_REASON_[A-Z0-9_]+` scan also
+matches the prefix and the value names mentioned in that file's own prose comments.
 
-`system_retirement.rs` gets a membership test in its existing inline `mod tests`, asserting both
-codes resolve via `ErrorReason::from_wire_reason`.
+**Scan.** `rs/crates/*/*/src/**/*.rs`, excluding `**/src/generated/**` by path (E4). Pattern
+`\\?"<code>\\?"` (E5).
+
+### 4. The manifest
+
+Module-level data in `check.py` — no second file and no TOML parser, and it diffs legibly. One
+row per file, with a role and a reason:
+
+| Role | File | Guard / reason |
+|---|---|---|
+| `emits` | `paigasus-iam/src/application/error.rs` | `every_tenancy_code_is_declared_in_the_canonical_registry` |
+| `emits` | `paigasus-gateway/src/adapters/http/error.rs` | `every_gateway_code_is_declared_in_the_canonical_registry` |
+| `emits` | `paigasus-iam/src/adapters/http/authn.rs` | `every_authn_http_code_is_in_the_registry` (partial — E3) |
+| `emits` | `paigasus-iam/src/adapters/http/system_retirement.rs` | *new — §5* |
+| `emits` | `paigasus-gateway/src/adapters/http/chat.rs` | `the_terminal_sse_frame_carries_a_registered_code` |
+| `asserts` | `paigasus-iam/src/adapters/grpc/convert.rs` | hosts three membership tests |
+| `asserts` | `paigasus-proto/src/error.rs` | `EXPECTED_REASONS`, the registry's own mirror |
+| `asserts` | `paigasus-iam/src/adapters/http/error.rs` | test assertions only |
+| `asserts` | `paigasus-gateway/src/adapters/http/auth.rs` | test assertion only |
+| `asserts` | `paigasus-iam/src/application/create_user.rs` | test assertion only |
+| `excluded` | `paigasus-observability/src/grpc.rs` | `grpc_code_name` maps `tonic::Code` to a metric label; its `"internal"` is not a registry code |
+| `excluded` | `**/src/generated/**` | prost output, doc comments only, not authored here |
+
+For every `emits` row the named guard must still exist. `check.py` asserts this by grepping the
+crate for `fn <name>`. That is cheap, and it recovers the only part of the deleted arm 1 that was
+ever load-bearing: deleting a membership test now reds this gate, even though nothing here runs it.
+
+### 5. The seventh membership test
+
+`system_retirement.rs` gets a membership test in its existing inline `mod tests`, closing E2.
 
 It reads the code out of `response_for`'s rendered body rather than restating the literal — a
-comparison against the same literal the code is built from would pass even if the code were never
+comparison against the same literal the code is built from passes even if the code was never
 registered (the trap `the_terminal_sse_frame_carries_a_registered_code` documents).
 
-Exhaustiveness is enforced by an `match` over `RetireOutcome` inside the test, **not** by
+Exhaustiveness comes from a `match` over `RetireOutcome` inside the test, **not** from
 `strum::EnumIter`: its variants are struct variants carrying `PolicyKind` and `Vec<GrantRef>`, and
-`EnumIter` requires `Default` for every field type, which `PolicyKind` does not provide. A new
-`RetireOutcome` variant therefore fails to compile the test rather than silently escaping it —
-the same guarantee the other four get, reached by the mechanism this type actually supports.
+`EnumIter` requires `Default` for every field type. `RetireOutcome` is not `#[non_exhaustive]`
+(`paigasus-iam-core/src/authz/retirement.rs:71-87`), so a cross-crate `match` is genuinely
+exhaustive and a new variant fails to compile the test. The `Retired` arm asserts **no** `code` is
+present, so a future `Retired` that grows one cannot escape.
 
-### 6. Controls — the vacuity budget
+### 6. Fixing `envelope_rejection`'s coverage (E3)
 
-Every gate here can fail open. Each mode gets a named control; without these the task passes while
-guarding nothing, which is the failure `promtool`'s all-firing fixture and the Prometheus
-`# TYPE` assertions both taught.
+`every_authn_http_code_is_in_the_registry` stops hand-restating the two literals and instead drives
+real `JsonRejection`s through `envelope_rejection`, reading the codes out of the rendered bodies.
+A third branch is then covered automatically.
+
+### 7. Controls — the vacuity budget
+
+Every gate can fail open. Each mode gets a named control; without these the task passes while
+guarding nothing.
 
 | Failure mode | Control |
 |---|---|
-| proto parse breaks → empty code set → arm 2 scans for nothing | derived set must be non-empty **and** contain a known anchor code |
-| pattern or path wrong → zero hits anywhere → arm 2 passes | hits **inside** `SITES` files must be non-empty |
-| a covered file's literals vanish (moved, or hidden below an early `#[cfg(test)]`) | each `SITES` file's production-hit count must be > 0 |
-| every membership test renamed | nextest `rc=4`; **never** `--no-tests=pass` |
-| *one* membership test renamed | tests-run count must equal `len(SITES) + len(EXTRA_TESTS)` (E5) |
-| a `SITES` row names a test that no longer exists | folded into the count control above |
-| an `EXCLUSIONS` entry outlives its reason | self-test asserts every excluded file still contains a hit; a stale exclusion reds |
+| proto parse breaks → few or no codes derived → scan finds nothing | derived set must equal `EXPECTED_REASONS` in `paigasus-proto/src/error.rs:154` **as a set**, and number 46, matching that file's own `:217` anchor |
+| pattern or path wrong → zero hits anywhere | total hits across listed files must be non-empty |
+| a listed file stops containing any code (moved, renamed, deleted) | each `emits`/`asserts`/`excluded` row must still match ≥ 1 hit; a stale row reds |
+| a membership test is deleted | each `emits` row's named guard must still be found as `fn <name>` |
+| the checker itself rots | `--self-test` runs first in the same script block |
 
-### 7. CI wiring (AC 4)
+The first control is the important one, and it is a genuine cross-check rather than a smoke test.
+The first draft proposed "non-empty and contains a known anchor code", which a parser returning 3
+of 46 would pass. Comparing against `EXPECTED_REASONS` makes the Python parser and the Rust
+registry mutually validating: they are independent transcriptions of the same proto, so they can
+only agree if both are right. It also answers the "third copy of the mapping rule" objection —
+the copy exists, but it is now checked against the second copy on every run.
 
-Both targets appended to `.github/workflows/ci.yml`'s `T=(…)` array and to the full-graph command
-documented in CLAUDE.md.
+### 8. CI wiring (AC 4)
+
+`:error-code-single-site` appended to `.github/workflows/ci.yml`'s `T=(…)` array and to the
+full-graph command documented in CLAUDE.md. One target, not two.
 
 **Known collision:** SMA-541 (in flight, `feature/sma-541-ci-target-coverage-gate`) parses that
 same array and asserts it against CLAUDE.md. Whichever lands second rebases onto the other; if
 SMA-541 lands first, this change must satisfy its parity assertion rather than only editing the
 two files by hand.
 
+`:affected-smoke` needs no re-baselining: `ci/affected-graph/run.sh:30`'s `assert_case` compares
+the affected set **minus `repo`**, and `assert_task_case` filters to task names `build`/`test`/
+`lint`. A `repo` task named `error-code-single-site` enters neither, and
+`cargo_moon_parity.py`'s FFI markers do not match its script.
+
 ## Verification
 
-Negative controls, each run by deliberately breaking the tree and asserting red, then reverting.
-`--self-test` covers the parser and manifest invariants in-process; the rest are manual and
-recorded in the PR body.
+Each control is exercised by injecting the defect, observing which task reds, and reverting. The
+task that reds is recorded — a control that cannot attribute its red is not a control.
 
-| # | Injected defect | Must red |
-|---|---|---|
-| 1 | spell a declared code in a **new** production file not on `SITES` | arm 2 |
-| 2 | add an undeclared code to `system_retirement.rs` | arm 1 (new test) |
-| 3 | delete `ERROR_REASON_SLUG_CONFLICT` from `error.proto` (still emitted as a literal) | arm 1 |
-| 4 | rename one membership test | arm 1 (count control) |
-| 5 | rename all membership tests | arm 1 (`rc=4`) |
-| 6 | corrupt the `ERROR_REASON_` prefix so the parse yields nothing | arm 2 (non-empty control) |
-| 7 | remove `paigasus-observability/src/grpc.rs`'s `"internal"` | `--self-test` (stale exclusion) |
+| # | Injected defect | Must red | Attribution risk |
+|---|---|---|---|
+| 1 | spell a declared code in a new `src/` file not on the manifest | `repo:error-code-single-site` | none — no other gate reads that file |
+| 2 | add an undeclared code to `system_retirement.rs` | `paigasus-iam-rs:test` (new test, §5) | none |
+| 3 | add a third `envelope_rejection` branch with an undeclared code | `paigasus-iam-rs:test` (§6) | none |
+| 4 | delete a manifest row whose file still contains a hit | `repo:error-code-single-site` | none |
+| 5 | delete `every_tenancy_code_is_declared_in_the_canonical_registry` | `repo:error-code-single-site` (guard control) | also reds `paigasus-iam-rs:test`? no — deleting a test cannot fail it |
+| 6 | remove `ERROR_REASON_SLUG_CONFLICT` from `error.proto`, regenerate, **and** update `EXPECTED_REASONS` and the `46` anchor | `paigasus-iam-rs:test` | the extra edits are required precisely so the red is attributable to the membership test rather than to `paigasus-proto-rs:test` |
+| 7 | corrupt the derivation so it yields a subset | `repo:error-code-single-site` (set-equality control) | exercised in `--self-test` against an in-process fixture, not by mutating the real proto |
 
-Control 3 is the one that fails on `main` today, and is the direct proof that E1's gap was real.
+Control 6 is the AC 3 proof. It must be run in its full form: the naive version (delete the value
+and stop) reds `paigasus-proto-rs:test` and `contracts:lint` first and proves nothing about the
+membership tests.
 
-Beyond the controls: the full graph as CI runs it, per CLAUDE.md, including both new targets.
+Beyond the controls: the full graph as CI runs it, per CLAUDE.md, including the new target.
 
 ## Limitations
 
 Stated rather than papered over, matching the posture of the two existing single-site gates.
 
-1. **Arm 2 is vocabulary-scoped: it detects a *declared* code in an *unlisted* file, not an
+1. **The gate is vocabulary-scoped: it detects a *declared* code in an *unlisted* file, not an
    *undeclared* code anywhere.** It greps for the 46 strings the registry declares, so a new site
-   inventing `"widget-jammed"` — a code absent from `error.proto` — produces no hit and passes.
-   This is the load-bearing limitation of the whole design and is worth stating precisely:
+   inventing `"widget-jammed"` produces no hit and passes.
 
    | New site emits | Caught by | Why |
    |---|---|---|
-   | a declared code, in a file not on `SITES` | arm 2 | it is in the derived set |
-   | an undeclared code, added to a covered enum | arm 1 | the membership test enumerates that enum's variants |
-   | an undeclared code, at a wholly new site | **nothing** | not in the derived set, and no membership test exists yet |
+   | a declared code, in an unlisted file | this gate | it is in the derived set |
+   | an undeclared code, added to a covered enum | that enum's membership test | the test enumerates variants |
+   | an undeclared code, in a listed file but outside the guarded enum | **nothing** | E3's shape |
+   | an undeclared code, at a wholly new site | **nothing** | not in the derived set, no test exists yet |
 
-   Closing row 3 mechanically would mean flagging kebab-case literals *by shape* rather than by
-   vocabulary, which collides with ordinary strings (`"content-type"`,
-   `"application/json"`, `"paigasus-retryable"`) and would drown the gate in false positives.
-   Accepted deliberately. The residual risk is bounded by what such a code is worth: a reason
-   absent from the registry does not resolve through `ErrorReason::from_wire_reason` on any
-   consumer, which SMA-504's design already treats as the defect — so the code is dead on the wire
-   whether or not this gate names it.
+   Closing rows 3 and 4 mechanically would mean flagging kebab literals *by shape* rather than by
+   vocabulary, which collides with ordinary strings (`"content-type"`, `"application/json"`,
+   `"paigasus-retryable"`) and would drown the gate in false positives. Accepted deliberately. The
+   residual risk is bounded by what such a code is worth: a reason absent from the registry
+   resolves through `ErrorReason::from_wire_reason` on no consumer, which SMA-504 already treats as
+   the defect — so the code is dead on the wire whether or not this gate names it.
 
-2. **Codes composed at runtime are invisible to arm 2.** `format!("{prefix}-conflict")` matches
-   nothing. Arm 1 covers such a site only if someone wrote a test for it.
-3. **An early column-0 `#[cfg(test)]` in a *new, uncovered* file hides literals below it.** The
-   per-file control catches this for `SITES` files only.
-4. **Arm 2 proves membership of a file on a list, not the quality of the test named beside it.** A
-   `SITES` row whose test asserts nothing useful passes both arms. Review is the control there.
-5. **The exclusion list is hand-maintained.** A second genuine `tonic::Code`-style collision needs
-   a new entry with a stated reason; the self-test only proves existing entries still match
-   something.
-6. **`registry ⊆ emitted` is not checked** — see Out of scope.
+2. **Codes composed at runtime are invisible.** `format!("{prefix}-conflict")` matches nothing.
+
+3. **Block comments are not filtered.** There is no comment filter at all now (§2), so a
+   `/* … */` or `///` mention of a code in an unlisted file reds the gate. Same class of gap
+   `redis-connect-single-site` documents, inverted: here it produces a false positive, not a false
+   negative, so it fails safe and is fixed by listing the file.
+
+4. **A manifest row asserts a file was reviewed, not that its guard is good.** A row whose named
+   test asserts nothing useful passes. Review is the control there.
+
+5. **The exclusion rows are hand-maintained.** A second `tonic::Code`-style collision needs a new
+   row with a stated reason.
+
+6. **Scope is `rs/crates/*/*/src/**`.** `tests/`, `benches/`, `build.rs` and the `py/`/`ts/`
+   workspaces are out. Emissions live in `src/`; integration tests under `tests/` assert against
+   the wire and are not emission sites. A future non-Rust service that emits codes needs the scan
+   widened.
+
+7. **`registry ⊆ emitted` is not checked** — see Out of scope.
 
 ## Out of scope
 
-- **The consumed side (AC 2).** No consumer exists (E7) and SMA-508's AC 3 already owns it. A
-  vacuous TS arm that passes today while guarding nothing was considered and rejected: it is the
-  exact "green gate proving nothing" shape this design spends §6 defending against.
+- **The consumed side (AC 2).** Nothing consumes the vocabulary (E7) and SMA-508's AC 3 already
+  owns it. A vacuous TS arm that passes today while guarding nothing was considered and rejected:
+  it is the exact "green gate proving nothing" shape §7 exists to prevent.
 - **`registry ⊆ emitted`** — dead registry entries are legal by design. The registry is
   append-only; retracting a code requires reserving name and number, so unused entries are the
   expected steady state, not drift.
 - **Refactoring the 47 production literals to `ErrorReason::`.** Considered; it would make an
-  undeclared code unwritable and a removed one a compile error. Rejected as disproportionate:
-  `TenancyError::code() -> &'static str` would have to change shape across 26 sites and its
-  callers, for a guarantee the allowlist already delivers at the granularity that matters.
+  undeclared code unwritable. Rejected as disproportionate: `TenancyError::code() -> &'static str`
+  would have to change shape across 26 sites and its callers.
 
 ## Departures
 
+**`repo:error-registry-drift` is deleted.** The first draft's premise — that a contracts-only
+change never schedules the membership tests — was measured false (E1). AC 3 needs no new code.
+
 **AC 2 is deferred**, with the issue's explicit permission ("if this lands before the SDK, ship
 the emitted-side check first and add the consumed side with `@paigasus/sdk`"). SMA-507's AC 2 is
-amended to say so and the handoff recorded on SMA-508, whose AC 3 is already the same
-requirement. Nothing is silently dropped.
+amended to say so and the handoff recorded on SMA-508, whose AC 3 is the same requirement.
 
-**AC 1 is delivered by two mechanisms rather than one.** The issue's wording — "adding an
-undeclared code to a Rust error enum reds the gate" — is already true today for the three enums
-with membership tests. The design reads AC 1 as the stronger claim it must have meant: a new
-emission site should not be able to escape unguarded. E2 shows the weaker reading was already
-violated in the tree.
-
-That stronger reading is delivered **partially, not fully**, and the boundary is Limitation 1: a
-new site reusing declared vocabulary is caught, a new site inventing vocabulary is not. This is a
-deliberate trade against a false-positive explosion, not an oversight, and it is called out here
-rather than left for a reader to discover from the code.
+**AC 1 is read as the stronger claim.** Its literal wording — "adding an undeclared code to a Rust
+error enum reds the gate" — is already true for the three enums with membership tests. The design
+reads it as: a new emission site should not escape unguarded. E2 and E3 show the weaker reading was
+already violated twice in the tree. The stronger reading is delivered **partially**, and the
+boundary is Limitation 1.
 
 ## Acceptance criteria mapping
 
 | AC | Where | Verified by |
 |---|---|---|
-| 1 — undeclared code in a Rust error enum reds | arm 1: the membership tests enumerate each covered enum's variants, so an undeclared code fails one. Arm 2 additionally forces a new *site* to register. **Not** covered: an undeclared code at a wholly new site (Limitation 1) | controls 1, 2 |
+| 1 — undeclared code in a Rust error enum reds | existing membership tests, plus the new one (§5) and the widened one (§6); the gate forces a new *site* to register | controls 1–3 |
 | 2 — undeclared code in the console copy map reds | **deferred to SMA-508 AC 3** (E7) | — |
-| 3 — removing a still-emitted code reds | arm 1, which is the only thing that runs the tests on a contracts-only PR (E1) | control 3 |
-| 4 — wired into the `moon ci` target list | §7 | full-graph run |
+| 3 — removing a still-emitted code reds | **already satisfied** — a contracts change schedules both services' `:test` (E1) | control 6 |
+| 4 — wired into the `moon ci` target list | §8 | full-graph run |
