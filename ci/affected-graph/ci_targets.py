@@ -69,6 +69,27 @@ T_ARRAY_RE = re.compile(r"^[ \t]*T=\((.*?)\)[ \t]*$", re.MULTILINE)
 MARKER_BEGIN = "<!-- ci-targets:begin -->"
 MARKER_END = "<!-- ci-targets:end -->"
 
+# task name -> why this CI-eligible `repo` task is deliberately absent from ci.yml's `T`.
+# SHIPS EMPTY, and that is the point: it is the sanctioned escape, not a live exemption.
+#
+# It exists because `runInCI: false` — the only exemption C1 would otherwise honour — is documented
+# in this repo as BROKEN for this purpose: "Do NOT set `runInCI: false`: Moon also excludes such
+# tasks from `moon run` whenever CI=true, which would make the CI gate resolve zero tasks and exit
+# 1" (ts/moon.yml:31-32, repeated at :45-46). CI-eligible-but-not-in-`T` tasks already exist one
+# project over — `build-release` on all 13 Rust crates, `contracts:generate`, `ts:commitlint`,
+# `ts:check-config-only` — so the day a `repo:*` gate needs its own workflow step, the alternative
+# to this table is someone deleting the assertion.
+#
+# An entry is a RECORDED DECISION, not a silent exemption: the reason string is required and a
+# blank one is itself an assertion failure, mirroring cargo_moon_parity.py's ALLOW_NO_CARGO_BACKING.
+T_EXEMPT = {}
+
+# The floor. C1 compares two derived sets, and two EMPTY sets compare equal — so a project-id
+# filter that stops matching, or a moon output shape change, would print PASS while asserting
+# nothing. Every task named here must be present and CI-eligible in the parsed `repo` set.
+# Same role as cargo_moon_parity.py's REQUIRED_FFI_TASKS.
+REQUIRED_REPO_TASKS = ("affected-smoke", "promtool", "publish-metadata")
+
 
 def parse_t(text):
     """The `T=(...)` array from ci.yml, as BARE task names (no leading colon).
@@ -139,6 +160,69 @@ def parse_doc_targets(text):
         if token.startswith(":"):
             targets.append(token[1:])
     return targets, region
+
+
+def moon_tasks():
+    """Moon's own resolved task graph: project id -> task name -> CI-eligible.
+
+    ONE subprocess call, filtered by project id in Python rather than with `--project repo`:
+    moon's query filters are regex-based and unanchored, so a future project named e.g.
+    `paigasus-repo-ts` would silently join the "repo task set" and false-red C1 (D8).
+
+    Eligibility polarity is deliberately `is not False`: an absent `runInCI`, or an absent
+    `options` object, means ELIGIBLE. Defaulting toward inclusion means a moon output change
+    cannot silently exempt a gate — it can only over-require, which is a loud red.
+    """
+    out = subprocess.run(
+        ["moon", "query", "tasks"], capture_output=True, text=True, check=True
+    ).stdout
+    projects = json.loads(out).get("tasks") or {}
+    if not projects:
+        raise MoonOutputError("`moon query tasks` reported no projects at all")
+    saw_options = False
+    result = {}
+    for pid, tasks in projects.items():
+        row = {}
+        for name, task in (tasks or {}).items():
+            options = task.get("options")
+            if options is not None:
+                saw_options = True
+            row[name] = (options or {}).get("runInCI") is not False
+        result[pid] = row
+    if not saw_options:
+        # Not one task carried `options` — moon's shape changed and runInCI can no longer be read.
+        # Escalate rather than treat every task as eligible: a silent shape change is how a gate
+        # starts asserting something other than what it claims.
+        raise MoonOutputError(
+            "no task in `moon query tasks` output carries an `options` key — moon's output shape "
+            "changed, so `runInCI` can no longer be read (SMA-541 D8)"
+        )
+    return result
+
+
+def check_floor(tasks, floor=REQUIRED_REPO_TASKS):
+    """Floor members absent from the parsed CI-eligible `repo` set."""
+    repo = tasks.get("repo") or {}
+    eligible = {name for name, ok in repo.items() if ok}
+    return sorted(set(floor) - eligible)
+
+
+def check_forward(tasks, t_targets, exempt=None):
+    """(missing, unexpected, bad_exempt) — strict equality over `T`'s repo-owned partition.
+
+    `got` deliberately counts every `T` entry that names ANY `repo` task, eligible or not. That is
+    what makes flipping a gate to `runInCI: false` while leaving it in `T` show up as `unexpected`
+    instead of passing three green checks (D3).
+    """
+    exempt = T_EXEMPT if exempt is None else exempt
+    repo = tasks.get("repo")
+    if repo is None:
+        raise MoonOutputError("`moon query tasks` reported no `repo` project")
+    eligible = {name for name, ok in repo.items() if ok}
+    want = eligible - set(exempt)
+    got = {name for name in t_targets if name in repo}
+    bad_exempt = sorted(name for name, reason in exempt.items() if not (reason or "").strip())
+    return sorted(want - got), sorted(got - want), bad_exempt
 
 
 def self_test():
@@ -221,6 +305,52 @@ def self_test():
     expect_doc_red("duplicate-begin", f"{MARKER_BEGIN}\n{MARKER_BEGIN}\nx\n{MARKER_END}\n")
     expect_doc_red("inverted", f"{MARKER_END}\n`moon ci :build`\n{MARKER_BEGIN}\n")
     expect_doc_red("empty-region", f"{MARKER_BEGIN}\n\n{MARKER_END}\n")
+
+    # project id -> task name -> CI-eligible. Mirrors moon_tasks()'s return shape.
+    tasks_fixture = {
+        "repo": {"deny": True, "promtool": True, "affected-smoke": True,
+                 "publish-metadata": True, "install-hooks": False},
+        "some-crate-rs": {"build": True, "test": True, "build-release": True},
+    }
+    aligned_t = ["build", "test", "deny", "promtool", "affected-smoke", "publish-metadata"]
+
+    def forward(label, tasks, t, exempt, want_missing, want_unexpected, want_bad_exempt=()):
+        missing, unexpected, bad = check_forward(tasks, t, exempt)
+        if (missing, unexpected, bad) != (list(want_missing), list(want_unexpected), list(want_bad_exempt)):
+            failures.append(
+                f"check_forward[{label}]: got {missing}/{unexpected}/{bad}, want "
+                f"{list(want_missing)}/{list(want_unexpected)}/{list(want_bad_exempt)}"
+            )
+
+    forward("aligned", tasks_fixture, aligned_t, {}, [], [])
+    # AC #3: a runInCI:false task absent from T must not trip the gate — asserted with SEVERAL of
+    # them, so the exclusion is a rule and not an accident of install-hooks happening to be alone.
+    # (A fixture identical to "aligned" would restate that case without testing anything new.)
+    two_disabled = {**tasks_fixture,
+                    "repo": {**tasks_fixture["repo"], "install-hooks": False, "second-hook": False}}
+    forward("runInCI-false-absent", two_disabled, aligned_t, {}, [], [])
+    # A new repo gate that nobody added to T.
+    forward("missing-gate", {**tasks_fixture, "repo": {**tasks_fixture["repo"], "new-gate": True}},
+            aligned_t, {}, ["new-gate"], [])
+    # THE BLOCKER: a gate flipped to runInCI:false but LEFT in T. A subset test passes this.
+    forward("disabled-but-still-in-T",
+            {**tasks_fixture, "repo": {**tasks_fixture["repo"], "promtool": False}},
+            aligned_t, {}, [], ["promtool"])
+    # A task in T_EXEMPT with a reason may be absent from T...
+    forward("exempt-absent", tasks_fixture,
+            [t for t in aligned_t if t != "promtool"], {"promtool": "runs in its own step"}, [], [])
+    # ...but present-AND-exempt is contradictory and must be reported.
+    forward("exempt-but-present", tasks_fixture, aligned_t,
+            {"promtool": "runs in its own step"}, [], ["promtool"])
+    # A bare-membership exemption with no reason is unreviewable — reject it.
+    forward("exempt-without-reason", tasks_fixture,
+            [t for t in aligned_t if t != "promtool"], {"promtool": "  "}, [], [], ["promtool"])
+
+    if check_floor(tasks_fixture) != []:
+        failures.append("check_floor: fired on a fixture containing every floor member")
+    thin = {"repo": {"deny": True}}
+    if check_floor(thin) != ["affected-smoke", "promtool", "publish-metadata"]:
+        failures.append(f"check_floor: did not name every absent floor member: {check_floor(thin)}")
 
     if failures:
         print("ci-targets self-test FAILED:", file=sys.stderr)
