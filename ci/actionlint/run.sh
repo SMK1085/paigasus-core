@@ -1137,9 +1137,14 @@ origin_candidates() {
 # branch_filter_self_test, never from inside a $( ), where it would exit only the subshell.
 no_origin_main_infra() {
   infra "refs/remotes/origin/main does not resolve in this checkout, so no 'branches:' entry can
-      be verified. This is an environment problem, not a workflow defect: run 'git fetch origin',
-      or re-clone without --single-branch. If main was genuinely RENAMED, every branches: filter
-      in this repo is now dead — update them and this canary together."
+      be verified. This is an environment problem, not a workflow defect. Recover with the EXPLICIT
+      refspec:
+          git fetch origin +refs/heads/main:refs/remotes/origin/main
+      A bare 'git fetch origin' is NOT enough and neither is 'git fetch origin main' — the case
+      that lands you here is usually a --single-branch clone, whose remote.origin.fetch names only
+      the branch it was cloned for, and the two-argument form updates FETCH_HEAD without ever
+      writing a remote-tracking ref (both measured). If main was genuinely RENAMED, every
+      branches: filter in this repo is now dead — update them and this canary together."
 }
 
 # The single source of truth for check 5's verdict on one branch entry. Echoes exactly one stable

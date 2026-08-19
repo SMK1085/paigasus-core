@@ -1152,9 +1152,16 @@ Add to the Gotchas section. **Prose only** — no `ci-targets` marker strings, n
 
 - [ ] **Step 7: Verify the gate and the docs agree**
 
-Run: `ci/actionlint/run.sh && echo GATE-GREEN`
-Expected: `GATE-GREEN`. `moon.yml` is an input to nothing here, but a YAML typo in it would break the next Moon invocation, so also run:
-`moon run repo:actionlint` and expect a pass.
+Run (the PATH export is required — both `actionlint` and `moon` are proto-managed and are not on a
+non-interactive shell's default PATH; without it you may silently get a system `actionlint`):
+
+```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+ci/actionlint/run.sh && echo GATE-GREEN
+moon run repo:actionlint
+```
+
+Expected: `GATE-GREEN`, then a passing Moon task. `moon.yml` is an input to nothing here, but a YAML typo in it would break the next Moon invocation, which is why the second command is run at all.
 
 - [ ] **Step 8: Commit**
 

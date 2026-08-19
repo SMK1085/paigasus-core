@@ -308,7 +308,11 @@ otherwise                          -> unresolved     FAIL: typo? or skip-list it
 ```
 
 The git calls are `git check-ref-format "refs/heads/$n"` and a lookup against a **single**
-`git for-each-ref --format='%(refname:short)' refs/remotes/origin/` collected once per run — one
+`git for-each-ref --format='%(refname:lstrip=3)' refs/remotes/origin/` collected once per run
+(`lstrip=3` drops exactly `refs/remotes/origin/`, leaving a nested name like `feature/x` intact;
+`%(refname:short)` — which an earlier draft of this section named — would yield `origin/main` and
+so never match a workflow entry, and `origin/HEAD` is filtered out so it cannot make a literal
+`HEAD` entry resolve) — one
 subprocess instead of one per entry, and it makes both the canary (is the list missing `main`?) and
 the `unresolved` message (which names near-miss candidates from the list, rather than reporting a
 bare boolean) fall out for free. `check-ref-format` is preferred to a hand-rolled character class
