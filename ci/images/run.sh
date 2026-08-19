@@ -97,6 +97,119 @@ build_one() {
   echo "  built ${tag}"
 }
 
+NET="paigasus-smoke-$$"
+cleanup() {
+  docker rm -f smoke-iam smoke-gw smoke-pg >/dev/null 2>&1 || true
+  docker network rm "$NET" >/dev/null 2>&1 || true
+}
+
+# Poll until the container's own HEALTHCHECK reports healthy. This is the ONLY assertion that
+# exercises the probe binary INSIDE the shell-less image — an outside-the-container curl passes
+# even when HEALTHCHECK is broken.
+wait_healthy() {
+  local name="$1" i status
+  for i in $(seq 1 60); do
+    status="$(docker inspect --format '{{.State.Health.Status}}' "$name" 2>/dev/null || echo missing)"
+    [ "$status" = "healthy" ] && { echo "  $name is healthy (in-image probe, ${i}s)"; return 0; }
+    [ "$status" = "missing" ] && { echo "::error::$name is gone; logs follow" >&2; docker logs "$name" 2>&1 | tail -30 >&2; return 1; }
+    sleep 1
+  done
+  echo "::error::$name never became healthy (last status: $status)" >&2
+  docker logs "$name" 2>&1 | tail -30 >&2
+  return 1
+}
+
+expect_status() {
+  local label="$1" url="$2" want="$3" got
+  got="$(docker run --rm --network "$NET" curlimages/curl:8.11.1 -s -o /dev/null -w '%{http_code}' "$url" || echo 000)"
+  if [ "$got" != "$want" ]; then
+    echo "::error::${label}: expected HTTP ${want}, got ${got}" >&2
+    return 1
+  fi
+  echo "  ${label}: HTTP ${got}"
+}
+
+# The base must stay the base. Without these a future `FROM ubuntu:24.04` "just to debug
+# something" would pass every other assertion in this suite.
+assert_base_intact() {
+  local image="$1" certs size
+  if docker run --rm --entrypoint /bin/sh "$image" -c true >/dev/null 2>&1; then
+    echo "::error::${image} has a shell; the runtime base must stay chiseled/scratch." >&2
+    return 1
+  fi
+  docker create --name certprobe "$image" >/dev/null
+  certs="$(docker cp certprobe:/etc/ssl/certs/ca-certificates.crt - 2>/dev/null | tar -xO 2>/dev/null | grep -c 'BEGIN CERTIFICATE' || true)"
+  docker rm -f certprobe >/dev/null
+  if [ "${certs:-0}" -lt 100 ]; then
+    echo "::error::${image} carries ${certs} CA certificates; the trust bundle is missing or truncated." >&2
+    return 1
+  fi
+  size="$(docker image inspect --format '{{.Size}}' "$image")"
+  if [ "$size" -gt 209715200 ]; then
+    echo "::error::${image} is ${size} bytes, over the 200 MB ceiling — the runtime base has probably grown." >&2
+    return 1
+  fi
+  echo "  ${image}: no shell, ${certs} CA certs, $((size / 1024 / 1024)) MB"
+}
+
+smoke() {
+  trap cleanup EXIT
+  cleanup
+  docker network create "$NET" >/dev/null
+
+  echo "== gateway: standalone =="
+  # Runtime-only config (AC-2): env vars ONLY, no mounted file, no --env-file. Success IS the
+  # proof. The key is a literal dummy and must never be a real one.
+  docker run -d --name smoke-gw --network "$NET" \
+    -e GATEWAY_UPSTREAM__OPENAI__API_KEY=sk-smoke-not-a-real-key \
+    paigasus-gateway:dev >/dev/null
+  wait_healthy smoke-gw
+  expect_status "gateway /healthz" "http://smoke-gw:8088/healthz" 200
+  # The NEGATIVE case is the point: no IAM is reachable, so a /readyz returning 200 is lying.
+  expect_status "gateway /readyz (no IAM)" "http://smoke-gw:8088/readyz" 503
+  # `if !` rather than `cmd; [ $? -eq 1 ]`: under `set -e` a bare non-zero command aborts the
+  # script, and exiting 1 here is the EXPECTED result (the gateway is unready without IAM).
+  if docker exec smoke-gw /usr/local/bin/paigasus-service healthcheck --path /readyz; then
+    echo "::error::gateway readyz probe reported healthy with no IAM reachable" >&2
+    return 1
+  fi
+  echo "  gateway readyz probe exits non-zero while unready (in-image, --path works)"
+  assert_base_intact paigasus-gateway:dev
+
+  echo "== iam: with postgres, reached BY HOSTNAME =="
+  docker run -d --name smoke-pg --network "$NET" \
+    -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=iam postgres:16-alpine >/dev/null
+  sleep 8
+  # `smoke-pg`, never 127.0.0.1: this is what exercises glibc name resolution inside the
+  # chiseled rootfs. An IP literal would bypass NSS entirely and the assertion would go vacuous.
+  # IAM_API_KEYS__PEPPER: IamConfig::validate requires a base64 pepper decoding to >=32 bytes
+  # (ApiKeyConfig::pepper / Pepper::from_config) — boot fails without it. A literal dummy, never
+  # a real secret; decodes to 43 bytes.
+  docker run -d --name smoke-iam --network "$NET" \
+    -e IAM_DATABASE_URL="postgres://postgres:smoke@smoke-pg:5432/iam" \
+    -e IAM_AUTHN__ISSUERS='[{issuer="https://idp.example.com",audiences=["paigasus"]}]' \
+    -e IAM_API_KEYS__PEPPER="cGFpZ2FzdXMtc21va2UtcGVwcGVyLW5vdC1hLXJlYWwtc2VjcmV0LTAwMA==" \
+    paigasus-iam:dev >/dev/null
+  wait_healthy smoke-iam
+  expect_status "iam /healthz" "http://smoke-iam:8080/healthz" 200
+  expect_status "iam /readyz"  "http://smoke-iam:8080/readyz"  200
+  assert_base_intact paigasus-iam:dev
+
+  echo "== runs as the non-root uid it claims =="
+  # `docker top`, not `docker inspect .Config.User`: the latter reads IMAGE config, so a
+  # `--user 0` invocation would still pass it.
+  # `-o pid,user`, not `-o user` alone: some docker engines (observed on Docker Desktop 29.6.2)
+  # require the ps format to include `pid` to correlate host processes back to the container and
+  # error `Couldn't find PID field in ps output` otherwise. `awk '{print $NF}'` takes the last
+  # column so the field order doesn't matter.
+  for c in smoke-gw smoke-iam; do
+    uid="$(docker top "$c" -o pid,user 2>/dev/null | tail -1 | awk '{print $NF}')"
+    [ "$uid" = "65532" ] || { echo "::error::$c runs as ${uid}, expected 65532" >&2; return 1; }
+    echo "  $c runs as uid ${uid}"
+  done
+  echo "SMOKE OK"
+}
+
 cmd="${1:?usage: ci/images/run.sh \{build\|smoke\|all\} [iam|gateway]}"
 target="${2:-all}"
 services=("iam" "gateway")
@@ -104,5 +217,7 @@ services=("iam" "gateway")
 
 case "$cmd" in
   build) assert_pins; for s in "${services[@]}"; do build_one "$s"; done ;;
+  smoke) smoke ;;
+  all)   assert_pins; for s in "${services[@]}"; do build_one "$s"; done; smoke ;;
   *) echo "unknown command: $cmd" >&2; exit 1 ;;
 esac
