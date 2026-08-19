@@ -16,8 +16,8 @@ so a valid-but-never-matching glob (`rz/**`) passes it cleanly. Checks 5–7 clo
 
 `branches:` has the identical property and was SMA-525's stated limitation L5. `branches: [mian]`
 is a valid glob, actionlint accepts it, and the workflow stops running — silently and permanently,
-one key over. All three workflows here trigger off `branches: [main]`, including the required
-check. See SMA-540 and
+one key over. All three workflows here trigger off a `branches:` filter naming `main`, including
+the required check. See SMA-540 and
 `docs/superpowers/specs/2026-08-19-sma-540-branches-filter-gate-design.md`.
 
 ## The checks
@@ -29,12 +29,13 @@ check. See SMA-540 and
 | 3 | Four stdin fixtures, one per defect class, each must fail **with its expected rule tag** |
 | 4 | A healthy stdin fixture must pass — the control for check 3 |
 | 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree, and every `branches:` entry resolves as a ref or is skip-listed |
-| 6 | Every extracted filter key carries at least one sequence entry, at least one of them positive |
+| 6 | Every extracted filter key carries at least one sequence entry; a `paths:`/`branches:` key must also have at least one of them positive (the `-ignore` variants are exempt) |
 | 7 | Four self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist (`run.sh --self-test`) |
 
-Only a `paths:`/`paths-ignore:` **two levels deep** inside `on:` — `on.<event>.paths` — is a path
-filter. A workflow input may legitimately be *named* `paths`, and it sits one level deeper, under
-`on.workflow_dispatch.inputs`; checks 5 and 6 ignore it. This depth rule holds in flow style too,
+Only a `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` key **two levels deep** inside
+`on:` — `on.<event>.paths` — is a filter. A workflow input may legitimately be *named* `paths` or
+`branches`, and it sits one level deeper, under `on.workflow_dispatch.inputs`; checks 5 and 6
+ignore it. This depth rule holds in flow style too,
 not just block style: a top-level flow `on: { workflow_dispatch: { inputs: { paths: {...} } } }`
 or an event's own flow value `push: { inputs: { paths: x } }` both correctly ignore the nested
 `inputs.paths`, quoted or not — the extractor tracks brace depth rather than matching a `paths`
@@ -82,9 +83,9 @@ workflow run *more* often, which is the fail-safe direction.
   a comment justifying it and saying what verifies it instead.
 - A **branch that does not exist yet**, or a branch pattern: add it to `BRANCH_SKIP` in `run.sh`
   with a comment justifying it and saying what verifies it instead.
-- **Anything worse**: drop `:actionlint` from `T=(…)` in `.github/workflows/ci.yml`. Once SMA-541
-  lands this must be removed from the CLAUDE.md `ci-targets` block as well, since a gate asserts
-  the two agree.
+- **Anything worse**: drop `:actionlint` from `T=(…)` in `.github/workflows/ci.yml`. This must
+  also be removed from the CLAUDE.md `ci-targets` block, since `repo:affected-smoke` asserts the
+  two agree.
 
 ## Cost
 

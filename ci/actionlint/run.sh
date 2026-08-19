@@ -1179,9 +1179,11 @@ branch_verdict() {
   fi
 
   # The canary is LAZY (D7) — only an entry that has survived every filter above actually needs a
-  # ref, so a repo whose branch filters are all wildcards or skip-listed never pays it, and a
-  # checkout without origin/main does not lose checks 1-6 as well. Returned as a TOKEN, not an
-  # infra call: this function always runs inside $( ), where exit 2 would kill only the subshell.
+  # ref, so checks 1-6 still run to completion and report their own findings before this canary
+  # ever fires. That laziness does NOT make a full run ref-free: branch_filter_self_test (check 7)
+  # asserts the same 'origin/main' precondition unconditionally, so a checkout without it still
+  # exits 2. Returned as a TOKEN, not an infra call: this function always runs inside $( ), where
+  # exit 2 would kill only the subshell.
   origin_has 'main' || { echo 'no-origin-main'; return; }
 
   origin_has "$b" && { echo 'ok'; return; }
