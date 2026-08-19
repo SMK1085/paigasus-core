@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "498244567380",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-541-ci-target-coverage-gate",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/49/8244567380/0/metadata.json",
+      "transcript": "/49/8244567380/0/full.jsonl",
+      "compact_transcript": "/49/8244567380/0/transcript.jsonl",
+      "content_hash": "/49/8244567380/0/content_hash.txt",
+      "prompt": "/49/8244567380/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 12064,
+    "cache_creation_tokens": 417700,
+    "cache_read_tokens": 19402988,
+    "output_tokens": 156911,
+    "api_call_count": 94
+  }
+}
