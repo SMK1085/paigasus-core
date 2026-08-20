@@ -23,6 +23,14 @@
 # (a full authentication bypass). Exists solely for integration tests against IdPs
 # with self-signed dev certificates (mock IdP / Keycloak-in-Docker).
 # accept_invalid_tls = false          # default shown
+#
+# Extra trust anchors for the IdP discovery/JWKS fetches — a path to a PEM bundle. ADDS to the
+# trust store (compiled-in Mozilla roots + the image's /etc/ssl/certs); it does NOT replace it.
+# Note this is the OPPOSITE of [outbox.publisher].root_ca_bundle below, which REPLACES — hence
+# the `extra_` prefix. ROOTS ONLY: every certificate here becomes an unconstrained trust anchor
+# for every outbound HTTPS call. Read once at boot, so a rotated bundle needs a restart. Cannot
+# be combined with accept_invalid_tls (boot refuses). Does not help a self-signed LEAF.
+# extra_ca_bundle_path = "/etc/paigasus/corp-ca.pem"
 
 # [authn.jwks_cache]
 # backend = "memory"                  # "memory" (default) | "redis"

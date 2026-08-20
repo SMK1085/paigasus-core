@@ -49,6 +49,11 @@
 # figment extraction — an unset key loads fine but boot refuses to start). NEVER put this in
 # gateway.toml; source it from the environment so it never lands in a config file or VCS:
 # GATEWAY_UPSTREAM__OPENAI__API_KEY=sk-...
+#
+# Extra trust anchors for the upstream calls — a path to a PEM bundle, for a self-hosted
+# vLLM/LiteLLM endpoint behind a corporate CA. ADDS to the trust store; the OPPOSITE of
+# [iam.tls] ca_cert_path, which PINS. ROOTS ONLY. Read once at boot.
+# extra_ca_bundle_path = "/etc/paigasus/corp-ca.pem"
 
 # --- Metrics (SMA-446 Unit 2: Prometheus `GET /metrics`) ---
 

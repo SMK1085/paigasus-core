@@ -118,9 +118,37 @@ build itself — they bite the first operator who deploys without reading this s
   **outside** its equivalent layers, so this asymmetry between the two services is real, not an
   oversight to normalize away.
 - **Neither service terminates TLS.** Both require a TLS-terminating ingress in front of them.
-- **A private-CA identity provider is not supported.** IAM's `reqwest`-based path to the IdP
-  (discovery/JWKS) carries compiled-in webpki roots, so mounting a CA certificate into the
-  container does not make IAM trust it.
+- **A private-CA identity provider is supported (SMA-558), and the routes are not equivalent.**
+  Both services' `reqwest` clients now trust the compiled-in Mozilla roots, the image's own store,
+  **and** any bundle you name — unioned, so no route costs you the public roots. Prefer them in
+  this order:
+
+  1. **`authn.extra_ca_bundle_path`** (`IAM_AUTHN__EXTRA_CA_BUNDLE_PATH`), and
+     `upstream.openai.extra_ca_bundle_path` for the gateway's upstream. **Recommended** — the only
+     route that fails loudly at boot when it is wrong, and the only one with an auditable record
+     in config. A rotated bundle needs a restart.
+  2. **Replace (or bind-mount over) the `/etc/ssl/certs/ca-certificates.crt` file.** In this
+     chiseled image, that file is the *entire* cert store — there are no hashed `xxxxxxxx.0`-style
+     symlinks for a directory-based lookup to find. There is no shell and no
+     `update-ca-certificates` to regenerate it, so you must assemble the replacement bundle
+     yourself (your CA concatenated with whatever public roots you still need) and mount or
+     overwrite the file wholesale — dropping an additional `.crt` alongside it does nothing. This
+     is also why `SSL_CERT_DIR` below is the weakest of the three routes: it names a directory,
+     and this image's `/etc/ssl/certs` has no hashed symlinks in it for a directory-based reader
+     to find.
+  3. **`SSL_CERT_FILE` / `SSL_CERT_DIR` — last resort.** Setting either makes the process read
+     *only* those paths and **ignore the image's own store**, so it replaces rather than adds. A
+     path that does not exist, or a file that is not PEM, is silently ignored — no boot error, no
+     request error against public hosts, and a still-broken private IdP.
+
+  **Put roots in the bundle, never intermediates.** Every certificate in it becomes an
+  unconstrained trust anchor for every outbound HTTPS call the process makes — TLS performs no
+  `cA` check on an anchor, so an intermediate is silently promoted to a root.
+
+  **A self-signed *leaf* is still not supported.** Webpki has no support for self-signed
+  certificates, so an IdP presenting a bare self-signed certificate (rather than one issued by a
+  CA you can name) still requires `authn.accept_invalid_tls`, which disables verification
+  entirely. Mint a small private CA and issue the IdP a certificate from it instead.
 
 ## 6. Conventions the console images must follow
 
