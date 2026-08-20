@@ -66,6 +66,20 @@ and the image does not need to change to support it. The image itself ships neit
 
 ## 4. Probe contract
 
+### Listening ports
+
+| Service | HTTP | gRPC |
+| --- | --- | --- |
+| `paigasus-iam` | `8080` | `9090` |
+| `paigasus-gateway` | `8088` | — |
+
+Both probes below ride the HTTP port. These are config defaults, not fixed values —
+`IAM_HTTP_ADDR`, `IAM_GRPC_ADDR`, and `GATEWAY_HTTP_ADDR` each override the **full** `host:port`,
+not just the port number. IAM also accepts an optional, separate `[metrics].addr`
+(`IAM_METRICS__ADDR`; the gateway has the identical `GATEWAY_METRICS__ADDR`) that moves
+`/metrics` onto its own port instead of merging it onto `http_addr` — when unset (the default),
+`/metrics` shares the HTTP port with everything else.
+
 | Probe | Endpoint | Notes |
 | --- | --- | --- |
 | liveness | `GET /healthz` | Never touches a dependency, by construction in both services |

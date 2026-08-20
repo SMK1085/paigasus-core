@@ -27,15 +27,27 @@ crate_for() {
 # The pins in rs/Dockerfile are only as good as their agreement with the repo's own toolchain
 # pin. `FROM rust:X.Y.Z` does NOT decide which compiler runs — rust-toolchain.toml is inside the
 # build context and rustup honours it — so a channel bump would leave the Dockerfile looking
-# pinned and being nothing of the sort (SMA-500 D3).
+# pinned and being nothing of the sort (SMA-500 D3). Three sites must all agree: the toolchain's
+# own `channel`, the Dockerfile's `FROM rust:X.Y.Z` tag, and its `ENV RUSTUP_TOOLCHAIN=X.Y.Z` —
+# the FROM tag alone is decorative without the ENV line actually pinning what rustup resolves.
 assert_pins() {
   local dockerfile="$ROOT/rs/Dockerfile"
-  local channel from_version
+  local channel from_version rustup_toolchain
   channel="$(grep -E '^channel[[:space:]]*=' "$ROOT/rs/rust-toolchain.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
   from_version="$(grep -oE '^FROM rust:[0-9]+\.[0-9]+\.[0-9]+' "$dockerfile" | head -1 | sed 's/^FROM rust://')"
   if [ "$channel" != "$from_version" ]; then
-    echo "::error::rs/Dockerfile builds on rust:${from_version} but rs/rust-toolchain.toml pins ${channel}." >&2
+    echo "::error::rs/Dockerfile's FROM tag (rust:${from_version}) disagrees with rs/rust-toolchain.toml's channel (${channel})." >&2
     echo "  Bump the FROM line (and its digest) together with the toolchain, or the image ships a different compiler." >&2
+    return 1
+  fi
+  # The FROM tag alone does not pin the compiler rustup actually runs — rust-toolchain.toml is
+  # inside the build context and rustup honours it over the image. ENV RUSTUP_TOOLCHAIN is what
+  # closes that gap, so it must agree with channel/FROM too, or a bump that forgets this one line
+  # reintroduces the exact drift the FROM/channel check above exists to prevent.
+  rustup_toolchain="$(grep -oE '^ENV RUSTUP_TOOLCHAIN=[0-9]+\.[0-9]+\.[0-9]+' "$dockerfile" | head -1 | sed 's/^ENV RUSTUP_TOOLCHAIN=//')"
+  if [ "$channel" != "$rustup_toolchain" ]; then
+    echo "::error::rs/Dockerfile's ENV RUSTUP_TOOLCHAIN (${rustup_toolchain:-<missing>}) disagrees with rs/rust-toolchain.toml's channel (${channel})." >&2
+    echo "  Bump ENV RUSTUP_TOOLCHAIN together with the FROM line and the toolchain, or the builder can resolve a different compiler than the FROM tag implies." >&2
     return 1
   fi
   # Builder glibc must be <= runtime glibc. bookworm is 2.36, noble (ubuntu:24.04) is 2.39.
