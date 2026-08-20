@@ -379,7 +379,7 @@ count. The site and idiom already exist: `adapters/http/mod.rs:665-667` logs the
 | `gateway/Cargo.toml` | `tempfile` dev-dependency |
 | `gateway/gateway.toml.example` | document the field under `[upstream.openai]` |
 | `docs/ops/RUNBOOK-containers.md` | replace the § 5 "not supported" bullet (AC2) |
-| `CLAUDE.md` | gotcha: three CA knobs, two replace and one extends |
+| `CLAUDE.md` | gotcha: four CA knobs, two replace and two extend |
 
 Neither `AuthnConfig` nor `OpenAiConfig` derives `Default`, so `..Default::default()` is
 unavailable: **every** struct literal of either type must gain the field. The 11 sites are listed
@@ -606,7 +606,7 @@ Three further points the operator needs:
 `iam.toml.example` and `gateway.toml.example` document the field with the same `extra_` vs
 `root_ca_bundle` contrast, since an operator reading one will assume the other.
 
-`CLAUDE.md` gains a gotcha recording the three CA-path knobs, which of them replace vs extend, and
+`CLAUDE.md` gains a gotcha recording the four CA-path knobs, which of them replace vs extend, and
 which convention a fourth should join — subject to § 4.1's marker warning.
 
 `docs/superpowers/specs/2026-08-19-sma-500-...-design.md` is **not** edited. Its § 2.2 row and

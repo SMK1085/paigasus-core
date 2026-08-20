@@ -277,8 +277,15 @@ impl GatewayConfig {
             return Err("upstream.openai.api_key must not be empty (an empty key is a misconfiguration)".to_string());
         }
 
-        if self.upstream.openai.extra_ca_bundle_path.as_deref().is_some_and(str::is_empty) {
-            return Err("upstream.openai.extra_ca_bundle_path must not be empty (omit the key entirely to use the default trust store)".to_string());
+        // Empty and padded are the same operator mistake, and both would otherwise reach
+        // `std::fs::read`. Mirrors iam's rule on `authn.extra_ca_bundle_path`.
+        if let Some(path) = self.upstream.openai.extra_ca_bundle_path.as_deref() {
+            if path.trim().is_empty() {
+                return Err("upstream.openai.extra_ca_bundle_path must not be empty (omit the key entirely to use the default trust store)".to_string());
+            }
+            if path != path.trim() {
+                return Err(format!("upstream.openai.extra_ca_bundle_path has leading/trailing whitespace, which is never valid config: {path:?}"));
+            }
         }
 
         if matches!(self.iam.tls, IamTlsConfig::LoopbackInsecure) && !is_loopback_host(&self.iam.grpc_addr) {
@@ -433,6 +440,46 @@ mod tests {
             jail.create_file("gateway.toml", &format!("max_request_bytes = 0\n{}", valid_toml()))?;
             let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
             assert!(cfg.validate().is_err(), "expected max_request_bytes = 0 to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_ca_bundle_path() {
+        // `GATEWAY_UPSTREAM__OPENAI__EXTRA_CA_BUNDLE_PATH=` deserializes to Some(""), not None,
+        // which would otherwise reach `std::fs::read("")` and fail with a confusing empty path.
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "gateway.toml",
+                r#"
+                    [upstream.openai]
+                    api_key = "sk-test-key"
+                    extra_ca_bundle_path = ""
+                "#,
+            )?;
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "an empty bundle path must be rejected");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_a_padded_ca_bundle_path() {
+        // Likelier than the empty case in practice: a heredoc'd Kubernetes secret or an env
+        // override carries a trailing newline, and the resulting error would name a path that
+        // reads as correct. Mirrors iam's rule on `authn.extra_ca_bundle_path`.
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "gateway.toml",
+                r#"
+                    [upstream.openai]
+                    api_key = "sk-test-key"
+                    extra_ca_bundle_path = "/etc/paigasus/corp-ca.pem\n"
+                "#,
+            )?;
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            let err = cfg.validate().expect_err("a padded bundle path must be rejected");
+            assert!(err.contains("whitespace"), "the message must name the defect: {err}");
             Ok(())
         });
     }

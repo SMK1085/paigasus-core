@@ -1033,9 +1033,17 @@ impl IamConfig {
                 .to_string());
         }
 
-        // `IAM_AUTHN__EXTRA_CA_BUNDLE_PATH=` yields Some(""), not None.
-        if self.authn.extra_ca_bundle_path.as_deref().is_some_and(str::is_empty) {
-            return Err("authn.extra_ca_bundle_path must not be empty (omit the key entirely to use the default trust store)".to_string());
+        // `IAM_AUTHN__EXTRA_CA_BUNDLE_PATH=` yields Some(""), not None. Padding is rejected for
+        // the same reason `authn.issuers` rejects it above — a trailing newline off a heredoc'd
+        // secret or an env override would otherwise reach `std::fs::read` and fail naming a path
+        // that reads as correct in the error message.
+        if let Some(path) = self.authn.extra_ca_bundle_path.as_deref() {
+            if path.trim().is_empty() {
+                return Err("authn.extra_ca_bundle_path must not be empty (omit the key entirely to use the default trust store)".to_string());
+            }
+            if path != path.trim() {
+                return Err(format!("authn.extra_ca_bundle_path has leading/trailing whitespace, which is never valid config: {path:?}"));
+            }
         }
 
         if self.authz.cache.backend == AuthzCacheBackend::Redis && self.authz.cache.redis_url.is_none() {
@@ -1665,6 +1673,33 @@ mod tests {
             )?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert!(cfg.validate().is_err(), "an empty bundle path must be rejected");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_a_padded_ca_bundle_path() {
+        // Same operator mistake as the empty case, and likelier: a heredoc'd Kubernetes secret or
+        // an env override carries a trailing newline. Without this the padded value reaches
+        // `std::fs::read` and the error names a path that reads as correct. Mirrors the padding
+        // rule `authn.issuers` already enforces.
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "iam.toml",
+                r#"
+                    database_url = "postgres://u:p@localhost/db"
+                    [api_keys]
+                    pepper = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+                    [authn]
+                    extra_ca_bundle_path = "/etc/paigasus/corp-ca.pem\n"
+                    [[authn.issuers]]
+                    issuer = "https://idp.example.com"
+                    audiences = ["paigasus"]
+                "#,
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            let err = cfg.validate().expect_err("a padded bundle path must be rejected");
+            assert!(err.contains("whitespace"), "the message must name the defect: {err}");
             Ok(())
         });
     }
