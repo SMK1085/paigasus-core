@@ -122,7 +122,26 @@ pub struct AuthnConfig {
     /// SMA-443 Tasks 10/13) can fetch from HTTPS endpoints with self-signed dev certs.
     #[serde(default)]
     pub accept_invalid_tls: bool,
-    // Task 3 (SMA-558) expands this field's documentation and adds `validate()` rules.
+    /// Extra trust anchors for the IdP discovery/JWKS fetches, as a path to a PEM bundle.
+    ///
+    /// **This ADDS to the trust store, it does not replace it.** The client trusts the
+    /// compiled-in Mozilla roots, the image's own store (`/etc/ssl/certs`), AND every
+    /// certificate in this bundle. That is the OPPOSITE of the sibling
+    /// [`PublisherConfig::root_ca_bundle`] and of the gateway's `iam.tls.ca_cert_path`, both of
+    /// which REPLACE — hence the `extra_` prefix (cf. `NODE_EXTRA_CA_CERTS`, which is additive,
+    /// against `REQUESTS_CA_BUNDLE`, which is not).
+    ///
+    /// **ROOTS ONLY.** Every certificate here becomes an UNCONSTRAINED trust anchor for every
+    /// HTTPS call this process makes — rustls performs no `cA` basic-constraints check on an
+    /// anchor. An intermediate placed here is silently promoted to a root.
+    ///
+    /// Read ONCE at boot, so a rotated bundle needs a restart (unlike `root_ca_bundle`, which is
+    /// re-read per connection attempt). An unreadable, malformed, or certificate-FREE bundle is a
+    /// hard boot failure, never a warning. Mutually exclusive with `accept_invalid_tls`, which
+    /// would make it dead — `validate()` rejects the pair.
+    ///
+    /// Does NOT help a self-signed LEAF certificate: webpki has no support for self-signed
+    /// certificates, so that case still needs `accept_invalid_tls` (SMA-558 § 9).
     #[serde(default)]
     pub extra_ca_bundle_path: Option<String>,
     pub jwks_cache: JwksCacheConfig,
@@ -657,7 +676,11 @@ struct Defaults {
     metrics: MetricsConfig,
 }
 
-// Mirrors `AuthnConfig` minus `issuers` — deliberately absent, see `AuthnConfig` doc.
+// Mirrors `AuthnConfig` minus TWO fields, for different reasons. `issuers` is absent so a missing
+// issuer list is a hard error rather than silently defaulting to empty (see `AuthnConfig`'s doc).
+// `extra_ca_bundle_path` is absent because it is an `Option` carrying `#[serde(default)]`, which
+// already resolves to `None` without a defaults-layer entry; adding one would serialize a null
+// into the layer for no gain.
 #[derive(Serialize)]
 struct AuthnDefaults {
     leeway_secs: u64,
@@ -962,7 +985,8 @@ impl IamConfig {
     /// `authn.jwks_cache`/`authz.cache` above), and `max_token_bytes` falls within a sane range
     /// whose floor scales with `key_prefix.len()` — a `max_token_bytes` below the shortest
     /// token this config can ever emit would make `api_key::parse_token` reject every issued
-    /// key.
+    /// key. Also (SMA-558): `authn.accept_invalid_tls` and `authn.extra_ca_bundle_path` are
+    /// mutually exclusive, and the latter is non-empty when present.
     pub fn validate(&self) -> Result<(), String> {
         if self.authn.issuers.is_empty() {
             return Err("authn.issuers must contain at least one issuer".to_string());
@@ -996,6 +1020,21 @@ impl IamConfig {
         // inside the cooldown window fail Unavailable). Reject at boot instead.
         if self.authn.jwks_ttl_secs == 0 {
             return Err("authn.jwks_ttl_secs must be at least 1 (0 disables JWKS caching and breaks both cache backends)".to_string());
+        }
+
+        // `accept_invalid_tls` disables verification outright, so a configured bundle could never
+        // be consulted. The pair is always an operator mistake; the adapter seam's `IdpTls` enum
+        // makes it unrepresentable in code, and this makes it a readable message in config
+        // (SMA-558 D5).
+        if self.authn.accept_invalid_tls && self.authn.extra_ca_bundle_path.is_some() {
+            return Err("authn.accept_invalid_tls = true disables certificate verification entirely, so \
+                 authn.extra_ca_bundle_path can never take effect — set one or the other, not both"
+                .to_string());
+        }
+
+        // `IAM_AUTHN__EXTRA_CA_BUNDLE_PATH=` yields Some(""), not None.
+        if self.authn.extra_ca_bundle_path.as_deref().is_some_and(str::is_empty) {
+            return Err("authn.extra_ca_bundle_path must not be empty (omit the key entirely to use the default trust store)".to_string());
         }
 
         if self.authz.cache.backend == AuthzCacheBackend::Redis && self.authz.cache.redis_url.is_none() {
@@ -1576,6 +1615,75 @@ mod tests {
             )?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert!(cfg.validate().is_err(), "expected jwks_ttl_secs = 0 to fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_accept_invalid_tls_together_with_a_ca_bundle() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "iam.toml",
+                r#"
+                    database_url = "postgres://u:p@localhost/db"
+                    [api_keys]
+                    pepper = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+                    [authn]
+                    accept_invalid_tls = true
+                    extra_ca_bundle_path = "/etc/paigasus/corp-ca.pem"
+                    [[authn.issuers]]
+                    issuer = "https://idp.example.com"
+                    audiences = ["paigasus"]
+                "#,
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            let err = cfg.validate().expect_err("the combination must be rejected");
+            assert!(err.contains("extra_ca_bundle_path"), "the message must name the field: {err}");
+            assert!(err.contains("accept_invalid_tls"), "the message must name the other field: {err}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_ca_bundle_path() {
+        // `IAM_AUTHN__EXTRA_CA_BUNDLE_PATH=` deserializes to Some(""), not None, which would
+        // otherwise reach std::fs::read("") and fail with a confusing empty path.
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "iam.toml",
+                r#"
+                    database_url = "postgres://u:p@localhost/db"
+                    [api_keys]
+                    pepper = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+                    [authn]
+                    extra_ca_bundle_path = ""
+                    [[authn.issuers]]
+                    issuer = "https://idp.example.com"
+                    audiences = ["paigasus"]
+                "#,
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "an empty bundle path must be rejected");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn extra_ca_bundle_path_defaults_to_none() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "iam.toml",
+                r#"
+                    database_url = "postgres://u:p@localhost/db"
+                    [api_keys]
+                    pepper = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+                    [[authn.issuers]]
+                    issuer = "https://idp.example.com"
+                    audiences = ["paigasus"]
+                "#,
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.authn.extra_ca_bundle_path.is_none(), "absent config must yield None");
             Ok(())
         });
     }
