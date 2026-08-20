@@ -127,19 +127,16 @@ build itself — they bite the first operator who deploys without reading this s
      `upstream.openai.extra_ca_bundle_path` for the gateway's upstream. **Recommended** — the only
      route that fails loudly at boot when it is wrong, and the only one with an auditable record
      in config. A rotated bundle needs a restart.
-  2. **Replace (or bind-mount over) the `/etc/ssl/certs/ca-certificates.crt` file.** In this
-     chiseled image, that file is the *entire* cert store — there are no hashed `xxxxxxxx.0`-style
-     symlinks for a directory-based lookup to find. There is no shell and no
-     `update-ca-certificates` to regenerate it, so you must assemble the replacement bundle
-     yourself (your CA concatenated with whatever public roots you still need) and mount or
-     overwrite the file wholesale — dropping an additional `.crt` alongside it does nothing. This
-     is also why `SSL_CERT_DIR` below is the weakest of the three routes: it names a directory,
-     and this image's `/etc/ssl/certs` has no hashed symlinks in it for a directory-based reader
-     to find.
-  3. **`SSL_CERT_FILE` / `SSL_CERT_DIR` — last resort.** Setting either makes the process read
-     *only* those paths and **ignore the image's own store**, so it replaces rather than adds. A
-     path that does not exist, or a file that is not PEM, is silently ignored — no boot error, no
-     request error against public hosts, and a still-broken private IdP.
+  2. **Bind-mount your CA as an additional file into `/etc/ssl/certs/`** (e.g.
+     `/etc/ssl/certs/corp-ca.crt`), leaving `ca-certificates.crt` itself untouched. No environment
+     variable needed — the platform trust-store reader loads every regular file in that directory
+     at boot; it does not require OpenSSL's `c_rehash` hashed-symlink naming. Genuinely additive,
+     so this is the natural second choice after the config knob above.
+  3. **`SSL_CERT_FILE` / `SSL_CERT_DIR` — last resort.** Setting either short-circuits the
+     platform probe: the process then reads *only* the path(s) you name and **ignores the image's
+     own store**, so it replaces rather than adds. `SSL_CERT_FILE` alone also loses the directory
+     scan entirely. A path that does not exist, or a file that is not PEM, is silently ignored —
+     no boot error, no request error against public hosts, and a still-broken private IdP.
 
   **Put roots in the bundle, never intermediates.** Every certificate in it becomes an
   unconstrained trust anchor for every outbound HTTPS call the process makes — TLS performs no
