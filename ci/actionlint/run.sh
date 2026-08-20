@@ -37,7 +37,7 @@ FAILED=0
 # Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
 # protection and would break a future harness that sources this file twice (SMA-542 D3).
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=5   # extractor, path-filter, branch-filter, config, ci-target-floor
+SELF_TEST_COUNT=6   # extractor, path-filter, branch-filter, config, ci-target-floor, kill-predicate
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -52,11 +52,11 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the five fixture tables only — extractor, path-filter verdicts," >&2
-  echo "                 branch-filter verdicts, config allowlist, ci-target floor. No actionlint" >&2
-  echo "                 binary is required, but the branch-filter table needs a git repo" >&2
-  echo "                 carrying refs/remotes/origin/main. The check-9 mutation battery is NOT" >&2
-  echo "                 part of this — it runs on the full gate only." >&2
+  echo "  --self-test    run the six fixture tables only — extractor, path-filter verdicts," >&2
+  echo "                 branch-filter verdicts, config allowlist, ci-target floor, kill" >&2
+  echo "                 predicate. No actionlint binary is required, but the branch-filter" >&2
+  echo "                 table needs a git repo carrying refs/remotes/origin/main. The check-9" >&2
+  echo "                 mutation battery is NOT part of this — it runs on the full gate only." >&2
   exit 2
 }
 
@@ -1203,7 +1203,8 @@ branch_verdict() {
   # no longer the whole story for a FULL run: check 7 runs first and asserts the same origin/main
   # precondition unconditionally (branch_filter_self_test), so a checkout without the ref now
   # exits 2 BEFORE actionlint is invoked, and you lose the checks 1-6 findings you used to see.
-  # Accepted: README.md gives the one-command recovery and the gate is ~1.5s. Returned as a
+  # Accepted: README.md gives the one-command recovery and the gate is ~4s standalone (measured;
+  # see the cost table in README.md). Returned as a
   # TOKEN, not an infra call: this function always runs inside $( ), where exit 2 would kill only
   # the subshell.
   origin_has 'main' || { echo 'no-origin-main'; return; }
@@ -1670,10 +1671,34 @@ is_coe_skipped() {
   return 1
 }
 
+# SWALLOWED_SKIP is the escape hatch for a `moon` command line the verdict below cannot know is
+# harmless. `swallowed` is file-wide over ci.yml and fires on ANY `moon`-prefixed line carrying a
+# trailing `||`/`&&`/`;`/`|` — deliberately, for the same reason COE_SKIP's key is over-inclusive
+# rather than parsed: telling "the invocation guarding T" apart from a different, harmless `moon`
+# line (a diagnostic `moon run x | tee log` in an unrelated job, say) needs YAML step/job-boundary
+# parsing, which is exactly where this file's real bugs have lived (flow vs block style). Without
+# an escape hatch, that future line has no remediation but "remove the tail" even when the tail is
+# fine (SMA-542 review M6). Same "<lineno>:<exact text>" format as COE_SKIP and the same reasoning
+# for keying by both: a bare line number would silently absorb whatever line drifts onto it after
+# an edit; pinning the text too makes a shifted entry stop matching and red instead. Ships empty.
+SWALLOWED_SKIP=(
+  # (empty — add entries as "<lineno>:<exact text of the matched line, leading blanks included>"
+  # # why, and what verifies the suppressed invocation's own failure instead)
+)
+
+is_swallowed_skipped() {
+  local key="$1" s
+  for s in ${SWALLOWED_SKIP+"${SWALLOWED_SKIP[@]}"}; do
+    [ "$s" = "$key" ] && return 0
+  done
+  return 1
+}
+
 # Echoes one verdict token per problem, and nothing for an acceptable file:
 #   no-file                      the workflow does not exist
 #   no-array                     zero, or more than one, single-line T=( … )
 #   missing <entry>              the array parsed; <entry> is not among its tokens
+#   continued <lineno>           a `moon` command line is continued onto another physical line
 #   swallowed <lineno>           a `moon` command line discards its own exit status
 #   continue-on-error <lineno>   a step's continue-on-error value is not literally `false`
 ci_target_floor_verdict() {
@@ -1685,6 +1710,12 @@ ci_target_floor_verdict() {
   # Zero or two matches is a FAILURE, never a skip: an array reformatted across lines is exactly
   # the condition under which this check would otherwise stop asserting anything.
   arrays="$(grep -cE '^[[:blank:]]*T=\(.*\)[[:blank:]]*$' "$f")"
+  # Hardened exactly like $defs (run_self_tests) and $n (selftest_mutation_battery) below: without
+  # this, a $arrays that comes back empty (grep itself failing rather than matching zero times)
+  # makes `[ "$arrays" -ne 1 ]` exit 2 under `set -uo pipefail`'s no-`set -e`, which the `if` reads
+  # as false — skipping the 'no-array' report and falling through to parse a body from zero matches
+  # (SMA-542 review M5).
+  case "$arrays" in ''|*[!0-9]*) echo 'no-array'; return ;; esac
   if [ "$arrays" -ne 1 ]; then
     echo 'no-array'
     return
@@ -1713,9 +1744,25 @@ ci_target_floor_verdict() {
   # because the step exits 0. Complementary to C5, which asserts T is HANDED OVER; this asserts
   # the result is PROPAGATED. It lives here because this is the half that survives
   # repo:affected-smoke being silenced.
+  #
+  # A backslash-continued invocation is checked FIRST and reported as its own verdict, never as
+  # 'swallowed' (SMA-542 fix-wave finding I2 — distinct from the earlier task-4b-review I1/I2
+  # labels elsewhere in this file). `grep -n` returns only the FIRST physical line of a wrapped
+  # command, so:
+  #   moon ci "${T[@]}" \
+  #     --base origin/main \
+  #     --include-relations || true
+  # matches the loop below on a line reading `moon ci "${T[@]}" \` — no `||`/`&&`/`;`/`|` in THAT
+  # text, so the real tail two lines down was invisible and the verdict came back empty (measured).
+  # Reporting this as 'swallowed' would be a misdiagnosis: the tail might not even be there, and
+  # the fix is not "remove the tail" but "put the invocation back on one line" — the same demand
+  # `no-array` already makes of `T=( … )` itself. This check cannot see past a continuation either
+  # way, so it rejects the shape outright rather than guessing what follows it.
   while IFS=: read -r lineno text; do
     case "$text" in
-      *'||'*|*'&&'*|*';'*|*'|'*) echo "swallowed $lineno" ;;
+      *'\') echo "continued $lineno" ;;
+      *'||'*|*'&&'*|*';'*|*'|'*)
+        is_swallowed_skipped "$lineno:$text" || echo "swallowed $lineno" ;;
     esac
   done < <(grep -nE '^[[:blank:]]*moon[[:blank:]]' "$f")
 
@@ -1750,7 +1797,7 @@ ci_target_floor_verdict() {
 # cannot tell a working check from a stuck one (SMA-466).
 ci_target_floor_self_test() {
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
-  local rc=0 tmp got saved_coe_skip
+  local rc=0 tmp got saved_coe_skip saved_swallowed_skip
 
   expect_floor() {
     local name="$1" expected="$2" body="$3"
@@ -1805,11 +1852,60 @@ ci_target_floor_self_test() {
 '          T=(:affected-smoke)
           moon ci "${T[@]}" --base origin/main --include-relations || true
 '
+  # SWALLOWED_SKIP (SMA-542 review M6), same three-row shape as COE_SKIP's below: (1) an entry
+  # whose lineno AND text match the real line is silenced; (2) an identical-text occurrence one
+  # line later, NOT listed, still fires — the skip doesn't leak past its own line; (3) a STALE
+  # entry whose line number matches but whose text does not must NOT silence the line that now
+  # sits there. Ships empty, so overridden per assertion and restored immediately.
+  saved_swallowed_skip=(${SWALLOWED_SKIP+"${SWALLOWED_SKIP[@]}"})
+  SWALLOWED_SKIP=('2:          moon ci "${T[@]}" --base origin/main --include-relations || true')
+  expect_floor 'SWALLOWED_SKIP silences an exact lineno+text match' '' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}" --base origin/main --include-relations || true
+'
+  expect_floor 'SWALLOWED_SKIP does not leak to a different line with identical text' \
+    'swallowed 3' \
+'          T=(:affected-smoke)
+          moon run "${T[@]}"
+          moon ci "${T[@]}" --base origin/main --include-relations || true
+'
+  expect_floor 'a stale SWALLOWED_SKIP entry (matching lineno, drifted text) does not silence the line' \
+    'swallowed 2' \
+'          T=(:affected-smoke)
+          moon run "${T[@]}" || true
+'
+  SWALLOWED_SKIP=(${saved_swallowed_skip+"${saved_swallowed_skip[@]}"})
   # `moon` not at command position is not an invocation — it must not fire.
   expect_floor 'moon mentioned in a comment' '' \
 '          T=(:affected-smoke)
           # run moon ci; it will pass
           moon ci "${T[@]}"
+'
+
+  # Fix-wave finding I2: a backslash-continued invocation hides its own tail from the line-at-a-
+  # time scan above. The reviewer's own reproduction — measured to return an EMPTY verdict before
+  # this fix, silencing every gate in T while T itself stayed correct — now reads as 'continued',
+  # never as the misdiagnosing 'swallowed'.
+  expect_floor 'moon invocation continued via backslash is rejected, not misread as swallowed' \
+    'continued 2' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}" \
+            --base origin/main \
+            --include-relations || true
+'
+  # The negative control: the REAL ci.yml shape — three separate single-line moon invocations
+  # across a pull_request/push/else branch — kept unwrapped. Must not fire, and must not be
+  # confused for the continued form above just because it also spans several physical lines.
+  expect_floor 'the real if/elif/else form, each moon invocation kept on one line, does not fire' \
+    '' \
+'          T=(:affected-smoke)
+          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]}" --base origin/main --include-relations
+          elif [ -n "$BEFORE" ]; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+            moon run "${T[@]}"
+          fi
 '
 
   # continue-on-error: — the third D14 spelling (SMA-542 task 4b). Both directions per SMA-466:
@@ -1886,9 +1982,61 @@ ci_target_floor_self_test() {
 }
 
 # ---------------------------------------------------------------------------------------------
+# Check 9's kill predicate (SMA-542 review M3 / spec T3) — extracted so it can be driven directly
+# by a fixture table instead of living inline in the mutant-collection loop below, where nothing
+# proved it. It is correct today; what was missing is the STANDING proof, in a file that cites
+# SMA-466's all-firing-fixture lesson four times over.
+#
+# A mutant counts as killed only when it exits 1 (fail()'s exit code) AND its captured output
+# carries assert_self_tests_ran's own distinctive message. rc 2 (infra()), rc 126 and rc 127
+# (a missing or unexecutable file) must NEVER score as a kill — scoring an infrastructure abort as
+# a kill would let the battery report "N/N killed" without ever having exercised the counter
+# assertion at all (SMA-542 D10).
+# ---------------------------------------------------------------------------------------------
+mutant_is_killed() {
+  local rc="$1" outfile="$2"
+  [ "$rc" -eq 1 ] && grep -q 'self-test counter:' "$outfile"
+}
+
+# The sixth self-test. Synthetic (rc, captured-output) pairs, no subprocess and no actionlint
+# binary needed — same style as config_self_test's expect_config above.
+kill_predicate_self_test() {
+  local rc=0
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+
+  expect_kill() {
+    local name="$1" want="$2" mrc="$3" body="$4" tmp got
+    tmp="$(mktemp)"
+    printf '%s' "$body" > "$tmp"
+    if mutant_is_killed "$mrc" "$tmp"; then got=killed; else got=not-killed; fi
+    rm -f "$tmp"
+    if [ "$got" != "$want" ]; then
+      fail "kill-predicate self-test '$name': got '$got', expected '$want'. Check 9's kill
+      predicate is not deciding what it is documented to decide."
+      rc=1
+    fi
+  }
+
+  expect_kill 'rc 1 with the counter message is a kill' 'killed' 1 \
+    'actionlint gate: self-test counter: 4 of 6 self-tests ran. An invocation is missing.'
+  # rc 2/126/127 must NEVER be a kill, even carrying the exact message — an infra abort proves
+  # nothing about the assertion, and must not be mistaken for having reached it (SMA-542 D10).
+  expect_kill 'rc 2 (infra abort) is never a kill, even with the message' 'not-killed' 2 \
+    'actionlint gate: self-test counter: 4 of 6 self-tests ran. An invocation is missing.'
+  expect_kill 'rc 126 (not executable) is never a kill' 'not-killed' 126 ''
+  expect_kill 'rc 127 (missing file) is never a kill' 'not-killed' 127 ''
+  # rc 1 without the message is not a kill either — some OTHER fail() fired, not the counter's.
+  expect_kill 'rc 1 without the counter message is not a kill' 'not-killed' 1 \
+    'actionlint gate: some unrelated assertion failed'
+  expect_kill 'rc 0 (mutant did not fail at all) is never a kill' 'not-killed' 0 ''
+
+  return $rc
+}
+
+# ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
-# All five are defined above so this block can run them from ONE call site, reached by both the
+# All six are defined above so this block can run them from ONE call site, reached by both the
 # --self-test path and the full gate. One call site rather than two is deliberate: ci_targets.py's
 # C4 pins this by whole stripped line, and two identical lines would let one be deleted while the
 # pin still matched (SMA-542 D2).
@@ -1911,6 +2059,7 @@ run_self_tests() {
   branch_filter_self_test
   config_self_test
   ci_target_floor_self_test
+  kill_predicate_self_test
 
   assert_self_tests_ran "$SELF_TEST_COUNT"
 
@@ -1918,9 +2067,15 @@ run_self_tests() {
   # wired up, because the count would still match. Asserting the DEFINITION count closes that —
   # adding a table without calling it reds, and so does deleting one without decrementing
   # SELF_TEST_COUNT. Adding a table is the highest-probability future edit here (SMA-542 D13).
+  #
+  # Tolerant of blank-before-paren (`seventh_self_test () {`) and the `function` keyword form
+  # (`function seventh_self_test {`, with or without `()`) — a table written either way must still
+  # be counted, or D13's own hole reopens for the style it does not recognise (SMA-542 review M8).
+  # Not tolerant of a definition split across lines (`seventh_self_test()\n{`) — a rarer style this
+  # file uses nowhere today; the residual is accepted rather than chasing every valid bash form.
   [ -f "$SELF_SRC" ] && [ -r "$SELF_SRC" ] \
     || infra "cannot read \$SELF_SRC ($SELF_SRC) to count self-test definitions"
-  defs="$(grep -cE '^[a-z_]+_self_test\(\) \{' "$SELF_SRC")"
+  defs="$(grep -cE '^(function[[:blank:]]+)?[a-z_]+_self_test([[:blank:]]*\(\))?[[:blank:]]*\{' "$SELF_SRC")"
   case "$defs" in ''|*[!0-9]*) infra "could not count self-test definitions in $SELF_SRC" ;; esac
   if [ "$defs" -ne "$SELF_TEST_COUNT" ]; then
     fail "self-test definitions: $defs '*_self_test' functions are defined but SELF_TEST_COUNT is
@@ -2020,8 +2175,10 @@ selftest_mutation_battery() {
     fi
     # A KILL is rc 1 carrying the counter's own message — not merely "non-zero". infra() exits 2,
     # a missing file exits 127, and branch_filter_self_test's own precondition exits 2; scoring any
-    # of those as a kill would let a transient fault stand in for the proof (SMA-542 D10).
-    if [ "$rc" -eq 1 ] && grep -q 'self-test counter:' "$dir/$label.out"; then
+    # of those as a kill would let a transient fault stand in for the proof (SMA-542 D10). The
+    # decision itself is mutant_is_killed (above, next to kill_predicate_self_test's fixture table
+    # driving it) rather than inline here, so it has a standing proof of its own (SMA-542 review M3).
+    if mutant_is_killed "$rc" "$dir/$label.out"; then
       continue
     fi
     case "$rc" in
@@ -2077,10 +2234,20 @@ while IFS= read -r verdict; do
       entry schedules the gate which guards T itself: without it ci_targets.py's C1-C5, the
       affected-graph cascade cases and cargo_moon_parity all stop running, every one of them
       green. Restore it — and the matching entry in CLAUDE.md's ci-targets block." ;;
+    'continued '*)
+      fail ".github/workflows/ci.yml:${verdict#continued } invokes 'moon' across more than one
+      physical line (a trailing backslash continuation). This check reads one physical line at a
+      time, so it cannot see a '||'/'&&'/';'/'|' tail sitting on a later line of the same
+      invocation — reporting 'swallowed' here would name a problem this check cannot actually
+      confirm. Put the whole 'moon ci'/'moon run' invocation back on ONE physical line, the same
+      requirement 'no-array' already makes of T=( … ) itself." ;;
     'swallowed '*)
       fail ".github/workflows/ci.yml:${verdict#swallowed } runs 'moon' but discards its exit
-      status (a '||', '&&', ';' or '|' tail). That greens every gate in T while leaving T itself
-      perfectly correct, so no other check in this repo can see it. Remove the tail." ;;
+      status (a '||', '&&', ';' or '|' tail). If this is the invocation that guards T, that greens
+      every gate in T while leaving T itself perfectly correct, so no other check in this repo can
+      see it — remove the tail. If it is a DIFFERENT, harmless 'moon' line (a diagnostic
+      'moon run x | tee log' in an unrelated job, say), this check cannot tell the two apart and it
+      belongs in SWALLOWED_SKIP (above ci_target_floor_verdict in $0) with a reason." ;;
     'continue-on-error '*)
       fail ".github/workflows/ci.yml:${verdict#continue-on-error } suppresses that step's own
       failure (a 'continue-on-error:' value other than 'false'). If this is the step that runs
