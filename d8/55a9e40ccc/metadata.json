@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "d855a9e40ccc",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-542-guard-self-test-invocations",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/superpowers/specs/2026-08-20-sma-542-self-test-invocation-guard-design.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d8/55a9e40ccc/0/metadata.json",
+      "transcript": "/d8/55a9e40ccc/0/full.jsonl",
+      "compact_transcript": "/d8/55a9e40ccc/0/transcript.jsonl",
+      "content_hash": "/d8/55a9e40ccc/0/content_hash.txt",
+      "prompt": "/d8/55a9e40ccc/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 16,
+    "cache_creation_tokens": 43692,
+    "cache_read_tokens": 1361291,
+    "output_tokens": 29343,
+    "api_call_count": 9
+  }
+}
