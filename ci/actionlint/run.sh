@@ -1681,6 +1681,11 @@ is_coe_skipped() {
 # fine (SMA-542 review M6). Same "<lineno>:<exact text>" format as COE_SKIP and the same reasoning
 # for keying by both: a bare line number would silently absorb whatever line drifts onto it after
 # an edit; pinning the text too makes a shifted entry stop matching and red instead. Ships empty.
+#
+# Also the escape hatch for `wrapped` (PR 150 CodeRabbit fix), not a fourth list: a wrapped and a
+# bare-`moon` swallowed line are the same underlying problem — "this check cannot confirm the
+# invocation's exit status propagates" — spelled two different ways depending on where the wrapper
+# sits, so one skip list keyed the same way (lineno + exact text) covers both.
 SWALLOWED_SKIP=(
   # (empty — add entries as "<lineno>:<exact text of the matched line, leading blanks included>"
   # # why, and what verifies the suppressed invocation's own failure instead)
@@ -1700,6 +1705,9 @@ is_swallowed_skipped() {
 #   missing <entry>              the array parsed; <entry> is not among its tokens
 #   continued <lineno>           a `moon` command line is continued onto another physical line
 #   swallowed <lineno>           a `moon` command line discards its own exit status
+#   wrapped <lineno>             a `moon ci`/`moon run` invocation sits behind a known command
+#                                 wrapper (command/env/time/eval/exec/if/while/until/!) instead of
+#                                 at command position, so propagation cannot be confirmed
 #   continue-on-error <lineno>   a step's continue-on-error value is not literally `false`
 ci_target_floor_verdict() {
   local f="$1" arrays body tok w found lineno text q value
@@ -1765,6 +1773,39 @@ ci_target_floor_verdict() {
         is_swallowed_skipped "$lineno:$text" || echo "swallowed $lineno" ;;
     esac
   done < <(grep -nE '^[[:blank:]]*moon[[:blank:]]' "$f")
+
+  # 'wrapped' — a `moon ci`/`moon run` invocation hidden behind a known command wrapper on the SAME
+  # physical line evades the swallowed loop above BY CONSTRUCTION: that loop's grep requires `moon`
+  # to be the line's first token, and none of these wrapper forms puts it there. Two motivating
+  # cases, both measured to produce NO verdict at all under the loop above (CodeRabbit, PR 150):
+  #   command moon ci "${T[@]}" --base origin/main --include-relations || true
+  #   if moon ci "${T[@]}" --base origin/main --include-relations; then :; fi
+  # The first is 'swallowed' in every way that matters, just spelled so the anchor misses it. The
+  # second has no `||`/`&&`/`;`/`|` TAIL at all — its `;` belongs to the `if` syntax, not a
+  # discarded exit status — yet it is exactly as silent: a failing `if` CONDITION does not fail the
+  # `if` STATEMENT, so the step exits 0 either way.
+  #
+  # A CLOSED, ENUMERATED vocabulary, matching this file's own convention for a restricted-and-loud
+  # vocabulary (pattern_verdict's SKIP_PATTERNS, branch_verdict's BRANCH_SKIP): reject the shape
+  # outright rather than try to guess whether a given wrapper actually swallows the exit status.
+  # `command`/`env`/`time`/`eval`/`exec`/`if`/`while`/`until`/`!` are the forms most likely to
+  # appear in a CI script; a wrapper outside this list (a shell function, `sudo`, `nice`, ...) is
+  # invisible to it — the same residual `swallowed` and `continued` already carry for constructs
+  # outside THEIR vocabulary. Reported as its own verdict, never folded into 'swallowed': the fix is
+  # always "put the invocation back at command position on one physical line", which for the `if`
+  # case is not "remove the tail" (there may be none).
+  #
+  # Both halves are required on the SAME physical line — bash 3.2's `grep -E` is POSIX ERE with no
+  # lookahead, so "wrapper token AND moon ci/run" cannot be one regex. Piped as two greps instead:
+  # the first anchors the wrapper at column 0 (mirroring the `moon` anchor just above), the second
+  # narrows to lines that also invoke `moon ci`/`moon run` specifically — `moon setup`/`moon sync`
+  # are not gated by T and are out of scope. `grep -n` on the first stage keeps the "N:text" record
+  # shape the read loop expects; the second stage matches against that whole "N:text" string, which
+  # is safe because a line number is numeric and cannot itself contain "moon ci"/"moon run".
+  while IFS=: read -r lineno text; do
+    is_swallowed_skipped "$lineno:$text" || echo "wrapped $lineno"
+  done < <(grep -nE '^[[:blank:]]*(command|env|time|eval|exec|if|while|until|!)[[:blank:]]' "$f" \
+             | grep -E 'moon[[:blank:]]+(ci|run)([[:blank:]]|$)')
 
   # continue-on-error: — the third spelling of D14's idea, at step rather than command-line
   # granularity, and deliberately as syntactic and over-inclusive as `swallowed` above (SMA-542
@@ -1907,6 +1948,49 @@ ci_target_floor_self_test() {
             moon run "${T[@]}"
           fi
 '
+
+  # 'wrapped' (CodeRabbit, PR 150): a command wrapper on the SAME physical line as the invocation
+  # evades the swallowed loop above by construction — that loop's anchor requires `moon` to be the
+  # line's first token, and neither motivating case puts it there. Both directions per SMA-466.
+  expect_floor 'command-wrapped moon invocation with a swallowing tail is flagged as wrapped, not missed' \
+    'wrapped 2' \
+'          T=(:affected-smoke)
+          command moon ci "${T[@]}" --base origin/main --include-relations || true
+'
+  # No `||`/`&&`/`;`/`|` TAIL at all here — the `;` belongs to `if` syntax — yet it is just as
+  # silent: a failing `if` CONDITION does not fail the `if` STATEMENT, so this must still fire.
+  expect_floor 'if-wrapped moon invocation (a failing condition would not fail the if) is flagged as wrapped' \
+    'wrapped 2' \
+'          T=(:affected-smoke)
+          if moon ci "${T[@]}" --base origin/main --include-relations; then :; fi
+'
+  # A wrapper token followed by a line that only MENTIONS moon (in a string), not an actual
+  # `moon ci`/`moon run` invocation — real ci.yml line 179's shape. Proves the AND-condition: the
+  # wrapper-prefix match alone is not enough to fire.
+  expect_floor 'a wrapper token on a line that only mentions moon, not moon ci/run, does not fire' \
+    '' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+          command -v pnpm >/dev/null || { echo "moon setup failed"; exit 1; }
+'
+  # `moon setup`/`moon sync` are not gated by T and out of scope for this floor — a wrapper in
+  # front of one of those must not fire either. Proves the moon-verb match is narrowed to ci/run.
+  expect_floor 'a wrapper around moon setup (not moon ci/run) does not fire' '' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+          command moon setup || true
+'
+  # SWALLOWED_SKIP is REUSED for 'wrapped' rather than a fourth skip list (spec decision, PR 150):
+  # a wrapped and a bare-`moon` swallowed line are the same underlying problem spelled two ways, so
+  # the same lineno+text-keyed escape hatch applies to both.
+  saved_swallowed_skip=(${SWALLOWED_SKIP+"${SWALLOWED_SKIP[@]}"})
+  SWALLOWED_SKIP=('2:          command moon ci "${T[@]}" --base origin/main --include-relations || true')
+  expect_floor 'SWALLOWED_SKIP also silences a wrapped line (reused skip list, not a fourth one)' \
+    '' \
+'          T=(:affected-smoke)
+          command moon ci "${T[@]}" --base origin/main --include-relations || true
+'
+  SWALLOWED_SKIP=(${saved_swallowed_skip+"${saved_swallowed_skip[@]}"})
 
   # continue-on-error: — the third D14 spelling (SMA-542 task 4b). Both directions per SMA-466:
   # each positive row below must fire, and each negative control must specifically be what stops
@@ -2248,6 +2332,17 @@ while IFS= read -r verdict; do
       see it — remove the tail. If it is a DIFFERENT, harmless 'moon' line (a diagnostic
       'moon run x | tee log' in an unrelated job, say), this check cannot tell the two apart and it
       belongs in SWALLOWED_SKIP (above ci_target_floor_verdict in $0) with a reason." ;;
+    'wrapped '*)
+      fail ".github/workflows/ci.yml:${verdict#wrapped } runs 'moon ci'/'moon run' behind a known
+      command wrapper (command/env/time/eval/exec/if/while/until/!) on the same physical line, so
+      this check cannot confirm the invocation's exit status propagates — a wrapper can swallow a
+      failure exactly like a '||'/'&&'/';'/'|' tail does ('command moon ci ... || true'), or even
+      with no tail at all ('if moon ci ...; then :; fi' exits 0 regardless of moon's exit code,
+      because a failing 'if' CONDITION does not fail the 'if' STATEMENT). Put the invocation at
+      command position on ONE physical line, unwrapped — the same requirement 'swallowed' already
+      makes. This check only recognizes that fixed list of wrappers and cannot see an arbitrary
+      one; if this IS a different, harmless wrapped 'moon' line, it belongs in SWALLOWED_SKIP
+      (above ci_target_floor_verdict in $0) with a reason." ;;
     'continue-on-error '*)
       fail ".github/workflows/ci.yml:${verdict#continue-on-error } suppresses that step's own
       failure (a 'continue-on-error:' value other than 'false'). If this is the step that runs

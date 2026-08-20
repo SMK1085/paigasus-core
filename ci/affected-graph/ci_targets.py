@@ -228,7 +228,7 @@ SELF_SCHEDULED_GATES = {
 # lines would not schedule this task at all, while repo:actionlint (inputs: ['**/*']) still ran and
 # asserted nothing — the exact defect this closes. Do not remove that input.
 #
-# Matched as WHOLE STRIPPED LINES, like SELF_SCHEDULED_GATES and unlike RUN_SH_CALL_SITES:
+# Matched as WHOLE LINES, like SELF_SCHEDULED_GATES and unlike RUN_SH_CALL_SITES:
 # `run_self_tests` is a strict substring of its own definition line `run_self_tests() {`, so a
 # substring test would report the file as wired after the call had been deleted. The third entry,
 # the `done < <(...)` line closing check 8's production `while` loop, is unambiguous the same way:
@@ -239,6 +239,26 @@ SELF_SCHEDULED_GATES = {
 # cycle-asymmetry "review finding I2" cited above — the reviewer deleted this exact block and
 # measured: full gate rc 0, this gate PASS, with T_FLOOR/swallowed/continue-on-error asserting
 # nothing until this entry closed it).
+#
+# COLUMN 0, not stripped-both-sides (CodeRabbit, PR 150). check_self_invocation used to build
+# `actionlint_lines` with `line.strip()`, so a required line was satisfied by that exact TEXT
+# appearing anywhere in the file — including indented inside `if false; then … fi` or a heredoc,
+# neither of which ever executes. Wrapping one of these three calls in a conditional block is
+# exactly the shape a false negative would take, and it conventionally INDENTS the wrapped line, so
+# matching now requires no leading whitespace at all (trailing whitespace is still stripped). This
+# is a deliberate ASYMMETRY with the other two haystacks, not an oversight: RUN_SH_CALL_SITES
+# matches substrings because its lines are indented inside a bash function, and
+# SELF_SCHEDULED_GATES strips both sides because moon task scripts are indented inside YAML — both
+# would break under a column-0 requirement. This haystack is different: `run_self_tests`,
+# `selftest_mutation_battery` and the `done < <(...)` line all sit at run.sh's TOP LEVEL (verified:
+# none is nested in a function, `if`, or loop), so column 0 is where the real, executing call sites
+# actually live, and is available as a signal here in a way it is not for the other two.
+#
+# THIS IS NOT REACHABILITY ANALYSIS, and does not claim to be — parsing bash control flow in
+# Python is fragile and out of scope (spec decision). What it does NOT close: a required line
+# copied into an UNINDENTED `if false; then … fi` block, or an unindented heredoc, still satisfies
+# it — column 0 rejects the common case (an indented copy) without attempting the general one. That
+# residual is recorded in ci/actionlint/README.md's Limitations section.
 #
 # PROPAGATION CONTRACT — these entries carry no `|| RC=1` suffix, and that is not the hole
 # RUN_SH_CALL_SITES' suffixes close. `run_self_tests` and `selftest_mutation_battery` report through
@@ -603,7 +623,12 @@ def check_self_invocation(run_sh_text, scripts, actionlint_sh_text):
     for task, required in sorted(SELF_SCHEDULED_GATES.items()):
         present = {line.strip() for line in scripts.get(task, "").splitlines()}
         missing.extend(f"{task} script: {site}" for site in required if site not in present)
-    actionlint_lines = {line.strip() for line in actionlint_sh_text.splitlines()}
+    # COLUMN 0 only (rstrip, no lstrip) — see the comment at ACTIONLINT_SH_CALL_SITES above for why
+    # this one haystack, alone of the three, requires the line to carry NO leading whitespace: an
+    # indented copy (e.g. wrapped in `if false; then … fi`) must not satisfy the pin.
+    actionlint_lines = {
+        line.rstrip() for line in actionlint_sh_text.splitlines() if line == line.lstrip()
+    }
     missing.extend(
         f"ci/actionlint/run.sh: {site}"
         for site in ACTIONLINT_SH_CALL_SITES
@@ -1074,6 +1099,36 @@ def self_test():
     if not check_self_invocation(wired, scripts, no_floor_call):
         failures.append(
             "check_self_invocation: missed a deleted check-8 production call site (fix-wave I1)"
+        )
+    # CodeRabbit (PR 150) — the column-0 requirement itself. Before this fix, `check_self_invocation`
+    # matched actionlint call sites by STRIPPED line (both sides), so a required line was satisfied
+    # by that exact text appearing anywhere, including indented inside an `if false; then … fi`
+    # block or a heredoc — neither of which ever executes. Wrapping a call in a conditional
+    # conventionally INDENTS it, so an indented copy of each of the three required lines must now be
+    # reported missing — one row per line, so a mutant that widened the column-0 check back to
+    # "matches anywhere" is caught regardless of which entry it is tested against. The "fired on a
+    # wired tree" assertion above already proves the real, column-0 tree keeps passing under this
+    # tighter rule.
+    indented_run_self_tests = wired_actionlint.replace("run_self_tests\n", "  run_self_tests\n", 1)
+    if not check_self_invocation(wired, scripts, indented_run_self_tests):
+        failures.append(
+            "check_self_invocation: an INDENTED run_self_tests call satisfied the column-0 pin"
+        )
+    indented_battery = wired_actionlint.replace(
+        "selftest_mutation_battery\n", "  selftest_mutation_battery\n"
+    )
+    if not check_self_invocation(wired, scripts, indented_battery):
+        failures.append(
+            "check_self_invocation: an INDENTED selftest_mutation_battery call satisfied the "
+            "column-0 pin"
+        )
+    indented_floor_call = wired_actionlint.replace(
+        "done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n",
+        "  done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n",
+    )
+    if not check_self_invocation(wired, scripts, indented_floor_call):
+        failures.append(
+            "check_self_invocation: an INDENTED check-8 call site satisfied the column-0 pin"
         )
     # Contamination cases, THREE of them (SMA-542 review finding I1, plus a round-2 addition). The
     # obvious "swap the two texts wholesale" version tried first passed unconditionally, because it

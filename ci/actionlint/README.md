@@ -31,7 +31,7 @@ the required check. See SMA-540 and
 | 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree, and every `branches:` entry resolves as a ref or is skip-listed |
 | 6 | Every extracted filter key carries at least one sequence entry; a `paths:`/`branches:` key must also have at least one of them positive (the `-ignore` variants are exempt) |
 | 7 | Six self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, kill predicate — plus a counter (`SELF_TESTS_RAN`/`SELF_TEST_COUNT`) asserting all six ran, and a definition-count check catching a seventh table that is defined but never wired into `run_self_tests` (`run.sh --self-test`) |
-| 8 | `ci.yml`'s `T=(…)` still schedules the gate that guards `T` itself, and nothing silences that gate's result. Four verdict families: **(a)** the floor — `:affected-smoke` present in `T` (`missing`), or the array can't even be read (`no-array`/`no-file`); **(b)** no `moon` command line is continued onto another physical line, where a discarded exit status would be invisible to this check (`continued`); **(c)** no single-line `moon` command line discards its own exit status (`swallowed`), with `SWALLOWED_SKIP` as the escape hatch for an unrelated `moon` line this check cannot know is harmless; **(d)** no step's `continue-on-error:` value suppresses it — any spelling but the literal `false` (`continue-on-error`), with `COE_SKIP` as the escape hatch for an unrelated later step |
+| 8 | `ci.yml`'s `T=(…)` still schedules the gate that guards `T` itself, and nothing silences that gate's result. Five verdict families: **(a)** the floor — `:affected-smoke` present in `T` (`missing`), or the array can't even be read (`no-array`/`no-file`); **(b)** no `moon` command line is continued onto another physical line, where a discarded exit status would be invisible to this check (`continued`); **(c)** no single-line `moon` command line discards its own exit status (`swallowed`), with `SWALLOWED_SKIP` as the escape hatch for an unrelated `moon` line this check cannot know is harmless; **(d)** no `moon ci`/`moon run` invocation sits behind a known command wrapper (`command`/`env`/`time`/`eval`/`exec`/`if`/`while`/`until`/`!`) on the same line, where propagation cannot be confirmed (`wrapped`), sharing `SWALLOWED_SKIP` as its escape hatch; **(e)** no step's `continue-on-error:` value suppresses it — any spelling but the literal `false` (`continue-on-error`), with `COE_SKIP` as the escape hatch for an unrelated later step |
 | 9 | A mutation battery, full-gate only: each of the six self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message (a kill predicate driven by its own fixture table, not merely "non-zero"), or the battery itself reds |
 
 Only a `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` key **two levels deep** inside
@@ -86,11 +86,13 @@ workflow run *more* often, which is the fail-safe direction.
 - A **branch that does not exist yet**, or a branch pattern: add it to `BRANCH_SKIP` in `run.sh`
   with a comment justifying it and saying what verifies it instead.
 - A **`moon` command line check 8 cannot know is harmless** (any `moon` line other than the one
-  guarding `T`, carrying a `;`/`|`/`&&`/`||` tail for its own legitimate reason): add it to
-  `SWALLOWED_SKIP` in `run.sh` with a comment justifying it and saying what verifies its own
-  failure instead. There is deliberately **no** equivalent hatch for `continued` — a
-  backslash-continued `moon` invocation is rejected outright, the same way `no-array` never skips;
-  put it back on one physical line.
+  guarding `T`, carrying a `;`/`|`/`&&`/`||` tail for its own legitimate reason, **or** a `moon
+  ci`/`moon run` line sitting behind a wrapper check 8 recognizes but this one is harmless): add
+  it to `SWALLOWED_SKIP` in `run.sh` with a comment justifying it and saying what verifies its own
+  failure instead — the one skip list covers both `swallowed` and `wrapped`, since they are the
+  same underlying problem spelled two ways. There is deliberately **no** equivalent hatch for
+  `continued` — a backslash-continued `moon` invocation is rejected outright, the same way
+  `no-array` never skips; put it back on one physical line.
 - **Anything worse**: drop `:actionlint` from `T=(…)` in `.github/workflows/ci.yml`. This must
   also be removed from the CLAUDE.md `ci-targets` block, since `repo:affected-smoke` asserts the
   two agree — **and** needs a `T_EXEMPT` entry in `ci/affected-graph/ci_targets.py` with a stated
@@ -135,6 +137,24 @@ problem — this check reads one physical line at a time and does not reassemble
 before scanning it. Deliberate (SMA-542 fix-wave finding I2): guessing at what follows the backslash risks
 the exact misdiagnosis ("swallowed" when the tail wasn't there, or vice versa) this check exists to
 avoid, so it demands the invocation be rejoined onto one line instead.
+
+**L9 — `wrapped` recognizes a closed, enumerated vocabulary, not "any wrapper."** Only
+`command`/`env`/`time`/`eval`/`exec`/`if`/`while`/`until`/`!` are checked, and only when the
+wrapper token and the `moon ci`/`moon run` invocation share one physical line. A wrapper outside
+that list (a shell function, `sudo`, `nice`, a `case` arm, ...) is invisible to it, and a wrapper
+on one line with the invocation on a later one is neither `wrapped` nor `swallowed` — it falls
+into the same blind spot L8 already documents for a backslash continuation. Deliberate (CodeRabbit,
+PR 150): parsing arbitrary bash wrapping accurately needs the same kind of control-flow analysis
+this file's own history shows goes wrong (flow vs block style, SMA-525/540 rounds 2–3) — reject
+the enumerated shapes loudly rather than guess at the rest.
+
+**L10 — `ci_targets.py`'s column-0 pin on `ACTIONLINT_SH_CALL_SITES` is not reachability
+analysis.** It closes the common case — an indented copy of a required line, the shape wrapping
+one of the three calls in a conditional block conventionally produces — but a required line copied
+into an **unindented** `if false; then … fi` block, or an **unindented** heredoc, still sits at
+column 0 and still satisfies the pin even though neither ever executes. Deliberate (CodeRabbit, PR
+150): genuine bash-reachability analysis in Python is fragile and out of scope; see the comment at
+`ACTIONLINT_SH_CALL_SITES` in `ci/affected-graph/ci_targets.py`.
 
 ## Cost
 
