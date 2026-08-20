@@ -1644,18 +1644,28 @@ T_FLOOR=(':affected-smoke')
 # same reason as SKIP_PATTERNS/BRANCH_SKIP above (spec §6): the verdict is deliberately syntactic,
 # like `swallowed`, rather than parsing YAML step-block boundaries to work out "which step is
 # this key under" for itself — this file's own history (flow vs block style) is exactly where
-# that kind of parsing has hidden real bugs. Keyed by 1-based line number rather than step name
-# for the same reason: resolving a name from a key would need the same block-boundary parsing
-# this file is choosing not to do. Every entry needs a comment naming what verifies the
-# suppressed step's own failure instead (SMA-542 task 4b review, I2).
+# that kind of parsing has hidden real bugs.
+#
+# Keyed by BOTH the 1-based line number AND the exact matched line text — entries have the form
+# "<lineno>:<text>", reconstructing the raw `grep -n` record the reader loop below already splits
+# into those two pieces (`IFS=: read -r lineno text`). This is the only positionally-keyed skip
+# list in this file — SKIP_PATTERNS and BRANCH_SKIP key by content alone and are drift-immune by
+# construction. A bare line number is not: an edit that shifts the file leaves a stale entry
+# sitting on whatever line now occupies its old number, silently absorbing a DIFFERENT
+# continue-on-error occurrence that happens to land there — a fail-open in the one check whose
+# purpose is closing fail-opens. Pinning the text too means a shifted entry simply stops matching
+# and reds instead of silently skipping. Every entry needs a comment naming what verifies the
+# suppressed step's own failure instead (SMA-542 task 4b review, I2; keyed by content, SMA-542
+# follow-up — it shipped empty, so this was the cheapest point to close it).
 COE_SKIP=(
-  # (empty — add entries as <lineno>  # why, and what verifies it instead)
+  # (empty — add entries as "<lineno>:<exact text of the matched line, leading blanks included>"
+  # # why, and what verifies it instead)
 )
 
 is_coe_skipped() {
-  local n="$1" s
+  local key="$1" s
   for s in ${COE_SKIP+"${COE_SKIP[@]}"}; do
-    [ "$s" = "$n" ] && return 0
+    [ "$s" = "$key" ] && return 0
   done
   return 1
 }
@@ -1731,7 +1741,7 @@ ci_target_floor_verdict() {
     value="${value%"${value##*[![:blank:]]}"}"     # trim trailing blanks
     case "$value" in
       false) : ;;
-      *) is_coe_skipped "$lineno" || echo "continue-on-error $lineno" ;;
+      *) is_coe_skipped "$lineno:$text" || echo "continue-on-error $lineno" ;;
     esac
   done < <(grep -nE "^[[:blank:]]*${q}continue-on-error${q}[[:blank:]]*:" "$f")
 }
@@ -1837,18 +1847,31 @@ ci_target_floor_self_test() {
           moon ci "${T[@]}"
           # continue-on-error: true
 '
-  # I2's escape hatch, both directions in one fixture: line 3 is on COE_SKIP and must be silent;
-  # line 4 is an identical key one line later and is NOT listed, so it must still fire. Proves
-  # is_coe_skipped compares whole entries (like BRANCH_SKIP's fixture above), not "list
-  # non-empty therefore everything is skipped" — and that the skip doesn't leak past its own line.
-  # COE_SKIP ships empty, so it is overridden for this one assertion and restored immediately.
+  # I2's escape hatch, now keyed by lineno AND text (SMA-542 follow-up). Three rows, both
+  # directions: (1) an entry whose lineno AND text match the real line is silenced; (2) an
+  # identical-text occurrence one line later, NOT listed, still fires — the skip doesn't leak past
+  # its own line; (3) the case this key format exists for — a STALE entry whose line number
+  # matches but whose text does not (the file shifted and a DIFFERENT continue-on-error now sits
+  # on that line) must NOT be silenced. A bare-lineno key would wrongly skip row 3; only the
+  # lineno+text pair tells them apart. COE_SKIP ships empty, so it is overridden per assertion and
+  # restored immediately.
   saved_coe_skip=(${COE_SKIP+"${COE_SKIP[@]}"})
-  COE_SKIP=(3)
-  expect_floor 'COE_SKIP silences only the listed line, not the next one' 'continue-on-error 4' \
+  COE_SKIP=('3:            continue-on-error: true')
+  expect_floor 'COE_SKIP silences an exact lineno+text match' '' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+            continue-on-error: true
+'
+  expect_floor 'COE_SKIP does not leak to a different line with identical text' 'continue-on-error 4' \
 '          T=(:affected-smoke)
           moon ci "${T[@]}"
             continue-on-error: true
             continue-on-error: true
+'
+  expect_floor 'a stale COE_SKIP entry (matching lineno, drifted text) does not silence the line' 'continue-on-error 3' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+        continue-on-error: true
 '
   COE_SKIP=(${saved_coe_skip+"${saved_coe_skip[@]}"})
 
