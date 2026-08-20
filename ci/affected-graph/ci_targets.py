@@ -169,7 +169,11 @@ REQUIRED_DOC_FLAGS = ("--base origin/main", "--include-relations")
 # deleting the call.
 #
 # A PARTIAL mitigation, not a closure: deleting the `assert_ci_targets` call removes C4 along with
-# it. SMA-542 is the general fix for this class (spec L6).
+# it.
+#
+# SMA-542 closed the general case: ACTIONLINT_SH_CALL_SITES below pins repo:actionlint's own call
+# sites from here, and check 8 in ci/actionlint/run.sh pins `:affected-smoke` in `T` from there, so
+# the two gates guard each other rather than themselves.
 RUN_SH_CALL_SITES = (
     "assert_ci_targets || SUITE_RC=1",
     # The `|| NEG_RC=1` suffix is as load-bearing as the command. Matching the prefix alone left
@@ -205,6 +209,29 @@ SELF_SCHEDULED_GATES = {
         "python3 ci/affected-graph/task_inputs.py",
     ),
 }
+
+# C4, actionlint half (SMA-542). repo:actionlint's self-tests and mutation battery are invoked from
+# ONE call site each inside ci/actionlint/run.sh. That script cannot assert its own invocation —
+# deleting the calls was the sole survivor of SMA-525's mutation battery — so the assertion lives
+# here, in a gate scheduled independently of it. The reverse direction is check 8 in that same
+# script, which asserts `:affected-smoke` is still in `T`: neither gate is the sole judge of its
+# own scheduling.
+#
+# REACHABILITY IS NOT AUTOMATIC. This check only runs when repo:affected-smoke is scheduled, so
+# moon.yml lists `ci/actionlint/**/*` among its inputs. Without that entry a PR deleting these two
+# lines would not schedule this task at all, while repo:actionlint (inputs: ['**/*']) still ran and
+# asserted nothing — the exact defect this closes. Do not remove that input.
+#
+# Matched as WHOLE STRIPPED LINES, like SELF_SCHEDULED_GATES and unlike RUN_SH_CALL_SITES:
+# `run_self_tests` is a strict substring of its own definition line `run_self_tests() {`, so a
+# substring test would report the file as wired after the call had been deleted.
+#
+# PROPAGATION CONTRACT — these entries carry no `|| RC=1` suffix, and that is not the hole
+# RUN_SH_CALL_SITES' suffixes close. Both functions report through run.sh's global `FAILED`, as its
+# four self-tests already do (run.sh:29-32), so there is no status to propagate at the call site.
+# The consequence is that a future `run_self_tests || FAILED=1` would red this check even though it
+# is harmless; restore the bare line, or update this constant.
+ACTIONLINT_SH_CALL_SITES = ("run_self_tests", "selftest_mutation_battery")
 
 
 def read_input(path, label):
@@ -536,22 +563,32 @@ def _scripts(projects):
     return scripts
 
 
-def check_self_invocation(run_sh_text, scripts):
-    """Call sites of the affected-graph gates that are missing from where they must appear.
+def check_self_invocation(run_sh_text, scripts, actionlint_sh_text):
+    """Call sites of the affected-graph and actionlint gates missing from where they must appear.
 
-    The two halves match DIFFERENTLY, on purpose (see SELF_SCHEDULED_GATES): run.sh sites are
-    substrings, because they are indented and one is a mid-line fragment, and their `|| RC=1`
-    suffixes already make them unambiguous; task-script sites are whole stripped LINES, because
-    one required line is a strict prefix of the other and a substring test would report a script
-    as fully wired after its real run had been deleted.
+    Three haystacks, matched TWO different ways. run.sh sites are substrings, because they are
+    indented and one is a mid-line fragment, and their `|| RC=1` suffixes already make them
+    unambiguous. Task-script and actionlint sites are whole stripped LINES, because in each case
+    one required token is a strict prefix of something else in the file — `task_inputs.py` of
+    `task_inputs.py --self-test`, and `run_self_tests` of `run_self_tests() {`.
 
-    The two texts are checked SEPARATELY rather than against one concatenated haystack, so a call
-    site living in the wrong file cannot satisfy the other's requirement.
+    The three texts are checked SEPARATELY rather than against one concatenated haystack, so a call
+    site living in the wrong file cannot satisfy another's requirement.
+
+    `actionlint_sh_text` is a REQUIRED positional parameter, deliberately. An optional one
+    defaulting to "" would make every existing caller pass vacuously — re-creating the class of
+    hole this check exists to close.
     """
     missing = [site for site in RUN_SH_CALL_SITES if site not in run_sh_text]
     for task, required in sorted(SELF_SCHEDULED_GATES.items()):
         present = {line.strip() for line in scripts.get(task, "").splitlines()}
         missing.extend(f"{task} script: {site}" for site in required if site not in present)
+    actionlint_lines = {line.strip() for line in actionlint_sh_text.splitlines()}
+    missing.extend(
+        f"ci/actionlint/run.sh: {site}"
+        for site in ACTIONLINT_SH_CALL_SITES
+        if site not in actionlint_lines
+    )
     return missing
 
 
@@ -941,29 +978,39 @@ def self_test():
         "python3 ci/affected-graph/task_inputs.py\n"
     )
     scripts = {"input-liveness": wired_script}
-    if check_self_invocation(wired, scripts):
+    wired_actionlint = (
+        # Load-bearing, exactly as `assert_ci_targets() {` is above: with the DEFINITION present,
+        # `no_actionlint_call` below still contains the bare name `run_self_tests`, so a
+        # name-only entry would survive deleting the call. Whole-line matching is what separates
+        # them, and dropping this line silently de-fangs that assertion.
+        "run_self_tests() {\n  :\n}\n"
+        "run_self_tests\n"
+        "selftest_mutation_battery\n"
+    )
+    if check_self_invocation(wired, scripts, wired_actionlint):
         failures.append(
-            f"check_self_invocation: fired on a wired tree: {check_self_invocation(wired, scripts)}"
+            "check_self_invocation: fired on a wired tree: "
+            f"{check_self_invocation(wired, scripts, wired_actionlint)}"
         )
     no_call = wired.replace("  assert_ci_targets || SUITE_RC=1\n", "")
-    if not check_self_invocation(no_call, scripts):
+    if not check_self_invocation(no_call, scripts, wired_actionlint):
         failures.append("check_self_invocation: missed a deleted run_suite call")
     no_selftest = wired.replace('  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n', "")
-    if not check_self_invocation(no_selftest, scripts):
+    if not check_self_invocation(no_selftest, scripts, wired_actionlint):
         failures.append("check_self_invocation: missed a deleted --self-test call")
     silenced = wired.replace("--self-test || NEG_RC=1", "--self-test || true")
-    if not check_self_invocation(silenced, scripts):
+    if not check_self_invocation(silenced, scripts, wired_actionlint):
         failures.append("check_self_invocation: missed a --self-test whose failure is swallowed")
     # SMA-553 D10 — the task-script half. The REAL-RUN line is a strict PREFIX of the --self-test
     # line, so a substring test would report the script below as fully wired while the gate no
     # longer runs at all. Whole-line matching is what distinguishes them.
     if not check_self_invocation(wired, {"input-liveness": wired_script.replace(
         "python3 ci/affected-graph/task_inputs.py\n", ""
-    )}):
+    )}, wired_actionlint):
         failures.append("check_self_invocation: missed a deleted task_inputs real run (prefix hole)")
     if not check_self_invocation(wired, {"input-liveness": wired_script.replace(
         "python3 ci/affected-graph/task_inputs.py --self-test\n", ""
-    )}):
+    )}, wired_actionlint):
         failures.append("check_self_invocation: missed a deleted task_inputs --self-test")
     # SMA-553 review finding 1 — the errexit line itself. Moon's `script:` blocks have no
     # errexit, so the script's exit status is its LAST command's; deleting `set -euo pipefail`
@@ -971,18 +1018,33 @@ def self_test():
     # stay green while a failing --self-test is silently swallowed (SMA-526).
     if not check_self_invocation(wired, {"input-liveness": wired_script.replace(
         "set -euo pipefail\n", ""
-    )}):
+    )}, wired_actionlint):
         failures.append("check_self_invocation: missed a deleted errexit line ahead of the invocations")
-    if not check_self_invocation(wired, {}):
+    if not check_self_invocation(wired, {}, wired_actionlint):
         failures.append("check_self_invocation: missed an absent input-liveness script entirely")
     # The two texts are checked SEPARATELY: a call site in the wrong file must not satisfy the
     # other's requirement, which a concatenated haystack would allow.
-    if not check_self_invocation(wired_script, {"input-liveness": wired}):
+    if not check_self_invocation(wired_script, {"input-liveness": wired}, wired_actionlint):
         failures.append("check_self_invocation: accepted the two texts swapped")
     # ...and the reverse direction, which the swap fixture above does not reach: script text must
     # not satisfy a run.sh requirement either.
-    if not check_self_invocation(no_call, {"input-liveness": wired + wired_script}):
+    if not check_self_invocation(no_call, {"input-liveness": wired + wired_script}, wired_actionlint):
         failures.append("check_self_invocation: a run.sh call site was satisfied by script text")
+    if check_self_invocation(wired, scripts, wired_actionlint):
+        failures.append("check_self_invocation: fired on a wired actionlint tree")
+    no_actionlint_call = wired_actionlint.replace("\nrun_self_tests\n", "\n")
+    if not check_self_invocation(wired, scripts, no_actionlint_call):
+        failures.append("check_self_invocation: missed a deleted run_self_tests call")
+    no_battery = wired_actionlint.replace("selftest_mutation_battery\n", "")
+    if not check_self_invocation(wired, scripts, no_battery):
+        failures.append("check_self_invocation: missed a deleted mutation-battery call")
+    # Swap cases, BOTH directions — the existing suite carries these for the other two texts and
+    # they are the reason the haystacks are kept separate. A call site living in the wrong file
+    # must not satisfy the other's requirement.
+    if not check_self_invocation(wired, scripts, wired):
+        failures.append("check_self_invocation: accepted affected-graph's text as actionlint's")
+    if not check_self_invocation(wired_actionlint, scripts, wired_actionlint):
+        failures.append("check_self_invocation: accepted actionlint's text as affected-graph's")
 
     # _scripts (SMA-553 D10) — a second pure extractor, so _eligibility's shape is untouched.
     got_scripts = _scripts({"repo": {"input-liveness": {"script": "hi"}}, "ts": {"lint": {}}})
@@ -1063,6 +1125,9 @@ def main():
         run_sh = read_input(
             root / "ci" / "affected-graph" / "run.sh", "ci/affected-graph/run.sh"
         )
+        actionlint_sh = read_input(
+            root / "ci" / "actionlint" / "run.sh", "ci/actionlint/run.sh"
+        )
         floor = check_floor(tasks)
         missing, unexpected, bad_exempt, stale_exempt = check_forward(tasks, t_targets)
         # SMA-553 review finding 1 — these two also raise MoonOutputError (INFRA_ERRORS), so their
@@ -1083,7 +1148,7 @@ def main():
 
     dead = check_reverse(tasks, t_targets)
     doc_problems = check_docs(t_targets, doc_targets, region)
-    missing_sites = check_self_invocation(run_sh, scripts)
+    missing_sites = check_self_invocation(run_sh, scripts, actionlint_sh)
     bad_invocation = check_invocation(ci_yml)
 
     if not (floor or missing or unexpected or bad_exempt or stale_exempt or dead or doc_problems
@@ -1140,11 +1205,15 @@ def main():
          "    Fix: copy `T` verbatim between the <!-- ci-targets:begin/end --> markers, keeping\n"
          "    the `--base origin/main --include-relations` tail."),
         (missing_sites,
-         "A gate's own call site is missing: either this gate's, from\n"
-         "    ci/affected-graph/run.sh, or a self-scheduled gate's own invocation from inside its\n"
-         "    moon.yml task script — so that gate (or its negative control) would not run at all.\n"
-         "    Fix: restore the exact line; see RUN_SH_CALL_SITES and SELF_SCHEDULED_GATES in\n"
-         "    ci/affected-graph/ci_targets.py."),
+         "A gate's own call site is missing: this gate's, from\n"
+         "    ci/affected-graph/run.sh; a self-scheduled gate's own invocation from inside its\n"
+         "    moon.yml task script; or repo:actionlint's, from ci/actionlint/run.sh — so that\n"
+         "    gate (or its negative control) would not run at all.\n"
+         "    Fix: restore the exact line; see RUN_SH_CALL_SITES, SELF_SCHEDULED_GATES and\n"
+         "    ACTIONLINT_SH_CALL_SITES in ci/affected-graph/ci_targets.py.\n"
+         "    A row prefixed `ci/actionlint/run.sh:` means repo:actionlint would run its checks\n"
+         "    while asserting nothing — its self-tests or its mutation battery are no longer\n"
+         "    invoked."),
         (bad_invocation,
          "A `moon ci` invocation in .github/workflows/ci.yml does not hand it the WHOLE `T`\n"
          "    array. Every check above asserts what is IN `T`; this one asserts `T` is what runs.\n"
