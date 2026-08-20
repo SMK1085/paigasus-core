@@ -31,8 +31,8 @@ the required check. See SMA-540 and
 | 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree, and every `branches:` entry resolves as a ref or is skip-listed |
 | 6 | Every extracted filter key carries at least one sequence entry; a `paths:`/`branches:` key must also have at least one of them positive (the `-ignore` variants are exempt) |
 | 7 | Seven self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation allowlist, kill predicate — plus a counter (`SELF_TESTS_RAN`/`SELF_TEST_COUNT`) asserting all seven ran, and a definition-count check catching an eighth table that is defined but never wired into `run_self_tests` (`run.sh --self-test`) |
-| 8 | `ci.yml`'s `T=(…)` still schedules the gate that guards `T` itself, and nothing silences that gate's result. Five verdict families: **(a)** the floor — `:affected-smoke` present in `T` (`missing`), or the array can't even be read (`no-array`/`no-file`); **(b)** no `moon` command line is continued onto another physical line, where a discarded exit status would be invisible to this check (`continued`); **(c)** no single-line `moon` command line discards its own exit status (`swallowed`), with `SWALLOWED_SKIP` as the escape hatch for an unrelated `moon` line this check cannot know is harmless; **(d)** no `moon ci`/`moon run` invocation sits behind a known command wrapper (`command`/`env`/`time`/`eval`/`exec`/`if`/`while`/`until`/`!`) on the same line, where propagation cannot be confirmed (`wrapped`), sharing `SWALLOWED_SKIP` as its escape hatch; **(e)** no step's `continue-on-error:` value suppresses it — any spelling but the literal `false` (`continue-on-error`), with `COE_SKIP` as the escape hatch for an unrelated later step |
-| 8b | Every line in `ci.yml` carrying the target-array expansion `"${T[@]}"` matches one of `T_INVOCATION_ALLOWLIST` (declared with `T_FLOOR`) **exactly** — indentation included — and the number of such lines matches the array's length. This is the PRIMARY guard (SMA-542 CodeRabbit round 3, finding B — a bare `VAR=value` assignment prefix defeated BOTH check 8's `swallowed` and `wrapped`, since it has neither `moon` at column 0 nor a recognized wrapper token there); check 8's `continued`/`swallowed`/`wrapped` stay for their more specific diagnostics and are consulted first, so a line they already explain is not also reported here as `not-allowlisted` |
+| 8 | `ci.yml`'s `T=(…)` still schedules the gate that guards `T` itself, and nothing silences that gate's result. Six verdict families: **(a)** the floor — `:affected-smoke` present in `T` (`missing`), or the array can't even be read (`no-array`/`no-file`); **(b)** no `moon` command line is continued onto another physical line, where a discarded exit status would be invisible to this check (`continued`); **(c)** no single-line `moon` command line discards its own exit status (`swallowed`), with `SWALLOWED_SKIP` as the escape hatch for an unrelated `moon` line this check cannot know is harmless; **(d)** no line CLOSING a block (`fi`/`done`/`}`) discards its own exit status either, the same tail on a different line (`block-swallowed`), sharing `SWALLOWED_SKIP`; **(e)** no `moon ci`/`moon run` invocation sits behind a known command wrapper (`command`/`env`/`time`/`eval`/`exec`/`if`/`while`/`until`/`!`) on the same line, where propagation cannot be confirmed (`wrapped`), sharing `SWALLOWED_SKIP` as its escape hatch; **(f)** no step's `continue-on-error:` value suppresses it — any spelling but the literal `false` (`continue-on-error`), with `COE_SKIP` as the escape hatch for an unrelated later step |
+| 8b | Every line in `ci.yml` carrying the target-array expansion `"${T[@]}"` matches one of `T_INVOCATION_ALLOWLIST` (declared with `T_FLOOR`) **exactly** — indentation included — and the number of such lines matches the array's length. This is the PRIMARY guard on the INVOCATION LINES themselves (SMA-542 CodeRabbit round 3, finding B — a bare `VAR=value` assignment prefix defeated BOTH check 8's `swallowed` and `wrapped`, since it has neither `moon` at column 0 nor a recognized wrapper token there); check 8's `continued`/`swallowed`/`block-swallowed`/`wrapped` stay for their more specific diagnostics and are consulted first, so a line they already explain is not also reported here as `not-allowlisted`. It is NOT a complete guard on the step's control flow — see L12 |
 | 9 | A mutation battery, full-gate only: each of the seven self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message (a kill predicate driven by its own fixture table, not merely "non-zero"), or the battery itself reds |
 
 Only a `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` key **two levels deep** inside
@@ -187,6 +187,29 @@ continuation: a plain `moon ci \` (no wrapper) still starts with `moon` at colum
 `continued` verdict catches THAT shape before `invocation_allowlist_verdict` ever needs to (see
 Check 8b's row in the table above — `continued`/`swallowed`/`wrapped` are consulted first).
 
+**L12 — check 8b pins the invocation LINES, not the control flow around them; it is not a
+complete guard on the step, and the table calling it "the PRIMARY guard" should be read that
+narrowly.** Two shapes independently reviewed and found to still leave the gate at rc 0 while
+silencing every gate in `T` (SMA-542, independent review of PR 150, finding I4):
+
+```
+fi || true      # ci.yml's real closing 'fi', a tail appended — no moon, no "${T[@]}", no
+                # wrapper token; T_INVOCATION_ALLOWLIST never even scans this line
+{ … } || true   # the WHOLE if/fi wrapped in a brace group — the invocation lines inside stay
+                # byte-identical to T_INVOCATION_ALLOWLIST, so check 8b sees nothing wrong there
+```
+
+The first — `fi || true` — is now CLOSED, by check 8's new `block-swallowed` verdict (a `fi`/
+`done`/`}` line is checked for a discarded exit status the same way a `moon` line already was).
+That verdict also closes the second shape's OWN closing line (the `}` in `{ … } || true` is itself
+a `}`-first-token line with a tail), so both of the concretely-identified cases above are closed —
+but the closed set is still `fi`/`done`/`}` specifically, not "any control-flow construct that can
+discard a status". What remains genuinely open is arbitrary shell placed AFTER the block with no
+recognized terminator token of its own — a trailing `exit 0` on its own line, say, or a later step
+in the same job overwriting the outcome — which no LINE-shaped rule can catch without reassembling
+the step's actual control flow, the same reachability-analysis line every other limitation in this
+file (L9, L11, ci_targets.py's L10) declines to cross.
+
 ## Cost
 
 `inputs: ['**/*']` is deliberate (see the WHY comment on the `actionlint:` task in `moon.yml`),
@@ -209,13 +232,14 @@ Without that filter it costs **~87s**. Alternating `moon run repo:actionlint --f
 Narrowing this task's inputs would not meaningfully help; do not do it without also revisiting
 `hasher.ignorePatterns`.
 
-**Standalone cost, since SMA-542.** Check 9's mutation battery — six mutants plus an unmutated
-control, each a full `--self-test` invocation, run concurrently, full-gate only — is the dominant
-addition; check 8's floor/`continued`/`swallowed`/`continue-on-error` assertions are a handful of
-`grep`/`sed` passes over one workflow file and cost nothing worth measuring by comparison. Measured
-min-of-7 (`ci/actionlint/run.sh`, bypassing Moon; `uptime` immediately before read load averages
-2.02/3.35/4.36 — this box runs other concurrent sessions and a mean can read several times
-inflated under a load spike, hence min-of-7 rather than a mean):
+**Standalone cost, since SMA-542.** Check 9's mutation battery — seven mutants plus an
+unmutated control, each a full `--self-test` invocation, run concurrently, full-gate only — is the
+dominant addition; check 8's floor/`continued`/`swallowed`/`continue-on-error` assertions and check
+8b's allowlist/count assertions are a handful of `grep`/`sed` passes over one workflow file and cost
+nothing worth measuring by comparison. Measured min-of-7 (`ci/actionlint/run.sh`, bypassing Moon;
+`uptime` immediately before read load averages 2.02/3.35/4.36 — this box runs other concurrent
+sessions and a mean can read several times inflated under a load spike, hence min-of-7 rather than
+a mean):
 
 | Invocation | Min-of-7 |
 |---|---|
@@ -223,10 +247,18 @@ inflated under a load spike, hence min-of-7 rather than a mean):
 | `ci/actionlint/run.sh --self-test` (six fixture tables, no battery) | ~1.26s |
 
 Before SMA-542 the full gate measured ~1.5s standalone and `--self-test` ~1.0s. SMA-542 itself
-(five self-tests, five-mutant battery) brought those to ~3.68s / ~1.25s. This fix wave added the
-sixth self-test (`kill_predicate_self_test`, closing spec T3) and checks 8's `continued` verdict,
-taking the mutant count to six (seven concurrent `--self-test` subprocesses, control included) —
-essentially all of the remaining increase.
+(five self-tests, five-mutant battery) brought those to ~3.68s / ~1.25s. That fix wave added the
+sixth self-test (`kill_predicate_self_test`, closing spec T3) and check 8's `continued` verdict,
+taking the mutant count to six (seven concurrent `--self-test` subprocesses, control included).
+This wave (SMA-542 CodeRabbit rounds 3-4) added the SEVENTH self-test
+(`invocation_allowlist_self_test`, closing round-3 finding B) and check 8b's allowlist/count
+verdicts, taking the mutant count to seven (eight concurrent `--self-test` subprocesses, control
+included) — re-measured min-of-7, load averages 3.83/2.61/2.58 immediately before:
+
+| Invocation | Min-of-7 |
+|---|---|
+| `ci/actionlint/run.sh` (full gate, with the battery) | ~4.81s |
+| `ci/actionlint/run.sh --self-test` (seven fixture tables, no battery) | ~1.46s |
 
 **Do not conclude `hasher.ignorePatterns` is inert from the log.** It does *not* silence the
 ~2000 `only files can be hashed` warnings about pnpm's symlinked store — those appear identically
@@ -240,10 +272,10 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"   # proto CLIs (moon, ac
                                                             # on a default shell PATH
 moon run repo:actionlint      # via Moon, as CI does
 ci/actionlint/run.sh          # directly, bypassing the Moon cache
-ci/actionlint/run.sh --self-test   # the six fixture tables only, for fast iteration
+ci/actionlint/run.sh --self-test   # the seven fixture tables only, for fast iteration
 ```
 
-`--self-test` runs the six fixture tables and nothing else — check 9's mutation battery is
+`--self-test` runs the seven fixture tables and nothing else — check 9's mutation battery is
 full-gate-only, which is what keeps `--self-test` the fast path and what makes the battery's own
 mutants (each internally invoked with `--self-test`) unable to recurse into a battery of their
 own.

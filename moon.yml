@@ -508,11 +508,11 @@ tasks:
     # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
     # (cargo nextest, next typegen). This one is ~4.11s standalone and warm (measured, min-of-7;
     # was ~1.0s before SMA-542 added checks 8-9): six actionlint invocations — one over the real
-    # workflows, five stdin fixtures — 26 `git ls-files` calls, and six fixture tables (extractor,
-    # path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, kill
-    # predicate). Check 9's mutation battery is most of the added time: it re-runs the whole of
-    # `--self-test` — all 9 `git ls-files` calls included — once per self-test invocation plus
-    # once unmutated, seven concurrent subprocesses. See the measured table in
+    # workflows, five stdin fixtures — 26 `git ls-files` calls, and seven fixture tables (extractor,
+    # path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation
+    # allowlist, kill predicate). Check 9's mutation battery is most of the added time: it re-runs
+    # the whole of `--self-test` — all 9 `git ls-files` calls included — once per self-test
+    # invocation plus once unmutated, eight concurrent subprocesses. See the measured table in
     # ci/actionlint/README.md.
     # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
     # measured table in ci/actionlint/README.md before concluding the inputs are the problem.

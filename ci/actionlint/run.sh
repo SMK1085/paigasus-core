@@ -1738,6 +1738,7 @@ is_swallowed_skipped() {
 #   missing <entry>              the array parsed; <entry> is not among its tokens
 #   continued <lineno>           a `moon` command line is continued onto another physical line
 #   swallowed <lineno>           a `moon` command line discards its own exit status
+#   block-swallowed <lineno>     a block terminator (`fi`/`done`/`}`) discards its OWN exit status
 #   wrapped <lineno>             a `moon ci`/`moon run` invocation sits behind a known command
 #                                 wrapper (command/env/time/eval/exec/if/while/until/!) instead of
 #                                 at command position, so propagation cannot be confirmed
@@ -1806,6 +1807,31 @@ ci_target_floor_verdict() {
         is_swallowed_skipped "$lineno:$text" || echo "swallowed $lineno" ;;
     esac
   done < <(grep -nE '^[[:blank:]]*moon[[:blank:]]' "$f")
+
+  # 'block-swallowed' — a discarded exit status on the LINE THAT CLOSES a block (`fi`/`done`/`}`)
+  # is just as silent as one on the `moon` line itself, and neither T_INVOCATION_ALLOWLIST nor
+  # anything above sees it: T_INVOCATION_ALLOWLIST only scans lines carrying the literal
+  # `"${T[@]}"` substring, and a terminator line carries neither that nor `moon` nor a wrapper
+  # token (independent review of PR 150 round 3, finding I4). Two measured cases:
+  #   fi || true          # ci.yml's real 'fi' closing the if/elif/else, tail appended
+  #   { … } || true       # the WHOLE if/fi wrapped in a brace group; the invocation lines inside
+  #                        # stay byte-identical to T_INVOCATION_ALLOWLIST, so check 8b sees
+  #                        # nothing wrong either — only the closing '}' line carries the tail
+  # A CLOSED, BOUNDED vocabulary, same convention as 'wrapped' above: only `fi`, `done` and `}` are
+  # recognized, each required to be the line's FIRST token (immediately followed by a blank, `;`,
+  # `&`, `|`, or end of line — so `fill`/`donetime`/etc. cannot false-match). Whether the tail
+  # actually belongs to the terminator or to something appended after it on the same physical line
+  # is not distinguished, deliberately over-inclusive in the same direction 'swallowed' already is
+  # (a bare `fi;` next-statement idiom would also fire) — SWALLOWED_SKIP is the same documented
+  # escape hatch for a case this check cannot itself know is harmless. Reported as its own verdict,
+  # not folded into 'swallowed', because that verdict's message specifically says "runs 'moon'" —
+  # which a `fi`/`done`/`}` line does not.
+  while IFS=: read -r lineno text; do
+    case "$text" in
+      *'||'*|*'&&'*|*';'*|*'|'*)
+        is_swallowed_skipped "$lineno:$text" || echo "block-swallowed $lineno" ;;
+    esac
+  done < <(grep -nE '^[[:blank:]]*(fi|done|\})([[:blank:]]|[;&|]|$)' "$f")
 
   # 'wrapped' — a `moon ci`/`moon run` invocation hidden behind a known command wrapper on the SAME
   # physical line evades the swallowed loop above BY CONSTRUCTION: that loop's grep requires `moon`
@@ -2022,6 +2048,57 @@ ci_target_floor_self_test() {
           moon run "${T[@]}" || true
 '
   SWALLOWED_SKIP=(${saved_swallowed_skip+"${saved_swallowed_skip[@]}"})
+
+  # 'block-swallowed' (independent review of PR 150, finding I4): a tail on the line that CLOSES a
+  # block is just as silent as one on the 'moon' line, and is invisible to the moon-anchored loop
+  # above by construction. Both directions per SMA-466.
+  expect_floor 'fi with a swallowing tail is block-swallowed' 'block-swallowed 2' \
+'          T=(:affected-smoke)
+          fi || true
+'
+  expect_floor 'done with a swallowing tail is block-swallowed' 'block-swallowed 2' \
+'          T=(:affected-smoke)
+          done || true
+'
+  # The whole if/fi wrapped in a brace group: the invocation lines inside stay byte-identical to
+  # T_INVOCATION_ALLOWLIST, so only the closing brace's own tail gives it away.
+  expect_floor 'a closing brace with a swallowing tail is block-swallowed' 'block-swallowed 2' \
+'          T=(:affected-smoke)
+          } || true
+'
+  # ';' counts as a tail here exactly as it does for 'swallowed' above — deliberately
+  # over-inclusive, same reasoning: a bare 'fi;next_command' one-liner idiom also fires.
+  expect_floor 'fi followed by a semicolon and another command is block-swallowed' 'block-swallowed 2' \
+'          T=(:affected-smoke)
+          fi;next_command
+'
+  # The negative control that matters most: ci.yml's REAL closing 'fi', with no tail at all,
+  # must stay silent — this is the healthy, unmodified shape on every PR today.
+  expect_floor 'a bare fi with no tail does not fire' '' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+          fi
+'
+  # Word-boundary proof: 'fi'/'done' must be the line's WHOLE first token, not a prefix of a
+  # longer one. Without the boundary requirement, this would misfire on 'fill'/'donetime'.
+  expect_floor 'a word merely starting with fi does not fire' '' \
+'          T=(:affected-smoke)
+          fill_the_cache || true
+'
+  expect_floor 'a word merely starting with done does not fire' '' \
+'          T=(:affected-smoke)
+          donetime_metric || true
+'
+  # SWALLOWED_SKIP is REUSED here too (same reasoning as 'wrapped' above): a block-swallowed line
+  # is the same underlying problem as a moon-swallowed line, spelled a third way.
+  saved_swallowed_skip=(${saved_swallowed_skip+"${saved_swallowed_skip[@]}"})
+  SWALLOWED_SKIP=('2:          fi || true')
+  expect_floor 'SWALLOWED_SKIP also silences a block-swallowed line' '' \
+'          T=(:affected-smoke)
+          fi || true
+'
+  SWALLOWED_SKIP=(${saved_swallowed_skip+"${saved_swallowed_skip[@]}"})
+
   # `moon` not at command position is not an invocation — it must not fire.
   expect_floor 'moon mentioned in a comment' '' \
 '          T=(:affected-smoke)
@@ -2330,6 +2407,40 @@ invocation_allowlist_self_test() {
   expect_invocation 'trailing whitespace on an otherwise-correct line is not-allowlisted' \
     'not-allowlisted 6' "$trailing_ws"
 
+  # Indentation exactness (independent review of PR 150, finding minor-2): mutating the comparison
+  # to strip LEADING blanks from both sides before comparing would let this row through. 8 spaces
+  # (shallower than the required 12) and the text otherwise byte-identical to the allowed form.
+  local under_indented='          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]}" --base origin/main --include-relations
+          elif [ -n "${BEFORE:-}" ]; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+        moon run "${T[@]}"
+          fi
+'
+  expect_invocation 'a correct line at the wrong indent (8 spaces, not 12) is not-allowlisted' \
+    'not-allowlisted 6' "$under_indented"
+  # ...and the other direction, 16 spaces (deeper than required).
+  local over_indented='          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]}" --base origin/main --include-relations
+          elif [ -n "${BEFORE:-}" ]; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+                moon run "${T[@]}"
+          fi
+'
+  expect_invocation 'a correct line at the wrong indent (16 spaces, not 12) is not-allowlisted' \
+    'not-allowlisted 6' "$over_indented"
+
+  # Skip-list padding (independent review of PR 150, finding minor-3): the skip argument is
+  # SPACE-PADDED and matched as a whole token (" $lineno "), not a bare substring test. Without
+  # that padding, a caller-supplied skip value that merely CONTAINS this line's number as a
+  # substring — '12' contains '2' — would wrongly suppress line 2, a real fail-open (a reported
+  # line 219 would silently suppress an unrelated line 19). skip='12' here must NOT suppress the
+  # bad line at line 2.
+  expect_invocation 'a skip value containing this lineno as a SUBSTRING, not a whole token, does not suppress it' \
+    'not-allowlisted 2' "$prefixed" '12'
+
   got="$(invocation_allowlist_verdict /nonexistent/ci.yml)"
   if [ "$got" != 'no-file' ]; then
     fail "invocation-allowlist self-test 'missing file': got '$got', expected 'no-file'."
@@ -2376,11 +2487,11 @@ kill_predicate_self_test() {
   }
 
   expect_kill 'rc 1 with the counter message is a kill' 'killed' 1 \
-    'actionlint gate: self-test counter: 4 of 6 self-tests ran. An invocation is missing.'
+    'actionlint gate: self-test counter: 4 of 7 self-tests ran. An invocation is missing.'
   # rc 2/126/127 must NEVER be a kill, even carrying the exact message — an infra abort proves
   # nothing about the assertion, and must not be mistaken for having reached it (SMA-542 D10).
   expect_kill 'rc 2 (infra abort) is never a kill, even with the message' 'not-killed' 2 \
-    'actionlint gate: self-test counter: 4 of 6 self-tests ran. An invocation is missing.'
+    'actionlint gate: self-test counter: 4 of 7 self-tests ran. An invocation is missing.'
   expect_kill 'rc 126 (not executable) is never a kill' 'not-killed' 126 ''
   expect_kill 'rc 127 (missing file) is never a kill' 'not-killed' 127 ''
   # rc 1 without the message is not a kill either — some OTHER fail() fired, not the counter's.
@@ -2580,18 +2691,23 @@ fi
 # are with ci_target_floor_verdict above.
 #
 # REPORTED_LINENOS accumulates the line numbers this loop already explains via 'continued',
-# 'swallowed' or 'wrapped', so the invocation-allowlist check just below (Check 8b) can skip
-# reporting the SAME line a second time under a less specific name — "you appended '|| true'" beats
-# "does not match an allowlisted form". Plain (not local): this is top-level script, not a
-# function.
+# 'swallowed', 'block-swallowed' or 'wrapped', so the invocation-allowlist check just below
+# (Check 8b) can skip reporting the SAME line a second time under a less specific name — "you
+# appended '|| true'" beats "does not match an allowlisted form". CI_YML_MISSING is the same idea
+# at file granularity: a missing ci.yml is reported ONCE, here, rather than a second time by check
+# 8b below (independent review of PR 150, finding minor-4) — check 8b has nothing useful to add
+# once check 8 has already said the file does not exist. Both plain (not local): this is top-level
+# script, not a function.
 # ---------------------------------------------------------------------------------------------
 REPORTED_LINENOS=''
+CI_YML_MISSING=0
 while IFS= read -r verdict; do
   case "$verdict" in
     '') ;;
     no-file)
       fail ".github/workflows/ci.yml does not exist, so this gate cannot confirm that
-      repo:affected-smoke is still scheduled. If the workflow was renamed, update this check." ;;
+      repo:affected-smoke is still scheduled. If the workflow was renamed, update this check."
+      CI_YML_MISSING=1 ;;
     no-array)
       fail ".github/workflows/ci.yml has no single-line 'T=( … )' array, or has more than one, so
       the target list cannot be read. Keep T on ONE line — ci_targets.py's C3 requires it too."  ;;
@@ -2616,6 +2732,16 @@ while IFS= read -r verdict; do
       'moon run x | tee log' in an unrelated job, say), this check cannot tell the two apart and it
       belongs in SWALLOWED_SKIP (above ci_target_floor_verdict in $0) with a reason."
       REPORTED_LINENOS="$REPORTED_LINENOS ${verdict#swallowed }" ;;
+    'block-swallowed '*)
+      fail ".github/workflows/ci.yml:${verdict#block-swallowed } closes a block ('fi'/'done'/'}')
+      but that closing line itself discards an exit status (a '||', '&&', ';' or '|' tail) — just
+      as silent as the same tail on the 'moon' line, and invisible to EVERY other check here:
+      T_INVOCATION_ALLOWLIST only scans lines carrying the literal '\${T[@]}' expansion, which a
+      terminator line does not carry, and neither does it carry 'moon' or a recognized wrapper
+      token. 'fi || true' on ci.yml's real if/elif/else, or the whole block wrapped in
+      '{ ... } || true', both take this shape. Remove the tail. If it is a DIFFERENT, harmless
+      terminator line this check cannot know is unrelated to T, it belongs in SWALLOWED_SKIP
+      (above ci_target_floor_verdict in $0) with a reason." ;;
     'wrapped '*)
       fail ".github/workflows/ci.yml:${verdict#wrapped } runs 'moon ci'/'moon run' behind a known
       command wrapper (command/env/time/eval/exec/if/while/until/!) on the same physical line, so
@@ -2643,17 +2769,20 @@ done < <(ci_target_floor_verdict .github/workflows/ci.yml)
 # ---------------------------------------------------------------------------------------------
 # Check 8b — every "${T[@]}"-bearing line matches an ALLOWLISTED invocation form exactly, and the
 # invocation count is pinned (SMA-542 CodeRabbit round 3, finding B). Rationale, the T_INVOCATION_
-# ALLOWLIST array, and the verdict function are all above, with T_FLOOR. This is the PRIMARY
-# mechanism now — 'swallowed'/'continued'/'wrapped' above stay for their more specific diagnostics,
-# and REPORTED_LINENOS (built above) keeps a line from being reported under both names.
+# ALLOWLIST array, and the verdict function are all above, with T_FLOOR. This is the PRIMARY guard
+# on the invocation lines themselves — 'swallowed'/'continued'/'block-swallowed'/'wrapped' above
+# stay for their more specific diagnostics, and REPORTED_LINENOS (built above) keeps a line from
+# being reported under both names.
+#
+# Skipped entirely when CI_YML_MISSING (set above): invocation_allowlist_verdict would itself
+# report 'no-file' redundantly — check 8 has already said the file does not exist, and check 8b's
+# verdict function still WORKS standalone (its own self-test drives that path directly), so this
+# is a call-site de-dup, not a defect in the function.
 # ---------------------------------------------------------------------------------------------
+if [ "$CI_YML_MISSING" -eq 0 ]; then
 while IFS= read -r verdict; do
   case "$verdict" in
     '') ;;
-    no-file)
-      fail ".github/workflows/ci.yml does not exist, so this gate cannot confirm that its
-      '\${T[@]}' invocations still match T_INVOCATION_ALLOWLIST. If the workflow was renamed,
-      update this check." ;;
     'not-allowlisted '*)
       fail ".github/workflows/ci.yml:${verdict#not-allowlisted } carries the target-array
       expansion '\${T[@]}' but does not match any entry in T_INVOCATION_ALLOWLIST (above,
@@ -2675,6 +2804,7 @@ while IFS= read -r verdict; do
       infra "unhandled invocation-allowlist verdict '$verdict'" ;;
   esac
 done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")
+fi
 
 # Guard lives here, AFTER the --self-test early exit: --self-test never shells out to actionlint,
 # so it must not infra-exit on a machine that simply doesn't have the binary on PATH yet.
