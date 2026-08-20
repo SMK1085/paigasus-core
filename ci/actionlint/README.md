@@ -206,7 +206,13 @@ a `}`-first-token line with a tail), so both of the concretely-identified cases 
 but the closed set is still `fi`/`done`/`}` specifically, not "any control-flow construct that can
 discard a status". What remains genuinely open is arbitrary shell placed AFTER the block with no
 recognized terminator token of its own — a trailing `exit 0` on its own line, say, or a later step
-in the same job overwriting the outcome — which no LINE-shaped rule can catch without reassembling
+in the same job overwriting the outcome — and, symmetrically, an always-false OUTER
+conditional WRAPPING the whole block (`if false; then … fi`), where all three invocation
+lines stay byte-identical to `T_INVOCATION_ALLOWLIST` and check 8b sees nothing wrong while
+nothing executes on any event path (CodeRabbit round 5 on PR 150). Closing that one needs
+either enclosing-branch analysis or extracting the step's `run:` block and executing it
+against a mocked `moon` per event path — a materially new mechanism, not a rule tweak.
+None of these is caught by a LINE-shaped rule without reassembling
 the step's actual control flow, the same reachability-analysis line every other limitation in this
 file (L9, L11, ci_targets.py's L10) declines to cross.
 
