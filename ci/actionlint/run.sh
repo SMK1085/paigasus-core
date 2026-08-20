@@ -22,9 +22,22 @@
 # status. Each check captures status explicitly and sets FAILED instead.
 set -uo pipefail
 
+# Absolute path to THIS file, captured BEFORE the cd below. `$0` is not usable after it: invoked
+# as `cd ci/actionlint && ./run.sh`, `$0` is './run.sh', which stops resolving the moment we move
+# to the repo root. Check 9 copies this file, and run_self_tests greps it (SMA-542 D11).
+SELF_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
 cd "$(git rev-parse --show-toplevel)" || exit 2
 
 FAILED=0
+
+# Check 7's counter. A fixture table that is never CALLED is dead code, and deleting the calls was
+# the sole survivor of SMA-525's mutation battery. The increment lives inside each self-test (not
+# at the call site) so it survives reformatting and cannot be spoofed by a stranded increment.
+# Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
+# protection and would break a future harness that sources this file twice (SMA-542 D3).
+SELF_TESTS_RAN=0
+SELF_TEST_COUNT=4   # extractor, path-filter, branch-filter, config
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -272,6 +285,7 @@ extract_filter_keys() {
 # ---------------------------------------------------------------------------------------------
 extractor_self_test() {
   local name expected actual tmp yaml rc=0
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 
   check_fixture() {
     name="$1"; expected="$2"; yaml="$3"
@@ -1184,11 +1198,13 @@ branch_verdict() {
   fi
 
   # The canary is LAZY (D7) — only an entry that has survived every filter above actually needs a
-  # ref, so checks 1-6 still run to completion and report their own findings before this canary
-  # ever fires. That laziness does NOT make a full run ref-free: branch_filter_self_test (check 7)
-  # asserts the same 'origin/main' precondition unconditionally, so a checkout without it still
-  # exits 2. Returned as a TOKEN, not an infra call: this function always runs inside $( ), where
-  # exit 2 would kill only the subshell.
+  # ref, so checks 1-6 report their own findings before this canary fires. Since SMA-542 that is
+  # no longer the whole story for a FULL run: check 7 runs first and asserts the same origin/main
+  # precondition unconditionally (branch_filter_self_test), so a checkout without the ref now
+  # exits 2 BEFORE actionlint is invoked, and you lose the checks 1-6 findings you used to see.
+  # Accepted: README.md gives the one-command recovery and the gate is ~1.5s. Returned as a
+  # TOKEN, not an infra call: this function always runs inside $( ), where exit 2 would kill only
+  # the subshell.
   origin_has 'main' || { echo 'no-origin-main'; return; }
 
   origin_has "$b" && { echo 'ok'; return; }
@@ -1282,6 +1298,7 @@ scan_workflow_records() {
 # ---------------------------------------------------------------------------------------------
 path_filter_self_test() {
   local rc=0 quoted_key_tmp
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 
   expect_pattern() {
     local pattern="$1" expected="$2" got
@@ -1384,6 +1401,7 @@ jobs:
 # ---------------------------------------------------------------------------------------------
 branch_filter_self_test() {
   local rc=0 saved_skip saved_origin_refs saved_origin_refs_loaded tmp
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 
   # This table asserts a real ref resolves, so it shares the canary's precondition. Asserted here
   # rather than left to a confusing per-fixture mismatch: --self-test still needs no actionlint
@@ -1550,6 +1568,7 @@ config_verdict() {
 
 config_self_test() {
   local rc=0
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 
   expect_config() {
     local name="$1" expected="$2" body="$3" tmp got
@@ -1601,21 +1620,76 @@ $got"
   return $rc
 }
 
+# ---------------------------------------------------------------------------------------------
+# Check 7 — the self-tests, and the counter that proves they were invoked.
+#
+# All five (four until SMA-542's floor table lands) are defined above so this block can run them
+# from ONE call site, reached by both the --self-test path and the full gate. One call site rather
+# than two is deliberate: ci_targets.py's C4 pins this by whole stripped line, and two identical
+# lines would let one be deleted while the pin still matched (SMA-542 D2).
+# ---------------------------------------------------------------------------------------------
+assert_self_tests_ran() {
+  local want="$1"
+  if [ "$SELF_TESTS_RAN" -ne "$want" ]; then
+    fail "self-test counter: $SELF_TESTS_RAN of $want self-tests ran. An invocation is missing from
+      run_self_tests. A fixture table that is never called is dead code that guards nothing — this
+      is the failure SMA-542 exists to catch. Restore the call."
+  fi
+}
+
+run_self_tests() {
+  local defs
+  SELF_TESTS_RAN=0
+
+  extractor_self_test
+  path_filter_self_test
+  branch_filter_self_test
+  config_self_test
+
+  assert_self_tests_ran "$SELF_TEST_COUNT"
+
+  # The counter proves the KNOWN tables ran; it cannot notice a table added tomorrow and never
+  # wired up, because the count would still match. Asserting the DEFINITION count closes that —
+  # adding a table without calling it reds, and so does deleting one without decrementing
+  # SELF_TEST_COUNT. Adding a table is the highest-probability future edit here (SMA-542 D13).
+  [ -r "$SELF_SRC" ] || infra "cannot read \$SELF_SRC ($SELF_SRC) to count self-test definitions"
+  defs="$(grep -cE '^[a-z_]+_self_test\(\) \{' "$SELF_SRC")"
+  if [ "$defs" -ne "$SELF_TEST_COUNT" ]; then
+    fail "self-test definitions: $defs '*_self_test' functions are defined but SELF_TEST_COUNT is
+      $SELF_TEST_COUNT. A fixture table that is not called from run_self_tests guards nothing.
+      Wire it up and bump SELF_TEST_COUNT, or delete it."
+  fi
+
+  # branch_filter_self_test reaches its 'no-origin-main' fixture by swapping ORIGIN_REFS for a
+  # main-free list and forcing ORIGIN_REFS_LOADED=1, restoring both immediately. That was harmless
+  # while the self-tests ran LAST; now they run FIRST, and load_origin_refs early-returns on
+  # ORIGIN_REFS_LOADED=1 — so a future botched restore would feed checks 5/6 a fake ref list and
+  # turn every real branches: entry into a false 'unresolved' or an infra exit. Resetting here
+  # makes checks 5/6 independent of that fixture's bookkeeping rather than trusting it.
+  ORIGIN_REFS_LOADED=0
+}
+
+SELF_TEST_ONLY=0
 case "$#:${1:-}" in
   '0:')
     ;;
   '1:--self-test')
-    # --self-test never shells out to actionlint, so it runs everything that does not need the
-    # binary and exits before the PATH guard below. It DOES need a git repo carrying origin/main,
-    # since branch_filter_self_test's control pair asserts a real ref resolves (SMA-540 D7).
-    extractor_self_test
-    path_filter_self_test
-    branch_filter_self_test
-    config_self_test
-    exit "$FAILED" ;;
+    SELF_TEST_ONLY=1 ;;
   *)
     usage ;;
 esac
+
+# Check 7 runs FIRST, and from a single call site. --self-test never shells out to actionlint, so
+# this sits AHEAD of the PATH guard below and stays runnable on a machine without the binary. It
+# DOES need a git repo carrying origin/main: branch_filter_self_test's control pair asserts a real
+# ref resolves (SMA-540 D7). Running the controls before the checks they guard matches the
+# convention moon.yml states for repo:affected-smoke, repo:publish-metadata and
+# repo:error-code-single-site — a rotted checker must red rather than ship green.
+run_self_tests
+
+if [ "$SELF_TEST_ONLY" = 1 ]; then
+  exit "$FAILED"
+fi
 
 # Guard lives here, AFTER the --self-test early exit: --self-test never shells out to actionlint,
 # so it must not infra-exit on a machine that simply doesn't have the binary on PATH yet.
@@ -1858,16 +1932,8 @@ for wf in "${WORKFLOW_FILES[@]}"; do
 done
 
 # ---------------------------------------------------------------------------------------------
-# Check 7 — the self-tests, invoked for real.
-#
-# All four are defined earlier so the `--self-test` early exit near the top of this script can
-# run them standalone for fast iteration. These are the unconditional invocations that actually
-# make the fixture tables guard the gate on every real run — without them the tables are dead
-# code in CI.
+# Check 7 ran near the top, from run_self_tests — see the comment at its call site for why the
+# controls precede the checks they guard.
 # ---------------------------------------------------------------------------------------------
-extractor_self_test
-path_filter_self_test
-branch_filter_self_test
-config_self_test
 
 exit "$FAILED"
