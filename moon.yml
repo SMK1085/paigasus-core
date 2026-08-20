@@ -486,7 +486,7 @@ tasks:
       - '.gitignore'
 
   actionlint:
-    description: 'actionlint over .github/workflows/**, plus controls that every paths: glob still matches the tree and every branches: entry names a real branch (SMA-525, SMA-540).'
+    description: 'actionlint over .github/workflows/**, plus controls that every paths: glob still matches the tree, every branches: entry names a real branch, and the self-test/mutation-battery invocations that guard all of it cannot be silently deleted (SMA-525, SMA-540, SMA-542).'
     # WHY `inputs: **/*` AND NOT THE NARROW LIST THE OTHER repo:* GATES USE — this gate makes an
     # assertion about the WHOLE FILE TREE, not about the workflow files. A directory rename is the
     # dominant real-world way a paths: glob comes to match nothing (a typo is at least made by
@@ -506,10 +506,14 @@ tasks:
     # docs/superpowers/specs/2026-08-19-sma-540-branches-filter-gate-design.md.
     #
     # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
-    # (cargo nextest, next typegen). This one is ~1.0s standalone and warm (measured): six
-    # actionlint invocations — one over the real workflows, five stdin fixtures — 26
-    # `git ls-files` calls, and four fixture tables (extractor, path-filter verdicts,
-    # branch-filter verdicts, config allowlist).
+    # (cargo nextest, next typegen). This one is ~4.11s standalone and warm (measured, min-of-7;
+    # was ~1.0s before SMA-542 added checks 8-9): six actionlint invocations — one over the real
+    # workflows, five stdin fixtures — 26 `git ls-files` calls, and six fixture tables (extractor,
+    # path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, kill
+    # predicate). Check 9's mutation battery is most of the added time: it re-runs the whole of
+    # `--self-test` — all 26 `git ls-files` calls included — once per self-test invocation plus
+    # once unmutated, seven concurrent subprocesses. See the measured table in
+    # ci/actionlint/README.md.
     # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
     # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
     script: 'ci/actionlint/run.sh'
