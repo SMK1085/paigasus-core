@@ -42,6 +42,10 @@ thiserror = { workspace = true }
 # system-trust (no custom-CA) path. Cargo unions features workspace-wide, so both stay
 # ring-backed and `aws-lc-rs` remains absent from Cargo.lock.
 tonic = { workspace = true, features = ["tls-ring", "tls-native-roots"] }
+# `adapters::http::auth::is_identity_not_provisioned` reads `google.rpc.ErrorInfo` off an IAM
+# `Status` (SMA-504) via `tonic_types::StatusExt::get_error_details`/`ErrorDetails::error_info`;
+# the test harness also builds fake `Status`es carrying `ErrorDetails` with it.
+tonic-types = { workspace = true }
 # `adapters::iam::client` names the generated `paigasus.iam.v1` gRPC clients + request/response
 # messages (`AuthnServiceClient`, `AuthorizationServiceClient`, `IntrospectApiKeyRequest`, …).
 paigasus-proto = { workspace = true }
@@ -80,6 +84,12 @@ figment = { workspace = true, features = ["test"] }
 # `src/adapters/http/mod.rs`'s health unit tests and `tests/chat_proxy.rs`'s integration tests
 # both drive the router via `ServiceExt::oneshot` (no real listener).
 tower = { workspace = true, features = ["util"] }
+# cfg(test) so strum_macros never enters the shipped binary, exactly as paigasus-iam does it
+# (SMA-498). Drives the AC 6 exhaustive registry test over `GatewayError` (SMA-504).
+strum = { version = "0.26", features = ["derive"] }
+# `adapters::iam::client`'s correlation-propagation test builds `paigasus_observability::RequestIds`
+# from explicit `Uuid`s (SMA-504) — test-only, so no non-default features (no `v4`/`v7`) are needed.
+uuid = { workspace = true }
 
 [lints]
 workspace = true

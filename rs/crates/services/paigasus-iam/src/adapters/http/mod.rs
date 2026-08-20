@@ -847,6 +847,12 @@ fn app_routes(state: AppState) -> Router {
         .merge(authn_api)
         .merge(api_key_introspect_api)
         .layer(paigasus_observability::http_metrics_layer("iam"))
+        // SMA-504 D10: outside the metrics layer and therefore outside the bearer middleware, so
+        // a 401 is still attributable. Attached HERE rather than in `serve_http` for the same
+        // reason the bearer layer is: `router()` is what the `oneshot` test harness builds, and a
+        // layer added in `serve_http` would be invisible to every existing integration test.
+        // `/healthz`, `/readyz` and `/metrics` are merged ABOVE this router and stay outside.
+        .layer(paigasus_observability::CorrelationLayer)
 }
 
 /// Full HTTP surface for the `oneshot`-based test harness: liveness + DB-backed readiness

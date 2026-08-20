@@ -68,14 +68,47 @@ impl IdGenerator for KernelIdGenerator {
         self.mint()
     }
 
+    /// Adopts the in-flight request's correlation id when there is one (SMA-504 D9), so the id a
+    /// customer reads off `paigasus-correlation-id` is the SAME id on the `audit_log` and
+    /// `event_outbox` rows the request produced. Mints outside a request scope (boot-time
+    /// convergence, the outbox relay).
+    ///
+    /// A caller may supply that id (spec D6 requires only that it parse as a UUID), so a caller
+    /// can group their OWN audit rows under one id. That is what a correlation id is for; each
+    /// row keeps its own primary key and `occurred_at`, and no caller can affect anyone else's
+    /// rows.
     fn new_correlation_id(&self) -> Uuid {
-        self.mint()
+        paigasus_observability::current_ids().map_or_else(|| self.mint(), |ids| ids.correlation_id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paigasus_observability::RequestIds;
+
+    /// D9: IAM already had a `correlation_id`, minted per mutation and persisted on the
+    /// `audit_log` and `event_outbox` rows. Left unlinked, an operator handed a
+    /// `paigasus-correlation-id` from a customer could not find the audit row it produced —
+    /// which is the entire support story ADR-0019 calls the highest-value item here.
+    #[tokio::test]
+    async fn new_correlation_id_adopts_the_ambient_request_correlation_id() {
+        let ids = RequestIds {
+            request_id: Uuid::from_u128(1),
+            correlation_id: Uuid::from_u128(2),
+        };
+        let got = paigasus_observability::correlation::scope_for_test(ids, async { KernelIdGenerator.new_correlation_id() }).await;
+        assert_eq!(got, ids.correlation_id);
+    }
+
+    /// Outside a request — boot-time convergence, the outbox relay — there is nothing to adopt,
+    /// so it mints. Two calls must differ, or the fallback silently became a constant.
+    #[test]
+    fn new_correlation_id_mints_outside_a_request_scope() {
+        let a = KernelIdGenerator.new_correlation_id();
+        let b = KernelIdGenerator.new_correlation_id();
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn mints_a_v7_principal_prn() {

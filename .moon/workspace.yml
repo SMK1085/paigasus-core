@@ -30,3 +30,35 @@ codeowners:
 generator:
   templates:
     - './.moon/templates'
+
+hasher:
+  # DO NOT DELETE without re-measuring — removing these makes `repo:actionlint` ~8x slower.
+  #
+  # Gitignored dependency/build trees are not an input to any task here — verified: no moon.yml
+  # lists them under `inputs:`. Hashing them anyway dominates the cost of any task with a broad
+  # `inputs:` glob, because the walk descends into pnpm's symlinked content-addressable store.
+  #
+  # AND DO NOT ADD ONE EITHER: no task may declare an `inputs:` path under these trees. A path
+  # excluded here contributes nothing to any cache key, so the task that names it would never be
+  # invalidated by a change to it — a permanently stale cached pass, with nothing red to notice.
+  #
+  # Measured on SMA-525, alternating `moon run repo:actionlint --force` (macOS, warm, 3 runs each):
+  #
+  #     inputs ['**/*'] WITH these patterns      ~11.6s
+  #     inputs ['**/*'] WITHOUT them             ~98.6s
+  #     a NARROW input list (for reference)      ~10.4s
+  #     repo:promtool, an existing narrow task    ~8.7s   <- Moon's per-task floor in this repo
+  #
+  # So broad inputs cost ~1s over a narrow list once these are filtered, and ~87s without.
+  #
+  # CAVEAT for whoever reads the logs next: these patterns do NOT silence the ~2000
+  # "only files can be hashed" warnings about the pnpm store — those appear identically with and
+  # without this block (verified). The warnings come from input COLLECTION; this filter skips the
+  # hashing that follows. The block looks inert in the log and is not. Judge it by wall time.
+  #
+  # Deliberately NOT listing '**/.next/**': it is a declared `outputs:` of paigasus-console-ts:build
+  # (ts/apps/paigasus-console/moon.yml), and it is not a meaningful part of the cost.
+  ignorePatterns:
+    - '**/node_modules/**'
+    - '**/target/**'
+    - '**/.venv/**'

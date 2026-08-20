@@ -3,6 +3,14 @@
 //! Domain <-> proto conversions and the shared gRPC helpers (`status_to_grpc`, `node_uuid`,
 //! `to_page`) every `TenancyGrpc` method uses: parse -> service call -> convert, no business
 //! logic in this layer (task-16 brief).
+//!
+//! `iam_status` (SMA-504) is the single construction point every IAM gRPC error must go
+//! through: it is the only place that builds `ErrorDetails::with_error_info`, so no call site
+//! can forget the machine-readable `(domain, reason, metadata)` triple. `status_to_grpc` and
+//! `authn_status` are themselves thin `iam_status` callers, not independent constructors.
+
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
@@ -11,23 +19,94 @@ use paigasus_iam_core::{
     ServiceAccountRecord, Team,
 };
 use paigasus_kernel::Prn;
-use paigasus_proto::paigasus::common::v1::AuditMetadata;
+use paigasus_observability::{Retryable, current_ids};
+use paigasus_proto::error::IAM_DOMAIN;
+use paigasus_proto::paigasus::common::v1::{AuditMetadata, ErrorReason};
 use paigasus_proto::paigasus::iam::v1::{
     ApiKey as ProtoApiKey, ApiKeyStatus as ProtoApiKeyStatus, IntrospectApiKeyResponse, IntrospectResponse, IssueApiKeyResponse, Membership, NodeStatus as ProtoNodeStatus,
     Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RoleGrant as ProtoRoleGrant, RoleGrantRef as ProtoRoleGrantRef, ServiceAccount as ProtoServiceAccount,
     Team as ProtoTeam,
 };
 use tonic::{Code, Status};
+use tonic_types::{ErrorDetails, StatusExt};
 use uuid::Uuid;
 
+use crate::adapters::retryable::{authn_retryable, tenancy_retryable};
 use crate::application::error::{ErrorClass, TenancyError};
 use crate::application::pagination::Page;
 
-/// Maps a `TenancyError` to a `tonic::Status`: the gRPC code follows `ErrorClass`; the message
-/// is `"{code}: {display}"` — the stable kebab-case code (`TenancyError::code`) stays
-/// machine-readable in-band, since tonic has no structured-error-detail convention by default
-/// (task-16 brief). `Internal`'s `Display` never carries interpolated data (D7), so this never
-/// leaks backend detail either.
+/// Derived from the registry, not written as a literal, and hoisted because `as_wire_reason`
+/// allocates on every call (ADR-0019 D8).
+static MISSING_AUTH_CONTEXT: LazyLock<String> = LazyLock::new(|| ErrorReason::MissingAuthContext.as_wire_reason().expect("a declared reason is never the sentinel"));
+static CAPABILITY_DISABLED: LazyLock<String> = LazyLock::new(|| ErrorReason::CapabilityDisabled.as_wire_reason().expect("a declared reason is never the sentinel"));
+
+/// `authn_status`'s six reasons, same registry-derived pattern as the two statics above
+/// (D8): every one of these already exists in the registry (spec §6.3), so — per the human's
+/// ruling on review finding #2 — they are derived, not hardcoded, even though the brief handed
+/// them to us as string literals.
+static INVALID_TOKEN: LazyLock<String> = LazyLock::new(|| ErrorReason::InvalidToken.as_wire_reason().expect("a declared reason is never the sentinel"));
+static IDENTITY_NOT_PROVISIONED: LazyLock<String> = LazyLock::new(|| ErrorReason::IdentityNotProvisioned.as_wire_reason().expect("a declared reason is never the sentinel"));
+static PROVISIONING_FAILED: LazyLock<String> = LazyLock::new(|| ErrorReason::ProvisioningFailed.as_wire_reason().expect("a declared reason is never the sentinel"));
+static PRINCIPAL_INACTIVE: LazyLock<String> = LazyLock::new(|| ErrorReason::PrincipalInactive.as_wire_reason().expect("a declared reason is never the sentinel"));
+static AUTHN_UNAVAILABLE: LazyLock<String> = LazyLock::new(|| ErrorReason::AuthnUnavailable.as_wire_reason().expect("a declared reason is never the sentinel"));
+static AUTHN_INTERNAL: LazyLock<String> = LazyLock::new(|| ErrorReason::Internal.as_wire_reason().expect("a declared reason is never the sentinel"));
+
+/// The `ErrorInfo.metadata` every IAM gRPC error carries.
+///
+/// The id keys are OMITTED when there is no request scope (§4.3 — unit tests, background tasks
+/// and response-body streaming) rather than filled with a nil UUID that would read as a real id.
+fn error_metadata(retryable: Retryable, extra: &[(&str, &str)]) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    // `extra` inserts FIRST: the canonical keys below (`retryable`/`correlation_id`/
+    // `request_id`) are authoritative and must win a collision, never be silently overwritten by
+    // a future caller that happens to pass one of those names in `extra` (review finding #9 —
+    // only `("capability", ...)` is passed today, so this ordering is free to fix now).
+    for (k, v) in extra {
+        metadata.insert((*k).to_owned(), (*v).to_owned());
+    }
+    metadata.insert("retryable".to_owned(), retryable.as_wire().to_owned());
+    if let Some(ids) = current_ids() {
+        metadata.insert("correlation_id".to_owned(), ids.correlation_id.to_string());
+        metadata.insert("request_id".to_owned(), ids.request_id.to_string());
+    }
+    metadata
+}
+
+/// Builds a `Status` carrying `google.rpc.ErrorInfo` in the `grpc-status-details-bin` trailer.
+/// The single construction point for every IAM gRPC error, so no site can forget the details.
+pub fn iam_status(code: Code, reason: &str, message: impl Into<String>, retryable: Retryable, extra: &[(&str, &str)]) -> Status {
+    let details = ErrorDetails::with_error_info(reason, &*IAM_DOMAIN, error_metadata(retryable, extra));
+    Status::with_error_details(code, message, details)
+}
+
+/// The enforcement layer admitted a request without attaching an authenticated context — an
+/// internal invariant violation, surfaced as a distinct diagnostic rather than a bare
+/// unauthenticated with no machine code at all. `Retryable::No`, not `Unknown` (review finding
+/// #4): D4's `Unknown` is for a source ERASED at conversion (a Postgres blip and a logic bug
+/// arriving as the same `Internal` variant, indistinguishable to the caller) — that reasoning
+/// doesn't apply here. We know exactly what happened (the layer never attached a context), and
+/// retrying the identical request cannot resolve it.
+pub fn missing_auth_context() -> Status {
+    iam_status(Code::Unauthenticated, &MISSING_AUTH_CONTEXT, "missing authentication context", Retryable::No, &[])
+}
+
+/// An RPC belonging to a capability this deployment has switched off. The capability NAME rides
+/// in metadata rather than in the reason, so a new capability needs no new registry value.
+pub fn capability_disabled(capability: &str) -> Status {
+    iam_status(
+        Code::Unimplemented,
+        &CAPABILITY_DISABLED,
+        format!("capability {capability} is not enabled on this service"),
+        Retryable::No,
+        &[("capability", capability)],
+    )
+}
+
+/// Maps a `TenancyError` to a `tonic::Status`: the gRPC code follows `ErrorClass`, the message is
+/// purely human-readable, and the machine-readable `(domain, reason)` rides in `ErrorInfo` in the
+/// `grpc-status-details-bin` trailer (ADR-0019 decision 4). The old `"{code}: {display}"` prefix
+/// is GONE — clients read `ErrorInfo.reason`, never the message. `Internal`'s `Display` never
+/// carries interpolated data (D7), so this never leaks backend detail either.
 pub fn status_to_grpc(e: TenancyError) -> Status {
     let code = match e.class() {
         ErrorClass::Validation => Code::InvalidArgument,
@@ -40,31 +119,32 @@ pub fn status_to_grpc(e: TenancyError) -> Status {
             Code::Internal
         }
     };
-    Status::new(code, format!("{}: {}", e.code(), e))
+    // `e.code()` IS the canonical wire string — the registry is the validation (see the
+    // `every_tenancy_code_is_declared_in_the_canonical_registry` test), not the transform.
+    iam_status(code, e.code(), e.to_string(), tenancy_retryable(e.class()), &[])
 }
 
 /// Maps an `AuthnError` to a `tonic::Status` for the gRPC authn surface (spec §6.3, D12).
 /// Deliberately SEPARATE from the tenancy `status_to_grpc`: authn needs `Unauthenticated`,
-/// `PermissionDenied`, `Unavailable`, and `Internal`, none of which the tenancy `ErrorClass`
-/// expresses. Every message is STATIC per code — no token, claim, or upstream error text
-/// ever reaches the wire (mirrors the HTTP `AuthnApiError` funnel). The enforcement layer
-/// renders the returned `Status` as a trailers-only gRPC response via `Status::into_http`;
-/// the `Introspect` handler returns it directly.
+/// `PermissionDenied`, `Unavailable` and `Internal`, none of which `ErrorClass` expresses. Every
+/// message is STATIC per code and unchanged by SMA-504 — no token, claim or upstream error text
+/// ever reaches the wire. What IS new is the machine-readable reason: the gateway previously had
+/// to accept a bare `PermissionDenied`, which collapsed three variants (ADR-0020 D4's tripwire).
 pub fn authn_status(err: &AuthnError) -> Status {
-    let (code, message) = match err {
-        AuthnError::InvalidToken(_) => (Code::Unauthenticated, "invalid bearer token"),
-        AuthnError::IdentityNotProvisioned => (Code::PermissionDenied, "identity not provisioned"),
-        AuthnError::ProvisioningFailed(_) => (Code::PermissionDenied, "provisioning failed"),
-        AuthnError::PrincipalInactive => (Code::PermissionDenied, "principal inactive"),
-        AuthnError::Unavailable => (Code::Unavailable, "authentication backend unavailable"),
+    let (code, reason, message) = match err {
+        AuthnError::InvalidToken(_) => (Code::Unauthenticated, INVALID_TOKEN.as_str(), "invalid bearer token"),
+        AuthnError::IdentityNotProvisioned => (Code::PermissionDenied, IDENTITY_NOT_PROVISIONED.as_str(), "identity not provisioned"),
+        AuthnError::ProvisioningFailed(_) => (Code::PermissionDenied, PROVISIONING_FAILED.as_str(), "provisioning failed"),
+        AuthnError::PrincipalInactive => (Code::PermissionDenied, PRINCIPAL_INACTIVE.as_str(), "principal inactive"),
+        AuthnError::Unavailable => (Code::Unavailable, AUTHN_UNAVAILABLE.as_str(), "authentication backend unavailable"),
         AuthnError::Backend(_) => {
             // `Debug` carries the boxed repository/infra source (never token or claim
             // material, by `AuthnError`'s own contract) — logged here, never surfaced.
             tracing::error!(error = ?err, "internal error handling a gRPC authn request");
-            (Code::Internal, "internal error")
+            (Code::Internal, AUTHN_INTERNAL.as_str(), "internal error")
         }
     };
-    Status::new(code, message)
+    iam_status(code, reason, message, authn_retryable(err), &[])
 }
 
 /// Parses a wire PRN, requiring the `"iam"` service and an `expect`ed resource type. Returns
@@ -334,18 +414,151 @@ mod tests {
     use super::*;
 
     #[test]
-    fn forbidden_maps_to_permission_denied() {
+    fn forbidden_maps_to_permission_denied_with_structured_detail() {
+        use tonic_types::StatusExt;
+
         let status = status_to_grpc(TenancyError::Forbidden);
         assert_eq!(status.code(), Code::PermissionDenied);
-        // Message stays "{code}: {display}", and `Forbidden`'s Display is static (SMA-444
-        // task-16 brief) — no denying-policy detail ever reaches the wire.
-        assert_eq!(status.message(), "forbidden: access denied");
+        // The wire change itself: the message is PURELY human-readable now. `Forbidden`'s Display
+        // is static (SMA-444 task-16 brief), so no denying-policy detail reaches the wire either.
+        assert_eq!(status.message(), "access denied");
+        assert!(!status.message().starts_with("forbidden:"), "the in-band code prefix is gone (ADR-0019 decision 4)");
+
+        let details = status.get_error_details();
+        let info = details.error_info().expect("every IAM status carries ErrorInfo");
+        assert_eq!(info.domain, *paigasus_proto::error::IAM_DOMAIN);
+        assert_eq!(info.reason, "forbidden");
+        assert_eq!(info.metadata.get("retryable").map(String::as_str), Some("false"));
     }
 
     #[test]
     fn not_found_maps_to_grpc_not_found() {
         let status = status_to_grpc(TenancyError::NotFound);
         assert_eq!(status.code(), Code::NotFound);
+    }
+
+    /// §4.3: outside a request scope the id keys are OMITTED, never filled with a nil UUID that
+    /// would read as a real id in a support ticket.
+    #[test]
+    fn the_id_metadata_keys_are_absent_outside_a_request_scope() {
+        use tonic_types::StatusExt;
+
+        let status = status_to_grpc(TenancyError::NotFound);
+        let details = status.get_error_details();
+        let info = details.error_info().expect("ErrorInfo");
+        assert!(!info.metadata.contains_key("correlation_id"));
+        assert!(!info.metadata.contains_key("request_id"));
+    }
+
+    /// The positive half of the contract the test above only pins the negative of (review
+    /// finding #1): INSIDE a request scope, both id keys are present and equal exactly the
+    /// scope's own ids — not just "present", which `contains_key` alone couldn't distinguish
+    /// from a scope leaking someone else's ids. `scope_for_test` (Task 2/3) enters the same
+    /// task-local `error_metadata`'s `current_ids()` reads.
+    #[tokio::test]
+    async fn the_id_metadata_keys_match_the_request_scope_when_present() {
+        use paigasus_observability::correlation::{RequestIds, scope_for_test};
+        use tonic_types::StatusExt;
+
+        let ids = RequestIds {
+            request_id: Uuid::parse_str("0198f2c1-7777-7000-8000-000000000042").unwrap(),
+            correlation_id: Uuid::parse_str("0198f2c1-8888-7000-8000-000000000042").unwrap(),
+        };
+        let status = scope_for_test(ids, async { status_to_grpc(TenancyError::NotFound) }).await;
+        let details = status.get_error_details();
+        let info = details.error_info().expect("ErrorInfo");
+        assert_eq!(info.metadata.get("correlation_id"), Some(&ids.correlation_id.to_string()));
+        assert_eq!(info.metadata.get("request_id"), Some(&ids.request_id.to_string()));
+    }
+
+    /// AC 4: an internal error's gRPC message is the static generic one, and nothing in the
+    /// metadata carries backend text.
+    #[test]
+    fn internal_carries_a_generic_message_and_an_unknown_retryable() {
+        use tonic_types::StatusExt;
+
+        let status = status_to_grpc(TenancyError::Internal);
+        assert_eq!(status.code(), Code::Internal);
+        assert_eq!(status.message(), "internal server error");
+        let details = status.get_error_details();
+        let info = details.error_info().expect("ErrorInfo");
+        assert_eq!(info.reason, "internal");
+        assert_eq!(info.metadata.get("retryable").map(String::as_str), Some("unknown"));
+    }
+
+    /// AC 6 for the authn funnel: five codes, all registry-resolvable, messages unchanged.
+    #[test]
+    fn every_authn_status_carries_a_registered_reason_and_its_original_message() {
+        use paigasus_iam_core::{ProvisioningDefect, TokenDefect};
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+        use tonic_types::StatusExt;
+
+        let cases = [
+            (AuthnError::InvalidToken(TokenDefect::Malformed), Code::Unauthenticated, "invalid-token", "invalid bearer token"),
+            (AuthnError::IdentityNotProvisioned, Code::PermissionDenied, "identity-not-provisioned", "identity not provisioned"),
+            (
+                AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail),
+                Code::PermissionDenied,
+                "provisioning-failed",
+                "provisioning failed",
+            ),
+            (AuthnError::PrincipalInactive, Code::PermissionDenied, "principal-inactive", "principal inactive"),
+            (AuthnError::Unavailable, Code::Unavailable, "authn-unavailable", "authentication backend unavailable"),
+            (AuthnError::Backend("secret db detail".into()), Code::Internal, "internal", "internal error"),
+        ];
+        for (err, code, reason, message) in cases {
+            let status = authn_status(&err);
+            assert_eq!(status.code(), code, "{reason}");
+            assert_eq!(status.message(), message, "authn messages are static and unchanged (D12)");
+            assert!(ErrorReason::from_wire_reason(reason).is_some(), "{reason} must be in the registry");
+            let details = status.get_error_details();
+            let info = details.error_info().expect("ErrorInfo");
+            assert_eq!(info.reason, reason);
+            assert!(!format!("{:?}", info.metadata).contains("secret db detail"), "metadata must never carry backend text");
+        }
+    }
+
+    /// AC 6 for the six sites that build a bare `Status` — the gap SMA-498's HTTP-only sweep
+    /// missed. Both capability gates are here because they are exactly what an SDK branches on.
+    #[test]
+    fn the_bare_status_sites_carry_registered_reasons() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+        use tonic_types::StatusExt;
+
+        let missing = missing_auth_context();
+        assert_eq!(missing.code(), Code::Unauthenticated);
+        let details = missing.get_error_details();
+        let missing_info = details.error_info().expect("ErrorInfo");
+        assert_eq!(missing_info.reason, "missing-auth-context");
+        // Review finding #4: `No`, not `Unknown` — the cause is known (the layer never attached
+        // a context) and retrying the identical request cannot resolve it.
+        assert_eq!(missing_info.metadata.get("retryable").map(String::as_str), Some("false"));
+        assert!(ErrorReason::from_wire_reason("missing-auth-context").is_some());
+
+        let disabled = capability_disabled("iam.apikeys");
+        assert_eq!(disabled.code(), Code::Unimplemented);
+        let details = disabled.get_error_details();
+        let info = details.error_info().expect("ErrorInfo");
+        assert_eq!(info.reason, "capability-disabled");
+        assert_eq!(info.metadata.get("capability").map(String::as_str), Some("iam.apikeys"));
+        assert!(ErrorReason::from_wire_reason("capability-disabled").is_some());
+    }
+
+    /// Review finding #9: `extra` is inserted BEFORE the canonical `retryable`/`correlation_id`/
+    /// `request_id` keys, so a caller that (accidentally or otherwise) passes one of those names
+    /// in `extra` can never silently overwrite the authoritative value.
+    #[test]
+    fn extra_metadata_can_never_override_the_canonical_retryable_key() {
+        use tonic_types::StatusExt;
+
+        let status = iam_status(Code::Internal, "internal", "internal error", Retryable::Unknown, &[("retryable", "true")]);
+        let details = status.get_error_details();
+        let info = details.error_info().expect("ErrorInfo");
+        assert_eq!(
+            info.metadata.get("retryable").map(String::as_str),
+            Some("unknown"),
+            "the canonical retryable value must win over a same-named extra entry"
+        );
     }
 
     /// SMA-446: `to_introspect_api_key_response` surfaces the credential's `scope_prn` on the

@@ -145,7 +145,13 @@ fn grants_json(grants: &[GrantRef]) -> serde_json::Value {
 fn conflict(code: &str, message: &str, mut extra: serde_json::Value) -> Response {
     let obj = extra.as_object_mut().expect("extra is always a json object — every call site above passes a json!({...})");
     obj.insert("error".to_string(), json!({ "code": code, "message": message }));
-    (StatusCode::CONFLICT, Json(extra)).into_response()
+    let mut response = (StatusCode::CONFLICT, Json(extra)).into_response();
+    // Both refusals below are 409 conflicts the caller cannot retry as-is: `Retryable::No`.
+    response.headers_mut().insert(
+        paigasus_observability::correlation::RETRYABLE_HEADER,
+        axum::http::HeaderValue::from_static(paigasus_observability::Retryable::No.as_wire()),
+    );
+    response
 }
 
 #[cfg(test)]
@@ -232,7 +238,7 @@ mod tests {
         // stable envelope would still leave an `expect_err`-only test green.
         assert_eq!(rejection.status(), StatusCode::BAD_REQUEST, "the runbook documents a 400 for this exact request");
         let body = body_json(rejection).await;
-        assert_eq!(body["error"]["code"], json!("invalid_request"));
+        assert_eq!(body["error"]["code"], json!("invalid-request-body"));
         assert_eq!(body["error"]["message"], json!("invalid request body"));
     }
 
@@ -253,7 +259,7 @@ mod tests {
             .expect_err("malformed JSON must be rejected");
         assert_eq!(rejection.status(), StatusCode::BAD_REQUEST);
         let body = body_json(rejection).await;
-        assert_eq!(body["error"]["code"], json!("invalid_request"));
+        assert_eq!(body["error"]["code"], json!("invalid-request-body"));
         assert_eq!(body["error"]["message"], json!("invalid request body"));
     }
 
@@ -290,6 +296,8 @@ mod tests {
     async fn conflict_keeps_the_stable_error_envelope_and_adds_sibling_fields() {
         let resp = conflict("grants-survive", "boom", json!({ "total_surviving": 3, "truncated": false }));
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+        // D4: a 409 conflict is never retryable as-is — the caller must change the request.
+        assert_eq!(resp.headers()["paigasus-retryable"], "false");
         let body = body_json(resp).await;
         assert_eq!(body["error"]["code"], json!("grants-survive"));
         assert_eq!(body["error"]["message"], json!("boom"));
@@ -390,5 +398,62 @@ mod tests {
         assert_eq!(body["kind"], json!("static"));
         assert_eq!(body["source"], json!("forbid(principal, action, resource);"));
         assert_eq!(body["description"], json!("a retired guard"));
+    }
+
+    /// AC 1 for this module: every code `response_for` can put on the wire is declared in the
+    /// canonical registry (`contracts/proto/paigasus/common/v1/error.proto`, SMA-498).
+    ///
+    /// SMA-504 renamed nothing here — both codes were already canonical — so this module got no
+    /// membership test either, leaving it the one emission site in the crate with no registry
+    /// assertion at all (SMA-507 E2).
+    ///
+    /// Exhaustiveness comes from the `match` below, NOT from `strum::EnumIter`: `RetireOutcome`'s
+    /// variants are struct variants carrying `PolicyKind` and `Vec<GrantRef>`, and `EnumIter`
+    /// requires `Default` for every field type. `RetireOutcome` is not `#[non_exhaustive]`, so a
+    /// new variant fails to COMPILE this match rather than silently escaping the assertion.
+    ///
+    /// The code is read back out of the rendered body rather than compared against the literal
+    /// `response_for` is built from — a comparison against that same literal would pass even if
+    /// the code were never registered.
+    #[tokio::test]
+    async fn every_system_retirement_code_is_declared_in_the_canonical_registry() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+
+        let outcomes = [
+            RetireOutcome::Retired {
+                policy_id: "p".to_string(),
+                kind: PolicyKind::Template,
+                role_deleted: true,
+            },
+            RetireOutcome::Blocked {
+                role_key: "r".to_string(),
+                grants: Vec::new(),
+                total: 1,
+                truncated: false,
+            },
+            RetireOutcome::NeedsAcknowledgement {
+                policy_id: "p".to_string(),
+                kind: PolicyKind::Static,
+                source: "s".to_string(),
+                description: "d".to_string(),
+            },
+        ];
+
+        for outcome in outcomes {
+            // Exhaustive: a new RetireOutcome variant fails to compile here, which is what forces
+            // it into `outcomes` above and therefore into this assertion.
+            let expects_code = match outcome {
+                RetireOutcome::Retired { .. } => false,
+                RetireOutcome::Blocked { .. } | RetireOutcome::NeedsAcknowledgement { .. } => true,
+            };
+            let body = body_json(response_for(outcome)).await;
+            let code = body["error"]["code"].as_str();
+            if expects_code {
+                let code = code.expect("a refusal must carry an error.code");
+                assert!(ErrorReason::from_wire_reason(code).is_some(), "{code} is not declared in common/v1/error.proto");
+            } else {
+                assert!(code.is_none(), "Retired carries no error.code today; if it grows one, register it and assert it here");
+            }
+        }
     }
 }

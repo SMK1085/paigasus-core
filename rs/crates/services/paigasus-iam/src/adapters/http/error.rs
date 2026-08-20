@@ -32,7 +32,12 @@ impl IntoResponse for ApiError {
             self.0.to_string()
         };
 
-        (status, Json(json!({ "error": { "code": self.0.code(), "message": message } }))).into_response()
+        let mut response = (status, Json(json!({ "error": { "code": self.0.code(), "message": message } }))).into_response();
+        response.headers_mut().insert(
+            paigasus_observability::correlation::RETRYABLE_HEADER,
+            axum::http::HeaderValue::from_static(crate::adapters::retryable::tenancy_retryable(self.0.class()).as_wire()),
+        );
+        response
     }
 }
 
@@ -92,5 +97,23 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["error"]["code"], "internal");
         assert_eq!(body["error"]["message"], "internal error");
+    }
+
+    /// AC 3: the `error` object's key set is EXACTLY code+message — a positive assertion, so a
+    /// stray added field fails rather than passing unnoticed. Scoped to the `error` object, not
+    /// the whole body: `system_retirement::conflict` deliberately emits sibling keys beside it.
+    #[tokio::test]
+    async fn the_error_object_key_set_is_unchanged() {
+        let body = body_json(ApiError(TenancyError::SlugConflict).into_response()).await;
+        let keys: std::collections::BTreeSet<&str> = body["error"].as_object().expect("an object").keys().map(String::as_str).collect();
+        assert_eq!(keys, ["code", "message"].into_iter().collect::<std::collections::BTreeSet<_>>());
+    }
+
+    #[tokio::test]
+    async fn tenancy_errors_carry_a_retryable_header() {
+        let resp = ApiError(TenancyError::SlugConflict).into_response();
+        assert_eq!(resp.headers()["paigasus-retryable"], "false");
+        let resp = ApiError(TenancyError::Internal).into_response();
+        assert_eq!(resp.headers()["paigasus-retryable"], "unknown", "an internal error erases whether its source was transient");
     }
 }

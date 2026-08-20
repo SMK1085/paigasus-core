@@ -211,6 +211,6 @@ async fn dead_letter_routes_require_bearer_through_the_real_composed_router() {
     ] {
         let (status, body) = send(&app, method, &path, None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "route {method} {path} must be 401 without a bearer token: {body}");
-        assert_eq!(body["error"]["code"], "invalid_token", "route {method} {path}: unexpected body {body}");
+        assert_eq!(body["error"]["code"], "invalid-token", "route {method} {path}: unexpected body {body}");
     }
 }

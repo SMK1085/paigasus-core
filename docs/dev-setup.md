@@ -64,6 +64,31 @@ that CI absorbs via `actions/cache`.
   "Materialize main ref" step.
 - GUI git clients often strip `PATH`; add `~/.proto/shims` to their environment if
   hooks fail with "command not found".
+- **`paigasus-iam`'s Docker-backed integration suites need Docker.** 58 of its 62 integration
+  binaries start a container and skip when the daemon is unreachable. You will not miss it:
+  `tests/docker_preflight.rs` fails in that case, so a Docker-less `cargo nextest run -p
+  paigasus-iam` reports exactly one failure naming the problem, rather than a green run that
+  executed nothing. Skips themselves print `SKIP[docker-unavailable] <suite>: <error>`, greppable
+  if you re-run with `--success-output immediate`.
+  - `PAIGASUS_REQUIRE_DOCKER=1` — every suite panics instead of skipping. Use it with a
+    filtered run (`--test relay_pg`), which does not include the canary.
+  - `PAIGASUS_SKIP_DOCKER=1` — everything skips, canary included. For a Docker Hub rate limit or
+    a daemon restart. Per-invocation: putting it in your shell profile puts you straight back to
+    green runs that tested nothing, and a `moon run` under it caches the green, so add
+    `--force` on the next real run.
+  - Both parse `1`/`true`/`yes` only; `0` and unset are off. `CI` is presence-based (any value
+    means CI) and outranks both. If you carry a stray `CI=false`, use
+    `env -u CI cargo nextest run -p paigasus-iam`.
+  - A container that fails to start while the daemon IS reachable is a hard failure, not a skip —
+    unless `PAIGASUS_SKIP_DOCKER` is set, which is checked first (see the next bullet).
+  - Setting both at once: `PAIGASUS_SKIP_DOCKER` wins over `PAIGASUS_REQUIRE_DOCKER`. It is the
+    escape hatch of last resort, so it is checked first — you get a skip, not a panic.
+- Retries and the container-concurrency cap for those suites live in `rs/.config/nextest.toml`
+  (`profile.default`), so they apply to `moon run`, to `cargo nextest` typed by hand, and to
+  anything else that shells out to nextest. `cargo test` bypasses them entirely — prefer `cargo
+  nextest` in this repo. The JUnit report nextest writes lives on a separate `profile.iam`, which
+  only `paigasus-iam`'s Moon task selects (`--profile iam`); a bare `cargo nextest run -p
+  paigasus-iam` still runs under the same retry/concurrency policy but writes no report.
 
 ## NATS (optional — outbox publisher, SMA-471)
 

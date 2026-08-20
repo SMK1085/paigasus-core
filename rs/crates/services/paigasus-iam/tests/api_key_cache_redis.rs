@@ -6,9 +6,9 @@
 //! contract — `get`/`put`/`evict` all degrade gracefully, never panicking or surfacing a Redis
 //! error through the cache's infallible signatures.
 //!
-//! Runs against an ephemeral Redis in Docker. In CI (`CI` env set) a missing Docker daemon is a
-//! HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note — same gating
-//! pattern as `tests/authz_cache_redis.rs`/`tests/redis_jwks_cache.rs`.
+//! Runs against an ephemeral Redis in Docker. The Docker-unavailable policy lives once in
+//! `tests/support/docker.rs` (SMA-538): a container failure with a reachable daemon is a hard
+//! failure, an unreachable daemon skips locally and reds in CI.
 
 use chrono::Utc;
 use paigasus_iam::adapters::api_keys::{ApiKeyValidationCache, CachedValidation, MemoryApiKeyCache, RedisApiKeyCache};
@@ -16,27 +16,17 @@ use paigasus_iam_core::{ApiKeyId, PrincipalId, PrincipalStatus};
 use paigasus_kernel::Prn;
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::ContainerAsync;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use uuid::Uuid;
 
-/// Starts an ephemeral Redis container, returning its connection URL. Same CI-hard-fail /
-/// local-skip gating as `tests/authz_cache_redis.rs`; self-contained here since this file has
-/// no other Redis consumer.
-async fn start_redis() -> Option<(ContainerAsync<Redis>, String)> {
-    let node = match Redis::default().start().await {
-        Ok(n) => n,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker is required for the api key cache redis test in CI: {e}");
-            }
-            eprintln!("skipping api_key_cache_redis: Docker unavailable ({e})");
-            return None;
-        }
-    };
+// This file has no `mod support;` — including `support/docker.rs` directly keeps it that way,
+// pulling in one small standalone file rather than the whole support surface (SMA-521).
+#[path = "support/docker.rs"]
+mod docker;
 
-    let port = node.get_host_port_ipv4(6379).await.unwrap();
-    let url = format!("redis://127.0.0.1:{port}");
-    Some((node, url))
+/// Starts an ephemeral Redis container, returning its connection URL. The skip-versus-fail
+/// decision lives once, in `support/docker.rs` (SMA-538).
+async fn start_redis() -> Option<(ContainerAsync<Redis>, String)> {
+    docker::start_redis_or_skip("api_key_cache_redis").await
 }
 
 fn pid(n: u128) -> PrincipalId {

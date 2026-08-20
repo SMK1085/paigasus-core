@@ -69,6 +69,23 @@ tasks:
       # Parity corpus (SMA-433): a corpus change must re-key the ts replay. Task-hash input only —
       # it does not make this project affected by a corpus-only edit (see affected-smoke parity-oneway).
       - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
+      #
+      # Workspace-level Rust files (SMA-546). This task LINKS two cdylibs and compiles
+      # wasm32-unknown-unknown; `cargo clippy` does neither, so SMA-534's thirteen lints cannot
+      # cover a dependency bump here. Without these the task replays a CACHED artifact built from
+      # a different resolution — a cache-correctness bug independent of scheduling. Moon has no
+      # hash-only input, so declaring them also makes a lockfile touch SCHEDULE this task, which
+      # is the coverage half of SMA-546.
+      #   /rs/Cargo.lock          the resolved versions the PR ships
+      #   /rs/Cargo.toml          [workspace.dependencies] + feature flips, which never reach the lock
+      #   /rs/rust-toolchain.toml the compiler wasm-pack selects (it runs from INSIDE the crate dir
+      #                           precisely so this file's 1.95.0 override wins)
+      #   /.prototools            pins wasm-pack itself — the OTHER half of the rs/Cargo.toml:90-97
+      #                           invariant, which is bidirectional ("bump the two together")
+      - '/rs/Cargo.lock'
+      - '/rs/Cargo.toml'
+      - '/rs/rust-toolchain.toml'
+      - '/.prototools'
     outputs:
       # Glob the platform-suffixed .node (darwin-arm64 on dev, linux-x64-gnu on CI, …) so the
       # declared output exists on EVERY host — a hardcoded triple fails Moon's output check on Linux.
@@ -123,3 +140,11 @@ tasks:
       # Parity corpus (SMA-433): a corpus change must re-key the ts replay. Task-hash input only —
       # it does not make this project affected by a corpus-only edit (see affected-smoke parity-oneway).
       - '/rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
+      #
+      # Workspace-level Rust files (SMA-546) — same rationale as `build` above: this task rebuilds
+      # both cdylibs before asserting, so its cached vitest RESULT is as resolution-dependent as
+      # build's artifact.
+      - '/rs/Cargo.lock'
+      - '/rs/Cargo.toml'
+      - '/rs/rust-toolchain.toml'
+      - '/.prototools'

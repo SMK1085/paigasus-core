@@ -21,9 +21,22 @@ tasks:
     inputs: ['@group(sources)', 'Cargo.toml']
   test:
     command: 'cargo nextest run --no-tests=pass'
-    inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml']
+    # `/rs/.config/nextest.toml` is workspace-relative (leading `/`). Required because `rs/` is
+    # NOT a Moon project — `.moon/workspace.yml` globs cover only `rs/crates/{libs,bindings,
+    # services}/*` — so the profile is outside every project's project-relative inputs and
+    # `implicitInputs` covers only `.moon/*`. Without this, editing the retry policy would not
+    # bust this task's cache (stale PASS) and a profile-only PR would not select it under
+    # `moon ci --affected`.
+    inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml', '/rs/.config/nextest.toml']
   lint:
-    command: 'cargo clippy --all-targets -- -D warnings'
+    # `--locked` so clippy lints the resolution the PR actually SHIPS. Without it cargo silently
+    # re-resolves and rewrites an inconsistent Cargo.lock, and the thirteen lints below would
+    # compile against newest-compatible versions instead — which would make the whole point of the
+    # workspace inputs unprovable. Among the compile gates, only `lint` passes `--locked`;
+    # `repo:publish-metadata` also uses it, for its packaging checks
+    # (`ci/publish-metadata/run.sh:243,258`). A Dependabot Cargo PR has already shipped a lockfile
+    # resolved from 3 of 11 workspace members here (SMA-534).
+    command: 'cargo clippy --locked --all-targets -- -D warnings'
     # `^:build` is what makes a task AFFECTED when an upstream changes. Without it clippy
     # propagated across no edge at all, so an upstream change that tripped `-D warnings` in a
     # CONSUMER shipped green and redded main later (SMA-526). Declared here rather than per-crate
@@ -32,7 +45,31 @@ tasks:
     # that separately.
     # `repo:affected-smoke` asserts this expansion for every crate (cargo_moon_parity.py A3).
     deps: ['^:build']
-    inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml']
+    # The three WORKSPACE-level inputs (SMA-534). `rs/` has no Moon project, so without these a
+    # Cargo.lock-only change — every Dependabot Cargo PR — scheduled no crate task at all.
+    # Leading `/` = workspace-relative. Declared here, not per-crate, for the same reason as `deps`.
+    #   /rs/Cargo.lock          the resolved dependency versions. The issue's motivating case.
+    #   /rs/Cargo.toml          [workspace.dependencies] AND [workspace.lints.{rust,clippy}] — the
+    #                           clippy posture itself — AND feature flips, which never reach the lock.
+    #   /rs/rust-toolchain.toml which clippy-driver runs. Defence-in-depth: a CORRECT toolchain bump
+    #                           also touches .moon/toolchains.yml, which is an implicitInput
+    #                           (.moon/tasks.yml:17) and already schedules all thirteen lints. This
+    #                           input catches the bump that drifts the two files apart, which
+    #                           rust-toolchain.toml's own lockstep comment warns about.
+    # Deliberately NOT on build/test/fmt: `clippy --all-targets` is a superset of
+    # `check --all-targets`, so it already type-checks libs, bins and tests; adding `test` would put
+    # the Docker-gated IAM container suites on every Dependabot PR. Clippy still neither links the
+    # cdylibs nor compiles wasm32 — but that gap is CLOSED for the FFI cdylibs by SMA-546, which puts
+    # these same three workspace inputs on `paigasus-kernel-ts:{build,test}` and
+    # `paigasus-kernel-py:test` instead, since those are the tasks that actually link and compile
+    # them. See `ci/affected-graph/README.md`'s A5 bullet for the guard that keeps it that way.
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'Cargo.toml'
+      - '/rs/Cargo.toml'
+      - '/rs/Cargo.lock'
+      - '/rs/rust-toolchain.toml'
   fmt:
     command: 'cargo fmt --check'
     inputs: ['@group(sources)']

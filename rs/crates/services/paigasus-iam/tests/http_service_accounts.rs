@@ -130,7 +130,7 @@ async fn revoke_returns_204_and_denies() {
     // The introspection endpoint agrees: the same revoked token is rejected, not resolved.
     let (status, err) = send(&app, "POST", "/v1/authn/api-keys/introspect", Some(json!({ "token": plaintext })), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{err}");
-    assert_eq!(err["error"]["code"], "invalid_token");
+    assert_eq!(err["error"]["code"], "invalid-token");
 }
 
 #[tokio::test]
@@ -176,11 +176,11 @@ async fn introspect_endpoint_validates_a_key() {
     assert!(body["memberships"].as_array().expect("memberships array").is_empty());
     assert!(body["role_grants"].as_array().expect("role_grants array").is_empty());
 
-    // Garbage input gets the same token-introspect-style rejection: 401 `invalid_token`, no
+    // Garbage input gets the same token-introspect-style rejection: 401 `invalid-token`, no
     // request-body echo.
     let (status, err) = send(&app, "POST", "/v1/authn/api-keys/introspect", Some(json!({ "token": "not-a-key-at-all" })), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{err}");
-    assert_eq!(err["error"]["code"], "invalid_token");
+    assert_eq!(err["error"]["code"], "invalid-token");
     assert!(!err["error"]["message"].as_str().unwrap().contains("not-a-key-at-all"), "{err}");
 }
 
