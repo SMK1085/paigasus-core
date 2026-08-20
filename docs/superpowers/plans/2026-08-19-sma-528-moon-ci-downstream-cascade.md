@@ -1165,8 +1165,12 @@ merging**, per spec §5.
 
 This change touches `.moon/tasks/rust.yml`, which schedules the entire Rust graph.
 
+`T` is the same 24-entry array as Step 1 — redeclared here so this step is runnable on its own.
+`moon ci` with no targets errors in a non-TTY, so an undeclared `T` is not a harmless no-op.
+
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+T=(:build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site :promtool :observability-drift :nats-permissions :release-parity :release-parity-py :release-parity-ts :publish-metadata)
 moon ci "${T[@]}" --base origin/main --include-relations
 ```
 

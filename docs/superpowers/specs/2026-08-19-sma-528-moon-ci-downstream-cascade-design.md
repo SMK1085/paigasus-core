@@ -251,8 +251,12 @@ Three details are load-bearing:
    {`paigasus-kernel-rs`, `paigasus-proto-rs`} and `paigasus-kernel-parity-rs` ⊇
    {`paigasus-kernel-rs`}.
 
-A6 iterates every crate unconditionally — like A4, and unlike A1–A3, which are guarded by `if want:`
-and so never reach crates with no in-tree dependencies.
+A6 iterates every **Moon-reported Rust crate** unconditionally — unlike A1–A3, which are guarded by
+`if want:` and so never reach crates with no in-tree dependencies. The `language == "rust"` filter is
+a real boundary, not a formality: a crate Moon stops reporting as Rust drops out of A6's loop
+entirely. `REQUIRED_CLOSURE_EDGES` catches that only for the consumers it names; the general
+backstops are A4 (which enumerates Cargo manifests from disk, not Moon's language field) and
+`run.sh`'s hand-listed `lockfile->all-lint` set. Recorded in `ci/affected-graph/README.md`.
 
 A6 adds no Moon task: it runs inside `cargo_moon_parity.py`, which runs inside `repo:affected-smoke`.
 **`ci.yml`'s `T` array and CLAUDE.md's marker block are therefore unchanged**, and `ci_targets.py`
@@ -322,8 +326,9 @@ K/L, i.e. in every probe including the real 24-target shape. No probe in which i
   derivation vs `REQUIRED_CLOSURE_EDGES`).
 - A new **`expect_red_task`** helper is required: today's `expect_red` (`run.sh:289`) calls
   `assert_case`, the *project* helper, so there is no task-case negative control anywhere. The new
-  helper wraps `assert_task_case`, and the **two existing task cases gain controls too** — they have
-  none today.
+  helper wraps **`assert_task_case_ci`** — the controls must exercise the no-flag CI selection path,
+  which is the one that was silently broken; the deep traversal stays covered by its own cases. The
+  **two existing task cases gain controls too** — they have none today.
 
 ### 4.7 What the CI-traversal cases actually prove — stated, not assumed
 
@@ -396,9 +401,10 @@ toolchain hash and `-line-tables-only-` intact.
 
 **Acceptance threshold and rollback.** The implementing PR reports its own CI wall time and `df -h`.
 If it exceeds **25 minutes** or shows disk pressure, the job is split or the timeout raised *before*
-merge rather than after. The rollback unit is `@group(upstreams)` on `test` alone — removing it
-leaves `build`/`lint` coverage, A6 self-consistent (its per-task loop is parameterized by task name),
-and the CI-traversal cases re-baselined.
+merge rather than after. The rollback unit is `@group(upstreams)` on `test` alone, which leaves
+`build`/`lint` coverage intact — but it is **two** edits, not one: `UPSTREAM_INPUT_TASKS` must drop
+`test` in the same commit, or A6 reports missing `test` inputs for every crate. The CI-traversal
+cases are re-baselined at the same time.
 
 **Staged rollout was proposed by review and rejected.** Landing `build`+`lint` first and `test` a
 week later is the option explicitly weighed and declined at design time in favour of full coverage;

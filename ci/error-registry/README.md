@@ -33,9 +33,10 @@ Verify with:
     export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
     printf 'contracts/proto/paigasus/common/v1/error.proto\n' | moon query tasks --affected --downstream deep
 
-(Until SMA-528 this was aspirational: `^:build` schedules an upstream's build, it does not make this
-crate affected. What makes it true is `@group(upstreams)` — this crate's build/test/lint now key on
-paigasus-proto's sources, so a contracts change that regenerates them selects this test.)
+(Until SMA-528 this was aspirational: `^:build` schedules an upstream's build, it does not make a
+consumer affected. What makes it true is `@group(upstreams)` — `paigasus-iam-rs`'s and
+`paigasus-gateway-rs`'s `build`/`test`/`lint` now key on `paigasus-proto`'s sources, so a contracts
+change that regenerates them selects both service crates' membership tests.)
 
 ## Adding a row
 

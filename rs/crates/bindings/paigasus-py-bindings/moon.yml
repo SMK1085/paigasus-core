@@ -10,7 +10,10 @@ language: 'rust'
 # The kernel→binding edge (ADR-0005): a kernel change must rebuild this crate. `dependsOn`
 # creates the project edge; the task-level `^:build` schedules the kernel's build under
 # `moon ci --include-relations`. Neither confers affectedness (SMA-389 D3, corrected by
-# SMA-524) — that's `@group(upstreams)` below (SMA-528). Mirrors paigasus-gateway-rs.
+# SMA-524) — that's `@group(upstreams)` below (SMA-528). Mirrors paigasus-node-bindings-rs and
+# paigasus-wasm-rs, the other Cargo-backed kernel consumers. NOT paigasus-gateway-rs: that crate's
+# kernel edge has no Cargo backing at all and is allowlisted in cargo_moon_parity.py's
+# ALLOW_NO_CARGO_BACKING, so it is the opposite case, not a sibling.
 dependsOn:
   - 'paigasus-kernel-rs'
 
