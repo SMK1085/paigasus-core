@@ -116,8 +116,10 @@ UPSTREAM_INPUT_TASKS = ("build", "test", "lint")
 #
 # MIND THE KEY SHAPE: it is (moon id, upstream SOURCE DIR) — e.g.
 # ("paigasus-iam-rs", "rs/crates/libs/paigasus-kernel") — NOT the (moon id, moon id) shape
-# ALLOW_NO_CARGO_BACKING uses twelve lines above. A6 recovers the upstream half by stripping the
-# suffix off a resolved input path, and a moon id never appears in one. A waiver written in the
+# ALLOW_NO_CARGO_BACKING uses twelve lines above. A6 recovers the upstream half STRUCTURALLY, from
+# the first four `/`-separated segments of a resolved input path (`rs/crates/<layer>/<crate>`),
+# not by stripping a known suffix — an over-approximating entry can carry any suffix now, not just
+# `/src/**/*` or `/Cargo.toml`. A moon id never appears in a resolved path. A waiver written in the
 # neighbouring shape is silently inert.
 ALLOW_OVER_APPROXIMATION = {}
 
@@ -378,30 +380,32 @@ def check_upstream_inputs(
                 continue
             resolved = set(declared_files or []) | set(declared_globs or [])
             # Observed = every entry pointing INTO another crate's tree. The crate's own
-            # `src/**/*` and `Cargo.toml` come from .moon/tasks/rust.yml and are not upstreams.
+            # `src/**/*`, `tests/**/*`, `**/*_test.rs`, and `Cargo.toml` come from
+            # .moon/tasks/rust.yml and are not upstreams — excluded below by the `own/` prefix
+            # check, not by suffix, so this needs no updating when rust.yml grows a new own-crate
+            # glob shape.
             #
-            # What this filter deliberately CANNOT see: an entry outside the `rs/crates/**` +
-            # `/src/**/*`-or-`/Cargo.toml` shape — e.g. a stray `contracts/**/*`, or an
-            # over-broad `.../paigasus-kernel/**/*` sitting beside the correct pair — never enters
-            # `observed`, so it can never surface in the `observed - want` diff either. That diff
-            # is what strict equality relies on to catch over-declaration, so an extra entry of
-            # this shape silently widens what a crate's build/test/lint keys on — the exact
-            # direction strict equality was chosen to catch (SMA-429). Under-declaration is still
-            # caught: a missing correct-shaped pair still fails `want - observed`. This also means
-            # a future Rust crate living outside `rs/crates/` would red A6 with no waiver path —
-            # `ALLOW_OVER_APPROXIMATION`'s reason-string escape hatch is unreachable for an entry
-            # this filter never surfaces. Documentation only: do not change the logic below.
+            # Deliberately WIDE: any entry under `rs/crates/` that is not the crate's own enters
+            # `observed`, regardless of suffix. A prior version matched only `/src/**/*` or
+            # `/Cargo.toml`, so a broad `.../paigasus-kernel/**/*` or a
+            # `.../paigasus-kernel/tests/**/*` sitting beside the correct pair never entered
+            # `observed` and could never surface in the `observed - want` diff below — silently
+            # widening what a crate's build/test/lint keys on, the exact direction strict equality
+            # was chosen to catch (SMA-429). What this filter still CANNOT see: an over-declared
+            # entry living OUTSIDE `rs/crates/**` entirely (e.g. a stray `contracts/**/*`) — such
+            # an entry can never be in `want` either, so it is invisible to strict equality in
+            # both directions regardless of this filter. Under-declaration is unaffected either
+            # way: a missing correct-shaped pair still fails `want - observed`.
             observed = {
-                e
-                for e in resolved
-                if e.startswith("rs/crates/")
-                and not e.startswith(f"{own}/")
-                and (e.endswith("/src/**/*") or e.endswith("/Cargo.toml"))
+                e for e in resolved if e.startswith("rs/crates/") and not e.startswith(f"{own}/")
             }
             for entry in sorted(want - observed):
                 a6.append(f"{pid}:{task} inputs omit {entry}")
             for entry in sorted(observed - want):
-                upstream = entry.rsplit("/src/**/*", 1)[0].rsplit("/Cargo.toml", 1)[0]
+                # Structural derivation, not suffix-stripping: `entry` may now carry any suffix
+                # (`/src/**/*`, `/Cargo.toml`, `/**/*`, `/tests/**/*`, ...), but the first four
+                # `/`-separated segments are always `rs/crates/<layer>/<crate>`.
+                upstream = "/".join(entry.split("/")[:4])
                 if not _allowlisted(allow, pid, upstream):
                     a6.append(f"{pid}:{task} inputs include {entry}, which is not in its closure")
     return a6
@@ -765,6 +769,20 @@ def self_test():
         check_upstream_inputs(broken, allow={}, floor={})
     ):
         failures.append("A6 did not fire on an upstream outside the closure")
+
+    # A6-c2: a BROAD glob into a crate that IS a real upstream — the hole the `observed` filter
+    # was widened to close (SMA-528 CodeRabbit finding). Unlike A6-c's `ghost` entry, `b-rs` IS in
+    # `a-rs`'s closure — but a `**/*` glob is still not the `src/**/*`-or-`Cargo.toml` pair `want`
+    # expects, so strict equality must still fire on the literal mismatch. Before the widened
+    # filter this entry matched neither suffix, so it never entered `observed` and the violation
+    # was invisible regardless of what the fixture declared.
+    broad = "rs/crates/libs/b/**/*"
+    broad_broken = json.loads(json.dumps(ok))
+    broad_broken["a-rs"]["task_input_globs"]["lint"].append(broad)
+    if f"a-rs:lint inputs include {broad}, which is not in its closure" not in (
+        check_upstream_inputs(broad_broken, allow={}, floor={})
+    ):
+        failures.append("A6 did not fire on a broad glob into a real upstream's tree")
 
     # A6-d: an allowlisted over-approximation must be accepted, and only WITH a reason. `broken`
     # carries exactly one defect, so a working allowlist empties the list outright.

@@ -150,8 +150,10 @@ assert_task_case_ci() {
     "the consumer's build/test/lint does not key on this upstream's sources; check its fileGroups.upstreams and that .moon/tasks/rust.yml still references @group(upstreams)."
 }
 
-# Every real `moon ci` shell invocation in ci.yml must carry --include-relations: it is the
-# flag that activates relation/dependent rebuilds.
+# Every real `moon ci` shell invocation in ci.yml must carry --include-relations. This gate does
+# not assert the flag does anything today — see the NOTE below. It exists so the flag cannot
+# silently disappear from ci.yml: it remains the documented mechanism for relation/dependent
+# rebuilds, should moonrepo fix the dependent traversal upstream.
 #
 # NOTE (SMA-528): `--include-relations` was measured to change NOTHING in every probe run —
 # including the full 24-target ci.yml shape, where `moon ci "${T[@]}" --stdin --include-relations`

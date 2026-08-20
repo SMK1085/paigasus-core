@@ -275,7 +275,11 @@ deep assertions stay.
 ### 4.3 New task case `kernel->consumer-tasks`
 
 Issue item 3. Pins a kernel source edit to `paigasus-kernel-parity-rs:test` — the highest-value
-consumer and the one whose absence is least obvious — under **both** traversals.
+consumer and the one whose absence is least obvious — under the CI traversal
+(`assert_task_case_ci`). It has no `deep` twin: `proto->svc-info-deep` already supplies the
+behavioural `^:build` detector (§4.2), and the existing `kernel->bindings` project case covers the
+kernel chain's `dependsOn` edges, so a second deep case here would assert nothing new. `README.md`
+documents this explicitly.
 
 The expected set is **enumerated in the plan from intent, not pasted from output**. Under strict
 equality over `build|test|lint` across all projects it is substantially larger than the five
