@@ -368,6 +368,64 @@ pub async fn start_mock_idp_private_ca() -> (MockIdp, String) {
     (MockIdp { issuer, sign, kid, jwks_body, handle }, ca_pem)
 }
 
+/// Like [`start_mock_idp`], but also returns the leaf's own certificate PEM (SMA-558 Finding 1
+/// regression fixture).
+///
+/// This exists to keep a FALSE claim from silently becoming true again. Four sites (this
+/// crate's `config.rs` doc comment, `CLAUDE.md`, `RUNBOOK-containers.md`, and
+/// `iam.toml.example`) used to say a self-signed *leaf* certificate placed in
+/// `extra_ca_bundle_path` would NOT validate, and that `accept_invalid_tls` was still needed.
+/// That was wrong: rustls applies no `cA` basic-constraints check to a trust anchor
+/// (`anchor_from_trusted_cert`), and `verify_cert.rs` only rejects `CaUsedAsEndEntity` when the
+/// LEAF BEING VERIFIED asserts CA:TRUE — which `generate_simple_self_signed`'s output never
+/// does. A self-signed leaf's own PEM in the bundle verifies fine. Regressing this silently
+/// would push an operator with a self-signed IdP toward `accept_invalid_tls`, which disables
+/// certificate verification entirely — the exact bypass SMA-558 exists to make unnecessary. See
+/// `tests/authn_private_ca.rs`'s `self_signed_leaf_in_the_bundle_also_validates`.
+#[allow(dead_code)]
+pub async fn start_mock_idp_self_signed() -> (MockIdp, String) {
+    let kid = "mock-idp-es256-initial".to_string();
+    let (sign, jwk) = es256_keypair(&kid);
+
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()]).expect("self-signed cert");
+    let leaf_pem = cert.cert.pem();
+    let tls = axum_server::tls_rustls::RustlsConfig::from_pem(cert.cert.pem().into_bytes(), cert.key_pair.serialize_pem().into_bytes())
+        .await
+        .expect("rustls config from generated pem");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral port");
+    listener.set_nonblocking(true).expect("nonblocking listener");
+    let addr = listener.local_addr().unwrap();
+    let issuer = format!("https://{addr}");
+
+    let discovery_body = serde_json::json!({ "issuer": issuer, "jwks_uri": format!("{issuer}/jwks") }).to_string();
+    let jwks_body = Arc::new(RwLock::new(serde_json::to_string(&JwkSet { keys: vec![jwk] }).expect("jwks serializes")));
+
+    let jwks_for_route = jwks_body.clone();
+    let idp_routes = Router::new()
+        .route(
+            "/.well-known/openid-configuration",
+            get(move || {
+                let body = discovery_body.clone();
+                async move { ([("content-type", "application/json")], body) }
+            }),
+        )
+        .route(
+            "/jwks",
+            get(move || {
+                let shared = jwks_for_route.clone();
+                let body = shared.read().expect("jwks lock not poisoned").clone();
+                async move { ([("content-type", "application/json")], body) }
+            }),
+        );
+
+    let handle = tokio::spawn(async move {
+        axum_server::from_tcp_rustls(listener, tls).serve(idp_routes.into_make_service()).await.expect("mock idp server");
+    });
+
+    (MockIdp { issuer, sign, kid, jwks_body, handle }, leaf_pem)
+}
+
 /// An `IamConfig` wired to the mock IdP: test defaults, the mock issuer with audience
 /// `"paigasus"` + JIT enabled, and `accept_invalid_tls` set (the mock's cert is
 /// self-signed — the flag exists exactly for this, and is `false` by default in prod).

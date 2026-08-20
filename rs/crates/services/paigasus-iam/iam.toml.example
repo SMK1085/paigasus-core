@@ -29,7 +29,8 @@
 # Note this is the OPPOSITE of [outbox.publisher].root_ca_bundle below, which REPLACES — hence
 # the `extra_` prefix. ROOTS ONLY: every certificate here becomes an unconstrained trust anchor
 # for every outbound HTTPS call. Read once at boot, so a rotated bundle needs a restart. Cannot
-# be combined with accept_invalid_tls (boot refuses). Does not help a self-signed LEAF.
+# be combined with accept_invalid_tls (boot refuses). A self-signed LEAF works too — put its own
+# certificate in the bundle.
 # extra_ca_bundle_path = "/etc/paigasus/corp-ca.pem"
 
 # [authn.jwks_cache]

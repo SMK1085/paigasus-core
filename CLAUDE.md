@@ -208,16 +208,16 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   parameterized `rs/Dockerfile` installs both binaries to the fixed path
   `/usr/local/bin/paigasus-service`. Service identity comes from `paigasus_logging::init`, not
   `argv[0]`.
-- This repo now has **three** CA-bundle config knobs and they do NOT share semantics. `authn.extra_ca_bundle_path`
+- This repo now has **four** CA-bundle config knobs and they do NOT share semantics. `authn.extra_ca_bundle_path`
   and `upstream.openai.extra_ca_bundle_path` (SMA-558) **ADD** to the trust store — reqwest builds one
   `RootCertStore` by unioning `add_root_certificate` calls with the webpki roots and the platform store, so
   the workspace pins BOTH `rustls-tls` and `rustls-tls-native-roots` (dropping the former is not a
   simplification: reqwest accepts an EMPTY platform store silently, and webpki is the floor that stops a bad
   mount becoming a per-request failure). `outbox.publisher.root_ca_bundle` and the gateway's
-  `iam.tls.ca_cert_path` **REPLACE** it. The `extra_` prefix is the marker — a fourth knob must pick a side
+  `iam.tls.ca_cert_path` **REPLACE** it. The `extra_` prefix is the marker — a fifth knob must pick a side
   and say which in its doc. Anything in an added bundle becomes an **unconstrained** anchor (no `cA` check),
-  so it must contain roots only; and a self-signed LEAF still needs `accept_invalid_tls`, since webpki has no
-  support for self-signed certificates.
+  so it must contain roots only; a self-signed LEAF works too (put its own cert in the bundle) since rustls
+  applies no `cA` check to a trust anchor.
 
 ## Workflow
 

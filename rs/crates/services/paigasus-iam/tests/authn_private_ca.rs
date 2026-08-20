@@ -60,6 +60,30 @@ async fn private_ca_issuer_validates_with_extra_ca_bundle() {
 }
 
 #[tokio::test]
+async fn self_signed_leaf_in_the_bundle_also_validates() {
+    // Regression test for a FALSE claim that used to be documented at four sites (this crate's
+    // `config.rs`, `CLAUDE.md`, `RUNBOOK-containers.md`, `iam.toml.example`): that a self-signed
+    // *leaf* certificate placed in `extra_ca_bundle_path` would not validate, and that such an
+    // operator still needed `accept_invalid_tls`. It is false — rustls applies no `cA`
+    // basic-constraints check to a trust anchor, and `verify_cert.rs` only rejects
+    // `CaUsedAsEndEntity` when the LEAF BEING VERIFIED asserts CA:TRUE, which a
+    // `generate_simple_self_signed` leaf never does. Regressing this silently would push an
+    // operator with a self-signed IdP toward `accept_invalid_tls`, which disables certificate
+    // verification entirely — the exact full-authentication-bypass SMA-558 exists to eliminate.
+    let (idp, leaf_pem) = support::start_mock_idp_self_signed().await;
+
+    let mut bundle = tempfile::NamedTempFile::new().expect("temp file");
+    bundle.write_all(leaf_pem.as_bytes()).expect("write leaf pem");
+    bundle.flush().expect("flush");
+
+    let authn = authenticator_for(&idp.issuer, Some(bundle.path().to_str().unwrap()));
+    let token = idp.bearer("sub-alice", Some("alice@example.com"), "paigasus", 3600);
+
+    let claims = authn.authenticate(&token).await.expect("a self-signed leaf must validate when its own cert is trusted");
+    assert_eq!(claims.subject, "sub-alice");
+}
+
+#[tokio::test]
 async fn private_ca_issuer_fails_without_extra_ca_bundle() {
     // The negative control. Identical to the test above except `extra_bundle: None`, so the
     // failure is attributable to the trust anchor and nothing else. Without this, the positive

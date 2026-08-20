@@ -84,8 +84,10 @@ impl std::fmt::Debug for ChatResponse {
 #[derive(Debug, thiserror::Error)]
 pub enum OpenAiError {
     /// The `reqwest::Client` could not be constructed (TLS backend init, invalid builder config) —
-    /// a boot-time fault, surfaced when G7 builds the client at startup.
-    #[error("failed to build the OpenAI HTTP client")]
+    /// a boot-time fault, surfaced when G7 builds the client at startup. Native-roots support
+    /// (SMA-558 D1) made an empty/unparseable platform trust store a newly reachable cause here,
+    /// mirroring `paigasus-iam/src/adapters/oidc/jwks.rs`'s equivalent hint.
+    #[error("failed to build the OpenAI HTTP client — this can also mean the platform trust store contains no parseable certificates")]
     Build(#[source] reqwest::Error),
     /// Failed to establish the connection to the upstream (DNS / TCP / TLS handshake).
     #[error("failed to connect to the OpenAI upstream")]
@@ -285,6 +287,10 @@ mod tests {
     fn missing_ca_bundle_path_is_a_build_error() {
         let err = client_with_bundle("sk-x", Some("/nonexistent/paigasus-sma558/ca.pem".to_string())).expect_err("a nonexistent bundle path must fail");
         assert!(matches!(err, OpenAiError::CaBundle { .. }), "expected CaBundle, got {err:?}");
+        assert!(
+            format!("{err:?}").contains("NotFound"),
+            "the error must be attributable to a missing file, not another CaBundle cause: {err:?}"
+        );
     }
 
     #[test]
@@ -294,6 +300,7 @@ mod tests {
         let f = tmp_file_with(b"-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n-----END PRIVATE KEY-----\n");
         let err = client_with_bundle("sk-x", Some(f.path().to_str().unwrap().to_string())).expect_err("a certificate-free bundle must fail");
         assert!(matches!(err, OpenAiError::CaBundle { .. }), "expected CaBundle, got {err:?}");
+        assert!(format!("{err:?}").contains("no PEM certificates"), "the error must say the bundle was empty: {err:?}");
     }
 
     #[test]
@@ -301,6 +308,7 @@ mod tests {
         let f = tmp_file_with(b"-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n");
         let err = client_with_bundle("sk-x", Some(f.path().to_str().unwrap().to_string())).expect_err("an undecodable bundle must fail");
         assert!(matches!(err, OpenAiError::CaBundle { .. }), "expected CaBundle, got {err:?}");
+        assert!(format!("{err:?}").contains("invalid certificate encoding"), "the error must say the bundle failed to decode: {err:?}");
     }
 
     /// A throwaway CA certificate, minted fresh per test run. Used ONLY to prove the bundle path

@@ -140,8 +140,9 @@ pub struct AuthnConfig {
     /// hard boot failure, never a warning. Mutually exclusive with `accept_invalid_tls`, which
     /// would make it dead — `validate()` rejects the pair.
     ///
-    /// Does NOT help a self-signed LEAF certificate: webpki has no support for self-signed
-    /// certificates, so that case still needs `accept_invalid_tls` (SMA-558 § 9).
+    /// A self-signed LEAF certificate works too: put the leaf's own certificate in the bundle.
+    /// rustls applies no `cA` basic-constraints check to a trust anchor, so this needs no
+    /// `accept_invalid_tls` fallback (SMA-558 § 9).
     #[serde(default)]
     pub extra_ca_bundle_path: Option<String>,
     pub jwks_cache: JwksCacheConfig,

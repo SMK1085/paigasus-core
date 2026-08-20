@@ -178,6 +178,15 @@ every reqwest destination in the process — so operator guidance must say **roo
 per the same doc at `:23`, "Webpki has no support for self-signed certificates", so a self-signed
 *leaf* dropped into the bundle will not verify itself — see § 9.
 
+> **Corrected during implementation:** the paragraph above over-read the webpki doc line as a
+> hard rejection. It is not: rustls applies no `cA` basic-constraints check to a trust anchor, and
+> `verify_cert.rs` only rejects `CaUsedAsEndEntity` when the *leaf being verified* asserts CA:TRUE
+> — an unrelated case. A self-signed leaf's own certificate placed in the bundle **does** verify;
+> proven empirically against `start_mock_idp_self_signed` in
+> `rs/crates/services/paigasus-iam/tests/authn_private_ca.rs`
+> (`self_signed_leaf_in_the_bundle_also_validates`). § 9's limitation entry is stale for the same
+> reason — see the correction note there.
+
 ## 3. Decisions
 
 ### D1 — trust anchors are webpki ∪ system ∪ optional explicit bundle, all additive
@@ -651,10 +660,13 @@ Every row is an expectation to *verify by running*, not to assume.
 
 ## 9. Out of scope
 
-- **A self-signed IdP leaf certificate.** Per § 2.9, webpki has no support for self-signed
+- ~~**A self-signed IdP leaf certificate.** Per § 2.9, webpki has no support for self-signed
   certificates, so dropping a self-signed *leaf* into `extra_ca_bundle_path` will not verify.
-  `accept_invalid_tls` remains the only route for that case. AC1 asks specifically for a
-  private-**CA** issuer, which is satisfied — but this limit is real and belongs in the runbook.
+  `accept_invalid_tls` remains the only route for that case.~~
+  **Corrected during implementation:** this limit does not exist. A self-signed leaf's own
+  certificate placed in the bundle verifies — see the § 2.9 correction note and
+  `self_signed_leaf_in_the_bundle_also_validates` in `authn_private_ca.rs`. AC1 asks specifically
+  for a private-**CA** issuer, which is satisfied either way.
 - `sqlx`/`sea-orm` and `redis` trust stores (§ 2.1) — still webpki-pinned. Operator-controlled
   infrastructure links, not third-party issuers, and not named by SMA-558's acceptance criteria.
 - Certificate *pinning* for OIDC issuers (risk 2), and per-issuer trust anchors (D3, risk 3).
@@ -670,7 +682,7 @@ Every row is an expectation to *verify by running*, not to assume.
 
 | AC | Where |
 | --- | --- |
-| 1. Trust a private-CA issuer without disabling verification | D1's three routes; proven by test 1 with verification ON. Limit: self-signed leaves (§ 9) |
+| 1. Trust a private-CA issuer without disabling verification | D1's three routes; proven by test 1 with verification ON. Self-signed leaves also verify (§ 9 correction) |
 | 2. Documented in `RUNBOOK-containers.md`, replacing "not supported" | § 6, ranked per D1 |
 | 3. A test covers the trusted-private-CA path | § 5, tests 1 + 2 at the § 5.3 Docker-free seam |
 | 4. `accept_invalid_tls` remains available, no longer the only route | Unchanged behaviour; D5 only forbids combining it with the new field |

@@ -648,6 +648,10 @@ mod tests {
         .expect_err("an undecodable bundle must fail");
 
         assert!(matches!(err, AuthnError::Backend(_)), "expected Backend, got {err:?}");
+        assert!(
+            format!("{err:?}").contains("not a valid PEM certificate bundle"),
+            "the error must say the bundle failed to decode: {err:?}"
+        );
     }
 
     #[test]

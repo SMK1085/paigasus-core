@@ -142,10 +142,10 @@ build itself — they bite the first operator who deploys without reading this s
   unconstrained trust anchor for every outbound HTTPS call the process makes — TLS performs no
   `cA` check on an anchor, so an intermediate is silently promoted to a root.
 
-  **A self-signed *leaf* is still not supported.** Webpki has no support for self-signed
-  certificates, so an IdP presenting a bare self-signed certificate (rather than one issued by a
-  CA you can name) still requires `authn.accept_invalid_tls`, which disables verification
-  entirely. Mint a small private CA and issue the IdP a certificate from it instead.
+  **A self-signed *leaf* works too.** rustls applies no `cA` check to a trust anchor, so an IdP
+  presenting a bare self-signed certificate validates once that certificate's own PEM is in the
+  bundle — no `accept_invalid_tls` needed. A small private CA is still the tidier posture once
+  more than one host is involved (rotation and revocation stay CA-level instead of per-leaf).
 
 ## 6. Conventions the console images must follow
 
