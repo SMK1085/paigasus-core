@@ -30,9 +30,9 @@ the required check. See SMA-540 and
 | 4 | A healthy stdin fixture must pass — the control for check 3 |
 | 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree, and every `branches:` entry resolves as a ref or is skip-listed |
 | 6 | Every extracted filter key carries at least one sequence entry; a `paths:`/`branches:` key must also have at least one of them positive (the `-ignore` variants are exempt) |
-| 7 | Five self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor — plus a counter (`SELF_TESTS_RAN`/`SELF_TEST_COUNT`) asserting all five ran, and a definition-count check catching a sixth table that is defined but never wired into `run_self_tests` (`run.sh --self-test`) |
-| 8 | `ci.yml`'s `T=(…)` still schedules the gate that guards `T` itself, and nothing silences that gate's result. Three verdict families: **(a)** the floor — `:affected-smoke` present in `T` (`missing`), or the array can't even be read (`no-array`/`no-file`); **(b)** no `moon` command line discards its own exit status (`swallowed`); **(c)** no step's `continue-on-error:` value suppresses it — any spelling but the literal `false` (`continue-on-error`), with `COE_SKIP` as the escape hatch for an unrelated later step |
-| 9 | A mutation battery, full-gate only: each of the five self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message, or the battery itself reds |
+| 7 | Six self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, kill predicate — plus a counter (`SELF_TESTS_RAN`/`SELF_TEST_COUNT`) asserting all six ran, and a definition-count check catching a seventh table that is defined but never wired into `run_self_tests` (`run.sh --self-test`) |
+| 8 | `ci.yml`'s `T=(…)` still schedules the gate that guards `T` itself, and nothing silences that gate's result. Four verdict families: **(a)** the floor — `:affected-smoke` present in `T` (`missing`), or the array can't even be read (`no-array`/`no-file`); **(b)** no `moon` command line is continued onto another physical line, where a discarded exit status would be invisible to this check (`continued`); **(c)** no single-line `moon` command line discards its own exit status (`swallowed`), with `SWALLOWED_SKIP` as the escape hatch for an unrelated `moon` line this check cannot know is harmless; **(d)** no step's `continue-on-error:` value suppresses it — any spelling but the literal `false` (`continue-on-error`), with `COE_SKIP` as the escape hatch for an unrelated later step |
+| 9 | A mutation battery, full-gate only: each of the six self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message (a kill predicate driven by its own fixture table, not merely "non-zero"), or the battery itself reds |
 
 Only a `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` key **two levels deep** inside
 `on:` — `on.<event>.paths` — is a filter. A workflow input may legitimately be *named* `paths` or
@@ -85,6 +85,12 @@ workflow run *more* often, which is the fail-safe direction.
   a comment justifying it and saying what verifies it instead.
 - A **branch that does not exist yet**, or a branch pattern: add it to `BRANCH_SKIP` in `run.sh`
   with a comment justifying it and saying what verifies it instead.
+- A **`moon` command line check 8 cannot know is harmless** (any `moon` line other than the one
+  guarding `T`, carrying a `;`/`|`/`&&`/`||` tail for its own legitimate reason): add it to
+  `SWALLOWED_SKIP` in `run.sh` with a comment justifying it and saying what verifies its own
+  failure instead. There is deliberately **no** equivalent hatch for `continued` — a
+  backslash-continued `moon` invocation is rejected outright, the same way `no-array` never skips;
+  put it back on one physical line.
 - **Anything worse**: drop `:actionlint` from `T=(…)` in `.github/workflows/ci.yml`. This must
   also be removed from the CLAUDE.md `ci-targets` block, since `repo:affected-smoke` asserts the
   two agree — **and** needs a `T_EXEMPT` entry in `ci/affected-graph/ci_targets.py` with a stated
@@ -117,11 +123,18 @@ The `T` floor reads a tracked file, so it is unaffected; check 5's branch half s
 half of the guard silently, with everything green. `ci/affected-graph/ci_targets.py`'s
 `RUN_SH_CALL_SITES` comment describes this accurately; keep the two consistent.
 
-**L7 — `COE_SKIP` is exact-text, not semantic.** An entry is keyed by both line number and the
-matched line's exact text (leading blanks included), so a later reformat of that one line — even
-whitespace-only — makes the entry stop matching. That is the fail-safe direction: the check fires
-again and asks for the entry to be updated, rather than silently continuing to skip a line whose
-content has since changed underneath it. `COE_SKIP` ships empty today.
+**L7 — `COE_SKIP` and `SWALLOWED_SKIP` are exact-text, not semantic.** Each entry is keyed by both
+line number and the matched line's exact text (leading blanks included), so a later reformat of
+that one line — even whitespace-only — makes the entry stop matching. That is the fail-safe
+direction: the check fires again and asks for the entry to be updated, rather than silently
+continuing to skip a line whose content has since changed underneath it. Both ship empty today.
+
+**L8 — `continued` cannot see past its own continuation.** A backslash-continued `moon` line is
+always rejected, whether or not a tail on a later physical line would actually have been a
+problem — this check reads one physical line at a time and does not reassemble a continuation
+before scanning it. Deliberate (SMA-542 fix-wave finding I2): guessing at what follows the backslash risks
+the exact misdiagnosis ("swallowed" when the tail wasn't there, or vice versa) this check exists to
+avoid, so it demands the invocation be rejoined onto one line instead.
 
 ## Cost
 
@@ -145,21 +158,24 @@ Without that filter it costs **~87s**. Alternating `moon run repo:actionlint --f
 Narrowing this task's inputs would not meaningfully help; do not do it without also revisiting
 `hasher.ignorePatterns`.
 
-**Standalone cost, since SMA-542.** Check 9's mutation battery — five mutants plus an unmutated
+**Standalone cost, since SMA-542.** Check 9's mutation battery — six mutants plus an unmutated
 control, each a full `--self-test` invocation, run concurrently, full-gate only — is the dominant
-addition; check 8's floor/swallowed/`continue-on-error` assertions are a handful of `grep`/`sed`
-passes over one workflow file and cost nothing worth measuring by comparison. Measured min-of-7
-(`ci/actionlint/run.sh`, bypassing Moon; `uptime` immediately before read load averages
-7.50/6.34/5.66 — this box runs other concurrent sessions and a mean can read several times
+addition; check 8's floor/`continued`/`swallowed`/`continue-on-error` assertions are a handful of
+`grep`/`sed` passes over one workflow file and cost nothing worth measuring by comparison. Measured
+min-of-7 (`ci/actionlint/run.sh`, bypassing Moon; `uptime` immediately before read load averages
+2.02/3.35/4.36 — this box runs other concurrent sessions and a mean can read several times
 inflated under a load spike, hence min-of-7 rather than a mean):
 
 | Invocation | Min-of-7 |
 |---|---|
-| `ci/actionlint/run.sh` (full gate, with the battery) | ~3.68s |
-| `ci/actionlint/run.sh --self-test` (five fixture tables, no battery) | ~1.25s |
+| `ci/actionlint/run.sh` (full gate, with the battery) | ~4.11s |
+| `ci/actionlint/run.sh --self-test` (six fixture tables, no battery) | ~1.26s |
 
-Before SMA-542 the full gate measured ~1.5s standalone and `--self-test` ~1.0s — the battery adds
-roughly 2s, essentially all of it the five concurrent `--self-test` subprocesses check 9 spawns.
+Before SMA-542 the full gate measured ~1.5s standalone and `--self-test` ~1.0s. SMA-542 itself
+(five self-tests, five-mutant battery) brought those to ~3.68s / ~1.25s. This fix wave added the
+sixth self-test (`kill_predicate_self_test`, closing spec T3) and checks 8's `continued` verdict,
+taking the mutant count to six (seven concurrent `--self-test` subprocesses, control included) —
+essentially all of the remaining increase.
 
 **Do not conclude `hasher.ignorePatterns` is inert from the log.** It does *not* silence the
 ~2000 `only files can be hashed` warnings about pnpm's symlinked store — those appear identically
@@ -173,10 +189,10 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"   # proto CLIs (moon, ac
                                                             # on a default shell PATH
 moon run repo:actionlint      # via Moon, as CI does
 ci/actionlint/run.sh          # directly, bypassing the Moon cache
-ci/actionlint/run.sh --self-test   # the five fixture tables only, for fast iteration
+ci/actionlint/run.sh --self-test   # the six fixture tables only, for fast iteration
 ```
 
-`--self-test` runs the five fixture tables and nothing else — check 9's mutation battery is
+`--self-test` runs the six fixture tables and nothing else — check 9's mutation battery is
 full-gate-only, which is what keeps `--self-test` the fast path and what makes the battery's own
 mutants (each internally invoked with `--self-test`) unable to recurse into a battery of their
 own.
