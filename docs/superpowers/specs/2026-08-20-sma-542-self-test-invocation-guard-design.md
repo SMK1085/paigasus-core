@@ -446,13 +446,16 @@ suppression spelling — an overclaim the adversarial review caught.
 SELF_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 …
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=5   # extractor, path-filter, branch-filter, config, ci-target-floor
+SELF_TEST_COUNT=6   # extractor, path-filter, branch-filter, config, ci-target-floor, kill-predicate
 ```
+
+(`SELF_TEST_COUNT` was 5 as originally shipped; the sixth entry, `kill-predicate`, was added by the
+fix wave below closing T3 — see §8.)
 
 **`assert_self_tests_ran <want>`** — compares and calls `fail()` on mismatch with a distinctive,
 greppable message (D10 matches on it) naming the likely cause and pointing at `run_self_tests`.
 
-**`run_self_tests`** — resets the counter, calls the five self-tests, asserts the total (D3),
+**`run_self_tests`** — resets the counter, calls the six self-tests, asserts the total (D3),
 asserts the definition count (D13), and resets `ORIGIN_REFS_LOADED=0`.
 
 That last line is not incidental. `branch_filter_self_test` deliberately poisons `ORIGIN_REFS` with
@@ -474,22 +477,30 @@ table at all (`run.sh:994-996` records that lesson):
 | `no-file` | `.github/workflows/ci.yml` does not exist |
 | `no-array` | zero, or more than one, single-line `T=(…)` |
 | `missing <entry>` | the array parsed; `<entry>` is not among its tokens |
+| `continued <lineno>` | a `moon` command line is continued onto another physical line (fix wave, §8, I2) |
 | `swallowed <lineno>` | a `moon` command line carries a `\|\|`, `&&`, `;` or `\|` tail (D14) |
+| `continue-on-error <lineno>` | a step's `continue-on-error:` value is not literally `false` |
 
 `no-file` is distinct from `no-array` so the remediation text is not the misleading *"keep `T` on
 one line"* when the real problem is a renamed workflow. `no-array` is a failure, never a skip — a
 `T` array reformatted across lines is exactly the condition under which this check would otherwise
-stop asserting anything.
+stop asserting anything. `continued` is the same shape: never a skip, and checked *before*
+`swallowed` on the same matched line, because a wrapped invocation hides any real tail from the
+line-at-a-time scan below it — reporting `swallowed` there would name a problem this check cannot
+actually confirm (fix wave I2, §8).
 
 The array regex is anchored `^[ \t]*T=\((.*?)\)[ \t]*$`, mirroring `T_ARRAY_RE`
 (`ci_targets.py:66`) rather than a bare `T=(` (which would also match `EXPECT=(`). Membership
 compares **whole whitespace-separated tokens**, since `:affected-smoke` is a prefix of a
 hypothetical `:affected-smoke-disabled`.
 
-**`ci_target_floor_self_test`** — the fifth self-test. Fixture table with control pairs: an array
-containing `:affected-smoke` yields no verdict; one without it yields `missing :affected-smoke`;
-a text with no `T=(` line and one with two both yield `no-array`; a missing path yields `no-file`;
-a `moon ci "${T[@]}" … || true` line yields `swallowed`, and the real three-line form does not.
+**`ci_target_floor_self_test`** — the fifth self-test as originally shipped. Fixture table with
+control pairs: an array containing `:affected-smoke` yields no verdict; one without it yields
+`missing :affected-smoke`; a text with no `T=(` line and one with two both yield `no-array`; a
+missing path yields `no-file`; a backslash-continued `moon` invocation yields `continued <lineno>`
+and is not misread as `swallowed` (fix wave I2); a `moon ci "${T[@]}" … || true` line on ONE
+physical line yields `swallowed`, and the real if/elif/else form (three separate single-line `moon`
+invocations, matching `ci.yml`) does not.
 
 **Check 8 (production call site)** — runs `ci_target_floor_verdict` against the real
 `.github/workflows/ci.yml` and converts each verdict into a `fail()` with remediation text.
@@ -500,33 +511,57 @@ T_FLOOR=(':affected-smoke')
 
 with the comment recording D8 — why `:actionlint` is deliberately absent.
 
-**`selftest_mutation_battery` (check 9)** — per D5/D6/D10/D11/D12. Validate all five preconditions,
-then spawn five mutants plus the unmutated control concurrently, collect by PID, and require
-`rc == 1` with the counter's message for each mutant and `rc == 0` for the control.
+**`SWALLOWED_SKIP`** (fix wave, §8, M6) — a `COE_SKIP`-shaped escape hatch, keyed the identical
+`"<lineno>:<exact text>"` way, for a `moon` line `swallowed` cannot know is harmless (a diagnostic
+pipe in an unrelated job, say). `continued` deliberately has no equivalent hatch — see the verdict
+table note above.
 
-**`usage()`** — `--self-test` still runs the fixture tables only; the count changes from four to
-five. The mutation battery is explicitly *not* part of it.
+**`mutant_is_killed <rc> <outfile>`** (fix wave, §8, M3 / spec T3) — the kill predicate, extracted
+out of `selftest_mutation_battery`'s collection loop so `kill_predicate_self_test` (the sixth
+self-test) can drive it directly against synthetic `(rc, output)` pairs: rc 1 with the counter's
+message is a kill; rc 2/126/127, and rc 1 without the message, are not.
+
+**`selftest_mutation_battery` (check 9)** — per D5/D6/D10/D11/D12. Validate all six preconditions,
+then spawn six mutants plus the unmutated control concurrently, collect by PID, and require
+`rc == 1` with the counter's message for each mutant and `rc == 0` for the control — via
+`mutant_is_killed`, not an inline comparison, since the fix wave.
+
+**`usage()`** — `--self-test` still runs the fixture tables only; the count changes from four
+(originally) to five (as shipped) to six (fix wave). The mutation battery is explicitly *not* part
+of it.
 
 **Comment at `run.sh:1186-1191`** — updated for D2's reordering, which makes its stated lazy-canary
 property false.
 
 ### `ci/affected-graph/ci_targets.py`
 
-New constant, whole-line matched per §2.4:
+New constant, whole-line matched per §2.4. Originally two entries; the fix wave (§8, I1) added a
+third, `done < <(ci_target_floor_verdict .github/workflows/ci.yml)` — check 8's own production call
+site, which the reviewer found deletable with the full gate still exiting 0 and this check still
+reporting PASS:
 
 ```python
-ACTIONLINT_SH_CALL_SITES = ("run_self_tests", "selftest_mutation_battery")
+ACTIONLINT_SH_CALL_SITES = (
+    "run_self_tests",
+    "selftest_mutation_battery",
+    "done < <(ci_target_floor_verdict .github/workflows/ci.yml)",
+)
 ```
 
 `run_self_tests` is a strict substring of its own definition line `run_self_tests() {`, which is
 the `SELF_SCHEDULED_GATES` trap verbatim — a substring test would survive deleting the call.
-Whole-line matching distinguishes them.
+Whole-line matching distinguishes them. The third entry has the identical property against
+`ci_target_floor_verdict`'s own self-test call sites (`ci_target_floor_verdict "$tmp"` /
+`ci_target_floor_verdict /nonexistent/ci.yml`) — neither is the whole `done < <(...)` line, so
+whole-line matching keeps them apart too.
 
 A comment records the **propagation contract**, which differs from `RUN_SH_CALL_SITES` and would
-otherwise read as the hole §2.4 just closed: these entries carry no `|| RC=1` suffix because
-propagation is through the global `FAILED`, as it already is for the four existing self-tests
-(`run.sh:29-32`). It also notes the consequence — a future `run_self_tests || FAILED=1` would red
-C4 (see §6 L3).
+otherwise read as the hole §2.4 just closed: `run_self_tests` and `selftest_mutation_battery` carry
+no `|| RC=1` suffix because propagation is through the global `FAILED`, as it already is for the
+self-tests (`run.sh:29-32`); the `done < <(...)` entry has nothing to propagate at all — it is the
+tail of a `while` loop whose body already calls `fail()` per verdict. It also notes the
+consequence — a future reformat of any of the three lines would red C4 even though harmless (see §6
+L3).
 
 `check_self_invocation` gains a **required third positional parameter** for
 `ci/actionlint/run.sh`'s text, checked against its own required set rather than a shared haystack.
@@ -538,9 +573,9 @@ re-creates the hole being fixed.
 mistake) rather than aborting the whole guard with rc 2.
 
 The `--self-test` block gains synthetic-mutation cases in the established `wired.replace(...)`
-style: a wired tree must not fire; deleting each of the two lines must fire; a tree retaining only
-the definition `run_self_tests() {` must fire; and **both swap directions** must fire — an
-actionlint call site in the affected-graph text, and vice versa.
+style: a wired tree must not fire; deleting each of the (now three) lines must fire; a tree
+retaining only the definition `run_self_tests() {` must fire; and **both swap directions** must
+fire — an actionlint call site in the affected-graph text, and vice versa.
 
 The `RUN_SH_CALL_SITES` comment naming SMA-542 as the general fix for its residual is updated to
 say what shipped. The failure message extends the existing *"restore the exact line; see
@@ -568,24 +603,28 @@ a change there must re-key it, and `repo:actionlint`'s own `**/*` cannot green a
 
 | # | Assertion | How |
 |---|---|---|
-| T1 | Each of the five invocations, deleted, reds the gate | Check 9, standing, in CI |
+| T1 | Each of the six invocations, deleted, reds the gate | Check 9, standing, in CI |
 | T2 | An unmutated tree exits 0 | Check 9's control (D6) |
-| T3 | A mutant dying at rc 2 is not scored as killed | `--self-test` fixture over the kill predicate (D10) |
+| T3 | A mutant dying at rc 2 (or 126/127, or rc 1 without the message) is not scored as killed | Implemented (fix wave, §8, M3): `kill_predicate_self_test`, the sixth self-test, drives `mutant_is_killed` directly against synthetic `(rc, output)` pairs — `--self-test`, standing |
 | T4 | `assert_self_tests_ran` deleted → all mutants survive → red | Manual mutation, recorded in the PR |
-| T5 | `run_self_tests` / `selftest_mutation_battery` call deleted → C4 reds | `ci_targets.py --self-test`, standing |
+| T5 | `run_self_tests` / `selftest_mutation_battery` / the check-8 production call site (fix wave, I1) call deleted → C4 reds | `ci_targets.py --self-test`, standing |
 | T6 | `run_self_tests() {` definition alone does not satisfy C4 | `ci_targets.py --self-test`, standing |
 | T7 | A call site in the wrong file does not satisfy C4 (both directions) | `ci_targets.py --self-test`, standing |
-| T8 | An unwired sixth self-test reds | `--self-test` fixture over the definition count (D13) |
+| T8 | An unwired seventh self-test reds | `--self-test` fixture over the definition count (D13) |
 | T9 | `:affected-smoke` removed from `T` → check 8 reds | `ci_target_floor_self_test`, standing; plus one manual edit of the real `ci.yml` |
 | T10 | `T` reformatted across lines → `no-array`; `ci.yml` renamed → `no-file` | `ci_target_floor_self_test`, standing |
-| T11 | `\|\| true` on the `moon ci` line → `swallowed` | `ci_target_floor_self_test`, standing (D14) |
+| T11 | `\|\| true` on a single-line `moon ci` invocation → `swallowed` | `ci_target_floor_self_test`, standing (D14) |
 | T12 | `:actionlint` removed from `T` → C1 reds | Manual, confirms §2.3's premise on the real file |
-| T13 | Deleting the two call-site lines schedules `repo:affected-smoke` | `moon query tasks --affected` after the `moon.yml` change (§2.6) |
+| T13 | Deleting the three call-site lines (fix wave: was two) schedules `repo:affected-smoke` | `moon query tasks --affected` after the `moon.yml` change (§2.6) |
 | T14 | AC-2's extraction table unchanged | Direct comparison against §2.5 |
 | T15 | Full graph green | `moon ci …` per CLAUDE.md's marker block |
+| T16 | A backslash-continued `moon` invocation → `continued <lineno>`, never `swallowed`; the real unwrapped if/elif/else form does not fire | Added (fix wave, §8, I2): `ci_target_floor_self_test`, standing; plus one manual reproduction of the reviewer's exact scenario against a temp copy of the real `ci.yml` |
+| T17 | `SWALLOWED_SKIP` silences an exact lineno+text match, does not leak to a different line, and a stale (lineno-only) match does not silence | Added (fix wave, §8, M6): `ci_target_floor_self_test`, standing, mirroring `COE_SKIP`'s three-row shape |
+| T18 | Deleting the check-8 production call site (`done < <(ci_target_floor_verdict …)`) → full gate rc 0 and `ci_targets.py` PASS before the fix; `ci_targets.py` reports it after | Added (fix wave, §8, I1): manual deletion of the real block, confirmed red, restored |
 
-T4, T9 and T12 are one-off manual mutations by construction — they mutate the very mechanisms the
-standing controls run through. Their results go in the PR body.
+T4, T9, T12, T16 and T18 are one-off manual mutations by construction — they mutate the very
+mechanisms the standing controls run through, or (T16/T18) reproduce a reviewer finding directly on
+the real files. Their results go in the PR body / fix-wave report.
 
 **Cost ceiling (adversarial review, QUESTION) — SUPERSEDED during implementation (§8).** The
 original ceiling required the full gate to stay **under 2× its current ~1.5s standalone** — i.e.
@@ -601,6 +640,12 @@ mutant costs a fraction of a second, not a whole extra invocation. Moon's own pe
 this repo is ~9–11s regardless of what a task does, so the gate — even at ~3.36s standalone — is
 nowhere near the critical path. `ci/actionlint/README.md`'s cost table carries the current
 measured figures for both the full gate and `--self-test`.
+
+**Further superseded by the fix wave (§8).** T3's implementation added a sixth self-test, and I2
+added the `continued` check, taking the battery to six mutants (seven concurrent `--self-test`
+subprocesses including the control). Standalone cost is now ~4.11s full gate / ~1.26s `--self-test`
+(min-of-7). Still nowhere near Moon's ~9–11s per-task floor, so the conclusion is unchanged —
+`ci/actionlint/README.md`'s cost table carries the current figures.
 
 ## 6. Limitations
 
@@ -689,3 +734,87 @@ been updated in place rather than left to silently drift from what shipped:
   sites, but not the reverse: `repo:actionlint` pins only `:affected-smoke`'s scheduling, not
   `repo:affected-smoke`'s own internal correctness) — which is the more important limitation this
   work leaves standing.
+
+## 9. Changelog — fix wave (2026-08-20)
+
+A final whole-branch code review, run before this branch was proposed for merge, found two
+Important-severity findings (labelled I1/I2 in this section — **distinct** from the earlier
+task-4b-review I1/I2 labels inside `run.sh`'s `continue-on-error` comments, and from the
+cycle-asymmetry "review finding I2" cited in §6's L6, both of which predate this pass) and six
+Minor findings (M3-M8). All eight were fixed in this wave; none were pushed back on.
+
+**I1 — check 8's own production call site was unpinned.** The reviewer deleted the
+`while IFS= read -r verdict … done < <(ci_target_floor_verdict .github/workflows/ci.yml)` block
+from `run.sh` and measured: full gate rc 0, `ci_targets.py` PASS — check 8's entire T-floor/
+`swallowed`/`continue-on-error` machinery asserted nothing, with `ACTIONLINT_SH_CALL_SITES`
+pinning only `run_self_tests` and `selftest_mutation_battery`. This was the branch's own defect
+class (an unpinned, deletable assertion) applied to the check the branch had just added. Fixed by
+adding the block's distinctive final line, `done < <(ci_target_floor_verdict
+.github/workflows/ci.yml)`, as a third `ACTIONLINT_SH_CALL_SITES` entry (whole-line matched, per
+§4/§2.4), with a matching line in the `wired_actionlint` self-test fixture and a new deletion case
+(`no_floor_call`) in `ci_targets.py --self-test`. Verified by reproducing the reviewer's exact
+deletion, confirming `ci_targets.py` now reports the missing site, and restoring the file.
+
+**I2 — `swallowed` read only the first physical line of a `moon` invocation.** A backslash-
+continued invocation —
+```
+moon ci "${T[@]}" \
+  --base origin/main \
+  --include-relations || true
+```
+— hid its own `|| true` tail from `ci_target_floor_verdict`'s line-at-a-time scan, returning an
+EMPTY verdict (measured) and silencing every gate in `T` while `T` itself stayed correct. Fixed
+with a new `continued <lineno>` verdict, checked *before* `swallowed` on the same matched line: a
+`moon`-prefixed line ending in a literal backslash is rejected outright, with remediation text
+demanding the invocation be rejoined onto one physical line — mirroring `no-array`'s stance on `T`
+itself — rather than misdiagnosing it as `swallowed`. Fixture rows added in both directions:
+the reviewer's continued form fires `continued <lineno>`; the real if/elif/else form (three
+separate single-line `moon` invocations, matching `ci.yml`'s actual shape) does not.
+
+**M3 — T3 (the kill-predicate standing proof) was unimplemented.** The kill decision was inline in
+check 9's mutant-collection loop, so nothing proved rc 2/126/127 (or rc 1 without the counter's
+message) is never scored as a kill — a gap in a file that cites SMA-466's all-firing-fixture lesson
+four times. Implemented, not struck: the decision was extracted into `mutant_is_killed <rc>
+<outfile>`, and a **sixth self-test**, `kill_predicate_self_test`, drives it directly against six
+synthetic `(rc, output)` pairs (both directions). This is the one finding whose fix changes
+`SELF_TEST_COUNT` (5 → 6) — every place that counts self-tests was updated in lockstep: `run.sh`'s
+own comment, `usage()`, `README.md`'s check table and "Running it" section, `moon.yml`'s cost
+comment, and this spec's §4 components, §5 testing table (T1/T3/T8/T13), and cost-ceiling addendum.
+Check 9's battery grew from five mutants to six (seven concurrent `--self-test` subprocesses
+including the control); standalone cost moved from ~3.68s/~1.25s (as originally shipped) to
+~4.11s/~1.26s (min-of-7, this fix wave) — see `ci/actionlint/README.md`'s cost table.
+
+**M4 — the `actionlint:` task comment in `moon.yml` was stale in four ways**, and
+`run.sh:1206`'s "~1.5s" claim was stale in a fifth: the fixture-table count ("four" → six, having
+missed the ci-target floor even before M3), the standalone timing (~1.0s → the current measured
+figure), the `git ls-files` multiplication (now by seven concurrent `--self-test` subprocesses, not
+six), and the `description:` field (still crediting only SMA-525/SMA-540). All five corrected;
+`description:` now names SMA-542 and the self-test/mutation-battery guarantee.
+
+**M5 — `arrays` (the `T=(…)` match count) was not numerically validated**, unlike the `defs` and
+`n` counters hardened earlier in the branch. An empty `grep -c` result would have made `[ "$arrays"
+-ne 1 ]` exit 2 under `set -uo pipefail`'s no-`set -e`, silently skipping the `no-array` report.
+Fixed with the identical `case "$arrays" in ''|*[!0-9]*) …` guard already used for `defs`/`n`.
+
+**M6 — `swallowed` had no escape hatch**, unlike `continue-on-error` (which has `COE_SKIP`). Fixed
+by adding `SWALLOWED_SKIP`, a `COE_SKIP`-shaped list keyed the identical `"<lineno>:<exact text>"`
+way, for a `moon` line this syntactic, file-wide check cannot know is harmless. Chosen over
+rewording the failure text alone because an escape hatch, not just better prose, is what a future
+legitimate case (a diagnostic `moon run x | tee log` in an unrelated job) will actually need — and
+`COE_SKIP` already established the drift-proof keying convention this reuses verbatim. `continued`
+deliberately gets **no** equivalent hatch: unlike a harmless pipe, a wrapped invocation has no
+legitimate form this check can recognise, so it is rejected outright, like `no-array`.
+
+**M7 — four cross-file line/text citations into `run.sh` had gone stale** as earlier SMA-542 work
+reorganised the file (`task_inputs.py:59,118,130`, `ci_targets.py:654`). Re-anchored to the
+current lines and verified each quoted string appears there (see the PR/report for the exact
+before/after line numbers, which continued to shift as this fix wave's own edits landed).
+
+**M8 — the self-test definition-count regex (`run.sh`'s D13 check) was style-brittle**, missing
+`sixth_self_test () {` (space before the parens) and the `function name {` keyword form — either
+of which would leave a real table both unwired AND uncounted, reopening the hole D13 exists to
+close. Fixed by broadening the regex to
+`^(function[[:blank:]]+)?[a-z_]+_self_test([[:blank:]]*\(\))?[[:blank:]]*\{`, covering both
+spacing variants and the `function` keyword form (with or without explicit `()`), verified against
+synthetic examples of each. The one residual — a definition split across lines
+(`name()\n{`) — is accepted and noted in a comment; this file uses no such style today.
