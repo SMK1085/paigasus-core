@@ -10,6 +10,15 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-20-sma-558-private-ca-oidc-issuer-design.md`
 
+> **Corrected during implementation.** Wherever this plan says a self-signed **leaf** certificate
+> is not supported and still requires `accept_invalid_tls` (Task 3's doc comment, Task 6's runbook
+> and `iam.toml.example` text, and the CLAUDE.md gotcha), that claim is **false** and was not
+> shipped. It over-read rustls-webpki's `anchor_from_trusted_cert` note: rustls applies no `cA`
+> check to a trust anchor, so a self-signed leaf placed in `extra_ca_bundle_path` verifies. Proven
+> empirically and locked in by `tests/authn_private_ca.rs::self_signed_leaf_in_the_bundle_also_validates`.
+> The shipped docs say the opposite of this plan. Left in place rather than rewritten, because a
+> dated plan is a record of what was intended, not of what is true.
+
 ## Global Constraints
 
 - Every source file opens with `// SPDX-License-Identifier: Apache-2.0`.
