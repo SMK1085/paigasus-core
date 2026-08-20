@@ -810,6 +810,11 @@ In `rs/crates/services/paigasus-gateway/Cargo.toml`, in the existing `[dev-depen
 # Writes throwaway CA-bundle fixtures for `adapters::openai::client`'s trust-anchor tests
 # (SMA-558) — the same dev-dep paigasus-iam already carries for its own fixtures.
 tempfile = "3"
+# Mints those fixtures' CA certificate at RUNTIME rather than committing a PEM blob, matching
+# the convention paigasus-iam records in tests/support/mod.rs ("no committed PEM/JWK fixtures").
+# Only the cert minter — deliberately NOT axum-server, since no gateway test starts a TLS
+# listener (SMA-558 D6).
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
 ```
 
 - [ ] **Step 2: Write the failing tests**
@@ -851,9 +856,7 @@ Then add the four tests:
 
     #[test]
     fn valid_ca_bundle_builds_the_client() {
-        // A real, self-contained CA certificate. Parsing does not check expiry, so a fixed
-        // fixture cannot rot.
-        let f = tmp_file_with(TEST_CA_PEM.as_bytes());
+        let f = tmp_file_with(test_ca_pem().as_bytes());
         client_with_bundle("sk-x", Some(f.path().to_str().unwrap().to_string())).expect("a valid bundle must build");
     }
 
@@ -883,20 +886,22 @@ Then add the four tests:
     }
 ```
 
-For `TEST_CA_PEM`, generate a real CA certificate once and paste it as a `const` in the test module. Produce it with:
-
-```bash
-openssl req -x509 -newkey rsa:2048 -keyout /dev/null -nodes \
-  -subj "/CN=paigasus-gateway-test-ca" -days 36500 2>/dev/null
-```
-
-Declare it as:
+`test_ca_pem()` mints the certificate at runtime rather than committing a PEM blob — matching the
+convention `paigasus-iam/tests/support/mod.rs` records on `es256_keypair` ("no committed PEM/JWK
+fixtures"). Add it to the same test module:
 
 ```rust
-    /// A throwaway CA certificate, used ONLY to prove the bundle path parses and reaches the
-    /// builder. Never trusted by anything real. Parsing does not verify expiry, so this does not
-    /// rot; it was minted with a 100-year validity regardless.
-    const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\n…paste…\n-----END CERTIFICATE-----\n";
+    /// A throwaway CA certificate, minted fresh per test run. Used ONLY to prove the bundle path
+    /// parses and reaches the builder — nothing here is ever trusted by a real handshake, and no
+    /// gateway test starts a TLS listener (SMA-558 D6). Minted rather than committed so there is
+    /// no fixture to rot, and none for a future reader to mistake for a real trust anchor.
+    fn test_ca_pem() -> String {
+        let mut params = rcgen::CertificateParams::new(Vec::new()).expect("ca params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.distinguished_name.push(rcgen::DnType::CommonName, "paigasus-gateway-test-ca");
+        let key = rcgen::KeyPair::generate().expect("ca keypair");
+        params.self_signed(&key).expect("self-signed ca").pem()
+    }
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
