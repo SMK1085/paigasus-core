@@ -215,28 +215,43 @@ SELF_SCHEDULED_GATES = {
     ),
 }
 
-# C4, actionlint half (SMA-542). repo:actionlint's self-tests and mutation battery are invoked from
-# ONE call site each inside ci/actionlint/run.sh. That script cannot assert its own invocation —
-# deleting the calls was the sole survivor of SMA-525's mutation battery — so the assertion lives
-# here, in a gate scheduled independently of it. The reverse direction is check 8 in that same
-# script, which asserts `:affected-smoke` is still in `T`: neither gate is the sole judge of its
-# own scheduling.
+# C4, actionlint half (SMA-542). repo:actionlint's self-tests, mutation battery, and the check-8
+# production call site are each invoked from ONE call site inside ci/actionlint/run.sh. That
+# script cannot assert its own invocation — deleting the self-test calls was the sole survivor of
+# SMA-525's mutation battery, and deleting the check-8 call site was fix-wave finding I1 on the
+# very check this issue added — so the assertion lives here, in a gate scheduled independently of
+# it. The reverse direction is check 8 in that same script, which asserts `:affected-smoke` is
+# still in `T`: neither gate is the sole judge of its own scheduling.
 #
 # REACHABILITY IS NOT AUTOMATIC. This check only runs when repo:affected-smoke is scheduled, so
-# moon.yml lists `ci/actionlint/**/*` among its inputs. Without that entry a PR deleting these two
+# moon.yml lists `ci/actionlint/**/*` among its inputs. Without that entry a PR deleting these
 # lines would not schedule this task at all, while repo:actionlint (inputs: ['**/*']) still ran and
 # asserted nothing — the exact defect this closes. Do not remove that input.
 #
 # Matched as WHOLE STRIPPED LINES, like SELF_SCHEDULED_GATES and unlike RUN_SH_CALL_SITES:
 # `run_self_tests` is a strict substring of its own definition line `run_self_tests() {`, so a
-# substring test would report the file as wired after the call had been deleted.
+# substring test would report the file as wired after the call had been deleted. The third entry,
+# the `done < <(...)` line closing check 8's production `while` loop, is unambiguous the same way:
+# `ci_target_floor_verdict` is also invoked from inside the self-test fixtures
+# (`ci_target_floor_verdict "$tmp"` / `ci_target_floor_verdict /nonexistent/ci.yml`), but neither of
+# those is the whole `done < <(ci_target_floor_verdict .github/workflows/ci.yml)` line, so a
+# whole-line match cannot confuse them (SMA-542 fix-wave finding I1, distinct from the
+# cycle-asymmetry "review finding I2" cited above — the reviewer deleted this exact block and
+# measured: full gate rc 0, this gate PASS, with T_FLOOR/swallowed/continue-on-error asserting
+# nothing until this entry closed it).
 #
 # PROPAGATION CONTRACT — these entries carry no `|| RC=1` suffix, and that is not the hole
-# RUN_SH_CALL_SITES' suffixes close. Both functions report through run.sh's global `FAILED`, as its
-# five self-tests already do (run.sh:42-45), so there is no status to propagate at the call site.
-# The consequence is that a future `run_self_tests || FAILED=1` would red this check even though it
-# is harmless; restore the bare line, or update this constant.
-ACTIONLINT_SH_CALL_SITES = ("run_self_tests", "selftest_mutation_battery")
+# RUN_SH_CALL_SITES' suffixes close. `run_self_tests` and `selftest_mutation_battery` report through
+# run.sh's global `FAILED`, as its six self-tests already do (run.sh:42-45); the `done < <(...)`
+# line has nothing to propagate at all — it is the tail of a `while` loop whose body already calls
+# `fail()` per verdict. The consequence is that a future `run_self_tests || FAILED=1` (or an
+# equally harmless reformat of the `done < <(...)` line) would red this check even though it is
+# harmless; restore the bare line, or update this constant.
+ACTIONLINT_SH_CALL_SITES = (
+    "run_self_tests",
+    "selftest_mutation_battery",
+    "done < <(ci_target_floor_verdict .github/workflows/ci.yml)",
+)
 
 
 def read_input(path, label):
@@ -651,7 +666,7 @@ def self_test():
     Drives the PARSERS as well as the checks. The parsers are the component this gate cannot
     self-detect a fault in — a total match failure hits the rc-1 path, but a PARTIAL mis-parse is
     silent — and hand-rolled text extraction "is exactly the kind of thing that silently does the
-    wrong thing" (ci/actionlint/run.sh:265, which backs that claim with ~35 extractor fixtures).
+    wrong thing" (ci/actionlint/run.sh:284, which backs that claim with ~35 extractor fixtures).
     """
     failures = []
 
@@ -991,6 +1006,11 @@ def self_test():
         "run_self_tests() {\n  :\n}\n"
         "run_self_tests\n"
         "selftest_mutation_battery\n"
+        # Check 8's production call site (SMA-542 fix-wave I1). Also contains `ci_target_floor_verdict`
+        # as a substring — the self-test fixtures call it too, as `ci_target_floor_verdict "$tmp"`
+        # and `ci_target_floor_verdict /nonexistent/ci.yml` — so this MUST be whole-line matched,
+        # exactly like the two entries above.
+        "done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n"
     )
     if check_self_invocation(wired, scripts, wired_actionlint):
         failures.append(
@@ -1045,6 +1065,16 @@ def self_test():
     no_battery = wired_actionlint.replace("selftest_mutation_battery\n", "")
     if not check_self_invocation(wired, scripts, no_battery):
         failures.append("check_self_invocation: missed a deleted mutation-battery call")
+    # SMA-542 fix-wave I1 — the reviewer deleted this exact block from run.sh and measured: full
+    # gate rc 0, this gate PASS, with check 8's T floor/swallowed/continue-on-error verdicts
+    # asserting nothing until the third ACTIONLINT_SH_CALL_SITES entry closed it.
+    no_floor_call = wired_actionlint.replace(
+        "done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n", ""
+    )
+    if not check_self_invocation(wired, scripts, no_floor_call):
+        failures.append(
+            "check_self_invocation: missed a deleted check-8 production call site (fix-wave I1)"
+        )
     # Contamination cases, THREE of them (SMA-542 review finding I1, plus a round-2 addition). The
     # obvious "swap the two texts wholesale" version tried first passed unconditionally, because it
     # only proves the required site is ABSENT from the wrong haystack — never exercising whether
