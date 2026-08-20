@@ -25,7 +25,7 @@ set -uo pipefail
 # Absolute path to THIS file, captured BEFORE the cd below. `$0` is not usable after it: invoked
 # as `cd ci/actionlint && ./run.sh`, `$0` is './run.sh', which stops resolving the moment we move
 # to the repo root. Check 9 copies this file, and run_self_tests greps it (SMA-542 D11).
-SELF_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+SELF_SRC="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 cd "$(git rev-parse --show-toplevel)" || exit 2
 
@@ -1652,8 +1652,10 @@ run_self_tests() {
   # wired up, because the count would still match. Asserting the DEFINITION count closes that —
   # adding a table without calling it reds, and so does deleting one without decrementing
   # SELF_TEST_COUNT. Adding a table is the highest-probability future edit here (SMA-542 D13).
-  [ -r "$SELF_SRC" ] || infra "cannot read \$SELF_SRC ($SELF_SRC) to count self-test definitions"
+  [ -f "$SELF_SRC" ] && [ -r "$SELF_SRC" ] \
+    || infra "cannot read \$SELF_SRC ($SELF_SRC) to count self-test definitions"
   defs="$(grep -cE '^[a-z_]+_self_test\(\) \{' "$SELF_SRC")"
+  case "$defs" in ''|*[!0-9]*) infra "could not count self-test definitions in $SELF_SRC" ;; esac
   if [ "$defs" -ne "$SELF_TEST_COUNT" ]; then
     fail "self-test definitions: $defs '*_self_test' functions are defined but SELF_TEST_COUNT is
       $SELF_TEST_COUNT. A fixture table that is not called from run_self_tests guards nothing.
@@ -1667,6 +1669,105 @@ run_self_tests() {
   # turn every real branches: entry into a false 'unresolved' or an infra exit. Resetting here
   # makes checks 5/6 independent of that fixture's bookkeeping rather than trusting it.
   ORIGIN_REFS_LOADED=0
+}
+
+# ---------------------------------------------------------------------------------------------
+# Check 9 — prove the counter actually fires, by mutation rather than assertion.
+#
+# SMA-525's F4: a one-off mutation battery is not a standing control. So the battery runs in CI.
+#
+# NO RECURSION, BY CONSTRUCTION: mutants are invoked with --self-test, which exits before this
+# function is reached. That is why nothing here needs a bypass env var (which would be a live
+# switch for turning the gate off) and why each mutant deletes exactly ONE line (SMA-542 D5).
+#
+# The invocation list is DERIVED from run_self_tests' own body, not hardcoded: adding a table
+# extends the battery automatically, and a mismatch against SELF_TEST_COUNT reds.
+# ---------------------------------------------------------------------------------------------
+selftest_mutation_battery() {
+  local dir lines line n removed mutant rc i label
+  local pids='' labels=''
+
+  [ -f "$SELF_SRC" ] && [ -r "$SELF_SRC" ] || infra "check 9: cannot read \$SELF_SRC ($SELF_SRC)"
+
+  lines="$(awk '
+    /^run_self_tests\(\) \{$/ { inside = 1; next }
+    inside && /^\}$/          { exit }
+    inside && /^  [a-z_]+_self_test$/ { print $1 }
+  ' "$SELF_SRC")"
+  n="$(printf '%s\n' "$lines" | grep -c '[^[:space:]]')"
+  case "$n" in ''|*[!0-9]*) infra "check 9: could not count self-test invocations in $SELF_SRC" ;; esac
+  if [ "$n" -ne "$SELF_TEST_COUNT" ]; then
+    fail "check 9: found $n self-test invocations inside run_self_tests, expected
+      \$SELF_TEST_COUNT=$SELF_TEST_COUNT. Either a call is missing or the count is stale."
+    return
+  fi
+
+  dir="$(mktemp -d)" || infra "check 9: mktemp -d failed"
+  # Expanded at trap-SET time (double quotes), because $dir is local and would be out of scope by
+  # the time an EXIT trap fired.
+  trap "rm -rf '$dir'" EXIT
+
+  # EVERY precondition is validated BEFORE any subprocess is created. A sed that matched nothing
+  # would otherwise produce a mutant byte-identical to the original, which exits 0 and reads as a
+  # survivor — an accurate red for a completely misleading reason.
+  for line in $lines; do
+    sed "/^  ${line}\$/d" "$SELF_SRC" > "$dir/$line.sh" \
+      || infra "check 9: sed failed while mutating '$line'"
+    removed=$(( $(wc -l < "$SELF_SRC") - $(wc -l < "$dir/$line.sh") ))
+    if [ "$removed" -ne 1 ]; then
+      fail "check 9: mutating '$line' removed $removed lines, expected exactly 1. The invocation
+        inside run_self_tests is not on a line of its own, or is duplicated. Check 9 cannot build a
+        meaningful mutant until it is."
+      return
+    fi
+  done
+
+  # Spawned concurrently: six sequential --self-test runs would roughly quadruple this gate's
+  # standalone cost, and they are independent. Collected by PID, so results do not depend on
+  # completion order (SMA-542 D12).
+  for line in $lines; do
+    bash "$dir/$line.sh" --self-test > "$dir/$line.out" 2>&1 &
+    pids="$pids $!"
+    labels="$labels $line"
+  done
+  # The control (D6): the REAL file, unmutated, which must exit 0. Five mutants that all fire
+  # cannot tell a working battery from a stuck one (SMA-466). This proves the harness itself —
+  # the bash invocation, the cwd, the argument passing — yields 0 on a healthy tree.
+  bash "$SELF_SRC" --self-test > "$dir/__control__.out" 2>&1 &
+  pids="$pids $!"
+  labels="$labels __control__"
+
+  i=0
+  set -- $labels
+  for pid in $pids; do
+    i=$((i + 1))
+    eval "label=\${$i}"
+    wait "$pid"
+    rc=$?
+    if [ "$label" = '__control__' ]; then
+      if [ "$rc" -ne 0 ]; then
+        fail "check 9: the unmutated control exited $rc, expected 0. The battery's own harness is
+      broken, so its five dead mutants prove nothing. Output follows."
+        sed 's/^/      check 9 [control]: /' "$dir/__control__.out" >&2
+      fi
+      continue
+    fi
+    # A KILL is rc 1 carrying the counter's own message — not merely "non-zero". infra() exits 2,
+    # a missing file exits 127, and branch_filter_self_test's own precondition exits 2; scoring any
+    # of those as a kill would let a transient fault stand in for the proof (SMA-542 D10).
+    if [ "$rc" -eq 1 ] && grep -q 'self-test counter:' "$dir/$label.out"; then
+      continue
+    fi
+    if [ "$rc" -eq 2 ]; then
+      fail "check 9: mutant '$label' aborted with an infrastructure error (rc 2) before reaching
+      the counter, so it proves nothing. Output follows."
+    else
+      fail "check 9: mutant '$label' exited $rc without the counter's message. Deleting that
+      invocation did NOT red the gate — assert_self_tests_ran is missing or neutered, which is
+      exactly the silent pass SMA-542 exists to prevent. Output follows."
+    fi
+    sed "s/^/      check 9 [mutant $label]: /" "$dir/$label.out" >&2
+  done
 }
 
 SELF_TEST_ONLY=0
@@ -1934,6 +2035,11 @@ done
 # ---------------------------------------------------------------------------------------------
 # Check 7 ran near the top, from run_self_tests — see the comment at its call site for why the
 # controls precede the checks they guard.
+#
+# Check 9 runs HERE, and only here: it is deliberately NOT part of --self-test. That is what makes
+# recursion structurally impossible (mutants are invoked with --self-test and exit before reaching
+# it), and it keeps --self-test the fast iteration path README.md advertises.
 # ---------------------------------------------------------------------------------------------
+selftest_mutation_battery
 
 exit "$FAILED"
