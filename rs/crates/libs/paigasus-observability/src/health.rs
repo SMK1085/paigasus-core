@@ -62,7 +62,18 @@ where
     Ok(Mode::Healthcheck { path })
 }
 
-/// Probe `path` on `addr` over plaintext HTTP/1.1, within a TOTAL `deadline`.
+/// Probe `path` on `addr` over plaintext HTTP/1.1, budgeted by `deadline`.
+///
+/// `deadline` is spent down across connect, write and read: each call to `remaining()` derives
+/// that step's timeout from whatever budget is left, via `connect_timeout` /
+/// `set_write_timeout` / `set_read_timeout`. That bounds connect and bounds the *first* read,
+/// but it is a per-operation timeout, not a strict cumulative cap: `read_line` may issue more
+/// than one `read()` syscall for a server that drip-feeds the status line one byte at a time,
+/// and `set_read_timeout` is set once before `read_line` runs, so each of those syscalls gets
+/// the timeout value that was live at that point rather than a continuously shrinking
+/// remainder — a pathological server could in principle stretch total wall time past
+/// `deadline`. In practice this is bounded externally: the container `HEALTHCHECK --timeout`
+/// kills the whole probe process regardless of what happens inside it.
 ///
 /// `Ok(true)` iff the response status is 2xx; `Ok(false)` for any other status (a 503 from
 /// `/readyz` is a healthy *answer*, not a failure); `Err` if the service could not be reached,
@@ -76,8 +87,10 @@ pub fn probe(addr: SocketAddr, path: &str, deadline: Duration) -> io::Result<boo
 
     let mut stream = TcpStream::connect_timeout(&target, remaining(deadline, started)?)?;
 
-    // `deadline` is a TOTAL budget, not a connect timeout. A server that has accepted but
-    // wedged (a saturated axum, a blocked handler) would otherwise block this call forever.
+    // `deadline` bounds more than just the connect: a server that has accepted but wedged (a
+    // saturated axum, a blocked handler) would otherwise block this call forever. Write and
+    // read each get whatever budget remains at the point they're armed — see the doc comment
+    // above for why that is a per-operation timeout, not a strict cumulative cap.
     stream.set_write_timeout(Some(remaining(deadline, started)?))?;
     let request = format!("GET {path} HTTP/1.1\r\nHost: {target}\r\nUser-Agent: paigasus-healthcheck\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes())?;
