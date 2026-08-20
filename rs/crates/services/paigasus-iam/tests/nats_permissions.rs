@@ -16,8 +16,8 @@
 //! negative case here asserts on the server's asynchronous `Permissions Violation` text naming the
 //! exact subject (D9), captured through the connection's `event_callback`.
 //!
-//! Docker gating matches the rest of the suite: a missing daemon is a HARD FAILURE in CI (`CI`
-//! set) and a skip on a Docker-less laptop.
+//! Docker gating is the single policy owned by `tests/support/docker.rs`'s `start_or_skip`
+//! (SMA-538), not restated here.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -28,15 +28,15 @@ use paigasus_iam::adapters::events::{NatsEventPublisher, NatsPublisherError};
 use paigasus_iam::config::{PublisherBackend, PublisherConfig};
 use paigasus_iam_core::{DomainEvent, EventPublisher, EventType};
 use testcontainers::core::WaitFor;
-use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
-/// See `tests/nats_publisher.rs` — same load budget, same reasoning: a ceiling on Docker being
-/// slow under contention, not an expectation of how long anything takes.
-const CONTAINER_READY_BUDGET: Duration = Duration::from_secs(90);
+// This file has no `mod support;` — including `support/docker.rs` directly keeps it that way,
+// pulling in one small standalone file rather than the whole support surface (SMA-538).
+#[path = "support/docker.rs"]
+mod docker;
 
 /// How long a denial assertion waits for the server's asynchronous refusal. Generous, because the
 /// cost of it being too short is a flake and the cost of it being too long is a slow failure —
@@ -133,25 +133,8 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
         image = image.with_copy_to(target, bytes);
     }
 
-    let node = match image.start().await {
-        Ok(n) => n,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker is required for the nats permission tests in CI: {e}");
-            }
-            eprintln!("skipping nats_permissions: Docker unavailable ({e})");
-            return None;
-        }
-    };
-
-    let deadline = std::time::Instant::now() + CONTAINER_READY_BUDGET;
-    let port = loop {
-        match node.get_host_port_ipv4(4222).await {
-            Ok(p) => break p,
-            Err(e) if std::time::Instant::now() >= deadline => panic!("nats port was never published within {CONTAINER_READY_BUDGET:?}: {e}"),
-            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-        }
-    };
+    let node = docker::start_or_skip(image, "nats_permissions").await?;
+    let port = docker::mapped_port(&node, 4222, "nats_permissions").await;
 
     Some(Fixture {
         _node: node,

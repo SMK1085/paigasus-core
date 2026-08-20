@@ -11,7 +11,11 @@
 //! the RS256 accept-path coverage the ES256-only in-process mock IdP could not exercise
 //! (spec §8).
 //!
-//! Docker gating mirrors `support::start_migrated_postgres`: a CI hard-fail, a local skip.
+//! Docker gating is the single policy owned by `tests/support/docker.rs`'s `start_or_skip`
+//! (SMA-538), not restated here — notably, this suite's 240-second Keycloak startup timeout is
+//! now a hard failure locally too, not the fast skip it used to be: a container failure against
+//! a reachable daemon is never a skip.
+//!
 //! Keycloak's HTTPS listener uses a runtime self-signed cert, so both the test's own token
 //! fetch (`danger_accept_invalid_certs`) and the service's JWKS fetch (`accept_invalid_tls`)
 //! trust it — the latter is still config-only. Because Keycloak derives a token's `iss` from
@@ -36,7 +40,6 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use support::{provision_platform_admin, send, start_migrated_postgres};
 use testcontainers_modules::testcontainers::core::IntoContainerPort;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use uuid::Uuid;
 
@@ -78,20 +81,13 @@ async fn keycloak_end_to_end_config_only_oidc() {
         .with_cmd(["start-dev", "--import-realm", "--https-port=8443"])
         .with_startup_timeout(Duration::from_secs(240));
 
-    let keycloak = match image.start().await {
-        Ok(container) => container,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker/Keycloak is required for the keycloak e2e test in CI: {e}");
-            }
-            eprintln!("skipping keycloak e2e: container unavailable ({e})");
-            return;
-        }
+    let Some(keycloak) = support::docker::start_or_skip(image, "keycloak_e2e").await else {
+        return;
     };
 
     // Keycloak issues `iss` from the request host in dev mode, so the config issuer and every
     // call below share this exact `127.0.0.1:{mapped}` form.
-    let https_port = keycloak.get_host_port_ipv4(HTTPS_PORT).await.expect("mapped https port");
+    let https_port = support::docker::mapped_port(&keycloak, HTTPS_PORT, "keycloak https").await;
     let issuer = format!("https://127.0.0.1:{https_port}/realms/{REALM}");
 
     // One reqwest client for the test's own IdP calls, trusting the self-signed cert (the test

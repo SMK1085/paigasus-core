@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! End-to-end HTTP coverage for `POST /v1/authn/introspect` (SMA-443 Task 10): the D10
-//! read-only guarantee (unknown identity -> 403 `identity_not_provisioned`, never
+//! read-only guarantee (unknown identity -> 403 `identity-not-provisioned`, never
 //! provisions), the happy path after provisioning through `AuthnSvc::resolve(..,
 //! Enabled)` — exercising the REAL discovery + JWKS fetch against the HTTPS mock IdP —
-//! and the 401 `invalid_token` surfaces including the `WWW-Authenticate` challenge and
+//! and the 401 `invalid-token` surfaces including the `WWW-Authenticate` challenge and
 //! the oversized-token cap. Drives the real `router(AppState::new(db, &cfg))` via
 //! `tower::ServiceExt::oneshot` against an ephemeral Postgres (Docker; see
 //! `tests/support/mod.rs`).
@@ -31,13 +31,13 @@ async fn introspect_unknown_identity_is_403_and_never_provisions() {
     let token = idp.bearer("sub-unknown", Some("unknown@example.com"), "paigasus", 3600);
     let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": token })), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["error"]["code"], "identity_not_provisioned");
+    assert_eq!(body["error"]["code"], "identity-not-provisioned");
 
     // Introspect again with the same token: still 403 — definitive evidence the first
     // call had no user-creation side effect (D10 read-only guarantee).
     let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": token })), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["error"]["code"], "identity_not_provisioned");
+    assert_eq!(body["error"]["code"], "identity-not-provisioned");
 }
 
 #[tokio::test]
@@ -101,7 +101,7 @@ async fn introspect_invalid_token_is_401_with_www_authenticate() {
     assert_eq!(challenge, "Bearer error=\"invalid_token\"");
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["error"]["code"], "invalid_token");
+    assert_eq!(body["error"]["code"], "invalid-token");
     // The static message never echoes the presented token (spec §6.3).
     assert!(!body["error"]["message"].as_str().unwrap().contains("not-a-jwt"), "{body}");
 }
@@ -113,12 +113,12 @@ async fn introspect_oversized_token_is_401_invalid_token() {
     };
     let (app, _idp) = support::app(db).await;
 
-    // One byte over `test_config`'s max_token_bytes (16384): 401 `invalid_token` via the
+    // One byte over `test_config`'s max_token_bytes (16384): 401 `invalid-token` via the
     // validator's own length cap — the handler must NOT pre-filter (D10 note).
     let oversized = "a".repeat(16_385);
     let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": oversized })), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
-    assert_eq!(body["error"]["code"], "invalid_token");
+    assert_eq!(body["error"]["code"], "invalid-token");
 }
 
 #[tokio::test]
@@ -137,7 +137,7 @@ async fn introspect_oversized_body_is_413_request_too_large() {
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["error"]["code"], "request_too_large");
+    assert_eq!(body["error"]["code"], "request-too-large");
     assert_eq!(body["error"]["message"], "request body too large");
 }
 
@@ -154,7 +154,7 @@ async fn introspect_malformed_json_is_enveloped() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(body["error"]["code"], "invalid-request-body");
     assert_eq!(body["error"]["message"], "invalid request body");
 }
 
@@ -169,7 +169,7 @@ async fn introspect_wrong_content_type_is_enveloped() {
     assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(body["error"]["code"], "invalid-request-body");
 }
 
 // --- Task 11: bearer enforcement on the protected `/v1` surface (D14, spec §7.4) ---
@@ -182,7 +182,7 @@ async fn protected_route_without_token_is_401() {
     let (app, _idp) = support::app(db).await;
 
     // No `Authorization` header at all on a protected tenancy route: 401 with the same
-    // `invalid_token` body as any rejected credential, but a BARE `Bearer` challenge —
+    // `invalid-token` body as any rejected credential, but a BARE `Bearer` challenge —
     // RFC 6750 §3.1 says a request with no authentication information gets a challenge
     // without an error attribute (H3). Only the header distinguishes the cases.
     let response = send_raw(&app, "POST", "/v1/organizations", Some(json!({ "slug": "acme", "name": "Acme" })), None).await;
@@ -191,7 +191,7 @@ async fn protected_route_without_token_is_401() {
     assert_eq!(challenge, "Bearer");
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["error"]["code"], "invalid_token");
+    assert_eq!(body["error"]["code"], "invalid-token");
 }
 
 #[tokio::test]
@@ -218,14 +218,14 @@ async fn protected_route_with_invalid_token_is_401_with_www_authenticate() {
     let (app, _idp) = support::app(db).await;
 
     // A syntactically-broken bearer token on a protected GET: the validator rejects it and
-    // the middleware funnels that through the same 401 `invalid_token` + challenge path.
+    // the middleware funnels that through the same 401 `invalid-token` + challenge path.
     let response = send_raw(&app, "GET", "/v1/organizations", None, Some("not-a-jwt")).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let challenge = response.headers().get("www-authenticate").expect("WWW-Authenticate header").to_str().unwrap();
     assert_eq!(challenge, "Bearer error=\"invalid_token\"");
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["error"]["code"], "invalid_token");
+    assert_eq!(body["error"]["code"], "invalid-token");
 }
 
 #[tokio::test]
@@ -243,7 +243,7 @@ async fn fused_bearer_scheme_is_401() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["error"]["code"], "invalid_token");
+    assert_eq!(body["error"]["code"], "invalid-token");
 }
 
 #[tokio::test]
@@ -310,12 +310,12 @@ async fn readyz_and_introspect_do_not_require_bearer() {
 
     // `POST /v1/authn/introspect` is exempt too: a bearer-free request reaches the handler.
     // The token (in the body, not the header) is a valid but never-provisioned identity, so
-    // the handler's own D10 read-only path answers 403 `identity_not_provisioned` — crucially
-    // NOT the middleware's 401 `invalid_token`, the tell-tale of an enforced route.
+    // the handler's own D10 read-only path answers 403 `identity-not-provisioned` — crucially
+    // NOT the middleware's 401 `invalid-token`, the tell-tale of an enforced route.
     let token = idp.bearer("introspect-exempt", Some("exempt@example.com"), "paigasus", 3600);
     let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": token })), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["error"]["code"], "identity_not_provisioned");
+    assert_eq!(body["error"]["code"], "identity-not-provisioned");
 }
 
 #[tokio::test]
@@ -331,11 +331,11 @@ async fn jit_disabled_unknown_identity_is_403() {
 
     // A valid token from the JIT-disabled issuer for an unknown identity: the middleware
     // verifies the signature but refuses to provision (per-issuer flag, D5), so the request
-    // is 403 `identity_not_provisioned` instead of a JIT success.
+    // is 403 `identity-not-provisioned` instead of a JIT success.
     let token = jit_disabled.bearer("no-jit-user", Some("nojit@example.com"), "paigasus", 3600);
     let (status, body) = send(&app, "POST", "/v1/organizations", Some(json!({ "slug": "acme", "name": "Acme" })), Some(&token)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["error"]["code"], "identity_not_provisioned");
+    assert_eq!(body["error"]["code"], "identity-not-provisioned");
 }
 
 #[tokio::test]
@@ -439,7 +439,7 @@ async fn every_protected_v1_route_requires_bearer() {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "route {method} {path} must be 401 without a bearer token");
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["error"]["code"], "invalid_token", "route {method} {path}: unexpected body {body}");
+        assert_eq!(body["error"]["code"], "invalid-token", "route {method} {path}: unexpected body {body}");
     }
 
     // Expected-200-without-token: liveness/readiness stay reachable with no bearer at all.
@@ -450,10 +450,10 @@ async fn every_protected_v1_route_requires_bearer() {
 
     // Exception: POST /v1/authn/introspect is deliberately bearer-free (D10) — the credential
     // travels in the body, not the header. Proof it's NOT enforced: an unprovisioned-but-valid
-    // token reaches the handler and gets the handler's OWN 403 (identity_not_provisioned), not
-    // the middleware's 401 invalid_token that every route above returns when bearer-free.
+    // token reaches the handler and gets the handler's OWN 403 (identity-not-provisioned), not
+    // the middleware's 401 invalid-token that every route above returns when bearer-free.
     let token = idp.bearer("sweep-exempt", Some("sweep@example.com"), "paigasus", 3600);
     let (status, body) = send(&app, "POST", "/v1/authn/introspect", Some(json!({ "token": token })), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "/v1/authn/introspect must stay exempt from bearer enforcement: {body}");
-    assert_eq!(body["error"]["code"], "identity_not_provisioned");
+    assert_eq!(body["error"]["code"], "identity-not-provisioned");
 }

@@ -21,7 +21,8 @@ on:
   # Also validate the gate itself whenever its own wiring changes, so a broken scanner
   # pin/plugin is caught on the PR that breaks it rather than at 07:17 the next morning.
   pull_request:
-    branches: [main]
+    branches:
+      - main
     paths:
       - '.github/workflows/security-scan.yml'
       - 'ci/osv/**'

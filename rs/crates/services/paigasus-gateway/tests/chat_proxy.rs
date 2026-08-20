@@ -297,7 +297,7 @@ async fn mid_stream_error_emits_terminal_sse_event() {
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(text.starts_with("data: first\n\ndata: second\n\n"), "the pre-error frames are forwarded in order: {text}");
-    assert!(text.contains(r#""code":"upstream_error""#), "the stream ends with the terminal SSE error event: {text}");
+    assert!(text.contains(r#""code":"upstream-error""#), "the stream ends with the terminal SSE error event: {text}");
     assert!(text.trim_end().ends_with("}}"), "the terminal error event is the last frame on the wire: {text}");
 }
 
@@ -316,7 +316,7 @@ async fn a_stream_request_is_refused_when_streaming_is_disabled() {
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["param"], "stream", "the refused field must be named: {json}");
-    assert_eq!(json["error"]["code"], "streaming_disabled");
+    assert_eq!(json["error"]["code"], "streaming-disabled");
     assert!(mock.recorded().is_none(), "a refused streaming request must never reach the upstream");
 
     // Then repeat with `"stream": false` and assert the request still reaches the upstream —

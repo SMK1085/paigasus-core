@@ -16,6 +16,11 @@ authors      = ["Paigasus contributors"]
 [workspace.dependencies]
 axum = "0.8"
 tower = "0.5"
+# http: the protocol-agnostic `Request`/`Response`/`HeaderValue`/`StatusCode` types axum and tonic
+# both build on. `paigasus-observability`'s correlation layer (SMA-504) is written against these
+# rather than axum's re-exports, which is what lets ONE `tower::Layer` wrap an axum router and a
+# tonic server alike. Already in Cargo.lock transitively (axum/hyper/tonic); this only promotes it.
+http = "1"
 # tower-http: TraceLayer (request/response spans) + TimeoutLayer for `paigasus-iam`'s
 # `serve_http` helper (SMA-441 Task 11 — the first consumer).
 tower-http = { version = "0.6", features = ["trace", "timeout"] }
@@ -52,6 +57,9 @@ tonic-prost = "0.14"
 # tonic-health — the well-known `grpc.health.v1.Health` service (M0 walking skeleton,
 # SMA-441 Task 9). Tracks the pinned tonic 0.14 line.
 tonic-health = "0.14"
+# tonic-types — google.rpc.* richer-error details (ErrorDetails/StatusExt). Production dep on
+# BOTH services: iam emits ErrorInfo, the gateway reads it (SMA-504, ADR-0019 decision 4).
+tonic-types = "0.14"
 # tokio-stream — wraps a `TcpListener` into the `Stream` tonic's `serve_with_incoming`
 # expects. Consumers add the features they need (e.g. the iam service's gRPC boot test
 # needs `net` for `TcpListenerStream`); no default features at the workspace baseline.

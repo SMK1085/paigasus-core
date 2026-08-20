@@ -1,0 +1,123 @@
+# The retry/concurrency policy for paigasus-iam's Docker-backed integration tests (SMA-521).
+#
+# Deliberately on `profile.default`, NOT a `[profile.ci]`: a `ci` profile only applies with
+# `--profile ci`, which the inherited `.moon/tasks/rust.yml` command
+# (`cargo nextest run --no-tests=pass`) does not pass. Putting it on the default profile is what
+# makes Moon, the manual command, and a developer's bare `cargo nextest` all read ONE definition.
+# Note `cargo test` picks up none of this — nextest config is nextest-only.
+nextest-version = { required = "0.9.136" }
+
+# Bounds how many tests in this group start containers concurrently, ON TOP OF the global
+# `test-threads` (left at its default so non-container crates keep full parallelism).
+#
+# Floored at 4 on purpose: CI (`ubuntu-latest`, 4 vCPU on this public repo) already runs only
+# ~4-way, so a cap >= 4 is provably a no-op there and cannot serialize the graph into ci.yml's
+# 30-minute job timeout. The win is local, where a bare `cargo nextest` otherwise fires 18
+# concurrent container startups at an 8-CPU Docker VM.
+#
+# NOTE this cap is per nextest PROCESS, not global: `moon ci` runs `paigasus-iam-rs:test` and
+# `repo:nats-permissions` as separate tasks, each with its own budget.
+#
+# MEASURED 2026-08-16 on an 18-logical-CPU Apple M5 Max macOS host with an 8-CPU / ~7.8 GB
+# Docker VM (Docker 29.6.2), `CI=1 cargo nextest run -p paigasus-iam`, two runs each (wall clock
+# via `time`, all runs 873 passed / 0 skipped):
+#   uncapped (test-group commented out): 55.8s (1 leaky) / 123.4s (1 flaky: postgres conn timeout)
+#   max-threads = 8: 84.7s (clean) / 84.0s (clean)
+#   max-threads = 6: 99.5s (2 flaky) / 126.6s (1 flaky)
+#   max-threads = 4: 109.0s (clean, matches the prior 108.4s reference) / 145.0s (1 flaky, 1 leaky)
+#
+# CAVEAT: n=2 per config, run SEQUENTIALLY in increasing-cap order (uncapped, 4, 6, 8 — never
+# randomized/interleaved), so a warm-up effect (Docker layer cache, connection pools, OS file
+# cache) favoring later-tested configs cannot be excluded. Partial cross-session corroboration
+# exists for 4 (Task 3, a separate earlier session, independently measured 108.4s, matching this
+# run's 109.0s) but NOT for 8, which has no such replicate.
+#
+# Chose 8, NOT the floor of 4 — on VARIANCE, not raw speed. Read literally against the table
+# above, "8 is fastest" is FALSE: uncapped's single best run (55.8s) beats every capped run
+# tested, including both cap=8 runs. What 8 has is PREDICTABILITY and the best average: its two
+# runs span only 84.0-84.7s (a 0.7s range) against uncapped's 55.8-123.4s (a 68s range), and its
+# 84.3s average beats uncapped's 89.6s, cap=6's 113.1s, and cap=4's 127.0s. cap=4 hit the same
+# postgres connection-timeout mode uncapped hit; cap=6 also flaked (twice in one run, once in the
+# other) but its captured output does not record the failure mode, so that comparison is not
+# claimed; cap=8 hit no failure of any kind in either run.
+#
+# The brief's literal "within ~30% of the uncapped baseline" rule is ambiguous on this data:
+# against uncapped's AVERAGE (89.6s) both 6 (+26%) and 8 (-6%) qualify, which by "lowest cap
+# that qualifies" would pick 6; against uncapped's fastest single run (55.8s) nothing qualifies.
+# Neither reading is stable given the spreads above, so variance — not the 30% rule — is what
+# actually drove this choice.
+#
+# Re-derive by repeating the above, ideally randomizing/interleaving run order across configs to
+# rule out the warm-up confound; the optimum tracks Docker VM capacity, not host CPU count.
+[test-groups.docker-containers]
+max-threads = 8
+
+# ORDER IS LOAD-BEARING. nextest applies "the first override that matches the test and
+# configures the setting" — first-match-wins PER SETTING, evaluated top-to-bottom. The general
+# `kind(test)` override below also matches keycloak_e2e and also sets `retries`, so if it came
+# first this narrower block would never apply and the safeguard would exist only as a comment.
+# Specific before general.
+[[profile.default.overrides]]
+# keycloak_e2e starts a Keycloak with a 240s startup timeout (tests/keycloak_e2e.rs:79). Three
+# attempts of a genuinely failing run would be ~18 minutes against ci.yml's 30-minute budget.
+# Scoped to the whole BINARY (`binary(keycloak_e2e)`), not a test name: the safeguard exists
+# because of the container this binary starts, not because of what any one test is called. A
+# `test(keycloak)` filter would silently stop covering a second test added to this file under a
+# different name, falling through to the general kind(test) override's count=2 retries — three
+# 240s startups (~12 minutes) against ci.yml's 30-minute budget. Verified the match set is
+# unchanged: `cargo nextest list -E 'package(=paigasus-iam) and binary(keycloak_e2e)'` lists the
+# same single test as the old `test(keycloak)` filter did.
+filter = 'package(=paigasus-iam) and binary(keycloak_e2e)'
+retries = 1
+
+[[profile.default.overrides]]
+# The SMA-538 canary. `retries = 1`, not the general block's 2: when Docker is genuinely
+# unreachable every attempt fails identically, so the extra attempt only adds ~45s of backoff to
+# a run that is already going to red. One retry is still kept, because the policy now hard-fails
+# a container that could not start with a REACHABLE daemon — exactly the transient class
+# SMA-521's retry budget exists to absorb — and this test is a mandatory gate.
+# Deliberately does NOT set `test-group`; it inherits `docker-containers` from the block below,
+# the same per-setting precedence keycloak_e2e relies on.
+filter = 'package(=paigasus-iam) and binary(docker_preflight)'
+retries = 1
+
+[[profile.default.overrides]]
+# `=` is an exact-match matcher. Verified that the bare form does NOT match `paigasus-iam-core`
+# either, but the explicit form means no reader has to know the matcher's semantics.
+# `kind(test)` selects integration-test targets only, so paigasus-iam's own --lib unit tests and
+# every other crate keep retries = 0 — a flaky pure-logic test must still red immediately.
+filter = 'package(=paigasus-iam) and kind(test)'
+# Attempts land at roughly t, t+15s, t+45s. Sized against a MEASURED contention window: see
+# tests/nats_publisher.rs:51-58, where a full-suite run that normally takes 3.7s took 33s under
+# load. A flat 2s backoff would put all three attempts inside that window and absorb nothing.
+retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
+# The keycloak override above deliberately does NOT set `test-group`, so keycloak_e2e still
+# picks up the group from here — precedence is per-setting, so a narrower block only overrides
+# the settings it names.
+test-group = 'docker-containers'
+
+# JUnit lives on a DEDICATED profile, not on `default`, because nextest resolves the report path
+# relative to the workspace `target/` — so every `cargo nextest` in the workspace would otherwise
+# write the same `target/nextest/default/junit.xml` and clobber the others. One `moon ci` run
+# invokes nextest 15+ times concurrently (a `:test` per Rust crate, plus repo:nats-permissions and
+# repo:observability-drift), so a report on `default` would be whichever process finished last —
+# almost never the one we care about. A custom profile gets its own store dir,
+# `target/nextest/iam/`, and INHERITS profile.default's overrides, so the retry budget and the
+# docker-containers group still apply. The policy stays on `default` so a bare `cargo nextest`
+# still gets it (AC2); only the report destination is profile-scoped.
+[profile.iam]
+
+[profile.iam.junit]
+path = 'junit.xml'
+
+# `repo:nats-permissions` (moon.yml) runs a SECOND nextest process against this same crate —
+# `-p paigasus-iam --test nats_permissions` — because an ops-only change must still re-run that
+# gate. It gets its own profile rather than reusing `iam`: the two tasks can run concurrently in
+# one `moon ci`, so sharing a store dir would reintroduce exactly the clobbering that moving off
+# `default` was meant to end. Without a profile of its own it wrote no report at all, leaving the
+# crate's most container-heavy suite (12 containers, TLS certs) as the one with no flaky signal.
+# `ci.yml` uploads `target/nextest/iam*/junit.xml`, which matches both this and `iam`.
+[profile.iam-nats]
+
+[profile.iam-nats.junit]
+path = 'junit.xml'

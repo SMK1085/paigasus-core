@@ -116,7 +116,16 @@ tasks:
 
   affected-smoke:
     description: 'Assert the cross-language affected graph still cascades; fail red on a deleted edge or a dropped --include-relations (SMA-409).'
-    script: 'ci/affected-graph/run.sh'
+    # Run the negative control FIRST, mirroring repo:publish-metadata. Without this CI runs only the
+    # real suite, so the self-tests that prove these assertions can FIRE are never executed — a
+    # rotted self-test ships green, taking the repo's only proof-that-the-gate-bites with it
+    # (SMA-526 hit this; SMA-534 adds A4's rows, which are worth exactly nothing unexecuted).
+    # Moon does not enable errexit for `script:` blocks — same latent defect the nats-permissions,
+    # promtool and publish-metadata tasks document — hence the explicit `set -euo pipefail`.
+    script: |
+      set -euo pipefail
+      ci/affected-graph/run.sh --negative-control
+      ci/affected-graph/run.sh
     toolchain: 'system'
     inputs:
       - 'ci/affected-graph/**/*'
@@ -134,6 +143,16 @@ tasks:
       - 'rs/crates/*/*/package.json'
       - 'ts/packages/*/package.json'
       - 'ts/apps/*/package.json'
+      # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
+      # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
+      # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
+      # CLAUDE.md, but that is a different task and cannot green this one.)
+      - 'CLAUDE.md'
+      # The guard shells out to the proto-pinned `moon` for its query output, and this file's own
+      # README states the expected sets are "a snapshot ... at the pinned moon version" — which is
+      # only true if a version bump re-runs it. Every other repo gate that shells out to a
+      # proto-pinned binary lists this (repo:osv, repo:promtool, the three release-parity*).
+      - '.prototools'
 
   parity-corpus-drift:
     description: 'Regenerate the parity corpus from the kernel; assert it matches the committed vectors (SMA-433).'
@@ -180,7 +199,11 @@ tasks:
     script: |
       set -euo pipefail
       bash ops/nats/check-subjects.sh
-      ( cd rs && cargo nextest run --no-tests=pass -p paigasus-iam --test nats_permissions )
+      # `--profile iam-nats` only sets where the JUnit report is written; the retry budget and the
+      # docker-containers group still come from `profile.default`, which custom profiles inherit.
+      # Its own profile, not `iam`: this task and paigasus-iam-rs:test can run concurrently, and a
+      # shared store dir would clobber one report with the other (SMA-521).
+      ( cd rs && cargo nextest run --no-tests=pass -p paigasus-iam --test nats_permissions --test docker_preflight --profile iam-nats )
     toolchain: 'system'
     # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
     # Per entry:
@@ -198,17 +221,28 @@ tasks:
     #     the cheaper failure mode versus a missed gate on an actual `PublisherConfig` change.
     #   - 'Cargo.toml', 'rs/Cargo.lock' — dependency/version changes that could alter broker
     #     client behavior (e.g. the NATS crate itself).
-    # NOT included: 'tests/support/**/*' (~748 lines of shared auth/tenancy/audit/API-key test
-    # infra) — nats_permissions.rs has no `mod support;` and never references it (unlike ~30
-    # other test files in this crate that do), so it is not a real dependency; including it
-    # would trigger this Docker-backed, TLS-cert-minting suite on unrelated test-fixture changes.
+    #   - 'rs/.config/nextest.toml' — this task runs its own `cargo nextest` against
+    #     -p paigasus-iam, which the SMA-521 retry/test-group override matches. Without this
+    #     input a profile edit would leave this gate serving a cached PASS. (It is NOT
+    #     inherited from .moon/tasks/rust.yml: that file is `inheritedBy: languages: ['rust']`
+    #     and this task is `language: 'bash'` on the root `repo` project.)
+    # NOT included: 'tests/support/**/*' (~776 lines of shared auth/tenancy/audit/API-key test
+    # infra) — nats_permissions.rs still has no `mod support;`, so that surface is not a
+    # dependency and including it would trigger this Docker-backed, TLS-cert-minting suite on
+    # unrelated test-fixture changes. Its ONE standalone file IS a dependency since SMA-538
+    # (`#[path = "support/docker.rs"] mod docker;` for the shared skip policy) and is listed
+    # below individually — without it a policy edit would change this binary while leaving the
+    # gate that proves the committed permission set has not been loosened on a cached PASS.
     inputs:
       - 'ops/nats/**/*'
       - 'rs/crates/services/paigasus-iam/tests/nats_permissions.rs'
+      - 'rs/crates/services/paigasus-iam/tests/docker_preflight.rs'
+      - 'rs/crates/services/paigasus-iam/tests/support/docker.rs'
       - 'rs/crates/services/paigasus-iam/src/adapters/events/**/*'
       - 'rs/crates/services/paigasus-iam/src/config.rs'
       - 'rs/crates/services/paigasus-iam/Cargo.toml'
       - 'rs/Cargo.lock'
+      - 'rs/.config/nextest.toml'
 
   wasm-getrandom-free:
     description: 'Assert the wasm binding pulls no `getrandom` — the kernel mints UUIDv7 from injected bytes, so wasm32-unknown-unknown stays buildable (SMA-448).'
@@ -311,6 +345,91 @@ tasks:
       - 'rs/crates/services/paigasus-iam/src/**/*'
       - 'rs/crates/services/paigasus-iam/tests/**/*'
 
+  iam-docker-policy-single-site:
+    description: 'Assert the Docker-unavailable decision exists exactly once, in tests/support/docker.rs, so a new container-backed suite cannot hand-roll copy #12 (SMA-538).'
+    # WHAT IS GATED — two independent tells, both under this crate's tests/, both expected to
+    # appear ONLY in the one file that owns the policy:
+    #
+    #   1. Reading the `CI` environment variable. Every one of the 11 copies SMA-538 removed was
+    #      `if std::env::var_os("CI").is_some() { panic!(..) }` followed by an `eprintln!` and a
+    #      `return None`. Three alternatives are matched: `var_os("CI")` and `var("CI")` are the
+    #      runtime reads the removed copies used — `var\("CI"\)` is unprefixed on purpose so it
+    #      also catches a bare `use std::env::var; var("CI")` import, not only the fully
+    #      qualified `env::var("CI")` form; `option_env!("CI")` is a compile-time read of the
+    #      same variable — not a perfect substitute (baked in at build time, not read per-process)
+    #      but standard and discoverable enough that a well-meaning author reaching for "check if
+    #      CI is set" could land on it instead of the neighbouring `std::env::var_os` idiom.
+    #      Covering it costs one alternation; not covering it would let copy #12 through under a
+    #      different macro name, which defeats the point of a durability gate. A whitespace-padded
+    #      call, e.g. `std::env::var_os( "CI" )`, is a KNOWN, deliberately-uncovered gap — not
+    #      missed, just not worth chasing here, because `cargo fmt --check` is a separate
+    #      mandatory gate on the same PR and would reject that spacing regardless.
+    #   2. Importing `AsyncRunner`. Reading `CI` is only how the 11 original copies happened to be
+    #      written — the actual decision is "does this suite skip on its own instead of calling
+    #      `start_or_skip`", and a new suite could do that unconditionally
+    #      (`let Ok(node) = image.start().await else { return; };`) without ever touching `CI`,
+    #      evading term 1 and passing in CI too. The consolidation made a tighter term possible:
+    #      `AsyncRunner` (which `.start()` needs to be in scope) now appears in exactly one place.
+    #      Matched as `use .*runners::.*AsyncRunner` — the IMPORT, not `.start()` itself:
+    #      `nats_publisher.rs` legitimately calls `ContainerAsync::start` to restart an
+    #      already-created container, and gating bare `.start()` would collide with that.
+    #      The `.*` between `runners::` and `AsyncRunner` is load-bearing: it catches the BRACED
+    #      form `use testcontainers::runners::{AsyncRunner, ..}`, which an anchored
+    #      `runners::AsyncRunner` misses. rustfmt here sets only `max_width`, so import
+    #      granularity survives exactly as an author typed it — the braced form is ordinary, not
+    #      exotic. STILL uncovered, and knowingly so: a glob (`use ..::runners::*;`) and a
+    #      fully-qualified inline path with no import at all. Both are unusual enough, and this
+    #      gate is defence-in-depth behind the canary, that chasing them would cost more in
+    #      false-positive surface than it buys.
+    #
+    # Modelled on repo:redis-connect-single-site, including its two portability lessons: do NOT
+    # anchor paths on `^\./` (GNU grep emits the prefix, ugrep strips it), and filter comment
+    # lines by CONTENT (`:[0-9]+:[[:space:]]*//`) so prose may still name the variable or the API
+    # (e.g. `nats_publisher.rs`'s two `AsyncRunner::start` doc-comment mentions).
+    #
+    # The control — `expected` must be non-empty — is what catches a pattern typo or a rename:
+    # without it all greps could go empty and the gate would pass while guarding nothing.
+    script: |
+      cd rs/crates/services/paigasus-iam
+      hits="$(grep -rnE 'var_os\("CI"\)|var\("CI"\)|option_env!\("CI"\)|use .*runners::.*AsyncRunner' tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      expected="$(printf '%s\n' "$hits" | grep -E '^tests/support/docker\.rs:' || true)"
+      offenders="$(printf '%s\n' "$hits" | grep -vE '^tests/support/docker\.rs:' | grep -v '^$' || true)"
+      if [ -z "$expected" ]; then
+        echo "no CI check or AsyncRunner import found in tests/support/docker.rs — the guard is not guarding anything (moved? renamed?)" >&2
+        exit 2
+      fi
+      if [ -n "$offenders" ]; then
+        echo "Docker-skip policy hand-rolled outside tests/support/docker.rs (SMA-538 — call start_or_skip):" >&2
+        printf '%s\n' "$offenders" >&2
+        exit 1
+      fi
+    toolchain: 'system'
+    # Narrow inputs — `repo` owns the whole tree, so without these the guard runs on every change.
+    inputs:
+      - 'rs/crates/services/paigasus-iam/tests/**/*'
+
+  input-liveness:
+    description: 'Assert every repo:* task input still matches a tracked file, so a wired gate cannot silently stop firing (SMA-553).'
+    # inputs MUST stay ['**/*'] — asserted by this gate's own D13 floor AND by ci_targets.py, so
+    # neither is the sole judge of its own configuration. The verdict depends on the WHOLE tracked
+    # tree because a glob dies when files MOVE, and no narrow input list can observe that. This is
+    # also why the check is not folded into ci/affected-graph/run.sh: repo:affected-smoke's narrow
+    # inputs list no `ops/` path, so renaming ops/ would leave it serving a cached PASS on exactly
+    # the change that kills repo:promtool (SMA-553 D2). Same reasoning repo:actionlint records.
+    #
+    # Negative control FIRST, mirroring repo:affected-smoke and repo:publish-metadata: without it
+    # CI runs only the real check, so the self-test that proves these assertions can FIRE never
+    # executes and a rotted control ships green (SMA-526). Moon does not enable errexit for
+    # `script:` blocks — a failing command followed by a succeeding one still exits 0 — so
+    # `set -euo pipefail` is required explicitly.
+    script: |
+      set -euo pipefail
+      python3 ci/affected-graph/task_inputs.py --self-test
+      python3 ci/affected-graph/task_inputs.py
+    toolchain: 'system'
+    inputs:
+      - '**/*'
+
   promtool:
     description: 'promtool validates the Prometheus scrape config + alert rules + rule unit tests under ops/observability/prometheus/ (SMA-446).'
     # Moon does not enable errexit for `script:` blocks — same latent defect as nats-permissions
@@ -358,3 +477,62 @@ tasks:
       - 'rs/.cargo/config.toml'
       - 'rs/release-plz.toml'
       - '.gitignore'
+
+  actionlint:
+    description: 'actionlint over .github/workflows/**, plus controls that every paths: glob still matches the tree and every branches: entry names a real branch (SMA-525, SMA-540).'
+    # WHY `inputs: **/*` AND NOT THE NARROW LIST THE OTHER repo:* GATES USE — this gate makes an
+    # assertion about the WHOLE FILE TREE, not about the workflow files. A directory rename is the
+    # dominant real-world way a paths: glob comes to match nothing (a typo is at least made by
+    # someone looking at the file), and keying on .github/workflows/** would let Moon serve a
+    # cached pass indefinitely — reproducing the "silent and permanent" failure this gate exists
+    # to prevent. Concretely: security-scan.yml filters on 'ci/osv/**', and this change adds a
+    # sibling ci/actionlint/, so a future ci/ reshuffle is plausible.
+    #
+    # WHAT `inputs: **/*` STILL DOES NOT COVER (SMA-540) — the branch half of check 5 reads git REF
+    # state, and .git/ is in no task's input hash. Two runs over an identical tree therefore hash
+    # identically, and ci.yml restores .moon/cache across runs, so a PASS recorded while a branch
+    # existed can replay after that branch is deleted upstream — a silent pass in a gate whose
+    # whole premise is that it never silently passes. Narrow today (every filter in this repo names
+    # `main`, which is never deleted) and it fails safe in the other direction, since a genuinely
+    # typo'd name changes the workflow file and so changes the hash. Run `ci/actionlint/run.sh`
+    # directly, or `moon run repo:actionlint --force`, to bypass the cache. Stated as L9 in
+    # docs/superpowers/specs/2026-08-19-sma-540-branches-filter-gate-design.md.
+    #
+    # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
+    # (cargo nextest, next typegen). This one is ~1.0s standalone and warm (measured): six
+    # actionlint invocations — one over the real workflows, five stdin fixtures — 26
+    # `git ls-files` calls, and four fixture tables (extractor, path-filter verdicts,
+    # branch-filter verdicts, config allowlist).
+    # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
+    # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
+    script: 'ci/actionlint/run.sh'
+    toolchain: 'system'
+    inputs:
+      - '**/*'
+
+  error-code-single-site:
+    description: 'Assert every file spelling a canonical error code is on a reviewed manifest, so a new emission site cannot ship without a registry membership test (SMA-507).'
+    # WHY `inputs: rs/crates/**/src/**/*.rs` AND NOT A NARROW LIST — this gate's whole job is to
+    # notice a NEW emission site in a NEW file. Narrow inputs would schedule it only when an
+    # already-listed file changed, so the one case it exists for would be the one case it never
+    # runs on. Cheap for the same reason repo:actionlint is: .moon/workspace.yml's
+    # hasher.ignorePatterns keeps gitignored trees out of the hash walk, and the check is a
+    # pure-python regex scan of ~200 files with no cargo invocation.
+    #
+    # `--self-test` runs FIRST and in the SAME script block, per repo:affected-smoke and
+    # repo:publish-metadata: a rotted checker must red rather than ship green. `set -euo pipefail`
+    # is REQUIRED — Moon does not enable errexit for `script:` blocks, so without it a failing
+    # --self-test would be masked by a passing --single-site.
+    #
+    # This gate does NOT guard code REMOVAL. It does not need to: both service crates declare
+    # `test: deps: ['^:build']` in their own moon.yml, so a contracts change already schedules
+    # paigasus-{iam,gateway}-rs:test and the membership tests run. See ci/error-registry/README.md.
+    script: |
+      set -euo pipefail
+      python3 ci/error-registry/check.py --self-test
+      python3 ci/error-registry/check.py --single-site
+    toolchain: 'system'
+    inputs:
+      - 'rs/crates/**/src/**/*.rs'
+      - 'contracts/proto/paigasus/common/v1/error.proto'
+      - 'ci/error-registry/**/*'

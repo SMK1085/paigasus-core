@@ -63,30 +63,14 @@ use std::time::Duration;
 use support::{app_with_config, app_with_state, provision, provision_platform_admin, send};
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::ContainerAsync;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tonic::transport::Channel;
 
-/// Starts an ephemeral Redis container, returning its connection URL. Same CI-hard-fail /
-/// local-skip gating as `support::start_migrated_postgres`/`tests/authz_cache_redis.rs`;
-/// self-contained here since this file's Redis cross-replica/fail-open cases are its only
-/// consumer.
+/// Starts an ephemeral Redis container, returning its connection URL. The skip-versus-fail
+/// decision lives once, in `support/docker.rs` (SMA-538).
 async fn start_redis() -> Option<(ContainerAsync<Redis>, String)> {
-    let node = match Redis::default().start().await {
-        Ok(n) => n,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker is required for the authz acceptance redis cases in CI: {e}");
-            }
-            eprintln!("skipping authz_acceptance redis cases: Docker unavailable ({e})");
-            return None;
-        }
-    };
-
-    let port = node.get_host_port_ipv4(6379).await.unwrap();
-    let url = format!("redis://127.0.0.1:{port}");
-    Some((node, url))
+    support::docker::start_redis_or_skip("authz_acceptance").await
 }
 
 /// Spawns the full `grpc::router` (health + tenancy + authn + authorization, all wrapped by
