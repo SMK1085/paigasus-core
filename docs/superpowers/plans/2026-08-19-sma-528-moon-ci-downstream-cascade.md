@@ -806,19 +806,21 @@ def check_upstream_inputs(
                 )
                 continue
             resolved = set(declared_files or []) | set(declared_globs or [])
-            # Observed = every entry pointing INTO another crate's tree. The crate's own
-            # `src/**/*` and `Cargo.toml` come from .moon/tasks/rust.yml and are not upstreams.
+            # Observed = EVERY entry pointing INTO another crate's tree, whatever its suffix. The
+            # crate's own `src/**/*` and `Cargo.toml` come from .moon/tasks/rust.yml and are not
+            # upstreams. Do NOT restrict this to `/src/**/*` and `/Cargo.toml`: a broad
+            # `.../paigasus-kernel/**/*` or a `.../paigasus-kernel/tests/**/*` would then be
+            # invisible to strict equality, i.e. silent unbounded CI widening in exactly the
+            # direction strict equality is chosen to catch.
             observed = {
-                e
-                for e in resolved
-                if e.startswith("rs/crates/")
-                and not e.startswith(f"{own}/")
-                and (e.endswith("/src/**/*") or e.endswith("/Cargo.toml"))
+                e for e in resolved if e.startswith("rs/crates/") and not e.startswith(f"{own}/")
             }
             for entry in sorted(want - observed):
                 a6.append(f"{pid}:{task} inputs omit {entry}")
             for entry in sorted(observed - want):
-                upstream = entry.rsplit("/src/**/*", 1)[0].rsplit("/Cargo.toml", 1)[0]
+                # Structural derivation, not suffix-stripping: `entry` may carry any suffix, but the
+                # first four `/`-separated segments are always `rs/crates/<layer>/<crate>`.
+                upstream = "/".join(entry.split("/")[:4])
                 if not _allowlisted(allow, pid, upstream):
                     a6.append(f"{pid}:{task} inputs include {entry}, which is not in its closure")
     return a6
