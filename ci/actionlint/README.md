@@ -30,10 +30,11 @@ the required check. See SMA-540 and
 | 4 | A healthy stdin fixture must pass — the control for check 3 |
 | 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree, and every `branches:` entry resolves as a ref or is skip-listed |
 | 6 | Every extracted filter key carries at least one sequence entry; a `paths:`/`branches:` key must also have at least one of them positive (the `-ignore` variants are exempt) |
-| 7 | Seven self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation allowlist, kill predicate — plus a counter (`SELF_TESTS_RAN`/`SELF_TEST_COUNT`) asserting all seven ran, and a definition-count check catching an eighth table that is defined but never wired into `run_self_tests` (`run.sh --self-test`) |
+| 7 | Eight self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation allowlist, affected-graph wiring, kill predicate — plus a counter (`SELF_TESTS_RAN`/`SELF_TEST_COUNT`) asserting all eight ran, and a definition-count check catching a ninth table that is defined but never wired into `run_self_tests` (`run.sh --self-test`) |
 | 8 | `ci.yml`'s `T=(…)` still schedules the gate that guards `T` itself, and nothing silences that gate's result. Six verdict families: **(a)** the floor — `:affected-smoke` present in `T` (`missing`), or the array can't even be read (`no-array`/`no-file`); **(b)** no `moon` command line is continued onto another physical line, where a discarded exit status would be invisible to this check (`continued`); **(c)** no single-line `moon` command line discards its own exit status (`swallowed`), with `SWALLOWED_SKIP` as the escape hatch for an unrelated `moon` line this check cannot know is harmless; **(d)** no line CLOSING a block (`fi`/`done`/`}`) discards its own exit status either, the same tail on a different line (`block-swallowed`), sharing `SWALLOWED_SKIP`; **(e)** no `moon ci`/`moon run` invocation sits behind a known command wrapper (`command`/`env`/`time`/`eval`/`exec`/`if`/`while`/`until`/`!`) on the same line, where propagation cannot be confirmed (`wrapped`), sharing `SWALLOWED_SKIP` as its escape hatch; **(f)** no step's `continue-on-error:` value suppresses it — any spelling but the literal `false` (`continue-on-error`), with `COE_SKIP` as the escape hatch for an unrelated later step |
 | 8b | Every line in `ci.yml` carrying the target-array expansion `"${T[@]}"` matches one of `T_INVOCATION_ALLOWLIST` (declared with `T_FLOOR`) **exactly** — indentation included — and the number of such lines matches the array's length. This is the PRIMARY guard on the INVOCATION LINES themselves (SMA-542 CodeRabbit round 3, finding B — a bare `VAR=value` assignment prefix defeated BOTH check 8's `swallowed` and `wrapped`, since it has neither `moon` at column 0 nor a recognized wrapper token there); check 8's `continued`/`swallowed`/`block-swallowed`/`wrapped` stay for their more specific diagnostics and are consulted first, so a line they already explain is not also reported here as `not-allowlisted`. It is NOT a complete guard on the step's control flow — see L12 |
-| 9 | A mutation battery, full-gate only: each of the seven self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message (a kill predicate driven by its own fixture table, not merely "non-zero"), or the battery itself reds |
+| 8c | `ci/affected-graph/run.sh` still contains its own two call sites into `ci_targets.py` — `assert_ci_targets \|\| SUITE_RC=1` and `"$HERE/ci_targets.py" --self-test \|\| NEG_RC=1` — WITH each `\|\| RC=1` propagation suffix intact (`missing <site>`), and that the file itself exists and is readable (`no-file`). Closes L6 (SMA-542 residual closure, PR 150 follow-up): check 8 above pins only `:affected-smoke`'s *scheduling*; this pins the two lines that actually INVOKE the gate which, in turn, pins THIS file's own call sites back (`ci_targets.py`'s `ACTIONLINT_SH_CALL_SITES`). Scheduled independently of `ci/affected-graph/`, so it survives a deletion there that would otherwise green both directions of the cycle silently |
+| 9 | A mutation battery, full-gate only: each of the eight self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message (a kill predicate driven by its own fixture table, not merely "non-zero"), or the battery itself reds |
 
 Only a `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` key **two levels deep** inside
 `on:` — `on.<event>.paths` — is a filter. A workflow input may legitimately be *named* `paths` or
@@ -125,11 +126,24 @@ still runs, still increments, and still passes. That is check 7's own tables' jo
 **L5 — `.git` state remains outside Moon's input hash.** See the `actionlint:` task in `moon.yml`.
 The `T` floor reads a tracked file, so it is unaffected; check 5's branch half still is.
 
-**L6 — The cycle is asymmetric.** `repo:affected-smoke` pins `repo:actionlint`'s call sites, but
-`repo:actionlint` pins only `:affected-smoke`'s *presence in `T`* — i.e. its scheduling. Deleting
-`assert_ci_targets || SUITE_RC=1` from `ci/affected-graph/run.sh` therefore still removes that
-half of the guard silently, with everything green. `ci/affected-graph/ci_targets.py`'s
-`RUN_SH_CALL_SITES` comment describes this accurately; keep the two consistent.
+**L6 — The cycle's second half is now closed (SMA-542 residual closure, PR 150 follow-up).**
+Previously `repo:actionlint` pinned only `:affected-smoke`'s *presence in `T`* — its scheduling —
+never `ci/affected-graph/run.sh`'s own two call sites into `ci_targets.py`. Check 8c above closes
+that: it reads `ci/affected-graph/run.sh` directly and asserts `assert_ci_targets || SUITE_RC=1`
+and `"$HERE/ci_targets.py" --self-test || NEG_RC=1` are both still present, propagation suffix
+intact — mirroring `ci_targets.py`'s own `RUN_SH_CALL_SITES`, which is the ONE place that pin used
+to live (and which pins `ACTIONLINT_SH_CALL_SITES`, this file's five call sites, in return). Both
+directions are now guarded from a location independent of the file being guarded.
+
+What remains, and is inherent rather than an oversight: deleting check 8c's OWN production call
+site (`done < <(affected_graph_wiring_verdict ...)`, below) AND `assert_ci_targets || SUITE_RC=1`
+in the SAME edit still silences both directions at once — the former is pinned by
+`ci_targets.py`'s `ACTIONLINT_SH_CALL_SITES`, which runs FROM the very call the latter deletes.
+This is the same shape L1 already names for `T`'s own two entries: two independently-scheduled
+gates are the most the graph offers, and closing a combined deletion needs a third, which only
+moves the same problem one level out. Bounded for the same reason L1 is: the two lines this
+residual depends on sit next to each other inside a five-line function, not scattered across the
+tree.
 
 **L7 — `COE_SKIP` and `SWALLOWED_SKIP` are exact-text, not semantic.** Each entry is keyed by both
 line number and the matched line's exact text (leading blanks included), so a later reformat of
@@ -238,14 +252,14 @@ Without that filter it costs **~87s**. Alternating `moon run repo:actionlint --f
 Narrowing this task's inputs would not meaningfully help; do not do it without also revisiting
 `hasher.ignorePatterns`.
 
-**Standalone cost, since SMA-542.** Check 9's mutation battery — seven mutants plus an
+**Standalone cost, since SMA-542.** Check 9's mutation battery — eight mutants plus an
 unmutated control, each a full `--self-test` invocation, run concurrently, full-gate only — is the
-dominant addition; check 8's floor/`continued`/`swallowed`/`continue-on-error` assertions and check
-8b's allowlist/count assertions are a handful of `grep`/`sed` passes over one workflow file and cost
-nothing worth measuring by comparison. Two tables below, EACH LABELED WITH THE STATE IT MEASURES
-(independent review of PR 150 round 4, finding F3 — the first table's own row already says "six
-fixture tables", but an unlabeled table reads as "the current numbers" regardless): measured
-min-of-7 (`ci/actionlint/run.sh`, bypassing Moon; `uptime` immediately before read load averages
+dominant addition; check 8's floor/`continued`/`swallowed`/`continue-on-error` assertions, check
+8b's allowlist/count assertions and check 8c's two-call-site assertion are a handful of
+`grep`/`sed` passes over one file each and cost nothing worth measuring by comparison. Three
+tables below, EACH LABELED WITH THE STATE IT MEASURES (independent review of PR 150 round 4,
+finding F3 — an unlabeled table reads as "the current numbers" regardless): measured min-of-7
+(`ci/actionlint/run.sh`, bypassing Moon; `uptime` immediately before read load averages
 2.02/3.35/4.36 — this box runs other concurrent sessions and a mean can read several times
 inflated under a load spike, hence min-of-7 rather than a mean).
 
@@ -264,16 +278,28 @@ taking the mutant count to six (seven concurrent `--self-test` subprocesses, con
 A later wave (SMA-542 CodeRabbit rounds 3-4) added the SEVENTH self-test
 (`invocation_allowlist_self_test`, closing round-3 finding B) and check 8b's allowlist/count
 verdicts, taking the mutant count to seven (eight concurrent `--self-test` subprocesses, control
-included) — this is the CURRENT state, and the numbers below are re-measured after round 4's own
-fixes (F1's new fixture, F2's one-line correctness fix), not copied forward from round 3.
+included) — superseded by the third table below; numbers kept here for the before/after
+narrative, not as current figures. A still later wave (SMA-542 residual closure, PR 150
+follow-up) added the EIGHTH self-test (`affected_graph_wiring_self_test`, closing L6) and check
+8c's two-call-site assertion, taking the mutant count to eight (nine concurrent `--self-test`
+subprocesses, control included) — this is the CURRENT state.
 
-State: CURRENT — seven fixture tables, seven mutants (load averages 2.87/2.49/2.79 immediately
-before):
+State: seven fixture tables, seven mutants (superseded by the third table below; kept for the
+before/after narrative, not as current numbers; load averages 2.87/2.49/2.79 immediately before):
 
 | Invocation | Min-of-7 |
 |---|---|
 | `ci/actionlint/run.sh` (full gate, with the battery) | ~5.20s |
 | `ci/actionlint/run.sh --self-test` (seven fixture tables, no battery) | ~1.66s |
+
+State: CURRENT — eight fixture tables, eight mutants (load averages 3.79/5.68/5.27 immediately
+before, after waiting for the box's load to settle from an initial 6.82/9.18 — see the gotcha on
+this box's shared-session spikes):
+
+| Invocation | Min-of-7 |
+|---|---|
+| `ci/actionlint/run.sh` (full gate, with the battery) | ~6.33s |
+| `ci/actionlint/run.sh --self-test` (eight fixture tables, no battery) | ~2.01s |
 
 **Do not conclude `hasher.ignorePatterns` is inert from the log.** It does *not* silence the
 ~2000 `only files can be hashed` warnings about pnpm's symlinked store — those appear identically
@@ -287,10 +313,10 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"   # proto CLIs (moon, ac
                                                             # on a default shell PATH
 moon run repo:actionlint      # via Moon, as CI does
 ci/actionlint/run.sh          # directly, bypassing the Moon cache
-ci/actionlint/run.sh --self-test   # the seven fixture tables only, for fast iteration
+ci/actionlint/run.sh --self-test   # the eight fixture tables only, for fast iteration
 ```
 
-`--self-test` runs the seven fixture tables and nothing else — check 9's mutation battery is
+`--self-test` runs the eight fixture tables and nothing else — check 9's mutation battery is
 full-gate-only, which is what keeps `--self-test` the fast path and what makes the battery's own
 mutants (each internally invoked with `--self-test`) unable to recurse into a battery of their
 own.

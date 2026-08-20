@@ -169,23 +169,30 @@ REQUIRED_DOC_FLAGS = ("--base origin/main", "--include-relations")
 # `assert_ci_targets` also appears in the function definition, so a name-only match would survive
 # deleting the call.
 #
-# A PARTIAL mitigation, not a closure: deleting the `assert_ci_targets` call removes C4 along with
-# it — and that residual is NOT closed below.
-#
 # SMA-542 closed the actionlint half of this class: ACTIONLINT_SH_CALL_SITES below pins
-# repo:actionlint's own call sites from here, and check 8 in ci/actionlint/run.sh pins
-# `:affected-smoke`'s presence in `T` from there, so neither gate is the sole judge of its own
-# SCHEDULING. This gate's own call site — `assert_ci_targets || SUITE_RC=1`, just below — remains
-# self-guarded: nothing pins it from a third, independent location, so the residual noted above
-# still stands. Closing it is a deliberate, deferred follow-up (SMA-542 review finding I2), not
-# something this change claims to do.
+# repo:actionlint's own call sites from here. In return, and as of the SMA-542 residual closure
+# (PR 150 follow-up), check 8c in ci/actionlint/run.sh pins THESE two entries — this gate's own
+# call sites, copied verbatim there as T_AFFECTED_GRAPH_CALL_SITES — from that independently
+# scheduled file. Neither gate is now the sole judge of its own SCHEDULING (check 8 still pins
+# `:affected-smoke`'s presence in `T`) nor of its own WIRING (check 8c pins these two lines
+# directly): deleting `assert_ci_targets || SUITE_RC=1` used to remove C4 silently along with
+# itself, with nothing outside ci/affected-graph/ able to notice — check 8c catches that now.
+#
+# What remains, and is inherent rather than an oversight, is the same shape check 8c's own comment
+# names for its production call site (ci/actionlint/run.sh, ACTIONLINT_SH_CALL_SITES below):
+# deleting THAT call site (the `done < <(affected_graph_wiring_verdict ...)` line) and this entry's
+# `assert_ci_targets || SUITE_RC=1` in the SAME edit still silences both directions at once — two
+# independently-scheduled gates are the most the graph offers, and closing a combined deletion
+# needs a third, which only moves the same problem one level out.
 RUN_SH_CALL_SITES = (
     "assert_ci_targets || SUITE_RC=1",
     # The `|| NEG_RC=1` suffix is as load-bearing as the command. Matching the prefix alone left
     # `--self-test || true` looking identical to a wired call site: the self-test still RUNS, its
     # failure is simply swallowed, and the negative control silently stops being able to report red
     # — the rotted-self-test outcome moon.yml's affected-smoke comment was written about. Both
-    # entries now pin their propagation, symmetrically (CodeRabbit round 3).
+    # entries now pin their propagation, symmetrically (CodeRabbit round 3), and check 8c in
+    # ci/actionlint/run.sh mirrors that same suffix requirement from its own copy of these two
+    # strings.
     '"$HERE/ci_targets.py" --self-test || NEG_RC=1',
 )
 
@@ -215,15 +222,16 @@ SELF_SCHEDULED_GATES = {
     ),
 }
 
-# C4, actionlint half (SMA-542). repo:actionlint's self-tests, mutation battery, and the check-8
-# AND check-8b production call sites are each invoked from ONE call site inside
+# C4, actionlint half (SMA-542). repo:actionlint's self-tests, mutation battery, and the check-8,
+# check-8b AND check-8c production call sites are each invoked from ONE call site inside
 # ci/actionlint/run.sh. That script cannot assert its own invocation — deleting the self-test calls
 # was the sole survivor of SMA-525's mutation battery, deleting the check-8 call site was fix-wave
-# finding I1, and deleting the check-8b call site reopened that SAME defect one round later
-# (CodeRabbit round 4, finding C1) on the check that replaced check-8 as the primary guard — so the
-# assertion lives here, in a gate scheduled independently of it. The reverse direction is check 8 in
-# that same script, which asserts `:affected-smoke` is still in `T`: neither gate is the sole judge
-# of its own scheduling.
+# finding I1, deleting the check-8b call site reopened that SAME defect one round later (CodeRabbit
+# round 4, finding C1) on the check that replaced check-8 as the primary guard, and check-8c is the
+# SMA-542 residual closure itself (PR 150 follow-up) — so the assertion lives here, in a gate
+# scheduled independently of it. The reverse direction is check 8 (still-`:affected-smoke`-in-`T`)
+# and check 8c (still-invokes-ci_targets.py, i.e. RUN_SH_CALL_SITES above) in that same script:
+# neither gate is the sole judge of its own scheduling OR its own wiring.
 #
 # REACHABILITY IS NOT AUTOMATIC. This check only runs when repo:affected-smoke is scheduled, so
 # moon.yml lists `ci/actionlint/**/*` among its inputs. Without that entry a PR deleting these
@@ -232,33 +240,38 @@ SELF_SCHEDULED_GATES = {
 #
 # Matched as WHOLE LINES, like SELF_SCHEDULED_GATES and unlike RUN_SH_CALL_SITES:
 # `run_self_tests` is a strict substring of its own definition line `run_self_tests() {`, so a
-# substring test would report the file as wired after the call had been deleted. The third and
-# fourth entries, the `done < <(...)` lines closing check 8's and check 8b's production `while`
-# loops, are unambiguous the same way: `ci_target_floor_verdict` and `invocation_allowlist_verdict`
-# are each also invoked from inside their own self-test fixtures (e.g.
-# `ci_target_floor_verdict "$tmp"` / `invocation_allowlist_verdict "$tmp" "$skip"`), but neither of
-# those calls is the whole `done < <(...)` line that schedules the PRODUCTION run, so a whole-line
-# match cannot confuse them. The third entry closed fix-wave finding I1 (the reviewer deleted that
-# exact block and measured: full gate rc 0, this gate PASS, with T_FLOOR/swallowed/
+# substring test would report the file as wired after the call had been deleted. The third, fourth
+# and fifth entries, the `done < <(...)` lines closing check 8's, check 8b's and check 8c's
+# production `while` loops, are unambiguous the same way: `ci_target_floor_verdict`,
+# `invocation_allowlist_verdict` and `affected_graph_wiring_verdict` are each also invoked from
+# inside their own self-test fixtures (e.g. `ci_target_floor_verdict "$tmp"` /
+# `invocation_allowlist_verdict "$tmp" "$skip"` / `affected_graph_wiring_verdict "$tmp"`), but none
+# of those calls is the whole `done < <(...)` line that schedules the PRODUCTION run, so a
+# whole-line match cannot confuse them. The third entry closed fix-wave finding I1 (the reviewer
+# deleted that exact block and measured: full gate rc 0, this gate PASS, with T_FLOOR/swallowed/
 # continue-on-error asserting nothing until it closed). The fourth entry closes the SAME defect
 # reopened one round later against check 8b (CodeRabbit round 4, finding C1) — measured the same
 # way: deleting the whole "# Check 8b ..." block left run.sh at rc 0 and this gate PASSing, because
 # invocation_allowlist_self_test still calls the function; only the production `done < <(...)` line
-# proves it is also applied to the real ci.yml.
+# proves it is also applied to the real ci.yml. The fifth entry closes check 8c's OWN production
+# call site the same way — without it, deleting check 8c's block would leave run.sh at rc 0 and
+# THIS gate PASSing, because affected_graph_wiring_self_test still calls the function, which is
+# exactly the recursive version of the residual check 8c itself exists to close: pinning check 8c
+# by anything OTHER than its own production line would make it the sole judge of its own wiring.
 #
 # COLUMN 0, not stripped-both-sides (CodeRabbit, PR 150). check_self_invocation used to build
 # `actionlint_lines` with `line.strip()`, so a required line was satisfied by that exact TEXT
 # appearing anywhere in the file — including indented inside `if false; then … fi` or a heredoc,
-# neither of which ever executes. Wrapping one of these four calls in a conditional block is
+# neither of which ever executes. Wrapping one of these five calls in a conditional block is
 # exactly the shape a false negative would take, and it conventionally INDENTS the wrapped line, so
 # matching now requires no leading whitespace at all (trailing whitespace is still stripped). This
 # is a deliberate ASYMMETRY with the other two haystacks, not an oversight: RUN_SH_CALL_SITES
 # matches substrings because its lines are indented inside a bash function, and
 # SELF_SCHEDULED_GATES strips both sides because moon task scripts are indented inside YAML — both
 # would break under a column-0 requirement. This haystack is different: `run_self_tests`,
-# `selftest_mutation_battery` and both `done < <(...)` lines all sit at run.sh's TOP LEVEL (verified:
-# none is nested in a function, `if`, or loop), so column 0 is where the real, executing call sites
-# actually live, and is available as a signal here in a way it is not for the other two.
+# `selftest_mutation_battery` and all three `done < <(...)` lines all sit at run.sh's TOP LEVEL
+# (verified: none is nested in a function, `if`, or loop), so column 0 is where the real, executing
+# call sites actually live, and is available as a signal here in a way it is not for the other two.
 #
 # THIS IS NOT REACHABILITY ANALYSIS, and does not claim to be — parsing bash control flow in
 # Python is fragile and out of scope (spec decision). What it does NOT close: a required line
@@ -268,10 +281,10 @@ SELF_SCHEDULED_GATES = {
 #
 # PROPAGATION CONTRACT — these entries carry no `|| RC=1` suffix, and that is not the hole
 # RUN_SH_CALL_SITES' suffixes close. `run_self_tests` and `selftest_mutation_battery` report through
-# run.sh's global `FAILED`, as its seven self-tests already do (run.sh:43-46); NEITHER `done < <(...)`
+# run.sh's global `FAILED`, as its eight self-tests already do (run.sh:43-46); NEITHER `done < <(...)`
 # line has anything to propagate — each is the tail of a `while` loop whose body already calls
 # `fail()` per verdict. The consequence is that a future `run_self_tests || FAILED=1` (or an
-# equally harmless reformat of either `done < <(...)` line) would red this check even though it is
+# equally harmless reformat of any `done < <(...)` line) would red this check even though it is
 # harmless; restore the bare line, or update this constant.
 ACTIONLINT_SH_CALL_SITES = (
     "run_self_tests",
@@ -286,6 +299,13 @@ ACTIONLINT_SH_CALL_SITES = (
     # `invocation_allowlist_verdict /nonexistent/ci.yml`), so a substring test would be satisfied
     # by those and survive deleting this exact line.
     'done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")',
+    # Check 8c's production call site (SMA-542 residual closure, PR 150 follow-up) — the reverse
+    # pin: repo:actionlint's own check that ci/affected-graph/run.sh still invokes THIS gate
+    # (RUN_SH_CALL_SITES, above). Same shape as the two entries above it: `affected_graph_wiring_
+    # verdict` is also called from inside its own self-test fixture
+    # (`affected_graph_wiring_verdict "$tmp"`), so a substring test would be satisfied by that call
+    # and survive deleting this exact production line.
+    "done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)",
 )
 
 
@@ -1055,6 +1075,10 @@ def self_test():
         # same reason: `invocation_allowlist_verdict` is also called from inside its own self-test
         # fixtures, so this MUST be whole-line matched too.
         'done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")\n'
+        # Check 8c's production call site (SMA-542 residual closure, PR 150 follow-up) — same
+        # shape again: `affected_graph_wiring_verdict` is also called from inside its own
+        # self-test fixture, so this MUST be whole-line matched too.
+        'done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n'
     )
     if check_self_invocation(wired, scripts, wired_actionlint):
         failures.append(
@@ -1131,11 +1155,22 @@ def self_test():
             "check_self_invocation: missed a deleted check-8b production call site "
             "(CodeRabbit round 4, finding C1)"
         )
+    # SMA-542 residual closure (PR 150 follow-up) — the SAME defect one level further out, against
+    # check 8c: deleting ITS production call site must be caught too, or check 8c would be the sole
+    # judge of its own wiring, exactly the problem it exists to close for RUN_SH_CALL_SITES.
+    no_check8c_call = wired_actionlint.replace(
+        "done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n", ""
+    )
+    if not check_self_invocation(wired, scripts, no_check8c_call):
+        failures.append(
+            "check_self_invocation: missed a deleted check-8c production call site "
+            "(SMA-542 residual closure)"
+        )
     # CodeRabbit (PR 150) — the column-0 requirement itself. Before this fix, `check_self_invocation`
     # matched actionlint call sites by STRIPPED line (both sides), so a required line was satisfied
     # by that exact text appearing anywhere, including indented inside an `if false; then … fi`
     # block or a heredoc — neither of which ever executes. Wrapping a call in a conditional
-    # conventionally INDENTS it, so an indented copy of each of the three required lines must now be
+    # conventionally INDENTS it, so an indented copy of each of the five required lines must now be
     # reported missing — one row per line, so a mutant that widened the column-0 check back to
     # "matches anywhere" is caught regardless of which entry it is tested against. The "fired on a
     # wired tree" assertion above already proves the real, column-0 tree keeps passing under this
@@ -1168,6 +1203,14 @@ def self_test():
     if not check_self_invocation(wired, scripts, indented_check8b_call):
         failures.append(
             "check_self_invocation: an INDENTED check-8b call site satisfied the column-0 pin"
+        )
+    indented_check8c_call = wired_actionlint.replace(
+        "done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n",
+        "  done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n",
+    )
+    if not check_self_invocation(wired, scripts, indented_check8c_call):
+        failures.append(
+            "check_self_invocation: an INDENTED check-8c call site satisfied the column-0 pin"
         )
     # Contamination cases, THREE of them (SMA-542 review finding I1, plus a round-2 addition). The
     # obvious "swap the two texts wholesale" version tried first passed unconditionally, because it

@@ -228,11 +228,14 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `run_self_tests` and `selftest_mutation_battery` as **whole lines** in `run.sh` (a substring
   match would survive deleting the call, since the name is a prefix of its own definition). That
   pin only works because `repo:affected-smoke` lists `ci/actionlint/**/*` in its `inputs` — remove
-  that and the pin stays green on exactly the PR that breaks it. Adding an eighth-and-later
-  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 7): the gate asserts invocations
-  AND definitions. The cycle is still asymmetric: `repo:actionlint` pins only `:affected-smoke`'s
-  presence in `T`, never `repo:affected-smoke`'s own call site inside `ci/affected-graph/run.sh` —
-  see `ci/actionlint/README.md`'s Limitations section.
+  that and the pin stays green on exactly the PR that breaks it. Adding a ninth-and-later
+  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 8): the gate asserts invocations
+  AND definitions. The cycle's second half is now closed too (SMA-542 residual closure): check 8c
+  in `ci/actionlint/run.sh` pins `ci/affected-graph/run.sh`'s own two call sites into
+  `ci_targets.py`, mirroring `ci_targets.py`'s `RUN_SH_CALL_SITES` from the other, independently
+  scheduled file — see `ci/actionlint/README.md`'s Limitations section (L6) for what residual
+  still remains (a single combined edit deleting both gates' own call sites at once, the same
+  bounded shape as the `T`-array cycle above).
 
 ## Workflow
 

@@ -37,8 +37,8 @@ FAILED=0
 # Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
 # protection and would break a future harness that sources this file twice (SMA-542 D3).
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=7   # extractor, path-filter, branch-filter, config, ci-target-floor,
-                    # invocation-allowlist, kill-predicate
+SELF_TEST_COUNT=8   # extractor, path-filter, branch-filter, config, ci-target-floor,
+                    # invocation-allowlist, affected-graph-wiring, kill-predicate
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -53,10 +53,11 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the seven fixture tables only — extractor, path-filter verdicts," >&2
+  echo "  --self-test    run the eight fixture tables only — extractor, path-filter verdicts," >&2
   echo "                 branch-filter verdicts, config allowlist, ci-target floor, invocation" >&2
-  echo "                 allowlist, kill predicate. No actionlint binary is required, but the" >&2
-  echo "                 branch-filter table needs a git repo carrying refs/remotes/origin/main." >&2
+  echo "                 allowlist, affected-graph wiring, kill predicate. No actionlint binary" >&2
+  echo "                 is required, but the branch-filter table needs a git repo carrying" >&2
+  echo "                 refs/remotes/origin/main." >&2
   echo "                 The check-9 mutation battery is NOT part of this — full gate only." >&2
   exit 2
 }
@@ -1977,6 +1978,66 @@ invocation_allowlist_verdict() {
   done < <(grep -nF -- '"${T[@]}"' "$f")
 }
 
+# ---------------------------------------------------------------------------------------------
+# T_AFFECTED_GRAPH_CALL_SITES / affected_graph_wiring_verdict — Check 8c (SMA-542 residual
+# closure, PR 150 follow-up). This file's own README named the gap as L6: check 8 above pins only
+# `:affected-smoke`'s SCHEDULING — its presence in ci.yml's `T=(…)` — never the two lines inside
+# `ci/affected-graph/run.sh` that actually INVOKE `ci_targets.py`, the file that in turn pins THIS
+# file's own call sites (ACTIONLINT_SH_CALL_SITES, in ci_targets.py). Those two lines were pinned
+# only by `RUN_SH_CALL_SITES`, which lives INSIDE ci_targets.py — so deleting
+# `assert_ci_targets || SUITE_RC=1` from run.sh removed ci_targets.py's own C1-C5 AND its
+# self-invocation check on THIS file in one edit, and nothing inside ci/affected-graph/ could
+# notice its own deletion (ci_targets.py's RUN_SH_CALL_SITES comment used to say exactly that:
+# "remains self-guarded"). This check closes it from the other side: independently scheduled
+# (`inputs: ['**/*']` on repo:actionlint), so it survives exactly that deletion.
+#
+# Copied VERBATIM from ci_targets.py's RUN_SH_CALL_SITES, including the `|| RC=1` propagation
+# suffix on each — that suffix is as load-bearing here as it is there: a CodeRabbit round on this
+# very branch found that matching the command prefix alone let `--self-test || true` masquerade
+# as wired, since the self-test still RUNS but its failure is silently swallowed and the negative
+# control can no longer report red. Matching the whole suffixed string closes that the same way
+# RUN_SH_CALL_SITES does. Not sourced/imported — bash has no cross-script constant sharing here —
+# so a deliberate edit to either copy must be mirrored in the other; that drift is exactly what
+# neither gate can catch on its own, the same cost T_FLOOR/T_INVOCATION_ALLOWLIST/
+# SELF_TASK_EXPECTED_GLOBS already accept as the price of not being the sole judge of your own
+# configuration.
+T_AFFECTED_GRAPH_CALL_SITES=(
+  'assert_ci_targets || SUITE_RC=1'
+  '"$HERE/ci_targets.py" --self-test || NEG_RC=1'
+)
+
+# Echoes one verdict token per problem, and nothing for a wired file:
+#   no-file          ci/affected-graph/run.sh does not exist, or is not a readable regular file
+#   missing <site>    the exact substring named is absent — see T_AFFECTED_GRAPH_CALL_SITES above
+#
+# Substring-matched (grep -F), exactly like ci_targets.py's own RUN_SH_CALL_SITES and for the same
+# reason: `assert_ci_targets` is also the bare name of its own function definition
+# (`assert_ci_targets() {`, ci/affected-graph/run.sh) and of a self-test fixture's synthetic
+# definition below, so a name-only match would survive the CALL being deleted while the
+# DEFINITION remains — the same substring trap ACTIONLINT_SH_CALL_SITES documents from the other
+# direction.
+#
+# `[ -f "$f" ] && [ -r "$f" ]`, not `[ -e "$f" ]`: a directory in place of the file must report
+# 'no-file' too, not silently fall through to two 'missing' rows that misdescribe a renamed
+# *directory* as "both call sites deleted" (mirrors invocation_allowlist_verdict's own file check
+# above, one cluster up).
+#
+# Never `infra` from inside this function: it is invoked at the production call site below as
+# `done < <(affected_graph_wiring_verdict ...)`, so it runs inside that process substitution's OWN
+# subshell — `infra`'s `exit 2` would exit only the subshell, FAILED would never be set, and the
+# gate would finish rc 0 having asserted nothing. Exactly the bug CodeRabbit found on
+# invocation_allowlist_verdict two rounds ago on this same branch (see the comment above that
+# function): a verdict function reachable from `< <(...)` must echo a token and `return`, always.
+affected_graph_wiring_verdict() {
+  local f="$1" site
+
+  [ -f "$f" ] && [ -r "$f" ] || { echo 'no-file'; return; }
+
+  for site in "${T_AFFECTED_GRAPH_CALL_SITES[@]}"; do
+    grep -qF -- "$site" "$f" || echo "missing $site"
+  done
+}
+
 # The standing control for check 8. Both directions on every verdict: a table whose rows all fire
 # cannot tell a working check from a stuck one (SMA-466).
 ci_target_floor_self_test() {
@@ -2482,6 +2543,120 @@ invocation_allowlist_self_test() {
   return $rc
 }
 
+# The standing control for Check 8c (SMA-542 residual closure). Both directions per SMA-466: a
+# healthy tree stays silent, EACH call site's deletion fires on its own, a swallowed propagation
+# suffix fires exactly the same as an outright deletion, and the substring trap (a function's own
+# definition satisfying a name-only match) is proven NOT to satisfy this one.
+affected_graph_wiring_self_test() {
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+  local rc=0 tmp got
+
+  expect_wiring() {
+    local name="$1" expected="$2" body="$3"
+    tmp="$(mktemp)"
+    printf '%s' "$body" > "$tmp"
+    got="$(affected_graph_wiring_verdict "$tmp")"
+    rm -f "$tmp"
+    if [ "$got" != "$expected" ]; then
+      fail "affected-graph-wiring self-test '$name': got '$got', expected '$expected'. Check 8c
+      is not deciding what it is documented to decide."
+      rc=1
+    fi
+  }
+
+  # The healthy control: both call sites present, exactly as ci/affected-graph/run.sh's real
+  # run_suite() and its --negative-control branch have them, plus the function DEFINITION that
+  # makes the substring-trap fixture below meaningful (mirrors ci_targets.py's own `wired`
+  # self-test fixture for this exact pair of lines).
+  local wired='assert_ci_targets() {
+  :
+}
+  assert_ci_targets || SUITE_RC=1
+  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
+'
+  expect_wiring 'both call sites present, suffixes intact, is clean' '' "$wired"
+
+  # Each site deleted OUTRIGHT, one at a time — the plainest form of the residual this check
+  # closes.
+  local no_assert_call='  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
+'
+  expect_wiring 'assert_ci_targets call site deleted outright fires' \
+    'missing assert_ci_targets || SUITE_RC=1' "$no_assert_call"
+
+  local no_selftest_call='assert_ci_targets() {
+  :
+}
+  assert_ci_targets || SUITE_RC=1
+'
+  expect_wiring 'the --self-test call site deleted outright fires' \
+    'missing "$HERE/ci_targets.py" --self-test || NEG_RC=1' "$no_selftest_call"
+
+  # The substring trap (same reasoning as ci_targets.py's own `wired` fixture, and as
+  # ACTIONLINT_SH_CALL_SITES' comment on this file's `run_self_tests() {` definition): the bare
+  # name `assert_ci_targets` is present here too, but ONLY as its own function definition — never
+  # as the suffixed call — so a name-only match would wrongly read this as wired.
+  local def_only_no_call='assert_ci_targets() {
+  :
+}
+  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
+'
+  expect_wiring 'assert_ci_targets present only in its own definition still fires' \
+    'missing assert_ci_targets || SUITE_RC=1' "$def_only_no_call"
+
+  # The propagation suffix swallowed rather than the line deleted — the CodeRabbit-found hole
+  # this check exists to close (same class as ci_targets.py's own `silenced` fixture): the call
+  # still RUNS, but its failure no longer reaches SUITE_RC/NEG_RC, so a red ci_targets.py would
+  # silently stop failing the suite.
+  local assert_swallowed='assert_ci_targets() {
+  :
+}
+  assert_ci_targets || true
+  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
+'
+  expect_wiring 'assert_ci_targets suffix swallowed by || true fires' \
+    'missing assert_ci_targets || SUITE_RC=1' "$assert_swallowed"
+
+  local selftest_swallowed='assert_ci_targets() {
+  :
+}
+  assert_ci_targets || SUITE_RC=1
+  python3 "$HERE/ci_targets.py" --self-test || true
+'
+  expect_wiring 'the --self-test suffix swallowed by || true fires' \
+    'missing "$HERE/ci_targets.py" --self-test || NEG_RC=1' "$selftest_swallowed"
+
+  # Both missing at once — proves the two are reported independently, in
+  # T_AFFECTED_GRAPH_CALL_SITES' own order, not merged into a single verdict that could mask the
+  # second.
+  expect_wiring 'both call sites missing fires both, independently' \
+    'missing assert_ci_targets || SUITE_RC=1
+missing "$HERE/ci_targets.py" --self-test || NEG_RC=1' \
+    'echo "nothing relevant here"
+'
+
+  got="$(affected_graph_wiring_verdict /nonexistent/ci/affected-graph/run.sh)"
+  if [ "$got" != 'no-file' ]; then
+    fail "affected-graph-wiring self-test 'missing file': got '$got', expected 'no-file'. A
+      renamed ci/affected-graph/run.sh must not be misread as \"both call sites deleted\"."
+    rc=1
+  fi
+
+  # A directory in place of the file — same "distinct verdict, not a silent skip" requirement,
+  # proven without relying on chmod (which can silently no-op when tests run as root; same
+  # reasoning as invocation_allowlist_self_test's unreadable_dir fixture above).
+  local unreadable_dir
+  unreadable_dir="$(mktemp -d)"
+  got="$(affected_graph_wiring_verdict "$unreadable_dir")"
+  rmdir "$unreadable_dir"
+  if [ "$got" != 'no-file' ]; then
+    fail "affected-graph-wiring self-test 'directory in place of file': got '$got', expected
+      'no-file'. A directory must not be read as two missing call sites."
+    rc=1
+  fi
+
+  return $rc
+}
+
 # ---------------------------------------------------------------------------------------------
 # Check 9's kill predicate (SMA-542 review M3 / spec T3) — extracted so it can be driven directly
 # by a fixture table instead of living inline in the mutant-collection loop below, where nothing
@@ -2499,8 +2674,8 @@ mutant_is_killed() {
   [ "$rc" -eq 1 ] && grep -q 'self-test counter:' "$outfile"
 }
 
-# The seventh self-test. Synthetic (rc, captured-output) pairs, no subprocess and no actionlint
-# binary needed — same style as config_self_test's expect_config above.
+# The eighth (and last-called) self-test. Synthetic (rc, captured-output) pairs, no subprocess and
+# no actionlint binary needed — same style as config_self_test's expect_config above.
 kill_predicate_self_test() {
   local rc=0
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
@@ -2537,7 +2712,7 @@ kill_predicate_self_test() {
 # ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
-# All seven are defined above so this block can run them from ONE call site, reached by both the
+# All eight are defined above so this block can run them from ONE call site, reached by both the
 # --self-test path and the full gate. One call site rather than two is deliberate: ci_targets.py's
 # C4 pins this by whole stripped line, and two identical lines would let one be deleted while the
 # pin still matched (SMA-542 D2).
@@ -2561,6 +2736,7 @@ run_self_tests() {
   config_self_test
   ci_target_floor_self_test
   invocation_allowlist_self_test
+  affected_graph_wiring_self_test
   kill_predicate_self_test
 
   assert_self_tests_ran "$SELF_TEST_COUNT"
@@ -2842,6 +3018,36 @@ while IFS= read -r verdict; do
   esac
 done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")
 fi
+
+# ---------------------------------------------------------------------------------------------
+# Check 8c — ci/affected-graph/run.sh's own two call sites into ci_targets.py (SMA-542 residual
+# closure — this file's README L6, now closed; ci_targets.py's RUN_SH_CALL_SITES comment updated
+# to match). Rationale and fixtures are with T_AFFECTED_GRAPH_CALL_SITES and
+# affected_graph_wiring_verdict above.
+#
+# Unconditional — reads ci/affected-graph/run.sh, a file ci.yml's own state cannot affect, so
+# there is no CI_YML_MISSING-style de-dup to make against checks 8/8b.
+# ---------------------------------------------------------------------------------------------
+while IFS= read -r verdict; do
+  case "$verdict" in
+    '') ;;
+    no-file)
+      fail "ci/affected-graph/run.sh does not exist, or is not a readable regular file, so this
+      gate cannot confirm ci_targets.py is still invoked from it. If the file was renamed, update
+      T_AFFECTED_GRAPH_CALL_SITES (above affected_graph_wiring_verdict in $0)." ;;
+    'missing '*)
+      fail "ci/affected-graph/run.sh no longer contains the exact text
+      '${verdict#missing }' (its '|| SUITE_RC=1'/'|| NEG_RC=1' propagation suffix included). That
+      call is what runs ci_targets.py's C1-C5 AND ci_targets.py's own check of THIS file's call
+      sites (ACTIONLINT_SH_CALL_SITES) — delete it, or swallow its suffix with e.g. '|| true', and
+      BOTH stop running, silently, with nothing inside ci/affected-graph/ able to notice its own
+      deletion. This check exists to close exactly that: it is scheduled independently of
+      ci/affected-graph/ (repo:actionlint's inputs are ['**/*']), so it survives the deletion.
+      Restore the exact line, suffix included." ;;
+    *)
+      infra "unhandled affected-graph-wiring verdict '$verdict'" ;;
+  esac
+done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)
 
 # Guard lives here, AFTER the --self-test early exit: --self-test never shells out to actionlint,
 # so it must not infra-exit on a machine that simply doesn't have the binary on PATH yet.
