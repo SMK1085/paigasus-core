@@ -174,6 +174,17 @@ assert_cargo_moon_parity() {
   esac
 }
 
+# SMA-541 — CI target-array coverage. rc 2 (infra) aborts, mirroring run_case.
+assert_ci_targets() {
+  local ec=0
+  python3 "$HERE/ci_targets.py" || ec=$?
+  case "$ec" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) echo "== affected-graph guard ABORTED: ci-targets infrastructure error (rc=$ec) ==" >&2; exit 2 ;;
+  esac
+}
+
 run_suite() {
   SUITE_RC=0
   # contracts proto edit -> proto packages in all three languages + the gateway rebuild + the
@@ -198,10 +209,11 @@ run_suite() {
   # kernel edit -> kernel + all three bindings (py/node/wasm) + gateway + both language wrappers (SMA-419/420/427)
   # + the IAM crates that consume the kernel's PRN/UUIDv7 (paigasus-iam-core-rs & the paigasus-iam-rs
   # service, SMA-441). paigasus-logging-rs is deliberately ABSENT — it has no kernel edge.
+  # + paigasus-observability-rs, whose correlation layer mints UUIDv7 via the kernel (SMA-504).
   # Strict equality (default-deny): any OTHER project appearing (an unrelated *-py/*-ts package, a
   # contracts/py/ts root) fails the case automatically — no forbid enumeration needed.
   run_case "kernel->bindings" "rs/crates/libs/paigasus-kernel/src/lib.rs" \
-    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts,paigasus-wasm-rs,paigasus-kernel-parity-rs,paigasus-iam-core-rs,paigasus-iam-rs"
+    "paigasus-kernel-rs,paigasus-py-bindings-rs,paigasus-gateway-rs,paigasus-kernel-py,paigasus-node-bindings-rs,paigasus-kernel-ts,paigasus-wasm-rs,paigasus-kernel-parity-rs,paigasus-iam-core-rs,paigasus-iam-rs,paigasus-observability-rs"
   # py binding edit -> the binding + the py wrapper that depends on it (SMA-419). One-directional
   # w.r.t. the kernel: paigasus-kernel-rs is deliberately ABSENT (a binding edit must not rebuild
   # the kernel), now enforced implicitly by strict equality rather than a forbid-regex.
@@ -226,10 +238,46 @@ run_suite() {
   # parity gate asserts `^:build` is DECLARED, this asserts it takes EFFECT.
   run_task_case "proto->service-info-tasks" "rs/crates/libs/paigasus-proto/src/lib.rs" \
     "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint"
+  # A workspace-level change must schedule EVERY crate's lint, AND the three tasks that compile the
+  # FFI cdylibs. `rs/` has no Moon project, so these files belong to `repo`; affectedness reaches
+  # both sets through task INPUTS, not through `dependsOn` — which is why no project case above
+  # changes. Before SMA-534 a Cargo.lock-only touch (i.e. every Dependabot Cargo PR) scheduled no
+  # crate task at all, so a dependency bump that tripped `-D warnings` merged green and redded main
+  # later.
+  #
+  # The three build/test rows are SMA-546. `cargo clippy` emits metadata and never LINKS, and runs
+  # on the host target only — so the thirteen lints cannot cover the three `crate-type = ["cdylib"]`
+  # bindings, for which linking IS the failure mode, nor wasm32-unknown-unknown, which they never
+  # compile. paigasus-kernel-ts:{build,test} and paigasus-kernel-py:test are the tasks that do.
+  #
+  # The case name still says `all-lint`. It is now a slight misnomer, kept deliberately: it is
+  # referenced by CLAUDE.md and ci/affected-graph/README.md, and renaming it would break those
+  # greps for no functional gain.
+  #
+  # SAFETY OF THE NAME FILTER: `assert_task_case` matches the task NAMES build/test/lint across
+  # every project, so a same-named task elsewhere would enter this set. One premise makes that safe
+  # and it must be stated narrowly: `repo` declares no task named build/test/lint (verify:
+  # `moon query tasks`). The py/ts side is no longer a premise but an ASSERTION — the three tasks
+  # that key on `rs/Cargo.lock` are listed below, so a fourth one appearing shows up here as an
+  # `unexpected` row rather than passing silently. Add it if intended; do not widen the filter.
+  #
+  # The py CONFIGURATION ROOT's tasks (py:test/lint/fmt/typecheck) are deliberately absent. They do
+  # not key on these files: `uv run` alone serves a CACHED wheel and cannot observe a Rust change
+  # (measured for SMA-546 — a kernel edit that made `--reinstall-package` fail 67 tests left plain
+  # `uv run pytest` reporting 124 passed), so giving them these inputs would buy cost with no
+  # coverage.
+  run_task_case "lockfile->all-lint" "rs/Cargo.lock" \
+    "paigasus-gateway-rs:lint,paigasus-iam-core-rs:lint,paigasus-iam-rs:lint,paigasus-kernel-parity-rs:lint,paigasus-kernel-py:test,paigasus-kernel-rs:lint,paigasus-kernel-ts:build,paigasus-kernel-ts:test,paigasus-logging-rs:lint,paigasus-node-bindings-rs:lint,paigasus-observability-rs:lint,paigasus-proto-derive-rs:lint,paigasus-proto-rs:lint,paigasus-py-bindings-rs:lint,paigasus-service-info-rs:lint,paigasus-wasm-rs:lint"
   # Generic Cargo<->Moon parity: catches a MISSING case, which is how SMA-524's bug survived review.
   assert_cargo_moon_parity || SUITE_RC=1
   # assert_include_relations returns only 0/1 (no infra code), so collapsing is correct here.
   assert_include_relations || SUITE_RC=1
+  # LAST deliberately: assert_ci_targets can exit 2 on a broken `moon query`, and an rc-2 abort
+  # kills the script — so anything ordered after it would lose its diagnostics on exactly the
+  # runs where they are most useful. `run_case`, `run_task_case` and `assert_cargo_moon_parity`
+  # can all abort this way too, so ordering does NOT make the suite abort-proof; putting
+  # assert_ci_targets last simply means its own abort costs nothing (SMA-541 D2).
+  assert_ci_targets || SUITE_RC=1
   return "$SUITE_RC"
 }
 
@@ -256,6 +304,9 @@ if [ "$NEGATIVE" = 1 ]; then
   # 3) the parity gate must fire on synthetic violations of each of its three assertions — a gate
   #    that can pass vacuously reproduces the very bug it exists to prevent (SMA-524 D6).
   python3 "$HERE/cargo_moon_parity.py" --self-test || NEG_RC=1
+  # 4) the ci-target coverage gate must fire on synthetic violations of each of its five checks —
+  #    including its two hand-rolled parsers, which are the part it cannot self-detect a fault in.
+  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1
   if [ "$NEG_RC" = 0 ]; then
     echo "negative-control OK: harness reported red on all wrong expectations"; exit 0
   else

@@ -62,11 +62,7 @@ impl ServiceAccountGrpc {
 /// `grpc::tenancy::actor_context`/`grpc::authz::actor_context` exactly (duplicated rather than
 /// shared across a transport-internal module boundary, the same posture as those).
 fn actor_context<T>(request: &Request<T>) -> Result<AuthContext, Status> {
-    request
-        .extensions()
-        .get::<AuthContext>()
-        .cloned()
-        .ok_or_else(|| Status::unauthenticated("missing authentication context"))
+    request.extensions().get::<AuthContext>().cloned().ok_or_else(convert::missing_auth_context)
 }
 
 /// Parses a caller-supplied PRN string into a `TenancyNodeRef` — mirrors
@@ -101,7 +97,7 @@ fn require_apikey_management(state: &AppState) -> Result<(), Status> {
     if state.capabilities.apikeys_management {
         Ok(())
     } else {
-        Err(Status::unimplemented("capability iam.apikeys is not enabled on this service"))
+        Err(convert::capability_disabled("iam.apikeys"))
     }
 }
 

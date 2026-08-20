@@ -165,11 +165,16 @@ async fn is_authorized_non_self_query_by_an_unauthorized_actor_over_grpc_is_perm
         .unwrap_err();
 
     // A trailers-only `PermissionDenied` — the 403-equivalent gRPC code — with the stable
-    // `forbidden:` message prefix and NOTHING else: no `allowed` bit, no
+    // `forbidden` reason carried in `ErrorInfo` and NOTHING else: no `allowed` bit, no
     // `determining_policies` for the probed principal ever reached the wire (there is no
     // response message on an error status at all).
     assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
-    assert!(err.message().starts_with("forbidden:"), "unexpected message: {}", err.message());
+    // SMA-504: the code is no longer in the message. Read it from ErrorInfo instead — asserting
+    // the reason, not a prefix, is what the wire change actually moved.
+    let details = tonic_types::StatusExt::get_error_details(&err);
+    let info = details.error_info().expect("every IAM status carries ErrorInfo");
+    assert_eq!(info.reason, "forbidden", "unexpected reason: {info:?}");
+    assert_eq!(info.domain, *paigasus_proto::error::IAM_DOMAIN);
 
     server.abort();
 }

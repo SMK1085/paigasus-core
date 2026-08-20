@@ -60,15 +60,41 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   and reds `main` after merge (SMA-448: `prn.rs` → `resource_name.rs`). An underscore/hyphen
   suffix (`prn_canonical`, `prn-fields`) is fine.
 - Per-project Moon tasks (`<proj>:build/test/lint/fmt`) do NOT run the repo-level gates
-  (`:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
-  new crates/deps/proto, run the full graph like CI does: `moon ci :build :test :lint :fmt
-  :deny :osv :machete :typecheck :breaking :affected-smoke :parity-corpus-drift
-  :next-env-drift :wasm-getrandom-free :redis-connect-single-site :promtool :observability-drift
-  :nats-permissions :release-parity :release-parity-py :release-parity-ts :publish-metadata
-  --base origin/main --include-relations`.
-- A new crate that `dependsOn` `paigasus-kernel-rs` reds `:affected-smoke` until it's added to
-  the `kernel->bindings` expected set in `ci/affected-graph/run.sh` (strict-equality guard,
-  SMA-409). New workspace deps may need `rs/deny.toml` `[licenses] exceptions` or a dev-only
+  (e.g. `:deny`, `:osv`, `:machete`, `:affected-smoke`, codegen-drift, CODEOWNERS). Before pushing
+  new crates/deps/proto, run the full graph like CI does. The command between the markers below is
+  gated against `ci.yml`'s `T=(…)` array by `repo:affected-smoke` — keep the two identical, and do
+  not remove **or quote** the markers: a second copy of either one anywhere in this file, even
+  inside backticks in prose, makes the count 2 and reds the gate (SMA-541):
+  <!-- ci-targets:begin -->
+  `moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking
+  :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free
+  :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site
+  :input-liveness :promtool :observability-drift :nats-permissions :release-parity
+  :release-parity-py :release-parity-ts :publish-metadata --base origin/main --include-relations`
+  <!-- ci-targets:end -->
+- A new `repo:*` gate reds `:affected-smoke` until it is in **both** `ci.yml`'s `T=(…)` array and
+  the marker-delimited command above — `ci/affected-graph/ci_targets.py` asserts the two agree, and
+  that every `T` entry still resolves to a CI-eligible task. That last half matters because
+  `moon ci` exits **0** on a target that resolves to nothing (even with real targets around it), so
+  a typo is otherwise a silent no-op on every PR. A gate that must stay out of `T` needs a
+  `T_EXEMPT` entry with a reason — `runInCI: false` is NOT a general escape, since Moon then drops
+  the task from `moon run` under `CI=true` too (see the comments in `ts/moon.yml`). `T` must also
+  stay a single-line bash array (SMA-541).
+- A `repo:*` task's `inputs` are now asserted **live**: `repo:input-liveness`
+  (`ci/affected-graph/task_inputs.py`) fails if a declared glob matches zero tracked files or a
+  declared file is untracked, so moving a directory a gate keys on reds CI instead of silently
+  switching that gate off. It also asserts its OWN `inputs: ['**/*']` is unchanged — narrowing it
+  for cost would make it stop noticing exactly the renames it exists to catch. A genuinely dead
+  input needs an `ALLOW_DEAD_INPUT` entry with a reason (SMA-553).
+- A new Rust crate reds `:affected-smoke` until it's added to the `lockfile->all-lint` expected set
+  in `ci/affected-graph/run.sh` — that case lists **every** crate, so **every** new crate changes it
+  (SMA-534) — and, if it `dependsOn` `paigasus-kernel-rs`, to the `kernel->bindings` set as well
+  (strict-equality guard, SMA-409). The parity gate's A4 needs no update: a new crate inherits
+  `lint`'s workspace inputs from `.moon/tasks/rust.yml`. That case now also carries three non-lint
+  rows — `paigasus-kernel-ts:{build,test}` and `paigasus-kernel-py:test`, the tasks that link the
+  cdylibs and compile `wasm32` (SMA-546) — so keep them when re-baselining; a new Rust crate does
+  not change them. New workspace deps may need
+  `rs/deny.toml` `[licenses] exceptions` or a dev-only
   `[advisories] ignore` (Rust); an npm/pip advisory needs a version bump — a pnpm-workspace
   `overrides:` selector or `uv lock --upgrade-package` — or a justified `osv-scanner.toml`
   waiver; a dep consumed only by a later commit needs a temporary
@@ -87,6 +113,55 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - Bash tool PATH lacks the proto-managed CLIs; prefix commands with
   `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so moon/uv/buf/nextest resolve to
   the repo-pinned versions (shims first).
+- `paigasus-iam`'s Docker-backed suites get their retry budget and container-concurrency cap from
+  `rs/.config/nextest.toml` (`profile.default`), so **Moon, `moon run …:test`, and a bare
+  `cargo nextest` all pick it up** — but `cargo test` does NOT, since nextest config is
+  nextest-only. Don't add `--retries` to a Moon task or a doc: that recreates the
+  documented-vs-executed split SMA-521 closed. A test that fails every attempt still reds; one
+  that passes on a retry is reported FLAKY. The JUnit report itself is NOT on `profile.default` —
+  nextest resolves a profile's report path relative to the shared workspace `target/`, so `moon
+  ci`'s 15+ concurrent nextest runs would clobber a report left on `default`. It lives on a
+  dedicated `[profile.iam]` instead, selected only by `paigasus-iam-rs:test`'s `args: ['--profile',
+  'iam']` — CI uploads it as the `nextest-junit` artifact, but a bare `cargo nextest run -p
+  paigasus-iam` writes no report at all.
+- `paigasus-iam`'s **Docker-backed** suites (58 of its 62 integration binaries) skip when the
+  daemon is unreachable, and that skip is deliberately quiet — nextest discards a passing test's
+  stderr and Moon discards a passing task's output, so no message can surface there. What makes
+  it visible is `tests/docker_preflight.rs`, a canary that FAILS when Docker is unreachable: a
+  Docker-less run yields exactly one red instead of 57 silent passes (SMA-538). The policy itself
+  lives once, in `tests/support/docker.rs`, and `repo:iam-docker-policy-single-site` fails if a
+  new suite hand-rolls its own copy. Two env vars, both parsing `1`/`true`/`yes` (anything else,
+  including `0`, is off — unlike `CI`, which is presence-based):
+  `PAIGASUS_REQUIRE_DOCKER=1` turns every suite's skip into a panic, which is what a FILTERED run
+  (`--test relay_pg`, `-E 'test(foo)'`) needs, since the canary is not in that filter.
+  `PAIGASUS_SKIP_DOCKER=1` restores skipping everywhere including the canary — it is a
+  per-invocation escape hatch for a Docker Hub rate limit or a daemon restart, **not** a
+  shell-profile setting, and a `moon run` that greened under it leaves a cached PASS that replays
+  after Docker returns, so follow it with `moon run … --force`. `CI` outranks both, so no
+  workflow-file env var can green a CI run that tested nothing. A container that fails with a
+  REACHABLE daemon is a hard failure by default — including `keycloak_e2e`'s 240s startup
+  timeout, which used to be a fast local skip — though `PAIGASUS_SKIP_DOCKER=1` still downgrades
+  it to a skip, since that hatch is checked before any classification happens. A stray `CI=false` still counts as "CI present" (the
+  check is presence-based, not value-based) — clear it with `env -u CI cargo nextest run -p
+  paigasus-iam`.
+- Broad `inputs: ['**/*']` Moon tasks (e.g. `repo:actionlint`) stay cheap only because
+  `.moon/workspace.yml`'s `hasher.ignorePatterns` filters gitignored trees out of the hash walk.
+- Adding a **new error-code emission site** in Rust reds `repo:error-code-single-site` until the file
+  is added to `ci/error-registry/check.py`'s `MANIFEST` — as `emits` (which also requires a
+  membership test asserting every code it emits resolves via `ErrorReason::from_wire_reason`),
+  `asserts`, or `excluded` with a stated reason. The gate matches the registry's **declared**
+  vocabulary, so it cannot see a code you invented and never added to
+  `contracts/proto/paigasus/common/v1/error.proto`; adding the code there is what makes it
+  resolvable on any consumer. Code **removal** needs no gate — both service crates carry
+  `test: deps: ['^:build']`, so a contracts change already runs their membership tests.
+- Workflow trigger filters are gated by `repo:actionlint`. Write `branches:`, `paths:` **and their
+  `-ignore` variants** as **block sequences**, never the inline `branches: [main]` form — the
+  gate's extractor does not parse inline flow and fails all four keys loudly rather than skipping
+  them in silence. Every wildcard-free
+  `branches:` entry must resolve as `refs/remotes/origin/<name>`; a branch that does not exist yet,
+  or any entry carrying a glob character (`*`, `?`, `+`, `[]` — `+` included, since GitHub reads it
+  as a quantifier), needs a justified `BRANCH_SKIP` entry in `ci/actionlint/run.sh`. A typo'd
+  branch name otherwise disables a workflow silently and permanently (SMA-540).
 
 ## Workflow
 

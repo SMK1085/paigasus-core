@@ -73,6 +73,9 @@ base64 = { workspace = true }
 # (Task 16) the `TenancyService` gRPC server.
 tonic = { workspace = true }
 tonic-health = { workspace = true }
+# `adapters::grpc::convert::iam_status` — `tonic_types::{ErrorDetails, StatusExt}` attaches
+# `google.rpc.ErrorInfo` to every gRPC status (SMA-504, ADR-0019 decision 4).
+tonic-types = { workspace = true }
 # `adapters::grpc::tenancy` — the generated `paigasus.iam.v1` request/response/service types.
 paigasus-proto = { workspace = true }
 # `adapters::grpc::convert::ts` — builds the `AuditMetadata.created_at`/`modified_at` fields.

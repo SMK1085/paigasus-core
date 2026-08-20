@@ -3,10 +3,10 @@
 //! Shared integration-test support: an ephemeral, migrated Postgres via Docker, an
 //! in-process mock OIDC IdP, plus the axum-`oneshot` HTTP test harness (`app`/`send`).
 //!
-//! `start_migrated_postgres` runs against an ephemeral Postgres in Docker. In CI (`CI` env
-//! set) a missing Docker daemon is a HARD FAILURE; on a Docker-less laptop the test skips
-//! (returns `None`) with a note. Used by every integration test file that needs a real
-//! database. `start_raw_postgres` is the same container/CI-gating posture but skips the
+//! `start_migrated_postgres` runs against an ephemeral Postgres in Docker; the Docker-unavailable
+//! skip-versus-panic decision lives once, in `tests/support/docker.rs`'s `start_or_skip`
+//! (SMA-538), rather than being restated here. Used by every integration test file that needs a
+//! real database. `start_raw_postgres` is the same container/policy posture but skips the
 //! `Migrator::up(&db, None)` step, for tests that must drive migrations one step at a time
 //! (pinning the schema to an exact migration count) instead of always migrating to the tip.
 //!
@@ -53,26 +53,20 @@ use std::sync::{Arc, RwLock};
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ContainerAsync;
 use testcontainers_modules::testcontainers::ImageExt;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// Standalone container helpers — see `support/docker.rs`. Declared `pub` so the ~52 files that
+/// carry `mod support;` reach it as `support::docker::*`; the four Redis-only files that have no
+/// `mod support;` include the same file directly via `#[path = "support/docker.rs"]`.
+pub mod docker;
+
 /// Starts an ephemeral Postgres container, connects, and runs migrations.
 ///
-/// Returns `None` when Docker is unavailable and `CI` is unset (local skip path). Panics
-/// when `CI` is set and Docker is unreachable — Docker must be present in CI.
+/// The skip-versus-panic decision lives once, in `docker::start_or_skip` (SMA-538).
 pub async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseConnection)> {
-    let node = match Postgres::default().with_tag("16-alpine").start().await {
-        Ok(n) => n,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker is required for the round-trip test in CI: {e}");
-            }
-            eprintln!("skipping round-trip: Docker unavailable ({e})");
-            return None;
-        }
-    };
+    let node = docker::start_or_skip(Postgres::default().with_tag("16-alpine"), "start_migrated_postgres").await?;
 
     let url = connection_url(&node).await;
     let db = connect_when_ready(&url).await;
@@ -91,7 +85,7 @@ pub async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, Data
 /// handle — `PgOutboxListener::new(url, ..)` and a bare `sqlx::PgListener::connect(&url)` used as
 /// an independent observer of `pg_notify`. Both must reach the SAME database as `db`.
 pub async fn connection_url(pg: &ContainerAsync<Postgres>) -> String {
-    let port = pg.get_host_port_ipv4(5432).await.expect("mapped postgres port");
+    let port = docker::mapped_port(pg, 5432, "postgres").await;
     format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")
 }
 
@@ -143,16 +137,7 @@ async fn connect_when_ready(opts: impl Into<ConnectOptions>) -> DatabaseConnecti
 /// CodeRabbit SMA-467 round 2).
 #[allow(dead_code)]
 pub async fn start_raw_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseConnection)> {
-    let node = match Postgres::default().with_tag("16-alpine").start().await {
-        Ok(n) => n,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker is required for this test in CI: {e}");
-            }
-            eprintln!("skipping raw-postgres test: Docker unavailable ({e})");
-            return None;
-        }
-    };
+    let node = docker::start_or_skip(Postgres::default().with_tag("16-alpine"), "start_raw_postgres").await?;
     // Through `connection_url`, not a second inline `format!` — one definition of the URL, as
     // that helper's doc claims (CodeRabbit SMA-489 round 1).
     let mut opts = ConnectOptions::new(connection_url(&node).await);

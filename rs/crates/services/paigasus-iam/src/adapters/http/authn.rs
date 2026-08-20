@@ -4,8 +4,8 @@
 //! response funnel (spec §6.3, D12). This funnel is deliberately SEPARATE from the tenancy
 //! `ApiError`/`ErrorClass` machinery — that path expresses 400/404/409/500 plus a single
 //! generic 403 (`forbidden`, SMA-444 task-16), while authn needs 401 (+ `WWW-Authenticate`),
-//! several DISTINCT 403 subcodes (`identity_not_provisioned`/`provisioning_failed`/
-//! `principal_inactive`), and 503. Bodies reuse the same `{"error":{code,message}}`
+//! several DISTINCT 403 subcodes (`identity-not-provisioned`/`provisioning-failed`/
+//! `principal-inactive`), and 503. Bodies reuse the same `{"error":{code,message}}`
 //! envelope; every message is STATIC per code — no claim values, token fragments, or
 //! upstream error text ever reach the response (spec §6.3).
 
@@ -37,11 +37,14 @@ impl From<AuthnError> for AuthnApiError {
 impl IntoResponse for AuthnApiError {
     fn into_response(self) -> Response {
         let (status, code, message) = match &self.0 {
-            AuthnError::InvalidToken(_) => (StatusCode::UNAUTHORIZED, "invalid_token", "invalid bearer token"),
-            AuthnError::IdentityNotProvisioned => (StatusCode::FORBIDDEN, "identity_not_provisioned", "identity not provisioned"),
-            AuthnError::ProvisioningFailed(_) => (StatusCode::FORBIDDEN, "provisioning_failed", "provisioning failed"),
-            AuthnError::PrincipalInactive => (StatusCode::FORBIDDEN, "principal_inactive", "principal inactive"),
-            AuthnError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable", "authentication backend unavailable"),
+            AuthnError::InvalidToken(_) => (StatusCode::UNAUTHORIZED, "invalid-token", "invalid bearer token"),
+            AuthnError::IdentityNotProvisioned => (StatusCode::FORBIDDEN, "identity-not-provisioned", "identity not provisioned"),
+            AuthnError::ProvisioningFailed(_) => (StatusCode::FORBIDDEN, "provisioning-failed", "provisioning failed"),
+            AuthnError::PrincipalInactive => (StatusCode::FORBIDDEN, "principal-inactive", "principal inactive"),
+            // `authn-unavailable`, NOT a bare `unavailable`: a rename, not a recasing, so it does
+            // not read as a generic service-down code alongside the gateway's `iam-unavailable`
+            // and `upstream-unavailable`, which name different failures (ADR-0019 A1.3).
+            AuthnError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "authn-unavailable", "authentication backend unavailable"),
             AuthnError::Backend(_) => {
                 // Debug carries the boxed repository/infra source (never token or claim
                 // material by `AuthnError`'s own contract) — logged here, never surfaced.
@@ -51,7 +54,12 @@ impl IntoResponse for AuthnApiError {
         };
 
         let mut response = (status, Json(json!({ "error": { "code": code, "message": message } }))).into_response();
+        response.headers_mut().insert(
+            paigasus_observability::correlation::RETRYABLE_HEADER,
+            HeaderValue::from_static(crate::adapters::retryable::authn_retryable(&self.0).as_wire()),
+        );
         if matches!(self.0, AuthnError::InvalidToken(_)) {
+            // RFC 6750 §3.1 standardises this value. NOT ours to rename — only the body's code is.
             response.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static(BEARER_CHALLENGE));
         }
         response
@@ -71,16 +79,49 @@ impl IntoResponse for AuthnApiError {
 #[derive(Debug)]
 pub(crate) struct EnvelopeJson<T>(pub(crate) T);
 
+/// Every `(code, message)` pair [`envelope_rejection`] can put on the wire.
+///
+/// Extracted from the `if` that used to inline both literals so the membership test can enumerate
+/// them rather than restate them. The test previously hand-copied `"request-too-large"` and
+/// `"invalid-request-body"`, so a third branch here would have escaped both it and
+/// `repo:error-code-single-site` (SMA-507 E3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(strum::EnumIter))]
+enum RejectionKind {
+    /// The body exceeded the configured byte limit.
+    TooLarge,
+    /// The body could not be deserialized.
+    Invalid,
+}
+
+impl RejectionKind {
+    /// This kind's canonical registry code and its static, caller-safe message.
+    fn parts(self) -> (&'static str, &'static str) {
+        match self {
+            // `invalid-request-body` is merged with the gateway's identical case: one code for one
+            // condition across both services (ADR-0019 A1.3).
+            RejectionKind::Invalid => ("invalid-request-body", "invalid request body"),
+            RejectionKind::TooLarge => ("request-too-large", "request body too large"),
+        }
+    }
+}
+
 /// Maps a `JsonRejection` into the stable `{"error":{code,message}}` envelope — shared by both
 /// `EnvelopeJson`'s required (`FromRequest`) and optional (`OptionalFromRequest`) extraction
 /// paths below so the two can never drift apart on status/code/message.
 fn envelope_rejection(rejection: JsonRejection) -> Response {
-    let (code, message) = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        ("request_too_large", "request body too large")
+    let kind = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        RejectionKind::TooLarge
     } else {
-        ("invalid_request", "invalid request body")
+        RejectionKind::Invalid
     };
-    (rejection.status(), Json(json!({ "error": { "code": code, "message": message } }))).into_response()
+    let (code, message) = kind.parts();
+    let mut response = (rejection.status(), Json(json!({ "error": { "code": code, "message": message } }))).into_response();
+    response.headers_mut().insert(
+        paigasus_observability::correlation::RETRYABLE_HEADER,
+        HeaderValue::from_static(paigasus_observability::Retryable::No.as_wire()),
+    );
+    response
 }
 
 impl<S, T> FromRequest<S> for EnvelopeJson<T>
@@ -133,7 +174,7 @@ pub fn router(body_limit: usize) -> Router<AppState> {
 
 /// `POST /v1/authn/introspect` (spec §7.2): the full `PrincipalContext` for a presented
 /// token. READ-ONLY (D10): `AuthenticateToken::introspect` resolves with
-/// `Provisioning::Disabled`, so an unknown identity is 403 `identity_not_provisioned` and
+/// `Provisioning::Disabled`, so an unknown identity is 403 `identity-not-provisioned` and
 /// this unauthenticated endpoint never has a user-creation side effect. The body carries
 /// the credential itself and is NEVER logged (nothing here logs, and an oversized token is
 /// rejected by the validator's own length cap — no pre-filtering, no echo).
@@ -185,7 +226,7 @@ mod tests {
         assert_eq!(rejection.status(), StatusCode::BAD_REQUEST);
         let bytes = to_bytes(rejection.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["error"]["code"], json!("invalid_request"));
+        assert_eq!(body["error"]["code"], json!("invalid-request-body"));
         assert_eq!(body["error"]["message"], json!("invalid request body"));
     }
 
@@ -215,12 +256,13 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_token_is_401_with_bearer_challenge() {
-        // Every `TokenDefect` renders identically — the defect kind never leaks (spec §6.3).
         for defect in [TokenDefect::Malformed, TokenDefect::Expired, TokenDefect::Oversized, TokenDefect::BadSignature] {
             let (status, challenge, body) = rendered(AuthnError::InvalidToken(defect)).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED);
+            // AC 7: RFC 6750 §3.1 standardises `invalid_token` in the CHALLENGE. It is not ours
+            // to rename — only the JSON body's code becomes canonical.
             assert_eq!(challenge.as_deref(), Some("Bearer error=\"invalid_token\""));
-            assert_eq!(body["error"]["code"], "invalid_token");
+            assert_eq!(body["error"]["code"], "invalid-token");
             assert_eq!(body["error"]["message"], "invalid bearer token");
         }
     }
@@ -228,10 +270,10 @@ mod tests {
     #[tokio::test]
     async fn forbidden_family_is_403_with_stable_codes_and_no_challenge() {
         let cases = [
-            (AuthnError::IdentityNotProvisioned, "identity_not_provisioned", "identity not provisioned"),
-            (AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail), "provisioning_failed", "provisioning failed"),
-            (AuthnError::ProvisioningFailed(ProvisioningDefect::EmailConflict), "provisioning_failed", "provisioning failed"),
-            (AuthnError::PrincipalInactive, "principal_inactive", "principal inactive"),
+            (AuthnError::IdentityNotProvisioned, "identity-not-provisioned", "identity not provisioned"),
+            (AuthnError::ProvisioningFailed(ProvisioningDefect::MissingEmail), "provisioning-failed", "provisioning failed"),
+            (AuthnError::ProvisioningFailed(ProvisioningDefect::EmailConflict), "provisioning-failed", "provisioning failed"),
+            (AuthnError::PrincipalInactive, "principal-inactive", "principal inactive"),
         ];
         for (err, code, message) in cases {
             let (status, challenge, body) = rendered(err).await;
@@ -247,8 +289,55 @@ mod tests {
         let (status, challenge, body) = rendered(AuthnError::Unavailable).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(challenge, None);
-        assert_eq!(body["error"]["code"], "unavailable");
+        assert_eq!(body["error"]["code"], "authn-unavailable");
         assert_eq!(body["error"]["message"], "authentication backend unavailable");
+    }
+
+    /// AC 1: every code this funnel and its extractor can emit is in the canonical registry.
+    ///
+    /// The `AuthnError` half is driven off `all_authn_errors()`, so a new variant is covered
+    /// automatically. The extractor half used to hand-restate `envelope_rejection`'s two literals
+    /// here, which meant a third branch there would have escaped this test AND
+    /// `repo:error-code-single-site` (this file is on the manifest) — SMA-507 E3. It now
+    /// enumerates `RejectionKind`, so a new kind must state its parts or fail to compile.
+    ///
+    /// What this does NOT close, stated so the comment above is not read as more than it is: the
+    /// codes come from `RejectionKind::parts()`, not from a rendered `envelope_rejection`
+    /// response. A future branch that returns a literal WITHOUT routing through `RejectionKind`
+    /// escapes both this test and `repo:error-code-single-site` — the gate reports no offender
+    /// because this file is already on its manifest. That is the residual the gate's README calls
+    /// "a code added to an already-listed file but outside the enum its guard enumerates".
+    /// `system_retirement.rs`'s guard reads its code back out of the body precisely because it
+    /// could; here the two rejection kinds are not reachable without a real `JsonRejection`.
+    #[tokio::test]
+    async fn every_authn_http_code_is_in_the_registry() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+        use strum::IntoEnumIterator;
+
+        let mut codes: Vec<String> = RejectionKind::iter().map(|kind| kind.parts().0.to_owned()).collect();
+        assert!(!codes.is_empty(), "RejectionKind must yield at least one code, or this half asserts nothing");
+        for err in crate::adapters::retryable::tests_support::all_authn_errors() {
+            let (_, _, body) = rendered(err).await;
+            codes.push(body["error"]["code"].as_str().expect("a code").to_owned());
+        }
+        for code in codes {
+            assert!(ErrorReason::from_wire_reason(&code).is_some(), "{code} is not declared in common/v1/error.proto");
+        }
+    }
+
+    /// D4: the header is present on EVERY error response, carrying the literal `false` where the
+    /// error is not retryable — a client must never have to read absence as `false`.
+    #[tokio::test]
+    async fn every_authn_error_carries_a_retryable_header() {
+        let cases = [
+            (AuthnError::InvalidToken(TokenDefect::Malformed), "false"),
+            (AuthnError::Unavailable, "true"),
+            (AuthnError::Backend("x".into()), "unknown"),
+        ];
+        for (err, want) in cases {
+            let response = AuthnApiError(err).into_response();
+            assert_eq!(response.headers()["paigasus-retryable"], want);
+        }
     }
 
     #[tokio::test]

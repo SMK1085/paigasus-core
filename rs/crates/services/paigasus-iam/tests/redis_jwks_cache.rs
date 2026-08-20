@@ -4,9 +4,9 @@
 //! through a real Redis, an unknown issuer misses cleanly (`None`, not an error), and a
 //! stopped container surfaces `AuthnError::Unavailable` rather than hanging or panicking.
 //!
-//! Runs against an ephemeral Redis in Docker. In CI (`CI` env set) a missing Docker daemon
-//! is a HARD FAILURE; on a Docker-less laptop the test skips (returns) with a note — same
-//! gating pattern as `tests/support/mod.rs::start_migrated_postgres`.
+//! Runs against an ephemeral Redis in Docker. The Docker-unavailable policy lives once in
+//! `tests/support/docker.rs` (SMA-538): a container failure with a reachable daemon is a hard
+//! failure, an unreachable daemon skips locally and reds in CI.
 
 use chrono::{SubsecRound, Utc};
 use jsonwebtoken::jwk::JwkSet;
@@ -15,26 +15,16 @@ use paigasus_iam::adapters::oidc::redis_cache::RedisJwksCache;
 use paigasus_iam_core::{AuthnError, Issuer};
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::ContainerAsync;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
-/// Starts an ephemeral Redis container, returning its connection URL. Same CI-hard-fail /
-/// local-skip gating as `support::start_migrated_postgres`; self-contained here since this
-/// is the only consumer of a Redis container in this test crate.
+// This file has no `mod support;` — including `support/docker.rs` directly keeps it that way,
+// pulling in one small standalone file rather than the whole support surface (SMA-521).
+#[path = "support/docker.rs"]
+mod docker;
+
+/// Starts an ephemeral Redis container, returning its connection URL. The skip-versus-fail
+/// decision lives once, in `support/docker.rs` (SMA-538).
 async fn start_redis() -> Option<(ContainerAsync<Redis>, String)> {
-    let node = match Redis::default().start().await {
-        Ok(n) => n,
-        Err(e) => {
-            if std::env::var_os("CI").is_some() {
-                panic!("Docker is required for the redis jwks cache test in CI: {e}");
-            }
-            eprintln!("skipping redis_jwks_cache: Docker unavailable ({e})");
-            return None;
-        }
-    };
-
-    let port = node.get_host_port_ipv4(6379).await.unwrap();
-    let url = format!("redis://127.0.0.1:{port}");
-    Some((node, url))
+    docker::start_redis_or_skip("redis_jwks_cache").await
 }
 
 fn sample_jwks(fetched_at: chrono::DateTime<Utc>) -> CachedJwks {

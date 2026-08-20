@@ -410,7 +410,7 @@ fn actor() -> Prn {
 /// session holds open. Mirrors `tests/outbox_retention_concurrency_pg.rs`'s own "own pool, own
 /// physical session, not one borrowed from db's own pool" hold-open technique.
 async fn second_connection(container: &ContainerAsync<Postgres>) -> DatabaseConnection {
-    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let port = support::docker::mapped_port(container, 5432, "postgres (second connection)").await;
     Database::connect(format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")).await.unwrap()
 }
 

@@ -8,7 +8,8 @@ on:
   # ts/pnpm-lock.yaml, and listing it here would fire the full matrix weekly for a change
   # that cannot affect the addon's Rust source (SMA-520 AC-3).
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - 'rs/**'                              # includes rs/Cargo.lock + rs/rust-toolchain.toml
       - '.github/workflows/prebuild.yml'
@@ -23,7 +24,8 @@ on:
   # required check (the `Protect main` ruleset requires only `moon ci`), so a skipped run
   # cannot wedge a merge.
   pull_request:
-    branches: [main]
+    branches:
+      - main
     paths:
       - '.github/workflows/prebuild.yml'
       - '.prototools'
