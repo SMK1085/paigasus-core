@@ -2911,12 +2911,26 @@ block_execution_verdict() {
   # The stub: logs its OWN full argument list (never "moon" itself, which is $0 from its own point
   # of view) and exits 0 unconditionally — a stubbed `moon` that could fail would make a
   # 'zero-invocations' verdict ambiguous between "never called" and "called, then failed".
-  cat > "$bindir/moon" <<'STUB'
+  # Both the write and the chmod are checked, for the same reason the count below is: an
+  # unexecutable stub leaves NO `moon` on the narrow PATH, every path then logs nothing, and the
+  # loop would report 'zero-invocations' — blaming ci.yml and citing README L12 for what is
+  # actually an environment failure. Same misdiagnosis class as an unreadable count (CodeRabbit
+  # CLI review of PR 150).
+  if ! cat > "$bindir/moon" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$MOON_STUB_LOG"
 exit 0
 STUB
-  chmod +x "$bindir/moon"
+  then
+    echo 'setup-failed'
+    rm -rf "$bindir"
+    return
+  fi
+  if ! chmod +x "$bindir/moon"; then
+    echo 'setup-failed'
+    rm -rf "$bindir"
+    return
+  fi
 
   for row in "${MOON_STEP_EVENT_PATHS[@]}"; do
     IFS=: read -r label event before sub <<< "$row"
