@@ -152,7 +152,7 @@ build_one() {
     --build-arg "BIN=${crate}" \
     --label "org.opencontainers.image.title=${crate}" \
     --label "org.opencontainers.image.description=Paigasus ${service} service" \
-    --label "org.opencontainers.image.source=https://github.com/paigasus/paigasus-core" \
+    --label "org.opencontainers.image.source=https://github.com/SMK1085/paigasus-core" \
     --label "org.opencontainers.image.revision=${REVISION}" \
     --label "org.opencontainers.image.licenses=Apache-2.0" \
     -t "$tag" -t "${crate}:dev" \

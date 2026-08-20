@@ -639,7 +639,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-500
+cd "$(git rev-parse --show-toplevel)"
 docker build -f rs/Dockerfile --build-arg BIN=paigasus-gateway -t paigasus-gateway:dev rs/
 docker build -f rs/Dockerfile --build-arg BIN=paigasus-iam     -t paigasus-iam:dev     rs/
 docker run --rm -d --name gw-t -p 18088:8088 -e GATEWAY_UPSTREAM__OPENAI__API_KEY=sk-smoke-not-a-real-key paigasus-gateway:dev
@@ -1174,7 +1174,7 @@ Per-project Moon tasks do NOT run the repo-level gates. Run the whole thing:
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-500
+cd "$(git rev-parse --show-toplevel)"
 moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking \
   :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free \
   :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site \

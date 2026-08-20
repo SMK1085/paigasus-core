@@ -179,7 +179,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (`-with-certs` adds ~120 PEMs nothing reads); there is **no `/etc/passwd`**, so `USER` must be
   numeric; and `chisel cut --root DIR` does not create `DIR`. `/etc/nsswitch.conf` is also absent
   and that is FINE — glibc falls back to a compiled-in `files dns` default and the NSS modules
-  ship in `libc6_libs` (DNS verified end-to-end for a container hostname and a public name).
+  ship in `libc6_libs`. The smoke suite pins this by reaching Postgres at a CONTAINER
+  HOSTNAME rather than an IP literal; public-name resolution was verified once by hand during
+  design and is NOT covered continuously.
 - `FROM rust:X.Y.Z` does **not** pin the compiler: `rust-toolchain.toml` is inside the build
   context and rustup honours it over the image, so a channel bump silently changes the compiler
   behind a pinned-looking `FROM`. `rs/Dockerfile` sets `RUSTUP_TOOLCHAIN` and
