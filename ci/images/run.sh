@@ -15,7 +15,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-REGISTRY="${PAIGASUS_IMAGE_REGISTRY:-ghcr.io/paigasus}"
+REGISTRY="${PAIGASUS_IMAGE_REGISTRY:-ghcr.io/smk1085}"
 REVISION="$(git -C "$ROOT" rev-parse HEAD)"
 
 # Digest-pinned smoke-test dependencies. This branch's whole design argument is that a floating

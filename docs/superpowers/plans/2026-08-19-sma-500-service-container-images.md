@@ -688,7 +688,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-REGISTRY="${PAIGASUS_IMAGE_REGISTRY:-ghcr.io/paigasus}"
+REGISTRY="${PAIGASUS_IMAGE_REGISTRY:-ghcr.io/smk1085}"
 REVISION="$(git -C "$ROOT" rev-parse HEAD)"
 
 crate_for() {
@@ -1116,7 +1116,7 @@ git commit -m "ci(repo): build and smoke-test the service images in CI (SMA-500)
 Create `docs/ops/RUNBOOK-containers.md` covering exactly these sections — this is the contract SMA-513 reads, so nothing here may be vague:
 
 1. **Build locally** — `ci/images/run.sh all`, and the single-service form.
-2. **Image names** — `ghcr.io/paigasus/paigasus-{iam,gateway}:<git-sha>`. Publishing is deferred; the names are fixed so the Helm chart has something to inherit.
+2. **Image names** — `ghcr.io/smk1085/paigasus-{iam,gateway}:<git-sha>`. Publishing is deferred; the names are fixed so the Helm chart has something to inherit.
 3. **Runtime configuration** — env only: defaults `<` optional TOML `<` `IAM_*`/`GATEWAY_*`, with `__` for nesting (`IAM_API_KEYS__PEPPER` -> `api_keys.pepper`). Nothing is baked. A mounted TOML still layers, because that is figment's behaviour.
 4. **Probe contract** — the table from spec §4.6: liveness `GET /healthz`, readiness `GET /readyz`, startup `GET /healthz` with a generous `failureThreshold` because IAM migrates before binding. Commands use absolute paths and the exec form (no shell). `/readyz` via `/usr/local/bin/paigasus-service healthcheck --path /readyz`. Exit codes 0/1/2.
 5. **Operational rules that are NOT image properties but bite operators first:**

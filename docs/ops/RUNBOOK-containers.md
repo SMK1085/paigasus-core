@@ -43,8 +43,8 @@ until `images.yml` itself exists on `main`.)
 ## 2. Image names
 
 ```text
-ghcr.io/paigasus/paigasus-iam:<git-sha>
-ghcr.io/paigasus/paigasus-gateway:<git-sha>
+ghcr.io/smk1085/paigasus-iam:<git-sha>
+ghcr.io/smk1085/paigasus-gateway:<git-sha>
 ```
 
 Publishing to the registry is deferred — `ci/images/run.sh` only builds and smoke-tests, it never
