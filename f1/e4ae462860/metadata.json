@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "f1e4ae462860",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-542-guard-self-test-invocations",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "moon.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f1/e4ae462860/0/metadata.json",
+      "transcript": "/f1/e4ae462860/0/full.jsonl",
+      "compact_transcript": "/f1/e4ae462860/0/transcript.jsonl",
+      "content_hash": "/f1/e4ae462860/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 8,
+    "cache_creation_tokens": 14173,
+    "cache_read_tokens": 912861,
+    "output_tokens": 4283,
+    "api_call_count": 4
+  }
+}
