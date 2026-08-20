@@ -587,11 +587,20 @@ a change there must re-key it, and `repo:actionlint`'s own `**/*` cannot green a
 T4, T9 and T12 are one-off manual mutations by construction — they mutate the very mechanisms the
 standing controls run through. Their results go in the PR body.
 
-**Cost ceiling (adversarial review, QUESTION).** The battery is accepted only if the full gate stays
-**under 2× its current ~1.5s standalone** — i.e. ~3s, which D12's parallelism projects. `--self-test`
-must be unchanged at ~1.0s, since `README.md` advertises it as the fast path. If the measured
-figures exceed that, the fallback is the review's own proposal: one mutant plus five textual
-preconditions (2 subprocesses). Both figures get measured and the README table updated either way.
+**Cost ceiling (adversarial review, QUESTION) — SUPERSEDED during implementation (§8).** The
+original ceiling required the full gate to stay **under 2× its current ~1.5s standalone** — i.e.
+~3s — with a fallback to one mutant plus five textual preconditions (2 subprocesses) if the
+measured figures missed it. The gate measures ~3.36s standalone (min-of-7), and the five-mutant
+battery was kept as designed rather than falling back. Two reasons the ceiling itself was retired
+rather than the design: it was 2× a *pre-change* baseline, but check 8 (the `T` floor plus the
+swallowed/`continue-on-error` verdicts) legitimately grew the gate beyond what a bare self-test
+counter would have cost, so "2× the old number" stopped being the right question once check 8
+existed; and the battery's cost is parallel-bound rather than proportional to mutant count —
+measured concurrent `--self-test` invocations: 1 → 1.09s, 2 → 1.21s, 6 → 2.07s, so a future sixth
+mutant costs a fraction of a second, not a whole extra invocation. Moon's own per-task floor in
+this repo is ~9–11s regardless of what a task does, so the gate — even at ~3.36s standalone — is
+nowhere near the critical path. `ci/actionlint/README.md`'s cost table carries the current
+measured figures for both the full gate and `--self-test`.
 
 ## 6. Limitations
 
@@ -619,10 +628,17 @@ their own control pairs; the battery is orthogonal.
 on the `actionlint:` task in `moon.yml` (SMA-540 L9). The `T` floor reads a tracked file, so it is
 unaffected; check 5's branch half still is.
 
-**L6 — Suppression spellings beyond `moon ci`.** D14 pins the `moon` command lines in `ci.yml`.
-A sufficiently creative edit elsewhere in the workflow — `continue-on-error: true` on the step, or
-removing the step entirely — is not covered. `continue-on-error` is worth a follow-up issue; step
-removal is caught by the required-check configuration on GitHub, which is outside this repo.
+**L6 — The cycle is asymmetric (superseded during implementation, §8).** The original L6 said
+`continue-on-error: true` was not covered by D14 and was worth a follow-up issue; check 8 now
+covers it (any spelling but the literal `false`, with `COE_SKIP` as the escape hatch for an
+unrelated later step). What replaces it: `repo:affected-smoke` pins `repo:actionlint`'s call
+sites (`ACTIONLINT_SH_CALL_SITES`), but `repo:actionlint` pins only `:affected-smoke`'s *presence
+in `T`* — i.e. its scheduling, not its own internal correctness. Deleting
+`assert_ci_targets || SUITE_RC=1` from `ci/affected-graph/run.sh` therefore still removes that
+half of the guard silently, with everything green: `repo:affected-smoke` keeps running and keeps
+exiting 0, because the line that would have made it fail is gone. `ci_targets.py`'s
+`RUN_SH_CALL_SITES` comment describes this residual accurately (SMA-542 review finding I2); it is
+a deliberate, deferred follow-up, not something this change claims to close.
 
 ## 7. Acceptance criteria
 
@@ -657,3 +673,19 @@ end line, "byte-identical" in §2.2).
 Reason in D12: AC-1 is written as *"any self-test invocation"*, and D12's parallelism reduces the
 cost difference to about one wall-second. Recorded as the explicit fallback in §5's cost ceiling if
 the measured figures miss it.
+
+**Decided during implementation (task 6, 2026-08-20).** Two things this spec drafted as open
+questions were settled once real code and real measurements existed, and both sections above have
+been updated in place rather than left to silently drift from what shipped:
+
+- §5's cost ceiling (2× the ~1.5s pre-change baseline, with the one-mutant fallback) was
+  superseded rather than triggered. The gate measures ~3.36s standalone with the five-mutant
+  battery kept as designed — the fallback was never invoked. See §5 for the reasoning: check 8
+  legitimately grew the gate beyond what the pre-change baseline priced in, and the battery's cost
+  is parallel-bound rather than proportional to mutant count.
+- §6's L6 ("`continue-on-error: true` is not covered, worth a follow-up issue") is now false: check
+  8 covers it directly, with `COE_SKIP` as the escape hatch. L6 was replaced with the residual that
+  actually remains — the cycle's asymmetry (`repo:affected-smoke` pins `repo:actionlint`'s call
+  sites, but not the reverse: `repo:actionlint` pins only `:affected-smoke`'s scheduling, not
+  `repo:affected-smoke`'s own internal correctness) — which is the more important limitation this
+  work leaves standing.

@@ -218,6 +218,21 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   and say which in its doc. Anything in an added bundle becomes an **unconstrained** anchor (no `cA` check),
   so it must contain roots only; a self-signed LEAF works too (put its own cert in the bundle) since rustls
   applies no `cA` check to a trust anchor.
+- `repo:actionlint` and `repo:affected-smoke` now **guard each other**, and neither can guard
+  itself (SMA-542). `ci/actionlint/run.sh`'s check 8 asserts `:affected-smoke` is still in
+  `ci.yml`'s `T=(…)` array, that no `moon` line discards its exit status (a `||`/`&&`/`;`/`|`
+  tail), and that no step's `continue-on-error:` value suppresses it (anything but the literal
+  `false`) — escape-hatched per line via `COE_SKIP`, keyed by BOTH the line number and the line's
+  own text, so a shifted entry stops matching instead of silently absorbing a different occurrence
+  that lands on the vacated line. In return, `ci_targets.py`'s `ACTIONLINT_SH_CALL_SITES` pins
+  `run_self_tests` and `selftest_mutation_battery` as **whole lines** in `run.sh` (a substring
+  match would survive deleting the call, since the name is a prefix of its own definition). That
+  pin only works because `repo:affected-smoke` lists `ci/actionlint/**/*` in its `inputs` — remove
+  that and the pin stays green on exactly the PR that breaks it. Adding a sixth-and-later
+  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 5): the gate asserts invocations
+  AND definitions. The cycle is still asymmetric: `repo:actionlint` pins only `:affected-smoke`'s
+  presence in `T`, never `repo:affected-smoke`'s own call site inside `ci/affected-graph/run.sh` —
+  see `ci/actionlint/README.md`'s Limitations section.
 
 ## Workflow
 
