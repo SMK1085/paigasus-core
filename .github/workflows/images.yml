@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: Apache-2.0
+name: images
+
+on:
+  workflow_dispatch:
+
+  # POST-merge verification. `rs/**` because any service or dependency change can break an
+  # image build, and this is the only place that is checked.
+  push:
+    branches:
+      - main
+    paths:
+      - 'rs/**'
+      - 'ci/images/**'
+      - '.github/workflows/images.yml'
+
+  # PRE-merge verification of the BUILD INPUTS only. `rs/**` is deliberately absent: most PRs
+  # here touch it, and two cold --release builds on every one of them would raise the bill
+  # (SMA-520). These are the inputs that can actually break an image build — a new dependency,
+  # a toolchain bump, or the build machinery itself.
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'rs/Cargo.lock'
+      - 'rs/Cargo.toml'
+      - 'rs/rust-toolchain.toml'
+      - 'rs/Dockerfile'
+      - 'rs/.dockerignore'
+      - 'ci/images/**'
+      - '.github/workflows/images.yml'
+
+# Build-and-verify only: no registry, no credentials, nothing is pushed (SMA-500 D1).
+permissions:
+  contents: read
+
+concurrency:
+  # `event_name` is in the GROUP so a manual dispatch cannot cancel a running push job.
+  group: images-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  images:
+    name: build + smoke
+    runs-on: ubuntu-latest
+    # Two cold --release builds of a tree that has already overflowed the runner disk once.
+    # Deliberately ONE job, not a per-service matrix: the smoke suite needs BOTH images present,
+    # and matrix legs run on separate runners with no shared image store — a matrix would have to
+    # rebuild the other service inside one leg to smoke anything.
+    timeout-minutes: 60
+    steps:
+      # Same reclaim as ci.yml: this builds the cedar-policy tree in --release on a ~14 GB disk.
+      - name: Reclaim runner disk (drop unused preinstalled toolchains)
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435  # v3.11.1
+
+      - name: Build + smoke both images
+        run: ci/images/run.sh all
+
+      - name: Upload chisel package manifests
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: chisel-manifests
+          path: chisel-manifest-*.txt
+          if-no-files-found: ignore
+          # 90, not the 14-day default: any image built from this manifest can and does outlive
+          # a 14-day artifact expiry, and the manifest is the only record of which chisel-cut
+          # package versions (including libc6) that image actually shipped.
+          retention-days: 90

@@ -162,6 +162,36 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   or any entry carrying a glob character (`*`, `?`, `+`, `[]` — `+` included, since GitHub reads it
   as a quantifier), needs a justified `BRANCH_SKIP` entry in `ci/actionlint/run.sh`. A typo'd
   branch name otherwise disables a workflow silently and permanently (SMA-540).
+- Container images (SMA-500) live behind `ci/images/run.sh {build,smoke,all}` and
+  `.github/workflows/images.yml`, **not** Moon — a `repo:*` task would have to join `ci.yml`'s
+  `T=(…)` array (a `--release` build on every affected PR) or become a `T_EXEMPT` entry. The
+  workflow is **not a required check**, so a broken image build reds `main`, not the PR. Its
+  `pull_request` trigger already covers `rs/Dockerfile`, `rs/Cargo.{lock,toml}`,
+  `rs/rust-toolchain.toml`, `rs/.dockerignore`, `ci/images/**` and the workflow itself, so a PR
+  touching any of those runs it automatically — no manual step needed there.
+  `workflow_dispatch` it instead for a PR touching `rs/**` but **none** of those filtered
+  inputs (a plain service code change, say) — that's the one case the narrower `pull_request`
+  filter misses, and it can still break an image build. (`gh workflow run images.yml --ref
+  <branch>` 404s until `images.yml` itself is on `main`.)
+- The runtime base is a `chisel cut` of Ubuntu 24.04 into `FROM scratch`. Four traps, all
+  measured: `libgcc-s1_libs` is REQUIRED (Rust panic unwinding links `libgcc_s.so.1`) and its
+  absence fails at container START, not build; `ca-certificates_data` is the right variant
+  (`-with-certs` adds ~120 PEMs nothing reads); there is **no `/etc/passwd`**, so `USER` must be
+  numeric; and `chisel cut --root DIR` does not create `DIR`. `/etc/nsswitch.conf` is also absent
+  and that is FINE — glibc falls back to a compiled-in `files dns` default and the NSS modules
+  ship in `libc6_libs`. The smoke suite pins this by reaching Postgres at a CONTAINER
+  HOSTNAME rather than an IP literal; public-name resolution was verified once by hand during
+  design and is NOT covered continuously.
+- `FROM rust:X.Y.Z` does **not** pin the compiler: `rust-toolchain.toml` is inside the build
+  context and rustup honours it over the image, so a channel bump silently changes the compiler
+  behind a pinned-looking `FROM`. `rs/Dockerfile` sets `RUSTUP_TOOLCHAIN` and
+  `ci/images/run.sh` asserts the two agree. The related invariant — builder glibc ≤ runtime
+  glibc (bookworm 2.36 ≤ noble 2.39) — is also asserted there; inverting it fails at container
+  start with `GLIBC_2.4x not found`.
+- Exec-form `ENTRYPOINT`/`HEALTHCHECK` do **not** expand `ARG`/`ENV`, which is why one
+  parameterized `rs/Dockerfile` installs both binaries to the fixed path
+  `/usr/local/bin/paigasus-service`. Service identity comes from `paigasus_logging::init`, not
+  `argv[0]`.
 
 ## Workflow
 

@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# Keep the build context small. `target/` alone is gigabytes on any machine that has ever run
+# `cargo build`, and every byte of it is uploaded to the daemon on every build.
+target/
+**/*.node
+**/*.wasm
+.git/

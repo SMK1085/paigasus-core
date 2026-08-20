@@ -70,3 +70,6 @@ Thumbs.db
 .claude/*
 !.claude/settings.json
 .entire/
+
+# SMA-500: chisel package manifests are CI artifacts, not tracked files.
+chisel-manifest-*.txt
