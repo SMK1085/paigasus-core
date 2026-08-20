@@ -2807,9 +2807,11 @@ extract_moon_step_block() {
 #   no-target-array               the file has no single, unambiguous 'T=( … )' — the same
 #                                condition ci_target_floor_verdict's own 'no-array' names, read
 #                                independently here
-#   setup-failed                  could not resolve a `bash` to execute the block with, or could
-#                                not create a scratch directory/file for one of the event-path
-#                                runs — infrastructure, not a defect in ci.yml
+#   setup-failed                  could not resolve a `bash` to execute the block with, could not
+#                                create or truncate a scratch directory/file for one of the
+#                                event-path runs, or could not read back a usable invocation count
+#                                after running one (a malformed `wc`/`tr` result) — infrastructure,
+#                                not a defect in ci.yml
 #   zero-invocations <path>       the block, executed with EVENT/BEFORE set for <path>, never
 #                                invoked `moon` at all — an outer `if false; then … fi` (or any
 #                                other shape with the same effect) produces exactly this
@@ -2836,11 +2838,39 @@ extract_moon_step_block() {
 # gate would finish rc 0 having asserted nothing. Every genuine infrastructure failure inside this
 # function echoes 'setup-failed' and returns instead; the call site is what turns that into an
 # actual `infra` exit, from the main shell, where it works.
+
+# The single source of truth for turning ONE path's captured invocation count into a verdict
+# token. Extracted from the per-path loop below for the same reason mutant_is_killed (check 9,
+# further down) is extracted from its own collection loop: a real `wc`/`tr` failure that leaves
+# `$n` malformed is not something a portable, root-safe self-test can reliably force live (a
+# scratch directory made read-only is a no-op under root, per this file's own existing
+# unreadable_dir caveat elsewhere), so the DECISION is pulled out where a fixture table can drive
+# it directly with a synthetic, already-malformed `$n` instead.
+#
+# $1 label, $2 the captured count text (possibly malformed), $3 actual logged args (only
+# meaningful when $2 is exactly "1"), $4 the expected args for this path.
+invocation_count_verdict() {
+  local label="$1" n="$2" actual="$3" expected="$4"
+  # Hardened exactly like $arrays/$defs/$n elsewhere in this file (ci_target_floor_verdict,
+  # run_self_tests, selftest_mutation_battery): without this, a `wc`/`tr` failure leaves $n empty
+  # (or non-numeric), and the numeric `case` below falls through to its `*)` arm — reporting
+  # 'wrong-count <label> ' with an EMPTY count, which blames ci.yml for what is actually an
+  # environment failure (CodeRabbit, PR 150, finding F1).
+  case "$n" in
+    ''|*[!0-9]*) echo 'setup-failed'; return ;;
+  esac
+  case "$n" in
+    0) echo "zero-invocations $label" ;;
+    1) [ "$actual" = "$expected" ] || echo "bad-args $label" ;;
+    *) echo "wrong-count $label $n" ;;
+  esac
+}
+
 block_execution_verdict() {
   local f="$1" step_count run_block bash_bin
   local -a t_arr
   local t_joined tok row label event before sub expected
-  local bindir logf actual n
+  local bindir logf actual n verdict_out
 
   [ -e "$f" ] || { echo 'no-file'; return; }
 
@@ -2902,7 +2932,15 @@ STUB
         expected="run $t_joined" ;;
     esac
 
-    : > "$logf"
+    # Truncating (not re-`mktemp`ing) the log is what makes 'setup-failed' reachable here: without
+    # this check, a failed truncation (a full disk, a scratch dir removed out from under this
+    # function) leaves the PREVIOUS iteration's log in place — `wc -l` still succeeds, on stale
+    # content, and the verdict silently describes the WRONG path.
+    if ! : > "$logf"; then
+      echo 'setup-failed'
+      rm -rf "$bindir"
+      return
+    fi
 
     # PATH restricted to the stub dir FIRST, then /usr/bin:/bin ONLY — deliberately minimal, so the
     # real `moon` (wherever proto installed it) can never be found even if the block's own PATH
@@ -2913,12 +2951,11 @@ STUB
       "$bash_bin" -c "$run_block" >/dev/null 2>&1
 
     n="$(wc -l < "$logf" | tr -d ' ')"
-    case "$n" in
-      0) echo "zero-invocations $label" ;;
-      1)
-        actual="$(cat "$logf")"
-        [ "$actual" = "$expected" ] || echo "bad-args $label" ;;
-      *) echo "wrong-count $label $n" ;;
+    actual="$(cat "$logf" 2>/dev/null)"
+    verdict_out="$(invocation_count_verdict "$label" "$n" "$actual" "$expected")"
+    [ -n "$verdict_out" ] && echo "$verdict_out"
+    case "$verdict_out" in
+      setup-failed) rm -rf "$bindir"; return ;;
     esac
   done
 
@@ -2954,6 +2991,35 @@ $got"
       rc=1
     fi
   }
+
+  # invocation_count_verdict, driven directly with synthetic counts (CodeRabbit, PR 150, finding
+  # F1). A real `wc`/`tr` failure that leaves the captured count empty or non-numeric is not
+  # something a portable, root-safe fixture can force live — a scratch directory made read-only is
+  # a no-op under root, the same caveat this file's own unreadable_dir fixtures already document —
+  # so this proves the DECISION directly instead: 'setup-failed' for a malformed count (empty, or
+  # carrying a non-digit), never silently read as the numeric `case`'s `*)` arm ('wrong-count'
+  # with an EMPTY number, which would misdiagnose an environment failure as a ci.yml defect).
+  expect_count() {
+    local name="$1" expected="$2" n="$3" actual="${4:-}" want="${5:-}"
+    got="$(invocation_count_verdict 'some-path' "$n" "$actual" "$want")"
+    if [ "$got" != "$expected" ]; then
+      fail "block-execution self-test '$name': invocation_count_verdict('$n') returned '$got',
+      expected '$expected'."
+      rc=1
+    fi
+  }
+  expect_count 'an empty count is setup-failed, not an empty wrong-count' \
+    'setup-failed' ''
+  expect_count 'a non-numeric count is setup-failed' 'setup-failed' 'abc'
+  expect_count 'a count with a trailing non-digit is setup-failed' 'setup-failed' '12x'
+  expect_count 'a genuine zero count is zero-invocations, not setup-failed' \
+    'zero-invocations some-path' '0'
+  expect_count 'a genuine one-count matching the expected args is clean' \
+    '' '1' 'ci :a --base origin/main --include-relations' 'ci :a --base origin/main --include-relations'
+  expect_count 'a genuine one-count NOT matching the expected args is bad-args' \
+    'bad-args some-path' '1' 'ci :a' 'ci :a --base origin/main --include-relations'
+  expect_count 'a genuine count above one is wrong-count, with the real number' \
+    'wrong-count some-path 3' '3'
 
   # The healthy control: a small, faithful copy of the real if/elif/else shape (including the
   # zero-SHA grep check the elif condition needs — without it, "40 zeros" would read as merely
@@ -3219,7 +3285,7 @@ jobs:
 # Check 9's kill predicate (SMA-542 review M3 / spec T3) — extracted so it can be driven directly
 # by a fixture table instead of living inline in the mutant-collection loop below, where nothing
 # proved it. It is correct today; what was missing is the STANDING proof, in a file that cites
-# SMA-466's all-firing-fixture lesson four times over.
+# SMA-466's all-firing-fixture lesson five times over.
 #
 # A mutant counts as killed only when it exits 1 (fail()'s exit code) AND its captured output
 # carries assert_self_tests_ran's own distinctive message. rc 2 (infra()), rc 126 and rc 127
@@ -3643,9 +3709,10 @@ while IFS= read -r verdict; do
       fail ".github/workflows/ci.yml has no single, unambiguous 'T=( … )' array — see check 8's
       'no-array' above for the same underlying problem." ;;
     setup-failed)
-      infra "could not resolve a bash binary, or could not create a scratch directory/file, while
-      trying to execute .github/workflows/ci.yml's \"moon ci (affected graph)\" step. This is an
-      environment problem, not a defect in ci.yml." ;;
+      infra "could not resolve a bash binary, could not create or truncate a scratch
+      directory/file, or could not read back a usable invocation count, while trying to execute
+      .github/workflows/ci.yml's \"moon ci (affected graph)\" step. This is an environment
+      problem, not a defect in ci.yml." ;;
     'zero-invocations '*)
       fail ".github/workflows/ci.yml's \"moon ci (affected graph)\" step, executed with EVENT/
       BEFORE set for the '${verdict#zero-invocations }' event path, never invoked 'moon' at all.

@@ -510,17 +510,26 @@ tasks:
     # re-measured after the SMA-542 residual closure (PR 150 follow-up) added a ninth self-test
     # rather than paired with a stale figure from an earlier fixture-table count — was ~1.0s before
     # SMA-542 added checks 8-9, ~6.33s before this wave added check 8d): six actionlint invocations
-    # — one over the real workflows, five stdin fixtures — 26 `git ls-files` calls, and nine
-    # fixture tables (extractor, path-filter verdicts, branch-filter verdicts, config allowlist,
-    # ci-target floor, invocation allowlist, affected-graph wiring, block execution, kill
-    # predicate). Check 9's mutation battery is most of the added time: it re-runs the whole of
-    # `--self-test` — all 9 `git ls-files` calls included, PLUS check 8d's own dynamic execution of
-    # the moon-ci-affected-graph step's `run:` block against a stubbed `moon`, once per event path
-    # — once per self-test invocation plus once unmutated, ten concurrent subprocesses. That dynamic
+    # — one over the real workflows, five stdin fixtures — and nine fixture tables (extractor,
+    # path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation
+    # allowlist, affected-graph wiring, block execution, kill predicate). TWO DIFFERENT `git
+    # ls-files` counts, for two different walks, are worth keeping distinct rather than merging
+    # into one number (measured via `bash -x`, CodeRabbit PR 150 finding F2 — a merged "26" here
+    # previously read as the SAME walk check 9 re-runs, when it is not): the FULL GATE (checks 5/6
+    # scanning the real workflow files' `paths:`/`branches:` filters, on top of everything
+    # `--self-test` already does) makes 27; `--self-test` ALONE (the fixture tables' own synthetic
+    # `pattern_verdict`/`tracked_exact`/branch-resolution calls, never touching the real workflow
+    # files) makes 9. Check 9's mutation battery re-runs the SECOND of those — the whole of
+    # `--self-test`, 9 `git ls-files` calls included — PLUS check 8d's own dynamic execution of the
+    # moon-ci-affected-graph step's `run:` block against a stubbed `moon`, once per event path, all
+    # once per self-test invocation plus once unmutated, ten concurrent subprocesses. That dynamic
     # execution is most of check 8d's OWN standalone cost (~1.5s of the ~2.01s -> ~3.52s
-    # `--self-test` jump): each of six fixtures that reach it spawns a handful of real subprocesses
-    # (a scratch `mktemp -d`, then per event path a `bash -c` running the extracted block, which
-    # itself shells out to `grep` and the stubbed `moon`) rather than a `grep`/`sed` pass over text.
+    # `--self-test` jump): each of the EIGHT fixtures that reach the per-event-path loop (the
+    # healthy control, the if-false mutant, two healthy rechecks, the subset mutant, the
+    # branch-swap mutant, the duplicate-invocation mutant, and the final aggregate re-run — every
+    # other fixture returns before the loop) spawns a handful of real subprocesses (a scratch
+    # `mktemp -d`, then per event path a `bash -c` running the extracted block, which itself shells
+    # out to `grep` and the stubbed `moon`) rather than a `grep`/`sed` pass over text.
     # See the measured table in ci/actionlint/README.md.
     # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
     # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
