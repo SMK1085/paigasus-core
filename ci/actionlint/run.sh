@@ -37,8 +37,8 @@ FAILED=0
 # Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
 # protection and would break a future harness that sources this file twice (SMA-542 D3).
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=8   # extractor, path-filter, branch-filter, config, ci-target-floor,
-                    # invocation-allowlist, affected-graph-wiring, kill-predicate
+SELF_TEST_COUNT=9   # extractor, path-filter, branch-filter, config, ci-target-floor,
+                    # invocation-allowlist, affected-graph-wiring, block-execution, kill-predicate
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -53,11 +53,11 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the eight fixture tables only — extractor, path-filter verdicts," >&2
+  echo "  --self-test    run the nine fixture tables only — extractor, path-filter verdicts," >&2
   echo "                 branch-filter verdicts, config allowlist, ci-target floor, invocation" >&2
-  echo "                 allowlist, affected-graph wiring, kill predicate. No actionlint binary" >&2
-  echo "                 is required, but the branch-filter table needs a git repo carrying" >&2
-  echo "                 refs/remotes/origin/main." >&2
+  echo "                 allowlist, affected-graph wiring, block execution, kill predicate. No" >&2
+  echo "                 actionlint binary is required, but the branch-filter table needs a git" >&2
+  echo "                 repo carrying refs/remotes/origin/main." >&2
   echo "                 The check-9 mutation battery is NOT part of this — full gate only." >&2
   exit 2
 }
@@ -2658,6 +2658,564 @@ missing "$HERE/ci_targets.py" --self-test || NEG_RC=1' \
 }
 
 # ---------------------------------------------------------------------------------------------
+# Check 8d (definitions) — the "moon ci (affected graph)" step's `run:` block, extracted from
+# ci.yml and EXECUTED once per GitHub event path against a stubbed `moon` (SMA-542 residual
+# closure, PR 150 follow-up; closes README L12). Check 8b pins the three invocation LINES
+# byte-for-byte; it has no view of the CONTROL FLOW around them, so wrapping the whole if/elif/else
+# in an always-false outer conditional —
+#
+#   if false; then
+#     if [ "$EVENT" = "pull_request" ]; then
+#       moon ci "${T[@]}" --base origin/main --include-relations
+#     ...
+#     fi
+#   fi
+#
+# — leaves all three lines byte-identical to T_INVOCATION_ALLOWLIST while nothing executes on any
+# event path at all (CodeRabbit round 5, PR 150 — L12's own worked example; measured: full gate
+# rc 0 under this shape before this check existed). Every OTHER verdict in checks 8/8b matches a
+# fixed, enumerated TEXT shape (swallowed/wrapped/not-allowlisted) — the same reachability-analysis
+# trap this file's own history warns against crossing (L9/L10/L11, and ci_targets.py's own L10
+# comment on ACTIONLINT_SH_CALL_SITES). Rather than add a seventh enumerated shape to that list,
+# this check sidesteps the analysis entirely: it runs the actual bash and asks whether `moon` was
+# actually invoked — the one property that matters, on every path the step's own logic claims to
+# support.
+#
+# SAFETY. This executes text extracted from a TRACKED, REVIEWED workflow file
+# (.github/workflows/ci.yml) — the same trust boundary check 1 (actionlint) and every other check
+# in this file already cross by reading it; it is not untrusted input. `moon` is stubbed in a fresh
+# `mktemp -d` bin directory and put FIRST on a deliberately minimal PATH (the stub dir, then
+# /usr/bin:/bin) BEFORE the block ever runs, so the real `moon` — wherever `proto install` put it —
+# is never reachable, even if the block's own logic behaved unexpectedly. The block's own source
+# (the step named "moon ci (affected graph)" in ci.yml) uses nothing besides `printf`/`grep`/
+# `moon`; the first is a bash builtin and the second sits on that minimal PATH on both the macOS
+# and Ubuntu runners this repo runs on.
+# ---------------------------------------------------------------------------------------------
+
+# A 40-zero and a 40-nonzero value, matching the two shapes GitHub's `github.event.before` takes on
+# a push event: the literal all-zero SHA on a branch's first push (nothing to diff against), and a
+# real SHA otherwise. Built with `printf '%040d'` rather than a hand-typed 40-character literal, so
+# the length is not something to get wrong by hand — `$BEFORE`'s own `grep -qE '^0+$'` check in the
+# real block cares about exactly this distinction.
+MOON_STEP_BEFORE_ZERO="$(printf '%040d' 0)"
+MOON_STEP_BEFORE_NONZERO="$(printf '%040d' 1)"
+
+# One row per GitHub event path the step's own if/elif/else supports, as
+# "<label>:<EVENT value>:<BEFORE value>:<expected moon subcommand>" — colon-separated, since none
+# of these four fields can itself contain a colon. Bash 3.2 has no associative array to hold this
+# instead, the same fixed-row-of-strings convention T_INVOCATION_ALLOWLIST/
+# T_AFFECTED_GRAPH_CALL_SITES already use for a small table. <expected moon subcommand> plus
+# <EVENT>/<BEFORE> is enough for block_execution_verdict, below, to DERIVE the full expected
+# invocation independently, rather than comparing the block's behavior against a copy of its own
+# logic — the same "re-derive the oracle" principle the rest of this check's design follows.
+MOON_STEP_EVENT_PATHS=(
+  "pull_request:pull_request::ci"
+  "push-nonzero-before:push:${MOON_STEP_BEFORE_NONZERO}:ci"
+  "push-zero-before:push:${MOON_STEP_BEFORE_ZERO}:run"
+  "push-empty-before:push::run"
+)
+
+# The T=( … ) body, tokenized — a second, independent read of the SAME array check 8's
+# ci_target_floor_verdict already extracts. Not shared by calling that function: it returns a list
+# of PROBLEMS, not a list of tokens, and reshaping it would couple this check's fixtures to check
+# 8's own ~25-row table for no reason (the same reason invocation_allowlist_verdict stayed a
+# separate function from ci_target_floor_verdict). Duplicating the one-line sed costs the same kind
+# of drift risk T_FLOOR/T_INVOCATION_ALLOWLIST/T_AFFECTED_GRAPH_CALL_SITES already accept as the
+# price of not being the sole judge of your own configuration.
+#
+# Echoes nothing and returns 1 when the array cannot be read unambiguously (zero, or more than one,
+# single-line 'T=( … )') — the SAME condition, by the SAME regex, as ci_target_floor_verdict's own
+# 'no-array', so the two independently agree on when T cannot be trusted. Otherwise echoes one
+# token per line and returns 0.
+moon_target_array_tokens() {
+  local f="$1" arrays body w
+  arrays="$(grep -cE '^[[:blank:]]*T=\(.*\)[[:blank:]]*$' "$f")"
+  case "$arrays" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$arrays" -eq 1 ] || return 1
+  body="$(sed -nE 's/^[[:blank:]]*T=\((.*)\)[[:blank:]]*$/\1/p' "$f")"
+  # set -f for the unquoted `$body` expansion, same reasoning and same no-op-today status as
+  # ci_target_floor_verdict's own identical guard above.
+  set -f
+  for w in $body; do
+    printf '%s\n' "$w"
+  done
+  set +f
+  return 0
+}
+
+# Extracts the `run:` block body of the step whose name is EXACTLY "moon ci (affected graph)" —
+# matched as stripped text, the same "read the file's shape, don't parse full YAML" approach
+# extract_filter_keys takes above, not a general parser. Prints the block, dedented to column 0, to
+# stdout on success. Prints NOTHING on any failure (no matching step, no run: found before the step
+# ends) — this function only ever processes the FIRST such step, by design; block_execution_verdict
+# below counts occurrences itself, FIRST, and never calls this unless that count is exactly one.
+extract_moon_step_block() {
+  local f="$1"
+  awk '
+    BEGIN { state = "seek-step" }
+    {
+      line = $0
+      sub(/\r$/, "", line)                       # tolerate CRLF, same as extract_filter_keys
+      match(line, /^[ ]*/); ind = RLENGTH
+      stripped = line
+      sub(/^[ ]*/, "", stripped)
+
+      if (state == "seek-step") {
+        if (stripped == "- name: moon ci (affected graph)") {
+          step_ind = ind
+          state = "seek-run"
+        }
+        next
+      }
+
+      if (state == "seek-run") {
+        if (stripped == "") next
+        if (ind <= step_ind) { exit }              # left the step with no run: key found
+        if (stripped ~ /^run:[ \t]*[|>][-+]?([ \t]|$)/) {
+          run_ind = ind
+          state = "in-run"
+          next
+        }
+        next                                       # some other step key (env:, if:, ...) — skip
+      }
+
+      # state == "in-run"
+      if (stripped == "") { print ""; next }        # a blank line inside the block scalar
+      if (ind > run_ind) {
+        if (body_ind == "") body_ind = ind          # dedent relative to the FIRST body line
+        print substr(line, body_ind + 1)
+        next
+      }
+      exit                                          # dedented back out — block scalar is done
+    }
+  ' "$f"
+}
+
+# block_execution_verdict — the enforcement for check 8d. $1 is the workflow file.
+#
+# Echoes one verdict token per problem, and nothing for a healthy step:
+#   no-file                      the workflow does not exist
+#   count-unreadable              could not count occurrences of the step's name line (the same
+#                                grep-fails-outright condition invocation_allowlist_verdict's own
+#                                'count-unreadable' guards against, e.g. a directory in place of
+#                                the file)
+#   no-step                      no step named exactly "moon ci (affected graph)" was found
+#   multi-step <n>                that name was found more than once — which one guards T is
+#                                ambiguous, so this check refuses to guess
+#   no-run-block                  the step was found exactly once, but no `run: |`/`run: >` block
+#                                could be extracted from it
+#   no-target-array               the file has no single, unambiguous 'T=( … )' — the same
+#                                condition ci_target_floor_verdict's own 'no-array' names, read
+#                                independently here
+#   setup-failed                  could not resolve a `bash` to execute the block with, or could
+#                                not create a scratch directory/file for one of the event-path
+#                                runs — infrastructure, not a defect in ci.yml
+#   zero-invocations <path>       the block, executed with EVENT/BEFORE set for <path>, never
+#                                invoked `moon` at all — an outer `if false; then … fi` (or any
+#                                other shape with the same effect) produces exactly this
+#   wrong-count <path> <n>        <path> invoked `moon` <n> times, not once
+#   bad-args <path>               <path> invoked `moon` exactly once, but not with the exact
+#                                subcommand + WHOLE `T` array + `--base`/`--include-relations`
+#                                shape that path requires. T_INVOCATION_ALLOWLIST (check 8b) checks
+#                                each line against a SET of allowed forms with no notion of WHICH
+#                                branch a line sits under, so three lines that individually match
+#                                the set, sitting under the WRONG conditions (the `if` and `else`
+#                                bodies swapped, say), pass 8b outright — count and per-line match
+#                                both stay clean. This check derives the expected invocation from
+#                                the path itself, so a swap like that is exactly what it catches. A
+#                                same-line subset (`moon ci "${T[@]:0:5}" ...`) also lands here, but
+#                                that specific shape is already caught by 8b's own invocation-count
+#                                (it stops containing the literal `"${T[@]}"` substring) — this
+#                                check catching it too is redundant-but-consistent with that path,
+#                                not an exclusive closure of it.
+#
+# NEVER `infra` from inside this function (SMA-542 CodeRabbit round 4 finding F1, and the SAME bug
+# reopened once already on invocation_allowlist_verdict): it is invoked at the production call site
+# below as `done < <(block_execution_verdict ...)`, so it runs inside that process substitution's
+# OWN subshell — an `exit 2` there would exit only the subshell, FAILED would never be set, and the
+# gate would finish rc 0 having asserted nothing. Every genuine infrastructure failure inside this
+# function echoes 'setup-failed' and returns instead; the call site is what turns that into an
+# actual `infra` exit, from the main shell, where it works.
+block_execution_verdict() {
+  local f="$1" step_count run_block bash_bin
+  local -a t_arr
+  local t_joined tok row label event before sub expected
+  local bindir logf actual n
+
+  [ -e "$f" ] || { echo 'no-file'; return; }
+
+  step_count="$(grep -cE '^[[:blank:]]*- name: moon ci \(affected graph\)[[:blank:]]*$' "$f")"
+  case "$step_count" in ''|*[!0-9]*) echo 'count-unreadable'; return ;; esac
+  if [ "$step_count" -eq 0 ]; then echo 'no-step'; return; fi
+  if [ "$step_count" -gt 1 ]; then echo "multi-step $step_count"; return; fi
+
+  run_block="$(extract_moon_step_block "$f")"
+  if [ -z "$run_block" ]; then echo 'no-run-block'; return; fi
+
+  t_arr=()
+  while IFS= read -r tok; do
+    t_arr+=("$tok")
+  done < <(moon_target_array_tokens "$f")
+  if [ "${#t_arr[@]}" -eq 0 ]; then echo 'no-target-array'; return; fi
+  t_joined="${t_arr[*]}"
+
+  # Resolved via the CURRENT, unrestricted PATH — before the per-row loop below ever narrows it.
+  # `PATH=narrow bash -c ...` would make THIS shell's own command-word lookup for `bash` use the
+  # narrowed value too (measured: `PATH=/nonexistent bash -c 'echo hi'` reports "bash: command not
+  # found" from the OUTER shell, never even reaching the inner one) — resolving to an absolute
+  # path first and invoking THAT sidesteps PATH lookup for the exec itself, so only the block's OWN
+  # internal commands (printf/grep/moon) are subject to the minimal PATH below.
+  bash_bin="$(command -v bash)"
+  if [ -z "$bash_bin" ]; then echo 'setup-failed'; return; fi
+
+  # ONE scratch directory and ONE stub script for all four paths below, not one per path — this
+  # function runs inside check 9's mutation battery, which re-invokes the WHOLE of `--self-test`
+  # (this self-test's every fixture, every path) up to ten times concurrently, so a `mktemp -d` +
+  # `chmod` per path multiplied that cost by 4x for no benefit: the stub's CONTENT never varies
+  # across paths, only which log file it appends to (MOON_STUB_LOG, an env var, not baked into the
+  # script). The log itself is a fixed path inside this same scratch dir, truncated with a shell
+  # redirection (a builtin, not a subprocess) at the top of each iteration instead of re-created
+  # with `mktemp`.
+  bindir="$(mktemp -d)" || { echo 'setup-failed'; return; }
+  logf="$bindir/invocation.log"
+  # The stub: logs its OWN full argument list (never "moon" itself, which is $0 from its own point
+  # of view) and exits 0 unconditionally — a stubbed `moon` that could fail would make a
+  # 'zero-invocations' verdict ambiguous between "never called" and "called, then failed".
+  cat > "$bindir/moon" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOON_STUB_LOG"
+exit 0
+STUB
+  chmod +x "$bindir/moon"
+
+  for row in "${MOON_STEP_EVENT_PATHS[@]}"; do
+    IFS=: read -r label event before sub <<< "$row"
+
+    case "$sub" in
+      ci)
+        if [ "$event" = "pull_request" ]; then
+          expected="ci $t_joined --base origin/main --include-relations"
+        else
+          expected="ci $t_joined --base $before --include-relations"
+        fi ;;
+      run)
+        expected="run $t_joined" ;;
+    esac
+
+    : > "$logf"
+
+    # PATH restricted to the stub dir FIRST, then /usr/bin:/bin ONLY — deliberately minimal, so the
+    # real `moon` (wherever proto installed it) can never be found even if the block's own PATH
+    # handling behaved unexpectedly. The block's own source uses nothing besides printf (a bash
+    # builtin, not subject to PATH at all) and grep (present at /usr/bin/grep on macOS and at
+    # /usr/bin/grep or /bin/grep on the Ubuntu runner this repo's CI uses).
+    PATH="$bindir:/usr/bin:/bin" MOON_STUB_LOG="$logf" EVENT="$event" BEFORE="$before" \
+      "$bash_bin" -c "$run_block" >/dev/null 2>&1
+
+    n="$(wc -l < "$logf" | tr -d ' ')"
+    case "$n" in
+      0) echo "zero-invocations $label" ;;
+      1)
+        actual="$(cat "$logf")"
+        [ "$actual" = "$expected" ] || echo "bad-args $label" ;;
+      *) echo "wrong-count $label $n" ;;
+    esac
+  done
+
+  rm -rf "$bindir"
+}
+
+# The standing control for check 8d. Both directions per SMA-466: the real if/elif/else shape
+# passes on all four event paths, that SAME shape wrapped in `if false; then … fi` (this check's
+# own motivating case, L12) fires on all four, a subsetted "${T[@]:0:1}" fires on all four, the
+# `if`/`else` BODIES SWAPPED (each line individually still matches T_INVOCATION_ALLOWLIST's SET,
+# under the wrong condition — invisible to check 8b's position-blind matching) fires on the three
+# paths that land in the wrong branch, a duplicated invocation on ONE path fires only on that path,
+# and a HEALTHY re-run passes again after the two most control-flow-sensitive mutations (if-false,
+# branch-swap) and once more at the very end, aggregating the rest — proving no state leaks between
+# calls (each call creates its own mktemp scratch files and touches no global except
+# SELF_TESTS_RAN, so one aggregate proof at the end is as strong as one after every row).
+block_execution_self_test() {
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+  local rc=0 tmp got
+
+  expect_block() {
+    local name="$1" expected="$2" body="$3"
+    tmp="$(mktemp)"
+    printf '%s' "$body" > "$tmp"
+    got="$(block_execution_verdict "$tmp")"
+    rm -f "$tmp"
+    if [ "$got" != "$expected" ]; then
+      fail "block-execution self-test '$name' mismatch.
+--- expected ---
+$expected
+--- actual ---
+$got"
+      rc=1
+    fi
+  }
+
+  # The healthy control: a small, faithful copy of the real if/elif/else shape (including the
+  # zero-SHA grep check the elif condition needs — without it, "40 zeros" would read as merely
+  # non-empty and misroute to the wrong branch) with a 3-entry T so the fixture stays short. Every
+  # OTHER fixture below is a mutation of this exact body, so a failure here would mean the fixture
+  # itself is wrong, not the check.
+  local healthy='name: t
+on:
+  push:
+    branches:
+      - main
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: moon ci (affected graph)
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          T=(:a :b :c)
+          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]}" --base origin/main --include-relations
+          elif [ -n "${BEFORE:-}" ] && ! printf '"'"'%s'"'"' "$BEFORE" | grep -qE '"'"'^0+$'"'"'; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+            moon run "${T[@]}"
+          fi
+'
+  expect_block 'a healthy step invokes moon exactly once, correctly, on all four event paths' \
+    '' "$healthy"
+
+  # THE motivating case (CodeRabbit round 5, PR 150 — README L12): the whole if/elif/else wrapped
+  # in an always-false outer conditional. T_INVOCATION_ALLOWLIST's three lines stay byte-identical
+  # to the allowed forms; only EXECUTING the block reveals that nothing ever runs.
+  local if_false='name: t
+on:
+  push:
+    branches:
+      - main
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: moon ci (affected graph)
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          T=(:a :b :c)
+          if false; then
+          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]}" --base origin/main --include-relations
+          elif [ -n "${BEFORE:-}" ] && ! printf '"'"'%s'"'"' "$BEFORE" | grep -qE '"'"'^0+$'"'"'; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+            moon run "${T[@]}"
+          fi
+          fi
+'
+  expect_block 'an always-false outer conditional produces zero invocations on every path (L12)' \
+"$(printf 'zero-invocations pull_request\nzero-invocations push-nonzero-before\nzero-invocations push-zero-before\nzero-invocations push-empty-before')" \
+    "$if_false"
+
+  expect_block 'a healthy step still passes after the if-false mutation' '' "$healthy"
+
+  # A subsetted "${T[@]:0:1}" expansion in all three invocations. This shape is ALSO caught by
+  # check 8b's own invocation-count (a subset no longer contains the literal '"${T[@]}"'
+  # substring, so the count drops) — this fixture is not proving an exclusive gap, only that this
+  # check independently reaches the same conclusion by executing the block rather than counting
+  # substrings. The branch-swap fixture below is the one that is genuinely invisible to 8b.
+  local subset='name: t
+on:
+  push:
+    branches:
+      - main
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: moon ci (affected graph)
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          T=(:a :b :c)
+          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]:0:1}" --base origin/main --include-relations
+          elif [ -n "${BEFORE:-}" ] && ! printf '"'"'%s'"'"' "$BEFORE" | grep -qE '"'"'^0+$'"'"'; then
+            moon ci "${T[@]:0:1}" --base "$BEFORE" --include-relations
+          else
+            moon run "${T[@]:0:1}"
+          fi
+'
+  expect_block 'a subsetted "${T[@]:0:1}" expansion is a bad-args mismatch on every path' \
+"$(printf 'bad-args pull_request\nbad-args push-nonzero-before\nbad-args push-zero-before\nbad-args push-empty-before')" \
+    "$subset"
+
+  # THE case that is genuinely invisible to check 8b: the `if` and `else` BODIES swapped, `elif`
+  # left untouched. Every invocation line still matches SOME entry of T_INVOCATION_ALLOWLIST — the
+  # set of three allowed forms doesn't care which branch a line sits under — and the count is still
+  # 3, so check 8b sees nothing wrong at all (measured live against a mutated .github/workflows/
+  # ci.yml during this check's development: rc 0 from checks 8/8b, only this check fired). The
+  # `elif` branch is untouched, so the push-nonzero-before path stays correct; the other three land
+  # in the wrong branch.
+  local branch_swap='name: t
+on:
+  push:
+    branches:
+      - main
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: moon ci (affected graph)
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          T=(:a :b :c)
+          if [ "$EVENT" = "pull_request" ]; then
+            moon run "${T[@]}"
+          elif [ -n "${BEFORE:-}" ] && ! printf '"'"'%s'"'"' "$BEFORE" | grep -qE '"'"'^0+$'"'"'; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+            moon ci "${T[@]}" --base origin/main --include-relations
+          fi
+'
+  expect_block 'the if/else bodies swapped is bad-args on every path except the untouched elif' \
+"$(printf 'bad-args pull_request\nbad-args push-zero-before\nbad-args push-empty-before')" \
+    "$branch_swap"
+
+  expect_block 'a healthy step still passes after the branch-swap mutation' '' "$healthy"
+
+  # A duplicated invocation on ONE branch only — the other three paths stay correct, proving
+  # 'wrong-count' is reported per path, not as a whole-file verdict.
+  local double_invoke='name: t
+on:
+  push:
+    branches:
+      - main
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: moon ci (affected graph)
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          T=(:a :b :c)
+          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]}" --base origin/main --include-relations
+            moon ci "${T[@]}" --base origin/main --include-relations
+          elif [ -n "${BEFORE:-}" ] && ! printf '"'"'%s'"'"' "$BEFORE" | grep -qE '"'"'^0+$'"'"'; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+            moon run "${T[@]}"
+          fi
+'
+  expect_block 'a duplicated invocation on one path only is a wrong-count on that path alone' \
+    'wrong-count pull_request 2' "$double_invoke"
+
+  expect_block 'a step named differently is no-step' 'no-step' \
+'name: t
+on:
+  push:
+    branches:
+      - main
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: some other step
+        run: |
+          echo hi
+'
+
+  expect_block 'the step name appearing twice is multi-step, not a guess at which one' \
+    'multi-step 2' \
+'name: t
+on:
+  push:
+    branches:
+      - main
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: moon ci (affected graph)
+        run: |
+          echo hi
+      - name: moon ci (affected graph)
+        run: |
+          echo hi
+'
+
+  expect_block 'a step with no run: block at all is no-run-block' 'no-run-block' \
+'name: t
+on:
+  push:
+    branches:
+      - main
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: moon ci (affected graph)
+        uses: some/action@v1
+'
+
+  expect_block 'a run: block with no T=( … ) at all is no-target-array' 'no-target-array' \
+'name: t
+on:
+  push:
+    branches:
+      - main
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: moon ci (affected graph)
+        run: |
+          echo hi
+'
+
+  got="$(block_execution_verdict /nonexistent/ci.yml)"
+  if [ "$got" != 'no-file' ]; then
+    fail "block-execution self-test 'missing file': got '$got', expected 'no-file'."
+    rc=1
+  fi
+
+  # A directory in place of the file — same "distinct verdict, not a silent skip" requirement,
+  # proven without chmod (which can silently no-op when tests run as root; same reasoning as
+  # invocation_allowlist_self_test's and affected_graph_wiring_self_test's own unreadable_dir
+  # fixtures).
+  local unreadable_dir
+  unreadable_dir="$(mktemp -d)"
+  got="$(block_execution_verdict "$unreadable_dir" 2>/dev/null)"
+  rmdir "$unreadable_dir"
+  if [ "$got" != 'count-unreadable' ]; then
+    fail "block-execution self-test 'directory in place of file': got '$got', expected
+    'count-unreadable'. A directory must not be silently read as zero step occurrences."
+    rc=1
+  fi
+
+  # One final aggregate re-run, covering everything since the if-false/branch-swap rechecks above:
+  # the subset, duplicate-invocation, no-step, multi-step, no-run-block, no-target-array, missing-
+  # file and directory-in-place-of-file fixtures. None of those mutate global state (every call
+  # above gets its own mktemp scratch file/directory), so one aggregate proof here — rather than a
+  # dedicated recheck wedged after each individual row — is enough to show nothing accumulated.
+  expect_block 'a healthy step still passes after every mutation above' '' "$healthy"
+
+  return $rc
+}
+
+# ---------------------------------------------------------------------------------------------
 # Check 9's kill predicate (SMA-542 review M3 / spec T3) — extracted so it can be driven directly
 # by a fixture table instead of living inline in the mutant-collection loop below, where nothing
 # proved it. It is correct today; what was missing is the STANDING proof, in a file that cites
@@ -2674,7 +3232,7 @@ mutant_is_killed() {
   [ "$rc" -eq 1 ] && grep -q 'self-test counter:' "$outfile"
 }
 
-# The eighth (and last-called) self-test. Synthetic (rc, captured-output) pairs, no subprocess and
+# The ninth (and last-called) self-test. Synthetic (rc, captured-output) pairs, no subprocess and
 # no actionlint binary needed — same style as config_self_test's expect_config above.
 kill_predicate_self_test() {
   local rc=0
@@ -2712,7 +3270,7 @@ kill_predicate_self_test() {
 # ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
-# All eight are defined above so this block can run them from ONE call site, reached by both the
+# All nine are defined above so this block can run them from ONE call site, reached by both the
 # --self-test path and the full gate. One call site rather than two is deliberate: ci_targets.py's
 # C4 pins this by whole stripped line, and two identical lines would let one be deleted while the
 # pin still matched (SMA-542 D2).
@@ -2737,6 +3295,7 @@ run_self_tests() {
   ci_target_floor_self_test
   invocation_allowlist_self_test
   affected_graph_wiring_self_test
+  block_execution_self_test
   kill_predicate_self_test
 
   assert_self_tests_ran "$SELF_TEST_COUNT"
@@ -2746,10 +3305,10 @@ run_self_tests() {
   # adding a table without calling it reds, and so does deleting one without decrementing
   # SELF_TEST_COUNT. Adding a table is the highest-probability future edit here (SMA-542 D13).
   #
-  # Tolerant of blank-before-paren (`eighth_self_test () {`) and the `function` keyword form
-  # (`function eighth_self_test {`, with or without `()`) — a table written either way must still
+  # Tolerant of blank-before-paren (`tenth_self_test () {`) and the `function` keyword form
+  # (`function tenth_self_test {`, with or without `()`) — a table written either way must still
   # be counted, or D13's own hole reopens for the style it does not recognise (SMA-542 review M8).
-  # Not tolerant of a definition split across lines (`eighth_self_test()\n{`) — a rarer style this
+  # Not tolerant of a definition split across lines (`tenth_self_test()\n{`) — a rarer style this
   # file uses nowhere today; the residual is accepted rather than chasing every valid bash form.
   [ -f "$SELF_SRC" ] && [ -r "$SELF_SRC" ] \
     || infra "cannot read \$SELF_SRC ($SELF_SRC) to count self-test definitions"
@@ -3048,6 +3607,72 @@ while IFS= read -r verdict; do
       infra "unhandled affected-graph-wiring verdict '$verdict'" ;;
   esac
 done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)
+
+# ---------------------------------------------------------------------------------------------
+# Check 8d — the step's `run:` block, EXECUTED once per event path against a stubbed `moon`.
+# Rationale, MOON_STEP_EVENT_PATHS and block_execution_verdict are all above, with check 8c.
+#
+# Skipped entirely when CI_YML_MISSING (set by check 8, above): block_execution_verdict would
+# itself report 'no-file' redundantly — check 8 has already said the file does not exist, and this
+# check's own verdict function still WORKS standalone (its own self-test drives that path
+# directly), so this is a call-site de-dup, not a defect in the function. NOT deduped against
+# check 8's 'no-array': block_execution_verdict reads T independently (moon_target_array_tokens,
+# above), and a redundant-but-truthful second complaint about the same malformed array is
+# tolerated here the same way this file already tolerates checks 8/8b overlapping in other ways —
+# neither is the sole judge of ci.yml's shape.
+# ---------------------------------------------------------------------------------------------
+if [ "$CI_YML_MISSING" -eq 0 ]; then
+while IFS= read -r verdict; do
+  case "$verdict" in
+    '') ;;
+    count-unreadable)
+      infra "could not count occurrences of the \"moon ci (affected graph)\" step name in
+      .github/workflows/ci.yml — grep itself failed rather than matching zero times." ;;
+    no-step)
+      fail ".github/workflows/ci.yml has no step named exactly \"moon ci (affected graph)\", so
+      this check cannot find the block that guards T to execute it. If the step was renamed,
+      update the literal name check 8d matches on (above block_execution_verdict in $0)." ;;
+    'multi-step '*)
+      fail ".github/workflows/ci.yml has ${verdict#multi-step } steps named exactly
+      \"moon ci (affected graph)\" — which one actually guards T is ambiguous, so this check
+      refuses to guess. Rename all but the real one." ;;
+    no-run-block)
+      fail ".github/workflows/ci.yml's \"moon ci (affected graph)\" step has no extractable
+      'run: |'/'run: >' block, so this check cannot execute it." ;;
+    no-target-array)
+      fail ".github/workflows/ci.yml has no single, unambiguous 'T=( … )' array — see check 8's
+      'no-array' above for the same underlying problem." ;;
+    setup-failed)
+      infra "could not resolve a bash binary, or could not create a scratch directory/file, while
+      trying to execute .github/workflows/ci.yml's \"moon ci (affected graph)\" step. This is an
+      environment problem, not a defect in ci.yml." ;;
+    'zero-invocations '*)
+      fail ".github/workflows/ci.yml's \"moon ci (affected graph)\" step, executed with EVENT/
+      BEFORE set for the '${verdict#zero-invocations }' event path, never invoked 'moon' at all.
+      T_INVOCATION_ALLOWLIST's three lines can stay byte-identical to the allowed forms while this
+      still fires — an outer 'if false; then … fi' (or any other shape with the same effect)
+      produces exactly this. This is the failure README L12 names and this check exists to close."
+      ;;
+    'wrong-count '*)
+      # "wrong-count <path> <n>" — split on the LAST space (n is always the final word; every
+      # path label above is hyphenated, never space-separated, so this is unambiguous).
+      WRONG_COUNT_REST="${verdict#wrong-count }"
+      fail ".github/workflows/ci.yml's \"moon ci (affected graph)\" step, executed for the
+      '${WRONG_COUNT_REST% *}' event path, invoked 'moon' ${WRONG_COUNT_REST##* } time(s), not
+      once." ;;
+    'bad-args '*)
+      fail ".github/workflows/ci.yml's \"moon ci (affected graph)\" step, executed for the
+      '${verdict#bad-args }' event path, invoked 'moon' exactly once but not with the exact
+      subcommand + WHOLE T array + --base/--include-relations shape that path requires. Check 8b
+      matches each invocation LINE against a SET of allowed forms with no notion of which branch
+      it sits under, so three lines that individually match the set, in the WRONG branches (the
+      'if' and 'else' bodies swapped, say), pass 8b outright — this check derives what the path
+      itself requires and catches exactly that." ;;
+    *)
+      infra "unhandled block-execution verdict '$verdict'" ;;
+  esac
+done < <(block_execution_verdict .github/workflows/ci.yml)
+fi
 
 # Guard lives here, AFTER the --self-test early exit: --self-test never shells out to actionlint,
 # so it must not infra-exit on a machine that simply doesn't have the binary on PATH yet.

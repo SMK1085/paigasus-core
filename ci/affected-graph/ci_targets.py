@@ -281,7 +281,7 @@ SELF_SCHEDULED_GATES = {
 #
 # PROPAGATION CONTRACT — these entries carry no `|| RC=1` suffix, and that is not the hole
 # RUN_SH_CALL_SITES' suffixes close. `run_self_tests` and `selftest_mutation_battery` report through
-# run.sh's global `FAILED`, as its eight self-tests already do (run.sh:43-46); NEITHER `done < <(...)`
+# run.sh's global `FAILED`, as its nine self-tests already do (run.sh:43-46); NEITHER `done < <(...)`
 # line has anything to propagate — each is the tail of a `while` loop whose body already calls
 # `fail()` per verdict. The consequence is that a future `run_self_tests || FAILED=1` (or an
 # equally harmless reformat of any `done < <(...)` line) would red this check even though it is
@@ -306,6 +306,14 @@ ACTIONLINT_SH_CALL_SITES = (
     # (`affected_graph_wiring_verdict "$tmp"`), so a substring test would be satisfied by that call
     # and survive deleting this exact production line.
     "done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)",
+    # Check 8d's production call site (SMA-542 residual closure, PR 150 follow-up — closes
+    # ci/actionlint/README.md's L12): the block-execution check that closes the "wrap the whole
+    # invocation block in an always-false conditional" gap check 8b's line-shaped matching cannot
+    # see. Same shape as the three entries above it: `block_execution_verdict` also appears inside
+    # its own self-test fixtures (`block_execution_verdict "$tmp"`,
+    # `block_execution_verdict /nonexistent/ci.yml`, ...), so a substring test would be satisfied
+    # by those and survive deleting this exact production line.
+    "done < <(block_execution_verdict .github/workflows/ci.yml)",
 )
 
 
@@ -1079,6 +1087,10 @@ def self_test():
         # shape again: `affected_graph_wiring_verdict` is also called from inside its own
         # self-test fixture, so this MUST be whole-line matched too.
         'done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n'
+        # Check 8d's production call site (SMA-542 residual closure, PR 150 follow-up — closes
+        # README L12) — same shape again: `block_execution_verdict` is also called from inside its
+        # own self-test fixtures, so this MUST be whole-line matched too.
+        'done < <(block_execution_verdict .github/workflows/ci.yml)\n'
     )
     if check_self_invocation(wired, scripts, wired_actionlint):
         failures.append(
@@ -1166,11 +1178,22 @@ def self_test():
             "check_self_invocation: missed a deleted check-8c production call site "
             "(SMA-542 residual closure)"
         )
+    # The SAME defect one level further out again, against check 8d (SMA-542 residual closure, PR
+    # 150 follow-up — closes README L12): deleting ITS production call site must be caught too, or
+    # check 8d would be the sole judge of its own wiring.
+    no_check8d_call = wired_actionlint.replace(
+        "done < <(block_execution_verdict .github/workflows/ci.yml)\n", ""
+    )
+    if not check_self_invocation(wired, scripts, no_check8d_call):
+        failures.append(
+            "check_self_invocation: missed a deleted check-8d production call site "
+            "(SMA-542 residual closure, README L12)"
+        )
     # CodeRabbit (PR 150) — the column-0 requirement itself. Before this fix, `check_self_invocation`
     # matched actionlint call sites by STRIPPED line (both sides), so a required line was satisfied
     # by that exact text appearing anywhere, including indented inside an `if false; then … fi`
     # block or a heredoc — neither of which ever executes. Wrapping a call in a conditional
-    # conventionally INDENTS it, so an indented copy of each of the five required lines must now be
+    # conventionally INDENTS it, so an indented copy of each of the six required lines must now be
     # reported missing — one row per line, so a mutant that widened the column-0 check back to
     # "matches anywhere" is caught regardless of which entry it is tested against. The "fired on a
     # wired tree" assertion above already proves the real, column-0 tree keeps passing under this
@@ -1211,6 +1234,14 @@ def self_test():
     if not check_self_invocation(wired, scripts, indented_check8c_call):
         failures.append(
             "check_self_invocation: an INDENTED check-8c call site satisfied the column-0 pin"
+        )
+    indented_check8d_call = wired_actionlint.replace(
+        "done < <(block_execution_verdict .github/workflows/ci.yml)\n",
+        "  done < <(block_execution_verdict .github/workflows/ci.yml)\n",
+    )
+    if not check_self_invocation(wired, scripts, indented_check8d_call):
+        failures.append(
+            "check_self_invocation: an INDENTED check-8d call site satisfied the column-0 pin"
         )
     # Contamination cases, THREE of them (SMA-542 review finding I1, plus a round-2 addition). The
     # obvious "swap the two texts wholesale" version tried first passed unconditionally, because it

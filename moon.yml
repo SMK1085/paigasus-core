@@ -506,15 +506,21 @@ tasks:
     # docs/superpowers/specs/2026-08-19-sma-540-branches-filter-gate-design.md.
     #
     # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
-    # (cargo nextest, next typegen). This one is ~6.33s standalone and warm (measured, min-of-7,
-    # re-measured after the SMA-542 residual closure (PR 150 follow-up) added an eighth self-test
+    # (cargo nextest, next typegen). This one is ~14.42s standalone and warm (measured, min-of-7,
+    # re-measured after the SMA-542 residual closure (PR 150 follow-up) added a ninth self-test
     # rather than paired with a stale figure from an earlier fixture-table count — was ~1.0s before
-    # SMA-542 added checks 8-9): six actionlint invocations — one over the real workflows, five
-    # stdin fixtures — 26 `git ls-files` calls, and eight fixture tables (extractor, path-filter
-    # verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation allowlist,
-    # affected-graph wiring, kill predicate). Check 9's mutation battery is most of the added time:
-    # it re-runs the whole of `--self-test` — all 9 `git ls-files` calls included — once per
-    # self-test invocation plus once unmutated, nine concurrent subprocesses.
+    # SMA-542 added checks 8-9, ~6.33s before this wave added check 8d): six actionlint invocations
+    # — one over the real workflows, five stdin fixtures — 26 `git ls-files` calls, and nine
+    # fixture tables (extractor, path-filter verdicts, branch-filter verdicts, config allowlist,
+    # ci-target floor, invocation allowlist, affected-graph wiring, block execution, kill
+    # predicate). Check 9's mutation battery is most of the added time: it re-runs the whole of
+    # `--self-test` — all 9 `git ls-files` calls included, PLUS check 8d's own dynamic execution of
+    # the moon-ci-affected-graph step's `run:` block against a stubbed `moon`, once per event path
+    # — once per self-test invocation plus once unmutated, ten concurrent subprocesses. That dynamic
+    # execution is most of check 8d's OWN standalone cost (~1.5s of the ~2.01s -> ~3.52s
+    # `--self-test` jump): each of six fixtures that reach it spawns a handful of real subprocesses
+    # (a scratch `mktemp -d`, then per event path a `bash -c` running the extracted block, which
+    # itself shells out to `grep` and the stubbed `moon`) rather than a `grep`/`sed` pass over text.
     # See the measured table in ci/actionlint/README.md.
     # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
     # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
