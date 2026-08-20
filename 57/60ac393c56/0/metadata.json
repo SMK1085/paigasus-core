@@ -1,0 +1,144 @@
+{
+  "cli_version": "0.9.0",
+  "checkpoint_id": "5760ac393c56",
+  "session_id": "7713c5a0-e0c3-41bd-a600-c8ef512eb878",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-20T06:58:44.579758Z",
+  "branch": "feature/sma-542-guard-self-test-invocations",
+  "checkpoints_count": 1,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "claude-opus-5",
+  "turn_id": "b9a83fc295f9",
+  "checkpoint_transcript_start": 259,
+  "transcript_lines_at_start": 259,
+  "compact_transcript_start": 70,
+  "token_usage": {
+    "input_tokens": 7,
+    "cache_creation_tokens": 5979,
+    "cache_read_tokens": 953433,
+    "output_tokens": 4430,
+    "api_call_count": 4
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "prompt-skill-claude-code-feature-pipeline-2026-08-20T05:42:49.432256Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "feature-pipeline"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "e059eb3813fe",
+      "timestamp": "2026-08-20T05:42:49.432256Z",
+      "native": {
+        "command": "/feature-pipeline"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/feature-pipeline",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01MayKFBsvi73SjRKKRNE1Nz",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:brainstorming"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "b9a83fc295f9",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 92,
+        "end": 93,
+        "entry_ids": [
+          "2b454803-41b7-4edc-ae6f-03cc6a3ad0b5"
+        ],
+        "tool_use_id": "toolu_01MayKFBsvi73SjRKKRNE1Nz"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01MayKFBsvi73SjRKKRNE1Nz"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:brainstorming",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01WxhjHBXzXedboKa17tmEye",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:writing-plans"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "b9a83fc295f9",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 223,
+        "end": 224,
+        "entry_ids": [
+          "7b2ccfaf-a7e1-464b-b4f9-cf1c24c9b68c"
+        ],
+        "tool_use_id": "toolu_01WxhjHBXzXedboKa17tmEye"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01WxhjHBXzXedboKa17tmEye"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:writing-plans",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_014hRH8rPNh2AyRb9pEC1xvG",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:subagent-driven-development"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "b9a83fc295f9",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 245,
+        "end": 246,
+        "entry_ids": [
+          "7220d89c-d7a1-4ad0-bafa-b8ca31004b20"
+        ],
+        "tool_use_id": "toolu_014hRH8rPNh2AyRb9pEC1xvG"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_014hRH8rPNh2AyRb9pEC1xvG"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:subagent-driven-development",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 3
+  }
+}
