@@ -95,6 +95,26 @@ It also runs several checks that the per-case project sets structurally **cannot
   `assert_include_relations` with it. Never exempt or drop it — see the design doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
   design doc's L3.
+- **`task-inputs`** (`task_inputs.py`, SMA-553) asserts every `repo:*` task's declared `inputs`
+  still match a tracked file — the layer below `ci-targets`, which proves only that a gate is
+  *wired*. **I1** no glob matches zero tracked files; **I2** every file input is tracked, by exact
+  set membership (a wildcard-free pathspec prefix-matches a directory, so asking git would pass for
+  any directory path); **I3** every task declares at least one input of its own, after subtracting
+  Moon's injected `.moon/*.{…}` glob, which is present on every task and makes a "resolved" input
+  set never empty; **I4** every pattern is one the gate will evaluate — braces, character classes
+  and pathspec magic are rejected loudly rather than skipped; **I5** the anti-vacuity floors,
+  including a **composition** guard requiring the inputs common to every `repo` task to be exactly
+  that one injected glob, and a `**/*` assertion on this gate's own task.
+  Scheduled by its own `repo:input-liveness` task rather than from `run.sh`: the verdict depends on
+  the whole tracked tree, and `repo:affected-smoke`'s narrow inputs would serve a cached PASS on
+  exactly the rename that kills a gate. Two live-fire canaries run on every invocation, so a
+  matcher stuck reporting "live" cannot pass vacuously. `ALLOW_DEAD_INPUT` ships empty and requires
+  a reason. Scope is `repo` only — the other 27 projects carry 98 legitimately-dead convention
+  globs inherited from `.moon/tasks/{rust,typescript,python}.yml`. Standalone cost is ~6.0s
+  wall-clock (measured, median of 3 alternating `moon run repo:input-liveness --force` runs,
+  warm) — an order of magnitude below the ~35s a broadened `repo:affected-smoke` would cost on
+  every PR, which is why this lives in its own task rather than folded into `run.sh` (design
+  doc D2).
 
 It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
 `--include-relations` (the edges are inert without it).
