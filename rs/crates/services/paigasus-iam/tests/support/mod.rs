@@ -311,6 +311,7 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
             jwks_refresh_cooldown_secs,
             max_token_bytes: 16384,
             accept_invalid_tls: true,
+            extra_ca_bundle_path: None,
             jwks_cache: JwksCacheConfig {
                 backend: JwksCacheBackend::Memory,
                 redis_url: None,

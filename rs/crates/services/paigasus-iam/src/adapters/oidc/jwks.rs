@@ -77,29 +77,96 @@ struct DiscoveryDocument {
     jwks_uri: String,
 }
 
+/// A config/wiring fault, carrying its cause. `AuthnError::Backend` takes a boxed error and std
+/// supplies `From<String> for Box<dyn Error + Send + Sync>`, which is the idiom
+/// `adapters/http/mod.rs:605` already uses.
+fn backend(message: String) -> AuthnError {
+    AuthnError::Backend(message.into())
+}
+
+/// How the IdP HTTP client establishes TLS trust.
+///
+/// An enum rather than a `bool` + `Option<&str>` pair so that "certificate verification disabled
+/// AND a trust bundle configured" — always an operator mistake, since a disabled verifier can
+/// never consult the bundle — is unrepresentable at the type level. Same reasoning as the
+/// gateway's `IamTlsConfig` (SMA-504 D8); it also removes a transposable positional pair.
+///
+/// `IamConfig::validate` rejects the same combination at the config-file level, so the operator
+/// gets a readable message rather than a type error they cannot see.
+pub enum IdpTls<'a> {
+    /// TEST-ONLY: `danger_accept_invalid_certs`. See `AuthnConfig::accept_invalid_tls` — this
+    /// DISABLES verification for every fetch the client makes, which is a full authentication
+    /// bypass in production.
+    AcceptInvalid,
+    /// Verify normally. The client's trust anchors are the compiled-in webpki Mozilla roots, the
+    /// platform store (`/etc/ssl/certs`), AND every certificate in `extra_bundle` if set — all
+    /// three unioned (SMA-558 D1).
+    Verify { extra_bundle: Option<&'a str> },
+}
+
 /// Live `JwksFetcher`: `GET {issuer}/.well-known/openid-configuration`, verify the document's
 /// `issuer` field exactly matches and its `jwks_uri` is `https`, then `GET` the JWKS itself
 /// (spec §4.2).
+#[derive(Debug)]
 pub struct HttpJwksFetcher {
     client: reqwest::Client,
     clock: SystemClock,
 }
 
 impl HttpJwksFetcher {
-    /// Builds the fetcher's `reqwest::Client` (rustls, per the workspace baseline) with the
-    /// given request timeout. No custom redirect policy is needed — reqwest's default is fine
-    /// for a discovery endpoint operators configure directly.
+    /// Builds the fetcher's `reqwest::Client` with the given request timeout and TLS posture.
+    /// No custom redirect policy is needed — reqwest's default is fine for a discovery endpoint
+    /// operators configure directly.
     ///
-    /// `accept_invalid_tls` is `AuthnConfig::accept_invalid_tls`, the TEST-ONLY escape for
-    /// self-signed IdP certificates (mock IdP / Keycloak-in-Docker): `true` DISABLES
-    /// certificate verification for every fetch this client makes — never enable it in
-    /// production (a forged JWKS is a full authentication bypass).
-    pub fn new(timeout: Duration, accept_invalid_tls: bool) -> Result<Self, AuthnError> {
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .danger_accept_invalid_certs(accept_invalid_tls)
-            .build()
-            .map_err(|_| AuthnError::Unavailable)?;
+    /// Every failure here is a BOOT failure carrying its cause (SMA-558 D4). It returns
+    /// `AuthnError::Backend`, never `Unavailable`: a misconfigured bundle path must be
+    /// diagnosable, not indistinguishable from the IdP being down.
+    pub fn new(timeout: Duration, tls: IdpTls<'_>) -> Result<Self, AuthnError> {
+        let mut builder = reqwest::Client::builder().timeout(timeout);
+
+        match tls {
+            IdpTls::AcceptInvalid => builder = builder.danger_accept_invalid_certs(true),
+            IdpTls::Verify { extra_bundle: None } => {}
+            IdpTls::Verify { extra_bundle: Some(path) } => {
+                let pem = std::fs::read(path).map_err(|e| backend(format!("failed to read authn.extra_ca_bundle_path {path:?}: {e}")))?;
+
+                // `from_pem_bundle`, NOT `from_pem`: a bundle may legitimately carry more than one
+                // ROOT (a cross-signed CA, or two corporate roots mid-rotation) and `from_pem`
+                // reads only the first. This is NOT an invitation to add intermediates — every
+                // certificate here becomes an UNCONSTRAINED trust anchor (rustls performs no `cA`
+                // basic-constraints check on an anchor), so an intermediate would be promoted to a
+                // root for every HTTPS call this process makes.
+                let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| backend(format!("authn.extra_ca_bundle_path {path:?} is not a valid PEM certificate bundle: {e}")))?;
+
+                // `from_pem_bundle` returns Ok(vec![]) — not an error — for any file with no PEM
+                // CERTIFICATE section: a DER-encoded .crt, a key-only PEM, an empty file, a
+                // truncated mount. Without this guard the likeliest operator mistake boots green
+                // having added nothing at all (SMA-558 § 2.8).
+                if certs.is_empty() {
+                    return Err(backend(format!(
+                        "authn.extra_ca_bundle_path {path:?} contained no PEM certificates — a DER file, \
+                         a key-only PEM or an empty file parses as an empty bundle"
+                    )));
+                }
+
+                tracing::info!(
+                    path = %path,
+                    count = certs.len(),
+                    "loaded extra IdP trust anchors from authn.extra_ca_bundle_path"
+                );
+
+                for cert in certs {
+                    builder = builder.add_root_certificate(cert);
+                }
+            }
+        }
+
+        let client = builder.build().map_err(|e| {
+            backend(format!(
+                "failed to build the IdP HTTP client: {e} — this can also mean the platform trust store \
+                 contains no parseable certificates"
+            ))
+        })?;
         Ok(Self { client, clock: SystemClock })
     }
 
@@ -518,6 +585,76 @@ mod tests {
 
         assert!(matches!(second, AuthnError::Unavailable));
         assert_eq!(calls.load(Ordering::SeqCst), 1, "the cooldown must suppress the second refetch attempt");
+    }
+
+    // ---- extra_ca_bundle_path loading (SMA-558 D4) -------------------------------------------
+    // Three distinct failure modes with three distinct operator fixes, so three tests. The
+    // certificate-FREE case is the one that does not come free: `from_pem_bundle` returns
+    // Ok(vec![]) rather than erroring for any file with no BEGIN CERTIFICATE section, so only
+    // an explicit is_empty() check catches it (spec § 2.8).
+
+    fn tmp_file_with(contents: &[u8]) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        f.write_all(contents).expect("write");
+        f.flush().expect("flush");
+        f
+    }
+
+    #[test]
+    fn missing_bundle_path_is_a_boot_error() {
+        let err = HttpJwksFetcher::new(
+            Duration::from_secs(5),
+            IdpTls::Verify {
+                extra_bundle: Some("/nonexistent/paigasus-sma558/ca.pem"),
+            },
+        )
+        .expect_err("a nonexistent bundle path must fail");
+
+        // Backend, NOT Unavailable: a config fault must be diagnosable, not look like the IdP
+        // being down.
+        assert!(matches!(err, AuthnError::Backend(_)), "expected Backend, got {err:?}");
+        assert!(format!("{err:?}").contains("extra_ca_bundle_path"), "the error must name the config key: {err:?}");
+    }
+
+    #[test]
+    fn certificate_free_bundle_is_a_boot_error() {
+        // A key-only PEM: well-formed, parses cleanly, contains zero CERTIFICATE sections.
+        // Without the is_empty() guard this loads silently and adds no anchors at all.
+        let f = tmp_file_with(b"-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n-----END PRIVATE KEY-----\n");
+        let err = HttpJwksFetcher::new(
+            Duration::from_secs(5),
+            IdpTls::Verify {
+                extra_bundle: Some(f.path().to_str().unwrap()),
+            },
+        )
+        .expect_err("a bundle with no certificates must fail");
+
+        assert!(matches!(err, AuthnError::Backend(_)), "expected Backend, got {err:?}");
+        assert!(format!("{err:?}").contains("no PEM certificates"), "the error must say the bundle was empty: {err:?}");
+    }
+
+    #[test]
+    fn undecodable_bundle_is_a_boot_error() {
+        // A well-framed CERTIFICATE section whose body is not valid base64/DER. Unlike the case
+        // above this DOES fail inside the PEM/DER decode rather than at the is_empty() guard.
+        let f = tmp_file_with(b"-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n");
+        let err = HttpJwksFetcher::new(
+            Duration::from_secs(5),
+            IdpTls::Verify {
+                extra_bundle: Some(f.path().to_str().unwrap()),
+            },
+        )
+        .expect_err("an undecodable bundle must fail");
+
+        assert!(matches!(err, AuthnError::Backend(_)), "expected Backend, got {err:?}");
+    }
+
+    #[test]
+    fn no_bundle_and_accept_invalid_both_build() {
+        // The two non-bundle postures must still construct a client.
+        HttpJwksFetcher::new(Duration::from_secs(5), IdpTls::Verify { extra_bundle: None }).expect("verify without a bundle builds");
+        HttpJwksFetcher::new(Duration::from_secs(5), IdpTls::AcceptInvalid).expect("accept-invalid builds");
     }
 
     #[tokio::test]

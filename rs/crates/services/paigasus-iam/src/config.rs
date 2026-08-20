@@ -122,6 +122,9 @@ pub struct AuthnConfig {
     /// SMA-443 Tasks 10/13) can fetch from HTTPS endpoints with self-signed dev certs.
     #[serde(default)]
     pub accept_invalid_tls: bool,
+    // Task 3 (SMA-558) expands this field's documentation and adds `validate()` rules.
+    #[serde(default)]
+    pub extra_ca_bundle_path: Option<String>,
     pub jwks_cache: JwksCacheConfig,
     pub issuers: Vec<IssuerConfig>,
 }

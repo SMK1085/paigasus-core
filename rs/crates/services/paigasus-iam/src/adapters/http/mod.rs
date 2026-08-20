@@ -44,7 +44,7 @@ use crate::adapters::authz::{
 };
 use crate::adapters::clock::SystemClock;
 use crate::adapters::id::KernelIdGenerator;
-use crate::adapters::oidc::jwks::{HttpJwksFetcher, InMemoryJwksCache, JwksProvider};
+use crate::adapters::oidc::jwks::{HttpJwksFetcher, IdpTls, InMemoryJwksCache, JwksProvider};
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
@@ -665,7 +665,18 @@ impl AppState {
         if authn_cfg.accept_invalid_tls {
             tracing::warn!("accept_invalid_tls is enabled: TLS certificate verification for IdP discovery/JWKS fetches is DISABLED — test-only configuration, never use in production");
         }
-        let fetcher = HttpJwksFetcher::new(Duration::from_secs(authn_cfg.http_timeout_secs), authn_cfg.accept_invalid_tls)?;
+        // `validate()` rejects accept_invalid_tls + a bundle, so this collapse is not lossy: at
+        // most one arm's data is ever meaningful. `AcceptInvalid` wins if both somehow arrive
+        // (an embedder that skipped validate()), which is the safe direction — it cannot silently
+        // pretend a bundle is in force.
+        let idp_tls = if authn_cfg.accept_invalid_tls {
+            IdpTls::AcceptInvalid
+        } else {
+            IdpTls::Verify {
+                extra_bundle: authn_cfg.extra_ca_bundle_path.as_deref(),
+            }
+        };
+        let fetcher = HttpJwksFetcher::new(Duration::from_secs(authn_cfg.http_timeout_secs), idp_tls)?;
         let ttl = Duration::from_secs(authn_cfg.jwks_ttl_secs);
         let cooldown = Duration::from_secs(authn_cfg.jwks_refresh_cooldown_secs);
         let authenticator = match authn_cfg.jwks_cache.backend {
