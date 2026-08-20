@@ -42,7 +42,7 @@ until `images.yml` itself exists on `main`.)
 
 ## 2. Image names
 
-```
+```text
 ghcr.io/paigasus/paigasus-iam:<git-sha>
 ghcr.io/paigasus/paigasus-gateway:<git-sha>
 ```
@@ -57,7 +57,7 @@ tag convention are fixed now regardless, so SMA-513's Helm chart has a concrete
 Both services take configuration from runtime environment only. Nothing is baked into the image.
 Precedence, lowest to highest:
 
-```
+```text
 defaults  <  optional TOML file  <  IAM_* / GATEWAY_* environment variables
 ```
 
@@ -96,7 +96,7 @@ form** — no `sh -c`, no shell pipelines. Docker's own `HEALTHCHECK` only ever 
 (Docker has no separate readiness concept); `/readyz` is reachable through the same binary for
 anyone wiring a Kubernetes `exec` readiness probe:
 
-```
+```bash
 /usr/local/bin/paigasus-service healthcheck --path /readyz
 ```
 

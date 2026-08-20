@@ -302,11 +302,11 @@ binary.
 
 ### D9 — one Dockerfile, not two
 
-The two services' Dockerfiles differ only in crate name, binary name and exposed ports. Two copies
+The two services' Dockerfiles differ only in crate name and binary name. Two copies
 would mean ~60 duplicated lines carrying two base-image digests and two chisel checksums, in a repo
 that ships `repo:redis-connect-single-site`, `repo:iam-docker-policy-single-site` and
 `repo:error-code-single-site` precisely to stop hand-duplicated policy from drifting. A single
-`rs/Dockerfile` with `ARG BIN` / `ARG PORTS`, invoked twice by `run.sh`, keeps the pins in one place.
+`rs/Dockerfile` with `ARG BIN`, invoked twice by `run.sh`, keeps the pins in one place.
 
 ### D10 — decide the image names now, publish later
 
@@ -440,8 +440,6 @@ Notes on choices that are not obvious:
   `org.opencontainers.image.title` to the real service name, so the image is self-describing.
 - **`--start-period=60s`, not 15s**, because IAM runs `Migrator::up` before binding (§ 2.4). A short
   start period would have the daemon marking a migrating container unhealthy.
-- **`EXPOSE` is documentation only.** IAM declares 8080/9090, the gateway 8088; a deployment that
-  configures a separate `metrics.addr` exposes that port itself, since it is optional config.
 - **No `WORKDIR` carrying a config file.** With no `iam.toml` present, figment resolves defaults +
   env. A self-hoster who *mounts* a TOML still gets file layering, because that is figment's
   documented behaviour — AC-2 forbids baking config at build time, not supporting file config.
@@ -526,11 +524,11 @@ guards that are cheaper here than as prose:
 - the builder base is a `bookworm` tag, i.e. the glibc ordering invariant (D3).
 
 `build` also captures the resolved package versions that `chisel cut` selected into a
-`chisel-manifest.txt` build artifact, so "which libc did this image ship?" is answerable after the
-fact — the cheap half of limitation 2. It reads them from `chisel cut`'s own build output
-(`--progress=plain`, whose `Fetching pool/main/g/glibc/libc6_2.39-0ubuntu8.8_amd64.deb` lines carry
-the exact versions) rather than writing a manifest file into `/rootfs`, which would ship the
-manifest inside every image.
+`chisel-manifest-<service>.txt` build artifact per service, so "which libc did this image ship?" is
+answerable after the fact — the cheap half of limitation 2. It reads them from `chisel cut`'s own
+build output (`--progress=plain`, whose `Fetching pool/main/g/glibc/libc6_2.39-0ubuntu8.8_amd64.deb`
+lines carry the exact versions) rather than writing a manifest file into `/rootfs`, which would ship
+the manifest inside every image.
 
 ### 4.6 The probe contract the console must inherit
 
@@ -558,7 +556,7 @@ Rules that go with it:
   TLS-terminating ingress (§ 4.3).
 
 Docker has no readiness concept, so the in-image `HEALTHCHECK` maps to `/healthz` only. `/readyz` is
-reachable through the same binary via `/usr/local/bin/paigasus-service healthcheck --path /readyz` for anyone who needs an
+reachable through the same binary via the command `/usr/local/bin/paigasus-service healthcheck --path /readyz` for anyone who needs an
 `exec` readiness probe.
 
 ## 5. Verification
@@ -599,9 +597,12 @@ answers `/healthz`, and is declared good.
   /bin/sh <img> -c true` must **fail**; the extracted `/etc/ssl/certs/ca-certificates.crt` must
   carry >= 100 certificates; and `docker image inspect --format '{{.Size}}'` must be under a stated
   ceiling.
-- **Non-root, as actually run.** `docker top <c> -o user` rather than
-  `docker inspect '{{.Config.User}}'` — the latter asserts image config, so a `--user 0` invocation
-  would still pass it.
+- **Non-root, as actually run.** `docker top <c> -o pid,uid` rather than `-o user` or
+  `docker inspect '{{.Config.User}}'`. The former reads image config, so a `--user 0` invocation
+  would still pass it; the latter is resolved through NSS, so a host where uid 65532 resolves to a
+  synthesized name (e.g. `nss-systemd` on GitHub-hosted runners) would print the name instead of
+  `65532` and false-negative CI on a correct image. `pid` is required by some docker engines to
+  correlate processes back to the container; `uid` is the raw numeric column and is never name-resolved.
 
 `run.sh smoke` must never dump full `docker inspect` output into the CI log; `.Config.Env` would
 print the dummy key and set a bad precedent for anyone who later runs it with a real one.
@@ -610,9 +611,12 @@ print the dummy key and set a bad precedent for anyone who later runs it with a 
 
 `.github/workflows/images.yml`, modelled on `prebuild.yml`:
 
-- **Job shape:** a two-leg matrix (`iam`, `gateway`) with `fail-fast: false`, so the two cold
-  `--release` builds do not serialize into one job against one timeout, and a gateway failure still
-  reports the IAM result. `timeout-minutes: 45`.
+- **Job shape:** **one serial job, not a matrix.** The smoke suite (§ 5.2) needs both images
+  present on the **same** docker daemon's local image store to run `docker network create` and
+  cross-container calls between them. Matrix legs run on separate runners with no shared image
+  store, so a matrix would require either rebuilding the other service inside one leg (defeating
+  the point of splitting the job) or smoking nothing. One job compiles both `--release` binaries
+  plus the smoke suite serially on one runner. `timeout-minutes: 60`.
 - **Concurrency:** `group: images-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}`
   with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}` — the event name is in the
   group so a manual dispatch cannot cancel a running push job, mirroring `prebuild.yml`'s reasoning.
@@ -677,22 +681,3 @@ dispatch; nothing depends on any of it until SMA-513.
 - Switching reqwest to native roots (limitation 3) and adding an advisory lock around
   `Migrator::up` (§ 4.6) — both are real, both are service changes, both need their own issue.
 - Multi-arch builds and arm64 CI verification.
-
-## 9. As-built deltas
-
-`docs/ops/RUNBOOK-containers.md` points readers at this document as the design rationale, so a
-place where the shipped implementation differs from the prose above is a durable trap for a
-future reader, not a cosmetic mismatch. Four are recorded here rather than silently corrected in
-place, so the "why" survives alongside the "what":
-
-| § | Spec said | Shipped | Why |
-| --- | --- | --- | --- |
-| 5.3 | A two-leg `matrix: [iam, gateway]`, `fail-fast: false`, `timeout-minutes: 45` | **One** job, `timeout-minutes: 60` | The smoke suite (§ 5.2) needs both images present on the SAME docker daemon's local image store to run `docker network create` and cross-container calls between them. Matrix legs run on separate runners with no shared store, so smoking from either leg would mean rebuilding the other service inside it — defeating the point of splitting the job. One job compiles both --release builds plus the smoke suite serially on one runner; 60 minutes covers that, not 45. |
-| 4.2 | `ARG PORTS` alongside `ARG BIN`, plus `EXPOSE` lines for 8080/9090/8088 | **Neither exists** in `rs/Dockerfile` | `EXPOSE` is metadata only — it does not publish anything — and the ports, with their config-override env keys, are already the authoritative record in `docs/ops/RUNBOOK-containers.md` § 4. `ARG PORTS` had no consumer once `EXPOSE` was dropped, so it was never added either. |
-| 5.3 / § 4.5 | `docker top -o user` | `-o pid,uid` | `user` is resolved through NSS. On a host where uid 65532 resolves to a synthesized name (observed: `nss-systemd` on GitHub-hosted `ubuntu-latest`), `-o user` prints that name instead of `65532` and **false-negatives CI on a correct image**. `ci/images/run.sh` carries an explicit comment forbidding "simplifying" this back to `-o user`. This is the row that matters most: as written, this spec instructs a future reader to make the exact change the shipped code's own comment forbids. |
-| § 4.5 | A single `chisel-manifest.txt` | `chisel-manifest-<service>.txt` (one file per service) | A single shared file could not distinguish the two services' resolved package sets. It also would have masked the fix-round-1 bug where BuildKit cache-hit the `ARG BIN`-independent `rootfs` stage for whichever service built second, leaving that service's manifest silently empty (`--no-cache-filter=rootfs` in `ci/images/run.sh` is the fix) — a shared filename gives that bug nowhere to be visible. |
-
-None of these change an AC or a § 3 decision — they are implementation details this spec
-under-specified or got wrong, not design reversals. `docs/ops/RUNBOOK-containers.md` and
-`ci/images/run.sh` are the authoritative sources for the ports, the manifest filename, and the
-`docker top` invocation; this document is not.
