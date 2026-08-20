@@ -76,4 +76,7 @@ jobs:
           name: chisel-manifests
           path: chisel-manifest-*.txt
           if-no-files-found: ignore
-          retention-days: 14
+          # 90, not the 14-day default: any image built from this manifest can and does outlive
+          # a 14-day artifact expiry, and the manifest is the only record of which chisel-cut
+          # package versions (including libc6) that image actually shipped.
+          retention-days: 90
