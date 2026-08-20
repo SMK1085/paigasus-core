@@ -1936,17 +1936,28 @@ ci_target_floor_verdict() {
 #                                quietly subsetted to `"${T[@]:0:5}"`, which no longer contains the
 #                                literal expansion at all) still reds even though no single
 #                                surviving line looks wrong on its own
+#   count-unreadable             `grep -c` itself failed (not "matched zero", the command did not
+#                                run cleanly), so the count cannot be trusted either way
 # ---------------------------------------------------------------------------------------------
 invocation_allowlist_verdict() {
   local f="$1" skip=" ${2:-} " lineno text n matched allowed
 
   [ -e "$f" ] || { echo 'no-file'; return; }
 
-  # Hardened exactly like $arrays/$defs elsewhere in this file: without this, a $n that comes back
-  # empty (grep itself failing rather than matching zero times) makes the numeric comparison below
-  # exit 2 under `set -uo pipefail`'s no-`set -e`, which silently skips the report.
+  # NOT `infra` (CodeRabbit round 4, finding F1) — this function is invoked at the production call
+  # site as `done < <(invocation_allowlist_verdict ...)`, so it runs inside the process
+  # substitution's OWN subshell. `infra`'s `exit 2` would exit only that subshell; the parent
+  # `while` simply reads EOF, FAILED never gets set, and the gate finishes rc 0 with nothing but a
+  # stderr line — measured. A verdict function reachable from `< <(...)` must ECHO a token and
+  # `return` instead, exactly like `ci_target_floor_verdict`'s own `$arrays` hardening just above
+  # (`case "$arrays" in ''|*[!0-9]*) echo 'no-array'; return ;; esac`) — the call site is what
+  # turns `count-unreadable` into an actual `infra` exit, from the MAIN shell, where it works.
+  # Without this, a $n that comes back empty (grep itself failing rather than matching zero times)
+  # makes the numeric comparison below exit 2 under `set -uo pipefail`'s no-`set -e`, which the
+  # `if` reads as false — skipping the 'invocation-count' report and falling through to a false
+  # 'ok' the same way `$arrays` would (SMA-542 CodeRabbit round 4 finding F1).
   n="$(grep -cF -- '"${T[@]}"' "$f")"
-  case "$n" in ''|*[!0-9]*) infra "could not count \"\${T[@]}\"-bearing lines in $f" ;; esac
+  case "$n" in ''|*[!0-9]*) echo 'count-unreadable'; return ;; esac
   if [ "$n" -ne "${#T_INVOCATION_ALLOWLIST[@]}" ]; then
     echo "invocation-count $n"
   fi
@@ -2091,7 +2102,7 @@ ci_target_floor_self_test() {
 '
   # SWALLOWED_SKIP is REUSED here too (same reasoning as 'wrapped' above): a block-swallowed line
   # is the same underlying problem as a moon-swallowed line, spelled a third way.
-  saved_swallowed_skip=(${saved_swallowed_skip+"${saved_swallowed_skip[@]}"})
+  saved_swallowed_skip=(${SWALLOWED_SKIP+"${SWALLOWED_SKIP[@]}"})
   SWALLOWED_SKIP=('2:          fi || true')
   expect_floor 'SWALLOWED_SKIP also silences a block-swallowed line' '' \
 '          T=(:affected-smoke)
@@ -2444,6 +2455,27 @@ invocation_allowlist_self_test() {
   got="$(invocation_allowlist_verdict /nonexistent/ci.yml)"
   if [ "$got" != 'no-file' ]; then
     fail "invocation-allowlist self-test 'missing file': got '$got', expected 'no-file'."
+    rc=1
+  fi
+
+  # count-unreadable (CodeRabbit round 4, finding F1) — the round-trip half this self-test CAN
+  # prove: the verdict function itself must echo 'count-unreadable' and return, never call
+  # `infra` (which would only exit the process-substitution subshell at the production call
+  # site — see the comment above invocation_allowlist_verdict). The other half of the round-trip —
+  # the call site turning this token into an actual `infra` exit — is proven live against a
+  # forced real-file scenario, not here; --self-test never reaches that call site at all.
+  #
+  # A DIRECTORY in place of a file portably forces `grep -c` to fail without ever writing to
+  # stdout (measured: `grep -cF -- pattern DIR` writes only to stderr and exits non-zero, leaving
+  # $n empty) — no reliance on `chmod`, which can silently no-op when tests run as root.
+  local unreadable_dir
+  unreadable_dir="$(mktemp -d)"
+  got="$(invocation_allowlist_verdict "$unreadable_dir" 2>/dev/null)"
+  rmdir "$unreadable_dir"
+  if [ "$got" != 'count-unreadable' ]; then
+    fail "invocation-allowlist self-test 'unreadable count': got '$got', expected
+    'count-unreadable'. A directory in place of a file must make grep fail loudly, not silently
+    read as zero matches."
     rc=1
   fi
 
@@ -2800,6 +2832,11 @@ while IFS= read -r verdict; do
       literal expansion at all) drops the count even though no surviving line looks wrong on its
       own. If this is a deliberate, reviewed change in how many invocations ci.yml has, update
       T_INVOCATION_ALLOWLIST to match." ;;
+    count-unreadable)
+      infra "could not count \"\${T[@]}\"-bearing lines in .github/workflows/ci.yml — grep
+      itself failed rather than matching zero times. This runs in the MAIN shell (this while
+      loop), unlike the verdict function above, which runs inside \`< <(...)\` and cannot exit the
+      gate itself (SMA-542 CodeRabbit round 4, finding F1)." ;;
     *)
       infra "unhandled invocation-allowlist verdict '$verdict'" ;;
   esac

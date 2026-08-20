@@ -236,10 +236,15 @@ Narrowing this task's inputs would not meaningfully help; do not do it without a
 unmutated control, each a full `--self-test` invocation, run concurrently, full-gate only — is the
 dominant addition; check 8's floor/`continued`/`swallowed`/`continue-on-error` assertions and check
 8b's allowlist/count assertions are a handful of `grep`/`sed` passes over one workflow file and cost
-nothing worth measuring by comparison. Measured min-of-7 (`ci/actionlint/run.sh`, bypassing Moon;
-`uptime` immediately before read load averages 2.02/3.35/4.36 — this box runs other concurrent
-sessions and a mean can read several times inflated under a load spike, hence min-of-7 rather than
-a mean):
+nothing worth measuring by comparison. Two tables below, EACH LABELED WITH THE STATE IT MEASURES
+(independent review of PR 150 round 4, finding F3 — the first table's own row already says "six
+fixture tables", but an unlabeled table reads as "the current numbers" regardless): measured
+min-of-7 (`ci/actionlint/run.sh`, bypassing Moon; `uptime` immediately before read load averages
+2.02/3.35/4.36 — this box runs other concurrent sessions and a mean can read several times
+inflated under a load spike, hence min-of-7 rather than a mean).
+
+State: six fixture tables, six mutants (the ORIGINAL SMA-542 fix wave — superseded by the second
+table below; kept for the before/after narrative that follows it, not as current numbers):
 
 | Invocation | Min-of-7 |
 |---|---|
@@ -250,15 +255,19 @@ Before SMA-542 the full gate measured ~1.5s standalone and `--self-test` ~1.0s. 
 (five self-tests, five-mutant battery) brought those to ~3.68s / ~1.25s. That fix wave added the
 sixth self-test (`kill_predicate_self_test`, closing spec T3) and check 8's `continued` verdict,
 taking the mutant count to six (seven concurrent `--self-test` subprocesses, control included).
-This wave (SMA-542 CodeRabbit rounds 3-4) added the SEVENTH self-test
+A later wave (SMA-542 CodeRabbit rounds 3-4) added the SEVENTH self-test
 (`invocation_allowlist_self_test`, closing round-3 finding B) and check 8b's allowlist/count
 verdicts, taking the mutant count to seven (eight concurrent `--self-test` subprocesses, control
-included) — re-measured min-of-7, load averages 3.83/2.61/2.58 immediately before:
+included) — this is the CURRENT state, and the numbers below are re-measured after round 4's own
+fixes (F1's new fixture, F2's one-line correctness fix), not copied forward from round 3.
+
+State: CURRENT — seven fixture tables, seven mutants (load averages 2.87/2.49/2.79 immediately
+before):
 
 | Invocation | Min-of-7 |
 |---|---|
-| `ci/actionlint/run.sh` (full gate, with the battery) | ~4.81s |
-| `ci/actionlint/run.sh --self-test` (seven fixture tables, no battery) | ~1.46s |
+| `ci/actionlint/run.sh` (full gate, with the battery) | ~5.20s |
+| `ci/actionlint/run.sh --self-test` (seven fixture tables, no battery) | ~1.66s |
 
 **Do not conclude `hasher.ignorePatterns` is inert from the log.** It does *not* silence the
 ~2000 `only files can be hashed` warnings about pnpm's symlinked store — those appear identically
