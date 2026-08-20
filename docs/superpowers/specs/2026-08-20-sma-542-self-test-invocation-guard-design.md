@@ -216,7 +216,7 @@ Four properties, in order of importance:
 2. **The battery cannot recurse.** Mutants are invoked with `--self-test`, which exits before
    check 9 is reached. This is structural, not a guard that can be removed — and it is why D5 needs
    no two-line deletion and no `PAIGASUS_ACTIONLINT_MUTANT` bypass env var.
-3. **`--self-test` stays fast and binary-free.** It runs the five tables and nothing else, which is
+3. **`--self-test` stays fast and binary-free.** It runs the six tables and nothing else, which is
    what `README.md:125` advertises it as. The call sits ahead of the PATH guard, preserving the
    property that guard's comment exists to protect.
 4. **Self-tests run first.** Matching the convention `moon.yml` already states for
@@ -229,8 +229,9 @@ first.
 
 Check **numbers are not renumbered**. They are logical identities, not execution order — checks 5
 and 6 are already defined ahead of check 1. Check 7 remains "the self-tests"; the new work is
-checks 8 and 9. All five self-test functions are defined by `run.sh:1602`, ahead of the dispatch at
-`:1604`, so the single call site can reach every one.
+checks 8 and 9. All six self-test functions are defined earlier in the file, each ahead of the
+single dispatch call site (the `case "$#:${1:-}"` block that sets `SELF_TEST_ONLY` and calls
+`run_self_tests`, near the bottom of the script), so the single call site can reach every one.
 
 **Accepted cost of running self-tests first (adversarial review, MAJOR).** `branch_filter_self_test`
 asserts its `origin/main` precondition unconditionally (`run.sh:1391-1392`) and exits 2 if it is
@@ -281,7 +282,7 @@ against reformatting for no coverage.
 
 **The redundancy is intentional and worth stating** (adversarial review, QUESTION): check 9 *also*
 covers a deleted `run_self_tests` call — with it gone, every mutant's `--self-test` run asserts
-nothing and exits 0, so all five survive and the battery reds. That means the primary AC-1
+nothing and exits 0, so all six survive and the battery reds. That means the primary AC-1
 mechanism does not depend solely on C4 being reachable, which is a useful second line of defence
 behind the `moon.yml` input fix in §2.6.
 
@@ -295,7 +296,7 @@ battery's own call.
 Rejected: a `PAIGASUS_ACTIONLINT_MUTANT=1` recursion guard. It would be a live bypass surface in a
 gate whose premise is that it cannot be silently switched off, and D2 makes it unnecessary.
 
-The battery validates **all five preconditions before creating any subprocess**: each `sed` must
+The battery validates **all six preconditions before creating any subprocess**: each `sed` must
 remove exactly one line. A reformatted or duplicated invocation therefore reds with a precise
 message rather than producing a mutant byte-identical to the original (which would exit 0 and be
 misreported as a survivor). `cp` and `sed` failures are checked explicitly, not assumed — the
@@ -308,7 +309,7 @@ orphaned function body that dies of a bash syntax error — killed for the wrong
 
 ### D6 — The control is the real script, unmutated
 
-Five mutants that all fire cannot distinguish a working battery from a stuck one — SMA-466's
+Six mutants that all fire cannot distinguish a working battery from a stuck one — SMA-466's
 lesson, and the reason `branch_filter_self_test` carries both directions. Check 9 therefore also
 runs `bash "$SELF_SRC" --self-test` and requires exit **0**.
 
@@ -319,7 +320,7 @@ would recurse forever if that `sed` ever matched zero lines.
 
 The control is not redundant with the outer `run_self_tests` call. It proves the *harness* — the
 `bash` invocation, the working directory, the argument passing — yields 0 on a healthy tree. A
-battery whose subprocess invocation was broken would otherwise report five dead mutants and read as
+battery whose subprocess invocation was broken would otherwise report six dead mutants and read as
 maximally healthy.
 
 ### D7 — The `T` floor lives in bash, inside `run.sh`
@@ -367,7 +368,7 @@ A mutant counts as killed only when **`rc == 1` and its captured stderr contains
 
 `run.sh` does `cd "$(git rev-parse --show-toplevel)"` on entry (`:25`). `$0` is therefore unsafe:
 under `cd ci/actionlint && ./run.sh` it is `./run.sh`, which no longer resolves after the `cd`.
-Without `set -e` the `cp` would fail silently, `bash <missing>` would exit 127, and all five
+Without `set -e` the `cp` would fail silently, `bash <missing>` would exit 127, and all six
 mutants would score as killed — a false pass on AC-1.
 
 The absolute path is captured **before** the `cd`:
@@ -406,9 +407,15 @@ precisely the inference this repo's gates decline to make elsewhere — `run_tas
 equality lists every crate rather than sampling one. Parallelism reduces the disagreement to about
 one wall-second, which is a cheap price for an assertion that matches its AC literally.
 
+**Superseded by the fix wave (§9).** This five-vs-one debate predates M3, which added a sixth
+self-test (`kill_predicate_self_test`) for an unrelated reason (T3's kill-predicate coverage). The
+battery now runs six mutants — seven concurrent `--self-test` subprocesses including the control —
+and the parallelism argument above is unaffected by the extra mutant. Current measured cost is in
+§9's M3 entry and §5's cost-ceiling addendum.
+
 ### D13 — A self-test that is never wired is caught too
 
-The counter proves five invocations ran; it cannot notice a *sixth* fixture table added tomorrow
+The counter proves six invocations ran; it cannot notice a *seventh* fixture table added tomorrow
 and never called. `SELF_TESTS_RAN` would still equal `SELF_TEST_COUNT`, the battery only mutates
 lines already inside `run_self_tests`, and C4 pins only the two call-site lines. That is this
 issue's own defect class, one step out — and adding a table is the highest-probability future edit.
@@ -417,8 +424,13 @@ issue's own defect class, one step out — and adding a table is the highest-pro
 `$SELF_SRC` equals `SELF_TEST_COUNT`:
 
 ```bash
-grep -cE '^[a-z_]+_self_test\(\) \{' "$SELF_SRC"     # must equal SELF_TEST_COUNT
+grep -cE '^(function[[:blank:]]+)?[a-z_]+_self_test([[:blank:]]*\(\))?[[:blank:]]*\{' "$SELF_SRC"
+# must equal SELF_TEST_COUNT
 ```
+
+Broadened during the fix wave (M3/M8, §9) to also count the `function name {` keyword form and a
+space before the parens — a table written either way must still be counted, or this check's own
+hole reopens for the style it does not recognise.
 
 Adding a table without wiring it reds; so does deleting a table's definition without decrementing
 the count. This also closes the first draft's L2 escape (see §6).
@@ -450,7 +462,7 @@ SELF_TEST_COUNT=6   # extractor, path-filter, branch-filter, config, ci-target-f
 ```
 
 (`SELF_TEST_COUNT` was 5 as originally shipped; the sixth entry, `kill-predicate`, was added by the
-fix wave below closing T3 — see §8.)
+fix wave below closing T3 — see §9.)
 
 **`assert_self_tests_ran <want>`** — compares and calls `fail()` on mismatch with a distinctive,
 greppable message (D10 matches on it) naming the likely cause and pointing at `run_self_tests`.
@@ -477,7 +489,7 @@ table at all (`run.sh:994-996` records that lesson):
 | `no-file` | `.github/workflows/ci.yml` does not exist |
 | `no-array` | zero, or more than one, single-line `T=(…)` |
 | `missing <entry>` | the array parsed; `<entry>` is not among its tokens |
-| `continued <lineno>` | a `moon` command line is continued onto another physical line (fix wave, §8, I2) |
+| `continued <lineno>` | a `moon` command line is continued onto another physical line (fix wave, §9, I2) |
 | `swallowed <lineno>` | a `moon` command line carries a `\|\|`, `&&`, `;` or `\|` tail (D14) |
 | `continue-on-error <lineno>` | a step's `continue-on-error:` value is not literally `false` |
 
@@ -487,7 +499,7 @@ one line"* when the real problem is a renamed workflow. `no-array` is a failure,
 stop asserting anything. `continued` is the same shape: never a skip, and checked *before*
 `swallowed` on the same matched line, because a wrapped invocation hides any real tail from the
 line-at-a-time scan below it — reporting `swallowed` there would name a problem this check cannot
-actually confirm (fix wave I2, §8).
+actually confirm (fix wave I2, §9).
 
 The array regex is anchored `^[ \t]*T=\((.*?)\)[ \t]*$`, mirroring `T_ARRAY_RE`
 (`ci_targets.py:66`) rather than a bare `T=(` (which would also match `EXPECT=(`). Membership
@@ -511,12 +523,12 @@ T_FLOOR=(':affected-smoke')
 
 with the comment recording D8 — why `:actionlint` is deliberately absent.
 
-**`SWALLOWED_SKIP`** (fix wave, §8, M6) — a `COE_SKIP`-shaped escape hatch, keyed the identical
+**`SWALLOWED_SKIP`** (fix wave, §9, M6) — a `COE_SKIP`-shaped escape hatch, keyed the identical
 `"<lineno>:<exact text>"` way, for a `moon` line `swallowed` cannot know is harmless (a diagnostic
 pipe in an unrelated job, say). `continued` deliberately has no equivalent hatch — see the verdict
 table note above.
 
-**`mutant_is_killed <rc> <outfile>`** (fix wave, §8, M3 / spec T3) — the kill predicate, extracted
+**`mutant_is_killed <rc> <outfile>`** (fix wave, §9, M3 / spec T3) — the kill predicate, extracted
 out of `selftest_mutation_battery`'s collection loop so `kill_predicate_self_test` (the sixth
 self-test) can drive it directly against synthetic `(rc, output)` pairs: rc 1 with the counter's
 message is a kill; rc 2/126/127, and rc 1 without the message, are not.
@@ -535,7 +547,7 @@ property false.
 
 ### `ci/affected-graph/ci_targets.py`
 
-New constant, whole-line matched per §2.4. Originally two entries; the fix wave (§8, I1) added a
+New constant, whole-line matched per §2.4. Originally two entries; the fix wave (§9, I1) added a
 third, `done < <(ci_target_floor_verdict .github/workflows/ci.yml)` — check 8's own production call
 site, which the reviewer found deletable with the full gate still exiting 0 and this check still
 reporting PASS:
@@ -605,7 +617,7 @@ a change there must re-key it, and `repo:actionlint`'s own `**/*` cannot green a
 |---|---|---|
 | T1 | Each of the six invocations, deleted, reds the gate | Check 9, standing, in CI |
 | T2 | An unmutated tree exits 0 | Check 9's control (D6) |
-| T3 | A mutant dying at rc 2 (or 126/127, or rc 1 without the message) is not scored as killed | Implemented (fix wave, §8, M3): `kill_predicate_self_test`, the sixth self-test, drives `mutant_is_killed` directly against synthetic `(rc, output)` pairs — `--self-test`, standing |
+| T3 | A mutant dying at rc 2 (or 126/127, or rc 1 without the message) is not scored as killed | Implemented (fix wave, §9, M3): `kill_predicate_self_test`, the sixth self-test, drives `mutant_is_killed` directly against synthetic `(rc, output)` pairs — `--self-test`, standing |
 | T4 | `assert_self_tests_ran` deleted → all mutants survive → red | Manual mutation, recorded in the PR |
 | T5 | `run_self_tests` / `selftest_mutation_battery` / the check-8 production call site (fix wave, I1) call deleted → C4 reds | `ci_targets.py --self-test`, standing |
 | T6 | `run_self_tests() {` definition alone does not satisfy C4 | `ci_targets.py --self-test`, standing |
@@ -618,9 +630,9 @@ a change there must re-key it, and `repo:actionlint`'s own `**/*` cannot green a
 | T13 | Deleting the three call-site lines (fix wave: was two) schedules `repo:affected-smoke` | `moon query tasks --affected` after the `moon.yml` change (§2.6) |
 | T14 | AC-2's extraction table unchanged | Direct comparison against §2.5 |
 | T15 | Full graph green | `moon ci …` per CLAUDE.md's marker block |
-| T16 | A backslash-continued `moon` invocation → `continued <lineno>`, never `swallowed`; the real unwrapped if/elif/else form does not fire | Added (fix wave, §8, I2): `ci_target_floor_self_test`, standing; plus one manual reproduction of the reviewer's exact scenario against a temp copy of the real `ci.yml` |
-| T17 | `SWALLOWED_SKIP` silences an exact lineno+text match, does not leak to a different line, and a stale (lineno-only) match does not silence | Added (fix wave, §8, M6): `ci_target_floor_self_test`, standing, mirroring `COE_SKIP`'s three-row shape |
-| T18 | Deleting the check-8 production call site (`done < <(ci_target_floor_verdict …)`) → full gate rc 0 and `ci_targets.py` PASS before the fix; `ci_targets.py` reports it after | Added (fix wave, §8, I1): manual deletion of the real block, confirmed red, restored |
+| T16 | A backslash-continued `moon` invocation → `continued <lineno>`, never `swallowed`; the real unwrapped if/elif/else form does not fire | Added (fix wave, §9, I2): `ci_target_floor_self_test`, standing; plus one manual reproduction of the reviewer's exact scenario against a temp copy of the real `ci.yml` |
+| T17 | `SWALLOWED_SKIP` silences an exact lineno+text match, does not leak to a different line, and a stale (lineno-only) match does not silence | Added (fix wave, §9, M6): `ci_target_floor_self_test`, standing, mirroring `COE_SKIP`'s three-row shape |
+| T18 | Deleting the check-8 production call site (`done < <(ci_target_floor_verdict …)`) → full gate rc 0 and `ci_targets.py` PASS before the fix; `ci_targets.py` reports it after | Added (fix wave, §9, I1): manual deletion of the real block, confirmed red, restored |
 
 T4, T9, T12, T16 and T18 are one-off manual mutations by construction — they mutate the very
 mechanisms the standing controls run through, or (T16/T18) reproduce a reviewer finding directly on
@@ -641,7 +653,7 @@ this repo is ~9–11s regardless of what a task does, so the gate — even at ~3
 nowhere near the critical path. `ci/actionlint/README.md`'s cost table carries the current
 measured figures for both the full gate and `--self-test`.
 
-**Further superseded by the fix wave (§8).** T3's implementation added a sixth self-test, and I2
+**Further superseded by the fix wave (§9).** T3's implementation added a sixth self-test, and I2
 added the `continued` check, taking the battery to six mutants (seven concurrent `--self-test`
 subprocesses including the control). Standalone cost is now ~4.11s full gate / ~1.26s `--self-test`
 (min-of-7). Still nowhere near Moon's ~9–11s per-task floor, so the conclusion is unchanged —
