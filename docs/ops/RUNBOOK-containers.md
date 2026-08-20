@@ -31,9 +31,14 @@ The build context is `rs/` (the Cargo workspace root). This is also what
 touches `rs/**`, and on pull requests that touch the build inputs (`rs/Cargo.lock`,
 `rs/Cargo.toml`, `rs/rust-toolchain.toml`, `rs/Dockerfile`, `rs/.dockerignore`,
 `ci/images/**`). **The workflow is not a required check**, so a broken image build reds `main`
-after merge rather than blocking the PR that broke it. Run `gh workflow run images.yml --ref
-<branch>` on any branch touching `rs/Dockerfile` before merging it, so a broken build shows up
-before the merge rather than after.
+after merge rather than blocking the PR that broke it.
+
+That said, a PR touching any of the filtered inputs above — including `rs/Dockerfile` — already
+triggers the workflow automatically via its `pull_request` path filter; no manual step is needed
+there. Run `gh workflow run images.yml --ref <branch>` instead on a PR that touches `rs/**` but
+**none** of those filtered inputs (a plain service code change, say) — that is the one case the
+narrower `pull_request` filter does not cover, and it can still break an image build. (This 404s
+until `images.yml` itself exists on `main`.)
 
 ## 2. Image names
 
@@ -127,3 +132,47 @@ Any future console-facing image in this repo should follow the same shape:
   that uses it.
 - Runtime environment configuration only — nothing deployment-varying baked into the image.
 - Digest-pinned base images, covered by Dependabot's `docker` ecosystem updater.
+
+## 7. What the first Deployment needs
+
+The values below are what SMA-513's chart reads off these two images specifically — spelled out
+because "a numeric, non-root `USER`" (§ 6) is a convention, not an operable value.
+
+### Identity and `securityContext`
+
+Both images run as uid:gid **`65532:65532`** — `USER 65532:65532` in `rs/Dockerfile`; the
+chiseled rootfs has no `/etc/passwd`, so it cannot be a name (§ 2.6 of the design doc). The
+Deployment's pod or container `securityContext` should set:
+
+```yaml
+securityContext:
+  runAsUser: 65532
+  runAsGroup: 65532
+  runAsNonRoot: true
+```
+
+**Do not** additionally set `readOnlyRootFilesystem: true` on the strength of this runbook. That
+posture is **untested** — nothing in SMA-500's smoke suite or elsewhere exercises either image
+under a read-only root, and the rootfs does ship a writable `/tmp` (mode `1777`) whose need, if
+any, is unverified. Treat it as a follow-up to test, not a default to ship.
+
+### `terminationGracePeriodSeconds`
+
+The image sets `STOPSIGNAL SIGTERM`, and both services install a SIGTERM handler: IAM drains a
+`JoinSet` of relays and maintainers before exiting. Set `terminationGracePeriodSeconds`
+generously enough to cover that drain. Neither the image nor this issue measures a worst-case
+drain time, so treat Kubernetes' 30s default as a floor to widen from, not a value already
+validated against IAM's actual outbox relay workload — and revisit it if a rolling update is
+observed truncating a drain.
+
+### Which libc is in the image I am running?
+
+`ci/images/run.sh build` produces (and `.github/workflows/images.yml` uploads as a CI artifact,
+`chisel-manifests`, 90-day retention) a `chisel-manifest-<service>.txt` per service — e.g.
+`chisel-manifest-iam.txt` — listing the exact `chisel cut` package versions, including the
+resolved `libc6`, that build actually resolved. This is the answerable half of a real
+limitation: `chisel cut` resolves against the **live** Ubuntu archive (§ 2.6 of the design doc),
+so two builds a month apart produce different, patched base layers — the image is **not**
+bit-reproducible from `rs/Dockerfile` alone. The manifest artifact for the specific build that
+produced a given `:<git-sha>` tag is the only record of which packages actually shipped in it;
+without it, "which libc is in the image I am running" has no answer after the fact.

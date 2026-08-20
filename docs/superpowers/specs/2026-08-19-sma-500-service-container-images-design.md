@@ -677,3 +677,22 @@ dispatch; nothing depends on any of it until SMA-513.
 - Switching reqwest to native roots (limitation 3) and adding an advisory lock around
   `Migrator::up` (§ 4.6) — both are real, both are service changes, both need their own issue.
 - Multi-arch builds and arm64 CI verification.
+
+## 9. As-built deltas
+
+`docs/ops/RUNBOOK-containers.md` points readers at this document as the design rationale, so a
+place where the shipped implementation differs from the prose above is a durable trap for a
+future reader, not a cosmetic mismatch. Four are recorded here rather than silently corrected in
+place, so the "why" survives alongside the "what":
+
+| § | Spec said | Shipped | Why |
+| --- | --- | --- | --- |
+| 5.3 | A two-leg `matrix: [iam, gateway]`, `fail-fast: false`, `timeout-minutes: 45` | **One** job, `timeout-minutes: 60` | The smoke suite (§ 5.2) needs both images present on the SAME docker daemon's local image store to run `docker network create` and cross-container calls between them. Matrix legs run on separate runners with no shared store, so smoking from either leg would mean rebuilding the other service inside it — defeating the point of splitting the job. One job compiles both --release builds plus the smoke suite serially on one runner; 60 minutes covers that, not 45. |
+| 4.2 | `ARG PORTS` alongside `ARG BIN`, plus `EXPOSE` lines for 8080/9090/8088 | **Neither exists** in `rs/Dockerfile` | `EXPOSE` is metadata only — it does not publish anything — and the ports, with their config-override env keys, are already the authoritative record in `docs/ops/RUNBOOK-containers.md` § 4. `ARG PORTS` had no consumer once `EXPOSE` was dropped, so it was never added either. |
+| 5.3 / § 4.5 | `docker top -o user` | `-o pid,uid` | `user` is resolved through NSS. On a host where uid 65532 resolves to a synthesized name (observed: `nss-systemd` on GitHub-hosted `ubuntu-latest`), `-o user` prints that name instead of `65532` and **false-negatives CI on a correct image**. `ci/images/run.sh` carries an explicit comment forbidding "simplifying" this back to `-o user`. This is the row that matters most: as written, this spec instructs a future reader to make the exact change the shipped code's own comment forbids. |
+| § 4.5 | A single `chisel-manifest.txt` | `chisel-manifest-<service>.txt` (one file per service) | A single shared file could not distinguish the two services' resolved package sets. It also would have masked the fix-round-1 bug where BuildKit cache-hit the `ARG BIN`-independent `rootfs` stage for whichever service built second, leaving that service's manifest silently empty (`--no-cache-filter=rootfs` in `ci/images/run.sh` is the fix) — a shared filename gives that bug nowhere to be visible. |
+
+None of these change an AC or a § 3 decision — they are implementation details this spec
+under-specified or got wrong, not design reversals. `docs/ops/RUNBOOK-containers.md` and
+`ci/images/run.sh` are the authoritative sources for the ports, the manifest filename, and the
+`docker top` invocation; this document is not.

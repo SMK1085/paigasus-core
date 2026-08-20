@@ -165,8 +165,14 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - Container images (SMA-500) live behind `ci/images/run.sh {build,smoke,all}` and
   `.github/workflows/images.yml`, **not** Moon — a `repo:*` task would have to join `ci.yml`'s
   `T=(…)` array (a `--release` build on every affected PR) or become a `T_EXEMPT` entry. The
-  workflow is **not a required check**, so a broken image build reds `main`, not the PR;
-  `workflow_dispatch` it on the branch before merging anything that touches `rs/Dockerfile`.
+  workflow is **not a required check**, so a broken image build reds `main`, not the PR. Its
+  `pull_request` trigger already covers `rs/Dockerfile`, `rs/Cargo.{lock,toml}`,
+  `rs/rust-toolchain.toml`, `rs/.dockerignore`, `ci/images/**` and the workflow itself, so a PR
+  touching any of those runs it automatically — no manual step needed there.
+  `workflow_dispatch` it instead for a PR touching `rs/**` but **none** of those filtered
+  inputs (a plain service code change, say) — that's the one case the narrower `pull_request`
+  filter misses, and it can still break an image build. (`gh workflow run images.yml --ref
+  <branch>` 404s until `images.yml` itself is on `main`.)
 - The runtime base is a `chisel cut` of Ubuntu 24.04 into `FROM scratch`. Four traps, all
   measured: `libgcc-s1_libs` is REQUIRED (Rust panic unwinding links `libgcc_s.so.1`) and its
   absence fails at container START, not build; `ca-certificates_data` is the right variant
