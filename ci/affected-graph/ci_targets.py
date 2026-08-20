@@ -1045,19 +1045,27 @@ def self_test():
     no_battery = wired_actionlint.replace("selftest_mutation_battery\n", "")
     if not check_self_invocation(wired, scripts, no_battery):
         failures.append("check_self_invocation: missed a deleted mutation-battery call")
-    # Contamination cases, BOTH directions (SMA-542 review finding I1). The obvious "swap the two
-    # texts wholesale" version tried first passed unconditionally, because it only proves the
-    # required site is ABSENT from the wrong haystack — never exercising whether the two are
-    # actually checked separately. An 8-mutant battery against check_self_invocation found three
-    # survivors of that version: actionlint sites satisfied by run_sh_text, run.sh sites satisfied
-    # by actionlint_sh_text, and actionlint sites satisfied by script text. These two concatenate
-    # the OTHER haystack's fully-wired text onto the ALREADY-BROKEN text under test: if the two are
-    # ever read as one, the missing site would be masked by the appended text and this would
-    # wrongly pass.
+    # Contamination cases, THREE of them (SMA-542 review finding I1, plus a round-2 addition). The
+    # obvious "swap the two texts wholesale" version tried first passed unconditionally, because it
+    # only proves the required site is ABSENT from the wrong haystack — never exercising whether
+    # the haystacks are actually checked separately. An 8-mutant battery against
+    # check_self_invocation found three survivors of that version: actionlint sites satisfied by
+    # run_sh_text, run.sh sites satisfied by actionlint_sh_text, and actionlint sites satisfied by
+    # task-script text. Each case below concatenates the WRONG haystack's fully-wired text onto the
+    # ALREADY-BROKEN text under test: if the two are ever read as one, the missing site would be
+    # masked by the appended text and this would wrongly pass. Round 1 landed only the first two —
+    # the task-script pairing is a DISTINCT haystack combination neither of them exercises, so a
+    # check that concatenated task-script and actionlint text would have survived undetected.
     if not check_self_invocation(wired + wired_actionlint, scripts, no_actionlint_call):
         failures.append("check_self_invocation: an actionlint site was satisfied by run.sh text")
     if not check_self_invocation(no_call, scripts, wired_actionlint + wired):
         failures.append("check_self_invocation: a run.sh site was satisfied by actionlint text")
+    if not check_self_invocation(
+        wired, {"input-liveness": wired_script + wired_actionlint}, no_actionlint_call
+    ):
+        failures.append(
+            "check_self_invocation: an actionlint site was satisfied by task-script text"
+        )
     # The docstring's "REQUIRED positional parameter" claim (SMA-542) is otherwise unenforced: every
     # caller above already passes it explicitly, so a future `actionlint_sh_text=""` default would
     # make all of them pass vacuously — the exact class of hole this parameter exists to close —
