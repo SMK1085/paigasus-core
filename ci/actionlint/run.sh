@@ -1638,14 +1638,36 @@ $got"
 # ---------------------------------------------------------------------------------------------
 T_FLOOR=(':affected-smoke')
 
+# COE_SKIP is the escape hatch for a `continue-on-error:` line the verdict below cannot know is
+# harmless — e.g. a step that runs strictly AFTER "moon ci (affected graph)", whose own
+# success/failure can no longer un-run or un-honor gates that already finished. Same shape and
+# same reason as SKIP_PATTERNS/BRANCH_SKIP above (spec §6): the verdict is deliberately syntactic,
+# like `swallowed`, rather than parsing YAML step-block boundaries to work out "which step is
+# this key under" for itself — this file's own history (flow vs block style) is exactly where
+# that kind of parsing has hidden real bugs. Keyed by 1-based line number rather than step name
+# for the same reason: resolving a name from a key would need the same block-boundary parsing
+# this file is choosing not to do. Every entry needs a comment naming what verifies the
+# suppressed step's own failure instead (SMA-542 task 4b review, I2).
+COE_SKIP=(
+  # (empty — add entries as <lineno>  # why, and what verifies it instead)
+)
+
+is_coe_skipped() {
+  local n="$1" s
+  for s in ${COE_SKIP+"${COE_SKIP[@]}"}; do
+    [ "$s" = "$n" ] && return 0
+  done
+  return 1
+}
+
 # Echoes one verdict token per problem, and nothing for an acceptable file:
 #   no-file                      the workflow does not exist
 #   no-array                     zero, or more than one, single-line T=( … )
 #   missing <entry>              the array parsed; <entry> is not among its tokens
 #   swallowed <lineno>           a `moon` command line discards its own exit status
-#   continue-on-error <lineno>   a step carries `continue-on-error: true`
+#   continue-on-error <lineno>   a step's continue-on-error value is not literally `false`
 ci_target_floor_verdict() {
-  local f="$1" arrays body tok w found lineno text q
+  local f="$1" arrays body tok w found lineno text q value
 
   [ -e "$f" ] || { echo 'no-file'; return; }
 
@@ -1687,24 +1709,38 @@ ci_target_floor_verdict() {
     esac
   done < <(grep -nE '^[[:blank:]]*moon[[:blank:]]' "$f")
 
-  # continue-on-error: true — the third spelling of D14's idea, at step rather than command-line
-  # granularity. GitHub Actions itself reports the job green when a failed step carries this key,
-  # leaving T correct and the `moon` command line untouched, so it is invisible to every check
-  # above. Key matched at any indentation, quote style, and spacing before the colon — same spirit
-  # as config_verdict's `$q` above — but the VALUE must be the literal `true`: `false` is a
-  # deliberate no-op and must stay silent, and a leading `#` (comment) can never match because the
-  # anchored key immediately follows the indentation, with no room for a comment marker before it.
+  # continue-on-error: — the third spelling of D14's idea, at step rather than command-line
+  # granularity, and deliberately as syntactic and over-inclusive as `swallowed` above (SMA-542
+  # task 4b review, I1): GitHub Actions accepts far more spellings of "suppress this step" than
+  # the bare word `true` (`True`, `TRUE`, `yes`, `on`, a `${{ }}` expression, ...), so requiring an
+  # exact `true` left every one of those silently unguarded — the exact hole this check exists to
+  # close. `false` is the one spelling GitHub Actions itself treats as "do not suppress this
+  # step", so it is the only value this check leaves silent; every other value fires. This is
+  # file-wide rather than scoped to the step that runs `moon` (I2): telling that step apart from
+  # an unrelated later one needs YAML step-block-boundary parsing, which is exactly where this
+  # file's real bugs have lived (flow vs block style) — COE_SKIP above is the documented way to
+  # silence a line this check cannot itself know is harmless. Key matched at any indentation and
+  # quote style, same spirit as config_verdict's `$q` above; a leading `#` (comment) can never
+  # match because the anchored key immediately follows the indentation, with no room for a
+  # comment marker before it.
   q='["'"'"']?'
   while IFS=: read -r lineno text; do
-    echo "continue-on-error $lineno"
-  done < <(grep -nE "^[[:blank:]]*${q}continue-on-error${q}[[:blank:]]*:[[:blank:]]*true[[:blank:]]*(#.*)?$" "$f")
+    value="${text#*:}"                             # drop through the key:value colon
+    value="${value%%#*}"                           # drop a trailing comment
+    value="${value#"${value%%[![:blank:]]*}"}"     # trim leading blanks
+    value="${value%"${value##*[![:blank:]]}"}"     # trim trailing blanks
+    case "$value" in
+      false) : ;;
+      *) is_coe_skipped "$lineno" || echo "continue-on-error $lineno" ;;
+    esac
+  done < <(grep -nE "^[[:blank:]]*${q}continue-on-error${q}[[:blank:]]*:" "$f")
 }
 
 # The standing control for check 8. Both directions on every verdict: a table whose rows all fire
 # cannot tell a working check from a stuck one (SMA-466).
 ci_target_floor_self_test() {
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
-  local rc=0 tmp got
+  local rc=0 tmp got saved_coe_skip
 
   expect_floor() {
     local name="$1" expected="$2" body="$3"
@@ -1766,17 +1802,30 @@ ci_target_floor_self_test() {
           moon ci "${T[@]}"
 '
 
-  # continue-on-error: true — the third D14 spelling (SMA-542 task 4b). Both directions per
-  # SMA-466: the positive row below must fire, and each negative control here must specifically
-  # be what stops it from firing — not just an unrelated healthy file.
+  # continue-on-error: — the third D14 spelling (SMA-542 task 4b). Both directions per SMA-466:
+  # each positive row below must fire, and each negative control must specifically be what stops
+  # firing — not just an unrelated healthy file.
   expect_floor 'continue-on-error true silences a step' 'continue-on-error 3' \
 '          T=(:affected-smoke)
           moon ci "${T[@]}"
             continue-on-error: true
 '
-  # `false` is a deliberate no-op, not silencing. If the verdict logic ever stopped checking the
-  # value and fired on the key alone, this is the row that would catch it.
-  expect_floor 'continue-on-error false is not truthy' '' \
+  # I1: the match is deliberately over-inclusive, not just `true`. If a future edit narrowed it
+  # back to the literal word `true`, these two rows are what would catch it.
+  expect_floor 'continue-on-error True (capitalized) fires' 'continue-on-error 3' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+            continue-on-error: True
+'
+  expect_floor 'continue-on-error as a ${{ }} expression fires' 'continue-on-error 3' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+            continue-on-error: ${{ true }}
+'
+  # `false` is the ONE spelling GitHub Actions itself treats as "do not suppress" — under the I1
+  # inversion this is the load-bearing negative control. If the verdict logic ever stopped
+  # checking the value and fired on the key alone, this is the row that would catch it.
+  expect_floor 'continue-on-error false is excluded' '' \
 '          T=(:affected-smoke)
           moon ci "${T[@]}"
           continue-on-error: false
@@ -1788,6 +1837,20 @@ ci_target_floor_self_test() {
           moon ci "${T[@]}"
           # continue-on-error: true
 '
+  # I2's escape hatch, both directions in one fixture: line 3 is on COE_SKIP and must be silent;
+  # line 4 is an identical key one line later and is NOT listed, so it must still fire. Proves
+  # is_coe_skipped compares whole entries (like BRANCH_SKIP's fixture above), not "list
+  # non-empty therefore everything is skipped" — and that the skip doesn't leak past its own line.
+  # COE_SKIP ships empty, so it is overridden for this one assertion and restored immediately.
+  saved_coe_skip=(${COE_SKIP+"${COE_SKIP[@]}"})
+  COE_SKIP=(3)
+  expect_floor 'COE_SKIP silences only the listed line, not the next one' 'continue-on-error 4' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+            continue-on-error: true
+            continue-on-error: true
+'
+  COE_SKIP=(${saved_coe_skip+"${saved_coe_skip[@]}"})
 
   got="$(ci_target_floor_verdict /nonexistent/ci.yml)"
   if [ "$got" != 'no-file' ]; then
@@ -1996,10 +2059,12 @@ while IFS= read -r verdict; do
       status (a '||', '&&', ';' or '|' tail). That greens every gate in T while leaving T itself
       perfectly correct, so no other check in this repo can see it. Remove the tail." ;;
     'continue-on-error '*)
-      fail ".github/workflows/ci.yml:${verdict#continue-on-error } sets 'continue-on-error: true'
-      on a step. GitHub Actions reports the job green even when that step's command fails,
-      leaving T correct and the moon command line untouched, so no other check in this repo can
-      see it. Remove the key, or set it to false." ;;
+      fail ".github/workflows/ci.yml:${verdict#continue-on-error } suppresses that step's own
+      failure (a 'continue-on-error:' value other than 'false'). If this is the step that runs
+      'moon ci', every gate in T is silenced while T itself stays perfectly correct, so no other
+      check in this repo can see it — remove the key, or set it to false. If it is a different,
+      later step, this line does not silence T's gates and belongs in COE_SKIP (above
+      ci_target_floor_verdict in $0) with a reason." ;;
     *)
       infra "unhandled ci-target-floor verdict '$verdict'" ;;
   esac
