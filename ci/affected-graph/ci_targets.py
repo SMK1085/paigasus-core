@@ -16,6 +16,7 @@
 # control wired into run.sh's `--negative-control` branch, and never parsing moon.yml.
 #
 # usage: ci_targets.py [--self-test]
+import inspect
 import json
 import re
 import subprocess
@@ -169,11 +170,15 @@ REQUIRED_DOC_FLAGS = ("--base origin/main", "--include-relations")
 # deleting the call.
 #
 # A PARTIAL mitigation, not a closure: deleting the `assert_ci_targets` call removes C4 along with
-# it.
+# it — and that residual is NOT closed below.
 #
-# SMA-542 closed the general case: ACTIONLINT_SH_CALL_SITES below pins repo:actionlint's own call
-# sites from here, and check 8 in ci/actionlint/run.sh pins `:affected-smoke` in `T` from there, so
-# the two gates guard each other rather than themselves.
+# SMA-542 closed the actionlint half of this class: ACTIONLINT_SH_CALL_SITES below pins
+# repo:actionlint's own call sites from here, and check 8 in ci/actionlint/run.sh pins
+# `:affected-smoke`'s presence in `T` from there, so neither gate is the sole judge of its own
+# SCHEDULING. This gate's own call site — `assert_ci_targets || SUITE_RC=1`, just below — remains
+# self-guarded: nothing pins it from a third, independent location, so the residual noted above
+# still stands. Closing it is a deliberate, deferred follow-up (SMA-542 review finding I2), not
+# something this change claims to do.
 RUN_SH_CALL_SITES = (
     "assert_ci_targets || SUITE_RC=1",
     # The `|| NEG_RC=1` suffix is as load-bearing as the command. Matching the prefix alone left
@@ -228,7 +233,7 @@ SELF_SCHEDULED_GATES = {
 #
 # PROPAGATION CONTRACT — these entries carry no `|| RC=1` suffix, and that is not the hole
 # RUN_SH_CALL_SITES' suffixes close. Both functions report through run.sh's global `FAILED`, as its
-# four self-tests already do (run.sh:29-32), so there is no status to propagate at the call site.
+# five self-tests already do (run.sh:42-45), so there is no status to propagate at the call site.
 # The consequence is that a future `run_self_tests || FAILED=1` would red this check even though it
 # is harmless; restore the bare line, or update this constant.
 ACTIONLINT_SH_CALL_SITES = ("run_self_tests", "selftest_mutation_battery")
@@ -1030,21 +1035,37 @@ def self_test():
     # not satisfy a run.sh requirement either.
     if not check_self_invocation(no_call, {"input-liveness": wired + wired_script}, wired_actionlint):
         failures.append("check_self_invocation: a run.sh call site was satisfied by script text")
-    if check_self_invocation(wired, scripts, wired_actionlint):
-        failures.append("check_self_invocation: fired on a wired actionlint tree")
+    # The "fired on a wired tree" positive control above already covers all three haystacks
+    # simultaneously wired, including wired_actionlint — a second, argument-identical repeat here
+    # would only ever fire alongside that one and add no coverage (SMA-542 review, smaller
+    # correction 2).
     no_actionlint_call = wired_actionlint.replace("\nrun_self_tests\n", "\n")
     if not check_self_invocation(wired, scripts, no_actionlint_call):
         failures.append("check_self_invocation: missed a deleted run_self_tests call")
     no_battery = wired_actionlint.replace("selftest_mutation_battery\n", "")
     if not check_self_invocation(wired, scripts, no_battery):
         failures.append("check_self_invocation: missed a deleted mutation-battery call")
-    # Swap cases, BOTH directions — the existing suite carries these for the other two texts and
-    # they are the reason the haystacks are kept separate. A call site living in the wrong file
-    # must not satisfy the other's requirement.
-    if not check_self_invocation(wired, scripts, wired):
-        failures.append("check_self_invocation: accepted affected-graph's text as actionlint's")
-    if not check_self_invocation(wired_actionlint, scripts, wired_actionlint):
-        failures.append("check_self_invocation: accepted actionlint's text as affected-graph's")
+    # Contamination cases, BOTH directions (SMA-542 review finding I1). The obvious "swap the two
+    # texts wholesale" version tried first passed unconditionally, because it only proves the
+    # required site is ABSENT from the wrong haystack — never exercising whether the two are
+    # actually checked separately. An 8-mutant battery against check_self_invocation found three
+    # survivors of that version: actionlint sites satisfied by run_sh_text, run.sh sites satisfied
+    # by actionlint_sh_text, and actionlint sites satisfied by script text. These two concatenate
+    # the OTHER haystack's fully-wired text onto the ALREADY-BROKEN text under test: if the two are
+    # ever read as one, the missing site would be masked by the appended text and this would
+    # wrongly pass.
+    if not check_self_invocation(wired + wired_actionlint, scripts, no_actionlint_call):
+        failures.append("check_self_invocation: an actionlint site was satisfied by run.sh text")
+    if not check_self_invocation(no_call, scripts, wired_actionlint + wired):
+        failures.append("check_self_invocation: a run.sh site was satisfied by actionlint text")
+    # The docstring's "REQUIRED positional parameter" claim (SMA-542) is otherwise unenforced: every
+    # caller above already passes it explicitly, so a future `actionlint_sh_text=""` default would
+    # make all of them pass vacuously — the exact class of hole this parameter exists to close —
+    # while every call-site-shaped assertion above stayed green. Only introspecting the signature
+    # itself catches that regression (SMA-542 review, smaller correction 3).
+    default = inspect.signature(check_self_invocation).parameters["actionlint_sh_text"].default
+    if default is not inspect.Parameter.empty:
+        failures.append("check_self_invocation: actionlint_sh_text must stay a REQUIRED parameter")
 
     # _scripts (SMA-553 D10) — a second pure extractor, so _eligibility's shape is untouched.
     got_scripts = _scripts({"repo": {"input-liveness": {"script": "hi"}}, "ts": {"lint": {}}})
