@@ -8,7 +8,9 @@
 # cedar-policy has already overflowed once) or become a T_EXEMPT entry. It runs from
 # .github/workflows/images.yml instead.
 #
-# usage: ci/images/run.sh {build|smoke|all} [iam|gateway]
+# usage: ci/images/run.sh build [iam|gateway]     # [iam|gateway] scopes the build
+#        ci/images/run.sh smoke                    # always smokes BOTH images; takes no service arg
+#        ci/images/run.sh all                       # build both + smoke; takes no service arg
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,18 +58,51 @@ assert_pins() {
     echo "::error::the builder base must stay a digest-pinned -bookworm tag (glibc 2.36 <= the runtime's 2.39)." >&2
     return 1
   fi
+  # The rootfs stage's FROM tag and its `chisel cut --release ubuntu-X.Y` must name the SAME
+  # release: chisel cuts package slices out of a specific Ubuntu release manifest, so an
+  # ubuntu:25.04 bump that forgot to also bump `--release ubuntu-24.04` would cut 24.04 slices
+  # into a 25.04-labelled rootfs — nothing else here or in the smoke suite would notice.
+  local ubuntu_from ubuntu_chisel
+  ubuntu_from="$(grep -oE '^FROM ubuntu:[0-9]+\.[0-9]+' "$dockerfile" | head -1 | sed 's/^FROM ubuntu://')"
+  ubuntu_chisel="$(grep -oE 'chisel cut --release ubuntu-[0-9]+\.[0-9]+' "$dockerfile" | head -1 | sed 's/.*ubuntu-//')"
+  if [ "$ubuntu_from" != "$ubuntu_chisel" ]; then
+    echo "::error::rs/Dockerfile's FROM tag (ubuntu:${ubuntu_from}) disagrees with its chisel cut --release (ubuntu-${ubuntu_chisel})." >&2
+    echo "  Bump both together, or chisel cuts the wrong release's package slices into the rootfs." >&2
+    return 1
+  fi
   # AC-2: nothing deployment-varying may be baked. Config reaches the container through
   # IAM_*/GATEWAY_* env at RUNTIME only. Join `\`-continued lines first: an ENV instruction can
   # spread its assignments across multiple physical lines, and IAM_/GATEWAY_ can appear as the
   # 2nd+ token on either the first or a continuation line, not only as the token right after
-  # `ENV` — a naive single-line "starts with ENV IAM_/GATEWAY_" match misses both.
+  # `ENV` — a naive single-line "starts with ENV IAM_/GATEWAY_" match misses both. The
+  # instruction match (`[Ee][Nn][Vv]`) is case-insensitive because Docker parses instructions
+  # case-insensitively (`env IAM_DATABASE_URL=...` is a valid, equivalent ENV instruction); the
+  # variable-name alternation stays case-SENSITIVE on purpose — only IAM_/GATEWAY_ are the
+  # repo's actual env prefixes, and lower-casing that half would just as easily hide unrelated
+  # matches.
   local joined_env
   joined_env="$(awk '/\\[[:space:]]*$/ { sub(/\\[[:space:]]*$/, " "); printf "%s", $0; next } { print }' "$dockerfile")"
-  if grep -nE '^[[:space:]]*ENV[[:space:]]+.*(IAM_|GATEWAY_)' <<<"$joined_env"; then
+  if grep -nE '^[[:space:]]*[Ee][Nn][Vv][[:space:]]+.*(IAM_|GATEWAY_)' <<<"$joined_env"; then
     echo "::error::rs/Dockerfile bakes service config into the image; configure at runtime via env instead." >&2
     return 1
   fi
-  echo "  pins OK: rustc ${channel}, bookworm builder, no baked service config"
+  # AC-2 continued, the bigger hole: the ENV guard above only sees baked *env* config. A
+  # `COPY iam.toml /iam.toml` into the final stage would bake config just the same, pass the ENV
+  # guard, AND pass the smoke suite — a baked TOML layers *beneath* runtime env (figment's
+  # documented merge order), so nothing observable changes. The final (last, unnamed
+  # `FROM scratch`) stage may therefore COPY exactly two things: the chiseled rootfs and the
+  # compiled service binary. Anything else fails closed here rather than shipping silently.
+  local final_from_line final_stage copy_lines bad_copy
+  final_from_line="$(grep -niE '^FROM[[:space:]]' "$dockerfile" | tail -1 | cut -d: -f1)"
+  final_stage="$(sed -n "${final_from_line},\$p" "$dockerfile")"
+  copy_lines="$(grep -iE '^[[:space:]]*COPY[[:space:]]+' <<<"$final_stage")"
+  bad_copy="$(grep -vxE 'COPY --from=rootfs /rootfs /|COPY --from=builder /out/service /usr/local/bin/paigasus-service' <<<"$copy_lines" || true)"
+  if [ -n "$bad_copy" ]; then
+    echo "::error::rs/Dockerfile's final stage COPYs something beyond the rootfs and the service binary — this can bake deployment config beneath runtime env, invisible to both the ENV check above and the smoke suite:" >&2
+    echo "$bad_copy" >&2
+    return 1
+  fi
+  echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config"
 }
 
 build_one() {
@@ -85,9 +120,16 @@ build_one() {
   # always re-execute is what the comment above already assumed ("re-resolves ... on every
   # build") and costs one small apt/chisel fetch, not a rebuild of the (cache-mounted) Rust
   # compile.
+  # --load: docker/setup-buildx-action makes a `docker-container` builder CURRENT, and that
+  # driver does not reliably auto-load its output into the local `docker images` store on every
+  # Docker version (it happens to on 29.6.2, but the CI runner's version is not guaranteed to
+  # match). Without --load the failure mode is silent here and loud at the first `docker run`
+  # below ("No such image"). Under the plain `docker` driver (no buildx container) --load is a
+  # no-op-safe `--output=type=docker`, so it costs nothing locally.
   docker build \
     --progress=plain \
     --no-cache-filter=rootfs \
+    --load \
     -f "$ROOT/rs/Dockerfile" \
     --build-arg "BIN=${crate}" \
     --label "org.opencontainers.image.title=${crate}" \
@@ -187,19 +229,32 @@ smoke() {
   expect_status "gateway /healthz" "http://${GW_NAME}:8088/healthz" 200
   # The NEGATIVE case is the point: no IAM is reachable, so a /readyz returning 200 is lying.
   expect_status "gateway /readyz (no IAM)" "http://${GW_NAME}:8088/readyz" 503
-  # `if !` rather than `cmd; [ $? -eq 1 ]`: under `set -e` a bare non-zero command aborts the
-  # script, and exiting 1 here is the EXPECTED result (the gateway is unready without IAM).
-  if docker exec "$GW_NAME" /usr/local/bin/paigasus-service healthcheck --path /readyz; then
-    echo "::error::gateway readyz probe reported healthy with no IAM reachable" >&2
-    return 1
-  fi
-  echo "  gateway readyz probe exits non-zero while unready (in-image, --path works)"
+  # Capture the ACTUAL exit code rather than treating any non-zero as proof: the healthcheck
+  # subcommand's contract is 0=healthy, 1=unhealthy, 2=usage error (§ D4 in the design doc). If
+  # `--path` were ever renamed, the binary would exit 2 (usage error) and a bare `if !` would
+  # read that as "correctly reported unready" — the only assertion proving `--path` works would
+  # have silently stopped proving it. Require exactly 1.
+  local readyz_rc=0
+  docker exec "$GW_NAME" /usr/local/bin/paigasus-service healthcheck --path /readyz || readyz_rc=$?
+  case "$readyz_rc" in
+    1) echo "  gateway readyz probe exits 1 (unhealthy) while unready (in-image, --path works)" ;;
+    0) echo "::error::gateway readyz probe reported healthy (exit 0) with no IAM reachable" >&2; return 1 ;;
+    2) echo "::error::gateway readyz probe exited 2 (usage error) — --path was rejected, so this no longer proves --path works" >&2; return 1 ;;
+    *) echo "::error::gateway readyz probe exited ${readyz_rc}, expected exactly 1 (unhealthy)" >&2; return 1 ;;
+  esac
   assert_base_intact paigasus-gateway:dev
 
   echo "== iam: with postgres, reached BY HOSTNAME =="
+  # --health-cmd/--health-interval + wait_healthy, not a fixed `sleep`: sea-orm's
+  # Database::connect does not retry, so IAM's own boot attempt must land AFTER postgres is
+  # actually accepting connections, not after a guessed wait. A fixed `sleep 8` either wastes
+  # time on a fast runner or, worse, is too short on a slow one — IAM would exit before postgres
+  # is ready, and wait_healthy on IAM would then burn its own 60s budget reporting a probe
+  # failure that was really "postgres wasn't up yet".
   docker run -d --name "$PG_NAME" --network "$NET" \
+    --health-cmd 'pg_isready -U postgres' --health-interval=1s \
     -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=iam postgres:16-alpine >/dev/null
-  sleep 8
+  wait_healthy "$PG_NAME"
   # `$PG_NAME`, never 127.0.0.1: this is what exercises glibc name resolution inside the
   # chiseled rootfs. An IP literal would bypass NSS entirely and the assertion would go vacuous.
   # IAM_API_KEYS__PEPPER: IamConfig::validate requires a base64 pepper decoding to >=32 bytes
@@ -234,14 +289,34 @@ smoke() {
   echo "SMOKE OK"
 }
 
-cmd="${1:?usage: ci/images/run.sh \{build\|smoke\|all\} [iam|gateway]}"
-target="${2:-all}"
+cmd="${1:?usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh \{smoke\|all\}}"
+target="${2:-}"
 services=("iam" "gateway")
-[ "$target" != "all" ] && services=("$target")
+[ -n "$target" ] && services=("$target")
 
+# `smoke` and `all` always exercise BOTH images (§ 5.2: the negative case on the gateway needs
+# no IAM reachable, and the positive case needs IAM's own postgres) — a service argument on
+# either of them is silently ignored by `build_one`'s scoping but NOT by `smoke`, which has no
+# way to honour it. `run.sh all iam` would then build only iam while still smoke-testing
+# whatever `paigasus-gateway:dev` happens to already be on the daemon (stale or absent), and
+# report SMOKE OK regardless. Reject the argument outright rather than let it lie.
 case "$cmd" in
   build) assert_pins; for s in "${services[@]}"; do build_one "$s"; done ;;
-  smoke) smoke ;;
-  all)   assert_pins; for s in "${services[@]}"; do build_one "$s"; done; smoke ;;
+  smoke)
+    if [ -n "$target" ]; then
+      echo "usage: ci/images/run.sh smoke takes no service argument — it always smokes both images" >&2
+      exit 1
+    fi
+    smoke
+    ;;
+  all)
+    if [ -n "$target" ]; then
+      echo "usage: ci/images/run.sh all takes no service argument — it builds and smokes both images; use 'build [iam|gateway]' to build one" >&2
+      exit 1
+    fi
+    assert_pins
+    for s in "${services[@]}"; do build_one "$s"; done
+    smoke
+    ;;
   *) echo "unknown command: $cmd" >&2; exit 1 ;;
 esac
