@@ -106,6 +106,19 @@ pub struct OpenAiConfig {
     /// `SecretString`, so no hand-rolled newtype is needed here.
     #[serde(skip_serializing)]
     pub api_key: SecretString,
+    /// Extra trust anchors for the outbound upstream calls, as a path to a PEM bundle.
+    ///
+    /// **This ADDS to the trust store, it does not replace it** — the client trusts the
+    /// compiled-in Mozilla roots, the image's own store, AND every certificate here. The
+    /// opposite of the sibling `iam.tls.ca_cert_path`, which PINS; hence the `extra_` prefix.
+    /// For a self-hosted vLLM/LiteLLM upstream behind a corporate CA (SMA-558).
+    ///
+    /// **ROOTS ONLY** — every certificate here becomes an unconstrained trust anchor for every
+    /// HTTPS call this process makes. Read once at boot; an unreadable, malformed or
+    /// certificate-free bundle is a hard boot failure. Mirrors
+    /// `paigasus-iam`'s `authn.extra_ca_bundle_path`.
+    #[serde(default)]
+    pub extra_ca_bundle_path: Option<String>,
 }
 
 /// `GET /metrics` (SMA-446 Unit 2): whether the Prometheus recorder is installed at all, and
@@ -149,13 +162,16 @@ struct UpstreamDefaults {
     openai: OpenAiDefaults,
 }
 
-// Mirrors `OpenAiConfig` field-for-field, EXCEPT `api_key`'s TYPE: this struct only ever
-// feeds figment's default LAYER (`Serialized::defaults`), never gets logged/dumped itself, so
-// a plain (unredacted) `String` is fine here — figment still deserializes the eventual merged
-// value into `OpenAiConfig.api_key: SecretString` regardless of which layer (default/toml/env)
-// supplied it. The default is the empty string, deliberately INVALID (an empty key can never
-// authenticate to OpenAI) — caught by `GatewayConfig::validate` rather than at figment
-// extraction, mirroring iam's `ApiKeyDefaults`/`RawPepper` pattern exactly.
+// Mirrors `OpenAiConfig` minus `extra_ca_bundle_path` — the second such omission in this
+// codebase (see iam's `AuthnDefaults`, the first): it is an `Option` carrying
+// `#[serde(default)]`, which already resolves to `None` without a defaults-layer entry; adding
+// one would serialize a null into the layer for no gain. Also EXCEPT `api_key`'s TYPE: this
+// struct only ever feeds figment's default LAYER (`Serialized::defaults`), never gets
+// logged/dumped itself, so a plain (unredacted) `String` is fine here — figment still
+// deserializes the eventual merged value into `OpenAiConfig.api_key: SecretString` regardless of
+// which layer (default/toml/env) supplied it. The default is the empty string, deliberately
+// INVALID (an empty key can never authenticate to OpenAI) — caught by `GatewayConfig::validate`
+// rather than at figment extraction, mirroring iam's `ApiKeyDefaults`/`RawPepper` pattern exactly.
 #[derive(Serialize)]
 struct OpenAiDefaults {
     base_url: String,
@@ -259,6 +275,10 @@ impl GatewayConfig {
 
         if self.upstream.openai.api_key.expose_secret().is_empty() {
             return Err("upstream.openai.api_key must not be empty (an empty key is a misconfiguration)".to_string());
+        }
+
+        if self.upstream.openai.extra_ca_bundle_path.as_deref().is_some_and(str::is_empty) {
+            return Err("upstream.openai.extra_ca_bundle_path must not be empty (omit the key entirely to use the default trust store)".to_string());
         }
 
         if matches!(self.iam.tls, IamTlsConfig::LoopbackInsecure) && !is_loopback_host(&self.iam.grpc_addr) {

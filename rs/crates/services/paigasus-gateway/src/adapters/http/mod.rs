@@ -233,6 +233,7 @@ mod tests {
         let cfg = OpenAiConfig {
             base_url: "http://127.0.0.1:1".to_string(),
             api_key: SecretString::from("sk-unused".to_string()),
+            extra_ca_bundle_path: None,
         };
         OpenAiClient::new(&cfg, Duration::from_secs(1), Duration::from_secs(1), Duration::from_secs(1)).expect("client builds")
     }

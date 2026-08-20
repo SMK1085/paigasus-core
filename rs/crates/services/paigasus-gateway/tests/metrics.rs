@@ -93,6 +93,7 @@ fn unused_openai() -> OpenAiClient {
     let cfg = OpenAiConfig {
         base_url: "http://127.0.0.1:1".to_string(),
         api_key: SecretString::from("sk-unused".to_string()),
+        extra_ca_bundle_path: None,
     };
     OpenAiClient::new(&cfg, Duration::from_secs(1), Duration::from_secs(1), Duration::from_secs(1)).expect("client builds")
 }
@@ -145,6 +146,7 @@ async fn successful_proxied_request_records_iam_and_upstream_metrics() {
     let cfg = OpenAiConfig {
         base_url: mock.base_url.clone(),
         api_key: SecretString::from("sk-real-openai-key".to_string()),
+        extra_ca_bundle_path: None,
     };
     let openai = OpenAiClient::new(&cfg, Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(300)).expect("client builds");
 

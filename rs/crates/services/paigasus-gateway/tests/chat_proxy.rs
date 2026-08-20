@@ -130,6 +130,7 @@ fn app_for_with_streaming(fake: FakeIam, base_url: String, max_request_bytes: us
     let cfg = OpenAiConfig {
         base_url,
         api_key: SecretString::from(REAL_KEY.to_string()),
+        extra_ca_bundle_path: None,
     };
     let openai = OpenAiClient::new(&cfg, Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(300)).expect("client builds");
     let state = AppState {
