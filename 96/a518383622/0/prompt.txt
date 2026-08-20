@@ -1,0 +1,142 @@
+<task-notification>
+<task-id>a394793077493a426</task-id>
+<tool-use-id>toolu_01YBkU22goRapxDyxp5K8D9Z</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a19cb7d1-7551-4054-ba7a-9e80a3de0013/tasks/a394793077493a426.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 3: mutation battery" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Final state verified: commit `7758827` on branch `feature/sma-542-guard-self-test-invocations`, working tree clean, gate passes.
+
+**Status: DONE**
+**Commit:** `77588274ea1eb649684a2f8051d6fabc82a42f8f` — "feat(repo): prove the self-test counter fires, by mutation (SMA-542)"
+**Verification summary:** Steps 1-6 all passed as specified (healthy tree rc=0; `--self-test` unaffected at ~1.1s; battery kills all 4 mutants, `4` "did NOT red the gate" hits, restore byte-exact); Step 7's authoritative clean-window measurement (coordinator, interleaved with baseline to control for contention) gave median ~2.98s vs. ~1.52s baseline — **1.96x, just under the 2x/~3.04s ceiling with ~2% margin** — so the design stands, no fallback needed; post-commit sanity re-run also returned rc=0.
+
+**Concerns:**
+- The 2x margin is thin (~2%); worth revisiting if `SELF_TEST_COUNT` grows in a future task (more concurrent subprocesses in the battery).
+- My own initial Step 7 measurement (4.59s/6.24s/7.41s) was taken under heavy, unrelated concurrent load (another session's Rust build plus several busy peer sessions) and was not representative — flagged and escalated rather than acted on, per instructions; the coordinator's clean-window remeasurement is the authoritative figure and is what's recorded in the report for Task 6 to copy into `ci/actionlint/README.md`'s cost table.
+
+Report updated with both measurement sets, the authoritative clean-window table, and the final commit block: `.superpowers/sdd/2026-08-20-sma-542-self-test-invocation-guard/task-3-report.md`.</result>
+<usage><subagent_tokens>151748</subagent_tokens><tool_uses>14</tool_uses><duration_ms>111905</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a811f66525ad3a3cc</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a19cb7d1-7551-4054-ba7a-9e80a3de0013/tasks/a811f66525ad3a3cc.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 4" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Verdict 1 — Spec compliance: ✅
+
+The diff is the brief, verbatim, plus the four folded-in fixes and nothing else (`ci/actionlint/run.sh` is the only file in the commit; `.github/workflows/ci.yml` is byte-identical to HEAD; `git status` shows only the pre-existing untracked `.claude/`).
+
+Every brief item, verified by execution rather than reading:
+
+| Brief item | Where | Evidence |
+|---|---|---|
+| `T_FLOOR`, verdict fn, self-test before the dispatch | `ci/actionlint/run.sh:1639`, `:1646`, `:1685` | placed after `config_self_test`, mirroring `config_verdict`/`config_self_test` |
+| wired into `run_self_tests`; `SELF_TEST_COUNT=5` | `:1784`, `:40` | full gate rc 0 (the `defs`-count assertion at `:1796` and check 9's `n -ne SELF_TEST_COUNT` at `:1836` both bite) |
+| production call site after `--self-test` exit, before PATH guard | `:1929` → `:1934-1958` → `:1962` | see (4) below |
+| `usage()` updated | `:52-61` | "five", ci-target floor, battery-not-included sentence |
+| `set -e` not added, exit codes 1/`fail` vs 2/`infra` | — | `fail` for all four verdicts, `infra` only on the unhandled-verdict arm (`:1956`) |
+| checks 1–7 not renumbered | — | no renumbering in the diff |
+| commit message | HEAD | `moon run ts:commitlint --from HEAD~1 --to HEAD` passes; subject 74 chars, lowercase, scope `repo`, no `#NNN` |
+
+**(1) Parsing robustness — verified by mutation, not inspection.** I ran six targeted mutants of `ci_target_floor_verdict` against the committed fixture table; each was killed by exactly the row that should have killed it:
+
+- `[ "$arrays" -ne 1 ]` → `-gt 1` (i.e. "zero arrays is a skip") kills `no array at all`, `array reformatted across lines`, `lookalike assignment is not T`. Zero and two both route to `no-array`, as required.
+- Dropping the `\)[ \t]*$` anchor from `:1654` kills `array reformatted across lines`.
+- `^[ \t]*T=` → `.*T=` kills `lookalike assignment is not T` — so `EXPECT=(:affected-smoke)` genuinely cannot be read as the array.
+- `[ "$w" = "$tok" ]` → prefix match, and → substring match on the whole body, both kill `floor entry renamed away`. `:affected-smoke-disabled` does not satisfy `:affected-smoke`.
+
+**(2) The `swallowed` check.** Fires on the real file: with `|| true` appended to `ci.yml:219`, the gate prints `.github/workflows/ci.yml:219 runs 'moon' but discards its exit` (1 hit) and exits 1. Against the unmutated `ci.yml` it fires on none of the **seven** real `moon`-at-command-position lines (193, 198, 219, 221, 224, 254, 269 — `moon run ts:commitlint`, `ts:check-config-only`, two `moon ci`, `moon run "${T[@]}"`, `contracts:generate`, `moon sync`), and correctly ignores `run: moon setup` (line 126) and the prose mentions. Command-position anchoring is a live control, not decoration: unanchoring `^[ \t]*moon[ \t]` → `moon` kills the `moon mentioned in a comment` row (whose comment text carries a `;`), and dropping `-n` kills `moon failure swallowed` (which pins the line number).
+
+**(3) `no-file` is distinct.** With `ci.yml` removed the gate prints `does not exist, so this gate cannot confirm that repo:affected-smoke is still scheduled` — not the "keep T on one line" text. Deleting the `[ -e "$f" ]` guard kills the `missing file` case.
+
+**(4) Placement.** `--self-test` run against a *deliberately broken* `ci.yml` (`:affected-smoke` deleted): rc 0, zero check-8 messages — production check 8 does not run under `--self-test`. With `PATH=/usr/bin:/bin` (no `actionlint`) and the same broken file, check 8's verdict is line 1 of stderr and the PATH `infra` is line 5, so the verdict is produced on a machine with no binary.
+
+**(5) The fixture table is a real control pair.** No vacuous row. Every verdict has both directions, and I confirmed each row's discriminating power by finding a mutant it alone kills: `missing` (rows 2, 3 fire; row 1 doesn't), `no-array` (rows 4–7 fire; row 1 doesn't), `swallowed` (row 8 fires; rows 1 and 9 don't), `no-file` (the `/nonexistent` case fires; all nine tmp-file rows don't). Making `swallowed` fire unconditionally kills 4 rows including `healthy`; making `missing` fire unconditionally kills 3 including `healthy` — the negative controls are load-bearing.
+
+**(6) Battery auto-extended, 4 → 5, zero edits.** The `awk` derivation at `:1829-1833` is untouched context in the diff, and run against the committed file it now emits five names ending in `ci_target_floor_self_test`. No hardcoded count crept in: `n` is derived at `:1834` and compared to `SELF_TEST_COUNT` at `:1836`. Because the full gate exits 0, all five mutants were built (`removed -ne 1` precondition), spawned, and **killed** — a surviving fifth mutant would have called `fail`.
+
+**(7) The four folded-in fixes** — all landed, none broke anything:
+- `:1899` — `case "$rc" in 2|126|127)` … `*)`. The kill test (`rc -eq 1` **and** the counter's message, `:1895`) is still evaluated *first*, so 126/127 remain non-kills; the widening only changes their diagnosis from "survivor" to "infra abort", and `rc $rc` replaces the hardcoded `rc 2` so the message can't misreport.
+- `:1870-1872` — "Five mutants that all fire" → "One mutant per invocation, all firing"; `:1887` — `its $n dead mutants` using the live count. `grep -i five` over the battery body returns nothing.
+- `:1824` — `pid` present in the `local` list.
+- `mutant` removed; `grep -n '\$mutant'` over the whole file returns nothing.
+
+Sibling gates still green: `moon run repo:affected-smoke repo:actionlint` → 2 completed. Task 5's `ACTIONLINT_SH_CALL_SITES` (referenced by `moon.yml:147`) pins the bare names `run_self_tests` / `selftest_mutation_battery`, so this task correctly needed no change there.
+
+## Verdict 2 — Task quality: Approved, with findings
+
+**Important (follow-up, not a spec deviation, does not block)** — `continue-on-error: true` is the same hole, one YAML key away, and nothing sees it. `:1675-1680` inspects only the *command line*, so it closes `moon … || true`. The canonical GitHub-Actions spelling of "green a step that failed" is `continue-on-error: true` on the step (or `if: false`), which leaves `T` perfectly correct, leaves the `moon ci` line pristine, and greens the required `moon ci` **job**. I grepped: `continue-on-error` appears in no workflow and in no gate under `ci/`. The failure text at `:1951-1953` — "no other check in this repo can see it" — is literally true of that spelling too. The brief scoped check 8 to the command line, so this is out of scope for Task 4, but it belongs in the same `T_FLOOR` block and is cheap (a `grep -n 'continue-on-error' ci.yml` verdict).
+
+**Minor** — `[ \t]` inside a grep bracket expression is not portable. `:1654`, `:1659`, `:1680` all use `[ \t]`. I verified locally that **BSD grep treats it as a tab** (a tab-indented `T=(…)` matched). GNU grep (Linux CI) documents backslash as non-special inside bracket expressions, which would make the class `{space, backslash, t}` — so the comment at `:1651` ("Anchored like `ci_targets.py`'s `T_ARRAY_RE`", where Python's `\t` genuinely *is* a tab) is not strictly accurate. Impact is bounded and fail-closed in practice: YAML forbids tab indentation, so every real line is space-indented; on GNU the array regex only becomes *over*-broad (`ttt T=(…)` would match → count 2 → `no-array`, a loud failure), and the only under-broad case is a tab between `moon` and its args. Use `[[:blank:]]` if you want the two gates to actually agree. ⚠️ *GNU-side behaviour is asserted from documented semantics, not measured — see below.*
+
+**Minor** — stale parenthetical at `:1762`: "All five **(four until SMA-542's floor table lands)** are defined above". The floor table has now landed; the parenthetical is dead narration. The implementer flagged this as a conscious out-of-scope call, which is defensible, but it is one word and sits three lines above the code it describes.
+
+**Minor** — a numeric hardcode survived the "no hardcoded counts" fix. `:1862`: "**six** sequential `--self-test` runs would roughly quadruple this gate's standalone cost." That is 5 mutants + control, so it is *accurate now* (it was wrong at Task 3, with 4 mutants) — but it is the same class of hardcode the folded-in fix removed two lines below at `:1870`, and it will go stale again on the sixth table.
+
+**Minor (nit)** — `for w in $body` at `:1665` is an unquoted expansion with no `set -f`, so tokens are subject to pathname expansion against the repo root. Harmless for the current floor (`:affected-smoke` contains no glob metacharacter, so it cannot be expanded away), but a future `T_FLOOR` entry containing `[`, `*` or `?` would silently mis-compare.
+
+## ⚠️ Cannot verify locally
+
+- **GNU-grep semantics of `[ \t]`** (the Minor above). No `ggrep`/GNU grep or Linux container available in this environment; BSD behaviour was measured (matches a tab), GNU behaviour is inferred from POSIX/GNU documentation. If it matters, it is one CI run to confirm — and either way the failure mode is fail-closed for the array.
+- **Timing** — excluded from scope per instruction; not measured or assessed.</result>
+<usage><subagent_tokens>105802</subagent_tokens><tool_uses>33</tool_uses><duration_ms>581516</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>adc8325f77e1c1233</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a19cb7d1-7551-4054-ba7a-9e80a3de0013/tasks/adc8325f77e1c1233.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 4b: continue-on-error + nits" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All green post-commit, tree clean (only the pre-existing untracked `.claude/`), subject 83 chars (≤100), lowercase start.
+
+**Status:** DONE
+**Commit:** `e0a42e30222a01e8c3c5aae4a05aabf7ecefef44` (short: `e0a42e3`) on branch `feature/sma-542-guard-self-test-invocations`
+**Verification summary:** I1 confirmed closed by re-proving the real-file case with `continue-on-error: True` (previously invisible, now reds naming line 212); I2's `COE_SKIP` escape hatch and reworded message verified via a fixture proving skip silences only the listed line, not its neighbor; `--self-test` and full gate both exit 0 pre/post-commit, `.github/workflows/ci.yml` restored via `cp` with clean `git diff --stat`, and mutation-testing confirms every new/changed fixture row has genuine discriminating power in both directions. Min-of-5 timing: 3.63s (a noisier first attempt read 4.31s under a load spike), consistent with the ~3.36s baseline.
+
+Concerns: none blocking. Two judgment calls are documented in the appended report section — `false` is matched literally unquoted (a hypothetical `continue-on-error: 'false'` would still fire, erring toward flagging), and `COE_SKIP` is keyed by line number rather than step name (per the brief's own stated preference to avoid YAML block-boundary parsing).</result>
+<usage><subagent_tokens>210077</subagent_tokens><tool_uses>61</tool_uses><duration_ms>727964</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a575c5d9e43553ed8</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a19cb7d1-7551-4054-ba7a-9e80a3de0013/tasks/a575c5d9e43553ed8.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 5: C4 pin in ci_targets.py" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>**Status: DONE**
+
+- Commit SHA: `fb01978af2bedfb63bdec8ebcd490de5d0c46355`
+- Verification: `python3 ci/affected-graph/ci_targets.py --self-test` exits 0; `moon run repo:affected-smoke --force` exits 0 (`Tasks: 1 completed`, ~30s); deliberate mutation (making the actionlint check also consult `run_sh_text`) reds the suite specifically on the new I1 case, confirmed reverted cleanly via `cp` from a pre-mutation backup.
+- Concerns: I addressed only the two survivors the coordinator's replacement code targets (run.sh↔actionlint contamination, both directions) and verified one of them by deliberate mutation as instructed. The third mutant named in the finding — "actionlint sites also satisfied by script text" — is not exercised by either new case or any existing one; the coordinator's own summary said the replacement "reds both survivors" (not three), so I left it unaddressed rather than unilaterally expanding scope, but flagged it explicitly in the appended report in case that was an oversight worth a follow-up round.</result>
+<usage><subagent_tokens>128892</subagent_tokens><tool_uses>30</tool_uses><duration_ms>254772</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a575c5d9e43553ed8</task-id>
+<tool-use-id>toolu_014t2HNppAb6QJg3ThoFYhZp</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/a19cb7d1-7551-4054-ba7a-9e80a3de0013/tasks/a575c5d9e43553ed8.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 5: C4 pin in ci_targets.py" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>**Status: DONE**
+
+- Commit SHA: `07af49f84e564e5df296f62eef4504084786b80e`
+- Verification: `python3 ci/affected-graph/ci_targets.py --self-test` exits 0; `moon run repo:affected-smoke --force` exits 0 (`Tasks: 1 completed`); deliberate mutation (actionlint check also consulting `scripts["input-liveness"]`) reds the suite with exactly one failure line naming the new case, then reverted cleanly via `cp` from a backup.
+- Concerns: none. `ci/actionlint/run.sh` untouched throughout; only `ci/affected-graph/ci_targets.py` in the commit. Report appended to `task-5-report.md` with the mutation-check transcript.</result>
+<usage><subagent_tokens>145372</subagent_tokens><tool_uses>17</tool_uses><duration_ms>158204</duration_ms></usage>
+</task-notification>
