@@ -37,7 +37,7 @@ FAILED=0
 # Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
 # protection and would break a future harness that sources this file twice (SMA-542 D3).
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=4   # extractor, path-filter, branch-filter, config
+SELF_TEST_COUNT=5   # extractor, path-filter, branch-filter, config, ci-target-floor
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -52,10 +52,11 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the four fixture tables only — extractor, path-filter verdicts," >&2
-  echo "                 branch-filter verdicts, config allowlist. No actionlint binary is" >&2
-  echo "                 required, but the branch-filter table needs a git repo carrying" >&2
-  echo "                 refs/remotes/origin/main" >&2
+  echo "  --self-test    run the five fixture tables only — extractor, path-filter verdicts," >&2
+  echo "                 branch-filter verdicts, config allowlist, ci-target floor. No actionlint" >&2
+  echo "                 binary is required, but the branch-filter table needs a git repo" >&2
+  echo "                 carrying refs/remotes/origin/main. The check-9 mutation battery is NOT" >&2
+  echo "                 part of this — it runs on the full gate only." >&2
   exit 2
 }
 
@@ -1621,6 +1622,141 @@ $got"
 }
 
 # ---------------------------------------------------------------------------------------------
+# Check 8 (definitions) — ci.yml's `T=(…)` must still schedule the gate that guards `T`.
+#
+# Deleting `:affected-smoke` from that array stops repo:affected-smoke running, which in ONE edit
+# removes ci_targets.py's C1-C5, all eight cascade cases, cargo_moon_parity's A1-A5 and
+# assert_include_relations — every one of them green, because the thing that would complain is the
+# thing that stopped running. It is unclosable from inside ci/affected-graph/ for the same reason
+# SMA-542 exists, and this gate is the natural host: independently scheduled, and already reading
+# every workflow file.
+#
+# ':actionlint' is DELIBERATELY NOT in the floor. ci_targets.py's C1 (check_forward) is a strict
+# equality over T's repo partition, so dropping :actionlint already reds repo:affected-smoke.
+# Asserting it HERE would be vacuous: the only run in which the entry is missing is the run in
+# which this assertion does not execute (SMA-542 D8).
+# ---------------------------------------------------------------------------------------------
+T_FLOOR=(':affected-smoke')
+
+# Echoes one verdict token per problem, and nothing for an acceptable file:
+#   no-file              the workflow does not exist
+#   no-array             zero, or more than one, single-line T=( … )
+#   missing <entry>      the array parsed; <entry> is not among its tokens
+#   swallowed <lineno>   a `moon` command line discards its own exit status
+ci_target_floor_verdict() {
+  local f="$1" arrays body tok w found lineno text
+
+  [ -e "$f" ] || { echo 'no-file'; return; }
+
+  # Anchored like ci_targets.py's T_ARRAY_RE, not a bare `T=(` — which would also match `EXPECT=(`.
+  # Zero or two matches is a FAILURE, never a skip: an array reformatted across lines is exactly
+  # the condition under which this check would otherwise stop asserting anything.
+  arrays="$(grep -cE '^[ \t]*T=\(.*\)[ \t]*$' "$f")"
+  if [ "$arrays" -ne 1 ]; then
+    echo 'no-array'
+    return
+  fi
+  body="$(sed -nE 's/^[ \t]*T=\((.*)\)[ \t]*$/\1/p' "$f")"
+
+  for tok in "${T_FLOOR[@]}"; do
+    found=0
+    # Whole-token comparison: ':affected-smoke' is a prefix of ':affected-smoke-disabled', so a
+    # substring test would accept a renamed-away gate.
+    for w in $body; do
+      if [ "$w" = "$tok" ]; then found=1; break; fi
+    done
+    [ "$found" -eq 1 ] || echo "missing $tok"
+  done
+
+  # D14 — `|| true` on the moon line silences every gate in T while leaving T itself perfectly
+  # correct: C1/C2/C3 pass, C5's expansion test passes, and `set -euo pipefail` does not help
+  # because the step exits 0. Complementary to C5, which asserts T is HANDED OVER; this asserts
+  # the result is PROPAGATED. It lives here because this is the half that survives
+  # repo:affected-smoke being silenced.
+  while IFS=: read -r lineno text; do
+    case "$text" in
+      *'||'*|*'&&'*|*';'*|*'|'*) echo "swallowed $lineno" ;;
+    esac
+  done < <(grep -nE '^[ \t]*moon[ \t]' "$f")
+}
+
+# The standing control for check 8. Both directions on every verdict: a table whose rows all fire
+# cannot tell a working check from a stuck one (SMA-466).
+ci_target_floor_self_test() {
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+  local rc=0 tmp got
+
+  expect_floor() {
+    local name="$1" expected="$2" body="$3"
+    tmp="$(mktemp)"
+    printf '%s' "$body" > "$tmp"
+    got="$(ci_target_floor_verdict "$tmp")"
+    rm -f "$tmp"
+    if [ "$got" != "$expected" ]; then
+      fail "ci-target-floor self-test '$name': got '$got', expected '$expected'. Check 8 is not
+      deciding what it is documented to decide."
+      rc=1
+    fi
+  }
+
+  expect_floor 'healthy array and invocations' '' \
+'          T=(:build :affected-smoke :actionlint)
+          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]}" --base origin/main --include-relations
+          else
+            moon run "${T[@]}"
+          fi
+'
+  expect_floor 'floor entry absent' 'missing :affected-smoke' \
+'          T=(:build :actionlint)
+          moon ci "${T[@]}" --base origin/main --include-relations
+'
+  # A prefix of the floor entry must NOT satisfy it.
+  expect_floor 'floor entry renamed away' 'missing :affected-smoke' \
+'          T=(:build :affected-smoke-disabled)
+          moon ci "${T[@]}"
+'
+  expect_floor 'no array at all' 'no-array' \
+'          moon ci --base origin/main
+'
+  expect_floor 'two arrays' 'no-array' \
+'          T=(:affected-smoke)
+          T=(:build)
+          moon ci "${T[@]}"
+'
+  expect_floor 'array reformatted across lines' 'no-array' \
+'          T=(
+            :affected-smoke
+          )
+          moon ci "${T[@]}"
+'
+  # A similarly-shaped assignment must not be read as the array.
+  expect_floor 'lookalike assignment is not T' 'no-array' \
+'          EXPECT=(:affected-smoke)
+          moon ci "${T[@]}"
+'
+  expect_floor 'moon failure swallowed' 'swallowed 2' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}" --base origin/main --include-relations || true
+'
+  # `moon` not at command position is not an invocation — it must not fire.
+  expect_floor 'moon mentioned in a comment' '' \
+'          T=(:affected-smoke)
+          # run moon ci; it will pass
+          moon ci "${T[@]}"
+'
+
+  got="$(ci_target_floor_verdict /nonexistent/ci.yml)"
+  if [ "$got" != 'no-file' ]; then
+    fail "ci-target-floor self-test 'missing file': got '$got', expected 'no-file'. A renamed
+      workflow must not report the misleading 'keep T on one line' remediation."
+    rc=1
+  fi
+
+  return $rc
+}
+
+# ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
 # All five (four until SMA-542's floor table lands) are defined above so this block can run them
@@ -1645,6 +1781,7 @@ run_self_tests() {
   path_filter_self_test
   branch_filter_self_test
   config_self_test
+  ci_target_floor_self_test
 
   assert_self_tests_ran "$SELF_TEST_COUNT"
 
@@ -1684,7 +1821,7 @@ run_self_tests() {
 # extends the battery automatically, and a mismatch against SELF_TEST_COUNT reds.
 # ---------------------------------------------------------------------------------------------
 selftest_mutation_battery() {
-  local dir lines line n removed mutant rc i label
+  local dir lines line n removed rc i label pid
   local pids='' labels=''
 
   [ -f "$SELF_SRC" ] && [ -r "$SELF_SRC" ] || infra "check 9: cannot read \$SELF_SRC ($SELF_SRC)"
@@ -1730,9 +1867,9 @@ selftest_mutation_battery() {
     pids="$pids $!"
     labels="$labels $line"
   done
-  # The control (D6): the REAL file, unmutated, which must exit 0. Five mutants that all fire
-  # cannot tell a working battery from a stuck one (SMA-466). This proves the harness itself —
-  # the bash invocation, the cwd, the argument passing — yields 0 on a healthy tree.
+  # The control (D6): the REAL file, unmutated, which must exit 0. One mutant per invocation, all
+  # firing, cannot tell a working battery from a stuck one (SMA-466). This proves the harness
+  # itself — the bash invocation, the cwd, the argument passing — yields 0 on a healthy tree.
   bash "$SELF_SRC" --self-test > "$dir/__control__.out" 2>&1 &
   pids="$pids $!"
   labels="$labels __control__"
@@ -1747,7 +1884,7 @@ selftest_mutation_battery() {
     if [ "$label" = '__control__' ]; then
       if [ "$rc" -ne 0 ]; then
         fail "check 9: the unmutated control exited $rc, expected 0. The battery's own harness is
-      broken, so its five dead mutants prove nothing. Output follows."
+      broken, so its $n dead mutants prove nothing. Output follows."
         sed 's/^/      check 9 [control]: /' "$dir/__control__.out" >&2
       fi
       continue
@@ -1758,14 +1895,15 @@ selftest_mutation_battery() {
     if [ "$rc" -eq 1 ] && grep -q 'self-test counter:' "$dir/$label.out"; then
       continue
     fi
-    if [ "$rc" -eq 2 ]; then
-      fail "check 9: mutant '$label' aborted with an infrastructure error (rc 2) before reaching
-      the counter, so it proves nothing. Output follows."
-    else
-      fail "check 9: mutant '$label' exited $rc without the counter's message. Deleting that
+    case "$rc" in
+      2|126|127)
+        fail "check 9: mutant '$label' aborted with an infrastructure error (rc $rc) before
+      reaching the counter, so it proves nothing. Output follows." ;;
+      *)
+        fail "check 9: mutant '$label' exited $rc without the counter's message. Deleting that
       invocation did NOT red the gate — assert_self_tests_ran is missing or neutered, which is
-      exactly the silent pass SMA-542 exists to prevent. Output follows."
-    fi
+      exactly the silent pass SMA-542 exists to prevent. Output follows." ;;
+    esac
     sed "s/^/      check 9 [mutant $label]: /" "$dir/$label.out" >&2
   done
 }
@@ -1791,6 +1929,33 @@ run_self_tests
 if [ "$SELF_TEST_ONLY" = 1 ]; then
   exit "$FAILED"
 fi
+
+# ---------------------------------------------------------------------------------------------
+# Check 8 — the T=() floor, and the propagation of `moon`'s exit status. Rationale and fixtures
+# are with ci_target_floor_verdict above.
+# ---------------------------------------------------------------------------------------------
+while IFS= read -r verdict; do
+  case "$verdict" in
+    '') ;;
+    no-file)
+      fail ".github/workflows/ci.yml does not exist, so this gate cannot confirm that
+      repo:affected-smoke is still scheduled. If the workflow was renamed, update this check." ;;
+    no-array)
+      fail ".github/workflows/ci.yml has no single-line 'T=( … )' array, or has more than one, so
+      the target list cannot be read. Keep T on ONE line — ci_targets.py's C3 requires it too."  ;;
+    'missing '*)
+      fail ".github/workflows/ci.yml's T=( … ) no longer contains '${verdict#missing }'. That
+      entry schedules the gate which guards T itself: without it ci_targets.py's C1-C5, the
+      affected-graph cascade cases and cargo_moon_parity all stop running, every one of them
+      green. Restore it — and the matching entry in CLAUDE.md's ci-targets block." ;;
+    'swallowed '*)
+      fail ".github/workflows/ci.yml:${verdict#swallowed } runs 'moon' but discards its exit
+      status (a '||', '&&', ';' or '|' tail). That greens every gate in T while leaving T itself
+      perfectly correct, so no other check in this repo can see it. Remove the tail." ;;
+    *)
+      infra "unhandled ci-target-floor verdict '$verdict'" ;;
+  esac
+done < <(ci_target_floor_verdict .github/workflows/ci.yml)
 
 # Guard lives here, AFTER the --self-test early exit: --self-test never shells out to actionlint,
 # so it must not infra-exit on a machine that simply doesn't have the binary on PATH yet.
