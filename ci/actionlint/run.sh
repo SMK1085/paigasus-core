@@ -1795,17 +1795,33 @@ ci_target_floor_verdict() {
   # always "put the invocation back at command position on one physical line", which for the `if`
   # case is not "remove the tail" (there may be none).
   #
-  # Both halves are required on the SAME physical line — bash 3.2's `grep -E` is POSIX ERE with no
-  # lookahead, so "wrapper token AND moon ci/run" cannot be one regex. Piped as two greps instead:
-  # the first anchors the wrapper at column 0 (mirroring the `moon` anchor just above), the second
-  # narrows to lines that also invoke `moon ci`/`moon run` specifically — `moon setup`/`moon sync`
-  # are not gated by T and are out of scope. `grep -n` on the first stage keeps the "N:text" record
-  # shape the read loop expects; the second stage matches against that whole "N:text" string, which
-  # is safe because a line number is numeric and cannot itself contain "moon ci"/"moon run".
+  # `moon` MUST BE THE NEXT COMMAND WORD after the wrapper, not merely present somewhere on the
+  # line (CodeRabbit, PR 150 round 2 — a false positive, measured):
+  #   if test -n "$X"; then echo "moon ci failed"; fi
+  # begins with `if` and the STRING "moon ci" appears later on the line, but no `moon` is ever
+  # executed — this is the exact "any line containing 'moon ci'" trap already deliberately avoided
+  # at file scope (ci_targets.py's MOON_CI_LINE_RE / this file's own `moon`-at-command-position
+  # anchor above), reappearing one level down inside a wrapper-prefixed line. So the pattern below
+  # requires `moon` immediately after the leading wrapper, tolerating only what genuinely occurs
+  # between them: a CHAIN of further wrapper tokens (`command env moon ci …`), a negation
+  # (`if ! moon ci …`), or a `VAR=value` assignment (`env FOO=bar moon ci …`) — any number of these,
+  # each blank-separated — but nothing else. `if test -n "$X"; then …` fails to match: after `if`,
+  # `test` is neither a wrapper token, a negation, nor an assignment, so the chain cannot reach
+  # `moon` and the whole anchored pattern does not match that line at all.
+  #
+  # ONE ERE (bash 3.2's `grep -E` is POSIX ERE with no lookahead, but no lookahead is needed once
+  # the whole chain is spelled out as `(glue)*` before the required `moon`). Anchored at column 0,
+  # mirroring the `moon` anchor on the swallowed loop just above. `moon setup`/`moon sync` are not
+  # gated by T and stay out of scope via the trailing `(ci|run)`.
+  #
+  # RESIDUAL, same shape as the vocabulary residual above: a wrapper reached through anything other
+  # than whitespace — `true && moon ci …`, a `case` arm, a custom shell function — is invisible to
+  # this check, same as it would be to `swallowed`'s own vocabulary. Not attempting general
+  # reachability analysis here either (ci_targets.py's `ACTIONLINT_SH_CALL_SITES` comment makes the
+  # same call for the same reason).
   while IFS=: read -r lineno text; do
     is_swallowed_skipped "$lineno:$text" || echo "wrapped $lineno"
-  done < <(grep -nE '^[[:blank:]]*(command|env|time|eval|exec|if|while|until|!)[[:blank:]]' "$f" \
-             | grep -E 'moon[[:blank:]]+(ci|run)([[:blank:]]|$)')
+  done < <(grep -nE '^[[:blank:]]*(command|env|time|eval|exec|if|while|until|!)([[:blank:]]+(command|env|time|eval|exec|if|while|until|!|[A-Za-z_][A-Za-z0-9_]*=[^[:blank:]]*))*[[:blank:]]+moon[[:blank:]]+(ci|run)([[:blank:]]|$)' "$f")
 
   # continue-on-error: — the third spelling of D14's idea, at step rather than command-line
   # granularity, and deliberately as syntactic and over-inclusive as `swallowed` above (SMA-542
@@ -1963,6 +1979,45 @@ ci_target_floor_self_test() {
     'wrapped 2' \
 '          T=(:affected-smoke)
           if moon ci "${T[@]}" --base origin/main --include-relations; then :; fi
+'
+  # Glue tolerance, round 2 (CodeRabbit): a negation between the wrapper and `moon` is exactly the
+  # `if ! cmd` shape a reviewer would actually write, and must still fire.
+  expect_floor 'if-wrapped with a negation (if ! moon ci) still fires as wrapped' \
+    'wrapped 2' \
+'          T=(:affected-smoke)
+          if ! moon ci "${T[@]}" --base origin/main --include-relations; then exit 1; fi
+'
+  # ...a CHAINED wrapper (a second wrapper token between the first and `moon`) still fires.
+  expect_floor 'a chained wrapper (command env moon ci) still fires as wrapped' \
+    'wrapped 2' \
+'          T=(:affected-smoke)
+          command env moon ci "${T[@]}" --base origin/main --include-relations || true
+'
+  # ...and a `VAR=value` assignment between `env` and `moon` (the one non-wrapper, non-negation
+  # token this check tolerates) still fires.
+  expect_floor 'an env assignment before moon (env FOO=bar moon ci) still fires as wrapped' \
+    'wrapped 2' \
+'          T=(:affected-smoke)
+          env FOO=bar moon ci "${T[@]}" --base origin/main --include-relations || true
+'
+  # THE FALSE POSITIVE (CodeRabbit, PR 150 round 2, measured): a wrapper token at line start with
+  # `moon ci` appearing only INSIDE A STRING later on the line, while the actual next command word
+  # is something else entirely. No `moon` ever runs here. This is the "any line containing
+  # 'moon ci'" trap the file-scope anchor above was written to avoid, one level down inside a
+  # wrapper-prefixed line — proves `moon` must be the NEXT COMMAND WORD, not merely present.
+  expect_floor 'a wrapper whose real command is not moon, with "moon ci" only inside a string, does not fire' \
+    '' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+          if test -n "$X"; then echo "moon ci failed"; fi
+'
+  # The same trap, for `moon run` and a different wrapper (`while`), so the fix is proven for both
+  # verbs and is not accidentally scoped to `if`/`moon ci` alone.
+  expect_floor 'a wrapper whose real command is not moon, with "moon run" only inside a string, does not fire' \
+    '' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+          while read -r line; do echo "moon run scheduled: $line"; done < list.txt
 '
   # A wrapper token followed by a line that only MENTIONS moon (in a string), not an actual
   # `moon ci`/`moon run` invocation — real ci.yml line 179's shape. Proves the AND-condition: the

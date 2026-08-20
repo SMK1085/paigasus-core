@@ -138,15 +138,21 @@ before scanning it. Deliberate (SMA-542 fix-wave finding I2): guessing at what f
 the exact misdiagnosis ("swallowed" when the tail wasn't there, or vice versa) this check exists to
 avoid, so it demands the invocation be rejoined onto one line instead.
 
-**L9 — `wrapped` recognizes a closed, enumerated vocabulary, not "any wrapper."** Only
-`command`/`env`/`time`/`eval`/`exec`/`if`/`while`/`until`/`!` are checked, and only when the
-wrapper token and the `moon ci`/`moon run` invocation share one physical line. A wrapper outside
-that list (a shell function, `sudo`, `nice`, a `case` arm, ...) is invisible to it, and a wrapper
-on one line with the invocation on a later one is neither `wrapped` nor `swallowed` — it falls
-into the same blind spot L8 already documents for a backslash continuation. Deliberate (CodeRabbit,
-PR 150): parsing arbitrary bash wrapping accurately needs the same kind of control-flow analysis
-this file's own history shows goes wrong (flow vs block style, SMA-525/540 rounds 2–3) — reject
-the enumerated shapes loudly rather than guess at the rest.
+**L9 — `wrapped` recognizes a closed, enumerated vocabulary, not "any wrapper," and `moon` must
+be the very next command word.** Only `command`/`env`/`time`/`eval`/`exec`/`if`/`while`/`until`/`!`
+are checked, only when the wrapper and the `moon ci`/`moon run` invocation share one physical line,
+and only with whitespace-separated "glue" tolerated in between: further wrapper tokens
+(`command env moon ci …`), a negation (`if ! moon ci …`), or a `VAR=value` assignment
+(`env FOO=bar moon ci …`). A wrapper outside that list (a shell function, `sudo`, `nice`, a `case`
+arm, ...), `moon` reached through anything other than whitespace (`true && moon ci …`), or a
+wrapper on one line with the invocation on a later one is invisible to it — the last of these falls
+into the same blind spot L8 already documents for a backslash continuation. This IS what closes the
+CodeRabbit round-2 false positive (`if test -n "$X"; then echo "moon ci failed"; fi` — a wrapper at
+line start with "moon ci" appearing only inside a string later on the line): with `test` as the
+next command word rather than `moon` or recognized glue, the pattern does not match that line at
+all. Deliberate (CodeRabbit, PR 150): parsing arbitrary bash wrapping accurately needs the same
+kind of control-flow analysis this file's own history shows goes wrong (flow vs block style,
+SMA-525/540 rounds 2–3) — reject the enumerated shapes loudly rather than guess at the rest.
 
 **L10 — `ci_targets.py`'s column-0 pin on `ACTIONLINT_SH_CALL_SITES` is not reachability
 analysis.** It closes the common case — an indented copy of a required line, the shape wrapping
