@@ -232,8 +232,13 @@ Three details are load-bearing:
    alone — as the pre-review draft of this spec said — would make the manifest half of A6 unable to
    fire, which is the same class of bug this issue exists to fix. An absent *either* key is a
    violation or an infrastructure error, never a skip, exactly as A4 treats it.
-2. **Strict equality, with an escape hatch.** The observed set is every resolved input entry matching
-   `rs/crates/*/*/{src/**/*,Cargo.toml}`; it must equal the derived closure. A subset check would
+2. **Strict equality, with an escape hatch.** The observed set is every resolved input entry that
+   points into **another crate's tree** — anything under `rs/crates/` that is not under this crate's
+   own `source_dir`, whatever its suffix — and it must equal the derived closure. Matching only
+   `{src/**/*,Cargo.toml}` would leave a broad glob (`…/paigasus-kernel/**/*`) or a `tests/**/*`
+   entry invisible, i.e. silent unbounded CI widening in precisely the direction strict equality is
+   chosen to catch. The upstream's source dir is recovered structurally (`rs/crates/<layer>/<crate>`)
+   rather than by stripping known suffixes, so the allowlist still keys correctly. A subset check would
    let a removed `dependsOn` edge leave stale globs in place forever and let a copy-pasted
    `upstreams` block over-approximate permanently — unbounded, invisible CI cost in the exact
    dimension this change already spends heavily. Intentional over-approximation goes in an
@@ -259,7 +264,12 @@ The task helper is parameterized by traversal, and cases declare which one they 
 
 - **`assert_task_case_ci`** — `moon query tasks --affected`, no graph flags. Asserts (a
   characterized proxy for) what CI selects. This is the measurement fix for issue item 2.
-- **`assert_task_case_deep`** — the existing `--downstream deep` traversal, **retained**.
+- **`assert_task_case`** — the existing `--downstream deep` traversal, **retained** under its
+  original name so existing call sites keep working unchanged.
+
+Both are thin wrappers over a shared `_assert_task_case_impl` parameterized by the query flags, so
+the extractor and the missing/unexpected reporting exist once. `expect_red_task` is their
+negative-control counterpart.
 
 Retaining the deep mode is a correction to the pre-review draft. `run.sh` and `README.md` state that
 the task cases exist because the project query is blind to `^:build` and "This case sees it" — and it
