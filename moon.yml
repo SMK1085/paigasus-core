@@ -143,6 +143,13 @@ tasks:
       - 'rs/crates/*/*/package.json'
       - 'ts/packages/*/package.json'
       - 'ts/apps/*/package.json'
+      # SMA-542 — this task now pins the call sites of repo:actionlint's self-tests and mutation
+      # battery (ACTIONLINT_SH_CALL_SITES), so a change under ci/actionlint/ MUST re-key it.
+      # Without this the pin is real but unreachable: the PR that deletes those lines does not
+      # schedule this task, while repo:actionlint (inputs: ['**/*']) still runs and now asserts
+      # nothing. Same reasoning as the CLAUDE.md entry below — repo:actionlint's own `**/*` cannot
+      # green a different task.
+      - 'ci/actionlint/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
