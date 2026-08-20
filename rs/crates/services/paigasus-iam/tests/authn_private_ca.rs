@@ -75,3 +75,30 @@ async fn private_ca_issuer_fails_without_extra_ca_bundle() {
         "a TLS trust failure surfaces as Unavailable (the JWKS fetch failed), got {err:?}"
     );
 }
+
+#[tokio::test]
+async fn private_ca_issuer_fails_with_the_wrong_ca_bundle() {
+    // The second negative control, and it catches a regression the other two cannot. Those two
+    // distinguish only "a bundle was loaded" from "no bundle at all", so anything that made a
+    // non-empty bundle RELAX verification rather than EXTEND it — `danger_accept_invalid_certs`
+    // added alongside `add_root_certificate`, or a custom verifier that returns Ok once any extra
+    // anchor is present — would leave both of them green. Here the bundle is non-empty and
+    // well-formed but carries the WRONG root, so it must still fail. (Observed at the reqwest
+    // layer, this handshake dies with `InvalidCertificate(BadSignature)`, where an absent bundle
+    // gives `InvalidCertificate(UnknownIssuer)` — both surface here as `Unavailable`.)
+    let (idp_a, _ca_a_pem) = support::start_mock_idp_private_ca().await;
+    let (_idp_b, ca_b_pem) = support::start_mock_idp_private_ca().await;
+
+    let mut bundle = tempfile::NamedTempFile::new().expect("temp file");
+    bundle.write_all(ca_b_pem.as_bytes()).expect("write the OTHER ca's pem");
+    bundle.flush().expect("flush");
+
+    let authn = authenticator_for(&idp_a.issuer, Some(bundle.path().to_str().unwrap()));
+    let token = idp_a.bearer("sub-alice", Some("alice@example.com"), "paigasus", 3600);
+
+    let err = authn.authenticate(&token).await.expect_err("a bundle holding an unrelated CA must not validate");
+    assert!(
+        matches!(err, AuthnError::Unavailable),
+        "a TLS trust failure surfaces as Unavailable (the JWKS fetch failed), got {err:?}"
+    );
+}
