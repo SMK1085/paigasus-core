@@ -7,3 +7,29 @@ dependsOn:
   - 'paigasus-proto-rs'
   - 'paigasus-kernel-rs'
 {%- endif %}
+
+# SMA-528 — every Rust crate MUST declare this group: .moon/tasks/rust.yml references
+# `@group(upstreams)` from build/test/lint, and a missing group is a hard graph-load error
+# (`project::unknown_file_group`) for every moon command, repo-wide. A generated crate therefore
+# ships one from the start. Keep it in sync with `dependsOn` above — repo:affected-smoke's A6
+# asserts the two agree to strict equality.
+fileGroups:
+{%- if archetype == "service" %}
+  upstreams:
+    - '/rs/crates/libs/paigasus-kernel/src/**/*'
+    - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
+    - '/rs/crates/libs/paigasus-proto-derive/src/**/*'
+    - '/rs/crates/libs/paigasus-proto-derive/Cargo.toml'
+    - '/rs/crates/libs/paigasus-proto/src/**/*'
+    - '/rs/crates/libs/paigasus-proto/Cargo.toml'
+
+# A3 requires build and test to schedule each upstream's build. Without these a generated service
+# reds repo:affected-smoke on its first run.
+tasks:
+  build:
+    deps: ['^:build']
+  test:
+    deps: ['^:build']
+{%- else %}
+  upstreams: []
+{%- endif %}

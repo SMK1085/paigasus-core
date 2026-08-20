@@ -95,22 +95,19 @@ jobs:
           # rust-toolchain.toml nor Cargo.lock changed, so without a new literal segment the primary
           # key still hits the pre-change entry — and actions/cache SKIPS its save on a primary-key
           # hit, so the enlarged target would never be written. Cold rebuild every run, forever.
-          # rs/Cargo.toml joins the hash (SMA-534): lint now keys on it, and a FEATURE flip on an
-          # existing workspace dep changes no resolution — Cargo.lock stays byte-identical. The
-          # primary key would hit exactly, actions/cache would skip its save, and the extra units
-          # that flip compiles would be rebuilt cold every run, forever. Hashing both files instead
-          # of adding a literal discriminator segment keeps the existing restore-keys prefixes
-          # warm, so there is no one-time cold-churn of the whole cache.
-          key: rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-lint-deps-${{ hashFiles('rs/Cargo.lock', 'rs/Cargo.toml') }}
-          # Two-tier fallback: the new `lint-deps` prefix is tried first, and only goes warm once
-          # the first post-merge run saves under it. The old prefix is kept as a second fallback so
-          # that very first run — which also runs ~70 tasks including the Docker-gated IAM suite
-          # against `timeout-minutes: 30` — still restores a warm ~/.cargo + rs/target instead of
-          # starting fully cold. actions/cache only skips its save on a primary-key HIT, which can
-          # no longer happen, so the new key still gets written. Both prefixes keep the toolchain
-          # hash and `-line-tables-only-`, so neither the SMA-389 cross-version guard nor the
-          # debuginfo-bloat guard is weakened.
+          # SMA-528 adds `upstream-inputs`: a kernel/proto/logging/observability/service-info commit
+          # now builds and TESTS the whole downstream graph, but changes neither rs/Cargo.lock nor
+          # rs/Cargo.toml — so the previous primary key would HIT exactly, actions/cache would skip
+          # its save, and those newly-built test binaries would be rebuilt cold every run, forever.
+          # (The SMA-534 comment this replaces claimed a primary hit "can no longer happen" once
+          # rs/Cargo.toml joined the hash. It can: every PR that touches neither file hits it.)
+          # Three-tier restore: the new prefix goes warm after the first post-merge save; the two
+          # older prefixes keep that first run — which builds far more than any before it — from
+          # starting fully cold. All three keep the toolchain hash and `-line-tables-only-`, so
+          # neither the SMA-389 cross-version guard nor the debuginfo-bloat guard is weakened.
+          key: rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-lint-deps-upstream-inputs-${{ hashFiles('rs/Cargo.lock', 'rs/Cargo.toml') }}
           restore-keys: |
+            rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-lint-deps-upstream-inputs-
             rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-lint-deps-
             rust-${{ runner.os }}-${{ hashFiles('rs/rust-toolchain.toml') }}-line-tables-only-
 
