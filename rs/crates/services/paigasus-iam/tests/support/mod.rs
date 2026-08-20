@@ -65,6 +65,11 @@ pub mod docker;
 /// Starts an ephemeral Postgres container, connects, and runs migrations.
 ///
 /// The skip-versus-panic decision lives once, in `docker::start_or_skip` (SMA-538).
+///
+/// `#[allow(dead_code)]` for the same reason as the helpers below: `tests/authn_private_ca.rs`
+/// (SMA-558) is the first binary carrying `mod support;` that needs NO database at all — it binds
+/// at the `OidcAuthenticator` seam so it stays Docker-free — so this is unused there.
+#[allow(dead_code)]
 pub async fn start_migrated_postgres() -> Option<(ContainerAsync<Postgres>, DatabaseConnection)> {
     let node = docker::start_or_skip(Postgres::default().with_tag("16-alpine"), "start_migrated_postgres").await?;
 
@@ -282,6 +287,85 @@ pub async fn start_mock_idp() -> MockIdp {
     });
 
     MockIdp { issuer, sign, kid, jwks_body, handle }
+}
+
+/// Like [`start_mock_idp`], but served with a leaf certificate signed by a freshly minted
+/// PRIVATE CA, and returns that CA's certificate PEM alongside the IdP (SMA-558 AC3).
+///
+/// The server is configured with the **leaf alone**, not the chain. That is correct TLS practice
+/// for a root the client is expected to hold, and it is what makes the test strict: the client
+/// cannot learn the CA from the handshake, so it can only succeed if `extra_ca_bundle_path`
+/// genuinely loaded.
+///
+/// Three details are load-bearing, because `CertificateParams::default()` leaves the
+/// distinguished name EMPTY and the pre-existing `start_mock_idp` fixture has never been
+/// exercised against real verification (every one of its call sites runs with
+/// `accept_invalid_tls: true`):
+///   - the CA and the leaf get DISTINCT, non-empty CNs — otherwise both carry an empty subject
+///     DN and path building has nothing to match on;
+///   - the leaf carries both `localhost` and `127.0.0.1` SANs, since the server binds an
+///     ephemeral `127.0.0.1` port and the issuer URL is `https://127.0.0.1:<port>`;
+///   - `CertificateParams::signed_by` CONSUMES `self`, so the params must be built and passed by
+///     value.
+#[allow(dead_code)]
+pub async fn start_mock_idp_private_ca() -> (MockIdp, String) {
+    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
+
+    // --- the private CA ---
+    // `DistinguishedName::push` takes `impl Into<DnValue>` and rcgen has a blanket
+    // `impl<T: Into<String>> From<T> for DnValue`, so a bare &str is enough (it becomes a
+    // Utf8String). No PrintableString conversion needed.
+    let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.distinguished_name.push(DnType::CommonName, "paigasus-test-private-ca");
+    let ca_key = KeyPair::generate().expect("ca keypair");
+    let ca_cert = ca_params.self_signed(&ca_key).expect("self-signed ca");
+    let ca_pem = ca_cert.pem();
+
+    // --- the leaf, signed BY the CA ---
+    let mut leaf_params = CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()]).expect("leaf params");
+    leaf_params.distinguished_name.push(DnType::CommonName, "paigasus-mock-idp");
+    let leaf_key = KeyPair::generate().expect("leaf keypair");
+    let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).expect("ca-signed leaf");
+
+    let kid = "mock-idp-es256-initial".to_string();
+    let (sign, jwk) = es256_keypair(&kid);
+
+    let tls = axum_server::tls_rustls::RustlsConfig::from_pem(leaf_cert.pem().into_bytes(), leaf_key.serialize_pem().into_bytes())
+        .await
+        .expect("rustls config from generated pem");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral port");
+    listener.set_nonblocking(true).expect("nonblocking listener");
+    let addr = listener.local_addr().unwrap();
+    let issuer = format!("https://{addr}");
+
+    let discovery_body = serde_json::json!({ "issuer": issuer, "jwks_uri": format!("{issuer}/jwks") }).to_string();
+    let jwks_body = Arc::new(RwLock::new(serde_json::to_string(&JwkSet { keys: vec![jwk] }).expect("jwks serializes")));
+
+    let jwks_for_route = jwks_body.clone();
+    let idp_routes = Router::new()
+        .route(
+            "/.well-known/openid-configuration",
+            get(move || {
+                let body = discovery_body.clone();
+                async move { ([("content-type", "application/json")], body) }
+            }),
+        )
+        .route(
+            "/jwks",
+            get(move || {
+                let shared = jwks_for_route.clone();
+                let body = shared.read().expect("jwks lock not poisoned").clone();
+                async move { ([("content-type", "application/json")], body) }
+            }),
+        );
+
+    let handle = tokio::spawn(async move {
+        axum_server::from_tcp_rustls(listener, tls).serve(idp_routes.into_make_service()).await.expect("mock idp server");
+    });
+
+    (MockIdp { issuer, sign, kid, jwks_body, handle }, ca_pem)
 }
 
 /// An `IamConfig` wired to the mock IdP: test defaults, the mock issuer with audience
