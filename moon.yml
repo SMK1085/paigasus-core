@@ -143,6 +143,16 @@ tasks:
       - 'rs/crates/*/*/package.json'
       - 'ts/packages/*/package.json'
       - 'ts/apps/*/package.json'
+      # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
+      # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
+      # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
+      # CLAUDE.md, but that is a different task and cannot green this one.)
+      - 'CLAUDE.md'
+      # The guard shells out to the proto-pinned `moon` for its query output, and this file's own
+      # README states the expected sets are "a snapshot ... at the pinned moon version" — which is
+      # only true if a version bump re-runs it. Every other repo gate that shells out to a
+      # proto-pinned binary lists this (repo:osv, repo:promtool, the three release-parity*).
+      - '.prototools'
 
   parity-corpus-drift:
     description: 'Regenerate the parity corpus from the kernel; assert it matches the committed vectors (SMA-433).'
@@ -398,6 +408,28 @@ tasks:
     inputs:
       - 'rs/crates/services/paigasus-iam/tests/**/*'
 
+  input-liveness:
+    description: 'Assert every repo:* task input still matches a tracked file, so a wired gate cannot silently stop firing (SMA-553).'
+    # inputs MUST stay ['**/*'] — asserted by this gate's own D13 floor AND by ci_targets.py, so
+    # neither is the sole judge of its own configuration. The verdict depends on the WHOLE tracked
+    # tree because a glob dies when files MOVE, and no narrow input list can observe that. This is
+    # also why the check is not folded into ci/affected-graph/run.sh: repo:affected-smoke's narrow
+    # inputs list no `ops/` path, so renaming ops/ would leave it serving a cached PASS on exactly
+    # the change that kills repo:promtool (SMA-553 D2). Same reasoning repo:actionlint records.
+    #
+    # Negative control FIRST, mirroring repo:affected-smoke and repo:publish-metadata: without it
+    # CI runs only the real check, so the self-test that proves these assertions can FIRE never
+    # executes and a rotted control ships green (SMA-526). Moon does not enable errexit for
+    # `script:` blocks — a failing command followed by a succeeding one still exits 0 — so
+    # `set -euo pipefail` is required explicitly.
+    script: |
+      set -euo pipefail
+      python3 ci/affected-graph/task_inputs.py --self-test
+      python3 ci/affected-graph/task_inputs.py
+    toolchain: 'system'
+    inputs:
+      - '**/*'
+
   promtool:
     description: 'promtool validates the Prometheus scrape config + alert rules + rule unit tests under ops/observability/prometheus/ (SMA-446).'
     # Moon does not enable errexit for `script:` blocks — same latent defect as nats-permissions
@@ -447,7 +479,7 @@ tasks:
       - '.gitignore'
 
   actionlint:
-    description: 'actionlint over .github/workflows/**, plus a control that every paths: filter glob still matches the tree (SMA-525).'
+    description: 'actionlint over .github/workflows/**, plus controls that every paths: glob still matches the tree and every branches: entry names a real branch (SMA-525, SMA-540).'
     # WHY `inputs: **/*` AND NOT THE NARROW LIST THE OTHER repo:* GATES USE — this gate makes an
     # assertion about the WHOLE FILE TREE, not about the workflow files. A directory rename is the
     # dominant real-world way a paths: glob comes to match nothing (a typo is at least made by
@@ -456,13 +488,51 @@ tasks:
     # to prevent. Concretely: security-scan.yml filters on 'ci/osv/**', and this change adds a
     # sibling ci/actionlint/, so a future ci/ reshuffle is plausible.
     #
+    # WHAT `inputs: **/*` STILL DOES NOT COVER (SMA-540) — the branch half of check 5 reads git REF
+    # state, and .git/ is in no task's input hash. Two runs over an identical tree therefore hash
+    # identically, and ci.yml restores .moon/cache across runs, so a PASS recorded while a branch
+    # existed can replay after that branch is deleted upstream — a silent pass in a gate whose
+    # whole premise is that it never silently passes. Narrow today (every filter in this repo names
+    # `main`, which is never deleted) and it fails safe in the other direction, since a genuinely
+    # typo'd name changes the workflow file and so changes the hash. Run `ci/actionlint/run.sh`
+    # directly, or `moon run repo:actionlint --force`, to bypass the cache. Stated as L9 in
+    # docs/superpowers/specs/2026-08-19-sma-540-branches-filter-gate-design.md.
+    #
     # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
     # (cargo nextest, next typegen). This one is ~1.0s standalone and warm (measured): six
     # actionlint invocations — one over the real workflows, five stdin fixtures — 26
-    # `git ls-files` calls, and three fixture tables (extractor, path filters, config allowlist).
+    # `git ls-files` calls, and four fixture tables (extractor, path-filter verdicts,
+    # branch-filter verdicts, config allowlist).
     # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
     # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
     script: 'ci/actionlint/run.sh'
     toolchain: 'system'
     inputs:
       - '**/*'
+
+  error-code-single-site:
+    description: 'Assert every file spelling a canonical error code is on a reviewed manifest, so a new emission site cannot ship without a registry membership test (SMA-507).'
+    # WHY `inputs: rs/crates/**/src/**/*.rs` AND NOT A NARROW LIST — this gate's whole job is to
+    # notice a NEW emission site in a NEW file. Narrow inputs would schedule it only when an
+    # already-listed file changed, so the one case it exists for would be the one case it never
+    # runs on. Cheap for the same reason repo:actionlint is: .moon/workspace.yml's
+    # hasher.ignorePatterns keeps gitignored trees out of the hash walk, and the check is a
+    # pure-python regex scan of ~200 files with no cargo invocation.
+    #
+    # `--self-test` runs FIRST and in the SAME script block, per repo:affected-smoke and
+    # repo:publish-metadata: a rotted checker must red rather than ship green. `set -euo pipefail`
+    # is REQUIRED — Moon does not enable errexit for `script:` blocks, so without it a failing
+    # --self-test would be masked by a passing --single-site.
+    #
+    # This gate does NOT guard code REMOVAL. It does not need to: both service crates declare
+    # `test: deps: ['^:build']` in their own moon.yml, so a contracts change already schedules
+    # paigasus-{iam,gateway}-rs:test and the membership tests run. See ci/error-registry/README.md.
+    script: |
+      set -euo pipefail
+      python3 ci/error-registry/check.py --self-test
+      python3 ci/error-registry/check.py --single-site
+    toolchain: 'system'
+    inputs:
+      - 'rs/crates/**/src/**/*.rs'
+      - 'contracts/proto/paigasus/common/v1/error.proto'
+      - 'ci/error-registry/**/*'

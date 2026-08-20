@@ -1,6 +1,7 @@
 # actionlint gate
 
-Lints `.github/workflows/**` and proves every `paths:` filter glob still matches the tree.
+Lints `.github/workflows/**`, proves every `paths:` filter glob still matches the tree, and
+proves every `branches:` filter entry names a branch that exists.
 
 ## Why
 
@@ -13,6 +14,12 @@ verification would silently cease. See SMA-525 and
 actionlint alone is **not** sufficient: it validates syntax and has no view of the file tree,
 so a valid-but-never-matching glob (`rz/**`) passes it cleanly. Checks 5–7 close that.
 
+`branches:` has the identical property and was SMA-525's stated limitation L5. `branches: [mian]`
+is a valid glob, actionlint accepts it, and the workflow stops running — silently and permanently,
+one key over. All three workflows here trigger off a `branches:` filter naming `main`, including
+the required check. See SMA-540 and
+`docs/superpowers/specs/2026-08-19-sma-540-branches-filter-gate-design.md`.
+
 ## The checks
 
 | # | Check |
@@ -21,13 +28,14 @@ so a valid-but-never-matching glob (`rz/**`) passes it cleanly. Checks 5–7 clo
 | 2 | `.github/actionlint.{yaml,yml}` declares nothing but `self-hosted-runner`, and no `ignore` key in any style (either would neuter check 1 invisibly) |
 | 3 | Four stdin fixtures, one per defect class, each must fail **with its expected rule tag** |
 | 4 | A healthy stdin fixture must pass — the control for check 3 |
-| 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree |
-| 6 | Every extracted `paths:` key carries at least one sequence entry, at least one of them positive |
-| 7 | Three self-tests against fixture tables — extractor, path-filter verdicts, config allowlist (`run.sh --self-test`) |
+| 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree, and every `branches:` entry resolves as a ref or is skip-listed |
+| 6 | Every extracted filter key carries at least one sequence entry; a `paths:`/`branches:` key must also have at least one of them positive (the `-ignore` variants are exempt) |
+| 7 | Four self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist (`run.sh --self-test`) |
 
-Only a `paths:`/`paths-ignore:` **two levels deep** inside `on:` — `on.<event>.paths` — is a path
-filter. A workflow input may legitimately be *named* `paths`, and it sits one level deeper, under
-`on.workflow_dispatch.inputs`; checks 5 and 6 ignore it. This depth rule holds in flow style too,
+Only a `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` key **two levels deep** inside
+`on:` — `on.<event>.paths` — is a filter. A workflow input may legitimately be *named* `paths` or
+`branches`, and it sits one level deeper, under `on.workflow_dispatch.inputs`; checks 5 and 6
+ignore it. This depth rule holds in flow style too,
 not just block style: a top-level flow `on: { workflow_dispatch: { inputs: { paths: {...} } } }`
 or an event's own flow value `push: { inputs: { paths: x } }` both correctly ignore the nested
 `inputs.paths`, quoted or not — the extractor tracks brace depth rather than matching a `paths`
@@ -47,6 +55,25 @@ only the subset where both provably agree:
 
 Rejected loudly, never guessed at: `?`, `+`, `[]`, and `**` embedded in a segment (`**.js`).
 
+## Branch filter entries
+
+`branches:` is read as a **block sequence** — the inline `branches: [main]` form is deliberately
+not parsed and fails check 6 by design, exactly as `paths: [a, b]` does. Each entry must:
+
+- **resolve** as `refs/remotes/origin/<name>`, or
+- appear in `BRANCH_SKIP` in `run.sh` with a comment justifying it.
+
+Local `refs/heads/*` is deliberately **not** consulted: a workflow triggers on branches as they
+exist on GitHub, and a local-only branch does not. A glob metacharacter (`*`, `**`, `?`, `+`,
+`[]`) makes an entry a pattern rather than a name, so it cannot be resolved and must be
+skip-listed — `+` counts as a glob even though git allows it in a ref name, because GitHub reads
+it as "one or more of the preceding character".
+
+`branches-ignore:` is extracted and counted but never resolved: a typo'd exclusion makes a
+workflow run *more* often, which is the fail-safe direction.
+
+`tags:` and `tags-ignore:` are not covered — see the spec's §7 L4.
+
 ## Escape hatches
 
 - A **new GitHub runner label** the pinned actionlint does not know: add it to
@@ -54,7 +81,11 @@ Rejected loudly, never guessed at: `?`, `+`, `[]`, and `**` embedded in a segmen
   `self-hosted-runner` is the one top-level key it allows there.
 - A **GitHub-valid pattern outside the vocabulary**: add it to `SKIP_PATTERNS` in `run.sh` with
   a comment justifying it and saying what verifies it instead.
-- **Anything worse**: drop `:actionlint` from `T=(…)` in `.github/workflows/ci.yml`. One line.
+- A **branch that does not exist yet**, or a branch pattern: add it to `BRANCH_SKIP` in `run.sh`
+  with a comment justifying it and saying what verifies it instead.
+- **Anything worse**: drop `:actionlint` from `T=(…)` in `.github/workflows/ci.yml`. This must
+  also be removed from the CLAUDE.md `ci-targets` block, since `repo:affected-smoke` asserts the
+  two agree.
 
 ## Cost
 
@@ -91,7 +122,19 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"   # proto CLIs (moon, ac
                                                             # on a default shell PATH
 moon run repo:actionlint      # via Moon, as CI does
 ci/actionlint/run.sh          # directly, bypassing the Moon cache
-ci/actionlint/run.sh --self-test   # the three fixture tables only, for fast iteration
+ci/actionlint/run.sh --self-test   # the four fixture tables only, for fast iteration
+```
+
+`--self-test` still needs no `actionlint` binary — that is the point of it — but since SMA-540 it
+does need a git checkout carrying `refs/remotes/origin/main`, because the branch-filter table's
+control pair asserts that a real ref resolves. In a `--single-branch` or `--depth 1` clone it
+exits 2 with the canary message instead of running the tables. Recover with the **explicit
+refspec** — a bare `git fetch origin` re-uses the clone's single-branch refspec and fetches
+nothing else, and `git fetch origin main` updates only `FETCH_HEAD`, so neither creates the ref
+(both measured):
+
+```bash
+git fetch origin +refs/heads/main:refs/remotes/origin/main
 ```
 
 Any other argument exits 2 with a usage line — a typo'd `--selftest` must not run the full gate
