@@ -1639,25 +1639,32 @@ $got"
 T_FLOOR=(':affected-smoke')
 
 # Echoes one verdict token per problem, and nothing for an acceptable file:
-#   no-file              the workflow does not exist
-#   no-array             zero, or more than one, single-line T=( … )
-#   missing <entry>      the array parsed; <entry> is not among its tokens
-#   swallowed <lineno>   a `moon` command line discards its own exit status
+#   no-file                      the workflow does not exist
+#   no-array                     zero, or more than one, single-line T=( … )
+#   missing <entry>              the array parsed; <entry> is not among its tokens
+#   swallowed <lineno>           a `moon` command line discards its own exit status
+#   continue-on-error <lineno>   a step carries `continue-on-error: true`
 ci_target_floor_verdict() {
-  local f="$1" arrays body tok w found lineno text
+  local f="$1" arrays body tok w found lineno text q
 
   [ -e "$f" ] || { echo 'no-file'; return; }
 
   # Anchored like ci_targets.py's T_ARRAY_RE, not a bare `T=(` — which would also match `EXPECT=(`.
   # Zero or two matches is a FAILURE, never a skip: an array reformatted across lines is exactly
   # the condition under which this check would otherwise stop asserting anything.
-  arrays="$(grep -cE '^[ \t]*T=\(.*\)[ \t]*$' "$f")"
+  arrays="$(grep -cE '^[[:blank:]]*T=\(.*\)[[:blank:]]*$' "$f")"
   if [ "$arrays" -ne 1 ]; then
     echo 'no-array'
     return
   fi
-  body="$(sed -nE 's/^[ \t]*T=\((.*)\)[ \t]*$/\1/p' "$f")"
+  body="$(sed -nE 's/^[[:blank:]]*T=\((.*)\)[[:blank:]]*$/\1/p' "$f")"
 
+  # set -f for the unquoted `$body` expansion below: a bare `for w in $body` word-splits AND
+  # glob-expands, so a future T_FLOOR (or T=(…)) entry containing `[`, `*` or `?` would compare
+  # against whatever that glob happened to match in cwd instead of the literal token. No entry
+  # today has a glob metacharacter, so this is currently a no-op — restored right after the loop,
+  # not left disabled for the rest of the function.
+  set -f
   for tok in "${T_FLOOR[@]}"; do
     found=0
     # Whole-token comparison: ':affected-smoke' is a prefix of ':affected-smoke-disabled', so a
@@ -1667,6 +1674,7 @@ ci_target_floor_verdict() {
     done
     [ "$found" -eq 1 ] || echo "missing $tok"
   done
+  set +f
 
   # D14 — `|| true` on the moon line silences every gate in T while leaving T itself perfectly
   # correct: C1/C2/C3 pass, C5's expansion test passes, and `set -euo pipefail` does not help
@@ -1677,7 +1685,19 @@ ci_target_floor_verdict() {
     case "$text" in
       *'||'*|*'&&'*|*';'*|*'|'*) echo "swallowed $lineno" ;;
     esac
-  done < <(grep -nE '^[ \t]*moon[ \t]' "$f")
+  done < <(grep -nE '^[[:blank:]]*moon[[:blank:]]' "$f")
+
+  # continue-on-error: true — the third spelling of D14's idea, at step rather than command-line
+  # granularity. GitHub Actions itself reports the job green when a failed step carries this key,
+  # leaving T correct and the `moon` command line untouched, so it is invisible to every check
+  # above. Key matched at any indentation, quote style, and spacing before the colon — same spirit
+  # as config_verdict's `$q` above — but the VALUE must be the literal `true`: `false` is a
+  # deliberate no-op and must stay silent, and a leading `#` (comment) can never match because the
+  # anchored key immediately follows the indentation, with no room for a comment marker before it.
+  q='["'"'"']?'
+  while IFS=: read -r lineno text; do
+    echo "continue-on-error $lineno"
+  done < <(grep -nE "^[[:blank:]]*${q}continue-on-error${q}[[:blank:]]*:[[:blank:]]*true[[:blank:]]*(#.*)?$" "$f")
 }
 
 # The standing control for check 8. Both directions on every verdict: a table whose rows all fire
@@ -1746,6 +1766,29 @@ ci_target_floor_self_test() {
           moon ci "${T[@]}"
 '
 
+  # continue-on-error: true — the third D14 spelling (SMA-542 task 4b). Both directions per
+  # SMA-466: the positive row below must fire, and each negative control here must specifically
+  # be what stops it from firing — not just an unrelated healthy file.
+  expect_floor 'continue-on-error true silences a step' 'continue-on-error 3' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+            continue-on-error: true
+'
+  # `false` is a deliberate no-op, not silencing. If the verdict logic ever stopped checking the
+  # value and fired on the key alone, this is the row that would catch it.
+  expect_floor 'continue-on-error false is not truthy' '' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+          continue-on-error: false
+'
+  # A commented-out occurrence must not fire. If the key match ever stopped anchoring to the
+  # start of the (post-indentation) line, this is the row that would catch it.
+  expect_floor 'continue-on-error commented out' '' \
+'          T=(:affected-smoke)
+          moon ci "${T[@]}"
+          # continue-on-error: true
+'
+
   got="$(ci_target_floor_verdict /nonexistent/ci.yml)"
   if [ "$got" != 'no-file' ]; then
     fail "ci-target-floor self-test 'missing file': got '$got', expected 'no-file'. A renamed
@@ -1759,10 +1802,10 @@ ci_target_floor_self_test() {
 # ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
-# All five (four until SMA-542's floor table lands) are defined above so this block can run them
-# from ONE call site, reached by both the --self-test path and the full gate. One call site rather
-# than two is deliberate: ci_targets.py's C4 pins this by whole stripped line, and two identical
-# lines would let one be deleted while the pin still matched (SMA-542 D2).
+# All five are defined above so this block can run them from ONE call site, reached by both the
+# --self-test path and the full gate. One call site rather than two is deliberate: ci_targets.py's
+# C4 pins this by whole stripped line, and two identical lines would let one be deleted while the
+# pin still matched (SMA-542 D2).
 # ---------------------------------------------------------------------------------------------
 assert_self_tests_ran() {
   local want="$1"
@@ -1859,9 +1902,9 @@ selftest_mutation_battery() {
     fi
   done
 
-  # Spawned concurrently: six sequential --self-test runs would roughly quadruple this gate's
-  # standalone cost, and they are independent. Collected by PID, so results do not depend on
-  # completion order (SMA-542 D12).
+  # Spawned concurrently: running these --self-test invocations one after another would multiply
+  # this gate's standalone cost by the size of the table, and they are independent. Collected by
+  # PID, so results do not depend on completion order (SMA-542 D12).
   for line in $lines; do
     bash "$dir/$line.sh" --self-test > "$dir/$line.out" 2>&1 &
     pids="$pids $!"
@@ -1952,6 +1995,11 @@ while IFS= read -r verdict; do
       fail ".github/workflows/ci.yml:${verdict#swallowed } runs 'moon' but discards its exit
       status (a '||', '&&', ';' or '|' tail). That greens every gate in T while leaving T itself
       perfectly correct, so no other check in this repo can see it. Remove the tail." ;;
+    'continue-on-error '*)
+      fail ".github/workflows/ci.yml:${verdict#continue-on-error } sets 'continue-on-error: true'
+      on a step. GitHub Actions reports the job green even when that step's command fails,
+      leaving T correct and the moon command line untouched, so no other check in this repo can
+      see it. Remove the key, or set it to false." ;;
     *)
       infra "unhandled ci-target-floor verdict '$verdict'" ;;
   esac
