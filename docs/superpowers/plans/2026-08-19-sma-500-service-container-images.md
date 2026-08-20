@@ -514,6 +514,7 @@ Expected: `healthcheck exit=1` returning promptly (well under 5s), and `typo exi
 - [ ] **Step 4: Verify the whole Rust graph still builds and lints**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd rs && cargo fmt --check 2>&1 | tail -20
 cargo clippy --locked --all-targets -- -D warnings 2>&1 | tail -20
 cargo nextest run --no-tests=pass -p paigasus-observability -p paigasus-iam -p paigasus-gateway 2>&1 | tail -10

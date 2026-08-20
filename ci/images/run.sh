@@ -18,6 +18,17 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 REGISTRY="${PAIGASUS_IMAGE_REGISTRY:-ghcr.io/paigasus}"
 REVISION="$(git -C "$ROOT" rev-parse HEAD)"
 
+# Digest-pinned smoke-test dependencies. This branch's whole design argument is that a floating
+# tag is the least-pinned input in a repo that pins everything else, so the smoke path pins its
+# own images too rather than trusting `postgres:16-alpine` (which genuinely floats) or
+# `curlimages/curl:8.11.1` (tag-immutable in practice, but pin it anyway for consistency). Both
+# are the multi-platform manifest-list digest, so the pin resolves on amd64 and arm64 alike.
+# Refresh with:
+#   docker buildx imagetools inspect postgres:16-alpine --format '{{.Manifest.Digest}}'
+#   docker buildx imagetools inspect curlimages/curl:8.11.1 --format '{{.Manifest.Digest}}'
+POSTGRES_16_ALPINE_DIGEST="postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685"
+CURL_8_11_1_DIGEST="curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
+
 crate_for() {
   case "$1" in
     iam)     echo "paigasus-iam" ;;
@@ -106,9 +117,16 @@ assert_pins() {
 }
 
 build_one() {
-  local service="$1" crate tag
+  local service="$1" crate tag build_log
   crate="$(crate_for "$service")"
   tag="${REGISTRY}/${crate}:${REVISION}"
+  # mktemp, not a fixed /tmp/paigasus-build-${service}.log: a predictable path in a
+  # world-writable directory, written with `tee`, is a symlink-attack target. Reused for both
+  # the `tee` below and the chisel-manifest grep, then removed once both are done. The X's stay
+  # at the very end of the template (no trailing suffix after them): BSD/macOS mktemp only
+  # substitutes a run of trailing X's, unlike GNU mktemp which also accepts one after them.
+  build_log="$(mktemp "${TMPDIR:-/tmp}/paigasus-build-${service}.XXXXXX")"
+  trap 'rm -f "$build_log"' RETURN
   echo "== build ${crate} =="
   # --progress=plain so chisel's `Fetching pool/...` lines are capturable below: they name the
   # exact archive package versions this image resolved, which `chisel cut` re-resolves against
@@ -138,8 +156,8 @@ build_one() {
     --label "org.opencontainers.image.revision=${REVISION}" \
     --label "org.opencontainers.image.licenses=Apache-2.0" \
     -t "$tag" -t "${crate}:dev" \
-    "$ROOT/rs" 2>&1 | tee "/tmp/paigasus-build-${service}.log"
-  grep -oE 'Fetching pool/[^ ]+\.deb' "/tmp/paigasus-build-${service}.log" | sort -u > "$ROOT/chisel-manifest-${service}.txt" || true
+    "$ROOT/rs" 2>&1 | tee "$build_log"
+  grep -oE 'Fetching pool/[^ ]+\.deb' "$build_log" | sort -u > "$ROOT/chisel-manifest-${service}.txt" || true
   # Defense in depth on top of --no-cache-filter=rootfs above: if the manifest is EVER empty
   # (a future chisel version changing its log wording, buildkit changing --progress=plain
   # formatting, etc.), fail loudly instead of shipping a 0-byte file that silently answers
@@ -183,7 +201,7 @@ wait_healthy() {
 
 expect_status() {
   local label="$1" url="$2" want="$3" got
-  got="$(docker run --rm --network "$NET" curlimages/curl:8.11.1 -s -o /dev/null -w '%{http_code}' "$url" || echo 000)"
+  got="$(docker run --rm --network "$NET" "$CURL_8_11_1_DIGEST" -s -o /dev/null -w '%{http_code}' "$url" || echo 000)"
   if [ "$got" != "$want" ]; then
     echo "::error::${label}: expected HTTP ${want}, got ${got}" >&2
     return 1
@@ -253,7 +271,7 @@ smoke() {
   # failure that was really "postgres wasn't up yet".
   docker run -d --name "$PG_NAME" --network "$NET" \
     --health-cmd 'pg_isready -U postgres' --health-interval=1s \
-    -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=iam postgres:16-alpine >/dev/null
+    -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=iam "$POSTGRES_16_ALPINE_DIGEST" >/dev/null
   wait_healthy "$PG_NAME"
   # `$PG_NAME`, never 127.0.0.1: this is what exercises glibc name resolution inside the
   # chiseled rootfs. An IP literal would bypass NSS entirely and the assertion would go vacuous.

@@ -122,11 +122,17 @@ fn connectable(addr: SocketAddr) -> SocketAddr {
 }
 
 fn status_is_success(status_line: &str) -> io::Result<bool> {
-    let code: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse().ok())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("malformed HTTP status line: {status_line:?}")))?;
+    let malformed = || io::Error::new(io::ErrorKind::InvalidData, format!("malformed HTTP status line: {status_line:?}"));
+    let mut tokens = status_line.split_whitespace();
+    // The first token must be a supported HTTP version, not merely whatever happens to be
+    // sitting there: any process on the probed port (an SSH banner, a stray echo server) can
+    // put a 2xx-parseable number in the second whitespace-delimited position, and without this
+    // check the probe would call that "healthy" without ever confirming it is talking to HTTP.
+    match tokens.next() {
+        Some("HTTP/1.0") | Some("HTTP/1.1") => {}
+        _ => return Err(malformed()),
+    }
+    let code: u16 = tokens.next().and_then(|code| code.parse().ok()).ok_or_else(malformed)?;
     Ok((200..300).contains(&code))
 }
 
@@ -200,6 +206,23 @@ mod tests {
     #[test]
     fn a_malformed_status_line_is_an_error() {
         let addr = serve_once("NOT-HTTP");
+        assert!(probe(addr, "/healthz", Duration::from_secs(2)).is_err());
+    }
+
+    #[test]
+    fn a_non_http_greeting_with_a_2xx_looking_second_token_is_an_error() {
+        // The regression this pins: taking "the second whitespace token" without first
+        // confirming the line is HTTP at all would parse "200" out of this and report healthy,
+        // even though no HTTP response was ever sent.
+        let addr = serve_once("NOT-HTTP 200 OK");
+        assert!(probe(addr, "/healthz", Duration::from_secs(2)).is_err());
+    }
+
+    #[test]
+    fn an_ssh_banner_is_an_error_not_a_healthy_status() {
+        // Same regression, via a realistic non-HTTP greeting: an SSH server (or anything else)
+        // listening on the probed port must never be read as a healthy HTTP response.
+        let addr = serve_once("SSH-2.0-OpenSSH 200");
         assert!(probe(addr, "/healthz", Duration::from_secs(2)).is_err());
     }
 
