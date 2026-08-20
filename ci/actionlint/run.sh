@@ -37,7 +37,8 @@ FAILED=0
 # Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
 # protection and would break a future harness that sources this file twice (SMA-542 D3).
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=6   # extractor, path-filter, branch-filter, config, ci-target-floor, kill-predicate
+SELF_TEST_COUNT=7   # extractor, path-filter, branch-filter, config, ci-target-floor,
+                    # invocation-allowlist, kill-predicate
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -52,11 +53,11 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the six fixture tables only — extractor, path-filter verdicts," >&2
-  echo "                 branch-filter verdicts, config allowlist, ci-target floor, kill" >&2
-  echo "                 predicate. No actionlint binary is required, but the branch-filter" >&2
-  echo "                 table needs a git repo carrying refs/remotes/origin/main. The check-9" >&2
-  echo "                 mutation battery is NOT part of this — it runs on the full gate only." >&2
+  echo "  --self-test    run the seven fixture tables only — extractor, path-filter verdicts," >&2
+  echo "                 branch-filter verdicts, config allowlist, ci-target floor, invocation" >&2
+  echo "                 allowlist, kill predicate. No actionlint binary is required, but the" >&2
+  echo "                 branch-filter table needs a git repo carrying refs/remotes/origin/main." >&2
+  echo "                 The check-9 mutation battery is NOT part of this — full gate only." >&2
   exit 2
 }
 
@@ -1639,6 +1640,38 @@ $got"
 # ---------------------------------------------------------------------------------------------
 T_FLOOR=(':affected-smoke')
 
+# T_INVOCATION_ALLOWLIST — a WHITELIST, not another blacklist (SMA-542 CodeRabbit round 3, finding
+# B). Three rounds running, a new spelling of "moon at effective command position" got past
+# whatever precedent the `swallowed`/`wrapped` checks below had just learned to reject:
+#   round 1  moon ci "${T[@]}" ... || true              (swallowed's own motivating case)
+#   round 2  command moon ci "${T[@]}" ...  /  if moon ci "${T[@]}" ...; then :; fi
+#   round 3  FOO=bar moon ci "${T[@]}" ... || true       (measured: full gate rc 0, NO verdict —
+#            `swallowed` requires `moon` at column 0, `wrapped` requires a recognized wrapper
+#            token at column 0; a bare shell assignment prefix is neither, and it is idiomatic in
+#            CI scripts, so it is not a corner case)
+# Enumerating what may PRECEDE `moon` is an open set — a blacklist can only ever list the forms
+# already seen. So this inverts the question, exactly as CodeRabbit's round-1 review originally
+# asked ("define and enforce the exact allowed `moon ci` and `moon run` invocation forms"): every
+# line in ci.yml carrying the target-array expansion `"${T[@]}"` must match one of THESE strings
+# EXACTLY — indentation included, nothing before or after. `invocation_allowlist_verdict` below is
+# the enforcement; `swallowed`/`continued`/`wrapped`/`continue-on-error` stay in place for their
+# more specific diagnostics ("you appended `|| true`" beats "does not match an allowlisted form").
+# `invocation_allowlist_verdict` runs LAST, after `continued`/`swallowed`/`wrapped` have already had
+# a chance to explain a given `moon` line: a line already reported by one of those is not ALSO
+# reported here (see the verdict function for how "already reported" is decided). `continue-on-error`
+# is orthogonal — it names a different line, the step's own key, not the invocation — so it neither
+# feeds nor is fed by this suppression.
+#
+# These are copied VERBATIM from .github/workflows/ci.yml, indentation included — re-verify
+# against the real file (`grep -n 'T\[@\]' .github/workflows/ci.yml`) before editing this array; do
+# not hand-format a new entry. A genuinely new, reviewed invocation form is added here; there is
+# deliberately no separate skip list — this array IS the reviewed exception mechanism.
+T_INVOCATION_ALLOWLIST=(
+  '            moon ci "${T[@]}" --base origin/main --include-relations'
+  '            moon ci "${T[@]}" --base "$BEFORE" --include-relations'
+  '            moon run "${T[@]}"'
+)
+
 # COE_SKIP is the escape hatch for a `continue-on-error:` line the verdict below cannot know is
 # harmless — e.g. a step that runs strictly AFTER "moon ci (affected graph)", whose own
 # success/failure can no longer un-run or un-honor gates that already finished. Same shape and
@@ -1848,6 +1881,63 @@ ci_target_floor_verdict() {
       *) is_coe_skipped "$lineno:$text" || echo "continue-on-error $lineno" ;;
     esac
   done < <(grep -nE "^[[:blank:]]*${q}continue-on-error${q}[[:blank:]]*:" "$f")
+}
+
+# ---------------------------------------------------------------------------------------------
+# invocation_allowlist_verdict — the enforcement for T_INVOCATION_ALLOWLIST above (SMA-542
+# CodeRabbit round 3, finding B). A SEPARATE function and a SEPARATE self-test table rather than
+# folded into ci_target_floor_verdict/ci_target_floor_self_test above: that table's ~25 fixtures
+# are small, synthetic, hand-indented bodies built to exercise ONE verdict at a time, and this
+# check's two rules (an exact allowlist match, and a count pinned to
+# `${#T_INVOCATION_ALLOWLIST[@]}`) are properties of the file as a WHOLE — every one of those
+# existing fixtures would need padding out to exactly 3 correctly-indented matching lines just to
+# stop tripping `invocation-count`, coupling ~25 unrelated rows to this array's literal contents
+# for no reason. Splitting it out keeps both tables honest instead.
+#
+# $1 is the workflow file. $2 (optional) is a SPACE-SEPARATED list of line numbers already
+# explained by a more specific verdict (`continued`/`swallowed`/`wrapped`) — built at the
+# production call site from ci_target_floor_verdict's own output, so "you appended `|| true`" is
+# reported once, not twice under two different names. Self-tests below pass a synthetic list
+# directly, to prove the suppression itself independent of ci_target_floor_verdict's output.
+#
+# Echoes one verdict token per problem, and nothing for an acceptable file:
+#   no-file                     the workflow does not exist
+#   not-allowlisted <lineno>    a `"${T[@]}"`-bearing line matches none of T_INVOCATION_ALLOWLIST
+#                                exactly, and was not already explained by a more specific verdict
+#   invocation-count <n>        <n> lines carry `"${T[@]}"`, not the expected
+#                                `${#T_INVOCATION_ALLOWLIST[@]}` — checked regardless of whether
+#                                every individual line matches, so a DELETED invocation (or one
+#                                quietly subsetted to `"${T[@]:0:5}"`, which no longer contains the
+#                                literal expansion at all) still reds even though no single
+#                                surviving line looks wrong on its own
+# ---------------------------------------------------------------------------------------------
+invocation_allowlist_verdict() {
+  local f="$1" skip=" ${2:-} " lineno text n matched allowed
+
+  [ -e "$f" ] || { echo 'no-file'; return; }
+
+  # Hardened exactly like $arrays/$defs elsewhere in this file: without this, a $n that comes back
+  # empty (grep itself failing rather than matching zero times) makes the numeric comparison below
+  # exit 2 under `set -uo pipefail`'s no-`set -e`, which silently skips the report.
+  n="$(grep -cF -- '"${T[@]}"' "$f")"
+  case "$n" in ''|*[!0-9]*) infra "could not count \"\${T[@]}\"-bearing lines in $f" ;; esac
+  if [ "$n" -ne "${#T_INVOCATION_ALLOWLIST[@]}" ]; then
+    echo "invocation-count $n"
+  fi
+
+  while IFS=: read -r lineno text; do
+    case "$skip" in
+      *" $lineno "*) continue ;;
+    esac
+    matched=0
+    for allowed in "${T_INVOCATION_ALLOWLIST[@]}"; do
+      if [ "$text" = "$allowed" ]; then
+        matched=1
+        break
+      fi
+    done
+    [ "$matched" -eq 1 ] || echo "not-allowlisted $lineno"
+  done < <(grep -nF -- '"${T[@]}"' "$f")
 }
 
 # The standing control for check 8. Both directions on every verdict: a table whose rows all fire
@@ -2120,6 +2210,135 @@ ci_target_floor_self_test() {
   return $rc
 }
 
+# The standing control for invocation_allowlist_verdict (SMA-542 CodeRabbit round 3). Both
+# directions on every rule per SMA-466: the exact-match rule and the count rule are each proven to
+# fire AND to stay silent on a healthy file, and the suppression argument is proven to actually
+# suppress rather than just happening to agree with an empty expectation.
+invocation_allowlist_self_test() {
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+  local rc=0 tmp got
+
+  expect_invocation() {
+    local name="$1" expected="$2" body="$3" skip="${4:-}"
+    tmp="$(mktemp)"
+    printf '%s' "$body" > "$tmp"
+    got="$(invocation_allowlist_verdict "$tmp" "$skip")"
+    rm -f "$tmp"
+    if [ "$got" != "$expected" ]; then
+      fail "invocation-allowlist self-test '$name': got '$got', expected '$expected'. This check
+      is not deciding what it is documented to decide."
+      rc=1
+    fi
+  }
+
+  # The healthy control: the real ci.yml if/elif/else shape, all three lines exact. Every OTHER
+  # row below is a one-line mutation of this same body, so a failure here would mean the fixture
+  # itself is wrong, not the check.
+  local healthy='          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]}" --base origin/main --include-relations
+          elif [ -n "${BEFORE:-}" ]; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+            moon run "${T[@]}"
+          fi
+'
+  expect_invocation 'the real if/elif/else shape, all three lines exact, is clean' '' "$healthy"
+
+  # Count rule, alone: one correctly-formed line is still wrong because only ONE of the three
+  # required invocations is present. Proves the count check does not just defer to the per-line
+  # check (the one line present matches perfectly).
+  expect_invocation 'a single correct line, alone, is still an invocation-count mismatch' \
+    'invocation-count 1' \
+    '            moon run "${T[@]}"
+'
+  # ...and the other direction: one EXTRA line (a duplicate of an allowed form) is a mismatch too,
+  # even though every line still matches the allowlist individually.
+  expect_invocation 'a fourth (duplicate) line is also an invocation-count mismatch' \
+    'invocation-count 4' \
+    "$healthy"'            moon run "${T[@]}"
+'
+
+  # not-allowlisted, isolated from the count check: each variant below replaces exactly one of the
+  # three healthy lines, so the count stays at 3 and only the per-line rule can fire.
+  local prefixed='          if [ "$EVENT" = "pull_request" ]; then
+            FOO=bar moon ci "${T[@]}" --base origin/main --include-relations
+          elif [ -n "${BEFORE:-}" ]; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+            moon run "${T[@]}"
+          fi
+'
+  expect_invocation 'an assignment-prefixed line (round 3 shape, no tail) is not-allowlisted' \
+    'not-allowlisted 2' "$prefixed"
+
+  local suffixed='          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]}" --base origin/main --include-relations
+          elif [ -n "${BEFORE:-}" ]; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+            moon run "${T[@]}" --dry-run
+          fi
+'
+  expect_invocation 'a suffixed line (extra trailing flag) is not-allowlisted' \
+    'not-allowlisted 6' "$suffixed"
+
+  local wrapped='          if [ "$EVENT" = "pull_request" ]; then
+            command moon ci "${T[@]}" --base origin/main --include-relations || true
+          elif [ -n "${BEFORE:-}" ]; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+            moon run "${T[@]}"
+          fi
+'
+  expect_invocation 'a wrapped line, with no skip argument, is not-allowlisted' \
+    'not-allowlisted 2' "$wrapped"
+  # ...and the SAME body, told line 2 is already explained elsewhere (as the production call site
+  # would, from ci_target_floor_verdict's own 'wrapped 2'), is clean. Proves the skip argument
+  # actually suppresses — not merely that this shape happens to be silent regardless.
+  expect_invocation 'the same wrapped line, told it is already explained via skip, is clean' \
+    '' "$wrapped" '2'
+  # ...and a DIFFERENT lineno in the skip list must NOT suppress line 2 — the skip is positional,
+  # not "any problem exists somewhere, so say nothing".
+  expect_invocation 'a skip argument naming a DIFFERENT line does not suppress this one' \
+    'not-allowlisted 2' "$wrapped" '99'
+
+  # THE motivating case (CodeRabbit round 3, finding B), reproduced exactly: an assignment prefix
+  # WITH a swallowing tail. Measured on the real file before this fix: full gate rc 0, no verdict
+  # at all — `swallowed` needs `moon` at column 0, `wrapped` needs a recognized wrapper token at
+  # column 0, and a bare `VAR=value` prefix is neither.
+  local finding_b='          if [ "$EVENT" = "pull_request" ]; then
+            FOO=bar moon ci "${T[@]}" --base origin/main --include-relations || true
+          elif [ -n "${BEFORE:-}" ]; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+            moon run "${T[@]}"
+          fi
+'
+  expect_invocation 'an assignment prefix WITH a swallowing tail (round 3 finding B) is not-allowlisted' \
+    'not-allowlisted 2' "$finding_b"
+
+  # Exactness, not a loose/trimmed comparison: trailing whitespace on an otherwise-correct line
+  # must still fail. Guards against an implementation that trims before comparing.
+  local trailing_ws='          if [ "$EVENT" = "pull_request" ]; then
+            moon ci "${T[@]}" --base origin/main --include-relations
+          elif [ -n "${BEFORE:-}" ]; then
+            moon ci "${T[@]}" --base "$BEFORE" --include-relations
+          else
+            moon run "${T[@]}" 
+          fi
+'
+  expect_invocation 'trailing whitespace on an otherwise-correct line is not-allowlisted' \
+    'not-allowlisted 6' "$trailing_ws"
+
+  got="$(invocation_allowlist_verdict /nonexistent/ci.yml)"
+  if [ "$got" != 'no-file' ]; then
+    fail "invocation-allowlist self-test 'missing file': got '$got', expected 'no-file'."
+    rc=1
+  fi
+
+  return $rc
+}
+
 # ---------------------------------------------------------------------------------------------
 # Check 9's kill predicate (SMA-542 review M3 / spec T3) — extracted so it can be driven directly
 # by a fixture table instead of living inline in the mutant-collection loop below, where nothing
@@ -2137,7 +2356,7 @@ mutant_is_killed() {
   [ "$rc" -eq 1 ] && grep -q 'self-test counter:' "$outfile"
 }
 
-# The sixth self-test. Synthetic (rc, captured-output) pairs, no subprocess and no actionlint
+# The seventh self-test. Synthetic (rc, captured-output) pairs, no subprocess and no actionlint
 # binary needed — same style as config_self_test's expect_config above.
 kill_predicate_self_test() {
   local rc=0
@@ -2175,7 +2394,7 @@ kill_predicate_self_test() {
 # ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
-# All six are defined above so this block can run them from ONE call site, reached by both the
+# All seven are defined above so this block can run them from ONE call site, reached by both the
 # --self-test path and the full gate. One call site rather than two is deliberate: ci_targets.py's
 # C4 pins this by whole stripped line, and two identical lines would let one be deleted while the
 # pin still matched (SMA-542 D2).
@@ -2198,6 +2417,7 @@ run_self_tests() {
   branch_filter_self_test
   config_self_test
   ci_target_floor_self_test
+  invocation_allowlist_self_test
   kill_predicate_self_test
 
   assert_self_tests_ran "$SELF_TEST_COUNT"
@@ -2207,10 +2427,10 @@ run_self_tests() {
   # adding a table without calling it reds, and so does deleting one without decrementing
   # SELF_TEST_COUNT. Adding a table is the highest-probability future edit here (SMA-542 D13).
   #
-  # Tolerant of blank-before-paren (`seventh_self_test () {`) and the `function` keyword form
-  # (`function seventh_self_test {`, with or without `()`) — a table written either way must still
+  # Tolerant of blank-before-paren (`eighth_self_test () {`) and the `function` keyword form
+  # (`function eighth_self_test {`, with or without `()`) — a table written either way must still
   # be counted, or D13's own hole reopens for the style it does not recognise (SMA-542 review M8).
-  # Not tolerant of a definition split across lines (`seventh_self_test()\n{`) — a rarer style this
+  # Not tolerant of a definition split across lines (`eighth_self_test()\n{`) — a rarer style this
   # file uses nowhere today; the residual is accepted rather than chasing every valid bash form.
   [ -f "$SELF_SRC" ] && [ -r "$SELF_SRC" ] \
     || infra "cannot read \$SELF_SRC ($SELF_SRC) to count self-test definitions"
@@ -2358,7 +2578,14 @@ fi
 # ---------------------------------------------------------------------------------------------
 # Check 8 — the T=() floor, and the propagation of `moon`'s exit status. Rationale and fixtures
 # are with ci_target_floor_verdict above.
+#
+# REPORTED_LINENOS accumulates the line numbers this loop already explains via 'continued',
+# 'swallowed' or 'wrapped', so the invocation-allowlist check just below (Check 8b) can skip
+# reporting the SAME line a second time under a less specific name — "you appended '|| true'" beats
+# "does not match an allowlisted form". Plain (not local): this is top-level script, not a
+# function.
 # ---------------------------------------------------------------------------------------------
+REPORTED_LINENOS=''
 while IFS= read -r verdict; do
   case "$verdict" in
     '') ;;
@@ -2379,14 +2606,16 @@ while IFS= read -r verdict; do
       time, so it cannot see a '||'/'&&'/';'/'|' tail sitting on a later line of the same
       invocation — reporting 'swallowed' here would name a problem this check cannot actually
       confirm. Put the whole 'moon ci'/'moon run' invocation back on ONE physical line, the same
-      requirement 'no-array' already makes of T=( … ) itself." ;;
+      requirement 'no-array' already makes of T=( … ) itself."
+      REPORTED_LINENOS="$REPORTED_LINENOS ${verdict#continued }" ;;
     'swallowed '*)
       fail ".github/workflows/ci.yml:${verdict#swallowed } runs 'moon' but discards its exit
       status (a '||', '&&', ';' or '|' tail). If this is the invocation that guards T, that greens
       every gate in T while leaving T itself perfectly correct, so no other check in this repo can
       see it — remove the tail. If it is a DIFFERENT, harmless 'moon' line (a diagnostic
       'moon run x | tee log' in an unrelated job, say), this check cannot tell the two apart and it
-      belongs in SWALLOWED_SKIP (above ci_target_floor_verdict in $0) with a reason." ;;
+      belongs in SWALLOWED_SKIP (above ci_target_floor_verdict in $0) with a reason."
+      REPORTED_LINENOS="$REPORTED_LINENOS ${verdict#swallowed }" ;;
     'wrapped '*)
       fail ".github/workflows/ci.yml:${verdict#wrapped } runs 'moon ci'/'moon run' behind a known
       command wrapper (command/env/time/eval/exec/if/while/until/!) on the same physical line, so
@@ -2397,7 +2626,8 @@ while IFS= read -r verdict; do
       command position on ONE physical line, unwrapped — the same requirement 'swallowed' already
       makes. This check only recognizes that fixed list of wrappers and cannot see an arbitrary
       one; if this IS a different, harmless wrapped 'moon' line, it belongs in SWALLOWED_SKIP
-      (above ci_target_floor_verdict in $0) with a reason." ;;
+      (above ci_target_floor_verdict in $0) with a reason."
+      REPORTED_LINENOS="$REPORTED_LINENOS ${verdict#wrapped }" ;;
     'continue-on-error '*)
       fail ".github/workflows/ci.yml:${verdict#continue-on-error } suppresses that step's own
       failure (a 'continue-on-error:' value other than 'false'). If this is the step that runs
@@ -2409,6 +2639,42 @@ while IFS= read -r verdict; do
       infra "unhandled ci-target-floor verdict '$verdict'" ;;
   esac
 done < <(ci_target_floor_verdict .github/workflows/ci.yml)
+
+# ---------------------------------------------------------------------------------------------
+# Check 8b — every "${T[@]}"-bearing line matches an ALLOWLISTED invocation form exactly, and the
+# invocation count is pinned (SMA-542 CodeRabbit round 3, finding B). Rationale, the T_INVOCATION_
+# ALLOWLIST array, and the verdict function are all above, with T_FLOOR. This is the PRIMARY
+# mechanism now — 'swallowed'/'continued'/'wrapped' above stay for their more specific diagnostics,
+# and REPORTED_LINENOS (built above) keeps a line from being reported under both names.
+# ---------------------------------------------------------------------------------------------
+while IFS= read -r verdict; do
+  case "$verdict" in
+    '') ;;
+    no-file)
+      fail ".github/workflows/ci.yml does not exist, so this gate cannot confirm that its
+      '\${T[@]}' invocations still match T_INVOCATION_ALLOWLIST. If the workflow was renamed,
+      update this check." ;;
+    'not-allowlisted '*)
+      fail ".github/workflows/ci.yml:${verdict#not-allowlisted } carries the target-array
+      expansion '\${T[@]}' but does not match any entry in T_INVOCATION_ALLOWLIST (above,
+      with T_FLOOR) EXACTLY — indentation included, nothing before or after. Three rounds of
+      CodeRabbit review each found a new way to precede 'moon' that the 'swallowed'/'wrapped'
+      blacklist above did not anticipate (a wrapper, quoted text after a wrapper, a bare
+      'VAR=value' assignment prefix), so this line is checked against the allowed forms directly
+      instead. If this is a deliberate, reviewed change to how ci.yml invokes moon, update
+      T_INVOCATION_ALLOWLIST to match — copied verbatim from the file, indentation included."  ;;
+    'invocation-count '*)
+      fail ".github/workflows/ci.yml has ${verdict#invocation-count } line(s) carrying the
+      target-array expansion '\${T[@]}', not the ${#T_INVOCATION_ALLOWLIST[@]} this gate
+      expects. This fires independently of whether every individual line matches — a DELETED
+      invocation (or one quietly subsetted to '\${T[@]:0:5}', which no longer contains the
+      literal expansion at all) drops the count even though no surviving line looks wrong on its
+      own. If this is a deliberate, reviewed change in how many invocations ci.yml has, update
+      T_INVOCATION_ALLOWLIST to match." ;;
+    *)
+      infra "unhandled invocation-allowlist verdict '$verdict'" ;;
+  esac
+done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")
 
 # Guard lives here, AFTER the --self-test early exit: --self-test never shells out to actionlint,
 # so it must not infra-exit on a machine that simply doesn't have the binary on PATH yet.

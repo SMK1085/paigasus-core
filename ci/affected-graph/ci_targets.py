@@ -262,7 +262,7 @@ SELF_SCHEDULED_GATES = {
 #
 # PROPAGATION CONTRACT — these entries carry no `|| RC=1` suffix, and that is not the hole
 # RUN_SH_CALL_SITES' suffixes close. `run_self_tests` and `selftest_mutation_battery` report through
-# run.sh's global `FAILED`, as its six self-tests already do (run.sh:42-45); the `done < <(...)`
+# run.sh's global `FAILED`, as its seven self-tests already do (run.sh:42-45); the `done < <(...)`
 # line has nothing to propagate at all — it is the tail of a `while` loop whose body already calls
 # `fail()` per verdict. The consequence is that a future `run_self_tests || FAILED=1` (or an
 # equally harmless reformat of the `done < <(...)` line) would red this check even though it is

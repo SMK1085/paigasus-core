@@ -228,8 +228,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `run_self_tests` and `selftest_mutation_battery` as **whole lines** in `run.sh` (a substring
   match would survive deleting the call, since the name is a prefix of its own definition). That
   pin only works because `repo:affected-smoke` lists `ci/actionlint/**/*` in its `inputs` — remove
-  that and the pin stays green on exactly the PR that breaks it. Adding a seventh-and-later
-  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 6): the gate asserts invocations
+  that and the pin stays green on exactly the PR that breaks it. Adding an eighth-and-later
+  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 7): the gate asserts invocations
   AND definitions. The cycle is still asymmetric: `repo:actionlint` pins only `:affected-smoke`'s
   presence in `T`, never `repo:affected-smoke`'s own call site inside `ci/affected-graph/run.sh` —
   see `ci/actionlint/README.md`'s Limitations section.

@@ -30,9 +30,10 @@ the required check. See SMA-540 and
 | 4 | A healthy stdin fixture must pass — the control for check 3 |
 | 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree, and every `branches:` entry resolves as a ref or is skip-listed |
 | 6 | Every extracted filter key carries at least one sequence entry; a `paths:`/`branches:` key must also have at least one of them positive (the `-ignore` variants are exempt) |
-| 7 | Six self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, kill predicate — plus a counter (`SELF_TESTS_RAN`/`SELF_TEST_COUNT`) asserting all six ran, and a definition-count check catching a seventh table that is defined but never wired into `run_self_tests` (`run.sh --self-test`) |
+| 7 | Seven self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation allowlist, kill predicate — plus a counter (`SELF_TESTS_RAN`/`SELF_TEST_COUNT`) asserting all seven ran, and a definition-count check catching an eighth table that is defined but never wired into `run_self_tests` (`run.sh --self-test`) |
 | 8 | `ci.yml`'s `T=(…)` still schedules the gate that guards `T` itself, and nothing silences that gate's result. Five verdict families: **(a)** the floor — `:affected-smoke` present in `T` (`missing`), or the array can't even be read (`no-array`/`no-file`); **(b)** no `moon` command line is continued onto another physical line, where a discarded exit status would be invisible to this check (`continued`); **(c)** no single-line `moon` command line discards its own exit status (`swallowed`), with `SWALLOWED_SKIP` as the escape hatch for an unrelated `moon` line this check cannot know is harmless; **(d)** no `moon ci`/`moon run` invocation sits behind a known command wrapper (`command`/`env`/`time`/`eval`/`exec`/`if`/`while`/`until`/`!`) on the same line, where propagation cannot be confirmed (`wrapped`), sharing `SWALLOWED_SKIP` as its escape hatch; **(e)** no step's `continue-on-error:` value suppresses it — any spelling but the literal `false` (`continue-on-error`), with `COE_SKIP` as the escape hatch for an unrelated later step |
-| 9 | A mutation battery, full-gate only: each of the six self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message (a kill predicate driven by its own fixture table, not merely "non-zero"), or the battery itself reds |
+| 8b | Every line in `ci.yml` carrying the target-array expansion `"${T[@]}"` matches one of `T_INVOCATION_ALLOWLIST` (declared with `T_FLOOR`) **exactly** — indentation included — and the number of such lines matches the array's length. This is the PRIMARY guard (SMA-542 CodeRabbit round 3, finding B — a bare `VAR=value` assignment prefix defeated BOTH check 8's `swallowed` and `wrapped`, since it has neither `moon` at column 0 nor a recognized wrapper token there); check 8's `continued`/`swallowed`/`wrapped` stay for their more specific diagnostics and are consulted first, so a line they already explain is not also reported here as `not-allowlisted` |
+| 9 | A mutation battery, full-gate only: each of the seven self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message (a kill predicate driven by its own fixture table, not merely "non-zero"), or the battery itself reds |
 
 Only a `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` key **two levels deep** inside
 `on:` — `on.<event>.paths` — is a filter. A workflow input may legitimately be *named* `paths` or
@@ -93,6 +94,11 @@ workflow run *more* often, which is the fail-safe direction.
   same underlying problem spelled two ways. There is deliberately **no** equivalent hatch for
   `continued` — a backslash-continued `moon` invocation is rejected outright, the same way
   `no-array` never skips; put it back on one physical line.
+- A **deliberate, reviewed change to how ci.yml invokes `moon`** (a genuinely new invocation form,
+  or a genuinely new number of invocations): update `T_INVOCATION_ALLOWLIST` in `run.sh`, copying
+  the new line(s) VERBATIM from the file, indentation included. There is deliberately **no**
+  separate skip list for check 8b — the array IS the reviewed exception mechanism, the same way
+  `T_FLOOR` has none.
 - **Anything worse**: drop `:actionlint` from `T=(…)` in `.github/workflows/ci.yml`. This must
   also be removed from the CLAUDE.md `ci-targets` block, since `repo:affected-smoke` asserts the
   two agree — **and** needs a `T_EXEMPT` entry in `ci/affected-graph/ci_targets.py` with a stated
@@ -144,9 +150,14 @@ are checked, only when the wrapper and the `moon ci`/`moon run` invocation share
 and only with whitespace-separated "glue" tolerated in between: further wrapper tokens
 (`command env moon ci …`), a negation (`if ! moon ci …`), or a `VAR=value` assignment
 (`env FOO=bar moon ci …`). A wrapper outside that list (a shell function, `sudo`, `nice`, a `case`
-arm, ...), `moon` reached through anything other than whitespace (`true && moon ci …`), or a
-wrapper on one line with the invocation on a later one is invisible to it — the last of these falls
-into the same blind spot L8 already documents for a backslash continuation. This IS what closes the
+arm, ...), or `moon` reached through anything other than whitespace (`true && moon ci …`), is
+invisible to it. A wrapper on one physical line with the invocation on a LATER one shares L8's
+physical-line-only parsing — but unlike L8, where a plain backslash-continued `moon` line IS
+reported (as `continued`), a wrapper split across lines this way is not reported by check 8 at
+all: `command \` alone on its line has no `moon` for this pattern to match, and `moon ci …` alone
+on the next line has no wrapper for `wrapped` to see (it may not even reach `swallowed` either, if
+that second line carries no tail of its own). T_INVOCATION_ALLOWLIST does not close this either —
+see L11. This IS what closes the
 CodeRabbit round-2 false positive (`if test -n "$X"; then echo "moon ci failed"; fi` — a wrapper at
 line start with "moon ci" appearing only inside a string later on the line): with `test` as the
 next command word rather than `moon` or recognized glue, the pattern does not match that line at
@@ -161,6 +172,20 @@ into an **unindented** `if false; then … fi` block, or an **unindented** hered
 column 0 and still satisfies the pin even though neither ever executes. Deliberate (CodeRabbit, PR
 150): genuine bash-reachability analysis in Python is fragile and out of scope; see the comment at
 `ACTIONLINT_SH_CALL_SITES` in `ci/affected-graph/ci_targets.py`.
+
+**L11 — `T_INVOCATION_ALLOWLIST` matches per LINE, so a wrapper split across physical lines (L9's
+own residual) slips past it too.** `invocation_allowlist_verdict` only examines lines that
+literally contain `"${T[@]}"`; a line reading `command \` (the wrapper alone, continued) does not
+contain that substring at all, so it is never scanned, and the SECOND line — `moon ci "${T[@]}"
+--base origin/main --include-relations`, say — can be BYTE-IDENTICAL to an allowed entry once
+split onto its own line this way, so it passes both the exact-match rule and the count (the line
+still carries the expansion and still counts toward the total). Closing this needs either
+reassembling continuations before matching (parsing the same bash control flow this file has
+repeatedly gotten wrong, per L9) or literally forbidding a backslash on any line adjacent to one
+containing `"${T[@]}"` — neither attempted here. Not believed reachable through an *unwrapped*
+continuation: a plain `moon ci \` (no wrapper) still starts with `moon` at column 0, so check 8's
+`continued` verdict catches THAT shape before `invocation_allowlist_verdict` ever needs to (see
+Check 8b's row in the table above — `continued`/`swallowed`/`wrapped` are consulted first).
 
 ## Cost
 
