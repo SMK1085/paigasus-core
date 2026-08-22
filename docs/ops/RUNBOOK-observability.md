@@ -381,7 +381,11 @@ to "how many rows are parked right now" if needed, or a direct SQL count (below)
    unfiltered (or only `event_type`-filtered) query, so nothing is permanently lost. The `m0009`
    migration backfilled `parked_at = now()` for every pre-existing parked row, so exposure to this
    is small in practice, but a triaging operator who knows a row is parked and can't find it in a
-   windowed query should think of this before assuming a bug.
+   windowed query should think of this before assuming a bug. **A gRPC mirror of this whole
+   surface shipped in SMA-501**, for an operator client that isn't HTTP: `OutboxService`'s
+   `ListDeadLetters`, `ReplayDeadLetter`, `BulkReplayDeadLetters`, and `DiscardDeadLetter` RPCs
+   (`rs/crates/services/paigasus-iam/src/adapters/grpc/dead_letters.rs`) are Root-only exactly
+   like the HTTP routes above and registered unconditionally alongside them.
 3. **Break-glass fallback (API unreachable only).** Count/inspect parked rows directly against
    Postgres:
    ```sql
@@ -2395,10 +2399,6 @@ Not implemented in this cycle; tracked as explicit follow-ups:
 - **Hosted Prometheus + Grafana deployment**, long-term metrics storage, and alert **routing**
   (Alertmanager → PagerDuty/Opsgenie or similar) — this RUNBOOK's alert rules define *what* fires,
   not *where it pages*; routing is deployment-specific and not yet configured anywhere.
-- **A gRPC mirror of the `/v1/outbox/dead-letters` surface**, if a non-HTTP operator client ever
-  needs one — untracked, no follow-up issue filed. Deliberately out of scope for SMA-469 — the
-  HTTP adapter's own module doc calls this a scope decision, not an API-boundary principle, and
-  keeping it HTTP-only keeps `contracts/` untouched.
 - **Bulk discard**, if `[outbox.retention].parked_days` proves insufficient in practice for
   retiring a mass-parked backlog. There is deliberately no bulk-discard endpoint today (SMA-469);
   the supported bulk-retirement path is the retention sweep — see `IamOutboxEventsParked`'s

@@ -17,9 +17,12 @@
 //! an operator triaging why a known-parked row is missing from a windowed query should know
 //! this before assuming a bug.
 //!
-//! This is an operator-only break-glass surface and is deliberately HTTP-only: unlike the
-//! audit read API it has no gRPC mirror, which keeps `contracts/` untouched. That is a scope
-//! decision, not an API-boundary principle.
+//! This is an operator-only break-glass surface. It used to be deliberately HTTP-only — unlike
+//! the audit read API, with no gRPC mirror, to keep `contracts/` untouched — but SMA-501
+//! reversed that scope decision: the surface now also has a gRPC mirror, `grpc::dead_letters`'s
+//! `OutboxService`. The two adapters are independently hand-written over the same
+//! `DeadLetterService` application service, not a transport wrapping the other, with paired
+//! projection tests across both modules as the drift guard.
 
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
