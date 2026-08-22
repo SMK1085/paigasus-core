@@ -490,29 +490,52 @@ pub async fn migrate_under_lock(db: &DatabaseConnection, wait: Duration) -> Resu
         // is unusable, which no amount of waiting fixes.
         let txn = db.begin().await.map_err(MigrationLockError::Db)?;
 
-        let acquired = txn
+        // Rollback is EXPLICIT on every path we own, INCLUDING the fallible reads below.
+        // `DatabaseTransaction::Drop` calls `start_rollback().expect(..)`, which panics if the
+        // connection mutex is contended — turning a migration error into a panic in the
+        // composition root. A bare `?` here would leave `txn` live and hit exactly that.
+        // (sea-orm-migration drops its own inner savepoint transaction on error; that residual
+        // is not ours.) `db.begin()` above is the one exception: there is no transaction yet.
+        let acquired = match txn
             .query_one(Statement::from_string(
                 DatabaseBackend::Postgres,
                 format!("SELECT pg_try_advisory_xact_lock({MIGRATION_LOCK_KEY}) AS locked"),
             ))
             .await
-            .map_err(MigrationLockError::Db)?
-            .and_then(|r| r.try_get::<bool>("", "locked").ok())
-            .unwrap_or(false);
+        {
+            Ok(row) => row.and_then(|r| r.try_get::<bool>("", "locked").ok()).unwrap_or(false),
+            Err(e) => {
+                let _ = txn.rollback().await;
+                return Err(MigrationLockError::Db(e));
+            }
+        };
 
         if acquired {
-            let before = applied_count(&txn).await.map_err(MigrationLockError::Db)?;
-            // Rollback is EXPLICIT on every path we own. `DatabaseTransaction::Drop` calls
-            // `start_rollback().expect(..)`, which panics if the connection mutex is contended —
-            // turning a migration error into a panic in the composition root. (sea-orm-migration
-            // drops its own inner savepoint transaction on error; that residual is not ours.)
+            // Captured BEFORE the migration runs: `waited` is documented as excluding the
+            // migration itself, and Task 4 asserts on it to prove a waiter genuinely waited.
+            // Computing it after `commit` would silently fold migration time in and stop the
+            // assertion discriminating.
+            let waited = start.elapsed();
+            let before = match applied_count(&txn).await {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = txn.rollback().await;
+                    return Err(MigrationLockError::Db(e));
+                }
+            };
             if let Err(e) = Migrator::up(&txn, None).await {
                 let _ = txn.rollback().await;
                 return Err(MigrationLockError::Migrate(e));
             }
-            let after = applied_count(&txn).await.map_err(MigrationLockError::Db)?;
+            let after = match applied_count(&txn).await {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = txn.rollback().await;
+                    return Err(MigrationLockError::Db(e));
+                }
+            };
             txn.commit().await.map_err(MigrationLockError::Db)?;
-            return Ok(MigrationLockOutcome { waited: start.elapsed(), polls, migrations_applied: after.saturating_sub(before) });
+            return Ok(MigrationLockOutcome { waited, polls, migrations_applied: after.saturating_sub(before) });
         }
 
         let _ = txn.rollback().await;

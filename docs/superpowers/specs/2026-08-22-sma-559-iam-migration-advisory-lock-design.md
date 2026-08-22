@@ -53,7 +53,12 @@ What concurrent starts genuinely risk:
   *boot* fails, and under Kubernetes that is a crash-loop rather than a converged rollout.
 * **Long lock contention** on a large migration, with no operator-visible explanation.
 
-All three are fixed by serialising the migration; none is fixed by documentation.
+Serialising the migration **eliminates** the first two — two migrating transactions can no longer
+overlap, so neither the deadlock nor the duplicate-object boot failure can arise. It does not
+eliminate the third: a slow migration still holds its locks for as long as it takes, and a waiter
+can still exhaust `lock_wait_secs` and fail to boot. What changes there is that the contention
+becomes **bounded and operator-visible** — a stated budget and a periodic "still waiting" line,
+instead of an unexplained stall. None of the three is fixed by documentation.
 
 ### 2.1 What this lock does NOT subsume
 
