@@ -3,8 +3,9 @@ name = "paigasus-kernel"
 # The 0.1.0 floor (ADR-0011 S3). release-plz cuts every tag; never hand-place a `*-vX.Y.Z`
 # tag — manual tags lack release-plz's tracking metadata and silently stop future bumps
 # (the SMA-385 trap). This version is held in lockstep with the py/npm binding artifacts by
-# `repo:version-lockstep`. `rs/release-plz.toml` will group this family via `version_group`
-# once that config lands (SMA-576 Task 6) — it does not yet.
+# `repo:version-lockstep`. `rs/release-plz.toml` groups this family via `version_group`
+# (SMA-576 Task 6) — the three binding crates track this version even though their own
+# manifests say `publish = false` (measured against release-plz 0.3.158).
 version = "0.1.0"
 description = "Pure-logic behavioral kernel for Paigasus — resource names (PRN), UUIDv7 minting, and Cedar entity UIDs."
 repository = "https://github.com/SMK1085/paigasus-core"

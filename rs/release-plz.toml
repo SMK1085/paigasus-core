@@ -1,22 +1,95 @@
-# Dormant release-plz configuration (SMA-398).
+# Live release-plz configuration (SMA-576).
 #
-# Present so the SMA-398 parity harness derives its fixture config from the REAL
-# classification settings (ci/release-parity). NO release-plz workflow is wired
-# yet: activation (0.0.0 -> 0.1.0, live release PRs/tags) is deferred to
-# E-activate. Real crates stay `publish = false`; this file changes no publish
-# state and cuts no tags.
+# The SMA-398 parity harness DERIVES its fixture config from the classification keys below,
+# so this file is the single source of truth for commit->semver behaviour. Do not duplicate
+# them into ci/release-parity/.
 
 [workspace]
-# Publishing is BLOCKED while packages sit at the 0.0.0 stub floor: releasing 0.0.0
-# would permanently burn that version on crates.io. SMA-407 removes this line as part of
-# moving every package to the 0.1.0 floor. `repo:publish-metadata` asserts the pairing —
-# this block cannot be removed while a publishable crate is still at 0.0.0.
-release = false
+# NO workspace-level `release` key. It was `release = false` while every package sat at the
+# 0.0.0 stub floor; measured against release-plz 0.3.158, that makes the tool hard-error with
+# "no public packages found", so a release-PR job cannot run under it. Releasability is now
+# declared per package below — which is also what stops `dependencies_update` from cascading
+# tags into crates nobody intended to release (spec §8).
+#
 # Conventional-Commit -> semver classification (the contract SMA-398 asserts).
 # In 0.x: fix -> patch, feat -> minor, breaking (! or BREAKING CHANGE) -> minor.
-# features_always_increment_minor keeps feat distinguishable from fix in 0.x.
 features_always_increment_minor = true
+# Kept ON deliberately. It cascades a patch bump into every transitive dependent of a bumped
+# crate (measured: a crate neither in the version group nor touched by the commit was still
+# bumped, logged "dependencies changed"). That is correct for a workspace that vendors its own
+# libs; the per-package `release = false` entries below are what stop the cascade turning into
+# tags. Turning it off instead would change what the parity fixture derives from this file.
 dependencies_update = true
+
+# --- Releasable: the kernel family (ADR-0011 S1) ------------------------------------------
+# One version across crates.io/PyPI/npm. `version_group` holds them together, and it DOES
+# apply to crates whose Cargo manifest says `publish = false` (measured) — which is exactly
+# what the three binding crates need, since they ship as maturin/napi/wasm byproducts rather
+# than to crates.io. `repo:version-lockstep` asserts the non-Cargo manifests follow.
+[[package]]
+name = "paigasus-kernel"
+version_group = "kernel"
+release = true
+
+[[package]]
+name = "paigasus-py-bindings"
+version_group = "kernel"
+release = true
+
+[[package]]
+name = "paigasus-node-bindings"
+version_group = "kernel"
+release = true
+
+[[package]]
+name = "paigasus-wasm"
+version_group = "kernel"
+release = true
+
+# --- Not releasable ------------------------------------------------------------------------
+# Every other member. `release = false` removes a package from the release-PR proposal
+# ENTIRELY (measured: it is neither bumped nor listed), which is what keeps the
+# dependencies_update cascade from bumping and permanently tagging crates nobody released.
+#
+# paigasus-proto / paigasus-proto-derive join the "proto" version_group in SMA-577, once they
+# carry publishable metadata. paigasus-gateway / paigasus-iam stay at 0.0.0 deliberately:
+# their `env!("CARGO_PKG_VERSION")` feeds the ServiceInfo descriptor, and ADR-0020 skew
+# reporting is parked on that value (SMA-505 R7).
+[[package]]
+name = "paigasus-proto"
+release = false
+
+[[package]]
+name = "paigasus-proto-derive"
+release = false
+
+[[package]]
+name = "paigasus-iam-core"
+release = false
+
+[[package]]
+name = "paigasus-kernel-parity"
+release = false
+
+[[package]]
+name = "paigasus-logging"
+release = false
+
+[[package]]
+name = "paigasus-observability"
+release = false
+
+[[package]]
+name = "paigasus-service-info"
+release = false
+
+[[package]]
+name = "paigasus-gateway"
+release = false
+
+[[package]]
+name = "paigasus-iam"
+release = false
 
 [changelog]
 sort_commits = "newest"
