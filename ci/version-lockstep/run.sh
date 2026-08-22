@@ -8,7 +8,6 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SELF_SRC="${BASH_SOURCE[0]}"
 
 die_infra() { printf 'INFRA: %s\n' "$*" >&2; exit 2; }
 fail()      { printf 'FAIL: %s\n' "$*" >&2; }
@@ -55,45 +54,89 @@ read_version() { # $1 kind  $2 path-or-name
   case "$kind" in
     cargo-package)
       [ -r "$abs" ] || die_infra "cannot read $target"
-      python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["package"]["version"])' "$abs"
+      python3 - "$abs" <<'PY'
+import sys, tomllib
+p = sys.argv[1]
+try:
+    v = tomllib.load(open(p, "rb"))["package"]["version"]
+except Exception as e:
+    print(f"malformed {p}: {e}", file=sys.stderr); sys.exit(2)
+print(v)
+PY
       ;;
     cargo-wsdep)
-      python3 -c '
+      [ -r "$REPO_ROOT/rs/Cargo.toml" ] || die_infra "cannot read rs/Cargo.toml"
+      python3 - "$REPO_ROOT/rs/Cargo.toml" "$target" <<'PY'
 import sys, tomllib
-d = tomllib.load(open(sys.argv[1], "rb"))["workspace"]["dependencies"].get(sys.argv[2])
+p = sys.argv[1]
+try:
+    deps = tomllib.load(open(p, "rb"))["workspace"]["dependencies"]
+except Exception as e:
+    print(f"malformed {p}: {e}", file=sys.stderr); sys.exit(2)
+d = deps.get(sys.argv[2])
 print(d.get("version", "") if isinstance(d, dict) else "")
-' "$REPO_ROOT/rs/Cargo.toml" "$target"
+PY
       ;;
     pyproject)
       [ -r "$abs" ] || die_infra "cannot read $target"
-      python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["project"]["version"])' "$abs"
+      python3 - "$abs" <<'PY'
+import sys, tomllib
+p = sys.argv[1]
+try:
+    v = tomllib.load(open(p, "rb"))["project"]["version"]
+except Exception as e:
+    print(f"malformed {p}: {e}", file=sys.stderr); sys.exit(2)
+print(v)
+PY
       ;;
     pyproject-dep)
       # The pin on paigasus-py-bindings. An UNPINNED dep prints "" and so reads as MISMATCH —
       # which is the point: uv strips [tool.uv.sources] from the built wheel, so an unpinned
-      # wrapper would float against any bindings version once published (spec §4).
-      python3 -c '
+      # wrapper would float against any bindings version once published (spec §4). A malformed
+      # or unparsable pyproject.toml is a DIFFERENT failure mode — infrastructure, not drift —
+      # and exits 2 instead.
+      [ -r "$abs" ] || die_infra "cannot read $target"
+      python3 - "$abs" <<'PY'
 import re, sys, tomllib
-deps = tomllib.load(open(sys.argv[1], "rb"))["project"].get("dependencies", [])
+p = sys.argv[1]
+try:
+    deps = tomllib.load(open(p, "rb"))["project"].get("dependencies", [])
+except Exception as e:
+    print(f"malformed {p}: {e}", file=sys.stderr); sys.exit(2)
 for d in deps:
     m = re.fullmatch(r"paigasus-py-bindings==([0-9][^,;\s]*)", d.strip())
     if m:
         print(m.group(1)); break
 else:
     print("")
-' "$abs"
+PY
       ;;
     packagejson)
       [ -r "$abs" ] || die_infra "cannot read $target"
-      python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$abs"
+      python3 - "$abs" <<'PY'
+import json, sys
+p = sys.argv[1]
+try:
+    v = json.load(open(p))["version"]
+except Exception as e:
+    print(f"malformed {p}: {e}", file=sys.stderr); sys.exit(2)
+print(v)
+PY
       ;;
     cargo-lock)
       # Every kernel-group member must appear in the lock at the group version. Prints the
-      # DISTINCT set; anything but a single value reads as MISMATCH against the expected.
-      python3 -c '
+      # DISTINCT set; anything but a single value reads as MISMATCH against the expected —
+      # that is the repo being wrong, not infrastructure failing. An unreadable or
+      # undecodable lockfile is infrastructure failing, and exits 2 instead.
+      [ -r "$abs" ] || die_infra "cannot read $target"
+      python3 - "$abs" <<'PY'
 import re, sys
+p = sys.argv[1]
 names = {"paigasus-kernel", "paigasus-py-bindings", "paigasus-node-bindings", "paigasus-wasm"}
-text = open(sys.argv[1], encoding="utf-8").read()
+try:
+    text = open(p, encoding="utf-8").read()
+except Exception as e:
+    print(f"malformed {p}: {e}", file=sys.stderr); sys.exit(2)
 found = set()
 for blk in text.split("[[package]]"):
     n = re.search(r"^name = \"([^\"]+)\"", blk, re.M)
@@ -101,13 +144,18 @@ for blk in text.split("[[package]]"):
     if n and v and n.group(1) in names:
         found.add(v.group(1))
 print(found.pop() if len(found) == 1 else "")
-' "$abs"
+PY
       ;;
     uv-lock)
-      python3 -c '
+      [ -r "$abs" ] || die_infra "cannot read $target"
+      python3 - "$abs" <<'PY'
 import re, sys
+p = sys.argv[1]
 names = {"paigasus-kernel", "paigasus-py-bindings"}
-text = open(sys.argv[1], encoding="utf-8").read()
+try:
+    text = open(p, encoding="utf-8").read()
+except Exception as e:
+    print(f"malformed {p}: {e}", file=sys.stderr); sys.exit(2)
 found = set()
 for blk in text.split("[[package]]"):
     n = re.search(r"^name = \"([^\"]+)\"", blk, re.M)
@@ -115,14 +163,21 @@ for blk in text.split("[[package]]"):
     if n and v and n.group(1) in names:
         found.add(v.group(1))
 print(found.pop() if len(found) == 1 else "")
-' "$abs"
+PY
       ;;
     napi-glue)
       # napi regenerates 26 `bindingPackageVersion !== '<v>'` guards from package.json.
-      # A non-uniform set prints "" and reads as MISMATCH.
+      # A non-uniform set prints "" and reads as MISMATCH; an unreadable or undecodable
+      # file exits 2.
+      [ -r "$abs" ] || die_infra "cannot read $target"
       python3 - "$abs" <<'PY'
 import re, sys
-vs = set(re.findall(r"bindingPackageVersion !== '([^']+)'", open(sys.argv[1], encoding="utf-8").read()))
+p = sys.argv[1]
+try:
+    text = open(p, encoding="utf-8").read()
+except Exception as e:
+    print(f"malformed {p}: {e}", file=sys.stderr); sys.exit(2)
+vs = set(re.findall(r"bindingPackageVersion !== '([^']+)'", text))
 print(vs.pop() if len(vs) == 1 else "")
 PY
       ;;
