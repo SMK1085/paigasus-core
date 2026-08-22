@@ -9,8 +9,12 @@ name: security-scan
 # dependency PR — landing 40 unrelated findings on Dependabot's own bump. This job decouples
 # detection from dependency churn. It is the piece that would actually have caught that.
 #
-# Runs against the default branch. A red run here means an advisory landed on shipped code:
-# triage it, do not let it queue — a scheduled job nobody reads is just the alerts tab again.
+# Runs against the default branch. TWO different kinds of red live here, and they triage
+# differently:
+#   * `osv` red — an advisory landed on shipped code. Triage it, do not let it queue.
+#   * `category-slugs` red — our vendored crates.io category snapshot drifted from the
+#     live registry. Not a security event: run `ci/publish-metadata/run.sh
+#     --refresh-categories` and commit the result (SMA-529).
 
 on:
   schedule:
@@ -29,6 +33,7 @@ on:
       - 'osv-scanner.toml'
       - '.proto/plugins/osv-scanner.toml'
       - '.prototools'
+      - 'ci/publish-metadata/**'
 
 # Least privilege: the job only reads the tree and runs a scanner.
 permissions:
@@ -65,3 +70,20 @@ jobs:
       # state this job exists to re-check against a freshly published advisory.
       - name: OSV advisory gate (npm + pip lockfiles)
         run: ci/osv/run.sh
+
+  category-slugs:
+    name: crates.io category snapshot freshness
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Invoked directly, NOT through `moon run repo:publish-metadata`: Moon reports that
+      # task cached whenever the tree is unchanged, which is the normal case here and
+      # exactly the state this job exists to re-check against a changed crates.io. Needs no
+      # toolchain — python3 is on the runner and the check is stdlib-only.
+      - name: crates.io category snapshot freshness
+        run: ci/publish-metadata/run.sh --check-categories-freshness
