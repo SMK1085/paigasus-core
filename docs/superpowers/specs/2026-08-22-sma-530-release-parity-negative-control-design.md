@@ -170,16 +170,34 @@ per task. The D4a pin sees nothing — it pins `moon.yml` text, not semantics. T
 repo's recurring lesson (CLAUDE.md; SMA-542 I1; CodeRabbit round 4 C1): *a gate check's own
 call site is what goes unguarded*.
 
-Close it with a third registry pinning the block's load-bearing lines as stripped whole
+Close it with a third registry pinning the control's load-bearing lines as stripped whole
 lines:
 
 ```python
 RELEASE_PARITY_SH_CALL_SITES = (
+    '--negative-control) NEGATIVE=1; shift ;;',
     'if [ "$NEGATIVE" = 1 ]; then',
+    'ec=0; check_case "neg-fix-bang" "fix!: deliberately wrong" "-" "0.1.1" || ec=$?',
     '1) echo "negative-control OK: harness reported red as expected"; exit 0 ;;',
     '0) echo "negative-control FAILED: harness accepted a wrong expectation" >&2; exit 1 ;;',
 )
 ```
+
+> **Amended during implementation.** This draft listed only the three block lines. Review
+> then measured two bypasses that leave all three byte-identical, so the registry ships with
+> **five** entries — parse, guard, assertion, and both report arms:
+>
+> - **Neutering the parse** (`--negative-control) shift ;;`) leaves `NEGATIVE` at its `0`
+>   initialisation, so the control branch is never entered and the invocation falls through
+>   to the real five-case suite at rc 0 — CI runs the real suite twice per task.
+> - **Gutting the assertion** (replacing the `check_case` call with a literal `ec=1`) never
+>   reaches the real suite at all: it exits inside the control branch printing
+>   `negative-control OK: harness reported red as expected` without having invoked the
+>   harness — a control that actively asserts a lie, which is worse than one that does
+>   nothing.
+>
+> Pinning the assertion line couples the pin to the fixture case id and the `0.1.1`
+> expectation; that is the accepted cost, and L4 already records the same coupling.
 
 **Reachability requires a new input.** `check_self_invocation` runs only when
 `repo:affected-smoke` is scheduled, and its inputs (`moon.yml:130-162`) do **not** list
@@ -333,6 +351,15 @@ pinned line, which is the failure that matters.
   flags reds the gate although nothing is broken. Restore the exact line or update the
   constant — the same consequence `ACTIONLINT_SH_CALL_SITES` records for its own entries
   at `ci_targets.py:288-294`.
+- **L5 — whole-line pins prove presence, not absence.** They cannot see an INSERTION.
+  Measured: adding a bare `NEGATIVE=0` immediately before the guard satisfies all five pins
+  and falls through to the real suite at rc 0; so does deleting the block, neutering the
+  parse, and parking all five pinned lines verbatim in a never-executed heredoc. Same class
+  as L2, and the same one `ci_targets.py` already disclaims for the actionlint haystack
+  ("THIS IS NOT REACHABILITY ANALYSIS") — parsing bash control flow in Python is fragile and
+  out of scope. A narrower fail-safe strengthening is available if it ever bites: a count
+  assertion such as `release_parity_sh_text.count("NEGATIVE=") == 2`, which can only
+  false-red. Deliberately not implemented.
 - **L4 — the control's `0.1.1` is coupled to `cases.tsv`'s contract.** `run.sh:62-63`
   hardcodes it as "deliberately wrong" for `fix!` in 0.x. Should the canonical contract
   ever change so that value is correct, all three controls red spuriously and the
@@ -381,8 +408,9 @@ pinned line, which is the failure that matters.
    correct code).
 3. **`set -euo pipefail` is load-bearing.** Delete it with the control forced to fail;
    confirm the task reports success. Demonstration, then restore.
-4. **D4a pin bites.** Delete each of the nine lines in turn from `moon.yml`;
-   `ci/affected-graph/run.sh` names the missing call site and exits non-zero.
+4. **The pins bite — all fourteen.** Delete each of the nine `moon.yml` lines and each of
+   the five `ci/release-parity/run.sh` lines in turn; `ci/affected-graph/run.sh` names the
+   missing call site and exits non-zero every time. Script it.
 5. **D4b pin bites, and is reachable.** Delete `run.sh:60-69` leaving the flag parse;
    confirm all three tasks still exit 0 (the hole), and that `ci/affected-graph/run.sh`
    reds. Confirm a `ci/release-parity/**` edit now selects `repo:affected-smoke`
