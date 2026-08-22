@@ -319,19 +319,72 @@ PY
       # "wrote" on files whose version was already correct and pollute the diff with
       # unrelated Prettier-style churn (measured against this repo's committed package.json
       # files, SMA-576 review finding).
+      #
+      # A plain regex over the whole file matches the FIRST "version" key anywhere in the
+      # text, not the object's own top-level one — a "version" key nested inside an earlier
+      # object (e.g. an `engines` block) is rewritten instead, silently, since exactly one
+      # match is still found. find_top_level_version_span walks the string tracking brace
+      # depth and string-literal state (so braces/quotes inside string VALUES can't fool
+      # it) and only returns the span of the value at depth 1 (SMA-576 review finding).
       python3 - "$abs" "$version" <<'PY'
-import json, re, sys
+import json, sys
+
+def find_top_level_version_span(s):
+    """Return (start, end) of the top-level "version" VALUE literal, or None."""
+    depth = 0
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c == '"':
+            j = i + 1
+            while j < n:
+                if s[j] == '\\':
+                    j += 2
+                    continue
+                if s[j] == '"':
+                    break
+                j += 1
+            key = s[i + 1:j]
+            k = j + 1
+            while k < n and s[k].isspace():
+                k += 1
+            if depth == 1 and key == "version" and k < n and s[k] == ':':
+                k += 1
+                while k < n and s[k].isspace():
+                    k += 1
+                if k >= n or s[k] != '"':
+                    return None          # non-string version — refuse, do not guess
+                v = k + 1
+                while v < n:
+                    if s[v] == '\\':
+                        v += 2
+                        continue
+                    if s[v] == '"':
+                        break
+                    v += 1
+                return (k, v + 1)
+            i = j + 1
+            continue
+        if c in '{[':
+            depth += 1
+        elif c in '}]':
+            depth -= 1
+        i += 1
+    return None
+
 p, v = sys.argv[1], sys.argv[2]
 s = open(p, encoding="utf-8").read()
 try:
-    d = json.loads(s)
+    json.loads(s)
 except Exception as e:
     print(f"FATAL: malformed {p}: {e}", file=sys.stderr); raise SystemExit(2)
-if "version" not in d:
-    print(f"FATAL: no version key in {p}", file=sys.stderr); raise SystemExit(2)
-new, n = re.subn(r'("version"\s*:\s*)"[^"]*"', lambda m: f'{m.group(1)}"{v}"', s, count=1)
-if n != 1:
-    print(f"FATAL: no version field pattern in {p}", file=sys.stderr); raise SystemExit(2)
+span = find_top_level_version_span(s)
+if span is None:
+    print(f"FATAL: no top-level string \"version\" field in {p}", file=sys.stderr)
+    raise SystemExit(2)
+start, end = span
+new = s[:start] + f'"{v}"' + s[end:]
 open(p, "w", encoding="utf-8").write(new)
 print(int(new != s))
 PY
