@@ -229,16 +229,21 @@ service OutboxService {
 }
 ```
 
-- [ ] **Step 2: Add the retire RPC to the existing `AuthorizationService`**
+- [ ] **Step 2: Do NOT add the retire RPC here — it belongs to Task 7**
 
-Find the `service AuthorizationService { … }` block (around line 352) and add one line after
-`ListRoleGrants`:
+The retire **messages** above stay in this task: Task 4 needs the generated
+`RetireSystemPolicyResponse`/`RetiredPolicy`/… types and runs before Task 7. Unreferenced
+messages are valid proto and `buf lint` does not object.
 
-```proto
-  // Root-only, and additionally gated on the iam.authz.cedar capability,
-  // mirroring the HTTP route's placement behind caps.authz_admin.
-  rpc RetireSystemPolicy(RetireSystemPolicyRequest) returns (RetireSystemPolicyResponse);
-```
+The `rpc RetireSystemPolicy(...)` line itself must **not** be added here. `AuthorizationService`
+already has a concrete implementor — `AuthzGrpc` in `grpc/authz.rs:92` — and Rust requires every
+trait method to be implemented, so adding the RPC without the handler is a hard `error[E0046]`
+that would break `cargo build --workspace` for Tasks 2 through 6. This differs from
+`UserService`/`OutboxService`, which are brand-new traits with zero implementors and are
+therefore safe to declare here.
+
+Task 7 adds the RPC line, regenerates, and implements the handler in one commit, so the contract
+change and its implementor land atomically.
 
 - [ ] **Step 3: Refresh the stale file header**
 
@@ -1371,9 +1376,38 @@ git commit -m "feat(rs): serve the outbox dead-letter surface over grpc (SMA-501
 **Files:**
 - Modify: `rs/crates/services/paigasus-iam/src/adapters/grpc/authz.rs`
 
+**Files:** additionally modify `contracts/proto/paigasus/iam/v1/iam.proto` and commit the
+regenerated bindings — see Step 0.
+
 **Interfaces:**
-- Consumes: `convert::to_proto_retire_response` (Task 4), `require_authz_admin` (existing, `authz.rs:83`), Task 1's generated request/response types.
+- Consumes: `convert::to_proto_retire_response` (Task 4), `require_authz_admin` (existing, `authz.rs:83`), Task 1's generated message types.
 - Produces: nothing further.
+
+- [ ] **Step 0: Declare the RPC in the contract and regenerate**
+
+Task 1 deliberately left this line out: `AuthorizationService` already has a concrete
+implementor (`AuthzGrpc`), so declaring an RPC without its handler is `error[E0046]` and would
+have broken the build for every task in between. Declaring it and implementing it in this one
+commit keeps the workspace green throughout.
+
+Find the `service AuthorizationService { … }` block and add one line after `ListRoleGrants`:
+
+```proto
+  // Root-only, and additionally gated on the iam.authz.cedar capability,
+  // mirroring the HTTP route's placement behind caps.authz_admin.
+  rpc RetireSystemPolicy(RetireSystemPolicyRequest) returns (RetireSystemPolicyResponse);
+```
+
+Then, from the repo root:
+
+```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+cd contracts && buf format -w && buf lint && buf breaking --against '../.git#branch=main,subdir=contracts' && buf generate
+```
+Expected: all exit 0. Adding an RPC to an existing service is additive, so `buf breaking` passes.
+
+Also update the file header's service list, which Task 1 left saying `AuthorizationService` had
+not yet gained this RPC.
 
 - [ ] **Step 1: Add the RPC to the existing `impl AuthorizationService for AuthzGrpc`**
 
