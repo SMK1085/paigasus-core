@@ -14,9 +14,10 @@ use std::sync::LazyLock;
 
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
+use paigasus_iam_core::authz::reconcile::policy_kind_str;
 use paigasus_iam_core::{
-    ApiKey, ApiKeyStatus, AuthnError, Credential, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant, RoleGrantRef,
-    ServiceAccountRecord, Team,
+    ApiKey, ApiKeyStatus, AuthnError, Credential, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RetireOutcome, RoleGrant,
+    RoleGrantRef, ServiceAccountRecord, Team,
 };
 use paigasus_kernel::Prn;
 use paigasus_observability::{Retryable, current_ids};
@@ -24,8 +25,8 @@ use paigasus_proto::error::IAM_DOMAIN;
 use paigasus_proto::paigasus::common::v1::{AuditMetadata, ErrorReason};
 use paigasus_proto::paigasus::iam::v1::{
     ApiKey as ProtoApiKey, ApiKeyStatus as ProtoApiKeyStatus, DeadLetterEntry as ProtoDeadLetterEntry, IntrospectApiKeyResponse, IntrospectResponse, IssueApiKeyResponse, Membership,
-    NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RoleGrant as ProtoRoleGrant, RoleGrantRef as ProtoRoleGrantRef,
-    ServiceAccount as ProtoServiceAccount, Team as ProtoTeam,
+    NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RetireSystemPolicyResponse, RetiredPolicy, RetirementBlocked,
+    RetirementNeedsAcknowledgement, RoleGrant as ProtoRoleGrant, RoleGrantRef as ProtoRoleGrantRef, ServiceAccount as ProtoServiceAccount, SurvivingGrant, Team as ProtoTeam,
 };
 use tonic::{Code, Status};
 use tonic_types::{ErrorDetails, StatusExt};
@@ -451,6 +452,45 @@ pub fn to_proto_dead_letter_entry(e: &paigasus_iam_core::DeadLetterEntry) -> Pro
     }
 }
 
+/// Maps a [`RetireOutcome`] onto its wire response. All three variants are gRPC `OK`: the two
+/// refusals are outcomes that are not `Retired`, never server errors (design D3, and the same
+/// argument `http::system_retirement`'s module doc makes for routing them around `ApiError`).
+///
+/// A free function over an OWNED outcome, deliberately — that is what lets every variant be
+/// constructed in a test with no `AppState`, database, or request, which is exactly the gap
+/// that let an earlier `200`->`204` regression in the HTTP twin pass a green suite.
+pub fn to_proto_retire_response(outcome: RetireOutcome) -> RetireSystemPolicyResponse {
+    use paigasus_proto::paigasus::iam::v1::retire_system_policy_response::Outcome;
+
+    let variant = match outcome {
+        RetireOutcome::Retired { policy_id, kind, role_deleted } => Outcome::Retired(RetiredPolicy {
+            policy_id,
+            kind: policy_kind_str(kind).to_string(),
+            role_deleted,
+        }),
+        RetireOutcome::Blocked { role_key, grants, total, truncated } => Outcome::Blocked(RetirementBlocked {
+            role_key,
+            grants: grants
+                .iter()
+                .map(|g| SurvivingGrant {
+                    id: g.id.clone(),
+                    principal_prn: g.principal_prn.clone(),
+                    scope_prn: g.scope_prn.clone(),
+                })
+                .collect(),
+            total_surviving: total,
+            truncated,
+        }),
+        RetireOutcome::NeedsAcknowledgement { policy_id, kind, source, description } => Outcome::NeedsAcknowledgement(RetirementNeedsAcknowledgement {
+            policy_id,
+            kind: policy_kind_str(kind).to_string(),
+            source,
+            description,
+        }),
+    };
+    RetireSystemPolicyResponse { outcome: Some(variant) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,5 +824,69 @@ mod tests {
         assert_eq!(grpc.correlation_id, correlation.to_string());
         assert_eq!(grpc.last_error, "connection refused");
         assert_eq!(grpc.parked_at, None, "an unparked row must carry an ABSENT timestamp, not epoch");
+    }
+
+    /// Every variant constructed directly — no `AppState`, database, or request needed. That is the
+    /// whole point of this being a free function over an owned `RetireOutcome` (design D8): an
+    /// earlier revision of the HTTP twin changed `Retired`'s status code and the entire crate's
+    /// suite stayed green, because nothing exercised the mapping against a real outcome value.
+    #[test]
+    fn retire_response_maps_each_outcome_to_its_own_variant() {
+        use paigasus_iam_core::GrantRef;
+        use paigasus_iam_core::authz::model::PolicyKind;
+        use paigasus_proto::paigasus::iam::v1::retire_system_policy_response::Outcome;
+
+        let retired = to_proto_retire_response(RetireOutcome::Retired {
+            policy_id: "legacy_auditor".to_string(),
+            kind: PolicyKind::Template,
+            role_deleted: true,
+        });
+        match retired.outcome.expect("outcome must be set") {
+            Outcome::Retired(r) => {
+                assert_eq!(r.policy_id, "legacy_auditor");
+                assert_eq!(r.kind, "template");
+                assert!(r.role_deleted);
+            }
+            other => panic!("expected Retired, got {other:?}"),
+        }
+
+        let blocked = to_proto_retire_response(RetireOutcome::Blocked {
+            role_key: "legacy_auditor".to_string(),
+            grants: vec![GrantRef {
+                id: "0192f1c0-0000-7000-8000-000000000001".to_string(),
+                principal_prn: "prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000002".to_string(),
+                scope_prn: "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-000000000003".to_string(),
+            }],
+            total: 42,
+            truncated: true,
+        });
+        match blocked.outcome.expect("outcome must be set") {
+            Outcome::Blocked(b) => {
+                assert_eq!(b.role_key, "legacy_auditor");
+                assert_eq!(b.total_surviving, 42, "the TRUE total, not the truncated page length");
+                assert!(b.truncated);
+                assert_eq!(b.grants.len(), 1);
+                assert_eq!(b.grants[0].id, "0192f1c0-0000-7000-8000-000000000001");
+                assert_eq!(b.grants[0].principal_prn, "prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000002");
+                assert_eq!(b.grants[0].scope_prn, "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-000000000003");
+            }
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+
+        let needs = to_proto_retire_response(RetireOutcome::NeedsAcknowledgement {
+            policy_id: "legacy_forbid".to_string(),
+            kind: PolicyKind::Static,
+            source: "permit(principal, action, resource);".to_string(),
+            description: "an orphaned starter policy".to_string(),
+        });
+        match needs.outcome.expect("outcome must be set") {
+            Outcome::NeedsAcknowledgement(n) => {
+                assert_eq!(n.policy_id, "legacy_forbid");
+                assert_eq!(n.kind, "static");
+                assert_eq!(n.source, "permit(principal, action, resource);");
+                assert_eq!(n.description, "an orphaned starter policy");
+            }
+            other => panic!("expected NeedsAcknowledgement, got {other:?}"),
+        }
     }
 }
