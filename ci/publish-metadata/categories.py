@@ -14,8 +14,10 @@ right triage). Nothing here may return a value that reads as "validated" on fail
 import datetime
 import difflib
 import json
+import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -183,6 +185,70 @@ def nearest(slug: str, slugs: list[str]) -> str | None:
     return matches[0] if matches else None
 
 
+def validate_live_payload(status: int, body) -> list[str]:
+    """Decide whether a fetched payload is trustworthy. Raises FetchError.
+
+    Split out from the request itself so --negative-control can drive the deciding half
+    with fixtures. Every branch here is a way a fetch LOOKS successful while carrying
+    nothing: a 403 body, a CDN HTML error page, a truncated response, an empty array. Any
+    of them reaching --refresh unchecked would overwrite the committed snapshot with
+    garbage, which is worse than the typo this gate exists to catch.
+    """
+    if status != 200:
+        raise FetchError(f"crates.io returned HTTP {status} (expected 200)")
+    if isinstance(body, bytes):
+        try:
+            body = body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise FetchError(f"response body is not valid UTF-8: {exc}") from exc
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise FetchError(
+            f"response body is not valid JSON ({exc}); the first 80 bytes were "
+            f"{body[:80]!r} — this is usually an HTML error page from a CDN"
+        ) from exc
+    if not isinstance(payload, dict) or "category_slugs" not in payload:
+        raise FetchError("response JSON has no `category_slugs` key")
+    entries = payload["category_slugs"]
+    if not isinstance(entries, list):
+        raise FetchError("`category_slugs` is not a list")
+    slugs = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("slug"), str):
+            raise FetchError(f"malformed category entry: {entry!r}")
+        slugs.append(entry["slug"])
+    if not slugs:
+        # Never "zero slugs, no error": that is the shape of a vacuous pass.
+        raise FetchError("crates.io returned an empty category list")
+    if len(slugs) < ABSOLUTE_FLOOR:
+        raise FetchError(f"crates.io returned only {len(slugs)} slug(s)")
+    return slugs
+
+
+def fetch_live_slugs(url: str = API_URL) -> list[str]:
+    """Thin request wrapper; all judgement lives in validate_live_payload."""
+    last: Exception | None = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return validate_live_payload(resp.status, resp.read())
+        except FetchError:
+            raise
+        except (urllib.error.URLError, OSError) as exc:
+            last = exc
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+    raise FetchError(f"could not reach {url} after 3 attempts: {last}")
+
+
+def diff_slug_sets(live: list[str], snapshot: list[str]):
+    """Set-based, so file ordering can never cause a false red."""
+    live_set, snap_set = set(live), set(snapshot)
+    return sorted(live_set - snap_set), sorted(snap_set - live_set)
+
+
 def _self_test() -> int:
     """Counted self-tests. A gate that cannot report red is worse than no gate, and a
     self-test that silently stops running takes the only proof-that-it-bites with it
@@ -209,6 +275,21 @@ def _self_test() -> int:
             fn()
         except SnapshotError:
             print(f"  ok — {label} raises SnapshotError")
+            return
+        except Exception as exc:  # noqa: BLE001
+            print(f"  FAILED — {label}: wrong exception {exc!r}", file=sys.stderr)
+            failures += 1
+            return
+        print(f"  FAILED — {label}: did not raise", file=sys.stderr)
+        failures += 1
+
+    def expect_fetch_error(label, fn):
+        nonlocal checks, failures
+        checks += 1
+        try:
+            fn()
+        except FetchError:
+            print(f"  ok — {label} raises FetchError")
             return
         except Exception as exc:  # noqa: BLE001
             print(f"  FAILED — {label}: wrong exception {exc!r}", file=sys.stderr)
@@ -321,7 +402,52 @@ def _self_test() -> int:
         lambda: _assert(nearest("zzzzzzzz", good) is None, "nearest miss"),
     )
 
-    expected_checks = 20
+    ok_payload = json.dumps({"category_slugs": [{"slug": s} for s in good]})
+
+    expect_ok(
+        "a valid payload validates",
+        lambda: _assert(validate_live_payload(200, ok_payload) == good, "payload slugs"),
+    )
+    expect_fetch_error(
+        "a 403 response",
+        lambda: validate_live_payload(403, b"you must supply a User-Agent"),
+    )
+    expect_fetch_error(
+        "an HTML error page",
+        lambda: validate_live_payload(200, b"<html><head><title>502</title></head>"),
+    )
+    expect_fetch_error(
+        "an empty category list",
+        lambda: validate_live_payload(200, b'{"category_slugs":[]}'),
+    )
+    expect_fetch_error(
+        "a truncated JSON body",
+        lambda: validate_live_payload(200, ok_payload[: len(ok_payload) // 2]),
+    )
+    expect_fetch_error(
+        "a payload with no category_slugs key",
+        lambda: validate_live_payload(200, b'{"categories":[]}'),
+    )
+    expect_ok(
+        "diff_slug_sets reports an upstream addition",
+        lambda: _assert(
+            diff_slug_sets(good + ["brand-new"], good) == (["brand-new"], []), "added"
+        ),
+    )
+    expect_ok(
+        "diff_slug_sets reports an upstream removal",
+        lambda: _assert(
+            diff_slug_sets(good[:-1], good) == ([], [good[-1]]), "removed"
+        ),
+    )
+    expect_ok(
+        "diff_slug_sets is order-insensitive",
+        lambda: _assert(
+            diff_slug_sets(list(reversed(good)), good) == ([], []), "order"
+        ),
+    )
+
+    expected_checks = 29
     if checks != expected_checks:
         print(
             f"SELF-TEST COUNT CHANGED: ran {checks}, expected {expected_checks}. Update "
@@ -343,10 +469,72 @@ def _assert(condition: bool, label: str) -> None:
         raise AssertionError(label)
 
 
+def _cmd_check_freshness(snapshot_path: str) -> int:
+    today = datetime.date.today()
+    try:
+        live = fetch_live_slugs()
+    except FetchError as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return 2
+    try:
+        snapshot = load_snapshot(snapshot_path, today)
+    except SnapshotError as exc:
+        print(f"category snapshot: {exc}", file=sys.stderr)
+        return 1
+    added, removed = diff_slug_sets(live, snapshot)
+    if not added and not removed:
+        print(f"category snapshot: fresh ({len(snapshot)} slugs)")
+        return 0
+    for slug in added:
+        print(f"  + {slug} (crates.io added this)", file=sys.stderr)
+    for slug in removed:
+        print(f"  - {slug} (crates.io no longer has this)", file=sys.stderr)
+    print(
+        "category snapshot is STALE. This is a metadata-freshness failure, NOT a security "
+        "advisory. Fix: run `ci/publish-metadata/run.sh --refresh-categories` and commit "
+        f"{snapshot_path}.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _cmd_refresh(snapshot_path: str) -> int:
+    # Refuses under CI: this mutates the tree, and a gate that rewrites its own expected
+    # data in CI would green itself against whatever it just fetched.
+    if os.environ.get("CI"):
+        print("FATAL: --refresh mutates the tree and must not run in CI", file=sys.stderr)
+        return 2
+    try:
+        live = fetch_live_slugs()
+    except FetchError as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return 2
+    text = render_snapshot(live, datetime.date.today())
+    # Temp file + atomic rename: a partial write must never leave a truncated snapshot
+    # behind, because the next run would validate against it.
+    tmp_path = snapshot_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp_path, snapshot_path)
+    print(f"category snapshot: wrote {len(live)} slugs to {snapshot_path}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
-    if argv[1:] == ["--self-test"]:
+    args = argv[1:]
+    if args == ["--self-test"]:
         return _self_test()
-    print(f"usage: {argv[0]} --self-test", file=sys.stderr)
+    if len(args) == 3 and args[1] == "--snapshot":
+        if args[0] == "--check-freshness":
+            return _cmd_check_freshness(args[2])
+        if args[0] == "--refresh":
+            return _cmd_refresh(args[2])
+    print(
+        f"usage: {argv[0]} --self-test\n"
+        f"       {argv[0]} --check-freshness --snapshot PATH\n"
+        f"       {argv[0]} --refresh --snapshot PATH",
+        file=sys.stderr,
+    )
     return 2
 
 
