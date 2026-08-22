@@ -207,15 +207,19 @@ run_self_tests() {
 run_check() {
   local rc=0 group kind target expected actual verdict
   for group in "${!SOURCE_OF_TRUTH[@]}"; do
-    expected="$(read_version cargo-package "${SOURCE_OF_TRUTH[$group]}")"
+    # Explicit `|| return 2` rather than relying on errexit: when run_check is itself called
+    # on the left of a `||` (as negative_control does), POSIX suspends errexit for run_check
+    # AND everything it calls, so a read_version infra failure would otherwise be swallowed
+    # into an empty string instead of propagating (SMA-576 review finding).
+    expected="$(read_version cargo-package "${SOURCE_OF_TRUTH[$group]}")" || return 2
     [ -n "$expected" ] || die_infra "group '$group': source of truth has no version"
     printf 'group %s: source of truth = %s\n' "$group" "$expected"
   done
   local checked=0
   for entry in "${SITES[@]}"; do
     IFS='|' read -r group kind target <<<"$entry"
-    expected="$(read_version cargo-package "${SOURCE_OF_TRUTH[$group]}")"
-    actual="$(read_version "$kind" "$target")"
+    expected="$(read_version cargo-package "${SOURCE_OF_TRUTH[$group]}")" || return 2
+    actual="$(read_version "$kind" "$target")" || return 2
     verdict="$(site_verdict "$expected" "$actual")"
     checked=$((checked + 1))
     if [ "$verdict" != OK ]; then
@@ -269,6 +273,12 @@ PY
   if [ "$ec" -eq 1 ]; then
     printf '== negative control: version-lockstep reported red as expected ==\n'
     return 0
+  fi
+  if [ "$ec" -eq 2 ]; then
+    fail "negative control: run_check hit an infrastructure failure (exit 2) instead of
+      reporting the drift. The scratch staging is incomplete or a site went unreadable —
+      that is a broken control, not proof the gate can report red."
+    return 1
   fi
   fail "negative control: a drifted site was ACCEPTED (run_check exited $ec, expected 1).
       The gate can no longer report red and is green exactly when it matters."
