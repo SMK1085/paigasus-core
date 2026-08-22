@@ -143,9 +143,12 @@ matters.
 block's status is its LAST command's: without it a failing control is masked by the
 passing real run. `run.sh`'s own `set -euo pipefail` governs its body, not the Moon block.
 
-**Why all three tasks.** Their inputs are disjoint (`moon.yml:57-119`), so a PR touching
-only `ts/packages/paigasus-sdk/.releaserc.json` selects `release-parity-ts` and neither
-sibling; one shared control would leave that PR uncontrolled. Net measured cost
+**Why all three tasks.** Their *ecosystem-specific* inputs are distinct
+(`moon.yml:57-119`), so a PR touching only `ts/packages/paigasus-sdk/.releaserc.json`
+selects `release-parity-ts` and neither sibling; one shared control would leave that PR
+uncontrolled. The input sets are **not** disjoint overall — all three also list
+`ci/release-parity/**/*` and `.prototools`, and that shared entry is what makes an edit
+under `ci/release-parity/` schedule all three at once. Net measured cost
 +890ms/+733ms/+1111ms (~20% each). Note the control's per-ecosystem code path is a strict
 *subset* of the real run's — the argument is affectedness and symmetry, not extra
 adapter coverage.

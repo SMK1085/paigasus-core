@@ -238,7 +238,8 @@ SELF_SCHEDULED_GATES = {
         "python3 ci/affected-graph/task_inputs.py",
     ),
     # SMA-530. Three sibling tasks over one script, each with its own control: their inputs
-    # are DISJOINT (moon.yml:61-89), so a PR touching only ts/packages/paigasus-sdk/
+    # ECOSYSTEM-SPECIFIC inputs are distinct (moon.yml:61-89) — they still share
+    # ci/release-parity/**/* and .prototools — so a PR touching only ts/packages/paigasus-sdk/
     # .releaserc.json selects release-parity-ts and neither sibling — one shared control
     # would leave that PR running a parity gate with nothing proving it can report red.
     # Measured net cost +890ms/+733ms/+1111ms per task (~20%).
@@ -375,7 +376,8 @@ In `moon.yml`, replace the three one-line `script:` values. `release-parity` (`:
     # passing real run. run.sh's own `set -euo pipefail` governs its body, not this block.
     # Same trap repo:promtool, repo:nats-permissions and repo:publish-metadata document.
     #
-    # All three sibling tasks carry their own control because their inputs are DISJOINT: a
+    # All three sibling tasks carry their own control because their ECOSYSTEM-SPECIFIC
+    # inputs are distinct (they still share ci/release-parity/**/* and .prototools): a
     # PR touching only ts/packages/paigasus-sdk/.releaserc.json selects release-parity-ts
     # alone. Net cost measured at +890ms/+733ms/+1111ms (~20% each). These three lines are
     # pinned by SELF_SCHEDULED_GATES in ci/affected-graph/ci_targets.py — edit them and that
@@ -397,7 +399,8 @@ In `moon.yml`, replace the three one-line `script:` values. `release-parity` (`:
 
 ```yaml
     # Negative control FIRST — see repo:release-parity above for the full reasoning; this
-    # task carries its own because the three tasks' inputs are disjoint (SMA-530).
+    # task carries its own because the three tasks' ECOSYSTEM-SPECIFIC inputs are distinct
+    # (they still share ci/release-parity/**/* and .prototools) (SMA-530).
     script: |
       set -euo pipefail
       ci/release-parity/run.sh --ecosystem python-semantic-release --negative-control
@@ -408,7 +411,8 @@ In `moon.yml`, replace the three one-line `script:` values. `release-parity` (`:
 
 ```yaml
     # Negative control FIRST — see repo:release-parity above for the full reasoning; this
-    # task carries its own because the three tasks' inputs are disjoint (SMA-530).
+    # task carries its own because the three tasks' ECOSYSTEM-SPECIFIC inputs are distinct
+    # (they still share ci/release-parity/**/* and .prototools) (SMA-530).
     script: |
       set -euo pipefail
       ci/release-parity/run.sh --ecosystem semantic-release --negative-control
@@ -487,7 +491,16 @@ After `ACTIONLINT_SH_CALL_SITES` in `ci/affected-graph/ci_targets.py`:
 # that give the control its verdict AND its exit status, and a substring match on the message
 # text alone would survive `exit 0`/`exit 1` being swapped or dropped.
 RELEASE_PARITY_SH_CALL_SITES = (
+    # Pin the PARSE, the GUARD and the ASSERTION, not just the block. Two bypasses were
+    # measured against a guard-plus-report-arms-only pin: neutering the parse
+    # (`--negative-control) shift ;;`) leaves NEGATIVE at 0 so the invocation falls through
+    # to the real five-case suite at rc 0; replacing the check_case call with a literal
+    # `ec=1` exits inside the control branch printing "negative-control OK" without ever
+    # invoking the harness. Pinning the assertion couples this to the fixture case id and
+    # the 0.1.1 expectation — the accepted cost, recorded as L4.
+    '--negative-control) NEGATIVE=1; shift ;;',
     'if [ "$NEGATIVE" = 1 ]; then',
+    'ec=0; check_case "neg-fix-bang" "fix!: deliberately wrong" "-" "0.1.1" || ec=$?',
     '1) echo "negative-control OK: harness reported red as expected"; exit 0 ;;',
     '0) echo "negative-control FAILED: harness accepted a wrong expectation" >&2; exit 1 ;;',
 )
@@ -786,7 +799,8 @@ matters.
 block's status is its LAST command's: without it a failing control is masked by the
 passing real run. `run.sh`'s own `set -euo pipefail` governs its body, not the Moon block.
 
-**Why all three tasks.** Their inputs are disjoint (`moon.yml:61-89`), so a PR touching
+**Why all three tasks.** Their *ecosystem-specific* inputs are distinct — they still share
+`ci/release-parity/**/*` and `.prototools` — so a PR touching
 only `ts/packages/paigasus-sdk/.releaserc.json` selects `release-parity-ts` and neither
 sibling; one shared control would leave that PR uncontrolled. Net measured cost
 +890ms/+733ms/+1111ms (~20% each). Note the control's per-ecosystem code path is a strict
@@ -850,7 +864,8 @@ Add after the existing `repo:actionlint`/`repo:affected-smoke` guard-each-other 
 ```markdown
 - All three `repo:release-parity*` tasks run `ci/release-parity/run.sh --negative-control`
   before their real run, under an explicit `set -euo pipefail` (SMA-530). Each carries its
-  own control because their `inputs` are disjoint — a PR touching only a `.releaserc.json`
+  own control because their *ecosystem-specific* `inputs` are distinct (they still share
+  `ci/release-parity/**/*`) — a PR touching only a `.releaserc.json`
   selects `-ts` alone. Two pins guard it, both living in `ci/affected-graph/ci_targets.py`
   and both running inside `repo:affected-smoke`: `SELF_SCHEDULED_GATES` pins the nine
   `moon.yml` lines (byte-exact whole lines — reordering a flag or adding a trailing comment

@@ -232,10 +232,13 @@ SELF_SCHEDULED_GATES = {
         "python3 ci/affected-graph/task_inputs.py --self-test",
         "python3 ci/affected-graph/task_inputs.py",
     ),
-    # SMA-530. Three sibling tasks over one script, each with its own control: their inputs
-    # are DISJOINT (moon.yml:81-85, 96-101, 112-119), so a PR touching only ts/packages/paigasus-sdk/
-    # .releaserc.json selects release-parity-ts and neither sibling — one shared control
-    # would leave that PR running a parity gate with nothing proving it can report red.
+    # SMA-530. Three sibling tasks over one script, each with its own control: their
+    # ECOSYSTEM-SPECIFIC inputs are distinct (moon.yml:81-85, 96-101, 112-119), so a PR
+    # touching only ts/packages/paigasus-sdk/.releaserc.json selects release-parity-ts and
+    # neither sibling — one shared control would leave that PR running a parity gate with
+    # nothing proving it can report red. The input sets are NOT disjoint overall: all three
+    # also list ci/release-parity/**/* and .prototools, which is why an edit under
+    # ci/release-parity/ schedules all three.
     # Measured net cost +890ms/+733ms/+1111ms per task (~20%).
     #
     # WHOLE-LINE matched, and that is load-bearing in one direction here: the real-run line

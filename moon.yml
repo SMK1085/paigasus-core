@@ -68,9 +68,12 @@ tasks:
     # passing real run. run.sh's own `set -euo pipefail` governs its body, not this block.
     # Same trap repo:promtool, repo:nats-permissions and repo:publish-metadata document.
     #
-    # All three sibling tasks carry their own control because their inputs are DISJOINT: a
-    # PR touching only ts/packages/paigasus-sdk/.releaserc.json selects release-parity-ts
-    # alone. Net cost measured at +890ms/+733ms/+1111ms (~20% each). These three lines are
+    # All three sibling tasks carry their own control because their ECOSYSTEM-SPECIFIC
+    # inputs are distinct: a PR touching only ts/packages/paigasus-sdk/.releaserc.json
+    # selects release-parity-ts alone. They are not disjoint overall — all three also share
+    # ci/release-parity/**/* and .prototools, and that sharing is load-bearing in the other
+    # direction: it is what makes a ci/release-parity/ edit schedule all three at once.
+    # Net cost measured at +890ms/+733ms/+1111ms (~20% each). These three lines are
     # pinned by SELF_SCHEDULED_GATES in ci/affected-graph/ci_targets.py — edit them and that
     # gate reds until the constant agrees.
     script: |
@@ -87,7 +90,8 @@ tasks:
   release-parity-py:
     description: 'Dry-run python-semantic-release over synthetic commits; assert commit->semver parity (SMA-405).'
     # Negative control FIRST — see repo:release-parity above for the full reasoning; this
-    # task carries its own because the three tasks' inputs are disjoint (SMA-530).
+    # task carries its own because the three tasks' ECOSYSTEM-SPECIFIC inputs are distinct
+    # (they still share ci/release-parity/**/* and .prototools) (SMA-530).
     script: |
       set -euo pipefail
       ci/release-parity/run.sh --ecosystem python-semantic-release --negative-control
@@ -103,7 +107,8 @@ tasks:
   release-parity-ts:
     description: 'Dry-run semantic-release over synthetic commits; assert commit->semver parity + documented 0.x divergence (SMA-406).'
     # Negative control FIRST — see repo:release-parity above for the full reasoning; this
-    # task carries its own because the three tasks' inputs are disjoint (SMA-530).
+    # task carries its own because the three tasks' ECOSYSTEM-SPECIFIC inputs are distinct
+    # (they still share ci/release-parity/**/* and .prototools) (SMA-530).
     script: |
       set -euo pipefail
       ci/release-parity/run.sh --ecosystem semantic-release --negative-control

@@ -238,8 +238,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   bounded shape as the `T`-array cycle above).
 - All three `repo:release-parity*` tasks run `ci/release-parity/run.sh --negative-control`
   before their real run, under an explicit `set -euo pipefail` (SMA-530). Each carries its
-  own control because their `inputs` are disjoint — a PR touching only a `.releaserc.json`
-  selects `-ts` alone. Two pins guard it, both living in `ci/affected-graph/ci_targets.py`
+  own control because their *ecosystem-specific* `inputs` are distinct — a PR touching only
+  a `.releaserc.json` selects `-ts` alone. They are not disjoint overall: all three also
+  list `ci/release-parity/**/*` and `.prototools`, so an edit there schedules all three. Two pins guard it, both living in `ci/affected-graph/ci_targets.py`
   and both running inside `repo:affected-smoke`: `SELF_SCHEDULED_GATES` pins the nine
   `moon.yml` lines (whole lines, compared after stripping — reordering a flag or adding a
   trailing comment still reds it), and `RELEASE_PARITY_SH_CALL_SITES` pins five discrete
