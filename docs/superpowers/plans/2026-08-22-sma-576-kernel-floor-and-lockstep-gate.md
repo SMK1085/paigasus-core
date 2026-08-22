@@ -465,7 +465,7 @@ bash ci/version-lockstep/run.sh --negative-control
 ```
 Expected: exit `1`, `negative control: a drifted site was ACCEPTED`.
 
-**Then revert the edit via `git checkout -- ci/version-lockstep/run.sh` and re-apply the file, or undo by hand — do NOT restore from a `.bak`, which rolls mtime backwards.**
+**Then undo the neutering by re-editing `site_verdict` back to its Task 1 body.** Do **NOT** run `git checkout -- ci/version-lockstep/run.sh`: this task's negative-control work is still uncommitted and that command would discard it. Do not restore from a `.bak` either — that rolls mtime backwards.
 
 - [ ] **Step 4: Re-run both modes to confirm the revert**
 
