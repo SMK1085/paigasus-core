@@ -598,7 +598,9 @@ class DeadLetterEntry(betterproto2.Message):
     """
     ─────────────────────────────────────────────────────────────────────────
     Outbox dead letters (SMA-501), mirroring /v1/outbox/dead-letters.
-    Every RPC here is Root-only, enforced inside DeadLetterService itself.
+    Every RPC here is Root-only, enforced server-side in the IAM service's
+    application layer: nothing about a dead letter's contents reaches a
+    non-Root caller.
 
     A caveat for the time filters, not a bug: a row with parked_at unset can
     never satisfy parked_from/parked_to, because Postgres never evaluates a
@@ -1864,10 +1866,11 @@ class ServiceInfo(betterproto2.Message):
     IAM v1 wire model.
 
     Hosts the tenancy hierarchy — `TenancyService` (M1) — authentication
-    introspection — `AuthnService` (M2) — authorization/policy administration
-    — `AuthorizationService` (M3) — machine identities — `ServiceAccountService`
-    — audit log access — `AuditService` — user creation — `UserService`
-    (SMA-501) — and outbox dead-letter operations — `OutboxService` (SMA-501).
+    introspection — `AuthnService` (M2) — authorization/policy administration,
+    now including system-policy retirement (SMA-501) — `AuthorizationService`
+    (M3) — machine identities — `ServiceAccountService` — audit log access —
+    `AuditService` — user creation — `UserService` (SMA-501) — and outbox
+    dead-letter operations — `OutboxService` (SMA-501).
     `ServiceInfoService` (ADR-0020) lives in `common/v1`, not here.
 
     AuthorizationService's originally-planned Introspect rpc is not duplicated
@@ -2118,6 +2121,28 @@ class AuthorizationServiceStub(betterproto2_grpclib.ServiceStub):
             "/paigasus.iam.v1.AuthorizationService/ListRoleGrants",
             message,
             ListRoleGrantsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def retire_system_policy(
+        self,
+        message: "RetireSystemPolicyRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "RetireSystemPolicyResponse":
+        """
+        Root-only, and additionally gated on the iam.authz.cedar capability,
+        mirroring the HTTP route's placement behind caps.authz_admin.
+        """
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuthorizationService/RetireSystemPolicy",
+            message,
+            RetireSystemPolicyResponse,
             timeout=timeout,
             deadline=deadline,
             metadata=metadata,

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `AuthzGrpc`: the `AuthorizationService` gRPC server (7 RPCs, SMA-444 Task 19) — a thin
+//! `AuthzGrpc`: the `AuthorizationService` gRPC server (7 RPCs from SMA-444 Task 19, plus
+//! `RetireSystemPolicy` from SMA-501) — a thin
 //! adapter over the same `AppState.authorize`/`policies`/`roles` use cases the HTTP
 //! `/v1/authz/*` surface (`adapters::http::authz`) drives: parse the wire request -> call the
 //! application service with the bearer-resolved actor -> convert the result, no business
@@ -31,7 +32,7 @@ use paigasus_observability::record_grpc;
 use paigasus_proto::paigasus::iam::v1::authorization_service_server::AuthorizationService;
 use paigasus_proto::paigasus::iam::v1::{
     DeletePolicyRequest, DeletePolicyResponse, GrantRoleRequest, GrantRoleResponse, IsAuthorizedRequest, IsAuthorizedResponse, ListPoliciesRequest, ListPoliciesResponse, ListRoleGrantsRequest,
-    ListRoleGrantsResponse, PutPolicyRequest, PutPolicyResponse, RevokeRoleRequest, RevokeRoleResponse,
+    ListRoleGrantsResponse, PutPolicyRequest, PutPolicyResponse, RetireSystemPolicyRequest, RetireSystemPolicyResponse, RevokeRoleRequest, RevokeRoleResponse,
 };
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -239,6 +240,39 @@ impl AuthorizationService for AuthzGrpc {
         }
         .await;
         record_grpc("Authorization", "ListRoleGrants", started, &result);
+        result
+    }
+
+    /// `RetireSystemPolicy`: Root-only (enforced inside `SystemRetirementService::retire`), and
+    /// additionally gated on `iam.authz.cedar` — mirroring HTTP, where
+    /// `system_retirement::router()` is merged only under `caps.authz_admin`.
+    ///
+    /// **All three outcomes return `OK`**, discriminated by the response `oneof`: the two
+    /// refusals are outcomes that are not `Retired`, not server errors (design D3, and the same
+    /// argument `http::system_retirement`'s module doc makes). This DIVERGES from HTTP, which
+    /// answers both refusals with a 409 carrying a registry error code — the payload fields are
+    /// identical, the status is not. A consequence worth knowing: `record_grpc` labels a
+    /// refusal `grpc_status="ok"`, so refusals do not feed the gRPC error-rate alert.
+    ///
+    /// The outcome -> response mapping lives in `convert::to_proto_retire_response`, a free
+    /// function over an owned `RetireOutcome`, so every variant stays testable without an
+    /// `AppState` — see its doc for the regression that made that necessary.
+    async fn retire_system_policy(&self, request: Request<RetireSystemPolicyRequest>) -> Result<Response<RetireSystemPolicyResponse>, Status> {
+        require_authz_admin(&self.state)?;
+        let started = Instant::now();
+        let result: Result<Response<RetireSystemPolicyResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            let req = request.into_inner();
+            let outcome = self
+                .state
+                .retirement
+                .retire(&actor, &req.policy_id, req.acknowledge_decision_change)
+                .await
+                .map_err(convert::status_to_grpc)?;
+            Ok(Response::new(convert::to_proto_retire_response(outcome)))
+        }
+        .await;
+        record_grpc("Authorization", "RetireSystemPolicy", started, &result);
         result
     }
 }

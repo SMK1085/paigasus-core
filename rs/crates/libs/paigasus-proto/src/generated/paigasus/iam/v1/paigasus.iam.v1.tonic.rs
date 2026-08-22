@@ -2536,6 +2536,35 @@ pub mod authorization_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn retire_system_policy(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RetireSystemPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RetireSystemPolicyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.AuthorizationService/RetireSystemPolicy",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.AuthorizationService",
+                        "RetireSystemPolicy",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -2598,6 +2627,13 @@ pub mod authorization_service_server {
             request: tonic::Request<super::ListRoleGrantsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ListRoleGrantsResponse>,
+            tonic::Status,
+        >;
+        async fn retire_system_policy(
+            &self,
+            request: tonic::Request<super::RetireSystemPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RetireSystemPolicyResponse>,
             tonic::Status,
         >;
     }
@@ -3003,6 +3039,55 @@ pub mod authorization_service_server {
                     };
                     Box::pin(fut)
                 }
+                "/paigasus.iam.v1.AuthorizationService/RetireSystemPolicy" => {
+                    #[allow(non_camel_case_types)]
+                    struct RetireSystemPolicySvc<T: AuthorizationService>(pub Arc<T>);
+                    impl<
+                        T: AuthorizationService,
+                    > tonic::server::UnaryService<super::RetireSystemPolicyRequest>
+                    for RetireSystemPolicySvc<T> {
+                        type Response = super::RetireSystemPolicyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RetireSystemPolicyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AuthorizationService>::retire_system_policy(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RetireSystemPolicySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 _ => {
                     Box::pin(async move {
                         let mut response = http::Response::new(
@@ -3315,7 +3400,6 @@ pub mod service_account_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        ///
         pub async fn list_api_keys(
             &mut self,
             request: impl tonic::IntoRequest<super::ListApiKeysRequest>,
@@ -3408,7 +3492,6 @@ pub mod service_account_service_server {
             tonic::Response<super::RevokeApiKeyResponse>,
             tonic::Status,
         >;
-        ///
         async fn list_api_keys(
             &self,
             request: tonic::Request<super::ListApiKeysRequest>,

@@ -9,10 +9,11 @@ import "paigasus/common/v1/audit.proto";
 // IAM v1 wire model.
 //
 // Hosts the tenancy hierarchy — `TenancyService` (M1) — authentication
-// introspection — `AuthnService` (M2) — authorization/policy administration
-// — `AuthorizationService` (M3) — machine identities — `ServiceAccountService`
-// — audit log access — `AuditService` — user creation — `UserService`
-// (SMA-501) — and outbox dead-letter operations — `OutboxService` (SMA-501).
+// introspection — `AuthnService` (M2) — authorization/policy administration,
+// now including system-policy retirement (SMA-501) — `AuthorizationService`
+// (M3) — machine identities — `ServiceAccountService` — audit log access —
+// `AuditService` — user creation — `UserService` (SMA-501) — and outbox
+// dead-letter operations — `OutboxService` (SMA-501).
 // `ServiceInfoService` (ADR-0020) lives in `common/v1`, not here.
 //
 // AuthorizationService's originally-planned Introspect rpc is not duplicated
@@ -360,6 +361,9 @@ service AuthorizationService {
   rpc GrantRole(GrantRoleRequest) returns (GrantRoleResponse);
   rpc RevokeRole(RevokeRoleRequest) returns (RevokeRoleResponse);
   rpc ListRoleGrants(ListRoleGrantsRequest) returns (ListRoleGrantsResponse);
+  // Root-only, and additionally gated on the iam.authz.cedar capability,
+  // mirroring the HTTP route's placement behind caps.authz_admin.
+  rpc RetireSystemPolicy(RetireSystemPolicyRequest) returns (RetireSystemPolicyResponse);
 }
 
 // ServiceAccount is a machine identity: a principal PRN owned by exactly one
@@ -590,7 +594,9 @@ message RetireSystemPolicyResponse {
 
 // ─────────────────────────────────────────────────────────────────────────
 // Outbox dead letters (SMA-501), mirroring /v1/outbox/dead-letters.
-// Every RPC here is Root-only, enforced inside DeadLetterService itself.
+// Every RPC here is Root-only, enforced server-side in the IAM service's
+// application layer: nothing about a dead letter's contents reaches a
+// non-Root caller.
 //
 // A caveat for the time filters, not a bug: a row with parked_at unset can
 // never satisfy parked_from/parked_to, because Postgres never evaluates a
