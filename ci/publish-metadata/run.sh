@@ -606,6 +606,15 @@ main() {
 case "${1:-}" in
   '') main "$@" ;;
   --negative-control) negative_control ;;
-  -h|--help) echo "usage: run.sh [--negative-control] [-h|--help]"; exit 0 ;;
+  --check-categories-freshness)
+    exec python3 "$REPO_ROOT/ci/publish-metadata/categories.py" \
+      --check-freshness --snapshot "$SNAPSHOT" ;;
+  --refresh-categories)
+    exec python3 "$REPO_ROOT/ci/publish-metadata/categories.py" \
+      --refresh --snapshot "$SNAPSHOT" ;;
+  -h|--help)
+    echo "usage: run.sh [--negative-control | --check-categories-freshness |"
+    echo "               --refresh-categories | -h|--help]"
+    exit 0 ;;
   *) echo "unknown arg: $1" >&2; exit 2 ;;
 esac

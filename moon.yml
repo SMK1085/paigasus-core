@@ -477,6 +477,11 @@ tasks:
     # staleness ci/next-env/run.sh documents.
     inputs:
       - 'ci/publish-metadata/run.sh'
+      # security-scan.yml is an input because Check 4 ASSERTS ON IT: without this, the
+      # call-site pin would serve a cached pass on exactly the PR that deletes the job.
+      - 'ci/publish-metadata/categories.py'
+      - 'ci/publish-metadata/crates-io-categories.txt'
+      - '.github/workflows/security-scan.yml'
       - 'rs/Cargo.toml'
       - 'rs/Cargo.lock'
       - 'rs/crates/**/*'
