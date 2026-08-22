@@ -23,9 +23,9 @@ use paigasus_observability::{Retryable, current_ids};
 use paigasus_proto::error::IAM_DOMAIN;
 use paigasus_proto::paigasus::common::v1::{AuditMetadata, ErrorReason};
 use paigasus_proto::paigasus::iam::v1::{
-    ApiKey as ProtoApiKey, ApiKeyStatus as ProtoApiKeyStatus, IntrospectApiKeyResponse, IntrospectResponse, IssueApiKeyResponse, Membership, NodeStatus as ProtoNodeStatus,
-    Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RoleGrant as ProtoRoleGrant, RoleGrantRef as ProtoRoleGrantRef, ServiceAccount as ProtoServiceAccount,
-    Team as ProtoTeam,
+    ApiKey as ProtoApiKey, ApiKeyStatus as ProtoApiKeyStatus, DeadLetterEntry as ProtoDeadLetterEntry, IntrospectApiKeyResponse, IntrospectResponse, IssueApiKeyResponse, Membership,
+    NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RoleGrant as ProtoRoleGrant, RoleGrantRef as ProtoRoleGrantRef,
+    ServiceAccount as ProtoServiceAccount, Team as ProtoTeam,
 };
 use tonic::{Code, Status};
 use tonic_types::{ErrorDetails, StatusExt};
@@ -429,6 +429,28 @@ pub fn to_introspect_api_key_response(ctx: &PrincipalContext) -> IntrospectApiKe
     }
 }
 
+/// Projects a domain [`DeadLetterEntry`] into its wire message. `id`/`correlation_id` become
+/// canonical uuid strings, `actor_prn`/`correlation_id`/`last_error` collapse `None` to the
+/// empty-string sentinel the proto documents, and an unparked row carries an ABSENT
+/// `parked_at` rather than an epoch timestamp. Mirrors `http::dto::DeadLetterEntryDto`'s
+/// `From` impl field-for-field — the two are pinned together by
+/// `dead_letter_entry_projects_identically_for_http_and_grpc`.
+pub fn to_proto_dead_letter_entry(e: &paigasus_iam_core::DeadLetterEntry) -> ProtoDeadLetterEntry {
+    ProtoDeadLetterEntry {
+        id: e.id.to_string(),
+        occurred_at: Some(ts(e.occurred_at)),
+        event_type: e.event_type.clone(),
+        schema_version: e.schema_version,
+        aggregate_prn: e.aggregate_prn.clone(),
+        actor_prn: e.actor_prn.clone().unwrap_or_default(),
+        payload: e.payload.clone(),
+        correlation_id: e.correlation_id.map(|id| id.to_string()).unwrap_or_default(),
+        attempts: e.attempts,
+        parked_at: e.parked_at.map(ts),
+        last_error: e.last_error.clone().unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,5 +711,78 @@ mod tests {
             ),
             other => panic!("expected TenancyError::InvalidPrn, got {other:?}"),
         }
+    }
+
+    /// The HTTP/gRPC drift guard for the dead-letter surface (design D9.1), paired with
+    /// `http::dto`'s own projection. Both transports project the SAME domain value, so feeding one
+    /// `DeadLetterEntry` through both and comparing field-for-field is the only cheap, deterministic
+    /// way to catch one of them drifting. Deliberately exercises the `None` half of every optional
+    /// field, since the empty-string / absent-timestamp sentinel mapping is where the two shapes
+    /// differ in TYPE and so is where they are most likely to diverge in MEANING.
+    #[test]
+    fn dead_letter_entry_projects_identically_for_http_and_grpc() {
+        use crate::adapters::http::dto::DeadLetterEntryDto;
+
+        let occurred = DateTime::parse_from_rfc3339("2026-08-01T10:00:00Z").unwrap().with_timezone(&Utc);
+        let parked = DateTime::parse_from_rfc3339("2026-08-01T11:00:00Z").unwrap().with_timezone(&Utc);
+        let domain = paigasus_iam_core::DeadLetterEntry {
+            id: Uuid::from_u128(7),
+            occurred_at: occurred,
+            event_type: "iam.principal.created".to_string(),
+            schema_version: 3,
+            aggregate_prn: "prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000042".to_string(),
+            actor_prn: None,
+            payload: r#"{"principal_id":"x"}"#.to_string(),
+            correlation_id: None,
+            attempts: 5,
+            parked_at: Some(parked),
+            last_error: None,
+        };
+
+        let http = DeadLetterEntryDto::from(domain.clone());
+        let grpc = to_proto_dead_letter_entry(&domain);
+
+        assert_eq!(grpc.id, http.id.to_string());
+        assert_eq!(grpc.occurred_at, Some(ts(http.occurred_at)));
+        assert_eq!(grpc.event_type, http.event_type);
+        assert_eq!(grpc.schema_version, http.schema_version);
+        assert_eq!(grpc.aggregate_prn, http.aggregate_prn);
+        assert_eq!(grpc.attempts, http.attempts);
+        assert_eq!(grpc.parked_at, http.parked_at.map(ts));
+        // The sentinel half: HTTP keeps `None`, the wire uses "".
+        assert_eq!(http.actor_prn, None);
+        assert_eq!(grpc.actor_prn, "");
+        assert_eq!(http.correlation_id, None);
+        assert_eq!(grpc.correlation_id, "");
+        assert_eq!(http.last_error, None);
+        assert_eq!(grpc.last_error, "");
+        assert_eq!(grpc.payload, http.payload);
+    }
+
+    /// The `Some` half, asserted separately so a projection that hardcoded the empty-string
+    /// sentinel — passing the test above — still fails here.
+    #[test]
+    fn dead_letter_entry_forwards_present_optional_fields_verbatim() {
+        let occurred = DateTime::parse_from_rfc3339("2026-08-01T10:00:00Z").unwrap().with_timezone(&Utc);
+        let correlation = Uuid::from_u128(99);
+        let domain = paigasus_iam_core::DeadLetterEntry {
+            id: Uuid::from_u128(7),
+            occurred_at: occurred,
+            event_type: "iam.principal.created".to_string(),
+            schema_version: 3,
+            aggregate_prn: "prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000042".to_string(),
+            actor_prn: Some("prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000001".to_string()),
+            payload: "{}".to_string(),
+            correlation_id: Some(correlation),
+            attempts: 1,
+            parked_at: None,
+            last_error: Some("connection refused".to_string()),
+        };
+
+        let grpc = to_proto_dead_letter_entry(&domain);
+        assert_eq!(grpc.actor_prn, domain.actor_prn.clone().unwrap());
+        assert_eq!(grpc.correlation_id, correlation.to_string());
+        assert_eq!(grpc.last_error, "connection refused");
+        assert_eq!(grpc.parked_at, None, "an unparked row must carry an ABSENT timestamp, not epoch");
     }
 }
