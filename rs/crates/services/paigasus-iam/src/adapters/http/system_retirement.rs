@@ -532,4 +532,41 @@ mod tests {
         assert_eq!(grpc.kind, http["kind"].as_str().unwrap());
         assert_eq!(grpc.role_deleted, http["role_deleted"].as_bool().unwrap());
     }
+
+    /// The third variant, completing D9.1's "all three `RetireOutcome` variants into both"
+    /// requirement. It is the one worth pairing most: like `Blocked`, it carries a gRPC-only
+    /// field (`policy_id`, which HTTP has only inside `error.message` prose), so without a
+    /// paired assertion the allowlisted divergence could drift on either side unnoticed. The
+    /// preview fields are the substance — a static policy's refusal doubles as the operator's
+    /// preview of what retiring it would destroy, so `source` and `description` reaching the
+    /// wire intact is the whole point of refusing with a body rather than an empty status.
+    #[tokio::test]
+    async fn a_needs_acknowledgement_outcome_projects_consistently_across_http_and_grpc() {
+        use crate::adapters::grpc::convert;
+        use paigasus_proto::paigasus::iam::v1::retire_system_policy_response::Outcome;
+
+        let outcome = RetireOutcome::NeedsAcknowledgement {
+            policy_id: "legacy_forbid".to_string(),
+            kind: PolicyKind::Static,
+            source: "permit(principal, action, resource);".to_string(),
+            description: "an orphaned starter policy".to_string(),
+        };
+
+        let http_response = response_for(outcome.clone());
+        assert_eq!(http_response.status(), StatusCode::CONFLICT, "the HTTP twin refuses with 409");
+        let bytes = to_bytes(http_response.into_body(), usize::MAX).await.unwrap();
+        let http: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let Some(Outcome::NeedsAcknowledgement(grpc)) = convert::to_proto_retire_response(outcome).outcome else {
+            panic!("gRPC must map a NeedsAcknowledgement outcome to the NeedsAcknowledgement variant");
+        };
+        assert_eq!(grpc.kind, http["kind"].as_str().unwrap());
+        assert_eq!(grpc.source, http["source"].as_str().unwrap());
+        assert_eq!(grpc.description, http["description"].as_str().unwrap());
+
+        // The allowlisted divergences (design D6), asserted so they stay DELIBERATE.
+        assert_eq!(grpc.policy_id, "legacy_forbid", "gRPC-only field");
+        assert!(http.get("policy_id").is_none(), "HTTP carries policy_id only in the message prose");
+        assert!(http["error"]["code"].is_string(), "HTTP-only field");
+    }
 }

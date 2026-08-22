@@ -204,6 +204,12 @@ message DiscardDeadLetterResponse {
 // ReplayDeadLetter while replaying up to 10000 rows instead of one, on a
 // destructive operator surface, with no lint rule that would catch the
 // typo. Matches the BulkReplayRequest type it maps onto.
+// NOTE: what shipped also carries the partial-failure contract this block
+// omits — bulk replay is NOT atomic, so a DEADLINE_EXCEEDED or cancelled RPC
+// may leave an unknown number of rows already replayed, and re-issuing is
+// safe because every replay statement carries `AND parked = true`, so an
+// already-replayed row no longer matches. Added in the final fix wave; see
+// the shipped `contracts/proto/paigasus/iam/v1/iam.proto`.
 message BulkReplayDeadLettersRequest {
   string event_type = 1;
   google.protobuf.Timestamp parked_from = 2;
@@ -902,6 +908,18 @@ mod tests {
         assert_eq!(opt_string(String::new()), None);
         assert_eq!(opt_string("de-DE".to_string()), Some("de-DE".to_string()));
     }
+
+    // ⚠️ SUPERSEDED DURING IMPLEMENTATION — do not copy the test below.
+    //
+    // As written here it is VACUOUS: it builds the "HTTP side" as a hand-written struct literal
+    // rather than running the real projection, so every value it compares is one the test just
+    // wrote, and one assertion compares a value to itself. Mutating the real HTTP mapping to
+    // `locale: None` leaves it green. The final whole-branch review caught this.
+    //
+    // What shipped instead: `http::users::to_command` was extracted as a pure function so BOTH
+    // sides of the twin run production code, and the test lives in `http/users.rs` (it cannot
+    // live in `grpc/users.rs` — `mod users` is private inside `adapters::http`, so naming
+    // `http::users::to_command` from there is `E0603`). See `adapters/http/users.rs`.
 
     /// The HTTP/gRPC twin test for this surface (design D9.1), covering the ONE field where the
     /// two transports deliberately disagree (D11). Both build the same `NewUser` command, so
