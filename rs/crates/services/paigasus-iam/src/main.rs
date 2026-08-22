@@ -9,12 +9,12 @@ use std::time::Duration;
 use paigasus_iam::adapters::events::{NatsEventPublisher, OutboxRelay, TracingEventPublisher};
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::{AppState, serve_http};
-use paigasus_iam::adapters::persistence::{Migrator, OutboxRetentionPolicy, PgOutboxListener, PgOutboxMaintainer, PgPartitionMaintainer, RetentionPolicy};
+use paigasus_iam::adapters::persistence::migration_lock::{IMAGE_START_PERIOD_SECS, MIGRATION_BUDGET_SECS};
+use paigasus_iam::adapters::persistence::{OutboxRetentionPolicy, PgOutboxListener, PgOutboxMaintainer, PgPartitionMaintainer, RetentionPolicy, migrate_under_lock};
 use paigasus_iam::config::{IamConfig, PublisherBackend};
 use paigasus_iam_core::EventPublisher;
 use paigasus_observability::names;
 use sea_orm::Database;
-use sea_orm_migration::MigratorTrait;
 use tokio::task::JoinSet;
 
 /// Dispatch before any runtime is built. `healthcheck` is what the image's `HEALTHCHECK` runs:
@@ -106,7 +106,24 @@ async fn serve() -> anyhow::Result<()> {
     }
 
     let db = Database::connect(config.database_url.as_str()).await?;
-    Migrator::up(&db, None).await?;
+    // SMA-559: serialised against a concurrently starting replica by a transaction-scoped
+    // advisory lock. A waiter blocks here with NO listener bound — see the probe-budget note in
+    // docs/ops/RUNBOOK-containers.md, and SMA-571 for the bind-first fix that removes the
+    // coupling entirely.
+    if config.migration.lock_wait_secs + MIGRATION_BUDGET_SECS > IMAGE_START_PERIOD_SECS {
+        tracing::warn!(
+            lock_wait_secs = config.migration.lock_wait_secs,
+            start_period_secs = IMAGE_START_PERIOD_SECS,
+            "migration.lock_wait_secs plus the migration budget exceeds the container image's HEALTHCHECK start period — a waiting replica may be reported unhealthy before it finishes waiting"
+        );
+    }
+    let migration = migrate_under_lock(&db, config.migration.lock_wait()).await?;
+    tracing::info!(
+        waited = ?migration.waited,
+        polls = migration.polls,
+        migrations_applied = migration.migrations_applied,
+        "database migrations complete"
+    );
     // Built once and cloned into each server task below (a cheap handle-clone: every
     // per-aggregate service just wraps the same underlying connection pool, and the wired
     // authenticator's JWKS cache/single-flight state is `Arc`-shared) — HTTP and gRPC

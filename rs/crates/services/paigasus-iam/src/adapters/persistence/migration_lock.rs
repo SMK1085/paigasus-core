@@ -14,7 +14,12 @@
 //! see `AUDIT_PARTITION_LOCK_KEY` and spec §2.1. Do not read this module as licence to drop a
 //! hand-rolled advisory lock from a future migration.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement, TransactionTrait};
+use sea_orm_migration::MigratorTrait;
+
+use super::Migrator;
 
 /// Namespaces a whole migration RUN against another run. Must never collide with
 /// `AUDIT_PARTITION_LOCK_KEY` (5_580_467).
@@ -61,6 +66,135 @@ pub fn next_poll(elapsed: Duration, wait: Duration) -> Poll {
     }
     // Clamped, so the wait is honoured exactly rather than overshot by up to one interval.
     Poll::Retry(POLL_BACKOFF.min(remaining))
+}
+
+/// What a `migrate_under_lock` call actually did.
+///
+/// Returned rather than discarded because a `Result<(), _>` makes the wait unobservable: a test
+/// measuring wall clock around the call cannot tell "waited for the lock" from "ran the
+/// migration", so it would pass with the lock deleted. An advisory lock does not block DDL, so
+/// that is not a theoretical concern. `PgPartitionMaintainer::tick` returns a `MaintenanceReport`
+/// for the same reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationLockOutcome {
+    /// Time spent waiting for the lock, excluding the migration itself.
+    pub waited: Duration,
+    /// Failed acquisition attempts before the successful one. `0` = uncontended.
+    pub polls: u32,
+    /// Migrations actually applied. `0` on a warm boot.
+    pub migrations_applied: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MigrationLockError {
+    #[error(
+        "timed out after {waited:?} waiting for the migration advisory lock (key {key}); another \
+         replica may still be migrating, or a lock may be stranded by a hard-killed pod — see \
+         docs/ops/RUNBOOK-containers.md"
+    )]
+    Contended { waited: Duration, key: i64 },
+    #[error("database error while acquiring the migration advisory lock: {0}")]
+    Db(#[source] DbErr),
+    #[error("migration failed under the advisory lock: {0}")]
+    Migrate(#[source] DbErr),
+}
+
+/// How many migrations `seaql_migrations` records, or `0` when the table does not exist yet.
+///
+/// Two statements rather than one `COALESCE`: Postgres plans a whole statement up front, so a
+/// `SELECT count(*) FROM seaql_migrations` guarded by a subquery still fails on a fresh database
+/// where `Migrator::up`'s own `install()` has not run yet.
+async fn applied_count<C: ConnectionTrait>(db: &C) -> Result<u64, DbErr> {
+    let present = db
+        .query_one(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT to_regclass('public.seaql_migrations') IS NOT NULL AS present".to_string(),
+        ))
+        .await?
+        .and_then(|r| r.try_get::<bool>("", "present").ok())
+        .unwrap_or(false);
+    if !present {
+        return Ok(0);
+    }
+    let row = db
+        .query_one(Statement::from_string(DatabaseBackend::Postgres, "SELECT count(*)::bigint AS n FROM seaql_migrations".to_string()))
+        .await?;
+    Ok(row.and_then(|r| r.try_get::<i64>("", "n").ok()).unwrap_or(0).max(0) as u64)
+}
+
+/// Run `Migrator::up` under a transaction-scoped advisory lock, waiting up to `wait` to acquire it.
+///
+/// **Production code must never call `Migrator::up` bare.** There is exactly one production call
+/// site (`main.rs`) and this is it; the remaining call sites are integration tests that
+/// deliberately drive migrations step by step.
+///
+/// The loop is do-while: an attempt always happens before any give-up decision, so even the
+/// smallest legal `wait` still asks Postgres once.
+pub async fn migrate_under_lock(db: &DatabaseConnection, wait: Duration) -> Result<MigrationLockOutcome, MigrationLockError> {
+    let start = Instant::now();
+    let mut polls: u32 = 0;
+    let mut last_log = start;
+
+    loop {
+        // A failure here aborts boot rather than counting against the budget: it means the pool
+        // is unusable, which no amount of waiting fixes.
+        let txn = db.begin().await.map_err(MigrationLockError::Db)?;
+
+        let acquired = txn
+            .query_one(Statement::from_string(
+                DatabaseBackend::Postgres,
+                format!("SELECT pg_try_advisory_xact_lock({MIGRATION_LOCK_KEY}) AS locked"),
+            ))
+            .await
+            .map_err(MigrationLockError::Db)?
+            .and_then(|r| r.try_get::<bool>("", "locked").ok())
+            .unwrap_or(false);
+
+        if acquired {
+            let before = applied_count(&txn).await.map_err(MigrationLockError::Db)?;
+            // Rollback is EXPLICIT on every path we own. `DatabaseTransaction::Drop` calls
+            // `start_rollback().expect(..)`, which panics if the connection mutex is contended —
+            // turning a migration error into a panic in the composition root. (sea-orm-migration
+            // drops its own inner savepoint transaction on error; that residual is not ours.)
+            if let Err(e) = Migrator::up(&txn, None).await {
+                let _ = txn.rollback().await;
+                return Err(MigrationLockError::Migrate(e));
+            }
+            let after = applied_count(&txn).await.map_err(MigrationLockError::Db)?;
+            txn.commit().await.map_err(MigrationLockError::Db)?;
+            return Ok(MigrationLockOutcome {
+                waited: start.elapsed(),
+                polls,
+                migrations_applied: after.saturating_sub(before),
+            });
+        }
+
+        let _ = txn.rollback().await;
+
+        match next_poll(start.elapsed(), wait) {
+            Poll::GiveUp => {
+                let waited = start.elapsed();
+                // `main.rs` surfaces a boot error only through a bare `eprintln!`, which bypasses
+                // `paigasus_logging` — without this the structured pipeline gets the waiting
+                // lines and then silence at the moment that actually matters.
+                tracing::error!(?waited, polls, key = MIGRATION_LOCK_KEY, "gave up waiting for the migration advisory lock");
+                return Err(MigrationLockError::Contended { waited, key: MIGRATION_LOCK_KEY });
+            }
+            Poll::Retry(backoff) => {
+                if last_log.elapsed() >= LOG_THROTTLE || polls == 0 {
+                    tracing::info!(
+                        elapsed = ?start.elapsed(),
+                        remaining = ?wait.saturating_sub(start.elapsed()),
+                        key = MIGRATION_LOCK_KEY,
+                        "another replica is migrating; waiting for the migration advisory lock"
+                    );
+                    last_log = Instant::now();
+                }
+                polls = polls.saturating_add(1);
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
