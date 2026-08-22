@@ -1,0 +1,302 @@
+{
+  "cli_version": "0.10.2",
+  "checkpoint_id": "2f17001b19aa",
+  "session_id": "b9b99dc1-235a-4cbd-899a-f0194d3bde9f",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-22T14:44:36.843512Z",
+  "branch": "feature/sma-530-release-parity-negative-control",
+  "checkpoints_count": 11,
+  "save_step_count": 11,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "claude-opus-5[1m]",
+  "turn_id": "720a32de1764",
+  "checkpoint_transcript_start": 549,
+  "transcript_lines_at_start": 549,
+  "compact_transcript_start": 104,
+  "token_usage": {
+    "input_tokens": 92,
+    "cache_creation_tokens": 80434,
+    "cache_read_tokens": 14620613,
+    "output_tokens": 43524,
+    "api_call_count": 46,
+    "subagent_tokens": {
+      "input_tokens": 652,
+      "cache_creation_tokens": 1003873,
+      "cache_read_tokens": 29586309,
+      "output_tokens": 201846,
+      "api_call_count": 326
+    }
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "prompt-skill-claude-code-feature-pipeline-2026-08-22T08:29:56.050237Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "feature-pipeline"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "cfc65924d447",
+      "timestamp": "2026-08-22T08:29:56.050237Z",
+      "native": {
+        "command": "/feature-pipeline"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/feature-pipeline",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01FpzTzGni6LvbtwWxUi5EQX",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:brainstorming"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "720a32de1764",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 136,
+        "end": 137,
+        "entry_ids": [
+          "4d4ff9a0-62b0-42c9-a596-f5e82b310240"
+        ],
+        "tool_use_id": "toolu_01FpzTzGni6LvbtwWxUi5EQX"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01FpzTzGni6LvbtwWxUi5EQX"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:brainstorming",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_019RNXkEcH9HRo1fk1GX9418",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:writing-plans"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "720a32de1764",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 288,
+        "end": 289,
+        "entry_ids": [
+          "32a98c72-be4f-4e4c-adcf-62ccf7a428dc"
+        ],
+        "tool_use_id": "toolu_019RNXkEcH9HRo1fk1GX9418"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_019RNXkEcH9HRo1fk1GX9418"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:writing-plans",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_01Q9HJjoHRRHeL1UM8yK2PW3",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:subagent-driven-development"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "720a32de1764",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 343,
+        "end": 344,
+        "entry_ids": [
+          "34a74000-6128-4b57-8aa8-25db54de656a"
+        ],
+        "tool_use_id": "toolu_01Q9HJjoHRRHeL1UM8yK2PW3"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01Q9HJjoHRRHeL1UM8yK2PW3"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:subagent-driven-development",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "claude-skill-toolu_015KFqtabTxJog2p3rKpFu8C",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "feature-factory:local-review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "720a32de1764",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 799,
+        "end": 800,
+        "entry_ids": [
+          "4e33aa10-d444-4a48-897c-fdb39f3d5764"
+        ],
+        "tool_use_id": "toolu_015KFqtabTxJog2p3rKpFu8C"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_015KFqtabTxJog2p3rKpFu8C"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: feature-factory:local-review",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 22
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    },
+    {
+      "checkpoint_number": 6,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    },
+    {
+      "checkpoint_number": 7,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    },
+    {
+      "checkpoint_number": 8,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    },
+    {
+      "checkpoint_number": 9,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    },
+    {
+      "checkpoint_number": 10,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    },
+    {
+      "checkpoint_number": 11,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    },
+    {
+      "checkpoint_number": 12,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    }
+  ]
+}

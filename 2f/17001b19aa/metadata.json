@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.10.2",
+  "checkpoint_id": "2f17001b19aa",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-530-release-parity-negative-control",
+  "checkpoints_count": 11,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/2f/17001b19aa/0/metadata.json",
+      "transcript": "/2f/17001b19aa/0/full.jsonl",
+      "compact_transcript": "/2f/17001b19aa/0/transcript.jsonl",
+      "content_hash": "/2f/17001b19aa/0/content_hash.txt",
+      "prompt": "/2f/17001b19aa/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 92,
+    "cache_creation_tokens": 80434,
+    "cache_read_tokens": 14620613,
+    "output_tokens": 43524,
+    "api_call_count": 46,
+    "subagent_tokens": {
+      "input_tokens": 652,
+      "cache_creation_tokens": 1003873,
+      "cache_read_tokens": 29586309,
+      "output_tokens": 201846,
+      "api_call_count": 326
+    }
+  }
+}
