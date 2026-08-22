@@ -1,9 +1,10 @@
 # SMA-407 — Release activation: `0.1.0` floor, kernel/proto lockstep, live release workflows
 
-**Status:** Designed (brainstorming 2026-08-22; **adversarial review incorporated 2026-08-22 — B1–B6, M1–M14**)
+**Status:** Approved (brainstorming 2026-08-22; **adversarial review incorporated — B1–B6, M1–M14**; **decomposition accepted 2026-08-22 — §12**)
 **Date:** 2026-08-22
-**Linear:** [SMA-407](https://linear.app/smaschek/issue/SMA-407/release-activation-000-010-floor-kernelproto-lockstep-wiring-live)
-**Branch:** `feature/sma-407-release-activation-000-010-floor-kernelproto-lockstep-wiring`
+**Linear:** umbrella [SMA-407](https://linear.app/smaschek/issue/SMA-407/release-activation-000-010-floor-kernelproto-lockstep-wiring-live) → children SMA-576 … SMA-580 (§12)
+**Implements here:** **SMA-576** only — the kernel-family floor, the lockstep gate, and the `release-pr` job.
+**Branch:** `feature/sma-576-release-activation-a-kernel-family-010-floor-repoversion`
 **Targets:** `main` (currently `14b8603`).
 **References:** ADR-0011 (S1 hybrid lockstep, S3 `0.1.0` floor + tool owns every tag, S4 dormant-until-real, S5 file-path attribution, S6 canonical contract); ADR-0005; ADR-0006; ADR-0010; ADR-0020 (service version skew); SMA-398; SMA-376; SMA-378; SMA-388; SMA-385; SMA-307; SMA-419 / SMA-427 / SMA-428; SMA-505 (R7 — service version parked on `0.0.0` "until E-activate"); SMA-529; SMA-541; SMA-553.
 
@@ -353,7 +354,7 @@ registries.
   > **SMA-530 is not on `main`.** The precedent stands; that citation did not.
 - **`repo:release-parity*` is unchanged** — nothing here alters classification.
 
-## 12. Recommendation: this issue must be decomposed
+## 12. Decomposition — accepted 2026-08-22
 
 The first draft assumed the gated scope was deliverable as one unit. The review shows it is not.
 Three findings are each a subsystem:
@@ -364,16 +365,21 @@ Three findings are each a subsystem:
 | The maturin wheel matrix (§7) — no matrix exists; comparable to SMA-428's napi work | a full issue |
 | The napi ↔ release-plz tagging boundary + `@paigasus/wasm` packaging (§7) | a full issue |
 
-**Proposed split:**
+**The split, as filed under SMA-407:**
 
-1. **SMA-407a — kernel-family floor + lockstep gate.** Sites 1–4, 7, 10–11, 13–18; `ci/version-lockstep`;
-   per-package release-plz settings (§8); the `release-pr` job with its App token. No publish.
-2. **SMA-407b — proto-family publishability.** §6 in full, plus the derive→proto ordering. Absorbs SMA-388.
-3. **SMA-407c — maturin wheel matrix.** §7's PyPI half.
-4. **SMA-407d — npm activation.** Tagging boundary, `@paigasus/wasm` packaging, the `release` job's npm path.
-5. **SMA-407e — flip the variable.** Pre-flight checklist (§10), then `PAIGASUS_RELEASE_ENABLED`.
+| Issue | Scope |
+| --- | --- |
+| **[SMA-576](https://linear.app/smaschek/issue/SMA-576)** — kernel-family floor + lockstep gate | Sites 1–4, 7, 10–11, 13–18; `ci/version-lockstep`; per-package release-plz settings (§8); the `release-pr` job with its App token. **No publish.** |
+| **[SMA-577](https://linear.app/smaschek/issue/SMA-577)** — proto-family publishability | §6 in full, plus the derive→proto ordering. Absorbs SMA-388. |
+| **[SMA-578](https://linear.app/smaschek/issue/SMA-578)** — maturin wheel matrix | §7's PyPI half. |
+| **[SMA-579](https://linear.app/smaschek/issue/SMA-579)** — npm activation | Tagging boundary, `@paigasus/wasm` packaging, the `release` job's npm path. |
+| **[SMA-580](https://linear.app/smaschek/issue/SMA-580)** — flip the variable | Pre-flight checklist (§10), then `PAIGASUS_RELEASE_ENABLED`. |
 
-Ordering: 1 → (2 ‖ 3 ‖ 4) → 5.
+Ordering: **576 → (577 ‖ 578 ‖ 579) → 580**, recorded as Linear blocking relations.
+
+**This document remains the umbrella design for all five.** Sections 6, 7's PyPI/npm halves, and 10's
+pre-flight are inputs to 577–580 and are deliberately *not* implemented by 576 — they are kept here
+rather than split across five documents so the activation is readable as one strategy.
 
 ## 13. Documentation
 
