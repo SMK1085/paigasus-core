@@ -152,6 +152,17 @@ def parse_snapshot(text: str, today: datetime.date) -> list[str]:
         raise SnapshotError(
             f"snapshot `# fetched:` is not an ISO date: {fetched_raw!r}"
         ) from exc
+    if fetched > today:
+        # A future date makes `age` negative, so the max-age comparison below would never
+        # fire — a hand-edited `# fetched: 2099-01-01` would silently and permanently
+        # disable the staleness bound, which is the exact failure class this gate exists
+        # to prevent. Rejected here, before that comparison, so a future date can never
+        # slip through as merely "not yet stale".
+        raise SnapshotError(
+            f"snapshot `# fetched:` date {fetched_raw} is in the future (today is "
+            f"{today.isoformat()}). The snapshot looks corrupt or hand-edited — "
+            "regenerate it with `ci/publish-metadata/run.sh --refresh-categories`."
+        )
     age = (today - fetched).days
     if age > MAX_SNAPSHOT_AGE_DAYS:
         raise SnapshotError(
@@ -381,6 +392,13 @@ def _self_test() -> int:
         ),
     )
     expect_snapshot_error(
+        "a fetched: date in the future (regression guard — a negative age must not read "
+        "as 'not yet stale')",
+        lambda: parse_snapshot(
+            body(good, fetched=(today + datetime.timedelta(days=1)).isoformat()), today
+        ),
+    )
+    expect_snapshot_error(
         "an uppercase character in a slug",
         lambda: parse_snapshot(body(["Data-Structures"]), today),
     )
@@ -547,7 +565,7 @@ def _self_test() -> int:
         ),
     )
 
-    expected_checks = 35
+    expected_checks = 36
     if checks != expected_checks:
         print(
             f"SELF-TEST COUNT CHANGED: ran {checks}, expected {expected_checks}. Update "

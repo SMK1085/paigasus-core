@@ -145,9 +145,12 @@ value for the same reason the existing three are: `--negative-control` drives th
 code with fixtures.
 
 For every publishable crate, each `categories` entry must appear in the snapshot, compared
-**exactly**. Entries are stripped of surrounding whitespace before comparison; a non-string
-entry is a repo error, not a crash. A miss appends to the existing `errors` list and
-therefore exits **1**, uniform with every other Check 1 rule:
+**exactly**. Surrounding whitespace is **not** normalized: an entry that differs from its
+stripped form is itself the error (`category {category!r} has surrounding whitespace`) and
+is never compared against the snapshot, rather than being silently trimmed into a match. A
+non-string entry is likewise a repo error, not a crash (`category {category!r} is not a
+string`). Either miss appends to the existing `errors` list and therefore exits **1**,
+uniform with every other Check 1 rule:
 
 ```
 paigasus-kernel: category 'data-structure' is not a crates.io category slug.
@@ -358,21 +361,27 @@ stops a CRLF checkout from redding every PR.
 
 ### 9. Moon wiring
 
-`inputs` gains **two literal paths**, and the existing `ci/publish-metadata/run.sh` literal
-stays:
+`inputs` gains **three literal paths** — the snapshot, the module that validates it, and the
+workflow Check 4 asserts on — and the existing `ci/publish-metadata/run.sh` literal stays:
 
 ```yaml
 - 'ci/publish-metadata/run.sh'
+- 'ci/publish-metadata/categories.py'
 - 'ci/publish-metadata/crates-io-categories.txt'
 - '.github/workflows/security-scan.yml'
 ```
+
+`categories.py` earns its place the same way the others do: without it as an input, Moon
+would serve a cached pass on a PR that changes only the validation logic, never re-running
+Check 1b or `--self-test` against the new code.
 
 An earlier draft widened this to the glob `ci/publish-metadata/**/*`. The challenge showed
 that trades a strong pin for a weak one: `ci/affected-graph/task_inputs.py` checks
 `inputFiles` for *exact tracked membership* but checks `inputGlobs` only for "matches ≥ 1
 tracked file" — which `run.sh` alone satisfies forever, so deleting the snapshot would stop
 redding `repo:input-liveness`. It also silently assumed wax collapses `**/` to zero
-components. Literal paths keep both files exactly pinned and make the wax question moot.
+components. Literal paths keep every one of these files exactly pinned and make the wax
+question moot.
 
 **No `T=(…)` or CLAUDE.md marker change**: `:publish-metadata` is already in the array and no
 new Moon target is added, so `repo:affected-smoke` is untouched.
