@@ -94,7 +94,7 @@ pub struct MigrationLockOutcome {
     /// Failed acquisition attempts before the successful one. `0` = uncontended.
     pub polls: u32,
     /// Migrations actually applied. `0` on a warm boot, which is the §3.2 second-runner path.
-    pub migrations_applied: usize,
+    pub migrations_applied: u64,
 }
 
 pub async fn migrate_under_lock(
