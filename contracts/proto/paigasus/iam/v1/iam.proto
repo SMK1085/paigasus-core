@@ -9,8 +9,11 @@ import "paigasus/common/v1/audit.proto";
 // IAM v1 wire model.
 //
 // Hosts the tenancy hierarchy — `TenancyService` (M1) — authentication
-// introspection — `AuthnService` (M2) — and authorization/policy
-// administration — `AuthorizationService` (M3).
+// introspection — `AuthnService` (M2) — authorization/policy administration
+// — `AuthorizationService` (M3) — machine identities — `ServiceAccountService`
+// — audit log access — `AuditService` — user creation — `UserService`
+// (SMA-501) — and outbox dead-letter operations — `OutboxService` (SMA-501).
+// `ServiceInfoService` (ADR-0020) lives in `common/v1`, not here.
 //
 // AuthorizationService's originally-planned Introspect rpc is not duplicated
 // there: it folds into AuthnService.Introspect below (spec D4).
@@ -494,4 +497,173 @@ message ListAuditEntriesResponse {
 
 service AuditService {
   rpc ListAuditEntries(ListAuditEntriesRequest) returns (ListAuditEntriesResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Users (SMA-501). CreateUser has NO per-action authorization — it requires
+// a bearer and nothing more, mirroring `POST /v1/users` exactly. That is a
+// deliberate parity decision, not an oversight: see the design doc's D0.
+// It lives on its own service rather than on TenancyService precisely so
+// that property is visible in the contract instead of hidden among 21
+// authorized RPCs.
+// ─────────────────────────────────────────────────────────────────────────
+message CreateUserRequest {
+  string email = 1;
+  string display_name = 2;
+  // Empty means unset. This DIVERGES from HTTP, where `{"locale": ""}`
+  // persists an empty string rather than NULL (design doc D11). The proto
+  // sentinel is normative for gRPC; HTTP is unchanged.
+  string locale = 3;
+  string timezone = 4;
+}
+message CreateUserResponse {
+  string principal_prn = 1;
+}
+
+service UserService {
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// System-policy retirement (SMA-501), mirroring
+// POST /v1/authz/system-policies/{id}/retire.
+// ─────────────────────────────────────────────────────────────────────────
+message RetireSystemPolicyRequest {
+  string policy_id = 1;
+  // Absent == false == "not acknowledged". The safe reading of an
+  // unspecified acknowledgement is "no", so the flag must be set
+  // deliberately to take effect.
+  bool acknowledge_decision_change = 2;
+}
+
+// One grant blocking a role retirement. Deliberately NOT the existing
+// RoleGrant: this mirrors the HTTP body's three fields exactly, and
+// role_key is carried once on RetirementBlocked rather than repeated.
+message SurvivingGrant {
+  string id = 1;
+  string principal_prn = 2;
+  string scope_prn = 3;
+}
+
+message RetiredPolicy {
+  string policy_id = 1;
+  string kind = 2; // "static" or "template"
+  bool role_deleted = 3;
+}
+
+// A refusal, not an error: nothing was written because grants of this role
+// survive and must be revoked first. `role_key` is a gRPC-only field — the
+// HTTP twin carries it only inside its error message prose (design D6).
+message RetirementBlocked {
+  string role_key = 1;
+  repeated SurvivingGrant grants = 2;
+  uint64 total_surviving = 3;
+  bool truncated = 4;
+}
+
+// A refusal, not an error: this is a STATIC policy, so removing it changes
+// decisions fleet-wide and the caller has not acknowledged that. Carries
+// what would be destroyed, so the refusal doubles as the operator's
+// preview. `policy_id` is a gRPC-only field (design D6).
+message RetirementNeedsAcknowledgement {
+  string policy_id = 1;
+  string kind = 2;
+  string source = 3;
+  string description = 4;
+}
+
+// All three outcomes return gRPC OK: the two refusals are outcomes that
+// are not Retired, never server errors (design D3). Two consequences a
+// client MUST handle:
+//   1. An UNSET `outcome` is a protocol error. Treat it as failure, never
+//      as a successful retirement.
+//   2. The HTTP twin answers the two refusals with 409 plus a registry
+//      error code; this response carries neither. The payload fields are
+//      the same, the status is not.
+message RetireSystemPolicyResponse {
+  oneof outcome {
+    RetiredPolicy retired = 1;
+    RetirementBlocked blocked = 2;
+    RetirementNeedsAcknowledgement needs_acknowledgement = 3;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Outbox dead letters (SMA-501), mirroring /v1/outbox/dead-letters.
+// Every RPC here is Root-only, enforced inside DeadLetterService itself.
+//
+// A caveat for the time filters, not a bug: a row with parked_at unset can
+// never satisfy parked_from/parked_to, because Postgres never evaluates a
+// NULL comparison as true. Such a row is invisible to ListDeadLetters
+// whenever either bound is set. It stays reachable via an unfiltered list.
+// ─────────────────────────────────────────────────────────────────────────
+message DeadLetterEntry {
+  string id = 1;
+  google.protobuf.Timestamp occurred_at = 2;
+  string event_type = 3;
+  int32 schema_version = 4;
+  string aggregate_prn = 5;
+  string actor_prn = 6; // empty => none
+  string payload = 7; // JSON-serialized string, like AuditEntry.detail_json
+  string correlation_id = 8; // empty => none
+  uint32 attempts = 9;
+  google.protobuf.Timestamp parked_at = 10; // absent => not parked
+  string last_error = 11; // empty => none
+}
+
+// Optional filters use absent/empty/zero sentinels, mirroring
+// ListAuditEntriesRequest. An ABSENT timestamp means unfiltered; a PRESENT
+// but unrepresentable one is INVALID_ARGUMENT and never silently
+// unfiltered (design D10).
+message ListDeadLettersRequest {
+  string event_type = 1;
+  google.protobuf.Timestamp parked_from = 2;
+  google.protobuf.Timestamp parked_to = 3;
+  string cursor = 4;
+  uint32 limit = 5; // 0 => server default; clamped to 200
+}
+message ListDeadLettersResponse {
+  repeated DeadLetterEntry entries = 1;
+  string next_cursor = 2; // set only when the page came back FULL
+}
+
+message ReplayDeadLetterRequest {
+  string id = 1;
+}
+message ReplayDeadLetterResponse {
+  DeadLetterEntry entry = 1;
+}
+message DiscardDeadLetterRequest {
+  string id = 1;
+}
+message DiscardDeadLetterResponse {
+  DeadLetterEntry entry = 1;
+}
+
+// Named BulkReplayDeadLetters, not ReplayDeadLetters: one character from
+// ReplayDeadLetter while replaying up to 10000 rows instead of one, on a
+// destructive operator surface, with no lint rule that would catch the
+// typo. Matches the BulkReplayRequest type it maps onto.
+message BulkReplayDeadLettersRequest {
+  string event_type = 1;
+  google.protobuf.Timestamp parked_from = 2;
+  google.protobuf.Timestamp parked_to = 3;
+  // 0 is rejected as invalid-bulk-replay before any store access, and an
+  // absent field collapses to 0, so "didn't say" and "said zero" are
+  // rejected identically — exactly HTTP's behavior. This is DELIBERATE.
+  // Do NOT "fix" it into an optional: the explicit row budget is the guard
+  // on blast radius and must never default to anything usable.
+  // Silently clamped to 10000, with no signal to the caller, on both
+  // transports.
+  uint64 max_rows = 4;
+}
+message BulkReplayDeadLettersResponse {
+  uint64 replayed = 1;
+}
+
+service OutboxService {
+  rpc ListDeadLetters(ListDeadLettersRequest) returns (ListDeadLettersResponse);
+  rpc ReplayDeadLetter(ReplayDeadLetterRequest) returns (ReplayDeadLetterResponse);
+  rpc BulkReplayDeadLetters(BulkReplayDeadLettersRequest) returns (BulkReplayDeadLettersResponse);
+  rpc DiscardDeadLetter(DiscardDeadLetterRequest) returns (DiscardDeadLetterResponse);
 }
