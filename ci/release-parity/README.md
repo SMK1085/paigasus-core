@@ -119,3 +119,68 @@ from the real `paigasus-sdk` **and** `paigasus-ui` `.releaserc.json`, and fails
 loudly if either adds a `releaseRules` clamp (the documented divergence would no
 longer hold) or if the two disagree. Both configs are task inputs, so editing
 either re-runs this check.
+
+## The negative control runs in CI (SMA-530)
+
+All three Moon tasks run `--negative-control` before the real suite, under an explicit
+`set -euo pipefail`:
+
+```yaml
+script: |
+  set -euo pipefail
+  ci/release-parity/run.sh --negative-control
+  ci/release-parity/run.sh
+```
+
+**Why the real run cannot substitute for it.** Change `run.sh:51` from
+`if [ "$got_a" = "$expected" ] && [ "$got_b" = "$BASELINE" ]` to
+`if [ "$got_b" = "$BASELINE" ]`. Slot `b` is at baseline in all five `cases.tsv` rows, so
+the real run prints `== all parity cases passed ==` and exits 0 — the gate is vacuous. The
+control reds. A gate that has lost the ability to report red is green exactly when it
+matters.
+
+**Why the pipefail line.** Moon does not enable errexit for `script:` blocks, so the
+block's status is its LAST command's: without it a failing control is masked by the
+passing real run. `run.sh`'s own `set -euo pipefail` governs its body, not the Moon block.
+
+**Why all three tasks.** Their inputs are disjoint (`moon.yml:57-119`), so a PR touching
+only `ts/packages/paigasus-sdk/.releaserc.json` selects `release-parity-ts` and neither
+sibling; one shared control would leave that PR uncontrolled. Net measured cost
++890ms/+733ms/+1111ms (~20% each). Note the control's per-ecosystem code path is a strict
+*subset* of the real run's — the argument is affectedness and symmetry, not extra
+adapter coverage.
+
+**What guards it.** `ci/affected-graph/ci_targets.py` pins the nine `moon.yml` lines
+(`SELF_SCHEDULED_GATES`) and five discrete lines inside `run.sh` itself
+(`RELEASE_PARITY_SH_CALL_SITES`: the flag parse `--negative-control) NEGATIVE=1; shift ;;`,
+the `if [ "$NEGATIVE" = 1 ]; then` guard, the assertion body `check_case "neg-fix-bang" …`,
+and both report arms — the `exit 0` on "reported red as expected" and the `exit 1` on
+"accepted a wrong expectation"), from inside `repo:affected-smoke` — a separately scheduled
+gate, so neither judges its own wiring. Five discrete lines, not one span, because pinning
+the block as a unit left two working bypasses: the flag-parse line or the `if` guard could
+each be deleted alone, silently turning `--negative-control` into a no-op that falls through
+to the real suite and exits 0. `repo:affected-smoke` lists `ci/release-parity/**/*` in its
+inputs to make this pin reachable.
+
+### Limitations
+
+- **L1 — `repo:affected-smoke`'s own `moon.yml` input is unpinned.** Every pin above
+  depends on `- 'moon.yml'` (`moon.yml:164`). Deleting that entry is itself a root
+  `moon.yml` edit, and afterwards the task's remaining globs do not match the root file
+  (`*/moon.yml` matches `rs/moon.yml`, not `moon.yml`; `.moon/**/*` does not match it), so
+  the removal PR would not schedule the gate. Pre-existing — the `input-liveness` pin
+  rests on the same entry — and closing it needs a *containment* variant of
+  `SELF_TASK_EXPECTED_GLOBS`, which is today an exact match.
+- **L2 — the task-script haystack strips both sides** (`ci_targets.py:783`), so an
+  indented copy inside `if false; then … fi` satisfies the pin. The column-0 rule that
+  rejects this for the actionlint haystack is unavailable here: Moon task scripts are
+  indented inside YAML. Separately, `set +e` inserted *after* the pipefail line satisfies
+  all three pins while re-opening the masking they exist to prevent.
+- **L3 — whole-line pins are brittle in the false-red direction.** Making the base task's
+  ecosystem explicit (`--ecosystem release-plz`), adding a trailing comment, or reordering
+  flags reds the gate although nothing is broken. Restore the exact line or update the
+  constant.
+- **L4 — the control's `0.1.1` is coupled to `cases.tsv`'s contract.** `run.sh:62-63`
+  hardcodes it as "deliberately wrong" for `fix!` in 0.x. Should the canonical contract
+  ever change so that value becomes correct, all three controls red spuriously and the
+  diagnosis is non-obvious.

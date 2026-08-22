@@ -121,10 +121,13 @@ It also runs several checks that the per-case project sets structurally **cannot
   make some other gate run at all — this gate's own invocation in `ci/affected-graph/run.sh`
   (`RUN_SH_CALL_SITES`, substring-matched, each already carrying its own `|| RC=1` propagation
   suffix); a self-scheduled gate's invocation inside its own `moon.yml` task script
-  (`SELF_SCHEDULED_GATES`, whole-line-matched — currently `repo:input-liveness`'s, SMA-553); and
-  `repo:actionlint`'s own self-test and mutation-battery calls inside `ci/actionlint/run.sh`
-  (`ACTIONLINT_SH_CALL_SITES`, whole-line-matched — SMA-542); **C5** every `moon ci` invocation in
-  `ci.yml` is handed the WHOLE array — C1-C4 assert what is *in* `T`, and a subsetted
+  (`SELF_SCHEDULED_GATES`, whole-line-matched — `repo:input-liveness`'s and the three
+  `repo:release-parity*`, SMA-553 / SMA-530); `repo:actionlint`'s own self-test and
+  mutation-battery calls inside `ci/actionlint/run.sh` (`ACTIONLINT_SH_CALL_SITES`,
+  whole-line-matched — SMA-542); and `ci/release-parity/run.sh`'s own `--negative-control`
+  block (`RELEASE_PARITY_SH_CALL_SITES`, whole-line-matched — SMA-530); **C5** every
+  `moon ci` invocation in `ci.yml` is handed the WHOLE array — C1-C4 assert what is *in*
+  `T`, and a subsetted
   `"${T[@]:0:5}"` leaves all four green while switching most of the graph off. C5's line matcher
   is deliberately BROADER than
   `assert_include_relations`' `moon ci +"` grep: mirroring it left both blind to a subsetted array
@@ -147,6 +150,12 @@ It also runs several checks that the per-case project sets structurally **cannot
   doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
   design doc's L3.
+
+  A script-pinned gate must also have its `inputs` pinned (`SELF_TASK_EXPECTED_GLOBS`) or
+  carry a reasoned `SELF_TASK_GLOBS_EXEMPT` entry; an exemption naming no script-pinned
+  gate, or one with a blank reason, is itself reported. The registries were equality-paired
+  until SMA-530 — a plain subset would have let `repo:affected-smoke` be script-pinned
+  later without pinning the inputs that make every pin in this file reachable.
 - **`task-inputs`** (`task_inputs.py`, SMA-553) asserts every `repo:*` task's declared `inputs`
   still match a tracked file — the layer below `ci-targets`, which proves only that a gate is
   *wired*. **I1** no glob matches zero tracked files; **I2** every file input is tracked, by exact
