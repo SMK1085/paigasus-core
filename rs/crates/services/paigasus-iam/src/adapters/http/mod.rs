@@ -44,7 +44,7 @@ use crate::adapters::authz::{
 };
 use crate::adapters::clock::SystemClock;
 use crate::adapters::id::KernelIdGenerator;
-use crate::adapters::oidc::jwks::{HttpJwksFetcher, InMemoryJwksCache, JwksProvider};
+use crate::adapters::oidc::jwks::{HttpJwksFetcher, IdpTls, InMemoryJwksCache, JwksProvider};
 use crate::adapters::oidc::redis_cache::RedisJwksCache;
 use crate::adapters::oidc::validator::OidcAuthenticator;
 use crate::adapters::persistence::{
@@ -69,7 +69,7 @@ use crate::application::roles::{RoleService, RoleServiceDeps};
 use crate::application::service_accounts::{ServiceAccountService, ServiceAccountServiceDeps};
 use crate::application::system_retirement::{SystemRetirementDeps, SystemRetirementService};
 use crate::application::teams::TeamService;
-use crate::config::{ApiKeyCacheBackend, AuthzCacheBackend, IamConfig, JwksCacheBackend, RedactedUrl};
+use crate::config::{ApiKeyCacheBackend, AuthnConfig, AuthzCacheBackend, IamConfig, JwksCacheBackend, RedactedUrl};
 use paigasus_iam_core::{
     ApiKeyRepository, AuditLog, AuditSink, DecisionCache, EntitySliceLoader, OrganizationRepository, Outbox, PolicyGenBumper, PolicyStore, ProjectRepository, RoleGrantStore, SystemPolicyReconciler,
     SystemRoleReconciler, TeamRepository, UnitOfWork,
@@ -665,7 +665,10 @@ impl AppState {
         if authn_cfg.accept_invalid_tls {
             tracing::warn!("accept_invalid_tls is enabled: TLS certificate verification for IdP discovery/JWKS fetches is DISABLED — test-only configuration, never use in production");
         }
-        let fetcher = HttpJwksFetcher::new(Duration::from_secs(authn_cfg.http_timeout_secs), authn_cfg.accept_invalid_tls)?;
+        // The collapse itself, and why `AcceptInvalid` wins if both somehow arrive, live on
+        // `idp_tls_for` — extracted so the config→adapter hop is unit-testable without a database.
+        let idp_tls = idp_tls_for(authn_cfg);
+        let fetcher = HttpJwksFetcher::new(Duration::from_secs(authn_cfg.http_timeout_secs), idp_tls)?;
         let ttl = Duration::from_secs(authn_cfg.jwks_ttl_secs);
         let cooldown = Duration::from_secs(authn_cfg.jwks_refresh_cooldown_secs);
         let authenticator = match authn_cfg.jwks_cache.backend {
@@ -776,6 +779,30 @@ async fn connect_redis(redis_url: &str, role: RedisRole) -> Result<RedisHandle, 
 /// splitting a deployment the operator believes is unified.
 pub(crate) fn shares_one_connection(authz_url: &str, api_key_url: &str) -> bool {
     authz_url.trim() == api_key_url.trim()
+}
+
+/// Collapses the two `AuthnConfig` TLS fields into the single [`IdpTls`] the JWKS fetcher takes
+/// (SMA-558).
+///
+/// `validate()` rejects accept_invalid_tls + a bundle, so this collapse is not lossy: at most one
+/// arm's data is ever meaningful. `AcceptInvalid` wins if both somehow arrive (an embedder that
+/// skipped validate()), which is the safe direction — it cannot silently pretend a bundle is in
+/// force.
+///
+/// Extracted from `AppState::new` purely so it can be tested. Inline, this was the ONLY site that
+/// reads `authn.extra_ca_bundle_path`, and it sat behind a `DatabaseConnection` — so the whole
+/// config→adapter hop was Docker-gated and uncovered. `tests/authn_private_ca.rs` enters at
+/// `IdpTls` and could not see it: hard-wiring `extra_bundle: None` here, or inverting the
+/// `accept_invalid_tls` branch, left every test in the tree green while the shipped feature did
+/// nothing at all.
+pub(crate) fn idp_tls_for(authn_cfg: &AuthnConfig) -> IdpTls<'_> {
+    if authn_cfg.accept_invalid_tls {
+        IdpTls::AcceptInvalid
+    } else {
+        IdpTls::Verify {
+            extra_bundle: authn_cfg.extra_ca_bundle_path.as_deref(),
+        }
+    }
 }
 
 /// Liveness only — stateless, so it is testable without a database.
@@ -912,6 +939,7 @@ pub async fn serve_http(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::JwksCacheConfig;
 
     /// SMA-469 + SMA-505: axum panics AT REGISTRATION time (inside `.route`/`.merge`, not
     /// later at request time) when two patterns conflict — never a compile error. This
@@ -974,5 +1002,55 @@ mod tests {
         ] {
             assert_eq!(shares_one_connection(authz, api_key), expected, "{why}: ({authz:?}, {api_key:?})");
         }
+    }
+
+    /// An `AuthnConfig` carrying only the two fields [`idp_tls_for`] reads; everything else is an
+    /// arbitrary valid value.
+    fn authn_cfg(accept_invalid_tls: bool, extra_ca_bundle_path: Option<&str>) -> AuthnConfig {
+        AuthnConfig {
+            leeway_secs: 60,
+            http_timeout_secs: 5,
+            jwks_ttl_secs: 3600,
+            jwks_refresh_cooldown_secs: 30,
+            max_token_bytes: 16384,
+            accept_invalid_tls,
+            extra_ca_bundle_path: extra_ca_bundle_path.map(str::to_string),
+            jwks_cache: JwksCacheConfig {
+                backend: JwksCacheBackend::Memory,
+                redis_url: None,
+            },
+            issuers: Vec::new(),
+        }
+    }
+
+    /// SMA-558: the config→adapter hop, which `tests/authn_private_ca.rs` structurally CANNOT
+    /// cover — that suite enters at `IdpTls` because the real call site sits inside
+    /// `AppState::new`, behind a `DatabaseConnection`.
+    ///
+    /// This is the regression it catches: hard-wire `extra_bundle: None` in [`idp_tls_for`], or
+    /// invert the `accept_invalid_tls` branch, and `authn.extra_ca_bundle_path` becomes a config
+    /// key the process reads and then discards — with every integration test still green, because
+    /// none of them reach this line.
+    #[test]
+    fn idp_tls_for_collapses_the_two_authn_tls_fields() {
+        assert!(matches!(idp_tls_for(&authn_cfg(false, None)), IdpTls::Verify { extra_bundle: None }), "verification on, no bundle");
+        assert!(
+            matches!(
+                idp_tls_for(&authn_cfg(false, Some("/etc/paigasus/ca.pem"))),
+                IdpTls::Verify {
+                    extra_bundle: Some("/etc/paigasus/ca.pem")
+                }
+            ),
+            "the bundle path must reach the fetcher verbatim, with verification still ON"
+        );
+        assert!(matches!(idp_tls_for(&authn_cfg(true, None)), IdpTls::AcceptInvalid), "the test-only escape hatch");
+    }
+
+    /// `validate()` rejects this pair, so it is only reachable by an embedder that skipped it.
+    /// `AcceptInvalid` winning is the safe direction — the alternative would silently claim a
+    /// bundle is in force while the verifier that would consult it is switched off.
+    #[test]
+    fn idp_tls_for_lets_accept_invalid_win_over_a_bundle() {
+        assert!(matches!(idp_tls_for(&authn_cfg(true, Some("/etc/paigasus/ca.pem"))), IdpTls::AcceptInvalid));
     }
 }

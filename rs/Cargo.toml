@@ -73,7 +73,21 @@ async-trait = "0.1"
 futures = "0.3"
 # TLS baseline is rustls + json. If a service needs gzip/brotli/cookies, opt in PER CRATE —
 # do NOT set default-features = true here (it re-introduces openssl across the workspace).
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+#
+# BOTH root-store features are on deliberately (SMA-558 D1). reqwest builds ONE RootCertStore by
+# UNION: `add_root_certificate()` calls, then webpki roots if `rustls-tls-webpki-roots`, then the
+# platform store if `rustls-tls-native-roots` (async_impl/client.rs:687-732). So this yields
+# webpki ∪ /etc/ssl/certs ∪ any explicitly configured bundle, not a choice between them — which is
+# what lets an operator trust a private-CA IdP without `accept_invalid_tls`.
+#
+# Keeping `rustls-tls` alongside is NOT redundancy. reqwest errors on a native store only when it
+# finds certificates that ALL fail to parse (client.rs:715); an ABSENT or EMPTY store falls through
+# and yields a client with zero anchors that fails every handshake at request time. The webpki
+# roots are the floor that makes that unrepresentable.
+#
+# Both features alias through to `__rustls-ring` (reqwest/Cargo.toml:148,154-172), so there is no
+# second CryptoProvider — cf. the aws-lc-rs note on `async-nats` below.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json"] }
 # jsonwebtoken — JWT decode/verify + the `jwk` module (`JwkSet`/`Jwk`, `DecodingKey::from_jwk`)
 # for the OIDC adapter's JWKS cache (SMA-443 Task 6) and validator (Task 7). MIT-licensed.
 jsonwebtoken = "10"

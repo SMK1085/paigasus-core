@@ -78,15 +78,17 @@ pub enum GatewayError {
     StreamingDisabled,
 }
 
-/// Map an [`OpenAiError`] (egress send/connect/timeout/build failure) to its client-facing
-/// [`GatewayError`]: a fired timeout is a `504`; every other transport/connect/build failure is a
-/// `502` (upstream unreachable/misbuilt). A non-2xx upstream is NOT an `OpenAiError` (G6 returns it
-/// as a `ChatResponse::Full` for verbatim passthrough), so it never reaches this mapping.
+/// Map an [`OpenAiError`] (egress send/connect/timeout/build/CA-bundle failure) to its
+/// client-facing [`GatewayError`]: a fired timeout is a `504`; every other transport/connect/
+/// build/CA-bundle failure is a `502` (upstream unreachable/misbuilt — a bad
+/// `upstream.openai.extra_ca_bundle_path` prevents the client from ever being built, same as a
+/// `Build` failure). A non-2xx upstream is NOT an `OpenAiError` (G6 returns it as a
+/// `ChatResponse::Full` for verbatim passthrough), so it never reaches this mapping.
 impl From<OpenAiError> for GatewayError {
     fn from(err: OpenAiError) -> Self {
         match err {
             OpenAiError::Timeout(_) => GatewayError::UpstreamTimeout,
-            OpenAiError::Connect(_) | OpenAiError::Transport(_) | OpenAiError::Build(_) => GatewayError::UpstreamUnavailable,
+            OpenAiError::Connect(_) | OpenAiError::Transport(_) | OpenAiError::Build(_) | OpenAiError::CaBundle { .. } => GatewayError::UpstreamUnavailable,
         }
     }
 }
@@ -210,6 +212,13 @@ mod tests {
         assert_eq!(GatewayError::from(OpenAiError::Connect(dead_port_error().await)), GatewayError::UpstreamUnavailable);
         assert_eq!(GatewayError::from(OpenAiError::Transport(dead_port_error().await)), GatewayError::UpstreamUnavailable);
         assert_eq!(GatewayError::from(OpenAiError::Build(dead_port_error().await)), GatewayError::UpstreamUnavailable);
+        assert_eq!(
+            GatewayError::from(OpenAiError::CaBundle {
+                path: "/x".to_string(),
+                source: "boom".into()
+            }),
+            GatewayError::UpstreamUnavailable
+        );
     }
 
     /// Produce a genuine `reqwest::Error` (no public constructor) by dialing an unroutable port.

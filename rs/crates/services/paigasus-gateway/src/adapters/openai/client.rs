@@ -84,8 +84,10 @@ impl std::fmt::Debug for ChatResponse {
 #[derive(Debug, thiserror::Error)]
 pub enum OpenAiError {
     /// The `reqwest::Client` could not be constructed (TLS backend init, invalid builder config) —
-    /// a boot-time fault, surfaced when G7 builds the client at startup.
-    #[error("failed to build the OpenAI HTTP client")]
+    /// a boot-time fault, surfaced when G7 builds the client at startup. Native-roots support
+    /// (SMA-558 D1) made an empty/unparseable platform trust store a newly reachable cause here,
+    /// mirroring `paigasus-iam/src/adapters/oidc/jwks.rs`'s equivalent hint.
+    #[error("failed to build the OpenAI HTTP client — this can also mean the platform trust store contains no parseable certificates")]
     Build(#[source] reqwest::Error),
     /// Failed to establish the connection to the upstream (DNS / TCP / TLS handshake).
     #[error("failed to connect to the OpenAI upstream")]
@@ -96,6 +98,15 @@ pub enum OpenAiError {
     /// Any other transport-level failure talking to the upstream.
     #[error("transport error talking to the OpenAI upstream")]
     Transport(#[source] reqwest::Error),
+    /// The configured CA bundle could not be read, parsed, or contained no certificates — a
+    /// boot-time fault like `Build`, never a request-time one, so G7's status mapping is
+    /// unaffected.
+    #[error("failed to load upstream.openai.extra_ca_bundle_path {path:?}")]
+    CaBundle {
+        path: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl OpenAiError {
@@ -136,11 +147,32 @@ impl OpenAiClient {
     /// underlying `reqwest::Client`; `first_byte_timeout` is stored and applied per non-stream
     /// request. NO global client `.timeout()` is set (it would cap a legitimate long stream).
     pub fn new(cfg: &OpenAiConfig, connect_timeout: Duration, first_byte_timeout: Duration, stream_idle_timeout: Duration) -> Result<Self, OpenAiError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(connect_timeout)
-            .read_timeout(stream_idle_timeout)
-            .build()
-            .map_err(OpenAiError::Build)?;
+        let mut builder = reqwest::Client::builder().connect_timeout(connect_timeout).read_timeout(stream_idle_timeout);
+
+        if let Some(path) = cfg.extra_ca_bundle_path.as_deref() {
+            let ca_bundle = |source: Box<dyn std::error::Error + Send + Sync>| OpenAiError::CaBundle { path: path.to_string(), source };
+
+            let pem = std::fs::read(path).map_err(|e| ca_bundle(Box::new(e)))?;
+            // `from_pem_bundle`, NOT `from_pem`: a bundle may carry more than one ROOT and
+            // `from_pem` reads only the first. Not an invitation to add intermediates — see the
+            // ROOTS ONLY note on the config field. Mirrors
+            // `paigasus-iam/src/adapters/oidc/jwks.rs`'s copy; see SMA-558 D7 for why the two are
+            // duplicated rather than extracted.
+            let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| ca_bundle(Box::new(e)))?;
+            // Ok(vec![]) is what a DER .crt, a key-only PEM or an empty file parses to, so
+            // without this the likeliest operator mistake boots green having added nothing.
+            if certs.is_empty() {
+                return Err(ca_bundle(
+                    "contained no PEM certificates — a DER file, a key-only PEM or an empty file parses as an empty bundle".into(),
+                ));
+            }
+            tracing::info!(path = %path, count = certs.len(), "loaded extra upstream trust anchors from upstream.openai.extra_ca_bundle_path");
+            for cert in certs {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
+
+        let http = builder.build().map_err(OpenAiError::Build)?;
         Ok(Self {
             http,
             // Trim a trailing slash so `{base_url}/v1/chat/completions` never doubles up.
@@ -200,11 +232,24 @@ mod tests {
     use super::*;
 
     fn test_client(api_key: &str) -> OpenAiClient {
+        client_with_bundle(api_key, None).expect("client builds")
+    }
+
+    fn client_with_bundle(api_key: &str, extra_ca_bundle_path: Option<String>) -> Result<OpenAiClient, OpenAiError> {
         let cfg = OpenAiConfig {
             base_url: "https://api.openai.com/".to_string(),
             api_key: SecretString::from(api_key.to_string()),
+            extra_ca_bundle_path,
         };
-        OpenAiClient::new(&cfg, Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(300)).expect("client builds")
+        OpenAiClient::new(&cfg, Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(300))
+    }
+
+    fn tmp_file_with(contents: &[u8]) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        f.write_all(contents).expect("write");
+        f.flush().expect("flush");
+        f
     }
 
     #[test]
@@ -223,5 +268,58 @@ mod tests {
         // A configured trailing slash must not produce `//v1/...`.
         let client = test_client("sk-x");
         assert_eq!(client.base_url, "https://api.openai.com");
+    }
+
+    // ---- extra_ca_bundle_path plumbing (SMA-558 D6) ------------------------------------------
+    // These prove the gateway's OWN wiring: the config field reaches reqwest and each failure
+    // mode maps to CaBundle. They deliberately prove NOTHING about whether a handshake against a
+    // private-CA upstream succeeds — `reqwest::Client` exposes no trust-store accessor, so no
+    // test here could observe that. IAM's `tests/authn_private_ca.rs` proves it once for the
+    // shared reqwest mechanism.
+
+    #[test]
+    fn valid_ca_bundle_builds_the_client() {
+        let f = tmp_file_with(test_ca_pem().as_bytes());
+        client_with_bundle("sk-x", Some(f.path().to_str().unwrap().to_string())).expect("a valid bundle must build");
+    }
+
+    #[test]
+    fn missing_ca_bundle_path_is_a_build_error() {
+        let err = client_with_bundle("sk-x", Some("/nonexistent/paigasus-sma558/ca.pem".to_string())).expect_err("a nonexistent bundle path must fail");
+        assert!(matches!(err, OpenAiError::CaBundle { .. }), "expected CaBundle, got {err:?}");
+        assert!(
+            format!("{err:?}").contains("NotFound"),
+            "the error must be attributable to a missing file, not another CaBundle cause: {err:?}"
+        );
+    }
+
+    #[test]
+    fn certificate_free_ca_bundle_is_a_build_error() {
+        // `from_pem_bundle` returns Ok(vec![]) for a file with no CERTIFICATE section, so only an
+        // explicit is_empty() check catches this.
+        let f = tmp_file_with(b"-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n-----END PRIVATE KEY-----\n");
+        let err = client_with_bundle("sk-x", Some(f.path().to_str().unwrap().to_string())).expect_err("a certificate-free bundle must fail");
+        assert!(matches!(err, OpenAiError::CaBundle { .. }), "expected CaBundle, got {err:?}");
+        assert!(format!("{err:?}").contains("no PEM certificates"), "the error must say the bundle was empty: {err:?}");
+    }
+
+    #[test]
+    fn undecodable_ca_bundle_is_a_build_error() {
+        let f = tmp_file_with(b"-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n");
+        let err = client_with_bundle("sk-x", Some(f.path().to_str().unwrap().to_string())).expect_err("an undecodable bundle must fail");
+        assert!(matches!(err, OpenAiError::CaBundle { .. }), "expected CaBundle, got {err:?}");
+        assert!(format!("{err:?}").contains("invalid certificate encoding"), "the error must say the bundle failed to decode: {err:?}");
+    }
+
+    /// A throwaway CA certificate, minted fresh per test run. Used ONLY to prove the bundle path
+    /// parses and reaches the builder — nothing here is ever trusted by a real handshake, and no
+    /// gateway test starts a TLS listener (SMA-558 D6). Minted rather than committed so there is
+    /// no fixture to rot, and none for a future reader to mistake for a real trust anchor.
+    fn test_ca_pem() -> String {
+        let mut params = rcgen::CertificateParams::new(Vec::new()).expect("ca params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.distinguished_name.push(rcgen::DnType::CommonName, "paigasus-gateway-test-ca");
+        let key = rcgen::KeyPair::generate().expect("ca keypair");
+        params.self_signed(&key).expect("self-signed ca").pem()
     }
 }

@@ -103,6 +103,7 @@ mod tests {
                     openai: OpenAiConfig {
                         base_url: "https://api.openai.com".to_string(),
                         api_key: secrecy::SecretString::from("sk-test".to_string()),
+                        extra_ca_bundle_path: None,
                     },
                 },
                 log_level: "info".to_string(),

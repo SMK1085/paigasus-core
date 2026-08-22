@@ -24,6 +24,7 @@ fn client_for(mock: &MockOpenAi) -> OpenAiClient {
     let cfg = OpenAiConfig {
         base_url: mock.base_url.clone(),
         api_key: SecretString::from(REAL_KEY.to_string()),
+        extra_ca_bundle_path: None,
     };
     OpenAiClient::new(&cfg, Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(300)).expect("client builds")
 }
