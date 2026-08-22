@@ -15,9 +15,13 @@ Asserts every publishable crate is genuinely releasable (SMA-376), and that its
 | 2 | `cargo publish --dry-run` succeeds | 1 / 2 |
 | 2b | The packaged file list ships README + LICENSE, not moon.yml | 1 |
 | 3 | A 0.0.0 crate is release-blocked | 1 |
-| 4 | The freshness job's call site still exists | 1 |
+| 4 | The freshness job's call site still exists | 1 / 2 |
 
-Exit codes: `0` pass, `1` the repo is wrong, `2` infrastructure failed.
+Exit codes: `0` pass, `1` the repo is wrong, `2` infrastructure failed. Check 4's `1 / 2`
+split: `assert_freshness_call_site` returns `2` when the workflow file is missing or
+unreadable (it cannot assert anything), and `1` when the file is readable but the
+assertion itself fails (the invocation is gone, its exit status is discarded, or a
+`continue-on-error`/`if:` can suppress its red).
 
 ## The category snapshot
 

@@ -185,7 +185,14 @@ Re-running fixes none of these. The issue's requirement is *never pass*, and tha
 | Zero parsed slugs, or no `count:` header | 1 | Corrupt committed data. |
 | A line fails the corruption check | 1 | Corrupt committed data. |
 | Snapshot `fetched:` date older than 90 days | 1 | The staleness bound. |
+| Snapshot `fetched:` date in the future | 1 | A negative age would otherwise never cross the staleness bound, so a hand-edited or clock-skewed future date would silently and permanently disable it. Rejected before the age comparison runs. |
 | Live fetch fails / non-200 / unparseable / empty | 2 | Genuine infrastructure; re-running is the right triage. |
+
+All dates in this module — `render_snapshot`'s `# fetched:` stamp, and every comparison
+against it — are derived from **UTC**, never the local clock, via a single `_today_utc()`
+helper. `render_snapshot` runs on a developer's machine and `parse_snapshot` runs on a CI
+runner; without a shared basis, a refresh run west or east of UTC near midnight stamps a
+date CI reads as tomorrow, which the future-date guard above then rejects as corrupt.
 
 **Truncation is caught by the header count, not a magic floor.** An earlier draft proposed
 `MIN_CATEGORY_SLUGS = 50` justified by the Dependabot Cargo lockfile truncation (543 → 172
@@ -342,6 +349,7 @@ New fixtures:
 | Line with CRLF only (should be tolerated) | rc 0 |
 | Line failing the corruption check | rc 1 |
 | `fetched:` date older than 90 days | rc 1 |
+| `fetched:` date in the future | rc 1 |
 | 4th argument absent | rc 2 |
 | `validate_live_payload`: 403 body | rc 2 |
 | `validate_live_payload`: HTML error page | rc 2 |

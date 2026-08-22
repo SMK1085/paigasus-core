@@ -61,6 +61,13 @@ _SOURCE_LINE = f"# source: {API_URL}"
 _REFRESH_LINE = "# refresh: ci/publish-metadata/run.sh --refresh-categories"
 
 
+def _today_utc() -> datetime.date:
+    """UTC, not local. render_snapshot stamps `# fetched:` and parse_snapshot compares
+    against it from a DIFFERENT machine — a developer west or east of UTC would otherwise
+    stamp a date CI reads as the future, which the future-date guard rejects as corrupt."""
+    return datetime.datetime.now(datetime.timezone.utc).date()
+
+
 class SnapshotError(Exception):
     """The committed snapshot is missing, stale, or corrupt. Maps to exit 1."""
 
@@ -108,12 +115,19 @@ def parse_snapshot(text: str, today: datetime.date) -> list[str]:
     for line in lines:
         if not line or line.startswith("#"):
             continue
+        if line in ALLOW_SLUG_SHAPE:
+            # The escape hatch must rescue an allowlisted entry from BOTH corruption
+            # checks below — a slug too long for MAX_SLUG_LEN is exactly the kind of
+            # shape ALLOW_SLUG_SHAPE exists to unblock, so testing membership before
+            # either check keeps the hatch from being unable to rescue its own case.
+            slugs.append(line)
+            continue
         if len(line) > MAX_SLUG_LEN:
             raise SnapshotError(
                 f"slug {line[:MAX_SLUG_LEN]!r}… exceeds {MAX_SLUG_LEN} chars — "
                 "the snapshot looks corrupt"
             )
-        if not _SLUG_CORRUPT_RE.match(line) and line not in ALLOW_SLUG_SHAPE:
+        if not _SLUG_CORRUPT_RE.match(line):
             raise SnapshotError(
                 f"snapshot line {line!r} is not a plausible slug (expected only "
                 "lowercase letters, digits, '-' and ':'). The snapshot looks corrupt — "
@@ -433,6 +447,15 @@ def _self_test() -> int:
             lambda: parse_snapshot(body(good + ["Weird-Slug"]), today),
         ),
     )
+    expect_ok(
+        "an ALLOW_SLUG_SHAPE entry longer than MAX_SLUG_LEN still parses (F2 regression "
+        "guard — the hatch must bypass MAX_SLUG_LEN too, not only the corruption regex, "
+        "or it cannot rescue exactly the case it exists for)",
+        lambda: _with_allow_slug_shape(
+            {("a" * (MAX_SLUG_LEN + 1)): "crates.io shipped an over-length slug, see SMA-000"},
+            lambda: parse_snapshot(body(good + ["a" * (MAX_SLUG_LEN + 1)]), today),
+        ),
+    )
     expect_snapshot_error(
         "an HTML error page pasted into the snapshot",
         lambda: parse_snapshot(body(["<html><head><title>502</title>"]), today),
@@ -474,6 +497,17 @@ def _self_test() -> int:
     expect_ok(
         "nearest returns None when nothing is close",
         lambda: _assert(nearest("zzzzzzzz", good) is None, "nearest miss"),
+    )
+    expect_ok(
+        "_today_utc() agrees with datetime.datetime.now(UTC).date() and returns a "
+        "datetime.date (F1 regression guard — render_snapshot/parse_snapshot/refresh must "
+        "all derive 'today' from the SAME, UTC, basis or a developer west/east of UTC "
+        "stamps a date CI reads as the future)",
+        lambda: _assert(
+            _today_utc() == datetime.datetime.now(datetime.timezone.utc).date()
+            and isinstance(_today_utc(), datetime.date),
+            "_today_utc basis",
+        ),
     )
 
     ok_payload = json.dumps({"category_slugs": [{"slug": s} for s in good]})
@@ -628,7 +662,7 @@ def _self_test() -> int:
         ),
     )
 
-    expected_checks = 37
+    expected_checks = 39
     if checks != expected_checks:
         print(
             f"SELF-TEST COUNT CHANGED: ran {checks}, expected {expected_checks}. Update "
@@ -651,7 +685,7 @@ def _assert(condition: bool, label: str) -> None:
 
 
 def _cmd_check_freshness(snapshot_path: str) -> int:
-    today = datetime.date.today()
+    today = _today_utc()
     try:
         live = fetch_live_slugs()
     except FetchError as exc:
@@ -690,7 +724,7 @@ def _cmd_refresh(snapshot_path: str) -> int:
     except FetchError as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
         return 2
-    fetched = datetime.date.today()
+    fetched = _today_utc()
     text = render_snapshot(live, fetched)
     # The round trip must be closed: render_snapshot has no corruption check of its own, so
     # if crates.io ever ships a slug shape parse_snapshot rejects, that must be caught HERE —
@@ -698,7 +732,7 @@ def _cmd_refresh(snapshot_path: str) -> int:
     # which would then have no path forward except editing this gate under a red CI (the
     # exact scenario ALLOW_SLUG_SHAPE exists to prevent).
     try:
-        parse_snapshot(text, fetched)
+        written_slugs = parse_snapshot(text, fetched)
     except SnapshotError as exc:
         print(
             f"FATAL: the fetched payload would render a snapshot the offline check rejects: "
@@ -723,7 +757,11 @@ def _cmd_refresh(snapshot_path: str) -> int:
         # success, since os.replace has already moved the file away by then.
         with contextlib.suppress(OSError):
             os.remove(tmp_path)
-    print(f"category snapshot: wrote {len(live)} slugs to {snapshot_path}")
+    # Report the count actually written, i.e. render_snapshot's own dedup+parse result —
+    # not len(live). render_snapshot dedupes via sorted(set(slugs)); if crates.io ever
+    # returned a duplicate slug, len(live) would disagree with the snapshot's own
+    # `# count:` header.
+    print(f"category snapshot: wrote {len(written_slugs)} slugs to {snapshot_path}")
     return 0
 
 

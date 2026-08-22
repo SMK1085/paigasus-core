@@ -57,7 +57,7 @@ die_infra() { printf '%s\n' "$*" >&2; exit 2; }
 # On success prints one "<name>\t<manifest-dir>" line per publishable crate on stdout.
 metadata_checks() { # $1 metadata.json  $2 release-plz.toml  $3 expected-csv  $4 snapshot
   python3 - "$1" "$2" "$3" "${4:-}" <<'PY'
-import datetime, json, os, re, sys, tomllib
+import json, os, re, sys, tomllib
 
 # A MISSING 4th argument is a broken invocation, not a reason to skip Check 1b. Exit 2:
 # silently skipping would make every fixture below pass while asserting nothing, and an
@@ -76,7 +76,7 @@ expected = sorted(x for x in expected_csv.split(",") if x)
 import categories as categories_module
 
 try:
-    known_slugs = categories_module.load_snapshot(snapshot_path, datetime.date.today())
+    known_slugs = categories_module.load_snapshot(snapshot_path, categories_module._today_utc())
 except categories_module.SnapshotError as exc:
     print(f"category snapshot: {exc}", file=sys.stderr)
     sys.exit(1)
