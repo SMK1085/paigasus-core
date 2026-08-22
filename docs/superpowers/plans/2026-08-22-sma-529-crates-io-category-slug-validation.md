@@ -27,6 +27,19 @@
 - Run every command with `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"` so `moon` resolves to the repo-pinned version.
 - Commit messages: conventional commits with a workspace scope (`feat(ci):`, `fix(ci):`). Subject must start lowercase and be ≤100 chars. No `#NNN` in the body — it breaks commitlint's `footer-leading-blank`.
 
+## Corrections applied during execution
+
+This plan was written before execution; several of its code blocks were corrected while implementing it. This is the record of what was planned — the tasks below are left as originally written. Anyone re-running them verbatim should account for these corrections instead:
+
+- Fixture snapshots in Task 4 need **≥2 slugs** with a matching `# count:` — `ABSOLUTE_FLOOR` is 2 and fires before the count, `fetched:` and staleness guards, so single-slug fixtures red for the wrong reason and the `crlf-snap` row (which expects rc 0) fails outright.
+- Task 4 must use `import categories as categories_module` — a local `categories` variable shadows the module.
+- `categories.py` carries **no shebang**; SPDX is line 1, matching the sibling `ci/*.py` files.
+- `.rstrip()` in `parse_snapshot` guards **trailing whitespace**, not CRLF — `str.splitlines()` and universal-newline translation already handle CRLF, so the plan's CRLF rationale overclaims.
+- `fetch_live_slugs` must catch `urllib.error.HTTPError` **before** `(URLError, OSError)`, or a definitive 403 is retried three times.
+- Check 4's grep must be anchored to a non-comment `run:` line and also reject `if:` — an unanchored substring match is defeated by commenting the invocation out.
+- The self-test count grew from the plan's arithmetic to **37** as review rounds added rows.
+- `moon.yml` gained a fourth literal input, `ci/publish-metadata/categories.py`, which the plan's YAML block omitted.
+
 ## Measured baseline (do not re-derive)
 
 Exit codes of the eleven existing negative-control fixtures plus the positive control, measured against the unmodified `ci/publish-metadata/run.sh`. Task 1 encodes exactly these:

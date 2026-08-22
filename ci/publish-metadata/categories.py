@@ -11,12 +11,15 @@ Exit-code contract, inherited from run.sh: 0 pass / 1 the repo is wrong / 2 infr
 SnapshotError maps to 1 (re-running fixes nothing); FetchError maps to 2 (re-running is the
 right triage). Nothing here may return a value that reads as "validated" on failure.
 """
+import contextlib
 import datetime
 import difflib
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -546,6 +549,66 @@ def _self_test() -> int:
         _check_no_retry_on_http_error,
     )
 
+    def _check_refresh_rejects_invalid_slug_shape():
+        # A slug crates.io could plausibly ship that the corruption check would reject —
+        # this proves _cmd_refresh closes the render/parse round trip instead of writing a
+        # snapshot the offline check then rejects on every subsequent PR.
+        bad_payload = json.dumps(
+            {"category_slugs": [{"slug": "Bad Slug"}, {"slug": "data-structures"}]}
+        ).encode("utf-8")
+
+        class _FakeResponse:
+            status = 200
+
+            def read(self):
+                return bad_payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+        def fake_urlopen(*args, **kwargs):
+            return _FakeResponse()
+
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            target = os.path.join(tmp_dir, "crates-io-categories.txt")
+            original_urlopen = urllib.request.urlopen
+            urllib.request.urlopen = fake_urlopen
+            # _cmd_refresh's own CI guard would otherwise return 2 for the wrong reason and
+            # make this row pass vacuously in a CI-run self-test.
+            had_ci = "CI" in os.environ
+            saved_ci = os.environ.pop("CI", None)
+            try:
+                rc = _cmd_refresh(target)
+            finally:
+                urllib.request.urlopen = original_urlopen
+                if had_ci:
+                    os.environ["CI"] = saved_ci
+            _assert(
+                rc == 2,
+                f"_cmd_refresh must return 2 on a payload that renders an invalid "
+                f"snapshot, got {rc}",
+            )
+            _assert(
+                not os.path.exists(target),
+                "_cmd_refresh must not create the target file on rejection",
+            )
+            _assert(
+                not os.path.exists(target + ".tmp"),
+                "_cmd_refresh must not leave a .tmp file behind on rejection",
+            )
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    expect_ok(
+        "--refresh rejects a fetched payload that would render an invalid snapshot, "
+        "without creating the target file or leaving a .tmp behind",
+        _check_refresh_rejects_invalid_slug_shape,
+    )
+
     expect_ok(
         "diff_slug_sets reports an upstream addition",
         lambda: _assert(
@@ -565,7 +628,7 @@ def _self_test() -> int:
         ),
     )
 
-    expected_checks = 36
+    expected_checks = 37
     if checks != expected_checks:
         print(
             f"SELF-TEST COUNT CHANGED: ran {checks}, expected {expected_checks}. Update "
@@ -627,13 +690,39 @@ def _cmd_refresh(snapshot_path: str) -> int:
     except FetchError as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
         return 2
-    text = render_snapshot(live, datetime.date.today())
+    fetched = datetime.date.today()
+    text = render_snapshot(live, fetched)
+    # The round trip must be closed: render_snapshot has no corruption check of its own, so
+    # if crates.io ever ships a slug shape parse_snapshot rejects, that must be caught HERE —
+    # before the committed file is touched — not discovered by the next PR's offline check,
+    # which would then have no path forward except editing this gate under a red CI (the
+    # exact scenario ALLOW_SLUG_SHAPE exists to prevent).
+    try:
+        parse_snapshot(text, fetched)
+    except SnapshotError as exc:
+        print(
+            f"FATAL: the fetched payload would render a snapshot the offline check rejects: "
+            f"{exc}. NOT writing {snapshot_path}. If crates.io genuinely introduced this "
+            "slug shape, add an ALLOW_SLUG_SHAPE entry in ci/publish-metadata/categories.py "
+            "with a reason and re-run --refresh.",
+            file=sys.stderr,
+        )
+        return 2
     # Temp file + atomic rename: a partial write must never leave a truncated snapshot
     # behind, because the next run would validate against it.
     tmp_path = snapshot_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp_path, snapshot_path)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp_path, snapshot_path)
+    except OSError as exc:
+        print(f"FATAL: could not write {snapshot_path}: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        # Covers both failure paths above (open/write and replace) and is a no-op on
+        # success, since os.replace has already moved the file away by then.
+        with contextlib.suppress(OSError):
+            os.remove(tmp_path)
     print(f"category snapshot: wrote {len(live)} slugs to {snapshot_path}")
     return 0
 
