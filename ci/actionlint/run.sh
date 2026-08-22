@@ -1940,8 +1940,30 @@ ci_target_floor_verdict() {
 #   count-unreadable             `grep -c` itself failed (not "matched zero", the command did not
 #                                run cleanly), so the count cannot be trusted either way
 # ---------------------------------------------------------------------------------------------
+
+# The single source of truth for turning a captured '"${T[@]}"' occurrence count into a verdict
+# token (or nothing, for a count that already matches the expected floor). Extracted out of
+# invocation_allowlist_verdict below so a self-test can drive it directly with synthetic,
+# already-malformed count strings instead of trying to force a real `grep -c` read failure via a
+# directory in place of the file — that trick is NOT portable. BSD grep (macOS) fails outright
+# reading a directory and writes nothing to stdout, so $n comes back empty and lands on
+# 'count-unreadable' below; GNU grep (Linux, what CI actually runs) instead prints a literal '0'
+# for the exact same input — a well-formed-but-wrong count that lands on 'invocation-count 0'
+# instead, a DIFFERENT verdict than the fixture that used to live here asserted (reds Linux CI,
+# passes macOS: SMA-542, CodeRabbit review of PR 150). A malformed synthetic string never touches
+# grep at all, so it cannot disagree by platform.
+#
+# $1 the captured count text (possibly malformed/non-numeric), $2 the expected count.
+invocation_allowlist_count_verdict() {
+  local n="$1" expected="$2"
+  case "$n" in ''|*[!0-9]*) echo 'count-unreadable'; return ;; esac
+  if [ "$n" -ne "$expected" ]; then
+    echo "invocation-count $n"
+  fi
+}
+
 invocation_allowlist_verdict() {
-  local f="$1" skip=" ${2:-} " lineno text n matched allowed
+  local f="$1" skip=" ${2:-} " lineno text n matched allowed count_verdict
 
   [ -e "$f" ] || { echo 'no-file'; return; }
 
@@ -1958,10 +1980,12 @@ invocation_allowlist_verdict() {
   # `if` reads as false — skipping the 'invocation-count' report and falling through to a false
   # 'ok' the same way `$arrays` would (SMA-542 CodeRabbit round 4 finding F1).
   n="$(grep -cF -- '"${T[@]}"' "$f")"
-  case "$n" in ''|*[!0-9]*) echo 'count-unreadable'; return ;; esac
-  if [ "$n" -ne "${#T_INVOCATION_ALLOWLIST[@]}" ]; then
-    echo "invocation-count $n"
+  count_verdict="$(invocation_allowlist_count_verdict "$n" "${#T_INVOCATION_ALLOWLIST[@]}")"
+  if [ "$count_verdict" = 'count-unreadable' ]; then
+    echo "$count_verdict"
+    return
   fi
+  [ -n "$count_verdict" ] && echo "$count_verdict"
 
   while IFS=: read -r lineno text; do
     case "$skip" in
@@ -2526,19 +2550,24 @@ invocation_allowlist_self_test() {
   # the call site turning this token into an actual `infra` exit — is proven live against a
   # forced real-file scenario, not here; --self-test never reaches that call site at all.
   #
-  # A DIRECTORY in place of a file portably forces `grep -c` to fail without ever writing to
-  # stdout (measured: `grep -cF -- pattern DIR` writes only to stderr and exits non-zero, leaving
-  # $n empty) — no reliance on `chmod`, which can silently no-op when tests run as root.
-  local unreadable_dir
-  unreadable_dir="$(mktemp -d)"
-  got="$(invocation_allowlist_verdict "$unreadable_dir" 2>/dev/null)"
-  rmdir "$unreadable_dir"
-  if [ "$got" != 'count-unreadable' ]; then
-    fail "invocation-allowlist self-test 'unreadable count': got '$got', expected
-    'count-unreadable'. A directory in place of a file must make grep fail loudly, not silently
-    read as zero matches."
-    rc=1
-  fi
+  # Driven directly through invocation_allowlist_count_verdict with synthetic malformed counts —
+  # NOT via a directory in place of a file. A directory used to sit here on the theory that it
+  # "portably forces `grep -c` to fail without ever writing to stdout"; that is true of BSD grep
+  # (macOS: the read fails outright, $n comes back empty, landing on 'count-unreadable') but false
+  # of GNU grep (Linux, what CI actually runs), which prints a literal '0' to stdout for the same
+  # directory argument — a well-formed-but-wrong count that instead lands on 'invocation-count 0'.
+  # That split is exactly what reds this fixture on Linux CI while passing on a macOS dev box
+  # (SMA-542, CodeRabbit review of PR 150). A malformed synthetic string never touches grep at
+  # all, so no platform's `grep` behaviour can make it disagree.
+  local n
+  for n in '' 'x' ' '; do
+    got="$(invocation_allowlist_count_verdict "$n" "${#T_INVOCATION_ALLOWLIST[@]}")"
+    if [ "$got" != 'count-unreadable' ]; then
+      fail "invocation-allowlist self-test 'unreadable count (n=\"$n\")': got '$got', expected
+      'count-unreadable'. A malformed count must fail loudly, not silently read as zero matches."
+      rc=1
+    fi
+  done
 
   return $rc
 }
@@ -2642,8 +2671,13 @@ missing "$HERE/ci_targets.py" --self-test || NEG_RC=1' \
   fi
 
   # A directory in place of the file — same "distinct verdict, not a silent skip" requirement,
-  # proven without relying on chmod (which can silently no-op when tests run as root; same
-  # reasoning as invocation_allowlist_self_test's unreadable_dir fixture above).
+  # proven without relying on chmod (which can silently no-op when tests run as root). This one
+  # IS portable, unlike the directory tricks that used to sit in invocation_allowlist_self_test
+  # and block_execution_self_test (both replaced with synthetic malformed counts, SMA-542
+  # CodeRabbit review of PR 150 — see the WHY comment on invocation_allowlist_count_verdict):
+  # affected_graph_wiring_verdict guards with `[ -f "$f" ] && [ -r "$f" ]`, a bash builtin `test`,
+  # BEFORE it ever reaches a `grep`, so a directory is rejected identically on BSD and GNU — there
+  # is no grep-behaviour split to disagree across platforms here.
   local unreadable_dir
   unreadable_dir="$(mktemp -d)"
   got="$(affected_graph_wiring_verdict "$unreadable_dir")"
@@ -2797,8 +2831,11 @@ extract_moon_step_block() {
 #   no-file                      the workflow does not exist
 #   count-unreadable              could not count occurrences of the step's name line (the same
 #                                grep-fails-outright condition invocation_allowlist_verdict's own
-#                                'count-unreadable' guards against, e.g. a directory in place of
-#                                the file)
+#                                'count-unreadable' guards against — e.g. a permissions failure.
+#                                NOT reliably a directory in place of the file: that reads as an
+#                                outright read failure on BSD grep but as a well-formed zero on
+#                                GNU grep, so it cannot be used to portably force this branch — see
+#                                the WHY comment on block_step_count_verdict below)
 #   no-step                      no step named exactly "moon ci (affected graph)" was found
 #   multi-step <n>                that name was found more than once — which one guards T is
 #                                ambiguous, so this check refuses to guess
@@ -2866,8 +2903,28 @@ invocation_count_verdict() {
   esac
 }
 
+# The single source of truth for turning the step-name occurrence count into a verdict token (or
+# nothing, for exactly one match). Extracted out of block_execution_verdict below for the same
+# reason invocation_allowlist_count_verdict was extracted from invocation_allowlist_verdict above:
+# a self-test needs to drive a malformed count directly, not by forcing a real `grep -c` read
+# failure via a directory in place of the file. That trick is not portable — BSD grep (macOS)
+# fails outright reading a directory and writes nothing to stdout, landing on 'count-unreadable'
+# below, while GNU grep (Linux, what CI runs) prints a literal '0' for the same input, landing on
+# 'no-step' instead (a DIFFERENT verdict — the same platform split as
+# invocation_allowlist_count_verdict's comment above, and the second of the two fixtures that
+# actually reproduced it: reds Linux CI, passes macOS, SMA-542 / CodeRabbit review of PR 150). A
+# malformed synthetic string never touches grep at all.
+#
+# $1 the captured step-name occurrence count (possibly malformed/non-numeric).
+block_step_count_verdict() {
+  local n="$1"
+  case "$n" in ''|*[!0-9]*) echo 'count-unreadable'; return ;; esac
+  if [ "$n" -eq 0 ]; then echo 'no-step'; return; fi
+  if [ "$n" -gt 1 ]; then echo "multi-step $n"; return; fi
+}
+
 block_execution_verdict() {
-  local f="$1" step_count run_block bash_bin
+  local f="$1" step_count run_block bash_bin step_verdict
   local -a t_arr
   local t_joined tok row label event before sub expected
   local bindir logf actual n verdict_out
@@ -2875,9 +2932,11 @@ block_execution_verdict() {
   [ -e "$f" ] || { echo 'no-file'; return; }
 
   step_count="$(grep -cE '^[[:blank:]]*- name: moon ci \(affected graph\)[[:blank:]]*$' "$f")"
-  case "$step_count" in ''|*[!0-9]*) echo 'count-unreadable'; return ;; esac
-  if [ "$step_count" -eq 0 ]; then echo 'no-step'; return; fi
-  if [ "$step_count" -gt 1 ]; then echo "multi-step $step_count"; return; fi
+  step_verdict="$(block_step_count_verdict "$step_count")"
+  if [ -n "$step_verdict" ]; then
+    echo "$step_verdict"
+    return
+  fi
 
   run_block="$(extract_moon_step_block "$f")"
   if [ -z "$run_block" ]; then echo 'no-run-block'; return; fi
@@ -3271,25 +3330,32 @@ jobs:
     rc=1
   fi
 
-  # A directory in place of the file — same "distinct verdict, not a silent skip" requirement,
-  # proven without chmod (which can silently no-op when tests run as root; same reasoning as
-  # invocation_allowlist_self_test's and affected_graph_wiring_self_test's own unreadable_dir
-  # fixtures).
-  local unreadable_dir
-  unreadable_dir="$(mktemp -d)"
-  got="$(block_execution_verdict "$unreadable_dir" 2>/dev/null)"
-  rmdir "$unreadable_dir"
-  if [ "$got" != 'count-unreadable' ]; then
-    fail "block-execution self-test 'directory in place of file': got '$got', expected
-    'count-unreadable'. A directory must not be silently read as zero step occurrences."
-    rc=1
-  fi
+  # count-unreadable, driven directly through block_step_count_verdict with synthetic malformed
+  # counts — NOT via a directory in place of the file. A directory used to sit here (same
+  # "distinct verdict, not a silent skip" requirement, proven without chmod, which can silently
+  # no-op when tests run as root), on the theory that it portably forces a `grep -c` read failure.
+  # It does not: BSD grep (macOS) fails outright reading a directory and writes nothing to stdout,
+  # landing on 'count-unreadable' below, but GNU grep (Linux, what CI actually runs) prints a
+  # literal '0' for the same directory argument — a well-formed-but-wrong count that instead lands
+  # on 'no-step'. That split is exactly what reds this fixture on Linux CI while passing on a
+  # macOS dev box (SMA-542, CodeRabbit review of PR 150 — the sibling of
+  # invocation_allowlist_count_verdict's own fix above; see its WHY comment for the measured
+  # behaviour). A malformed synthetic string never touches grep at all.
+  local n
+  for n in '' 'x' ' '; do
+    got="$(block_step_count_verdict "$n")"
+    if [ "$got" != 'count-unreadable' ]; then
+      fail "block-execution self-test 'unreadable step count (n=\"$n\")': got '$got', expected
+      'count-unreadable'. A malformed count must not be silently read as zero step occurrences."
+      rc=1
+    fi
+  done
 
   # One final aggregate re-run, covering everything since the if-false/branch-swap rechecks above:
-  # the subset, duplicate-invocation, no-step, multi-step, no-run-block, no-target-array, missing-
-  # file and directory-in-place-of-file fixtures. None of those mutate global state (every call
-  # above gets its own mktemp scratch file/directory), so one aggregate proof here — rather than a
-  # dedicated recheck wedged after each individual row — is enough to show nothing accumulated.
+  # the subset, duplicate-invocation, no-step, multi-step, no-run-block, no-target-array and
+  # missing-file fixtures. None of those mutate global state (every call above gets its own mktemp
+  # scratch file/directory), so one aggregate proof here — rather than a dedicated recheck wedged
+  # after each individual row — is enough to show nothing accumulated.
   expect_block 'a healthy step still passes after every mutation above' '' "$healthy"
 
   return $rc
