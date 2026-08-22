@@ -290,6 +290,16 @@ this is not defence-in-depth; it is the only thing standing between the first ke
 workspace-wide tag sweep. The plan must also state what version the service crates sit at afterwards
 and what that means for ADR-0020.
 
+**Two more measurements settle that this is required, not optional, and required *now*:**
+
+- Per-package `release = false` removes a package from the release-PR proposal **entirely** — the
+  fixture's `probe-b` was neither bumped nor listed. So it genuinely controls the cascade rather
+  than merely suppressing a tag.
+- `[workspace] release = false` — today's config — makes release-plz **hard-error**:
+  `no public packages found. Are there any public packages in your project?`. A live `release-pr`
+  job would therefore **fail outright**, not quietly do nothing. The replacement is a precondition
+  for §7's job existing at all, which is why it lands with SMA-576 rather than later.
+
 An alternative worth measuring in the plan: `dependencies_update = false`. It would stop the
 cascade at its source rather than suppressing its symptom — but it also changes the classification
 contract the SMA-398 parity harness derives its fixture config from (`rs/release-plz.toml` is the
