@@ -367,12 +367,27 @@ checkout.
 
 * **Binding `/healthz` before migrating**, serving `/readyz` as not-ready-while-migrating, so a
   migrating replica is externally visible and no start-period tuning is needed. This is the
-  standard pattern and would dissolve both the Dockerfile conflict (§3.5) and the
-  `startupProbe.failureThreshold` sizing problem. Rejected for this issue because `main.rs:135-141`
-  encodes a deliberate "fail with nothing bound" principle — an early return after a listener is
-  live aborts in-flight requests instead of never having accepted one — so reversing it is a
-  restructuring of the composition root, not a lock. Worth its own issue; flagged rather than
-  silently dropped.
+  standard pattern, it would dissolve both the Dockerfile conflict (§3.5) and the
+  `startupProbe.failureThreshold` sizing problem, and it would additionally fix the *single*-replica
+  slow-migration case, which is a real bug today with no concurrency involved. **Deferred to
+  [SMA-571](https://linear.app/smaschek/issue/SMA-571/), not dismissed.**
+
+  It is deferred because it is not a reordering. `AppState` provably cannot be built before the
+  migration: `adapters/http/mod.rs:396` reconciles system policies **into** Postgres via
+  `bootstrap::reconcile_starter`, and `:398-401` **reads** the policy store through
+  `PolicySnapshot::new` → `load_and_compile`. Both hit tables m0004 creates, so on a fresh
+  database they fail with "relation does not exist". The listener must therefore be *serving*
+  before the state exists, which rules out every cheap variant — binding early and calling
+  `axum::serve` later leaves connections accepted-but-unanswered (the probe times out, worse than
+  connection-refused), and handing the listener between two `axum::serve` calls opens a port-free
+  race window. The viable mechanism is a deferred-router slot (`health_router()` is already
+  stateless, `mod.rs:810`, so it can be served with a `fallback_service` over an
+  `Arc<ArcSwapOption<Router>>`), which is a novel request-path mechanism for this repo and earns
+  its own spec, challenge, and tests rather than riding along on a concurrency fix.
+
+  Until SMA-571 lands, §3.5's `start_period` invariant is what stands in for it — and it is
+  genuinely fragile, since a static Dockerfile value cannot be validated against a runtime config
+  value. That fragility is the price of the split and is recorded here rather than glossed.
 * **A boot metric.** A once-per-process event does not earn a metric family plus the
   `:observability-drift` surface it would add. The throttled `tracing` lines carry it.
 * **`SET lock_timeout` + blocking `pg_advisory_lock`.** Not rejected for uncertainty —
