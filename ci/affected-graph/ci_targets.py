@@ -16,6 +16,7 @@
 # control wired into run.sh's `--negative-control` branch, and never parsing moon.yml.
 #
 # usage: ci_targets.py [--self-test]
+import inspect
 import json
 import re
 import subprocess
@@ -168,15 +169,30 @@ REQUIRED_DOC_FLAGS = ("--base origin/main", "--include-relations")
 # `assert_ci_targets` also appears in the function definition, so a name-only match would survive
 # deleting the call.
 #
-# A PARTIAL mitigation, not a closure: deleting the `assert_ci_targets` call removes C4 along with
-# it. SMA-542 is the general fix for this class (spec L6).
+# SMA-542 closed the actionlint half of this class: ACTIONLINT_SH_CALL_SITES below pins
+# repo:actionlint's own call sites from here. In return, and as of the SMA-542 residual closure
+# (PR 150 follow-up), check 8c in ci/actionlint/run.sh pins THESE two entries — this gate's own
+# call sites, copied verbatim there as T_AFFECTED_GRAPH_CALL_SITES — from that independently
+# scheduled file. Neither gate is now the sole judge of its own SCHEDULING (check 8 still pins
+# `:affected-smoke`'s presence in `T`) nor of its own WIRING (check 8c pins these two lines
+# directly): deleting `assert_ci_targets || SUITE_RC=1` used to remove C4 silently along with
+# itself, with nothing outside ci/affected-graph/ able to notice — check 8c catches that now.
+#
+# What remains, and is inherent rather than an oversight, is the same shape check 8c's own comment
+# names for its production call site (ci/actionlint/run.sh, ACTIONLINT_SH_CALL_SITES below):
+# deleting THAT call site (the `done < <(affected_graph_wiring_verdict ...)` line) and this entry's
+# `assert_ci_targets || SUITE_RC=1` in the SAME edit still silences both directions at once — two
+# independently-scheduled gates are the most the graph offers, and closing a combined deletion
+# needs a third, which only moves the same problem one level out.
 RUN_SH_CALL_SITES = (
     "assert_ci_targets || SUITE_RC=1",
     # The `|| NEG_RC=1` suffix is as load-bearing as the command. Matching the prefix alone left
     # `--self-test || true` looking identical to a wired call site: the self-test still RUNS, its
     # failure is simply swallowed, and the negative control silently stops being able to report red
     # — the rotted-self-test outcome moon.yml's affected-smoke comment was written about. Both
-    # entries now pin their propagation, symmetrically (CodeRabbit round 3).
+    # entries now pin their propagation, symmetrically (CodeRabbit round 3), and check 8c in
+    # ci/actionlint/run.sh mirrors that same suffix requirement from its own copy of these two
+    # strings.
     '"$HERE/ci_targets.py" --self-test || NEG_RC=1',
 )
 
@@ -205,6 +221,106 @@ SELF_SCHEDULED_GATES = {
         "python3 ci/affected-graph/task_inputs.py",
     ),
 }
+
+# C4, actionlint half (SMA-542). repo:actionlint's self-tests, mutation battery, and the check-8,
+# check-8b, check-8c AND check-8d production call sites are each invoked from ONE call site inside
+# ci/actionlint/run.sh. That script cannot assert its own invocation — deleting the self-test calls
+# was the sole survivor of SMA-525's mutation battery, deleting the check-8 call site was fix-wave
+# finding I1, deleting the check-8b call site reopened that SAME defect one round later (CodeRabbit
+# round 4, finding C1) on the check that replaced check-8 as the primary guard, and check-8c and
+# check-8d are each their own SMA-542 residual closure (PR 150 follow-up, closing L6 and L12
+# respectively) — so the assertion lives here, in a gate scheduled independently of it. The reverse
+# direction is check 8 (still-`:affected-smoke`-in-`T`) and check 8c (still-invokes-ci_targets.py,
+# i.e. RUN_SH_CALL_SITES above) in that same script: neither gate is the sole judge of its own
+# scheduling OR its own wiring.
+#
+# REACHABILITY IS NOT AUTOMATIC. This check only runs when repo:affected-smoke is scheduled, so
+# moon.yml lists `ci/actionlint/**/*` among its inputs. Without that entry a PR deleting these
+# lines would not schedule this task at all, while repo:actionlint (inputs: ['**/*']) still ran and
+# asserted nothing — the exact defect this closes. Do not remove that input.
+#
+# Matched as WHOLE LINES, like SELF_SCHEDULED_GATES and unlike RUN_SH_CALL_SITES:
+# `run_self_tests` is a strict substring of its own definition line `run_self_tests() {`, so a
+# substring test would report the file as wired after the call had been deleted. The third,
+# fourth, fifth and sixth entries, the `done < <(...)` lines closing check 8's, check 8b's, check
+# 8c's and check 8d's production `while` loops, are unambiguous the same way: `ci_target_floor_
+# verdict`, `invocation_allowlist_verdict`, `affected_graph_wiring_verdict` and
+# `block_execution_verdict` are each also invoked from inside their own self-test fixtures (e.g.
+# `ci_target_floor_verdict "$tmp"` / `invocation_allowlist_verdict "$tmp" "$skip"` /
+# `affected_graph_wiring_verdict "$tmp"` / `block_execution_verdict "$tmp"`), but none of those
+# calls is the whole `done < <(...)` line that schedules the PRODUCTION run, so a whole-line match
+# cannot confuse them. The third entry closed fix-wave finding I1 (the reviewer deleted that exact
+# block and measured: full gate rc 0, this gate PASS, with T_FLOOR/swallowed/continue-on-error
+# asserting nothing until it closed). The fourth entry closes the SAME defect reopened one round
+# later against check 8b (CodeRabbit round 4, finding C1) — measured the same way: deleting the
+# whole "# Check 8b ..." block left run.sh at rc 0 and this gate PASSing, because
+# invocation_allowlist_self_test still calls the function; only the production `done < <(...)` line
+# proves it is also applied to the real ci.yml. The fifth entry closes check 8c's OWN production
+# call site the same way — without it, deleting check 8c's block would leave run.sh at rc 0 and
+# THIS gate PASSing, because affected_graph_wiring_self_test still calls the function, which is
+# exactly the recursive version of the residual check 8c itself exists to close: pinning check 8c
+# by anything OTHER than its own production line would make it the sole judge of its own wiring.
+# The sixth entry closes check 8d's OWN production call site the same way (SMA-542 residual
+# closure, PR 150 follow-up — closing README L12) — without it, deleting check 8d's block would
+# leave run.sh at rc 0 and THIS gate PASSing, because block_execution_self_test still calls the
+# function.
+#
+# COLUMN 0, not stripped-both-sides (CodeRabbit, PR 150). check_self_invocation used to build
+# `actionlint_lines` with `line.strip()`, so a required line was satisfied by that exact TEXT
+# appearing anywhere in the file — including indented inside `if false; then … fi` or a heredoc,
+# neither of which ever executes. Wrapping one of these six calls in a conditional block is
+# exactly the shape a false negative would take, and it conventionally INDENTS the wrapped line, so
+# matching now requires no leading whitespace at all (trailing whitespace is still stripped). This
+# is a deliberate ASYMMETRY with the other two haystacks, not an oversight: RUN_SH_CALL_SITES
+# matches substrings because its lines are indented inside a bash function, and
+# SELF_SCHEDULED_GATES strips both sides because moon task scripts are indented inside YAML — both
+# would break under a column-0 requirement. This haystack is different: `run_self_tests`,
+# `selftest_mutation_battery` and all four `done < <(...)` lines all sit at run.sh's TOP LEVEL
+# (verified: none is nested in a function, `if`, or loop), so column 0 is where the real, executing
+# call sites actually live, and is available as a signal here in a way it is not for the other two.
+#
+# THIS IS NOT REACHABILITY ANALYSIS, and does not claim to be — parsing bash control flow in
+# Python is fragile and out of scope (spec decision). What it does NOT close: a required line
+# copied into an UNINDENTED `if false; then … fi` block, or an unindented heredoc, still satisfies
+# it — column 0 rejects the common case (an indented copy) without attempting the general one. That
+# residual is recorded in ci/actionlint/README.md's Limitations section.
+#
+# PROPAGATION CONTRACT — these entries carry no `|| RC=1` suffix, and that is not the hole
+# RUN_SH_CALL_SITES' suffixes close. `run_self_tests` and `selftest_mutation_battery` report through
+# run.sh's global `FAILED`, as its nine self-tests already do (run.sh:43-46); NONE of the four
+# `done < <(...)` lines has anything to propagate — each is the tail of a `while` loop whose body
+# already calls `fail()` per verdict. The consequence is that a future `run_self_tests || FAILED=1` (or an
+# equally harmless reformat of any `done < <(...)` line) would red this check even though it is
+# harmless; restore the bare line, or update this constant.
+ACTIONLINT_SH_CALL_SITES = (
+    "run_self_tests",
+    "selftest_mutation_battery",
+    "done < <(ci_target_floor_verdict .github/workflows/ci.yml)",
+    # Check 8b's production call site (SMA-542 CodeRabbit round 4, finding C1) — reopens fix-wave
+    # I1 one check later: deleting the whole "# Check 8b ..." block from run.sh left the full gate
+    # at rc 0 and this gate PASSing, because invocation_allowlist_self_test still calls the
+    # FUNCTION; only this line proves it is also applied to the real ci.yml. Whole-line matched
+    # for the same reason as the entry above it: `invocation_allowlist_verdict` also appears inside
+    # the self-test fixtures (`invocation_allowlist_verdict "$tmp" "$skip"` and
+    # `invocation_allowlist_verdict /nonexistent/ci.yml`), so a substring test would be satisfied
+    # by those and survive deleting this exact line.
+    'done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")',
+    # Check 8c's production call site (SMA-542 residual closure, PR 150 follow-up) — the reverse
+    # pin: repo:actionlint's own check that ci/affected-graph/run.sh still invokes THIS gate
+    # (RUN_SH_CALL_SITES, above). Same shape as the two entries above it: `affected_graph_wiring_
+    # verdict` is also called from inside its own self-test fixture
+    # (`affected_graph_wiring_verdict "$tmp"`), so a substring test would be satisfied by that call
+    # and survive deleting this exact production line.
+    "done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)",
+    # Check 8d's production call site (SMA-542 residual closure, PR 150 follow-up — closes
+    # ci/actionlint/README.md's L12): the block-execution check that closes the "wrap the whole
+    # invocation block in an always-false conditional" gap check 8b's line-shaped matching cannot
+    # see. Same shape as the three entries above it: `block_execution_verdict` also appears inside
+    # its own self-test fixtures (`block_execution_verdict "$tmp"`,
+    # `block_execution_verdict /nonexistent/ci.yml`, ...), so a substring test would be satisfied
+    # by those and survive deleting this exact production line.
+    "done < <(block_execution_verdict .github/workflows/ci.yml)",
+)
 
 
 def read_input(path, label):
@@ -536,22 +652,37 @@ def _scripts(projects):
     return scripts
 
 
-def check_self_invocation(run_sh_text, scripts):
-    """Call sites of the affected-graph gates that are missing from where they must appear.
+def check_self_invocation(run_sh_text, scripts, actionlint_sh_text):
+    """Call sites of the affected-graph and actionlint gates missing from where they must appear.
 
-    The two halves match DIFFERENTLY, on purpose (see SELF_SCHEDULED_GATES): run.sh sites are
-    substrings, because they are indented and one is a mid-line fragment, and their `|| RC=1`
-    suffixes already make them unambiguous; task-script sites are whole stripped LINES, because
-    one required line is a strict prefix of the other and a substring test would report a script
-    as fully wired after its real run had been deleted.
+    Three haystacks, matched TWO different ways. run.sh sites are substrings, because they are
+    indented and one is a mid-line fragment, and their `|| RC=1` suffixes already make them
+    unambiguous. Task-script and actionlint sites are whole stripped LINES, because in each case
+    one required token is a strict prefix of something else in the file — `task_inputs.py` of
+    `task_inputs.py --self-test`, and `run_self_tests` of `run_self_tests() {`.
 
-    The two texts are checked SEPARATELY rather than against one concatenated haystack, so a call
-    site living in the wrong file cannot satisfy the other's requirement.
+    The three texts are checked SEPARATELY rather than against one concatenated haystack, so a call
+    site living in the wrong file cannot satisfy another's requirement.
+
+    `actionlint_sh_text` is a REQUIRED positional parameter, deliberately. An optional one
+    defaulting to "" would make every existing caller pass vacuously — re-creating the class of
+    hole this check exists to close.
     """
     missing = [site for site in RUN_SH_CALL_SITES if site not in run_sh_text]
     for task, required in sorted(SELF_SCHEDULED_GATES.items()):
         present = {line.strip() for line in scripts.get(task, "").splitlines()}
         missing.extend(f"{task} script: {site}" for site in required if site not in present)
+    # COLUMN 0 only (rstrip, no lstrip) — see the comment at ACTIONLINT_SH_CALL_SITES above for why
+    # this one haystack, alone of the three, requires the line to carry NO leading whitespace: an
+    # indented copy (e.g. wrapped in `if false; then … fi`) must not satisfy the pin.
+    actionlint_lines = {
+        line.rstrip() for line in actionlint_sh_text.splitlines() if line == line.lstrip()
+    }
+    missing.extend(
+        f"ci/actionlint/run.sh: {site}"
+        for site in ACTIONLINT_SH_CALL_SITES
+        if site not in actionlint_lines
+    )
     return missing
 
 
@@ -609,7 +740,7 @@ def self_test():
     Drives the PARSERS as well as the checks. The parsers are the component this gate cannot
     self-detect a fault in — a total match failure hits the rc-1 path, but a PARTIAL mis-parse is
     silent — and hand-rolled text extraction "is exactly the kind of thing that silently does the
-    wrong thing" (ci/actionlint/run.sh:265, which backs that claim with ~35 extractor fixtures).
+    wrong thing" (ci/actionlint/run.sh:284, which backs that claim with ~35 extractor fixtures).
     """
     failures = []
 
@@ -941,29 +1072,56 @@ def self_test():
         "python3 ci/affected-graph/task_inputs.py\n"
     )
     scripts = {"input-liveness": wired_script}
-    if check_self_invocation(wired, scripts):
+    wired_actionlint = (
+        # Load-bearing, exactly as `assert_ci_targets() {` is above: with the DEFINITION present,
+        # `no_actionlint_call` below still contains the bare name `run_self_tests`, so a
+        # name-only entry would survive deleting the call. Whole-line matching is what separates
+        # them, and dropping this line silently de-fangs that assertion.
+        "run_self_tests() {\n  :\n}\n"
+        "run_self_tests\n"
+        "selftest_mutation_battery\n"
+        # Check 8's production call site (SMA-542 fix-wave I1). Also contains `ci_target_floor_verdict`
+        # as a substring — the self-test fixtures call it too, as `ci_target_floor_verdict "$tmp"`
+        # and `ci_target_floor_verdict /nonexistent/ci.yml` — so this MUST be whole-line matched,
+        # exactly like the two entries above.
+        "done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n"
+        # Check 8b's production call site (SMA-542 CodeRabbit round 4, finding C1) — same shape,
+        # same reason: `invocation_allowlist_verdict` is also called from inside its own self-test
+        # fixtures, so this MUST be whole-line matched too.
+        'done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")\n'
+        # Check 8c's production call site (SMA-542 residual closure, PR 150 follow-up) — same
+        # shape again: `affected_graph_wiring_verdict` is also called from inside its own
+        # self-test fixture, so this MUST be whole-line matched too.
+        'done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n'
+        # Check 8d's production call site (SMA-542 residual closure, PR 150 follow-up — closes
+        # README L12) — same shape again: `block_execution_verdict` is also called from inside its
+        # own self-test fixtures, so this MUST be whole-line matched too.
+        'done < <(block_execution_verdict .github/workflows/ci.yml)\n'
+    )
+    if check_self_invocation(wired, scripts, wired_actionlint):
         failures.append(
-            f"check_self_invocation: fired on a wired tree: {check_self_invocation(wired, scripts)}"
+            "check_self_invocation: fired on a wired tree: "
+            f"{check_self_invocation(wired, scripts, wired_actionlint)}"
         )
     no_call = wired.replace("  assert_ci_targets || SUITE_RC=1\n", "")
-    if not check_self_invocation(no_call, scripts):
+    if not check_self_invocation(no_call, scripts, wired_actionlint):
         failures.append("check_self_invocation: missed a deleted run_suite call")
     no_selftest = wired.replace('  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n', "")
-    if not check_self_invocation(no_selftest, scripts):
+    if not check_self_invocation(no_selftest, scripts, wired_actionlint):
         failures.append("check_self_invocation: missed a deleted --self-test call")
     silenced = wired.replace("--self-test || NEG_RC=1", "--self-test || true")
-    if not check_self_invocation(silenced, scripts):
+    if not check_self_invocation(silenced, scripts, wired_actionlint):
         failures.append("check_self_invocation: missed a --self-test whose failure is swallowed")
     # SMA-553 D10 — the task-script half. The REAL-RUN line is a strict PREFIX of the --self-test
     # line, so a substring test would report the script below as fully wired while the gate no
     # longer runs at all. Whole-line matching is what distinguishes them.
     if not check_self_invocation(wired, {"input-liveness": wired_script.replace(
         "python3 ci/affected-graph/task_inputs.py\n", ""
-    )}):
+    )}, wired_actionlint):
         failures.append("check_self_invocation: missed a deleted task_inputs real run (prefix hole)")
     if not check_self_invocation(wired, {"input-liveness": wired_script.replace(
         "python3 ci/affected-graph/task_inputs.py --self-test\n", ""
-    )}):
+    )}, wired_actionlint):
         failures.append("check_self_invocation: missed a deleted task_inputs --self-test")
     # SMA-553 review finding 1 — the errexit line itself. Moon's `script:` blocks have no
     # errexit, so the script's exit status is its LAST command's; deleting `set -euo pipefail`
@@ -971,18 +1129,155 @@ def self_test():
     # stay green while a failing --self-test is silently swallowed (SMA-526).
     if not check_self_invocation(wired, {"input-liveness": wired_script.replace(
         "set -euo pipefail\n", ""
-    )}):
+    )}, wired_actionlint):
         failures.append("check_self_invocation: missed a deleted errexit line ahead of the invocations")
-    if not check_self_invocation(wired, {}):
+    if not check_self_invocation(wired, {}, wired_actionlint):
         failures.append("check_self_invocation: missed an absent input-liveness script entirely")
     # The two texts are checked SEPARATELY: a call site in the wrong file must not satisfy the
     # other's requirement, which a concatenated haystack would allow.
-    if not check_self_invocation(wired_script, {"input-liveness": wired}):
+    if not check_self_invocation(wired_script, {"input-liveness": wired}, wired_actionlint):
         failures.append("check_self_invocation: accepted the two texts swapped")
     # ...and the reverse direction, which the swap fixture above does not reach: script text must
     # not satisfy a run.sh requirement either.
-    if not check_self_invocation(no_call, {"input-liveness": wired + wired_script}):
+    if not check_self_invocation(no_call, {"input-liveness": wired + wired_script}, wired_actionlint):
         failures.append("check_self_invocation: a run.sh call site was satisfied by script text")
+    # The "fired on a wired tree" positive control above already covers all three haystacks
+    # simultaneously wired, including wired_actionlint — a second, argument-identical repeat here
+    # would only ever fire alongside that one and add no coverage (SMA-542 review, smaller
+    # correction 2).
+    no_actionlint_call = wired_actionlint.replace("\nrun_self_tests\n", "\n")
+    if not check_self_invocation(wired, scripts, no_actionlint_call):
+        failures.append("check_self_invocation: missed a deleted run_self_tests call")
+    no_battery = wired_actionlint.replace("selftest_mutation_battery\n", "")
+    if not check_self_invocation(wired, scripts, no_battery):
+        failures.append("check_self_invocation: missed a deleted mutation-battery call")
+    # SMA-542 fix-wave I1 — the reviewer deleted this exact block from run.sh and measured: full
+    # gate rc 0, this gate PASS, with check 8's T floor/swallowed/continue-on-error verdicts
+    # asserting nothing until the third ACTIONLINT_SH_CALL_SITES entry closed it.
+    no_floor_call = wired_actionlint.replace(
+        "done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n", ""
+    )
+    if not check_self_invocation(wired, scripts, no_floor_call):
+        failures.append(
+            "check_self_invocation: missed a deleted check-8 production call site (fix-wave I1)"
+        )
+    # CodeRabbit round 4, finding C1 — the SAME defect as fix-wave I1 above, reopened one round
+    # later against check 8b: deleting its production call site left the real run.sh at rc 0 and
+    # this gate PASSing, because invocation_allowlist_self_test still calls the FUNCTION. Only the
+    # production `done < <(...)` line proves it is also applied to the real ci.yml.
+    no_check8b_call = wired_actionlint.replace(
+        'done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")\n', ""
+    )
+    if not check_self_invocation(wired, scripts, no_check8b_call):
+        failures.append(
+            "check_self_invocation: missed a deleted check-8b production call site "
+            "(CodeRabbit round 4, finding C1)"
+        )
+    # SMA-542 residual closure (PR 150 follow-up) — the SAME defect one level further out, against
+    # check 8c: deleting ITS production call site must be caught too, or check 8c would be the sole
+    # judge of its own wiring, exactly the problem it exists to close for RUN_SH_CALL_SITES.
+    no_check8c_call = wired_actionlint.replace(
+        "done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n", ""
+    )
+    if not check_self_invocation(wired, scripts, no_check8c_call):
+        failures.append(
+            "check_self_invocation: missed a deleted check-8c production call site "
+            "(SMA-542 residual closure)"
+        )
+    # The SAME defect one level further out again, against check 8d (SMA-542 residual closure, PR
+    # 150 follow-up — closes README L12): deleting ITS production call site must be caught too, or
+    # check 8d would be the sole judge of its own wiring.
+    no_check8d_call = wired_actionlint.replace(
+        "done < <(block_execution_verdict .github/workflows/ci.yml)\n", ""
+    )
+    if not check_self_invocation(wired, scripts, no_check8d_call):
+        failures.append(
+            "check_self_invocation: missed a deleted check-8d production call site "
+            "(SMA-542 residual closure, README L12)"
+        )
+    # CodeRabbit (PR 150) — the column-0 requirement itself. Before this fix, `check_self_invocation`
+    # matched actionlint call sites by STRIPPED line (both sides), so a required line was satisfied
+    # by that exact text appearing anywhere, including indented inside an `if false; then … fi`
+    # block or a heredoc — neither of which ever executes. Wrapping a call in a conditional
+    # conventionally INDENTS it, so an indented copy of each of the six required lines must now be
+    # reported missing — one row per line, so a mutant that widened the column-0 check back to
+    # "matches anywhere" is caught regardless of which entry it is tested against. The "fired on a
+    # wired tree" assertion above already proves the real, column-0 tree keeps passing under this
+    # tighter rule.
+    indented_run_self_tests = wired_actionlint.replace("run_self_tests\n", "  run_self_tests\n", 1)
+    if not check_self_invocation(wired, scripts, indented_run_self_tests):
+        failures.append(
+            "check_self_invocation: an INDENTED run_self_tests call satisfied the column-0 pin"
+        )
+    indented_battery = wired_actionlint.replace(
+        "selftest_mutation_battery\n", "  selftest_mutation_battery\n"
+    )
+    if not check_self_invocation(wired, scripts, indented_battery):
+        failures.append(
+            "check_self_invocation: an INDENTED selftest_mutation_battery call satisfied the "
+            "column-0 pin"
+        )
+    indented_floor_call = wired_actionlint.replace(
+        "done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n",
+        "  done < <(ci_target_floor_verdict .github/workflows/ci.yml)\n",
+    )
+    if not check_self_invocation(wired, scripts, indented_floor_call):
+        failures.append(
+            "check_self_invocation: an INDENTED check-8 call site satisfied the column-0 pin"
+        )
+    indented_check8b_call = wired_actionlint.replace(
+        'done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")\n',
+        '  done < <(invocation_allowlist_verdict .github/workflows/ci.yml "$REPORTED_LINENOS")\n',
+    )
+    if not check_self_invocation(wired, scripts, indented_check8b_call):
+        failures.append(
+            "check_self_invocation: an INDENTED check-8b call site satisfied the column-0 pin"
+        )
+    indented_check8c_call = wired_actionlint.replace(
+        "done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n",
+        "  done < <(affected_graph_wiring_verdict ci/affected-graph/run.sh)\n",
+    )
+    if not check_self_invocation(wired, scripts, indented_check8c_call):
+        failures.append(
+            "check_self_invocation: an INDENTED check-8c call site satisfied the column-0 pin"
+        )
+    indented_check8d_call = wired_actionlint.replace(
+        "done < <(block_execution_verdict .github/workflows/ci.yml)\n",
+        "  done < <(block_execution_verdict .github/workflows/ci.yml)\n",
+    )
+    if not check_self_invocation(wired, scripts, indented_check8d_call):
+        failures.append(
+            "check_self_invocation: an INDENTED check-8d call site satisfied the column-0 pin"
+        )
+    # Contamination cases, THREE of them (SMA-542 review finding I1, plus a round-2 addition). The
+    # obvious "swap the two texts wholesale" version tried first passed unconditionally, because it
+    # only proves the required site is ABSENT from the wrong haystack — never exercising whether
+    # the haystacks are actually checked separately. An 8-mutant battery against
+    # check_self_invocation found three survivors of that version: actionlint sites satisfied by
+    # run_sh_text, run.sh sites satisfied by actionlint_sh_text, and actionlint sites satisfied by
+    # task-script text. Each case below concatenates the WRONG haystack's fully-wired text onto the
+    # ALREADY-BROKEN text under test: if the two are ever read as one, the missing site would be
+    # masked by the appended text and this would wrongly pass. Round 1 landed only the first two —
+    # the task-script pairing is a DISTINCT haystack combination neither of them exercises, so a
+    # check that concatenated task-script and actionlint text would have survived undetected.
+    if not check_self_invocation(wired + wired_actionlint, scripts, no_actionlint_call):
+        failures.append("check_self_invocation: an actionlint site was satisfied by run.sh text")
+    if not check_self_invocation(no_call, scripts, wired_actionlint + wired):
+        failures.append("check_self_invocation: a run.sh site was satisfied by actionlint text")
+    if not check_self_invocation(
+        wired, {"input-liveness": wired_script + wired_actionlint}, no_actionlint_call
+    ):
+        failures.append(
+            "check_self_invocation: an actionlint site was satisfied by task-script text"
+        )
+    # The docstring's "REQUIRED positional parameter" claim (SMA-542) is otherwise unenforced: every
+    # caller above already passes it explicitly, so a future `actionlint_sh_text=""` default would
+    # make all of them pass vacuously — the exact class of hole this parameter exists to close —
+    # while every call-site-shaped assertion above stayed green. Only introspecting the signature
+    # itself catches that regression (SMA-542 review, smaller correction 3).
+    default = inspect.signature(check_self_invocation).parameters["actionlint_sh_text"].default
+    if default is not inspect.Parameter.empty:
+        failures.append("check_self_invocation: actionlint_sh_text must stay a REQUIRED parameter")
 
     # _scripts (SMA-553 D10) — a second pure extractor, so _eligibility's shape is untouched.
     got_scripts = _scripts({"repo": {"input-liveness": {"script": "hi"}}, "ts": {"lint": {}}})
@@ -1063,6 +1358,9 @@ def main():
         run_sh = read_input(
             root / "ci" / "affected-graph" / "run.sh", "ci/affected-graph/run.sh"
         )
+        actionlint_sh = read_input(
+            root / "ci" / "actionlint" / "run.sh", "ci/actionlint/run.sh"
+        )
         floor = check_floor(tasks)
         missing, unexpected, bad_exempt, stale_exempt = check_forward(tasks, t_targets)
         # SMA-553 review finding 1 — these two also raise MoonOutputError (INFRA_ERRORS), so their
@@ -1083,7 +1381,7 @@ def main():
 
     dead = check_reverse(tasks, t_targets)
     doc_problems = check_docs(t_targets, doc_targets, region)
-    missing_sites = check_self_invocation(run_sh, scripts)
+    missing_sites = check_self_invocation(run_sh, scripts, actionlint_sh)
     bad_invocation = check_invocation(ci_yml)
 
     if not (floor or missing or unexpected or bad_exempt or stale_exempt or dead or doc_problems
@@ -1140,11 +1438,15 @@ def main():
          "    Fix: copy `T` verbatim between the <!-- ci-targets:begin/end --> markers, keeping\n"
          "    the `--base origin/main --include-relations` tail."),
         (missing_sites,
-         "A gate's own call site is missing: either this gate's, from\n"
-         "    ci/affected-graph/run.sh, or a self-scheduled gate's own invocation from inside its\n"
-         "    moon.yml task script — so that gate (or its negative control) would not run at all.\n"
-         "    Fix: restore the exact line; see RUN_SH_CALL_SITES and SELF_SCHEDULED_GATES in\n"
-         "    ci/affected-graph/ci_targets.py."),
+         "A gate's own call site is missing: this gate's, from\n"
+         "    ci/affected-graph/run.sh; a self-scheduled gate's own invocation from inside its\n"
+         "    moon.yml task script; or repo:actionlint's, from ci/actionlint/run.sh — so that\n"
+         "    gate (or its negative control) would not run at all.\n"
+         "    Fix: restore the exact line; see RUN_SH_CALL_SITES, SELF_SCHEDULED_GATES and\n"
+         "    ACTIONLINT_SH_CALL_SITES in ci/affected-graph/ci_targets.py.\n"
+         "    A row prefixed `ci/actionlint/run.sh:` means repo:actionlint would run its checks\n"
+         "    while asserting nothing — its self-tests or its mutation battery are no longer\n"
+         "    invoked."),
         (bad_invocation,
          "A `moon ci` invocation in .github/workflows/ci.yml does not hand it the WHOLE `T`\n"
          "    array. Every check above asserts what is IN `T`; this one asserts `T` is what runs.\n"

@@ -117,10 +117,16 @@ It also runs several checks that the per-case project sets structurally **cannot
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
   entry resolves to a CI-eligible task somewhere in the graph; **C3** CLAUDE.md's marker-delimited
   command mirrors `T` token-for-token in order and keeps its `--base origin/main
-  --include-relations` tail; **C4** both of this gate's own call sites are still present in
-  `run.sh`; **C5** every `moon ci` invocation in `ci.yml` is handed the WHOLE array —
-  C1-C4 assert what is *in* `T`, and a subsetted `"${T[@]:0:5}"` leaves all four green while
-  switching most of the graph off. C5's line matcher is deliberately BROADER than
+  --include-relations` tail; **C4** three separate haystacks all still carry the call site(s) that
+  make some other gate run at all — this gate's own invocation in `ci/affected-graph/run.sh`
+  (`RUN_SH_CALL_SITES`, substring-matched, each already carrying its own `|| RC=1` propagation
+  suffix); a self-scheduled gate's invocation inside its own `moon.yml` task script
+  (`SELF_SCHEDULED_GATES`, whole-line-matched — currently `repo:input-liveness`'s, SMA-553); and
+  `repo:actionlint`'s own self-test and mutation-battery calls inside `ci/actionlint/run.sh`
+  (`ACTIONLINT_SH_CALL_SITES`, whole-line-matched — SMA-542); **C5** every `moon ci` invocation in
+  `ci.yml` is handed the WHOLE array — C1-C4 assert what is *in* `T`, and a subsetted
+  `"${T[@]:0:5}"` leaves all four green while switching most of the graph off. C5's line matcher
+  is deliberately BROADER than
   `assert_include_relations`' `moon ci +"` grep: mirroring it left both blind to a subsetted array
   behind a leading flag (`moon ci --base origin/main "${T[@]:0:5}"`). `moon ci` exits **0** on a target that resolves to nothing —
   measured, including the mixed case — so without C2 a renamed or mistyped entry is a silent no-op

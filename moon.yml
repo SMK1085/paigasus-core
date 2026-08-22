@@ -143,6 +143,13 @@ tasks:
       - 'rs/crates/*/*/package.json'
       - 'ts/packages/*/package.json'
       - 'ts/apps/*/package.json'
+      # SMA-542 — this task now pins the call sites of repo:actionlint's self-tests and mutation
+      # battery (ACTIONLINT_SH_CALL_SITES), so a change under ci/actionlint/ MUST re-key it.
+      # Without this the pin is real but unreachable: the PR that deletes those lines does not
+      # schedule this task, while repo:actionlint (inputs: ['**/*']) still runs and now asserts
+      # nothing. Same reasoning as the CLAUDE.md entry below — repo:actionlint's own `**/*` cannot
+      # green a different task.
+      - 'ci/actionlint/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
@@ -479,7 +486,7 @@ tasks:
       - '.gitignore'
 
   actionlint:
-    description: 'actionlint over .github/workflows/**, plus controls that every paths: glob still matches the tree and every branches: entry names a real branch (SMA-525, SMA-540).'
+    description: 'actionlint over .github/workflows/**, plus controls that every paths: glob still matches the tree, every branches: entry names a real branch, and the self-test/mutation-battery invocations that guard all of it cannot be silently deleted (SMA-525, SMA-540, SMA-542).'
     # WHY `inputs: **/*` AND NOT THE NARROW LIST THE OTHER repo:* GATES USE — this gate makes an
     # assertion about the WHOLE FILE TREE, not about the workflow files. A directory rename is the
     # dominant real-world way a paths: glob comes to match nothing (a typo is at least made by
@@ -499,10 +506,31 @@ tasks:
     # docs/superpowers/specs/2026-08-19-sma-540-branches-filter-gate-design.md.
     #
     # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
-    # (cargo nextest, next typegen). This one is ~1.0s standalone and warm (measured): six
-    # actionlint invocations — one over the real workflows, five stdin fixtures — 26
-    # `git ls-files` calls, and four fixture tables (extractor, path-filter verdicts,
-    # branch-filter verdicts, config allowlist).
+    # (cargo nextest, next typegen). This one is ~14.42s standalone and warm (measured, min-of-7,
+    # re-measured after the SMA-542 residual closure (PR 150 follow-up) added a ninth self-test
+    # rather than paired with a stale figure from an earlier fixture-table count — was ~1.0s before
+    # SMA-542 added checks 8-9, ~6.33s before this wave added check 8d): six actionlint invocations
+    # — one over the real workflows, five stdin fixtures — and nine fixture tables (extractor,
+    # path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation
+    # allowlist, affected-graph wiring, block execution, kill predicate). TWO DIFFERENT `git
+    # ls-files` counts, for two different walks, are worth keeping distinct rather than merging
+    # into one number (measured via `bash -x`, CodeRabbit PR 150 finding F2 — a merged "26" here
+    # previously read as the SAME walk check 9 re-runs, when it is not): the FULL GATE (checks 5/6
+    # scanning the real workflow files' `paths:`/`branches:` filters, on top of everything
+    # `--self-test` already does) makes 27; `--self-test` ALONE (the fixture tables' own synthetic
+    # `pattern_verdict`/`tracked_exact`/branch-resolution calls, never touching the real workflow
+    # files) makes 9. Check 9's mutation battery re-runs the SECOND of those — the whole of
+    # `--self-test`, 9 `git ls-files` calls included — PLUS check 8d's own dynamic execution of the
+    # moon-ci-affected-graph step's `run:` block against a stubbed `moon`, once per event path, all
+    # once per self-test invocation plus once unmutated, ten concurrent subprocesses. That dynamic
+    # execution is most of check 8d's OWN standalone cost (~1.5s of the ~2.01s -> ~3.52s
+    # `--self-test` jump): each of the EIGHT fixtures that reach the per-event-path loop (the
+    # healthy control, the if-false mutant, two healthy rechecks, the subset mutant, the
+    # branch-swap mutant, the duplicate-invocation mutant, and the final aggregate re-run — every
+    # other fixture returns before the loop) spawns a handful of real subprocesses (a scratch
+    # `mktemp -d`, then per event path a `bash -c` running the extracted block, which itself shells
+    # out to `grep` and the stubbed `moon`) rather than a `grep`/`sed` pass over text.
+    # See the measured table in ci/actionlint/README.md.
     # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
     # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
     script: 'ci/actionlint/run.sh'
