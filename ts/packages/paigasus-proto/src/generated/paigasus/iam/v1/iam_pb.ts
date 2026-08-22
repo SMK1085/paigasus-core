@@ -2602,6 +2602,11 @@ export const DiscardDeadLetterResponseSchema: GenMessage<DiscardDeadLetterRespon
  * destructive operator surface, with no lint rule that would catch the
  * typo. Matches the BulkReplayRequest type it maps onto.
  *
+ * Not atomic: rows are replayed incrementally, so a DEADLINE_EXCEEDED or a
+ * cancelled RPC may leave an unknown number already replayed. Re-issuing is
+ * safe — an already-replayed row is no longer parked and therefore no
+ * longer matches.
+ *
  * @generated from message paigasus.iam.v1.BulkReplayDeadLettersRequest
  */
 export type BulkReplayDeadLettersRequest = Message<"paigasus.iam.v1.BulkReplayDeadLettersRequest"> & {

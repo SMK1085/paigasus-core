@@ -88,6 +88,11 @@ fn to_filter(req: ListAuditEntriesRequest) -> Result<AuditFilter, TenancyError> 
         resource_prn: opt_string(req.resource_prn),
         action: opt_string(req.action),
         outcome: parse_outcome(&req.outcome)?,
+        // KNOWN LATENT (design D10, SMA-501): this drops a PRESENT-but-unrepresentable bound to
+        // `None`, which on a filter field means UNFILTERED — a malformed timestamp silently widens
+        // the query instead of being rejected. `convert::parse_opt_ts` keeps the three cases
+        // distinct and is what `grpc::dead_letters` uses. Left as-is deliberately: this is a READ,
+        // so the blast radius is a wider result set rather than a wider mutation. Tracked in SMA-583.
         from: req.from.and_then(convert::from_ts),
         to: req.to.and_then(convert::from_ts),
         cursor: parse_cursor(&req.cursor)?,

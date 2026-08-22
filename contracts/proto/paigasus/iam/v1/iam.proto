@@ -650,6 +650,11 @@ message DiscardDeadLetterResponse {
 // ReplayDeadLetter while replaying up to 10000 rows instead of one, on a
 // destructive operator surface, with no lint rule that would catch the
 // typo. Matches the BulkReplayRequest type it maps onto.
+//
+// Not atomic: rows are replayed incrementally, so a DEADLINE_EXCEEDED or a
+// cancelled RPC may leave an unknown number already replayed. Re-issuing is
+// safe — an already-replayed row is no longer parked and therefore no
+// longer matches.
 message BulkReplayDeadLettersRequest {
   string event_type = 1;
   google.protobuf.Timestamp parked_from = 2;

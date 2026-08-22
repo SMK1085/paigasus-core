@@ -402,6 +402,11 @@ class BulkReplayDeadLettersRequest(betterproto2.Message):
     ReplayDeadLetter while replaying up to 10000 rows instead of one, on a
     destructive operator surface, with no lint rule that would catch the
     typo. Matches the BulkReplayRequest type it maps onto.
+
+    Not atomic: rows are replayed incrementally, so a DEADLINE_EXCEEDED or a
+    cancelled RPC may leave an unknown number already replayed. Re-issuing is
+    safe — an already-replayed row is no longer parked and therefore no
+    longer matches.
     """
 
     event_type: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)

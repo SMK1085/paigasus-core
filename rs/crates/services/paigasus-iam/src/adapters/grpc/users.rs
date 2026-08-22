@@ -46,7 +46,13 @@ impl UserGrpc {
 /// DIVERGES from HTTP, where `CreateUserBody.locale` is an `Option<String>` and `{"locale": ""}`
 /// therefore persists `Some("")` rather than `None` (design D11). The proto sentinel is
 /// normative for gRPC; HTTP is deliberately left unchanged.
-fn opt_string(raw: String) -> Option<String> {
+///
+/// `pub(crate)`, not private: the HTTP/gRPC twin test for `CreateUser` (design D9.1) lives in
+/// `http::users`, not here, because `adapters::http`'s `mod users` is private and this module
+/// (`adapters::grpc::users`, `pub mod` in `grpc::mod`) is the side that's reachable from there —
+/// mirrors `http::system_retirement`'s identical note about reaching `grpc::convert` rather than
+/// the other way around.
+pub(crate) fn opt_string(raw: String) -> Option<String> {
     if raw.is_empty() { None } else { Some(raw) }
 }
 
@@ -87,42 +93,9 @@ mod tests {
         assert_eq!(opt_string("de-DE".to_string()), Some("de-DE".to_string()));
     }
 
-    /// The HTTP/gRPC twin test for this surface (design D9.1), covering the ONE field where the
-    /// two transports deliberately disagree (D11). Both build the same `NewUser` command, so
-    /// feeding an equivalent wire payload through both projections is what pins the divergence
-    /// as intentional rather than letting it drift further.
-    #[test]
-    fn create_user_projects_onto_the_same_command_except_for_the_empty_string_sentinel() {
-        use crate::adapters::http::dto::CreateUserBody;
-
-        // Both present: the two transports must agree exactly.
-        let grpc = NewUser {
-            email: "a@example.com".to_string(),
-            display_name: "A".to_string(),
-            locale: opt_string("de-DE".to_string()),
-            timezone: opt_string("Europe/Berlin".to_string()),
-        };
-        let body = CreateUserBody {
-            email: "a@example.com".to_string(),
-            display_name: "A".to_string(),
-            locale: Some("de-DE".to_string()),
-            timezone: Some("Europe/Berlin".to_string()),
-        };
-        assert_eq!(grpc.email, body.email);
-        assert_eq!(grpc.display_name, body.display_name);
-        assert_eq!(grpc.locale, body.locale);
-        assert_eq!(grpc.timezone, body.timezone);
-
-        // The allowlisted divergence, asserted so it stays deliberate: the same "empty" wire
-        // value means `None` on gRPC and `Some("")` on HTTP, which persists an empty string
-        // rather than NULL.
-        assert_eq!(opt_string(String::new()), None);
-        let http_empty = CreateUserBody {
-            email: "b@example.com".to_string(),
-            display_name: "B".to_string(),
-            locale: Some(String::new()),
-            timezone: None,
-        };
-        assert_eq!(http_empty.locale, Some(String::new()), "HTTP keeps the empty string — gRPC does not");
-    }
+    // The HTTP/gRPC twin test for `CreateUser` (design D9.1) lives in `http::users`'s test
+    // module, not here: `adapters::http`'s `mod users` is private, so a test living in THIS
+    // module cannot name `http::users::to_command` to run the real HTTP-side projection. This
+    // module is `pub`, so the twin test reaches `opt_string` (above) from the other side instead
+    // — see `http::users` for the assertion.
 }
