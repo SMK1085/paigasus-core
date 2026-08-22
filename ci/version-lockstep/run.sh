@@ -232,11 +232,55 @@ run_check() {
   return "$rc"
 }
 
+# Copy the tree's version-carrying files into a scratch dir, drift ONE site, and assert the
+# checker reports red. Driving the real run_check (not a reimplementation) is what makes this
+# a control rather than a second, differently-wrong checker.
+negative_control() {
+  local tmp
+  tmp="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+
+  # Stage exactly the files the SITES table names, plus rs/Cargo.toml (which the cargo-wsdep
+  # kind reads by name rather than by path). Deriving the list from SITES rather than from a
+  # hand-written glob keeps the control honest when a site is added: a new site is staged
+  # automatically, so the control cannot quietly stop covering it.
+  local entry kind target
+  {
+    printf 'rs/Cargo.toml\n'
+    for entry in "${SITES[@]}"; do
+      IFS='|' read -r _ kind target <<<"$entry"
+      [ "$kind" = cargo-wsdep ] || printf '%s\n' "$target"
+    done
+  } | sort -u | ( cd "$REPO_ROOT" && tar -cf - -T - ) | ( cd "$tmp" && tar -xf - ) \
+    || die_infra "cannot stage a scratch copy of the version-carrying files"
+
+  # Drift site 13 (@paigasus/node-bindings) to a version no group member carries.
+  python3 - "$tmp/rs/crates/bindings/paigasus-node-bindings/package.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["version"] = "99.99.99"
+json.dump(d, open(p, "w"), indent=2)
+PY
+
+  local ec=0
+  REPO_ROOT="$tmp" run_check >/dev/null 2>&1 || ec=$?
+  if [ "$ec" -eq 1 ]; then
+    printf '== negative control: version-lockstep reported red as expected ==\n'
+    return 0
+  fi
+  fail "negative control: a drifted site was ACCEPTED (run_check exited $ec, expected 1).
+      The gate can no longer report red and is green exactly when it matters."
+  return 1
+}
+
 MODE=check
 while [ $# -gt 0 ]; do
   case "$1" in
-    --check)     MODE=check; shift ;;
-    --self-test) MODE=selftest; shift ;;
+    --check)             MODE=check; shift ;;
+    --self-test)         MODE=selftest; shift ;;
+    --negative-control)  MODE=negctl; shift ;;
     *) die_infra "unknown flag: $1" ;;
   esac
 done
@@ -244,4 +288,5 @@ done
 case "$MODE" in
   selftest) run_self_tests ;;
   check)    run_check ;;
+  negctl)   negative_control ;;
 esac

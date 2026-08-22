@@ -42,3 +42,13 @@ passing state — the proto family activates in SMA-577.
 | `--self-test` | Fixture tables for the verdict function. |
 
 Exit codes: `0` pass, `1` the repo is wrong, `2` infrastructure failed.
+
+## The negative control
+
+`--negative-control` stages a scratch copy of every version-carrying file, drifts
+`@paigasus/node-bindings` to `99.99.99`, and asserts `run_check` exits 1. It drives the
+**real** `run_check` rather than a reimplementation — a second, differently-wrong checker
+would prove nothing.
+
+Measured: with `site_verdict` neutered to always return `OK`, the real run still prints
+`== all 18 version-lockstep sites agree ==` and exits 0. The control reds.
