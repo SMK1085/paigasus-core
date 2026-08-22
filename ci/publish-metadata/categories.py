@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """crates.io category slug data for repo:publish-metadata (SMA-529).
 
@@ -75,10 +74,12 @@ def _header_value(lines: list[str], key: str) -> str | None:
 
 def parse_snapshot(text: str, today: datetime.date) -> list[str]:
     """Parse and fully validate a snapshot's text. Raises SnapshotError."""
-    # Strip \r BEFORE anything else. This repo ships no .gitattributes (stated as a known
-    # fact in ci/affected-graph/ci_targets.py), so on a CRLF checkout every line would carry
-    # a trailing \r, fail the corruption check, and red every PR with a message that is
-    # wrong about what is broken.
+    # NOTE: CRLF itself needs no help here — str.splitlines() already treats "\r\n" (and a
+    # lone "\r") as a line boundary and leaves no residual "\r", and load_snapshot's open()
+    # uses the default newline=None, which translates CRLF to "\n" before parse_snapshot
+    # ever sees the text. Python handles CRLF twice over on its own. What .rstrip() actually
+    # defends against is trailing whitespace (spaces/tabs) that a hand-edit can introduce,
+    # which would otherwise fail the corruption check below.
     lines = [line.rstrip() for line in text.splitlines()]
 
     slugs: list[str] = []
@@ -233,8 +234,13 @@ def _self_test() -> int:
         lambda: parse_snapshot(body(good), today),
     )
     expect_ok(
-        "CRLF line endings are tolerated",
+        "CRLF line endings parse (regression guard — Python's own splitlines()/universal "
+        "newlines handle this, not .rstrip())",
         lambda: parse_snapshot(body(good).replace("\n", "\r\n"), today),
+    )
+    expect_ok(
+        "a slug line with trailing spaces still parses (this is what .rstrip() defends)",
+        lambda: parse_snapshot(body(good)[:-1] + "   \n", today),
     )
     expect_ok(
         "a ::-nested slug is accepted",
@@ -280,6 +286,14 @@ def _self_test() -> int:
         "a slug longer than MAX_SLUG_LEN",
         lambda: parse_snapshot(body(["a" * (MAX_SLUG_LEN + 1)]), today),
     )
+    expect_ok(
+        "a slug of exactly MAX_SLUG_LEN chars parses",
+        lambda: parse_snapshot(body(["a" * MAX_SLUG_LEN, "data-structures"]), today),
+    )
+    expect_snapshot_error(
+        "a snapshot with exactly 1 slug is below ABSOLUTE_FLOOR",
+        lambda: parse_snapshot(body(["data-structures"]), today),
+    )
     expect_snapshot_error(
         "a missing snapshot file",
         lambda: load_snapshot("/nonexistent/crates-io-categories.txt", today),
@@ -307,7 +321,7 @@ def _self_test() -> int:
         lambda: _assert(nearest("zzzzzzzz", good) is None, "nearest miss"),
     )
 
-    expected_checks = 17
+    expected_checks = 20
     if checks != expected_checks:
         print(
             f"SELF-TEST COUNT CHANGED: ran {checks}, expected {expected_checks}. Update "
