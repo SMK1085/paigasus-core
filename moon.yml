@@ -56,7 +56,30 @@ tasks:
 
   release-parity:
     description: 'Dry-run release-plz over synthetic commits; assert commit->semver parity (SMA-398).'
-    script: 'ci/release-parity/run.sh'
+    # Negative control FIRST, mirroring repo:publish-metadata, repo:affected-smoke and
+    # repo:input-liveness (SMA-530). Without it CI runs only the real suite, and the real
+    # suite CANNOT detect a check_case that has lost the ability to report red — that is
+    # precisely when it is green. Measured: changing run.sh:51 to drop the `got_a` half of
+    # the comparison leaves all five cases.tsv rows passing (slot b is at baseline in every
+    # one) and the gate exits 0 while asserting nothing; only the control catches it.
+    #
+    # Moon does not enable errexit for `script:` blocks — the block's status is its LAST
+    # command's — so `set -euo pipefail` is REQUIRED, or a failing control is masked by the
+    # passing real run. run.sh's own `set -euo pipefail` governs its body, not this block.
+    # Same trap repo:promtool, repo:nats-permissions and repo:publish-metadata document.
+    #
+    # All three sibling tasks carry their own control because their ECOSYSTEM-SPECIFIC
+    # inputs are distinct: a PR touching only ts/packages/paigasus-sdk/.releaserc.json
+    # selects release-parity-ts alone. They are not disjoint overall — all three also share
+    # ci/release-parity/**/* and .prototools, and that sharing is load-bearing in the other
+    # direction: it is what makes a ci/release-parity/ edit schedule all three at once.
+    # Net cost measured at +890ms/+733ms/+1111ms (~20% each). These three lines are
+    # pinned by SELF_SCHEDULED_GATES in ci/affected-graph/ci_targets.py — edit them and that
+    # gate reds until the constant agrees.
+    script: |
+      set -euo pipefail
+      ci/release-parity/run.sh --negative-control
+      ci/release-parity/run.sh
     toolchain: 'system'
     inputs:
       - 'ci/release-parity/**/*'
@@ -66,7 +89,13 @@ tasks:
 
   release-parity-py:
     description: 'Dry-run python-semantic-release over synthetic commits; assert commit->semver parity (SMA-405).'
-    script: 'ci/release-parity/run.sh --ecosystem python-semantic-release'
+    # Negative control FIRST — see repo:release-parity above for the full reasoning; this
+    # task carries its own because the three tasks' ECOSYSTEM-SPECIFIC inputs are distinct
+    # (they still share ci/release-parity/**/* and .prototools) (SMA-530).
+    script: |
+      set -euo pipefail
+      ci/release-parity/run.sh --ecosystem python-semantic-release --negative-control
+      ci/release-parity/run.sh --ecosystem python-semantic-release
     toolchain: 'system'
     inputs:
       - 'ci/release-parity/**/*'
@@ -77,7 +106,13 @@ tasks:
 
   release-parity-ts:
     description: 'Dry-run semantic-release over synthetic commits; assert commit->semver parity + documented 0.x divergence (SMA-406).'
-    script: 'ci/release-parity/run.sh --ecosystem semantic-release'
+    # Negative control FIRST — see repo:release-parity above for the full reasoning; this
+    # task carries its own because the three tasks' ECOSYSTEM-SPECIFIC inputs are distinct
+    # (they still share ci/release-parity/**/* and .prototools) (SMA-530).
+    script: |
+      set -euo pipefail
+      ci/release-parity/run.sh --ecosystem semantic-release --negative-control
+      ci/release-parity/run.sh --ecosystem semantic-release
     toolchain: 'system'
     inputs:
       - 'ci/release-parity/**/*'
@@ -143,6 +178,18 @@ tasks:
       - 'rs/crates/*/*/package.json'
       - 'ts/packages/*/package.json'
       - 'ts/apps/*/package.json'
+      # SMA-542 — this task now pins the call sites of repo:actionlint's self-tests and mutation
+      # battery (ACTIONLINT_SH_CALL_SITES), so a change under ci/actionlint/ MUST re-key it.
+      # Without this the pin is real but unreachable: the PR that deletes those lines does not
+      # schedule this task, while repo:actionlint (inputs: ['**/*']) still runs and now asserts
+      # nothing. Same reasoning as the CLAUDE.md entry below — repo:actionlint's own `**/*` cannot
+      # green a different task.
+      - 'ci/actionlint/**/*'
+      # SMA-530 — this task now pins ci/release-parity/run.sh's --negative-control BLOCK
+      # (RELEASE_PARITY_SH_CALL_SITES), so a change under ci/release-parity/ MUST re-key it.
+      # Without this the pin is real but unreachable: the PR that deletes the block does not
+      # schedule this task. Same reasoning as the ci/actionlint/**/* entry above.
+      - 'ci/release-parity/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
@@ -470,6 +517,11 @@ tasks:
     # staleness ci/next-env/run.sh documents.
     inputs:
       - 'ci/publish-metadata/run.sh'
+      # security-scan.yml is an input because Check 4 ASSERTS ON IT: without this, the
+      # call-site pin would serve a cached pass on exactly the PR that deletes the job.
+      - 'ci/publish-metadata/categories.py'
+      - 'ci/publish-metadata/crates-io-categories.txt'
+      - '.github/workflows/security-scan.yml'
       - 'rs/Cargo.toml'
       - 'rs/Cargo.lock'
       - 'rs/crates/**/*'
@@ -479,7 +531,7 @@ tasks:
       - '.gitignore'
 
   actionlint:
-    description: 'actionlint over .github/workflows/**, plus controls that every paths: glob still matches the tree and every branches: entry names a real branch (SMA-525, SMA-540).'
+    description: 'actionlint over .github/workflows/**, plus controls that every paths: glob still matches the tree, every branches: entry names a real branch, and the self-test/mutation-battery invocations that guard all of it cannot be silently deleted (SMA-525, SMA-540, SMA-542).'
     # WHY `inputs: **/*` AND NOT THE NARROW LIST THE OTHER repo:* GATES USE — this gate makes an
     # assertion about the WHOLE FILE TREE, not about the workflow files. A directory rename is the
     # dominant real-world way a paths: glob comes to match nothing (a typo is at least made by
@@ -499,10 +551,31 @@ tasks:
     # docs/superpowers/specs/2026-08-19-sma-540-branches-filter-gate-design.md.
     #
     # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
-    # (cargo nextest, next typegen). This one is ~1.0s standalone and warm (measured): six
-    # actionlint invocations — one over the real workflows, five stdin fixtures — 26
-    # `git ls-files` calls, and four fixture tables (extractor, path-filter verdicts,
-    # branch-filter verdicts, config allowlist).
+    # (cargo nextest, next typegen). This one is ~14.42s standalone and warm (measured, min-of-7,
+    # re-measured after the SMA-542 residual closure (PR 150 follow-up) added a ninth self-test
+    # rather than paired with a stale figure from an earlier fixture-table count — was ~1.0s before
+    # SMA-542 added checks 8-9, ~6.33s before this wave added check 8d): six actionlint invocations
+    # — one over the real workflows, five stdin fixtures — and nine fixture tables (extractor,
+    # path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation
+    # allowlist, affected-graph wiring, block execution, kill predicate). TWO DIFFERENT `git
+    # ls-files` counts, for two different walks, are worth keeping distinct rather than merging
+    # into one number (measured via `bash -x`, CodeRabbit PR 150 finding F2 — a merged "26" here
+    # previously read as the SAME walk check 9 re-runs, when it is not): the FULL GATE (checks 5/6
+    # scanning the real workflow files' `paths:`/`branches:` filters, on top of everything
+    # `--self-test` already does) makes 27; `--self-test` ALONE (the fixture tables' own synthetic
+    # `pattern_verdict`/`tracked_exact`/branch-resolution calls, never touching the real workflow
+    # files) makes 9. Check 9's mutation battery re-runs the SECOND of those — the whole of
+    # `--self-test`, 9 `git ls-files` calls included — PLUS check 8d's own dynamic execution of the
+    # moon-ci-affected-graph step's `run:` block against a stubbed `moon`, once per event path, all
+    # once per self-test invocation plus once unmutated, ten concurrent subprocesses. That dynamic
+    # execution is most of check 8d's OWN standalone cost (~1.5s of the ~2.01s -> ~3.52s
+    # `--self-test` jump): each of the EIGHT fixtures that reach the per-event-path loop (the
+    # healthy control, the if-false mutant, two healthy rechecks, the subset mutant, the
+    # branch-swap mutant, the duplicate-invocation mutant, and the final aggregate re-run — every
+    # other fixture returns before the loop) spawns a handful of real subprocesses (a scratch
+    # `mktemp -d`, then per event path a `bash -c` running the extracted block, which itself shells
+    # out to `grep` and the stubbed `moon`) rather than a `grep`/`sed` pass over text.
+    # See the measured table in ci/actionlint/README.md.
     # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
     # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
     script: 'ci/actionlint/run.sh'

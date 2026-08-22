@@ -56,9 +56,9 @@ SAFE_CHARS_RE = re.compile(r"[A-Za-z0-9._/*-]+")
 
 # D7 — live-fire canaries, run on EVERY real invocation, not only under --self-test. This is the
 # one failure the fixture table cannot catch: a matcher stuck returning "live" passes I1, I2 and I4
-# vacuously while every check still prints PASS. Following ci/actionlint/run.sh:1449-1459 ("the
-# self-tests, invoked for real"), which calls its fixture tables unconditionally so they are not
-# dead code in CI. Costs one extra `git` call each.
+# vacuously while every check still prints PASS. Following ci/actionlint/run.sh:2037 ("Check 7 —
+# the self-tests, and the counter that proves they were invoked"), which calls its fixture tables
+# unconditionally so they are not dead code in CI. Costs one extra `git` call each.
 CANARY_DEAD = "zz-no-such-directory-sma553/**/*"
 
 
@@ -115,7 +115,7 @@ def classify(pattern):
     whole vocabulary without a tree, and it is why a `rejected-*` verdict is a FAILURE rather than
     a skip — a skip is the silent hole this whole gate exists to close.
 
-    The vocabulary is pattern_verdict's (ci/actionlint/run.sh:919-973), deliberately. This is a
+    The vocabulary is pattern_verdict's (ci/actionlint/run.sh:934-1011), deliberately. This is a
     REIMPLEMENTATION, not a reuse: that one is bash, and it answers a different question — whether
     a pattern is legal under GITHUB ACTIONS filter semantics. Keeping the token names identical
     means a reader moving between the two files is not learning a second vocabulary.
@@ -127,7 +127,7 @@ def classify(pattern):
         return "negated"
     # git pathspec has NO brace expansion — measured: `:(glob).moon/*.{yml,...}` matches 0 files
     # (spec E4). Expanding braces here would be hand-rolled parsing, "exactly the kind of thing
-    # that silently does the wrong thing" (ci/actionlint/run.sh:263-266, about hand-rolled YAML).
+    # that silently does the wrong thing" (ci/actionlint/run.sh:284, about hand-rolled YAML).
     if "{" in pattern or "}" in pattern:
         return "rejected-braces"
     # git and wax equivalence for these is UNMEASURED (spec E4 covers none of them). Unlike

@@ -218,6 +218,49 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   and say which in its doc. Anything in an added bundle becomes an **unconstrained** anchor (no `cA` check),
   so it must contain roots only; a self-signed LEAF works too (put its own cert in the bundle) since rustls
   applies no `cA` check to a trust anchor.
+- `repo:actionlint` and `repo:affected-smoke` now **guard each other**, and neither can guard
+  itself (SMA-542). `ci/actionlint/run.sh`'s check 8 asserts `:affected-smoke` is still in
+  `ci.yml`'s `T=(…)` array, that no `moon` line discards its exit status (a `||`/`&&`/`;`/`|`
+  tail), and that no step's `continue-on-error:` value suppresses it (anything but the literal
+  `false`) — escape-hatched per line via `COE_SKIP`, keyed by BOTH the line number and the line's
+  own text, so a shifted entry stops matching instead of silently absorbing a different occurrence
+  that lands on the vacated line. In return, `ci_targets.py`'s `ACTIONLINT_SH_CALL_SITES` pins
+  `run_self_tests` and `selftest_mutation_battery` as **whole lines** in `run.sh` (a substring
+  match would survive deleting the call, since the name is a prefix of its own definition). That
+  pin only works because `repo:affected-smoke` lists `ci/actionlint/**/*` in its `inputs` — remove
+  that and the pin stays green on exactly the PR that breaks it. Adding a tenth-and-later
+  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 9): the gate asserts invocations
+  AND definitions. The cycle's second half is now closed too (SMA-542 residual closure): check 8c
+  in `ci/actionlint/run.sh` pins `ci/affected-graph/run.sh`'s own two call sites into
+  `ci_targets.py`, mirroring `ci_targets.py`'s `RUN_SH_CALL_SITES` from the other, independently
+  scheduled file — see `ci/actionlint/README.md`'s Limitations section (L6) for what residual
+  still remains (a single combined edit deleting both gates' own call sites at once, the same
+  bounded shape as the `T`-array cycle above).
+- All three `repo:release-parity*` tasks run `ci/release-parity/run.sh --negative-control`
+  before their real run, under an explicit `set -euo pipefail` (SMA-530). Each carries its
+  own control because their *ecosystem-specific* `inputs` are distinct — a PR touching only
+  a `.releaserc.json` selects `-ts` alone. They are not disjoint overall: all three also
+  list `ci/release-parity/**/*` and `.prototools`, so an edit there schedules all three. Two pins guard it, both living in `ci/affected-graph/ci_targets.py`
+  and both running inside `repo:affected-smoke`: `SELF_SCHEDULED_GATES` pins the nine
+  `moon.yml` lines (whole lines, compared after stripping — reordering a flag or adding a
+  trailing comment still reds it), and `RELEASE_PARITY_SH_CALL_SITES` pins five discrete
+  lines inside `run.sh` itself — the flag parse, the `NEGATIVE` guard, the assertion body,
+  and both report arms — because pinning the span as one block left two MEASURED bypasses
+  with different failure shapes: neutering the flag parse (dropping `NEGATIVE=1`) leaves
+  `NEGATIVE` at its initialized 0, so the control branch is never entered and the invocation
+  falls through to the real suite, which then just runs twice and proves nothing; gutting
+  the assertion body (replacing the `check_case` call with a bare `ec=1`) never calls the
+  harness at all yet still prints "reported red as expected" — a control that actively lies
+  rather than one that merely no-ops. Those are the two bypasses closed by pinning five lines
+  instead of one span, not an exhaustive list — see `ci/release-parity/README.md`'s
+  Limitations section L5 for a residual (an inserted `NEGATIVE=0` before the guard, or all
+  five lines parked in a never-executed heredoc) that survives all five pins, and why closing
+  it generally is out of scope. That second pin is reachable only because
+  `repo:affected-smoke` lists `ci/release-parity/**/*` in its `inputs` — do not remove it. A
+  script-pinned gate needs either a `SELF_TASK_EXPECTED_GLOBS` entry or a reasoned
+  `SELF_TASK_GLOBS_EXEMPT` one. Note a `moon.yml`-only edit does NOT select the
+  `release-parity*` tasks (their own `script:` is not among their inputs), so a PR changing
+  those blocks should also touch `ci/release-parity/**` if it wants CI to execute them.
 
 ## Workflow
 
