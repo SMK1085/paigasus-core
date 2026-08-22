@@ -132,7 +132,7 @@ build itself — they bite the first operator who deploys without reading this s
   `docker run`, Compose and Swarm; **the kubelet ignores a `HEALTHCHECK` entirely** and sizes
   `startupProbe` instead:
 
-  ```
+  ```text
   startupProbe.failureThreshold × periodSeconds  >  lock_wait_secs + migration budget + AppState::new
   ```
 
@@ -171,10 +171,17 @@ build itself — they bite the first operator who deploys without reading this s
   stranded backend is *idle in transaction* only once its DDL statement has finished; a pod killed
   **mid-DDL** leaves an `active` backend instead, which `idle_in_transaction_session_timeout` can
   never reap (and `idle_session_timeout` does not apply to either case — setting that one
-  aggressively would instead kill a healthy replica between poll attempts). `tcp_user_timeout` is
-  the setting that bounds both cases, since it fires on the TCP connection regardless of backend
-  state (`tcp_keepalives_idle` alone only starts probing); set `idle_in_transaction_session_timeout`
-  too as a second line of defense for the post-DDL window.
+  aggressively would instead kill a healthy replica between poll attempts).
+
+  What reaps both cases is **TCP keepalives**, because both leave the connection silent on the
+  wire: set `tcp_keepalives_idle`, `tcp_keepalives_interval` and `tcp_keepalives_count` to bounded
+  values so the server actively probes a client that has vanished and drops the connection when
+  the probes go unanswered. `tcp_user_timeout` **complements** these rather than replacing them —
+  it bounds how long *transmitted but unacknowledged* data may linger, which on an otherwise
+  silent connection means the keepalive probes themselves; with no keepalives configured there is
+  nothing for it to act on. Set `idle_in_transaction_session_timeout` as well: it is server-side
+  and independent of TCP, so it still covers the post-DDL window if the keepalive settings are
+  wrong.
 
   Behind a transaction-mode pooler the lock is safe by construction — it is acquired and released
   within one transaction — but PgBouncer's `idle_transaction_timeout` can kill a long migration.
