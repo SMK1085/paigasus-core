@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: Apache-2.0
+name: release
+
+# Only the RELEASE-PR half is live (SMA-576). The release job — tags + registry publishes —
+# lands with SMA-580 behind `vars.PAIGASUS_RELEASE_ENABLED`. Nothing here publishes.
+on:
+  push:
+    branches:
+      - main
+
+# release-plz force-updates its PR branch on every run, so two rapid merges to main would
+# race. Do NOT cancel in progress: a cancelled run can leave the branch half-written.
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+# Least privilege for the auto GITHUB_TOKEN, matching every other workflow here: it is never
+# used for the push/PR below (that goes through secrets.RELEASE_PLZ_TOKEN — see Checkout).
+permissions:
+  contents: read
+
+jobs:
+  release-pr:
+    name: release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          # A PR opened with the default GITHUB_TOKEN does NOT trigger `pull_request`
+          # workflows, so `moon ci` — the required check on the Protect main ruleset —
+          # would never run and the release PR could never be merged. The App token is
+          # what makes the PR mergeable, and the same token needs push access for the
+          # "Commit the stamp" step below. So — unlike every other workflow in this repo,
+          # which sets persist-credentials: false for artipacked hardening — this checkout
+          # deliberately keeps credentials persisted, sourced from the App token instead of
+          # GITHUB_TOKEN.
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          # Don't cache the proto/Moon toolchain dir: a restored ~/.proto carries stale
+          # setup-state that makes `moon setup` skip installing node/pnpm (their shims
+          # then don't exist). Reinstall fresh each run (matches ci.yml/prebuild.yml).
+          cache: false
+
+      # release-plz is proto-pinned like every other CLI this repo depends on
+      # (.prototools, .proto/plugins/release-plz.toml) — install the pinned binary
+      # directly rather than through a third-party GitHub Action, which would resolve
+      # its own, unpinned release-plz build. Narrow install (not a bare `proto install`):
+      # this job needs none of actionlint/buf/deny/machete/nextest/promtool/wasm-pack.
+      - name: Install pinned release-plz CLI
+        run: proto install release-plz
+
+      - name: Install Moon-managed toolchains (node, pnpm, rust, python, uv)
+        run: moon setup
+
+      - name: Install JS workspace deps
+        run: pnpm --dir ts install --frozen-lockfile
+
+      # release-plz first, ALWAYS, then --write. release-plz owns every Cargo version and the
+      # [workspace.dependencies] requirements; --write then brings the six sites it cannot
+      # reach (pyproject/package.json/the dependency pin) plus the three regenerated sites
+      # into line. Reversing the order would stamp the OLD version.
+      #
+      # Run from rs/: release-plz's config/manifest discovery
+      # (./release-plz.toml, ./Cargo.toml) is CWD-relative with no upward search, so this is
+      # what makes it find rs/release-plz.toml and rs/Cargo.toml without --config/
+      # --manifest-path flags.
+      - name: Open or update the release PR
+        working-directory: rs
+        env:
+          GIT_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: release-plz release-pr
+
+      - name: Stamp the non-Cargo manifests
+        run: bash ci/version-lockstep/run.sh --write
+
+      - name: Commit the stamp onto the release PR branch
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "version-lockstep: nothing to stamp"
+            exit 0
+          fi
+          git config user.name  "paigasus-release[bot]"
+          git config user.email "paigasus-release[bot]@users.noreply.github.com"
+          BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+          git add -A
+          git commit -m "chore(rs): stamp the non-Cargo manifests to the release version"
+          git push origin "HEAD:$BRANCH"
