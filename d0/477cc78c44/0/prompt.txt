@@ -1,0 +1,76 @@
+<task-notification>
+<task-id>bxfxwq8b8</task-id>
+<summary>Monitor event: "CodeRabbit review + moon ci on PR 153"</summary>
+<event>MOON CI: completed/success</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>bxfxwq8b8</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/b9b99dc1-235a-4cbd-899a-f0194d3bde9f/tasks/bxfxwq8b8.output</output-file>
+<status>completed</status>
+<summary>Monitor "CodeRabbit review + moon ci on PR 153" stream ended</summary>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b9t12bsbs</task-id>
+<summary>Monitor event: "CodeRabbit rate-limit reset then review on PR 153"</summary>
+<event>RATE LIMIT WINDOW ELAPSED - triggering review</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b9t12bsbs</task-id>
+<summary>Monitor event: "CodeRabbit rate-limit reset then review on PR 153"</summary>
+<event>TRIGGER POSTED</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b9t12bsbs</task-id>
+<summary>Monitor event: "CodeRabbit rate-limit reset then review on PR 153"</summary>
+<event>STILL RATE LIMITED (retrying)</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>bq0i8xvu0</task-id>
+<summary>Monitor event: "CodeRabbit review on PR 153, re-triggering each window"</summary>
+<event>ATTEMPT 1: posting trigger at 15:43:53Z</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>bq0i8xvu0</task-id>
+<summary>Monitor event: "CodeRabbit review on PR 153, re-triggering each window"</summary>
+<event>attempt 1 still rate limited after 12m
+ATTEMPT 2: posting trigger at 15:56:27Z</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>bq0i8xvu0</task-id>
+<summary>Monitor event: "CodeRabbit review on PR 153, re-triggering each window"</summary>
+<event>attempt 2 still rate limited after 12m
+ATTEMPT 3: posting trigger at 16:09:02Z</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+check if you need to rebase, then do the merge and cleanup after
