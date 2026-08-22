@@ -26,6 +26,8 @@ pub struct IamConfig {
     pub audit: AuditConfig,
     pub outbox: OutboxConfig,
     pub metrics: MetricsConfig,
+    #[serde(default)]
+    pub migration: MigrationConfig,
 }
 
 /// A connection URL that may embed credentials (`postgres://user:pass@host/db`,
@@ -662,6 +664,37 @@ impl Default for MetricsConfig {
     }
 }
 
+/// Boot-migration serialisation (SMA-559) — the knob for
+/// [`migrate_under_lock`](crate::adapters::persistence::migration_lock::migrate_under_lock).
+/// Every field has a default, so an absent `[migration]` block is valid config.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MigrationConfig {
+    /// How long to wait for another replica's migration to finish before giving up and failing
+    /// boot. Validated `1..=3600`.
+    ///
+    /// **`0` is rejected, not a sentinel.** Everywhere else in this config surface `0` means
+    /// *never / unbounded* (see [`OutboxRetentionConfig`]); a second reading of `0` here would be
+    /// exactly the trap that doc warns about. Write `1` for fail-fast.
+    ///
+    /// The ceiling is operational, not arithmetic: a wait the container's `HEALTHCHECK
+    /// --start-period` cannot accommodate is not usable, so boot additionally warns when
+    /// `lock_wait_secs + MIGRATION_BUDGET_SECS` exceeds `IMAGE_START_PERIOD_SECS`.
+    pub lock_wait_secs: u64,
+}
+
+impl Default for MigrationConfig {
+    fn default() -> Self {
+        Self { lock_wait_secs: 120 }
+    }
+}
+
+impl MigrationConfig {
+    /// The configured wait as a `Duration`.
+    pub fn lock_wait(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.lock_wait_secs)
+    }
+}
+
 // Only the fields that HAVE a default. `database_url` and `authn.issuers` are
 // intentionally absent so a missing value is a hard error at load time.
 #[derive(Serialize)]
@@ -675,6 +708,7 @@ struct Defaults {
     audit: AuditDefaults,
     outbox: OutboxDefaults,
     metrics: MetricsConfig,
+    migration: MigrationConfig,
 }
 
 // Mirrors `AuthnConfig` minus TWO fields, for different reasons. `issuers` is absent so a missing
@@ -778,6 +812,7 @@ impl Default for Defaults {
             audit: AuditDefaults::default(),
             outbox: OutboxDefaults::default(),
             metrics: MetricsConfig::default(),
+            migration: MigrationConfig::default(),
         }
     }
 }
@@ -1358,6 +1393,14 @@ impl IamConfig {
             if addr.port() == self.grpc_addr.port() {
                 return Err("metrics.addr must use a different port than grpc_addr".to_string());
             }
+        }
+
+        // --- SMA-559: `[migration]` config -----------------------------------------------------
+        if !(1..=3600).contains(&self.migration.lock_wait_secs) {
+            return Err(format!(
+                "migration.lock_wait_secs must be between 1 and 3600 (got {}); 0 is rejected rather than meaning \"never\" — write 1 for fail-fast",
+                self.migration.lock_wait_secs
+            ));
         }
 
         Ok(())
@@ -2599,6 +2642,81 @@ mod tests {
             )?;
             let cfg: IamConfig = IamConfig::figment().extract()?;
             assert!(cfg.validate().is_err(), "interval_secs = 0 must fail validation");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn migration_lock_wait_defaults_to_120_when_the_block_is_absent() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"\n", minimal_issuer_toml(), valid_pepper_b64()))?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert_eq!(cfg.migration.lock_wait_secs, 120);
+            assert_eq!(cfg.migration.lock_wait(), std::time::Duration::from_secs(120));
+            Ok(())
+        });
+    }
+
+    /// `0` is REJECTED, not repurposed. Everywhere else in this file `0` means never/unbounded
+    /// (see `OutboxRetentionConfig`'s doc), so an operator writing `0` here to mean "don't time
+    /// out my migration wait" must not silently get a guaranteed crash on every contended
+    /// rollout.
+    #[test]
+    fn validate_rejects_zero_migration_lock_wait() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!("{}\n[api_keys]\npepper = \"{}\"\n[migration]\nlock_wait_secs = 0", minimal_issuer_toml(), valid_pepper_b64()),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            let err = cfg.validate().expect_err("0 must be rejected");
+            assert!(err.contains("migration.lock_wait_secs"), "unexpected error: {err}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_migration_lock_wait_above_the_ceiling() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "iam.toml",
+                &format!("{}\n[api_keys]\npepper = \"{}\"\n[migration]\nlock_wait_secs = 3601", minimal_issuer_toml(), valid_pepper_b64()),
+            )?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert!(cfg.validate().is_err(), "3601 must be rejected");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_accepts_the_migration_lock_wait_boundaries() {
+        for value in [1u64, 3600] {
+            figment::Jail::expect_with(move |jail| {
+                jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.create_file(
+                    "iam.toml",
+                    &format!("{}\n[api_keys]\npepper = \"{}\"\n[migration]\nlock_wait_secs = {value}", minimal_issuer_toml(), valid_pepper_b64()),
+                )?;
+                let cfg: IamConfig = IamConfig::figment().extract()?;
+                assert_eq!(cfg.migration.lock_wait_secs, value);
+                cfg.validate().unwrap_or_else(|e| panic!("{value} must be accepted: {e}"));
+                Ok(())
+            });
+        }
+    }
+
+    /// The `IAM_` env layer reaches a nested section through `split("__")` (see `figment()`).
+    #[test]
+    fn the_env_layer_reaches_migration_lock_wait_secs() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("IAM_MIGRATION__LOCK_WAIT_SECS", "300");
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"\n", minimal_issuer_toml(), valid_pepper_b64()))?;
+            let cfg: IamConfig = IamConfig::figment().extract()?;
+            assert_eq!(cfg.migration.lock_wait_secs, 300);
             Ok(())
         });
     }

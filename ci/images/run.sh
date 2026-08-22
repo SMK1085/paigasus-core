@@ -113,7 +113,40 @@ assert_pins() {
     echo "$bad_copy" >&2
     return 1
   fi
-  echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config"
+  # SMA-559: a replica that loses the migration-lock race waits with NO listener bound, so the
+  # image's start period must cover that wait plus the migration itself. A config default raised
+  # without touching the Dockerfile would silently re-arm the restart-while-waiting bug.
+  local start_period lock_wait budget required
+  start_period="$(grep -oE '\-\-start-period=[0-9]+s' "$dockerfile" | head -1 | grep -oE '[0-9]+' || true)"
+  lock_wait="$(grep -oE 'lock_wait_secs: [0-9]+' "$ROOT/rs/crates/services/paigasus-iam/src/config.rs" | head -1 | grep -oE '[0-9]+' || true)"
+  budget="$(grep -oE 'MIGRATION_BUDGET_SECS: u64 = [0-9]+' "$ROOT/rs/crates/services/paigasus-iam/src/adapters/persistence/migration_lock.rs" | head -1 | grep -oE '[0-9]+$' || true)"
+  if [ -z "$start_period" ] || [ -z "$lock_wait" ] || [ -z "$budget" ]; then
+    echo "::error::could not read the start-period/lock-wait/migration-budget triple (start_period=${start_period:-<missing>} lock_wait=${lock_wait:-<missing>} budget=${budget:-<missing>}); one of the grep anchors moved." >&2
+    return 1
+  fi
+  required=$((lock_wait + budget))
+  if [ "$start_period" -lt "$required" ]; then
+    echo "::error::rs/Dockerfile's HEALTHCHECK --start-period=${start_period}s is below migration.lock_wait_secs (${lock_wait}) + the migration budget (${budget}) = ${required}s." >&2
+    echo "  A replica waiting on the SMA-559 migration lock binds no listener, so it would be reported unhealthy while correctly waiting. Raise the start period or lower the default wait." >&2
+    return 1
+  fi
+  # migration_lock.rs's IMAGE_START_PERIOD_SECS doc claims it and rs/Dockerfile's --start-period
+  # agree — make that true rather than aspirational. Without this, bumping the Dockerfile to 300s
+  # while leaving the constant at 180 would pass the required-budget check above (300 >= 180) and
+  # fire the boot warning (`config.migration.lock_wait_secs + MIGRATION_BUDGET_SECS >
+  # IMAGE_START_PERIOD_SECS`) spuriously forever, with CI green throughout.
+  local image_start_period_const
+  image_start_period_const="$(grep -oE 'IMAGE_START_PERIOD_SECS: u64 = [0-9]+' "$ROOT/rs/crates/services/paigasus-iam/src/adapters/persistence/migration_lock.rs" | head -1 | grep -oE '[0-9]+$' || true)"
+  if [ -z "$image_start_period_const" ]; then
+    echo "::error::could not read IMAGE_START_PERIOD_SECS from migration_lock.rs; the grep anchor moved." >&2
+    return 1
+  fi
+  if [ "$image_start_period_const" != "$start_period" ]; then
+    echo "::error::migration_lock.rs's IMAGE_START_PERIOD_SECS (${image_start_period_const}) disagrees with rs/Dockerfile's HEALTHCHECK --start-period (${start_period}s)." >&2
+    echo "  Bump both together, or the boot warning that compares the configured wait against IMAGE_START_PERIOD_SECS no longer reflects what the container actually tolerates." >&2
+    return 1
+  fi
+  echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config, start-period ${start_period}s >= ${required}s, IMAGE_START_PERIOD_SECS == start-period"
 }
 
 build_one() {

@@ -89,7 +89,7 @@ not just the port number. IAM also accepts an optional, separate `[metrics].addr
 | --- | --- | --- |
 | liveness | `GET /healthz` | Never touches a dependency, by construction in both services |
 | readiness | `GET /readyz` | IAM pings Postgres; gateway issues a real gRPC introspect to IAM |
-| startup | `GET /healthz` | IAM migrates at boot — a `startupProbe` with a generous `failureThreshold` is required, or the kubelet kills it mid-migration |
+| startup | `GET /healthz` | IAM migrates at boot, and since SMA-559 a replica that loses the migration-lock race also *waits* with nothing bound — budget `lock_wait_secs` + the migration + `AppState::new`, see §5 |
 
 The image has no shell, so every probe command must use an **absolute path** and the **exec
 form** — no `sh -c`, no shell pipelines. Docker's own `HEALTHCHECK` only ever calls `/healthz`
@@ -108,9 +108,83 @@ through to starting the service).
 These follow from how the services behave once containerized, not from anything in the image
 build itself — they bite the first operator who deploys without reading this section.
 
-- **IAM runs `Migrator::up` on every process start, with no advisory lock around it.** A rolling
-  update or a scale-out risks concurrent migration. Migrate with a single replica —
-  `replicas: 1` with `strategy.rollingUpdate.maxSurge: 0` — or use a pre-install migration Job.
+- **IAM serialises its boot migration with a Postgres advisory lock (SMA-559), but that covers
+  migrations against *each other* and nothing else.** Two replicas starting together now converge:
+  the loser waits `migration.lock_wait_secs` (`IAM_MIGRATION__LOCK_WAIT_SECS`, default 120,
+  validated 1–3600), then finds nothing to do. **Two exceptions keep `replicas: 1` /
+  `strategy.rollingUpdate.maxSurge: 0` a requirement rather than a recommendation:**
+  1. **The release that introduces the lock.** Old replicas still migrate unguarded, so the
+     upgrade *to* the locking version is the one rollout the lock cannot protect. Relax only from
+     the release after it.
+  2. **A migration doing DDL on a table a background maintainer also touches** — the m0008 class.
+     An old replica's `PgPartitionMaintainer` holds `AUDIT_PARTITION_LOCK_KEY`, which m0008 waits
+     for under a 5s `lock_timeout`; hold it longer and the entire migration transaction aborts,
+     even though that replica won the migration lock.
+
+  A long migration also still warrants a maintenance window: the whole run is **one transaction**,
+  so m0008-class DDL holds `ACCESS EXCLUSIVE` on `audit_log` for its full duration and **every
+  running replica's audit writes block** for that window. Sizing `lock_wait_secs` for a large
+  table is simultaneously sizing an audit-write stall.
+
+  **Probe budgets.** A waiting replica has **no listener bound at all**, and the two probe systems
+  are not the same system. The image's `HEALTHCHECK --start-period` (180s = the 120s default wait
+  + a 60s migration budget, enforced by `ci/images/run.sh`'s `assert_pins`) governs
+  `docker run`, Compose and Swarm; **the kubelet ignores a `HEALTHCHECK` entirely** and sizes
+  `startupProbe` instead:
+
+  ```text
+  startupProbe.failureThreshold × periodSeconds  >  lock_wait_secs + migration budget + AppState::new
+  ```
+
+  There is no chart in this repo yet, so nothing ships a `startupProbe` today — the formula's
+  values at today's `lock_wait_secs` default would be `periodSeconds: 10`, `failureThreshold: 30`
+  (300s), and SMA-513's chart should ship exactly that pair rather than something smaller. Until
+  that chart lands, do not assume any `startupProbe` you have already deployed carries them.
+  `AppState::new` is a third, unbudgeted term — it reconciles policies and loads a snapshot after
+  the migration and still before any bind. Raising `lock_wait_secs` means raising both.
+
+  **Chart defaults (handoff to SMA-513).** `strategy.rollingUpdate.maxSurge` need no longer be
+  pinned to `0`, subject to the two exceptions above; set `startupProbe` from the formula; expose
+  `IAM_MIGRATION__LOCK_WAIT_SECS`. SMA-571 (bind-first readiness gating) will make the
+  `start-period` coupling vestigial. **Precondition to confirm before relaxing `maxSurge`:**
+  `AppState::new`'s `reconcile_starter` (`src/adapters/http/mod.rs` around :396) writes system
+  policies and roles on every boot with no advisory lock of its own and has never been tested
+  under concurrency — pre-existing and out of scope for SMA-559, but SMA-513 should confirm it is
+  safe under a surging rollout rather than discover it isn't.
+
+  **Recovering a stranded lock.** A pod SIGKILL'd on a partitioned node leaves its backend holding
+  the lock until TCP-level timeouts fire — by default, hours — and every later replica then waits
+  and fails to boot. Find it (scoped to this database, since one cluster may host several):
+
+  ```sql
+  SELECT pid, granted, query_start
+  FROM pg_locks l JOIN pg_stat_activity a USING (pid)
+  WHERE l.locktype = 'advisory'
+    AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+    AND ((l.classid::bigint << 32) | l.objid::bigint) = 5580559;
+  ```
+
+  The parentheses are load-bearing — Postgres gives `<<` and `|` equal precedence. Then
+  `SELECT pg_terminate_backend(<pid>)`. **This needs privileges the IAM application role usually
+  lacks**: `query_start` reads as NULL for other users' backends without `pg_read_all_stats`, and
+  `pg_terminate_backend` needs `pg_signal_backend` or superuser — run it as an admin role. The
+  stranded backend is *idle in transaction* only once its DDL statement has finished; a pod killed
+  **mid-DDL** leaves an `active` backend instead, which `idle_in_transaction_session_timeout` can
+  never reap (and `idle_session_timeout` does not apply to either case — setting that one
+  aggressively would instead kill a healthy replica between poll attempts).
+
+  What reaps both cases is **TCP keepalives**, because both leave the connection silent on the
+  wire: set `tcp_keepalives_idle`, `tcp_keepalives_interval` and `tcp_keepalives_count` to bounded
+  values so the server actively probes a client that has vanished and drops the connection when
+  the probes go unanswered. `tcp_user_timeout` **complements** these rather than replacing them —
+  it bounds how long *transmitted but unacknowledged* data may linger, which on an otherwise
+  silent connection means the keepalive probes themselves; with no keepalives configured there is
+  nothing for it to act on. Set `idle_in_transaction_session_timeout` as well: it is server-side
+  and independent of TCP, so it still covers the post-DDL window if the keepalive settings are
+  wrong.
+
+  Behind a transaction-mode pooler the lock is safe by construction — it is acquired and released
+  within one transaction — but PgBouncer's `idle_transaction_timeout` can kill a long migration.
 - **Gateway `/readyz` issues a real gRPC introspect call to IAM on every poll**, and both of the
   gateway's health routes sit inside its metrics and correlation layers (deliberately — SMA-504
   D10), so probe traffic is metered and load-bearing. Keep `readinessProbe.periodSeconds` at 30s

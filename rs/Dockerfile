@@ -67,6 +67,11 @@ USER 65532:65532
 # Both binaries install SIGTERM handlers and drain (IAM a JoinSet of relays and maintainers).
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/paigasus-service"]
-# 60s start period because IAM runs Migrator::up before it binds.
-HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
+# 180s start period = migration.lock_wait_secs (default 120) + a 60s migration budget. IAM runs
+# Migrator::up before it binds, and since SMA-559 a replica that LOSES the migration-lock race
+# waits for the leader with nothing bound at all. INVARIANT: start-period must stay >=
+# lock_wait_secs + 60; ci/images/run.sh's assert_pins enforces it against config.rs's default.
+# Note this governs docker run / Compose / Swarm and ci/images/run.sh only — the kubelet ignores
+# a HEALTHCHECK entirely, so Kubernetes sizes startupProbe instead (docs/ops/RUNBOOK-containers.md).
+HEALTHCHECK --interval=30s --timeout=3s --start-period=180s --retries=3 \
   CMD ["/usr/local/bin/paigasus-service", "healthcheck"]

@@ -4,6 +4,7 @@
 
 pub mod entities;
 pub mod migration;
+pub mod migration_lock;
 pub mod pg_api_keys;
 pub mod pg_audit_log;
 pub mod pg_dead_letters;
@@ -26,6 +27,7 @@ pub mod pg_teams;
 pub mod uow;
 
 pub use migration::Migrator;
+pub use migration_lock::{MigrationLockError, MigrationLockOutcome, migrate_under_lock};
 pub use pg_api_keys::PgApiKeyRepository;
 pub use pg_audit_log::PgAuditLog;
 pub use pg_dead_letters::PgDeadLetters;
