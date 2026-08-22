@@ -285,10 +285,101 @@ PY
   return 1
 }
 
+write_site() { # $1 kind  $2 target  $3 version  -> prints 1 if it changed the file, else 0
+  local kind="$1" target="$2" version="$3" abs="$REPO_ROOT/$2"
+  case "$kind" in
+    pyproject)
+      python3 - "$abs" "$version" <<'PY'
+import re, sys
+p, v = sys.argv[1], sys.argv[2]
+s = open(p, encoding="utf-8").read()
+new, n = re.subn(r'(?m)^(version\s*=\s*)"[^"]*"', lambda m: f'{m.group(1)}"{v}"', s, count=1)
+if n != 1:
+    print("FATAL: no [project] version line", file=sys.stderr); raise SystemExit(2)
+open(p, "w", encoding="utf-8").write(new)
+print(int(new != s))
+PY
+      ;;
+    pyproject-dep)
+      python3 - "$abs" "$version" <<'PY'
+import re, sys
+p, v = sys.argv[1], sys.argv[2]
+s = open(p, encoding="utf-8").read()
+new, n = re.subn(r'"paigasus-py-bindings(?:==[^"]*)?"', f'"paigasus-py-bindings=={v}"', s, count=1)
+if n != 1:
+    print("FATAL: no paigasus-py-bindings dependency", file=sys.stderr); raise SystemExit(2)
+open(p, "w", encoding="utf-8").write(new)
+print(int(new != s))
+PY
+      ;;
+    packagejson)
+      # Substitute the "version" field in place (like pyproject above) rather than round-
+      # tripping through json.dumps: a full re-serialization reformats every array in the
+      # file onto multiple lines (json.dumps has no compact-array mode), which would report
+      # "wrote" on files whose version was already correct and pollute the diff with
+      # unrelated Prettier-style churn (measured against this repo's committed package.json
+      # files, SMA-576 review finding).
+      python3 - "$abs" "$version" <<'PY'
+import json, re, sys
+p, v = sys.argv[1], sys.argv[2]
+s = open(p, encoding="utf-8").read()
+try:
+    d = json.loads(s)
+except Exception as e:
+    print(f"FATAL: malformed {p}: {e}", file=sys.stderr); raise SystemExit(2)
+if "version" not in d:
+    print(f"FATAL: no version key in {p}", file=sys.stderr); raise SystemExit(2)
+new, n = re.subn(r'("version"\s*:\s*)"[^"]*"', lambda m: f'{m.group(1)}"{v}"', s, count=1)
+if n != 1:
+    print(f"FATAL: no version field pattern in {p}", file=sys.stderr); raise SystemExit(2)
+open(p, "w", encoding="utf-8").write(new)
+print(int(new != s))
+PY
+      ;;
+    *) printf '0' ;;   # release-plz- and regeneration-owned kinds are not written here
+  esac
+}
+
+run_write() {
+  local wrote=0 group kind target expected changed
+  for entry in "${SITES[@]}"; do
+    IFS='|' read -r group kind target <<<"$entry"
+    case "$kind" in pyproject|pyproject-dep|packagejson) ;; *) continue ;; esac
+    # Explicit `|| return 2` rather than relying on errexit: run_write may be invoked from
+    # inside an `||` list, which suspends errexit for it and everything it calls, so a
+    # failing capture would otherwise be swallowed into an empty string instead of
+    # propagating as an infrastructure failure (same discipline as run_check, SMA-576).
+    expected="$(read_version cargo-package "${SOURCE_OF_TRUTH[$group]}")" || return 2
+    changed="$(write_site "$kind" "$target" "$expected")" || return 2
+    wrote=$((wrote + changed))
+  done
+
+  # Regenerate the three derived sites (16-18). Each is owned by a tool, not by this script.
+  ( cd "$REPO_ROOT/rs" && cargo update -w --offline >/dev/null 2>&1 ) \
+    || ( cd "$REPO_ROOT/rs" && cargo update -w >/dev/null ) \
+    || die_infra "cargo update -w failed (site 16)"
+  ( cd "$REPO_ROOT/py" && uv lock >/dev/null ) || die_infra "uv lock failed (site 17)"
+  # @napi-rs/cli is a devDependency of @paigasus/kernel, not of the ts workspace root
+  # (pnpm-workspace.yaml's catalog comment: a file:-linked dep's devDeps aren't installed
+  # at the consumer's node_modules root) — a bare `pnpm exec` from ts/ cannot find `napi`
+  # and pnpm treats it as a recursive exec across every workspace package instead, failing
+  # on the first one that lacks it. Scope it with --filter to the package that has it.
+  ( cd "$REPO_ROOT/ts" && pnpm --filter @paigasus/kernel exec napi build --platform \
+      --cwd "$REPO_ROOT/rs/crates/bindings/paigasus-node-bindings" >/dev/null ) \
+    || die_infra "napi build failed (site 18)"
+
+  if [ "$wrote" -gt 0 ]; then
+    printf 'version-lockstep: wrote %d site(s)\n' "$wrote"
+  else
+    printf 'version-lockstep: already in lockstep\n'
+  fi
+}
+
 MODE=check
 while [ $# -gt 0 ]; do
   case "$1" in
     --check)             MODE=check; shift ;;
+    --write)             MODE="write"; shift ;;
     --self-test)         MODE=selftest; shift ;;
     --negative-control)  MODE=negctl; shift ;;
     *) die_infra "unknown flag: $1" ;;
@@ -298,5 +389,6 @@ done
 case "$MODE" in
   selftest) run_self_tests ;;
   check)    run_check ;;
+  write)    run_write ;;
   negctl)   negative_control ;;
 esac

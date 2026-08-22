@@ -52,3 +52,19 @@ would prove nothing.
 
 Measured: with `site_verdict` neutered to always return `OK`, the real run still prints
 `== all 18 version-lockstep sites agree ==` and exits 0. The control reds.
+
+## `--write` implementation notes
+
+- The `packagejson` writer edits the `"version"` field **in place with a regex**, the same
+  approach as `pyproject`, rather than round-tripping through `json.loads`/`json.dumps`.
+  A full re-serialization reformats every array in the file onto multiple lines (Python's
+  `json.dumps` has no compact-array mode) — measured against this repo's committed
+  `package.json` files, that reports `wrote N site(s)` and rewrites unrelated Prettier-style
+  formatting even when the version was already correct, which breaks the "already in
+  lockstep" no-op case and pollutes the release-PR diff.
+- `@napi-rs/cli` is a devDependency of `@paigasus/kernel` (`ts/packages/paigasus-kernel`),
+  not of the ts workspace root — a `file:`-linked consumer's own devDeps aren't installed at
+  the root `node_modules`. A bare `pnpm exec napi …` from `ts/` finds no `napi` binary and
+  pnpm treats it as a recursive exec across every workspace package, failing on the first
+  one that lacks it. `run_write` scopes the call with `pnpm --filter @paigasus/kernel exec`
+  instead.
