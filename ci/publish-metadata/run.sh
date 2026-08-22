@@ -20,6 +20,9 @@
 #   Check 2b the packaged file list ships README.md + LICENSE and not moon.yml.
 #   Check 3  while any publishable crate is at 0.0.0, rs/release-plz.toml must block its
 #            release. Releasing 0.0.0 permanently burns that version on crates.io.
+#   Check 4  .github/workflows/security-scan.yml still INVOKES the freshness check and does
+#            not suppress it with continue-on-error. Nothing else guards a workflow job:
+#            repo:actionlint's call-site machinery is keyed on ci.yml only (SMA-529).
 #
 # Exit codes: 0 pass | 1 assertion failed (the repo is wrong) | 2 infrastructure failed.
 # A broken invocation must NEVER read as "all checks passed".
@@ -258,6 +261,38 @@ assert_package_list() { # $1 listing file  $2 package name
   return "$rc"
 }
 
+# Guard-the-guard (SMA-542): a new check's own CALL SITE is what goes unguarded. The
+# fixture rows below exercise this function; only this assertion covers its INVOCATION in
+# the workflow, and repo:actionlint's equivalent machinery is keyed on ci.yml alone.
+# Takes the workflow path as a FILE so --negative-control drives the same code.
+assert_freshness_call_site() { # $1 workflow file
+  local wf="$1" rc=0
+
+  if [ ! -f "$wf" ] || [ ! -r "$wf" ]; then
+    echo "FATAL: cannot read $wf — the call-site pin cannot assert anything" >&2
+    return 2
+  fi
+
+  if ! grep -qF -- '--check-categories-freshness' "$wf"; then
+    echo "Check 4 FAILED: $wf no longer invokes --check-categories-freshness." >&2
+    echo "  The category snapshot's ONLY drift detector would be silently disabled." >&2
+    rc=1
+  fi
+
+  # Any continue-on-error other than the literal `false` can suppress that job's red. The
+  # file carries none today, so a whole-file rule is both simple and strict; a legitimate
+  # future use needs an explicit exemption added here with a reason.
+  local offending
+  offending="$(grep -n 'continue-on-error:' "$wf" | grep -v 'continue-on-error: *false' || true)"
+  if [ -n "$offending" ]; then
+    echo "Check 4 FAILED: $wf suppresses a failure with continue-on-error:" >&2
+    printf '  %s\n' "$offending" >&2
+    rc=1
+  fi
+
+  return "$rc"
+}
+
 # cargo has no distinct exit code for "the registry is down" vs "your crate is broken",
 # so classify on stderr. Returns 2 for infrastructure, 1 for a real assertion failure.
 classify_cargo_failure() { # $1 captured-output file
@@ -491,6 +526,25 @@ PY
   _expect_rc 1 "Check 2b (moon.yml packaged)" \
     assert_package_list "$tmp/leaks-moon.txt" "fixture"
 
+  # --- Check 4: the freshness job's call site ------------------------------------------
+  local wf_ok="$tmp/wf-ok.yml" wf_gone="$tmp/wf-gone.yml" wf_coe="$tmp/wf-coe.yml"
+  printf 'jobs:\n  freshness:\n    steps:\n      - run: ci/publish-metadata/run.sh --check-categories-freshness\n' >"$wf_ok"
+  printf 'jobs:\n  freshness:\n    steps:\n      - run: echo nothing\n' >"$wf_gone"
+  printf 'jobs:\n  freshness:\n    steps:\n      - run: ci/publish-metadata/run.sh --check-categories-freshness\n        continue-on-error: true\n' >"$wf_coe"
+
+  _expect_rc 0 "Check 4 (workflow invokes the freshness check)" \
+    assert_freshness_call_site "$wf_ok"
+  _expect_rc 1 "Check 4 (freshness invocation deleted)" \
+    assert_freshness_call_site "$wf_gone"
+  _expect_rc 1 "Check 4 (freshness step suppressed by continue-on-error)" \
+    assert_freshness_call_site "$wf_coe"
+  _expect_rc 2 "Check 4 (workflow file unreadable)" \
+    assert_freshness_call_site "$tmp/no-such-workflow.yml"
+
+  # The REAL workflow must satisfy the same assertion the fixtures do.
+  _expect_rc 0 "Check 4 (the real security-scan.yml passes)" \
+    assert_freshness_call_site "$REPO_ROOT/.github/workflows/security-scan.yml"
+
   # Positive control: a clean fixture must pass, or every "red" above is meaningless.
   _meta "$tmp/good.json" "$(printf '%s' "$base" | sed 's/"version":"0.0.0"/"version":"0.1.0"/')"
   _expect_rc 0 "clean fixture passes (checks are not vacuously red)" \
@@ -506,6 +560,10 @@ PY
 
 main() {
   cd "$RS_DIR"
+
+  # Before anything expensive: if the freshness job is gone, the snapshot is unmaintained
+  # and every other check here is validating against data nothing keeps current.
+  assert_freshness_call_site "$REPO_ROOT/.github/workflows/security-scan.yml" || exit $?
 
   local meta_json
   meta_json="$(mktemp)"
