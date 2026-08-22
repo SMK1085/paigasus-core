@@ -1,12 +1,21 @@
 # affected-graph regression guard (SMA-409 / SMA-429)
 
 `moon ci` *uses* the affected graph but never *asserts* it is correct: a deleted
-`dependsOn` edge — or a dropped `moon ci --include-relations` — makes the affected set
+`dependsOn` edge — or a dropped `@group(upstreams)` reference, the fileGroup that actually
+confers affectedness in Moon 2.3.2 (not `--include-relations`, which SMA-528 measured to
+change nothing in any probe, including the full 24-target CI shape) — makes the affected set
 silently shrink, so CI under-builds and stays **green**. This guard closes that gap.
 
 `run.sh` feeds a synthetic touched-file to `moon query projects --affected --downstream
 deep` and asserts the affected project set **equals** an exact expected set per known case
 (default-deny; `repo`, which owns the whole tree as its source, is filtered out):
+
+Each **project** case below proves only that the `dependsOn` **edge exists** — that
+`moon query projects --affected --downstream deep` marks the downstream project affected. It does
+NOT prove `moon ci` schedules that downstream's build/test/lint: `--downstream deep` is a
+QUERY-time traversal, and `moon ci` was measured to use neither it nor any widening from
+`--include-relations` (SMA-528 — see the task-case paragraph below). Proving the cascade actually
+runs is the `*_ci` task cases' job.
 
 - **contracts edit** → `contracts` + `paigasus-proto-{rs,py,ts}` + `paigasus-gateway-rs`
   + `paigasus-iam-rs` (SMA-442) + `paigasus-service-info-rs` (SMA-505).
@@ -34,13 +43,27 @@ deep` and asserts the affected project set **equals** an exact expected set per 
 
 It also runs several checks that the per-case project sets structurally **cannot** make:
 
-- **`proto->service-info-tasks`** asserts the affected *task* set (`moon query tasks --affected`),
-  scoped to `build`, `test` and `lint` — the three tasks that carry `^:build`. `moon query projects
-  --affected` follows `dependsOn` only and is blind to a task-level `^:build`, so deleting one keeps
-  every project case **green** while `moon ci --include-relations` silently under-builds (SMA-429
-  F3, closed for build/test by SMA-524 and for lint by SMA-526). `lint`'s `^:build` is declared once,
-  in `.moon/tasks/rust.yml`, rather than per-crate the way build/test declare theirs — so this case
-  is also what catches a regression in that shared declaration.
+- **`proto->svc-info-deep`** asserts the affected *task* set (`moon query tasks --affected
+  --downstream deep`), scoped to `build`, `test` and `lint` — the three tasks that carry `^:build`.
+  `moon query projects --affected` follows `dependsOn` only and is blind to a task-level `^:build`,
+  so deleting one keeps every project case **green** while `moon ci --include-relations` silently
+  under-builds (SMA-429 F3, closed for build/test by SMA-524 and for lint by SMA-526). `lint`'s
+  `^:build` is declared once, in `.moon/tasks/rust.yml`, rather than per-crate the way build/test
+  declare theirs — so this case is also what catches a regression in that shared declaration.
+
+  Every task case comes in two traversal modes, each with its own helper (`assert_task_case` /
+  `assert_task_case_ci`, sharing a body in `_assert_task_case_impl`). The `deep` cases (this one,
+  `lockfile->all-lint`) use `moon query tasks --affected --downstream deep` — what the TASK GRAPH
+  would cascade — and are retained after SMA-528 as the only BEHAVIOURAL detector of a deleted
+  `^:build`, since affectedness now comes from task inputs and a missing `^:build` would not move a
+  `_ci` case's output at all. The `_ci` twins (`proto->svc-info-ci`, `lockfile->all-lint-ci`, and
+  `kernel->consumer-tasks`, which has no `deep` twin — it is the case SMA-528 exists for) use no
+  graph flags: the traversal `moon ci` actually uses. Measured relationship (SMA-528):
+      `moon ci` RunTask set = (query-affected ∩ `ci.yml`'s `T` array ∩ `runInCI`) ∪ upstream-dep closure
+  Both differences from a bare `--affected` query are benign for these cases — the `T` filter only
+  removes tasks none of them assert (`build-release`), and the upstream-dep closure only adds
+  builds. RE-MEASURE THIS ON A MOON BUMP, alongside A4's `inputFiles` shape, A5's
+  command/args/script shape and A6's `inputGlobs` shape.
 - **`lockfile->all-lint`** asserts that a `rs/Cargo.lock` touch schedules **every** crate's `lint`
   **and** the three tasks that compile the FFI cdylibs (`paigasus-kernel-ts:{build,test}`,
   `paigasus-kernel-py:test`). `rs/` has no Moon project, so the workspace files belong to `repo`
@@ -49,6 +72,10 @@ It also runs several checks that the per-case project sets structurally **cannot
   no crate task whatsoever, so every Dependabot Cargo PR was unlinted; before SMA-546 it still
   scheduled nothing that LINKS a cdylib or compiles `wasm32`, which clippy never does. The name is
   a deliberate misnomer — renaming it would break the `CLAUDE.md` procedure that greps for it.
+  Its `_ci` twin, **`lockfile->all-lint-ci`**, asserts the same expected set under the no-flags
+  traversal `moon ci` actually uses — expected to equal the `deep` set, since a `rs/Cargo.lock`
+  touch reaches every row through task **inputs**, not `dependsOn`, so neither traversal-specific
+  difference above applies to it.
 - **`cargo-moon-parity`** (`cargo_moon_parity.py`) compares every crate's Cargo deps against Moon's own
   resolved graph, asserting each edge exists *and* schedules the upstream's build. The per-case sets
   assert only edges someone remembered to write a case for; this catches a crate added with **no**
@@ -67,6 +94,24 @@ It also runs several checks that the per-case project sets structurally **cannot
   binding task on day one; a `REQUIRED_FFI_TASKS` **floor** stops the derivation degrading to a
   vacuous PASS if a task ever stops matching the markers. A task with none of a `command`, a
   `script`, or any `args` aborts as infra (rc 2), never as a silent skip.
+- **A6** (in `cargo_moon_parity.py`, SMA-528) asserts every crate's `build`/`test`/`lint` keys on its
+  TRANSITIVE `dependsOn` closure's sources — `fileGroups.upstreams`, strict equality against moon's
+  own Rust-restricted closure (`rust_closure()`, which excludes non-Rust build-scope parents like
+  `contracts` and walks the transitive `dependsOn` closure rather than stopping at direct
+  dependencies). No per-case task set can make
+  this assertion: the `_ci` cases above only prove the specific pairs someone wrote a case for are
+  wired, exactly the "no case at all" gap that let SMA-524's bug through, so A6 is the generic twin
+  that iterates every crate. It is also the ONLY guard on `fileGroups.upstreams` at all — F5: a
+  crate's own `moon.yml` is not an input to its own tasks (measured: a `fileGroups.upstreams` edit
+  alone does not change any task's hash), so a stale or wrong group cannot red anything by itself.
+  An intentional over-approximation (declared but outside the closure) needs a reason in
+  `ALLOW_OVER_APPROXIMATION`, mirroring A2; a `REQUIRED_CLOSURE_EDGES` floor stops the closure
+  derivation itself silently degrading to empty, mirroring `REQUIRED_FFI_TASKS`. A6 iterates crates
+  by moon's reported `language: "rust"`, so a crate mislabelled in moon (a toolchain reshuffle, a
+  hand-edited `language:`) drops out of A6's per-crate loop entirely; the floor catches this only for
+  the crates named in `REQUIRED_CLOSURE_EDGES`. The general backstop is A4, which enumerates Cargo
+  manifests from disk rather than trusting moon's `language` field, and `run.sh`'s
+  `lockfile->all-lint` set, which lists every crate by hand.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
@@ -91,8 +136,9 @@ It also runs several checks that the per-case project sets structurally **cannot
   under `CI=true` (`ts/moon.yml`). `REQUIRED_REPO_TASKS` is the floor that stops the comparison
   degrading to two empty sets. **`:affected-smoke` is load-bearing for every assertion in this
   file**: this gate runs *inside* it, so removing that one entry from `T` (and from CLAUDE.md)
-  passes C1-C5 by never executing them, and takes the eight cascade cases, A1-A5 and
-  `assert_include_relations` with it. Never exempt or drop it — see the design doc's L6.
+  passes C1-C5 by never executing them, and takes the eight project cascade cases, the five task
+  cases, A1-A6 and `assert_include_relations` with it. Never exempt or drop it — see the design
+  doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
   design doc's L3.
 - **`task-inputs`** (`task_inputs.py`, SMA-553) asserts every `repo:*` task's declared `inputs`
@@ -117,7 +163,11 @@ It also runs several checks that the per-case project sets structurally **cannot
   doc D2).
 
 It also asserts every `moon ci` invocation in `.github/workflows/ci.yml` carries
-`--include-relations` (the edges are inert without it).
+`--include-relations`. NOTE (SMA-528): the flag was measured to change NOTHING in every probe run,
+including the full 24-target `ci.yml` shape — do not read this assertion as evidence the cascade
+works. It is kept because removing it on that evidence is an unforced risk and it remains the
+documented mechanism should moonrepo fix the dependent traversal upstream. What actually carries the
+cascade is `@group(upstreams)`, asserted by the `_ci` task cases above and by A6.
 
 Run locally: `moon run repo:affected-smoke` (or `ci/affected-graph/run.sh`).
 `repo:affected-smoke` runs `--negative-control` first and then the real suite, so the proof that
@@ -135,7 +185,7 @@ implicitly: any project that appears but isn't in the expected set fails the cas
 - A project that **legitimately** becomes a new dependent (e.g. a future wasm kernel binding)
   makes the case fail with an `unexpected` entry → confirm the new edge is intended, then add the
   one project to that case's expected set.
-- A **task** case (`assert_task_case`, e.g. `proto->service-info-tasks`) works at `pid:task`
+- A **task** case (`assert_task_case`/`assert_task_case_ci`, e.g. `proto->svc-info-deep`) works at `pid:task`
   granularity, not project granularity, so its set can also grow without any new dependent
   project: widening the task-name filter itself (e.g. `lint` joining `build`/`test` in SMA-526)
   makes every already-listed project pick up a new `pid:task` row at once → same fix, confirm
@@ -146,11 +196,17 @@ implicitly: any project that appears but isn't in the expected set fails the cas
   `.moon/tasks/rust.yml`, which is the point of declaring them there. The case's three
   `build`/`test` rows are the FFI tasks (SMA-546) and are unaffected by adding a Rust crate; A5
   covers them, and likewise needs no update unless a *new* FFI-compiling task appears.
+- A new Rust crate (SMA-528) must declare `fileGroups.upstreams` in its own `moon.yml` — a missing
+  group is a hard graph-load error for every moon command, not a silent gap, so this cannot ship
+  unnoticed. Adding an in-tree dep to an *existing* crate changes that crate's transitive `dependsOn`
+  closure and therefore A6's expectation for it: `fileGroups.upstreams` must gain the new upstream's
+  `src/**/*` and `Cargo.toml` entries, or A6 fails with an `inputs omit ...` row.
 
 The expected sets are a snapshot of `moon query --affected --downstream deep` output at the
 **pinned moon version** (currently 2.3.2). A4 additionally depends on `moon query projects`
-emitting per-task `inputFiles` as a path-keyed object, and A5 on it emitting per-task `command`,
-`args` and `script`. A moon upgrade that changes either — even benignly — will fail the guard, so
-re-grounding is a known step of any moon bump. Both treat a missing key as a violation or an
-infrastructure error rather than skipping, precisely so such a change cannot turn into a silent
-pass.
+emitting per-task `inputFiles` as a path-keyed object, A5 on it emitting per-task `command`,
+`args` and `script`, and A6 on it emitting per-task `inputGlobs` the same shape as `inputFiles` and
+per-project `language`. A moon upgrade that changes any of `inputFiles`, `inputGlobs`, `language`,
+`command`, `args` or `script` — even benignly — will fail the guard, so re-grounding is a known step
+of any moon bump. All three treat a missing key as a violation or an infrastructure error rather
+than skipping, precisely so such a change cannot turn into a silent pass.

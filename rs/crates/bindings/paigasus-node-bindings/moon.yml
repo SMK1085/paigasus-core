@@ -6,11 +6,21 @@ id: 'paigasus-node-bindings-rs'
 layer: 'library'
 language: 'rust'
 
-# The kernel→binding edge (ADR-0005): a kernel change must rebuild this crate. The task-level
-# `^:build` is what propagates `affected` in `moon ci --include-relations` — a project-level
-# `dependsOn` alone does NOT (SMA-389 D3). Mirrors paigasus-py-bindings-rs.
+# The kernel→binding edge (ADR-0005): a kernel change must rebuild this crate. `dependsOn` creates
+# the project edge; the task-level `^:build` schedules the kernel's build under `moon ci
+# --include-relations`. Neither confers affectedness (SMA-389 D3, corrected by SMA-524) — that's
+# `@group(upstreams)` below (SMA-528). Mirrors paigasus-py-bindings-rs.
 dependsOn:
   - 'paigasus-kernel-rs'
+
+# SMA-528 — the transitive dependsOn closure's sources, consumed by build/test/lint via
+# `@group(upstreams)` in .moon/tasks/rust.yml. Moon confers affectedness ONLY through a task's own
+# `inputs`; dependsOn and `^:build` schedule an upstream but never select this crate. Asserted to
+# strict equality by repo:affected-smoke's A6.
+fileGroups:
+  upstreams:
+    - '/rs/crates/libs/paigasus-kernel/src/**/*'
+    - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
 
 tasks:
   build:
