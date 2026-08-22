@@ -54,11 +54,25 @@ provably cannot see it, and the only moment it appears is the irreversible uploa
 
 ## Limitations
 
-- **L1 — a single combined edit defeats Check 4.** Removing the freshness job from
-  `security-scan.yml` *and* the `assert_freshness_call_site` call from `run.sh` in one
-  commit passes green. Same bounded shape as `ci/actionlint/README.md`'s L6.
+- **L1 — a single combined edit defeats Check 4.** `assert_freshness_call_site` now
+  requires the invocation on a real, non-comment `run:` line with no discarded exit status,
+  and rejects a stray `continue-on-error:` or `if:` in the workflow. What still gets past it
+  is deleting the `assert_freshness_call_site` call from `run.sh` itself *and* removing the
+  freshness job from `security-scan.yml` in the same commit — the pin lives inside the file
+  it is pinning, so removing both at once leaves nothing to catch it. Same bounded shape as
+  `ci/actionlint/README.md`'s L6.
 - **L2 — removal detection is not in a required check.** `moon ci` is the only required
   status check; the freshness job is not. A slug retired upstream is caught on the PR path
   only after the 90-day staleness bound forces a refresh.
 - **L3 — the staleness bound reds a PR unrelated to categories.** By design: the
   alternative is a freshness mechanism that can switch itself off silently.
+- **L4 — the `categories.py --self-test` invocation inside `negative_control` is itself
+  unguarded.** Deleting that one line removes all 35 module controls silently. Closing it
+  would mean pinning whole lines into `ci/affected-graph/ci_targets.py` AND adding
+  `ci/publish-metadata/**/*` to `repo:affected-smoke`'s `inputs` (without which the pin is
+  unreachable on the PR that breaks it) — deliberately deferred as out of scope for SMA-529.
+- **L5 — `ABSOLUTE_FLOOR` is 2, which equals the number of slugs the repo currently uses.**
+  A hand edit that consistently truncates the snapshot AND its `# count:` header down to
+  just the used slugs would pass, leaving Check 1b validating against a near-empty
+  vocabulary. The scheduled freshness job reds the next morning, and a truncation that drops
+  a *used* slug reds rather than greens.

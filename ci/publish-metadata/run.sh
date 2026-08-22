@@ -20,8 +20,9 @@
 #   Check 2b the packaged file list ships README.md + LICENSE and not moon.yml.
 #   Check 3  while any publishable crate is at 0.0.0, rs/release-plz.toml must block its
 #            release. Releasing 0.0.0 permanently burns that version on crates.io.
-#   Check 4  .github/workflows/security-scan.yml still INVOKES the freshness check and does
-#            not suppress it with continue-on-error. Nothing else guards a workflow job:
+#   Check 4  .github/workflows/security-scan.yml still INVOKES the freshness check on a real,
+#            non-comment run: line whose exit status is not discarded, and does not suppress
+#            it with continue-on-error or if:. Nothing else guards a workflow job:
 #            repo:actionlint's call-site machinery is keyed on ci.yml only (SMA-529).
 #
 # Exit codes: 0 pass | 1 assertion failed (the repo is wrong) | 2 infrastructure failed.
@@ -273,10 +274,32 @@ assert_freshness_call_site() { # $1 workflow file
     return 2
   fi
 
-  if ! grep -qF -- '--check-categories-freshness' "$wf"; then
-    echo "Check 4 FAILED: $wf no longer invokes --check-categories-freshness." >&2
-    echo "  The category snapshot's ONLY drift detector would be silently disabled." >&2
+  # Anchored to a real, non-comment `run:` key — a bare substring match (grep -qF) would
+  # survive commenting the invocation out (`# run: … --check-categories-freshness`) plus a
+  # replacement `run: echo disabled` line, exactly the failure mode CLAUDE.md records for
+  # ci_targets.py's ACTIONLINT_SH_CALL_SITES: "a substring match would survive deleting the
+  # call". [[:space:]] and (- )? are ERE and portable across BSD and GNU grep.
+  local hit_line hit_lineno
+  hit_line="$(grep -nE '^[[:space:]]*(- )?run:[^#]*--check-categories-freshness' "$wf" | head -n1 || true)"
+  if [ -z "$hit_line" ]; then
+    echo "Check 4 FAILED: $wf no longer invokes --check-categories-freshness on a real," >&2
+    echo "  non-comment run: line. The category snapshot's ONLY drift detector would be" >&2
+    echo "  silently disabled." >&2
     rc=1
+  else
+    hit_lineno="${hit_line%%:*}"
+    # Mirror ci/actionlint/run.sh check 8's discard-tail reasoning: a wrapper's exit status
+    # can be swallowed by a trailing ||/&&/;/| on the SAME line even though the invocation
+    # itself is present and uncommented.
+    case "$hit_line" in
+      *'||'*|*'&&'*|*';'*|*'|'*)
+        echo "Check 4 FAILED: $wf line $hit_lineno discards the freshness invocation's" >&2
+        echo "  exit status with a ||/&&/;/| tail. A red freshness check would not fail" >&2
+        echo "  the job." >&2
+        printf '  %s\n' "$hit_line" >&2
+        rc=1
+        ;;
+    esac
   fi
 
   # Any continue-on-error other than the literal `false` can suppress that job's red. The
@@ -287,6 +310,23 @@ assert_freshness_call_site() { # $1 workflow file
   if [ -n "$offending" ]; then
     echo "Check 4 FAILED: $wf suppresses a failure with continue-on-error:" >&2
     printf '  %s\n' "$offending" >&2
+    rc=1
+  fi
+
+  # Any `if:` key can suppress the JOB (or step) that runs the freshness check without
+  # touching continue-on-error at all — measured: `if: false` on category-slugs: leaves this
+  # gate at rc 0 with no other change. The file carries no `if:` today, so a whole-file rule
+  # is both simple and strict. A legitimate future `if:` needs a deliberate exemption added
+  # HERE with a reason — the point is that changing conditional execution in the one file
+  # holding the only drift detector must be loud, never silent.
+  local if_offending
+  if_offending="$(grep -n 'if:' "$wf" || true)"
+  if [ -n "$if_offending" ]; then
+    echo "Check 4 FAILED: $wf gained an if: key, which can suppress the freshness job or" >&2
+    echo "  step without touching continue-on-error. No if: is expected in this file; add" >&2
+    echo "  a deliberate, reasoned exemption in assert_freshness_call_site if one is ever" >&2
+    echo "  legitimately needed." >&2
+    printf '  %s\n' "$if_offending" >&2
     rc=1
   fi
 
@@ -532,12 +572,34 @@ PY
   printf 'jobs:\n  freshness:\n    steps:\n      - run: echo nothing\n' >"$wf_gone"
   printf 'jobs:\n  freshness:\n    steps:\n      - run: ci/publish-metadata/run.sh --check-categories-freshness\n        continue-on-error: true\n' >"$wf_coe"
 
+  # F1 regression guard: the reviewer's measured attack — comment the invocation out and
+  # replace the step body with something inert. A bare `grep -qF` substring match survives
+  # this (the literal still appears, just behind a `#`); the anchored run: match must not.
+  local wf_commented="$tmp/wf-commented.yml"
+  printf 'jobs:\n  freshness:\n    steps:\n      - # run: ci/publish-metadata/run.sh --check-categories-freshness (disabled)\n        run: echo disabled\n' >"$wf_commented"
+
+  # F1 regression guard: the invocation is present and uncommented, but its exit status is
+  # discarded by a trailing tail on the SAME run: line — mirrors ci/actionlint/run.sh check 8.
+  local wf_discarded="$tmp/wf-discarded.yml"
+  printf 'jobs:\n  freshness:\n    steps:\n      - run: ci/publish-metadata/run.sh --check-categories-freshness || true\n' >"$wf_discarded"
+
+  # F2 regression guard: `if: false` on the job suppresses it entirely without touching
+  # continue-on-error at all — measured to leave the old gate at rc 0.
+  local wf_if_false="$tmp/wf-if-false.yml"
+  printf 'jobs:\n  category-slugs:\n    if: false\n    steps:\n      - run: ci/publish-metadata/run.sh --check-categories-freshness\n' >"$wf_if_false"
+
   _expect_rc 0 "Check 4 (workflow invokes the freshness check)" \
     assert_freshness_call_site "$wf_ok"
   _expect_rc 1 "Check 4 (freshness invocation deleted)" \
     assert_freshness_call_site "$wf_gone"
   _expect_rc 1 "Check 4 (freshness step suppressed by continue-on-error)" \
     assert_freshness_call_site "$wf_coe"
+  _expect_rc 1 "Check 4 (invocation commented out, replaced with an inert run:)" \
+    assert_freshness_call_site "$wf_commented"
+  _expect_rc 1 "Check 4 (invocation present but its exit status is discarded by || true)" \
+    assert_freshness_call_site "$wf_discarded"
+  _expect_rc 1 "Check 4 (job suppressed by if: false)" \
+    assert_freshness_call_site "$wf_if_false"
   _expect_rc 2 "Check 4 (workflow file unreadable)" \
     assert_freshness_call_site "$tmp/no-such-workflow.yml"
 

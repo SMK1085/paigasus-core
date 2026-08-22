@@ -76,6 +76,23 @@ def _header_value(lines: list[str], key: str) -> str | None:
 
 def parse_snapshot(text: str, today: datetime.date) -> list[str]:
     """Parse and fully validate a snapshot's text. Raises SnapshotError."""
+    # ALLOW_SLUG_SHAPE is an escape hatch into a corruption detector, so — mirroring
+    # SKIP_PATTERNS / BRANCH_SKIP / ALLOW_DEAD_INPUT / T_EXEMPT elsewhere in ci/ (see
+    # ci/affected-graph/ci_targets.py's bad_exempt check) — its reason is REQUIRED, not
+    # merely present as a dict value nobody reads. This must fire whether or not the
+    # offending slug even appears in this particular snapshot: an unreviewable blank-reason
+    # entry is a defect in the module itself, not a defect conditional on today's input.
+    bad_shape_exempt = sorted(
+        slug for slug, reason in ALLOW_SLUG_SHAPE.items() if not (reason or "").strip()
+    )
+    if bad_shape_exempt:
+        raise SnapshotError(
+            "ALLOW_SLUG_SHAPE entries with no reason: "
+            f"{bad_shape_exempt!r}. An exemption from the corruption check is a recorded "
+            "decision — give each entry a non-blank reason in "
+            "ci/publish-metadata/categories.py, or delete it."
+        )
+
     # NOTE: CRLF itself needs no help here — str.splitlines() already treats "\r\n" (and a
     # lone "\r") as a line boundary and leaves no residual "\r", and load_snapshot's open()
     # uses the default newline=None, which translates CRLF to "\n" before parse_snapshot
@@ -367,6 +384,34 @@ def _self_test() -> int:
         "an uppercase character in a slug",
         lambda: parse_snapshot(body(["Data-Structures"]), today),
     )
+
+    def _with_allow_slug_shape(entries, fn):
+        # Manipulate the module-level dict inside try/finally so a row cannot leak its
+        # mutation into any row that runs after it.
+        saved = dict(ALLOW_SLUG_SHAPE)
+        try:
+            ALLOW_SLUG_SHAPE.clear()
+            ALLOW_SLUG_SHAPE.update(entries)
+            fn()
+        finally:
+            ALLOW_SLUG_SHAPE.clear()
+            ALLOW_SLUG_SHAPE.update(saved)
+
+    expect_snapshot_error(
+        "an ALLOW_SLUG_SHAPE entry with a blank reason is rejected, even when the slug "
+        "does not appear in this snapshot (F3 regression guard)",
+        lambda: _with_allow_slug_shape(
+            {"Weird-Slug": ""}, lambda: parse_snapshot(body(good), today)
+        ),
+    )
+    expect_ok(
+        "an ALLOW_SLUG_SHAPE entry with a real reason genuinely silences the corruption "
+        "check for that slug (proves the hatch itself still works)",
+        lambda: _with_allow_slug_shape(
+            {"Weird-Slug": "crates.io shipped this mixed-case slug, see SMA-000"},
+            lambda: parse_snapshot(body(good + ["Weird-Slug"]), today),
+        ),
+    )
     expect_snapshot_error(
         "an HTML error page pasted into the snapshot",
         lambda: parse_snapshot(body(["<html><head><title>502</title>"]), today),
@@ -502,7 +547,7 @@ def _self_test() -> int:
         ),
     )
 
-    expected_checks = 33
+    expected_checks = 35
     if checks != expected_checks:
         print(
             f"SELF-TEST COUNT CHANGED: ran {checks}, expected {expected_checks}. Update "
