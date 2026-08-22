@@ -1474,8 +1474,16 @@ Expected: all pass.
 
 - [ ] **Step 4: Commit**
 
+Stage the proto, the regenerated bindings, AND the handler — the whole point of Step 0 is that
+the contract change and its implementor land in ONE commit, so the workspace is never left with
+an RPC declared on a trait that `AuthzGrpc` does not implement (`error[E0046]`).
+
 ```bash
-git add rs/crates/services/paigasus-iam/src/adapters/grpc/authz.rs
+git add contracts/proto/paigasus/iam/v1/iam.proto \
+        rs/crates/libs/paigasus-proto/src/generated/ \
+        py/packages/paigasus-proto/ \
+        ts/packages/paigasus-proto/ \
+        rs/crates/services/paigasus-iam/src/adapters/grpc/authz.rs
 git commit -m "feat(rs): serve system-policy retirement over grpc (SMA-501)"
 ```
 

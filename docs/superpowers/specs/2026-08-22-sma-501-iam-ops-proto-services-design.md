@@ -89,8 +89,13 @@ user principals** — including an identity the `AuthLayer` JIT-provisions under
 
 **Decision: mirror HTTP exactly — `CreateUser` over gRPC is bearer-only, with no Cedar check.**
 AC-1 is parity, and tightening authorization on an existing endpoint is a behavior change that
-belongs in its own issue with its own risk assessment. A follow-up will propose
-`Action::CreateUser` applied to both transports together.
+belongs in its own issue with its own risk assessment. **[SMA-584](https://linear.app/smaschek/issue/SMA-584)**
+proposes `Action::CreateUser` applied to both transports together.
+
+Two independent reviewers flagged this unprompted — the adversarial spec-challenger as a BLOCKER
+during design, and CodeRabbit again on the finished branch. Neither disputes the parity
+reasoning; both want the hole closed. That convergence is why SMA-584 is filed at High rather
+than left as a note here.
 
 **Consequence, and a reversal of an earlier decision: `CreateUser` moves to a dedicated
 `UserService` rather than joining `TenancyService`.** Placing the one unauthorized RPC among 21
@@ -497,12 +502,15 @@ Each records *why* the old shape was chosen, so each must be rewritten, not dele
 
 ## Risks
 
-- **`ReplayDeadLetters`' partial-failure contract is undefined** (challenge finding). It is a bulk
+- **`BulkReplayDeadLetters`' partial-failure contract is undefined** (challenge finding). It is a bulk
   mutation under tonic's `Server::timeout`, whose `Status` is produced *outside* `CorrelationLayer`
   and carries no ids or `ErrorInfo` — a gap `grpc/mod.rs` already documents as accepted. A client
   receiving `DEADLINE_EXCEEDED` mid-replay cannot tell how many rows were replayed. This is
-  **pre-existing on HTTP** and not made worse here, but the proto should say so rather than imply
-  atomicity.
+  **pre-existing on HTTP** and not made worse here. **Resolved as far as the contract can:**
+  `BulkReplayDeadLettersRequest` now states the operation is not atomic and that re-issuing is
+  safe, because every replay statement carries `AND parked = true` — an already-replayed row no
+  longer matches. The underlying "how many succeeded" question remains unanswerable on both
+  transports.
 - **Parity is asserted, not structurally guaranteed.** Nothing statically forces a future `/v1`
   route to acquire an RPC. A `repo:*` route↔RPC gate was rejected as disproportionate: a new
   `repo:*` task must join `ci.yml`'s `T=(…)`, the CLAUDE.md marker block, `ci_targets.py`, and
