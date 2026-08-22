@@ -15,6 +15,7 @@ mod support;
 use std::time::Duration;
 
 use paigasus_iam::adapters::persistence::Migrator;
+use paigasus_iam::adapters::persistence::migration::m0008_partition_audit_log::AUDIT_PARTITION_LOCK_KEY;
 use paigasus_iam::adapters::persistence::migration_lock::{MIGRATION_LOCK_KEY, MigrationLockError, migrate_under_lock};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, Statement};
 use sea_orm_migration::MigratorTrait;
@@ -170,11 +171,16 @@ async fn a_failed_migration_still_releases_the_lock() {
     let db = connect(&url).await;
     let observer = connect_pinned(&url).await;
 
-    // Collides with m0001's first CREATE TABLE, so `Migrator::up` fails inside the lock.
+    // m0001's `CREATE TABLE principal` is `.if_not_exists()`, so this seed is silently accepted
+    // rather than colliding directly — the migration instead fails later, when a subsequent
+    // migration's foreign key references `principal.id`, a column this bogus table lacks
+    // (observed as Postgres 42703, "column \"id\" referenced in foreign key constraint does not
+    // exist").
     db.execute_unprepared("CREATE TABLE principal (bogus int);").await.expect("seed the conflict");
 
     let err = migrate_under_lock(&db, Duration::from_secs(10)).await.expect_err("the migration must fail");
     assert!(!matches!(err, MigrationLockError::Contended { .. }), "expected a migration error, not Contended: {err:?}");
+    assert!(!migrations_table_exists(&db).await, "the whole migration transaction must roll back");
 
     assert!(
         scalar_bool(&observer, &format!("SELECT pg_try_advisory_lock({MIGRATION_LOCK_KEY}) AS v")).await,
@@ -208,8 +214,6 @@ async fn a_second_run_against_a_migrated_database_applies_nothing() {
 /// therefore aborts the entire migration — even though this replica won `MIGRATION_LOCK_KEY`.
 #[tokio::test]
 async fn a_held_audit_partition_lock_aborts_the_migration() {
-    const AUDIT_PARTITION_LOCK_KEY: i64 = 5_580_467;
-
     let Some((node, _pinned)) = support::start_raw_postgres().await else {
         eprintln!("skipping migration lock test: Docker unavailable");
         return;
@@ -223,11 +227,25 @@ async fn a_held_audit_partition_lock_aborts_the_migration() {
         "the stand-in maintainer must hold the audit-partition key"
     );
 
+    let started = std::time::Instant::now();
     let err = migrate_under_lock(&db, Duration::from_secs(30)).await.expect_err("m0008 must abort under a held audit-partition lock");
+    let elapsed = started.elapsed();
     assert!(
         !matches!(err, MigrationLockError::Contended { .. }),
         "the migration lock was won; the failure must come from m0008: {err:?}"
     );
+    // Discriminates from ANY migration failure: this must specifically be m0008's own
+    // `SET LOCAL lock_timeout = '5s'` firing on its `pg_advisory_xact_lock`, surfaced by
+    // Postgres as SQLSTATE 55P03 ("canceling statement due to lock timeout") — not, say, an
+    // unrelated `MigrationLockError::Db` or a different migration error entirely.
+    let rendered = format!("{err:?}");
+    assert!(
+        rendered.contains("55P03") || rendered.contains("lock timeout"),
+        "expected m0008's lock-timeout error (Postgres 55P03 / \"lock timeout\"), got: {rendered}"
+    );
+    // The abort should land around m0008's 5s `lock_timeout`, not the full 30s `wait` budget —
+    // bounding this catches a regression where the failure comes from some other, slower path.
+    assert!(elapsed < Duration::from_secs(15), "expected the lock-timeout abort well under the 30s wait budget, took {elapsed:?}");
     assert!(!migrations_table_exists(&db).await, "the whole migration transaction must roll back");
 
     assert!(scalar_bool(&maintainer, &format!("SELECT pg_advisory_unlock({AUDIT_PARTITION_LOCK_KEY}) AS v")).await);
