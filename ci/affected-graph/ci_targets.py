@@ -220,6 +220,57 @@ SELF_SCHEDULED_GATES = {
         "python3 ci/affected-graph/task_inputs.py --self-test",
         "python3 ci/affected-graph/task_inputs.py",
     ),
+    # SMA-530. Three sibling tasks over one script, each with its own control: their inputs
+    # are DISJOINT (moon.yml:61-89), so a PR touching only ts/packages/paigasus-sdk/
+    # .releaserc.json selects release-parity-ts and neither sibling — one shared control
+    # would leave that PR running a parity gate with nothing proving it can report red.
+    # Measured net cost +890ms/+733ms/+1111ms per task (~20%).
+    #
+    # WHOLE-LINE matched, and that is load-bearing in one direction here: the real-run line
+    # is a strict PREFIX of the control line in all three tasks, so a substring test would
+    # let the REAL RUN be deleted while this pin stayed green. `set -euo pipefail` is pinned
+    # as a first-class required line for the reason recorded at :199-209 — Moon's script:
+    # blocks have no errexit, so deleting it leaves both invocations' text untouched while a
+    # failing control is silently swallowed.
+    #
+    # These pin the moon.yml INVOCATION only. The control BLOCK they invoke
+    # (ci/release-parity/run.sh:60-69) is pinned separately by RELEASE_PARITY_SH_CALL_SITES
+    # below — deleting the block while leaving the flag parse makes --negative-control fall
+    # through to the real suite and exit 0, which these entries cannot see.
+    "release-parity": (
+        "set -euo pipefail",
+        "ci/release-parity/run.sh --negative-control",
+        "ci/release-parity/run.sh",
+    ),
+    "release-parity-py": (
+        "set -euo pipefail",
+        "ci/release-parity/run.sh --ecosystem python-semantic-release --negative-control",
+        "ci/release-parity/run.sh --ecosystem python-semantic-release",
+    ),
+    "release-parity-ts": (
+        "set -euo pipefail",
+        "ci/release-parity/run.sh --ecosystem semantic-release --negative-control",
+        "ci/release-parity/run.sh --ecosystem semantic-release",
+    ),
+}
+
+# SMA-530. A script-pinned gate whose `inputs` are NOT separately pinned must say so here,
+# with a reason — the repo's established idiom (T_EXEMPT, ALLOW_DEAD_INPUT,
+# ALLOW_NO_CARGO_BACKING, BRANCH_SKIP, COE_SKIP all work this way).
+#
+# Why an exemption rather than dropping the pairing rule: repo:affected-smoke's own inputs
+# are the most load-bearing input list in the repo (moon.yml:130-162, several entries
+# carrying explicit do-not-remove comments), so when it is script-pinned later it MUST also
+# have its globs pinned. A plain subset rule would let that be skipped in silence.
+SELF_TASK_GLOBS_EXEMPT = {
+    "release-parity": (
+        "narrow ecosystem-specific globs, unlike input-liveness's `**/*` which IS the thing "
+        "that gate exists to protect; declared-glob liveness is asserted generically by "
+        "repo:input-liveness (ci/affected-graph/task_inputs.py), so a second exact-match copy "
+        "here would red on every legitimate inputs edit and buy nothing"
+    ),
+    "release-parity-py": "as release-parity",
+    "release-parity-ts": "as release-parity",
 }
 
 # C4, actionlint half (SMA-542). repo:actionlint's self-tests, mutation battery, and the check-8,
@@ -732,6 +783,28 @@ def check_gate_inputs(projects):
                 "noticing the renames it exists to catch (SMA-553 D13)"
             )
     return rows
+
+
+def check_registry_pairing(scheduled=None, globs=None, exempt=None):
+    """SMA-530. The three self-scheduled-gate registries must stay consistent.
+
+    Returns (unpinned, bad_exempt, stale_exempt, both, orphan_globs), all sorted name lists.
+
+    Replaces a bare `set(A) != set(B)` equality. Equality forced every script-pinned gate to
+    duplicate its input globs here; a plain subset would have let repo:affected-smoke be
+    script-pinned later WITHOUT pinning the inputs that make every pin in this file
+    reachable. An exemption with a recorded reason keeps the decision explicit and visible.
+    """
+    scheduled = SELF_SCHEDULED_GATES if scheduled is None else scheduled
+    globs = SELF_TASK_EXPECTED_GLOBS if globs is None else globs
+    exempt = SELF_TASK_GLOBS_EXEMPT if exempt is None else exempt
+    return (
+        sorted(t for t in scheduled if t not in globs and t not in exempt),
+        sorted(t for t, reason in exempt.items() if not (reason or "").strip()),
+        sorted(set(exempt) - set(scheduled)),
+        sorted(set(globs) & set(exempt)),
+        sorted(set(globs) - set(scheduled)),
+    )
 
 
 def self_test():
@@ -1330,13 +1403,21 @@ def self_test():
     expect_infra("_scripts[non-string-script]",
                  lambda: _scripts({"repo": {"input-liveness": {"script": ["not", "a", "string"]}}}))
 
-    # Two registries keyed by the same task names, so a gate added to one but not the other is
-    # guarded on only half of what makes it work — its script but not its inputs, or vice versa.
-    if set(SELF_SCHEDULED_GATES) != set(SELF_TASK_EXPECTED_GLOBS):
-        failures.append(
-            "SELF_SCHEDULED_GATES and SELF_TASK_EXPECTED_GLOBS disagree on which gates are "
-            f"self-scheduled: {sorted(set(SELF_SCHEDULED_GATES) ^ set(SELF_TASK_EXPECTED_GLOBS))}"
-        )
+    # SMA-530 — the three registries, driven with fixtures rather than asserted inline, so
+    # each row can be shown to fire.
+    def pairing(label, scheduled, globs, exempt, want):
+        got = check_registry_pairing(scheduled, globs, exempt)
+        if got != want:
+            failures.append(f"check_registry_pairing[{label}]: got {got}, want {want}")
+
+    pairing("real-registries", None, None, None, ([], [], [], [], []))
+    pairing("unpinned", {"g": ()}, {}, {}, (["g"], [], [], [], []))
+    pairing("pinned-by-globs", {"g": ()}, {"g": ("**/*",)}, {}, ([], [], [], [], []))
+    pairing("pinned-by-exemption", {"g": ()}, {}, {"g": "reason"}, ([], [], [], [], []))
+    pairing("empty-reason", {"g": ()}, {}, {"g": "   "}, ([], ["g"], [], [], []))
+    pairing("stale-exemption", {}, {}, {"ghost": "outlived its task"}, ([], [], ["ghost"], [], []))
+    pairing("exempt-and-pinned", {"g": ()}, {"g": ("**/*",)}, {"g": "r"}, ([], [], [], ["g"], []))
+    pairing("orphan-globs", {}, {"ghost": ("**/*",)}, {}, ([], [], [], [], ["ghost"]))
 
     # SMA-553 D13, mirrored here so repo:input-liveness is not the sole judge of its own inputs.
     # The wired row carries the implicit .moon glob moon injects into every task, which must be

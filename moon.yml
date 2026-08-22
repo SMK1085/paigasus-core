@@ -56,7 +56,27 @@ tasks:
 
   release-parity:
     description: 'Dry-run release-plz over synthetic commits; assert commit->semver parity (SMA-398).'
-    script: 'ci/release-parity/run.sh'
+    # Negative control FIRST, mirroring repo:publish-metadata, repo:affected-smoke and
+    # repo:input-liveness (SMA-530). Without it CI runs only the real suite, and the real
+    # suite CANNOT detect a check_case that has lost the ability to report red — that is
+    # precisely when it is green. Measured: changing run.sh:51 to drop the `got_a` half of
+    # the comparison leaves all five cases.tsv rows passing (slot b is at baseline in every
+    # one) and the gate exits 0 while asserting nothing; only the control catches it.
+    #
+    # Moon does not enable errexit for `script:` blocks — the block's status is its LAST
+    # command's — so `set -euo pipefail` is REQUIRED, or a failing control is masked by the
+    # passing real run. run.sh's own `set -euo pipefail` governs its body, not this block.
+    # Same trap repo:promtool, repo:nats-permissions and repo:publish-metadata document.
+    #
+    # All three sibling tasks carry their own control because their inputs are DISJOINT: a
+    # PR touching only ts/packages/paigasus-sdk/.releaserc.json selects release-parity-ts
+    # alone. Net cost measured at +890ms/+733ms/+1111ms (~20% each). These three lines are
+    # pinned by SELF_SCHEDULED_GATES in ci/affected-graph/ci_targets.py — edit them and that
+    # gate reds until the constant agrees.
+    script: |
+      set -euo pipefail
+      ci/release-parity/run.sh --negative-control
+      ci/release-parity/run.sh
     toolchain: 'system'
     inputs:
       - 'ci/release-parity/**/*'
@@ -66,7 +86,12 @@ tasks:
 
   release-parity-py:
     description: 'Dry-run python-semantic-release over synthetic commits; assert commit->semver parity (SMA-405).'
-    script: 'ci/release-parity/run.sh --ecosystem python-semantic-release'
+    # Negative control FIRST — see repo:release-parity above for the full reasoning; this
+    # task carries its own because the three tasks' inputs are disjoint (SMA-530).
+    script: |
+      set -euo pipefail
+      ci/release-parity/run.sh --ecosystem python-semantic-release --negative-control
+      ci/release-parity/run.sh --ecosystem python-semantic-release
     toolchain: 'system'
     inputs:
       - 'ci/release-parity/**/*'
@@ -77,7 +102,12 @@ tasks:
 
   release-parity-ts:
     description: 'Dry-run semantic-release over synthetic commits; assert commit->semver parity + documented 0.x divergence (SMA-406).'
-    script: 'ci/release-parity/run.sh --ecosystem semantic-release'
+    # Negative control FIRST — see repo:release-parity above for the full reasoning; this
+    # task carries its own because the three tasks' inputs are disjoint (SMA-530).
+    script: |
+      set -euo pipefail
+      ci/release-parity/run.sh --ecosystem semantic-release --negative-control
+      ci/release-parity/run.sh --ecosystem semantic-release
     toolchain: 'system'
     inputs:
       - 'ci/release-parity/**/*'
