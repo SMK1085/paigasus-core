@@ -113,7 +113,24 @@ assert_pins() {
     echo "$bad_copy" >&2
     return 1
   fi
-  echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config"
+  # SMA-559: a replica that loses the migration-lock race waits with NO listener bound, so the
+  # image's start period must cover that wait plus the migration itself. A config default raised
+  # without touching the Dockerfile would silently re-arm the restart-while-waiting bug.
+  local start_period lock_wait budget required
+  start_period="$(grep -oE '\-\-start-period=[0-9]+s' "$dockerfile" | head -1 | grep -oE '[0-9]+')"
+  lock_wait="$(grep -oE 'lock_wait_secs: [0-9]+' "$ROOT/rs/crates/services/paigasus-iam/src/config.rs" | head -1 | grep -oE '[0-9]+')"
+  budget="$(grep -oE 'MIGRATION_BUDGET_SECS: u64 = [0-9]+' "$ROOT/rs/crates/services/paigasus-iam/src/adapters/persistence/migration_lock.rs" | head -1 | grep -oE '[0-9]+$')"
+  if [ -z "$start_period" ] || [ -z "$lock_wait" ] || [ -z "$budget" ]; then
+    echo "::error::could not read the start-period/lock-wait/migration-budget triple (start_period=${start_period:-<missing>} lock_wait=${lock_wait:-<missing>} budget=${budget:-<missing>}); one of the grep anchors moved." >&2
+    return 1
+  fi
+  required=$((lock_wait + budget))
+  if [ "$start_period" -lt "$required" ]; then
+    echo "::error::rs/Dockerfile's HEALTHCHECK --start-period=${start_period}s is below migration.lock_wait_secs (${lock_wait}) + the migration budget (${budget}) = ${required}s." >&2
+    echo "  A replica waiting on the SMA-559 migration lock binds no listener, so it would be reported unhealthy while correctly waiting. Raise the start period or lower the default wait." >&2
+    return 1
+  fi
+  echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config, start-period ${start_period}s >= ${required}s"
 }
 
 build_one() {
