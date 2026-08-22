@@ -180,6 +180,11 @@ tasks:
       # nothing. Same reasoning as the CLAUDE.md entry below — repo:actionlint's own `**/*` cannot
       # green a different task.
       - 'ci/actionlint/**/*'
+      # SMA-530 — this task now pins ci/release-parity/run.sh's --negative-control BLOCK
+      # (RELEASE_PARITY_SH_CALL_SITES), so a change under ci/release-parity/ MUST re-key it.
+      # Without this the pin is real but unreachable: the PR that deletes the block does not
+      # schedule this task. Same reasoning as the ci/actionlint/**/* entry above.
+      - 'ci/release-parity/**/*'
       # SMA-541 — this task now asserts that CLAUDE.md's documented full-graph command mirrors
       # ci.yml's `T=(...)` array, so a docs-only edit MUST re-key it; without this the assertion is
       # real but unreachable behind a cached PASS. (repo:actionlint's `**/*` already covers
