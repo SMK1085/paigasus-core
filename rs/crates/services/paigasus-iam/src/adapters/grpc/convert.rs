@@ -193,6 +193,26 @@ pub fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
     DateTime::<Utc>::from_timestamp(t.seconds, nanos)
 }
 
+/// Parses an optional wire timestamp with the three cases kept DISTINCT: absent means
+/// unfiltered, a valid value converts, and a **present but unrepresentable** value is a client
+/// error.
+///
+/// That third case is why this exists. [`from_ts`] returns `None` for a negative `nanos` or an
+/// out-of-`chrono`-range `seconds`, and on a filter field `None` means UNFILTERED — so the
+/// `req.field.and_then(convert::from_ts)` shape used in `grpc::audit` silently DROPS a
+/// malformed bound instead of rejecting it. On `BulkReplayDeadLetters` that turns a
+/// narrowly-scoped replay into "replay everything up to `max_rows`". The HTTP twin rejects the
+/// equivalent with a 400 (`http::dead_letters::parse_ts`), so this also restores parity.
+///
+/// `InvalidPrn`-as-sentinel, mirroring `http::dead_letters::parse_ts` and
+/// `grpc::audit::parse_cursor` — there is no dedicated error code for "not a valid timestamp".
+pub fn parse_opt_ts(t: Option<prost_types::Timestamp>, field: &str) -> Result<Option<DateTime<Utc>>, TenancyError> {
+    match t {
+        None => Ok(None),
+        Some(raw) => from_ts(raw).map(Some).ok_or_else(|| TenancyError::InvalidPrn(format!("invalid timestamp for {field}"))),
+    }
+}
+
 /// Builds `AuditMetadata` from created/modified timestamps. `created_by`/`modified_by` stay
 /// empty until M2 wires an actor through the request context (task-16 brief).
 pub fn audit(created: DateTime<Utc>, updated: DateTime<Utc>) -> AuditMetadata {
@@ -610,6 +630,64 @@ mod tests {
                 ErrorReason::from_wire_reason(code).is_some(),
                 "TenancyError::{err:?} emits {code:?}, which is not declared in common/v1/error.proto"
             );
+        }
+    }
+
+    #[test]
+    fn parse_opt_ts_treats_an_absent_timestamp_as_unfiltered() {
+        assert_eq!(parse_opt_ts(None, "parked_from").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_opt_ts_returns_the_exact_instant_for_a_valid_timestamp() {
+        let expected = DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z").unwrap().with_timezone(&Utc);
+        let got = parse_opt_ts(
+            Some(prost_types::Timestamp {
+                seconds: expected.timestamp(),
+                nanos: 0,
+            }),
+            "parked_from",
+        )
+        .unwrap();
+        assert_eq!(got, Some(expected));
+    }
+
+    /// The whole reason this helper exists. `from_ts` alone returns `None` here, and `None` means
+    /// UNFILTERED — so an `and_then(from_ts)` call site would silently drop the caller's time
+    /// bound and widen a bulk replay to every parked row. A present field must never be
+    /// reinterpreted as an absent one.
+    #[test]
+    fn parse_opt_ts_rejects_a_present_but_unrepresentable_timestamp_instead_of_unfiltering() {
+        for (label, t) in [
+            ("negative nanos", prost_types::Timestamp { seconds: 0, nanos: -1 }),
+            ("out-of-range seconds", prost_types::Timestamp { seconds: i64::MAX, nanos: 0 }),
+        ] {
+            let err = parse_opt_ts(Some(t), "parked_from").expect_err(label);
+            assert!(matches!(err, TenancyError::InvalidPrn(_)), "{label} must be a client error, not None");
+        }
+        // Sanity: the underlying primitive really does collapse these to None, which is what makes
+        // this helper load-bearing rather than decorative.
+        assert_eq!(from_ts(prost_types::Timestamp { seconds: 0, nanos: -1 }), None);
+    }
+
+    /// `InvalidPrn`'s Display is deliberately STATIC (`application::error`), so the `field`
+    /// argument never reaches a client — `status_to_grpc` puts `to_string()` on the wire and that
+    /// is the fixed message. Pinned here because it is genuinely surprising: the helper takes a
+    /// field name and then throws it away. The argument stays anyway, for symmetry with
+    /// `http::audit::parse_ts` / `http::dead_letters::parse_ts`, which pass an equally-swallowed
+    /// detail, and so the detail is already threaded through if that Display ever changes.
+    /// The important half — that a present-but-invalid timestamp is a CLIENT error rather than a
+    /// silently-unfiltered query — is asserted by the test above and is unaffected.
+    #[test]
+    fn parse_opt_ts_detail_is_swallowed_by_invalid_prns_static_display() {
+        let err = parse_opt_ts(Some(prost_types::Timestamp { seconds: 0, nanos: -1 }), "parked_to").unwrap_err();
+        assert!(!err.to_string().contains("parked_to"), "InvalidPrn's Display is static and must not surface the field name: got {err}");
+        match err {
+            TenancyError::InvalidPrn(detail) => assert!(
+                detail.contains("parked_to"),
+                "the payload itself must still carry the field name, even though Display drops it: got {detail}"
+            ),
+            other => panic!("expected TenancyError::InvalidPrn, got {other:?}"),
         }
     }
 }
