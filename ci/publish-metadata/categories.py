@@ -236,6 +236,14 @@ def fetch_live_slugs(url: str = API_URL) -> list[str]:
                 return validate_live_payload(resp.status, resp.read())
         except FetchError:
             raise
+        except urllib.error.HTTPError as exc:
+            # MUST precede the (URLError, OSError) arm: HTTPError subclasses URLError
+            # subclasses OSError, so the broad arm would otherwise retry a DEFINITIVE
+            # answer (403, 404) three times and report it as a connectivity failure.
+            # Body is deliberately not read — validate_live_payload rejects on status
+            # before it touches the body, and exc.fp can be None, making exc.read() throw.
+            validate_live_payload(exc.code, b"")
+            raise  # unreachable: validate_live_payload always raises on a non-200
         except (urllib.error.URLError, OSError) as exc:
             last = exc
             if attempt < 2:
@@ -428,6 +436,53 @@ def _self_test() -> int:
         "a payload with no category_slugs key",
         lambda: validate_live_payload(200, b'{"categories":[]}'),
     )
+    expect_fetch_error(
+        "category_slugs present but not a list",
+        lambda: validate_live_payload(200, b'{"category_slugs":{}}'),
+    )
+    expect_fetch_error(
+        "a malformed category entry (no string slug)",
+        lambda: validate_live_payload(200, b'{"category_slugs":[{"name":"x"}]}'),
+    )
+    expect_fetch_error(
+        "a non-empty list below ABSOLUTE_FLOOR",
+        lambda: validate_live_payload(
+            200, b'{"category_slugs":[{"slug":"data-structures"}]}'
+        ),
+    )
+
+    def _check_no_retry_on_http_error():
+        call_count = 0
+
+        def fake_urlopen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise urllib.error.HTTPError(
+                "https://crates.io/api/v1/category_slugs", 403, "Forbidden", {}, None
+            )
+
+        original_urlopen = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        try:
+            try:
+                fetch_live_slugs()
+            except FetchError:
+                pass
+            else:
+                raise AssertionError("fetch_live_slugs did not raise FetchError")
+        finally:
+            urllib.request.urlopen = original_urlopen
+        _assert(
+            call_count == 1,
+            f"a definitive 403 must not be retried — expected 1 urlopen call, got {call_count}",
+        )
+
+    expect_ok(
+        "a 403 HTTPError is reported without being retried "
+        "(regression guard for the URLError/OSError catch ordering)",
+        _check_no_retry_on_http_error,
+    )
+
     expect_ok(
         "diff_slug_sets reports an upstream addition",
         lambda: _assert(
@@ -447,7 +502,7 @@ def _self_test() -> int:
         ),
     )
 
-    expected_checks = 29
+    expected_checks = 33
     if checks != expected_checks:
         print(
             f"SELF-TEST COUNT CHANGED: ran {checks}, expected {expected_checks}. Update "
