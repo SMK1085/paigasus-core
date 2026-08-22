@@ -374,23 +374,39 @@ ACTIONLINT_SH_CALL_SITES = (
 )
 
 # SMA-530. The moon.yml pins above prove the CONTROL IS INVOKED; these prove it still DOES
-# something. run.sh:14 parses --negative-control into NEGATIVE and :60-69 is the block that
-# acts on it — delete the block while leaving the flag parse and `run.sh --negative-control`
-# falls straight through to the real suite, exits 0, and all three tasks stay green while CI
-# runs the five-case suite twice per task. SELF_SCHEDULED_GATES cannot see that: it pins
-# moon.yml text, not semantics. Same class as ACTIONLINT_SH_CALL_SITES above, and the same
-# lesson SMA-542 I1 and CodeRabbit round 4 C1 each cost a round to learn — a gate check's own
-# call site is what goes unguarded.
+# something. run.sh:14 parses --negative-control into NEGATIVE, :63 asserts the harness against
+# a deliberately-wrong expectation, and :60-69 is the block that acts on the result — all three
+# are pinned here, because a review measured that pinning only the "act" block leaves two other
+# ways to defeat the control while every one of these three lines stays byte-identical:
+#   (a) neuter the PARSE (`--negative-control) shift ;;`, dropping `NEGATIVE=1`): NEGATIVE stays
+#       0 (initialised at :9, so `set -u` is satisfied), `run.sh --negative-control` falls
+#       straight through to the real suite and exits 0 — the exact failure this registry exists
+#       to close, just one line further up than the act block this used to pin alone.
+#   (b) gut the ASSERT (`ec=0; check_case ... || ec=$?` → `ec=1`): the control never invokes the
+#       harness at all, yet still prints "negative-control OK: harness reported red as expected"
+#       and exits 0 — worse than (a), since the control now actively asserts a lie.
+# SELF_SCHEDULED_GATES cannot see any of this: it pins moon.yml text, not run.sh semantics. Same
+# class as ACTIONLINT_SH_CALL_SITES above, and the same lesson SMA-542 I1 and CodeRabbit round 4
+# C1 each cost a round to learn — a gate check's own call site is what goes unguarded.
 #
 # REACHABILITY IS NOT AUTOMATIC. This check only runs when repo:affected-smoke is scheduled,
 # so moon.yml lists `ci/release-parity/**/*` among its inputs. Without that entry the PR
 # deleting this block is exactly the PR that does not schedule this gate. Do not remove it.
 #
-# Matched as stripped WHOLE LINES, not substrings: the two `echo` lines are the case arms
-# that give the control its verdict AND its exit status, and a substring match on the message
-# text alone would survive `exit 0`/`exit 1` being swapped or dropped.
+# Matched as stripped WHOLE LINES, not substrings: for the two `echo` lines, a message-text
+# substring match would survive `exit 0`/`exit 1` being swapped or dropped, since the message
+# text does not change. Indentation tolerance is deliberate too (unlike ACTIONLINT_SH_CALL_SITES'
+# column-0 rule): the `case` arms and the assert line are conventionally indented inside the `if`,
+# so a column-0 requirement would reject the real, executing lines.
+#
+# TRADEOFF, worth recording: pinning the assert line couples this pin to the fixture case id
+# ("neg-fix-bang") and its "0.1.1" wrong-expectation literal. If cases.tsv's contract for that
+# case ever changes, this entry must be updated with it, or the pin will fire on a legitimate
+# edit.
 RELEASE_PARITY_SH_CALL_SITES = (
+    '--negative-control) NEGATIVE=1; shift ;;',
     'if [ "$NEGATIVE" = 1 ]; then',
+    'ec=0; check_case "neg-fix-bang" "fix!: deliberately wrong" "-" "0.1.1" || ec=$?',
     '1) echo "negative-control OK: harness reported red as expected"; exit 0 ;;',
     '0) echo "negative-control FAILED: harness accepted a wrong expectation" >&2; exit 1 ;;',
 )
@@ -731,10 +747,17 @@ def check_self_invocation(run_sh_text, scripts, actionlint_sh_text, release_pari
 
     Four haystacks, matched TWO different ways. run.sh sites are substrings, because they are
     indented and one is a mid-line fragment, and their `|| RC=1` suffixes already make them
-    unambiguous. Task-script, actionlint and release-parity sites are whole stripped LINES,
-    because in each case one required token is a strict prefix of something else in the file —
-    `task_inputs.py` of `task_inputs.py --self-test`, and `run_self_tests` of
-    `run_self_tests() {`.
+    unambiguous. Task-script, actionlint and release-parity sites are whole stripped LINES —
+    membership is checked against the set of a line's OWN full stripped text, not "does this
+    substring appear anywhere in the file" — but for two DIFFERENT reasons, not one shared
+    rationale. For task-script and actionlint, a required token is a strict PREFIX of something
+    else in the file — `task_inputs.py` of `task_inputs.py --self-test`, and `run_self_tests` of
+    `run_self_tests() {` — so a substring-over-the-whole-text match would be satisfied by the
+    wrong occurrence. Release-parity has no such prefix hazard; there, whole-line matching is
+    what makes a COMMENTED-OUT copy of a pinned line (e.g. `# if [ "$NEGATIVE" = 1 ]; then`)
+    report missing rather than silently satisfy the pin — a substring-over-the-whole-text version
+    would still find the required text inside the commented line and accept it, since commenting
+    a line out does not remove its text, only prefix it.
 
     The four texts are checked SEPARATELY rather than against one concatenated haystack, so a call
     site living in the wrong file cannot satisfy another's requirement.
@@ -1233,8 +1256,10 @@ def self_test():
         'done < <(block_execution_verdict .github/workflows/ci.yml)\n'
     )
     wired_release_parity = (
+        '    --negative-control) NEGATIVE=1; shift ;;\n'
         'if [ "$NEGATIVE" = 1 ]; then\n'
         '  echo "== negative control ... =="\n'
+        '  ec=0; check_case "neg-fix-bang" "fix!: deliberately wrong" "-" "0.1.1" || ec=$?\n'
         '  case "$ec" in\n'
         '    1) echo "negative-control OK: harness reported red as expected"; exit 0 ;;\n'
         '    0) echo "negative-control FAILED: harness accepted a wrong expectation" >&2; exit 1 ;;\n'
@@ -1423,14 +1448,19 @@ def self_test():
         failures.append(
             "check_self_invocation: an actionlint site was satisfied by task-script text"
         )
-    # The docstring's "REQUIRED positional parameter" claim (SMA-542) is otherwise unenforced: every
-    # caller above already passes it explicitly, so a future `actionlint_sh_text=""` default would
-    # make all of them pass vacuously — the exact class of hole this parameter exists to close —
-    # while every call-site-shaped assertion above stayed green. Only introspecting the signature
-    # itself catches that regression (SMA-542 review, smaller correction 3).
-    default = inspect.signature(check_self_invocation).parameters["actionlint_sh_text"].default
-    if default is not inspect.Parameter.empty:
-        failures.append("check_self_invocation: actionlint_sh_text must stay a REQUIRED parameter")
+    # The docstring's "REQUIRED positional parameter" claim (SMA-542, extended SMA-530) is
+    # otherwise unenforced: every caller above already passes both explicitly, so a future
+    # `actionlint_sh_text=""` or `release_parity_sh_text=""` default would make all of them pass
+    # vacuously — the exact class of hole these parameters exist to close — while every
+    # call-site-shaped assertion above stayed green. Only introspecting the signature itself
+    # catches that regression (SMA-542 review, smaller correction 3; looped over both parameter
+    # names so the SMA-530 addition gets the same guarantee, not just the pre-existing one).
+    for _param_name in ("actionlint_sh_text", "release_parity_sh_text"):
+        _default = inspect.signature(check_self_invocation).parameters[_param_name].default
+        if _default is not inspect.Parameter.empty:
+            failures.append(
+                f"check_self_invocation: {_param_name} must stay a REQUIRED parameter"
+            )
     # The task-script haystack strips BOTH sides (:673) — unlike the actionlint haystack's
     # column-0 rule — because Moon task scripts are indented inside YAML. Assert that
     # tolerance directly: a wired-but-indented script must NOT be reported missing.
@@ -1462,6 +1492,22 @@ def self_test():
     ):
         failures.append(
             "check_self_invocation: a release-parity site was satisfied by run.sh text"
+        )
+    # The release-parity haystack is whole-LINE, not substring, matched, and this fixture proves
+    # that is load-bearing, not decorative: commenting out a pinned line
+    # (`# if [ "$NEGATIVE" = 1 ]; then`) changes its stripped text and must be reported missing,
+    # but a widened match (`site not in text` as a plain substring over the whole file) would
+    # accept a line that never executes. This is the opposite direction from the
+    # indentation-tolerance property already exercised by every fixture above (an indented copy of
+    # a case arm must still be ACCEPTED, by design) — a commented-out copy must NOT be, and only a
+    # whole-line comparison tells the two apart.
+    commented_out = wired_release_parity.replace(
+        'if [ "$NEGATIVE" = 1 ]; then\n', '# if [ "$NEGATIVE" = 1 ]; then\n'
+    )
+    if not check_self_invocation(wired, scripts, wired_actionlint, commented_out):
+        failures.append(
+            "check_self_invocation: a COMMENTED-OUT release-parity line satisfied the pin "
+            "(widened to substring matching)"
         )
 
     # _scripts (SMA-553 D10) — a second pure extractor, so _eligibility's shape is untouched.
