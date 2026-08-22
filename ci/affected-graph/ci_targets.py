@@ -148,7 +148,19 @@ T_EXEMPT = {}
 # filter that stops matching, or a moon output shape change, would print PASS while asserting
 # nothing. Every task named here must be present and CI-eligible in the parsed `repo` set.
 # Same role as cargo_moon_parity.py's REQUIRED_FFI_TASKS.
-REQUIRED_REPO_TASKS = ("affected-smoke", "promtool", "publish-metadata")
+#
+# The three release-parity* tasks joined the floor with SMA-530: they now carry a negative
+# control, and check_forward's `want`/`got` shrink CONSISTENTLY when a task is dropped from
+# `T` and made CI-ineligible in the same edit — so without a floor entry the control could be
+# switched off entirely with every check green.
+REQUIRED_REPO_TASKS = (
+    "affected-smoke",
+    "promtool",
+    "publish-metadata",
+    "release-parity",
+    "release-parity-py",
+    "release-parity-ts",
+)
 
 # SMA-553 D13 — repo:input-liveness's `inputs: ['**/*']` is load-bearing, and asserting it ONLY
 # inside that gate would make it the sole judge of its own configuration. This is the second,
@@ -997,10 +1009,14 @@ def self_test():
     # project id -> task name -> CI-eligible. Mirrors _eligibility()'s return shape.
     tasks_fixture = {
         "repo": {"deny": True, "promtool": True, "affected-smoke": True,
-                 "publish-metadata": True, "install-hooks": False},
+                 "publish-metadata": True, "install-hooks": False,
+                 # SMA-530 — floor members, so they must be CI-eligible here too.
+                 "release-parity": True, "release-parity-py": True,
+                 "release-parity-ts": True},
         "some-crate-rs": {"build": True, "test": True, "build-release": True},
     }
-    aligned_t = ["build", "test", "deny", "promtool", "affected-smoke", "publish-metadata"]
+    aligned_t = ["build", "test", "deny", "promtool", "affected-smoke", "publish-metadata",
+                 "release-parity", "release-parity-py", "release-parity-ts"]
 
     def forward(label, tasks, t, exempt, want_missing, want_unexpected, want_bad_exempt=(),
                 want_stale_exempt=()):
@@ -1046,7 +1062,7 @@ def self_test():
     if check_floor(tasks_fixture) != []:
         failures.append("check_floor: fired on a fixture containing every floor member")
     thin = {"repo": {"deny": True}}
-    if check_floor(thin) != ["affected-smoke", "promtool", "publish-metadata"]:
+    if check_floor(thin) != sorted(REQUIRED_REPO_TASKS):
         failures.append(f"check_floor: did not name every absent floor member: {check_floor(thin)}")
 
     def reverse(label, tasks, t, want):
