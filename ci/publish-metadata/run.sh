@@ -274,13 +274,14 @@ assert_freshness_call_site() { # $1 workflow file
     return 2
   fi
 
-  # Anchored to a real, non-comment `run:` key — a bare substring match (grep -qF) would
-  # survive commenting the invocation out (`# run: … --check-categories-freshness`) plus a
-  # replacement `run: echo disabled` line, exactly the failure mode CLAUDE.md records for
-  # ci_targets.py's ACTIONLINT_SH_CALL_SITES: "a substring match would survive deleting the
-  # call". [[:space:]] and (- )? are ERE and portable across BSD and GNU grep.
+  # Anchored to a real, non-comment `run:` key AND to the actual command, not merely the
+  # flag text — a `run:` line containing the `--check-categories-freshness` substring is
+  # NOT enough: `run: echo --check-categories-freshness` matches the flag while invoking
+  # nothing (measured bypass). The value must invoke ci/publish-metadata/run.sh itself.
+  # `[[:space:]]` and `(- )?` are ERE and portable across BSD and GNU grep; the literal
+  # dot in the path is escaped so it does not match "any character".
   local hit_line hit_lineno
-  hit_line="$(grep -nE '^[[:space:]]*(- )?run:[^#]*--check-categories-freshness' "$wf" | head -n1 || true)"
+  hit_line="$(grep -nE '^[[:space:]]*(- )?run:[^#]*ci/publish-metadata/run\.sh[^#]*--check-categories-freshness' "$wf" | head -n1 || true)"
   if [ -z "$hit_line" ]; then
     echo "Check 4 FAILED: $wf no longer invokes --check-categories-freshness on a real," >&2
     echo "  non-comment run: line. The category snapshot's ONLY drift detector would be" >&2
@@ -578,6 +579,12 @@ PY
   local wf_commented="$tmp/wf-commented.yml"
   printf 'jobs:\n  freshness:\n    steps:\n      - # run: ci/publish-metadata/run.sh --check-categories-freshness (disabled)\n        run: echo disabled\n' >"$wf_commented"
 
+  # F4 regression guard: the reviewer's measured MAJOR bypass — a run: line containing the
+  # FLAG TEXT but not the actual command. The old regex matched on the flag substring alone
+  # and passed this; it must now fail, since nothing here invokes the gate.
+  local wf_flag_only="$tmp/wf-flag-only.yml"
+  printf 'jobs:\n  freshness:\n    steps:\n      - run: echo --check-categories-freshness\n' >"$wf_flag_only"
+
   # F1 regression guard: the invocation is present and uncommented, but its exit status is
   # discarded by a trailing tail on the SAME run: line — mirrors ci/actionlint/run.sh check 8.
   local wf_discarded="$tmp/wf-discarded.yml"
@@ -596,6 +603,8 @@ PY
     assert_freshness_call_site "$wf_coe"
   _expect_rc 1 "Check 4 (invocation commented out, replaced with an inert run:)" \
     assert_freshness_call_site "$wf_commented"
+  _expect_rc 1 "Check 4 (run: line contains only the flag text, not the command)" \
+    assert_freshness_call_site "$wf_flag_only"
   _expect_rc 1 "Check 4 (invocation present but its exit status is discarded by || true)" \
     assert_freshness_call_site "$wf_discarded"
   _expect_rc 1 "Check 4 (job suppressed by if: false)" \

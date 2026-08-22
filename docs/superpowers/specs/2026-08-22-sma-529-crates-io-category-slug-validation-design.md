@@ -204,9 +204,13 @@ it is a hand-maintained constant that goes stale in the wrong direction as crate
 needs no threshold. A small absolute floor of 2 remains only as a backstop against a
 both-header-and-body truncation.
 
-**The line check is a corruption detector, not a grammar.** It rejects a line containing
-whitespace, an uppercase character, a byte outside `[a-z0-9:-]`, or exceeding 64 chars. It
-is deliberately *not* the full slug grammar: crates.io owns this vocabulary, and a strict
+**The line check is a corruption detector, not a grammar.** Each line is `.rstrip()`ed
+before it is checked, so trailing whitespace from a hand edit is tolerated and never the
+error — `render_snapshot` never emits it, and a self-test row pins that a slug line with
+trailing spaces still parses. What the check rejects is a line that, after that trailing
+strip, still contains *interior* whitespace, an uppercase character, a byte outside
+`[a-z0-9:-]`, or exceeds 64 chars. It is deliberately *not* the full slug grammar: crates.io
+owns this vocabulary, and a strict
 grammar would mean the day upstream introduces a slug shaped unexpectedly,
 `--refresh-categories` writes a snapshot the offline check then rejects — and since
 `:publish-metadata` is in `ci.yml`'s `T=(…)`, that is **every PR red with no path forward

@@ -271,12 +271,12 @@ def validate_live_payload(status: int, body) -> list[str]:
     return slugs
 
 
-def fetch_live_slugs(url: str = API_URL) -> list[str]:
+def fetch_live_slugs() -> list[str]:
     """Thin request wrapper; all judgement lives in validate_live_payload."""
     last: Exception | None = None
     for attempt in range(3):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            req = urllib.request.Request(API_URL, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return validate_live_payload(resp.status, resp.read())
         except FetchError:
@@ -293,7 +293,7 @@ def fetch_live_slugs(url: str = API_URL) -> list[str]:
             last = exc
             if attempt < 2:
                 time.sleep(2 ** attempt)
-    raise FetchError(f"could not reach {url} after 3 attempts: {last}")
+    raise FetchError(f"could not reach {API_URL} after 3 attempts: {last}")
 
 
 def diff_slug_sets(live: list[str], snapshot: list[str]):
@@ -498,16 +498,26 @@ def _self_test() -> int:
         "nearest returns None when nothing is close",
         lambda: _assert(nearest("zzzzzzzz", good) is None, "nearest miss"),
     )
+    def _check_today_utc_basis():
+        # Bracket the call with independently-sampled bounds rather than comparing
+        # against a second, separately-computed "expected" value: sampling the clock
+        # twice (once for the expectation, once inside _today_utc()) is flaky across a
+        # UTC-midnight rollover, where the two samples land on different dates even
+        # though _today_utc() is correct both times. [before, after] tolerates that.
+        before = datetime.datetime.now(datetime.timezone.utc).date()
+        got = _today_utc()
+        after = datetime.datetime.now(datetime.timezone.utc).date()
+        _assert(
+            isinstance(got, datetime.date) and before <= got <= after,
+            "_today_utc basis",
+        )
+
     expect_ok(
         "_today_utc() agrees with datetime.datetime.now(UTC).date() and returns a "
         "datetime.date (F1 regression guard — render_snapshot/parse_snapshot/refresh must "
         "all derive 'today' from the SAME, UTC, basis or a developer west/east of UTC "
         "stamps a date CI reads as the future)",
-        lambda: _assert(
-            _today_utc() == datetime.datetime.now(datetime.timezone.utc).date()
-            and isinstance(_today_utc(), datetime.date),
-            "_today_utc basis",
-        ),
+        _check_today_utc_basis,
     )
 
     ok_payload = json.dumps({"category_slugs": [{"slug": s} for s in good]})

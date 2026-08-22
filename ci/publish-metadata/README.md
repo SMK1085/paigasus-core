@@ -71,7 +71,7 @@ provably cannot see it, and the only moment it appears is the irreversible uploa
 - **L3 — the staleness bound reds a PR unrelated to categories.** By design: the
   alternative is a freshness mechanism that can switch itself off silently.
 - **L4 — the `categories.py --self-test` invocation inside `negative_control` is itself
-  unguarded.** Deleting that one line removes all 35 module controls silently. Closing it
+  unguarded.** Deleting that one line removes all 39 module controls silently. Closing it
   would mean pinning whole lines into `ci/affected-graph/ci_targets.py` AND adding
   `ci/publish-metadata/**/*` to `repo:affected-smoke`'s `inputs` (without which the pin is
   unreachable on the PR that breaks it) — deliberately deferred as out of scope for SMA-529.
