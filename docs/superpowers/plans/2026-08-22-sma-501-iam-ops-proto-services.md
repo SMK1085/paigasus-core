@@ -1693,12 +1693,20 @@ performing no authorization check of its own.
 
 - [ ] **Step 4: Verify no registry code got quoted**
 
+Scope the search to what the gate actually reads. `ci/error-registry/check.py:77` sets
+`SCAN_GLOB = "**/src/**/*.rs"`, so only Rust files under a `src/` directory can trip it —
+searching `docs/` too would just match this plan's own quoted examples and cry wolf.
+
 ```bash
 grep -rn '"invalid-bulk-replay"\|"grants-survive"\|"decision-change-unacknowledged"' \
-  rs/crates/services/paigasus-iam/src rs/crates/services/paigasus-iam/tests contracts/proto docs/
+  rs/crates/services/paigasus-iam/src
 ```
 Expected: **no output.** Any hit drags that file onto `ci/error-registry/check.py`'s MANIFEST
 and reds `repo:error-code-single-site`. Remove the quotes.
+
+Pre-existing hits in files already on the MANIFEST (`application/error.rs`,
+`http/system_retirement.rs`) are expected and fine — the check is that no file this branch adds
+or edits newly acquires one.
 
 - [ ] **Step 5: Run the full CI graph**
 
