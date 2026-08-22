@@ -4,9 +4,7 @@
   "strategy": "manual-commit",
   "branch": "feature/sma-530-release-parity-negative-control",
   "checkpoints_count": 2,
-  "files_touched": [
-    "ci/release-parity/README.md"
-  ],
+  "files_touched": null,
   "sessions": [
     {
       "metadata": "/0f/313c2faad6/0/metadata.json",
@@ -17,10 +15,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 8,
-    "cache_creation_tokens": 5548,
-    "cache_read_tokens": 1730506,
-    "output_tokens": 2831,
-    "api_call_count": 4
+    "input_tokens": 378,
+    "cache_creation_tokens": 608385,
+    "cache_read_tokens": 52585123,
+    "output_tokens": 198312,
+    "api_call_count": 189
   }
 }
