@@ -1066,12 +1066,40 @@ def self_test():
         '  assert_ci_targets || SUITE_RC=1\n'
         '  python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1\n'
     )
-    wired_script = (
-        "set -euo pipefail\n"
-        "python3 ci/affected-graph/task_inputs.py --self-test\n"
-        "python3 ci/affected-graph/task_inputs.py\n"
-    )
-    scripts = {"input-liveness": wired_script}
+    def wired_scripts(**overrides):
+        """A fully-wired `scripts` dict for EVERY SELF_SCHEDULED_GATES key.
+
+        Every negative fixture below asserts `if not check_self_invocation(...)`, which is
+        satisfied by ANY missing entry. A literal one-key dict therefore starts passing for
+        the WRONG reason the moment a second gate is registered — the exact vacuity this
+        gate exists to prevent, and measured on SMA-530: adding three keys turned ~24 of
+        these assertions into no-ops while only the positive control red. Building from the
+        registry itself means a future gate cannot reopen it; each fixture then mutates
+        exactly ONE gate and leaves the rest wired.
+        """
+        built = {
+            task: "".join(f"{line}\n" for line in lines)
+            for task, lines in SELF_SCHEDULED_GATES.items()
+        }
+        built.update(overrides)
+        return built
+
+    def broken_script(task, drop):
+        """`task`'s wired script with exactly one required line removed."""
+        return "".join(
+            f"{line}\n" for line in SELF_SCHEDULED_GATES[task] if line != drop
+        )
+
+    wired_script = wired_scripts()["input-liveness"]
+    scripts = wired_scripts()
+    # The builder must not silently under-cover: a typo'd comprehension that dropped a gate
+    # would restore the very vacuity it exists to close, and every fixture below would go
+    # green together.
+    if set(scripts) != set(SELF_SCHEDULED_GATES):
+        failures.append(
+            f"wired_scripts: covers {sorted(scripts)}, registry has "
+            f"{sorted(SELF_SCHEDULED_GATES)}"
+        )
     wired_actionlint = (
         # Load-bearing, exactly as `assert_ci_targets() {` is above: with the DEFINITION present,
         # `no_actionlint_call` below still contains the bare name `run_self_tests`, so a
@@ -1112,34 +1140,36 @@ def self_test():
     silenced = wired.replace("--self-test || NEG_RC=1", "--self-test || true")
     if not check_self_invocation(silenced, scripts, wired_actionlint):
         failures.append("check_self_invocation: missed a --self-test whose failure is swallowed")
-    # SMA-553 D10 — the task-script half. The REAL-RUN line is a strict PREFIX of the --self-test
-    # line, so a substring test would report the script below as fully wired while the gate no
-    # longer runs at all. Whole-line matching is what distinguishes them.
-    if not check_self_invocation(wired, {"input-liveness": wired_script.replace(
-        "python3 ci/affected-graph/task_inputs.py\n", ""
-    )}, wired_actionlint):
-        failures.append("check_self_invocation: missed a deleted task_inputs real run (prefix hole)")
-    if not check_self_invocation(wired, {"input-liveness": wired_script.replace(
-        "python3 ci/affected-graph/task_inputs.py --self-test\n", ""
-    )}, wired_actionlint):
-        failures.append("check_self_invocation: missed a deleted task_inputs --self-test")
-    # SMA-553 review finding 1 — the errexit line itself. Moon's `script:` blocks have no
-    # errexit, so the script's exit status is its LAST command's; deleting `set -euo pipefail`
-    # leaves both python3 lines' TEXT untouched, so a check that pinned only the invocations would
-    # stay green while a failing --self-test is silently swallowed (SMA-526).
-    if not check_self_invocation(wired, {"input-liveness": wired_script.replace(
-        "set -euo pipefail\n", ""
-    )}, wired_actionlint):
-        failures.append("check_self_invocation: missed a deleted errexit line ahead of the invocations")
-    if not check_self_invocation(wired, {}, wired_actionlint):
+    # SMA-553 D10 + review finding 1, generalised (SMA-530). These three named fixtures used
+    # to be spelled out for input-liveness only: the deleted REAL RUN (a strict PREFIX of the
+    # --self-test line, so a substring test would report the script fully wired while the gate
+    # no longer ran at all), the deleted --self-test, and the deleted `set -euo pipefail`
+    # (Moon's script: blocks have no errexit, so deleting it leaves both invocations' TEXT
+    # untouched while a failing self-test is silently swallowed — SMA-526). Driving the loop
+    # from the registry keeps all three properties asserted for EVERY gate, including ones
+    # added later, and covers the same prefix hazard in release-parity*, where the real-run
+    # line is likewise a strict prefix of the control line.
+    for _task, _lines in sorted(SELF_SCHEDULED_GATES.items()):
+        for _line in _lines:
+            if not check_self_invocation(
+                wired, wired_scripts(**{_task: broken_script(_task, _line)}), wired_actionlint
+            ):
+                failures.append(
+                    f"check_self_invocation: missed {_line!r} deleted from repo:{_task}'s script"
+                )
+    if not check_self_invocation(wired, wired_scripts(**{"input-liveness": ""}), wired_actionlint):
         failures.append("check_self_invocation: missed an absent input-liveness script entirely")
     # The two texts are checked SEPARATELY: a call site in the wrong file must not satisfy the
     # other's requirement, which a concatenated haystack would allow.
-    if not check_self_invocation(wired_script, {"input-liveness": wired}, wired_actionlint):
+    if not check_self_invocation(
+        wired_script, wired_scripts(**{"input-liveness": wired}), wired_actionlint
+    ):
         failures.append("check_self_invocation: accepted the two texts swapped")
     # ...and the reverse direction, which the swap fixture above does not reach: script text must
     # not satisfy a run.sh requirement either.
-    if not check_self_invocation(no_call, {"input-liveness": wired + wired_script}, wired_actionlint):
+    if not check_self_invocation(
+        no_call, wired_scripts(**{"input-liveness": wired + wired_script}), wired_actionlint
+    ):
         failures.append("check_self_invocation: a run.sh call site was satisfied by script text")
     # The "fired on a wired tree" positive control above already covers all three haystacks
     # simultaneously wired, including wired_actionlint — a second, argument-identical repeat here
@@ -1265,7 +1295,7 @@ def self_test():
     if not check_self_invocation(no_call, scripts, wired_actionlint + wired):
         failures.append("check_self_invocation: a run.sh site was satisfied by actionlint text")
     if not check_self_invocation(
-        wired, {"input-liveness": wired_script + wired_actionlint}, no_actionlint_call
+        wired, wired_scripts(**{"input-liveness": wired_script + wired_actionlint}), no_actionlint_call
     ):
         failures.append(
             "check_self_invocation: an actionlint site was satisfied by task-script text"
@@ -1278,6 +1308,16 @@ def self_test():
     default = inspect.signature(check_self_invocation).parameters["actionlint_sh_text"].default
     if default is not inspect.Parameter.empty:
         failures.append("check_self_invocation: actionlint_sh_text must stay a REQUIRED parameter")
+    # The task-script haystack strips BOTH sides (:673) — unlike the actionlint haystack's
+    # column-0 rule — because Moon task scripts are indented inside YAML. Assert that
+    # tolerance directly: a wired-but-indented script must NOT be reported missing.
+    indented_task_script = "".join(
+        f"  {line}\n" for line in SELF_SCHEDULED_GATES["input-liveness"]
+    )
+    if check_self_invocation(
+        wired, wired_scripts(**{"input-liveness": indented_task_script}), wired_actionlint
+    ):
+        failures.append("check_self_invocation: an indented but fully wired script was reported missing")
 
     # _scripts (SMA-553 D10) — a second pure extractor, so _eligibility's shape is untouched.
     got_scripts = _scripts({"repo": {"input-liveness": {"script": "hi"}}, "ts": {"lint": {}}})
