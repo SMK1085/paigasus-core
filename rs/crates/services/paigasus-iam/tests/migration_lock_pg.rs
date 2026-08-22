@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use paigasus_iam::adapters::persistence::Migrator;
 use paigasus_iam::adapters::persistence::migration::m0008_partition_audit_log::AUDIT_PARTITION_LOCK_KEY;
-use paigasus_iam::adapters::persistence::migration_lock::{MIGRATION_LOCK_KEY, MigrationLockError, migrate_under_lock};
+use paigasus_iam::adapters::persistence::migration_lock::{MIGRATION_LOCK_KEY, MigrationLockError, POLL_BACKOFF, migrate_under_lock};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, Statement};
 use sea_orm_migration::MigratorTrait;
 
@@ -129,8 +129,22 @@ async fn a_held_lock_blocks_the_migration_and_leaves_the_database_untouched() {
 /// The wait-then-acquire path AC 1 actually asks for.
 ///
 /// Asserts on the OUTCOME, not wall clock: an advisory lock does not block DDL, so with the
-/// guard deleted a bare `Migrator::up` would also return `Ok` after >= 500ms and a wall-clock
-/// assertion would still pass.
+/// guard deleted a bare `Migrator::up` would also return `Ok` after the hold elapsed, and a
+/// wall-clock assertion would still pass.
+///
+/// **Both timing assertions are causal, not coincidental** (SMA-582). The earlier version held
+/// for a flat 500ms and asserted `waited >= 500ms`, which quietly depended on the waiter reaching
+/// its first `pg_try_advisory_xact_lock` within that window. Under this crate's documented Docker
+/// contention that is not safe — `outbox_retention_concurrency_pg.rs` records an in-container 5s
+/// `lock_timeout` inflating to 21.3s of wall clock under a full-crate run. A stall longer than the
+/// hold would let the first poll SUCCEED, and `polls >= 1` would fail for a reason unrelated to
+/// the behaviour under test. So:
+///
+/// * the hold is `2 * POLL_BACKOFF`, giving the first poll a two-backoff window to find the lock
+///   held rather than a 500ms one, and
+/// * the magnitude assertion is `waited >= POLL_BACKOFF`, which FOLLOWS from having polled at all:
+///   `wait` is far larger than one backoff here, so `next_poll` never clamps and each retry costs
+///   a full `POLL_BACKOFF`. It no longer races the releaser's timer.
 #[tokio::test]
 async fn a_waiter_waits_and_then_migrates() {
     let Some((node, _pinned)) = support::start_raw_postgres().await else {
@@ -141,10 +155,14 @@ async fn a_waiter_waits_and_then_migrates() {
     let holder = connect_pinned(&url).await;
     let db = connect(&url).await;
 
+    // Long enough that a stalled first poll still finds the lock held; derived from the
+    // production constant so a backoff change cannot silently invalidate the window.
+    let hold = 2 * POLL_BACKOFF;
+
     assert!(scalar_bool(&holder, &format!("SELECT pg_try_advisory_lock({MIGRATION_LOCK_KEY}) AS v")).await);
 
     let releaser = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(hold).await;
         assert!(scalar_bool(&holder, &format!("SELECT pg_advisory_unlock({MIGRATION_LOCK_KEY}) AS v")).await);
     });
 
@@ -152,7 +170,7 @@ async fn a_waiter_waits_and_then_migrates() {
     releaser.await.expect("releaser");
 
     assert!(outcome.polls >= 1, "the waiter must have polled at least once, got {outcome:?}");
-    assert!(outcome.waited >= Duration::from_millis(500), "the waiter must have waited for the holder, got {outcome:?}");
+    assert!(outcome.waited >= POLL_BACKOFF, "a waiter that polled must have slept at least one full backoff, got {outcome:?}");
     assert!(outcome.migrations_applied > 0, "the waiter must have applied the migrations, got {outcome:?}");
 }
 
