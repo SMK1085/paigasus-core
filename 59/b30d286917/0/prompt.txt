@@ -1,0 +1,10 @@
+Check all dependabot PRs and drive them to merge
+
+---
+
+<task-notification>
+<task-id>bod0473a0</task-id>
+<summary>Monitor event: "PR 149 CI checks settling"</summary>
+<event>build + smoke: pass</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
