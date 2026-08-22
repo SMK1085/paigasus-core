@@ -20,6 +20,8 @@ __all__ = (
     "AuditServiceStub",
     "AuthnServiceStub",
     "AuthorizationServiceStub",
+    "BulkReplayDeadLettersRequest",
+    "BulkReplayDeadLettersResponse",
     "CreateOrganizationRequest",
     "CreateOrganizationResponse",
     "CreateProjectRequest",
@@ -28,10 +30,15 @@ __all__ = (
     "CreateServiceAccountResponse",
     "CreateTeamRequest",
     "CreateTeamResponse",
+    "CreateUserRequest",
+    "CreateUserResponse",
+    "DeadLetterEntry",
     "DeletePolicyRequest",
     "DeletePolicyResponse",
     "DetachMembershipRequest",
     "DetachMembershipResponse",
+    "DiscardDeadLetterRequest",
+    "DiscardDeadLetterResponse",
     "GetOrganizationRequest",
     "GetOrganizationResponse",
     "GetProjectRequest",
@@ -54,6 +61,8 @@ __all__ = (
     "ListApiKeysResponse",
     "ListAuditEntriesRequest",
     "ListAuditEntriesResponse",
+    "ListDeadLettersRequest",
+    "ListDeadLettersResponse",
     "ListMembershipsRequest",
     "ListMembershipsResponse",
     "ListOrganizationsRequest",
@@ -71,6 +80,7 @@ __all__ = (
     "Membership",
     "NodeStatus",
     "Organization",
+    "OutboxServiceStub",
     "Policy",
     "Project",
     "PutPolicyRequest",
@@ -81,12 +91,19 @@ __all__ = (
     "RenameProjectResponse",
     "RenameTeamRequest",
     "RenameTeamResponse",
+    "ReplayDeadLetterRequest",
+    "ReplayDeadLetterResponse",
     "RestoreOrganizationRequest",
     "RestoreOrganizationResponse",
     "RestoreProjectRequest",
     "RestoreProjectResponse",
     "RestoreTeamRequest",
     "RestoreTeamResponse",
+    "RetireSystemPolicyRequest",
+    "RetireSystemPolicyResponse",
+    "RetiredPolicy",
+    "RetirementBlocked",
+    "RetirementNeedsAcknowledgement",
     "RevokeApiKeyRequest",
     "RevokeApiKeyResponse",
     "RevokeRoleRequest",
@@ -96,8 +113,10 @@ __all__ = (
     "ServiceAccount",
     "ServiceAccountServiceStub",
     "ServiceInfo",
+    "SurvivingGrant",
     "Team",
     "TenancyServiceStub",
+    "UserServiceStub",
 )
 
 import datetime
@@ -377,6 +396,63 @@ default_message_pool.register_message("paigasus.iam.v1", "AuditEntry", AuditEntr
 
 
 @dataclass(eq=False, repr=False)
+class BulkReplayDeadLettersRequest(betterproto2.Message):
+    """
+    Named BulkReplayDeadLetters, not ReplayDeadLetters: one character from
+    ReplayDeadLetter while replaying up to 10000 rows instead of one, on a
+    destructive operator surface, with no lint rule that would catch the
+    typo. Matches the BulkReplayRequest type it maps onto.
+
+    Not atomic: rows are replayed incrementally, so a DEADLINE_EXCEEDED or a
+    cancelled RPC may leave an unknown number already replayed. Re-issuing is
+    safe — an already-replayed row is no longer parked and therefore no
+    longer matches.
+    """
+
+    event_type: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    parked_from: "datetime.datetime | None" = betterproto2.field(
+        2,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    parked_to: "datetime.datetime | None" = betterproto2.field(
+        3,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    max_rows: "int" = betterproto2.field(4, betterproto2.TYPE_UINT64)
+    """
+    0 is rejected as invalid-bulk-replay before any store access, and an
+    absent field collapses to 0, so "didn't say" and "said zero" are
+    rejected identically — exactly HTTP's behavior. This is DELIBERATE.
+    Do NOT "fix" it into an optional: the explicit row budget is the guard
+    on blast radius and must never default to anything usable.
+    Silently clamped to 10000, with no signal to the caller, on both
+    transports.
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "BulkReplayDeadLettersRequest", BulkReplayDeadLettersRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class BulkReplayDeadLettersResponse(betterproto2.Message):
+    replayed: "int" = betterproto2.field(1, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "BulkReplayDeadLettersResponse", BulkReplayDeadLettersResponse
+)
+
+
+@dataclass(eq=False, repr=False)
 class CreateOrganizationRequest(betterproto2.Message):
     slug: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -481,6 +557,117 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class CreateUserRequest(betterproto2.Message):
+    """
+    ─────────────────────────────────────────────────────────────────────────
+    Users (SMA-501). CreateUser has NO per-action authorization — it requires
+    a bearer and nothing more, mirroring `POST /v1/users` exactly. That is a
+    deliberate parity decision, not an oversight: see the design doc's D0.
+    It lives on its own service rather than on TenancyService precisely so
+    that property is visible in the contract instead of hidden among 21
+    authorized RPCs.
+    ─────────────────────────────────────────────────────────────────────────
+    """
+
+    email: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    display_name: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    locale: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+    """
+    Empty means unset. This DIVERGES from HTTP, where `{"locale": ""}`
+    persists an empty string rather than NULL (design doc D11). The proto
+    sentinel is normative for gRPC; HTTP is unchanged.
+    """
+
+    timezone: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CreateUserRequest", CreateUserRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateUserResponse(betterproto2.Message):
+    principal_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "CreateUserResponse", CreateUserResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class DeadLetterEntry(betterproto2.Message):
+    """
+    ─────────────────────────────────────────────────────────────────────────
+    Outbox dead letters (SMA-501), mirroring /v1/outbox/dead-letters.
+    Every RPC here is Root-only, enforced server-side in the IAM service's
+    application layer: nothing about a dead letter's contents reaches a
+    non-Root caller.
+
+    A caveat for the time filters, not a bug: a row with parked_at unset can
+    never satisfy parked_from/parked_to, because Postgres never evaluates a
+    NULL comparison as true. Such a row is invisible to ListDeadLetters
+    whenever either bound is set. It stays reachable via an unfiltered list.
+    ─────────────────────────────────────────────────────────────────────────
+    """
+
+    id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    occurred_at: "datetime.datetime | None" = betterproto2.field(
+        2,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    event_type: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    schema_version: "int" = betterproto2.field(4, betterproto2.TYPE_INT32)
+
+    aggregate_prn: "str" = betterproto2.field(5, betterproto2.TYPE_STRING)
+
+    actor_prn: "str" = betterproto2.field(6, betterproto2.TYPE_STRING)
+    """
+    empty => none
+    """
+
+    payload: "str" = betterproto2.field(7, betterproto2.TYPE_STRING)
+    """
+    JSON-serialized string, like AuditEntry.detail_json
+    """
+
+    correlation_id: "str" = betterproto2.field(8, betterproto2.TYPE_STRING)
+    """
+    empty => none
+    """
+
+    attempts: "int" = betterproto2.field(9, betterproto2.TYPE_UINT32)
+
+    parked_at: "datetime.datetime | None" = betterproto2.field(
+        10,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+    """
+    absent => not parked
+    """
+
+    last_error: "str" = betterproto2.field(11, betterproto2.TYPE_STRING)
+    """
+    empty => none
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "DeadLetterEntry", DeadLetterEntry
+)
+
+
+@dataclass(eq=False, repr=False)
 class DeletePolicyRequest(betterproto2.Message):
     policy_id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -524,6 +711,28 @@ class DetachMembershipResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "DetachMembershipResponse", DetachMembershipResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class DiscardDeadLetterRequest(betterproto2.Message):
+    id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "DiscardDeadLetterRequest", DiscardDeadLetterRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class DiscardDeadLetterResponse(betterproto2.Message):
+    entry: "DeadLetterEntry | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "DiscardDeadLetterResponse", DiscardDeadLetterResponse
 )
 
 
@@ -903,6 +1112,61 @@ class ListAuditEntriesResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "ListAuditEntriesResponse", ListAuditEntriesResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListDeadLettersRequest(betterproto2.Message):
+    """
+    Optional filters use absent/empty/zero sentinels, mirroring
+    ListAuditEntriesRequest. An ABSENT timestamp means unfiltered; a PRESENT
+    but unrepresentable one is INVALID_ARGUMENT and never silently
+    unfiltered (design D10).
+    """
+
+    event_type: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    parked_from: "datetime.datetime | None" = betterproto2.field(
+        2,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    parked_to: "datetime.datetime | None" = betterproto2.field(
+        3,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    cursor: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    limit: "int" = betterproto2.field(5, betterproto2.TYPE_UINT32)
+    """
+    0 => server default; clamped to 200
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListDeadLettersRequest", ListDeadLettersRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListDeadLettersResponse(betterproto2.Message):
+    entries: "list[DeadLetterEntry]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+    next_cursor: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+    """
+    set only when the page came back FULL
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ListDeadLettersResponse", ListDeadLettersResponse
 )
 
 
@@ -1299,6 +1563,28 @@ default_message_pool.register_message(
 
 
 @dataclass(eq=False, repr=False)
+class ReplayDeadLetterRequest(betterproto2.Message):
+    id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ReplayDeadLetterRequest", ReplayDeadLetterRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ReplayDeadLetterResponse(betterproto2.Message):
+    entry: "DeadLetterEntry | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "ReplayDeadLetterResponse", ReplayDeadLetterResponse
+)
+
+
+@dataclass(eq=False, repr=False)
 class RestoreOrganizationRequest(betterproto2.Message):
     prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -1361,6 +1647,126 @@ class RestoreTeamResponse(betterproto2.Message):
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "RestoreTeamResponse", RestoreTeamResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class RetiredPolicy(betterproto2.Message):
+    policy_id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    kind: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+    """
+    "static" or "template"
+    """
+
+    role_deleted: "bool" = betterproto2.field(3, betterproto2.TYPE_BOOL)
+
+
+default_message_pool.register_message("paigasus.iam.v1", "RetiredPolicy", RetiredPolicy)
+
+
+@dataclass(eq=False, repr=False)
+class RetirementBlocked(betterproto2.Message):
+    """
+    A refusal, not an error: nothing was written because grants of this role
+    survive and must be revoked first. `role_key` is a gRPC-only field — the
+    HTTP twin carries it only inside its error message prose (design D6).
+    """
+
+    role_key: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    grants: "list[SurvivingGrant]" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+    total_surviving: "int" = betterproto2.field(3, betterproto2.TYPE_UINT64)
+
+    truncated: "bool" = betterproto2.field(4, betterproto2.TYPE_BOOL)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RetirementBlocked", RetirementBlocked
+)
+
+
+@dataclass(eq=False, repr=False)
+class RetirementNeedsAcknowledgement(betterproto2.Message):
+    """
+    A refusal, not an error: this is a STATIC policy, so removing it changes
+    decisions fleet-wide and the caller has not acknowledged that. Carries
+    what would be destroyed, so the refusal doubles as the operator's
+    preview. `policy_id` is a gRPC-only field (design D6).
+    """
+
+    policy_id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    kind: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    source: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    description: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RetirementNeedsAcknowledgement", RetirementNeedsAcknowledgement
+)
+
+
+@dataclass(eq=False, repr=False)
+class RetireSystemPolicyRequest(betterproto2.Message):
+    """
+    ─────────────────────────────────────────────────────────────────────────
+    System-policy retirement (SMA-501), mirroring
+    POST /v1/authz/system-policies/{id}/retire.
+    ─────────────────────────────────────────────────────────────────────────
+    """
+
+    policy_id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    acknowledge_decision_change: "bool" = betterproto2.field(2, betterproto2.TYPE_BOOL)
+    """
+    Absent == false == "not acknowledged". The safe reading of an
+    unspecified acknowledgement is "no", so the flag must be set
+    deliberately to take effect.
+    """
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RetireSystemPolicyRequest", RetireSystemPolicyRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class RetireSystemPolicyResponse(betterproto2.Message):
+    """
+    All three outcomes return gRPC OK: the two refusals are outcomes that
+    are not Retired, never server errors (design D3). Two consequences a
+    client MUST handle:
+      1. An UNSET `outcome` is a protocol error. Treat it as failure, never
+         as a successful retirement.
+      2. The HTTP twin answers the two refusals with 409 plus a registry
+         error code; this response carries neither. The payload fields are
+         the same, the status is not.
+
+    Oneofs:
+        - outcome:
+    """
+
+    retired: "RetiredPolicy | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True, group="outcome"
+    )
+
+    blocked: "RetirementBlocked | None" = betterproto2.field(
+        2, betterproto2.TYPE_MESSAGE, optional=True, group="outcome"
+    )
+
+    needs_acknowledgement: "RetirementNeedsAcknowledgement | None" = betterproto2.field(
+        3, betterproto2.TYPE_MESSAGE, optional=True, group="outcome"
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "RetireSystemPolicyResponse", RetireSystemPolicyResponse
 )
 
 
@@ -1465,8 +1871,12 @@ class ServiceInfo(betterproto2.Message):
     IAM v1 wire model.
 
     Hosts the tenancy hierarchy — `TenancyService` (M1) — authentication
-    introspection — `AuthnService` (M2) — and authorization/policy
-    administration — `AuthorizationService` (M3).
+    introspection — `AuthnService` (M2) — authorization/policy administration,
+    now including system-policy retirement (SMA-501) — `AuthorizationService`
+    (M3) — machine identities — `ServiceAccountService` — audit log access —
+    `AuditService` — user creation — `UserService` (SMA-501) — and outbox
+    dead-letter operations — `OutboxService` (SMA-501).
+    `ServiceInfoService` (ADR-0020) lives in `common/v1`, not here.
 
     AuthorizationService's originally-planned Introspect rpc is not duplicated
     there: it folds into AuthnService.Introspect below (spec D4).
@@ -1488,6 +1898,26 @@ class ServiceInfo(betterproto2.Message):
 
 
 default_message_pool.register_message("paigasus.iam.v1", "ServiceInfo", ServiceInfo)
+
+
+@dataclass(eq=False, repr=False)
+class SurvivingGrant(betterproto2.Message):
+    """
+    One grant blocking a role retirement. Deliberately NOT the existing
+    RoleGrant: this mirrors the HTTP body's three fields exactly, and
+    role_key is carried once on RetirementBlocked rather than repeated.
+    """
+
+    id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    principal_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    scope_prn: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.iam.v1", "SurvivingGrant", SurvivingGrant
+)
 
 
 @dataclass(eq=False, repr=False)
@@ -1696,6 +2126,102 @@ class AuthorizationServiceStub(betterproto2_grpclib.ServiceStub):
             "/paigasus.iam.v1.AuthorizationService/ListRoleGrants",
             message,
             ListRoleGrantsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def retire_system_policy(
+        self,
+        message: "RetireSystemPolicyRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "RetireSystemPolicyResponse":
+        """
+        Root-only, and additionally gated on the iam.authz.cedar capability,
+        mirroring the HTTP route's placement behind caps.authz_admin.
+        """
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.AuthorizationService/RetireSystemPolicy",
+            message,
+            RetireSystemPolicyResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+
+class OutboxServiceStub(betterproto2_grpclib.ServiceStub):
+    async def list_dead_letters(
+        self,
+        message: "ListDeadLettersRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListDeadLettersResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.OutboxService/ListDeadLetters",
+            message,
+            ListDeadLettersResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def replay_dead_letter(
+        self,
+        message: "ReplayDeadLetterRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ReplayDeadLetterResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.OutboxService/ReplayDeadLetter",
+            message,
+            ReplayDeadLetterResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def bulk_replay_dead_letters(
+        self,
+        message: "BulkReplayDeadLettersRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "BulkReplayDeadLettersResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.OutboxService/BulkReplayDeadLetters",
+            message,
+            BulkReplayDeadLettersResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def discard_dead_letter(
+        self,
+        message: "DiscardDeadLetterRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "DiscardDeadLetterResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.OutboxService/DiscardDeadLetter",
+            message,
+            DiscardDeadLetterResponse,
             timeout=timeout,
             deadline=deadline,
             metadata=metadata,
@@ -2208,6 +2734,26 @@ class TenancyServiceStub(betterproto2_grpclib.ServiceStub):
             "/paigasus.iam.v1.TenancyService/ListMemberships",
             message,
             ListMembershipsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+
+class UserServiceStub(betterproto2_grpclib.ServiceStub):
+    async def create_user(
+        self,
+        message: "CreateUserRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "CreateUserResponse":
+
+        return await self._unary_unary(
+            "/paigasus.iam.v1.UserService/CreateUser",
+            message,
+            CreateUserResponse,
             timeout=timeout,
             deadline=deadline,
             metadata=metadata,

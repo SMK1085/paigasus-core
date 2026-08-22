@@ -456,4 +456,117 @@ mod tests {
             }
         }
     }
+
+    /// The HTTP/gRPC drift guard for the retirement surface (design D9.1). Both transports project
+    /// the same `RetireOutcome`; feeding one value through both is the only deterministic way to
+    /// catch one drifting. Lives HERE, not in `grpc::convert`'s test module, because
+    /// `mod system_retirement` and `fn response_for` are both private — this file can reach
+    /// `grpc::convert`, but not the reverse.
+    ///
+    /// A SUBSET check with a named allowlist, not field-for-field (design D6): the wire messages
+    /// carry `role_key`/`policy_id` as real fields where HTTP has them only inside `error.message`
+    /// prose, and HTTP carries `error.code`/`error.message` which the proto deliberately omits.
+    /// Everything else must agree exactly.
+    #[tokio::test]
+    async fn retire_outcomes_project_consistently_across_http_and_grpc() {
+        use crate::adapters::grpc::convert;
+        use paigasus_proto::paigasus::iam::v1::retire_system_policy_response::Outcome;
+
+        let outcome = RetireOutcome::Blocked {
+            role_key: "legacy_auditor".to_string(),
+            grants: vec![GrantRef {
+                id: "0192f1c0-0000-7000-8000-000000000001".to_string(),
+                principal_prn: "prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000002".to_string(),
+                scope_prn: "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-000000000003".to_string(),
+            }],
+            total: 42,
+            truncated: true,
+        };
+
+        let http_response = response_for(outcome.clone());
+        assert_eq!(http_response.status(), StatusCode::CONFLICT, "the HTTP twin refuses with 409");
+        let bytes = to_bytes(http_response.into_body(), usize::MAX).await.unwrap();
+        let http: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let Some(Outcome::Blocked(grpc)) = convert::to_proto_retire_response(outcome).outcome else {
+            panic!("gRPC must map a Blocked outcome to the Blocked variant");
+        };
+
+        assert_eq!(grpc.total_surviving, http["total_surviving"].as_u64().unwrap());
+        assert_eq!(grpc.truncated, http["truncated"].as_bool().unwrap());
+        let http_grants = http["grants"].as_array().unwrap();
+        assert_eq!(grpc.grants.len(), http_grants.len());
+        assert_eq!(grpc.grants[0].id, http_grants[0]["id"].as_str().unwrap());
+        assert_eq!(grpc.grants[0].principal_prn, http_grants[0]["principal_prn"].as_str().unwrap());
+        assert_eq!(grpc.grants[0].scope_prn, http_grants[0]["scope_prn"].as_str().unwrap());
+
+        // The allowlisted divergences, asserted so they stay DELIBERATE rather than becoming
+        // accidents nobody notices.
+        assert_eq!(grpc.role_key, "legacy_auditor", "gRPC-only field");
+        assert!(http.get("role_key").is_none(), "HTTP carries role_key only in the message prose");
+        assert!(http["error"]["code"].is_string(), "HTTP-only field");
+    }
+
+    /// The `Retired` half of the same guard: the one variant whose HTTP status a past regression
+    /// actually changed.
+    #[tokio::test]
+    async fn a_retired_outcome_projects_consistently_across_http_and_grpc() {
+        use crate::adapters::grpc::convert;
+        use paigasus_proto::paigasus::iam::v1::retire_system_policy_response::Outcome;
+
+        let outcome = RetireOutcome::Retired {
+            policy_id: "legacy_auditor".to_string(),
+            kind: PolicyKind::Template,
+            role_deleted: true,
+        };
+
+        let http_response = response_for(outcome.clone());
+        assert_eq!(http_response.status(), StatusCode::OK, "200, never 204 — the body is the record");
+        let bytes = to_bytes(http_response.into_body(), usize::MAX).await.unwrap();
+        let http: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let Some(Outcome::Retired(grpc)) = convert::to_proto_retire_response(outcome).outcome else {
+            panic!("gRPC must map a Retired outcome to the Retired variant");
+        };
+        assert_eq!(grpc.policy_id, http["policy_id"].as_str().unwrap());
+        assert_eq!(grpc.kind, http["kind"].as_str().unwrap());
+        assert_eq!(grpc.role_deleted, http["role_deleted"].as_bool().unwrap());
+    }
+
+    /// The third variant, completing D9.1's "all three `RetireOutcome` variants into both"
+    /// requirement. It is the one worth pairing most: like `Blocked`, it carries a gRPC-only
+    /// field (`policy_id`, which HTTP has only inside `error.message` prose), so without a
+    /// paired assertion the allowlisted divergence could drift on either side unnoticed. The
+    /// preview fields are the substance — a static policy's refusal doubles as the operator's
+    /// preview of what retiring it would destroy, so `source` and `description` reaching the
+    /// wire intact is the whole point of refusing with a body rather than an empty status.
+    #[tokio::test]
+    async fn a_needs_acknowledgement_outcome_projects_consistently_across_http_and_grpc() {
+        use crate::adapters::grpc::convert;
+        use paigasus_proto::paigasus::iam::v1::retire_system_policy_response::Outcome;
+
+        let outcome = RetireOutcome::NeedsAcknowledgement {
+            policy_id: "legacy_forbid".to_string(),
+            kind: PolicyKind::Static,
+            source: "permit(principal, action, resource);".to_string(),
+            description: "an orphaned starter policy".to_string(),
+        };
+
+        let http_response = response_for(outcome.clone());
+        assert_eq!(http_response.status(), StatusCode::CONFLICT, "the HTTP twin refuses with 409");
+        let bytes = to_bytes(http_response.into_body(), usize::MAX).await.unwrap();
+        let http: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let Some(Outcome::NeedsAcknowledgement(grpc)) = convert::to_proto_retire_response(outcome).outcome else {
+            panic!("gRPC must map a NeedsAcknowledgement outcome to the NeedsAcknowledgement variant");
+        };
+        assert_eq!(grpc.kind, http["kind"].as_str().unwrap());
+        assert_eq!(grpc.source, http["source"].as_str().unwrap());
+        assert_eq!(grpc.description, http["description"].as_str().unwrap());
+
+        // The allowlisted divergences (design D6), asserted so they stay DELIBERATE.
+        assert_eq!(grpc.policy_id, "legacy_forbid", "gRPC-only field");
+        assert!(http.get("policy_id").is_none(), "HTTP carries policy_id only in the message prose");
+        assert!(http["error"]["code"].is_string(), "HTTP-only field");
+    }
 }

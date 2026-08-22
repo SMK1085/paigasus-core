@@ -7,6 +7,13 @@
 //! `/v1/audit` audit-log read endpoint (SMA-446 Task A11), the operator-only
 //! `/v1/outbox/dead-letters` surface (SMA-469), and the operator-only
 //! `/v1/authz/system-policies/{id}/retire` surface (SMA-481).
+//!
+//! Three of these now have a gRPC mirror too (SMA-501), each an independently hand-written
+//! adapter over the same application service rather than one transport wrapping the other:
+//! `POST /v1/users` mirrors `UserService.CreateUser`, `/v1/outbox/dead-letters/*` mirrors
+//! `OutboxService`'s four RPCs, and `/v1/authz/system-policies/{id}/retire` mirrors
+//! `AuthorizationService.RetireSystemPolicy` — see `adapters::grpc` for the full gRPC surface
+//! list.
 
 mod api_keys;
 mod audit;

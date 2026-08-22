@@ -122,7 +122,11 @@ pub struct AuthEnforce<S> {
 /// `IntrospectApiKey` RPCs (SMA-445 Task 21 adds the latter — both credential-introspection
 /// RPCs carry their token in the request body, not a bearer header, so neither can require
 /// one). Every `ServiceAccountService` management RPC is deliberately NOT here — proven by
-/// `tests/api_keys_grpc.rs::management_rpcs_not_exempt`.
+/// `tests/api_keys_grpc.rs::management_rpcs_not_exempt`. Nor is `UserService` (SMA-501) or
+/// `OutboxService` (SMA-501): `UserService.CreateUser` performs no authorization check of its
+/// own — see its module doc — but is still bearer-enforced, since "unauthorized" and
+/// "unauthenticated" are different properties; `OutboxService`'s four RPCs enforce Root
+/// internally, same as their HTTP mirror, and depend on this layer for the same reason.
 fn is_exempt(path: &str) -> bool {
     path.starts_with("/grpc.health.v1.Health/") || path == "/paigasus.iam.v1.AuthnService/Introspect" || path == "/paigasus.iam.v1.AuthnService/IntrospectApiKey"
 }

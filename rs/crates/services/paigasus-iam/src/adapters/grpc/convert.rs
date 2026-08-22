@@ -14,18 +14,19 @@ use std::sync::LazyLock;
 
 use chrono::{DateTime, Utc};
 use paigasus_iam_core::authz::model::PolicyKind;
+use paigasus_iam_core::authz::reconcile::policy_kind_str;
 use paigasus_iam_core::{
-    ApiKey, ApiKeyStatus, AuthnError, Credential, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RoleGrant, RoleGrantRef,
-    ServiceAccountRecord, Team,
+    ApiKey, ApiKeyStatus, AuthnError, Credential, MembershipRecord, NewApiKey, NodeStatus, NodeView, Organization, OrganizationId, PolicyDocument, PrincipalContext, Project, RetireOutcome, RoleGrant,
+    RoleGrantRef, ServiceAccountRecord, Team,
 };
 use paigasus_kernel::Prn;
 use paigasus_observability::{Retryable, current_ids};
 use paigasus_proto::error::IAM_DOMAIN;
 use paigasus_proto::paigasus::common::v1::{AuditMetadata, ErrorReason};
 use paigasus_proto::paigasus::iam::v1::{
-    ApiKey as ProtoApiKey, ApiKeyStatus as ProtoApiKeyStatus, IntrospectApiKeyResponse, IntrospectResponse, IssueApiKeyResponse, Membership, NodeStatus as ProtoNodeStatus,
-    Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RoleGrant as ProtoRoleGrant, RoleGrantRef as ProtoRoleGrantRef, ServiceAccount as ProtoServiceAccount,
-    Team as ProtoTeam,
+    ApiKey as ProtoApiKey, ApiKeyStatus as ProtoApiKeyStatus, DeadLetterEntry as ProtoDeadLetterEntry, IntrospectApiKeyResponse, IntrospectResponse, IssueApiKeyResponse, Membership,
+    NodeStatus as ProtoNodeStatus, Organization as ProtoOrganization, Policy as ProtoPolicy, Project as ProtoProject, RetireSystemPolicyResponse, RetiredPolicy, RetirementBlocked,
+    RetirementNeedsAcknowledgement, RoleGrant as ProtoRoleGrant, RoleGrantRef as ProtoRoleGrantRef, ServiceAccount as ProtoServiceAccount, SurvivingGrant, Team as ProtoTeam,
 };
 use tonic::{Code, Status};
 use tonic_types::{ErrorDetails, StatusExt};
@@ -191,6 +192,26 @@ pub fn ts(dt: DateTime<Utc>) -> prost_types::Timestamp {
 pub fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
     let nanos = u32::try_from(t.nanos).ok()?;
     DateTime::<Utc>::from_timestamp(t.seconds, nanos)
+}
+
+/// Parses an optional wire timestamp with the three cases kept DISTINCT: absent means
+/// unfiltered, a valid value converts, and a **present but unrepresentable** value is a client
+/// error.
+///
+/// That third case is why this exists. [`from_ts`] returns `None` for a negative `nanos` or an
+/// out-of-`chrono`-range `seconds`, and on a filter field `None` means UNFILTERED — so the
+/// `req.field.and_then(convert::from_ts)` shape used in `grpc::audit` silently DROPS a
+/// malformed bound instead of rejecting it. On `BulkReplayDeadLetters` that turns a
+/// narrowly-scoped replay into "replay everything up to `max_rows`". The HTTP twin rejects the
+/// equivalent with a 400 (`http::dead_letters::parse_ts`), so this also restores parity.
+///
+/// `InvalidPrn`-as-sentinel, mirroring `http::dead_letters::parse_ts` and
+/// `grpc::audit::parse_cursor` — there is no dedicated error code for "not a valid timestamp".
+pub fn parse_opt_ts(t: Option<prost_types::Timestamp>, field: &str) -> Result<Option<DateTime<Utc>>, TenancyError> {
+    match t {
+        None => Ok(None),
+        Some(raw) => from_ts(raw).map(Some).ok_or_else(|| TenancyError::InvalidPrn(format!("invalid timestamp for {field}"))),
+    }
 }
 
 /// Builds `AuditMetadata` from created/modified timestamps. `created_by`/`modified_by` stay
@@ -409,6 +430,67 @@ pub fn to_introspect_api_key_response(ctx: &PrincipalContext) -> IntrospectApiKe
     }
 }
 
+/// Projects a domain [`DeadLetterEntry`] into its wire message. `id`/`correlation_id` become
+/// canonical uuid strings, `actor_prn`/`correlation_id`/`last_error` collapse `None` to the
+/// empty-string sentinel the proto documents, and an unparked row carries an ABSENT
+/// `parked_at` rather than an epoch timestamp. Mirrors `http::dto::DeadLetterEntryDto`'s
+/// `From` impl field-for-field — the two are pinned together by
+/// `dead_letter_entry_projects_identically_for_http_and_grpc`.
+pub fn to_proto_dead_letter_entry(e: &paigasus_iam_core::DeadLetterEntry) -> ProtoDeadLetterEntry {
+    ProtoDeadLetterEntry {
+        id: e.id.to_string(),
+        occurred_at: Some(ts(e.occurred_at)),
+        event_type: e.event_type.clone(),
+        schema_version: e.schema_version,
+        aggregate_prn: e.aggregate_prn.clone(),
+        actor_prn: e.actor_prn.clone().unwrap_or_default(),
+        payload: e.payload.clone(),
+        correlation_id: e.correlation_id.map(|id| id.to_string()).unwrap_or_default(),
+        attempts: e.attempts,
+        parked_at: e.parked_at.map(ts),
+        last_error: e.last_error.clone().unwrap_or_default(),
+    }
+}
+
+/// Maps a [`RetireOutcome`] onto its wire response. All three variants are gRPC `OK`: the two
+/// refusals are outcomes that are not `Retired`, never server errors (design D3, and the same
+/// argument `http::system_retirement`'s module doc makes for routing them around `ApiError`).
+///
+/// A free function over an OWNED outcome, deliberately — that is what lets every variant be
+/// constructed in a test with no `AppState`, database, or request, which is exactly the gap
+/// that let an earlier `200`->`204` regression in the HTTP twin pass a green suite.
+pub fn to_proto_retire_response(outcome: RetireOutcome) -> RetireSystemPolicyResponse {
+    use paigasus_proto::paigasus::iam::v1::retire_system_policy_response::Outcome;
+
+    let variant = match outcome {
+        RetireOutcome::Retired { policy_id, kind, role_deleted } => Outcome::Retired(RetiredPolicy {
+            policy_id,
+            kind: policy_kind_str(kind).to_string(),
+            role_deleted,
+        }),
+        RetireOutcome::Blocked { role_key, grants, total, truncated } => Outcome::Blocked(RetirementBlocked {
+            role_key,
+            grants: grants
+                .iter()
+                .map(|g| SurvivingGrant {
+                    id: g.id.clone(),
+                    principal_prn: g.principal_prn.clone(),
+                    scope_prn: g.scope_prn.clone(),
+                })
+                .collect(),
+            total_surviving: total,
+            truncated,
+        }),
+        RetireOutcome::NeedsAcknowledgement { policy_id, kind, source, description } => Outcome::NeedsAcknowledgement(RetirementNeedsAcknowledgement {
+            policy_id,
+            kind: policy_kind_str(kind).to_string(),
+            source,
+            description,
+        }),
+    };
+    RetireSystemPolicyResponse { outcome: Some(variant) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,6 +692,201 @@ mod tests {
                 ErrorReason::from_wire_reason(code).is_some(),
                 "TenancyError::{err:?} emits {code:?}, which is not declared in common/v1/error.proto"
             );
+        }
+    }
+
+    #[test]
+    fn parse_opt_ts_treats_an_absent_timestamp_as_unfiltered() {
+        assert_eq!(parse_opt_ts(None, "parked_from").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_opt_ts_returns_the_exact_instant_for_a_valid_timestamp() {
+        let expected = DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z").unwrap().with_timezone(&Utc);
+        let got = parse_opt_ts(
+            Some(prost_types::Timestamp {
+                seconds: expected.timestamp(),
+                nanos: 0,
+            }),
+            "parked_from",
+        )
+        .unwrap();
+        assert_eq!(got, Some(expected));
+    }
+
+    /// The whole reason this helper exists. `from_ts` alone returns `None` here, and `None` means
+    /// UNFILTERED — so an `and_then(from_ts)` call site would silently drop the caller's time
+    /// bound and widen a bulk replay to every parked row. A present field must never be
+    /// reinterpreted as an absent one.
+    #[test]
+    fn parse_opt_ts_rejects_a_present_but_unrepresentable_timestamp_instead_of_unfiltering() {
+        for (label, t) in [
+            ("negative nanos", prost_types::Timestamp { seconds: 0, nanos: -1 }),
+            ("out-of-range seconds", prost_types::Timestamp { seconds: i64::MAX, nanos: 0 }),
+        ] {
+            let err = parse_opt_ts(Some(t), "parked_from").expect_err(label);
+            assert!(matches!(err, TenancyError::InvalidPrn(_)), "{label} must be a client error, not None");
+        }
+        // Sanity: the underlying primitive really does collapse these to None, which is what makes
+        // this helper load-bearing rather than decorative.
+        assert_eq!(from_ts(prost_types::Timestamp { seconds: 0, nanos: -1 }), None);
+    }
+
+    /// `InvalidPrn`'s Display is deliberately STATIC (`application::error`), so the `field`
+    /// argument never reaches a client — `status_to_grpc` puts `to_string()` on the wire and that
+    /// is the fixed message. Pinned here because it is genuinely surprising: the helper takes a
+    /// field name and then throws it away. The argument stays anyway, for symmetry with
+    /// `http::audit::parse_ts` / `http::dead_letters::parse_ts`, which pass an equally-swallowed
+    /// detail, and so the detail is already threaded through if that Display ever changes.
+    /// The important half — that a present-but-invalid timestamp is a CLIENT error rather than a
+    /// silently-unfiltered query — is asserted by the test above and is unaffected.
+    #[test]
+    fn parse_opt_ts_detail_is_swallowed_by_invalid_prns_static_display() {
+        let err = parse_opt_ts(Some(prost_types::Timestamp { seconds: 0, nanos: -1 }), "parked_to").unwrap_err();
+        assert!(!err.to_string().contains("parked_to"), "InvalidPrn's Display is static and must not surface the field name: got {err}");
+        match err {
+            TenancyError::InvalidPrn(detail) => assert!(
+                detail.contains("parked_to"),
+                "the payload itself must still carry the field name, even though Display drops it: got {detail}"
+            ),
+            other => panic!("expected TenancyError::InvalidPrn, got {other:?}"),
+        }
+    }
+
+    /// The HTTP/gRPC drift guard for the dead-letter surface (design D9.1), paired with
+    /// `http::dto`'s own projection. Both transports project the SAME domain value, so feeding one
+    /// `DeadLetterEntry` through both and comparing field-for-field is the only cheap, deterministic
+    /// way to catch one of them drifting. Deliberately exercises the `None` half of every optional
+    /// field, since the empty-string / absent-timestamp sentinel mapping is where the two shapes
+    /// differ in TYPE and so is where they are most likely to diverge in MEANING.
+    #[test]
+    fn dead_letter_entry_projects_identically_for_http_and_grpc() {
+        use crate::adapters::http::dto::DeadLetterEntryDto;
+
+        let occurred = DateTime::parse_from_rfc3339("2026-08-01T10:00:00Z").unwrap().with_timezone(&Utc);
+        let parked = DateTime::parse_from_rfc3339("2026-08-01T11:00:00Z").unwrap().with_timezone(&Utc);
+        let domain = paigasus_iam_core::DeadLetterEntry {
+            id: Uuid::from_u128(7),
+            occurred_at: occurred,
+            event_type: "iam.principal.created".to_string(),
+            schema_version: 3,
+            aggregate_prn: "prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000042".to_string(),
+            actor_prn: None,
+            payload: r#"{"principal_id":"x"}"#.to_string(),
+            correlation_id: None,
+            attempts: 5,
+            parked_at: Some(parked),
+            last_error: None,
+        };
+
+        let http = DeadLetterEntryDto::from(domain.clone());
+        let grpc = to_proto_dead_letter_entry(&domain);
+
+        assert_eq!(grpc.id, http.id.to_string());
+        assert_eq!(grpc.occurred_at, Some(ts(http.occurred_at)));
+        assert_eq!(grpc.event_type, http.event_type);
+        assert_eq!(grpc.schema_version, http.schema_version);
+        assert_eq!(grpc.aggregate_prn, http.aggregate_prn);
+        assert_eq!(grpc.attempts, http.attempts);
+        assert_eq!(grpc.parked_at, http.parked_at.map(ts));
+        // The sentinel half: HTTP keeps `None`, the wire uses "".
+        assert_eq!(http.actor_prn, None);
+        assert_eq!(grpc.actor_prn, "");
+        assert_eq!(http.correlation_id, None);
+        assert_eq!(grpc.correlation_id, "");
+        assert_eq!(http.last_error, None);
+        assert_eq!(grpc.last_error, "");
+        assert_eq!(grpc.payload, http.payload);
+    }
+
+    /// The `Some` half, asserted separately so a projection that hardcoded the empty-string
+    /// sentinel — passing the test above — still fails here.
+    #[test]
+    fn dead_letter_entry_forwards_present_optional_fields_verbatim() {
+        let occurred = DateTime::parse_from_rfc3339("2026-08-01T10:00:00Z").unwrap().with_timezone(&Utc);
+        let correlation = Uuid::from_u128(99);
+        let domain = paigasus_iam_core::DeadLetterEntry {
+            id: Uuid::from_u128(7),
+            occurred_at: occurred,
+            event_type: "iam.principal.created".to_string(),
+            schema_version: 3,
+            aggregate_prn: "prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000042".to_string(),
+            actor_prn: Some("prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000001".to_string()),
+            payload: "{}".to_string(),
+            correlation_id: Some(correlation),
+            attempts: 1,
+            parked_at: None,
+            last_error: Some("connection refused".to_string()),
+        };
+
+        let grpc = to_proto_dead_letter_entry(&domain);
+        assert_eq!(grpc.actor_prn, domain.actor_prn.clone().unwrap());
+        assert_eq!(grpc.correlation_id, correlation.to_string());
+        assert_eq!(grpc.last_error, "connection refused");
+        assert_eq!(grpc.parked_at, None, "an unparked row must carry an ABSENT timestamp, not epoch");
+    }
+
+    /// Every variant constructed directly — no `AppState`, database, or request needed. That is the
+    /// whole point of this being a free function over an owned `RetireOutcome` (design D8): an
+    /// earlier revision of the HTTP twin changed `Retired`'s status code and the entire crate's
+    /// suite stayed green, because nothing exercised the mapping against a real outcome value.
+    #[test]
+    fn retire_response_maps_each_outcome_to_its_own_variant() {
+        use paigasus_iam_core::GrantRef;
+        use paigasus_iam_core::authz::model::PolicyKind;
+        use paigasus_proto::paigasus::iam::v1::retire_system_policy_response::Outcome;
+
+        let retired = to_proto_retire_response(RetireOutcome::Retired {
+            policy_id: "legacy_auditor".to_string(),
+            kind: PolicyKind::Template,
+            role_deleted: true,
+        });
+        match retired.outcome.expect("outcome must be set") {
+            Outcome::Retired(r) => {
+                assert_eq!(r.policy_id, "legacy_auditor");
+                assert_eq!(r.kind, "template");
+                assert!(r.role_deleted);
+            }
+            other => panic!("expected Retired, got {other:?}"),
+        }
+
+        let blocked = to_proto_retire_response(RetireOutcome::Blocked {
+            role_key: "legacy_auditor".to_string(),
+            grants: vec![GrantRef {
+                id: "0192f1c0-0000-7000-8000-000000000001".to_string(),
+                principal_prn: "prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000002".to_string(),
+                scope_prn: "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-000000000003".to_string(),
+            }],
+            total: 42,
+            truncated: true,
+        });
+        match blocked.outcome.expect("outcome must be set") {
+            Outcome::Blocked(b) => {
+                assert_eq!(b.role_key, "legacy_auditor");
+                assert_eq!(b.total_surviving, 42, "the TRUE total, not the truncated page length");
+                assert!(b.truncated);
+                assert_eq!(b.grants.len(), 1);
+                assert_eq!(b.grants[0].id, "0192f1c0-0000-7000-8000-000000000001");
+                assert_eq!(b.grants[0].principal_prn, "prn:pgs:iam:::principal/0192f1c0-0000-7000-8000-000000000002");
+                assert_eq!(b.grants[0].scope_prn, "prn:pgs:iam:::organization/0192f1c0-0000-7000-8000-000000000003");
+            }
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+
+        let needs = to_proto_retire_response(RetireOutcome::NeedsAcknowledgement {
+            policy_id: "legacy_forbid".to_string(),
+            kind: PolicyKind::Static,
+            source: "permit(principal, action, resource);".to_string(),
+            description: "an orphaned starter policy".to_string(),
+        });
+        match needs.outcome.expect("outcome must be set") {
+            Outcome::NeedsAcknowledgement(n) => {
+                assert_eq!(n.policy_id, "legacy_forbid");
+                assert_eq!(n.kind, "static");
+                assert_eq!(n.source, "permit(principal, action, resource);");
+                assert_eq!(n.description, "an orphaned starter policy");
+            }
+            other => panic!("expected NeedsAcknowledgement, got {other:?}"),
         }
     }
 }

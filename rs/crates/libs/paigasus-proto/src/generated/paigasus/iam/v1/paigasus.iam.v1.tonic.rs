@@ -10,7 +10,6 @@ pub mod tenancy_service_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    ///
     #[derive(Debug, Clone)]
     pub struct TenancyServiceClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -91,7 +90,6 @@ pub mod tenancy_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        ///
         pub async fn create_organization(
             &mut self,
             request: impl tonic::IntoRequest<super::CreateOrganizationRequest>,
@@ -121,7 +119,6 @@ pub mod tenancy_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        ///
         pub async fn get_organization(
             &mut self,
             request: impl tonic::IntoRequest<super::GetOrganizationRequest>,
@@ -148,7 +145,6 @@ pub mod tenancy_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        ///
         pub async fn list_organizations(
             &mut self,
             request: impl tonic::IntoRequest<super::ListOrganizationsRequest>,
@@ -178,7 +174,6 @@ pub mod tenancy_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        ///
         pub async fn rename_organization(
             &mut self,
             request: impl tonic::IntoRequest<super::RenameOrganizationRequest>,
@@ -661,7 +656,6 @@ pub mod tenancy_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with TenancyServiceServer.
     #[async_trait]
     pub trait TenancyService: std::marker::Send + std::marker::Sync + 'static {
-        ///
         async fn create_organization(
             &self,
             request: tonic::Request<super::CreateOrganizationRequest>,
@@ -669,7 +663,6 @@ pub mod tenancy_service_server {
             tonic::Response<super::CreateOrganizationResponse>,
             tonic::Status,
         >;
-        ///
         async fn get_organization(
             &self,
             request: tonic::Request<super::GetOrganizationRequest>,
@@ -677,7 +670,6 @@ pub mod tenancy_service_server {
             tonic::Response<super::GetOrganizationResponse>,
             tonic::Status,
         >;
-        ///
         async fn list_organizations(
             &self,
             request: tonic::Request<super::ListOrganizationsRequest>,
@@ -685,7 +677,6 @@ pub mod tenancy_service_server {
             tonic::Response<super::ListOrganizationsResponse>,
             tonic::Status,
         >;
-        ///
         async fn rename_organization(
             &self,
             request: tonic::Request<super::RenameOrganizationRequest>,
@@ -810,7 +801,6 @@ pub mod tenancy_service_server {
             tonic::Status,
         >;
     }
-    ///
     #[derive(Debug)]
     pub struct TenancyServiceServer<T> {
         inner: Arc<T>,
@@ -2546,6 +2536,35 @@ pub mod authorization_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn retire_system_policy(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RetireSystemPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RetireSystemPolicyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.AuthorizationService/RetireSystemPolicy",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.AuthorizationService",
+                        "RetireSystemPolicy",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -2608,6 +2627,13 @@ pub mod authorization_service_server {
             request: tonic::Request<super::ListRoleGrantsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ListRoleGrantsResponse>,
+            tonic::Status,
+        >;
+        async fn retire_system_policy(
+            &self,
+            request: tonic::Request<super::RetireSystemPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RetireSystemPolicyResponse>,
             tonic::Status,
         >;
     }
@@ -3013,6 +3039,55 @@ pub mod authorization_service_server {
                     };
                     Box::pin(fut)
                 }
+                "/paigasus.iam.v1.AuthorizationService/RetireSystemPolicy" => {
+                    #[allow(non_camel_case_types)]
+                    struct RetireSystemPolicySvc<T: AuthorizationService>(pub Arc<T>);
+                    impl<
+                        T: AuthorizationService,
+                    > tonic::server::UnaryService<super::RetireSystemPolicyRequest>
+                    for RetireSystemPolicySvc<T> {
+                        type Response = super::RetireSystemPolicyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RetireSystemPolicyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AuthorizationService>::retire_system_policy(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RetireSystemPolicySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 _ => {
                     Box::pin(async move {
                         let mut response = http::Response::new(
@@ -3064,6 +3139,7 @@ pub mod service_account_service_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
+    ///
     #[derive(Debug, Clone)]
     pub struct ServiceAccountServiceClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -3144,6 +3220,7 @@ pub mod service_account_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
+        ///
         pub async fn create_service_account(
             &mut self,
             request: impl tonic::IntoRequest<super::CreateServiceAccountRequest>,
@@ -3173,6 +3250,7 @@ pub mod service_account_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        ///
         pub async fn get_service_account(
             &mut self,
             request: impl tonic::IntoRequest<super::GetServiceAccountRequest>,
@@ -3202,6 +3280,7 @@ pub mod service_account_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        ///
         pub async fn list_service_accounts(
             &mut self,
             request: impl tonic::IntoRequest<super::ListServiceAccountsRequest>,
@@ -3231,6 +3310,7 @@ pub mod service_account_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        ///
         pub async fn archive_service_account(
             &mut self,
             request: impl tonic::IntoRequest<super::ArchiveServiceAccountRequest>,
@@ -3260,6 +3340,7 @@ pub mod service_account_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        ///
         pub async fn issue_api_key(
             &mut self,
             request: impl tonic::IntoRequest<super::IssueApiKeyRequest>,
@@ -3289,6 +3370,7 @@ pub mod service_account_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        ///
         pub async fn revoke_api_key(
             &mut self,
             request: impl tonic::IntoRequest<super::RevokeApiKeyRequest>,
@@ -3362,6 +3444,7 @@ pub mod service_account_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with ServiceAccountServiceServer.
     #[async_trait]
     pub trait ServiceAccountService: std::marker::Send + std::marker::Sync + 'static {
+        ///
         async fn create_service_account(
             &self,
             request: tonic::Request<super::CreateServiceAccountRequest>,
@@ -3369,6 +3452,7 @@ pub mod service_account_service_server {
             tonic::Response<super::CreateServiceAccountResponse>,
             tonic::Status,
         >;
+        ///
         async fn get_service_account(
             &self,
             request: tonic::Request<super::GetServiceAccountRequest>,
@@ -3376,6 +3460,7 @@ pub mod service_account_service_server {
             tonic::Response<super::GetServiceAccountResponse>,
             tonic::Status,
         >;
+        ///
         async fn list_service_accounts(
             &self,
             request: tonic::Request<super::ListServiceAccountsRequest>,
@@ -3383,6 +3468,7 @@ pub mod service_account_service_server {
             tonic::Response<super::ListServiceAccountsResponse>,
             tonic::Status,
         >;
+        ///
         async fn archive_service_account(
             &self,
             request: tonic::Request<super::ArchiveServiceAccountRequest>,
@@ -3390,6 +3476,7 @@ pub mod service_account_service_server {
             tonic::Response<super::ArchiveServiceAccountResponse>,
             tonic::Status,
         >;
+        ///
         async fn issue_api_key(
             &self,
             request: tonic::Request<super::IssueApiKeyRequest>,
@@ -3397,6 +3484,7 @@ pub mod service_account_service_server {
             tonic::Response<super::IssueApiKeyResponse>,
             tonic::Status,
         >;
+        ///
         async fn revoke_api_key(
             &self,
             request: tonic::Request<super::RevokeApiKeyRequest>,
@@ -3412,6 +3500,7 @@ pub mod service_account_service_server {
             tonic::Status,
         >;
     }
+    ///
     #[derive(Debug)]
     pub struct ServiceAccountServiceServer<T> {
         inner: Arc<T>,
@@ -3879,7 +3968,6 @@ pub mod audit_service_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    ///
     #[derive(Debug, Clone)]
     pub struct AuditServiceClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -3960,7 +4048,6 @@ pub mod audit_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        ///
         pub async fn list_audit_entries(
             &mut self,
             request: impl tonic::IntoRequest<super::ListAuditEntriesRequest>,
@@ -4002,7 +4089,6 @@ pub mod audit_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with AuditServiceServer.
     #[async_trait]
     pub trait AuditService: std::marker::Send + std::marker::Sync + 'static {
-        ///
         async fn list_audit_entries(
             &self,
             request: tonic::Request<super::ListAuditEntriesRequest>,
@@ -4011,7 +4097,6 @@ pub mod audit_service_server {
             tonic::Status,
         >;
     }
-    ///
     #[derive(Debug)]
     pub struct AuditServiceServer<T> {
         inner: Arc<T>,
@@ -4171,6 +4256,860 @@ pub mod audit_service_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "paigasus.iam.v1.AuditService";
     impl<T> tonic::server::NamedService for AuditServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Generated client implementations.
+pub mod user_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct UserServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl UserServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> UserServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> UserServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            UserServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        pub async fn create_user(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateUserRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateUserResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.UserService/CreateUser",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("paigasus.iam.v1.UserService", "CreateUser"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod user_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with UserServiceServer.
+    #[async_trait]
+    pub trait UserService: std::marker::Send + std::marker::Sync + 'static {
+        async fn create_user(
+            &self,
+            request: tonic::Request<super::CreateUserRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateUserResponse>,
+            tonic::Status,
+        >;
+    }
+    #[derive(Debug)]
+    pub struct UserServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> UserServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for UserServiceServer<T>
+    where
+        T: UserService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/paigasus.iam.v1.UserService/CreateUser" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateUserSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::CreateUserRequest>
+                    for CreateUserSvc<T> {
+                        type Response = super::CreateUserResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateUserRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::create_user(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateUserSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for UserServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "paigasus.iam.v1.UserService";
+    impl<T> tonic::server::NamedService for UserServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Generated client implementations.
+pub mod outbox_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    ///
+    #[derive(Debug, Clone)]
+    pub struct OutboxServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl OutboxServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> OutboxServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> OutboxServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            OutboxServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        ///
+        pub async fn list_dead_letters(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListDeadLettersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListDeadLettersResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.OutboxService/ListDeadLetters",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("paigasus.iam.v1.OutboxService", "ListDeadLetters"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn replay_dead_letter(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ReplayDeadLetterRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReplayDeadLetterResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.OutboxService/ReplayDeadLetter",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("paigasus.iam.v1.OutboxService", "ReplayDeadLetter"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn bulk_replay_dead_letters(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BulkReplayDeadLettersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::BulkReplayDeadLettersResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.OutboxService/BulkReplayDeadLetters",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "paigasus.iam.v1.OutboxService",
+                        "BulkReplayDeadLetters",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        ///
+        pub async fn discard_dead_letter(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DiscardDeadLetterRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DiscardDeadLetterResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/paigasus.iam.v1.OutboxService/DiscardDeadLetter",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("paigasus.iam.v1.OutboxService", "DiscardDeadLetter"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod outbox_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with OutboxServiceServer.
+    #[async_trait]
+    pub trait OutboxService: std::marker::Send + std::marker::Sync + 'static {
+        ///
+        async fn list_dead_letters(
+            &self,
+            request: tonic::Request<super::ListDeadLettersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListDeadLettersResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn replay_dead_letter(
+            &self,
+            request: tonic::Request<super::ReplayDeadLetterRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReplayDeadLetterResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn bulk_replay_dead_letters(
+            &self,
+            request: tonic::Request<super::BulkReplayDeadLettersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::BulkReplayDeadLettersResponse>,
+            tonic::Status,
+        >;
+        ///
+        async fn discard_dead_letter(
+            &self,
+            request: tonic::Request<super::DiscardDeadLetterRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DiscardDeadLetterResponse>,
+            tonic::Status,
+        >;
+    }
+    ///
+    #[derive(Debug)]
+    pub struct OutboxServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> OutboxServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for OutboxServiceServer<T>
+    where
+        T: OutboxService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/paigasus.iam.v1.OutboxService/ListDeadLetters" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListDeadLettersSvc<T: OutboxService>(pub Arc<T>);
+                    impl<
+                        T: OutboxService,
+                    > tonic::server::UnaryService<super::ListDeadLettersRequest>
+                    for ListDeadLettersSvc<T> {
+                        type Response = super::ListDeadLettersResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListDeadLettersRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OutboxService>::list_dead_letters(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListDeadLettersSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.OutboxService/ReplayDeadLetter" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReplayDeadLetterSvc<T: OutboxService>(pub Arc<T>);
+                    impl<
+                        T: OutboxService,
+                    > tonic::server::UnaryService<super::ReplayDeadLetterRequest>
+                    for ReplayDeadLetterSvc<T> {
+                        type Response = super::ReplayDeadLetterResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ReplayDeadLetterRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OutboxService>::replay_dead_letter(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReplayDeadLetterSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.OutboxService/BulkReplayDeadLetters" => {
+                    #[allow(non_camel_case_types)]
+                    struct BulkReplayDeadLettersSvc<T: OutboxService>(pub Arc<T>);
+                    impl<
+                        T: OutboxService,
+                    > tonic::server::UnaryService<super::BulkReplayDeadLettersRequest>
+                    for BulkReplayDeadLettersSvc<T> {
+                        type Response = super::BulkReplayDeadLettersResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::BulkReplayDeadLettersRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OutboxService>::bulk_replay_dead_letters(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = BulkReplayDeadLettersSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/paigasus.iam.v1.OutboxService/DiscardDeadLetter" => {
+                    #[allow(non_camel_case_types)]
+                    struct DiscardDeadLetterSvc<T: OutboxService>(pub Arc<T>);
+                    impl<
+                        T: OutboxService,
+                    > tonic::server::UnaryService<super::DiscardDeadLetterRequest>
+                    for DiscardDeadLetterSvc<T> {
+                        type Response = super::DiscardDeadLetterResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DiscardDeadLetterRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OutboxService>::discard_dead_letter(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DiscardDeadLetterSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for OutboxServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "paigasus.iam.v1.OutboxService";
+    impl<T> tonic::server::NamedService for OutboxServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
