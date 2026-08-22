@@ -132,8 +132,10 @@ async fn team_membership_flow_over_grpc() {
     let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
 
     // Mint a principal via the application service directly — `TenancyService` has no
-    // `CreateUser` RPC (users stay HTTP-only per Task 15); `AppState.users` is the same
-    // service the HTTP `/v1/users` handler calls.
+    // `CreateUser` RPC (user creation now has its own gRPC surface on the separate
+    // `UserService`, SMA-501); this test still calls the application service directly because
+    // it only needs a principal to exist, not coverage of that RPC. `AppState.users` is the
+    // same service the HTTP `/v1/users` handler and `UserGrpc::create_user` both call.
     let principal_prn = state
         .users
         .execute(NewUser {
