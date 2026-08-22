@@ -11,6 +11,10 @@
 #   Check 1  each publishable crate carries metadata crates.io accepts AT UPLOAD TIME.
 #            `cargo publish --dry-run` only WARNS about a missing description, so this
 #            explicit assertion is the half that actually guards the metadata.
+#   Check 1b each category is a REAL crates.io slug, validated against the committed
+#            snapshot ci/publish-metadata/crates-io-categories.txt. crates.io DROPS unknown
+#            slugs and publishes anyway, and `cargo publish --dry-run` returns before the
+#            warning that would have said so — so Check 2 cannot catch this (SMA-529).
 #   Check 2  `cargo publish --dry-run` succeeds — the crate is publishABLE, packages, and
 #            compiles standalone with no unversioned path dependency.
 #   Check 2b the packaged file list ships README.md + LICENSE and not moon.yml.
@@ -29,6 +33,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RS_DIR="$REPO_ROOT/rs"
 
+SNAPSHOT="$REPO_ROOT/ci/publish-metadata/crates-io-categories.txt"
+
+# The heredocs below `cd` into rs/, so an import cannot rely on CWD. Exported once rather
+# than per-call so --negative-control's direct function calls see it too.
+export PYTHONPATH="$REPO_ROOT/ci/publish-metadata${PYTHONPATH:+:$PYTHONPATH}"
+
 # The ONE maintained fact in this script. SMA-388 adds paigasus-proto here.
 EXPECTED_PUBLISHABLE=("paigasus-kernel")
 
@@ -41,12 +51,31 @@ die_infra() { printf '%s\n' "$*" >&2; exit 2; }
 # Checks 0, 1 and 3 — pure functions of (cargo metadata JSON, release-plz.toml).
 # Takes file paths so --negative-control (Task 4) can drive the SAME code with fixtures.
 # On success prints one "<name>\t<manifest-dir>" line per publishable crate on stdout.
-metadata_checks() { # $1 metadata.json  $2 release-plz.toml  $3 comma-separated expected
-  python3 - "$1" "$2" "$3" <<'PY'
-import json, os, re, sys, tomllib
+metadata_checks() { # $1 metadata.json  $2 release-plz.toml  $3 expected-csv  $4 snapshot
+  python3 - "$1" "$2" "$3" "${4:-}" <<'PY'
+import datetime, json, os, re, sys, tomllib
 
-meta_path, rp_path, expected_csv = sys.argv[1], sys.argv[2], sys.argv[3]
+# A MISSING 4th argument is a broken invocation, not a reason to skip Check 1b. Exit 2:
+# silently skipping would make every fixture below pass while asserting nothing, and an
+# IndexError here exits 1, which a non-zero-only harness reports as a successful red.
+if len(sys.argv) < 5 or not sys.argv[4].strip():
+    print("FATAL: the snapshot path was not passed to metadata_checks", file=sys.stderr)
+    sys.exit(2)
+
+meta_path, rp_path, expected_csv, snapshot_path = (
+    sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+)
 expected = sorted(x for x in expected_csv.split(",") if x)
+
+# The local variable `categories` in the Check 1 loop below shadows the module name, so
+# import it under a distinct name.
+import categories as categories_module
+
+try:
+    known_slugs = categories_module.load_snapshot(snapshot_path, datetime.date.today())
+except categories_module.SnapshotError as exc:
+    print(f"category snapshot: {exc}", file=sys.stderr)
+    sys.exit(1)
 
 try:
     with open(meta_path, encoding="utf-8") as fh:
@@ -117,6 +146,28 @@ for name in found:
         errors.append(f"{name}: `categories` is empty")
     if len(categories) > 5:
         errors.append(f"{name}: {len(categories)} categories (crates.io max 5)")
+    for category in categories:
+        if not isinstance(category, str):
+            errors.append(f"{name}: category {category!r} is not a string")
+            continue
+        if category != category.strip():
+            errors.append(
+                f"{name}: category {category!r} has surrounding whitespace"
+            )
+            continue
+        if category in known_slugs:
+            continue
+        hint = categories_module.nearest(category, known_slugs)
+        suggestion = f" Did you mean {hint!r}?" if hint else ""
+        errors.append(
+            f"{name}: category {category!r} is not a crates.io category slug."
+            f"{suggestion} crates.io DROPS unknown slugs — the publish succeeds and the "
+            "crate appears uncategorized, and `cargo publish --dry-run` returns before "
+            "the warning that would have told you. crates.io matches slugs EXACTLY and "
+            "case-sensitively at publish time (its read API does not, which is why a "
+            "browser check misleads). Valid slugs: "
+            "ci/publish-metadata/crates-io-categories.txt"
+        )
 
 # --- Check 3: a 0.0.0 crate must be release-blocked -------------------------------
 stubs = [n for n in found if pkgs[n].get("version") == "0.0.0"]
@@ -274,6 +325,13 @@ negative_control() {
   local tmp failures=0
   tmp="$(mktemp -d)"
 
+  # The module's own controls run here too, so `run.sh --negative-control` is the single
+  # command that proves every layer of this gate can report red.
+  if ! python3 "$REPO_ROOT/ci/publish-metadata/categories.py" --self-test; then
+    echo "NEGATIVE CONTROL FAILED: categories.py self-test" >&2
+    failures=$((failures + 1))
+  fi
+
   _meta() { # $1 out-file, $2 JSON object for the single package
     python3 - "$1" "$2" <<'PY'
 import json, sys
@@ -307,44 +365,114 @@ PY
 
   local base='{"name":"paigasus-kernel","version":"0.0.0","publish":null,
     "manifest_path":"/nowhere/Cargo.toml","description":"d","license":"Apache-2.0",
-    "repository":"r","readme":"README.md","keywords":["k"],"categories":["c"]}'
+    "repository":"r","readme":"README.md","keywords":["k"],
+    "categories":["data-structures"]}'
+
+  # A REAL snapshot for the pre-existing rows. Without it every one of them would fail on
+  # a missing 4th argument (rc 2) instead of on the rule it names.
+  local fix_snap="$tmp/snapshot.txt"
+  printf '# fetched: %s\n# count: 3\ndata-structures\nparser-implementations\naerospace::drones\n' \
+    "$(date -u +%Y-%m-%d)" >"$fix_snap"
 
   # Check 0 — empty publishable set.
   printf '{"packages":[{"name":"x","version":"0.0.0","publish":[],"manifest_path":"/x"}]}' \
     >"$tmp/empty.json"
   _expect_rc 2 "Check 0 (empty publishable set)" \
-    metadata_checks "$tmp/empty.json" "$good_rp" "paigasus-kernel"
+    metadata_checks "$tmp/empty.json" "$good_rp" "paigasus-kernel" "$fix_snap"
 
   # Check 0 — set differs from expected.
   _meta "$tmp/wrong-name.json" "$(printf '%s' "$base" | sed 's/paigasus-kernel/some-other-crate/')"
   _expect_rc 1 "Check 0 (unexpected publishable crate)" \
-    metadata_checks "$tmp/wrong-name.json" "$good_rp" "paigasus-kernel"
+    metadata_checks "$tmp/wrong-name.json" "$good_rp" "paigasus-kernel" "$fix_snap"
 
   # Check 1 — each rule, one fixture apiece.
   _meta "$tmp/no-desc.json" "$(printf '%s' "$base" | sed 's/"description":"d"/"description":""/')"
   _expect_rc 1 "Check 1 (empty description)" \
-    metadata_checks "$tmp/no-desc.json" "$good_rp" "paigasus-kernel"
+    metadata_checks "$tmp/no-desc.json" "$good_rp" "paigasus-kernel" "$fix_snap"
 
   _meta "$tmp/six-kw.json" "$(printf '%s' "$base" | sed 's/"keywords":\["k"\]/"keywords":["a","b","c","d","e","f"]/')"
   _expect_rc 1 "Check 1 (six keywords)" \
-    metadata_checks "$tmp/six-kw.json" "$good_rp" "paigasus-kernel"
+    metadata_checks "$tmp/six-kw.json" "$good_rp" "paigasus-kernel" "$fix_snap"
 
   _meta "$tmp/long-kw.json" "$(printf '%s' "$base" | sed 's/"keywords":\["k"\]/"keywords":["aaaaaaaaaaaaaaaaaaaaa"]/')"
   _expect_rc 1 "Check 1 (21-char keyword)" \
-    metadata_checks "$tmp/long-kw.json" "$good_rp" "paigasus-kernel"
+    metadata_checks "$tmp/long-kw.json" "$good_rp" "paigasus-kernel" "$fix_snap"
 
   _meta "$tmp/bad-kw.json" "$(printf '%s' "$base" | sed 's/"keywords":\["k"\]/"keywords":["-nope"]/')"
   _expect_rc 1 "Check 1 (keyword with a leading hyphen)" \
-    metadata_checks "$tmp/bad-kw.json" "$good_rp" "paigasus-kernel"
+    metadata_checks "$tmp/bad-kw.json" "$good_rp" "paigasus-kernel" "$fix_snap"
 
-  _meta "$tmp/no-cat.json" "$(printf '%s' "$base" | sed 's/"categories":\["c"\]/"categories":[]/')"
+  _meta "$tmp/no-cat.json" "$(printf '%s' "$base" | sed 's/"categories":\["data-structures"\]/"categories":[]/')"
   _expect_rc 1 "Check 1 (no categories)" \
-    metadata_checks "$tmp/no-cat.json" "$good_rp" "paigasus-kernel"
+    metadata_checks "$tmp/no-cat.json" "$good_rp" "paigasus-kernel" "$fix_snap"
+
+  # --- Check 1b: category slugs must be real crates.io slugs ---------------------------
+  _meta "$tmp/bad-cat.json" "$(printf '%s' "$base" | sed 's/"data-structures"/"data-structure"/')"
+  _expect_rc 1 "Check 1b (category is not a crates.io slug)" \
+    metadata_checks "$tmp/bad-cat.json" "$good_rp" "paigasus-kernel" "$fix_snap"
+
+  # crates.io's PUBLISH path matches exactly (categories::slug.eq_any), while its READ api
+  # lowercases. A differently-cased slug is therefore DROPPED at publish, and this row is
+  # what stops a future "relax this to case-insensitive" edit reintroducing that false green.
+  _meta "$tmp/case-cat.json" "$(printf '%s' "$base" | sed 's/"data-structures"/"Data-Structures"/')"
+  _expect_rc 1 "Check 1b (category differs only in case)" \
+    metadata_checks "$tmp/case-cat.json" "$good_rp" "paigasus-kernel" "$fix_snap"
+
+  _meta "$tmp/ws-cat.json" "$(printf '%s' "$base" | sed 's/"data-structures"/" data-structures"/')"
+  _expect_rc 1 "Check 1b (category has surrounding whitespace)" \
+    metadata_checks "$tmp/ws-cat.json" "$good_rp" "paigasus-kernel" "$fix_snap"
+
+  _meta "$tmp/nested-ok.json" "$(printf '%s' "$base" | sed 's/"version":"0.0.0"/"version":"0.1.0"/; s/"data-structures"/"aerospace::drones"/')"
+  _expect_rc 0 "Check 1b (::-nested slug present in the snapshot)" \
+    metadata_checks "$tmp/nested-ok.json" "$bad_rp" "paigasus-kernel" "$fix_snap"
+
+  _meta "$tmp/nested-bad.json" "$(printf '%s' "$base" | sed 's/"data-structures"/"aerospace::drone"/')"
+  _expect_rc 1 "Check 1b (::-nested slug absent from the snapshot)" \
+    metadata_checks "$tmp/nested-bad.json" "$good_rp" "paigasus-kernel" "$fix_snap"
+
+  # The snapshot guards, driven through the SAME entry point the real run uses.
+  _expect_rc 1 "Check 1b (snapshot file missing)" \
+    metadata_checks "$tmp/nested-ok.json" "$bad_rp" "paigasus-kernel" "$tmp/nope.txt"
+
+  printf '# fetched: %s\n# count: 0\n' "$(date -u +%Y-%m-%d)" >"$tmp/empty-snap.txt"
+  _expect_rc 1 "Check 1b (snapshot contains no slugs)" \
+    metadata_checks "$tmp/nested-ok.json" "$bad_rp" "paigasus-kernel" "$tmp/empty-snap.txt"
+
+  # Two valid slugs (categories.py's ABSOLUTE_FLOOR is 2) so this fires on the count
+  # mismatch it names, not on the floor guard.
+  printf '# fetched: %s\n# count: 99\ndata-structures\nparser-implementations\n' \
+    "$(date -u +%Y-%m-%d)" >"$tmp/count-snap.txt"
+  _expect_rc 1 "Check 1b (snapshot count disagrees with its body)" \
+    metadata_checks "$tmp/nested-ok.json" "$bad_rp" "paigasus-kernel" "$tmp/count-snap.txt"
+
+  printf '# count: 2\ndata-structures\nparser-implementations\n' >"$tmp/nodate-snap.txt"
+  _expect_rc 1 "Check 1b (snapshot has no fetched: header)" \
+    metadata_checks "$tmp/nested-ok.json" "$bad_rp" "paigasus-kernel" "$tmp/nodate-snap.txt"
+
+  printf '# fetched: 2000-01-01\n# count: 2\ndata-structures\nparser-implementations\n' >"$tmp/old-snap.txt"
+  _expect_rc 1 "Check 1b (snapshot older than the staleness bound)" \
+    metadata_checks "$tmp/nested-ok.json" "$bad_rp" "paigasus-kernel" "$tmp/old-snap.txt"
+
+  printf '# fetched: %s\n# count: 1\n<html><title>502</title>\n' "$(date -u +%Y-%m-%d)" >"$tmp/html-snap.txt"
+  _expect_rc 1 "Check 1b (snapshot is an HTML error page)" \
+    metadata_checks "$tmp/nested-ok.json" "$bad_rp" "paigasus-kernel" "$tmp/html-snap.txt"
+
+  # CRLF must be TOLERATED — the repo ships no .gitattributes, and rejecting it would red
+  # every PR on a CRLF checkout with a message that is wrong about what is broken. Contains
+  # aerospace::drones (nested-ok.json's category) plus a second slug to clear the floor.
+  printf '# fetched: %s\r\n# count: 2\r\naerospace::drones\r\ndata-structures\r\n' \
+    "$(date -u +%Y-%m-%d)" >"$tmp/crlf-snap.txt"
+  _expect_rc 0 "Check 1b (CRLF snapshot is tolerated)" \
+    metadata_checks "$tmp/nested-ok.json" "$bad_rp" "paigasus-kernel" "$tmp/crlf-snap.txt"
+
+  # A broken INVOCATION must not read as "Check 1b skipped".
+  _expect_rc 2 "Check 1b (snapshot argument not passed)" \
+    metadata_checks "$tmp/nested-ok.json" "$bad_rp" "paigasus-kernel"
 
   # Check 3 — a 0.0.0 crate with no release block.
   _meta "$tmp/stub.json" "$base"
   _expect_rc 1 "Check 3 (0.0.0 crate not release-blocked)" \
-    metadata_checks "$tmp/stub.json" "$bad_rp" "paigasus-kernel"
+    metadata_checks "$tmp/stub.json" "$bad_rp" "paigasus-kernel" "$fix_snap"
 
   # The per-package override hole: [[package]] beats [workspace], so a `release = true`
   # entry leaves the crate releasable even with the workspace block in place. This is the
@@ -352,7 +480,7 @@ PY
   local override_rp="$tmp/override-release-plz.toml"
   printf '[workspace]\nrelease = false\n\n[[package]]\nname = "paigasus-kernel"\nrelease = true\n' >"$override_rp"
   _expect_rc 1 "Check 3 (per-package release = true override)" \
-    metadata_checks "$tmp/stub.json" "$override_rp" "paigasus-kernel"
+    metadata_checks "$tmp/stub.json" "$override_rp" "paigasus-kernel" "$fix_snap"
 
   # Check 2b — a listing missing LICENSE, and one containing moon.yml.
   printf 'Cargo.toml\nREADME.md\nsrc/lib.rs\n' >"$tmp/missing-license.txt"
@@ -366,7 +494,7 @@ PY
   # Positive control: a clean fixture must pass, or every "red" above is meaningless.
   _meta "$tmp/good.json" "$(printf '%s' "$base" | sed 's/"version":"0.0.0"/"version":"0.1.0"/')"
   _expect_rc 0 "clean fixture passes (checks are not vacuously red)" \
-    metadata_checks "$tmp/good.json" "$bad_rp" "paigasus-kernel"
+    metadata_checks "$tmp/good.json" "$bad_rp" "paigasus-kernel" "$fix_snap"
 
   rm -rf "$tmp"
   if [ "$failures" -gt 0 ]; then
@@ -395,7 +523,7 @@ main() {
   # silent pass — the exact vacuous-gate failure this script exists to prevent.
   local status=0
   local publishable
-  publishable="$(metadata_checks "$meta_json" "$RS_DIR/release-plz.toml" "$expected_csv")" \
+  publishable="$(metadata_checks "$meta_json" "$RS_DIR/release-plz.toml" "$expected_csv" "$SNAPSHOT")" \
     || status=$?
   rm -f "$meta_json"
   [ "$status" -eq 0 ] || exit "$status"
