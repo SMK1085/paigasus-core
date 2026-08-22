@@ -2596,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-kernel"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "thiserror",
@@ -2622,7 +2622,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-node-bindings"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "napi",
  "napi-build",
@@ -2672,7 +2672,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-py-bindings"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "paigasus-kernel",
  "pyo3",
@@ -2689,7 +2689,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-wasm"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "paigasus-kernel",
  "wasm-bindgen",

@@ -1,11 +1,10 @@
 [package]
 name = "paigasus-kernel"
-# 0.0.0 is the pre-release stub floor. SMA-407 moves every package to the 0.1.0 floor
-# together (crates.io/PyPI/npm in lockstep) and lets release-plz cut the first tag;
-# publishing THIS version would permanently burn it on crates.io. `rs/release-plz.toml`
-# therefore carries `release = false`, and `moon run repo:publish-metadata` fails if that
-# block is removed while a publishable crate is still at 0.0.0.
-version = "0.0.0"
+# The 0.1.0 floor (ADR-0011 S3). release-plz cuts every tag; never hand-place a `*-vX.Y.Z`
+# tag — manual tags lack release-plz's tracking metadata and silently stop future bumps
+# (the SMA-385 trap). This version is held in lockstep with the py/npm binding artifacts by
+# `repo:version-lockstep`, and release-plz keeps the group together via `version_group`.
+version = "0.1.0"
 description = "Pure-logic behavioral kernel for Paigasus — resource names (PRN), UUIDv7 minting, and Cedar entity UIDs."
 repository = "https://github.com/SMK1085/paigasus-core"
 homepage = "https://github.com/SMK1085/paigasus-core#readme"

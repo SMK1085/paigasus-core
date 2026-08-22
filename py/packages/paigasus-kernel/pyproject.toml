@@ -1,6 +1,6 @@
 [project]
 name = "paigasus-kernel"
-version = "0.0.0"
+version = "0.1.0"
 description = "Python bindings for the Paigasus behavioral kernel."
 readme = "README.md"
 license = "Apache-2.0"
@@ -19,7 +19,7 @@ classifiers = [
 # DEVELOPMENT-ONLY metadata — uv strips it from the built wheel — so without this pin the
 # published wrapper would float against any paigasus-py-bindings version (SMA-576, spec §4).
 # Under lockstep the bindings can never release independently, so an exact pin costs nothing.
-dependencies = ["paigasus-py-bindings==0.0.0"]
+dependencies = ["paigasus-py-bindings==0.1.0"]
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13"]
