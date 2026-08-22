@@ -41,7 +41,7 @@ use paigasus_iam::adapters::http::{AppState, router};
 use paigasus_iam::adapters::id::KernelIdGenerator;
 use paigasus_iam::adapters::persistence::Migrator;
 use paigasus_iam::application::authenticate_token::Provisioning;
-use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, OutboxConfig};
+use paigasus_iam::config::{ApiKeyConfig, AuditConfig, AuthnConfig, AuthzConfig, IamConfig, IssuerConfig, JwksCacheBackend, JwksCacheConfig, MetricsConfig, MigrationConfig, OutboxConfig};
 use paigasus_iam_core::{
     ApiKey, ApiKeyStatus, Clock, GrantScope, IdGenerator, OrganizationId, Principal, PrincipalId, PrincipalKind, PrincipalStatus, RoleGrant, ServiceAccount, TenancyNodeRef, display_prefix,
 };
@@ -472,6 +472,7 @@ pub fn test_config_with(idps: &[(&MockIdp, bool)], jwks_refresh_cooldown_secs: u
         audit: AuditConfig::default(),
         outbox: OutboxConfig::default(),
         metrics: MetricsConfig::default(),
+        migration: MigrationConfig::default(),
     }
 }
 
