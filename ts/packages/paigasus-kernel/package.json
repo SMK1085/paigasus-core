@@ -1,7 +1,7 @@
 {
   "name": "@paigasus/kernel",
   "_comment_exports": "node → the napi binding (compiled .node); browser/default → the wasm binding (paigasus-wasm, .wasm + glue). Conditions point at SOURCE (bundler-aware consumers walk TS); switch to ./dist/* when tsup wiring lands, IN LOCKSTEP with flipping `private: false`. workerd intentionally omitted (no verified workerd path yet — SMA-427 H3); it falls through to `default`.",
-  "_comment_publish": "Publish is DOUBLE-BLOCKED, deferred beyond SMA-428 (which only adds static metadata): (1) exports point at source — needs the tsup/dist build (SMA-420 deferral) before a pack ships JS instead of raw .ts, and the `file:` deps must become real npm packages; (2) the version flip off 0.0.0 + private:false belong to release activation (SMA-407).",
+  "_comment_publish": "Publish is DOUBLE-BLOCKED: (1) exports point at source — needs the tsup/dist build (SMA-420 deferral) before a pack ships JS instead of raw .ts, and the `file:` deps must become real npm packages; (2) release activation (SMA-407/SMA-576) has now landed and DELIBERATELY leaves this package's version at 0.0.0 + private:true as an exception to the kernel lockstep family — there is no JS emit in ts/ yet, so nothing here needs to move in lockstep with rs/crates/libs/paigasus-kernel. When publish unblocks, this rejoins the family at the family's THEN-current version, not necessarily 0.1.0.",
   "version": "0.0.0",
   "private": true,
   "type": "module",

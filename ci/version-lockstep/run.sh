@@ -36,6 +36,24 @@ SITES=(
   "kernel|napi-glue|rs/crates/bindings/paigasus-node-bindings/index.js"
 )
 
+# Non-vacuity anchor (SMA-576 review finding 2): `run_check`'s own "checked == ${#SITES[@]}"
+# guard is SELF-REFERENTIAL — deleting a row shrinks SITES and the expectation together, so it
+# was measured to let a deleted row (e.g. napi-glue) through silently, printing
+# "== all 17 … agree ==" and exiting 0 with the negative control and every other gate still
+# green. This literal is the anchor: it ties SITES to a number recorded OUTSIDE this array, so
+# a deleted (or accidentally duplicated) row now fails loudly instead. It can only ever
+# FALSE-RED — forgetting to bump it after a deliberate SITES edit — never silently absorb a
+# bypass, which is the correct failure direction for a gate whose whole job is not asserting
+# vacuously. This is the documented fallback (a Moon-query-based comparison against the task's
+# resolved inputs was judged impractical from inside a bash script with no dependency on the
+# `moon` binary or a YAML parser): update it ONLY together with a deliberate SITES edit. The
+# other half of this pin lives outside this file entirely, in
+# ci_targets.py's SELF_TASK_EXPECTED_GLOBS["version-lockstep"] (part of repo:affected-smoke),
+# which independently asserts moon.yml's own `inputs:` list — the paths SITES reads (15
+# distinct, since two rows share py/packages/paigasus-kernel/pyproject.toml) plus rs/Cargo.toml
+# (read by the cargo-wsdep kind by name, not by a SITES path) plus this script itself.
+EXPECTED_SITE_COUNT=18
+
 # Source of truth per group.
 declare -A SOURCE_OF_TRUTH=(
   [kernel]="rs/crates/libs/paigasus-kernel/Cargo.toml"
@@ -124,10 +142,17 @@ print(v)
 PY
       ;;
     cargo-lock)
-      # Every kernel-group member must appear in the lock at the group version. Prints the
-      # DISTINCT set; anything but a single value reads as MISMATCH against the expected —
-      # that is the repo being wrong, not infrastructure failing. An unreadable or
-      # undecodable lockfile is infrastructure failing, and exits 2 instead.
+      # Every kernel-group member must be PRESENT in the lock, all at the same version.
+      # Presence and uniformity are checked separately (SMA-576 review finding 4): comparing
+      # only the DISTINCT set of versions found among names that DID match was measured to
+      # pass vacuously when a name never appears at all — if three of four members vanished
+      # from the lockfile, the one survivor's version still forms a set of size 1 and reads
+      # as OK. A name absent from the lock is the repo being wrong (a stale `cargo update -w`,
+      # or a workspace member dropped without relocking), same failure class as a version
+      # mismatch, so it prints "" and reads as MISMATCH rather than exiting nonzero itself —
+      # matching how a non-uniform version set already reports (empty string, not sys.exit).
+      # An unreadable or undecodable lockfile is a DIFFERENT failure mode — infrastructure,
+      # not drift — and exits 2 instead.
       [ -r "$abs" ] || die_infra "cannot read $target"
       python3 - "$abs" <<'PY'
 import re, sys
@@ -137,16 +162,22 @@ try:
     text = open(p, encoding="utf-8").read()
 except Exception as e:
     print(f"malformed {p}: {e}", file=sys.stderr); sys.exit(2)
+present = set()
 found = set()
 for blk in text.split("[[package]]"):
     n = re.search(r"^name = \"([^\"]+)\"", blk, re.M)
     v = re.search(r"^version = \"([^\"]+)\"", blk, re.M)
-    if n and v and n.group(1) in names:
-        found.add(v.group(1))
-print(found.pop() if len(found) == 1 else "")
+    if n and n.group(1) in names:
+        present.add(n.group(1))
+        if v:
+            found.add(v.group(1))
+print(found.pop() if present == names and len(found) == 1 else "")
 PY
       ;;
     uv-lock)
+      # Same presence-plus-uniformity discipline as cargo-lock immediately above, and the
+      # same SMA-576 review finding 4: a name missing from the lock entirely must not be
+      # masked by the survivors' versions happening to agree.
       [ -r "$abs" ] || die_infra "cannot read $target"
       python3 - "$abs" <<'PY'
 import re, sys
@@ -156,13 +187,16 @@ try:
     text = open(p, encoding="utf-8").read()
 except Exception as e:
     print(f"malformed {p}: {e}", file=sys.stderr); sys.exit(2)
+present = set()
 found = set()
 for blk in text.split("[[package]]"):
     n = re.search(r"^name = \"([^\"]+)\"", blk, re.M)
     v = re.search(r"^version = \"([^\"]+)\"", blk, re.M)
-    if n and v and n.group(1) in names:
-        found.add(v.group(1))
-print(found.pop() if len(found) == 1 else "")
+    if n and n.group(1) in names:
+        present.add(n.group(1))
+        if v:
+            found.add(v.group(1))
+print(found.pop() if present == names and len(found) == 1 else "")
 PY
       ;;
     napi-glue)
@@ -206,6 +240,11 @@ run_self_tests() {
 
 run_check() {
   local rc=0 group kind target expected actual verdict
+  # SMA-576 review finding 2: check the literal anchor BEFORE anything else. This is what
+  # catches a deleted SITES row that the loop-internal "checked == ${#SITES[@]}" guard below
+  # cannot, because that guard is self-referential and shrinks in step with SITES.
+  [ "${#SITES[@]}" -eq "$EXPECTED_SITE_COUNT" ] \
+    || die_infra "SITES has ${#SITES[@]} entries, expected $EXPECTED_SITE_COUNT — this count must be updated deliberately alongside any SITES edit (see the comment above SITES; ci_targets.py's SELF_TASK_EXPECTED_GLOBS is the other half of this pin)"
   for group in "${!SOURCE_OF_TRUTH[@]}"; do
     # Explicit `|| return 2` rather than relying on errexit: when run_check is itself called
     # on the left of a `||` (as negative_control does), POSIX suspends errexit for run_check
@@ -289,13 +328,40 @@ write_site() { # $1 kind  $2 target  $3 version  -> prints 1 if it changed the f
   local kind="$1" target="$2" version="$3" abs="$REPO_ROOT/$2"
   case "$kind" in
     pyproject)
+      # A page-wide (?m)^version\s*= substitution matches the FIRST such line anywhere in the
+      # file, not [project]'s own — a `version =` key under an EARLIER TOML table (e.g.
+      # [build-system] or a [tool.*] table that precedes [project]) would be rewritten
+      # silently instead, since exactly one match is still found. Latent today only because
+      # [project] happens to come first in every pyproject.toml this script writes. This is
+      # the same unscoped-first-match class already hardened out of the packagejson arm below
+      # (find_top_level_version_span) — scope this one to the [project] table specifically
+      # (SMA-576 review finding 3).
       python3 - "$abs" "$version" <<'PY'
 import re, sys
+
+def find_project_version_match(s):
+    """Return (re.Match, table_start) for the `version = "..."` line inside the [project]
+    table specifically, or None. `table_start` is the offset of the table's body, so the
+    match's spans can be re-anchored onto the whole-file string."""
+    tm = re.search(r'(?m)^\[project\]\s*$', s)
+    if tm is None:
+        return None
+    table_start = tm.end()
+    nxt = re.search(r'(?m)^\[', s[table_start:])
+    table_end = table_start + nxt.start() if nxt else len(s)
+    vm = re.search(r'(?m)^(version\s*=\s*)"[^"]*"', s[table_start:table_end])
+    if vm is None:
+        return None
+    return vm, table_start
+
 p, v = sys.argv[1], sys.argv[2]
 s = open(p, encoding="utf-8").read()
-new, n = re.subn(r'(?m)^(version\s*=\s*)"[^"]*"', lambda m: f'{m.group(1)}"{v}"', s, count=1)
-if n != 1:
+result = find_project_version_match(s)
+if result is None:
     print("FATAL: no [project] version line", file=sys.stderr); raise SystemExit(2)
+vm, table_start = result
+start, end = table_start + vm.start(), table_start + vm.end()
+new = s[:start] + f'{vm.group(1)}"{v}"' + s[end:]
 open(p, "w", encoding="utf-8").write(new)
 print(int(new != s))
 PY

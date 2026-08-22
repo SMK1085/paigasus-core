@@ -303,16 +303,23 @@ SELF_SCHEDULED_GATES = {
         "ci/release-parity/run.sh --ecosystem semantic-release --negative-control",
         "ci/release-parity/run.sh --ecosystem semantic-release",
     ),
-    # SMA-576 — repo:version-lockstep, same three-line shape and the same reasoning end to end.
-    # The pipefail line is exactly as load-bearing as either invocation: Moon takes a `script:`
-    # block's status from its LAST command, so without it a `--negative-control` that has stopped
-    # being able to report red is masked by the real run passing, and the gate ships with no proof
-    # it bites. The whole-line discipline matters here for the same prefix reason as above —
-    # `bash ci/version-lockstep/run.sh` is a strict prefix of the control line, so under a
-    # substring test deleting the REAL RUN would leave this check green while CI only ever ran the
-    # control against a synthetic tree and never looked at the repo's actual versions.
+    # SMA-576 — repo:version-lockstep, same four-line shape and the same reasoning end to end.
+    # The pipefail line is exactly as load-bearing as any invocation: Moon takes a `script:`
+    # block's status from its LAST command, so without it a failing `--self-test` or
+    # `--negative-control` that has stopped being able to report red is masked by the real run
+    # passing, and the gate ships with no proof it bites. The whole-line discipline matters here
+    # for the same prefix reason as above — `bash ci/version-lockstep/run.sh` is a strict prefix
+    # of BOTH the `--self-test` and the `--negative-control` line, so under a substring test
+    # deleting the REAL RUN would leave this check green while CI only ever ran fixture tables and
+    # a control against a synthetic tree and never looked at the repo's actual versions.
+    # `--self-test` (SMA-576 fix-wave finding 1) closes the same "declared but never invoked"
+    # rot this whole table exists to prevent: before this entry, nothing in CI ever ran
+    # `run_self_tests` / `SELF_TEST_COUNT` / `site_verdict_self_test`, so they could bit-rot
+    # silently while ci/version-lockstep/README.md kept presenting `--self-test` as part of the
+    # guard.
     "version-lockstep": (
         "set -euo pipefail",
+        "bash ci/version-lockstep/run.sh --self-test",
         "bash ci/version-lockstep/run.sh --negative-control",
         "bash ci/version-lockstep/run.sh",
     ),

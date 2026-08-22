@@ -532,13 +532,17 @@ tasks:
 
   version-lockstep:
     description: "Assert every version-carrying site in the kernel and proto lockstep families agrees with that family's source-of-truth Cargo crate (SMA-576)."
-    # The negative control runs FIRST, mirroring repo:publish-metadata directly above: a gate that
-    # cannot report red is worse than no gate, and it is sub-second. Moon does NOT enable errexit
-    # for `script:` blocks — a script's status is simply its LAST command's — so without the
-    # explicit `set -euo pipefail` a failing control would be masked by the passing real run
-    # (the SMA-526 rotted-negative-control shape).
+    # --self-test runs FIRST (its fixture tables cost nothing and catching a broken verdict
+    # function before it's trusted by anything else is the point), then the negative control,
+    # mirroring repo:publish-metadata directly above: a gate that cannot report red is worse than
+    # no gate, and it is sub-second. Moon does NOT enable errexit for `script:` blocks — a script's
+    # status is simply its LAST command's — so without the explicit `set -euo pipefail` a failing
+    # self-test or control would be masked by the passing real run (the SMA-526 rotted-negative-
+    # control shape; the same shape applied `--self-test` was never invoked at all until this line
+    # was added — SMA-576 fix-wave finding 1).
     script: |
       set -euo pipefail
+      bash ci/version-lockstep/run.sh --self-test
       bash ci/version-lockstep/run.sh --negative-control
       bash ci/version-lockstep/run.sh
     toolchain: 'system'
