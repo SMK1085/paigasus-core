@@ -136,14 +136,21 @@ build itself — they bite the first operator who deploys without reading this s
   startupProbe.failureThreshold × periodSeconds  >  lock_wait_secs + migration budget + AppState::new
   ```
 
-  At the shipped default: `periodSeconds: 10`, `failureThreshold: 30` (300s). `AppState::new` is a
-  third, unbudgeted term — it reconciles policies and loads a snapshot after the migration and
-  still before any bind. Raising `lock_wait_secs` means raising both.
+  There is no chart in this repo yet, so nothing ships a `startupProbe` today — the formula's
+  values at today's `lock_wait_secs` default would be `periodSeconds: 10`, `failureThreshold: 30`
+  (300s), and SMA-513's chart should ship exactly that pair rather than something smaller. Until
+  that chart lands, do not assume any `startupProbe` you have already deployed carries them.
+  `AppState::new` is a third, unbudgeted term — it reconciles policies and loads a snapshot after
+  the migration and still before any bind. Raising `lock_wait_secs` means raising both.
 
   **Chart defaults (handoff to SMA-513).** `strategy.rollingUpdate.maxSurge` need no longer be
   pinned to `0`, subject to the two exceptions above; set `startupProbe` from the formula; expose
   `IAM_MIGRATION__LOCK_WAIT_SECS`. SMA-571 (bind-first readiness gating) will make the
-  `start-period` coupling vestigial.
+  `start-period` coupling vestigial. **Precondition to confirm before relaxing `maxSurge`:**
+  `AppState::new`'s `reconcile_starter` (`src/adapters/http/mod.rs` around :396) writes system
+  policies and roles on every boot with no advisory lock of its own and has never been tested
+  under concurrency — pre-existing and out of scope for SMA-559, but SMA-513 should confirm it is
+  safe under a surging rollout rather than discover it isn't.
 
   **Recovering a stranded lock.** A pod SIGKILL'd on a partitioned node leaves its backend holding
   the lock until TCP-level timeouts fire — by default, hours — and every later replica then waits
@@ -160,11 +167,14 @@ build itself — they bite the first operator who deploys without reading this s
   The parentheses are load-bearing — Postgres gives `<<` and `|` equal precedence. Then
   `SELECT pg_terminate_backend(<pid>)`. **This needs privileges the IAM application role usually
   lacks**: `query_start` reads as NULL for other users' backends without `pg_read_all_stats`, and
-  `pg_terminate_backend` needs `pg_signal_backend` or superuser — run it as an admin role. To
-  bound it automatically, set `idle_in_transaction_session_timeout` (the stranded backend is
-  *idle in transaction*, so `idle_session_timeout` does **not** apply — and setting that one
-  aggressively would instead kill a healthy replica between poll attempts) and `tcp_user_timeout`
-  (`tcp_keepalives_idle` alone only starts probing).
+  `pg_terminate_backend` needs `pg_signal_backend` or superuser — run it as an admin role. The
+  stranded backend is *idle in transaction* only once its DDL statement has finished; a pod killed
+  **mid-DDL** leaves an `active` backend instead, which `idle_in_transaction_session_timeout` can
+  never reap (and `idle_session_timeout` does not apply to either case — setting that one
+  aggressively would instead kill a healthy replica between poll attempts). `tcp_user_timeout` is
+  the setting that bounds both cases, since it fires on the TCP connection regardless of backend
+  state (`tcp_keepalives_idle` alone only starts probing); set `idle_in_transaction_session_timeout`
+  too as a second line of defense for the post-DDL window.
 
   Behind a transaction-mode pooler the lock is safe by construction — it is acquired and released
   within one transaction — but PgBouncer's `idle_transaction_timeout` can kill a long migration.

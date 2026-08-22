@@ -246,4 +246,30 @@ mod tests {
     fn an_overshot_budget_gives_up_rather_than_panicking() {
         assert_eq!(next_poll(Duration::from_secs(2), Duration::from_secs(1)), Poll::GiveUp);
     }
+
+    /// The claim in `migrate_under_lock`'s doc — "production code must never call `Migrator::up`
+    /// bare" — with teeth. Every integration test calls `migrate_under_lock` directly, so reverting
+    /// `main.rs` to a bare `Migrator::up` would leave the whole suite green while un-shipping the
+    /// feature. `include_str!` is deliberate: a `repo:*` gate for one call site would cost a `T`-array
+    /// entry, the CLAUDE.md marker block and an `:affected-smoke` re-baseline.
+    #[test]
+    fn the_composition_root_still_migrates_under_the_lock() {
+        const MAIN: &str = include_str!("../../main.rs");
+        assert!(MAIN.contains("migrate_under_lock("), "main.rs must call migrate_under_lock");
+        assert!(!MAIN.contains("Migrator::up"), "main.rs must not call Migrator::up bare — use migrate_under_lock");
+        assert!(MAIN.contains("config.migration.lock_wait()"), "main.rs must pass the CONFIGURED wait, not a hardcoded Duration");
+    }
+
+    /// The container's health-check start period must cover the configured wait plus the migration,
+    /// or a replica that is correctly WAITING for the lock gets reported unhealthy. `ci/images/run.sh`
+    /// pins `rs/Dockerfile` against `IMAGE_START_PERIOD_SECS`, but `images.yml`'s `pull_request` filter
+    /// excludes `rs/**` — so a raised default alone would not run it. This test does, under `:test`.
+    #[test]
+    fn the_default_wait_plus_the_migration_budget_fits_the_image_start_period() {
+        let default_wait = crate::config::MigrationConfig::default().lock_wait_secs;
+        assert!(
+            default_wait + MIGRATION_BUDGET_SECS <= IMAGE_START_PERIOD_SECS,
+            "default lock_wait_secs ({default_wait}) + MIGRATION_BUDGET_SECS ({MIGRATION_BUDGET_SECS}) exceeds IMAGE_START_PERIOD_SECS ({IMAGE_START_PERIOD_SECS}) — raise rs/Dockerfile's --start-period and the constant together"
+        );
+    }
 }

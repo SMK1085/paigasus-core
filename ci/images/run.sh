@@ -130,7 +130,23 @@ assert_pins() {
     echo "  A replica waiting on the SMA-559 migration lock binds no listener, so it would be reported unhealthy while correctly waiting. Raise the start period or lower the default wait." >&2
     return 1
   fi
-  echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config, start-period ${start_period}s >= ${required}s"
+  # migration_lock.rs's IMAGE_START_PERIOD_SECS doc claims it and rs/Dockerfile's --start-period
+  # agree — make that true rather than aspirational. Without this, bumping the Dockerfile to 300s
+  # while leaving the constant at 180 would pass the required-budget check above (300 >= 180) and
+  # fire the boot warning (`config.migration.lock_wait_secs + MIGRATION_BUDGET_SECS >
+  # IMAGE_START_PERIOD_SECS`) spuriously forever, with CI green throughout.
+  local image_start_period_const
+  image_start_period_const="$(grep -oE 'IMAGE_START_PERIOD_SECS: u64 = [0-9]+' "$ROOT/rs/crates/services/paigasus-iam/src/adapters/persistence/migration_lock.rs" | head -1 | grep -oE '[0-9]+$' || true)"
+  if [ -z "$image_start_period_const" ]; then
+    echo "::error::could not read IMAGE_START_PERIOD_SECS from migration_lock.rs; the grep anchor moved." >&2
+    return 1
+  fi
+  if [ "$image_start_period_const" != "$start_period" ]; then
+    echo "::error::migration_lock.rs's IMAGE_START_PERIOD_SECS (${image_start_period_const}) disagrees with rs/Dockerfile's HEALTHCHECK --start-period (${start_period}s)." >&2
+    echo "  Bump both together, or the boot warning that compares the configured wait against IMAGE_START_PERIOD_SECS no longer reflects what the container actually tolerates." >&2
+    return 1
+  fi
+  echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config, start-period ${start_period}s >= ${required}s, IMAGE_START_PERIOD_SECS == start-period"
 }
 
 build_one() {
