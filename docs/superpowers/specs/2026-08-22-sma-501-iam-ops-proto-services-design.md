@@ -382,8 +382,18 @@ hand-rolling a skip fails `repo:iam-docker-policy-single-site`.
   authorizes at `root_prn()` and `http_dead_letters.rs:82` satisfies it with
   `support::provision_platform_admin`, while `grpc_authz.rs:194` uses `seed_platform_admin` at
   Root. The real reason is **seeding complexity**: beyond re-declaring `seed_orphan_chain` /
-  `seed_grants` / `seed_system_policy_with_revision`, the suite must drive `converge_starter_set`
-  through the real boot path to clear the D11 `min_starter_revision` fleet-convergence guard.
+  `seed_grants` / `seed_system_policy_with_revision`, the suite must satisfy the
+  `min_starter_revision` fleet-convergence guard inside `SystemRetirementService::retire` —
+  that is `application::system_retirement`'s OWN D11, not this document's D11, which is the
+  `locale`/`timezone` divergence below.
+
+  **Resolved during implementation:** driving `converge_starter_set` explicitly turned out to be
+  unnecessary. `AppState::new` unconditionally calls `bootstrap::reconcile_starter`, which stamps
+  every `STARTER_POLICY_IDS` row at this binary's `STARTER_POLICY_REVISION` on a fresh database —
+  the same function `authz_system_retirement_pg.rs::converge_starter_set` calls. Since every gRPC
+  suite builds `AppState::new`, the guard is satisfied by construction rather than by
+  environment-dependent ordering. The seeding complexity that justifies a separate suite is real;
+  this particular step was not.
 - **new** `tests/grpc_users.rs`: happy path, duplicate email → conflict, invalid email →
   `INVALID_ARGUMENT`, plus a test pinning D0 (a non-admin bearer succeeds — the absence of a check
   is deliberate).
