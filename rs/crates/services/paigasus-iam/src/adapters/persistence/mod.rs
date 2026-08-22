@@ -4,6 +4,7 @@
 
 pub mod entities;
 pub mod migration;
+pub mod migration_lock;
 pub mod pg_api_keys;
 pub mod pg_audit_log;
 pub mod pg_dead_letters;
