@@ -70,7 +70,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free
   :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site
   :input-liveness :promtool :observability-drift :nats-permissions :release-parity
-  :release-parity-py :release-parity-ts :publish-metadata --base origin/main --include-relations`
+  :release-parity-py :release-parity-ts :publish-metadata :version-lockstep --base origin/main
+  --include-relations`
   <!-- ci-targets:end -->
 - A new `repo:*` gate reds `:affected-smoke` until it is in **both** `ci.yml`'s `T=(…)` array and
   the marker-delimited command above — `ci/affected-graph/ci_targets.py` asserts the two agree, and

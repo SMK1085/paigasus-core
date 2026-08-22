@@ -121,12 +121,14 @@ It also runs several checks that the per-case project sets structurally **cannot
   make some other gate run at all — this gate's own invocation in `ci/affected-graph/run.sh`
   (`RUN_SH_CALL_SITES`, substring-matched, each already carrying its own `|| RC=1` propagation
   suffix); a self-scheduled gate's invocation inside its own `moon.yml` task script
-  (`SELF_SCHEDULED_GATES`, whole-line-matched — `repo:input-liveness`'s and the three
-  `repo:release-parity*`, SMA-553 / SMA-530); `repo:actionlint`'s own self-test and
-  mutation-battery calls inside `ci/actionlint/run.sh` (`ACTIONLINT_SH_CALL_SITES`,
-  whole-line-matched — SMA-542); and `ci/release-parity/run.sh`'s own `--negative-control`
-  logic — the flag parse, the guard, the assertion and the two report arms
-  (`RELEASE_PARITY_SH_CALL_SITES`, whole-line-matched — SMA-530); **C5** every
+  (`SELF_SCHEDULED_GATES`, whole-line-matched — `repo:input-liveness`'s, the three
+  `repo:release-parity*`, and `repo:version-lockstep`'s; SMA-553 / SMA-530 / SMA-576, each
+  pinning `set -euo pipefail` alongside both of its invocations); `repo:actionlint`'s own
+  self-test and mutation-battery calls inside `ci/actionlint/run.sh`
+  (`ACTIONLINT_SH_CALL_SITES`, whole-line-matched — SMA-542); and
+  `ci/release-parity/run.sh`'s own `--negative-control` logic — the flag parse, the guard,
+  the assertion and the two report arms (`RELEASE_PARITY_SH_CALL_SITES`, whole-line-matched
+  — SMA-530); **C5** every
   `moon ci` invocation in `ci.yml` is handed the WHOLE array — C1-C4 assert what is *in* `T`,
   and a subsetted `"${T[@]:0:5}"` leaves all four green while switching most of the graph
   off. C5's line matcher is deliberately BROADER than
@@ -161,6 +163,11 @@ It also runs several checks that the per-case project sets structurally **cannot
   `repo:affected-smoke` → `ci/affected-graph/run.sh --negative-control` → run.sh:404's
   `python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1`, a line pinned by
   `RUN_SH_CALL_SITES` above and mirrored by `ci/actionlint/run.sh`'s check 8c.
+  Each value there is the gate's WHOLE authored input set, globs first then literal files,
+  because moon resolves a wildcard entry into `inputGlobs` and a literal path into
+  `inputFiles`: `repo:version-lockstep` (SMA-576) declares sixteen literal paths and no glob
+  at all, so the glob-only comparison this replaced would have read every one of them as
+  absent — and, being `got != expected or files`, was unsatisfiable for a file-only gate.
 - **`task-inputs`** (`task_inputs.py`, SMA-553) asserts every `repo:*` task's declared `inputs`
   still match a tracked file — the layer below `ci-targets`, which proves only that a gate is
   *wired*. **I1** no glob matches zero tracked files; **I2** every file input is tracked, by exact

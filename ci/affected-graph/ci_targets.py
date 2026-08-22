@@ -165,7 +165,43 @@ REQUIRED_REPO_TASKS = (
 # SMA-553 D13 — repo:input-liveness's `inputs: ['**/*']` is load-bearing, and asserting it ONLY
 # inside that gate would make it the sole judge of its own configuration. This is the second,
 # independently-scheduled copy: it runs inside repo:affected-smoke.
-SELF_TASK_EXPECTED_GLOBS = {"input-liveness": ("**/*",)}
+#
+# THE NAME IS HISTORICAL: each value is that gate's WHOLE authored input set — globs first
+# (sorted), then literal files (sorted) — because moon resolves a wildcard `inputs:` entry into
+# inputGlobs and a LITERAL path into inputFiles. While this table held only repo:input-liveness
+# every value was a glob; repo:version-lockstep (SMA-576) declares sixteen literal paths and no
+# glob at all, so a glob-only comparison would have read every one of them as absent and the entry
+# could not have been written. The order is FIXED (globs, then files) purely so the comparison is
+# deterministic and the failure message reads in a stable order; what actually catches a widening
+# such as `rs/Cargo.toml` -> `rs/*.toml` is the changed STRING, which moves the entry between the
+# buckets and out of the expected sequence at the same time. The constant keeps its name because
+# CLAUDE.md's gotchas reference it verbatim.
+#
+# repo:version-lockstep's entry is the file-level twin of its SELF_SCHEDULED_GATES pin below: that
+# one proves the gate still RUNS both halves, this one proves it is still SCHEDULED by every file
+# that carries a version. Drop `py/uv.lock` here and the gate stops re-keying on the one file a
+# `uv lock` rewrite touches — it would still report PASS, from cache, over a tree it never read.
+SELF_TASK_EXPECTED_GLOBS = {
+    "input-liveness": ("**/*",),
+    "version-lockstep": (
+        "ci/version-lockstep/run.sh",
+        "py/packages/paigasus-kernel/pyproject.toml",
+        "py/packages/paigasus-proto/pyproject.toml",
+        "py/uv.lock",
+        "rs/Cargo.lock",
+        "rs/Cargo.toml",
+        "rs/crates/bindings/paigasus-node-bindings/Cargo.toml",
+        "rs/crates/bindings/paigasus-node-bindings/index.js",
+        "rs/crates/bindings/paigasus-node-bindings/package.json",
+        "rs/crates/bindings/paigasus-py-bindings/Cargo.toml",
+        "rs/crates/bindings/paigasus-py-bindings/pyproject.toml",
+        "rs/crates/bindings/paigasus-wasm/Cargo.toml",
+        "rs/crates/bindings/paigasus-wasm/package.json",
+        "rs/crates/libs/paigasus-kernel/Cargo.toml",
+        "rs/crates/libs/paigasus-proto-derive/Cargo.toml",
+        "rs/crates/libs/paigasus-proto/Cargo.toml",
+    ),
+}
 
 # C3 checks the flag tail too. The first spec draft omitted it on the stated grounds that
 # assert_include_relations "already owns the flag question" — it does not: that function greps
@@ -266,6 +302,19 @@ SELF_SCHEDULED_GATES = {
         "set -euo pipefail",
         "ci/release-parity/run.sh --ecosystem semantic-release --negative-control",
         "ci/release-parity/run.sh --ecosystem semantic-release",
+    ),
+    # SMA-576 — repo:version-lockstep, same three-line shape and the same reasoning end to end.
+    # The pipefail line is exactly as load-bearing as either invocation: Moon takes a `script:`
+    # block's status from its LAST command, so without it a `--negative-control` that has stopped
+    # being able to report red is masked by the real run passing, and the gate ships with no proof
+    # it bites. The whole-line discipline matters here for the same prefix reason as above —
+    # `bash ci/version-lockstep/run.sh` is a strict prefix of the control line, so under a
+    # substring test deleting the REAL RUN would leave this check green while CI only ever ran the
+    # control against a synthetic tree and never looked at the repo's actual versions.
+    "version-lockstep": (
+        "set -euo pipefail",
+        "bash ci/version-lockstep/run.sh --negative-control",
+        "bash ci/version-lockstep/run.sh",
     ),
 }
 
@@ -817,14 +866,22 @@ def check_self_invocation(run_sh_text, scripts, actionlint_sh_text, release_pari
     return missing
 
 
-def check_gate_inputs(projects):
-    """SMA-553 D13, mirrored. Rows for a self-scheduled gate whose own inputs have drifted."""
+def check_gate_inputs(projects, expected_table=SELF_TASK_EXPECTED_GLOBS):
+    """SMA-553 D13, mirrored. Rows for a self-scheduled gate whose own inputs have drifted.
+
+    `expected_table` defaults to the real registry and production never passes it — it exists so
+    self_test() can drive a gate declaring BOTH globs and literal files, which no registered gate
+    does today (repo:input-liveness is glob-only, repo:version-lockstep file-only) and which is
+    therefore the one property of the comparison the live table cannot exercise. The default is
+    asserted to still BE that registry, so this parameter cannot quietly point production at a
+    stub the way an `actionlint_sh_text=""` default would have (SMA-576).
+    """
     # Unlike _scripts(), no isinstance guard: main() runs _eligibility(raw_tasks) on this same
     # payload first, which raises MoonOutputError on any non-dict project value before this is
     # reached. Calling this standalone on malformed input will AttributeError.
     repo = projects.get("repo") or {}
     rows = []
-    for task, expected in sorted(SELF_TASK_EXPECTED_GLOBS.items()):
+    for task, expected in sorted(expected_table.items()):
         entry = repo.get(task)
         if not isinstance(entry, dict):
             rows.append(f"repo:{task} is absent from the graph, so its inputs cannot be checked")
@@ -851,16 +908,24 @@ def check_gate_inputs(projects):
         # copy can do is red with a misleading "authored inputs changed".
         got = tuple(g for g in sorted(globs_raw or {})
                     if g != ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}")
-        # moon resolves a LITERAL path in `inputs:` into inputFiles, not inputGlobs, so the
-        # glob tuple alone can still read as wired while the input set has in fact changed.
-        # Printed alongside the globs because otherwise this branch reports two identical
-        # lists and blames "narrowing", leaving the reader unable to see what moved.
-        files = sorted(files_raw or {})
-        if got != expected or files:
+        # moon resolves a LITERAL path in `inputs:` into inputFiles, not inputGlobs, so the glob
+        # tuple alone can still read as wired while the input set has in fact changed. Both buckets
+        # are therefore compared, as ONE sequence in a fixed order — globs then files (SMA-576).
+        #
+        # This used to be `got != expected or files`, i.e. "the globs must match AND there must be
+        # no file inputs at all", which was adequate while repo:input-liveness was the only entry
+        # in the table and its whole declaration was a single glob. It cannot express a gate whose
+        # authored inputs are literal paths: repo:version-lockstep declares sixteen of them and no
+        # glob, so that form would have reported it as drifted on every run. Comparing the combined
+        # sequence keeps every assertion the old form made — for a glob-only gate `files` is empty,
+        # so a stray file input still lands in the comparison and still reds — and adds the two the
+        # old form could not make: a dropped and an added file input.
+        files = tuple(sorted(files_raw or {}))
+        if tuple(got) + files != tuple(expected):
             rows.append(
-                f"repo:{task}'s authored inputs are {list(got) + files}, "
+                f"repo:{task}'s authored inputs are {list(got) + list(files)}, "
                 f"expected exactly {list(expected)} — changing them makes that gate stop "
-                "noticing the renames it exists to catch (SMA-553 D13)"
+                "noticing the drift it exists to catch (SMA-553 D13, SMA-576)"
             )
     return rows
 
@@ -1247,7 +1312,11 @@ def self_test():
             f"{line}\n" for line in SELF_SCHEDULED_GATES[task] if line != drop
         )
 
-    wired_script = wired_scripts()["input-liveness"]
+    wired_script = (
+        "set -euo pipefail\n"
+        "python3 ci/affected-graph/task_inputs.py --self-test\n"
+        "python3 ci/affected-graph/task_inputs.py\n"
+    )
     scripts = wired_scripts()
     # The builder must not silently under-cover: a typo'd comprehension that dropped a gate
     # would restore the very vacuity it exists to close, and every fixture below would go
@@ -1256,6 +1325,16 @@ def self_test():
         failures.append(
             f"wired_scripts: covers {sorted(scripts)}, registry has "
             f"{sorted(SELF_SCHEDULED_GATES)}"
+        )
+    # ...and the table must still spell repo:input-liveness's script out line for line
+    # (SMA-576). `wired_script` is an INDEPENDENT literal, not a slice of the registry, so a
+    # typo introduced into SELF_SCHEDULED_GATES reds here rather than silently propagating
+    # into every fixture built from it. It is also the haystack the two "swapped texts"
+    # fixtures below need in its own right.
+    if scripts.get("input-liveness") != wired_script:
+        failures.append(
+            "check_self_invocation fixture: SELF_SCHEDULED_GATES no longer spells out "
+            "repo:input-liveness's wired script line for line"
         )
     wired_actionlint = (
         # Load-bearing, exactly as `assert_ci_targets() {` is above: with the DEFINITION present,
@@ -1330,6 +1409,19 @@ def self_test():
         wired, wired_scripts(**{"input-liveness": ""}), wired_actionlint, wired_release_parity
     ):
         failures.append("check_self_invocation: missed an absent input-liveness script entirely")
+    # SMA-576, generalised. A registered gate whose script is missing from the payload
+    # ALTOGETHER — not merely short a line — must red just as loudly: that is what a gate
+    # silently dropped from moon.yml looks like from here. Driven from the registry for the
+    # same reason the line-deletion loop above is: the input-liveness-only spelling this
+    # replaces went vacuous the moment a second gate was registered.
+    for _task in sorted(SELF_SCHEDULED_GATES):
+        if not check_self_invocation(
+            wired, {k: v for k, v in wired_scripts().items() if k != _task}, wired_actionlint,
+            wired_release_parity,
+        ):
+            failures.append(
+                f"check_self_invocation: missed an absent repo:{_task} script entirely"
+            )
     # The two texts are checked SEPARATELY: a call site in the wrong file must not satisfy the
     # other's requirement, which a concatenated haystack would allow.
     if not check_self_invocation(
@@ -1568,23 +1660,76 @@ def self_test():
     # SMA-553 D13, mirrored here so repo:input-liveness is not the sole judge of its own inputs.
     # The wired row carries the implicit .moon glob moon injects into every task, which must be
     # tolerated rather than counted as drift.
-    if check_gate_inputs({"repo": {"input-liveness": {"inputGlobs": {
-        "**/*": {}, ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {}
-    }}}}):
+    #
+    # EVERY fixture below is built by `wired()`, which supplies a correctly-wired entry for each
+    # gate in SELF_TASK_EXPECTED_GLOBS and then replaces only the one under test (SMA-576). The
+    # rows used to hardcode a single-task payload, which was fine while the table had one entry
+    # and silently vacuous the moment it had two: check_gate_inputs reports every REGISTERED gate
+    # missing from the payload, so the "wired" row would have fired on the absent second gate
+    # rather than on what it was testing, and each negative row would have passed for that same
+    # wrong reason. Deriving the payload from the table also means it cannot go stale.
+    injected = ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}"
+
+    def wired(overrides=None):
+        repo = {}
+        for gate, want in SELF_TASK_EXPECTED_GLOBS.items():
+            globs = [g for g in want if any(c in g for c in "*?[{")]
+            repo[gate] = {
+                "inputGlobs": {**{g: {} for g in globs}, injected: {}},
+                "inputFiles": {f: {} for f in want if f not in globs},
+            }
+        repo.update(overrides or {})
+        return {"repo": repo}
+
+    if check_gate_inputs(wired()):
         failures.append("check_gate_inputs: fired on a wired inputs declaration")
-    if not check_gate_inputs({"repo": {"input-liveness": {"inputGlobs": {"ops/**/*": {}}}}}):
+    if not check_gate_inputs(wired({"input-liveness": {"inputGlobs": {"ops/**/*": {}}}})):
         failures.append("check_gate_inputs: missed inputs narrowed away from **/*")
     # ...and WIDENED with an extra glob, which is equally a change to a load-bearing input set.
     # Relaxing the exact `!=` to a subset test keeps every other row here green.
     if not check_gate_inputs(
-        {"repo": {"input-liveness": {"inputGlobs": {"**/*": {}, "ops/**/*": {}}}}}
+        wired({"input-liveness": {"inputGlobs": {"**/*": {}, "ops/**/*": {}}}})
     ):
         failures.append("check_gate_inputs: missed an extra glob alongside **/*")
-    # ...and a file input, which the `or files` clause exists SOLELY to catch: the glob tuple
-    # is untouched here, so deleting that clause leaves every other row green.
-    if not check_gate_inputs({"repo": {"input-liveness": {
-            "inputGlobs": {"**/*": {}}, "inputFiles": {".prototools": {}}}}}):
+    # ...and a file input on a GLOB-ONLY gate, which nothing but the files half of the comparison
+    # can catch: the glob tuple is untouched here, so dropping `files` from it leaves every other
+    # row green. (This was the `or files` clause before SMA-576 generalised the comparison.)
+    if not check_gate_inputs(wired({"input-liveness": {
+            "inputGlobs": {"**/*": {}}, "inputFiles": {".prototools": {}}}})):
         failures.append("check_gate_inputs: missed a file input")
+    # ...and both directions on a FILES-ONLY gate (SMA-576). repo:version-lockstep declares
+    # sixteen literal paths and no glob, so neither of these rows is visible to the glob tuple at
+    # all: dropping an input silently shrinks the set of files that re-key the gate — it then
+    # reports PASS from cache over a version site it never read — and adding one is equally a
+    # change to a set two independently scheduled gates are supposed to agree on.
+    files_only = wired()["repo"]["version-lockstep"]
+    dropped = dict(files_only, inputFiles=dict(list(files_only["inputFiles"].items())[1:]))
+    if not check_gate_inputs(wired({"version-lockstep": dropped})):
+        failures.append("check_gate_inputs: missed a dropped file input on a files-only gate")
+    added = dict(files_only, inputFiles={**files_only["inputFiles"], "rs/deny.toml": {}})
+    if not check_gate_inputs(wired({"version-lockstep": added})):
+        failures.append("check_gate_inputs: missed an extra file input on a files-only gate")
+    # ...and the ORDER the two buckets are compared in (SMA-576). Every row above is blind to it:
+    # both registered gates declare exactly one kind of input, so "globs then files" and "files
+    # then globs" agree on all of them, and a mutation reversing the two survived the whole battery
+    # until this pair. Driven through `expected_table` rather than by adding a fake gate to the
+    # live registry, so nothing about the real graph is disturbed.
+    mixed_payload = {"repo": {"mixed": {
+        "inputGlobs": {"a/**/*": {}, injected: {}}, "inputFiles": {"b.txt": {}}
+    }}}
+    if check_gate_inputs(mixed_payload, {"mixed": ("a/**/*", "b.txt")}):
+        failures.append("check_gate_inputs: fired on a wired globs-and-files declaration")
+    if not check_gate_inputs(mixed_payload, {"mixed": ("b.txt", "a/**/*")}):
+        failures.append("check_gate_inputs: accepted globs and files in the wrong order")
+    # ...and that the parameter above still defaults to the LIVE registry. Without this row a
+    # future refactor could hand production an empty or stubbed table and every check here would
+    # keep passing while the real gates went unasserted — the same hole the actionlint_sh_text
+    # signature row below exists to close.
+    gate_default = inspect.signature(check_gate_inputs).parameters["expected_table"].default
+    if gate_default is not SELF_TASK_EXPECTED_GLOBS:
+        failures.append(
+            "check_gate_inputs: expected_table must default to SELF_TASK_EXPECTED_GLOBS"
+        )
     # ...and the task vanishing from the graph, which must be a LOUD row rather than a silent
     # `continue`: a task that cannot be found cannot be checked, so skipping it asserts nothing.
     if not check_gate_inputs({"repo": {}}):
