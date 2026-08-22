@@ -233,7 +233,7 @@ SELF_SCHEDULED_GATES = {
         "python3 ci/affected-graph/task_inputs.py",
     ),
     # SMA-530. Three sibling tasks over one script, each with its own control: their inputs
-    # are DISJOINT (moon.yml:61-89), so a PR touching only ts/packages/paigasus-sdk/
+    # are DISJOINT (moon.yml:81-85, 96-101, 112-119), so a PR touching only ts/packages/paigasus-sdk/
     # .releaserc.json selects release-parity-ts and neither sibling — one shared control
     # would leave that PR running a parity gate with nothing proving it can report red.
     # Measured net cost +890ms/+733ms/+1111ms per task (~20%).
@@ -241,7 +241,7 @@ SELF_SCHEDULED_GATES = {
     # WHOLE-LINE matched, and that is load-bearing in one direction here: the real-run line
     # is a strict PREFIX of the control line in all three tasks, so a substring test would
     # let the REAL RUN be deleted while this pin stayed green. `set -euo pipefail` is pinned
-    # as a first-class required line for the reason recorded at :199-209 — Moon's script:
+    # as a first-class required line for the reason recorded at :211-221 — Moon's script:
     # blocks have no errexit, so deleting it leaves both invocations' text untouched while a
     # failing control is silently swallowed.
     #
@@ -271,7 +271,7 @@ SELF_SCHEDULED_GATES = {
 # ALLOW_NO_CARGO_BACKING, BRANCH_SKIP, COE_SKIP all work this way).
 #
 # Why an exemption rather than dropping the pairing rule: repo:affected-smoke's own inputs
-# are the most load-bearing input list in the repo (moon.yml:130-162, several entries
+# are the most load-bearing input list in the repo (moon.yml:160-197, several entries
 # carrying explicit do-not-remove comments), so when it is script-pinned later it MUST also
 # have its globs pinned. A plain subset rule would let that be skipped in silence.
 SELF_TASK_GLOBS_EXEMPT = {
@@ -334,13 +334,14 @@ SELF_TASK_GLOBS_EXEMPT = {
 # neither of which ever executes. Wrapping one of these six calls in a conditional block is
 # exactly the shape a false negative would take, and it conventionally INDENTS the wrapped line, so
 # matching now requires no leading whitespace at all (trailing whitespace is still stripped). This
-# is a deliberate ASYMMETRY with the other two haystacks, not an oversight: RUN_SH_CALL_SITES
+# is a deliberate ASYMMETRY with the other three haystacks, not an oversight: RUN_SH_CALL_SITES
 # matches substrings because its lines are indented inside a bash function, and
-# SELF_SCHEDULED_GATES strips both sides because moon task scripts are indented inside YAML — both
-# would break under a column-0 requirement. This haystack is different: `run_self_tests`,
+# SELF_SCHEDULED_GATES and RELEASE_PARITY_SH_CALL_SITES strip both sides because their lines are
+# indented (moon task scripts inside YAML; the `if` body inside run.sh) — all three would break
+# under a column-0 requirement. This haystack is different: `run_self_tests`,
 # `selftest_mutation_battery` and all four `done < <(...)` lines all sit at run.sh's TOP LEVEL
 # (verified: none is nested in a function, `if`, or loop), so column 0 is where the real, executing
-# call sites actually live, and is available as a signal here in a way it is not for the other two.
+# call sites actually live, and is available as a signal here in a way it is not for the other three.
 #
 # THIS IS NOT REACHABILITY ANALYSIS, and does not claim to be — parsing bash control flow in
 # Python is fragile and out of scope (spec decision). What it does NOT close: a required line
@@ -386,10 +387,11 @@ ACTIONLINT_SH_CALL_SITES = (
 )
 
 # SMA-530. The moon.yml pins above prove the CONTROL IS INVOKED; these prove it still DOES
-# something. run.sh:14 parses --negative-control into NEGATIVE, :63 asserts the harness against
-# a deliberately-wrong expectation, and :60-69 is the block that acts on the result — all three
-# are pinned here, because a review measured that pinning only the "act" block leaves two other
-# ways to defeat the control while every one of these three lines stays byte-identical:
+# something. run.sh:14 parses --negative-control into NEGATIVE, the guard at :60 gates the
+# control body on it, :63 asserts the harness against a deliberately-wrong expectation, and the
+# two report arms at :65-66 report the result — five lines in total, pinned here because a
+# review MEASURED that pinning only the "act" block (:60-69) leaves two bypasses that defeat the
+# control while every one of these five lines stays byte-identical:
 #   (a) neuter the PARSE (`--negative-control) shift ;;`, dropping `NEGATIVE=1`): NEGATIVE stays
 #       0 (initialised at :9, so `set -u` is satisfied), `run.sh --negative-control` falls
 #       straight through to the real suite and exits 0 — the exact failure this registry exists
@@ -397,6 +399,13 @@ ACTIONLINT_SH_CALL_SITES = (
 #   (b) gut the ASSERT (`ec=0; check_case ... || ec=$?` → `ec=1`): the control never invokes the
 #       harness at all, yet still prints "negative-control OK: harness reported red as expected"
 #       and exits 0 — worse than (a), since the control now actively asserts a lie.
+# These are the two bypasses a review MEASURED against pinning only the act block; they are not
+# an exhaustive enumeration of ways to defeat the control. A third, measured against the five-line
+# pin ITSELF, survives: an inserted `NEGATIVE=0` on its own line immediately before the :60 guard
+# (same outcome as (a): falls through to the real suite at rc 0) or all five pinned lines parked
+# verbatim inside a never-executed heredoc with the block deleted and the parse neutered. See
+# ci/release-parity/README.md's Limitations section L5 for that residual and why closing it
+# generally is out of scope.
 # SELF_SCHEDULED_GATES cannot see any of this: it pins moon.yml text, not run.sh semantics. Same
 # class as ACTIONLINT_SH_CALL_SITES above, and the same lesson SMA-542 I1 and CodeRabbit round 4
 # C1 each cost a round to learn — a gate check's own call site is what goes unguarded.
@@ -783,7 +792,7 @@ def check_self_invocation(run_sh_text, scripts, actionlint_sh_text, release_pari
         present = {line.strip() for line in scripts.get(task, "").splitlines()}
         missing.extend(f"{task} script: {site}" for site in required if site not in present)
     # COLUMN 0 only (rstrip, no lstrip) — see the comment at ACTIONLINT_SH_CALL_SITES above for why
-    # this one haystack, alone of the three, requires the line to carry NO leading whitespace: an
+    # this one haystack, alone of the four, requires the line to carry NO leading whitespace: an
     # indented copy (e.g. wrapped in `if false; then … fi`) must not satisfy the pin.
     actionlint_lines = {
         line.rstrip() for line in actionlint_sh_text.splitlines() if line == line.lstrip()
@@ -1332,7 +1341,7 @@ def self_test():
         wired_release_parity,
     ):
         failures.append("check_self_invocation: a run.sh call site was satisfied by script text")
-    # The "fired on a wired tree" positive control above already covers all three haystacks
+    # The "fired on a wired tree" positive control above already covers all four haystacks
     # simultaneously wired, including wired_actionlint — a second, argument-identical repeat here
     # would only ever fire alongside that one and add no coverage (SMA-542 review, smaller
     # correction 2).
@@ -1706,9 +1715,12 @@ def main():
          "    A row prefixed `ci/actionlint/run.sh:` means repo:actionlint would run its checks\n"
          "    while asserting nothing — its self-tests or its mutation battery are no longer\n"
          "    invoked.\n"
-         "    A row prefixed `ci/release-parity/run.sh:` means the --negative-control FLAG is\n"
-         "    still parsed but the block that acts on it is gone, so the control silently runs\n"
-         "    the real suite twice and can no longer report red."),
+         "    A row prefixed `ci/release-parity/run.sh:` means one of the five pinned\n"
+         "    --negative-control lines — the flag parse, the NEGATIVE guard, the check_case\n"
+         "    assertion, or either report arm — is gone from run.sh: whichever one the row\n"
+         "    names is missing, so the control can no longer do its job (a missing parse or\n"
+         "    guard falls straight through to the real suite and reports nothing; a missing\n"
+         "    assertion or report arm breaks or misreports the control's own verdict)."),
         (bad_invocation,
          "A `moon ci` invocation in .github/workflows/ci.yml does not hand it the WHOLE `T`\n"
          "    array. Every check above asserts what is IN `T`; this one asserts `T` is what runs.\n"

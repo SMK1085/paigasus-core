@@ -127,10 +127,9 @@ It also runs several checks that the per-case project sets structurally **cannot
   whole-line-matched — SMA-542); and `ci/release-parity/run.sh`'s own `--negative-control`
   logic — the flag parse, the guard, the assertion and the two report arms
   (`RELEASE_PARITY_SH_CALL_SITES`, whole-line-matched — SMA-530); **C5** every
-  `moon ci` invocation in `ci.yml` is handed the WHOLE array — C1-C4 assert what is *in*
-  `T`, and a subsetted
-  `"${T[@]:0:5}"` leaves all four green while switching most of the graph off. C5's line matcher
-  is deliberately BROADER than
+  `moon ci` invocation in `ci.yml` is handed the WHOLE array — C1-C4 assert what is *in* `T`,
+  and a subsetted `"${T[@]:0:5}"` leaves all four green while switching most of the graph
+  off. C5's line matcher is deliberately BROADER than
   `assert_include_relations`' `moon ci +"` grep: mirroring it left both blind to a subsetted array
   behind a leading flag (`moon ci --base origin/main "${T[@]:0:5}"`). `moon ci` exits **0** on a target that resolves to nothing —
   measured, including the mixed case — so without C2 a renamed or mistyped entry is a silent no-op
@@ -156,7 +155,12 @@ It also runs several checks that the per-case project sets structurally **cannot
   carry a reasoned `SELF_TASK_GLOBS_EXEMPT` entry; an exemption naming no script-pinned
   gate, or one with a blank reason, is itself reported. The registries were equality-paired
   until SMA-530 — a plain subset would have let `repo:affected-smoke` be script-pinned
-  later without pinning the inputs that make every pin in this file reachable.
+  later without pinning the inputs that make every pin in this file reachable. The function
+  that asserts this pairing, `check_registry_pairing`, is not called from `main()` — it is
+  exercised only via the `--self-test` path, which CI reaches through
+  `repo:affected-smoke` → `ci/affected-graph/run.sh --negative-control` → run.sh:404's
+  `python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1`, a line pinned by
+  `RUN_SH_CALL_SITES` above and mirrored by `ci/actionlint/run.sh`'s check 8c.
 - **`task-inputs`** (`task_inputs.py`, SMA-553) asserts every `repo:*` task's declared `inputs`
   still match a tracked file — the layer below `ci-targets`, which proves only that a gate is
   *wired*. **I1** no glob matches zero tracked files; **I2** every file input is tracked, by exact

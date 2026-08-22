@@ -157,25 +157,32 @@ the `if [ "$NEGATIVE" = 1 ]; then` guard, the assertion body `check_case "neg-fi
 and both report arms — the `exit 0` on "reported red as expected" and the `exit 1` on
 "accepted a wrong expectation"), from inside `repo:affected-smoke` — a separately scheduled
 gate, so neither judges its own wiring. Five discrete lines, not one span, because pinning
-the block as a unit left two measured bypasses with different failure shapes: neutering the
+the block as a unit left two MEASURED bypasses with different failure shapes: neutering the
 flag parse (dropping `NEGATIVE=1`) leaves `NEGATIVE` at its initialized 0, so the control
 branch is never entered and the invocation falls through to the real suite, which then just
 runs twice and proves nothing; gutting the assertion body (replacing the `check_case` call
 with a bare `ec=1`) never calls the harness at all yet still prints "reported red as
-expected" — a control that actively lies rather than one that merely no-ops.
+expected" — a control that actively lies rather than one that merely no-ops. Those two are
+what pinning five lines instead of one span closes; they are not the full set of ways to
+defeat the control — see L5 for a residual that survives all five pins.
 `repo:affected-smoke` lists `ci/release-parity/**/*` in its inputs to make this pin
 reachable.
 
 ### Limitations
 
-- **L1 — `repo:affected-smoke`'s own `moon.yml` input is unpinned.** Every pin above
-  depends on `- 'moon.yml'` (`moon.yml:164`). Deleting that entry is itself a root
-  `moon.yml` edit, and afterwards the task's remaining globs do not match the root file
-  (`*/moon.yml` matches `rs/moon.yml`, not `moon.yml`; `.moon/**/*` does not match it), so
-  the removal PR would not schedule the gate. Pre-existing — the `input-liveness` pin
-  rests on the same entry — and closing it needs a *containment* variant of
-  `SELF_TASK_EXPECTED_GLOBS`, which is today an exact match.
-- **L2 — the task-script haystack strips both sides** (`ci_targets.py:783`), so an
+- **L1 — `repo:affected-smoke`'s own inputs are unpinned.** Every pin above depends on that
+  task being scheduled at all, and NONE of its `inputs` entries is itself pinned by anything —
+  including `- 'ci/release-parity/**/*'` (`moon.yml:187`), the entry this branch adds and the
+  one `RELEASE_PARITY_SH_CALL_SITES` is reachable through. Deleting that entry is green today
+  and would silently un-reach `RELEASE_PARITY_SH_CALL_SITES` for every later PR under
+  `ci/release-parity/`. The same is true of `- 'moon.yml'` (`moon.yml:164`): deleting it is
+  itself a root `moon.yml` edit, and afterwards the task's remaining globs do not match the
+  root file (`*/moon.yml` matches `rs/moon.yml`, not `moon.yml`; `.moon/**/*` does not match
+  it), so the removal PR would not schedule the gate. Pre-existing — the `input-liveness` pin
+  rests on the same `moon.yml` entry, and matches the accepted `ci/actionlint/**/*` precedent —
+  and closing it needs a *containment* variant of `SELF_TASK_EXPECTED_GLOBS`, which is today an
+  exact match.
+- **L2 — the task-script haystack strips both sides** (`ci_targets.py:792`), so an
   indented copy inside `if false; then … fi` satisfies the pin. The column-0 rule that
   rejects this for the actionlint haystack is unavailable here: Moon task scripts are
   indented inside YAML. Separately, `set +e` inserted *after* the pipefail line satisfies
@@ -188,3 +195,18 @@ reachable.
   hardcodes it as "deliberately wrong" for `fix!` in 0.x. Should the canonical contract
   ever change so that value becomes correct, all three controls red spuriously and the
   diagnosis is non-obvious.
+- **L5 — whole-line pins prove presence, not exclusivity.** All five
+  `RELEASE_PARITY_SH_CALL_SITES` entries staying byte-identical proves the required lines are
+  still THERE; it proves nothing about what else was added around them. Two bypasses were
+  measured that satisfy every one of the five pins while still defeating the control: inserting
+  a bare `NEGATIVE=0` on its own line immediately before the `if [ "$NEGATIVE" = 1 ]; then` guard
+  (the guard is never entered, execution falls straight through to the real suite, exit 0 — the
+  same outcome as the flag-parse bypass above), and deleting the block, neutering the parse, and
+  parking all five pinned lines verbatim inside a never-executed heredoc
+  (`: <<'DEADPIN' … DEADPIN`). This is the same class L2 records for the task-script haystack —
+  it strips both sides too, so the same insertion/heredoc shape applies there just as much as
+  here — and the same one `ci_targets.py` already disclaims for the actionlint haystack ("THIS IS
+  NOT REACHABILITY ANALYSIS"): parsing bash control flow in Python to close this generally is
+  fragile and out of scope (spec decision). The narrower fail-safe available if this ever bites:
+  a count assertion such as `release_parity_sh_text.count("NEGATIVE=") == 2`, which can only
+  false-red, never silently pass a bypass — not implemented here, just recorded as the option.
