@@ -241,12 +241,16 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   own control because their `inputs` are disjoint — a PR touching only a `.releaserc.json`
   selects `-ts` alone. Two pins guard it, both living in `ci/affected-graph/ci_targets.py`
   and both running inside `repo:affected-smoke`: `SELF_SCHEDULED_GATES` pins the nine
-  `moon.yml` lines (byte-exact whole lines — reordering a flag or adding a trailing comment
-  reds it), and `RELEASE_PARITY_SH_CALL_SITES` pins five discrete lines inside `run.sh`
-  itself — the flag parse, the `NEGATIVE` guard, the assertion body, and both report arms —
-  because pinning the span as one block left two working bypasses: the flag-parse line or
-  the `if` guard could each be deleted alone, making `--negative-control` silently fall
-  through to the real suite and exit 0. That second pin is reachable only because
+  `moon.yml` lines (whole lines, compared after stripping — reordering a flag or adding a
+  trailing comment still reds it), and `RELEASE_PARITY_SH_CALL_SITES` pins five discrete
+  lines inside `run.sh` itself — the flag parse, the `NEGATIVE` guard, the assertion body,
+  and both report arms — because pinning the span as one block left two measured bypasses
+  with different failure shapes: neutering the flag parse (dropping `NEGATIVE=1`) leaves
+  `NEGATIVE` at its initialized 0, so the control branch is never entered and the invocation
+  falls through to the real suite, which then just runs twice and proves nothing; gutting
+  the assertion body (replacing the `check_case` call with a bare `ec=1`) never calls the
+  harness at all yet still prints "reported red as expected" — a control that actively lies
+  rather than one that merely no-ops. That second pin is reachable only because
   `repo:affected-smoke` lists `ci/release-parity/**/*` in its `inputs` — do not remove it. A
   script-pinned gate needs either a `SELF_TASK_EXPECTED_GLOBS` entry or a reasoned
   `SELF_TASK_GLOBS_EXEMPT` one. Note a `moon.yml`-only edit does NOT select the

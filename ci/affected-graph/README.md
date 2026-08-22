@@ -117,7 +117,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
   entry resolves to a CI-eligible task somewhere in the graph; **C3** CLAUDE.md's marker-delimited
   command mirrors `T` token-for-token in order and keeps its `--base origin/main
-  --include-relations` tail; **C4** three separate haystacks all still carry the call site(s) that
+  --include-relations` tail; **C4** four separate haystacks all still carry the call site(s) that
   make some other gate run at all — this gate's own invocation in `ci/affected-graph/run.sh`
   (`RUN_SH_CALL_SITES`, substring-matched, each already carrying its own `|| RC=1` propagation
   suffix); a self-scheduled gate's invocation inside its own `moon.yml` task script
@@ -125,7 +125,8 @@ It also runs several checks that the per-case project sets structurally **cannot
   `repo:release-parity*`, SMA-553 / SMA-530); `repo:actionlint`'s own self-test and
   mutation-battery calls inside `ci/actionlint/run.sh` (`ACTIONLINT_SH_CALL_SITES`,
   whole-line-matched — SMA-542); and `ci/release-parity/run.sh`'s own `--negative-control`
-  block (`RELEASE_PARITY_SH_CALL_SITES`, whole-line-matched — SMA-530); **C5** every
+  logic — the flag parse, the guard, the assertion and the two report arms
+  (`RELEASE_PARITY_SH_CALL_SITES`, whole-line-matched — SMA-530); **C5** every
   `moon ci` invocation in `ci.yml` is handed the WHOLE array — C1-C4 assert what is *in*
   `T`, and a subsetted
   `"${T[@]:0:5}"` leaves all four green while switching most of the graph off. C5's line matcher

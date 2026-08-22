@@ -157,10 +157,14 @@ the `if [ "$NEGATIVE" = 1 ]; then` guard, the assertion body `check_case "neg-fi
 and both report arms — the `exit 0` on "reported red as expected" and the `exit 1` on
 "accepted a wrong expectation"), from inside `repo:affected-smoke` — a separately scheduled
 gate, so neither judges its own wiring. Five discrete lines, not one span, because pinning
-the block as a unit left two working bypasses: the flag-parse line or the `if` guard could
-each be deleted alone, silently turning `--negative-control` into a no-op that falls through
-to the real suite and exits 0. `repo:affected-smoke` lists `ci/release-parity/**/*` in its
-inputs to make this pin reachable.
+the block as a unit left two measured bypasses with different failure shapes: neutering the
+flag parse (dropping `NEGATIVE=1`) leaves `NEGATIVE` at its initialized 0, so the control
+branch is never entered and the invocation falls through to the real suite, which then just
+runs twice and proves nothing; gutting the assertion body (replacing the `check_case` call
+with a bare `ec=1`) never calls the harness at all yet still prints "reported red as
+expected" — a control that actively lies rather than one that merely no-ops.
+`repo:affected-smoke` lists `ci/release-parity/**/*` in its inputs to make this pin
+reachable.
 
 ### Limitations
 
