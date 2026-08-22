@@ -42,7 +42,7 @@ uuid = { version = "1" }
 # feeds random bytes into the kernel's pure `mint_uuid7`). Native-only consumer — must not
 # leak into the wasm-bindgen crate's dependency tree (same getrandom/wasm concern as uuid
 # above); `moon run repo:wasm-getrandom-free` guards this.
-rand = "0.9"
+rand = "0.10"
 bytes = "1"
 # Proto codegen runtimes — versions track the pinned neoeinstein-prost/tonic
 # v0.5.0 plugins (prost 0.14 / tonic 0.14). tonic 0.14 split the prost codec into
