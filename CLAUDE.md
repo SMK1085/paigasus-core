@@ -262,6 +262,46 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `SELF_TASK_GLOBS_EXEMPT` one. Note a `moon.yml`-only edit does NOT select the
   `release-parity*` tasks (their own `script:` is not among their inputs), so a PR changing
   those blocks should also touch `ci/release-parity/**` if it wants CI to execute them.
+- The kernel family (`paigasus-kernel` + the three binding crates + their `pyproject.toml` /
+  `package.json` faces) carries **one version** across eighteen sites, asserted by
+  `repo:version-lockstep` (`ci/version-lockstep/run.sh`). release-plz owns every Cargo
+  `[package] version` — via per-package `version_group` — **and** the `[workspace.dependencies]`
+  version requirements; both were measured against the pinned 0.3.158, as was the fact that
+  `version_group` applies to crates whose Cargo manifest says `publish = false`. The script owns
+  the six sites Cargo cannot reach (`--write`) and checks all eighteen, because a `version_group`
+  that silently stopped applying would otherwise go unnoticed. Two of the sites drift SILENTLY
+  without it: `py/uv.lock` (its `moon.yml` runs bare `uv sync`, not `--locked`) and the 26
+  `bindingPackageVersion` guards in the committed napi glue (the codegen-drift gate covers only
+  the three `**/generated` proto dirs). `repo:version-lockstep` is script-pinned the same way the
+  `release-parity*` tasks are — `SELF_SCHEDULED_GATES` pins its three `moon.yml` lines (control,
+  real run, `set -euo pipefail`) — and takes the `SELF_TASK_EXPECTED_GLOBS` route through the
+  pairing rule above, listing all sixteen of its literal `inputs`, so it needs no
+  `SELF_TASK_GLOBS_EXEMPT` entry (holding both would itself be reported).
+- `rs/release-plz.toml` declares releasability **per package**, never workspace-wide. A
+  `[workspace] release = false` makes release-plz hard-error (`no public packages found`), and
+  simply deleting it is worse: `dependencies_update = true` cascades a patch bump into every
+  transitive dependent — a crate neither in the version group nor touched by the commit still
+  gets bumped ("dependencies changed") — and Cargo's `publish = false` suppresses publishing but
+  **not tagging**, so the first release would permanently tag most of the workspace. Per-package
+  `release = false` removes a package from the proposal entirely; every non-family crate needs
+  one explicitly. `paigasus-gateway` / `paigasus-iam` stay at `0.0.0` deliberately: their
+  `env!("CARGO_PKG_VERSION")` feeds `ServiceInfo`, and ADR-0020 skew reporting is parked on that
+  value (SMA-505 R7).
+- release-plz's `release_pr()` does all its work in a **tempdir copy** (`copy_to_temp_dir`,
+  measured against the pinned 0.3.158) — it never touches the local working tree or `HEAD`. This
+  nearly shipped a direct push to `main`: deriving the push target with `git rev-parse
+  --abbrev-ref HEAD` after `release-plz release-pr` still reads `main`, so `git push origin
+  "HEAD:$BRANCH"` becomes an unreviewed push to protected `main` (the `Protect main` ruleset has
+  no `pull_request` rule and a `bypass_actors` entry for admin). Always derive the branch from
+  `release-plz release-pr --output json`'s `.prs[0].head_branch`; the `prs` array is empty
+  whenever no release is needed — see the next entry.
+- release-plz's version baseline is the **crates.io registry**, not git tags (no `git_only` is
+  set in `rs/release-plz.toml`). Measured on this repo at the `0.1.0` floor: it logs `WARN
+  Package 'paigasus-kernel@*.*.*' not found`, then proposes `next version is 0.1.0` — the
+  manifest version, no bump. So the **first release PR will be empty**, and "the release PR is
+  the acceptance evidence" does not hold for the first run. The real hazard here is name
+  squatting — release-plz performs a crates.io lookup for every workspace member name, so a
+  squatted name silently becomes the comparison baseline — not a runaway version proposal.
 
 ## Workflow
 

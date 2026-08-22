@@ -1,6 +1,6 @@
 # SMA-407 — Release activation: `0.1.0` floor, kernel/proto lockstep, live release workflows
 
-**Status:** Approved (brainstorming 2026-08-22; **adversarial review incorporated — B1–B6, M1–M14**; **decomposition accepted 2026-08-22 — §12**)
+**Status:** Approved (brainstorming 2026-08-22; **adversarial review incorporated — B1–B6, M1–M14**; **decomposition accepted 2026-08-22 — §12**). **SMA-576 implemented 2026-08-22** — kernel-family `0.1.0` floor, `repo:version-lockstep`, per-package release-plz releasability, and the live `release-pr` job. **SMA-577–580 remain open** (§12).
 **Date:** 2026-08-22
 **Linear:** umbrella [SMA-407](https://linear.app/smaschek/issue/SMA-407/release-activation-000-010-floor-kernelproto-lockstep-wiring-live) → children SMA-576 … SMA-580 (§12)
 **Implements here:** **SMA-576** only — the kernel-family floor, the lockstep gate, and the `release-pr` job.
@@ -344,14 +344,20 @@ configuration `rs/release-plz.toml` sets no `git_only`, so release-plz's baselin
 For a package absent from the registry, the expected behaviour is therefore to treat it as new and
 propose the **manifest version** — `0.1.0`, no bump.
 
+**Confirmed by SMA-576 (was a prediction; now measured).** Running `release-plz release-pr` on
+this repo at the `0.1.0` floor logs `WARN Package 'paigasus-kernel@*.*.*' not found`, then
+proposes `next version is 0.1.0` — the manifest version, no bump, exactly as predicted. The
+`release-pr --output json` result's `prs` array is empty: **the first release PR is empty.**
+
 Two consequences the first draft missed:
 
 1. **The §7 job split was justified by a hazard that probably does not exist in that form.** The
    split is still right — for the reasons in §7 (token strategy, credential isolation, observing
    real behaviour before publishing) — but the justification must be restated honestly.
-2. **The acceptance criterion may be unsatisfiable as written.** If release-plz proposes no change,
-   there is no release PR and therefore no "end-to-end evidence". The plan must state what evidence
-   looks like in the likely empty-PR case.
+2. **The acceptance criterion is unsatisfiable as written, confirmed.** Release-plz proposes no
+   change, so there is no release PR and therefore no "end-to-end evidence" from the first run —
+   this is no longer a hypothetical to plan around, it is what SMA-576 actually observed. Evidence
+   for that run is the empty `prs` array plus the log lines above, not a PR diff.
 
 **The real hazard is name squatting.** With `git_only` unset, release-plz performs a crates.io
 lookup for **every** workspace member name — `paigasus-logging`, `paigasus-observability`, … — and a
