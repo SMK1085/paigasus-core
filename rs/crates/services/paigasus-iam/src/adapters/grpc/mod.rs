@@ -5,13 +5,16 @@
 //! layer (SMA-443 Task 12), the `AuthorizationService` (SMA-444 Task 19), the
 //! `ServiceAccountService` (SMA-445 Task 21), the `ServiceInfoService` (SMA-505, always
 //! mounted), the `UserService` (SMA-501, always mounted — see `users` module doc for why
-//! `CreateUser` is deliberately unauthorized), and — when `iam.audit` is enabled — the
+//! `CreateUser` is deliberately unauthorized), the `OutboxService` (SMA-501, ALWAYS mounted —
+//! see `dead_letters` module doc for why this break-glass surface is not capability-gated,
+//! unlike its `AuditService` neighbour), and — when `iam.audit` is enabled — the
 //! `AuditService` (SMA-446 Task A10).
 
 pub mod audit;
 pub mod authn;
 pub mod authz;
 pub mod convert;
+pub mod dead_letters;
 pub mod service_accounts;
 pub mod service_info;
 pub mod tenancy;
@@ -27,11 +30,13 @@ use crate::adapters::http::AppState;
 use audit::AuditGrpc;
 use authn::{AuthLayer, AuthnGrpc};
 use authz::AuthzGrpc;
+use dead_letters::OutboxGrpc;
 use paigasus_observability::CorrelationLayer;
 use paigasus_proto::paigasus::common::v1::service_info_service_server::ServiceInfoServiceServer;
 use paigasus_proto::paigasus::iam::v1::audit_service_server::AuditServiceServer;
 use paigasus_proto::paigasus::iam::v1::authn_service_server::AuthnServiceServer;
 use paigasus_proto::paigasus::iam::v1::authorization_service_server::AuthorizationServiceServer;
+use paigasus_proto::paigasus::iam::v1::outbox_service_server::OutboxServiceServer;
 use paigasus_proto::paigasus::iam::v1::service_account_service_server::ServiceAccountServiceServer;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_server::TenancyServiceServer;
 use paigasus_proto::paigasus::iam::v1::user_service_server::UserServiceServer;
@@ -58,7 +63,9 @@ pub async fn health_service() -> (
 /// A tonic `Server` router with the health service, the `TenancyService` (Task 16), the
 /// `AuthnService` (Task 12), the `AuthorizationService` (SMA-444 Task 19), the
 /// `ServiceAccountService` (SMA-445 Task 21), the `ServiceInfoService` (SMA-505, always
-/// mounted), the `UserService` (SMA-501, always mounted), and — when `iam.audit` is enabled —
+/// mounted), the `UserService` (SMA-501, always mounted), the `OutboxService` (SMA-501, ALWAYS
+/// mounted — a break-glass surface must not be disable-able, unlike the read-only
+/// `AuditService` below it; see `dead_letters` module doc), and — when `iam.audit` is enabled —
 /// the `AuditService` (SMA-446 Task A10) mounted, serving a static `SERVING` health status (see
 /// `health_service`). [`CorrelationLayer`] (SMA-504) and `AuthLayer` both wrap the whole server,
 /// `CorrelationLayer` applied FIRST so it is outermost among our two — a bearer rejection still
@@ -68,9 +75,10 @@ pub async fn health_service() -> (
 /// accepted gap (closing it would mean reimplementing tonic's timeout). Health and
 /// `AuthnService.Introspect`/`IntrospectApiKey` are `:path`-exempt from bearer enforcement,
 /// every `TenancyService`/`AuthorizationService`/`ServiceAccountService`/`ServiceInfoService`/
-/// `UserService`/`AuditService` RPC is not (spec §7.4, D14) — `UserService.CreateUser` is
-/// bearer-required but otherwise unauthorized BY DESIGN (see `users` module doc). `main` calls
-/// `.serve_with_shutdown`. The reporter is dropped here — dynamic readiness is deferred to M1.
+/// `UserService`/`OutboxService`/`AuditService` RPC is not (spec §7.4, D14) —
+/// `UserService.CreateUser` is bearer-required but otherwise unauthorized BY DESIGN (see
+/// `users` module doc). `main` calls `.serve_with_shutdown`. The reporter is dropped here —
+/// dynamic readiness is deferred to M1.
 pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRouter<Stack<AuthLayer, Stack<CorrelationLayer, Identity>>> {
     let (_reporter, health) = health_service().await;
     let audit_enabled = state.capabilities.audit_query;
@@ -93,7 +101,14 @@ pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRoute
         .add_service(ServiceInfoServiceServer::new(ServiceInfoGrpc::new(state.clone())))
         // SMA-501: always served, mirroring HTTP's unconditional `/v1/users` mount — see
         // `users` module doc for why `CreateUser` performs no authorization check.
-        .add_service(UserServiceServer::new(UserGrpc::new(state.clone())));
+        .add_service(UserServiceServer::new(UserGrpc::new(state.clone())))
+        // SMA-501: always served, UNCONDITIONALLY — deliberately unlike `AuditService` below,
+        // which is dropped entirely when `iam.audit` is off. `iam.audit` gates a READ-ONLY
+        // surface; `OutboxService` permanently discards events and bulk-replays up to 10 000
+        // rows — a break-glass surface must not be disable-able, because the moment you need it
+        // is the moment a config flag is hardest to change. HTTP mounts `dead_letters::router()`
+        // ungated too (see its module doc), so gating gRPC alone would itself be a divergence.
+        .add_service(OutboxServiceServer::new(OutboxGrpc::new(state.clone())));
     // `AuditService` is WHOLLY within `iam.audit`, so it is not registered at all when the
     // capability is off — a client then gets `UNIMPLEMENTED`, exactly as it would from a build
     // predating the service. `add_service` returns `Self`, so this does not disturb the
