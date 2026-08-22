@@ -12,10 +12,19 @@ fileGroups:
     - 'tests/**/*'
     - '**/*_test.rs'
 
+# `@group(upstreams)` (SMA-528) is each crate's transitive dependsOn closure, declared per-crate in
+# its own moon.yml. It is what makes a CONSUMER affected by an UPSTREAM source change: Moon 2.3.2
+# confers affectedness only through a task's own `inputs`, so `dependsOn` and the `^:build` below
+# schedule an upstream's build but never SELECT this crate. Without it `moon ci` ran a kernel edit's
+# own tests and no consumer's — including paigasus-kernel-parity-rs, the ADR-0005 harness.
+# It also fixes a cache-correctness bug that is independent of scheduling: a consumer whose inputs
+# omit its upstreams replays a cached PASS built against a DIFFERENT upstream.
+# Deliberately NOT on `fmt` (crate-local by construction) or `build-release` (never runs in CI);
+# neither carries `^:build` either.
 tasks:
   build:
     command: 'cargo build'
-    inputs: ['@group(sources)', 'Cargo.toml']
+    inputs: ['@group(sources)', 'Cargo.toml', '@group(upstreams)']
   build-release:
     command: 'cargo build --release'
     inputs: ['@group(sources)', 'Cargo.toml']
@@ -27,7 +36,7 @@ tasks:
     # `implicitInputs` covers only `.moon/*`. Without this, editing the retry policy would not
     # bust this task's cache (stale PASS) and a profile-only PR would not select it under
     # `moon ci --affected`.
-    inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml', '/rs/.config/nextest.toml']
+    inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml', '/rs/.config/nextest.toml', '@group(upstreams)']
   lint:
     # `--locked` so clippy lints the resolution the PR actually SHIPS. Without it cargo silently
     # re-resolves and rewrites an inconsistent Cargo.lock, and the thirteen lints below would
@@ -37,12 +46,12 @@ tasks:
     # (`ci/publish-metadata/run.sh:243,258`). A Dependabot Cargo PR has already shipped a lockfile
     # resolved from 3 of 11 workspace members here (SMA-534).
     command: 'cargo clippy --locked --all-targets -- -D warnings'
-    # `^:build` is what makes a task AFFECTED when an upstream changes. Without it clippy
-    # propagated across no edge at all, so an upstream change that tripped `-D warnings` in a
-    # CONSUMER shipped green and redded main later (SMA-526). Declared here rather than per-crate
-    # so a new crate has no per-crate `lint` declaration to forget. A `workspace = true` in-tree
-    # dep still needs its own hand-written `dependsOn` (SMA-524) — the parity gate's A1 catches
-    # that separately.
+    # `^:build` schedules each upstream's build before this crate's clippy runs (and orders
+    # `contracts:generate` on the proto chain); it does NOT confer affectedness —
+    # `@group(upstreams)` does (SMA-528). Without it clippy compiled against a stale upstream
+    # artifact (SMA-526). Declared here rather than per-crate so a new crate has no per-crate
+    # `lint` declaration to forget. A `workspace = true` in-tree dep still needs its own
+    # hand-written `dependsOn` (SMA-524) — the parity gate's A1 catches that separately.
     # `repo:affected-smoke` asserts this expansion for every crate (cargo_moon_parity.py A3).
     deps: ['^:build']
     # The three WORKSPACE-level inputs (SMA-534). `rs/` has no Moon project, so without these a
@@ -70,6 +79,7 @@ tasks:
       - '/rs/Cargo.toml'
       - '/rs/Cargo.lock'
       - '/rs/rust-toolchain.toml'
+      - '@group(upstreams)'
   fmt:
     command: 'cargo fmt --check'
     inputs: ['@group(sources)']

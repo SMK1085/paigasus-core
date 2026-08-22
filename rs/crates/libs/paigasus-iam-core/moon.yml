@@ -7,6 +7,15 @@ language: 'rust'
 dependsOn:
   - 'paigasus-kernel-rs'
 
+# SMA-528 — the transitive dependsOn closure's sources, consumed by build/test/lint via
+# `@group(upstreams)` in .moon/tasks/rust.yml. Moon confers affectedness ONLY through a task's own
+# `inputs`; dependsOn and `^:build` schedule an upstream but never select this crate. Asserted to
+# strict equality by repo:affected-smoke's A6.
+fileGroups:
+  upstreams:
+    - '/rs/crates/libs/paigasus-kernel/src/**/*'
+    - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
+
 tasks:
   build:
     deps: ['^:build']

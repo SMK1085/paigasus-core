@@ -7,13 +7,33 @@ language: 'rust'
 dependsOn:
   - 'paigasus-proto-rs'
   # No Cargo dep backs this edge — the gateway does not use the kernel. Kept deliberately as an
-  # over-approximation: over-building costs CI time but can never under-build, and removing it would
-  # change the `kernel->bindings` expected set that SMA-409 owns. Allowlisted in
-  # ci/affected-graph/cargo_moon_parity.py (SMA-524 D4).
+  # over-approximation: removing it would change the `kernel->bindings` expected set that SMA-409
+  # owns. Allowlisted in ci/affected-graph/cargo_moon_parity.py (SMA-524 D4). NOTE (SMA-528): no
+  # longer free — this edge now feeds `fileGroups.upstreams` below, so every kernel edit runs this
+  # crate's full build+test+lint for a dependency that does not exist. See the allowlist entry.
   - 'paigasus-kernel-rs'
   - 'paigasus-logging-rs'
   - 'paigasus-observability-rs'
   - 'paigasus-service-info-rs'
+
+# SMA-528 — the transitive dependsOn closure's sources, consumed by build/test/lint via
+# `@group(upstreams)` in .moon/tasks/rust.yml. Moon confers affectedness ONLY through a task's own
+# `inputs`; dependsOn and `^:build` schedule an upstream but never select this crate. Asserted to
+# strict equality by repo:affected-smoke's A6.
+fileGroups:
+  upstreams:
+    - '/rs/crates/libs/paigasus-kernel/src/**/*'
+    - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
+    - '/rs/crates/libs/paigasus-logging/src/**/*'
+    - '/rs/crates/libs/paigasus-logging/Cargo.toml'
+    - '/rs/crates/libs/paigasus-observability/src/**/*'
+    - '/rs/crates/libs/paigasus-observability/Cargo.toml'
+    - '/rs/crates/libs/paigasus-proto-derive/src/**/*'
+    - '/rs/crates/libs/paigasus-proto-derive/Cargo.toml'
+    - '/rs/crates/libs/paigasus-proto/src/**/*'
+    - '/rs/crates/libs/paigasus-proto/Cargo.toml'
+    - '/rs/crates/libs/paigasus-service-info/src/**/*'
+    - '/rs/crates/libs/paigasus-service-info/Cargo.toml'
 
 tasks:
   build:

@@ -527,6 +527,10 @@ tasks:
     # This gate does NOT guard code REMOVAL. It does not need to: both service crates declare
     # `test: deps: ['^:build']` in their own moon.yml, so a contracts change already schedules
     # paigasus-{iam,gateway}-rs:test and the membership tests run. See ci/error-registry/README.md.
+    # (Until SMA-528 this was aspirational: `^:build` schedules an upstream's build, it does not
+    # make this crate affected. What makes it true is `@group(upstreams)` — both service crates'
+    # `test` now key on paigasus-proto's sources, so a contracts change that regenerates them
+    # selects the test.)
     script: |
       set -euo pipefail
       python3 ci/error-registry/check.py --self-test

@@ -3,3 +3,10 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 id: 'paigasus-proto-derive-rs'
 layer: 'library'
 language: 'rust'
+
+# SMA-528 — the transitive dependsOn closure's sources, consumed by build/test/lint via
+# `@group(upstreams)` in .moon/tasks/rust.yml. Moon confers affectedness ONLY through a task's own
+# `inputs`; dependsOn and `^:build` schedule an upstream but never select this crate. Empty because
+# this crate has no in-tree dependencies. Asserted to strict equality by repo:affected-smoke's A6.
+fileGroups:
+  upstreams: []
