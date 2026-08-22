@@ -58,7 +58,7 @@
 
 **Interfaces:**
 - Produces: `ci/version-lockstep/run.sh` accepting `--check` (default), `--self-test`. Exit `0`/`1`/`2`.
-- Produces: a bash function `group_versions()` printing `<group>\t<site-path>\t<field>\t<version>` per site, which Task 2's negative control and Task 3's `--write` both consume.
+- Produces, for Tasks 2 and 3 to consume: the `SITES` table, the `SOURCE_OF_TRUTH` map, `read_version`, `site_verdict`, and `run_check`. Task 2's negative control drives the **real** `run_check`; Task 3's `--write` iterates `SITES` directly. No separate per-site reporting function is needed, and adding one with no caller would be unused surface.
 
 - [ ] **Step 1: Write the failing self-test**
 
