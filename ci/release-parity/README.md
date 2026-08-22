@@ -139,9 +139,12 @@ the real run prints `== all parity cases passed ==` and exits 0 — the gate is 
 control reds. A gate that has lost the ability to report red is green exactly when it
 matters.
 
-**Why the pipefail line.** Moon does not enable errexit for `script:` blocks, so the
-block's status is its LAST command's: without it a failing control is masked by the
-passing real run. `run.sh`'s own `set -euo pipefail` governs its body, not the Moon block.
+**Why the `set -euo pipefail` line.** The load-bearing half is `-e` (errexit): Moon does
+not enable it for `script:` blocks, so without it the shell simply continues past a failing
+control and the block's status becomes its LAST command's — the passing real run. (`-o
+pipefail` only changes how a *pipeline's* status is computed, and `-u` only catches unset
+variables; neither is what stops the masking.) `run.sh`'s own `set -euo pipefail` does not
+help: it governs that script's body, not the Moon block that invokes it twice.
 
 **Why all three tasks.** Their *ecosystem-specific* inputs are distinct
 (`moon.yml:57-119`), so a PR touching only `ts/packages/paigasus-sdk/.releaserc.json`

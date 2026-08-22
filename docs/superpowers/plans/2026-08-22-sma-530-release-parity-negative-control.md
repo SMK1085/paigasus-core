@@ -564,9 +564,18 @@ All ~25 calls in `self_test()` now need a fourth argument. Add the wired fixture
 `wired_actionlint`:
 
 ```python
+    # MUST contain ALL FIVE pinned lines. Every deletion fixture below asserts
+    # `if not check_self_invocation(...)`, which is satisfied by ANY missing entry — so a
+    # fixture short of one line makes every one of them pass for the WRONG reason, which is
+    # precisely the vacuity this whole task exists to prevent. The "fired on a wired tree"
+    # positive control is what catches a forgotten line here, loudly.
     wired_release_parity = (
+        '  case "$1" in\n'
+        '    --negative-control) NEGATIVE=1; shift ;;\n'
+        '  esac\n'
         'if [ "$NEGATIVE" = 1 ]; then\n'
         '  echo "== negative control ... =="\n'
+        '  ec=0; check_case "neg-fix-bang" "fix!: deliberately wrong" "-" "0.1.1" || ec=$?\n'
         '  case "$ec" in\n'
         '    1) echo "negative-control OK: harness reported red as expected"; exit 0 ;;\n'
         '    0) echo "negative-control FAILED: harness accepted a wrong expectation" >&2; exit 1 ;;\n'
@@ -642,10 +651,13 @@ python3 ci/affected-graph/ci_targets.py; echo "restored rc=$?" # expect 0
 Then confirm reachability — a `ci/release-parity/**` edit must now select the gate:
 
 ```bash
+cp ci/release-parity/README.md /tmp/rp-readme.bak
 printf '\n# probe\n' >> ci/release-parity/README.md
 env -u AI_AGENT -u CLAUDECODE moon query tasks --affected 2>/dev/null \
   | python3 -c "import json,sys; d=json.load(sys.stdin); [print(f'{p}:{t}') for p,ts in d['tasks'].items() for t in ts]" | sort
-git checkout ci/release-parity/README.md
+# Restore from the backup, NOT `git checkout` — that would discard every other
+# uncommitted change to this file, and at this point in the task there are some.
+cp /tmp/rp-readme.bak ci/release-parity/README.md && touch ci/release-parity/README.md
 ```
 
 Expected: the list includes `repo:affected-smoke` **and** all three `repo:release-parity*`.

@@ -351,6 +351,10 @@ pinned line, which is the failure that matters.
   flags reds the gate although nothing is broken. Restore the exact line or update the
   constant — the same consequence `ACTIONLINT_SH_CALL_SITES` records for its own entries
   at `ci_targets.py:288-294`.
+- **L4 — the control's `0.1.1` is coupled to `cases.tsv`'s contract.** `run.sh:62-63`
+  hardcodes it as "deliberately wrong" for `fix!` in 0.x. Should the canonical contract
+  ever change so that value is correct, all three controls red spuriously and the
+  diagnosis is non-obvious.
 - **L5 — whole-line pins prove presence, not absence.** They cannot see an INSERTION.
   Measured: adding a bare `NEGATIVE=0` immediately before the guard satisfies all five pins
   and falls through to the real suite at rc 0; so does deleting the block, neutering the
@@ -360,10 +364,6 @@ pinned line, which is the failure that matters.
   out of scope. A narrower fail-safe strengthening is available if it ever bites: a count
   assertion such as `release_parity_sh_text.count("NEGATIVE=") == 2`, which can only
   false-red. Deliberately not implemented.
-- **L4 — the control's `0.1.1` is coupled to `cases.tsv`'s contract.** `run.sh:62-63`
-  hardcodes it as "deliberately wrong" for `fix!` in 0.x. Should the canonical contract
-  ever change so that value is correct, all three controls red spuriously and the
-  diagnosis is non-obvious.
 
 ## Non-goals
 
