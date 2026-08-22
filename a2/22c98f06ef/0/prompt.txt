@@ -1,0 +1,292 @@
+<task-notification>
+<task-id>a3c08754644c239c1</task-id>
+<tool-use-id>toolu_01PRvHwHPa3fcN4u7cHFbxR1</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/b9b99dc1-235a-4cbd-899a-f0194d3bde9f/tasks/a3c08754644c239c1.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 1 fixture builder" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Clean. Task complete.
+
+**Status:** DONE
+
+**Commit SHA:** `2599fea` — `refactor(repo): build ci_targets self-test script fixtures from the registry (SMA-530)` on `feature/sma-530-release-parity-negative-control`
+
+**Test summary:** `--self-test` rc=0 before and after; full `ci/affected-graph/run.sh --negative-control &amp;&amp; ci/affected-graph/run.sh` rc=0; Step 5 mutation (neutering the `:672-674` task-script loop) produced exactly 3 failure rows from the new registry-driven loop (one per required `input-liveness` line) plus 1 unrelated pre-existing fixture that shares the same code path, then reverted cleanly to rc=0. `SELF_SCHEDULED_GATES` still has exactly one key.
+
+**Concerns:** None blocking. Full detail (including the extra 4th row explanation and a line-wrap tidy) is in the report file at `.superpowers/sdd/2026-08-22-sma-530-release-parity-negative-control/task-1-report.md`.</result>
+<usage><subagent_tokens>99169</subagent_tokens><tool_uses>41</tool_uses><duration_ms>287576</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a3983c82f25f947e2</task-id>
+<tool-use-id>toolu_01P6oHDU6D3EzpTks5P4s4XY</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/b9b99dc1-235a-4cbd-899a-f0194d3bde9f/tasks/a3983c82f25f947e2.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 1 review" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Verdicts
+
+**Spec compliance: ✅**
+
+Per-requirement:
+
+| Requirement | Status |
+|---|---|
+| Only `ci/affected-graph/ci_targets.py` modified, no new files | Met — `git diff --stat bd64c39..2599fea` outside that file is empty |
+| `wired_scripts(**overrides)` builder, registry-driven | Met — `ci_targets.py:1069-1085` comprehends over `SELF_SCHEDULED_GATES.items()`, no hardcoded key |
+| Guard `set(scripts) != set(SELF_SCHEDULED_GATES)` | Met — `ci_targets.py:1098-1102` |
+| All 7 literal one-key `scripts` dicts routed through the builder | Met — `grep '{"input-liveness"'` shows zero remaining raw literals passed as the `scripts` arg; all 7 (3 deletion fixtures folded into the loop + 4 rewritten per Step-2 table) now go through `wired_scripts(**{...})` |
+| Registry-driven double loop (`for _task, _lines … for _line in _lines`) replacing the 3 named deletion fixtures, SMA-553 provenance preserved | Met — `ci_targets.py:1143-1159`; comment explicitly credits SMA-553 D10, review finding 1, and SMA-526 |
+| Controller amendment: `check_self_invocation(wired, {}, …)` → `wired_scripts(**{"input-liveness": ""})` | Met — `ci_targets.py:1160`, verbatim |
+| Step 3 indentation-tolerance positive fixture, correctly placed (after the required-param check, before `_scripts`) | Met — `ci_targets.py:1311-1320` |
+| `check_self_invocation` stays 3 positional args | Met — signature unchanged at `ci_targets.py:655` |
+| `SELF_SCHEDULED_GATES` still exactly one key | Met — verified on disk (`input-liveness`, 3 lines, unchanged) |
+| `--self-test` passes (rc=0) | Met — reproduced independently |
+| Conventional commit, workspace scope, lowercase subject, ≤100 chars | Met — `refactor(repo): …` (86 chars incl. newline), one commit `2599fea` |
+
+No extras beyond brief scope (the cosmetic line-wrap the implementer mentions is inside the same edited lines, not a separate change).
+
+**Task quality: Approved**
+
+Findings:
+
+- **None Critical, none Important.** I independently verified the highest-risk property (finding 6 in the review method — a vacuous or weakened assertion) by monkeypatching a second gate into `SELF_SCHEDULED_GATES` at runtime and re-running the exact `wired_scripts`/`check_self_invocation` logic outside the repo file (file left untouched on disk throughout — confirmed clean before and after): the builder auto-covered the new key, the positive control stayed green, and deleting the new gate's required line was correctly caught (`['dummy-gate script: echo dummy-required-line']`). This is exactly the property the task exists to establish, and it holds.
+- **Minor** — Report's Step-5 explanation (the 4th failure row, "missed an absent input-liveness script entirely") is accurate, not a masked regression. I traced it: neutering the task-script loop body (`continue`) at `ci_targets.py:672-674` suppresses *all* task-script-derived missing entries repo-wide, so any fixture whose only expected miss comes from that half fires. Only 4 of the ~24+ script-touching fixtures depend solely on that half (the 3 loop rows + the `wired_scripts(**{"input-liveness": ""})` absent-script fixture at line 1160); the other rewritten fixtures (lines 1165, 1171, 1298) each also assert a `RUN_SH_CALL_SITES`/`ACTIONLINT_SH_CALL_SITES` miss on an independent code path unaffected by the mutation, so they correctly stay silent. The report's count and explanation match this exactly.
+- **Minor** — The generic failure message (`f"missed {_line!r} deleted from repo:{_task}'s script"`) loses the three original fixtures' distinct human-readable context ("prefix hole", "errexit line ahead of the invocations"). This is a deliberate, brief-mandated tradeoff (genericization is the whole point), not a defect — noting it only because a future debugger will get a slightly less self-explanatory failure line than before.
+- **Minor** — `check_gate_inputs` (a sibling SMA-553 function, same file, checking `projects["repo"][task]["inputGlobs"]` rather than `scripts`) still uses literal `{"repo": {"input-liveness": {...}}}` dicts and is *not* migrated to a registry-driven builder. This is out of scope for Task 1 per the brief (which names only `check_self_invocation`'s 7 call sites) and does not affect this task's correctness — flagging only because it will be the same vacuity trap for a second gate unless a later task addresses it. Confirmed via the same monkeypatch experiment: adding a second key to the registry immediately reds `check_gate_inputs`'s "fired on a wired inputs declaration" fixture for an unrelated reason, so it's not a silent hole — it will loudly demand attention when the next gate lands.
+
+⚠️ Cannot verify from diff alone (verified separately, noted for completeness): the report's Step 6 (`ci/affected-graph/run.sh --negative-control &amp;&amp; ci/affected-graph/run.sh`) end-to-end run was not re-executed by me per the review instructions (not to duplicate the implementer's already-reported evidence); I relied on the report plus my own `--self-test` rerun (rc=0) and the targeted registry-generalization experiment above as independent corroboration.</result>
+<usage><subagent_tokens>90590</subagent_tokens><tool_uses>22</tool_uses><duration_ms>163957</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a23e476a8e683e23b</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/b9b99dc1-235a-4cbd-899a-f0194d3bde9f/tasks/a23e476a8e683e23b.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 2 wire and pin" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Clean commit on top of the correct branch, only the two intended files changed, `.claude/` left untracked as before.
+
+---
+
+**Status:** DONE
+
+**Commit SHA:** `2c90ee4` — "feat(repo): run release-parity's negative control in CI on all three tasks (SMA-530)" (on top of `2599fea`, both on `feature/sma-530-release-parity-negative-control`)
+
+**Test summary:** Step 3 (pre-wiring) — self-test rc=0, gate rc=1 with **6** missing rows (not 9 — see concern below). Step 5 (post-wiring) — self-test rc=0, gate rc=0. Step 6 — `moon run repo:release-parity{,-py,-ts} --force` all show the negative control firing (`FAIL neg-fix-bang...`, `negative-control OK: harness reported red as expected`) followed by 5 real PASS rows and `== all parity cases passed ==` for all three tasks.
+
+**Concerns:**
+1. Step 3 produced 6 missing rows, not the brief's predicted 9. Cause: the pre-existing (unwired) `moon.yml` already had each task's single-line `script:` exactly equal to the real-run required line, so only the `set -euo pipefail` and `--negative-control` lines were genuinely missing per task (2×3=6). The rc=1 red still correctly proves the pin is reachable; only the row count differs from the brief's fully-unwired prediction. Full explanation in the report.
+2. The `SELF_SCHEDULED_GATES` comment (copied verbatim from the brief) references `RELEASE_PARITY_SH_CALL_SITES below`, a constant that doesn't exist yet — presumably added in a later task pinning `run.sh`'s own control block. Flagging for whoever owns that follow-up.
+3. `check_registry_pairing` is defined and fixture-tested but not yet wired into `main()`'s live verdict — per the brief, that's explicitly Task 4's job.
+
+Full report at `/Users/smaschek/dev/paigasus/paigasus-core/.superpowers/sdd/2026-08-22-sma-530-release-parity-negative-control/task-2-report.md`.</result>
+<usage><subagent_tokens>98715</subagent_tokens><tool_uses>42</tool_uses><duration_ms>248743</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>aecb07ed3cf9838c7</task-id>
+<tool-use-id>toolu_019BS399uLXTybWpiKLmutwb</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/b9b99dc1-235a-4cbd-899a-f0194d3bde9f/tasks/aecb07ed3cf9838c7.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 2 review" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Spec compliance: ✅
+
+Per-requirement:
+
+| Requirement | Status |
+|---|---|
+| Only `moon.yml` and `ci/affected-graph/ci_targets.py` changed | Met — `git diff --stat 2599fea..2c90ee4` shows exactly these two files |
+| `--negative-control` last, after `--ecosystem X` | Met — verified in both `SELF_SCHEDULED_GATES` and the resolved `moon query tasks` script text for all three tasks |
+| Pins byte-exact whole lines | Met — `moon query tasks` output matches `SELF_SCHEDULED_GATES` tuples character-for-character, including `set -euo pipefail` |
+| `SELF_TASK_EXPECTED_GLOBS` stays exactly one key | Met — unchanged at `{"input-liveness": ("**/*",)}` |
+| `SELF_TASK_GLOBS_EXEMPT` covers the three new tasks | Met — three entries with non-empty reasons |
+| `check_gate_inputs` out of scope | Met — zero diff to that function |
+| `check_self_invocation` still takes 3 positional args | Met — signature unchanged: `(run_sh_text, scripts, actionlint_sh_text)` |
+| No new `repo:*` Moon task, no `ci.yml`/CLAUDE.md edit | Met — confirmed by diff scope |
+| Conventional commit, workspace scope, lowercase, ≤100 chars | Met — `feat(repo): run release-parity's negative control in CI on all three tasks (SMA-530)`, 84 chars |
+| `description`/`toolchain`/`inputs` untouched in moon.yml | Met — only `script:` blocks changed |
+
+Nothing extra or missing relative to the brief.
+
+## Task quality: Approved
+
+Findings:
+
+- **Minor** — `ci/affected-graph/ci_targets.py:237`: the `release-parity` registry comment references `RELEASE_PARITY_SH_CALL_SITES below`, a constant that does not exist yet anywhere in the file. This is copied verbatim from the brief (a deliberate forward reference to a later task's constant) and the implementer correctly flagged it in the report's "Concerns" section rather than silently leaving it unexplained. Not a defect for this task, but worth Task 3/4's owner confirming it lands as promised.
+- No Critical or Important findings.
+
+Verification performed (not just diff-reading):
+1. **Byte-exactness** — ran `env -u AI_AGENT -u CLAUDECODE moon query tasks` and diffed the three resolved `script` strings against `SELF_SCHEDULED_GATES`: exact match, including `set -euo pipefail` and flag order.
+2. **Pipefail line** — present in all three `moon.yml` script blocks and pinned as a first-class required line in all three registry entries.
+3. **Live pairing enforcement** — traced `check_registry_pairing` is *not* called from `main()`, but the `pairing("real-registries", None, None, None, ...)` fixture in `self_test()` defaults to the live constants, and `self_test()` is invoked as `python3 "$HERE/ci_targets.py" --self-test || NEG_RC=1` from `ci/affected-graph/run.sh:404`, inside repo:affected-smoke's own negative-control section. This is architecturally identical to how the old inline assert was enforced (it too lived only inside `self_test()`, never in `main()`). **No enforcement gap was introduced** — the implementer's concern-3 framing (main()-wiring is Task 4's job) is correct.
+4. **Old inline assert deletion** — confirmed fully removed (`grep` for its text returns 0 hits), not commented out, not left alongside a weaker duplicate.
+5. **Fixture vacuousness** — hand-traced all 8 `pairing(...)` cases against `check_registry_pairing`'s five list comprehensions. Three cases return the all-empty tuple (`real-registries`, `pinned-by-globs`, `pinned-by-exemption`) but each isolates a genuinely different code path (globs-only, exempt-only, and live production constants respectively) and each would fail if that path were broken. No vacuous fixture found.
+6. **Task 1's registry-driven deletion loop** (`ci_targets.py:1218-1230`, `for _task, _lines in sorted(SELF_SCHEDULED_GATES.items())`) — untouched by this diff, so it automatically covers the three new gates with zero hardcoded gate names or duplicate fixtures added.
+7. **6-vs-9 missing rows** — verified against `git show 2599fea:moon.yml`: the pre-existing one-line `script:` values (`'ci/release-parity/run.sh'`, etc.) were already byte-identical to the real-run required line for each task, so only `set -euo pipefail` + `--negative-control` (2 lines × 3 tasks = 6) were genuinely missing at Step 3. Arithmetically and mechanically correct, not concealing a dead pin.
+8. **moon.yml scope** — diffed non-script lines; confirmed only `script:` values were replaced, `description`/`toolchain`/`inputs` untouched on all three tasks.
+
+Also independently re-ran `python3 ci/affected-graph/ci_targets.py --self-test` (rc=0) and `python3 ci/affected-graph/ci_targets.py` (rc=0, PASS) on the current working tree, and `python3 -m py_compile` — all clean.
+
+No items require "⚠️ Cannot verify from diff" — everything in the review method was independently confirmed by running the actual tools against the checked-out state.</result>
+<usage><subagent_tokens>106482</subagent_tokens><tool_uses>34</tool_uses><duration_ms>243010</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a19583a58adbc1777</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/b9b99dc1-235a-4cbd-899a-f0194d3bde9f/tasks/a19583a58adbc1777.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 3 pin control block" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Status: DONE
+
+**Commit SHA:** `a36f367` (on `feature/sma-530-release-parity-negative-control`, parent `2c90ee4`)
+
+**Test summary:** `python3 ci/affected-graph/ci_targets.py --self-test` → OK (rc 0); real gate → PASS (rc 0); hand-verified the full hole→pin→restore→reachability sequence — gutted control exits 0 (the hole), pin catches it at rc 1 naming exactly the three pinned lines, restore returns rc 0, and a `ci/release-parity/**` probe edit selects `repo:affected-smoke` plus all three `repo:release-parity*` tasks in `moon query tasks --affected`.
+
+**Concerns:** None blocking. During implementation, an automated bulk-edit pass (adding the 4th arg to ~25 `check_self_invocation` call sites) briefly wired the *production* call in `main()` to the test fixture `wired_release_parity` instead of the real file content — caught via diff review before running any verification and fixed (added a proper `release_parity_sh = read_input(...)` in `main()`'s try block). Final diff and all runs are clean. `moon query tasks --affected` is slow enough to exceed a 2-minute timeout on a cold run — needed to run it backgrounded once; not a code issue, just worth knowing.
+
+Full report at `/Users/smaschek/dev/paigasus/paigasus-core/.superpowers/sdd/2026-08-22-sma-530-release-parity-negative-control/task-3-report.md`.</result>
+<usage><subagent_tokens>144621</subagent_tokens><tool_uses>70</tool_uses><duration_ms>523105</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>acbbbfdf96c596692</task-id>
+<tool-use-id>toolu_01KWmcQQXXur5zzaEKQ3gr5B</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/b9b99dc1-235a-4cbd-899a-f0194d3bde9f/tasks/acbbbfdf96c596692.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 3 review" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Spec compliance: ✅
+
+| Brief step | Status | Evidence |
+|---|---|---|
+| **1** — `RELEASE_PARITY_SH_CALL_SITES` after `ACTIONLINT_SH_CALL_SITES` | **Met** | `ci/affected-graph/ci_targets.py:392-396`, three entries exactly as specified, comment block verbatim |
+| **2** — 4th REQUIRED positional param + stripped-whole-line check before `return missing`; docstring updated | **Met** | `ci_targets.py:728` signature (no default); check at `:761-769`; docstring "Four haystacks" / "The four texts" at `:730-745` |
+| **3** — `main()` reads the real file inside `try:`; passes 4th arg; diagnostic extended | **Met** | `read_input(root / "ci" / "release-parity" / "run.sh", ...)` at `:1557-1559`, inside the `try:` opened at `:1542` and closed by `except GateAssertionError` at `:1569` (so `OSError` → rc 2 via `INFRA_ERRORS`); call at `:1580`; diagnostic at `:1636-1646` |
+| **4** — `wired_release_parity` fixture, every call updated, registry-driven deletion loop, contamination fixture | **Met** | fixture `:1235-1243`; deletion loop `:1447-1456`; contamination `:1457-1465` |
+| **5** — exactly one input glob in `repo:affected-smoke` | **Met** | `moon.yml:182-186`; `git diff 2c90ee4..a36f367 -- moon.yml` = 5 insertions, 0 deletions, 0 other changes |
+| **6** — verification | **Met** (independently reproduced (a)-(c); (d) taken on trust, see below) | |
+| **7** — commit | **Met** | `feat(repo): pin release-parity's negative-control block against deletion (SMA-530)`, 82 chars, lowercase subject |
+
+Global constraints: only `ci_targets.py` + `moon.yml` changed; 4th param has no default; no new files, no pytest. **Extra beyond the brief:** cosmetic reflow of ~6 call sites and one continuation-line indent (disclosed in the report, confined to the allowed file, no behavioural effect).
+
+### Review item 1 — production call reads the REAL file (HIGHEST PRIORITY): ✅ **verified independently**
+
+- `main()` binds `release_parity_sh = read_input(...)` on the real path, **inside** the `try:` block, before `check_floor` — an unreadable file routes to `except INFRA_ERRORS` → rc 2, not a raise.
+- AST scan of the whole file: `wired_release_parity` occurs **only** at `ci_targets.py:1235-1460`, all inside `self_test()`. No fixture identifier is reachable from `main()`. The mis-wiring the report discloses is genuinely gone.
+- **End-to-end proof on the real tree** (not the fixture): deleted the `1) echo "negative-control OK…"` line from the real `ci/release-parity/run.sh` → `python3 ci/affected-graph/ci_targets.py` → **rc 1**, naming exactly that line under the new `ci/release-parity/run.sh:` prefix. Restored + `touch` → **rc 0**. Tree confirmed clean afterwards.
+
+### Review item 2 — every call site updated: ✅
+
+AST parse: **28** `check_self_invocation` call nodes, **all 4 positional args, 0 keyword args** — 27 in `self_test()`, 1 in `main()`. All 27 are on `self_test()`'s straight-line path (proven live: mutant M1, deleting the whole release-parity check, produced exactly 3 failure rows from the registry-driven loop, so the loop executes). (Minor bookkeeping nit: the report says "24 real fixture calls / 26 total"; the actual syntactic count is 27 in `self_test`.)
+
+### Review item 3 — pinned strings match byte-for-byte: ✅
+
+All three entries resolve against `{l.strip() for l in open("ci/release-parity/run.sh")}`. Neither permanently-red nor vacuous.
+
+### Review item 5 — reachability: ✅ (one caveat)
+
+`moon.yml:186` `- 'ci/release-parity/**/*'` sits in `repo:affected-smoke`'s `inputs`; nothing else in the file changed. `python3 ci/affected-graph/task_inputs.py` → PASS (the new glob is live). I did **not** re-run `moon query tasks --affected` per instruction — see "Cannot verify" below.
+
+### Review item 7 — Tasks 1-2 not weakened: ✅
+
+The registry-driven `SELF_SCHEDULED_GATES` deletion loop (`:1265-1275`) still bites — mutant M5 (deleting the task-script check) reds the self-test with rows for all four gates. The eight `pairing(...)` fixtures (`:1485-1492`) and `wired_scripts`/`broken_script` are untouched by the diff.
+
+---
+
+## Task quality: **Needs work** (bounded — one registry edit plus two fixtures)
+
+### Important 1 — the pin does not close the hole its own comment claims to close (`ci_targets.py:392-396`)
+
+The registry comment says the hole is that "`run.sh:14` parses `--negative-control` into `NEGATIVE` and `:60-69` is the block that acts on it". Only the second half is pinned. Two edits leave **all three pinned lines byte-identical**, keep the gate at rc 0, and defeat the control. Both measured, not hypothesised:
+
+**(a) Neuter the flag parse** — `ci/release-parity/run.sh:14`:
+```diff
+-    --negative-control) NEGATIVE=1; shift ;;
++    --negative-control) shift ;;
+```
+`NEGATIVE` stays `0` (initialised at `:9`, so `set -u` is satisfied). Measured:
+```
+gate rc=0                      # PASS ci-targets -&gt; 25 targets
+bash ci/release-parity/run.sh --negative-control
+  PASS fix / PASS feat / PASS fix-bang / PASS fix-footer / PASS feat-bang
+  == all parity cases passed ==
+control rc=0
+```
+That is *verbatim* the failure the comment describes: falls through to the real suite, exits 0, three tasks green, five-case suite run twice per task.
+
+**(b) Gut the control's body** — `ci/release-parity/run.sh:63`:
+```diff
+-  ec=0; check_case "neg-fix-bang" "fix!: deliberately wrong" "-" "0.1.1" || ec=$?
++  ec=1
+```
+Measured: `gate rc=0`; control prints `negative-control OK: harness reported red as expected` and exits 0 **without ever invoking the harness**. This is arguably worse than (a): the control now actively asserts a lie.
+
+Fix: add `'--negative-control) NEGATIVE=1; shift ;;'` and `'ec=0; check_case "neg-fix-bang" "fix!: deliberately wrong" "-" "0.1.1" || ec=$?'` to `RELEASE_PARITY_SH_CALL_SITES`, and mirror both into `wired_release_parity` (`:1235`). The deletion loop is registry-driven, so both get per-line fixtures for free, and the "fired on a wired tree" control catches a forgotten fixture line loudly.
+
+### Minor 1 — nothing asserts the stripped-whole-line matching mode for this haystack (`ci_targets.py:761-769`, fixtures `:1447-1465`)
+
+Mutant M4 — widening `if site not in release_parity_lines` to `if site not in release_parity_sh_text` (plain substring over the whole text) — **survives the self-test (rc 0)**. The registry comment sells whole-line matching as deliberate ("Matched as stripped WHOLE LINES, not substrings"), and it does real work today: commenting the block out (`# if [ "$NEGATIVE" = 1 ]; then`) is caught under the current code and would *not* be under the widened one. Contrast `ACTIONLINT_SH_CALL_SITES`, which has six `indented_*` fixtures pinning its column-0 rule. Add one fixture: `wired_release_parity` with `# ` prefixed onto one pinned line must be reported missing. (Note: an *indented* copy must still be accepted here — the case arms are indented by design — so the fixture has to be a commented-out copy, not an indented one.)
+
+### Minor 2 — the "REQUIRED positional" guard covers only the third parameter (`ci_targets.py:1431-1433`)
+
+Mutant M6 — `def check_self_invocation(..., release_parity_sh_text=""):` — **self-test rc 0**. The identical regression on `actionlint_sh_text` is caught. The docstring at `:742-744` now claims the property for *both* parameters; only one is enforced. One-line fix: loop the `inspect.signature` assertion over both names.
+
+### Minor 3 — docstring rationale is inaccurate for the new haystack (`ci_targets.py:733-737`)
+
+"Task-script, actionlint and release-parity sites are whole stripped LINES, because in each case one required token is a strict prefix of something else in the file" — then gives only the two pre-existing examples. There is no strict-prefix hazard among the release-parity entries; the real reason is the one in the inline comment at `:392` (a message-text substring would survive an `exit 0`/`exit 1` swap). "in each case" is now false.
+
+### Not a Task-3 defect, but load-bearing for its argument
+
+`repo:affected-smoke`'s own `inputs` list is pinned by nothing — `SELF_TASK_EXPECTED_GLOBS` covers only `input-liveness`, and `affected-smoke` is not in `SELF_SCHEDULED_GATES`. So silently deleting `- 'ci/release-parity/**/*'` (or the `ci/actionlint/**/*` precedent) reds no gate, and the whole reachability argument depends on a comment. Pre-existing, out of scope, but it means the new comment's "Do not remove it" is the only enforcement.
+
+---
+
+## ⚠️ Cannot verify from diff / not verified
+
+- **Reachability evidence (d)** — I did not re-run `moon query tasks --affected` (explicitly instructed not to). The report's claim that a `ci/release-parity/**` edit selects `repo:affected-smoke` plus all three `repo:release-parity*` tasks is taken on trust. What I *did* confirm: the glob is syntactically inside `affected-smoke`'s `inputs`, and it is live (`task_inputs.py` PASS).
+- **CI behaviour of the three `repo:release-parity*` tasks** under the new input was not exercised.
+
+All mutations were reverted with `cp` + `touch`; final state verified: `git status --short` shows only the untracked `.claude/`, `--self-test` rc 0, gate rc 0.</result>
+<usage><subagent_tokens>110949</subagent_tokens><tool_uses>28</tool_uses><duration_ms>343916</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a19583a58adbc1777</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/b9b99dc1-235a-4cbd-899a-f0194d3bde9f/tasks/a19583a58adbc1777.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 3 pin control block" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Still locked. All work is complete, verified, and staged — only the commit itself is blocked pending 1Password unlock.
+
+## Status: BLOCKED (commit only — fixes complete, verified, staged)
+
+**Commit SHAs:** No new commit. `a36f367` (Task 3's original commit) is unchanged. This round's fixes are staged (`git add ci/affected-graph/ci_targets.py`) on top of it, on `feature/sma-530-release-parity-negative-control`, ready to commit.
+
+**Test summary:** self-test rc=0, gate rc=0; both new registry entries bite-proofed (rc=1 naming the exact line, verified for both edit (a) and edit (b), each restored+touched); mutants M4 and M6 re-run and now FAIL the self-test (both were surviving before this round's fix).
+
+**Concerns:**
+- `git commit` fails at the signing step 4/4 attempts: `error: 1Password: failed to fill whole buffer` / `error: 1Password: agent returned an error`, `fatal: failed to write commit object`. `op whoami` hung with no output, consistent with 1Password being locked and needing interactive unlock — not a transient hiccup.
+- I did not bypass signing (`--no-gpg-sign`/`commit.gpgsign=false`) or fall back to the GitHub API, since neither this task nor the coordinator's message explicitly authorized bypassing signing, and the branch doesn't exist on `origin` yet anyway (confirmed 404 via `gh api .../git/refs/heads/...`), so there's no remote-side path either.
+- **Action needed:** please unlock 1Password, then I (or you) can re-run the same `git commit` — commitlint already passes cleanly, so it should succeed immediately.
+
+Full fix report appended to `/Users/smaschek/dev/paigasus/paigasus-core/.superpowers/sdd/2026-08-22-sma-530-release-parity-negative-control/task-3-report.md`.</result>
+<usage><subagent_tokens>187414</subagent_tokens><tool_uses>56</tool_uses><duration_ms>800972</duration_ms></usage>
+</task-notification>
