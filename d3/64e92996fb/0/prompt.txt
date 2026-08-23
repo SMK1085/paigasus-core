@@ -1,0 +1,76 @@
+<task-notification>
+<task-id>a41b2be1e16d180e5</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a41b2be1e16d180e5.output</output-file>
+<status>completed</status>
+<summary>Agent "Final review fix wave" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>**Status: DONE_WITH_CONCERNS** — all seven fixes landed; concerns are two factual corrections to the brief plus one documented residual. Full report at `.superpowers/sdd/2026-08-23-sma-586-error-reason-taxonomy/final-fix-report.md`.
+
+**Commits** (on `feature/sma-586-error-reason-taxonomy`, no branch/worktree created):
+
+| SHA | Subject |
+| --- | --- |
+| `6126efa` | `fix(rs): correct the expires_at http-divergence claim (SMA-586)` |
+| `ff8eb64` | `fix(rs): normalise an empty membership filter oneof arm (SMA-586)` |
+| `f032fbb` | `fix(rs): name the failing path segment and keep router bugs 5xx (SMA-586)` |
+| `e334910` | `test(rs): drive the uuid path envelope on real routes (SMA-586)` |
+| `d008f94` | `docs(contracts): narrow the missing-required-field registry comment (SMA-586)` |
+| `8bed047` | `refactor(rs): make TenancyError::field exhaustive and fix stale docs (SMA-586)` |
+
+**Per fix:** 1 landed · 2 landed (+2 parity rows: present-but-empty and whitespace-only) · 3 landed · 4 landed via approach (b), two markers · 5 landed (2 Docker-backed tests, 9 real-route cases) · 6 landed + all three binding trees regenerated · 7 all landed, including the `extra_owned` → `Option::as_slice` simplification.
+
+**Red-then-green (mutate the fix, observe red, revert):**
+- **Fix 2** — normalisation removed → `http_and_grpc_agree_on_the_reason_for_the_same_failure` FAILED: `called Result::unwrap_err() on an Ok value: Principal("")`. Reverted → pass.
+- **Fix 3** — blanket `Err(_)` restored → `a_router_arity_bug_keeps_its_own_server_error` FAILED: `left: 400 / right: 500`. Reverted → pass.
+- **Fix 4** — pair reports `F2` for both → `each_segment_of_a_pair_names_its_own_field` FAILED: `left: "api_key_id must be a uuid" / right: "service_account_id must be a uuid"`. Reverted → pass.
+- **Fix 5 (bonus)** — reverted only the *handler's* marker to `UuidPathPair&lt;ApiKeyIdField, ApiKeyIdField&gt;`, leaving the extractor correct: unit tests stayed green, the new integration test went red with the same wrong message — proving it covers the handler→marker wiring no synthetic route can see.
+
+**Verification:** lib 612/612 · `paigasus-proto` 21+9+6+1 · `PAIGASUS_REQUIRE_DOCKER=1 env -u CI cargo nextest -p paigasus-iam --profile iam` **1007/1007** (was 1003; +4 = 2 integration + 2 unit) · **`docker_preflight` PASS** (also standalone) · clippy `-D warnings` clean · `cargo fmt --check` clean · `check.py --single-site` exit 0 (no MANIFEST row) and `--self-test: OK` · **codegen drift clean** · full `moon ci` 27-target graph **43 completed, 0 failed** · `git status` clean apart from the pre-existing untracked `.claude/` (found staged at start; unstaged back, never committed).
+
+**Concerns:**
+1. **The brief's axum claim was imprecise.** `PathRejection` has only two variants; `WrongNumberOfParameters`/`UnsupportedType` are *kinds inside* `FailedToDeserializePathParams`. Matching the outer variant as literally instructed would have left the arity bug reported as `400 invalid-uuid`. I branch on `FailedToDeserializePathParams::status()` instead, covering both levels.
+2. **"Seven routes" could not be reproduced** — 14 handlers use plain `axum::Json`. The comment names no count; worth reconciling in the follow-up ticket.
+3. **Documented residual (Fix 4):** a non-UTF-8 percent-encoded segment on the one two-segment route still answers outside the envelope. axum raises that from `UrlParams` before any deserialization, carrying the route key but no position, so no implementation can attribute it to one of two markers; naming one would be the guess the fix removes. The 24 single-segment routes are unaffected and keep the envelope. Stated in the `UuidPathPair` doc and at the fall-through arm; not pinned by a test (the assertion would be about axum's behaviour, not ours).
+4. **Transient:** the first two `moon ci` runs reported `paigasus-gateway-rs:test` failing on `connect_succeeds_for_default_tls_system_trust` (system trust-store load, a crate this diff does not touch). It passes 3/3 standalone at 1.3s each vs 15s under the loaded graph, 123/123 via `moon run … --force`, and the third full graph run was fully green. Environmental, not a regression — but worth knowing it can red a loaded CI run.</result>
+<usage><subagent_tokens>220927</subagent_tokens><tool_uses>108</tool_uses><duration_ms>2852266</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>aa0a66852a5e582de</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/aa0a66852a5e582de.output</output-file>
+<status>completed</status>
+<summary>Agent "Re-review the final fix wave" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>— Finding 1 (expires_at comment) — ADDRESSED. `grpc/service_accounts.rs` now states HTTP's `issue` uses plain `axum::Json`, produces a plain-text 422 with no `error.code`, and no longer claims `invalid-request-body`. Correction to the brief's "seven routes" (measured 14) is reasonable — comment names no count rather than asserting an unverified one.
+
+— Finding 2 (empty oneof arm) — ADDRESSED. `grpc::tenancy::membership_filter` now filters on `!raw.trim().is_empty()` before matching, matching HTTP's `.filter(|s| !s.trim().is_empty())`. Two new parity-table rows added (present-but-empty, whitespace-only) and verified red-then-green in the report.
+
+— Finding 3 (PathRejection swallowing 500s as 400s) — ADDRESSED, and correctly implemented. Verified against axum 0.8.9 source: `PathRejection` has exactly two variants (`FailedToDeserializePathParams`, `MissingPathParams`); `WrongNumberOfParameters`/`UnsupportedType` are `ErrorKind`s nested inside `FailedToDeserializePathParams`, not top-level rejection variants. `FailedToDeserializePathParams::status()` returns `INTERNAL_SERVER_ERROR` for exactly those two kinds and `BAD_REQUEST` for the rest; `MissingPathParams` is a flat 500. `is_client_error` in `path.rs` branches on `e.status() == BAD_REQUEST`, correctly classifying both.
+
+— Finding 4 (wrong field name on `{sa}`) — ADDRESSED. `UuidPathPair&lt;F1, F2&gt;` now parses each segment independently via `Uuid::parse_str`, attributing positionally; `revoke` uses `UuidPathPair&lt;ServiceAccountId, ApiKeyIdField&gt;`. Confirmed the sole production use of `UuidPathPair` in the codebase.
+
+— Finding 5 (no e2e coverage) — ADDRESSED. Two Docker-backed integration tests added on the real merged router (`tests/http_tenancy.rs`, `tests/http_service_accounts.rs`), each asserting `err["error"]["message"] == format!("{field} must be a uuid")` — the field name, not just the code — which is exactly what would have caught the original bug.
+
+— Finding 6 (registry comment overstatement) — ADDRESSED. Proto comment narrowed to name the five presence-parsing-not-checking RPCs; all three binding trees (rs/py/ts) regenerated consistently.
+
+— Finding 7 (assorted) — ADDRESSED. `field()` is now exhaustive with no catch-all (compiles clean, so genuinely exhaustive); doc corrections and `extra_owned` → `Option::as_slice` verified in diff, behaviorally identical (borrows, no allocation).
+
+**Independent verdict on the two reported corrections:**
+
+1. On finding 3's axum-variant correction: **confirmed sound** against the actual axum 0.8.9 source (`src/extract/rejection.rs`, `src/extract/path/mod.rs`). The brief's instruction, if followed literally, would indeed have left the arity bug reported as `400`. The implemented `status()`-based branch genuinely preserves 500 for arity/unsupported-type bugs and 400 for real client input errors.
+
+2. On finding 4's non-UTF-8 residual: **reasoning is sound, residual is acceptable and honestly documented.** Checked: `ErrorKind::InvalidUtf8InPathParam { key }` is raised in `get_params()` before `T::deserialize` runs, for both single- and pair-segment extraction, and its `status()` is `BAD_REQUEST`. The `key` it carries is the URL placeholder name (e.g. `sa`), not a marker/field name — attributing that to `F1` vs `F2` would require a route-specific placeholder→marker mapping the codebase deliberately does not build (consistent with the reasoning already accepted for choosing approach (b) over (a) in finding 4 itself). `UuidPath` (single-segment) still stays inside the envelope for this case since there's no ambiguity. This is a narrow, well-documented tradeoff (correct axum-native 400 response naming the right key, just outside the JSON envelope) versus the pre-fix behavior of a guessed field name inside a wrong-shaped envelope — not a cover-up.
+
+New breakage: none found. The six wire reason strings and proto numbers 33-38 are untouched (`git diff` on `error.proto` shows no change to those lines). No bare registry-code literal added under `src/`; no MANIFEST row added to `ci/error-registry/check.py`. The ~1400-line regenerated `paigasus.common.v1.rs` diff is entirely the shifted `FILE_DESCRIPTOR_SET` byte literal plus the matching doc-comment text — no hand-edited logic, field numbers, or enum values. `UuidPathPair` has exactly one production call site (`api_keys::revoke`), matching the report's claim.
+
+Verdict: all findings addressed
+
+Blocks merge: no
+
+Out of scope (deferred): the "seven routes" vs measured-14 `axum::Json` envelope-gap count reconciliation (Fix 1's concern #2, explicitly deferred to a follow-up ticket); no test for the non-UTF-8 path-segment case (Fix 4's residual, documented but unpinned by a test).</result>
+<usage><subagent_tokens>121649</subagent_tokens><tool_uses>30</tool_uses><duration_ms>304768</duration_ms></usage>
+</task-notification>
