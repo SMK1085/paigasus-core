@@ -82,19 +82,18 @@ fn parse_cursor(raw: &str) -> Result<Option<Uuid>, TenancyError> {
 /// `AuditFilter::capped_limit`'s OWN floor instead (`clamp(1, MAX_LIMIT)` treats a raw `0` as
 /// "at least 1", not "unset") — a real default request would then get back a single row,
 /// contradicting the wire's documented contract.
+///
+/// Timestamps go through [`convert::parse_opt_ts`], NOT `and_then(convert::from_ts)`: the
+/// latter maps an unrepresentable value to `None`, which on a filter field means UNFILTERED
+/// (SMA-583).
 fn to_filter(req: ListAuditEntriesRequest) -> Result<AuditFilter, TenancyError> {
     Ok(AuditFilter {
         actor_prn: opt_string(req.actor_prn),
         resource_prn: opt_string(req.resource_prn),
         action: opt_string(req.action),
         outcome: parse_outcome(&req.outcome)?,
-        // KNOWN LATENT (design D10, SMA-501): this drops a PRESENT-but-unrepresentable bound to
-        // `None`, which on a filter field means UNFILTERED — a malformed timestamp silently widens
-        // the query instead of being rejected. `convert::parse_opt_ts` keeps the three cases
-        // distinct and is what `grpc::dead_letters` uses. Left as-is deliberately: this is a READ,
-        // so the blast radius is a wider result set rather than a wider mutation. Tracked in SMA-583.
-        from: req.from.and_then(convert::from_ts),
-        to: req.to.and_then(convert::from_ts),
+        from: convert::parse_opt_ts(req.from, "from")?,
+        to: convert::parse_opt_ts(req.to, "to")?,
         cursor: parse_cursor(&req.cursor)?,
         limit: if req.limit == 0 { DEFAULT_LIMIT } else { u64::from(req.limit) },
     })
@@ -173,6 +172,10 @@ mod tests {
         assert_eq!(filter.action, None);
         assert_eq!(filter.outcome, None);
         assert_eq!(filter.cursor, None);
+        // The `from`/`to` half of "absent means unfiltered" — untested before SMA-583, which is
+        // how `and_then(from_ts)` mapped an INVALID bound to the same `None` unnoticed.
+        assert_eq!(filter.from, None);
+        assert_eq!(filter.to, None);
     }
 
     #[test]
@@ -215,6 +218,51 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, TenancyError::InvalidPrn(_)));
+    }
+
+    /// The case that catches a fix which rejects malformed bounds but drops VALID ones: both
+    /// bounds must survive as the exact instant the wire asked for. Mirrors
+    /// `http::audit::to_filter_parses_valid_rfc3339_from_and_to`, but asserts the instant
+    /// rather than just `is_some()` — the gRPC side converts, it does not parse a string.
+    #[test]
+    fn to_filter_parses_a_present_valid_from_and_to() {
+        let from = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let to = chrono::DateTime::from_timestamp(1_700_003_600, 500).unwrap();
+        let filter = to_filter(ListAuditEntriesRequest {
+            from: Some(convert::ts(from)),
+            to: Some(convert::ts(to)),
+            ..default_request()
+        })
+        .unwrap();
+        assert_eq!(filter.from, Some(from));
+        assert_eq!(filter.to, Some(to));
+    }
+
+    /// SMA-583: a PRESENT but unrepresentable `from` (`nanos: -1` is outside `Timestamp`'s
+    /// valid `[0, 999_999_999]`) is a client error, NOT silently unfiltered. `to` is left
+    /// absent deliberately — setting both would pass even if only the `from` line were fixed.
+    #[test]
+    fn to_filter_rejects_a_present_but_unrepresentable_from_instead_of_unfiltering() {
+        let err = to_filter(ListAuditEntriesRequest {
+            from: Some(prost_types::Timestamp { seconds: 0, nanos: -1 }),
+            to: None,
+            ..default_request()
+        })
+        .unwrap_err();
+        assert!(matches!(err, TenancyError::InvalidPrn(_)), "{err:?}");
+    }
+
+    /// The `to` half, with `from` absent for the same reason the previous test leaves `to`
+    /// absent: this is what fails if only one of the two call sites is fixed.
+    #[test]
+    fn to_filter_rejects_a_present_but_unrepresentable_to_instead_of_unfiltering() {
+        let err = to_filter(ListAuditEntriesRequest {
+            from: None,
+            to: Some(prost_types::Timestamp { seconds: 0, nanos: -1 }),
+            ..default_request()
+        })
+        .unwrap_err();
+        assert!(matches!(err, TenancyError::InvalidPrn(_)), "{err:?}");
     }
 
     #[test]
