@@ -571,7 +571,15 @@ Every command below is run and its output read, not assumed.
 2. `bash ci/publish-metadata/run.sh --negative-control` — the eleven new fixture rows plus the
    existing ~22. Proves the new assertions can report red **before** the real run proves they pass.
 3. `bash ci/publish-metadata/run.sh` — the real gate over the three-crate set, in two groups. This
-   is the check the issue predicted would red; it must now pass.
+   is the check the issue predicted would red; it must now pass. Expected output includes
+   `publish-metadata: group [paigasus-kernel] OK` and `publish-metadata: group [paigasus-proto
+   paigasus-proto-derive] OK` — `publish_groups` sorts within each component, and since
+   `"paigasus-proto"` is a proper prefix of `"paigasus-proto-derive"`, it sorts first. That
+   display order does not matter: measured separately by running `cargo publish --dry-run -p
+   paigasus-proto -p paigasus-proto-derive` (derive named *second*) and confirming cargo still
+   Packaged/Verified/Uploaded the derive crate *first* in all three phases — cargo computes the
+   topological publish order itself and ignores the order names are passed to `-p`, which is what
+   makes the group's display order safe to ignore.
 4. `bash ci/version-lockstep/run.sh --self-test`, `--negative-control`, then `--check` — the proto
    group at `0.1.0` across all 20 sites, with the new lock-reader self-test table running.
 5. `cargo package --list -p paigasus-proto` and `-p paigasus-proto-derive` — confirm `README.md`

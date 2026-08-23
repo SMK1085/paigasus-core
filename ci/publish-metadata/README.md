@@ -12,7 +12,9 @@ Asserts every publishable crate is genuinely releasable (SMA-376), and that its
 | 0 | The publishable set equals `EXPECTED_PUBLISHABLE` | 1 (2 if empty) |
 | 1 | Metadata crates.io accepts at upload time | 1 |
 | 1b | Every category is a real crates.io slug | 1 |
-| 2 | `cargo publish --dry-run` succeeds | 1 / 2 |
+| 1c | Every publishable crate declares its own `[lints.*]` table, and it does not deny | 1 / 2 |
+| 1d | Every publishable crate declares a non-empty `include` allowlist naming README.md and LICENSE | 1 / 2 |
+| 2 | `cargo publish --dry-run` succeeds, once per publish group | 1 / 2 |
 | 2b | The packaged file list ships README + LICENSE, not moon.yml | 1 |
 | 3 | A 0.0.0 crate is release-blocked | 1 |
 | 4 | The freshness job's call site still exists | 1 / 2 |
@@ -22,6 +24,59 @@ split: `assert_freshness_call_site` returns `2` when the workflow file is missin
 unreadable (it cannot assert anything), and `1` when the file is readable but the
 assertion itself fails (the invocation is gone, its exit status is discarded, or a
 `continue-on-error`/`if:` can suppress its red).
+
+### Check 1c — each crate's own lint table, and no `deny`
+
+Cargo inlines a crate's *resolved* `[lints]` table into the manifest it publishes, and
+docs.rs builds a published crate on nightly **as the root package**, where `--cap-lints
+allow` does not apply (that flag only downgrades lints in *dependency* crates). So an
+inherited `[lints] workspace = true` — or a hand-written table that resolves
+`lints.rust.warnings` or `lints.clippy.all` to `deny`/`forbid` — silently kills the docs.rs
+build the first time a new rustc or clippy lint fires, months after the PR that shipped it
+(SMA-577). The check therefore requires a crate's own, non-inherited `[lints.*]` table, and
+rejects both TOML spellings of `deny`/`forbid` (the bare string form and the
+`{ level = ..., priority = ... }` table form).
+
+### Check 1d — each crate's own `include` allowlist
+
+Cargo's default `include` is "every non-ignored file in the package directory", which is how
+`moon.yml` and other repo-local cruft leaks into a package (the defect Check 2b exists to
+catch after the fact). Check 1d asserts the *rule* up front: a publishable crate must declare
+its own `include` as a non-empty list of plain strings containing the literal entries
+`README.md` and `LICENSE`. `include.workspace = true` is rejected explicitly — it is
+inheritable the same way `[lints]` is, and a "does cargo package README.md/LICENSE" test
+would pass it vacuously. Membership is **literal**, so `include = ["**/*"]` fails by design:
+a glob that happens to cover both required files would also reinstate the `moon.yml` leak
+Check 2b catches, defeating the point of an allowlist.
+
+### Check 2 — one dry-run per publish group
+
+Check 2 now runs `cargo publish --dry-run` once per **publish group**: a connected component
+of the in-set dependency graph, computed at runtime from `cargo metadata` (nodes are the
+publishable crates, an edge joins A–B when A depends on B and both are publishable). Today
+that yields two groups, `{paigasus-kernel}` and `{paigasus-proto-derive, paigasus-proto}`.
+
+This is not a workspace shortcut — it is the registry-faithful form. A *per-package*
+dry-run of `paigasus-proto` exits 101 (`no matching package named 'paigasus-proto-derive'
+found`) as long as the derive crate is absent from crates.io, because cargo resolves an
+in-set path dependency against the registry, not the workspace, on a single-package
+`--dry-run`. `cargo publish --dry-run -p paigasus-proto-derive -p paigasus-proto` exits 0
+instead, resolving the in-set dependency from a locally staged tarball. `paigasus-kernel`
+has no in-set dependency, so it stays a group of one and keeps exactly the assertion it had
+before this change — grouping never weakens a crate that didn't need it.
+
+**`CHECK2_INVOKED`** — the guard-the-guard for this call site (SMA-542 shape). The Check 2
+helper (`check_publish_group`) appends every package name it was *actually invoked with* to
+`CHECK2_INVOKED`, and `assert_check2_covered_everything` compares that recorded set against
+the set the per-package Check 2b loop enumerated, exiting 2 on mismatch. Because the record
+is written by the helper rather than by its caller, deleting one invocation leaves the
+recorded set short and the assertion fires — a one-line deletion is caught. What remains
+open is deleting the invocation **and** the assertion together, a two-site edit. Closing that
+fully would mean an external pin — `PUBLISH_METADATA_SH_CALL_SITES` in
+`ci/affected-graph/ci_targets.py` **plus** adding `ci/publish-metadata/run.sh` to
+`repo:affected-smoke`'s `inputs` (without which the pin would serve a cached pass on exactly
+the PR that breaks it) — and that is deliberately deferred: pinning one check's call sites
+while this file's other four stay unpinned would misrepresent the coverage.
 
 ## The category snapshot
 

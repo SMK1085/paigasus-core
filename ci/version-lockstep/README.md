@@ -5,7 +5,7 @@
 Asserts every version-carrying site in a lockstep family agrees with that family's
 source-of-truth Cargo crate (ADR-0011 S1; SMA-576).
 
-## Why 18 sites and not 6
+## Why 20 sites and not 6
 
 release-plz owns the Cargo `[package] version` of every group member and the
 `[workspace.dependencies]` version *requirements* — both measured against the pinned
@@ -36,7 +36,7 @@ passing state — the proto family activates in SMA-577.
 
 | Mode | Behaviour |
 |---|---|
-| `--check` (default) | Compare all 18 sites. Exit 1 on any drift. |
+| `--check` (default) | Compare all 20 sites. Exit 1 on any drift. |
 | `--write` | Rewrite the six sites release-plz cannot reach and regenerate the three derived ones. |
 | `--negative-control` | Prove the checker can still report red. |
 | `--self-test` | Fixture tables for the verdict function. |
@@ -72,30 +72,49 @@ wiring:
 
 ## The negative control
 
-`--negative-control` stages a scratch copy of every version-carrying file, drifts
-`@paigasus/node-bindings` to `99.99.99`, and asserts `run_check` exits 1. It drives the
+`--negative-control` drives two drifts, each staged into its **own** pristine copy of every
+version-carrying file (`stage_pristine_tree`, one call per drift): the original drift of
+`@paigasus/node-bindings`'s `packagejson` to `99.99.99`, and a second drift of a `cargo-lock`
+row (`paigasus-proto-derive`'s entry in `rs/Cargo.lock`, made non-uniform against
+`paigasus-proto`'s). Each asserts `run_check` exits 1 against its own tree. It drives the
 **real** `run_check` rather than a reimplementation — a second, differently-wrong checker
-would prove nothing.
+would prove nothing. Splitting the drifts across separate pristine trees, rather than
+reusing one scratch dir, is itself load-bearing: `run_check`'s loop keeps checking every site
+after the first mismatch, so a shared tree would let the first (packagejson) drift alone
+guarantee the second `run_check`'s red regardless of whether the lock-row drift landed at all
+(SMA-577 review, Critical).
 
 Measured: with `site_verdict` neutered to always return `OK`, the real run still prints
-`== all 18 version-lockstep sites agree ==` and exits 0. The control reds.
+`== all 20 version-lockstep sites agree ==` and exits 0. The control reds.
 
 ## Limitations
 
-**L1 — The control drifts exactly one site.** `--negative-control` mutates site 13
-(`@paigasus/node-bindings`'s `packagejson`) to `99.99.99` and asserts `run_check` exits 1.
-That proves the **pipeline** — scratch staging, `run_check`'s loop, exit-code plumbing — can
-still report red. It does NOT prove each of the eight `read_version` **kinds**
-(`cargo-package`, `cargo-wsdep`, `pyproject`, `pyproject-dep`, `packagejson`, `cargo-lock`,
-`uv-lock`, `napi-glue`) is itself honest. A reader that silently always printed the expected
-value, regardless of what its file actually contained, would pass both the real check
-(vacuously) and the negative control (since the control never touches that reader's file).
+**L1 — The control drifts exactly two sites, of twenty.** `--negative-control` mutates site 13
+(`@paigasus/node-bindings`'s `packagejson`) and one `cargo-lock` row, and asserts `run_check`
+exits 1 against each drift's own pristine tree. That proves the **pipeline** — scratch
+staging, `run_check`'s loop, exit-code plumbing — can still report red for the `packagejson`
+and `cargo-lock` kinds specifically. It does NOT prove the remaining six `read_version`
+**kinds** (`cargo-package`, `cargo-wsdep`, `pyproject`, `pyproject-dep`, `uv-lock`,
+`napi-glue`) are themselves honest — including `uv-lock`, whose kind is exercised by
+`lock_reader_self_test` below but not by an end-to-end drift here. A reader that silently
+always printed the expected value, regardless of what its file actually contained, would pass
+both the real check (vacuously) and the negative control for any of those six kinds (since
+the control never touches that reader's file).
 
-**L2 — Only `site_verdict` has fixture tables.** `--self-test` (`SELF_TEST_COUNT=1`) exercises
-`site_verdict`'s OK/MISMATCH logic directly. None of the eight `read_version` kinds has its own
-fixture, so a broken parser inside one of them — the wrong TOML key, an off-by-one on the
-`[[package]]` block split, a regex that matches the wrong table — is caught only if it happens
-to manifest on the real repo's current files or on the one site the negative control drifts.
+**L2 — Fixture-table coverage now spans two of the eight `read_version` kinds.**
+`--self-test` (`SELF_TEST_COUNT=2`) runs `site_verdict_self_test` (OK/MISMATCH logic) and
+`lock_reader_self_test`, added in SMA-577 to close this limitation for the lock kinds
+specifically: before it, neither lock arm had ever been exercised in isolation, so dropping
+`paigasus-proto-derive` from `LOCK_MEMBERS[proto:cargo-lock]` would have been a silent
+false-green on the very change that introduced that table. `lock_reader_self_test` drives
+`read_version` directly against synthetic `Cargo.lock`/`uv.lock` fixtures — a uniform member
+set, a **missing member** (must read `""`, not the survivor's version), a non-uniform set
+(must read `""`), and a `uv-lock` read — covering both `cargo-lock` and `uv-lock`. The
+remaining six kinds (`cargo-package`, `cargo-wsdep`, `pyproject`, `pyproject-dep`,
+`packagejson`, `napi-glue`) still have no fixture of their own, so a broken parser inside one
+of them — the wrong TOML key, an off-by-one on the `[[package]]` block split, a regex that
+matches the wrong table — is caught only if it happens to manifest on the real repo's current
+files or on the one non-lock site (`packagejson`) the negative control drifts.
 
 **L3 — The non-vacuity anchors are literals, not derived.** Both the `checked == ${#SITES[@]}`
 loop guard and the `EXPECTED_SITE_COUNT` anchor above it are numbers, not a comparison against

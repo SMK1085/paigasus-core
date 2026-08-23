@@ -15,8 +15,21 @@
 #            snapshot ci/publish-metadata/crates-io-categories.txt. crates.io DROPS unknown
 #            slugs and publishes anyway, and `cargo publish --dry-run` returns before the
 #            warning that would have said so — so Check 2 cannot catch this (SMA-529).
-#   Check 2  `cargo publish --dry-run` succeeds — the crate is publishABLE, packages, and
-#            compiles standalone with no unversioned path dependency.
+#   Check 1c each publishable crate declares its OWN [lints.*] table and does not deny.
+#            Cargo inlines the resolved table into the published manifest and docs.rs builds
+#            on nightly as the root package, where --cap-lints allow does not apply — so an
+#            inherited (or hand-written) `warnings = "deny"` silently kills docs.rs builds
+#            on the first new rustc lint, months later (SMA-577).
+#   Check 1d each publishable crate declares a non-empty `include` ALLOWLIST containing
+#            README.md and LICENSE. Membership is literal: "**/*" is rejected, because it
+#            would "cover" both while reinstating the moon.yml leak 2b exists to catch.
+#   Check 2  `cargo publish --dry-run` succeeds, once per PUBLISH GROUP — a connected
+#            component of the in-set dependency graph, computed at runtime from `cargo
+#            metadata` — not once per package: a per-package dry-run of a crate with an
+#            unpublished in-tree dependency cannot succeed (`-p paigasus-proto` alone exits
+#            101, `no matching package named 'paigasus-proto-derive'`, until the derive crate
+#            is on crates.io). The group is publishABLE, packages, and compiles with no
+#            unversioned path dependency OUTSIDE the group.
 #   Check 2b the packaged file list ships README.md + LICENSE and not moon.yml.
 #   Check 3  while any publishable crate is at 0.0.0, rs/release-plz.toml must block its
 #            release. Releasing 0.0.0 permanently burns that version on crates.io.

@@ -54,7 +54,10 @@ Review finding **B1** — the largest gap in the first draft. `paigasus-proto` d
 - `rs/Cargo.toml:136` — *"PUBLISH ORDER (SMA-388): this crate must publish BEFORE paigasus-proto, which depends on it."*
 - `rs/crates/libs/paigasus-proto/Cargo.toml:10-11` — *"paigasus-proto-derive must publish FIRST."*
 
-So the publishable set is **four** crates, not two:
+So the publishable set is **three** crates, not two (the diagram below was already right; the
+miscount here came from counting the kernel *version group*'s four members — `paigasus-kernel`
+plus its three binding crates — rather than the publishable set, which is `paigasus-kernel`
+alone):
 
 ```
 paigasus-proto-derive ──▶ paigasus-proto      (proto family, ordered)
@@ -448,12 +451,22 @@ An **ADR-0011 amendment** recording four things:
 4. What is `git_tag_name`? `rs/release-plz.toml` sets none; the default is `{package}-v{version}`.
    Does it collide with napi's `lerna` style (`@paigasus/node-bindings@0.1.0`)?
 5. What schedules the `release` job, and is `release_always` on or off?
-6. How does the *first* `cargo publish --dry-run -p paigasus-proto` behave before
+6. ~~How does the *first* `cargo publish --dry-run -p paigasus-proto` behave before
    `paigasus-proto-derive` exists on crates.io — and can `check_package`'s per-package loop
-   (`run.sh:665-668`) express a two-crate publish at all?
-7. Does the generated per-crate `CHANGELOG.md` ship? `paigasus-kernel`'s `include` allowlist
+   (`run.sh:665-668`) express a two-crate publish at all?~~
+   **Answered.** It cannot: measured at exit 101, `no matching package named
+   'paigasus-proto-derive' found`. cargo 1.95's *multi*-package `cargo publish --dry-run -p
+   paigasus-proto-derive -p paigasus-proto` resolves the publish order itself — flag order is
+   irrelevant, cargo computes the topological order — and M3 proved it consumes the upstream
+   crate's locally staged, packaged tarball rather than replaying release-plz's sequential
+   registry publish. See `docs/superpowers/specs/2026-08-23-sma-577-proto-family-publishable-design.md`
+   §3.
+7. ~~Does the generated per-crate `CHANGELOG.md` ship? `paigasus-kernel`'s `include` allowlist
    (`Cargo.toml:19`) excludes it, and new tracked files have `repo:input-liveness` and Check 2b
-   consequences.
+   consequences.~~
+   **Answered — no.** `paigasus-proto` and `paigasus-proto-derive`'s `include` allowlists
+   (Check 1d) exclude `CHANGELOG.md` the same way `paigasus-kernel`'s does; it is generated but
+   does not ship.
 8. `paigasus-py-bindings/pyproject.toml` has essentially no PyPI metadata and no LICENSE/README.
    Nothing gates PyPI/npm metadata the way `repo:publish-metadata` gates crates.io — extend the new
    gate, or accept the asymmetry explicitly?
