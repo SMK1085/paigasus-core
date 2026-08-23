@@ -42,6 +42,7 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use super::convert;
+use super::convert::require_present;
 use crate::adapters::auth::AuthContext;
 use crate::adapters::http::AppState;
 use crate::application::error::TenancyError;
@@ -139,7 +140,8 @@ impl ServiceAccountService for ServiceAccountGrpc {
         let result: Result<Response<ListServiceAccountsResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
             let req = request.into_inner();
-            let owner = parse_node_prn(&req.owner_prn).map_err(convert::status_to_grpc)?;
+            let owner_prn = require_present(&req.owner_prn, "owner_prn").map_err(convert::status_to_grpc)?;
+            let owner = parse_node_prn(owner_prn).map_err(convert::status_to_grpc)?;
             let page = convert::to_page(req.limit, req.offset).map_err(convert::status_to_grpc)?;
             let accounts = self.state.service_accounts.list(&actor, &owner, page).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ListServiceAccountsResponse {
@@ -174,7 +176,8 @@ impl ServiceAccountService for ServiceAccountGrpc {
             let actor = actor_context(&request)?.principal_id.prn().clone();
             let req = request.into_inner();
             let sa_id = service_account_id(&req.service_account_prn).map_err(convert::status_to_grpc)?;
-            let scope = parse_node_prn(&req.scope_prn).map_err(convert::status_to_grpc)?;
+            let scope_prn = require_present(&req.scope_prn, "scope_prn").map_err(convert::status_to_grpc)?;
+            let scope = parse_node_prn(scope_prn).map_err(convert::status_to_grpc)?;
             // `expires_at` unset means non-expiring (or the configured `default_expiry_days`
             // fallback, `ApiKeyService::issue`) — mirrors `IssueApiKeyBody::expires_at`'s HTTP
             // counterpart. A present-but-out-of-range timestamp is `InvalidTimestamp`
@@ -209,10 +212,10 @@ impl ServiceAccountService for ServiceAccountGrpc {
         let result: Result<Response<RevokeApiKeyResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
             let req = request.into_inner();
-            // `id` is a plain uuid (an api key's own id), not a PRN — mirrors
-            // `TenancyGrpc::detach_membership`/`AuthzGrpc::revoke_role`'s identical posture for a
-            // non-PRN-shaped wire id: there is no dedicated error code for "not a uuid".
-            let id = Uuid::parse_str(&req.id).map_err(|_| convert::status_to_grpc(TenancyError::InvalidPrn("api key id must be a uuid".to_string())))?;
+            // `RevokeApiKeyRequest.id` is a bare uuid, not a PRN, so a malformed value is
+            // `InvalidUuid` naming the segment (SMA-586). The field name reaches the client in
+            // both the message and `ErrorInfo.metadata["field"]`.
+            let id = Uuid::parse_str(&req.id).map_err(|_| convert::status_to_grpc(TenancyError::InvalidUuid("api_key_id")))?;
             self.state.api_keys.revoke(&actor, ApiKeyId::from_uuid(id)).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(RevokeApiKeyResponse {}))
         }
@@ -237,5 +240,21 @@ impl ServiceAccountService for ServiceAccountGrpc {
         .await;
         record_grpc("ServiceAccount", "ListApiKeys", started, &result);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SMA-586 D5.2: an empty required PRN field is `missing-required-field`, not a PRN parse
+    /// failure. Before this, an empty `owner_prn` fell through to `parse_node_prn` and answered
+    /// `invalid-prn` — while the HTTP twin answered `missing-required-field`, so the two
+    /// transports disagreed on the same logical failure.
+    #[test]
+    fn an_empty_owner_prn_is_a_missing_required_field() {
+        assert_eq!(require_present("", "owner_prn").unwrap_err(), TenancyError::MissingRequiredField("owner_prn"));
+        assert_eq!(require_present("   ", "owner_prn").unwrap_err(), TenancyError::MissingRequiredField("owner_prn"));
+        assert_eq!(require_present("iam::org/x", "owner_prn").unwrap(), "iam::org/x");
     }
 }

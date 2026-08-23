@@ -82,6 +82,20 @@ fn parse_node_prn(raw: &str) -> Result<TenancyNodeRef, TenancyError> {
     Ok(TenancyNodeRef::from_prn(prn)?)
 }
 
+/// Maps the `ListMembershipsRequest.filter` oneof to a `MembershipFilter`.
+///
+/// A proto3 `oneof` cannot carry two values, so `None` means NEITHER field is set — which is
+/// `missing-required-field`, not a conflict (SMA-586 D6). The HTTP twin, whose two query
+/// params CAN both be present, is the only surface that can produce
+/// `MutuallyExclusiveFields`.
+pub(crate) fn membership_filter(filter: Option<list_memberships_request::Filter>) -> Result<MembershipFilter, TenancyError> {
+    match filter {
+        Some(list_memberships_request::Filter::PrincipalPrn(prn)) => Ok(MembershipFilter::Principal(prn)),
+        Some(list_memberships_request::Filter::NodePrn(prn)) => Ok(MembershipFilter::Node(prn)),
+        None => Err(TenancyError::MissingRequiredField("principal_prn|node_prn")),
+    }
+}
+
 /// Resolves `node`'s REAL, stored PRN by looking it up (by uuid alone, ignoring whatever org
 /// slot the caller's PRN claims) through the owning tenancy service — see the module docs.
 async fn resolve_node(state: &AppState, node: &TenancyNodeRef) -> Result<Prn, TenancyError> {
@@ -581,15 +595,14 @@ impl TenancyService for TenancyGrpc {
         let result: Result<Response<DetachMembershipResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
             let req = request.into_inner();
-            // `id` is a plain UUIDv7, not a PRN (D5) — there is no dedicated error code for "not a
-            // UUID", so this reuses `InvalidPrn` with a static string as context (same sentinel
-            // the PRN parsers use for "malformed input", just not itself a PRN here). The error
-            // payload is server-side context only; InvalidPrn's Display never surfaces it.
+            // `DetachMembershipRequest.id` is a bare uuid, not a PRN, so a malformed value is
+            // `InvalidUuid` naming the segment (SMA-586). The field name reaches the client in
+            // both the message and `ErrorInfo.metadata["field"]`.
             //
             // Detaching an ORG membership cascades: the principal's team/project memberships in
             // that same org are removed in the same transaction (spec §5.1 rule 5). Detaching a
             // team/project membership removes only itself.
-            let id = Uuid::parse_str(&req.id).map_err(|_| convert::status_to_grpc(TenancyError::InvalidPrn("membership id must be a uuid".to_string())))?;
+            let id = Uuid::parse_str(&req.id).map_err(|_| convert::status_to_grpc(TenancyError::InvalidUuid("membership_id")))?;
             if self.state.enforce_tenancy {
                 let record = self.state.memberships.get(id).await.map_err(convert::status_to_grpc)?;
                 let node_prn = Prn::parse(&record.node_prn).map_err(|e| convert::status_to_grpc(TenancyError::InvalidPrn(e.kind().to_owned())))?;
@@ -608,11 +621,7 @@ impl TenancyService for TenancyGrpc {
         let result: Result<Response<ListMembershipsResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
             let req = request.into_inner();
-            let filter = match req.filter {
-                Some(list_memberships_request::Filter::PrincipalPrn(prn)) => MembershipFilter::Principal(prn),
-                Some(list_memberships_request::Filter::NodePrn(prn)) => MembershipFilter::Node(prn),
-                None => return Err(convert::status_to_grpc(TenancyError::InvalidPrn("provide exactly one of principal_prn|node_prn".to_string()))),
-            };
+            let filter = membership_filter(req.filter).map_err(convert::status_to_grpc)?;
             if self.state.enforce_tenancy {
                 let resource = match &filter {
                     MembershipFilter::Principal(_) => root_prn(),
@@ -632,5 +641,20 @@ impl TenancyService for TenancyGrpc {
         .await;
         record_grpc("Tenancy", "ListMemberships", started, &result);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SMA-586 D6: the `ListMembershipsRequest.filter` oneof cannot carry two values, so its
+    /// `None` arm means NEITHER field is set — which is `missing-required-field`. The old message
+    /// ("provide exactly one of …") described a failure the wire format makes impossible.
+    #[test]
+    fn an_absent_membership_filter_oneof_is_a_missing_required_field() {
+        let err = membership_filter(None).unwrap_err();
+        assert_eq!(err, TenancyError::MissingRequiredField("principal_prn|node_prn"));
+        assert_eq!(err.code(), "missing-required-field");
     }
 }

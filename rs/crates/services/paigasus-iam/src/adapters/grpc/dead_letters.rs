@@ -110,8 +110,9 @@ fn to_bulk_request(req: BulkReplayDeadLettersRequest) -> Result<BulkReplayReques
     })
 }
 
-fn parse_id(raw: &str) -> Result<Uuid, TenancyError> {
-    Uuid::parse_str(raw).map_err(|_| TenancyError::InvalidPrn("id must be a uuid".to_string()))
+/// Widened to `pub(crate)` for Task 8's cross-transport parity test (SMA-586).
+pub(crate) fn parse_id(raw: &str) -> Result<Uuid, TenancyError> {
+    Uuid::parse_str(raw).map_err(|_| TenancyError::InvalidUuid("dead_letter_id"))
 }
 
 #[tonic::async_trait]

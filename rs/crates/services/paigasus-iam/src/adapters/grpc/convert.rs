@@ -227,6 +227,20 @@ pub fn parse_opt_ts(t: Option<prost_types::Timestamp>, field: &'static str) -> R
     }
 }
 
+/// Rejects an absent required wire field before it reaches a parser that would mis-describe
+/// the failure (SMA-586 D5.2).
+///
+/// proto3 has no absence for a plain `string`, so an unset field arrives as `""` — which
+/// `Prn::parse` would report as a malformed PRN rather than as a missing one, diverging from
+/// the HTTP twin where the param is genuinely `Option`. Whitespace counts as empty: a
+/// `?owner_prn=%20` is not a PRN anyone meant to send.
+pub(crate) fn require_present<'a>(raw: &'a str, field: &'static str) -> Result<&'a str, TenancyError> {
+    if raw.trim().is_empty() {
+        return Err(TenancyError::MissingRequiredField(field));
+    }
+    Ok(raw)
+}
+
 /// Builds `AuditMetadata` from created/modified timestamps. `created_by`/`modified_by` stay
 /// empty until M2 wires an actor through the request context (task-16 brief).
 pub fn audit(created: DateTime<Utc>, updated: DateTime<Utc>) -> AuditMetadata {

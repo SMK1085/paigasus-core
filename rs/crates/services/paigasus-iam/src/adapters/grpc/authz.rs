@@ -38,6 +38,7 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use super::convert;
+use super::convert::require_present;
 use crate::adapters::auth::AuthContext;
 use crate::adapters::http::AppState;
 use crate::application::error::TenancyError;
@@ -211,10 +212,10 @@ impl AuthorizationService for AuthzGrpc {
         let result: Result<Response<RevokeRoleResponse>, Status> = async {
             let actor = actor_context(&request)?.principal_id.prn().clone();
             let req = request.into_inner();
-            // `id` is a plain UUID (a role grant's own id), not a PRN — mirrors
-            // `TenancyGrpc::detach_membership`'s `InvalidPrn`-as-sentinel posture for a
-            // non-PRN-shaped wire id: there is no dedicated error code for "not a uuid".
-            let id = Uuid::parse_str(&req.id).map_err(|_| convert::status_to_grpc(TenancyError::InvalidPrn("role grant id must be a uuid".to_string())))?;
+            // `RevokeRoleRequest.id` is a bare uuid, not a PRN, so a malformed value is
+            // `InvalidUuid` naming the segment (SMA-586). The field name reaches the client in
+            // both the message and `ErrorInfo.metadata["field"]`.
+            let id = Uuid::parse_str(&req.id).map_err(|_| convert::status_to_grpc(TenancyError::InvalidUuid("role_grant_id")))?;
             self.state.roles.revoke(&actor, id).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(RevokeRoleResponse {}))
         }
@@ -233,7 +234,8 @@ impl AuthorizationService for AuthzGrpc {
             // `adapters::http::authz`'s `RoleGrantQuery` doesn't expose `limit`/`offset` at all
             // either); the wire fields exist for proto-shape parity with `ListPoliciesRequest`
             // but aren't enforced here.
-            let grants = self.state.roles.list(&actor, &req.principal_prn).await.map_err(convert::status_to_grpc)?;
+            let principal_prn = require_present(&req.principal_prn, "principal_prn").map_err(convert::status_to_grpc)?;
+            let grants = self.state.roles.list(&actor, principal_prn).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(ListRoleGrantsResponse {
                 grants: grants.iter().map(convert::to_proto_role_grant).collect(),
             }))
