@@ -500,3 +500,26 @@ Concerns: none — full report at `/Users/smaschek/dev/paigasus/paigasus-core/.s
 ⚠️ Cannot verify from diff: whether the brief's authors (spec stage) were aware of/accepted this asymmetry when writing the exact test code — that's outside this diff's scope to judge, but worth surfacing to whoever owns the SDD spec, since it slightly overstates what "AC-3 transport parity guard" actually guards for these two spots.</result>
 <usage><subagent_tokens>95850</subagent_tokens><tool_uses>33</tool_uses><duration_ms>363945</duration_ms></usage>
 </task-notification>
+
+---
+
+<task-notification>
+<task-id>a580c548be05cf8e3</task-id>
+<tool-use-id>toolu_01JXZHa4upf48FmNA7C11zts</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a580c548be05cf8e3.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 8: transport parity guard" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE_WITH_CONCERNS
+
+Commit SHA: `387e66b` — `test(rs): drive the real http extractors in the transport parity guard (SMA-586)`
+
+Test summary: `cargo test -p paigasus-iam --lib` → 610 passed, 0 failed; clippy clean; fmt clean; `error-registry --single-site` clean (no MANIFEST row added).
+
+Mutation-test outcomes:
+- Finding 1 fix (dead-letter id row lifted into `http_dead_letter_id_agrees_with_grpc_on_invalid_uuid`, driving the real `UuidPath&lt;DeadLetterId&gt;` extractor): mutated `http/path.rs`'s rejection from `InvalidUuid` to `InvalidPrn` → test went **red** (`left: "invalid-prn" / right: "invalid-uuid"`); reverted → test **green** again; `git diff` on `path.rs` confirmed empty (no leaked mutation).
+- Finding 2: no mutation test performed — the fix itself was blocked, not shipped (see concern below), per the ruling's escape hatch.
+
+Concerns: Investigating Finding 2 uncovered that the real `issue` HTTP handler (`http/api_keys.rs`) deserializes `IssueApiKeyBody` via plain `axum::Json`, not `EnvelopeJson` — so a malformed `expires_at` never reaches the IAM error envelope/registry at all (axum's plain-text 422, no `error.code` field), contradicting the divergence comment's original claim of `invalid-request-body`. Fixing that is a production-code change outside Task 8's scope, so I left the gRPC-half assertion as the only one asserted and rewrote the comment to state only what's verified, flagging this as a genuine preexisting gap worth a follow-up ticket (switch `issue` to `EnvelopeJson&lt;IssueApiKeyBody&gt;`, mirroring `introspect`). Full details and both mutation-test transcripts are appended to `.superpowers/sdd/2026-08-23-sma-586-error-reason-taxonomy/task-8-report.md`.</result>
+<usage><subagent_tokens>183837</subagent_tokens><tool_uses>43</tool_uses><duration_ms>398174</duration_ms></usage>
+</task-notification>
