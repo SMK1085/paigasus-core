@@ -182,10 +182,14 @@ impl ServiceAccountService for ServiceAccountGrpc {
             // fallback, `ApiKeyService::issue`) — mirrors `IssueApiKeyBody::expires_at`'s HTTP
             // counterpart. A present-but-out-of-range timestamp is `InvalidTimestamp`
             // (SMA-586). `parse_opt_ts` is that exact absent/valid/unrepresentable split,
-            // shared with the filter call sites (SMA-583). NOTE the HTTP twin diverges here
-            // and that is deliberate: its `expires_at` is a typed `DateTime<Utc>` in the body,
-            // so a malformed value fails inside serde and yields `invalid-request-body`, which
-            // is the correct reason for a body that would not deserialize.
+            // shared with the filter call sites (SMA-583). NOTE the HTTP twin diverges here,
+            // and NOT in IAM's favour: `http::api_keys::issue` deserializes with plain
+            // `axum::Json`, not `authn::EnvelopeJson`, so a malformed `expires_at` is rejected
+            // by axum with a plain-text 422 that carries no `error.code` at all — it never
+            // reaches the IAM error envelope, and so produces no registry reason for this
+            // failure on HTTP. That is a pre-existing envelope gap shared by every route that
+            // still deserializes its body with plain `axum::Json`, tracked as a follow-up;
+            // SMA-586 does not change it.
             let expires_at = convert::parse_opt_ts(req.expires_at, "expires_at").map_err(convert::status_to_grpc)?;
             let scope_actions = req
                 .scope_actions
