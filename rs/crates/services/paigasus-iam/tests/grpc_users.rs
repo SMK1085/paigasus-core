@@ -179,6 +179,9 @@ async fn create_user_requires_platform_admin() {
         return;
     };
     let idp = support::start_mock_idp().await;
+    // Cloned BEFORE `AppState::new` consumes `db`, so the row-count assertion below can query the
+    // same database independently — mirrors `tests/http_users.rs`'s identical setup.
+    let count_db = db.clone();
     let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
 
     // An ORDINARY principal: JIT-provisioned, no grant of any kind.
@@ -197,9 +200,19 @@ async fn create_user_requires_platform_admin() {
     let err = client.create_user(create_user_request("no-bearer@example.com")).await.unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
 
+    // Baseline taken AFTER both principals are provisioned, so the only thing that could move it
+    // is the denied create below.
+    let before = principal::Entity::find().count(&count_db).await.unwrap();
+
     // An ordinary, non-admin principal -> PermissionDenied.
     let err = client.create_user(authed(create_user_request("denied@example.com"), &plain_token)).await.unwrap_err();
     assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+
+    // The check must run BEFORE the use case: a denied create must not mint a principal row.
+    // Without this the test would still pass if a later change moved the guard AFTER
+    // `CreateUser::execute` and merely discarded the result — the HTTP twin asserts the same.
+    let after = principal::Entity::find().count(&count_db).await.unwrap();
+    assert_eq!(after, before, "a denied create must not mint a principal row");
 
     // platform_admin -> Ok.
     let resp = client.create_user(authed(create_user_request("allowed@example.com"), &admin_token)).await.unwrap().into_inner();
@@ -255,6 +268,40 @@ async fn the_grpc_guard_is_bound_to_create_user_specifically() {
 
     // Now permitted...
     let resp = client.create_user(authed(create_user_request("grpc-bound@example.com"), &subject_token)).await.unwrap().into_inner();
+    Prn::parse(&resp.principal_prn).unwrap_or_else(|e| panic!("unexpected principal prn {}: {e}", resp.principal_prn));
+
+    server.abort();
+}
+
+/// SMA-584: the gRPC twin of `tests/authz_enforce_toggle.rs`'s
+/// `enforce_tenancy_false_lets_an_otherwise_ungranted_principal_create_a_user`. Without this,
+/// `enforce_tenancy` is pinned on the HTTP transport only — deleting the
+/// `if self.state.enforce_tenancy` wrapper from `grpc::users` would leave gRPC always-checking
+/// while HTTP bypasses, and every test would still pass. That is a transport divergence, which
+/// is the one thing this issue exists to prevent, so both halves of the toggle are pinned.
+#[tokio::test]
+async fn enforce_tenancy_false_lets_an_ungranted_principal_create_a_user_over_grpc() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let mut cfg = support::test_config(&idp);
+    cfg.authz.enforce_tenancy = false;
+    let state = AppState::new(db, &cfg).await.unwrap();
+
+    let token = idp.bearer("grpc-toggle-tester", Some("grpc-toggle-tester@example.com"), "paigasus", 3600);
+    // JIT-provision the principal but grant it NOTHING — under the default `enforce_tenancy =
+    // true` this exact call is `PermissionDenied` (`create_user_requires_platform_admin`).
+    support::provision(&state, &token).await;
+
+    let (addr, server) = spawn_server(state).await;
+    let mut client = UserServiceClient::new(channel(addr).await);
+
+    let resp = client
+        .create_user(authed(create_user_request("grpc-toggle-off@example.com"), &token))
+        .await
+        .expect("enforce_tenancy = false must bypass the CreateUser gate over gRPC")
+        .into_inner();
     Prn::parse(&resp.principal_prn).unwrap_or_else(|e| panic!("unexpected principal prn {}: {e}", resp.principal_prn));
 
     server.abort();

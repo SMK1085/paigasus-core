@@ -722,7 +722,7 @@ impl AppState {
 
         if !authz_cfg.enforce_tenancy {
             tracing::warn!(
-                "enforce_tenancy is disabled: EVERY tenancy authorization check is bypassed, including Action::CreateUser on POST /v1/users and UserService.CreateUser — test-only configuration, never use in production"
+                "enforce_tenancy is disabled: the tenancy-adapter authorization guards are bypassed — org/team/project/membership CRUD, and Action::CreateUser on POST /v1/users and UserService.CreateUser. Application-layer authorization (policies, role grants, service accounts, API keys, audit, outbox dead letters, system retirement) still applies. Test-only configuration, never use in production"
             );
         }
 
