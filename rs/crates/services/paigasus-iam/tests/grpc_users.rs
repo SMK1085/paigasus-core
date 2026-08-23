@@ -2,11 +2,12 @@
 
 //! End-to-end gRPC coverage for `UserService.CreateUser` (SMA-501): minting a principal, the
 //! duplicate-email conflict, a malformed-email rejection (no principal minted), the D11
-//! empty-locale-becomes-unset wire sentinel, and the D0 pin that this RPC is bearer-required
-//! but performs NO further authorization check — mirroring `POST /v1/users` exactly (see
-//! `adapters::grpc::users` module doc). Drives the real `grpc::router(AppState::new(db, &cfg),
-//! ..)` over an ephemeral `TcpListener` (mirrors `tests/grpc_tenancy.rs`/`tests/grpc_audit.rs`)
-//! against an ephemeral Postgres (Docker; see `tests/support/mod.rs`) and the HTTPS mock IdP.
+//! empty-locale-becomes-unset wire sentinel, and the SMA-584 pin that this RPC is
+//! bearer-required AND authorized (`Action::CreateUser`@`Root`) — mirroring `POST /v1/users`
+//! exactly (see `adapters::grpc::users` module doc; `tests/http_users.rs` is the HTTP twin).
+//! Drives the real `grpc::router(AppState::new(db, &cfg), ..)` over an ephemeral `TcpListener`
+//! (mirrors `tests/grpc_tenancy.rs`/`tests/grpc_audit.rs`) against an ephemeral Postgres
+//! (Docker; see `tests/support/mod.rs`) and the HTTPS mock IdP.
 
 mod support;
 
@@ -72,7 +73,9 @@ async fn create_user_over_grpc_mints_a_principal() {
     let idp = support::start_mock_idp().await;
     let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
     let token = idp.bearer("grpc-user-tester", Some("grpc-user-tester@example.com"), "paigasus", 3600);
-    support::provision(&state, &token).await;
+    // SMA-584: CreateUser now requires `Action::CreateUser`@`Root`. These tests cover minting,
+    // conflicts and the D11 wire sentinel — not authorization — so they act as a platform_admin.
+    support::provision_platform_admin(&state, &token).await;
     let (addr, server) = spawn_server(state).await;
     let mut client = UserServiceClient::new(channel(addr).await);
 
@@ -94,7 +97,9 @@ async fn a_duplicate_email_is_already_exists() {
     let idp = support::start_mock_idp().await;
     let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
     let token = idp.bearer("grpc-dupe-tester", Some("grpc-dupe-tester@example.com"), "paigasus", 3600);
-    support::provision(&state, &token).await;
+    // SMA-584: CreateUser now requires `Action::CreateUser`@`Root`. These tests cover minting,
+    // conflicts and the D11 wire sentinel — not authorization — so they act as a platform_admin.
+    support::provision_platform_admin(&state, &token).await;
     let (addr, server) = spawn_server(state).await;
     let mut client = UserServiceClient::new(channel(addr).await);
 
@@ -119,7 +124,9 @@ async fn a_malformed_email_is_invalid_argument() {
     let token = idp.bearer("grpc-badmail-tester", Some("grpc-badmail-tester@example.com"), "paigasus", 3600);
     // Provision the acting principal FIRST, so its JIT-provisioned row is already counted in
     // `before` and the malformed create below is the only thing that could change the count.
-    support::provision(&state, &token).await;
+    // SMA-584: CreateUser now requires `Action::CreateUser`@`Root`. These tests cover minting,
+    // conflicts and the D11 wire sentinel — not authorization — so they act as a platform_admin.
+    support::provision_platform_admin(&state, &token).await;
     let before = principal::Entity::find().count(&count_db).await.unwrap();
     let (addr, server) = spawn_server(state).await;
     let mut client = UserServiceClient::new(channel(addr).await);
@@ -145,7 +152,9 @@ async fn an_empty_locale_becomes_unset() {
     let query_db = db.clone();
     let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
     let token = idp.bearer("grpc-locale-tester", Some("grpc-locale-tester@example.com"), "paigasus", 3600);
-    support::provision(&state, &token).await;
+    // SMA-584: CreateUser now requires `Action::CreateUser`@`Root`. These tests cover minting,
+    // conflicts and the D11 wire sentinel — not authorization — so they act as a platform_admin.
+    support::provision_platform_admin(&state, &token).await;
     let (addr, server) = spawn_server(state).await;
     let mut client = UserServiceClient::new(channel(addr).await);
 
@@ -157,27 +166,29 @@ async fn an_empty_locale_becomes_unset() {
     server.abort();
 }
 
-/// **Design pin (D0), not a bug report.** `UserService.CreateUser` is bearer-required but
-/// performs NO further authorization check, deliberately: `CreateUser::execute` takes no
-/// `actor` parameter, `adapters::http::users` extracts no `AuthContext`, and there is no
-/// `Action::CreateUser` in the Cedar action catalog — this gRPC adapter mirrors that exactly
-/// because parity with the HTTP surface is this issue's acceptance criterion (see
-/// `adapters::grpc::users` module doc). This test pins BOTH halves so a future maintainer who
-/// tightens authorization on ONE transport sees this test fail here and is forced to consider
-/// the other: an unauthenticated call is rejected (proving `UserService` carries no
-/// `is_exempt` allowlist entry, so the bearer layer still runs in front of it), and a call from
-/// an ordinary, non-admin principal — no grant, no capability, nothing — still succeeds.
+/// **Design pin (SMA-584).** `UserService.CreateUser` is bearer-required AND authorized: it
+/// checks `Action::CreateUser` at `root_prn()`, gated by `enforce_tenancy`, exactly as
+/// `POST /v1/users` does (`adapters::grpc::users` module doc). This test pins all three halves
+/// so a future maintainer who changes authorization on ONE transport is forced to consider the
+/// other: unauthenticated is rejected (proving `UserService` carries no `is_exempt` allowlist
+/// entry), an ordinary non-admin principal is DENIED, and a `platform_admin` succeeds.
+/// `tests/http_users.rs` is the HTTP-side twin.
 #[tokio::test]
-async fn create_user_requires_a_bearer_but_no_authorization() {
+async fn create_user_requires_platform_admin() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
     let idp = support::start_mock_idp().await;
     let state = AppState::new(db, &support::test_config(&idp)).await.unwrap();
-    let token = idp.bearer("grpc-plain-tester", Some("grpc-plain-tester@example.com"), "paigasus", 3600);
-    // An ORDINARY principal: JIT-provisioned via `support::provision`, no `platform_admin` (or
-    // any other) grant seeded — deliberately NOT `support::provision_platform_admin`.
-    support::provision(&state, &token).await;
+
+    // An ORDINARY principal: JIT-provisioned, no grant of any kind.
+    let plain_token = idp.bearer("grpc-plain-tester", Some("grpc-plain-tester@example.com"), "paigasus", 3600);
+    support::provision(&state, &plain_token).await;
+
+    // A platform_admin, seeded at Root.
+    let admin_token = idp.bearer("grpc-admin-tester", Some("grpc-admin-tester@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&state, &admin_token).await;
+
     let (addr, server) = spawn_server(state).await;
     let mut client = UserServiceClient::new(channel(addr).await);
 
@@ -186,8 +197,12 @@ async fn create_user_requires_a_bearer_but_no_authorization() {
     let err = client.create_user(create_user_request("no-bearer@example.com")).await.unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
 
-    // A bearer from an ordinary, non-admin principal SUCCEEDS: no Cedar check runs at all.
-    let resp = client.create_user(authed(create_user_request("plain-principal@example.com"), &token)).await.unwrap().into_inner();
+    // An ordinary, non-admin principal -> PermissionDenied.
+    let err = client.create_user(authed(create_user_request("denied@example.com"), &plain_token)).await.unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+
+    // platform_admin -> Ok.
+    let resp = client.create_user(authed(create_user_request("allowed@example.com"), &admin_token)).await.unwrap().into_inner();
     Prn::parse(&resp.principal_prn).unwrap_or_else(|e| panic!("unexpected principal prn {}: {e}", resp.principal_prn));
 
     server.abort();
