@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.10.2",
+  "checkpoint_id": "2d0a1b351e9d",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-586-error-reason-taxonomy",
+  "checkpoints_count": 2,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/2d/0a1b351e9d/0/metadata.json",
+      "transcript": "/2d/0a1b351e9d/0/full.jsonl",
+      "compact_transcript": "/2d/0a1b351e9d/0/transcript.jsonl",
+      "content_hash": "/2d/0a1b351e9d/0/content_hash.txt",
+      "prompt": "/2d/0a1b351e9d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 6,
+    "cache_creation_tokens": 4838,
+    "cache_read_tokens": 1329264,
+    "output_tokens": 1748,
+    "api_call_count": 3
+  }
+}
