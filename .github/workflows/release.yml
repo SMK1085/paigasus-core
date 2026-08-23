@@ -1,0 +1,158 @@
+# SPDX-License-Identifier: Apache-2.0
+name: release
+
+# Only the RELEASE-PR half is live (SMA-576). The release job — tags + registry publishes —
+# lands with SMA-580 behind `vars.PAIGASUS_RELEASE_ENABLED`. Nothing here publishes.
+on:
+  push:
+    branches:
+      - main
+
+# release-plz force-updates its PR branch on every run, so two rapid merges to main would
+# race. Do NOT cancel in progress: a cancelled run can leave the branch half-written.
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+# Least privilege for the auto GITHUB_TOKEN, matching every other workflow here: it is never
+# used for the push/PR below (that goes through secrets.RELEASE_PLZ_TOKEN — see Checkout).
+permissions:
+  contents: read
+
+jobs:
+  release-pr:
+    name: release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # RELEASE_PLZ_TOKEN does not exist yet (a human must create it — see the workflow's
+      # own doc). A job-level `if:` cannot see whether it's set: per GitHub's own context-
+      # availability table, `jobs.<job_id>.if` only sees github/needs/vars/inputs, never
+      # secrets. A step's `if:`/`env:` CAN see secrets, so every step below is individually
+      # guarded on this step's output instead. Left unconfigured, this makes the whole job
+      # skip cleanly (green) on every push to main instead of failing loudly forever.
+      - name: Check for the release-plz token
+        id: preflight
+        env:
+          TOKEN_SET: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
+        run: |
+          echo "configured=$TOKEN_SET" >> "$GITHUB_OUTPUT"
+          if [ "$TOKEN_SET" != "true" ]; then
+            echo "::notice::RELEASE_PLZ_TOKEN is not set — skipping the release-PR job until a human creates it (see release.yml)."
+          fi
+
+      - name: Checkout
+        if: steps.preflight.outputs.configured == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          # persist-credentials: false, matching every other checkout in this repo
+          # (artipacked hardening). An earlier revision persisted the App token here so the
+          # stamping step could push — but `actions/checkout` writes that credential into
+          # the local git config for the WHOLE job, which handed a write-capable token to
+          # four steps that have no business with it (setup-toolchain, proto install,
+          # moon setup, pnpm install). A compromised action or transitive dependency in any
+          # of them could have used it before release work even began.
+          #
+          # The token now reaches only the two steps that genuinely need it, via their own
+          # `env:` — release-plz (GIT_TOKEN) and the stamping step (which authenticates its
+          # fetch/push through an explicit remote URL rather than ambient git config).
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        if: steps.preflight.outputs.configured == 'true'
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          # Don't cache the proto/Moon toolchain dir: a restored ~/.proto carries stale
+          # setup-state that makes `moon setup` skip installing node/pnpm (their shims
+          # then don't exist). Reinstall fresh each run (matches ci.yml/prebuild.yml).
+          cache: false
+
+      # release-plz is proto-pinned like every other CLI this repo depends on
+      # (.prototools, .proto/plugins/release-plz.toml) — install the pinned binary
+      # directly rather than through a third-party GitHub Action, which would resolve
+      # its own, unpinned release-plz build. Narrow install (not a bare `proto install`):
+      # this job needs none of actionlint/buf/deny/machete/nextest/promtool/wasm-pack.
+      - name: Install pinned release-plz CLI
+        if: steps.preflight.outputs.configured == 'true'
+        run: proto install release-plz
+
+      - name: Install Moon-managed toolchains (node, pnpm, rust, python, uv)
+        if: steps.preflight.outputs.configured == 'true'
+        run: moon setup
+
+      - name: Install JS workspace deps
+        if: steps.preflight.outputs.configured == 'true'
+        run: pnpm --dir ts install --frozen-lockfile
+
+      # release-plz first, ALWAYS, then --write (next step). release-plz owns every Cargo
+      # version and the [workspace.dependencies] requirements; --write then brings the six
+      # sites it cannot reach (pyproject/package.json/the dependency pin) plus the three
+      # regenerated sites into line.
+      #
+      # Run from rs/: release-plz's config/manifest discovery (./release-plz.toml,
+      # ./Cargo.toml) is CWD-relative with no upward search, so this is what makes it find
+      # rs/release-plz.toml and rs/Cargo.toml without --config/--manifest-path flags.
+      #
+      # `--output json` always prints one line, `{"prs": [...]}`, with 0 or 1 elements —
+      # verified against the pinned 0.3.158 source
+      # (release_plz_core::command::release_pr::release_pr returns Option<ReleasePr>;
+      # main.rs wraps None as `[]`, Some(pr) as `[pr]`). Each element carries head_branch/
+      # base_branch/html_url/number/releases (the ReleasePr struct) — the CLI's own --help
+      # only promises "prints the branch, URL and number", so this was confirmed by reading
+      # the source at the exact pinned tag, not assumed from the docs.
+      - name: Open or update the release PR
+        id: release_pr
+        if: steps.preflight.outputs.configured == 'true'
+        working-directory: rs
+        env:
+          GIT_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          set -euo pipefail
+          OUT="$(release-plz release-pr --output json)"
+          echo "$OUT"
+          echo "json=$OUT" >> "$GITHUB_OUTPUT"
+
+      # release-plz does ALL of its work — version bumps, changelog, branch creation, push —
+      # inside a private copy under a tempdir
+      # (release_plz_core::command::release_pr::copy_to_temp_dir, confirmed by reading the
+      # pinned 0.3.158 source and independently measured: a throwaway clone's HEAD and
+      # working tree were untouched after a real `release-pr` run). This checkout's `main`
+      # is therefore NEVER the branch to act on — the branch comes only from the JSON above,
+      # never from `git rev-parse --abbrev-ref HEAD` (which would still read "main" here and
+      # push straight to it).
+      - name: Stamp the non-Cargo manifests onto the release PR branch
+        if: steps.preflight.outputs.configured == 'true'
+        env:
+          PR_JSON: ${{ steps.release_pr.outputs.json }}
+          # Scoped to this step only. The checkout sets persist-credentials: false, so there
+          # are no ambient git credentials — the fetch and push below authenticate through an
+          # explicit remote URL built from this value. GitHub masks the secret in logs, and
+          # the URL is never written to git config (no `remote set-url`), so it does not
+          # outlive the commands themselves.
+          GH_TOKEN_FOR_PUSH: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          set -euo pipefail
+          PR_COUNT="$(printf '%s' "$PR_JSON" | jq '.prs | length')"
+          if [ "$PR_COUNT" -eq 0 ]; then
+            echo "release-plz: no release PR needed (every releasable package is already" \
+                 "at its proposed version) — nothing to stamp"
+            exit 0
+          fi
+          BRANCH="$(printf '%s' "$PR_JSON" | jq -r '.prs[0].head_branch')"
+          AUTH_REMOTE="https://x-access-token:${GH_TOKEN_FOR_PUSH}@github.com/${GITHUB_REPOSITORY}.git"
+
+          git fetch "$AUTH_REMOTE" "$BRANCH"
+          git checkout -B "$BRANCH" FETCH_HEAD
+
+          bash ci/version-lockstep/run.sh --write
+
+          if git diff --quiet; then
+            echo "version-lockstep: nothing to stamp"
+            exit 0
+          fi
+          git config user.name  "paigasus-release[bot]"
+          git config user.email "paigasus-release[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore(rs): stamp the non-Cargo manifests to the release version"
+          git push "$AUTH_REMOTE" "HEAD:$BRANCH"
