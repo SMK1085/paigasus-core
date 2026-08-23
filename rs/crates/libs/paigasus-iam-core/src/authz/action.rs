@@ -55,6 +55,11 @@ pub enum Action {
     /// dead-letter actions above.
     RetireSystemPolicy,
     InvokeModel,
+    /// Mint a user principal (SMA-584). Authorized at `Root` only: a user principal has no
+    /// owner tenancy node (users attach to orgs/teams later, via memberships), so there is no
+    /// narrower resource to scope against. Checked in `adapters::http::users` and
+    /// `adapters::grpc::users`.
+    CreateUser,
 }
 
 impl Action {
@@ -100,6 +105,7 @@ impl Action {
         Action::DiscardOutboxDeadLetter,
         Action::RetireSystemPolicy,
         Action::InvokeModel,
+        Action::CreateUser,
     ];
 
     /// The exact Cedar action id, verbatim from `SCHEMA_SRC` — this string doubles as
@@ -147,6 +153,7 @@ impl Action {
             Action::DiscardOutboxDeadLetter => "DiscardOutboxDeadLetter",
             Action::RetireSystemPolicy => "RetireSystemPolicy",
             Action::InvokeModel => "InvokeModel",
+            Action::CreateUser => "CreateUser",
         }
     }
 
@@ -207,7 +214,8 @@ impl Action {
             | Action::ReplayOutboxDeadLetter
             | Action::DiscardOutboxDeadLetter
             | Action::RetireSystemPolicy
-            | Action::InvokeModel => true,
+            | Action::InvokeModel
+            | Action::CreateUser => true,
         }
     }
 
@@ -290,7 +298,8 @@ mod tests {
                 | Action::ReplayOutboxDeadLetter
                 | Action::DiscardOutboxDeadLetter
                 | Action::RetireSystemPolicy
-                | Action::InvokeModel => {}
+                | Action::InvokeModel
+                | Action::CreateUser => {}
             }
         }
         for a in Action::ALL {
@@ -298,8 +307,8 @@ mod tests {
         }
         assert_eq!(
             Action::ALL.len(),
-            40,
-            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy"
+            41,
+            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser"
         );
     }
     #[test]

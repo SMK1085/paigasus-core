@@ -23,7 +23,8 @@ namespace Pgs::Iam {
          PutPolicy, DeletePolicy, ListPolicies, GrantRole, RevokeRole, ListRoleGrants,
          CreateServiceAccount, GetServiceAccount, ListServiceAccounts, ArchiveServiceAccount,
          IssueApiKey, RevokeApiKey, ListApiKeys, ListAuditLog, ListOutboxDeadLetters,
-         ReplayOutboxDeadLetter, DiscardOutboxDeadLetter, RetireSystemPolicy, InvokeModel
+         ReplayOutboxDeadLetter, DiscardOutboxDeadLetter, RetireSystemPolicy, InvokeModel,
+         CreateUser
     appliesTo { principal: [Principal], resource: [Root, Organization, Team, Project] };
 }
 "#;
@@ -65,5 +66,12 @@ mod tests {
     #[test]
     fn the_retire_action_validates_against_the_embedded_schema() {
         assert!(validate_policy(r#"permit(principal, action == Pgs::Iam::Action::"RetireSystemPolicy", resource);"#).is_ok());
+    }
+    /// SMA-584: the twin of the `RetireSystemPolicy` test above. `SCHEMA_SRC`'s action list is
+    /// hand-maintained, so a `CreateUser` present in `Action::ALL` but missing here makes the
+    /// generated `forbid-archived-writes` source fail validation.
+    #[test]
+    fn the_create_user_action_validates_against_the_embedded_schema() {
+        assert!(validate_policy(r#"permit(principal, action == Pgs::Iam::Action::"CreateUser", resource);"#).is_ok());
     }
 }
