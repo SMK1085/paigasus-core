@@ -187,6 +187,13 @@ mod tests {
         // IAM: system-row retirement
         "grants-survive",
         "decision-change-unacknowledged",
+        // IAM: request validation (SMA-586)
+        "invalid-timestamp",
+        "invalid-uuid",
+        "invalid-cursor",
+        "invalid-audit-outcome",
+        "missing-required-field",
+        "mutually-exclusive-fields",
         // Gateway
         "missing-authorization",
         "invalid-api-key",
@@ -214,7 +221,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 46, "the registry should hold 46 reasons");
+        assert_eq!(actual.len(), 52, "the registry should hold 52 reasons");
     }
 
     #[test]
@@ -328,5 +335,23 @@ mod tests {
     fn the_domain_constants_match_the_registry() {
         assert_eq!(&*crate::error::IAM_DOMAIN, "iam.paigasus.io");
         assert_eq!(&*crate::error::GATEWAY_DOMAIN, "gateway.paigasus.io");
+    }
+
+    /// SMA-586: the six request-validation reasons that replace `invalid-prn`'s catch-all duty.
+    /// Asserted by wire string rather than by enum variant so a renumbering or a rename that
+    /// silently changes the kebab spelling fails here too.
+    #[test]
+    fn the_request_validation_reasons_resolve_both_ways() {
+        for (variant, wire) in [
+            (ErrorReason::InvalidTimestamp, "invalid-timestamp"),
+            (ErrorReason::InvalidUuid, "invalid-uuid"),
+            (ErrorReason::InvalidCursor, "invalid-cursor"),
+            (ErrorReason::InvalidAuditOutcome, "invalid-audit-outcome"),
+            (ErrorReason::MissingRequiredField, "missing-required-field"),
+            (ErrorReason::MutuallyExclusiveFields, "mutually-exclusive-fields"),
+        ] {
+            assert_eq!(variant.as_wire_reason().as_deref(), Some(wire));
+            assert_eq!(ErrorReason::from_wire_reason(wire), Some(variant));
+        }
     }
 }
