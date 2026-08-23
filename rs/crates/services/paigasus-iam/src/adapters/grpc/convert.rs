@@ -220,7 +220,7 @@ fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
 /// `InvalidTimestamp` carries the field name, which reaches both the message and
 /// `ErrorInfo.metadata["field"]` (SMA-586 — this used to be `InvalidPrn`-as-sentinel, whose
 /// static Display threw the field name away).
-pub fn parse_opt_ts(t: Option<prost_types::Timestamp>, field: &'static str) -> Result<Option<DateTime<Utc>>, TenancyError> {
+pub(crate) fn parse_opt_ts(t: Option<prost_types::Timestamp>, field: &'static str) -> Result<Option<DateTime<Utc>>, TenancyError> {
     match t {
         None => Ok(None),
         Some(raw) => from_ts(raw).map(Some).ok_or(TenancyError::InvalidTimestamp(field)),
@@ -934,5 +934,188 @@ mod tests {
             }
             other => panic!("expected NeedsAcknowledgement, got {other:?}"),
         }
+    }
+
+    /// AC-3: HTTP and gRPC agree on the reason for the same logical failure.
+    ///
+    /// Both transports derive `reason` from the SAME function (`TenancyError::code()`), so for a
+    /// GIVEN variant they cannot disagree. Parity can only break where the two sides CONSTRUCT
+    /// DIFFERENT VARIANTS — so this drives each transport's request-conversion entry point
+    /// (`to_filter`) rather than comparing two calls to `code()`, which would be tautological.
+    /// Driving `to_filter` also proves each helper is still WIRED IN, which is the failure SMA-583
+    /// actually hit: a helper that exists and is correct but no longer reached.
+    ///
+    /// Two rows call a helper directly, because those surfaces have no filter-shaped entry point:
+    /// the dead-letter id parser, and both `membership_filter`s.
+    #[test]
+    fn http_and_grpc_agree_on_the_reason_for_the_same_failure() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+
+        use crate::adapters::grpc::{audit as gaudit, dead_letters as gdl, tenancy as gtenancy};
+        use crate::adapters::http::dto::{AuditQuery, DeadLetterQuery};
+        use crate::adapters::http::{audit as haudit, dead_letters as hdl, memberships as hmem};
+        use paigasus_proto::paigasus::iam::v1::{ListAuditEntriesRequest, ListDeadLettersRequest};
+
+        // A `nanos` of -1 is unrepresentable in chrono, which is how a gRPC timestamp fails — it
+        // cannot fail to PARSE (it is already a struct), only to CONVERT.
+        let bad_ts = prost_types::Timestamp { seconds: 0, nanos: -1 };
+
+        fn audit_req() -> ListAuditEntriesRequest {
+            ListAuditEntriesRequest {
+                actor_prn: String::new(),
+                resource_prn: String::new(),
+                action: String::new(),
+                outcome: String::new(),
+                from: None,
+                to: None,
+                cursor: String::new(),
+                limit: 0,
+            }
+        }
+        fn audit_query() -> AuditQuery {
+            AuditQuery {
+                actor: None,
+                resource: None,
+                action: None,
+                outcome: None,
+                from: None,
+                to: None,
+                cursor: None,
+                limit: None,
+            }
+        }
+        fn dl_req() -> ListDeadLettersRequest {
+            ListDeadLettersRequest {
+                event_type: String::new(),
+                parked_from: None,
+                parked_to: None,
+                cursor: String::new(),
+                limit: 0,
+            }
+        }
+        fn dl_query() -> DeadLetterQuery {
+            DeadLetterQuery {
+                event_type: None,
+                parked_from: None,
+                parked_to: None,
+                cursor: None,
+                limit: None,
+            }
+        }
+
+        let cases: Vec<(&str, TenancyError, TenancyError, ErrorReason)> = vec![
+            (
+                "audit from-bound",
+                haudit::to_filter(AuditQuery {
+                    from: Some("not-a-timestamp".into()),
+                    ..audit_query()
+                })
+                .unwrap_err(),
+                gaudit::to_filter(ListAuditEntriesRequest { from: Some(bad_ts), ..audit_req() }).unwrap_err(),
+                ErrorReason::InvalidTimestamp,
+            ),
+            (
+                "audit cursor",
+                haudit::to_filter(AuditQuery {
+                    cursor: Some("not-a-uuid".into()),
+                    ..audit_query()
+                })
+                .unwrap_err(),
+                gaudit::to_filter(ListAuditEntriesRequest {
+                    cursor: "not-a-uuid".into(),
+                    ..audit_req()
+                })
+                .unwrap_err(),
+                ErrorReason::InvalidCursor,
+            ),
+            (
+                "audit outcome",
+                haudit::to_filter(AuditQuery {
+                    outcome: Some("not-a-real-outcome".into()),
+                    ..audit_query()
+                })
+                .unwrap_err(),
+                gaudit::to_filter(ListAuditEntriesRequest {
+                    outcome: "not-a-real-outcome".into(),
+                    ..audit_req()
+                })
+                .unwrap_err(),
+                ErrorReason::InvalidAuditOutcome,
+            ),
+            (
+                "dead-letter parked_from bound",
+                hdl::to_filter(DeadLetterQuery {
+                    parked_from: Some("not-a-timestamp".into()),
+                    ..dl_query()
+                })
+                .unwrap_err(),
+                gdl::to_filter(ListDeadLettersRequest {
+                    parked_from: Some(bad_ts),
+                    ..dl_req()
+                })
+                .unwrap_err(),
+                ErrorReason::InvalidTimestamp,
+            ),
+            (
+                "dead-letter cursor",
+                hdl::to_filter(DeadLetterQuery {
+                    cursor: Some("not-a-uuid".into()),
+                    ..dl_query()
+                })
+                .unwrap_err(),
+                gdl::to_filter(ListDeadLettersRequest {
+                    cursor: "not-a-uuid".into(),
+                    ..dl_req()
+                })
+                .unwrap_err(),
+                ErrorReason::InvalidCursor,
+            ),
+            (
+                // No filter-shaped entry point on either side: HTTP takes this segment through the
+                // `UuidPath<DeadLetterId>` extractor, gRPC through `parse_id`.
+                "dead-letter id",
+                TenancyError::InvalidUuid("dead_letter_id"),
+                gdl::parse_id("not-a-uuid").unwrap_err(),
+                ErrorReason::InvalidUuid,
+            ),
+            (
+                "membership filter, neither set",
+                hmem::membership_filter(None, None).unwrap_err(),
+                gtenancy::membership_filter(None).unwrap_err(),
+                ErrorReason::MissingRequiredField,
+            ),
+        ];
+
+        for (label, http_err, grpc_err, expected) in cases {
+            let wire = expected.as_wire_reason().expect("not the Unspecified sentinel");
+            assert_eq!(http_err.code(), wire, "{label}: HTTP reason");
+            assert_eq!(grpc_err.code(), wire, "{label}: gRPC reason");
+        }
+    }
+
+    /// The counterpart to the agreement table: the two places the transports DELIBERATELY differ.
+    /// Recorded as assertions so a change breaks this test rather than slipping through as an
+    /// omission — the failure mode the SMA-586 spec review caught in its own first draft.
+    #[test]
+    fn the_accepted_transport_divergences_are_exactly_these_two() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+
+        // 1. `IssueApiKey.expires_at`. gRPC takes a `prost_types::Timestamp` and classifies a bad
+        //    one itself; HTTP takes a typed `DateTime<Utc>` in the body, so a bad value fails
+        //    inside serde and never reaches our code — yielding `invalid-request-body`, which is
+        //    the registry's correct reason for a body that would not deserialize. Making it
+        //    `invalid-timestamp` would need a custom deserializer for no contract gain.
+        let wire = |r: ErrorReason| r.as_wire_reason().expect("not the Unspecified sentinel");
+        assert_eq!(
+            parse_opt_ts(Some(prost_types::Timestamp { seconds: 0, nanos: -1 }), "expires_at").unwrap_err().code(),
+            wire(ErrorReason::InvalidTimestamp),
+        );
+
+        // 2. `mutually-exclusive-fields` is HTTP-only and STRUCTURALLY so: the gRPC surface models
+        //    the same choice as a proto3 `oneof`, which cannot carry two values. Its only failure
+        //    is "neither set", asserted as `missing-required-field` in the table above.
+        use crate::adapters::http::memberships::membership_filter;
+        assert_eq!(membership_filter(Some("a".into()), Some("b".into())).unwrap_err().code(), wire(ErrorReason::MutuallyExclusiveFields));
+        // There is no gRPC expression of "both set" to compare against — that is the point.
     }
 }

@@ -16,15 +16,18 @@
 //! list.
 
 mod api_keys;
-mod audit;
+// `pub(crate)` rather than private so `grpc::convert`'s transport parity guard can drive these
+// modules' request-conversion helpers directly (SMA-586 AC-3). `dto` is already `pub` for the
+// same reason — the existing dead-letter projection drift guard.
+pub(crate) mod audit;
 pub mod auth_middleware;
 pub mod authn;
 mod authz;
 pub mod authz_middleware;
-mod dead_letters;
+pub(crate) mod dead_letters;
 pub mod dto;
 pub mod error;
-mod memberships;
+pub(crate) mod memberships;
 mod organizations;
 mod path;
 mod projects;
