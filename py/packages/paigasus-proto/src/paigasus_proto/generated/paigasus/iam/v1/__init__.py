@@ -560,12 +560,14 @@ default_message_pool.register_message(
 class CreateUserRequest(betterproto2.Message):
     """
     ─────────────────────────────────────────────────────────────────────────
-    Users (SMA-501). CreateUser has NO per-action authorization — it requires
-    a bearer and nothing more, mirroring `POST /v1/users` exactly. That is a
-    deliberate parity decision, not an oversight: see the design doc's D0.
-    It lives on its own service rather than on TenancyService precisely so
-    that property is visible in the contract instead of hidden among 21
-    authorized RPCs.
+    Users (SMA-501, authorization added in SMA-584). CreateUser requires a
+    bearer AND `Action::CreateUser` at the Cedar hierarchy root, gated by the
+    server's enforce_tenancy setting — mirroring `POST /v1/users` exactly.
+    Root is the top of the hierarchy, so no org/team/project-scoped role
+    grant can satisfy it: under the starter role set this is platform_admin
+    only. UserService is separate from TenancyService because a user is a
+    principal, not a tenancy node — a different aggregate, and the intended
+    home for future user-principal operations.
     ─────────────────────────────────────────────────────────────────────────
     """
 

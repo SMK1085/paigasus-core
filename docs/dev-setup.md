@@ -64,7 +64,7 @@ that CI absorbs via `actions/cache`.
   "Materialize main ref" step.
 - GUI git clients often strip `PATH`; add `~/.proto/shims` to their environment if
   hooks fail with "command not found".
-- **`paigasus-iam`'s Docker-backed integration suites need Docker.** 61 of its 65 integration
+- **`paigasus-iam`'s Docker-backed integration suites need Docker.** 65 of its 69 integration
   binaries start a container and skip when the daemon is unreachable. You will not miss it:
   `tests/docker_preflight.rs` fails in that case, so a Docker-less `cargo nextest run -p
   paigasus-iam` reports exactly one failure naming the problem, rather than a green run that
