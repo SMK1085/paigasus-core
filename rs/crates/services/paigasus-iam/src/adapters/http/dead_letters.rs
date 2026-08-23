@@ -59,32 +59,32 @@ fn opt_non_empty(raw: Option<String>) -> Option<String> {
     raw.filter(|s| !s.is_empty())
 }
 
-/// Absent/empty means unfiltered; a present value must parse as RFC3339.
-/// `InvalidPrn`-as-sentinel, mirroring `http::audit::parse_ts` exactly.
-fn parse_ts(raw: Option<String>) -> Result<Option<DateTime<Utc>>, TenancyError> {
+/// Absent/empty means unfiltered; a present value must parse as RFC3339. `field` names which
+/// bound failed (SMA-586). Mirrors `http::audit::parse_ts` exactly.
+pub(crate) fn parse_ts(raw: Option<String>, field: &'static str) -> Result<Option<DateTime<Utc>>, TenancyError> {
     match opt_non_empty(raw) {
         None => Ok(None),
         Some(s) => DateTime::parse_from_rfc3339(&s)
             .map(|dt| Some(dt.with_timezone(&Utc)))
-            .map_err(|_| TenancyError::InvalidPrn(format!("invalid RFC3339 timestamp: {s}"))),
+            .map_err(|_| TenancyError::InvalidTimestamp(field)),
     }
 }
 
-fn parse_cursor(raw: Option<String>) -> Result<Option<Uuid>, TenancyError> {
+pub(crate) fn parse_cursor(raw: Option<String>) -> Result<Option<Uuid>, TenancyError> {
     match opt_non_empty(raw) {
         None => Ok(None),
-        Some(s) => Uuid::parse_str(&s).map(Some).map_err(|_| TenancyError::InvalidPrn("cursor must be a uuid".to_string())),
+        Some(s) => Uuid::parse_str(&s).map(Some).map_err(|_| TenancyError::InvalidCursor("cursor")),
     }
 }
 
 /// `limit` absent or `0` maps to [`DEFAULT_LIMIT`] HERE — passing a bare `0` through would hit
 /// `DeadLetterFilter::capped_limit`'s own floor of 1 instead, so a default request would return
 /// a single row (the same trap `http::audit::to_filter` documents).
-fn to_filter(q: DeadLetterQuery) -> Result<DeadLetterFilter, TenancyError> {
+pub(crate) fn to_filter(q: DeadLetterQuery) -> Result<DeadLetterFilter, TenancyError> {
     Ok(DeadLetterFilter {
         event_type: opt_non_empty(q.event_type),
-        parked_from: parse_ts(q.parked_from)?,
-        parked_to: parse_ts(q.parked_to)?,
+        parked_from: parse_ts(q.parked_from, "parked_from")?,
+        parked_to: parse_ts(q.parked_to, "parked_to")?,
         cursor: parse_cursor(q.cursor)?,
         limit: match q.limit {
             None | Some(0) => DEFAULT_LIMIT,
@@ -100,8 +100,8 @@ impl BulkReplayBody {
     pub fn into_request(self) -> Result<BulkReplayRequest, TenancyError> {
         Ok(BulkReplayRequest {
             event_type: opt_non_empty(self.event_type),
-            parked_from: parse_ts(self.parked_from)?,
-            parked_to: parse_ts(self.parked_to)?,
+            parked_from: parse_ts(self.parked_from, "parked_from")?,
+            parked_to: parse_ts(self.parked_to, "parked_to")?,
             max_rows: self.max_rows.unwrap_or(0),
         })
     }
@@ -217,14 +217,14 @@ mod tests {
                 parked_from: Some("nope".to_string()),
                 ..q()
             }),
-            Err(TenancyError::InvalidPrn(_))
+            Err(TenancyError::InvalidTimestamp(_))
         ));
         assert!(matches!(
             to_filter(DeadLetterQuery {
                 cursor: Some("nope".to_string()),
                 ..q()
             }),
-            Err(TenancyError::InvalidPrn(_))
+            Err(TenancyError::InvalidCursor(_))
         ));
     }
 

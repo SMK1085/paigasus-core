@@ -142,7 +142,7 @@ async fn create_role_grant(State(s): State<AppState>, Extension(ctx): Extension<
 
 async fn list_role_grants(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Query(q): Query<RoleGrantQuery>) -> Result<Json<Vec<RoleGrantDto>>, ApiError> {
     let actor = actor_prn(&ctx);
-    let principal_prn = q.principal_prn.ok_or_else(|| TenancyError::InvalidPrn("principal_prn query parameter is required".to_string()))?;
+    let principal_prn = q.principal_prn.filter(|s| !s.trim().is_empty()).ok_or(TenancyError::MissingRequiredField("principal_prn"))?;
     let grants = s.roles.list(&actor, &principal_prn).await?;
     Ok(Json(grants.into_iter().map(RoleGrantDto::from).collect()))
 }

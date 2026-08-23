@@ -68,7 +68,7 @@ async fn create(State(s): State<AppState>, Extension(ctx): Extension<AuthContext
 
 async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Query(q): Query<ServiceAccountQuery>) -> Result<Json<Vec<ServiceAccountDto>>, ApiError> {
     let actor = actor_prn(&ctx);
-    let owner_prn = q.owner_prn.ok_or_else(|| TenancyError::InvalidPrn("owner_prn query parameter is required".to_string()))?;
+    let owner_prn = q.owner_prn.filter(|s| !s.trim().is_empty()).ok_or(TenancyError::MissingRequiredField("owner_prn"))?;
     let owner = parse_node_prn(&owner_prn)?;
     let page = Page::new(q.limit, q.offset)?;
     let accounts = s.service_accounts.list(&actor, &owner, page).await?;

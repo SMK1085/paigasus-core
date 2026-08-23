@@ -82,7 +82,7 @@ async fn issue(
 ) -> Result<(StatusCode, Json<IssueApiKeyResponseDto>), ApiError> {
     let actor = actor_prn(&ctx);
     let sa_id = service_account_id(sa);
-    let scope_prn = body.scope_prn.ok_or_else(|| TenancyError::InvalidPrn("scope_prn is required".to_string()))?;
+    let scope_prn = body.scope_prn.filter(|s| !s.trim().is_empty()).ok_or(TenancyError::MissingRequiredField("scope_prn"))?;
     let scope = parse_node_prn(&scope_prn)?;
     let scope_actions = body
         .scope_actions
