@@ -720,6 +720,12 @@ impl AppState {
             JitPolicy::from_issuers(&jit_flags),
         );
 
+        if !authz_cfg.enforce_tenancy {
+            tracing::warn!(
+                "enforce_tenancy is disabled: EVERY tenancy authorization check is bypassed, including Action::CreateUser on POST /v1/users and UserService.CreateUser — test-only configuration, never use in production"
+            );
+        }
+
         Ok(AppState {
             db,
             orgs,
