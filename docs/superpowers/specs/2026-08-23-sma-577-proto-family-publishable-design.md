@@ -393,10 +393,14 @@ Nothing publishes as a result. The `release` workflow stays gated behind
 `PAIGASUS_RELEASE_ENABLED`, which SMA-580 flips. `release = true` here only makes the crates
 eligible for the release **PR**.
 
-`rs/release-plz.toml` is an input to all three `repo:release-parity*` tasks (`moon.yml:86`), so this
-edit schedules all three. That is harmless: `ci/release-parity/ecosystems/release-plz.sh`'s
-`_derive_config` greps only `features_always_increment_minor`, so `[[package]]` blocks do not enter
-the derived fixture (review **m7**).
+`rs/release-plz.toml` is an input to `repo:release-parity` (`moon.yml:86`) and to
+`repo:publish-metadata` (`moon.yml:530`) — and, checked directly, nowhere else in `moon.yml`. It is
+NOT an input to `repo:release-parity-py` or `repo:release-parity-ts`, so this edit does not schedule
+either of those two. Confirmed on this branch's own CI run: `release-parity` ran (this file changed),
+`release-parity-py` ran too, but only because `py/uv.lock` also changed, and `release-parity-ts` did
+not run at all. Either way the edit is harmless to the parity gates: `ci/release-parity/ecosystems/
+release-plz.sh`'s `_derive_config` greps only `features_always_increment_minor`, so `[[package]]`
+blocks never enter the derived fixture (review **m7**).
 
 ### 6.2 The five version sites
 

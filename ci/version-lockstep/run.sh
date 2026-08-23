@@ -51,9 +51,10 @@ SITES=(
 # `moon` binary or a YAML parser): update it ONLY together with a deliberate SITES edit. The
 # other half of this pin lives outside this file entirely, in
 # ci_targets.py's SELF_TASK_EXPECTED_GLOBS["version-lockstep"] (part of repo:affected-smoke),
-# which independently asserts moon.yml's own `inputs:` list — the paths SITES reads (15
-# distinct, since two rows share py/packages/paigasus-kernel/pyproject.toml) plus rs/Cargo.toml
-# (read by the cargo-wsdep kind by name, not by a SITES path) plus this script itself.
+# which independently asserts moon.yml's own `inputs:` list — the paths SITES reads (14
+# distinct: py/packages/paigasus-kernel/pyproject.toml, rs/Cargo.lock, and py/uv.lock are each
+# read by two rows) plus rs/Cargo.toml (read by the cargo-wsdep kind by name, not by a SITES
+# path) plus this script itself — 16 total, matching moon.yml's inputs: list.
 EXPECTED_SITE_COUNT=20
 
 # Source of truth per group.
@@ -576,7 +577,9 @@ run_write() {
     wrote=$((wrote + changed))
   done
 
-  # Regenerate the three derived sites (16-18). Each is owned by a tool, not by this script.
+  # Regenerate the three derived files (SITES rows 16-20 — kernel's and proto's cargo-lock and
+  # uv-lock rows each point at the same file, so five rows resolve to three files). Each file is
+  # owned by a tool, not by this script.
   ( cd "$REPO_ROOT/rs" && cargo update -w --offline >/dev/null 2>&1 ) \
     || ( cd "$REPO_ROOT/rs" && cargo update -w >/dev/null ) \
     || die_infra "cargo update -w failed (site 16)"

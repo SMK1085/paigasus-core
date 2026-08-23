@@ -1009,9 +1009,11 @@ main() {
 
   # Checks 1c, 1d and 2b — per package. Read on FD 3, not stdin (the
   # ci/release-parity/run.sh idiom): a loop-body subprocess that reads stdin can swallow
-  # rows silently, and a silent skip reads as a false green. Not a live bug today — cargo
-  # never touches stdin here, all 3/3 iterations verified — but it becomes one the day
-  # SMA-388 adds a second publishable crate.
+  # rows silently, and a silent skip reads as a false green. Not a live bug — cargo never
+  # touches stdin here, all 3/3 iterations verified — but SMA-577 is what made it matter:
+  # it added paigasus-proto and paigasus-proto-derive as the second and third publishable
+  # crates (absorbing SMA-388), so this loop now actually runs multiple iterations instead
+  # of one.
   local name dir enumerated=()
   while IFS=$'\t' read -r -u 3 name dir; do
     [ -n "$name" ] || continue

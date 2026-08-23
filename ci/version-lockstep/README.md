@@ -37,7 +37,7 @@ passing state — the proto family activates in SMA-577.
 | Mode | Behaviour |
 |---|---|
 | `--check` (default) | Compare all 20 sites. Exit 1 on any drift. |
-| `--write` | Rewrite the six sites release-plz cannot reach and regenerate the three derived ones. |
+| `--write` | Rewrite the six sites release-plz cannot reach and regenerate the three derived files (five `SITES` rows: 16-20). |
 | `--negative-control` | Prove the checker can still report red. |
 | `--self-test` | Fixture tables for the verdict function. |
 
