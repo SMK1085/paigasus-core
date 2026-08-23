@@ -210,8 +210,11 @@ async fn create_user_requires_platform_admin() {
 
 /// **The action-identity pin, gRPC half (SMA-584).** The twin of
 /// `tests/http_users.rs::the_http_guard_is_bound_to_create_user_specifically`; see that test's
-/// doc for why a role grant cannot distinguish `CreateUser` from any other Root-only action.
-/// A mutation that wires a different action into `adapters::grpc::users` fails here.
+/// doc for why a role grant cannot distinguish `CreateUser` from any other Root-only action, and
+/// for why the policy seeded below is deliberately broad on principal/resource and narrow only
+/// on the action — it is NOT the least-privilege remediation an operator should copy (design doc
+/// §4.3 lever 1 is). A mutation that wires a different action into `adapters::grpc::users` fails
+/// here.
 #[tokio::test]
 async fn the_grpc_guard_is_bound_to_create_user_specifically() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {

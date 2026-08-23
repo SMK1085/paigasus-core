@@ -82,10 +82,15 @@ async fn create_user_requires_platform_admin_over_http() {
 /// `action in [...]` clause and no other system role carries `CreateUser`. So no ROLE grant can
 /// tell the two apart.
 ///
-/// A narrow STATIC policy can. This seeds one permitting exactly `CreateUser` (the operator
-/// remediation the design doc recommends, §4.3 lever 1) and asserts the principal it covers can
-/// create a user but NOT an organization. A mutation that wires any other action into
-/// `adapters::http::users` fails here.
+/// A narrow STATIC policy can — this seeds one permitting exactly `CreateUser` and asserts a
+/// subject holding it can create a user but NOT an organization. The policy is deliberately
+/// BROAD on principal and resource (unscoped, matching this repo's other test policies in
+/// `tests/authz_acceptance.rs`/`tests/authz_policy_store.rs`) and narrow only on the ACTION —
+/// that's the one axis under test, and exact-equality on it is what gives this test its
+/// discrimination power regardless of scoping. This is NOT the least-privilege remediation an
+/// operator should copy: the design doc's §4.3 lever 1 scopes the grant to a single named
+/// principal at Root instead. A mutation that wires any other action into `adapters::http::users`
+/// fails here.
 #[tokio::test]
 async fn the_http_guard_is_bound_to_create_user_specifically() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {

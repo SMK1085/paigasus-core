@@ -449,9 +449,13 @@ making D1 and D4 executable rather than prose:
 
 **(b) Integration — the action-identity test.** A test in which a principal is authorized
 for `CreateUser` and *not* for other Root actions. Seed, via the policy store, a static
-Cedar policy permitting exactly `Pgs::Iam::Action::"CreateUser"` at `Root` for principal
-X (the §4.3 lever 1 shape — so this test doubles as executable documentation of the
-recommended remediation). Then assert, for X:
+Cedar policy permitting exactly `Pgs::Iam::Action::"CreateUser"` at `Root`, matching this
+repo's existing test-policy convention of leaving principal and resource unscoped (see
+`tests/authz_acceptance.rs`/`tests/authz_policy_store.rs`) so it stays action-narrow but
+principal/resource-broad. That demonstrates the MECHANISM — a static policy can grant
+`CreateUser` alone — without being the deployable least-privilege form; it is not the
+§4.3 lever 1 shape, which additionally scopes the grant to one named principal. Then
+assert, for X:
 
 * `POST /v1/users` → `201`, and `UserService.CreateUser` → `Ok`;
 * **control:** `POST /v1/organizations` → `403`, proving the seeded policy really is

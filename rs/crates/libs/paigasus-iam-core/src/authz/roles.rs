@@ -659,8 +659,14 @@ mod tests {
                 resource: root_prn(),
                 expect: Effect::Allow,
             },
+            // A D4 allow-list regression guard: `org_admin` denies `CreateUser` at Root because
+            // `CreateUser` is simply absent from `ORG_ADMIN_ACTIONS` (no non-`platform_admin`
+            // role carries it, by design). This case cannot isolate hierarchy directionality —
+            // `org_admin`'s missing grant alone would deny here regardless of ancestor/descendant
+            // shape; that claim is pinned separately by "org_admin denies CreateProject on a
+            // project under a different org".
             Case {
-                name: "org_admin denies CreateUser at Root (Root is the ancestor, never a descendant)",
+                name: "org_admin denies CreateUser at Root (D4 allow-list regression guard)",
                 grants: vec![grant(91, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
                 action: Action::CreateUser,
                 resource: root_prn(),

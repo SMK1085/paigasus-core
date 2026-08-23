@@ -57,7 +57,7 @@ use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-/// Standalone container helpers — see `support/docker.rs`. Declared `pub` so the ~52 files that
+/// Standalone container helpers — see `support/docker.rs`. Declared `pub` so the ~59 files that
 /// carry `mod support;` reach it as `support::docker::*`; the four Redis-only files that have no
 /// `mod support;` include the same file directly via `#[path = "support/docker.rs"]`.
 pub mod docker;

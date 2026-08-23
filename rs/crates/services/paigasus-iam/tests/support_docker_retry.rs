@@ -6,7 +6,7 @@
 //! module inside `docker.rs` would be silently compiled out — `cfg(test)` is not enabled when
 //! rustc builds an integration-test binary — and would therefore never run. Plain
 //! `#[tokio::test]` functions inside `docker.rs` would instead run once per binary that
-//! includes it — currently 60 of them, same count `support_docker_policy.rs` cites for the
+//! includes it — currently 67 of them, same count `support_docker_policy.rs` cites for the
 //! identical reason — duplicating the same assertions instead of asserting them once, here.
 
 #[path = "support/docker.rs"]
