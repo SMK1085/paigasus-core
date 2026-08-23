@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.10.2",
+  "checkpoint_id": "39c62beb3cfd",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-586-error-reason-taxonomy",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/superpowers/specs/2026-08-23-sma-586-error-reason-taxonomy-design.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/39/c62beb3cfd/0/metadata.json",
+      "transcript": "/39/c62beb3cfd/0/full.jsonl",
+      "compact_transcript": "/39/c62beb3cfd/0/transcript.jsonl",
+      "content_hash": "/39/c62beb3cfd/0/content_hash.txt",
+      "prompt": "/39/c62beb3cfd/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 54,
+    "cache_creation_tokens": 119681,
+    "cache_read_tokens": 2986661,
+    "output_tokens": 24850,
+    "api_call_count": 27
+  }
+}
