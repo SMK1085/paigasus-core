@@ -1112,7 +1112,7 @@ bash ci/version-lockstep/run.sh --check
 
 Expected from the real publish-metadata run: **two** group lines —
 `publish-metadata: group [paigasus-kernel] OK` and
-`publish-metadata: group [paigasus-proto-derive paigasus-proto] OK` — then
+`publish-metadata: group [paigasus-proto paigasus-proto-derive] OK` — then
 `publish-metadata: all checks passed`. Expected from `--check`: all 20 sites agree, proto at `0.1.0`.
 
 - [ ] **Step 10: Commit — one commit, all of it**

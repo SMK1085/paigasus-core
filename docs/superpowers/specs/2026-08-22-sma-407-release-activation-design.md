@@ -129,7 +129,11 @@ Site 17 drifts **silently**: `py/packages/paigasus-kernel/moon.yml:36` runs bare
 
 `--check` verifies **all 18**, including the ones release-plz and the regeneration commands own.
 A gate that trusted release-plz to have done its half would not notice a `version_group` that
-silently stopped applying.
+silently stopped applying. (SMA-577 later added a `proto`-group `cargo-lock` row and a
+`proto`-group `uv-lock` row alongside the kernel-group ones already in this inventory, bringing
+the live total to **20** — see
+`docs/superpowers/specs/2026-08-23-sma-577-proto-family-publishable-design.md` §6.3. The
+18-row inventory below is the original SMA-576 baseline and is not re-numbered here.)
 
 ### The dependency-pin site
 
@@ -166,7 +170,7 @@ Everything Cargo cannot reach is therefore stamped by one script with three mode
 
 | Mode | Behaviour |
 | --- | --- |
-| `--check` (default) | Compares all 18 sites against each group's source of truth. The `repo:version-lockstep` Moon gate. |
+| `--check` (default) | Compares all 20 sites (18 below, plus the two SMA-577 proto lock rows) against each group's source of truth. The `repo:version-lockstep` Moon gate. |
 | `--write` | Rewrites sites 10–15 and invokes the regeneration commands for 16–18. |
 | `--negative-control` | Proves the checker can still report red. |
 
@@ -475,7 +479,7 @@ An **ADR-0011 amendment** recording four things:
 
 | Risk | Mitigation |
 | --- | --- |
-| A missed version site drifts silently | `repo:version-lockstep` checks all 18, including release-plz's and the regeneration commands'; the negative control proves it can still red. |
+| A missed version site drifts silently | `repo:version-lockstep` checks all 20, including release-plz's and the regeneration commands'; the negative control proves it can still red — on both a packagejson drift and a lock-row drift, each staged into its own pristine tree. |
 | Removing `release = false` tags ~9 unintended crates | Per-package settings instead of a workspace blanket (§8). |
 | `paigasus-proto` reds Check 2 on its own PR | §6's work list + resolving the derive publish order first (§3, §14 Q5). |
 | Registry tokens exfiltrated via a PR | Credentials only in `release.yml` (no `pull_request` trigger); prefer OIDC (§7). |
