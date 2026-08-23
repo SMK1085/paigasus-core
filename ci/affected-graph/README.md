@@ -123,7 +123,9 @@ It also runs several checks that the per-case project sets structurally **cannot
   suffix); a self-scheduled gate's invocation inside its own `moon.yml` task script
   (`SELF_SCHEDULED_GATES`, whole-line-matched — `repo:input-liveness`'s, the three
   `repo:release-parity*`, and `repo:version-lockstep`'s; SMA-553 / SMA-530 / SMA-576, each
-  pinning `set -euo pipefail` alongside both of its invocations); `repo:actionlint`'s own
+  pinning `set -euo pipefail` alongside every one of its invocations — two for
+  `repo:input-liveness` and the `repo:release-parity*` tasks, three for
+  `repo:version-lockstep`, which also invokes `--self-test`); `repo:actionlint`'s own
   self-test and mutation-battery calls inside `ci/actionlint/run.sh`
   (`ACTIONLINT_SH_CALL_SITES`, whole-line-matched — SMA-542); and
   `ci/release-parity/run.sh`'s own `--negative-control` logic — the flag parse, the guard,

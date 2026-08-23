@@ -46,15 +46,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
-          # A PR opened with the default GITHUB_TOKEN does NOT trigger `pull_request`
-          # workflows, so `moon ci` — the required check on the Protect main ruleset —
-          # would never run and the release PR could never be merged. The App token is
-          # what makes the PR mergeable, and the same token needs push access for the
-          # "Stamp the non-Cargo manifests" step below. So — unlike every other workflow
-          # in this repo, which sets persist-credentials: false for artipacked hardening —
-          # this checkout deliberately keeps credentials persisted, sourced from the App
-          # token instead of GITHUB_TOKEN.
-          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          # persist-credentials: false, matching every other checkout in this repo
+          # (artipacked hardening). An earlier revision persisted the App token here so the
+          # stamping step could push — but `actions/checkout` writes that credential into
+          # the local git config for the WHOLE job, which handed a write-capable token to
+          # four steps that have no business with it (setup-toolchain, proto install,
+          # moon setup, pnpm install). A compromised action or transitive dependency in any
+          # of them could have used it before release work even began.
+          #
+          # The token now reaches only the two steps that genuinely need it, via their own
+          # `env:` — release-plz (GIT_TOKEN) and the stamping step (which authenticates its
+          # fetch/push through an explicit remote URL rather than ambient git config).
+          persist-credentials: false
 
       - name: Set up proto + Moon
         if: steps.preflight.outputs.configured == 'true'
@@ -122,6 +125,12 @@ jobs:
         if: steps.preflight.outputs.configured == 'true'
         env:
           PR_JSON: ${{ steps.release_pr.outputs.json }}
+          # Scoped to this step only. The checkout sets persist-credentials: false, so there
+          # are no ambient git credentials — the fetch and push below authenticate through an
+          # explicit remote URL built from this value. GitHub masks the secret in logs, and
+          # the URL is never written to git config (no `remote set-url`), so it does not
+          # outlive the commands themselves.
+          GH_TOKEN_FOR_PUSH: ${{ secrets.RELEASE_PLZ_TOKEN }}
         run: |
           set -euo pipefail
           PR_COUNT="$(printf '%s' "$PR_JSON" | jq '.prs | length')"
@@ -131,9 +140,10 @@ jobs:
             exit 0
           fi
           BRANCH="$(printf '%s' "$PR_JSON" | jq -r '.prs[0].head_branch')"
+          AUTH_REMOTE="https://x-access-token:${GH_TOKEN_FOR_PUSH}@github.com/${GITHUB_REPOSITORY}.git"
 
-          git fetch origin "$BRANCH"
-          git checkout -B "$BRANCH" "origin/$BRANCH"
+          git fetch "$AUTH_REMOTE" "$BRANCH"
+          git checkout -B "$BRANCH" FETCH_HEAD
 
           bash ci/version-lockstep/run.sh --write
 
@@ -145,4 +155,4 @@ jobs:
           git config user.email "paigasus-release[bot]@users.noreply.github.com"
           git add -A
           git commit -m "chore(rs): stamp the non-Cargo manifests to the release version"
-          git push origin "HEAD:$BRANCH"
+          git push "$AUTH_REMOTE" "HEAD:$BRANCH"

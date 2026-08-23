@@ -273,8 +273,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   without it: `py/uv.lock` (its `moon.yml` runs bare `uv sync`, not `--locked`) and the 26
   `bindingPackageVersion` guards in the committed napi glue (the codegen-drift gate covers only
   the three `**/generated` proto dirs). `repo:version-lockstep` is script-pinned the same way the
-  `release-parity*` tasks are — `SELF_SCHEDULED_GATES` pins its three `moon.yml` lines (control,
-  real run, `set -euo pipefail`) — and takes the `SELF_TASK_EXPECTED_GLOBS` route through the
+  `release-parity*` tasks are — `SELF_SCHEDULED_GATES` pins its **four** `moon.yml` lines
+  (`--self-test`, `--negative-control`, the real run, and `set -euo pipefail`; one more than the
+  `release-parity*` tasks, which have no self-test invocation) — and takes the
+  `SELF_TASK_EXPECTED_GLOBS` route through the
   pairing rule above, listing all sixteen of its literal `inputs`, so it needs no
   `SELF_TASK_GLOBS_EXEMPT` entry (holding both would itself be reported).
 - `rs/release-plz.toml` declares releasability **per package**, never workspace-wide. A
