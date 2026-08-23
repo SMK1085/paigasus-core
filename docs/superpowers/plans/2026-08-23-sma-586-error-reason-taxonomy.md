@@ -128,11 +128,12 @@ Then change line 217 from `46` to `52`:
 
 - [ ] **Step 5: Format and regenerate the bindings**
 
-Run from the repo root:
+Run from **`contracts/`**, not the repo root — there is no root-level `buf.gen.yaml`; all buf
+config (`buf.yaml`, `buf.gen.yaml`, `buf.lock`) lives in `contracts/`, which is also the cwd
+Moon's `contracts:generate` task uses:
 
 ```bash
-buf format -w
-buf generate
+cd contracts && buf format -w && buf generate
 ```
 
 Do **not** use `moon run contracts:generate` here — that task declares no `outputs:`, so it can
@@ -1518,11 +1519,13 @@ Gate notes:
 - [ ] **Step 3: Verify no codegen drift**
 
 ```bash
-buf format -w && buf generate
+(cd contracts && buf format -w && buf generate)
 git add --intent-to-add . && git diff --exit-code
 ```
 
-Expected: exit 0. This is a **standalone** `ci.yml` step, not part of the Moon command above.
+Expected: exit 0. Note the subshell: buf must run from `contracts/` (no root-level
+`buf.gen.yaml`), while the drift check runs from the repo root. This is a **standalone**
+`ci.yml` step, not part of the Moon command above.
 
 - [ ] **Step 4: Verify the migration is complete**
 

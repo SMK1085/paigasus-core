@@ -341,7 +341,7 @@ Three coupled edits; a partial change reds CI rather than passing silently.
 3. Same file — `assert_eq!(actual.len(), 46, "the registry should hold 46 reasons")` becomes
    **52**. This is the single easiest step to miss.
 
-Then `buf format -w` followed by `buf generate`. A comment-and-constant change shifts the
+Then `buf format -w` followed by `buf generate`, both run from `contracts/`. A comment-and-constant change shifts the
 embedded `FILE_DESCRIPTOR_SET`, so all three generated trees (Rust, Python, TypeScript) move
 and must be committed, or the codegen-drift gate reds.
 
@@ -489,9 +489,12 @@ step (`.github/workflows/ci.yml:249-262`) and is deliberately absent from the `T
 is verified by hand, mirroring ci.yml's shape:
 
 ```
-buf format -w && buf generate
+(cd contracts && buf format -w && buf generate)
 git add --intent-to-add . && git diff --exit-code
 ```
+
+buf runs from `contracts/`: there is no root-level `buf.gen.yaml`, and that is the cwd Moon's
+`contracts:generate` task uses.
 
 Note `contracts:generate` has no `outputs:` declared (`contracts/moon.yml:7-8`), so a Moon run
 can serve stale cached output — run `buf generate` directly.
