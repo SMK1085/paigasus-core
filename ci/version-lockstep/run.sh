@@ -34,12 +34,14 @@ SITES=(
   "kernel|cargo-lock|rs/Cargo.lock"
   "kernel|uv-lock|py/uv.lock"
   "kernel|napi-glue|rs/crates/bindings/paigasus-node-bindings/index.js"
+  "proto|cargo-lock|rs/Cargo.lock"
+  "proto|uv-lock|py/uv.lock"
 )
 
 # Non-vacuity anchor (SMA-576 review finding 2): `run_check`'s own "checked == ${#SITES[@]}"
 # guard is SELF-REFERENTIAL — deleting a row shrinks SITES and the expectation together, so it
 # was measured to let a deleted row (e.g. napi-glue) through silently, printing
-# "== all 17 … agree ==" and exiting 0 with the negative control and every other gate still
+# "== all 19 … agree ==" and exiting 0 with the negative control and every other gate still
 # green. This literal is the anchor: it ties SITES to a number recorded OUTSIDE this array, so
 # a deleted (or accidentally duplicated) row now fails loudly instead. It can only ever
 # FALSE-RED — forgetting to bump it after a deliberate SITES edit — never silently absorb a
@@ -52,7 +54,7 @@ SITES=(
 # which independently asserts moon.yml's own `inputs:` list — the paths SITES reads (15
 # distinct, since two rows share py/packages/paigasus-kernel/pyproject.toml) plus rs/Cargo.toml
 # (read by the cargo-wsdep kind by name, not by a SITES path) plus this script itself.
-EXPECTED_SITE_COUNT=18
+EXPECTED_SITE_COUNT=20
 
 # Source of truth per group.
 declare -A SOURCE_OF_TRUTH=(
@@ -60,15 +62,28 @@ declare -A SOURCE_OF_TRUTH=(
   [proto]="rs/crates/libs/paigasus-proto/Cargo.toml"
 )
 
+# Lock-file membership, keyed <group>:<kind> — NOT by group alone, BECAUSE THE TWO KINDS
+# SPAN TWO NAMESPACES. cargo-lock names are Cargo crate names; uv-lock names are Python
+# distribution names. paigasus-node-bindings and paigasus-wasm are npm artifacts that
+# appear nowhere in py/uv.lock, and paigasus-proto-derive is a proc-macro crate with no
+# Python distribution at all. A single per-group set would demand it in py/uv.lock — a
+# permanent false red — or silently weaken the check.
+declare -A LOCK_MEMBERS=(
+  [kernel:cargo-lock]="paigasus-kernel paigasus-py-bindings paigasus-node-bindings paigasus-wasm"
+  [kernel:uv-lock]="paigasus-kernel paigasus-py-bindings"
+  [proto:cargo-lock]="paigasus-proto paigasus-proto-derive"
+  [proto:uv-lock]="paigasus-proto"
+)
+
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=1   # site_verdict
+SELF_TEST_COUNT=2   # site_verdict, lock_reader
 
 site_verdict() { # $1 expected  $2 actual
   if [ -n "$2" ] && [ "$1" = "$2" ]; then printf 'OK'; else printf 'MISMATCH'; fi
 }
 
-read_version() { # $1 kind  $2 path-or-name
-  local kind="$1" target="$2" abs="$REPO_ROOT/$2"
+read_version() { # $1 kind  $2 path-or-name  $3 group (required for lock kinds)
+  local kind="$1" target="$2" group="${3:-}" abs="$REPO_ROOT/$2"
   case "$kind" in
     cargo-package)
       [ -r "$abs" ] || die_infra "cannot read $target"
@@ -154,10 +169,12 @@ PY
       # An unreadable or undecodable lockfile is a DIFFERENT failure mode — infrastructure,
       # not drift — and exits 2 instead.
       [ -r "$abs" ] || die_infra "cannot read $target"
-      python3 - "$abs" <<'PY'
+      [ -n "$group" ] || die_infra "cargo-lock site for '$target' was read without a group"
+      local members="${LOCK_MEMBERS[$group:cargo-lock]:-}"
+      [ -n "$members" ] || die_infra "no LOCK_MEMBERS entry for '$group:cargo-lock'"
+      python3 - "$abs" "$members" <<'PY'
 import re, sys
-p = sys.argv[1]
-names = {"paigasus-kernel", "paigasus-py-bindings", "paigasus-node-bindings", "paigasus-wasm"}
+p, names = sys.argv[1], set(sys.argv[2].split())
 try:
     text = open(p, encoding="utf-8").read()
 except Exception as e:
@@ -179,10 +196,12 @@ PY
       # same SMA-576 review finding 4: a name missing from the lock entirely must not be
       # masked by the survivors' versions happening to agree.
       [ -r "$abs" ] || die_infra "cannot read $target"
-      python3 - "$abs" <<'PY'
+      [ -n "$group" ] || die_infra "uv-lock site for '$target' was read without a group"
+      local members="${LOCK_MEMBERS[$group:uv-lock]:-}"
+      [ -n "$members" ] || die_infra "no LOCK_MEMBERS entry for '$group:uv-lock'"
+      python3 - "$abs" "$members" <<'PY'
 import re, sys
-p = sys.argv[1]
-names = {"paigasus-kernel", "paigasus-py-bindings"}
+p, names = sys.argv[1], set(sys.argv[2].split())
 try:
     text = open(p, encoding="utf-8").read()
 except Exception as e:
@@ -230,9 +249,45 @@ site_verdict_self_test() {
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
 
+# L2 closure for the lock readers: EXPECTED_SITE_COUNT cannot see a WRONG name set, and the
+# negative control drifts a packagejson site, so before this table neither lock arm was
+# exercised at all. Dropping paigasus-proto-derive from [proto:cargo-lock] would have been
+# a silent false-green on the very change that introduced the table.
+lock_reader_self_test() {
+  local tmp got
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/rs" "$tmp/py"
+
+  # All members present at a uniform version -> that version.
+  printf '[[package]]\nname = "paigasus-proto"\nversion = "0.1.0"\n\n[[package]]\nname = "paigasus-proto-derive"\nversion = "0.1.0"\n' \
+    >"$tmp/rs/Cargo.lock"
+  got="$(REPO_ROOT="$tmp" read_version cargo-lock rs/Cargo.lock proto)"
+  [ "$got" = "0.1.0" ] || { fail "self-test: uniform proto cargo-lock should read 0.1.0, got '$got'"; rm -rf "$tmp"; return 1; }
+
+  # A MEMBER MISSING must read as "" (MISMATCH), not as the survivor's version.
+  printf '[[package]]\nname = "paigasus-proto"\nversion = "0.1.0"\n' >"$tmp/rs/Cargo.lock"
+  got="$(REPO_ROOT="$tmp" read_version cargo-lock rs/Cargo.lock proto)"
+  [ -z "$got" ] || { fail "self-test: a missing cargo-lock member must read '', got '$got'"; rm -rf "$tmp"; return 1; }
+
+  # Non-uniform versions must read "".
+  printf '[[package]]\nname = "paigasus-proto"\nversion = "0.1.0"\n\n[[package]]\nname = "paigasus-proto-derive"\nversion = "0.2.0"\n' \
+    >"$tmp/rs/Cargo.lock"
+  got="$(REPO_ROOT="$tmp" read_version cargo-lock rs/Cargo.lock proto)"
+  [ -z "$got" ] || { fail "self-test: a non-uniform cargo-lock must read '', got '$got'"; rm -rf "$tmp"; return 1; }
+
+  # The uv-lock arm reads its OWN namespace: proto's uv membership is one name.
+  printf '[[package]]\nname = "paigasus-proto"\nversion = "0.1.0"\n' >"$tmp/py/uv.lock"
+  got="$(REPO_ROOT="$tmp" read_version uv-lock py/uv.lock proto)"
+  [ "$got" = "0.1.0" ] || { fail "self-test: proto uv-lock should read 0.1.0, got '$got'"; rm -rf "$tmp"; return 1; }
+
+  rm -rf "$tmp"
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+}
+
 run_self_tests() {
   SELF_TESTS_RAN=0
   site_verdict_self_test
+  lock_reader_self_test
   [ "$SELF_TESTS_RAN" -eq "$SELF_TEST_COUNT" ] \
     || die_infra "self-tests ran $SELF_TESTS_RAN, expected $SELF_TEST_COUNT"
   printf '== version-lockstep self-tests passed (%d tables) ==\n' "$SELF_TESTS_RAN"
@@ -258,7 +313,7 @@ run_check() {
   for entry in "${SITES[@]}"; do
     IFS='|' read -r group kind target <<<"$entry"
     expected="$(read_version cargo-package "${SOURCE_OF_TRUTH[$group]}")" || return 2
-    actual="$(read_version "$kind" "$target")" || return 2
+    actual="$(read_version "$kind" "$target" "$group")" || return 2
     verdict="$(site_verdict "$expected" "$actual")"
     checked=$((checked + 1))
     if [ "$verdict" != OK ]; then
@@ -309,19 +364,43 @@ PY
 
   local ec=0
   REPO_ROOT="$tmp" run_check >/dev/null 2>&1 || ec=$?
-  if [ "$ec" -eq 1 ]; then
-    printf '== negative control: version-lockstep reported red as expected ==\n'
-    return 0
-  fi
   if [ "$ec" -eq 2 ]; then
     fail "negative control: run_check hit an infrastructure failure (exit 2) instead of
       reporting the drift. The scratch staging is incomplete or a site went unreadable —
       that is a broken control, not proof the gate can report red."
     return 1
   fi
-  fail "negative control: a drifted site was ACCEPTED (run_check exited $ec, expected 1).
+  if [ "$ec" -ne 1 ]; then
+    fail "negative control: a drifted site was ACCEPTED (run_check exited $ec, expected 1).
       The gate can no longer report red and is green exactly when it matters."
-  return 1
+    return 1
+  fi
+  # First drift correctly reported red — fall through (rather than returning) so the second,
+  # lock-row drift below is exercised too, instead of returning early on the first success.
+  printf '== negative control: version-lockstep reported red as expected ==\n'
+
+  # Second drift: a LOCK row. The packagejson drift above exercises no lock handler, so
+  # without this the new LOCK_MEMBERS table has no end-to-end control coverage.
+  python3 - "$tmp/rs/Cargo.lock" <<'PY'
+import re, sys
+p = sys.argv[1]
+text = open(p, encoding="utf-8").read()
+# Drift ONE proto member so the set is non-uniform -> the reader must print "".
+text = re.sub(
+    r'(\[\[package\]\]\nname = "paigasus-proto-derive"\nversion = ")[^"]+(")',
+    r"\g<1>99.99.99\g<2>", text, count=1)
+open(p, "w", encoding="utf-8").write(text)
+PY
+
+  local ec2=0
+  REPO_ROOT="$tmp" run_check >/dev/null 2>&1 || ec2=$?
+  if [ "$ec2" -ne 1 ]; then
+    fail "negative control: a drifted cargo-lock member was not reported (run_check exited $ec2, expected 1).
+      The LOCK_MEMBERS table or the cargo-lock reader can no longer report red."
+    return 1
+  fi
+  printf '== negative control: version-lockstep reported red on both a packagejson and a lock drift ==\n'
+  return 0
 }
 
 write_site() { # $1 kind  $2 target  $3 version  -> prints 1 if it changed the file, else 0
