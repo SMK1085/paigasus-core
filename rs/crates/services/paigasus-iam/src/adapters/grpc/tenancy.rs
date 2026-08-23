@@ -646,15 +646,22 @@ impl TenancyService for TenancyGrpc {
 
 #[cfg(test)]
 mod tests {
+    use paigasus_proto::paigasus::common::v1::ErrorReason;
+
     use super::*;
 
     /// SMA-586 D6: the `ListMembershipsRequest.filter` oneof cannot carry two values, so its
     /// `None` arm means NEITHER field is set — which is `missing-required-field`. The old message
     /// ("provide exactly one of …") described a failure the wire format makes impossible.
+    ///
+    /// The expected code is routed through the `ErrorReason` registry rather than spelled as a
+    /// bare kebab literal (review finding on SMA-586): this way the assertion fails not only on
+    /// a renamed wire string but also if `MissingRequiredField` is ever dropped from the
+    /// registry, and it never gives `repo:error-code-single-site` a new literal to guard.
     #[test]
     fn an_absent_membership_filter_oneof_is_a_missing_required_field() {
         let err = membership_filter(None).unwrap_err();
         assert_eq!(err, TenancyError::MissingRequiredField("principal_prn|node_prn"));
-        assert_eq!(err.code(), "missing-required-field");
+        assert_eq!(err.code(), ErrorReason::MissingRequiredField.as_wire_reason().expect("not the Unspecified sentinel"));
     }
 }
