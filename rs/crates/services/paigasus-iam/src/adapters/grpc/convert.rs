@@ -198,12 +198,14 @@ pub fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
 /// unfiltered, a valid value converts, and a **present but unrepresentable** value is a client
 /// error.
 ///
-/// That third case is why this exists. [`from_ts`] returns `None` for a negative `nanos` or an
-/// out-of-`chrono`-range `seconds`, and on a filter field `None` means UNFILTERED — so the
-/// `req.field.and_then(convert::from_ts)` shape used in `grpc::audit` silently DROPS a
-/// malformed bound instead of rejecting it. On `BulkReplayDeadLetters` that turns a
-/// narrowly-scoped replay into "replay everything up to `max_rows`". The HTTP twin rejects the
-/// equivalent with a 400 (`http::dead_letters::parse_ts`), so this also restores parity.
+/// That third case is why this exists. `from_ts` returns `None` for a negative `nanos` or an
+/// out-of-`chrono`-range `seconds`, and on a filter field `None` means UNFILTERED — so a
+/// `req.field.and_then(from_ts)` shape silently DROPS a malformed bound instead of rejecting
+/// it. On `BulkReplayDeadLetters` that turned a narrowly-scoped replay into "replay everything
+/// up to `max_rows`"; on `ListAuditEntries` it widened the result set (SMA-583). Both surfaces
+/// now use this helper, and `from_ts` is module-private so the shape cannot recur outside this
+/// file. The HTTP twin rejects the equivalent with a 400 (`http::dead_letters::parse_ts`), so
+/// this also restores parity.
 ///
 /// `InvalidPrn`-as-sentinel, mirroring `http::dead_letters::parse_ts` and
 /// `grpc::audit::parse_cursor` — there is no dedicated error code for "not a valid timestamp".
