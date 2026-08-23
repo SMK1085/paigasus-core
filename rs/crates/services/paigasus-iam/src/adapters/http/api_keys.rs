@@ -110,8 +110,10 @@ async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>,
 /// re-checked against the key's actual owner here — `ApiKeyService::revoke` looks the key up
 /// by `{id}` alone and authorizes against ITS OWN service account's owner node, exactly like
 /// `RevokeApiKeyRequest` (spec §10.1: `string id = 1`, no service-account field at all); the
-/// path segment exists purely for REST nesting.
-async fn revoke(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPathPair<ApiKeyIdField>) -> Result<StatusCode, ApiError> {
+/// path segment exists purely for REST nesting. It IS still validated as a uuid, and a
+/// malformed `{sa}` reports `service_account_id` — one marker per segment (SMA-586 fix round
+/// 2); the single-marker form this replaced named `api_key_id` for both.
+async fn revoke(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPathPair<ServiceAccountId, ApiKeyIdField>) -> Result<StatusCode, ApiError> {
     let actor = actor_prn(&ctx);
     // `first` (the `{sa}` segment) is intentionally unused — see the doc comment above: the
     // path segment exists purely for REST nesting, not for re-checking key ownership here.
