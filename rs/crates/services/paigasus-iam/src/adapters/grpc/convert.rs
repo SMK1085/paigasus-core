@@ -189,7 +189,13 @@ pub fn ts(dt: DateTime<Utc>) -> prost_types::Timestamp {
 /// value (a negative `nanos`, or a `seconds`/`nanos` pair `chrono` can't represent) rather than
 /// panicking — callers map that to a client error themselves (mirrors `node_uuid`'s own
 /// "caller decides how to surface a parse failure" posture).
-pub fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
+///
+/// **Module-private on purpose (SMA-583).** On a filter field `None` means UNFILTERED, so an
+/// `and_then(from_ts)` call site silently widens the query instead of rejecting a malformed
+/// bound. Callers outside this module must use [`parse_opt_ts`], which keeps the three cases
+/// distinct. Note this closes *that shape* only — `parse_opt_ts(..).ok().flatten()` would
+/// reintroduce the same bug, and no grep gate would catch that either.
+fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
     let nanos = u32::try_from(t.nanos).ok()?;
     DateTime::<Utc>::from_timestamp(t.seconds, nanos)
 }
