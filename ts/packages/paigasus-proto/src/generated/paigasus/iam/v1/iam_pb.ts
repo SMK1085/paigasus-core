@@ -2023,8 +2023,13 @@ export const AuditEntrySchema: GenMessage<AuditEntry> = /*@__PURE__*/
 
 /**
  * Optional scalar filters use empty-string/zero sentinels (mirrors the other
- * request messages in this file): an empty string / zero timestamp means
- * "unfiltered" on that field.
+ * request messages in this file): an empty string means "unfiltered" on that
+ * field, and limit 0 means the server default.
+ *
+ * Timestamps do NOT use a zero sentinel: a zero Timestamp is PRESENT and
+ * denotes the epoch, so it filters from 1970-01-01. An ABSENT timestamp means
+ * unfiltered; a PRESENT but unrepresentable one is INVALID_ARGUMENT and never
+ * silently unfiltered (SMA-583, matching ListDeadLettersRequest).
  *
  * @generated from message paigasus.iam.v1.ListAuditEntriesRequest
  */
