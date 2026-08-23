@@ -9,7 +9,7 @@
 //! TASK's output (`buffer-only-failure` in `.moon/tasks.yml`).
 //!
 //! So this test FAILS instead. A failure is shown by both. One red, named for the actual
-//! problem, in place of 60 silent greens.
+//! problem, in place of 64 silent greens.
 //!
 //! **These counts are derived, not typed by hand.** Before editing this file, re-derive them
 //! and grep for the NUMBERS themselves, not a fixed word list — a "56 silent" search once
@@ -17,12 +17,12 @@
 //! sentences, the assertion message below, `tests/support/docker.rs`'s `start_or_skip` doc
 //! comment (it restates the same fact in the one file that owns the policy), and the
 //! Docker-backed-suites bullets in `CLAUDE.md` and `docs/dev-setup.md`.
-//! `ls *.rs | wc -l` for the total (62); `grep -Ln "start_or_skip\|start_redis_or_skip\|
+//! `ls *.rs | wc -l` for the total (69); `grep -Ln "start_or_skip\|start_redis_or_skip\|
 //! start_migrated_postgres\|start_raw_postgres" *.rs` for the binaries that never start a
 //! container (currently `grpc_health.rs`, `health.rs`, `support_docker_policy.rs`,
-//! `support_docker_retry.rs` — 4 of them). Docker-backed = total minus that count (58); every
+//! `support_docker_retry.rs` — 4 of them). Docker-backed = total minus that count (65); every
 //! "N silently/quietly pass" occurrence subtracts one more, for whichever binary is the one
-//! reporting red, since it is not among the suites that would otherwise pass unnoticed (57).
+//! reporting red, since it is not among the suites that would otherwise pass unnoticed (64).
 //!
 //! It starts a real Redis rather than pinging the daemon: testcontainers exposes no ping, and
 //! merely constructing a client is not a probe — that succeeds when the endpoint exists with

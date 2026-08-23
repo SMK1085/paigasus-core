@@ -141,7 +141,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   daemon is unreachable, and that skip is deliberately quiet — nextest discards a passing test's
   stderr and Moon discards a passing task's output, so no message can surface there. What makes
   it visible is `tests/docker_preflight.rs`, a canary that FAILS when Docker is unreachable: a
-  Docker-less run yields exactly one red instead of 60 silent passes (SMA-538). The policy itself
+  Docker-less run yields exactly one red instead of 64 silent passes (SMA-538). The policy itself
   lives once, in `tests/support/docker.rs`, and `repo:iam-docker-policy-single-site` fails if a
   new suite hand-rolls its own copy. Two env vars, both parsing `1`/`true`/`yes` (anything else,
   including `0`, is off — unlike `CI`, which is presence-based):
