@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-proto"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "paigasus-proto-derive",
  "prost",
@@ -2663,7 +2663,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-proto-derive"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",

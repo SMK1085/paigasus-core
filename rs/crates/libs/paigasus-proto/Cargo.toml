@@ -1,7 +1,9 @@
 [package]
 name = "paigasus-proto"
-# The 0.1.0 floor (ADR-0011 S3) lands in SMA-577's atomic flip; release-plz cuts every tag.
-version = "0.0.0"
+# The 0.1.0 floor (ADR-0011 S3). release-plz cuts every tag; never hand-place a `*-vX.Y.Z`
+# tag — manual tags lack release-plz's tracking metadata and silently stop future bumps
+# (the SMA-385 trap). Held in lockstep across the proto family by `repo:version-lockstep`.
+version = "0.1.0"
 description = "Generated protobuf message types and tonic gRPC service stubs for Paigasus."
 repository = "https://github.com/SMK1085/paigasus-core"
 homepage = "https://github.com/SMK1085/paigasus-core#readme"
@@ -27,7 +29,7 @@ authors.workspace = true
 # this crate publishes. ACCEPTED deliberately in SMA-577: it embeds AuditMetadata, which is
 # already public in the generated code, so the fixture was never the binding constraint on
 # this crate's semver surface — the domain type it wraps is.
-publish = false
+publish = true
 
 [dependencies]
 prost.workspace = true

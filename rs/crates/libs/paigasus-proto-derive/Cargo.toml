@@ -2,8 +2,10 @@
 
 [package]
 name = "paigasus-proto-derive"
-# The 0.1.0 floor (ADR-0011 S3) lands in SMA-577's atomic flip; release-plz cuts every tag.
-version = "0.0.0"
+# The 0.1.0 floor (ADR-0011 S3). release-plz cuts every tag; never hand-place a `*-vX.Y.Z`
+# tag — manual tags lack release-plz's tracking metadata and silently stop future bumps
+# (the SMA-385 trap). Held in lockstep across the proto family by `repo:version-lockstep`.
+version = "0.1.0"
 description = "Derive macro for Paigasus audit metadata — #[derive(Auditable)] for generated protobuf messages."
 repository = "https://github.com/SMK1085/paigasus-core"
 homepage = "https://github.com/SMK1085/paigasus-core#readme"
@@ -19,7 +21,7 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 # PUBLISH ORDER: this crate must publish BEFORE paigasus-proto, which depends on it.
-publish = false
+publish = true
 
 [lib]
 proc-macro = true
