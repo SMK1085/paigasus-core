@@ -1,0 +1,502 @@
+<task-notification>
+<task-id>afce7f064861ce94e</task-id>
+<tool-use-id>toolu_01HDwX3JyZEu4PEEu84CA7tA</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/afce7f064861ce94e.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 1: register six error reasons" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+
+- Commit SHA: `29dcf9f617e480c38de8fe71b83e39f4270db83f` — `feat(contracts): register six request-validation error reasons (SMA-586)`
+- Test summary: `cargo test -p paigasus-proto`: 21/21 lib tests passing (incl. the new test and the 52-count assertion), 37/37 across the full crate (lib + integration + doctests)
+- Concerns: `buf generate` had to be run from `contracts/`, not the repo root as the brief's step 5 literally states — there is no root-level `buf.gen.yaml`, and that's where Moon's `contracts:generate` task actually runs it from. Diff verified correct by hand across all three generated trees plus a passing `ci/error-registry/check.py --single-site` cross-check. Full details in the report file.</result>
+<usage><subagent_tokens>89747</subagent_tokens><tool_uses>31</tool_uses><duration_ms>204575</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>afa14f7c3efd9bcbf</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/afa14f7c3efd9bcbf.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 1" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All existing values untouched (1-32 unchanged, no reordering/renumbering), new banner comment follows the existing `// ---- Section (range) ----` convention, and each new value's `//` comment repeats its wire literal verbatim exactly as the file's existing convention does. Append-only constraint respected.
+
+I have everything needed. Final assessment:
+
+## Spec: ✅
+
+All brief requirements met exactly:
+- Six proto values added at `contracts/proto/paigasus/common/v1/error.proto` lines 146-165, enum numbers exactly 33-38, no reordering/removal of existing 1-32.
+- Wire strings verified byte-for-byte correct via the registry's own `strip ERROR_REASON_, lowercase, _→-` rule (independently recomputed, all six match).
+- `EXPECTED_REASONS` in `rs/crates/libs/paigasus-proto/src/error.rs` mirrors the same six strings; count assertion changed 46→52. I recounted the proto enum by hand (53 total declarations including `UNSPECIFIED=0` → 52 real reasons) — 52 is correct.
+- No `google.rpc.*` import in error.proto (file's own header comment explicitly documents why it avoids this).
+- All three generated trees (`rs/…/paigasus.common.v1.rs`, `py/…/__init__.py`, `ts/…/error_pb.ts`) are mechanically consistent with the proto change — new values correctly numbered/ordered/documented, nothing else touched, no hand-editing evidence.
+- `ci/error-registry/check.py --single-site` (the CI cross-check gate) passes with exit 0, confirming the two independent transcriptions agree.
+- SPDX headers present and untouched on both hand-authored files.
+- Commit message: `feat(contracts): register six request-validation error reasons (SMA-586)` — 72 chars, starts lowercase, single-line body with only an `Entire-Checkpoint:` trailer (no `#NNN`, no stray `token: value` lines) — commitlint-safe.
+
+## Task quality: Approved (one Minor finding)
+
+- **Minor**: The doc comment on `all_reasons()` in `rs/crates/libs/paigasus-proto/src/error.rs` (line 141) still reads `the assert_eq!(actual.len(), 46) anchor` — a stale reference left over from before this task's count bump to 52. Purely cosmetic (doesn't affect the actual assertion, which was correctly updated), but it's a comment describing test infrastructure that now cites the wrong number. Worth a one-line fix in this task or the next touching that file.
+- Test added (`the_request_validation_reasons_resolve_both_ways`) meaningfully asserts both directions (`as_wire_reason` and `from_wire_reason`) for all six new variants, exactly as the brief specified — not a vacuous test.
+- The implementer's deviation from the brief's literal "run buf generate from repo root" is correctly diagnosed and justified: confirmed no root-level `buf.gen.yaml` exists, only `contracts/buf.gen.yaml`, and `contracts/moon.yml`'s `generate` task's working directory is `contracts/`. This is a plan defect (as the reviewer prompt anticipated), not an implementer error — and the implementer already flagged it explicitly and followed up with a separate docs commit (`a8bd845`, outside this diff's range) rather than silently glossing over it.
+- No scope creep — nothing beyond the six values, the mirror, the count, and regeneration was touched. The extra `check.py --single-site` verification was additive confidence-building, not scope creep.
+
+No `⚠️ Cannot verify from diff` items — everything required was verifiable from the repo state plus the diff.</result>
+<usage><subagent_tokens>89031</subagent_tokens><tool_uses>20</tool_uses><duration_ms>82125</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>af6d2a6edc5af2344</task-id>
+<tool-use-id>toolu_01GKiQMv1aUrBZDoBYQejRYE</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/af6d2a6edc5af2344.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 2: add TenancyError variants" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+
+Commit SHA: `020dfed` on `feature/sma-586-error-reason-taxonomy`
+
+Test summary: `cargo test -p paigasus-iam --lib` → 597/597 passed (includes the 3 new tests and the unmodified `every_tenancy_code_is_declared_in_the_canonical_registry` registry-membership test); fmt and clippy clean.
+
+Concerns: none. One minor deviation — ran `cargo fmt` after pasting the brief's hand-wrapped `field()` match arm, since the repo's rustfmt collapses it to one line; purely cosmetic, no logic/interface change. Full details in `/Users/smaschek/dev/paigasus/paigasus-core/.superpowers/sdd/2026-08-23-sma-586-error-reason-taxonomy/task-2-report.md`.</result>
+<usage><subagent_tokens>88921</subagent_tokens><tool_uses>20</tool_uses><duration_ms>215321</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a9255b02b1758f99b</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a9255b02b1758f99b.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 2" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>68 chars, well under 100. Subject starts lowercase after the scope prefix (convention followed elsewhere in repo). Body only has the `Entire-Checkpoint:` trailer, no `#NNN` ref. Good.
+
+All verification complete.
+
+**Spec: ✅**
+
+All six variants (`InvalidTimestamp`, `InvalidUuid`, `InvalidCursor`, `InvalidAuditOutcome`, `MissingRequiredField`, `MutuallyExclusiveFields`) added as `&amp;'static str` payloads exactly as specified — confirmed no `String` anywhere among the six. `code()` strings match the proto registry exactly (`invalid-timestamp`, `invalid-uuid`, `invalid-cursor`, `invalid-audit-outcome`, `missing-required-field`, `mutually-exclusive-fields`), verified against `contracts/proto/paigasus/common/v1/error.proto`. All six are wired into the `ErrorClass::Validation` arm of `class()`. `field()` returns `Some(f)` for exactly the six new variants and `_ =&gt; None` otherwise, correctly excluding `InvalidPrn(String)` (verified test asserts this explicitly). `every_tenancy_code_is_declared_in_the_canonical_registry` in `src/adapters/grpc/convert.rs` (lines 693–704) is byte-for-byte unmodified — it iterates via `strum::EnumIter` (enabled by pre-existing `#[cfg_attr(test, derive(strum::EnumIter))]`), so it picks up the six new variants automatically without any edit, exactly as the brief predicted. No call sites migrated; the six variants remain unconstructed outside tests. No file under `src/adapters/` touched — only `application/error.rs` changed (94 insertions, 0 deletions, 1 file). SPDX header present (pre-existing, unmodified). Commit message: `feat(rs): add six request-validation TenancyError variants (SMA-586)` — 68 chars, lowercase subject after scope, single `Entire-Checkpoint:` trailer in body, no `#NNN` ref.
+
+**Task quality: Approved**
+
+Findings:
+- **Minor** — `field()`'s catch-all `_ =&gt; None` arm (line 133 of diff) means a future variant that carries a field-name-shaped payload will silently return `None` unless someone remembers to add it to the `|`-pattern. This is a real (if standard) readability/exhaustiveness trade-off, and it is *not* explicitly called out in the doc comment above `field()` — the comment explains what `None` means for `InvalidPrn` but doesn't flag the silent-omission risk for future variants. Not blocking; a `match` with an explicit exhaustive list would trade this away at the cost of verbosity, and the existing pattern mirrors `class()`'s own catch-all style in this file.
+- **Minor** — the implementer deviated from the brief's literal step ordering (ran `cargo fmt` to collapse the `field()` match arm onto one line rather than leaving it multi-line as literally written in the brief snippet) and skipped running the standalone "confirm compile failure" step (folded into the full-suite run instead). Both deviations are explained transparently in the report, don't change any logic/interface, and are consistent with repo rustfmt conventions and existing style in `class()`. Non-blocking.
+- No scope creep found: single file touched, no call-site migration, no adapter changes.
+- The three new tests are meaningful, not true-by-construction: they pin exact `code()` strings against the proto registry (would fail on any typo), pin `Display` output including the `{0}` interpolation, and specifically assert `field()` returns `None` for `InvalidPrn` (the one variant most likely to be confused with the new "field name" semantics) plus `NotFound`/`Internal` as the no-payload control cases.
+
+⚠️ Cannot verify from diff: whether `cargo test -p paigasus-iam --lib` (597/597) and `cargo clippy -D warnings` actually ran clean, and whether the commit passed through the real `lefthook`/`commitlint` hook unbypassed — taking the implementer's report as evidence per the review method's instruction not to re-run the suite.</result>
+<usage><subagent_tokens>69615</subagent_tokens><tool_uses>7</tool_uses><duration_ms>35791</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a3c550a68b65b7311</task-id>
+<tool-use-id>toolu_01CJTqdJoygiWiLKR9wGdykH</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a3c550a68b65b7311.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 3: field name in gRPC metadata" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+
+Commit SHA: `dab79e7` — `feat(rs): carry the failing field name in grpc ErrorInfo metadata (SMA-586)`
+
+Test summary: `cargo test -p paigasus-iam --lib adapters::grpc::convert` — 19 passed, 0 failed (includes the 2 new tests); `cargo fmt --check` and `cargo clippy --lib`/`--tests -- -D warnings` both clean.
+
+Concerns: none — scope held to `status_to_grpc` and the two specified tests; `authn_status` and all call sites untouched. Full report at `/Users/smaschek/dev/paigasus/paigasus-core/.superpowers/sdd/2026-08-23-sma-586-error-reason-taxonomy/task-3-report.md`.</result>
+<usage><subagent_tokens>73160</subagent_tokens><tool_uses>16</tool_uses><duration_ms>97694</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ac25be3cf3047bdb9</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/ac25be3cf3047bdb9.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 3" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>75 chars, well under 100, lowercase start. SPDX header present (untouched, file already had it). No call sites migrated, `authn_status` untouched, `error_metadata` ordering unmodified. All checks pass.
+
+**Spec: ✅** — `status_to_grpc` now threads `TenancyError::field()` into `iam_status`'s `extra` via the `Vec` fallback form exactly as offered in the brief; `field()` itself lives in `error.rs` (Task 2, not part of this diff) and is consumed rather than re-derived via variant matching in the transport layer — confirmed by its doc comment ("keeps the transport layer free of variant knowledge") and by `convert.rs` only calling `e.field()`. Both brief-specified tests were added verbatim. `error_metadata` (lines 59-72) is untouched — `extra` still inserted first, canonical `retryable`/`correlation_id`/`request_id` keys inserted after and thus still win a collision. `authn_status` untouched. No call sites migrated — diff touches only `status_to_grpc` and the test module. Commit `dab79e7` is a single-file, single-purpose change matching the brief's Step 5 message; subject is 75 chars, lowercase start, no `#NNN`/stray `token: value` line in the body (only the `Entire-Checkpoint:` trailer, which is tooling-added and not something the brief warned against). SPDX header present (pre-existing, file unchanged at top).
+
+**Task quality: Approved**
+
+- Minor: the report's claim about "confirmed the new tests failed first" is soft (edits were made together, not a true red-green split), but the brief's Step 2 was satisfied in spirit and the report is transparent about the shortcut — not a spec violation, just worth noting for process rigor.
+- Minor: report says local `use tonic_types::StatusExt;` was needed per-test because the module-level import "alone was not sufficient" — plausible (shadowing/scoping with existing per-test-fn convention) but not independently verified from the diff; not a functional issue since it compiles per the implementer's clippy/test evidence.
+- Positive: the positive test (`status_to_grpc_puts_the_field_name_in_error_info_metadata`) asserts all three of `field`, `reason`, and that `retryable` survived — matches the brief and is meaningful (not true-by-construction, since a broken insertion order or key collision would fail it). The negative test correctly asserts absence via `!contains_key`, not empty-string equality.
+
+**⚠️ Cannot verify from diff:** `TenancyError::field()`'s implementation (which variants carry a field) is out of this diff's scope (Task 2) — confirmed it exists and matches the test's expectations (`InvalidTimestamp` → `Some(f)`, `NotFound` → `None`) by reading `error.rs` directly, so this is verified, not a gap.</result>
+<usage><subagent_tokens>68315</subagent_tokens><tool_uses>8</tool_uses><duration_ms>30496</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a7606140bafe69c28</task-id>
+<tool-use-id>toolu_01VYSCTns8FUsdBoFdKYRfNN</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a7606140bafe69c28.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 4: migrate gRPC filter sites" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+
+Commit SHA: `0cedf65f5a62d67973487831ca3358f0cfc6743f` — "feat(rs): migrate grpc timestamp, cursor and outcome sites off invalid-prn (SMA-586)"
+
+Test summary: `cargo test -p paigasus-iam --lib adapters::grpc` 38/38 passed; full crate `cargo nextest run -p paigasus-iam --lib` 599/599 passed, 0 failed, 0 skipped; fmt and clippy (`-D warnings`) clean.
+
+Concerns: None. All four scoped files (`convert.rs`, `audit.rs`, `dead_letters.rs`, `service_accounts.rs`) match the brief's exact code verbatim; `tenancy.rs`/`authz.rs`/`http/` untouched; uuid-id sites (Task 5) left alone; `to_bulk_request` kept private while both `to_filter`s widened to `pub(crate)`; `parse_opt_ts` kept `pub` per the brief's explicit note. Full report at `/Users/smaschek/dev/paigasus/paigasus-core/.superpowers/sdd/2026-08-23-sma-586-error-reason-taxonomy/task-4-report.md`.</result>
+<usage><subagent_tokens>108638</subagent_tokens><tool_uses>37</tool_uses><duration_ms>228965</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a60a1ded9b669f99b</task-id>
+<tool-use-id>toolu_012qLX7Sa27YmThGnWoaBBXb</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a60a1ded9b669f99b.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 4" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>84 chars (under 100), lowercase subject, no `#NNN` refs, single `Entire-Checkpoint:` trailer (not user-added, tool-generated) — commit message is compliant.
+
+All verification checks pass. Findings:
+
+**Spec: ✅**
+All required migrations landed correctly, verified against brief line-by-line:
+- `parse_opt_ts` (convert.rs): `&amp;str`→`&amp;'static str`, `InvalidPrn` → `InvalidTimestamp(field)`, `ok_or_else`→`ok_or`, doc comment fixed.
+- `parse_opt_ts_detail_is_swallowed_by_invalid_prns_static_display` deleted (not left coexisting), replaced verbatim with `parse_opt_ts_surfaces_the_field_name_in_its_display` (`assert_eq!` on exact variant+payload, `Display` contains check, `code()` check).
+- `parse_outcome`/`parse_cursor` (audit.rs) and `parse_cursor` (dead_letters.rs): correct variants (`InvalidAuditOutcome("outcome")`, `InvalidCursor("cursor")`), doc comments no longer claim "no dedicated error code."
+- `to_filter` in both `audit.rs` and `dead_letters.rs` widened to `pub(crate)`; `to_bulk_request` correctly left private.
+- All retargeted test assertions match the failure kind per the brief's mapping (cursor sites → `InvalidCursor`, not `InvalidUuid`; timestamp sites → `InvalidTimestamp`; outcome → `InvalidAuditOutcome`).
+- `service_accounts.rs` doc comment replaced verbatim, no code touched — the `expires_at` parse call itself unchanged (still calls `parse_opt_ts`, correctly out of scope for code changes).
+- Scope boundaries respected: `tenancy.rs`/`authz.rs` untouched, `src/adapters/http/` untouched, uuid-id sites (`parse_id` in dead_letters.rs, api-key-id parse in service_accounts.rs, `Prn::parse` sites) all left on `InvalidPrn` as expected — confirmed via grep, these are Task 5's scope.
+- No `format!`/caller-supplied strings reach any new variant's `&amp;'static str` payload — all literals are hardcoded (`"outcome"`, `"cursor"`, or the pre-existing `&amp;'static str` field-name arguments).
+- SPDX headers intact in all 4 touched files.
+- Commit: `feat(rs): migrate grpc timestamp, cursor and outcome sites off invalid-prn (SMA-586)` — 84 chars, lowercase subject, workspace scope, no stray body tokens (only an auto-appended `Entire-Checkpoint:` trailer).
+
+**Task quality: Approved**
+
+No Critical or Important findings.
+
+Minor:
+- `parse_opt_ts` stayed `pub` rather than `pub(crate)`. Verified by grep: every caller (`grpc::audit`, `grpc::dead_letters`, `grpc::service_accounts`) is inside `paigasus-iam` itself, so `pub(crate)` would be sufficient and tighter. The implementer followed the brief's explicit parenthetical override ("it stays `pub`") over the brief's own contradictory `pub(crate)` signature — this is the brief defect flagged in the review instructions, not an implementer error. Outcome is slightly more permissive than necessary but not wrong.
+
+⚠️ Cannot verify from diff: whether `cargo test`/`clippy`/`fmt` actually ran clean as claimed in the report (599/599 tests, clean clippy/fmt) — no test-run transcript in the review package, only the report's assertion. Diff content itself is internally consistent with a compiling, warning-free result (no leftover unused imports, no `format!` calls left dangling), but this is not independent proof of the run.</result>
+<usage><subagent_tokens>79448</subagent_tokens><tool_uses>5</tool_uses><duration_ms>59252</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ad84843b338038179</task-id>
+<tool-use-id>toolu_013woL9srhrhJ33G7ce82Qqa</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/ad84843b338038179.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 5: gRPC uuid and required fields" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+
+Commit SHA: `8a9a83b` — `feat(rs): grpc uuid and required-field reasons, oneof reclassified (SMA-586)`
+
+Test summary: `cargo test -p paigasus-iam --lib adapters::grpc` → 40/40 passed (incl. both new tests); `cargo nextest run -p paigasus-iam --lib` → 601/601 passed; clippy/fmt/build clean.
+
+Concerns:
+- I added one file beyond the brief's list: `ci/error-registry/check.py`. The brief's verbatim `tenancy.rs` test asserts `err.code() == "missing-required-field"`, which spells a registry-code literal and tripped `repo:error-code-single-site` (`--single-site` failed with `tenancy.rs` as the sole offender). I added a test-assertion-only MANIFEST row for it, mirroring existing rows for similar test-only files, and confirmed `--single-site` and `--self-test` both pass afterward.
+- I did not run the full `moon ci` graph (out of scope for a single-crate task); validated the specific gate script directly instead since it's the one this task's content touches. Full report at `.superpowers/sdd/2026-08-23-sma-586-error-reason-taxonomy/task-5-report.md`.</result>
+<usage><subagent_tokens>134432</subagent_tokens><tool_uses>57</tool_uses><duration_ms>268184</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ab82e8b28a1f752bb</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/ab82e8b28a1f752bb.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 5" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Review: Task 5 — gRPC uuid migration + required-field checks (SMA-586)
+
+### Priority item: `ci/error-registry/check.py` MANIFEST row for `grpc/tenancy.rs`
+
+**Verdict: defensible, but Important-severity design gap — flag for reviewer awareness, not a blocker.**
+
+- Verified the row is *honestly* classified: grepped `tenancy.rs` post-diff for any registry-code-shaped literal (`"[a-z-]+-[a-z-]+"`) — the **only** hit is the test's `assert_eq!(err.code(), "missing-required-field")` at line 658. All production paths in the file emit via `TenancyError::InvalidUuid(...)` / `TenancyError::MissingRequiredField(...)` variant constructors, never a bare literal. So the `"asserts"` role (vs. `"emits"`) is factually correct, and it exactly mirrors three existing precedent rows in the same MANIFEST (`http/error.rs`, gateway `auth.rs`, `application/create_user.rs`) — all production-code files that are `"asserts"`-classified for the identical reason (only their test modules spell literals).
+- However, `check.py`'s own `scan()` docstring is explicit that **the whole file is scanned, there is no production/test split**, precisely because splitting at `#[cfg(test)]` was tried and rejected as unsafe. Adding `tenancy.rs` to MANIFEST as `"asserts"` therefore blinds the gate to a *future production* literal added anywhere in that file (not just near this test) — the exact coverage hole the gate's design note warns about, and the exact thing `convert.rs`'s own row (which the implementer read and cited) argues against: "every code leaves it through an ErrorReason LazyLock static, never through a literal."
+- A strictly better fix existed and was available: compare against a registry-routed value instead of a bare literal, e.g. `assert_eq!(err.code(), TenancyError::MissingRequiredField("x").code())` — since `TenancyError::code()`'s `MissingRequiredField` arm ignores the payload (`Self::MissingRequiredField(_) =&gt; "missing-required-field"`). That keeps `tenancy.rs` off the MANIFEST entirely, preserves full-file coverage, and still fails if the wire string is ever renamed without updating the registry.
+- Mitigating factor: the brief's Step 1 **specifies the literal test verbatim** (`assert_eq!(err.code(), "missing-required-field");`), so the implementer was following the brief exactly rather than inventing a weak pattern independently. They also disclosed the tradeoff prominently in "Concerns / notes for reviewer" rather than hiding it.
+- **Recommendation for a follow-up**: swap the test's RHS literal for a registry-routed comparison and drop the MANIFEST row. Not blocking — the current state is consistent with existing repo convention and is transparently documented.
+
+### Spec compliance: ✅
+All eight brief steps verified present and correct against symbol names (not stale line numbers):
+- `require_present` in `convert.rs`, `pub(crate)`, whitespace-trimming, verbatim doc comment — matches brief exactly, called *before* PRN parsing at all three sites (`authz.rs::list_role_grants`, `service_accounts.rs::list_service_accounts`, `service_accounts.rs::issue_api_key`).
+- Four uuid sites migrated with the exact field literals: `"membership_id"`, `"role_grant_id"`, `"api_key_id"`, `"dead_letter_id"` — all `&amp;'static str`, no `format!`/interpolation reaching an error payload anywhere in the diff.
+- `membership_filter` in `tenancy.rs` is `pub(crate)`, extracted correctly, `None` → `MissingRequiredField("principal_prn|node_prn")` (not `MutuallyExclusiveFields` — correct, since the proto `oneof` makes "both set" unrepresentable).
+- `parse_id` in `dead_letters.rs` widened to `pub(crate)`, migrated to `InvalidUuid("dead_letter_id")`.
+- Stale doc comments in `tenancy.rs` (`detach_membership`) and `authz.rs` (`revoke_role`) replaced per brief; `service_accounts.rs::revoke_api_key`'s comment also updated (not explicitly in brief text but same pattern, correct and in-scope).
+- Both new tests are meaningful (exercise empty/whitespace/valid cases; exercise `None` → error variant + `.code()` wiring), not true-by-construction.
+- Genuine `Prn::parse` sites verified still `InvalidPrn` via grep across all four files — no over-migration.
+
+### Global constraints: all satisfied
+- SPDX headers intact (no new files created).
+- Commit subject: `feat(rs): grpc uuid and required-field reasons, oneof reclassified (SMA-586)` — lowercase start, 79 chars (≤100). Body has only an `Entire-Checkpoint:` trailer, no `#NNN` ref.
+- No `format!`/caller-supplied string reaches an `&amp;'static str` error payload — confirmed by inspection of all six diff call sites.
+- Rust `warnings = deny` — report claims `cargo clippy -D warnings` clean; not independently re-run per review method, no reason to doubt it.
+
+### Scope boundaries: respected
+- No changes under `src/adapters/http/`.
+- `grpc/audit.rs` and `service_accounts.rs`'s `expires_at` doc block untouched (confirmed via diff context — surrounding comment text identical, no hunk there).
+- Only bare-uuid / missing-required-field sites migrated; PRN-parse failures still `InvalidPrn` (grep-verified).
+
+### Task quality: Approved
+Findings:
+- **Important**: `ci/error-registry/check.py` MANIFEST row for `grpc/tenancy.rs` — correctly classified and honestly justified today, but narrows the gate's future coverage of a production adapter file when a registry-routed test alternative existed and was demonstrably preferable (mirrors `convert.rs`'s own stated reasoning). Recommend a follow-up to route the assertion through `TenancyError::code()` instead of a bare literal and drop the row.
+- No Critical or other Important/Minor findings — migration is clean, scoped, and matches the brief's intent exactly where it deviates from stale line numbers.
+
+⚠️ Cannot verify from diff: full `moon ci` graph / Docker-gated integration suites were not run by the implementer (explicitly disclosed as out-of-scope for a single-crate unit-test task); took the report's `cargo build/clippy/fmt/test/nextest` results on faith per review method (not re-run).</result>
+<usage><subagent_tokens>96923</subagent_tokens><tool_uses>10</tool_uses><duration_ms>150393</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ad84843b338038179</task-id>
+<tool-use-id>toolu_01TFGyv1uoB8nG4NE12ZvabL</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/ad84843b338038179.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 5: gRPC uuid and required fields" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Fix complete and verified.
+
+Status: DONE
+
+Commit SHA: `20e2445` — `fix(rs): route the oneof-reclassification test through the reason registry (SMA-586)`
+
+Test summary: `cargo test -p paigasus-iam --lib adapters::grpc` → 40/40 passed (incl. `an_absent_membership_filter_oneof_is_a_missing_required_field` now asserting via `ErrorReason::MissingRequiredField.as_wire_reason()`); `check.py --single-site`/`--self-test` pass with `check.py` unmodified; clippy/fmt clean.
+
+Concerns: none. The four touched files' only remaining occurrences of the six code strings are inside `///` doc-comment prose (backtick-quoted), not `"…"` string literals, so they're outside `check.py`'s scan pattern and needed no rewrite.</result>
+<usage><subagent_tokens>147109</subagent_tokens><tool_uses>17</tool_uses><duration_ms>110566</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a3729c5c2a8c5554f</task-id>
+<tool-use-id>toolu_016kdDBvtj7sTAcu2Zbzt6vy</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a3729c5c2a8c5554f.output</output-file>
+<status>completed</status>
+<summary>Agent "Re-review Task 5 fix" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>The gate passes cleanly. This confirms both (b) the check.py MANIFEST has no tenancy.rs row and correctly still passes, and the doc-comment claim in part (c) — no stray literal reds the gate.
+
+All checks complete. Final verdict below.
+
+---
+
+**Finding: `ci/error-registry` MANIFEST narrowing on `grpc/tenancy.rs` — ADDRESSED**
+
+(a) The test `an_absent_membership_filter_oneof_is_a_missing_required_field` (rs/crates/services/paigasus-iam/src/adapters/grpc/tenancy.rs:657-667) now asserts `err.code()` against `ErrorReason::MissingRequiredField.as_wire_reason().expect(...)`. Confirmed non-tautological: `err.code()` resolves to a hand-written match arm literal in `rs/crates/services/paigasus-iam/src/application/error.rs:163` (`"missing-required-field"`), while `as_wire_reason()` derives the string from the prost-generated `ErrorReason` enum's `as_str_name()` (kebab-cased) in `rs/crates/libs/paigasus-proto/src/error.rs:78-82` — two independently-sourced strings. Ran `cargo check -p paigasus-iam --tests` (clean) and the specific test (passes).
+
+(b) `git diff` on `ci/error-registry/check.py` confirmed empty by the caller; independently verified `grep -n "tenancy.rs" ci/error-registry/check.py` returns no MANIFEST row. Ran `python3 ci/error-registry/check.py --self-test` (OK) and `--single-site` (exit 0, no offenders) — the gate itself is green with the narrowing row removed and the file otherwise unchanged.
+
+(c) Verified `code_pattern()` (check.py:120-127) matches only `"code"` or `\"code\"` (quote-delimited, either plain or escaped) — never backtick-delimited text. Grepped all registry code strings against `convert.rs`, `tenancy.rs`, `authz.rs`, `dead_letters.rs`, `service_accounts.rs` for quote-delimited hits: only `convert.rs` has any (pre-existing, already covered by its own "asserts" MANIFEST row, untouched by this fix). The other four files' only occurrences of the six SMA-586 code strings are backtick-quoted in `///`/`//` comments (e.g. tenancy.rs:88,654; service_accounts.rs:187,250,252) — confirmed via targeted grep and manual inspection of surrounding lines. Claim holds; the live `--single-site` run corroborates it (exit 0).
+
+**New breakage: none.** The diff touches only the two intended files: an 8-line addition to `tenancy.rs` (one `use` import + doc comment + the registry-routed assertion, replacing the bare literal) and a clean 2-line MANIFEST row removal in `check.py`. No other code paths, imports, or assertions touched. Build and the specific test both verified green.
+
+**Verdict: all findings addressed**
+
+**Out of scope (deferred):** `application/error.rs:163` and the many other files (`convert.rs`, `service_accounts.rs`, etc.) still contain hand-written bare kebab-string literals for various codes — pre-existing and covered by their own existing MANIFEST rows/membership tests, untouched by this fix diff. Not part of this review's scope.</result>
+<usage><subagent_tokens>76091</subagent_tokens><tool_uses>20</tool_uses><duration_ms>119678</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>af453bcfb07890606</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/af453bcfb07890606.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 6: migrate HTTP query-param sites" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+
+Commit: `89b1a36` — feat(rs): migrate http query-param sites off the invalid-prn sentinel (SMA-586)
+
+Test summary: `cargo test -p paigasus-iam --lib adapters::http` — 58 passed, 0 failed; `cargo fmt --check`/`cargo clippy -- -D warnings`/`cargo build --workspace` all clean; `ci/error-registry/check.py --single-site` exits 0.
+
+Concerns: none functional — I also fixed one stale `InvalidPrn` doc comment on `AuditQuery` in `dto.rs` beyond the brief's four explicitly named lines (docs-only, same staleness category, left uncorrected it would misdescribe the just-migrated behavior).</result>
+<usage><subagent_tokens>116119</subagent_tokens><tool_uses>55</tool_uses><duration_ms>329231</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a787486d951c8e2a0</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a787486d951c8e2a0.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 6" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>That single `format!` is a pre-existing, unrelated site (`PolicyInvalid`, not touched by this task). No new-variant `format!` usage introduced. Review complete.
+
+## Spec: ✅
+
+All brief requirements verified against the diff:
+- `parse_ts`/`parse_cursor`/`parse_outcome` in `audit.rs` and `dead_letters.rs` migrated to `InvalidTimestamp`/`InvalidCursor`/`InvalidAuditOutcome`, all `pub(crate)`, `parse_ts` takes the `field: &amp;'static str` param on both call sites (including the not-explicitly-numbered `BulkReplayBody::into_request` sites, which needed it to compile).
+- Three required-field sites (`service_accounts.rs:owner_prn`, `api_keys.rs:scope_prn`, `authz.rs:principal_prn`) migrated to `MissingRequiredField`, whitespace-trimmed before `ok_or`.
+- `memberships.rs`'s `_ =&gt;` arm split into `membership_filter`, correctly producing `MissingRequiredField("principal|node")` for `(None,None)` and `MutuallyExclusiveFields("principal|node")` for `(Some,Some)` — not swapped.
+- D7 empty/whitespace-as-absent applied at all four named sites.
+- `to_filter` (audit), `to_filter` (dead_letters), `membership_filter` all widened to `pub(crate)` — the three functions named in the interface contract.
+- `dto.rs` stale doc comments fixed at all four brief-named sites.
+
+**Cross-transport agreement (the critical property) — verified by direct comparison against `src/adapters/grpc/`:**
+- Malformed timestamp → `InvalidTimestamp` on both, matching field names `"from"`/`"to"` (audit) and `"parked_from"`/`"parked_to"` (dead_letters), confirmed against `grpc/audit.rs:95-96` and `grpc/dead_letters.rs:91-92`.
+- Malformed cursor → `InvalidCursor("cursor")` on both (not `InvalidUuid`), confirmed against `grpc/audit.rs:74` and `grpc/dead_letters.rs:79`.
+- Unknown audit outcome → `InvalidAuditOutcome("outcome")` on both, confirmed against `grpc/audit.rs:63`.
+- Required PRN fields → `MissingRequiredField` on both with identical literals `"owner_prn"` (`grpc/service_accounts.rs:256-257`), `"scope_prn"` (`grpc/service_accounts.rs:179`), `"principal_prn"` (`grpc/authz.rs:237`).
+
+No divergence found.
+
+## Task quality: Approved
+
+**Findings:** none Critical, none Important.
+
+- Minor / non-issue: `membership_filter`'s combined key `"principal|node"` differs in style from gRPC's `"principal_prn|node_prn"` (`tenancy.rs:95`). Not flagged as a finding — it's dictated verbatim by the brief's own Step 6 code sample and test assertions, and the two transports genuinely use different field names at this site (HTTP query params are `principal`/`node`, not `principal_prn`/`node_prn`, per `MembershipQuery`'s DTO fields) — not the same field renamed without cause.
+- The declared deviation (fixing the un-named fifth stale `InvalidPrn` doc comment on `AuditQuery` in `dto.rs`) is reasonable in-scope tidying: same staleness category as the four named sites, doc-only, no behavior change, and leaving it would misdescribe the just-migrated `parse_ts`/`parse_cursor`/`parse_outcome` behavior. Not scope creep.
+- Global constraints all satisfied: SPDX headers present on all touched files; commit subject lowercase, 79 chars, conventional-commit `feat(rs):` scope, no `#NNN`/stray-trailer issues in body; no `format!`/caller string reaches any new variant's payload (only pre-existing, untouched `PolicyInvalid(format!(...))` in `authz.rs` uses `format!`); no bare registry-code string literals under `src/` (tests route through `ErrorReason::X.as_wire_reason()`); no MANIFEST row added.
+- Scope boundaries respected: nothing under `src/adapters/grpc/` or `tests/` touched; no handler path-parameter extraction changed; all remaining `InvalidPrn` sites are genuine `Prn::parse` failures (verified by grep — `api_keys.rs:62`, `authz.rs:72`, `memberships.rs:53,86`, `service_accounts.rs:51`, plus one doc comment describing one).
+- Tests are meaningful: assert against `TenancyError` variants and route through `ErrorReason::as_wire_reason()`, not true-by-construction.
+
+⚠️ Cannot verify from diff: full `cargo test`/`clippy`/`fmt` run was not re-executed (per instructions); relying on the implementer's report of 58 passing tests and clean clippy/fmt/build.</result>
+<usage><subagent_tokens>96397</subagent_tokens><tool_uses>17</tool_uses><duration_ms>108363</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a28f120e54b45d572</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a28f120e54b45d572.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 7: UuidPath extractor" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+
+Commit: `905ec5c71c28016fac46a00bf42f05716abd6e93` — "feat(rs): answer a malformed uuid path segment inside the error envelope (SMA-586)"
+
+Test summary: `cargo test -p paigasus-iam --lib` 607 passed / 0 failed; `cargo clippy --lib --tests -- -D warnings` clean; `cargo fmt --check` clean; `ci/error-registry/check.py --single-site` exit 0.
+
+Path sites migrated: 26 (24 single `UuidPath` + 1 `UuidPathPair` covering 2 uuids), matching the brief's table exactly across all 8 files — no extra or missing sites found.
+
+Concerns:
+- Two small deviations from the brief's literal test code, both required for green gates: `Uuid::new_v4()` doesn't compile (no `v4` feature on this crate's `uuid` dep) — swapped for a fixed `Uuid::from_u128(...)`; and the malformed-uuid test's bare `"invalid-uuid"` string literal tripped the error-registry single-site gate — routed through `ErrorReason::InvalidUuid.as_wire_reason()` instead (no MANIFEST row added).
+- `api_keys.rs::revoke`'s `UuidPathPair&lt;ApiKeyIdField&gt;.first` (the `{sa}` segment) is read-but-discarded (`let _sa = path.first;`) solely to satisfy the crate-wide dead-code lint — matches the pre-existing intentional-discard semantics, not a behavior change.</result>
+<usage><subagent_tokens>161339</subagent_tokens><tool_uses>69</tool_uses><duration_ms>494269</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a9f8ec8cb83896903</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a9f8ec8cb83896903.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 7" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Clean exit, no output — gate passes.
+
+## Verdict
+
+**Spec: ✅** — `path.rs` created with `PathField` trait, macro-generated eight marker types, `UuidPath&lt;F&gt;`/`UuidPathPair&lt;F&gt;` `FromRequestParts` impls returning the `{"error":{code,message}}` envelope via `ApiError(TenancyError::InvalidUuid(F::NAME))`. Module declared in `mod.rs`. All 26 path-param sites (24 single + 1 pair) migrated across all 8 named files; verified by grep that zero `Path&lt;Uuid&gt;`/`Path&lt;(Uuid, Uuid)&gt;` remain under `src/adapters/http/` (only stale doc-comment mentions remain, in `path.rs` itself and `service_accounts.rs`'s module doc). `cargo build`/`clippy -D warnings`/the 3 new unit tests all pass independently reproduced. `grpc/` and `tests/` untouched, no query/body-parsing code touched.
+
+**Marker-mapping check (priority item): all correct, no mismatches.** Verified against the diff directly, not just the report table:
+- `organizations.rs` → `OrganizationId` on all 6 sites, including the `{org_id}` parent segment on `create_team`/`list_teams` ✅
+- `teams.rs` → `TeamId` on all 6, including `{team_id}` on `create_project`/`list_projects` ✅
+- `projects.rs` → `ProjectId` ×4 ✅
+- `service_accounts.rs` → `ServiceAccountId` ×2 ✅
+- `api_keys.rs` → `ServiceAccountId` for `issue`/`list`'s `{sa}`; `ApiKeyId` (aliased `ApiKeyIdField` to avoid colliding with the domain `ApiKeyId` from `paigasus_iam_core`) for the `revoke` pair ✅
+- `memberships.rs` → `MembershipId` ✅
+- `authz.rs` → `RoleGrantId` ✅
+- `dead_letters.rs` → `DeadLetterId` ×2 ✅
+
+**Global constraints:** SPDX header present (line 1 of `path.rs`). Commit subject `feat(rs): answer a malformed uuid path segment inside the error envelope (SMA-586)` — lowercase start, 82 chars, correctly scoped; body is a single clean `Entire-Checkpoint:` trailer with a blank line before it, no `#NNN` ref. `warnings = "deny"` builds clean. No bare `"invalid-uuid"` literal introduced in `src/` — the test routes through `ErrorReason::InvalidUuid.as_wire_reason()`; confirmed `ci/error-registry/check.py --single-site` exits 0 with no MANIFEST changes.
+
+**Two declared deviations — both reasonable:**
+1. `Uuid::from_u128(...)` in place of `Uuid::new_v4()` is a correct fix (crate's `uuid` dep lacks the `v4` feature, consistent with the kernel's getrandom-free convention) and preserves the test's intent — a well-formed uuid round-trips unchanged.
+2. `api_keys.rs::revoke`'s `let _sa = path.first;` matches pre-existing semantics exactly. The old code was `Path((_sa, id)): Path&lt;(Uuid, Uuid)&gt;` — already discarding the first segment via underscore-binding, never using it for an ownership check (per the handler's own doc comment: "not re-checked against the key's actual owner here"). The new code performs the identical discard, just made explicit to satisfy the dead-code lint on the named struct field. No check silently dropped.
+
+**Other checks:** both malformed and well-formed cases are tested; `PathField::NAME` values are all descriptive (`organization_id`, not `id`), pinned by `the_path_field_names_are_stable`; test message assertion (`"membership_id must be a uuid"`) implicitly also pins the error-message format for the `MembershipId` marker used in the generic test handler.
+
+**Task quality: Approved.**
+
+Minor, non-blocking observations:
+- The module is declared `mod path;` (private) in `mod.rs`, not `pub(crate) mod path;` as the brief's Step 3 literally specifies. This is undisclosed in the report but harmless: `UuidPath`/`UuidPathPair` are `pub(crate)` themselves and only consumed by sibling submodules of `http`, which are descendants of `http` and can see `path` under standard Rust privacy rules — confirmed by a clean `cargo build`. Worth a one-line mention in the report but not a functional defect.
+- No new finding beyond what the implementer's own "Concerns/follow-ups" section already flagged.
+
+⚠️ Cannot verify from diff: full `--lib` 607-test pass count and `cargo fmt --check` cleanliness were not re-run in full (only the 3 new `path::tests` were reproduced here) — taken on the report's evidence per the review method's instruction not to re-run the full suite.</result>
+<usage><subagent_tokens>96673</subagent_tokens><tool_uses>12</tool_uses><duration_ms>88031</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a580c548be05cf8e3</task-id>
+<tool-use-id>toolu_01FkziKBLtqCaV8SuqKBdKmw</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a580c548be05cf8e3.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 8: transport parity guard" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+
+Commit SHA: `36031f6` — `test(rs): assert http and grpc agree on each validation reason (SMA-586)`
+
+Test summary: added two tests in `grpc/convert.rs` (agreement table + deliberate-divergences pin); widened three HTTP modules to `pub(crate)`; narrowed `parse_opt_ts` to `pub(crate)`. Full suite: 609 passed, 0 failed; clippy clean; fmt clean; `error-registry --single-site` clean.
+
+Parity test: passed on the first run, compiling and green immediately — no divergence found. All seven HTTP/gRPC pairs (audit from-bound, audit cursor, audit outcome, dead-letter parked_from, dead-letter cursor, dead-letter id, membership-filter-neither-set) produced matching `ErrorReason`s, confirming Tasks 4–7's helpers are correctly wired into both transports' live entry points.
+
+Concerns: none — full report at `/Users/smaschek/dev/paigasus/paigasus-core/.superpowers/sdd/2026-08-23-sma-586-error-reason-taxonomy/task-8-report.md`.</result>
+<usage><subagent_tokens>124226</subagent_tokens><tool_uses>42</tool_uses><duration_ms>246194</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a0ed0532694dc6436</task-id>
+<tool-use-id>toolu_013Pweyy23e23BqHLTMjgi2B</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a0ed0532694dc6436.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 8" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Working tree is clean (my mutation-test edits were fully reverted). Final review:
+
+**Spec: ✅**
+- Three HTTP modules (`audit`, `dead_letters`, `memberships`) widened to `pub(crate) mod` in `src/adapters/http/mod.rs`, with the brief's exact comment.
+- `parse_opt_ts` narrowed `pub` → `pub(crate)` in `grpc/convert.rs`; verified no external-crate caller exists (only comment mentions in `tests/api_keys_grpc.rs`, no actual call) — narrowing is safe.
+- Both tests added to `grpc/convert.rs`'s test module, matching the brief's code (rustfmt-reflowed only).
+- No production code path changed — confirmed by diff (only the two visibility keywords touch non-test code).
+- No `tests/` files touched; no MANIFEST/registry additions in `ci/error-registry/check.py` (confirmed via diff against `check.py`); no bare wire-string literals — all assertions route through `ErrorReason::X.as_wire_reason()`.
+- Commit `36031f6`, message `test(rs): assert http and grpc agree on each validation reason (SMA-586)` — lowercase subject, well under 100 chars, no `#NNN`/`token: value` footer issue.
+- SPDX headers present in both touched files.
+
+**Task quality: Changes needed**
+
+- **Important** — "dead-letter id" row in `http_and_grpc_agree_on_the_reason_for_the_same_failure` is only half load-bearing. The "HTTP" side is `TenancyError::InvalidUuid("dead_letter_id")` constructed directly in the test, not derived from calling the real `UuidPath&lt;DeadLetterId&gt;` extractor (`http/path.rs`). I mutated that extractor's rejection to `TenancyError::InvalidPrn` and reran the test — it still passed, confirming this half of the row can never fail regardless of what the real HTTP code does (`code()` maps `InvalidUuid(_)` to `"invalid-uuid"` unconditionally, so the hardcoded value is tautologically equal to `wire`). Only the gRPC half (`gdl::parse_id`) is genuinely exercised. This limitation is inherent in the brief's own prescribed code (an axum `FromRequestParts` extractor genuinely can't be driven from this unit-test context without request machinery), so it's a spec-level gap the implementer faithfully carried forward, not a deviation — but it should be flagged since the row reads as full transport parity coverage and isn't.
+- **Important** — In `the_accepted_transport_divergences_are_exactly_these_two`, the `expires_at` divergence pin only asserts the gRPC side (`parse_opt_ts(...).unwrap_err().code() == invalid-timestamp`, confirmed genuinely production-wired via `grpc/service_accounts.rs:189`). The HTTP-side half of the claim — that a malformed `expires_at` in `IssueApiKeyBody` fails inside serde and yields `invalid-request-body` — is stated only in a comment and never asserted against real code (no attempt to deserialize a malformed JSON body through `IssueApiKeyBody`). If HTTP's body typing regressed to something that produced a different reason, this test would not catch it. Same root cause as above: verbatim from the brief.
+- All other rows verified load-bearing: I mutated `grpc/audit.rs`'s `parse_cursor` (`InvalidCursor` → `InvalidUuid`) and the test failed exactly as expected (`audit cursor: gRPC reason — left: "invalid-uuid" right: "invalid-cursor"`), then reverted. The remaining agreement rows (`audit from-bound`, `audit outcome`, `dead-letter parked_from bound`, `dead-letter cursor`, `membership filter neither-set`) and the `mutually-exclusive-fields` divergence assertion all drive genuine, independent HTTP vs gRPC production entry points (`to_filter`/`membership_filter` on both sides) with expected values pinned to explicit `ErrorReason` variants rather than bare `assert_eq!(http, grpc)`. The `oneof filter` claim behind the mutually-exclusive-fields divergence is confirmed in the proto (`ListMembershipsRequest.filter` is a genuine `oneof`).
+- Minor: none further found. `cargo clippy -p paigasus-iam --lib --tests -- -D warnings` reran clean; tests pass in isolation.
+
+**Parity test is load-bearing: yes, with two documented exceptions** — 7 of 9 total assertions (7 agreement rows minus 1, plus the mutually-exclusive-fields divergence) are genuinely load-bearing and would catch a real transport-parity regression, verified by mutation testing two of them live. The "dead-letter id" row's HTTP half and the `expires_at` divergence's HTTP half are not exercised against real code — they either hardcode the expected value or only assert one of the two transports. This is a limitation carried in verbatim from the brief's own design (the affected code paths — an axum extractor and body deserialization — aren't reachable as plain function calls from this test module), not something the implementer introduced or could easily have fixed within scope.
+
+⚠️ Cannot verify from diff: whether the brief's authors (spec stage) were aware of/accepted this asymmetry when writing the exact test code — that's outside this diff's scope to judge, but worth surfacing to whoever owns the SDD spec, since it slightly overstates what "AC-3 transport parity guard" actually guards for these two spots.</result>
+<usage><subagent_tokens>95850</subagent_tokens><tool_uses>33</tool_uses><duration_ms>363945</duration_ms></usage>
+</task-notification>
