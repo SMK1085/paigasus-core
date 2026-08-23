@@ -88,7 +88,22 @@ fn parse_node_prn(raw: &str) -> Result<TenancyNodeRef, TenancyError> {
 /// `missing-required-field`, not a conflict (SMA-586 D6). The HTTP twin, whose two query
 /// params CAN both be present, is the only surface that can produce
 /// `MutuallyExclusiveFields`.
+///
+/// An explicitly-set-but-EMPTY arm is normalised to absent, exactly as
+/// `http::memberships::membership_filter` normalises `?principal=` — so both transports answer
+/// `missing-required-field` for it (SMA-586 fix round 2). D7's rationale for NOT applying
+/// `require_present` here ("proto3's empty string IS the unset sentinel") holds for a plain
+/// field, but not for a `oneof`, where the ARM's presence is the presence signal and an empty
+/// string inside a present arm is a real, distinguishable value. Left unnormalised it reached
+/// `application::memberships` and came back `invalid-prn` while HTTP said
+/// `missing-required-field` — a cross-transport divergence D7 exists to prevent.
 pub(crate) fn membership_filter(filter: Option<list_memberships_request::Filter>) -> Result<MembershipFilter, TenancyError> {
+    let filter = filter.filter(|f| {
+        let raw = match f {
+            list_memberships_request::Filter::PrincipalPrn(prn) | list_memberships_request::Filter::NodePrn(prn) => prn,
+        };
+        !raw.trim().is_empty()
+    });
     match filter {
         Some(list_memberships_request::Filter::PrincipalPrn(prn)) => Ok(MembershipFilter::Principal(prn)),
         Some(list_memberships_request::Filter::NodePrn(prn)) => Ok(MembershipFilter::Node(prn)),

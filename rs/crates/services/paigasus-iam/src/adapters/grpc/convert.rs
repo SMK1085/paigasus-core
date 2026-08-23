@@ -124,9 +124,10 @@ pub fn status_to_grpc(e: TenancyError) -> Status {
     // `every_tenancy_code_is_declared_in_the_canonical_registry` test), not the transform.
     // The field name (SMA-586) rides in metadata alongside it, so a client can act on WHICH
     // field failed without parsing the message — which SMA-508 AC2 forbids.
-    let field = e.field();
-    let extra_owned: Vec<(&str, &str)> = field.map(|f| ("field", f)).into_iter().collect();
-    iam_status(code, e.code(), e.to_string(), tenancy_retryable(e.class()), &extra_owned)
+    // `Option::as_slice` borrows the `Some` in place — an empty slice or a one-element one,
+    // with no allocation for what is at most a single borrowed pair.
+    let field = e.field().map(|f| ("field", f));
+    iam_status(code, e.code(), e.to_string(), tenancy_retryable(e.class()), field.as_slice())
 }
 
 /// Maps an `AuthnError` to a `tonic::Status` for the gRPC authn surface (spec §6.3, D12).
@@ -960,7 +961,7 @@ mod tests {
         use crate::adapters::grpc::{audit as gaudit, dead_letters as gdl, tenancy as gtenancy};
         use crate::adapters::http::dto::{AuditQuery, DeadLetterQuery};
         use crate::adapters::http::{audit as haudit, dead_letters as hdl, memberships as hmem};
-        use paigasus_proto::paigasus::iam::v1::{ListAuditEntriesRequest, ListDeadLettersRequest};
+        use paigasus_proto::paigasus::iam::v1::{ListAuditEntriesRequest, ListDeadLettersRequest, list_memberships_request};
 
         // A `nanos` of -1 is unrepresentable in chrono, which is how a gRPC timestamp fails — it
         // cannot fail to PARSE (it is already a struct), only to CONVERT.
@@ -1082,6 +1083,27 @@ mod tests {
                 gtenancy::membership_filter(None).unwrap_err(),
                 ErrorReason::MissingRequiredField,
             ),
+            // Present-but-EMPTY, which the `neither set` row above cannot see: it drives
+            // `(None, None)` / `None`, i.e. the ABSENT case, and both transports normalise
+            // empty to absent only if they were written to. gRPC's oneof arm is explicitly
+            // present here (`Some(PrincipalPrn(""))`), which is a state HTTP's `Option<String>`
+            // expresses as `Some("")` — before SMA-586's fix round 2 the gRPC side let it
+            // through to `application::memberships` and came back `invalid-prn` while HTTP said
+            // `missing-required-field` (SMA-586 fix round 2, Fix 2).
+            (
+                "membership filter, present but empty",
+                hmem::membership_filter(Some(String::new()), None).unwrap_err(),
+                gtenancy::membership_filter(Some(list_memberships_request::Filter::PrincipalPrn(String::new()))).unwrap_err(),
+                ErrorReason::MissingRequiredField,
+            ),
+            // The same, whitespace-only and on the OTHER arm — the trim is what makes `?node=%20`
+            // and a whitespace-only `node_prn` agree too.
+            (
+                "membership filter, whitespace-only node",
+                hmem::membership_filter(None, Some("   ".into())).unwrap_err(),
+                gtenancy::membership_filter(Some(list_memberships_request::Filter::NodePrn("   ".into()))).unwrap_err(),
+                ErrorReason::MissingRequiredField,
+            ),
         ];
 
         for (label, http_err, grpc_err, expected) in cases {
@@ -1132,14 +1154,18 @@ mod tests {
         assert_eq!(gdl::parse_id("not-a-uuid").unwrap_err().code(), wire, "gRPC reason");
     }
 
-    /// The counterpart to the agreement table: the two places the transports DELIBERATELY differ.
-    /// Recorded as assertions so a change breaks this test rather than slipping through as an
-    /// omission — the failure mode the SMA-586 spec review caught in its own first draft.
+    /// The counterpart to the agreement table: the transport divergences this branch ACCEPTS,
+    /// each pinned as an assertion so a change breaks this test rather than slipping through as
+    /// an omission — the failure mode the SMA-586 spec review caught in its own first draft.
+    ///
+    /// The name says "recorded", not "exactly these two", because nothing here enumerates the
+    /// transports' failure modes: this test asserts that the two recorded divergences still
+    /// hold, and CANNOT observe a third one appearing (SMA-586 fix round 2, Fix 7).
     ///
     /// Divergence 1 asserts only its gRPC half — see the comment on that assertion for why
     /// (SMA-586 fix round 1, Finding 2: the HTTP half of the original claim turned out false).
     #[test]
-    fn the_accepted_transport_divergences_are_exactly_these_two() {
+    fn the_recorded_transport_divergences_still_hold() {
         use paigasus_proto::paigasus::common::v1::ErrorReason;
 
         // 1. `IssueApiKey.expires_at`, gRPC half: `prost_types::Timestamp` fails to CONVERT (it
