@@ -137,7 +137,7 @@ proc-macro2 = "1"
 paigasus-proto-derive = { path = "crates/libs/paigasus-proto-derive", version = "0.0.0" }
 # In-tree path dep: the bindings (and future consumers) build against the live kernel, so a
 # kernel edit rebuilds them. This is also the cargo-side half of the affected-graph edge.
-paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.0.0" }
+paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.1.0" }
 # In-tree path dep: paigasus-iam's gRPC adapter binds the generated `paigasus.iam.v1` types
 # (Task 16) — same in-tree-freshness rationale as paigasus-kernel above.
 paigasus-proto = { path = "crates/libs/paigasus-proto", version = "0.0.0" }

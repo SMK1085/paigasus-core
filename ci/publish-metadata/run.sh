@@ -43,7 +43,8 @@ SNAPSHOT="$REPO_ROOT/ci/publish-metadata/crates-io-categories.txt"
 # than per-call so --negative-control's direct function calls see it too.
 export PYTHONPATH="$REPO_ROOT/ci/publish-metadata${PYTHONPATH:+:$PYTHONPATH}"
 
-# The ONE maintained fact in this script. SMA-388 adds paigasus-proto here.
+# The ONE maintained fact in this script. SMA-577 adds paigasus-proto AND
+# paigasus-proto-derive here — both, because the derive crate must publish first.
 EXPECTED_PUBLISHABLE=("paigasus-kernel")
 
 # What a published artifact must and must not contain.

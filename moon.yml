@@ -530,6 +530,46 @@ tasks:
       - 'rs/release-plz.toml'
       - '.gitignore'
 
+  version-lockstep:
+    description: "Assert every version-carrying site in the kernel and proto lockstep families agrees with that family's source-of-truth Cargo crate (SMA-576)."
+    # --self-test runs FIRST (its fixture tables cost nothing and catching a broken verdict
+    # function before it's trusted by anything else is the point), then the negative control,
+    # mirroring repo:publish-metadata directly above: a gate that cannot report red is worse than
+    # no gate, and it is sub-second. Moon does NOT enable errexit for `script:` blocks — a script's
+    # status is simply its LAST command's — so without the explicit `set -euo pipefail` a failing
+    # self-test or control would be masked by the passing real run (the SMA-526 rotted-negative-
+    # control shape; the same shape applied `--self-test` was never invoked at all until this line
+    # was added — SMA-576 fix-wave finding 1).
+    script: |
+      set -euo pipefail
+      bash ci/version-lockstep/run.sh --self-test
+      bash ci/version-lockstep/run.sh --negative-control
+      bash ci/version-lockstep/run.sh
+    toolchain: 'system'
+    # Every file that CARRIES a version in either family, plus the script itself. Narrower than
+    # publish-metadata's `rs/crates/**/*` because the site list here is STATIC (declared in run.sh's
+    # SITES array), not discovered at runtime — so a per-file list cannot go stale behind a new
+    # crate the way a runtime-discovered set would. Each entry must match a tracked file or
+    # repo:input-liveness reds; the set is pinned a second time, from an independently scheduled
+    # gate, by ci_targets.py's SELF_TASK_EXPECTED_GLOBS.
+    inputs:
+      - 'ci/version-lockstep/run.sh'
+      - 'rs/Cargo.toml'
+      - 'rs/Cargo.lock'
+      - 'rs/crates/libs/paigasus-kernel/Cargo.toml'
+      - 'rs/crates/libs/paigasus-proto/Cargo.toml'
+      - 'rs/crates/libs/paigasus-proto-derive/Cargo.toml'
+      - 'rs/crates/bindings/paigasus-py-bindings/Cargo.toml'
+      - 'rs/crates/bindings/paigasus-py-bindings/pyproject.toml'
+      - 'rs/crates/bindings/paigasus-node-bindings/Cargo.toml'
+      - 'rs/crates/bindings/paigasus-node-bindings/package.json'
+      - 'rs/crates/bindings/paigasus-node-bindings/index.js'
+      - 'rs/crates/bindings/paigasus-wasm/Cargo.toml'
+      - 'rs/crates/bindings/paigasus-wasm/package.json'
+      - 'py/uv.lock'
+      - 'py/packages/paigasus-kernel/pyproject.toml'
+      - 'py/packages/paigasus-proto/pyproject.toml'
+
   actionlint:
     description: 'actionlint over .github/workflows/**, plus controls that every paths: glob still matches the tree, every branches: entry names a real branch, and the self-test/mutation-battery invocations that guard all of it cannot be silently deleted (SMA-525, SMA-540, SMA-542).'
     # WHY `inputs: **/*` AND NOT THE NARROW LIST THE OTHER repo:* GATES USE — this gate makes an
