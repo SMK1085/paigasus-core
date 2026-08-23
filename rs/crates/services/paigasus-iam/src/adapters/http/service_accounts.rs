@@ -10,9 +10,9 @@
 //!
 //! **Path-id convention:** `{sa}` is the service account's PRINCIPAL uuid (the bare uuid
 //! inside its `PrincipalId`'s PRN, `resource_type = "principal"`) — mirrors
-//! `organizations.rs`'s `Path<Uuid>` convention for `{id}` (a tenancy node's bare uuid) rather
-//! than a raw PRN string in the path (which would need percent-encoding around its embedded
-//! `/`). `create`'s response DTO still carries the full canonical `prn` like every other
+//! `organizations.rs`'s convention for `{id}` (a tenancy node's bare uuid, extracted through
+//! `path::UuidPath` since SMA-586) rather than a raw PRN string in the path (which would need
+//! percent-encoding around its embedded `/`). `create`'s response DTO still carries the full canonical `prn` like every other
 //! `*Dto`, so a client threads the SAME id forward by taking the PRN's trailing `/`-segment —
 //! exactly the convention `tests/http_tenancy.rs` already uses for `ProjectDto`.
 

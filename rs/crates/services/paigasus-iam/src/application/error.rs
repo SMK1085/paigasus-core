@@ -42,13 +42,18 @@ pub enum TenancyError {
     InvalidPrn(String),
     /// SMA-586. The six variants below replace `InvalidPrn`'s former use as a catch-all
     /// sentinel for any validation failure without a dedicated code. Each carries a
-    /// `&'static str` naming the offending wire field, interpolated into `Display` and
-    /// emitted as `ErrorInfo.metadata["field"]` on gRPC.
+    /// `&'static str` naming the offending field, interpolated into `Display` and emitted as
+    /// `ErrorInfo.metadata["field"]` on gRPC. That name is usually the literal wire field but
+    /// is deliberately descriptive where the wire name would be ambiguous — see
+    /// [`TenancyError::field`].
     ///
     /// The payload type is load-bearing: a `&'static str` cannot hold caller-supplied input,
     /// so "never reflect untrusted input into an error body" is enforced by the type rather
     /// than remembered by each call site. The pre-SMA-586 sites passed a `format!` carrying
-    /// the caller's raw value; that is now unrepresentable.
+    /// the caller's raw value; that is now unrepresentable. `Box::leak`/`String::leak` would
+    /// defeat exactly that invariant — they mint a `&'static str` from runtime input, and
+    /// leak memory per request while doing it — so they must never be used to reach these
+    /// constructors.
     #[error("invalid timestamp for {0}")]
     InvalidTimestamp(&'static str),
     #[error("{0} must be a uuid")]
@@ -212,16 +217,52 @@ impl TenancyError {
         }
     }
 
-    /// The wire field name this error names, for `ErrorInfo.metadata["field"]` (SMA-586).
+    /// The field name this error names, for `ErrorInfo.metadata["field"]` (SMA-586).
+    ///
+    /// Usually the literal wire field, but deliberately not always: where the wire name would
+    /// be ambiguous out of context the DESCRIPTIVE name wins, because this value is what a
+    /// client reads to decide which input to blame. `RevokeApiKeyRequest.id` reports
+    /// `"api_key_id"`, not `"id"`; all 26 HTTP path segments report the resource they identify
+    /// (`{sa}` -> `"service_account_id"`) rather than the URL's placeholder name. Four gRPC
+    /// sites do the same.
     ///
     /// `None` for every variant that does not carry one — including `InvalidPrn`, whose
     /// `String` payload is a PRN error-kind token or a canonical PRN, not a field name.
     /// Returning it here rather than matching on variants inside `status_to_grpc` keeps the
     /// transport layer free of variant knowledge.
+    ///
+    /// EXHAUSTIVE, with no catch-all — matching `code()` and `class()` above. A future
+    /// field-carrying variant must choose here rather than silently losing its
+    /// `metadata["field"]` to a `_ => None` arm (SMA-586 fix round 2).
     pub fn field(&self) -> Option<&'static str> {
         match self {
             Self::InvalidTimestamp(f) | Self::InvalidUuid(f) | Self::InvalidCursor(f) | Self::InvalidAuditOutcome(f) | Self::MissingRequiredField(f) | Self::MutuallyExclusiveFields(f) => Some(f),
-            _ => None,
+            Self::SlugConflict
+            | Self::DuplicateMembership
+            | Self::EmailConflict
+            | Self::ServiceAccountNameConflict
+            | Self::InvalidEmail(_)
+            | Self::InvalidSlug(_)
+            | Self::InvalidName(_)
+            | Self::InvalidPrn(_)
+            | Self::PrnMismatch
+            | Self::InvalidPagination
+            | Self::NothingToRename
+            | Self::NotFound
+            | Self::ParentArchived
+            | Self::NodeArchived
+            | Self::MissingOrgMembership
+            | Self::Forbidden
+            | Self::UnknownRole(_)
+            | Self::InvalidScope(_)
+            | Self::SystemImmutable(_)
+            | Self::PolicyInvalid(_)
+            | Self::PolicyConflict(_)
+            | Self::InvalidAction(_)
+            | Self::InvalidBulkReplay
+            | Self::NotSystemOwned(_)
+            | Self::FleetNotConverged
+            | Self::Internal => None,
         }
     }
 }
