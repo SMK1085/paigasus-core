@@ -162,6 +162,16 @@ In `negative_control()`, after the last existing Check-1 row and before the Chec
   _expect_rc 0 "Check 1c (own table, warn — passes)" \
     assert_lint_table "$tmp/lints-good.toml"
 
+  # Added during PR review — see the amendment note under Step 4.
+  printf '[package]\nname = "f"\n[lints]\nworkspace = false\n' >"$tmp/lints-ws-false.toml"
+  _expect_rc 1 "Check 1c (workspace = false declares no local namespace)" \
+    assert_lint_table "$tmp/lints-ws-false.toml"
+
+  printf '[package]\nname = "f"\n[lints]\nworkspace = false\n[lints.rust]\nwarnings = "warn"\n' \
+    >"$tmp/lints-ws-false-plus-local.toml"
+  _expect_rc 0 "Check 1c (workspace = false WITH a local table — passes)" \
+    assert_lint_table "$tmp/lints-ws-false-plus-local.toml"
+
   _expect_rc 2 "Check 1c (malformed TOML is infra, not a repo defect)" \
     assert_lint_table "$tmp/does-not-exist.toml"
 ```
@@ -174,7 +184,13 @@ cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-577
 bash ci/publish-metadata/run.sh --negative-control
 ```
 
-Expected: exit 0, with seven new `ok — Check 1c (…)` lines and **no** `NEGATIVE CONTROL FAILED`.
+Expected: exit 0, with nine new `ok — Check 1c (…)` lines and **no** `NEGATIVE CONTROL FAILED`.
+
+> **Amended during PR review.** This task originally shipped seven fixtures. CodeRabbit found
+> that `[lints] workspace = false` — valid TOML, and per cargo's reference equivalent to omitting
+> the key — declares no local namespace, was not caught by the `is True` arm, and so fell through
+> to the level checks and PASSED. Two rows were added: the bare shape (reds) and the same shape
+> carrying a real `[lints.rust]` table (passes), which is why the count is nine rather than seven.
 
 - [ ] **Step 5: Run the real gate — `paigasus-kernel` must still pass**
 
