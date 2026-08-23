@@ -1,0 +1,37 @@
+{
+  "cli_version": "0.10.2",
+  "checkpoint_id": "4999e49c736e",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-586-error-reason-taxonomy",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "contracts/proto/paigasus/common/v1/error.proto",
+    "py/packages/paigasus-proto/src/paigasus_proto/generated/paigasus/common/v1/__init__.py",
+    "rs/crates/libs/paigasus-proto/src/error.rs",
+    "rs/crates/libs/paigasus-proto/src/generated/paigasus/common/v1/paigasus.common.v1.rs",
+    "ts/packages/paigasus-proto/src/generated/paigasus/common/v1/error_pb.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/49/99e49c736e/0/metadata.json",
+      "transcript": "/49/99e49c736e/0/full.jsonl",
+      "compact_transcript": "/49/99e49c736e/0/transcript.jsonl",
+      "content_hash": "/49/99e49c736e/0/content_hash.txt",
+      "prompt": "/49/99e49c736e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 140,
+    "cache_creation_tokens": 256216,
+    "cache_read_tokens": 12623902,
+    "output_tokens": 109414,
+    "api_call_count": 70,
+    "subagent_tokens": {
+      "input_tokens": 96,
+      "cache_creation_tokens": 252706,
+      "cache_read_tokens": 4776936,
+      "output_tokens": 42238,
+      "api_call_count": 48
+    }
+  }
+}
