@@ -330,31 +330,44 @@ run_check() {
   return "$rc"
 }
 
-# Copy the tree's version-carrying files into a scratch dir, drift ONE site, and assert the
-# checker reports red. Driving the real run_check (not a reimplementation) is what makes this
-# a control rather than a second, differently-wrong checker.
-negative_control() {
-  local tmp
-  tmp="$(mktemp -d)" || die_infra "cannot create a scratch dir"
-  # shellcheck disable=SC2064
-  trap "rm -rf '$tmp'" RETURN
-
-  # Stage exactly the files the SITES table names, plus rs/Cargo.toml (which the cargo-wsdep
-  # kind reads by name rather than by path). Deriving the list from SITES rather than from a
-  # hand-written glob keeps the control honest when a site is added: a new site is staged
-  # automatically, so the control cannot quietly stop covering it.
-  local entry kind target
+# Stage exactly the files the SITES table names, plus rs/Cargo.toml (which the cargo-wsdep
+# kind reads by name rather than by path), into a PRISTINE copy at $1. Deriving the list from
+# SITES rather than from a hand-written glob keeps the control honest when a site is added: a
+# new site is staged automatically, so the control cannot quietly stop covering it.
+#
+# A shared function called once per drift — rather than one scratch dir reused across both
+# drifts — because reuse left the FIRST drift still present in the tree while the SECOND
+# run_check ran: run_check's loop fails on any mismatched site and keeps checking the rest, so
+# the second run_check's rc=1 was guaranteed by the still-present first drift regardless of
+# whether the lock-row drift landed at all (SMA-577 review, Critical). Each drift now gets its
+# own pristine tree, so a later drift added to this control automatically gets isolation
+# instead of silently inheriting the same bug.
+stage_pristine_tree() { # $1 destination dir
+  local dest="$1" entry kind target
   {
     printf 'rs/Cargo.toml\n'
     for entry in "${SITES[@]}"; do
       IFS='|' read -r _ kind target <<<"$entry"
       [ "$kind" = cargo-wsdep ] || printf '%s\n' "$target"
     done
-  } | sort -u | ( cd "$REPO_ROOT" && tar -cf - -T - ) | ( cd "$tmp" && tar -xf - ) \
+  } | sort -u | ( cd "$REPO_ROOT" && tar -cf - -T - ) | ( cd "$dest" && tar -xf - ) \
     || die_infra "cannot stage a scratch copy of the version-carrying files"
+}
+
+# Drift ONE site in its OWN pristine scratch tree, and assert the checker reports red. Driving
+# the real run_check (not a reimplementation) is what makes this a control rather than a
+# second, differently-wrong checker.
+negative_control() {
+  local tmp1 tmp2
+  tmp1="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  tmp2="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp1' '$tmp2'" RETURN
+
+  stage_pristine_tree "$tmp1"
 
   # Drift site 13 (@paigasus/node-bindings) to a version no group member carries.
-  python3 - "$tmp/rs/crates/bindings/paigasus-node-bindings/package.json" <<'PY'
+  python3 - "$tmp1/rs/crates/bindings/paigasus-node-bindings/package.json" <<'PY'
 import json, sys
 p = sys.argv[1]
 d = json.load(open(p))
@@ -363,7 +376,7 @@ json.dump(d, open(p, "w"), indent=2)
 PY
 
   local ec=0
-  REPO_ROOT="$tmp" run_check >/dev/null 2>&1 || ec=$?
+  REPO_ROOT="$tmp1" run_check >/dev/null 2>&1 || ec=$?
   if [ "$ec" -eq 2 ]; then
     fail "negative control: run_check hit an infrastructure failure (exit 2) instead of
       reporting the drift. The scratch staging is incomplete or a site went unreadable —
@@ -379,9 +392,14 @@ PY
   # lock-row drift below is exercised too, instead of returning early on the first success.
   printf '== negative control: version-lockstep reported red as expected ==\n'
 
-  # Second drift: a LOCK row. The packagejson drift above exercises no lock handler, so
-  # without this the new LOCK_MEMBERS table has no end-to-end control coverage.
-  python3 - "$tmp/rs/Cargo.lock" <<'PY'
+  stage_pristine_tree "$tmp2"
+
+  # Second drift: a LOCK row, run against its OWN pristine tree (SMA-577 review, Critical) so
+  # this run_check's red proves the lock drift specifically — not a leftover from the first
+  # drift above, which no longer exists in $tmp2. The packagejson drift above exercises no
+  # lock handler, so without this the new LOCK_MEMBERS table has no end-to-end control
+  # coverage.
+  python3 - "$tmp2/rs/Cargo.lock" <<'PY'
 import re, sys
 p = sys.argv[1]
 text = open(p, encoding="utf-8").read()
@@ -393,9 +411,15 @@ open(p, "w", encoding="utf-8").write(text)
 PY
 
   local ec2=0
-  REPO_ROOT="$tmp" run_check >/dev/null 2>&1 || ec2=$?
+  REPO_ROOT="$tmp2" run_check >/dev/null 2>&1 || ec2=$?
+  if [ "$ec2" -eq 2 ]; then
+    fail "negative control: run_check hit an infrastructure failure (exit 2) instead of
+      reporting the lock-row drift. The scratch staging is incomplete or a site went
+      unreadable — that is a broken control, not proof the gate can report red."
+    return 1
+  fi
   if [ "$ec2" -ne 1 ]; then
-    fail "negative control: a drifted cargo-lock member was not reported (run_check exited $ec2, expected 1).
+    fail "negative control: a drifted cargo-lock member was ACCEPTED (run_check exited $ec2, expected 1).
       The LOCK_MEMBERS table or the cargo-lock reader can no longer report red."
     return 1
   fi
