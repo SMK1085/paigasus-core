@@ -122,7 +122,11 @@ pub fn status_to_grpc(e: TenancyError) -> Status {
     };
     // `e.code()` IS the canonical wire string — the registry is the validation (see the
     // `every_tenancy_code_is_declared_in_the_canonical_registry` test), not the transform.
-    iam_status(code, e.code(), e.to_string(), tenancy_retryable(e.class()), &[])
+    // The field name (SMA-586) rides in metadata alongside it, so a client can act on WHICH
+    // field failed without parsing the message — which SMA-508 AC2 forbids.
+    let field = e.field();
+    let extra_owned: Vec<(&str, &str)> = field.map(|f| ("field", f)).into_iter().collect();
+    iam_status(code, e.code(), e.to_string(), tenancy_retryable(e.class()), &extra_owned)
 }
 
 /// Maps an `AuthnError` to a `tonic::Status` for the gRPC authn surface (spec §6.3, D12).
@@ -574,6 +578,34 @@ mod tests {
         let info = details.error_info().expect("ErrorInfo");
         assert_eq!(info.reason, "internal");
         assert_eq!(info.metadata.get("retryable").map(String::as_str), Some("unknown"));
+    }
+
+    /// SMA-586: the field name is also machine-readable on gRPC. `Display` alone is not enough —
+    /// SMA-508 AC2 forbids branching on message text, so a field reachable only through the
+    /// message is reachable only by humans. Uses the same open metadata map as `capability`.
+    #[test]
+    fn status_to_grpc_puts_the_field_name_in_error_info_metadata() {
+        use tonic_types::StatusExt;
+
+        let status = status_to_grpc(TenancyError::InvalidTimestamp("parked_to"));
+        let details = status.get_error_details();
+        let info = details.error_info().expect("every IAM status carries ErrorInfo");
+        assert_eq!(info.metadata.get("field").map(String::as_str), Some("parked_to"));
+        assert_eq!(info.reason, "invalid-timestamp");
+        // The canonical keys are untouched by the new one.
+        assert_eq!(info.metadata.get("retryable").map(String::as_str), Some("false"));
+    }
+
+    /// A variant with no field name adds no key at all — an absent key, never an empty string,
+    /// so a consumer can distinguish "no field" from "a field named nothing".
+    #[test]
+    fn status_to_grpc_omits_the_field_key_when_there_is_no_field() {
+        use tonic_types::StatusExt;
+
+        let status = status_to_grpc(TenancyError::NotFound);
+        let details = status.get_error_details();
+        let info = details.error_info().expect("every IAM status carries ErrorInfo");
+        assert!(!info.metadata.contains_key("field"), "metadata: {:?}", info.metadata);
     }
 
     /// AC 6 for the authn funnel: five codes, all registry-resolvable, messages unchanged.
