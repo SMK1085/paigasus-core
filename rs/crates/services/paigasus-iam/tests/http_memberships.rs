@@ -12,7 +12,7 @@ mod support;
 use axum::Router;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use support::{app, app_with_state, provision_platform_admin, send};
+use support::{app_with_state, provision_platform_admin, send};
 use uuid::Uuid;
 
 /// Creates a user via `POST /v1/users` and returns its `principal_prn`.
@@ -133,8 +133,13 @@ async fn list_memberships_requires_exactly_one_filter() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, idp) = app(db).await;
+    let (app, state, idp) = app_with_state(db).await;
     let token = idp.bearer("sweep-user", Some("sweep@example.com"), "paigasus", 3600);
+    // SMA-584: `POST /v1/users` now requires `Action::CreateUser`@`Root`. These tests are about
+    // the membership filter / duplicate-email / invalid-email behaviour, not authorization, so
+    // they authenticate as a platform_admin to get past the gate — `tests/http_users.rs` owns
+    // the authorization cases.
+    provision_platform_admin(&state, &token).await;
 
     // Neither `principal` nor `node` set: 400 `invalid-prn`. (`TenancyError::InvalidPrn`'s
     // `Display` is a fixed, generic message across every construction site — the same
@@ -156,8 +161,13 @@ async fn create_user_rejects_duplicate_email() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, idp) = app(db).await;
+    let (app, state, idp) = app_with_state(db).await;
     let token = idp.bearer("sweep-user", Some("sweep@example.com"), "paigasus", 3600);
+    // SMA-584: `POST /v1/users` now requires `Action::CreateUser`@`Root`. These tests are about
+    // the membership filter / duplicate-email / invalid-email behaviour, not authorization, so
+    // they authenticate as a platform_admin to get past the gate — `tests/http_users.rs` owns
+    // the authorization cases.
+    provision_platform_admin(&state, &token).await;
 
     let _ = create_user(&app, &token, "dupe@example.com").await;
 
@@ -171,8 +181,13 @@ async fn create_user_rejects_invalid_email() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
-    let (app, idp) = app(db).await;
+    let (app, state, idp) = app_with_state(db).await;
     let token = idp.bearer("sweep-user", Some("sweep@example.com"), "paigasus", 3600);
+    // SMA-584: `POST /v1/users` now requires `Action::CreateUser`@`Root`. These tests are about
+    // the membership filter / duplicate-email / invalid-email behaviour, not authorization, so
+    // they authenticate as a platform_admin to get past the gate — `tests/http_users.rs` owns
+    // the authorization cases.
+    provision_platform_admin(&state, &token).await;
 
     let (status, err) = send(&app, "POST", "/v1/users", Some(json!({"email": "not-an-email", "display_name": "Nope"})), Some(token.as_str())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");

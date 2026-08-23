@@ -4,26 +4,41 @@
 //! mirroring `organizations.rs`; `CreateUserError` converts into `TenancyError` (see
 //! `application::create_user`) so `?` works against `ApiError` here too.
 //!
-//! **No authorization check beyond the bearer, deliberately (design D0).**
-//! `CreateUser::execute` takes no `actor` parameter, this handler extracts no `AuthContext`,
-//! and there is no `Action::CreateUser` in the Cedar action catalog — so any bearer-authenticated
-//! caller may create a user principal. `grpc::users`'s `UserGrpc::create_user` is the gRPC
-//! mirror of this exact posture (see its module doc for the three-part justification); tightening
-//! authorization here without tightening it there (or vice versa) breaks the parity that is this
-//! surface's whole acceptance criterion, so treat the two as one decision, not two.
+//! **Authorized (SMA-584):** the handler checks `Action::CreateUser` at `root_prn()`, gated by
+//! `AppState.enforce_tenancy` — the same shape `organizations.rs`'s `create_org` uses for
+//! `CreateOrganization`. `Root` is the top of the Cedar hierarchy and `resource in ?resource`
+//! is descendant-or-self, so no `Organization`/`Team`/`Project`-scoped grant can satisfy it:
+//! under the starter role set this is `platform_admin` only. (An operator-authored STATIC
+//! policy via `PutPolicy` can still permit it narrowly — that is the intended escape hatch,
+//! not a hole.)
+//!
+//! The check runs BEFORE `to_command`/`execute`, so a denied caller never reaches email
+//! validation or the unit of work and cannot use the endpoint as an email-existence oracle.
+//! `grpc::users`'s `UserGrpc::create_user` mirrors this exactly; the two transports are ONE
+//! decision, not two, and `tests/http_users.rs` + `tests/grpc_users.rs` are written so that
+//! changing either transport alone reds CI.
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
+use paigasus_iam_core::Action;
+use paigasus_iam_core::authz::model::root_prn;
 
 use super::AppState;
 use super::dto::{CreateUserBody, CreateUserResponse};
 use super::error::ApiError;
+use crate::adapters::auth::AuthContext;
 use crate::application::create_user::NewUser;
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/v1/users", post(create_user))
+}
+
+/// The acting principal's canonical `Prn`, from the bearer-resolved `AuthContext` — mirrors
+/// `adapters::http::organizations::actor_prn`.
+fn actor_prn(ctx: &AuthContext) -> paigasus_kernel::Prn {
+    ctx.principal_id.prn().clone()
 }
 
 /// The HTTP body -> use-case command projection, pulled out of the handler so the twin test
@@ -41,7 +56,10 @@ pub(crate) fn to_command(b: CreateUserBody) -> NewUser {
     }
 }
 
-async fn create_user(State(s): State<AppState>, Json(b): Json<CreateUserBody>) -> Result<(StatusCode, Json<CreateUserResponse>), ApiError> {
+async fn create_user(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Json(b): Json<CreateUserBody>) -> Result<(StatusCode, Json<CreateUserResponse>), ApiError> {
+    if s.enforce_tenancy {
+        s.authorize.check(&actor_prn(&ctx), Action::CreateUser, &root_prn()).await?;
+    }
     let cmd = to_command(b);
     let id = s.users.execute(cmd).await?;
     Ok((StatusCode::CREATED, Json(CreateUserResponse { principal_prn: id.canonical() })))
