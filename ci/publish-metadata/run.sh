@@ -478,13 +478,76 @@ classify_cargo_failure() { # $1 captured-output file
   return 1
 }
 
-check_package() { # $1 name  $2 manifest dir
+# A PUBLISH GROUP is a connected component of the in-set dependency graph: nodes are the
+# publishable crates, and an edge joins A-B when A depends on B and both are publishable.
+# Derived, not declared, so it needs no coupling to release-plz.toml's version_group and
+# cannot go stale when a dependency is added or removed. Today: {paigasus-kernel} and
+# {paigasus-proto-derive, paigasus-proto}.
+publish_groups() { # $1 metadata.json  $2 expected-csv -> one TAB-separated group per line
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        meta = json.load(fh)
+except Exception as exc:
+    print(f"FATAL: cannot read cargo metadata JSON: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+expected = {x for x in sys.argv[2].split(",") if x}
+pkgs = {p["name"]: p for p in meta.get("packages", []) if p["name"] in expected}
+if not pkgs:
+    print("FATAL: no publishable package matched the expected set", file=sys.stderr)
+    sys.exit(2)
+
+adjacency = {name: set() for name in pkgs}
+for name, pkg in pkgs.items():
+    for dep in pkg.get("dependencies", []):
+        other = dep.get("name")
+        if other in pkgs and other != name:
+            adjacency[name].add(other)
+            adjacency[other].add(name)
+
+seen, groups = set(), []
+for name in sorted(pkgs):
+    if name in seen:
+        continue
+    component, stack = set(), [name]
+    while stack:
+        current = stack.pop()
+        if current in component:
+            continue
+        component.add(current)
+        seen.add(current)
+        stack.extend(adjacency[current] - component)
+    groups.append(sorted(component))
+
+for group in sorted(groups):
+    print("\t".join(group))
+PY
+}
+
+# Populated by main()'s enumeration loop: name -> manifest dir, the same fact
+# metadata_checks's "<name>\t<manifest-dir>" stdout already carries. check_publish_group
+# consults this map by name rather than re-deriving a package's dir via a fresh `cargo
+# metadata` shell-out per package inside the dirty check — that would spawn a subprocess
+# for a fact main() already holds, and create a SECOND SOURCE OF TRUTH for the input that
+# decides --allow-dirty, a flag that CHANGES WHAT GETS PACKAGED. A divergence between the
+# two would silently mis-decide it.
+declare -A PKG_DIR=()
+
+# Every package name Check 2 was ACTUALLY invoked with, appended BY THE HELPER. main()
+# compares this against the set the Check 2b loop enumerated, so deleting an invocation
+# leaves this short and the assertion fires — a one-line deletion is caught. What remains
+# open is deleting the invocation AND the assertion together (a two-site edit).
+CHECK2_INVOKED=()
+
+# Check 2b — the packaged file list. Per package: `cargo package --list` performs no build,
+# so it has no chicken-and-egg (verified: it succeeds for paigasus-proto with the derive
+# crate absent from crates.io).
+check_package_list() { # $1 name  $2 manifest dir
   local pkg="$1" pkg_dir="$2" dirty=() out listing status
 
-  # --allow-dirty changes WHAT GETS PACKAGED: cargo enumerates via git, so untracked
-  # files are swept in and .cargo_vcs_info.json is stamped "dirty": true. Allow it only
-  # so a developer can run this gate on uncommitted work — NEVER in CI, where the
-  # assertion must be about a committed tree.
   if [ -z "${CI:-}" ] && [ -n "$(git -C "$REPO_ROOT" status --porcelain -- "$pkg_dir")" ]; then
     echo "publish-metadata: $pkg has uncommitted changes — adding --allow-dirty (local only)" >&2
     dirty=(--allow-dirty)
@@ -492,32 +555,87 @@ check_package() { # $1 name  $2 manifest dir
 
   out="$(mktemp)"
   listing="$(mktemp)"
-
-  # Check 2b first: it is cheap and does not compile anything.
   if ! cargo package --list --locked -p "$pkg" ${dirty[@]+"${dirty[@]}"} >"$listing" 2>"$out"; then
     cat "$out" >&2
     status=0; classify_cargo_failure "$out" || status=$?
     rm -f "$out" "$listing"
-    exit "$status"
+    return "$status"
   fi
   status=0
   assert_package_list "$listing" "$pkg" || status=$?
-  if [ "$status" -ne 0 ]; then
-    rm -f "$out" "$listing"
-    exit "$status"
+  rm -f "$out" "$listing"
+  return "$status"
+}
+
+# Check 2 — one `cargo publish --dry-run` per publish group. --locked so the verify build
+# resolves against the packaged lockfile rather than whatever the registry serves this
+# minute. Manifest dirs come from PKG_DIR (populated by main()'s enumeration loop), not
+# from a fresh `cargo metadata` call — see PKG_DIR's own comment for why.
+check_publish_group() { # $@ package names in ONE group
+  local pkgs=("$@") flags=() dirty_pkgs=() out status pkg pkg_dir
+
+  # Non-vacuity: an empty group would make this return 0 having asserted nothing.
+  # Defence-in-depth — Check 0 already exits 2 on an empty publishable set and pins the set
+  # by strict equality, so this is unreachable from main() today.
+  if [ "${#pkgs[@]}" -eq 0 ]; then
+    echo "FATAL: Check 2 invoked with an empty package list — it would assert nothing" >&2
+    return 2
   fi
 
-  # Check 2: --locked so the verify build resolves against the packaged lockfile rather
-  # than whatever the registry serves this minute.
-  if ! cargo publish --dry-run --locked -p "$pkg" ${dirty[@]+"${dirty[@]}"} >"$out" 2>&1; then
+  CHECK2_INVOKED+=("${pkgs[@]}")
+
+  # --allow-dirty CHANGES WHAT GETS PACKAGED (untracked files are swept in), and one flag
+  # covers the whole invocation — so it must be the UNION over the group, not a per-package
+  # decision, or a dirty paigasus-proto would silently package paigasus-proto-derive dirty
+  # too. Local only: CI sets CI, which skips the dirty check entirely.
+  if [ -z "${CI:-}" ]; then
+    for pkg in "${pkgs[@]}"; do
+      pkg_dir="${PKG_DIR[$pkg]:-}"
+      if [ -z "$pkg_dir" ]; then
+        echo "FATAL: Check 2 has no manifest dir for $pkg — PKG_DIR was not populated for it. This is infrastructure, not a repo defect: nothing about $pkg was asserted." >&2
+        return 2
+      fi
+      if [ -n "$(git -C "$REPO_ROOT" status --porcelain -- "$pkg_dir")" ]; then
+        dirty_pkgs+=("$pkg")
+      fi
+    done
+    if [ "${#dirty_pkgs[@]}" -gt 0 ]; then
+      echo "publish-metadata: --allow-dirty for group [${pkgs[*]}] — forced by: ${dirty_pkgs[*]} (local only)" >&2
+      flags=(--allow-dirty)
+    fi
+  fi
+
+  for pkg in "${pkgs[@]}"; do
+    flags+=(-p "$pkg")
+  done
+
+  out="$(mktemp)"
+  if ! cargo publish --dry-run --locked "${flags[@]}" >"$out" 2>&1; then
     cat "$out" >&2
     status=0; classify_cargo_failure "$out" || status=$?
-    rm -f "$out" "$listing"
-    exit "$status"
+    rm -f "$out"
+    return "$status"
   fi
+  rm -f "$out"
+  echo "publish-metadata: group [${pkgs[*]}] OK"
+}
 
-  rm -f "$out" "$listing"
-  echo "publish-metadata: $pkg OK"
+# Guard-the-guard (SMA-542): a new check's own CALL SITE is what goes unguarded. The
+# fixture rows exercise check_publish_group; only this covers its INVOCATION. Because
+# CHECK2_INVOKED is written BY THE HELPER, deleting an invocation leaves it short and this
+# fires. Exit 2, not 1: a Check 2 that silently ran over fewer crates than were enumerated
+# is a broken gate, not a wrong repo.
+assert_check2_covered_everything() { # $@ the names the per-package loop enumerated
+  local enumerated invoked
+  enumerated="$(printf '%s\n' "$@" | LC_ALL=C sort -u)"
+  invoked="$(printf '%s\n' ${CHECK2_INVOKED[@]+"${CHECK2_INVOKED[@]}"} | LC_ALL=C sort -u)"
+  if [ "$enumerated" != "$invoked" ]; then
+    echo "FATAL: Check 2 ran over a different set than Check 2b enumerated." >&2
+    echo "  enumerated: $(echo $enumerated)" >&2
+    echo "  Check 2 ran: $(echo $invoked)" >&2
+    echo "  Either a publish group was dropped or a Check 2 invocation was deleted." >&2
+    return 2
+  fi
 }
 
 # --negative-control — drive the SAME check code with deliberately broken fixtures and
@@ -746,6 +864,33 @@ PY
   _expect_rc 2 "Check 1d (malformed TOML is infra, not a repo defect)" \
     assert_include_allowlist "$tmp/does-not-exist.toml"
 
+  # --- Check 2 grouping + invoked-set fixtures -----------------------------------
+  _expect_rc 2 "Check 2 (empty package list is non-vacuous)" \
+    check_publish_group
+
+  # The invoked-set assertion must fire when Check 2 covered less than 2b enumerated.
+  CHECK2_INVOKED=("paigasus-kernel")
+  _expect_rc 2 "Check 2 (invoked set shorter than the enumerated set)" \
+    assert_check2_covered_everything "paigasus-kernel" "paigasus-proto"
+  CHECK2_INVOKED=("paigasus-kernel" "paigasus-proto")
+  _expect_rc 0 "Check 2 (invoked set matches the enumerated set)" \
+    assert_check2_covered_everything "paigasus-proto" "paigasus-kernel"
+  CHECK2_INVOKED=()
+
+  # publish_groups must separate independent crates and join dependent ones.
+  printf '%s' '{"packages":[
+    {"name":"a","dependencies":[]},
+    {"name":"b","dependencies":[{"name":"c"}]},
+    {"name":"c","dependencies":[]}]}' >"$tmp/groups.json"
+  local got_groups
+  got_groups="$(publish_groups "$tmp/groups.json" "a,b,c")"
+  if [ "$got_groups" != "$(printf 'a\nb\tc')" ]; then
+    echo "NEGATIVE CONTROL FAILED: publish_groups — expected 'a' and 'b<TAB>c', got: $got_groups" >&2
+    failures=$((failures + 1))
+  else
+    echo "  ok — publish_groups separates independent crates and joins dependent ones"
+  fi
+
   # Check 2b — a listing missing LICENSE, and one containing moon.yml.
   printf 'Cargo.toml\nREADME.md\nsrc/lib.rs\n' >"$tmp/missing-license.txt"
   _expect_rc 1 "Check 2b (LICENSE not packaged)" \
@@ -842,22 +987,42 @@ main() {
   local publishable
   publishable="$(metadata_checks "$meta_json" "$RS_DIR/release-plz.toml" "$expected_csv" "$SNAPSHOT")" \
     || status=$?
+  [ "$status" -eq 0 ] || { rm -f "$meta_json"; exit "$status"; }
+
+  local groups
+  groups="$(publish_groups "$meta_json" "$expected_csv")" || status=$?
   rm -f "$meta_json"
   [ "$status" -eq 0 ] || exit "$status"
 
-  local name dir
-  # Read on FD 3, not stdin (the ci/release-parity/run.sh idiom): a loop-body subprocess
-  # that reads stdin can swallow rows silently, and a silent skip reads as a false green.
-  # Not a live bug today — cargo never touches stdin here, all 3/3 iterations verified —
-  # but it becomes one the day SMA-388 adds a second publishable crate.
+  # Checks 1c, 1d and 2b — per package. Read on FD 3, not stdin (the
+  # ci/release-parity/run.sh idiom): a loop-body subprocess that reads stdin can swallow
+  # rows silently, and a silent skip reads as a false green. Not a live bug today — cargo
+  # never touches stdin here, all 3/3 iterations verified — but it becomes one the day
+  # SMA-388 adds a second publishable crate.
+  local name dir enumerated=()
   while IFS=$'\t' read -r -u 3 name dir; do
     [ -n "$name" ] || continue
+    enumerated+=("$name")
+    PKG_DIR[$name]="$dir"
     status=0; assert_lint_table "$dir/Cargo.toml" || status=$?
     [ "$status" -eq 0 ] || exit "$status"
     status=0; assert_include_allowlist "$dir/Cargo.toml" || status=$?
     [ "$status" -eq 0 ] || exit "$status"
-    check_package "$name" "$dir"
+    status=0; check_package_list "$name" "$dir" || status=$?
+    [ "$status" -eq 0 ] || exit "$status"
   done 3<<<"$publishable"
+
+  # Check 2 — one dry-run per publish group.
+  local group_line
+  while IFS= read -r -u 3 group_line; do
+    [ -n "$group_line" ] || continue
+    local group_pkgs
+    IFS=$'\t' read -r -a group_pkgs <<<"$group_line"
+    status=0; check_publish_group "${group_pkgs[@]}" || status=$?
+    [ "$status" -eq 0 ] || exit "$status"
+  done 3<<<"$groups"
+
+  assert_check2_covered_everything "${enumerated[@]}" || exit $?
 
   echo "publish-metadata: all checks passed"
 }
