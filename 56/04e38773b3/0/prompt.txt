@@ -1,0 +1,14 @@
+<task-notification>
+<task-id>afce7f064861ce94e</task-id>
+<tool-use-id>toolu_01HDwX3JyZEu4PEEu84CA7tA</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/afce7f064861ce94e.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 1: register six error reasons" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+
+- Commit SHA: `29dcf9f617e480c38de8fe71b83e39f4270db83f` — `feat(contracts): register six request-validation error reasons (SMA-586)`
+- Test summary: `cargo test -p paigasus-proto`: 21/21 lib tests passing (incl. the new test and the 52-count assertion), 37/37 across the full crate (lib + integration + doctests)
+- Concerns: `buf generate` had to be run from `contracts/`, not the repo root as the brief's step 5 literally states — there is no root-level `buf.gen.yaml`, and that's where Moon's `contracts:generate` task actually runs it from. Diff verified correct by hand across all three generated trees plus a passing `ci/error-registry/check.py --single-site` cross-check. Full details in the report file.</result>
+<usage><subagent_tokens>89747</subagent_tokens><tool_uses>31</tool_uses><duration_ms>204575</duration_ms></usage>
+</task-notification>
