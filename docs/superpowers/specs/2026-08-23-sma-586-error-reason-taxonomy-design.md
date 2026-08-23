@@ -170,11 +170,29 @@ two repairs are in scope rather than optional:
 
 **Accepted divergence: `expires_at`.** gRPC `IssueApiKey.expires_at` is a
 `prost_types::Timestamp` and yields `invalid-timestamp`; HTTP's `IssueApiKeyBody.expires_at`
-is `Option<DateTime<Utc>>` (`http/dto.rs:464`) and fails inside serde, yielding
-`invalid-request-body`. That is not a catch-all lie — the body genuinely failed to
-deserialize, and `invalid-request-body` is the registry's correct, distinct reason for exactly
-that. Making it `invalid-timestamp` would require a custom deserializer for no contract gain.
-Recorded as a row in the divergence table so it is asserted, not assumed.
+is `Option<DateTime<Utc>>` (`http/dto.rs:464`) and fails inside serde. Making the HTTP side
+`invalid-timestamp` would require a custom deserializer for no contract gain, so the
+divergence stands.
+
+**Correction (found during Task 8, 2026-08-24).** An earlier draft of this section claimed the
+HTTP side yields `invalid-request-body`. **That is false**, and the divergence table must not
+assert it. `http/api_keys.rs::issue` deserializes its body with plain `axum::Json`, not
+`authn::EnvelopeJson`, so a malformed body is rejected by axum with a plain-text 422 that
+carries no `error.code` at all — it never reaches the IAM error envelope or the registry.
+
+This is not unique to that handler. **Seven** JSON-body routes take plain `axum::Json`:
+`api_keys::issue`, `authz::{is_authorized, put_policy, create_role_grant}`,
+`dead_letters::replay_matching` and `service_accounts::create`. Only `api_keys::introspect` and
+`system_retirement::retire` use `EnvelopeJson`. So a malformed JSON body answers outside the
+error contract on seven routes — the same class of hole as D5.1's `Path<Uuid>` finding, and at
+comparable scale.
+
+**It is deliberately NOT fixed here** (see Out of scope). Closing it changes the status code and
+body shape of seven public endpoints, which no acceptance criterion of this ticket asks for and
+which deserves its own review — the same reasoning that defers the HTTP `field` key. AC-1's
+"malformed timestamp" is already satisfied on both transports by the query-param surfaces
+(`from`/`to`, `parked_from`/`parked_to`), which do yield `invalid-timestamp`. The divergence
+table therefore asserts only the gRPC half and says so.
 
 ### D6 — The gRPC `oneof` site is `missing-required-field`, not a conflict
 
@@ -509,3 +527,6 @@ Integration tests need Docker (`PAIGASUS_REQUIRE_DOCKER=1` for any filtered run,
 - The gateway's own error vocabulary.
 - Any change to HTTP or gRPC status codes. All six are `Validation`, exactly as today.
 - Extending the HTTP error envelope with a `field` key (follow-up, § *Compatibility*).
+- Switching the seven plain-`axum::Json` routes to `EnvelopeJson` so a malformed body answers
+  inside the error contract (follow-up — see the correction under D5). Discovered while writing
+  the AC-3 guard; real, pre-existing, and out of scope for a taxonomy change.
