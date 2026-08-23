@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.10.2",
+  "checkpoint_id": "6fc1b277e525",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-586-error-reason-taxonomy",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "rs/crates/libs/paigasus-proto/src/error.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/6f/c1b277e525/0/metadata.json",
+      "transcript": "/6f/c1b277e525/0/full.jsonl",
+      "compact_transcript": "/6f/c1b277e525/0/transcript.jsonl",
+      "content_hash": "/6f/c1b277e525/0/content_hash.txt",
+      "prompt": "/6f/c1b277e525/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 326,
+    "cache_creation_tokens": 390257,
+    "cache_read_tokens": 44970054,
+    "output_tokens": 189253,
+    "api_call_count": 163,
+    "subagent_tokens": {
+      "input_tokens": 166,
+      "cache_creation_tokens": 253503,
+      "cache_read_tokens": 9113678,
+      "output_tokens": 45976,
+      "api_call_count": 83
+    }
+  }
+}
