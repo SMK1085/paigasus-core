@@ -720,6 +720,12 @@ impl AppState {
             JitPolicy::from_issuers(&jit_flags),
         );
 
+        if !authz_cfg.enforce_tenancy {
+            tracing::warn!(
+                "enforce_tenancy is disabled: the tenancy-adapter authorization guards are bypassed — org/team/project/membership CRUD, and Action::CreateUser on POST /v1/users and UserService.CreateUser. Application-layer authorization (policies, role grants, service accounts, API keys, audit, outbox dead letters, system retirement) still applies. Test-only configuration, never use in production"
+            );
+        }
+
         Ok(AppState {
             db,
             orgs,

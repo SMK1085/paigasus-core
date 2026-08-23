@@ -52,6 +52,21 @@
 # --- Cedar authorization (M3) ---
 
 # [authz]
+# enforce_tenancy = true              # Enforce per-action Cedar authorization at the TENANCY
+#                                      # ADAPTER call sites (default true). When false, the
+#                                      # `if enforce_tenancy { authorize.check(..) }` guards are
+#                                      # skipped: org/team/project/membership CRUD, and
+#                                      # `Action::CreateUser` on POST /v1/users and
+#                                      # UserService.CreateUser (SMA-584).
+#                                      # It does NOT disable authorization that lives in the
+#                                      # APPLICATION layer — policies, role grants, service
+#                                      # accounts, API keys, audit, outbox dead letters and
+#                                      # system retirement each call `Authorize::check`
+#                                      # themselves and stay enforced regardless of this flag
+#                                      # (see `adapters/grpc/service_accounts.rs`'s module doc).
+#                                      # Authentication is unaffected: a bearer is still
+#                                      # required. Test-only — never set this false in
+#                                      # production.
 # admin_enabled = true                # Serve the policy / role-grant administration surface
 #                                      # (default true). When false, /v1/authz/policies*,
 #                                      # /v1/authz/role-grants* and

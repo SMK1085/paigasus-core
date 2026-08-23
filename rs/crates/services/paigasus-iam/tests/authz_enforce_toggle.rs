@@ -40,3 +40,32 @@ async fn enforce_tenancy_false_lets_an_otherwise_ungranted_principal_create_an_o
     let (status, body) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "no-grant-org", "name": "No Grant Org"})), Some(token.as_str())).await;
     assert_eq!(status, StatusCode::CREATED, "enforce_tenancy = false must bypass the authorization gate entirely: {body}");
 }
+
+/// SMA-584: `POST /v1/users` joined the set of `enforce_tenancy`-gated routes, so the `false`
+/// setting must short-circuit its `Action::CreateUser` check too. Without this, a guard that
+/// ignored `enforce_tenancy` entirely would pass every other test in the suite.
+#[tokio::test]
+async fn enforce_tenancy_false_lets_an_otherwise_ungranted_principal_create_a_user() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let mut cfg = test_config(&idp);
+    cfg.authz.enforce_tenancy = false;
+    let (app, state) = app_with_config(db, &cfg).await;
+
+    let token = idp.bearer("no-grants-user", Some("no-grants@example.com"), "paigasus", 3600);
+    // JIT-provision the principal but grant it NOTHING — under the default
+    // `enforce_tenancy = true` this exact call is a 403 (`tests/http_users.rs`).
+    provision(&state, &token).await;
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/v1/users",
+        Some(json!({"email": "toggle-off@example.com", "display_name": "Toggle Off"})),
+        Some(token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "enforce_tenancy = false must bypass the CreateUser gate: {body}");
+}

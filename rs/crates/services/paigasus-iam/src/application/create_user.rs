@@ -11,10 +11,15 @@
 //! (e.g. the `uq_user_email` unique-violation `CreateUser`'s duplicate-email 409 is built on)
 //! rolls the whole unit of work back before `Outbox::enqueue` is ever reached, so a rejected
 //! create emits nothing — the existing `Conflict(ConflictKind::EmailTaken)` -> `TenancyError::
-//! EmailConflict` mapping (`application::error`) is unchanged. `CreateUser::execute` has no
-//! `actor: &Prn` parameter — this use case is only ever invoked without a caller identity
-//! (self-service signup / JIT provisioning has its own paths) — so the event's `actor_prn` is
-//! always `None`, documented on the field itself rather than left implicit. The payload is
+//! EmailConflict` mapping (`application::error`) is unchanged. `CreateUser::execute` still
+//! takes no `actor: &Prn` parameter, so the emitted event's `actor_prn` is always `None` —
+//! that is now a KNOWN GAP, not a domain property: as of SMA-584 both callers
+//! (`adapters::http::users`, `adapters::grpc::users`) have already authenticated AND
+//! authorized the caller (`Action::CreateUser` at Root, a `platform_admin` under the starter
+//! role set) before invoking `execute`, so a successful create is currently UNATTRIBUTABLE —
+//! no `audit_log` row, no actor on the event. This is a deliberately deferred follow-up
+//! (design doc D2, "accepted cost 1"): threading `actor: &Prn` into `execute` would fix
+//! attribution independently of where the authorization check lives. The payload stays
 //! deliberately PII-minimal: `principal_id` + `kind` only, never the email address.
 use std::sync::Arc;
 
@@ -108,9 +113,10 @@ where
         let principal = Principal::new(id.clone(), PrincipalKind::User, PrincipalStatus::Active, now, now);
         let user = User::new(id.clone(), email, cmd.display_name, cmd.locale, cmd.timezone, now, now);
 
-        // `actor_prn: None` — `execute` has no `actor: &Prn` parameter (module docs): this
-        // use case is never invoked with a caller identity. The payload is PII-minimal:
-        // `principal_id` + `kind` only, never the email address.
+        // `actor_prn: None` — `execute` has no `actor: &Prn` parameter (module docs): a known
+        // attribution gap (design doc D2, "accepted cost 1"), not a property of the domain —
+        // both current callers already have an authorized caller identity. The payload is
+        // PII-minimal: `principal_id` + `kind` only, never the email address.
         let event = DomainEvent {
             id: self.id_gen.new_event_id(),
             event_type: EventType::PrincipalCreated,

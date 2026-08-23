@@ -4,17 +4,19 @@
 //! parse the wire request -> `CreateUser::execute` -> project the id, no business logic in this
 //! layer (mirrors `grpc::audit`'s posture).
 //!
-//! **This RPC performs NO authorization check, deliberately, and that is why the service
-//! exists.** `CreateUser::execute` takes no `actor` parameter, `http::users` extracts no
-//! `AuthContext`, and there is no `Action::CreateUser` in the Cedar action catalog — so
-//! `POST /v1/users` is bearer-gated and otherwise unauthorized. This adapter mirrors that
-//! exactly, because parity with the HTTP surface is the acceptance criterion and tightening
-//! authorization on an existing endpoint is a behavior change belonging to its own issue.
+//! **This RPC IS authorized (SMA-584):** it checks `Action::CreateUser` at `root_prn()`, gated
+//! by `enforce_tenancy`, exactly as `POST /v1/users` does. `Root` is the top of the Cedar
+//! hierarchy and `resource in ?resource` is descendant-or-self, so no `Organization`/`Team`/
+//! `Project`-scoped grant can satisfy it: under the starter role set this is `platform_admin`
+//! only. The check runs BEFORE `CreateUser::execute`, so a denied caller never reaches email
+//! validation or the unit of work.
 //!
-//! It sits on `UserService` rather than `TenancyService` for exactly this reason: all 21
-//! `TenancyService` RPCs authorize in the adapter (`if self.state.enforce_tenancy { … }`), so
-//! parking the one unchecked RPC among them would camouflage the single property a reviewer
-//! most needs to see. On its own service, the absence is legible in the contract.
+//! It sits on `UserService` rather than `TenancyService` because a **user is a principal, not
+//! a tenancy node** — a different aggregate from `TenancyService`'s org/team/project/membership
+//! surface, exactly as `ServiceAccountService` is. `UserService` is the intended home for
+//! future user-principal operations (`GetUser`, `ListUsers`, `ArchiveUser`). (Until SMA-584 the
+//! stated reason was that this was the one *unauthorized* RPC and parking it among 21
+//! authorized ones would camouflage it; that reason is now obsolete.)
 //!
 //! **Bearer enforcement still applies:** `UserService` is NOT on `AuthLayer`'s `:path`
 //! exemption list (`grpc::authn::is_exempt`), so an unauthenticated call never reaches here.
@@ -26,7 +28,11 @@ use paigasus_proto::paigasus::iam::v1::user_service_server::UserService;
 use paigasus_proto::paigasus::iam::v1::{CreateUserRequest, CreateUserResponse};
 use tonic::{Request, Response, Status};
 
+use paigasus_iam_core::Action;
+use paigasus_iam_core::authz::model::root_prn;
+
 use super::convert;
+use crate::adapters::auth::AuthContext;
 use crate::adapters::http::AppState;
 use crate::application::create_user::NewUser;
 use crate::application::error::TenancyError;
@@ -40,6 +46,13 @@ impl UserGrpc {
     pub fn new(state: AppState) -> Self {
         Self { state }
     }
+}
+
+/// Extracts the bearer-resolved [`AuthContext`] from a gRPC request's extensions — mirrors
+/// the identical private helper in `grpc::tenancy`/`grpc::authz`/`grpc::audit`/
+/// `grpc::service_accounts`/`grpc::dead_letters`.
+fn actor_context<T>(request: &Request<T>) -> Result<AuthContext, Status> {
+    request.extensions().get::<AuthContext>().cloned().ok_or_else(convert::missing_auth_context)
 }
 
 /// An empty wire string means "unset" on an optional scalar (the proto's own doc). NOTE this
@@ -58,13 +71,18 @@ pub(crate) fn opt_string(raw: String) -> Option<String> {
 
 #[tonic::async_trait]
 impl UserService for UserGrpc {
-    /// `CreateUser`: bearer-required, otherwise UNAUTHORIZED BY DESIGN — see this module's doc.
+    /// `CreateUser`: bearer-required AND authorized (`Action::CreateUser`@`Root`) — see this
+    /// module's doc.
     /// An invalid email is rejected before an id is minted or a transaction opened
     /// (`CreateUser::execute`), and a duplicate email rolls the whole unit of work back before
     /// the `iam.principal.created` event is ever enqueued.
     async fn create_user(&self, request: Request<CreateUserRequest>) -> Result<Response<CreateUserResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<CreateUserResponse>, Status> = async {
+            let actor = actor_context(&request)?.principal_id.prn().clone();
+            if self.state.enforce_tenancy {
+                self.state.authorize.check(&actor, Action::CreateUser, &root_prn()).await.map_err(convert::status_to_grpc)?;
+            }
             let req = request.into_inner();
             let cmd = NewUser {
                 email: req.email,

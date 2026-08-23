@@ -4,9 +4,10 @@
 //! IAM `TenancyService` (task-16 brief, SMA-442), the `AuthnService` + bearer-enforcement
 //! layer (SMA-443 Task 12), the `AuthorizationService` (SMA-444 Task 19), the
 //! `ServiceAccountService` (SMA-445 Task 21), the `ServiceInfoService` (SMA-505, always
-//! mounted), the `UserService` (SMA-501, always mounted — see `users` module doc for why
-//! `CreateUser` is deliberately unauthorized), the `OutboxService` (SMA-501, ALWAYS mounted —
-//! see `dead_letters` module doc for why this break-glass surface is not capability-gated,
+//! mounted), the `UserService` (SMA-501, always mounted — its one RPC authorizes
+//! `Action::CreateUser` at `Root`, SMA-584, see `users` module doc), the `OutboxService`
+//! (SMA-501, ALWAYS mounted — see `dead_letters` module doc for why this break-glass
+//! surface is not capability-gated,
 //! unlike its `AuditService` neighbour), and — when `iam.audit` is enabled — the
 //! `AuditService` (SMA-446 Task A10).
 
@@ -76,8 +77,9 @@ pub async fn health_service() -> (
 /// `AuthnService.Introspect`/`IntrospectApiKey` are `:path`-exempt from bearer enforcement,
 /// every `TenancyService`/`AuthorizationService`/`ServiceAccountService`/`ServiceInfoService`/
 /// `UserService`/`OutboxService`/`AuditService` RPC is not (spec §7.4, D14) —
-/// `UserService.CreateUser` is bearer-required but otherwise unauthorized BY DESIGN (see
-/// `users` module doc). `main` calls `.serve_with_shutdown`. The reporter is dropped here —
+/// `UserService.CreateUser` is bearer-required AND authorizes `Action::CreateUser` at `Root`,
+/// mirroring `POST /v1/users` (SMA-584, see `users` module doc). `main` calls
+/// `.serve_with_shutdown`. The reporter is dropped here —
 /// dynamic readiness is deferred to M1.
 pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRouter<Stack<AuthLayer, Stack<CorrelationLayer, Identity>>> {
     let (_reporter, health) = health_service().await;
@@ -99,8 +101,8 @@ pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRoute
         // SMA-505: always served — the descriptor is how a client learns what the rest of this
         // server offers, so it can never itself be capability-gated.
         .add_service(ServiceInfoServiceServer::new(ServiceInfoGrpc::new(state.clone())))
-        // SMA-501: always served, mirroring HTTP's unconditional `/v1/users` mount — see
-        // `users` module doc for why `CreateUser` performs no authorization check.
+        // SMA-501: always served, mirroring HTTP's unconditional `/v1/users` mount — its one
+        // RPC authorizes `Action::CreateUser` at `Root` (SMA-584, see `users` module doc).
         .add_service(UserServiceServer::new(UserGrpc::new(state.clone())))
         // SMA-501: always served, UNCONDITIONALLY — deliberately unlike `AuditService` below,
         // which is dropped entirely when `iam.audit` is off. `iam.audit` gates a READ-ONLY

@@ -54,7 +54,12 @@ pub const FORBID_ARCHIVED_WRITES_ID: &str = "forbid-archived-writes";
 ///
 /// `2`: SMA-481 added the `RetireSystemPolicy` action, which — being a non-restore write —
 /// joins `forbid-archived-writes`'s generated action list and so changes its `source`.
-pub const STARTER_POLICY_REVISION: u32 = 2;
+///
+/// `3`: SMA-584 added `CreateUser` for the same reason. The forbid can never actually bite on
+/// it (`entity Root;` declares no attributes, so `resource has effective_status` is
+/// unsatisfiable at `Root`), but the action list is *derived*, not hand-written, so the
+/// content moves and every deployed database now holds an older set.
+pub const STARTER_POLICY_REVISION: u32 = 3;
 
 /// Every `policy_id` [`starter_policies`] produces, in the order it produces them. A `const`
 /// so the reserved-namespace check in `PolicyStore::put_in` is a slice scan rather than nine
@@ -82,7 +87,7 @@ pub fn is_starter_policy_id(id: &str) -> bool {
 
 /// The pinned content hash guarding [`STARTER_POLICY_REVISION`] — see the test that reads it.
 #[cfg(test)]
-const EXPECTED_STARTER_CONTENT_HASH: &str = "6b6b6d461e3e76d4f9ef53bd149362d257f5c0545c542134e93091f12ad63c39";
+const EXPECTED_STARTER_CONTENT_HASH: &str = "b116dc14f23bf3dc658b333d17e1a79e6da800859d8d3ec7dab28b2de0f84cd5";
 
 /// `platform_admin`'s role key — also its template's `policy_id` (see module docs).
 const PLATFORM_ADMIN_KEY: &str = "platform_admin";
@@ -647,6 +652,26 @@ mod tests {
                 resource: uni.archived_project_in_o.prn().clone(),
                 expect: Effect::Deny,
             },
+            Case {
+                name: "platform_admin at Root allows CreateUser at Root itself",
+                grants: vec![grant(90, &uni.principal, "platform_admin", GrantScope::Root)],
+                action: Action::CreateUser,
+                resource: root_prn(),
+                expect: Effect::Allow,
+            },
+            // A D4 allow-list regression guard: `org_admin` denies `CreateUser` at Root because
+            // `CreateUser` is simply absent from `ORG_ADMIN_ACTIONS` (no non-`platform_admin`
+            // role carries it, by design). This case cannot isolate hierarchy directionality —
+            // `org_admin`'s missing grant alone would deny here regardless of ancestor/descendant
+            // shape; that claim is pinned separately by "org_admin denies CreateProject on a
+            // project under a different org".
+            Case {
+                name: "org_admin denies CreateUser at Root (D4 allow-list regression guard)",
+                grants: vec![grant(91, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::CreateUser,
+                resource: root_prn(),
+                expect: Effect::Deny,
+            },
         ];
 
         for case in cases {
@@ -744,6 +769,17 @@ mod tests {
         assert!(
             forbid_archived_writes_source().contains(r#"Pgs::Iam::Action::"RetireSystemPolicy""#),
             "RetireSystemPolicy is a write action, so it must appear in forbid-archived-writes"
+        );
+    }
+
+    /// SMA-584: `CreateUser` is a non-restore write, so it must reach the generated forbid
+    /// list — the reason `STARTER_POLICY_REVISION` has to move. A hand-updated content hash
+    /// with the action missing from `Action::ALL` would otherwise look green.
+    #[test]
+    fn the_create_user_action_is_in_the_generated_forbid_source() {
+        assert!(
+            forbid_archived_writes_source().contains(r#"Pgs::Iam::Action::"CreateUser""#),
+            "CreateUser is a write action, so it must appear in forbid-archived-writes"
         );
     }
 }

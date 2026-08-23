@@ -15,7 +15,12 @@
 //! node for a membership op, `Root` for the two Root-only actions) doesn't reduce to ONE
 //! fixed `Action` shared across a whole sub-router the way this layer wants. `AuthzLayer` is
 //! shipped standalone, unit-tested, ready for a coarser surface (a gateway proxying whole
-//! sub-trees behind one action) to reuse.
+//! sub-trees behind one action) to reuse. `POST /v1/users` (SMA-584) IS exactly that
+//! one-route/one-action/one-resource shape, yet still enforces per-handler: there is no tonic
+//! equivalent of this layer scoped to a single RPC (`grpc::authn::AuthLayer` is authn-only and
+//! service-wide), so enforcing HTTP in a layer while gRPC enforces in the handler would put the
+//! two transports' guards in structurally different places — exactly the divergence SMA-584
+//! exists to end.
 //!
 //! **Resource extraction is coarse and cheap** — the extractor closure sees the request's
 //! method/URI/headers (never the body), mirroring every other `AccessRequest` this crate
