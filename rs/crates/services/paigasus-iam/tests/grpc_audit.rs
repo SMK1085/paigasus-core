@@ -114,8 +114,17 @@ async fn list_audit_entries_over_grpc_is_permission_denied_for_a_non_admin() {
     server.abort();
 }
 
+/// Two halves against one seeded fixture. The first is the CONTROL: an unfiltered request
+/// returns the seeded row, proving the row is genuinely matchable. The second is SMA-583: a
+/// PRESENT but unrepresentable `from`/`to` is `InvalidArgument`, not a silently widened query.
+/// The control is what stops the second half being vacuous — without it these assertions would
+/// pass green against an empty database, proving nothing about unfiltering.
+///
+/// Deliberately one test, not two: the control is already written here and a second test would
+/// cost another Postgres container for no extra signal, given the fine-grained diagnosis now
+/// lives in `grpc::audit`'s unit tests. Trade-off accepted: one red instead of two on failure.
 #[tokio::test]
-async fn list_audit_entries_over_grpc_returns_seeded_rows_for_a_platform_admin() {
+async fn list_audit_entries_over_grpc_returns_seeded_rows_and_rejects_a_malformed_bound() {
     let Some((_node, db)) = support::start_migrated_postgres().await else {
         return;
     };
@@ -149,6 +158,35 @@ async fn list_audit_entries_over_grpc_returns_seeded_rows_for_a_platform_admin()
     assert!(wire_entry.occurred_at.is_some());
     // A single row under the default limit is not a full page, so there is no next cursor.
     assert!(resp.next_cursor.is_empty());
+
+    // SMA-583: a present-but-unrepresentable bound is rejected, never treated as unfiltered.
+    // `to` absent here, `from` absent below — setting both at once would still pass if only one
+    // of the two call sites had been fixed.
+    let err = audit
+        .list_audit_entries(authed(
+            ListAuditEntriesRequest {
+                from: Some(prost_types::Timestamp { seconds: 0, nanos: -1 }),
+                to: None,
+                ..default_request()
+            },
+            &admin_token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument, "malformed `from` must be rejected: {err:?}");
+
+    let err = audit
+        .list_audit_entries(authed(
+            ListAuditEntriesRequest {
+                from: None,
+                to: Some(prost_types::Timestamp { seconds: 0, nanos: -1 }),
+                ..default_request()
+            },
+            &admin_token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument, "malformed `to` must be rejected: {err:?}");
 
     server.abort();
 }
