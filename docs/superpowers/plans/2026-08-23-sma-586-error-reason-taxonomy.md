@@ -564,12 +564,22 @@ error code for 'not a valid timestamp' either". Replace those two sentences with
             // is the correct reason for a body that would not deserialize.
 ```
 
-- [ ] **Step 8: Run tests to verify they pass**
+- [ ] **Step 8: Widen both `to_filter` entry points**
+
+Task 8's parity guard drives the request-conversion entry points rather than the raw helpers,
+so that it also proves each helper is still WIRED IN — an unwired helper is the failure SMA-583
+actually hit, and a test calling the helper directly cannot catch it.
+
+Change `fn to_filter` to `pub(crate) fn to_filter` in **both**
+`grpc/audit.rs:89` and `grpc/dead_letters.rs:88`. Leave `to_bulk_request` private — Task 8 does
+not drive it.
+
+- [ ] **Step 9: Run tests to verify they pass**
 
 Run: `cd rs && cargo test -p paigasus-iam --lib adapters::grpc`
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add rs/crates/services/paigasus-iam/src/adapters/grpc/
@@ -663,7 +673,7 @@ Extract the oneof match out of the handler so it is unit-testable:
 /// `missing-required-field`, not a conflict (SMA-586 D6). The HTTP twin, whose two query
 /// params CAN both be present, is the only surface that can produce
 /// `MutuallyExclusiveFields`.
-fn membership_filter(filter: Option<list_memberships_request::Filter>) -> Result<MembershipFilter, TenancyError> {
+pub(crate) fn membership_filter(filter: Option<list_memberships_request::Filter>) -> Result<MembershipFilter, TenancyError> {
     match filter {
         Some(list_memberships_request::Filter::PrincipalPrn(prn)) => Ok(MembershipFilter::Principal(prn)),
         Some(list_memberships_request::Filter::NodePrn(prn)) => Ok(MembershipFilter::Node(prn)),
@@ -702,8 +712,9 @@ reuse — replace it with:
             // both the message and `ErrorInfo.metadata["field"]`.
 ```
 
-Do the same for `grpc/authz.rs:214-216` and `grpc/audit.rs:56-59`/`:67-69` if any stale
-"`InvalidPrn`-as-sentinel" prose survives Task 4 there.
+Do the same for `grpc/authz.rs:214-216`. Do **not** touch `grpc/audit.rs` or
+`grpc/service_accounts.rs:178-183` — Task 4 already fixed the stale prose there, and editing it
+again risks reverting that work.
 
 - [ ] **Step 6: Add the three required-field checks**
 
@@ -852,7 +863,8 @@ Update the two call sites at `:101-102`:
         to: parse_ts(q.to, "to")?,
 ```
 
-Make `to_filter` `pub(crate)` too — Task 8 drives it.
+Change `fn to_filter` to `pub(crate) fn to_filter` (`http/audit.rs:95`) — Task 8 drives it
+rather than the raw helpers, so that the guard also proves the helper is still wired in.
 
 - [ ] **Step 4: Migrate `http/dead_letters.rs`**
 
@@ -879,7 +891,7 @@ pub(crate) fn parse_cursor(raw: Option<String>) -> Result<Option<Uuid>, TenancyE
 ```
 
 Update all four call sites (`:86,87` and `:103,104`) to pass `"parked_from"` / `"parked_to"`,
-and make `to_filter` `pub(crate)`.
+and change `fn to_filter` to `pub(crate) fn to_filter` (`http/dead_letters.rs:83`).
 
 - [ ] **Step 5: Migrate the three required-field sites**
 
@@ -1235,59 +1247,91 @@ Add to `grpc/convert.rs`'s test module:
 ///
 /// Both transports derive `reason` from the SAME function (`TenancyError::code()`), so for a
 /// GIVEN variant they cannot disagree. Parity can only break where the two sides CONSTRUCT
-/// DIFFERENT VARIANTS — so this drives each transport's request-conversion entry point rather
-/// than comparing two calls to `code()`, which would be tautological. Driving `to_filter`
-/// rather than the raw helpers also proves the helper is still WIRED IN, which is the failure
-/// SMA-583 actually hit.
+/// DIFFERENT VARIANTS — so this drives each transport's request-conversion entry point
+/// (`to_filter`) rather than comparing two calls to `code()`, which would be tautological.
+/// Driving `to_filter` also proves each helper is still WIRED IN, which is the failure SMA-583
+/// actually hit: a helper that exists and is correct but no longer reached.
+///
+/// Two rows call a helper directly, because those surfaces have no filter-shaped entry point:
+/// the dead-letter id parser, and both `membership_filter`s.
 #[test]
 fn http_and_grpc_agree_on_the_reason_for_the_same_failure() {
     use paigasus_proto::paigasus::common::v1::ErrorReason;
 
-    use crate::adapters::http;
+    use crate::adapters::grpc::{audit as gaudit, dead_letters as gdl, tenancy as gtenancy};
+    use crate::adapters::http::{audit as haudit, dead_letters as hdl, memberships as hmem};
+    use crate::adapters::http::dto::{AuditQuery, DeadLetterQuery};
+    use paigasus_proto::paigasus::iam::v1::{ListAuditEntriesRequest, ListDeadLettersRequest};
 
+    // A `nanos` of -1 is unrepresentable in chrono, which is how a gRPC timestamp fails — it
+    // cannot fail to PARSE (it is already a struct), only to CONVERT.
     let bad_ts = prost_types::Timestamp { seconds: 0, nanos: -1 };
+
+    fn audit_req() -> ListAuditEntriesRequest {
+        ListAuditEntriesRequest {
+            actor_prn: String::new(),
+            resource_prn: String::new(),
+            action: String::new(),
+            outcome: String::new(),
+            from: None,
+            to: None,
+            cursor: String::new(),
+            limit: 0,
+        }
+    }
+    fn audit_query() -> AuditQuery {
+        AuditQuery { actor: None, resource: None, action: None, outcome: None, from: None, to: None, cursor: None, limit: None }
+    }
+    fn dl_req() -> ListDeadLettersRequest {
+        ListDeadLettersRequest { event_type: String::new(), parked_from: None, parked_to: None, cursor: String::new(), limit: 0 }
+    }
+    fn dl_query() -> DeadLetterQuery {
+        DeadLetterQuery { event_type: None, parked_from: None, parked_to: None, cursor: None, limit: None }
+    }
 
     let cases: Vec<(&str, TenancyError, TenancyError, ErrorReason)> = vec![
         (
             "audit from-bound",
-            http::audit::parse_ts(Some("nope".into()), "from").unwrap_err(),
-            parse_opt_ts(Some(bad_ts), "from").unwrap_err(),
+            haudit::to_filter(AuditQuery { from: Some("not-a-timestamp".into()), ..audit_query() }).unwrap_err(),
+            gaudit::to_filter(ListAuditEntriesRequest { from: Some(bad_ts), ..audit_req() }).unwrap_err(),
             ErrorReason::InvalidTimestamp,
         ),
         (
             "audit cursor",
-            http::audit::parse_cursor(Some("nope".into())).unwrap_err(),
-            crate::adapters::grpc::audit::parse_cursor("nope").unwrap_err(),
+            haudit::to_filter(AuditQuery { cursor: Some("not-a-uuid".into()), ..audit_query() }).unwrap_err(),
+            gaudit::to_filter(ListAuditEntriesRequest { cursor: "not-a-uuid".into(), ..audit_req() }).unwrap_err(),
             ErrorReason::InvalidCursor,
         ),
         (
             "audit outcome",
-            http::audit::parse_outcome(Some("maybe".into())).unwrap_err(),
-            crate::adapters::grpc::audit::parse_outcome("maybe").unwrap_err(),
+            haudit::to_filter(AuditQuery { outcome: Some("not-a-real-outcome".into()), ..audit_query() }).unwrap_err(),
+            gaudit::to_filter(ListAuditEntriesRequest { outcome: "not-a-real-outcome".into(), ..audit_req() }).unwrap_err(),
             ErrorReason::InvalidAuditOutcome,
         ),
         (
             "dead-letter parked_from bound",
-            http::dead_letters::parse_ts(Some("nope".into()), "parked_from").unwrap_err(),
-            parse_opt_ts(Some(bad_ts), "parked_from").unwrap_err(),
+            hdl::to_filter(DeadLetterQuery { parked_from: Some("not-a-timestamp".into()), ..dl_query() }).unwrap_err(),
+            gdl::to_filter(ListDeadLettersRequest { parked_from: Some(bad_ts), ..dl_req() }).unwrap_err(),
             ErrorReason::InvalidTimestamp,
         ),
         (
             "dead-letter cursor",
-            http::dead_letters::parse_cursor(Some("nope".into())).unwrap_err(),
-            crate::adapters::grpc::dead_letters::parse_cursor("nope").unwrap_err(),
+            hdl::to_filter(DeadLetterQuery { cursor: Some("not-a-uuid".into()), ..dl_query() }).unwrap_err(),
+            gdl::to_filter(ListDeadLettersRequest { cursor: "not-a-uuid".into(), ..dl_req() }).unwrap_err(),
             ErrorReason::InvalidCursor,
         ),
         (
+            // No filter-shaped entry point on either side: HTTP takes this segment through the
+            // `UuidPath<DeadLetterId>` extractor, gRPC through `parse_id`.
             "dead-letter id",
             TenancyError::InvalidUuid("dead_letter_id"),
-            crate::adapters::grpc::dead_letters::parse_id("nope").unwrap_err(),
+            gdl::parse_id("not-a-uuid").unwrap_err(),
             ErrorReason::InvalidUuid,
         ),
         (
             "membership filter, neither set",
-            http::memberships::membership_filter(None, None).unwrap_err(),
-            crate::adapters::grpc::tenancy::membership_filter(None).unwrap_err(),
+            hmem::membership_filter(None, None).unwrap_err(),
+            gtenancy::membership_filter(None).unwrap_err(),
             ErrorReason::MissingRequiredField,
         ),
     ];
@@ -1298,7 +1342,9 @@ fn http_and_grpc_agree_on_the_reason_for_the_same_failure() {
         assert_eq!(grpc_err.code(), wire, "{label}: gRPC reason");
     }
 }
+```
 
+```rust
 /// The counterpart to the agreement table: the two places the transports DELIBERATELY differ.
 /// Recorded as assertions so a change breaks this test rather than slipping through as an
 /// omission — the failure mode the SMA-586 spec review caught in its own first draft.
