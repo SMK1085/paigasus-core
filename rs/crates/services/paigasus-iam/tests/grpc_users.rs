@@ -207,3 +207,52 @@ async fn create_user_requires_platform_admin() {
 
     server.abort();
 }
+
+/// **The action-identity pin, gRPC half (SMA-584).** The twin of
+/// `tests/http_users.rs::the_http_guard_is_bound_to_create_user_specifically`; see that test's
+/// doc for why a role grant cannot distinguish `CreateUser` from any other Root-only action.
+/// A mutation that wires a different action into `adapters::grpc::users` fails here.
+#[tokio::test]
+async fn the_grpc_guard_is_bound_to_create_user_specifically() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let idp = support::start_mock_idp().await;
+    let mut cfg = support::test_config(&idp);
+    cfg.authz.policy_cache_ttl_secs = 1;
+    let state = AppState::new(db, &cfg).await.unwrap();
+
+    let admin_token = idp.bearer("grpc-bind-admin", Some("grpc-bind-admin@example.com"), "paigasus", 3600);
+    let admin_prn = support::provision_platform_admin(&state, &admin_token).await;
+
+    let subject_token = idp.bearer("grpc-bind-subject", Some("grpc-bind-subject@example.com"), "paigasus", 3600);
+    support::provision(&state, &subject_token).await;
+
+    let (addr, server) = spawn_server(state.clone()).await;
+    let mut client = UserServiceClient::new(channel(addr).await);
+
+    // Before the policy: denied.
+    let err = client.create_user(authed(create_user_request("grpc-before@example.com"), &subject_token)).await.unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+
+    // Seed a static policy permitting EXACTLY CreateUser, authored by the platform_admin.
+    let doc = paigasus_iam_core::PolicyDocument {
+        policy_id: "sma-584-create-user-only-grpc".to_string(),
+        kind: paigasus_iam_core::authz::model::PolicyKind::Static,
+        source: r#"permit(principal, action == Pgs::Iam::Action::"CreateUser", resource);"#.to_string(),
+        description: "SMA-584 action-identity pin: CreateUser only".to_string(),
+        system: false,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let actor = paigasus_kernel::Prn::parse(&admin_prn).expect("valid principal prn");
+    // `PolicyService::put(&self, actor: &Prn, doc: PolicyDocument)` — `doc` is taken BY VALUE.
+    // It authorizes `Action::PutPolicy` at Root itself, which the seeded platform_admin holds.
+    state.policies.put(&actor, doc).await.expect("platform_admin may PutPolicy at Root");
+
+    // Now permitted...
+    let resp = client.create_user(authed(create_user_request("grpc-bound@example.com"), &subject_token)).await.unwrap().into_inner();
+    Prn::parse(&resp.principal_prn).unwrap_or_else(|e| panic!("unexpected principal prn {}: {e}", resp.principal_prn));
+
+    server.abort();
+}
