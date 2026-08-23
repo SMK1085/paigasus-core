@@ -217,12 +217,13 @@ fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
 /// file. The HTTP twin rejects the equivalent with a 400 (`http::dead_letters::parse_ts`), so
 /// this also restores parity.
 ///
-/// `InvalidPrn`-as-sentinel, mirroring `http::dead_letters::parse_ts` and
-/// `grpc::audit::parse_cursor` — there is no dedicated error code for "not a valid timestamp".
-pub fn parse_opt_ts(t: Option<prost_types::Timestamp>, field: &str) -> Result<Option<DateTime<Utc>>, TenancyError> {
+/// `InvalidTimestamp` carries the field name, which reaches both the message and
+/// `ErrorInfo.metadata["field"]` (SMA-586 — this used to be `InvalidPrn`-as-sentinel, whose
+/// static Display threw the field name away).
+pub fn parse_opt_ts(t: Option<prost_types::Timestamp>, field: &'static str) -> Result<Option<DateTime<Utc>>, TenancyError> {
     match t {
         None => Ok(None),
-        Some(raw) => from_ts(raw).map(Some).ok_or_else(|| TenancyError::InvalidPrn(format!("invalid timestamp for {field}"))),
+        Some(raw) => from_ts(raw).map(Some).ok_or(TenancyError::InvalidTimestamp(field)),
     }
 }
 
@@ -765,32 +766,23 @@ mod tests {
             ("out-of-range seconds", prost_types::Timestamp { seconds: i64::MAX, nanos: 0 }),
         ] {
             let err = parse_opt_ts(Some(t), "parked_from").expect_err(label);
-            assert!(matches!(err, TenancyError::InvalidPrn(_)), "{label} must be a client error, not None");
+            assert!(matches!(err, TenancyError::InvalidTimestamp(_)), "{label} must be a client error, not None");
         }
         // Sanity: the underlying primitive really does collapse these to None, which is what makes
         // this helper load-bearing rather than decorative.
         assert_eq!(from_ts(prost_types::Timestamp { seconds: 0, nanos: -1 }), None);
     }
 
-    /// `InvalidPrn`'s Display is deliberately STATIC (`application::error`), so the `field`
-    /// argument never reaches a client — `status_to_grpc` puts `to_string()` on the wire and that
-    /// is the fixed message. Pinned here because it is genuinely surprising: the helper takes a
-    /// field name and then throws it away. The argument stays anyway, for symmetry with
-    /// `http::audit::parse_ts` / `http::dead_letters::parse_ts`, which pass an equally-swallowed
-    /// detail, and so the detail is already threaded through if that Display ever changes.
-    /// The important half — that a present-but-invalid timestamp is a CLIENT error rather than a
-    /// silently-unfiltered query — is asserted by the test above and is unaffected.
+    /// The inverse of the pre-SMA-586 behaviour this replaces. `parse_opt_ts` took a field name
+    /// and then threw it away, because `InvalidPrn`'s Display is static — pinned by the test that
+    /// used to live here. `InvalidTimestamp` interpolates it, so the caller learns WHICH bound
+    /// failed, and `status_to_grpc` also puts it in `ErrorInfo.metadata["field"]`.
     #[test]
-    fn parse_opt_ts_detail_is_swallowed_by_invalid_prns_static_display() {
+    fn parse_opt_ts_surfaces_the_field_name_in_its_display() {
         let err = parse_opt_ts(Some(prost_types::Timestamp { seconds: 0, nanos: -1 }), "parked_to").unwrap_err();
-        assert!(!err.to_string().contains("parked_to"), "InvalidPrn's Display is static and must not surface the field name: got {err}");
-        match err {
-            TenancyError::InvalidPrn(detail) => assert!(
-                detail.contains("parked_to"),
-                "the payload itself must still carry the field name, even though Display drops it: got {detail}"
-            ),
-            other => panic!("expected TenancyError::InvalidPrn, got {other:?}"),
-        }
+        assert_eq!(err, TenancyError::InvalidTimestamp("parked_to"));
+        assert!(err.to_string().contains("parked_to"), "got {err}");
+        assert_eq!(err.code(), "invalid-timestamp");
     }
 
     /// The HTTP/gRPC drift guard for the dead-letter surface (design D9.1), paired with

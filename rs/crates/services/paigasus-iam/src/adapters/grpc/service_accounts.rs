@@ -177,10 +177,12 @@ impl ServiceAccountService for ServiceAccountGrpc {
             let scope = parse_node_prn(&req.scope_prn).map_err(convert::status_to_grpc)?;
             // `expires_at` unset means non-expiring (or the configured `default_expiry_days`
             // fallback, `ApiKeyService::issue`) — mirrors `IssueApiKeyBody::expires_at`'s HTTP
-            // counterpart. A present-but-out-of-range timestamp is `InvalidPrn`-as-sentinel
-            // (mirrors `DetachMembershipRequest`'s "not a uuid" posture): there is no dedicated
-            // error code for "not a valid timestamp" either. `parse_opt_ts` is that exact
-            // absent/valid/unrepresentable split, shared with the filter call sites (SMA-583).
+            // counterpart. A present-but-out-of-range timestamp is `InvalidTimestamp`
+            // (SMA-586). `parse_opt_ts` is that exact absent/valid/unrepresentable split,
+            // shared with the filter call sites (SMA-583). NOTE the HTTP twin diverges here
+            // and that is deliberate: its `expires_at` is a typed `DateTime<Utc>` in the body,
+            // so a malformed value fails inside serde and yields `invalid-request-body`, which
+            // is the correct reason for a body that would not deserialize.
             let expires_at = convert::parse_opt_ts(req.expires_at, "expires_at").map_err(convert::status_to_grpc)?;
             let scope_actions = req
                 .scope_actions

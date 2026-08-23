@@ -70,13 +70,13 @@ fn opt_string(raw: String) -> Option<String> {
     if raw.is_empty() { None } else { Some(raw) }
 }
 
-/// Empty means unfiltered; a non-empty value must parse as a uuid. `InvalidPrn`-as-sentinel,
-/// mirroring `grpc::audit::parse_cursor`.
-fn parse_cursor(raw: &str) -> Result<Option<Uuid>, TenancyError> {
+/// Empty means unfiltered; a non-empty value must parse as a uuid. Mirrors
+/// `grpc::audit::parse_cursor`, including its `InvalidCursor`-not-`InvalidUuid` choice.
+pub(crate) fn parse_cursor(raw: &str) -> Result<Option<Uuid>, TenancyError> {
     if raw.is_empty() {
         return Ok(None);
     }
-    Uuid::parse_str(raw).map(Some).map_err(|_| TenancyError::InvalidPrn("cursor must be a uuid".to_string()))
+    Uuid::parse_str(raw).map(Some).map_err(|_| TenancyError::InvalidCursor("cursor"))
 }
 
 /// `limit` `0` maps to [`DEFAULT_LIMIT`] HERE — passing a bare `0` through would hit
@@ -85,7 +85,7 @@ fn parse_cursor(raw: &str) -> Result<Option<Uuid>, TenancyError> {
 ///
 /// Timestamps go through [`convert::parse_opt_ts`], NOT `and_then(convert::from_ts)`: the
 /// latter maps an unrepresentable value to `None`, which on a filter field means UNFILTERED.
-fn to_filter(req: ListDeadLettersRequest) -> Result<DeadLetterFilter, TenancyError> {
+pub(crate) fn to_filter(req: ListDeadLettersRequest) -> Result<DeadLetterFilter, TenancyError> {
     Ok(DeadLetterFilter {
         event_type: opt_string(req.event_type),
         parked_from: convert::parse_opt_ts(req.parked_from, "parked_from")?,
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn to_filter_rejects_a_malformed_cursor() {
-        assert!(matches!(to_filter(ListDeadLettersRequest { cursor: "nope".to_string(), ..req() }), Err(TenancyError::InvalidPrn(_))));
+        assert!(matches!(to_filter(ListDeadLettersRequest { cursor: "nope".to_string(), ..req() }), Err(TenancyError::InvalidCursor(_))));
     }
 
     /// The security-relevant case (design D10). A present-but-unrepresentable bound must be a
@@ -255,8 +255,8 @@ mod tests {
     #[test]
     fn to_filter_rejects_a_present_but_invalid_timestamp_rather_than_unfiltering() {
         for t in [prost_types::Timestamp { seconds: 0, nanos: -1 }, prost_types::Timestamp { seconds: i64::MAX, nanos: 0 }] {
-            assert!(matches!(to_filter(ListDeadLettersRequest { parked_from: Some(t), ..req() }), Err(TenancyError::InvalidPrn(_))));
-            assert!(matches!(to_filter(ListDeadLettersRequest { parked_to: Some(t), ..req() }), Err(TenancyError::InvalidPrn(_))));
+            assert!(matches!(to_filter(ListDeadLettersRequest { parked_from: Some(t), ..req() }), Err(TenancyError::InvalidTimestamp(_))));
+            assert!(matches!(to_filter(ListDeadLettersRequest { parked_to: Some(t), ..req() }), Err(TenancyError::InvalidTimestamp(_))));
         }
     }
 
@@ -307,7 +307,7 @@ mod tests {
                 max_rows: 500,
                 ..bulk()
             }),
-            Err(TenancyError::InvalidPrn(_))
+            Err(TenancyError::InvalidTimestamp(_))
         ));
         assert!(matches!(
             to_bulk_request(BulkReplayDeadLettersRequest {
@@ -315,7 +315,7 @@ mod tests {
                 max_rows: 500,
                 ..bulk()
             }),
-            Err(TenancyError::InvalidPrn(_))
+            Err(TenancyError::InvalidTimestamp(_))
         ));
     }
 }
