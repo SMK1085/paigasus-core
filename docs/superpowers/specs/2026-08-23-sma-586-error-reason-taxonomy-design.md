@@ -148,11 +148,20 @@ uniform) exists today. AC-1 requires each kind to yield its reason "on both HTTP
 two repairs are in scope rather than optional:
 
 1. **`invalid-uuid` has no HTTP emitter.** HTTP's uuid inputs are path params typed
-   `Path<Uuid>` (`http/memberships.rs:82`, `http/api_keys.rs`), so a malformed uuid is rejected
-   by axum's extractor before any of our code runs — producing axum's default plain-text
-   rejection, not even the `{"error":{code,message}}` envelope. A custom `FromRequestParts`
-   path extractor emitting `InvalidUuid` closes both the AC-1 gap and a pre-existing envelope
-   inconsistency.
+   `Path<Uuid>`, so a malformed uuid is rejected by axum's extractor before any of our code
+   runs — producing axum's default plain-text rejection, not even the
+   `{"error":{code,message}}` envelope. A custom `FromRequestParts` path extractor emitting
+   `InvalidUuid` closes both the AC-1 gap and a pre-existing envelope inconsistency.
+
+   **It is applied at all 26 `Path<Uuid>` / `Path<(Uuid, Uuid)>` sites**, not only the four
+   that twin a gRPC `invalid-uuid` site (`memberships.rs:82`, `authz.rs:150`,
+   `api_keys.rs:113`, `dead_letters.rs:126,132`). Migrating only those four would satisfy AC-1
+   while leaving 22 routes — every organization, team, project, service-account and api-key
+   path — answering a malformed uuid outside the error contract, which is a *new* inconsistency
+   inside HTTP itself of exactly the kind this ticket exists to remove. The change is wide but
+   mechanical: one extractor type, a signature swap per handler, no logic change. It models
+   `authn.rs`'s existing `EnvelopeJson` extractor, which already does this for `Json<T>`
+   rejections.
 2. **`missing-required-field`'s gRPC twins fall through to the PRN parser.** `grpc/authz.rs:236`,
    `grpc/service_accounts.rs:142` and `:177` pass an empty `principal_prn` / `owner_prn` /
    `scope_prn` straight into `parse_node_prn`, yielding `invalid-prn` where HTTP now yields
@@ -278,7 +287,10 @@ take none, so they cannot name which bound failed.
 
 `grpc/tenancy.rs:592` (`"membership_id"`), `grpc/authz.rs:217` (`"role_grant_id"`),
 `grpc/service_accounts.rs:213` (`"api_key_id"`), `grpc/dead_letters.rs:114`
-(`"dead_letter_id"`), plus the HTTP path extractor from D5.1 carrying the same literals.
+(`"dead_letter_id"`), plus the HTTP path extractor from D5.1 at all 26 path-param sites, each
+carrying a literal naming what the segment is (`"organization_id"`, `"team_id"`,
+`"project_id"`, `"service_account_id"`, `"api_key_id"`, `"membership_id"`, `"role_grant_id"`,
+`"dead_letter_id"`).
 
 These four use a *descriptive* name rather than the bare wire field name, which is `id` on all
 four RPCs. The existing payloads already say "membership id must be a uuid" / "role grant id
