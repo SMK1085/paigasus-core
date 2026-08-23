@@ -384,7 +384,13 @@ class ErrorReason(betterproto2.Enum):
 
     MISSING_REQUIRED_FIELD = 37
     """
-    "missing-required-field" — a semantically required field was absent or empty.
+    "missing-required-field" — a field the server explicitly checks for
+    presence was absent or empty. NOT a blanket guarantee for every required
+    field: an omitted PRN field on create_service_account, is_authorized,
+    attach_membership, grant_role and put_policy still surfaces as invalid-prn
+    (symmetrically on both transports), because those sites parse the value
+    rather than test for presence first. Widening that is a follow-up; this
+    comment describes what the code emits today.
     """
 
     MUTUALLY_EXCLUSIVE_FIELDS = 38
