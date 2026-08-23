@@ -774,13 +774,21 @@ file if none exists, with `use super::*;`):
 /// ticket removes, in miniature.
 #[test]
 fn the_membership_filter_distinguishes_neither_set_from_both_set() {
+    // Reasons are pinned as ErrorReason values compared via `as_wire_reason()`, NEVER as bare
+    // kebab literals. Two reasons: it routes the assertion through the registry, so an
+    // unregistered rename fails here too; and a literal in a `src/` file would put this
+    // production module on `ci/error-registry/check.py`'s MANIFEST, which would blind that gate
+    // to a future *production* code literal anywhere in this file.
+    use paigasus_proto::paigasus::common::v1::ErrorReason;
+    let wire = |r: ErrorReason| r.as_wire_reason().expect("not the Unspecified sentinel");
+
     let neither = membership_filter(None, None).unwrap_err();
     assert_eq!(neither, TenancyError::MissingRequiredField("principal|node"));
-    assert_eq!(neither.code(), "missing-required-field");
+    assert_eq!(neither.code(), wire(ErrorReason::MissingRequiredField));
 
     let both = membership_filter(Some("a".into()), Some("b".into())).unwrap_err();
     assert_eq!(both, TenancyError::MutuallyExclusiveFields("principal|node"));
-    assert_eq!(both.code(), "mutually-exclusive-fields");
+    assert_eq!(both.code(), wire(ErrorReason::MutuallyExclusiveFields));
 
     assert!(matches!(membership_filter(Some("a".into()), None).unwrap(), MembershipFilter::Principal(_)));
     assert!(matches!(membership_filter(None, Some("b".into())).unwrap(), MembershipFilter::Node(_)));
@@ -1351,18 +1359,24 @@ fn http_and_grpc_agree_on_the_reason_for_the_same_failure() {
 /// omission — the failure mode the SMA-586 spec review caught in its own first draft.
 #[test]
 fn the_accepted_transport_divergences_are_exactly_these_two() {
+    use paigasus_proto::paigasus::common::v1::ErrorReason;
+
     // 1. `IssueApiKey.expires_at`. gRPC takes a `prost_types::Timestamp` and classifies a bad
     //    one itself; HTTP takes a typed `DateTime<Utc>` in the body, so a bad value fails
     //    inside serde and never reaches our code — yielding `invalid-request-body`, which is
     //    the registry's correct reason for a body that would not deserialize. Making it
     //    `invalid-timestamp` would need a custom deserializer for no contract gain.
-    assert_eq!(parse_opt_ts(Some(prost_types::Timestamp { seconds: 0, nanos: -1 }), "expires_at").unwrap_err().code(), "invalid-timestamp");
+    let wire = |r: ErrorReason| r.as_wire_reason().expect("not the Unspecified sentinel");
+    assert_eq!(
+        parse_opt_ts(Some(prost_types::Timestamp { seconds: 0, nanos: -1 }), "expires_at").unwrap_err().code(),
+        wire(ErrorReason::InvalidTimestamp),
+    );
 
     // 2. `mutually-exclusive-fields` is HTTP-only and STRUCTURALLY so: the gRPC surface models
     //    the same choice as a proto3 `oneof`, which cannot carry two values. Its only failure
     //    is "neither set", asserted as `missing-required-field` in the table above.
     use crate::adapters::http::memberships::membership_filter;
-    assert_eq!(membership_filter(Some("a".into()), Some("b".into())).unwrap_err().code(), "mutually-exclusive-fields");
+    assert_eq!(membership_filter(Some("a".into()), Some("b".into())).unwrap_err().code(), wire(ErrorReason::MutuallyExclusiveFields));
     // There is no gRPC expression of "both set" to compare against — that is the point.
 }
 ```
