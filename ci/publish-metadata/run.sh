@@ -315,7 +315,9 @@ elif lints.get("workspace") is True:
         "workspace's `warnings = \"deny\"` would let the first new rustc warning silently "
         "kill docs.rs builds. Declare a per-crate table with `warnings = \"warn\"`."
     )
-elif not {k: v for k, v in lints.items() if k != "workspace"}:
+elif not any(
+    isinstance(v, dict) and v for k, v in lints.items() if k != "workspace"
+):
     # `[lints] workspace = false` is VALID TOML and, per cargo's reference, is equivalent to
     # omitting the key entirely — it declares no local lint namespace at all. It is not caught
     # by the `is True` arm above, and it used to reach the level checks below, where an absent
@@ -323,11 +325,13 @@ elif not {k: v for k, v in lints.items() if k != "workspace"}:
     # check's own stated rule ("must declare its own"), so it is rejected here rather than
     # falling through. Same treatment for any `[lints]` table whose only key is `workspace`.
     errors.append(
-        f"{name}: `[lints]` declares no local namespace (only `workspace`). "
-        "`workspace = false` is valid but is equivalent to having no lint table at all — it "
-        "inherits nothing AND declares nothing. The rule is discipline, not only "
-        "hazard-avoidance: declare a per-crate `[lints.rust]` / `[lints.clippy]` table with "
-        '`warnings = "warn"`, so a crate cannot drift into workspace inheritance by deletion.'
+        f"{name}: `[lints]` declares no NON-EMPTY local namespace. `workspace = false` is "
+        "valid but equivalent to having no lint table at all — it inherits nothing AND "
+        "declares nothing — and a present-but-empty `[lints.rust]` is the same vacuity in a "
+        "different shape: it satisfies 'has a local table' while setting no lint. The rule is "
+        "discipline, not only hazard-avoidance: declare a per-crate `[lints.rust]` / "
+        '`[lints.clippy]` table that actually sets `warnings = "warn"`, so a crate cannot '
+        "drift into workspace inheritance by deletion."
     )
 else:
     # Both TOML spellings: the string form `warnings = "deny"` and the table form
@@ -401,6 +405,17 @@ else:
     for entry in include:
         if not isinstance(entry, str):
             errors.append(f"{name}: include entry {entry!r} is not a string")
+    # A catch-all entry defeats the allowlist even when the required literals are ALSO
+    # listed: `["README.md", "LICENSE", "**/*"]` satisfies literal membership while
+    # packaging the whole directory, reinstating the exact moon.yml leak Check 2b exists
+    # to catch. Rejecting the bare `["**/*"]` shape via literal membership was not enough.
+    catch_alls = [e for e in include if isinstance(e, str) and e in ("**/*", "**", "*")]
+    if catch_alls:
+        errors.append(
+            f"{name}: `include` contains the catch-all {catch_alls[0]!r}, which packages the "
+            "whole crate directory and makes the rest of the allowlist decorative. Enumerate "
+            "what belongs — an allowlist that matches everything is not an allowlist."
+        )
     missing = [r for r in REQUIRED if r not in include]
     if missing:
         errors.append(
@@ -851,6 +866,12 @@ PY
   _expect_rc 0 "Check 1c (workspace = false WITH a local table — passes)" \
     assert_lint_table "$tmp/lints-ws-false-plus-local.toml"
 
+  # A present-but-EMPTY namespace is the same vacuity in a different shape: it satisfies
+  # "has a local table" while setting no lint at all.
+  printf '[package]\nname = "f"\n[lints.rust]\n' >"$tmp/lints-empty-ns.toml"
+  _expect_rc 1 "Check 1c (present but EMPTY [lints.rust] sets no lint)" \
+    assert_lint_table "$tmp/lints-empty-ns.toml"
+
   printf '[package]\nname = "f"\n[lints.rust]\nwarnings = "deny"\n' >"$tmp/lints-deny-str.toml"
   _expect_rc 1 "Check 1c (own table but warnings = deny, string form)" \
     assert_lint_table "$tmp/lints-deny-str.toml"
@@ -894,6 +915,13 @@ PY
   printf '[package]\nname = "f"\ninclude = ["**/*"]\n' >"$tmp/inc-wildcard.toml"
   _expect_rc 1 "Check 1d (a wildcard is not literal membership)" \
     assert_include_allowlist "$tmp/inc-wildcard.toml"
+
+  # The bare wildcard above fails on literal membership. This one SATISFIES membership and
+  # must still fail: a catch-all beside the required literals packages everything anyway.
+  printf '[package]\nname = "f"\ninclude = ["Cargo.toml", "README.md", "LICENSE", "**/*"]\n' \
+    >"$tmp/inc-catchall-plus-literals.toml"
+  _expect_rc 1 "Check 1d (catch-all alongside the required literals)" \
+    assert_include_allowlist "$tmp/inc-catchall-plus-literals.toml"
 
   printf '[package]\nname = "f"\ninclude = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE"]\n' \
     >"$tmp/inc-good.toml"
