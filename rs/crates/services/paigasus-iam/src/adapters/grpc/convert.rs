@@ -945,8 +945,14 @@ mod tests {
     /// Driving `to_filter` also proves each helper is still WIRED IN, which is the failure SMA-583
     /// actually hit: a helper that exists and is correct but no longer reached.
     ///
-    /// Two rows call a helper directly, because those surfaces have no filter-shaped entry point:
-    /// the dead-letter id parser, and both `membership_filter`s.
+    /// One row calls a helper directly, because that surface has no filter-shaped entry point:
+    /// `membership_filter` on both transports. The dead-letter id row used to live here too, as
+    /// a hardcoded `TenancyError::InvalidUuid("dead_letter_id")` on the HTTP side — but that
+    /// construction never touches HTTP code at all, so it was tautologically equal to the
+    /// expected reason (`InvalidUuid(_)::code()` is unconditionally `"invalid-uuid"`) and proved
+    /// nothing about HTTP (SMA-586 fix round 1, Finding 1). It now lives in
+    /// [`http_dead_letter_id_agrees_with_grpc_on_invalid_uuid`] below, which drives the real
+    /// `UuidPath<DeadLetterId>` extractor through an actual request/response round trip instead.
     #[test]
     fn http_and_grpc_agree_on_the_reason_for_the_same_failure() {
         use paigasus_proto::paigasus::common::v1::ErrorReason;
@@ -1071,14 +1077,6 @@ mod tests {
                 ErrorReason::InvalidCursor,
             ),
             (
-                // No filter-shaped entry point on either side: HTTP takes this segment through the
-                // `UuidPath<DeadLetterId>` extractor, gRPC through `parse_id`.
-                "dead-letter id",
-                TenancyError::InvalidUuid("dead_letter_id"),
-                gdl::parse_id("not-a-uuid").unwrap_err(),
-                ErrorReason::InvalidUuid,
-            ),
-            (
                 "membership filter, neither set",
                 hmem::membership_filter(None, None).unwrap_err(),
                 gtenancy::membership_filter(None).unwrap_err(),
@@ -1093,18 +1091,73 @@ mod tests {
         }
     }
 
+    /// The dead-letter-id row of the agreement table above, lifted out into its own test because
+    /// it needs an async request/response round trip rather than a plain function call (SMA-586
+    /// fix round 1, Finding 1).
+    ///
+    /// The HTTP side used to be a hardcoded `TenancyError::InvalidUuid("dead_letter_id")`
+    /// constructed inline in the test — never touching HTTP code, so it was tautologically equal
+    /// to the expected reason (`InvalidUuid(_)::code()` is unconditionally `"invalid-uuid"`).
+    /// This drives the REAL `UuidPath<DeadLetterId>` extractor `http::dead_letters`'s own
+    /// `replay_one`/`discard_one` routes use, through an actual `Router`/`oneshot` round trip —
+    /// the identical pattern `http::path`'s own tests use to prove the same extractor for
+    /// `UuidPath<MembershipId>`. No `AppState` is needed: extractor rejection happens before the
+    /// handler (and therefore before any state access), so a stateless one-route router reaches
+    /// the same rejection a real state-carrying route would produce.
+    #[tokio::test]
+    async fn http_dead_letter_id_agrees_with_grpc_on_invalid_uuid() {
+        use axum::Router;
+        use axum::body::to_bytes;
+        use axum::http::StatusCode;
+        use axum::routing::get;
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+        use tower::ServiceExt;
+
+        use crate::adapters::grpc::dead_letters as gdl;
+        use crate::adapters::http::path::{DeadLetterId, UuidPath};
+
+        async fn ok(_path: UuidPath<DeadLetterId>) -> StatusCode {
+            StatusCode::OK
+        }
+
+        let wire = ErrorReason::InvalidUuid.as_wire_reason().expect("not the Unspecified sentinel");
+
+        let app = Router::new().route("/x/{id}", get(ok));
+        let resp = app.oneshot(axum::http::Request::builder().uri("/x/not-a-uuid").body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], wire, "HTTP reason");
+
+        assert_eq!(gdl::parse_id("not-a-uuid").unwrap_err().code(), wire, "gRPC reason");
+    }
+
     /// The counterpart to the agreement table: the two places the transports DELIBERATELY differ.
     /// Recorded as assertions so a change breaks this test rather than slipping through as an
     /// omission — the failure mode the SMA-586 spec review caught in its own first draft.
+    ///
+    /// Divergence 1 asserts only its gRPC half — see the comment on that assertion for why
+    /// (SMA-586 fix round 1, Finding 2: the HTTP half of the original claim turned out false).
     #[test]
     fn the_accepted_transport_divergences_are_exactly_these_two() {
         use paigasus_proto::paigasus::common::v1::ErrorReason;
 
-        // 1. `IssueApiKey.expires_at`. gRPC takes a `prost_types::Timestamp` and classifies a bad
-        //    one itself; HTTP takes a typed `DateTime<Utc>` in the body, so a bad value fails
-        //    inside serde and never reaches our code — yielding `invalid-request-body`, which is
-        //    the registry's correct reason for a body that would not deserialize. Making it
-        //    `invalid-timestamp` would need a custom deserializer for no contract gain.
+        // 1. `IssueApiKey.expires_at`, gRPC half: `prost_types::Timestamp` fails to CONVERT (it
+        //    cannot fail to parse — it's already a struct), and gRPC classifies that itself via
+        //    `parse_opt_ts`, asserted below.
+        //
+        //    The HTTP half is NOT asserted here. The original claim was that HTTP's typed
+        //    `DateTime<Utc>` field fails inside serde and yields `invalid-request-body` — verified
+        //    FALSE against the real route: `issue`'s `Json<IssueApiKeyBody>` parameter
+        //    (`http/api_keys.rs`) is axum's plain `Json`, not `http::authn::EnvelopeJson`, so a
+        //    malformed body never reaches the IAM error envelope or the registry at all. Driving
+        //    the real extractor with `{"expires_at":"not-a-timestamp",...}` produces axum's own
+        //    non-JSON 422 rejection text, with no `error.code` field to compare against
+        //    `ErrorReason::InvalidRequestBody` in the first place — there is nothing for this test
+        //    to assert without either changing production code (out of scope for SMA-586 Task 8,
+        //    which makes test/visibility changes only) or hardcoding today's accidental
+        //    non-contract response shape as though it were the intended one, which would be worse
+        //    than asserting nothing. Flagged for a follow-up ticket rather than fixed here.
         let wire = |r: ErrorReason| r.as_wire_reason().expect("not the Unspecified sentinel");
         assert_eq!(
             parse_opt_ts(Some(prost_types::Timestamp { seconds: 0, nanos: -1 }), "expires_at").unwrap_err().code(),

@@ -29,7 +29,9 @@ pub mod dto;
 pub mod error;
 pub(crate) mod memberships;
 mod organizations;
-mod path;
+// `pub(crate)` for the same reason as `audit`/`dead_letters`/`memberships` above: `grpc::convert`'s
+// transport parity guard drives `UuidPath<DeadLetterId>` directly (SMA-586 fix round 1, Finding 1).
+pub(crate) mod path;
 mod projects;
 mod service_accounts;
 mod service_info;
