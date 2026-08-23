@@ -10,6 +10,25 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-23-sma-586-error-reason-taxonomy-design.md`
 
+> **This plan is a historical record, not live instructions.** It was executed on
+> 2026-08-23/24 and the branch's commits are the authority where the two differ. Review found
+> three defects in the plan's own prescribed code, all fixed in the shipped implementation —
+> do not copy these from here:
+> - **Task 7's `UuidPathPair<F>`** carried ONE marker and reported that field for either
+>   segment, so a malformed service-account uuid answered `"api_key_id must be a uuid"`. Shipped
+>   as `UuidPathPair<F1, F2>`, parsing each segment independently and attributing positionally.
+> - **Task 7's extractor** swallowed every `PathRejection`, turning 500-class router bugs into
+>   `400 invalid-uuid`. Shipped branching on `FailedToDeserializePathParams::status()`, which
+>   preserves a 500 for an arity/unsupported-type bug. (Note `PathRejection` has only two
+>   variants; `WrongNumberOfParameters`/`UnsupportedType` are kinds nested inside the first.)
+> - **Task 8's "dead-letter id" parity row** constructed `TenancyError::InvalidUuid` inline, so
+>   its HTTP half was tautological — mutation testing showed it stayed green with the real
+>   extractor broken. Shipped as a real `Router`/`oneshot` round trip.
+>
+> Task 1's `git add py ts` staging is also broader than that task's own outputs, and its Step 7
+> drift check runs before the intended changes are committed. Both were harmless in execution;
+> neither is a pattern to reuse.
+
 ## Global Constraints
 
 - Every source file opens with `// SPDX-License-Identifier: Apache-2.0`.

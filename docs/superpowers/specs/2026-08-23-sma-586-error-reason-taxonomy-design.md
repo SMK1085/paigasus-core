@@ -1,8 +1,8 @@
 # SMA-586 — Split the `invalid-prn` catch-all into a per-kind error taxonomy
 
 **Issue:** [SMA-586](https://linear.app/smaschek/issue/SMA-586/iam-invalid-prn-is-a-catch-all-sentinel-for-four-unrelated-validation)
-**Date:** 2026-08-23
-**Status:** Revised after adversarial challenge; pending approval
+**Date:** 2026-08-23 (amended 2026-08-24 during implementation — see the corrections under D5)
+**Status:** Implemented; corrections folded in from the final whole-branch review
 
 ## Problem
 
@@ -41,7 +41,7 @@ existing vocabulary *unchanged*, not to correct it.
 
 | AC | Where it is satisfied |
 |---|---|
-| **AC-1** — malformed timestamp, malformed uuid, unknown enum value and bad argument combination each yield a **distinct** reason, **on both HTTP and gRPC** | The vocabulary (§ *The vocabulary*) plus the two parity repairs in D5 — without those, `invalid-uuid` has no HTTP emitter and AC-1 fails on that kind |
+| **AC-1** — malformed timestamp, malformed uuid, unknown enum value and bad argument combination each yield a **distinct** reason, **on both HTTP and gRPC** | The vocabulary (§ *The vocabulary*) plus the two parity repairs in D5 — without those, `invalid-uuid` has no HTTP emitter and AC-1 fails on that kind. **One qualification:** the bad-argument case splits into `missing-required-field` (both transports) and `mutually-exclusive-fields` (**HTTP only, structurally** — a proto3 `oneof` cannot carry two values, so gRPC has no way to express the failure; see D6). Every kind that *can* occur on a transport has a distinct reason there. |
 | **AC-2** — `invalid-prn` is emitted only for genuine PRN parse/shape failures | D3; the residual `InvalidPrn` sites are enumerated in § *Sites that keep `InvalidPrn`* |
 | **AC-3** — a test asserts HTTP and gRPC agree on the reason for the same logical failure | D4 and § *Testing*, including the divergence table that makes each accepted asymmetry an assertion rather than an omission |
 | **AC-4** — every new reason resolves via `ErrorReason::from_wire_reason`, and `repo:error-code-single-site` is green | Free: the membership test iterates `strum::EnumIter`. § *Registry mechanics* and § *Verification* |
@@ -490,7 +490,14 @@ Two follow-ups are noted rather than folded in:
 ## Verification
 
 Per CLAUDE.md, per-project Moon tasks do **not** run the repo-level gates, so the full graph
-is run as CI does:
+is run as CI does. Every command in this section assumes the proto-managed CLIs are on `PATH`
+(they are not on the default one — `moon`, `buf` and `nextest` will otherwise resolve to the
+wrong binaries or not at all):
+
+```
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+```
+
 
 ```
 moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking
