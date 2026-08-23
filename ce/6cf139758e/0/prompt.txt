@@ -287,3 +287,34 @@ Test summary: `cargo test -p paigasus-iam --lib adapters::grpc` → 40/40 passed
 Concerns: none. The four touched files' only remaining occurrences of the six code strings are inside `///` doc-comment prose (backtick-quoted), not `"…"` string literals, so they're outside `check.py`'s scan pattern and needed no rewrite.</result>
 <usage><subagent_tokens>147109</subagent_tokens><tool_uses>17</tool_uses><duration_ms>110566</duration_ms></usage>
 </task-notification>
+
+---
+
+<task-notification>
+<task-id>a3729c5c2a8c5554f</task-id>
+<tool-use-id>toolu_016kdDBvtj7sTAcu2Zbzt6vy</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core--claude-worktrees-sma-584/92439804-9faa-496e-b708-f97a7cbdcfb8/tasks/a3729c5c2a8c5554f.output</output-file>
+<status>completed</status>
+<summary>Agent "Re-review Task 5 fix" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>The gate passes cleanly. This confirms both (b) the check.py MANIFEST has no tenancy.rs row and correctly still passes, and the doc-comment claim in part (c) — no stray literal reds the gate.
+
+All checks complete. Final verdict below.
+
+---
+
+**Finding: `ci/error-registry` MANIFEST narrowing on `grpc/tenancy.rs` — ADDRESSED**
+
+(a) The test `an_absent_membership_filter_oneof_is_a_missing_required_field` (rs/crates/services/paigasus-iam/src/adapters/grpc/tenancy.rs:657-667) now asserts `err.code()` against `ErrorReason::MissingRequiredField.as_wire_reason().expect(...)`. Confirmed non-tautological: `err.code()` resolves to a hand-written match arm literal in `rs/crates/services/paigasus-iam/src/application/error.rs:163` (`"missing-required-field"`), while `as_wire_reason()` derives the string from the prost-generated `ErrorReason` enum's `as_str_name()` (kebab-cased) in `rs/crates/libs/paigasus-proto/src/error.rs:78-82` — two independently-sourced strings. Ran `cargo check -p paigasus-iam --tests` (clean) and the specific test (passes).
+
+(b) `git diff` on `ci/error-registry/check.py` confirmed empty by the caller; independently verified `grep -n "tenancy.rs" ci/error-registry/check.py` returns no MANIFEST row. Ran `python3 ci/error-registry/check.py --self-test` (OK) and `--single-site` (exit 0, no offenders) — the gate itself is green with the narrowing row removed and the file otherwise unchanged.
+
+(c) Verified `code_pattern()` (check.py:120-127) matches only `"code"` or `\"code\"` (quote-delimited, either plain or escaped) — never backtick-delimited text. Grepped all registry code strings against `convert.rs`, `tenancy.rs`, `authz.rs`, `dead_letters.rs`, `service_accounts.rs` for quote-delimited hits: only `convert.rs` has any (pre-existing, already covered by its own "asserts" MANIFEST row, untouched by this fix). The other four files' only occurrences of the six SMA-586 code strings are backtick-quoted in `///`/`//` comments (e.g. tenancy.rs:88,654; service_accounts.rs:187,250,252) — confirmed via targeted grep and manual inspection of surrounding lines. Claim holds; the live `--single-site` run corroborates it (exit 0).
+
+**New breakage: none.** The diff touches only the two intended files: an 8-line addition to `tenancy.rs` (one `use` import + doc comment + the registry-routed assertion, replacing the bare literal) and a clean 2-line MANIFEST row removal in `check.py`. No other code paths, imports, or assertions touched. Build and the specific test both verified green.
+
+**Verdict: all findings addressed**
+
+**Out of scope (deferred):** `application/error.rs:163` and the many other files (`convert.rs`, `service_accounts.rs`, etc.) still contain hand-written bare kebab-string literals for various codes — pre-existing and covered by their own existing MANIFEST rows/membership tests, untouched by this fix diff. Not part of this review's scope.</result>
+<usage><subagent_tokens>76091</subagent_tokens><tool_uses>20</tool_uses><duration_ms>119678</duration_ms></usage>
+</task-notification>
