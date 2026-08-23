@@ -180,12 +180,16 @@ assert it. `http/api_keys.rs::issue` deserializes its body with plain `axum::Jso
 `authn::EnvelopeJson`, so a malformed body is rejected by axum with a plain-text 422 that
 carries no `error.code` at all — it never reaches the IAM error envelope or the registry.
 
-This is not unique to that handler. **Seven** JSON-body routes take plain `axum::Json`:
-`api_keys::issue`, `authz::{is_authorized, put_policy, create_role_grant}`,
-`dead_letters::replay_matching` and `service_accounts::create`. Only `api_keys::introspect` and
-`system_retirement::retire` use `EnvelopeJson`. So a malformed JSON body answers outside the
-error contract on seven routes — the same class of hole as D5.1's `Path<Uuid>` finding, and at
-comparable scale.
+This is not unique to that handler. **Fourteen** JSON-body request extractors take plain
+`axum::Json`, across `api_keys`, `authz` (×3), `dead_letters`, `memberships`, `projects`,
+`service_accounts`, `organizations` (×3), `teams` (×2) and `users`. Only two use
+`EnvelopeJson`: `api_keys::introspect` and `system_retirement::retire`. So a malformed JSON body
+answers outside the error contract on fourteen routes — the same class of hole as D5.1's
+`Path<Uuid>` finding, and larger than it.
+
+*(An earlier revision of this paragraph said "seven". That was an undercount: the grep behind it
+matched the `Json(body):` binding form and missed `Json(b):`. Corrected 2026-08-24 after the
+final review flagged the discrepancy.)*
 
 **It is deliberately NOT fixed here** (see Out of scope). Closing it changes the status code and
 body shape of seven public endpoints, which no acceptance criterion of this ticket asks for and
@@ -527,6 +531,6 @@ Integration tests need Docker (`PAIGASUS_REQUIRE_DOCKER=1` for any filtered run,
 - The gateway's own error vocabulary.
 - Any change to HTTP or gRPC status codes. All six are `Validation`, exactly as today.
 - Extending the HTTP error envelope with a `field` key (follow-up, § *Compatibility*).
-- Switching the seven plain-`axum::Json` routes to `EnvelopeJson` so a malformed body answers
+- Switching the fourteen plain-`axum::Json` routes to `EnvelopeJson` so a malformed body answers
   inside the error contract (follow-up — see the correction under D5). Discovered while writing
   the AC-3 guard; real, pre-existing, and out of scope for a taxonomy change.
