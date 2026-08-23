@@ -88,7 +88,8 @@ measurements in a disposable fixture:
 
 ### Site inventory, by owner
 
-The first draft claimed 11 sites. The true count is **18**, and the four missed classes
+The first draft claimed 11 sites. The true count is **18** (as of this review — SMA-577 later
+added two more, bringing the live total to 20; see below), and the four missed classes
 (review **B3**) are the highest-value part of this review — each is a silent drift channel, and
 two are load-bearing for the publish itself.
 
@@ -127,13 +128,9 @@ Site 17 drifts **silently**: `py/packages/paigasus-kernel/moon.yml:36` runs bare
 `paigasus-kernel-ts:build`, and `ci.yml`'s codegen-drift gate covers only the three
 `**/generated` proto dirs — so nothing reds there either.
 
-`--check` verifies **all 18**, including the ones release-plz and the regeneration commands own.
-A gate that trusted release-plz to have done its half would not notice a `version_group` that
-silently stopped applying. (SMA-577 later added a `proto`-group `cargo-lock` row and a
-`proto`-group `uv-lock` row alongside the kernel-group ones already in this inventory, bringing
-the live total to **20** — see
-`docs/superpowers/specs/2026-08-23-sma-577-proto-family-publishable-design.md` §6.3. The
-18-row inventory below is the original SMA-576 baseline and is not re-numbered here.)
+`--check` verifies **all 20** (the 18 below, plus the two SMA-577 proto lock rows), including the
+ones release-plz and the regeneration commands own. A gate that trusted release-plz to have done
+its half would not notice a `version_group` that silently stopped applying.
 
 ### The dependency-pin site
 
