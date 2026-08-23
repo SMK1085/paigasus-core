@@ -263,6 +263,71 @@ assert_package_list() { # $1 listing file  $2 package name
   return "$rc"
 }
 
+# Check 1c — a publishable crate must carry its OWN lint table, and that table must not
+# deny. Cargo INLINES the resolved lint table into the published manifest, and docs.rs
+# builds a published crate as the ROOT package on nightly, where `--cap-lints allow` does
+# not apply — so an inherited (or hand-written) `warnings = "deny"` lets the first new
+# rustc warning silently kill docs.rs builds of an already-released crate, months later.
+# Neither `[lints]` nor `include` appears in `cargo metadata`, so this reads the manifest.
+# Takes a PATH so --negative-control drives the same code with fixtures.
+assert_lint_table() { # $1 manifest path
+  python3 - "$1" <<'PY'
+import sys, tomllib
+
+path = sys.argv[1]
+try:
+    with open(path, "rb") as fh:
+        manifest = tomllib.load(fh)
+except Exception as exc:
+    # Unreadable or malformed TOML is INFRASTRUCTURE, not a repo defect: nothing was
+    # asserted, so it must not read as "the crate is fine" nor as "the crate is wrong".
+    print(f"FATAL: cannot parse {path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+lints = manifest.get("lints")
+name = manifest.get("package", {}).get("name", path)
+errors = []
+
+if not isinstance(lints, dict) or not lints:
+    errors.append(
+        f"{name}: no `[lints.*]` table. A publishable crate must declare its own — see the "
+        "rationale on paigasus-kernel/Cargo.toml. The rule is discipline, not only "
+        "hazard-avoidance: without it a crate can drift into workspace inheritance by deletion."
+    )
+elif lints.get("workspace") is True:
+    errors.append(
+        f"{name}: inherits workspace lints (`[lints] workspace = true`). Cargo inlines the "
+        "RESOLVED table into the published manifest, and docs.rs builds published crates as "
+        "the root package on nightly where `--cap-lints allow` does not apply, so the "
+        "workspace's `warnings = \"deny\"` would let the first new rustc warning silently "
+        "kill docs.rs builds. Declare a per-crate table with `warnings = \"warn\"`."
+    )
+else:
+    # Both TOML spellings: the string form `warnings = "deny"` and the table form
+    # `warnings = { level = "deny", priority = -1 }`. Checking only the string form would
+    # let the table form through while the crate carries the hazard in full.
+    def level_of(value):
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            return value.get("level")
+        return None
+
+    for table, key in (("rust", "warnings"), ("clippy", "all")):
+        level = level_of((lints.get(table) or {}).get(key))
+        if level in ("deny", "forbid"):
+            errors.append(
+                f"{name}: `[lints.{table}] {key}` is {level!r}. Its own table is not enough — "
+                f"a published crate must not deny, or docs.rs breaks on the first new lint. "
+                f'Use "warn"; CI strictness comes from the Moon lint task\'s explicit -D warnings.'
+            )
+
+if errors:
+    print("Check 1c FAILED\n  - " + "\n  - ".join(errors), file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 # Guard-the-guard (SMA-542): a new check's own CALL SITE is what goes unguarded. The
 # fixture rows below exercise this function; only this assertion covers its INVOCATION in
 # the workflow, and repo:actionlint's equivalent machinery is keyed on ci.yml alone.
@@ -559,6 +624,37 @@ PY
   _expect_rc 1 "Check 3 (per-package release = true override)" \
     metadata_checks "$tmp/stub.json" "$override_rp" "paigasus-kernel" "$fix_snap"
 
+  # --- Check 1c fixtures ---------------------------------------------------------
+  printf '[package]\nname = "f"\n[lints]\nworkspace = true\n' >"$tmp/lints-inherit.toml"
+  _expect_rc 1 "Check 1c (inherits workspace lints)" \
+    assert_lint_table "$tmp/lints-inherit.toml"
+
+  printf '[package]\nname = "f"\n' >"$tmp/lints-absent.toml"
+  _expect_rc 1 "Check 1c (no lint table at all)" \
+    assert_lint_table "$tmp/lints-absent.toml"
+
+  printf '[package]\nname = "f"\n[lints.rust]\nwarnings = "deny"\n' >"$tmp/lints-deny-str.toml"
+  _expect_rc 1 "Check 1c (own table but warnings = deny, string form)" \
+    assert_lint_table "$tmp/lints-deny-str.toml"
+
+  printf '[package]\nname = "f"\n[lints.rust]\nwarnings = { level = "forbid", priority = -1 }\n' \
+    >"$tmp/lints-forbid-tbl.toml"
+  _expect_rc 1 "Check 1c (own table but warnings = forbid, table form)" \
+    assert_lint_table "$tmp/lints-forbid-tbl.toml"
+
+  printf '[package]\nname = "f"\n[lints.rust]\nwarnings = "warn"\n[lints.clippy]\nall = "deny"\n' \
+    >"$tmp/lints-clippy-deny.toml"
+  _expect_rc 1 "Check 1c (clippy.all = deny)" \
+    assert_lint_table "$tmp/lints-clippy-deny.toml"
+
+  printf '[package]\nname = "f"\n[lints.rust]\nwarnings = "warn"\n[lints.clippy]\nall = "warn"\n' \
+    >"$tmp/lints-good.toml"
+  _expect_rc 0 "Check 1c (own table, warn — passes)" \
+    assert_lint_table "$tmp/lints-good.toml"
+
+  _expect_rc 2 "Check 1c (malformed TOML is infra, not a repo defect)" \
+    assert_lint_table "$tmp/does-not-exist.toml"
+
   # Check 2b — a listing missing LICENSE, and one containing moon.yml.
   printf 'Cargo.toml\nREADME.md\nsrc/lib.rs\n' >"$tmp/missing-license.txt"
   _expect_rc 1 "Check 2b (LICENSE not packaged)" \
@@ -665,6 +761,8 @@ main() {
   # but it becomes one the day SMA-388 adds a second publishable crate.
   while IFS=$'\t' read -r -u 3 name dir; do
     [ -n "$name" ] || continue
+    status=0; assert_lint_table "$dir/Cargo.toml" || status=$?
+    [ "$status" -eq 0 ] || exit "$status"
     check_package "$name" "$dir"
   done 3<<<"$publishable"
 
