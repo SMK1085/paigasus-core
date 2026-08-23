@@ -22,18 +22,18 @@
 //!   `Root` for a principal-filtered query (there is no single "target node" for "every node
 //!   a principal belongs to" — mirrofs `ListOrganizations`' platform-only posture, D4).
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Extension, Json, Router};
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::{Action, TenancyNodeRef};
 use paigasus_kernel::Prn;
-use uuid::Uuid;
 
 use super::AppState;
 use super::dto::{CreateMembershipBody, MembershipDto, MembershipQuery};
 use super::error::ApiError;
+use super::path::{MembershipId, UuidPath};
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::memberships::MembershipFilter;
@@ -80,7 +80,8 @@ async fn create_membership(State(s): State<AppState>, Extension(ctx): Extension<
 /// the same transaction (spec §5.1 rule 5). Detaching a team/project
 /// membership removes only itself. Detaching a nonexistent id is a 404, not
 /// an idempotent no-op.
-async fn delete_membership(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
+async fn delete_membership(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<MembershipId>) -> Result<StatusCode, ApiError> {
+    let id = path.id;
     if s.enforce_tenancy {
         let record = s.memberships.get(id).await?;
         let node_prn = Prn::parse(&record.node_prn).map_err(|e| TenancyError::InvalidPrn(e.kind().to_owned()))?;

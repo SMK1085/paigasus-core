@@ -26,6 +26,7 @@ pub mod dto;
 pub mod error;
 mod memberships;
 mod organizations;
+mod path;
 mod projects;
 mod service_accounts;
 mod service_info;

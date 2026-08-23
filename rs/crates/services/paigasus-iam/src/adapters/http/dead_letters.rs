@@ -24,7 +24,7 @@
 //! `DeadLetterService` application service, not a transport wrapping the other, with paired
 //! projection tests across both modules as the drift guard.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
@@ -35,6 +35,7 @@ use uuid::Uuid;
 use super::AppState;
 use super::dto::{BulkReplayBody, BulkReplayResponseDto, DeadLetterEntryDto, DeadLetterListResponseDto, DeadLetterQuery};
 use super::error::ApiError;
+use super::path::{DeadLetterId, UuidPath};
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::pagination::DEFAULT_LIMIT;
@@ -123,14 +124,14 @@ async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>,
 
 /// `POST /v1/outbox/dead-letters/{id}/replay`: Root-only. `404` covers an absent id, a live
 /// row, and a row another actor already replayed or discarded.
-async fn replay_one(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<DeadLetterEntryDto>, ApiError> {
-    Ok(Json(s.dead_letters.replay(&actor_prn(&ctx), id).await?.into()))
+async fn replay_one(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<DeadLetterId>) -> Result<Json<DeadLetterEntryDto>, ApiError> {
+    Ok(Json(s.dead_letters.replay(&actor_prn(&ctx), path.id).await?.into()))
 }
 
 /// `POST /v1/outbox/dead-letters/{id}/discard`: Root-only. A discarded row is gone forever —
 /// its audit entry is its only remaining trace (`DeadLetterService::discard`'s own doc).
-async fn discard_one(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<DeadLetterEntryDto>, ApiError> {
-    Ok(Json(s.dead_letters.discard(&actor_prn(&ctx), id).await?.into()))
+async fn discard_one(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<DeadLetterId>) -> Result<Json<DeadLetterEntryDto>, ApiError> {
+    Ok(Json(s.dead_letters.discard(&actor_prn(&ctx), path.id).await?.into()))
 }
 
 /// `POST /v1/outbox/dead-letters/replay`: Root-only. A missing or zero `max_rows` is rejected

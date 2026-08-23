@@ -20,17 +20,17 @@
 //! would reach the entity-slice loader with a dangling id and fail closed as an internal error
 //! rather than the expected `NotFound`/404.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use paigasus_iam_core::Action;
 use paigasus_iam_core::authz::model::root_prn;
-use uuid::Uuid;
 
 use super::AppState;
 use super::dto::{CreateNodeBody, CreateOrgResponse, OrgDto, PageQuery, RenameBody, TeamDto};
 use super::error::ApiError;
+use super::path::{OrganizationId, UuidPath};
 use crate::adapters::auth::AuthContext;
 use crate::application::pagination::Page;
 
@@ -68,7 +68,8 @@ async fn list_orgs(State(s): State<AppState>, Extension(ctx): Extension<AuthCont
     Ok(Json(orgs.into_iter().map(OrgDto::from).collect()))
 }
 
-async fn get_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<OrgDto>, ApiError> {
+async fn get_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<OrganizationId>) -> Result<Json<OrgDto>, ApiError> {
+    let id = path.id;
     let view = s.orgs.get(id).await?;
     if s.enforce_tenancy {
         s.authorize.check(&actor_prn(&ctx), Action::GetOrganization, view.node.id.prn()).await?;
@@ -76,7 +77,8 @@ async fn get_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContex
     Ok(Json(view.into()))
 }
 
-async fn rename_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>, Json(b): Json<RenameBody>) -> Result<Json<OrgDto>, ApiError> {
+async fn rename_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<OrganizationId>, Json(b): Json<RenameBody>) -> Result<Json<OrgDto>, ApiError> {
+    let id = path.id;
     if s.enforce_tenancy {
         let view = s.orgs.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RenameOrganization, view.node.id.prn()).await?;
@@ -85,7 +87,8 @@ async fn rename_org(State(s): State<AppState>, Extension(ctx): Extension<AuthCon
     Ok(Json(view.into()))
 }
 
-async fn archive_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<OrgDto>, ApiError> {
+async fn archive_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<OrganizationId>) -> Result<Json<OrgDto>, ApiError> {
+    let id = path.id;
     if s.enforce_tenancy {
         let view = s.orgs.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::ArchiveOrganization, view.node.id.prn()).await?;
@@ -94,7 +97,8 @@ async fn archive_org(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
     Ok(Json(view.into()))
 }
 
-async fn restore_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<OrgDto>, ApiError> {
+async fn restore_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<OrganizationId>) -> Result<Json<OrgDto>, ApiError> {
+    let id = path.id;
     if s.enforce_tenancy {
         let view = s.orgs.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RestoreOrganization, view.node.id.prn()).await?;
@@ -103,7 +107,13 @@ async fn restore_org(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
     Ok(Json(view.into()))
 }
 
-async fn create_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(org_id): Path<Uuid>, Json(b): Json<CreateNodeBody>) -> Result<(StatusCode, Json<TeamDto>), ApiError> {
+async fn create_team(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    path: UuidPath<OrganizationId>,
+    Json(b): Json<CreateNodeBody>,
+) -> Result<(StatusCode, Json<TeamDto>), ApiError> {
+    let org_id = path.id;
     if s.enforce_tenancy {
         let org_view = s.orgs.get(org_id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::CreateTeam, org_view.node.id.prn()).await?;
@@ -112,7 +122,8 @@ async fn create_team(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
     Ok((StatusCode::CREATED, Json(view.into())))
 }
 
-async fn list_teams(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(org_id): Path<Uuid>, Query(q): Query<PageQuery>) -> Result<Json<Vec<TeamDto>>, ApiError> {
+async fn list_teams(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<OrganizationId>, Query(q): Query<PageQuery>) -> Result<Json<Vec<TeamDto>>, ApiError> {
+    let org_id = path.id;
     if s.enforce_tenancy {
         let org_view = s.orgs.get(org_id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::ListTeams, org_view.node.id.prn()).await?;

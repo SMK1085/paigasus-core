@@ -7,15 +7,15 @@
 //! **SMA-444 Task 20 enforcement:** mirrors `organizations.rs`/`teams.rs`'s fetch-then-
 //! authorize-then-act posture for `Get`/`Rename`/`Archive`/`Restore`.
 
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use paigasus_iam_core::Action;
-use uuid::Uuid;
 
 use super::AppState;
 use super::dto::{ProjectDto, RenameBody};
 use super::error::ApiError;
+use super::path::{ProjectId, UuidPath};
 use crate::adapters::auth::AuthContext;
 
 pub fn router() -> Router<AppState> {
@@ -29,7 +29,8 @@ fn actor_prn(ctx: &AuthContext) -> paigasus_kernel::Prn {
     ctx.principal_id.prn().clone()
 }
 
-async fn get_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<ProjectDto>, ApiError> {
+async fn get_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<ProjectId>) -> Result<Json<ProjectDto>, ApiError> {
+    let id = path.id;
     let view = s.projects.get(id).await?;
     if s.enforce_tenancy {
         s.authorize.check(&actor_prn(&ctx), Action::GetProject, view.node.id.prn()).await?;
@@ -37,7 +38,8 @@ async fn get_project(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
     Ok(Json(view.into()))
 }
 
-async fn rename_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>, Json(b): Json<RenameBody>) -> Result<Json<ProjectDto>, ApiError> {
+async fn rename_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<ProjectId>, Json(b): Json<RenameBody>) -> Result<Json<ProjectDto>, ApiError> {
+    let id = path.id;
     if s.enforce_tenancy {
         let view = s.projects.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RenameProject, view.node.id.prn()).await?;
@@ -46,7 +48,8 @@ async fn rename_project(State(s): State<AppState>, Extension(ctx): Extension<Aut
     Ok(Json(view.into()))
 }
 
-async fn archive_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<ProjectDto>, ApiError> {
+async fn archive_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<ProjectId>) -> Result<Json<ProjectDto>, ApiError> {
+    let id = path.id;
     if s.enforce_tenancy {
         let view = s.projects.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::ArchiveProject, view.node.id.prn()).await?;
@@ -55,7 +58,8 @@ async fn archive_project(State(s): State<AppState>, Extension(ctx): Extension<Au
     Ok(Json(view.into()))
 }
 
-async fn restore_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<ProjectDto>, ApiError> {
+async fn restore_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<ProjectId>) -> Result<Json<ProjectDto>, ApiError> {
+    let id = path.id;
     if s.enforce_tenancy {
         let view = s.projects.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RestoreProject, view.node.id.prn()).await?;
