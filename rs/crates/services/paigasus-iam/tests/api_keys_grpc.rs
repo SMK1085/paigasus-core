@@ -111,6 +111,24 @@ async fn grpc_issue_and_introspect_parity() {
     assert!(issued.token.starts_with("pgs_sk_"), "{}", issued.token);
     let api_key = issued.api_key.expect("api_key");
     assert_eq!(api_key.service_account_prn, sa_prn);
+
+    // SMA-583: `expires_at` goes through the same `parse_opt_ts` helper as the audit filters.
+    // A present-but-unrepresentable value is a client error — the ONLY test of this path, and
+    // what makes the refactor's "no behaviour change" claim checkable.
+    let err = sa_client
+        .issue_api_key(authed(
+            IssueApiKeyRequest {
+                service_account_prn: sa_prn.clone(),
+                scope_prn: owner.canonical(),
+                expires_at: Some(prost_types::Timestamp { seconds: 0, nanos: -1 }),
+                scope_actions: Vec::new(),
+                scope_roles: Vec::new(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument, "an unrepresentable expires_at must be rejected: {err:?}");
     // The one-time issue response never carries a bare secret/hash field either -- `ApiKey`
     // structurally has neither (module docs), so there is nothing beyond `token` to leak.
 

@@ -179,12 +179,9 @@ impl ServiceAccountService for ServiceAccountGrpc {
             // fallback, `ApiKeyService::issue`) — mirrors `IssueApiKeyBody::expires_at`'s HTTP
             // counterpart. A present-but-out-of-range timestamp is `InvalidPrn`-as-sentinel
             // (mirrors `DetachMembershipRequest`'s "not a uuid" posture): there is no dedicated
-            // error code for "not a valid timestamp" either.
-            let expires_at = req
-                .expires_at
-                .map(|t| convert::from_ts(t).ok_or_else(|| TenancyError::InvalidPrn("expires_at out of range".to_string())))
-                .transpose()
-                .map_err(convert::status_to_grpc)?;
+            // error code for "not a valid timestamp" either. `parse_opt_ts` is that exact
+            // absent/valid/unrepresentable split, shared with the filter call sites (SMA-583).
+            let expires_at = convert::parse_opt_ts(req.expires_at, "expires_at").map_err(convert::status_to_grpc)?;
             let scope_actions = req
                 .scope_actions
                 .iter()

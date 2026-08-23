@@ -189,7 +189,13 @@ pub fn ts(dt: DateTime<Utc>) -> prost_types::Timestamp {
 /// value (a negative `nanos`, or a `seconds`/`nanos` pair `chrono` can't represent) rather than
 /// panicking — callers map that to a client error themselves (mirrors `node_uuid`'s own
 /// "caller decides how to surface a parse failure" posture).
-pub fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
+///
+/// **Module-private on purpose (SMA-583).** On a filter field `None` means UNFILTERED, so an
+/// `and_then(from_ts)` call site silently widens the query instead of rejecting a malformed
+/// bound. Callers outside this module must use [`parse_opt_ts`], which keeps the three cases
+/// distinct. Note this closes *that shape* only — `parse_opt_ts(..).ok().flatten()` would
+/// reintroduce the same bug, and no grep gate would catch that either.
+fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
     let nanos = u32::try_from(t.nanos).ok()?;
     DateTime::<Utc>::from_timestamp(t.seconds, nanos)
 }
@@ -198,12 +204,14 @@ pub fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
 /// unfiltered, a valid value converts, and a **present but unrepresentable** value is a client
 /// error.
 ///
-/// That third case is why this exists. [`from_ts`] returns `None` for a negative `nanos` or an
-/// out-of-`chrono`-range `seconds`, and on a filter field `None` means UNFILTERED — so the
-/// `req.field.and_then(convert::from_ts)` shape used in `grpc::audit` silently DROPS a
-/// malformed bound instead of rejecting it. On `BulkReplayDeadLetters` that turns a
-/// narrowly-scoped replay into "replay everything up to `max_rows`". The HTTP twin rejects the
-/// equivalent with a 400 (`http::dead_letters::parse_ts`), so this also restores parity.
+/// That third case is why this exists. `from_ts` returns `None` for a negative `nanos` or an
+/// out-of-`chrono`-range `seconds`, and on a filter field `None` means UNFILTERED — so a
+/// `req.field.and_then(from_ts)` shape silently DROPS a malformed bound instead of rejecting
+/// it. On `BulkReplayDeadLetters` that turned a narrowly-scoped replay into "replay everything
+/// up to `max_rows`"; on `ListAuditEntries` it widened the result set (SMA-583). Both surfaces
+/// now use this helper, and `from_ts` is module-private so the shape cannot recur outside this
+/// file. The HTTP twin rejects the equivalent with a 400 (`http::dead_letters::parse_ts`), so
+/// this also restores parity.
 ///
 /// `InvalidPrn`-as-sentinel, mirroring `http::dead_letters::parse_ts` and
 /// `grpc::audit::parse_cursor` — there is no dedicated error code for "not a valid timestamp".

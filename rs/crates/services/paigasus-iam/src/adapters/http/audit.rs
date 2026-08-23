@@ -64,9 +64,12 @@ fn parse_cursor(raw: Option<String>) -> Result<Option<Uuid>, TenancyError> {
 
 /// Parses an RFC3339 `from`/`to` query param: absent/empty means unfiltered; a present value
 /// must parse as RFC3339. `InvalidPrn`-as-sentinel, mirroring `parse_outcome`/`parse_cursor`
-/// above — there is no dedicated error code for "not a valid timestamp" either, and the gRPC
-/// wire has no equivalent failure mode to mirror here (its `from`/`to` are already-structured
-/// `prost_types::Timestamp`, never a string that can fail to parse).
+/// above — there is no dedicated error code for "not a valid timestamp" either.
+///
+/// The gRPC twin has the SAME three-case split, contrary to what this comment claimed before
+/// SMA-583: a `prost_types::Timestamp` cannot fail to *parse*, but it can fail to *convert*
+/// (a negative `nanos`, or a `seconds` outside `chrono`'s range), and `grpc::audit::to_filter`
+/// now rejects that via `convert::parse_opt_ts` exactly as this does.
 fn parse_ts(raw: Option<String>) -> Result<Option<DateTime<Utc>>, TenancyError> {
     match opt_non_empty(raw) {
         None => Ok(None),

@@ -1064,8 +1064,13 @@ default_message_pool.register_message(
 class ListAuditEntriesRequest(betterproto2.Message):
     """
     Optional scalar filters use empty-string/zero sentinels (mirrors the other
-    request messages in this file): an empty string / zero timestamp means
-    "unfiltered" on that field.
+    request messages in this file): an empty string means "unfiltered" on that
+    field, and limit 0 means the server default.
+
+    Timestamps do NOT use a zero sentinel: a zero Timestamp is PRESENT and
+    denotes the epoch, so it filters from 1970-01-01. An ABSENT timestamp means
+    unfiltered; a PRESENT but unrepresentable one is INVALID_ARGUMENT and never
+    silently unfiltered (SMA-583, matching ListDeadLettersRequest).
     """
 
     actor_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
