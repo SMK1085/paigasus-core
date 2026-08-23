@@ -184,6 +184,29 @@ published crate — are contracts restructures that would break the conformance 
 around it, for no benefit proportional to a `string` and an `AuditMetadata`. The stale
 `TODO(SMA-388)` prose recording it as open is replaced by a note recording it as decided.
 
+The decisive argument is not the message's size, though. `AuditableExample` **embeds**
+`AuditMetadata` (`auditable_example.proto:18`), and `AuditMetadata` is itself already public in the
+published crate's generated code (`paigasus.common.v1.rs:9`) — publishing does not newly expose it.
+The example was therefore never the binding constraint on this crate's semver surface; the domain
+type it wraps is. Blocking the flip on the fixture while shipping the type it demonstrates would be
+incoherent.
+
+### The SMA-439 window closes at SMA-580, not here
+
+[SMA-439](https://linear.app/smaschek/issue/SMA-439) replaces `AuditMetadata`'s opaque
+`created_by` / `modified_by` strings with a structured `Actor` message — an explicitly **breaking
+wire change** to the type this crate publishes. It changes nothing in this design: `release-plz.toml:15`
+classifies breaking as **minor** in 0.x, so it lands as `0.1.0 → 0.2.0`, and it touches none of the
+publish groups, the `LOCK_MEMBERS` table, or Checks 1c/1d.
+
+What matters is the **ordering**, and the window is wider than it looks. Nothing is published by
+this issue — SMA-580 flips `PAIGASUS_RELEASE_ENABLED`. So SMA-439 landing at any point before that
+flip costs nothing: there is no published consumer to break. After the first upload it becomes a
+real published break, with the add-alongside-and-deprecate sequencing SMA-439's own notes describe.
+SMA-439 is `blockedBy: []`, so taking it before SMA-580 is available and free. Recorded here rather
+than in SMA-580's pre-flight because this is the issue that makes the crate publishable, and it is
+the natural place for a reader to look.
+
 ## 5. Gate changes — `ci/publish-metadata/run.sh`
 
 ### 5.1 Check 2 becomes one invocation **per publish group**
@@ -571,3 +594,4 @@ Every command below is run and its output read, not assumed.
 | `EXPECTED_SITE_COUNT` false-reds a later legitimate `SITES` edit | Intended failure direction; the script's own comment records that it is updated only alongside a deliberate `SITES` change. |
 | Relocking `py/uv.lock` drags in unrelated updates | `uv lock` without `--upgrade` only resolves what changed; the diff is reviewed, and §6.3's new `uv-lock` row makes future drift red instead of silent. |
 | Publishing semver-locks `AuditableExample` | §4 records the decision to accept, with the reason and the rejected alternatives. |
+| SMA-439's breaking `Actor` change ships as a *published* 0.x break | §4 records the window: nothing uploads until SMA-580, and SMA-439 is unblocked, so taking it before that flip is free. Flagged for SMA-580's pre-flight checklist. |
