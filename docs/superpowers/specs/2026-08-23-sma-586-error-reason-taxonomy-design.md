@@ -403,13 +403,18 @@ Driving `to_filter` rather than the raw `parse_*` helpers is deliberate: it prov
 is still *wired in*, which is the failure mode SMA-583 actually hit.
 
 **Part 2 — recorded divergence.** One row per site where the transports intentionally differ,
-asserting *both* sides' reasons explicitly so a change breaks the test rather than slipping
-through:
+so a change breaks the test rather than slipping through. Only the assertable side is asserted;
+where a side cannot be asserted, the table says so rather than claiming a value:
 
 | Case | HTTP | gRPC | Why |
 |---|---|---|---|
-| `IssueApiKey.expires_at` malformed | `invalid-request-body` | `invalid-timestamp` | D5, accepted |
-| `(Some, Some)` membership filter | `mutually-exclusive-fields` | *unreachable* | D6, structural |
+| `IssueApiKey.expires_at` malformed | *no IAM envelope at all* — plain-text 422, no `error.code` (not asserted) | `invalid-timestamp` (asserted) | D5, accepted |
+| `(Some, Some)` membership filter | `mutually-exclusive-fields` (asserted) | *structurally unreachable* — proto3 `oneof` | D6, structural |
+
+The `expires_at` row originally read `invalid-request-body` on the HTTP side. That was false —
+see the correction under D5: `http/api_keys.rs::issue` uses plain `axum::Json`, so a malformed
+body never reaches the IAM envelope. The test asserts the gRPC half only, and its comment says
+so explicitly rather than implying coverage it does not have (tracked as SMA-587).
 
 ### Tests that must change, not merely be added
 
