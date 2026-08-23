@@ -315,6 +315,20 @@ elif lints.get("workspace") is True:
         "workspace's `warnings = \"deny\"` would let the first new rustc warning silently "
         "kill docs.rs builds. Declare a per-crate table with `warnings = \"warn\"`."
     )
+elif not {k: v for k, v in lints.items() if k != "workspace"}:
+    # `[lints] workspace = false` is VALID TOML and, per cargo's reference, is equivalent to
+    # omitting the key entirely — it declares no local lint namespace at all. It is not caught
+    # by the `is True` arm above, and it used to reach the level checks below, where an absent
+    # `rust`/`clippy` key yields no findings and the crate PASSED. That contradicts this
+    # check's own stated rule ("must declare its own"), so it is rejected here rather than
+    # falling through. Same treatment for any `[lints]` table whose only key is `workspace`.
+    errors.append(
+        f"{name}: `[lints]` declares no local namespace (only `workspace`). "
+        "`workspace = false` is valid but is equivalent to having no lint table at all — it "
+        "inherits nothing AND declares nothing. The rule is discipline, not only "
+        "hazard-avoidance: declare a per-crate `[lints.rust]` / `[lints.clippy]` table with "
+        '`warnings = "warn"`, so a crate cannot drift into workspace inheritance by deletion.'
+    )
 else:
     # Both TOML spellings: the string form `warnings = "deny"` and the table form
     # `warnings = { level = "deny", priority = -1 }`. Checking only the string form would
@@ -824,6 +838,18 @@ PY
   printf '[package]\nname = "f"\n' >"$tmp/lints-absent.toml"
   _expect_rc 1 "Check 1c (no lint table at all)" \
     assert_lint_table "$tmp/lints-absent.toml"
+
+  # `workspace = false` is valid TOML and equivalent to omitting the key — it declares no
+  # local namespace. Before this row it reached the level checks, found no rust/clippy key,
+  # and PASSED. Two shapes, because they fail on different halves of the same rule.
+  printf '[package]\nname = "f"\n[lints]\nworkspace = false\n' >"$tmp/lints-ws-false.toml"
+  _expect_rc 1 "Check 1c (workspace = false declares no local namespace)" \
+    assert_lint_table "$tmp/lints-ws-false.toml"
+
+  printf '[package]\nname = "f"\n[lints]\nworkspace = false\n[lints.rust]\nwarnings = "warn"\n' \
+    >"$tmp/lints-ws-false-plus-local.toml"
+  _expect_rc 0 "Check 1c (workspace = false WITH a local table — passes)" \
+    assert_lint_table "$tmp/lints-ws-false-plus-local.toml"
 
   printf '[package]\nname = "f"\n[lints.rust]\nwarnings = "deny"\n' >"$tmp/lints-deny-str.toml"
   _expect_rc 1 "Check 1c (own table but warnings = deny, string form)" \

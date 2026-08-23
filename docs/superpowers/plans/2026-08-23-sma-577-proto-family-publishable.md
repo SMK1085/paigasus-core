@@ -179,6 +179,7 @@ Expected: exit 0, with seven new `ok — Check 1c (…)` lines and **no** `NEGAT
 - [ ] **Step 5: Run the real gate — `paigasus-kernel` must still pass**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 bash ci/publish-metadata/run.sh
 ```
 
@@ -322,6 +323,7 @@ Immediately after Task 1's fixture block:
 - [ ] **Step 4: Run the negative control**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 bash ci/publish-metadata/run.sh --negative-control
 ```
 
@@ -330,6 +332,7 @@ Expected: exit 0, seven new `ok — Check 1d (…)` lines, no failures.
 - [ ] **Step 5: Run the real gate**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 bash ci/publish-metadata/run.sh
 ```
 
@@ -599,6 +602,7 @@ After Task 2's fixture block:
 - [ ] **Step 6: Run the negative control**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 bash ci/publish-metadata/run.sh --negative-control
 ```
 
@@ -607,6 +611,7 @@ Expected: exit 0, new `ok —` lines for the empty-list guard, both invoked-set 
 - [ ] **Step 7: Run the real gate**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 bash ci/publish-metadata/run.sh
 ```
 
@@ -775,6 +780,7 @@ Expected for BOTH: `README.md` and `LICENSE` present, `moon.yml` **absent**. `pa
 - [ ] **Step 7: Verify nothing else broke**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-577/rs
 cargo clippy -p paigasus-proto -p paigasus-proto-derive --all-targets -- -D warnings
 cargo nextest run -p paigasus-proto -p paigasus-proto-derive --no-tests=pass
@@ -975,6 +981,7 @@ Expected: `== version-lockstep self-tests passed (2 tables) ==`, then the both-d
 - [ ] **Step 8: Run the real check**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 bash ci/version-lockstep/run.sh --check
 ```
 
@@ -1049,6 +1056,7 @@ In `py/packages/paigasus-proto/pyproject.toml`, change `version = "0.0.0"` to `v
 - [ ] **Step 6: Relock both lockfiles**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-577/rs && cargo update -w
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-577/py && uv lock
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-577
