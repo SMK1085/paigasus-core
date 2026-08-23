@@ -328,6 +328,67 @@ if errors:
 PY
 }
 
+# Check 1d — a publishable crate must carry an `include` ALLOWLIST covering README.md and
+# LICENSE. Cargo's default include is "every non-ignored file in the package dir", which
+# sweeps moon.yml into the tarball and would ship whatever the dir gains next. Check 2b
+# catches the OUTCOME (a leaked moon.yml) but only for files someone added to
+# FORBIDDEN_PACKAGED, and only after a listing exists; 1d asserts the RULE.
+assert_include_allowlist() { # $1 manifest path
+  python3 - "$1" <<'PY'
+import sys, tomllib
+
+REQUIRED = ("README.md", "LICENSE")
+path = sys.argv[1]
+try:
+    with open(path, "rb") as fh:
+        manifest = tomllib.load(fh)
+except Exception as exc:
+    print(f"FATAL: cannot parse {path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+package = manifest.get("package", {})
+name = package.get("name", path)
+include = package.get("include")
+errors = []
+
+if include is None:
+    errors.append(
+        f"{name}: no `[package] include`. Cargo's default packages EVERY non-ignored file "
+        "in the crate dir — moon.yml today, and whatever the dir gains next. Enumerate what "
+        "belongs; an allowlist is the version that cannot leak."
+    )
+elif isinstance(include, dict):
+    # `include` is workspace-inheritable, so `include.workspace = true` parses as
+    # {"workspace": True} — non-empty, truthy, and NOT a list. A naive "declares a
+    # non-empty include" test passes it vacuously, which is why this arm is explicit.
+    errors.append(
+        f"{name}: `include` is inherited (`include.workspace = true`). A publishable crate "
+        "must carry its OWN allowlist — the packaged file set is per-crate, and an inherited "
+        "one cannot be right for every member."
+    )
+elif not isinstance(include, list):
+    errors.append(f"{name}: `include` is {type(include).__name__}, expected a list of strings")
+elif not include:
+    errors.append(f"{name}: `include` is empty — it would package nothing")
+else:
+    for entry in include:
+        if not isinstance(entry, str):
+            errors.append(f"{name}: include entry {entry!r} is not a string")
+    missing = [r for r in REQUIRED if r not in include]
+    if missing:
+        errors.append(
+            f"{name}: `include` does not list {', '.join(missing)}. Membership is LITERAL — "
+            "a wildcard such as \"**/*\" is deliberately NOT accepted, because it would "
+            "'cover' these files while reinstating exactly the moon.yml leak Check 2b exists "
+            "to catch. Add the exact strings."
+        )
+
+if errors:
+    print("Check 1d FAILED\n  - " + "\n  - ".join(errors), file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 # Guard-the-guard (SMA-542): a new check's own CALL SITE is what goes unguarded. The
 # fixture rows below exercise this function; only this assertion covers its INVOCATION in
 # the workflow, and repo:actionlint's equivalent machinery is keyed on ci.yml alone.
@@ -655,6 +716,36 @@ PY
   _expect_rc 2 "Check 1c (malformed TOML is infra, not a repo defect)" \
     assert_lint_table "$tmp/does-not-exist.toml"
 
+  # --- Check 1d fixtures ---------------------------------------------------------
+  printf '[package]\nname = "f"\n' >"$tmp/inc-absent.toml"
+  _expect_rc 1 "Check 1d (no include key)" \
+    assert_include_allowlist "$tmp/inc-absent.toml"
+
+  printf '[package]\nname = "f"\ninclude = []\n' >"$tmp/inc-empty.toml"
+  _expect_rc 1 "Check 1d (empty include)" \
+    assert_include_allowlist "$tmp/inc-empty.toml"
+
+  printf '[package]\nname = "f"\n[package.include]\nworkspace = true\n' >"$tmp/inc-inherit.toml"
+  _expect_rc 1 "Check 1d (include.workspace = true is not an allowlist)" \
+    assert_include_allowlist "$tmp/inc-inherit.toml"
+
+  printf '[package]\nname = "f"\ninclude = ["src/**/*.rs", "Cargo.toml", "README.md"]\n' \
+    >"$tmp/inc-no-license.toml"
+  _expect_rc 1 "Check 1d (include omits LICENSE)" \
+    assert_include_allowlist "$tmp/inc-no-license.toml"
+
+  printf '[package]\nname = "f"\ninclude = ["**/*"]\n' >"$tmp/inc-wildcard.toml"
+  _expect_rc 1 "Check 1d (a wildcard is not literal membership)" \
+    assert_include_allowlist "$tmp/inc-wildcard.toml"
+
+  printf '[package]\nname = "f"\ninclude = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE"]\n' \
+    >"$tmp/inc-good.toml"
+  _expect_rc 0 "Check 1d (proper allowlist — passes)" \
+    assert_include_allowlist "$tmp/inc-good.toml"
+
+  _expect_rc 2 "Check 1d (malformed TOML is infra, not a repo defect)" \
+    assert_include_allowlist "$tmp/does-not-exist.toml"
+
   # Check 2b — a listing missing LICENSE, and one containing moon.yml.
   printf 'Cargo.toml\nREADME.md\nsrc/lib.rs\n' >"$tmp/missing-license.txt"
   _expect_rc 1 "Check 2b (LICENSE not packaged)" \
@@ -762,6 +853,8 @@ main() {
   while IFS=$'\t' read -r -u 3 name dir; do
     [ -n "$name" ] || continue
     status=0; assert_lint_table "$dir/Cargo.toml" || status=$?
+    [ "$status" -eq 0 ] || exit "$status"
+    status=0; assert_include_allowlist "$dir/Cargo.toml" || status=$?
     [ "$status" -eq 0 ] || exit "$status"
     check_package "$name" "$dir"
   done 3<<<"$publishable"
