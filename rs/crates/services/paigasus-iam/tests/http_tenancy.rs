@@ -266,3 +266,41 @@ async fn create_organization_seeds_an_org_admin_owner_grant_for_the_creating_pri
     assert_eq!(owner_grant.principal, principal);
     assert_eq!(owner_grant.linked_policy_id, format!("grant:{}", owner_grant.id));
 }
+
+/// SMA-586 D5.1, end-to-end on REAL routes: a malformed uuid path segment answers inside the
+/// `{"error":{code,message}}` envelope, naming the field the segment actually stands for.
+///
+/// The extractor's own unit tests build a synthetic `Router::new().route("/x/{id}", …)`, which
+/// proves the extractor but NOT the handler-to-marker wiring — a handler carrying the wrong
+/// marker is invisible to a synthetic route. That is exactly how the `{sa}`-segment mis-naming
+/// fixed in round 2 survived the whole suite. These cases drive the real merged `router(...)`,
+/// so each assertion pins one live route's marker choice.
+#[tokio::test]
+async fn a_malformed_uuid_path_segment_answers_in_the_error_envelope() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("path-user", Some("path@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &token).await;
+
+    // (route, expected field) — one per distinct `PathField` marker reachable on this router.
+    let cases = [
+        ("GET", "/v1/organizations/not-a-uuid", "organization_id"),
+        ("GET", "/v1/organizations/not-a-uuid/teams", "organization_id"),
+        ("GET", "/v1/teams/not-a-uuid", "team_id"),
+        ("GET", "/v1/projects/not-a-uuid", "project_id"),
+        ("DELETE", "/v1/memberships/not-a-uuid", "membership_id"),
+    ];
+    for (method, uri, field) in cases {
+        let (status, err) = send(&app, method, uri, None, Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {uri}: {err}");
+        assert_eq!(err["error"]["code"], "invalid-uuid", "{method} {uri}: {err}");
+        assert_eq!(err["error"]["message"], format!("{field} must be a uuid"), "{method} {uri}: {err}");
+    }
+
+    // A well-formed uuid on the same route still reaches the handler (a 404, not a 400) — so
+    // the assertions above are about the SEGMENT's shape, not about the route being broken.
+    let (status, err) = send(&app, "GET", &format!("/v1/organizations/{}", Uuid::nil()), None, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{err}");
+}
