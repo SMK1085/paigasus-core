@@ -54,10 +54,10 @@ Review finding **B1** — the largest gap in the first draft. `paigasus-proto` d
 - `rs/Cargo.toml:136` — *"PUBLISH ORDER (SMA-388): this crate must publish BEFORE paigasus-proto, which depends on it."*
 - `rs/crates/libs/paigasus-proto/Cargo.toml:10-11` — *"paigasus-proto-derive must publish FIRST."*
 
-So the publishable set is **three** crates, not two (the diagram below was already right; the
-miscount here came from counting the kernel *version group*'s four members — `paigasus-kernel`
-plus its three binding crates — rather than the publishable set, which is `paigasus-kernel`
-alone):
+So the publishable set is **three** crates — corrected from the "four" this line claimed until
+SMA-577 (the diagram below was already right; the miscount came from counting the kernel
+*version group*'s four members — `paigasus-kernel` plus its three binding crates — rather than
+the publishable set, which from that group is `paigasus-kernel` alone):
 
 ```
 paigasus-proto-derive ──▶ paigasus-proto      (proto family, ordered)
