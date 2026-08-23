@@ -1,16 +1,32 @@
 [package]
 name = "paigasus-proto"
+# The 0.1.0 floor (ADR-0011 S3) lands in SMA-577's atomic flip; release-plz cuts every tag.
 version = "0.0.0"
+description = "Generated protobuf message types and tonic gRPC service stubs for Paigasus."
+repository = "https://github.com/SMK1085/paigasus-core"
+homepage = "https://github.com/SMK1085/paigasus-core#readme"
+readme = "README.md"
+keywords = ["paigasus", "protobuf", "grpc", "tonic", "prost"]
+categories = ["network-programming", "encoding"]
+# ALLOWLIST, not a denylist. Cargo's default include is "every non-ignored file in the
+# package dir", which swept this monorepo's moon.yml into the tarball. tests/ is kept
+# deliberately: a vendoring consumer can run the suite, and auditable_derive_drift.rs
+# parses src/generated/** which ships too. CHANGELOG.md is excluded, matching
+# paigasus-kernel — release-plz writes one at release time and it does not ship.
+include = ["src/**/*.rs", "tests/**/*.rs", "Cargo.toml", "README.md", "LICENSE"]
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-# TODO(SMA-388): flip publish = true + choose a real 0.x version once generated
-# code lands (paigasus-proto is crates.io-bound per the open-core release strategy).
-# paigasus-proto-derive must publish FIRST — this crate depends on it. And note
+# PUBLISH ORDER: paigasus-proto-derive must publish FIRST — this crate depends on it.
+# repo:publish-metadata expresses that as a publish GROUP (a connected component of the
+# in-set dependency graph), running one `cargo publish --dry-run -p derive -p proto`.
+#
 # AuditableExample's derived Auditable impl is public API as of SMA-438 (not cfg(test), a
 # deliberate reversal of an SMA-425 decision — spec D8), so it becomes semver-locked once
-# this crate publishes.
+# this crate publishes. ACCEPTED deliberately in SMA-577: it embeds AuditMetadata, which is
+# already public in the generated code, so the fixture was never the binding constraint on
+# this crate's semver surface — the domain type it wraps is.
 publish = false
 
 [dependencies]
@@ -30,5 +46,14 @@ paigasus-proto-derive.workspace = true
 # the several legal spellings of a cross-package type reference.
 syn.workspace = true
 
-[lints]
-workspace = true
+# NOT `workspace = true`. Cargo INLINES the resolved lint table into the published
+# manifest, and docs.rs builds a published crate as the ROOT package on nightly, where
+# cargo's `--cap-lints allow` does not apply. Inheriting the workspace's
+# `warnings = "deny"` would let the first new rustc warning silently kill docs.rs builds
+# of a released crate. CI strictness is unaffected: the Moon `lint` task passes
+# `-D warnings` explicitly. Asserted by repo:publish-metadata Check 1c.
+[lints.rust]
+warnings = "warn"
+
+[lints.clippy]
+all = "warn"
