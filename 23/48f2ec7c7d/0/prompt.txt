@@ -78,3 +78,12 @@ Out of scope (deferred): the "seven routes" vs measured-14 `axum::Json` envelope
 ---
 
 go ahead
+
+---
+
+<task-notification>
+<task-id>bhudmyhc0</task-id>
+<summary>Monitor event: "PR 164: moon ci and CodeRabbit review outcomes"</summary>
+<event>CodeRabbit: pass — Review completed</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
