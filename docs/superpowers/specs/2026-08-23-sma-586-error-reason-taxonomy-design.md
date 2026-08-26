@@ -192,7 +192,7 @@ matched the `Json(body):` binding form and missed `Json(b):`. Corrected 2026-08-
 final review flagged the discrepancy.)*
 
 **It is deliberately NOT fixed here** (see Out of scope). Closing it changes the status code and
-body shape of seven public endpoints, which no acceptance criterion of this ticket asks for and
+body shape of fourteen public endpoints, which no acceptance criterion of this ticket asks for and
 which deserves its own review — the same reasoning that defers the HTTP `field` key. AC-1's
 "malformed timestamp" is already satisfied on both transports by the query-param surfaces
 (`from`/`to`, `parked_from`/`parked_to`), which do yield `invalid-timestamp`. The divergence
