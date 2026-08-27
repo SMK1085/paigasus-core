@@ -124,3 +124,19 @@ would otherwise lose every parameter after it — a fail-open. The consequence i
 span *also* containing such a parameter, the cut is skipped and the return type stays in scope,
 which can only produce a false **positive** (a red on correct code). Failing that way round is the
 correct trade, and the self-test pins both branches.
+
+**L7 — `_FN` now recognises raw identifiers and macro-template names, and an unrecognisable `fn`
+token aborts rather than being skipped.** Task 7's review found that `_FN` required
+`[A-Za-z_]` immediately after `fn`, so a raw identifier (`fn r#type(body: Json<X>)`) was not
+recognised as a function at all — and the branch handling a matched `fn` whose `(` could not be
+found did a bare `continue`, skipping it silently. Both contradicted `parameter_spans`' own
+docstring ("must abort the gate loudly, never pass quietly"). Measured impact at the time was
+zero (339 `fn` tokens produced 339 parsed spans), but a raw identifier is already live in the
+scanned tree — `pub r#type` in
+[`paigasus-gateway/src/adapters/http/error.rs:42`](../../rs/crates/services/paigasus-gateway/src/adapters/http/error.rs) —
+so the shape is not hypothetical, even though that particular occurrence is a struct field, not a
+`fn` name. `_FN` now matches `fn (?:r#)?name`
+with `name` also allowing a leading `$` (a `macro_rules!` template parameter), and a matched `fn`
+token with no following `(` now raises `InfraError` instead of being silently skipped: no
+legitimate Rust shape reaches that branch, since every `fn <ident>` this regex can match is a
+declaration, and every declaration — even a zero-argument one — is followed by `(`.

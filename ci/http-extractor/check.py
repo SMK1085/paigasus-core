@@ -173,7 +173,7 @@ def strip_noise(text):
 # Signature parsing
 # --------------------------------------------------------------------------------------------
 
-_FN = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)")
+_FN = re.compile(r"\bfn\s+(?:r#)?([A-Za-z_$][A-Za-z0-9_]*)")
 
 
 def _skip_generics(text, i):
@@ -236,8 +236,16 @@ def parameter_spans(text, origin="<fixture>"):
         while i < n and text[i].isspace():
             i += 1
         if i >= n or text[i] != "(":
-            # Not a callable declaration we can read (e.g. `fn` used somewhere unexpected).
-            continue
+            # `_FN` only matches `fn <ident>` (or `fn r#<ident>`) with whitespace between them, which
+            # in well-formed Rust is always a function declaration — and every function declaration,
+            # including a zero-argument one, is followed by `(`. No fixture or scanned file has ever
+            # exercised a legitimate `fn <ident>` with no following `(`, so this is not a shape to
+            # skip past — it is the parser failing to read a signature it claims to recognise.
+            # Per this function's own docstring: abort the gate loudly, never pass quietly.
+            raise InfraError(
+                f"{origin}: `fn {m.group(1)}` at offset {m.start()} is not followed by `(` — "
+                "the parser cannot read this signature, so it must not report it clean"
+            )
         depth, j = 0, i
         while j < n:
             if text[j] == "(":
@@ -531,6 +539,16 @@ FIXTURES = (
         "async fn run<F: Fn() -> u32>(State(s): State<AppState>, Json(b): Json<Body>) -> Response {",
         [("run", "Json")],
     ),
+    (
+        "planted violation — a RAW IDENTIFIER function name (`fn r#type(...)`) must still be caught",
+        "async fn r#type(State(s): State<AppState>, Json(b): Json<TypeBody>) -> Response {",
+        [("type", "Json")],
+    ),
+    (
+        "planted violation — a MACRO-TEMPLATE function name (`fn $n(...)`) must still be caught",
+        "async fn $n(State(s): State<AppState>, Json(b): Json<Body>) -> Response {",
+        [("$n", "Json")],
+    ),
 )
 
 
@@ -570,6 +588,19 @@ def self_test():
         pass
     else:
         print("  FAIL [parameter_spans] an unbalanced signature did not raise InfraError", file=sys.stderr)
+        rc = 1
+
+    # A `fn <ident>` token with no following `(` must abort loudly too — the bare `continue` this
+    # used to be (SMA-587 Task 8 review) silently skipped it instead. There is no known legitimate
+    # Rust shape that reaches this branch; a matched `fn <ident>` is always a declaration and every
+    # declaration has a parameter list, even an empty `()`.
+    try:
+        list(parameter_spans("fn no_parens_here", "<fixture>"))
+    except InfraError:
+        pass
+    else:
+        print("  FAIL [parameter_spans] `fn <ident>` with no following `(` did not raise InfraError",
+              file=sys.stderr)
         rc = 1
 
     # `strip_noise` must not mistake a lifetime for a char literal and swallow the file.
