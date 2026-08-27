@@ -29,6 +29,7 @@ use axum::routing::get;
 use serde_json::json;
 use tonic_health::ServingStatus;
 use tonic_health::server::HealthReporter;
+use tower::{Layer, ServiceExt};
 
 use crate::adapters::http::AppState;
 
@@ -112,13 +113,14 @@ impl BootSlot {
 /// `metrics` is the same same-port `/metrics` router `main.rs` used to hand `serve_http` — `None`
 /// when metrics are disabled or served on their own `metrics.addr`.
 pub fn boot_http_router(slot: BootSlot, metrics: Option<Router>) -> Router {
-    let deferred = Router::new()
-        .fallback(deferred_fallback)
-        .with_state(slot.clone())
-        // SMA-504: the deferred 503 is precisely the response a caller wants to retry, so it
-        // carries request/correlation ids. `/healthz` and `/readyz` below are merged OUTSIDE this
-        // layer — `tests/correlation_headers.rs` pins that they stay header-free.
-        .layer(paigasus_observability::CorrelationLayer);
+    // NOT layered with `CorrelationLayer` here (SMA-571 review round 1): the delegated arm of
+    // `deferred_fallback` hands off to `serving.http`, which already carries its OWN
+    // `CorrelationLayer` inside `app_routes` (`http/mod.rs`). Layering it again here would
+    // double-apply it on every non-probe request for the process's entire post-migration
+    // lifetime — see `deferred_fallback`'s doc for why that is a real bug, not a harmless
+    // duplicate. The empty-slot 503 gets its OWN single application, scoped to just that arm,
+    // inside `deferred_fallback`.
+    let deferred = Router::new().fallback(deferred_fallback).with_state(slot.clone());
     let mut app = Router::new().route("/healthz", get(healthz)).route("/readyz", get(readyz)).with_state(slot).fallback_service(deferred);
     if let Some(metrics) = metrics {
         app = app.merge(metrics);
@@ -141,14 +143,36 @@ async fn readyz(State(slot): State<BootSlot>) -> impl IntoResponse {
 }
 
 /// Every non-probe path while the slot is empty; delegation once it is full.
+///
+/// **Exactly one `CorrelationLayer` application per arm, deliberately asymmetric** (SMA-571
+/// review round 1): the `None` arm has no layer of its own anywhere else, so it gets one HERE,
+/// scoped to just the bare 503 renderer via a one-off `tower::service_fn` run through `oneshot`.
+/// The `Some` arm hands off to `serving.http` — `traced_app_routes` → `app_routes` — which
+/// already applies `CorrelationLayer` inside `app_routes` (`http/mod.rs`); wrapping THIS
+/// function's whole body in a second layer (the original, wrong shape) would have double-applied
+/// it on that arm: `CorrelationLayer::call` mints a FRESH `request_id`/`correlation_id` and enters
+/// a nested `tokio::task_local!` scope every time it runs, and the two nested applications
+/// disagree — the handler/logs/audit trail observe the INNER (here: `app_routes`'s) ids, since
+/// nested `task_local!` scopes shadow, but the outer layer unconditionally overwrites the
+/// response headers with ITS OWN ids on the way out. Net effect: the id a caller receives on the
+/// response would never match the id that was actually logged, which is exactly the
+/// cross-service traceability guarantee (SMA-504) this header exists to provide.
 async fn deferred_fallback(State(slot): State<BootSlot>, req: axum::extract::Request) -> axum::response::Response {
     match slot.get() {
-        None => (StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({ "status": "migrating" }))).into_response(),
+        None => {
+            let svc = paigasus_observability::CorrelationLayer.layer(tower::service_fn(migrating_response));
+            svc.oneshot(req).await.expect("migrating_response is Infallible")
+        }
         // `OnceLock::get` is taken ONCE here, at dispatch — so a request in flight across an
         // `install` completes against the value it started with (AC 4's third clause).
-        Some(serving) => {
-            use tower::ServiceExt;
-            serving.http.clone().oneshot(req).await.into_response()
-        }
+        // Unlayered: `serving.http` already carries its own `CorrelationLayer` — see doc above.
+        Some(serving) => serving.http.clone().oneshot(req).await.into_response(),
     }
+}
+
+/// The bare empty-slot 503 body as a `tower::Service` fn, so [`deferred_fallback`]'s `None` arm
+/// can run it through exactly one `CorrelationLayer` application via `oneshot` — see that
+/// function's doc.
+async fn migrating_response(_req: axum::extract::Request) -> Result<axum::response::Response, std::convert::Infallible> {
+    Ok((StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({ "status": "migrating" }))).into_response())
 }
