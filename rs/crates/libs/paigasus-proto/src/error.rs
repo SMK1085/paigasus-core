@@ -210,6 +210,8 @@ mod tests {
         "request-too-large",
         "missing-auth-context",
         "capability-disabled",
+        "unsupported-content-type",
+        "invalid-request-schema",
     ];
 
     #[test]
@@ -221,7 +223,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 52, "the registry should hold 52 reasons");
+        assert_eq!(actual.len(), 54, "the registry should hold 54 reasons");
     }
 
     #[test]
