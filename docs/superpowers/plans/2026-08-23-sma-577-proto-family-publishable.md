@@ -81,6 +81,20 @@ elif lints.get("workspace") is True:
         "workspace's `warnings = \"deny\"` would let the first new rustc warning silently "
         "kill docs.rs builds. Declare a per-crate table with `warnings = \"warn\"`."
     )
+elif not any(
+    isinstance(v, dict) and v for k, v in lints.items() if k != "workspace"
+):
+    # ADDED DURING PR REVIEW. Two shapes reach here, and both used to fall through to the
+    # level checks below, find no rust/clippy key, and PASS: `[lints] workspace = false`
+    # (valid TOML, equivalent to omitting the key — inherits nothing AND declares nothing),
+    # and a present-but-EMPTY `[lints.rust]` (satisfies "has a local table" while setting no
+    # lint). Requiring a NON-EMPTY local namespace covers both.
+    errors.append(
+        f"{name}: `[lints]` declares no NON-EMPTY local namespace. The rule is discipline, "
+        "not only hazard-avoidance: declare a per-crate `[lints.rust]` / `[lints.clippy]` "
+        'table that actually sets `warnings = "warn"`, so a crate cannot drift into '
+        "workspace inheritance by deletion."
+    )
 else:
     # Both TOML spellings: the string form `warnings = "deny"` and the table form
     # `warnings = { level = "deny", priority = -1 }`. Checking only the string form would
@@ -278,6 +292,16 @@ else:
     for entry in include:
         if not isinstance(entry, str):
             errors.append(f"{name}: include entry {entry!r} is not a string")
+    # ADDED DURING PR REVIEW. Literal membership rejects the BARE `["**/*"]` shape, but a
+    # catch-all listed ALONGSIDE the required literals satisfies membership while packaging
+    # the whole directory — reinstating the exact moon.yml leak Check 2b exists to catch.
+    catch_alls = [e for e in include if isinstance(e, str) and e in ("**/*", "**", "*")]
+    if catch_alls:
+        errors.append(
+            f"{name}: `include` contains the catch-all {catch_alls[0]!r}, which packages the "
+            "whole crate directory and makes the rest of the allowlist decorative. Enumerate "
+            "what belongs — an allowlist that matches everything is not an allowlist."
+        )
     missing = [r for r in REQUIRED if r not in include]
     if missing:
         errors.append(
