@@ -558,6 +558,20 @@ pub async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>, to
     (status, value)
 }
 
+/// Drives one request with a RAW body through the router and returns `(status, json body)` —
+/// for tests that must send bytes `serde_json::Value` cannot represent (malformed JSON), or a
+/// deliberate wrong `Content-Type`. `send` cannot: it serializes a `Value`, which is always
+/// valid JSON. An empty response body yields `Value::Null`.
+#[allow(dead_code)]
+pub async fn send_bytes(app: &Router, method: &str, uri: &str, content_type: Option<&str>, body: &[u8], token: Option<&str>) -> (StatusCode, Value) {
+    let authorization = token.map(|token| format!("Bearer {token}"));
+    let response = send_raw_parts(app, method, uri, authorization.as_deref(), content_type, Some(body.to_vec())).await;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
+    (status, value)
+}
+
 /// Attaches an `authorization: Bearer <token>` metadata entry to a gRPC request — the gRPC
 /// surface's bearer credential (Task 12 enforcement), mirroring the HTTP `Authorization`
 /// header the axum middleware reads. Protected `TenancyService` calls carry it; the exempt

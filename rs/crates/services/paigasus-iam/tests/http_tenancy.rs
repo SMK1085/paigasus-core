@@ -304,3 +304,63 @@ async fn a_malformed_uuid_path_segment_answers_in_the_error_envelope() {
     let (status, err) = send(&app, "GET", &format!("/v1/organizations/{}", Uuid::nil()), None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{err}");
 }
+
+/// SMA-587, end-to-end on REAL routes: a refused request body answers inside the
+/// `{"error":{code,message}}` envelope with a kind-specific reason.
+///
+/// Driven against the merged `router(...)` rather than a synthetic one for the reason SMA-586
+/// learned expensively: a synthetic route proves the EXTRACTOR, never the handler wiring, and
+/// that is exactly how a mis-named `{sa}` path segment survived its whole suite. Each row here
+/// pins one live route's extractor choice.
+#[tokio::test]
+async fn a_refused_body_answers_in_the_error_envelope() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("body-user", Some("body@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &token).await;
+
+    // Seed a real org/team/project so the rename routes reach their extractor rather than 404.
+    let (_, created) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "envelope", "name": "Envelope"})), Some(token.as_str())).await;
+    let org_id = created["organization"]["prn"].as_str().expect("organization.prn").rsplit('/').next().unwrap().to_string();
+    let team_id = created["default_team"]["prn"].as_str().expect("default_team.prn").rsplit('/').next().unwrap().to_string();
+    let (_, project) = send(&app, "POST", &format!("/v1/teams/{team_id}/projects"), Some(json!({"slug": "p1", "name": "P1"})), Some(token.as_str())).await;
+    let project_id = project["prn"].as_str().expect("project.prn").rsplit('/').next().unwrap().to_string();
+
+    // (method, uri) for every tenancy route that takes a body.
+    let routes: Vec<(&str, String)> = vec![
+        ("POST", "/v1/organizations".to_string()),
+        ("PATCH", format!("/v1/organizations/{org_id}")),
+        ("POST", format!("/v1/organizations/{org_id}/teams")),
+        ("PATCH", format!("/v1/teams/{team_id}")),
+        ("POST", format!("/v1/teams/{team_id}/projects")),
+        ("PATCH", format!("/v1/projects/{project_id}")),
+    ];
+
+    for (method, uri) in &routes {
+        // 400: not JSON at all.
+        let (status, err) = support::send_bytes(&app, method, uri, Some("application/json"), b"{not json", Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {uri}: {err}");
+        assert_eq!(err["error"]["code"], "invalid-request-body", "{method} {uri}: {err}");
+
+        // 422: valid JSON, wrong shape. `RenameBody`'s fields are all `Option<String>` with no
+        // `deny_unknown_fields`, so `{}` would DESERIALIZE and reach the handler — a type
+        // mismatch is what actually reaches `JsonDataError` on the PATCH routes.
+        let (status, err) = support::send_bytes(&app, method, uri, Some("application/json"), br#"{"slug": 1, "name": 2}"#, Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{method} {uri}: {err}");
+        assert_eq!(err["error"]["code"], "invalid-request-schema", "{method} {uri}: {err}");
+    }
+
+    // 415 is an extractor-level fact, refused before any handler-specific code runs, so it is
+    // asserted ONCE here rather than per route (the `json.rs` unit test covers the extractor;
+    // this proves it is reachable on a real route at all).
+    let (status, err) = support::send_bytes(&app, "POST", "/v1/organizations", Some("text/plain"), b"{}", Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{err}");
+    assert_eq!(err["error"]["code"], "unsupported-content-type", "{err}");
+
+    // A well-formed body on the same route still reaches the handler — so every row above is an
+    // assertion about the BODY's shape, not about the route being broken.
+    let (status, _) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "still-works", "name": "Still Works"})), Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED);
+}
