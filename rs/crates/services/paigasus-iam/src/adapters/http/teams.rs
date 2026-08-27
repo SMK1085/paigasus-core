@@ -76,7 +76,12 @@ async fn restore_team(State(s): State<AppState>, Extension(ctx): Extension<AuthC
     Ok(Json(view.into()))
 }
 
-async fn create_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<TeamId>, EnvelopeJson(b): EnvelopeJson<CreateNodeBody>) -> Result<(StatusCode, Json<ProjectDto>), ApiError> {
+async fn create_project(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    path: UuidPath<TeamId>,
+    EnvelopeJson(b): EnvelopeJson<CreateNodeBody>,
+) -> Result<(StatusCode, Json<ProjectDto>), ApiError> {
     let team_id = path.id;
     if s.enforce_tenancy {
         let team_view = s.teams.get(team_id).await?;

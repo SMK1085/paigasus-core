@@ -61,7 +61,11 @@ fn service_account_id(uuid: Uuid) -> PrincipalId {
     PrincipalId::from_prn(Prn::build("iam", "", None, "principal", uuid).expect("static principal prn parts are valid"))
 }
 
-async fn create(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeJson(body): EnvelopeJson<CreateServiceAccountBody>) -> Result<(StatusCode, Json<ServiceAccountDto>), ApiError> {
+async fn create(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    EnvelopeJson(body): EnvelopeJson<CreateServiceAccountBody>,
+) -> Result<(StatusCode, Json<ServiceAccountDto>), ApiError> {
     let actor = actor_prn(&ctx);
     let owner = parse_node_prn(&body.owner_prn)?;
     let sa = s.service_accounts.create(&actor, owner, &body.name).await?;

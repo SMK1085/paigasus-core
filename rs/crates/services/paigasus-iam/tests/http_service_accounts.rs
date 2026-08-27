@@ -288,3 +288,67 @@ async fn each_segment_of_the_api_key_route_names_its_own_field() {
         assert_eq!(err["error"]["message"], format!("{field} must be a uuid"), "{method} {uri}: {err}");
     }
 }
+
+/// HTTP-body-envelope coverage for `POST /v1/service-accounts` and
+/// `POST /v1/service-accounts/{sa}/api-keys` (SMA-587 Task 5), mirroring
+/// `tests/http_tenancy.rs::a_refused_body_answers_in_the_error_envelope`'s shape. The api-key
+/// `issue` route lives in `api_keys::router()`, mounted only when `caps.apikeys_management` —
+/// `test_config`'s `ApiKeyConfig::with_test_pepper` inherits `ApiKeyConfig::default()`'s
+/// `management_enabled: true`, so plain `app_with_state` already mounts it (this file's other
+/// tests exercise the route the same way, confirming the capability is on by default here).
+#[tokio::test]
+async fn a_refused_body_answers_in_the_error_envelope() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("envelope-sa-admin", Some("envelope-sa-admin@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &token).await;
+    let owner = seed_org_ref(&state.db).await;
+
+    // A real service account, so the api-key route's `{sa}` path segment resolves and its
+    // body extractor is actually reached rather than 404ing on the path first.
+    let (status, created) = send(
+        &app,
+        "POST",
+        "/v1/service-accounts",
+        Some(json!({ "owner_prn": owner.canonical(), "name": "envelope-bot" })),
+        Some(token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let sa_id = created["prn"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+
+    // (method, uri, malformed-schema body) for both service-account routes that take a body.
+    let cases: Vec<(&str, String, &[u8])> = vec![
+        ("POST", "/v1/service-accounts".to_string(), br#"{"owner_prn": 1, "name": 2}"#),
+        ("POST", format!("/v1/service-accounts/{sa_id}/api-keys"), br#"{"scope_prn": 1}"#),
+    ];
+
+    for (method, uri, schema_body) in &cases {
+        // 400: not JSON at all.
+        let (status, err) = support::send_bytes(&app, method, uri, Some("application/json"), b"{not json", Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {uri}: {err}");
+        assert_eq!(err["error"]["code"], "invalid-request-body", "{method} {uri}: {err}");
+
+        // 422: valid JSON, wrong shape. `CreateServiceAccountBody`'s fields are both required
+        // `String`s; `IssueApiKeyBody::scope_prn` is `Option<String>`, but a number in that slot
+        // is still a genuine type mismatch (an `Option<String>` accepts `null` or a string, not
+        // a number) rather than the omitted-field case `IssueApiKeyBody`'s doc calls out as
+        // semantically-required-but-syntactically-optional.
+        let (status, err) = support::send_bytes(&app, method, uri, Some("application/json"), schema_body, Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{method} {uri}: {err}");
+        assert_eq!(err["error"]["code"], "invalid-request-schema", "{method} {uri}: {err}");
+    }
+
+    // A well-formed body on the same route still reaches the handler.
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/v1/service-accounts",
+        Some(json!({ "owner_prn": owner.canonical(), "name": "still-works-bot" })),
+        Some(token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}

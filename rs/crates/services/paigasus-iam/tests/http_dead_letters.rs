@@ -214,3 +214,41 @@ async fn dead_letter_routes_require_bearer_through_the_real_composed_router() {
         assert_eq!(body["error"]["code"], "invalid-token", "route {method} {path}: unexpected body {body}");
     }
 }
+
+/// HTTP-body-envelope coverage for `POST /v1/outbox/dead-letters/replay` (SMA-587 Task 5),
+/// mirroring `tests/http_tenancy.rs::a_refused_body_answers_in_the_error_envelope`'s shape.
+#[tokio::test]
+async fn a_refused_body_answers_in_the_error_envelope() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db.clone()).await;
+    let token = idp.bearer("envelope-dlq-admin", Some("envelope-dlq-admin@example.com"), "paigasus", 3600);
+    support::provision_platform_admin(&state, &token).await;
+
+    // 400: not JSON at all.
+    let (status, err) = support::send_bytes(&app, "POST", "/v1/outbox/dead-letters/replay", Some("application/json"), b"{not json", Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-request-body", "{err}");
+
+    // 422: valid JSON, wrong shape. `BulkReplayBody`'s fields are all `Option`, so `{}` alone
+    // would DESERIALIZE and reach the handler (see
+    // `bulk_replay_without_max_rows_is_400_invalid_bulk_replay` above, which gets a DIFFERENT,
+    // application-level 400 for exactly that body) — `max_rows` is `Option<u64>`, so a STRING
+    // there is the genuine type mismatch that reaches `JsonDataError`.
+    let (status, err) = support::send_bytes(
+        &app,
+        "POST",
+        "/v1/outbox/dead-letters/replay",
+        Some("application/json"),
+        br#"{"max_rows": "not-a-number"}"#,
+        Some(token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-request-schema", "{err}");
+
+    // A well-formed body on the same route still reaches the handler.
+    let (status, body) = send(&app, "POST", "/v1/outbox/dead-letters/replay", Some(json!({"max_rows": 10})), Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
