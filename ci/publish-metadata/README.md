@@ -49,6 +49,47 @@ would pass it vacuously. Membership is **literal**, so `include = ["**/*"]` fail
 a glob that happens to cover both required files would also reinstate the `moon.yml` leak
 Check 2b catches, defeating the point of an allowlist.
 
+**1d's denylist is best-effort and cannot be completed** — see Check 2c, which is what
+actually holds the invariant.
+
+### Check 2c — the behavioural catch-all detector
+
+1d rejects catch-all `include` entries by **spelling**, and that approach is unfixable in
+principle. Measured against cargo 1.95.0 with a probe crate carrying a private file, all of
+these package the whole crate root when listed beside the required literals:
+
+```text
+/**    /*    **/    /    **/**    */**    */*    ?*    [a-z]*    **/*.*
+```
+
+`./**` and a scoped `src/**/*.rs` do not. `/*` is the counter-intuitive one — cargo applies
+it recursively, unlike a strict gitignore reading. Any glob that happens to match everything
+belongs on that list, so the set is unbounded and a denylist is the wrong tool.
+
+Check 2c enforces the same rule by outcome: **if no tracked file was held back, the include
+matched everything and is a catch-all whatever it is spelled.** That holds for a spelling
+nobody has thought of yet.
+
+Two details matter:
+
+- It is a **subset** test (`tracked ⊆ packaged`), not equality. Equality was the first
+  implementation and was wrong: a catch-all can also sweep *untracked* files in, making the
+  packaged set a strict superset while every tracked file still ships. A probe under
+  `--allow-dirty` pulled `.git/**` into the tarball and the equality test passed a genuine
+  catch-all. There is a negative-control row pinning that shape.
+- It compares against **git-tracked** files, not `find` output. Untracked scratch in a
+  working tree would inflate the set and mask a catch-all, and a gate's assertion must be
+  about the committed tree.
+
+2c is what makes 1d's incompleteness tolerable rather than load-bearing. 2b remains narrower
+still: its `FORBIDDEN_PACKAGED` holds one entry (`moon.yml`), so a crate directory containing
+no forbidden file gets nothing from it — which is precisely the gap 2c covers.
+
+**Failure direction:** a crate whose every tracked file is legitimately publishable would
+false-red here. That is deliberate, and matches the repo's standing preference that a gate be
+allowed to false-red but never to absorb a bypass silently. Today every crate directory
+carries a `moon.yml` that must not ship, so the case does not arise.
+
 ### Check 2 — one dry-run per publish group
 
 Check 2 now runs `cargo publish --dry-run` once per **publish group**: a connected component

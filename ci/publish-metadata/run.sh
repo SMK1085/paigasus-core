@@ -31,6 +31,14 @@
 #            is on crates.io). The group is publishABLE, packages, and compiles with no
 #            unversioned path dependency OUTSIDE the group.
 #   Check 2b the packaged file list ships README.md + LICENSE and not moon.yml.
+#   Check 2c the packaged set does not contain EVERY tracked file in the crate dir. This is
+#            Check 1d's rule enforced BEHAVIOURALLY: 1d rejects catch-all `include` entries
+#            by spelling, and that list can never be complete — /**, /*, **/, /, **/**,
+#            */**, */*, ?*, [a-z]* and **/*.* were all MEASURED to package a crate's whole
+#            root, and any glob that happens to match everything joins them. If the allowlist
+#            held nothing back it matched everything, whatever it was spelled. Note this is a
+#            SUBSET test, not equality: a catch-all can also sweep untracked files in, making
+#            the packaged set a strict superset while every tracked file still ships (SMA-577).
 #   Check 3  while any publishable crate is at 0.0.0, rs/release-plz.toml must block its
 #            release. Releasing 0.0.0 permanently burns that version on crates.io.
 #   Check 4  .github/workflows/security-scan.yml still INVOKES the freshness check on a real,
@@ -593,8 +601,67 @@ CHECK2_INVOKED=()
 # Check 2b — the packaged file list. Per package: `cargo package --list` performs no build,
 # so it has no chicken-and-egg (verified: it succeeds for paigasus-proto with the derive
 # crate absent from crates.io).
+# Check 2c — the packaged set must not equal the crate's tracked file set.
+#
+# Check 1d rejects catch-all `include` entries by SPELLING, and that list can never be
+# complete: `**/*`, `**`, `*`, `/**`, `/*`, `**/`, `/`, `**/**`, `*/**`, `*/*`, `?*`,
+# `[a-z]*` and `**/*.*` were all MEASURED to package a crate's whole root, and any glob
+# that happens to match everything joins them. Enumerating spellings is the wrong tool.
+#
+# This is the same invariant checked BEHAVIOURALLY instead: if the include shipped every
+# tracked file, it matched everything, and it is a catch-all whatever it is spelled. That
+# holds for a spelling nobody has thought of yet.
+#
+# Takes BOTH listings as files so --negative-control drives the same code with synthetic
+# sets — there is no way to fixture a git-tracked directory cheaply.
+#
+# NOTE the failure direction. A crate whose tracked files are ALL legitimately publishable
+# would false-red here. That is deliberate and is the repo's standing preference (see
+# EXPECTED_SITE_COUNT's comment in ci/version-lockstep/run.sh): a gate that can only
+# false-red is safe, one that can silently absorb a bypass is not. Today every crate dir
+# carries a moon.yml that must never ship, so the sets cannot legitimately coincide.
+assert_not_catch_all() { # $1 packaged listing  $2 tracked listing  $3 package name
+  local packaged="$1" tracked="$2" pkg="$3"
+
+  if [ ! -r "$packaged" ] || [ ! -r "$tracked" ]; then
+    echo "FATAL: Check 2c cannot read its listings for $pkg" >&2
+    return 2
+  fi
+  # Non-vacuity: an empty tracked set would make the comparison meaningless and pass.
+  if [ ! -s "$tracked" ]; then
+    echo "FATAL: Check 2c got an EMPTY tracked-file set for $pkg — it would assert nothing" >&2
+    return 2
+  fi
+
+  # Cargo synthesizes these into every tarball; they are not crate sources and must not
+  # enter the comparison.
+  local pkg_norm
+  pkg_norm="$(grep -vxE 'Cargo\.lock|Cargo\.toml\.orig|\.cargo_vcs_info\.json' "$packaged" \
+    | LC_ALL=C sort -u)"
+  local trk_norm
+  trk_norm="$(LC_ALL=C sort -u "$tracked")"
+
+  # SUBSET, not equality. The invariant is "the allowlist excluded something", i.e. at
+  # least one tracked file did NOT ship. Equality was the first attempt and is WRONG: any
+  # extra entry in the tarball defeats it, and a catch-all readily produces extras (a probe
+  # under --allow-dirty swept .git/** in, so packaged was a strict SUPERSET of tracked and
+  # the equality test passed a genuine catch-all). Asking "was anything held back?" is
+  # immune to extras.
+  local excluded
+  excluded="$(LC_ALL=C comm -23 <(printf '%s\n' "$trk_norm") <(printf '%s\n' "$pkg_norm"))"
+
+  if [ -z "$excluded" ]; then
+    echo "Check 2c FAILED: $pkg packages EVERY tracked file in its directory — the" >&2
+    echo "  \`include\` list held nothing back, so it matched everything and is a catch-all" >&2
+    echo "  however it is spelled. Check 1d's denylist of literal catch-all patterns cannot" >&2
+    echo "  see a spelling it does not know (measured: /**, /*, **/, /, **/**, */**, */*," >&2
+    echo "  ?*, [a-z]* and **/*.* all package a crate's whole root). Enumerate what belongs." >&2
+    return 1
+  fi
+}
+
 check_package_list() { # $1 name  $2 manifest dir
-  local pkg="$1" pkg_dir="$2" dirty=() out listing status
+  local pkg="$1" pkg_dir="$2" dirty=() out listing tracked status
 
   if [ -z "${CI:-}" ] && [ -n "$(git -C "$REPO_ROOT" status --porcelain -- "$pkg_dir")" ]; then
     echo "publish-metadata: $pkg has uncommitted changes — adding --allow-dirty (local only)" >&2
@@ -611,6 +678,21 @@ check_package_list() { # $1 name  $2 manifest dir
   fi
   status=0
   assert_package_list "$listing" "$pkg" || status=$?
+  if [ "$status" -eq 0 ]; then
+    # Tracked files only, paths relative to the crate dir — the same shape cargo prints.
+    # Deliberately NOT `find`: untracked scratch would inflate the set and mask a
+    # catch-all, and a gate's assertion must be about the committed tree.
+    tracked="$(mktemp)"
+    # $pkg_dir is ABSOLUTE (metadata_checks prints os.path.dirname(manifest_path)), so it
+    # is passed to -C directly rather than joined onto REPO_ROOT.
+    if ! git -C "$pkg_dir" ls-files >"$tracked" 2>/dev/null; then
+      echo "FATAL: Check 2c could not list tracked files for $pkg" >&2
+      rm -f "$out" "$listing" "$tracked"
+      return 2
+    fi
+    assert_not_catch_all "$listing" "$tracked" "$pkg" || status=$?
+    rm -f "$tracked"
+  fi
   rm -f "$out" "$listing"
   return "$status"
 }
@@ -943,6 +1025,47 @@ PY
     >"$tmp/inc-scoped-glob.toml"
   _expect_rc 0 "Check 1d (scoped glob is not a catch-all — passes)" \
     assert_include_allowlist "$tmp/inc-scoped-glob.toml"
+
+  # --- Check 2c fixtures — the BEHAVIOURAL catch-all detector ----------------------
+  # 1d's denylist can never enumerate every glob that matches everything; 2c catches the
+  # outcome instead. These sets are synthetic because a git-tracked directory cannot be
+  # fixtured cheaply.
+  printf 'Cargo.toml\nREADME.md\nLICENSE\nmoon.yml\nsrc/lib.rs\n' >"$tmp/tracked.txt"
+
+  # Packaged == tracked: the include matched everything. Must red whatever it was spelled.
+  printf 'Cargo.toml\nREADME.md\nLICENSE\nmoon.yml\nsrc/lib.rs\n' >"$tmp/pkg-everything.txt"
+  _expect_rc 1 "Check 2c (packaged set equals the tracked set — a catch-all)" \
+    assert_not_catch_all "$tmp/pkg-everything.txt" "$tmp/tracked.txt" f
+
+  # Cargo's own synthesized entries must NOT make the sets differ — otherwise a real
+  # catch-all would slip through simply because the tarball carries Cargo.lock.
+  printf 'Cargo.lock\nCargo.toml\nCargo.toml.orig\n.cargo_vcs_info.json\nREADME.md\nLICENSE\nmoon.yml\nsrc/lib.rs\n' \
+    >"$tmp/pkg-everything-plus-generated.txt"
+  _expect_rc 1 "Check 2c (cargo-generated entries do not mask a catch-all)" \
+    assert_not_catch_all "$tmp/pkg-everything-plus-generated.txt" "$tmp/tracked.txt" f
+
+  # REGRESSION ROW. The first version of 2c compared the sets for EQUALITY and this shape
+  # slipped through: a catch-all that ALSO sweeps files outside the tracked set (measured —
+  # a probe under --allow-dirty pulled .git/** in) makes packaged a strict SUPERSET, so the
+  # sets are unequal while every tracked file still shipped. The subset test catches it.
+  printf 'Cargo.toml\nREADME.md\nLICENSE\nmoon.yml\nsrc/lib.rs\n.git/HEAD\n.git/index\nstray.tmp\n' \
+    >"$tmp/pkg-superset.txt"
+  _expect_rc 1 "Check 2c (catch-all that also sweeps extras — superset, not equal)" \
+    assert_not_catch_all "$tmp/pkg-superset.txt" "$tmp/tracked.txt" f
+
+  # A real allowlist excludes something — here moon.yml. Must pass.
+  printf 'Cargo.lock\nCargo.toml\nCargo.toml.orig\nREADME.md\nLICENSE\nsrc/lib.rs\n' \
+    >"$tmp/pkg-subset.txt"
+  _expect_rc 0 "Check 2c (a real allowlist excludes something — passes)" \
+    assert_not_catch_all "$tmp/pkg-subset.txt" "$tmp/tracked.txt" f
+
+  # Non-vacuity: an empty tracked set must be infrastructure, not a silent pass.
+  : >"$tmp/tracked-empty.txt"
+  _expect_rc 2 "Check 2c (empty tracked set is infra, not a pass)" \
+    assert_not_catch_all "$tmp/pkg-subset.txt" "$tmp/tracked-empty.txt" f
+
+  _expect_rc 2 "Check 2c (unreadable listing is infra)" \
+    assert_not_catch_all "$tmp/pkg-subset.txt" "$tmp/does-not-exist.txt" f
 
   printf '[package]\nname = "f"\ninclude = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE"]\n' \
     >"$tmp/inc-good.toml"
