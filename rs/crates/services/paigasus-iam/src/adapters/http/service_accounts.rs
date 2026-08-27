@@ -10,13 +10,13 @@
 //!
 //! **Path-id convention:** `{sa}` is the service account's PRINCIPAL uuid (the bare uuid
 //! inside its `PrincipalId`'s PRN, `resource_type = "principal"`) — mirrors
-//! `organizations.rs`'s `Path<Uuid>` convention for `{id}` (a tenancy node's bare uuid) rather
-//! than a raw PRN string in the path (which would need percent-encoding around its embedded
-//! `/`). `create`'s response DTO still carries the full canonical `prn` like every other
+//! `organizations.rs`'s convention for `{id}` (a tenancy node's bare uuid, extracted through
+//! `path::UuidPath` since SMA-586) rather than a raw PRN string in the path (which would need
+//! percent-encoding around its embedded `/`). `create`'s response DTO still carries the full canonical `prn` like every other
 //! `*Dto`, so a client threads the SAME id forward by taking the PRN's trailing `/`-segment —
 //! exactly the convention `tests/http_tenancy.rs` already uses for `ProjectDto`.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -27,6 +27,7 @@ use uuid::Uuid;
 use super::AppState;
 use super::dto::{CreateServiceAccountBody, ServiceAccountDto, ServiceAccountQuery};
 use super::error::ApiError;
+use super::path::{ServiceAccountId, UuidPath};
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
@@ -68,16 +69,16 @@ async fn create(State(s): State<AppState>, Extension(ctx): Extension<AuthContext
 
 async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Query(q): Query<ServiceAccountQuery>) -> Result<Json<Vec<ServiceAccountDto>>, ApiError> {
     let actor = actor_prn(&ctx);
-    let owner_prn = q.owner_prn.ok_or_else(|| TenancyError::InvalidPrn("owner_prn query parameter is required".to_string()))?;
+    let owner_prn = q.owner_prn.filter(|s| !s.trim().is_empty()).ok_or(TenancyError::MissingRequiredField("owner_prn"))?;
     let owner = parse_node_prn(&owner_prn)?;
     let page = Page::new(q.limit, q.offset)?;
     let accounts = s.service_accounts.list(&actor, &owner, page).await?;
     Ok(Json(accounts.into_iter().map(ServiceAccountDto::from).collect()))
 }
 
-async fn get_one(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(sa): Path<Uuid>) -> Result<Json<ServiceAccountDto>, ApiError> {
+async fn get_one(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<ServiceAccountId>) -> Result<Json<ServiceAccountDto>, ApiError> {
     let actor = actor_prn(&ctx);
-    let id = service_account_id(sa);
+    let id = service_account_id(path.id);
     let account = s.service_accounts.get(&actor, &id).await?;
     Ok(Json(account.into()))
 }
@@ -86,9 +87,9 @@ async fn get_one(State(s): State<AppState>, Extension(ctx): Extension<AuthContex
 /// every one of its cached API-key validations (`ServiceAccountService::archive`'s own
 /// module docs — the security-critical step). `204 No Content`, mirroring
 /// `adapters::http::authz::revoke_role_grant`'s shape.
-async fn archive(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(sa): Path<Uuid>) -> Result<StatusCode, ApiError> {
+async fn archive(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<ServiceAccountId>) -> Result<StatusCode, ApiError> {
     let actor = actor_prn(&ctx);
-    let id = service_account_id(sa);
+    let id = service_account_id(path.id);
     s.service_accounts.archive(&actor, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

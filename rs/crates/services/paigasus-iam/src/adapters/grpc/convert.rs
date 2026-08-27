@@ -122,7 +122,12 @@ pub fn status_to_grpc(e: TenancyError) -> Status {
     };
     // `e.code()` IS the canonical wire string — the registry is the validation (see the
     // `every_tenancy_code_is_declared_in_the_canonical_registry` test), not the transform.
-    iam_status(code, e.code(), e.to_string(), tenancy_retryable(e.class()), &[])
+    // The field name (SMA-586) rides in metadata alongside it, so a client can act on WHICH
+    // field failed without parsing the message — which SMA-508 AC2 forbids.
+    // `Option::as_slice` borrows the `Some` in place — an empty slice or a one-element one,
+    // with no allocation for what is at most a single borrowed pair.
+    let field = e.field().map(|f| ("field", f));
+    iam_status(code, e.code(), e.to_string(), tenancy_retryable(e.class()), field.as_slice())
 }
 
 /// Maps an `AuthnError` to a `tonic::Status` for the gRPC authn surface (spec §6.3, D12).
@@ -213,13 +218,28 @@ fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
 /// file. The HTTP twin rejects the equivalent with a 400 (`http::dead_letters::parse_ts`), so
 /// this also restores parity.
 ///
-/// `InvalidPrn`-as-sentinel, mirroring `http::dead_letters::parse_ts` and
-/// `grpc::audit::parse_cursor` — there is no dedicated error code for "not a valid timestamp".
-pub fn parse_opt_ts(t: Option<prost_types::Timestamp>, field: &str) -> Result<Option<DateTime<Utc>>, TenancyError> {
+/// `InvalidTimestamp` carries the field name, which reaches both the message and
+/// `ErrorInfo.metadata["field"]` (SMA-586 — this used to be `InvalidPrn`-as-sentinel, whose
+/// static Display threw the field name away).
+pub(crate) fn parse_opt_ts(t: Option<prost_types::Timestamp>, field: &'static str) -> Result<Option<DateTime<Utc>>, TenancyError> {
     match t {
         None => Ok(None),
-        Some(raw) => from_ts(raw).map(Some).ok_or_else(|| TenancyError::InvalidPrn(format!("invalid timestamp for {field}"))),
+        Some(raw) => from_ts(raw).map(Some).ok_or(TenancyError::InvalidTimestamp(field)),
     }
+}
+
+/// Rejects an absent required wire field before it reaches a parser that would mis-describe
+/// the failure (SMA-586 D5.2).
+///
+/// proto3 has no absence for a plain `string`, so an unset field arrives as `""` — which
+/// `Prn::parse` would report as a malformed PRN rather than as a missing one, diverging from
+/// the HTTP twin where the param is genuinely `Option`. Whitespace counts as empty: a
+/// `?owner_prn=%20` is not a PRN anyone meant to send.
+pub(crate) fn require_present<'a>(raw: &'a str, field: &'static str) -> Result<&'a str, TenancyError> {
+    if raw.trim().is_empty() {
+        return Err(TenancyError::MissingRequiredField(field));
+    }
+    Ok(raw)
 }
 
 /// Builds `AuditMetadata` from created/modified timestamps. `created_by`/`modified_by` stay
@@ -576,6 +596,34 @@ mod tests {
         assert_eq!(info.metadata.get("retryable").map(String::as_str), Some("unknown"));
     }
 
+    /// SMA-586: the field name is also machine-readable on gRPC. `Display` alone is not enough —
+    /// SMA-508 AC2 forbids branching on message text, so a field reachable only through the
+    /// message is reachable only by humans. Uses the same open metadata map as `capability`.
+    #[test]
+    fn status_to_grpc_puts_the_field_name_in_error_info_metadata() {
+        use tonic_types::StatusExt;
+
+        let status = status_to_grpc(TenancyError::InvalidTimestamp("parked_to"));
+        let details = status.get_error_details();
+        let info = details.error_info().expect("every IAM status carries ErrorInfo");
+        assert_eq!(info.metadata.get("field").map(String::as_str), Some("parked_to"));
+        assert_eq!(info.reason, "invalid-timestamp");
+        // The canonical keys are untouched by the new one.
+        assert_eq!(info.metadata.get("retryable").map(String::as_str), Some("false"));
+    }
+
+    /// A variant with no field name adds no key at all — an absent key, never an empty string,
+    /// so a consumer can distinguish "no field" from "a field named nothing".
+    #[test]
+    fn status_to_grpc_omits_the_field_key_when_there_is_no_field() {
+        use tonic_types::StatusExt;
+
+        let status = status_to_grpc(TenancyError::NotFound);
+        let details = status.get_error_details();
+        let info = details.error_info().expect("every IAM status carries ErrorInfo");
+        assert!(!info.metadata.contains_key("field"), "metadata: {:?}", info.metadata);
+    }
+
     /// AC 6 for the authn funnel: five codes, all registry-resolvable, messages unchanged.
     #[test]
     fn every_authn_status_carries_a_registered_reason_and_its_original_message() {
@@ -733,32 +781,23 @@ mod tests {
             ("out-of-range seconds", prost_types::Timestamp { seconds: i64::MAX, nanos: 0 }),
         ] {
             let err = parse_opt_ts(Some(t), "parked_from").expect_err(label);
-            assert!(matches!(err, TenancyError::InvalidPrn(_)), "{label} must be a client error, not None");
+            assert!(matches!(err, TenancyError::InvalidTimestamp(_)), "{label} must be a client error, not None");
         }
         // Sanity: the underlying primitive really does collapse these to None, which is what makes
         // this helper load-bearing rather than decorative.
         assert_eq!(from_ts(prost_types::Timestamp { seconds: 0, nanos: -1 }), None);
     }
 
-    /// `InvalidPrn`'s Display is deliberately STATIC (`application::error`), so the `field`
-    /// argument never reaches a client — `status_to_grpc` puts `to_string()` on the wire and that
-    /// is the fixed message. Pinned here because it is genuinely surprising: the helper takes a
-    /// field name and then throws it away. The argument stays anyway, for symmetry with
-    /// `http::audit::parse_ts` / `http::dead_letters::parse_ts`, which pass an equally-swallowed
-    /// detail, and so the detail is already threaded through if that Display ever changes.
-    /// The important half — that a present-but-invalid timestamp is a CLIENT error rather than a
-    /// silently-unfiltered query — is asserted by the test above and is unaffected.
+    /// The inverse of the pre-SMA-586 behaviour this replaces. `parse_opt_ts` took a field name
+    /// and then threw it away, because `InvalidPrn`'s Display is static — pinned by the test that
+    /// used to live here. `InvalidTimestamp` interpolates it, so the caller learns WHICH bound
+    /// failed, and `status_to_grpc` also puts it in `ErrorInfo.metadata["field"]`.
     #[test]
-    fn parse_opt_ts_detail_is_swallowed_by_invalid_prns_static_display() {
+    fn parse_opt_ts_surfaces_the_field_name_in_its_display() {
         let err = parse_opt_ts(Some(prost_types::Timestamp { seconds: 0, nanos: -1 }), "parked_to").unwrap_err();
-        assert!(!err.to_string().contains("parked_to"), "InvalidPrn's Display is static and must not surface the field name: got {err}");
-        match err {
-            TenancyError::InvalidPrn(detail) => assert!(
-                detail.contains("parked_to"),
-                "the payload itself must still carry the field name, even though Display drops it: got {detail}"
-            ),
-            other => panic!("expected TenancyError::InvalidPrn, got {other:?}"),
-        }
+        assert_eq!(err, TenancyError::InvalidTimestamp("parked_to"));
+        assert!(err.to_string().contains("parked_to"), "got {err}");
+        assert_eq!(err.code(), "invalid-timestamp");
     }
 
     /// The HTTP/gRPC drift guard for the dead-letter surface (design D9.1), paired with
@@ -896,5 +935,266 @@ mod tests {
             }
             other => panic!("expected NeedsAcknowledgement, got {other:?}"),
         }
+    }
+
+    /// AC-3: HTTP and gRPC agree on the reason for the same logical failure.
+    ///
+    /// Both transports derive `reason` from the SAME function (`TenancyError::code()`), so for a
+    /// GIVEN variant they cannot disagree. Parity can only break where the two sides CONSTRUCT
+    /// DIFFERENT VARIANTS — so this drives each transport's request-conversion entry point
+    /// (`to_filter`) rather than comparing two calls to `code()`, which would be tautological.
+    /// Driving `to_filter` also proves each helper is still WIRED IN, which is the failure SMA-583
+    /// actually hit: a helper that exists and is correct but no longer reached.
+    ///
+    /// One row calls a helper directly, because that surface has no filter-shaped entry point:
+    /// `membership_filter` on both transports. The dead-letter id row used to live here too, as
+    /// a hardcoded `TenancyError::InvalidUuid("dead_letter_id")` on the HTTP side — but that
+    /// construction never touches HTTP code at all, so it was tautologically equal to the
+    /// expected reason (`InvalidUuid(_)::code()` is unconditionally `"invalid-uuid"`) and proved
+    /// nothing about HTTP (SMA-586 fix round 1, Finding 1). It now lives in
+    /// [`http_dead_letter_id_agrees_with_grpc_on_invalid_uuid`] below, which drives the real
+    /// `UuidPath<DeadLetterId>` extractor through an actual request/response round trip instead.
+    #[test]
+    fn http_and_grpc_agree_on_the_reason_for_the_same_failure() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+
+        use crate::adapters::grpc::{audit as gaudit, dead_letters as gdl, tenancy as gtenancy};
+        use crate::adapters::http::dto::{AuditQuery, DeadLetterQuery};
+        use crate::adapters::http::{audit as haudit, dead_letters as hdl, memberships as hmem};
+        use paigasus_proto::paigasus::iam::v1::{ListAuditEntriesRequest, ListDeadLettersRequest, list_memberships_request};
+
+        // A `nanos` of -1 is unrepresentable in chrono, which is how a gRPC timestamp fails — it
+        // cannot fail to PARSE (it is already a struct), only to CONVERT.
+        let bad_ts = prost_types::Timestamp { seconds: 0, nanos: -1 };
+
+        fn audit_req() -> ListAuditEntriesRequest {
+            ListAuditEntriesRequest {
+                actor_prn: String::new(),
+                resource_prn: String::new(),
+                action: String::new(),
+                outcome: String::new(),
+                from: None,
+                to: None,
+                cursor: String::new(),
+                limit: 0,
+            }
+        }
+        fn audit_query() -> AuditQuery {
+            AuditQuery {
+                actor: None,
+                resource: None,
+                action: None,
+                outcome: None,
+                from: None,
+                to: None,
+                cursor: None,
+                limit: None,
+            }
+        }
+        fn dl_req() -> ListDeadLettersRequest {
+            ListDeadLettersRequest {
+                event_type: String::new(),
+                parked_from: None,
+                parked_to: None,
+                cursor: String::new(),
+                limit: 0,
+            }
+        }
+        fn dl_query() -> DeadLetterQuery {
+            DeadLetterQuery {
+                event_type: None,
+                parked_from: None,
+                parked_to: None,
+                cursor: None,
+                limit: None,
+            }
+        }
+
+        let cases: Vec<(&str, TenancyError, TenancyError, ErrorReason)> = vec![
+            (
+                "audit from-bound",
+                haudit::to_filter(AuditQuery {
+                    from: Some("not-a-timestamp".into()),
+                    ..audit_query()
+                })
+                .unwrap_err(),
+                gaudit::to_filter(ListAuditEntriesRequest { from: Some(bad_ts), ..audit_req() }).unwrap_err(),
+                ErrorReason::InvalidTimestamp,
+            ),
+            (
+                "audit cursor",
+                haudit::to_filter(AuditQuery {
+                    cursor: Some("not-a-uuid".into()),
+                    ..audit_query()
+                })
+                .unwrap_err(),
+                gaudit::to_filter(ListAuditEntriesRequest {
+                    cursor: "not-a-uuid".into(),
+                    ..audit_req()
+                })
+                .unwrap_err(),
+                ErrorReason::InvalidCursor,
+            ),
+            (
+                "audit outcome",
+                haudit::to_filter(AuditQuery {
+                    outcome: Some("not-a-real-outcome".into()),
+                    ..audit_query()
+                })
+                .unwrap_err(),
+                gaudit::to_filter(ListAuditEntriesRequest {
+                    outcome: "not-a-real-outcome".into(),
+                    ..audit_req()
+                })
+                .unwrap_err(),
+                ErrorReason::InvalidAuditOutcome,
+            ),
+            (
+                "dead-letter parked_from bound",
+                hdl::to_filter(DeadLetterQuery {
+                    parked_from: Some("not-a-timestamp".into()),
+                    ..dl_query()
+                })
+                .unwrap_err(),
+                gdl::to_filter(ListDeadLettersRequest {
+                    parked_from: Some(bad_ts),
+                    ..dl_req()
+                })
+                .unwrap_err(),
+                ErrorReason::InvalidTimestamp,
+            ),
+            (
+                "dead-letter cursor",
+                hdl::to_filter(DeadLetterQuery {
+                    cursor: Some("not-a-uuid".into()),
+                    ..dl_query()
+                })
+                .unwrap_err(),
+                gdl::to_filter(ListDeadLettersRequest {
+                    cursor: "not-a-uuid".into(),
+                    ..dl_req()
+                })
+                .unwrap_err(),
+                ErrorReason::InvalidCursor,
+            ),
+            (
+                "membership filter, neither set",
+                hmem::membership_filter(None, None).unwrap_err(),
+                gtenancy::membership_filter(None).unwrap_err(),
+                ErrorReason::MissingRequiredField,
+            ),
+            // Present-but-EMPTY, which the `neither set` row above cannot see: it drives
+            // `(None, None)` / `None`, i.e. the ABSENT case, and both transports normalise
+            // empty to absent only if they were written to. gRPC's oneof arm is explicitly
+            // present here (`Some(PrincipalPrn(""))`), which is a state HTTP's `Option<String>`
+            // expresses as `Some("")` — before SMA-586's fix round 2 the gRPC side let it
+            // through to `application::memberships` and came back `invalid-prn` while HTTP said
+            // `missing-required-field` (SMA-586 fix round 2, Fix 2).
+            (
+                "membership filter, present but empty",
+                hmem::membership_filter(Some(String::new()), None).unwrap_err(),
+                gtenancy::membership_filter(Some(list_memberships_request::Filter::PrincipalPrn(String::new()))).unwrap_err(),
+                ErrorReason::MissingRequiredField,
+            ),
+            // The same, whitespace-only and on the OTHER arm — the trim is what makes `?node=%20`
+            // and a whitespace-only `node_prn` agree too.
+            (
+                "membership filter, whitespace-only node",
+                hmem::membership_filter(None, Some("   ".into())).unwrap_err(),
+                gtenancy::membership_filter(Some(list_memberships_request::Filter::NodePrn("   ".into()))).unwrap_err(),
+                ErrorReason::MissingRequiredField,
+            ),
+        ];
+
+        for (label, http_err, grpc_err, expected) in cases {
+            let wire = expected.as_wire_reason().expect("not the Unspecified sentinel");
+            assert_eq!(http_err.code(), wire, "{label}: HTTP reason");
+            assert_eq!(grpc_err.code(), wire, "{label}: gRPC reason");
+        }
+    }
+
+    /// The dead-letter-id row of the agreement table above, lifted out into its own test because
+    /// it needs an async request/response round trip rather than a plain function call (SMA-586
+    /// fix round 1, Finding 1).
+    ///
+    /// The HTTP side used to be a hardcoded `TenancyError::InvalidUuid("dead_letter_id")`
+    /// constructed inline in the test — never touching HTTP code, so it was tautologically equal
+    /// to the expected reason (`InvalidUuid(_)::code()` is unconditionally `"invalid-uuid"`).
+    /// This drives the REAL `UuidPath<DeadLetterId>` extractor `http::dead_letters`'s own
+    /// `replay_one`/`discard_one` routes use, through an actual `Router`/`oneshot` round trip —
+    /// the identical pattern `http::path`'s own tests use to prove the same extractor for
+    /// `UuidPath<MembershipId>`. No `AppState` is needed: extractor rejection happens before the
+    /// handler (and therefore before any state access), so a stateless one-route router reaches
+    /// the same rejection a real state-carrying route would produce.
+    #[tokio::test]
+    async fn http_dead_letter_id_agrees_with_grpc_on_invalid_uuid() {
+        use axum::Router;
+        use axum::body::to_bytes;
+        use axum::http::StatusCode;
+        use axum::routing::get;
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+        use tower::ServiceExt;
+
+        use crate::adapters::grpc::dead_letters as gdl;
+        use crate::adapters::http::path::{DeadLetterId, UuidPath};
+
+        async fn ok(_path: UuidPath<DeadLetterId>) -> StatusCode {
+            StatusCode::OK
+        }
+
+        let wire = ErrorReason::InvalidUuid.as_wire_reason().expect("not the Unspecified sentinel");
+
+        let app = Router::new().route("/x/{id}", get(ok));
+        let resp = app.oneshot(axum::http::Request::builder().uri("/x/not-a-uuid").body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], wire, "HTTP reason");
+
+        assert_eq!(gdl::parse_id("not-a-uuid").unwrap_err().code(), wire, "gRPC reason");
+    }
+
+    /// The counterpart to the agreement table: the transport divergences this branch ACCEPTS,
+    /// each pinned as an assertion so a change breaks this test rather than slipping through as
+    /// an omission — the failure mode the SMA-586 spec review caught in its own first draft.
+    ///
+    /// The name says "recorded", not "exactly these two", because nothing here enumerates the
+    /// transports' failure modes: this test asserts that the two recorded divergences still
+    /// hold, and CANNOT observe a third one appearing (SMA-586 fix round 2, Fix 7).
+    ///
+    /// Divergence 1 asserts only its gRPC half — see the comment on that assertion for why
+    /// (SMA-586 fix round 1, Finding 2: the HTTP half of the original claim turned out false).
+    #[test]
+    fn the_recorded_transport_divergences_still_hold() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+
+        // 1. `IssueApiKey.expires_at`, gRPC half: `prost_types::Timestamp` fails to CONVERT (it
+        //    cannot fail to parse — it's already a struct), and gRPC classifies that itself via
+        //    `parse_opt_ts`, asserted below.
+        //
+        //    The HTTP half is NOT asserted here. The original claim was that HTTP's typed
+        //    `DateTime<Utc>` field fails inside serde and yields `invalid-request-body` — verified
+        //    FALSE against the real route: `issue`'s `Json<IssueApiKeyBody>` parameter
+        //    (`http/api_keys.rs`) is axum's plain `Json`, not `http::authn::EnvelopeJson`, so a
+        //    malformed body never reaches the IAM error envelope or the registry at all. Driving
+        //    the real extractor with `{"expires_at":"not-a-timestamp",...}` produces axum's own
+        //    non-JSON 422 rejection text, with no `error.code` field to compare against
+        //    `ErrorReason::InvalidRequestBody` in the first place — there is nothing for this test
+        //    to assert without either changing production code (out of scope for SMA-586 Task 8,
+        //    which makes test/visibility changes only) or hardcoding today's accidental
+        //    non-contract response shape as though it were the intended one, which would be worse
+        //    than asserting nothing. Flagged for a follow-up ticket rather than fixed here.
+        let wire = |r: ErrorReason| r.as_wire_reason().expect("not the Unspecified sentinel");
+        assert_eq!(
+            parse_opt_ts(Some(prost_types::Timestamp { seconds: 0, nanos: -1 }), "expires_at").unwrap_err().code(),
+            wire(ErrorReason::InvalidTimestamp),
+        );
+
+        // 2. `mutually-exclusive-fields` is HTTP-only and STRUCTURALLY so: the gRPC surface models
+        //    the same choice as a proto3 `oneof`, which cannot carry two values. Its only failure
+        //    is "neither set", asserted as `missing-required-field` in the table above.
+        use crate::adapters::http::memberships::membership_filter;
+        assert_eq!(membership_filter(Some("a".into()), Some("b".into())).unwrap_err().code(), wire(ErrorReason::MutuallyExclusiveFields));
+        // There is no gRPC expression of "both set" to compare against — that is the point.
     }
 }

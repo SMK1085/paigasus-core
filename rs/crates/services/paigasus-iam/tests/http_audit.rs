@@ -106,7 +106,9 @@ async fn get_audit_rejects_a_malformed_cursor() {
     let (status, body) = send(&app, "GET", "/v1/audit?cursor=not-a-uuid", None, Some(admin_token.as_str())).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["error"]["code"], "invalid-prn");
+    // `invalid-cursor`, not `invalid-uuid`: a cursor is server-issued, so a client can recover
+    // by restarting pagination rather than asking the user to fix input (SMA-586 D1).
+    assert_eq!(body["error"]["code"], "invalid-cursor");
 }
 
 #[tokio::test]

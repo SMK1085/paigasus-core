@@ -92,8 +92,9 @@ async-trait = { workspace = true }
 # methods' signatures (`new_team_id(&self, org: Uuid)`, `new_membership_id() -> Uuid`) —
 # production code, not just test fakes, since Task 4 (SMA-442). The workspace baseline
 # carries no `uuid` features (kernel/wasm keep it rng-free); `serde` is added here only —
-# `adapters::http`'s `Path<Uuid>` extractor and `dto::MembershipDto.id` need
-# `Uuid: Deserialize`/`Serialize` (Task 14, SMA-442).
+# `dto::MembershipDto.id` needs `Uuid: Deserialize`/`Serialize` (Task 14, SMA-442), as does
+# `dto`'s wider DTO surface. (`adapters::http::path`'s uuid path extractor no longer does: it
+# extracts each segment as a `String` and calls `Uuid::parse_str` itself, SMA-586.)
 uuid = { workspace = true, features = ["serde"] }
 # `adapters::oidc::redis_cache::RedisJwksCache` — external `JwksCache` backend so cached
 # JWKS survive process restarts and are shared across replicas (SMA-443 Task 8).

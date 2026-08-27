@@ -3,8 +3,9 @@
 //! `/v1/memberships` handlers: attach/detach/list principal-to-tenancy-node memberships.
 //! Thin extract -> service call -> map, mirroring `organizations.rs`/`teams.rs`, except
 //! `list_memberships` also validates the query itself: exactly one of `principal`/`node`
-//! must be set, else `TenancyError::InvalidPrn("provide exactly one of principal|node")`
-//! (code `invalid-prn`, 400) — mirrors the proto oneof rule (ADR-0014).
+//! must be set, else `TenancyError::MissingRequiredField("principal|node")` (neither set) or
+//! `TenancyError::MutuallyExclusiveFields("principal|node")` (both set) — both 400, mirroring
+//! the proto oneof rule (ADR-0014). See [`membership_filter`] for the split (SMA-586 D6).
 //!
 //! **SMA-444 Task 20 enforcement (spec §9.4: "Attach/Detach/List Membership -> the target
 //! tenancy node"):**
@@ -21,18 +22,18 @@
 //!   `Root` for a principal-filtered query (there is no single "target node" for "every node
 //!   a principal belongs to" — mirrofs `ListOrganizations`' platform-only posture, D4).
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Extension, Json, Router};
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::{Action, TenancyNodeRef};
 use paigasus_kernel::Prn;
-use uuid::Uuid;
 
 use super::AppState;
 use super::dto::{CreateMembershipBody, MembershipDto, MembershipQuery};
 use super::error::ApiError;
+use super::path::{MembershipId, UuidPath};
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::memberships::MembershipFilter;
@@ -79,7 +80,8 @@ async fn create_membership(State(s): State<AppState>, Extension(ctx): Extension<
 /// the same transaction (spec §5.1 rule 5). Detaching a team/project
 /// membership removes only itself. Detaching a nonexistent id is a 404, not
 /// an idempotent no-op.
-async fn delete_membership(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
+async fn delete_membership(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<MembershipId>) -> Result<StatusCode, ApiError> {
+    let id = path.id;
     if s.enforce_tenancy {
         let record = s.memberships.get(id).await?;
         let node_prn = Prn::parse(&record.node_prn).map_err(|e| TenancyError::InvalidPrn(e.kind().to_owned()))?;
@@ -89,12 +91,28 @@ async fn delete_membership(State(s): State<AppState>, Extension(ctx): Extension<
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Maps the two mutually-exclusive query params to a `MembershipFilter`.
+///
+/// The old single `_ =>` arm folded "neither set" and "both set" into one reason, which is the
+/// catch-all this ticket removes, in miniature (SMA-586 D6). An empty string counts as absent
+/// (D7), matching the gRPC surface where proto3's empty string IS the unset sentinel.
+///
+/// Unlike gRPC, this surface CAN receive both — its two query params are independent, where
+/// the wire models the same choice as a `oneof`. So `MutuallyExclusiveFields` is emitted here
+/// and nowhere else in the service.
+pub(crate) fn membership_filter(principal: Option<String>, node: Option<String>) -> Result<MembershipFilter, TenancyError> {
+    let principal = principal.filter(|s| !s.trim().is_empty());
+    let node = node.filter(|s| !s.trim().is_empty());
+    match (principal, node) {
+        (Some(principal), None) => Ok(MembershipFilter::Principal(principal)),
+        (None, Some(node)) => Ok(MembershipFilter::Node(node)),
+        (None, None) => Err(TenancyError::MissingRequiredField("principal|node")),
+        (Some(_), Some(_)) => Err(TenancyError::MutuallyExclusiveFields("principal|node")),
+    }
+}
+
 async fn list_memberships(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Query(q): Query<MembershipQuery>) -> Result<Json<Vec<MembershipDto>>, ApiError> {
-    let filter = match (q.principal, q.node) {
-        (Some(principal), None) => MembershipFilter::Principal(principal),
-        (None, Some(node)) => MembershipFilter::Node(node),
-        _ => return Err(ApiError(TenancyError::InvalidPrn("provide exactly one of principal|node".to_string()))),
-    };
+    let filter = membership_filter(q.principal, q.node)?;
     if s.enforce_tenancy {
         let resource = match &filter {
             MembershipFilter::Principal(_) => root_prn(),
@@ -105,4 +123,42 @@ async fn list_memberships(State(s): State<AppState>, Extension(ctx): Extension<A
     let page = Page::new(q.limit, q.offset)?;
     let records = s.memberships.list(filter, page).await?;
     Ok(Json(records.into_iter().map(MembershipDto::from).collect()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SMA-586 D6: the two halves of the old `_ =>` catch-all are different client mistakes and
+    /// now get different reasons. Both were `invalid-prn` before, which is the same catch-all this
+    /// ticket removes, in miniature.
+    #[test]
+    fn the_membership_filter_distinguishes_neither_set_from_both_set() {
+        // Reasons are pinned as ErrorReason values compared via `as_wire_reason()`, NEVER as bare
+        // kebab literals. Two reasons: it routes the assertion through the registry, so an
+        // unregistered rename fails here too; and a literal in a `src/` file would put this
+        // production module on `ci/error-registry/check.py`'s MANIFEST, which would blind that gate
+        // to a future *production* code literal anywhere in this file.
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+        let wire = |r: ErrorReason| r.as_wire_reason().expect("not the Unspecified sentinel");
+
+        let neither = membership_filter(None, None).unwrap_err();
+        assert_eq!(neither, TenancyError::MissingRequiredField("principal|node"));
+        assert_eq!(neither.code(), wire(ErrorReason::MissingRequiredField));
+
+        let both = membership_filter(Some("a".into()), Some("b".into())).unwrap_err();
+        assert_eq!(both, TenancyError::MutuallyExclusiveFields("principal|node"));
+        assert_eq!(both.code(), wire(ErrorReason::MutuallyExclusiveFields));
+
+        assert!(matches!(membership_filter(Some("a".into()), None).unwrap(), MembershipFilter::Principal(_)));
+        assert!(matches!(membership_filter(None, Some("b".into())).unwrap(), MembershipFilter::Node(_)));
+    }
+
+    /// SMA-586 D7: `?principal=` (present but empty) means the same thing as an absent param.
+    /// Without this, D5.2's gRPC repair — where proto3's empty string IS the unset sentinel —
+    /// would make the two transports disagree again.
+    #[test]
+    fn an_empty_membership_param_is_treated_as_absent() {
+        assert_eq!(membership_filter(Some(String::new()), None).unwrap_err(), TenancyError::MissingRequiredField("principal|node"));
+    }
 }
