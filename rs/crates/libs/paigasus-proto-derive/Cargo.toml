@@ -2,14 +2,26 @@
 
 [package]
 name = "paigasus-proto-derive"
-version = "0.0.0"
+# The 0.1.0 floor (ADR-0011 S3). release-plz cuts every tag; never hand-place a `*-vX.Y.Z`
+# tag — manual tags lack release-plz's tracking metadata and silently stop future bumps
+# (the SMA-385 trap). Held in lockstep across the proto family by `repo:version-lockstep`.
+version = "0.1.0"
+description = "Derive macro for Paigasus audit metadata — #[derive(Auditable)] for generated protobuf messages."
+repository = "https://github.com/SMK1085/paigasus-core"
+homepage = "https://github.com/SMK1085/paigasus-core#readme"
+readme = "README.md"
+keywords = ["paigasus", "protobuf", "derive", "macro", "audit"]
+categories = ["development-tools::procedural-macro-helpers", "development-tools"]
+# ALLOWLIST, not a denylist — see the rationale on paigasus-proto. No tests/**/*.rs here:
+# this crate has no tests/ directory (its expansion assertions are unit tests under src/).
+# Adding one later requires an allowlist edit, or it ships unrunnable.
+include = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE"]
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-# TODO(SMA-388): flip publish = true in lockstep with paigasus-proto. This crate must be
-# published FIRST — paigasus-proto depends on it.
-publish = false
+# PUBLISH ORDER: this crate must publish BEFORE paigasus-proto, which depends on it.
+publish = true
 
 [lib]
 proc-macro = true
@@ -26,5 +38,14 @@ proc-macro2.workspace = true
 # to dev-dependencies only — a plain (non-test) build of this crate does not pull it in.
 syn = { workspace = true, features = ["extra-traits"] }
 
-[lints]
-workspace = true
+# NOT `workspace = true`. Cargo INLINES the resolved lint table into the published
+# manifest, and docs.rs builds a published crate as the ROOT package on nightly, where
+# cargo's `--cap-lints allow` does not apply. Inheriting the workspace's
+# `warnings = "deny"` would let the first new rustc warning silently kill docs.rs builds
+# of a released crate. CI strictness is unaffected: the Moon `lint` task passes
+# `-D warnings` explicitly. Asserted by repo:publish-metadata Check 1c.
+[lints.rust]
+warnings = "warn"
+
+[lints.clippy]
+all = "warn"

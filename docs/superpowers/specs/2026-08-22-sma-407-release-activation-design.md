@@ -54,7 +54,10 @@ Review finding **B1** — the largest gap in the first draft. `paigasus-proto` d
 - `rs/Cargo.toml:136` — *"PUBLISH ORDER (SMA-388): this crate must publish BEFORE paigasus-proto, which depends on it."*
 - `rs/crates/libs/paigasus-proto/Cargo.toml:10-11` — *"paigasus-proto-derive must publish FIRST."*
 
-So the publishable set is **four** crates, not two:
+So the publishable set is **three** crates — corrected from the "four" this line claimed until
+SMA-577 (the diagram below was already right; the miscount came from counting the kernel
+*version group*'s four members — `paigasus-kernel` plus its three binding crates — rather than
+the publishable set, which from that group is `paigasus-kernel` alone):
 
 ```
 paigasus-proto-derive ──▶ paigasus-proto      (proto family, ordered)
@@ -85,7 +88,8 @@ measurements in a disposable fixture:
 
 ### Site inventory, by owner
 
-The first draft claimed 11 sites. The true count is **18**, and the four missed classes
+The first draft claimed 11 sites. The true count is **18** (as of this review — SMA-577 later
+added two more, bringing the live total to 20; see below), and the four missed classes
 (review **B3**) are the highest-value part of this review — each is a silent drift channel, and
 two are load-bearing for the publish itself.
 
@@ -124,9 +128,9 @@ Site 17 drifts **silently**: `py/packages/paigasus-kernel/moon.yml:36` runs bare
 `paigasus-kernel-ts:build`, and `ci.yml`'s codegen-drift gate covers only the three
 `**/generated` proto dirs — so nothing reds there either.
 
-`--check` verifies **all 18**, including the ones release-plz and the regeneration commands own.
-A gate that trusted release-plz to have done its half would not notice a `version_group` that
-silently stopped applying.
+`--check` verifies **all 20** (the 18 below, plus the two SMA-577 proto lock rows), including the
+ones release-plz and the regeneration commands own. A gate that trusted release-plz to have done
+its half would not notice a `version_group` that silently stopped applying.
 
 ### The dependency-pin site
 
@@ -163,7 +167,7 @@ Everything Cargo cannot reach is therefore stamped by one script with three mode
 
 | Mode | Behaviour |
 | --- | --- |
-| `--check` (default) | Compares all 18 sites against each group's source of truth. The `repo:version-lockstep` Moon gate. |
+| `--check` (default) | Compares all 20 sites (18 below, plus the two SMA-577 proto lock rows) against each group's source of truth. The `repo:version-lockstep` Moon gate. |
 | `--write` | Rewrites sites 10–15 and invokes the regeneration commands for 16–18. |
 | `--negative-control` | Proves the checker can still report red. |
 
@@ -448,12 +452,22 @@ An **ADR-0011 amendment** recording four things:
 4. What is `git_tag_name`? `rs/release-plz.toml` sets none; the default is `{package}-v{version}`.
    Does it collide with napi's `lerna` style (`@paigasus/node-bindings@0.1.0`)?
 5. What schedules the `release` job, and is `release_always` on or off?
-6. How does the *first* `cargo publish --dry-run -p paigasus-proto` behave before
+6. ~~How does the *first* `cargo publish --dry-run -p paigasus-proto` behave before
    `paigasus-proto-derive` exists on crates.io — and can `check_package`'s per-package loop
-   (`run.sh:665-668`) express a two-crate publish at all?
-7. Does the generated per-crate `CHANGELOG.md` ship? `paigasus-kernel`'s `include` allowlist
+   (`run.sh:665-668`) express a two-crate publish at all?~~
+   **Answered.** It cannot: measured at exit 101, `no matching package named
+   'paigasus-proto-derive' found`. cargo 1.95's *multi*-package `cargo publish --dry-run -p
+   paigasus-proto-derive -p paigasus-proto` resolves the publish order itself — flag order is
+   irrelevant, cargo computes the topological order — and M3 proved it consumes the upstream
+   crate's locally staged, packaged tarball rather than replaying release-plz's sequential
+   registry publish. See `docs/superpowers/specs/2026-08-23-sma-577-proto-family-publishable-design.md`
+   §3.
+7. ~~Does the generated per-crate `CHANGELOG.md` ship? `paigasus-kernel`'s `include` allowlist
    (`Cargo.toml:19`) excludes it, and new tracked files have `repo:input-liveness` and Check 2b
-   consequences.
+   consequences.~~
+   **Answered — no.** `paigasus-proto` and `paigasus-proto-derive`'s `include` allowlists
+   (Check 1d) exclude `CHANGELOG.md` the same way `paigasus-kernel`'s does; it is generated but
+   does not ship.
 8. `paigasus-py-bindings/pyproject.toml` has essentially no PyPI metadata and no LICENSE/README.
    Nothing gates PyPI/npm metadata the way `repo:publish-metadata` gates crates.io — extend the new
    gate, or accept the asymmetry explicitly?
@@ -462,7 +476,7 @@ An **ADR-0011 amendment** recording four things:
 
 | Risk | Mitigation |
 | --- | --- |
-| A missed version site drifts silently | `repo:version-lockstep` checks all 18, including release-plz's and the regeneration commands'; the negative control proves it can still red. |
+| A missed version site drifts silently | `repo:version-lockstep` checks all 20, including release-plz's and the regeneration commands'; the negative control proves it can still red — on both a packagejson drift and a lock-row drift, each staged into its own pristine tree. |
 | Removing `release = false` tags ~9 unintended crates | Per-package settings instead of a workspace blanket (§8). |
 | `paigasus-proto` reds Check 2 on its own PR | §6's work list + resolving the derive publish order first (§3, §14 Q5). |
 | Registry tokens exfiltrated via a PR | Credentials only in `release.yml` (no `pull_request` trigger); prefer OIDC (§7). |

@@ -133,14 +133,17 @@ proc-macro2 = "1"
 # In-tree path dep: the derive crate that generates `impl Auditable` for DTOs embedding
 # AuditMetadata. `paigasus-proto` re-exports it, and buf injects it onto the generated
 # messages — same in-tree-freshness rationale as paigasus-kernel/paigasus-proto above.
-# PUBLISH ORDER (SMA-388): this crate must publish BEFORE paigasus-proto, which depends on it.
-paigasus-proto-derive = { path = "crates/libs/paigasus-proto-derive", version = "0.0.0" }
+# PUBLISH ORDER (SMA-577): this crate must publish BEFORE paigasus-proto, which depends on
+# it. repo:publish-metadata expresses that as a publish GROUP (a connected component of the
+# in-set dependency graph, computed at runtime from `publish = true` crates), running one
+# `cargo publish --dry-run -p paigasus-proto-derive -p paigasus-proto`.
+paigasus-proto-derive = { path = "crates/libs/paigasus-proto-derive", version = "0.1.0" }
 # In-tree path dep: the bindings (and future consumers) build against the live kernel, so a
 # kernel edit rebuilds them. This is also the cargo-side half of the affected-graph edge.
 paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.1.0" }
 # In-tree path dep: paigasus-iam's gRPC adapter binds the generated `paigasus.iam.v1` types
 # (Task 16) — same in-tree-freshness rationale as paigasus-kernel above.
-paigasus-proto = { path = "crates/libs/paigasus-proto", version = "0.0.0" }
+paigasus-proto = { path = "crates/libs/paigasus-proto", version = "0.1.0" }
 # In-tree path dep: the shared observability lib (metrics recorder, `/metrics` router, axum
 # request-metrics layer, metric-name registry — SMA-446 Unit 1). Service crates instrument
 # their hot paths through it (Unit 2 — `paigasus-gateway` is the first consumer); same

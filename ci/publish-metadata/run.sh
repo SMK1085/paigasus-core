@@ -15,9 +15,30 @@
 #            snapshot ci/publish-metadata/crates-io-categories.txt. crates.io DROPS unknown
 #            slugs and publishes anyway, and `cargo publish --dry-run` returns before the
 #            warning that would have said so — so Check 2 cannot catch this (SMA-529).
-#   Check 2  `cargo publish --dry-run` succeeds — the crate is publishABLE, packages, and
-#            compiles standalone with no unversioned path dependency.
+#   Check 1c each publishable crate declares its OWN [lints.*] table and does not deny.
+#            Cargo inlines the resolved table into the published manifest and docs.rs builds
+#            on nightly as the root package, where --cap-lints allow does not apply — so an
+#            inherited (or hand-written) `warnings = "deny"` silently kills docs.rs builds
+#            on the first new rustc lint, months later (SMA-577).
+#   Check 1d each publishable crate declares a non-empty `include` ALLOWLIST containing
+#            README.md and LICENSE. Membership is literal: "**/*" is rejected, because it
+#            would "cover" both while reinstating the moon.yml leak 2b exists to catch.
+#   Check 2  `cargo publish --dry-run` succeeds, once per PUBLISH GROUP — a connected
+#            component of the in-set dependency graph, computed at runtime from `cargo
+#            metadata` — not once per package: a per-package dry-run of a crate with an
+#            unpublished in-tree dependency cannot succeed (`-p paigasus-proto` alone exits
+#            101, `no matching package named 'paigasus-proto-derive'`, until the derive crate
+#            is on crates.io). The group is publishABLE, packages, and compiles with no
+#            unversioned path dependency OUTSIDE the group.
 #   Check 2b the packaged file list ships README.md + LICENSE and not moon.yml.
+#   Check 2c the packaged set does not contain EVERY tracked file in the crate dir. This is
+#            Check 1d's rule enforced BEHAVIOURALLY: 1d rejects catch-all `include` entries
+#            by spelling, and that list can never be complete — /**, /*, **/, /, **/**,
+#            */**, */*, ?*, [a-z]* and **/*.* were all MEASURED to package a crate's whole
+#            root, and any glob that happens to match everything joins them. If the allowlist
+#            held nothing back it matched everything, whatever it was spelled. Note this is a
+#            SUBSET test, not equality: a catch-all can also sweep untracked files in, making
+#            the packaged set a strict superset while every tracked file still ships (SMA-577).
 #   Check 3  while any publishable crate is at 0.0.0, rs/release-plz.toml must block its
 #            release. Releasing 0.0.0 permanently burns that version on crates.io.
 #   Check 4  .github/workflows/security-scan.yml still INVOKES the freshness check on a real,
@@ -43,9 +64,9 @@ SNAPSHOT="$REPO_ROOT/ci/publish-metadata/crates-io-categories.txt"
 # than per-call so --negative-control's direct function calls see it too.
 export PYTHONPATH="$REPO_ROOT/ci/publish-metadata${PYTHONPATH:+:$PYTHONPATH}"
 
-# The ONE maintained fact in this script. SMA-577 adds paigasus-proto AND
+# The ONE maintained fact in this script. SMA-577 added paigasus-proto AND
 # paigasus-proto-derive here — both, because the derive crate must publish first.
-EXPECTED_PUBLISHABLE=("paigasus-kernel")
+EXPECTED_PUBLISHABLE=("paigasus-kernel" "paigasus-proto" "paigasus-proto-derive")
 
 # What a published artifact must and must not contain.
 REQUIRED_PACKAGED=("README.md" "LICENSE")
@@ -263,6 +284,167 @@ assert_package_list() { # $1 listing file  $2 package name
   return "$rc"
 }
 
+# Check 1c — a publishable crate must carry its OWN lint table, and that table must not
+# deny. Cargo INLINES the resolved lint table into the published manifest, and docs.rs
+# builds a published crate as the ROOT package on nightly, where `--cap-lints allow` does
+# not apply — so an inherited (or hand-written) `warnings = "deny"` lets the first new
+# rustc warning silently kill docs.rs builds of an already-released crate, months later.
+# Neither `[lints]` nor `include` appears in `cargo metadata`, so this reads the manifest.
+# Takes a PATH so --negative-control drives the same code with fixtures.
+assert_lint_table() { # $1 manifest path
+  python3 - "$1" <<'PY'
+import sys, tomllib
+
+path = sys.argv[1]
+try:
+    with open(path, "rb") as fh:
+        manifest = tomllib.load(fh)
+except Exception as exc:
+    # Unreadable or malformed TOML is INFRASTRUCTURE, not a repo defect: nothing was
+    # asserted, so it must not read as "the crate is fine" nor as "the crate is wrong".
+    print(f"FATAL: cannot parse {path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+lints = manifest.get("lints")
+name = manifest.get("package", {}).get("name", path)
+errors = []
+
+if not isinstance(lints, dict) or not lints:
+    errors.append(
+        f"{name}: no `[lints.*]` table. A publishable crate must declare its own — see the "
+        "rationale on paigasus-kernel/Cargo.toml. The rule is discipline, not only "
+        "hazard-avoidance: without it a crate can drift into workspace inheritance by deletion."
+    )
+elif lints.get("workspace") is True:
+    errors.append(
+        f"{name}: inherits workspace lints (`[lints] workspace = true`). Cargo inlines the "
+        "RESOLVED table into the published manifest, and docs.rs builds published crates as "
+        "the root package on nightly where `--cap-lints allow` does not apply, so the "
+        "workspace's `warnings = \"deny\"` would let the first new rustc warning silently "
+        "kill docs.rs builds. Declare a per-crate table with `warnings = \"warn\"`."
+    )
+elif not any(
+    isinstance(v, dict) and v for k, v in lints.items() if k != "workspace"
+):
+    # `[lints] workspace = false` is VALID TOML and, per cargo's reference, is equivalent to
+    # omitting the key entirely — it declares no local lint namespace at all. It is not caught
+    # by the `is True` arm above, and it used to reach the level checks below, where an absent
+    # `rust`/`clippy` key yields no findings and the crate PASSED. That contradicts this
+    # check's own stated rule ("must declare its own"), so it is rejected here rather than
+    # falling through. Same treatment for any `[lints]` table whose only key is `workspace`.
+    errors.append(
+        f"{name}: `[lints]` declares no NON-EMPTY local namespace. `workspace = false` is "
+        "valid but equivalent to having no lint table at all — it inherits nothing AND "
+        "declares nothing — and a present-but-empty `[lints.rust]` is the same vacuity in a "
+        "different shape: it satisfies 'has a local table' while setting no lint. The rule is "
+        "discipline, not only hazard-avoidance: declare a per-crate `[lints.rust]` / "
+        '`[lints.clippy]` table that actually sets `warnings = "warn"`, so a crate cannot '
+        "drift into workspace inheritance by deletion."
+    )
+else:
+    # Both TOML spellings: the string form `warnings = "deny"` and the table form
+    # `warnings = { level = "deny", priority = -1 }`. Checking only the string form would
+    # let the table form through while the crate carries the hazard in full.
+    def level_of(value):
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            return value.get("level")
+        return None
+
+    for table, key in (("rust", "warnings"), ("clippy", "all")):
+        level = level_of((lints.get(table) or {}).get(key))
+        if level in ("deny", "forbid"):
+            errors.append(
+                f"{name}: `[lints.{table}] {key}` is {level!r}. Its own table is not enough — "
+                f"a published crate must not deny, or docs.rs breaks on the first new lint. "
+                f'Use "warn"; CI strictness comes from the Moon lint task\'s explicit -D warnings.'
+            )
+
+if errors:
+    print("Check 1c FAILED\n  - " + "\n  - ".join(errors), file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+# Check 1d — a publishable crate must carry an `include` ALLOWLIST covering README.md and
+# LICENSE. Cargo's default include is "every non-ignored file in the package dir", which
+# sweeps moon.yml into the tarball and would ship whatever the dir gains next. Check 2b
+# catches the OUTCOME (a leaked moon.yml) but only for files someone added to
+# FORBIDDEN_PACKAGED, and only after a listing exists; 1d asserts the RULE.
+assert_include_allowlist() { # $1 manifest path
+  python3 - "$1" <<'PY'
+import sys, tomllib
+
+REQUIRED = ("README.md", "LICENSE")
+path = sys.argv[1]
+try:
+    with open(path, "rb") as fh:
+        manifest = tomllib.load(fh)
+except Exception as exc:
+    print(f"FATAL: cannot parse {path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+package = manifest.get("package", {})
+name = package.get("name", path)
+include = package.get("include")
+errors = []
+
+if include is None:
+    errors.append(
+        f"{name}: no `[package] include`. Cargo's default packages EVERY non-ignored file "
+        "in the crate dir — moon.yml today, and whatever the dir gains next. Enumerate what "
+        "belongs; an allowlist is the version that cannot leak."
+    )
+elif isinstance(include, dict):
+    # `include` is workspace-inheritable, so `include.workspace = true` parses as
+    # {"workspace": True} — non-empty, truthy, and NOT a list. A naive "declares a
+    # non-empty include" test passes it vacuously, which is why this arm is explicit.
+    errors.append(
+        f"{name}: `include` is inherited (`include.workspace = true`). A publishable crate "
+        "must carry its OWN allowlist — the packaged file set is per-crate, and an inherited "
+        "one cannot be right for every member."
+    )
+elif not isinstance(include, list):
+    errors.append(f"{name}: `include` is {type(include).__name__}, expected a list of strings")
+elif not include:
+    errors.append(f"{name}: `include` is empty — it would package nothing")
+else:
+    for entry in include:
+        if not isinstance(entry, str):
+            errors.append(f"{name}: include entry {entry!r} is not a string")
+    # A catch-all entry defeats the allowlist even when the required literals are ALSO
+    # listed: `["README.md", "LICENSE", "**/*"]` satisfies literal membership while
+    # packaging the whole directory, reinstating the exact moon.yml leak Check 2b exists
+    # to catch. Rejecting the bare `["**/*"]` shape via literal membership was not enough.
+    # MEASURED against cargo 1.95.0, not guessed. A probe crate carrying `private/secret.txt`
+    # plus `include = ["README.md", "LICENSE", <pattern>]` was packaged for each candidate;
+    # these six ship the secret, `./**` and a scoped `src/**/*.rs` do not. `/*` is the
+    # counter-intuitive one — cargo applies it recursively, unlike strict gitignore reading —
+    # and `/**` is what a reviewer found bypassing the original three-entry list.
+    CATCH_ALLS = ("**/*", "**", "*", "/**", "/*", "**/")
+    catch_alls = [e for e in include if isinstance(e, str) and e.strip() in CATCH_ALLS]
+    if catch_alls:
+        errors.append(
+            f"{name}: `include` contains the catch-all {catch_alls[0]!r}, which packages the "
+            "whole crate directory and makes the rest of the allowlist decorative. Enumerate "
+            "what belongs — an allowlist that matches everything is not an allowlist."
+        )
+    missing = [r for r in REQUIRED if r not in include]
+    if missing:
+        errors.append(
+            f"{name}: `include` does not list {', '.join(missing)}. Membership is LITERAL — "
+            "a wildcard such as \"**/*\" is deliberately NOT accepted, because it would "
+            "'cover' these files while reinstating exactly the moon.yml leak Check 2b exists "
+            "to catch. Add the exact strings."
+        )
+
+if errors:
+    print("Check 1d FAILED\n  - " + "\n  - ".join(errors), file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 # Guard-the-guard (SMA-542): a new check's own CALL SITE is what goes unguarded. The
 # fixture rows below exercise this function; only this assertion covers its INVOCATION in
 # the workflow, and repo:actionlint's equivalent machinery is keyed on ci.yml alone.
@@ -352,13 +534,135 @@ classify_cargo_failure() { # $1 captured-output file
   return 1
 }
 
-check_package() { # $1 name  $2 manifest dir
-  local pkg="$1" pkg_dir="$2" dirty=() out listing status
+# A PUBLISH GROUP is a connected component of the in-set dependency graph: nodes are the
+# publishable crates, and an edge joins A-B when A depends on B and both are publishable.
+# Derived, not declared, so it needs no coupling to release-plz.toml's version_group and
+# cannot go stale when a dependency is added or removed. Today: {paigasus-kernel} and
+# {paigasus-proto-derive, paigasus-proto}.
+publish_groups() { # $1 metadata.json  $2 expected-csv -> one TAB-separated group per line
+  python3 - "$1" "$2" <<'PY'
+import json, sys
 
-  # --allow-dirty changes WHAT GETS PACKAGED: cargo enumerates via git, so untracked
-  # files are swept in and .cargo_vcs_info.json is stamped "dirty": true. Allow it only
-  # so a developer can run this gate on uncommitted work — NEVER in CI, where the
-  # assertion must be about a committed tree.
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        meta = json.load(fh)
+except Exception as exc:
+    print(f"FATAL: cannot read cargo metadata JSON: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+expected = {x for x in sys.argv[2].split(",") if x}
+pkgs = {p["name"]: p for p in meta.get("packages", []) if p["name"] in expected}
+if not pkgs:
+    print("FATAL: no publishable package matched the expected set", file=sys.stderr)
+    sys.exit(2)
+
+adjacency = {name: set() for name in pkgs}
+for name, pkg in pkgs.items():
+    for dep in pkg.get("dependencies", []):
+        other = dep.get("name")
+        if other in pkgs and other != name:
+            adjacency[name].add(other)
+            adjacency[other].add(name)
+
+seen, groups = set(), []
+for name in sorted(pkgs):
+    if name in seen:
+        continue
+    component, stack = set(), [name]
+    while stack:
+        current = stack.pop()
+        if current in component:
+            continue
+        component.add(current)
+        seen.add(current)
+        stack.extend(adjacency[current] - component)
+    groups.append(sorted(component))
+
+for group in sorted(groups):
+    print("\t".join(group))
+PY
+}
+
+# Populated by main()'s enumeration loop: name -> manifest dir, the same fact
+# metadata_checks's "<name>\t<manifest-dir>" stdout already carries. check_publish_group
+# consults this map by name rather than re-deriving a package's dir via a fresh `cargo
+# metadata` shell-out per package inside the dirty check — that would spawn a subprocess
+# for a fact main() already holds, and create a SECOND SOURCE OF TRUTH for the input that
+# decides --allow-dirty, a flag that CHANGES WHAT GETS PACKAGED. A divergence between the
+# two would silently mis-decide it.
+declare -A PKG_DIR=()
+
+# Every package name Check 2 was ACTUALLY invoked with, appended BY THE HELPER. main()
+# compares this against the set the Check 2b loop enumerated, so deleting an invocation
+# leaves this short and the assertion fires — a one-line deletion is caught. What remains
+# open is deleting the invocation AND the assertion together (a two-site edit).
+CHECK2_INVOKED=()
+
+# Check 2b — the packaged file list. Per package: `cargo package --list` performs no build,
+# so it has no chicken-and-egg (verified: it succeeds for paigasus-proto with the derive
+# crate absent from crates.io).
+# Check 2c — the packaged set must not equal the crate's tracked file set.
+#
+# Check 1d rejects catch-all `include` entries by SPELLING, and that list can never be
+# complete: `**/*`, `**`, `*`, `/**`, `/*`, `**/`, `/`, `**/**`, `*/**`, `*/*`, `?*`,
+# `[a-z]*` and `**/*.*` were all MEASURED to package a crate's whole root, and any glob
+# that happens to match everything joins them. Enumerating spellings is the wrong tool.
+#
+# This is the same invariant checked BEHAVIOURALLY instead: if the include shipped every
+# tracked file, it matched everything, and it is a catch-all whatever it is spelled. That
+# holds for a spelling nobody has thought of yet.
+#
+# Takes BOTH listings as files so --negative-control drives the same code with synthetic
+# sets — there is no way to fixture a git-tracked directory cheaply.
+#
+# NOTE the failure direction. A crate whose tracked files are ALL legitimately publishable
+# would false-red here. That is deliberate and is the repo's standing preference (see
+# EXPECTED_SITE_COUNT's comment in ci/version-lockstep/run.sh): a gate that can only
+# false-red is safe, one that can silently absorb a bypass is not. Today every crate dir
+# carries a moon.yml that must never ship, so the sets cannot legitimately coincide.
+assert_not_catch_all() { # $1 packaged listing  $2 tracked listing  $3 package name
+  local packaged="$1" tracked="$2" pkg="$3"
+
+  if [ ! -r "$packaged" ] || [ ! -r "$tracked" ]; then
+    echo "FATAL: Check 2c cannot read its listings for $pkg" >&2
+    return 2
+  fi
+  # Non-vacuity: an empty tracked set would make the comparison meaningless and pass.
+  if [ ! -s "$tracked" ]; then
+    echo "FATAL: Check 2c got an EMPTY tracked-file set for $pkg — it would assert nothing" >&2
+    return 2
+  fi
+
+  # Cargo synthesizes these into every tarball; they are not crate sources and must not
+  # enter the comparison.
+  local pkg_norm
+  pkg_norm="$(grep -vxE 'Cargo\.lock|Cargo\.toml\.orig|\.cargo_vcs_info\.json' "$packaged" \
+    | LC_ALL=C sort -u)"
+  local trk_norm
+  trk_norm="$(LC_ALL=C sort -u "$tracked")"
+
+  # SUBSET, not equality. The invariant is "the allowlist excluded something", i.e. at
+  # least one tracked file did NOT ship. Equality was the first attempt and is WRONG: any
+  # extra entry in the tarball defeats it, and a catch-all readily produces extras (a probe
+  # under --allow-dirty swept .git/** in, so packaged was a strict SUPERSET of tracked and
+  # the equality test passed a genuine catch-all). Asking "was anything held back?" is
+  # immune to extras.
+  local excluded
+  excluded="$(LC_ALL=C comm -23 <(printf '%s\n' "$trk_norm") <(printf '%s\n' "$pkg_norm"))"
+
+  if [ -z "$excluded" ]; then
+    echo "Check 2c FAILED: $pkg packages EVERY tracked file in its directory — the" >&2
+    echo "  \`include\` list held nothing back, so it matched everything and is a catch-all" >&2
+    echo "  however it is spelled. Check 1d's denylist of literal catch-all patterns cannot" >&2
+    echo "  see a spelling it does not know (measured: /**, /*, **/, /, **/**, */**, */*," >&2
+    echo "  ?*, [a-z]* and **/*.* all package a crate's whole root). Enumerate what belongs." >&2
+    return 1
+  fi
+}
+
+check_package_list() { # $1 name  $2 manifest dir
+  local pkg="$1" pkg_dir="$2" dirty=() out listing tracked status
+
   if [ -z "${CI:-}" ] && [ -n "$(git -C "$REPO_ROOT" status --porcelain -- "$pkg_dir")" ]; then
     echo "publish-metadata: $pkg has uncommitted changes — adding --allow-dirty (local only)" >&2
     dirty=(--allow-dirty)
@@ -366,32 +670,102 @@ check_package() { # $1 name  $2 manifest dir
 
   out="$(mktemp)"
   listing="$(mktemp)"
-
-  # Check 2b first: it is cheap and does not compile anything.
   if ! cargo package --list --locked -p "$pkg" ${dirty[@]+"${dirty[@]}"} >"$listing" 2>"$out"; then
     cat "$out" >&2
     status=0; classify_cargo_failure "$out" || status=$?
     rm -f "$out" "$listing"
-    exit "$status"
+    return "$status"
   fi
   status=0
   assert_package_list "$listing" "$pkg" || status=$?
-  if [ "$status" -ne 0 ]; then
-    rm -f "$out" "$listing"
-    exit "$status"
+  if [ "$status" -eq 0 ]; then
+    # Tracked files only, paths relative to the crate dir — the same shape cargo prints.
+    # Deliberately NOT `find`: untracked scratch would inflate the set and mask a
+    # catch-all, and a gate's assertion must be about the committed tree.
+    tracked="$(mktemp)"
+    # $pkg_dir is ABSOLUTE (metadata_checks prints os.path.dirname(manifest_path)), so it
+    # is passed to -C directly rather than joined onto REPO_ROOT.
+    if ! git -C "$pkg_dir" ls-files >"$tracked" 2>/dev/null; then
+      echo "FATAL: Check 2c could not list tracked files for $pkg" >&2
+      rm -f "$out" "$listing" "$tracked"
+      return 2
+    fi
+    assert_not_catch_all "$listing" "$tracked" "$pkg" || status=$?
+    rm -f "$tracked"
+  fi
+  rm -f "$out" "$listing"
+  return "$status"
+}
+
+# Check 2 — one `cargo publish --dry-run` per publish group. --locked so the verify build
+# resolves against the packaged lockfile rather than whatever the registry serves this
+# minute. Manifest dirs come from PKG_DIR (populated by main()'s enumeration loop), not
+# from a fresh `cargo metadata` call — see PKG_DIR's own comment for why.
+check_publish_group() { # $@ package names in ONE group
+  local pkgs=("$@") flags=() dirty_pkgs=() out status pkg pkg_dir
+
+  # Non-vacuity: an empty group would make this return 0 having asserted nothing.
+  # Defence-in-depth — Check 0 already exits 2 on an empty publishable set and pins the set
+  # by strict equality, so this is unreachable from main() today.
+  if [ "${#pkgs[@]}" -eq 0 ]; then
+    echo "FATAL: Check 2 invoked with an empty package list — it would assert nothing" >&2
+    return 2
   fi
 
-  # Check 2: --locked so the verify build resolves against the packaged lockfile rather
-  # than whatever the registry serves this minute.
-  if ! cargo publish --dry-run --locked -p "$pkg" ${dirty[@]+"${dirty[@]}"} >"$out" 2>&1; then
+  CHECK2_INVOKED+=("${pkgs[@]}")
+
+  # --allow-dirty CHANGES WHAT GETS PACKAGED (untracked files are swept in), and one flag
+  # covers the whole invocation — so it must be the UNION over the group, not a per-package
+  # decision, or a dirty paigasus-proto would silently package paigasus-proto-derive dirty
+  # too. Local only: CI sets CI, which skips the dirty check entirely.
+  if [ -z "${CI:-}" ]; then
+    for pkg in "${pkgs[@]}"; do
+      pkg_dir="${PKG_DIR[$pkg]:-}"
+      if [ -z "$pkg_dir" ]; then
+        echo "FATAL: Check 2 has no manifest dir for $pkg — PKG_DIR was not populated for it. This is infrastructure, not a repo defect: nothing about $pkg was asserted." >&2
+        return 2
+      fi
+      if [ -n "$(git -C "$REPO_ROOT" status --porcelain -- "$pkg_dir")" ]; then
+        dirty_pkgs+=("$pkg")
+      fi
+    done
+    if [ "${#dirty_pkgs[@]}" -gt 0 ]; then
+      echo "publish-metadata: --allow-dirty for group [${pkgs[*]}] — forced by: ${dirty_pkgs[*]} (local only)" >&2
+      flags=(--allow-dirty)
+    fi
+  fi
+
+  for pkg in "${pkgs[@]}"; do
+    flags+=(-p "$pkg")
+  done
+
+  out="$(mktemp)"
+  if ! cargo publish --dry-run --locked "${flags[@]}" >"$out" 2>&1; then
     cat "$out" >&2
     status=0; classify_cargo_failure "$out" || status=$?
-    rm -f "$out" "$listing"
-    exit "$status"
+    rm -f "$out"
+    return "$status"
   fi
+  rm -f "$out"
+  echo "publish-metadata: group [${pkgs[*]}] OK"
+}
 
-  rm -f "$out" "$listing"
-  echo "publish-metadata: $pkg OK"
+# Guard-the-guard (SMA-542): a new check's own CALL SITE is what goes unguarded. The
+# fixture rows exercise check_publish_group; only this covers its INVOCATION. Because
+# CHECK2_INVOKED is written BY THE HELPER, deleting an invocation leaves it short and this
+# fires. Exit 2, not 1: a Check 2 that silently ran over fewer crates than were enumerated
+# is a broken gate, not a wrong repo.
+assert_check2_covered_everything() { # $@ the names the per-package loop enumerated
+  local enumerated invoked
+  enumerated="$(printf '%s\n' "$@" | LC_ALL=C sort -u)"
+  invoked="$(printf '%s\n' ${CHECK2_INVOKED[@]+"${CHECK2_INVOKED[@]}"} | LC_ALL=C sort -u)"
+  if [ "$enumerated" != "$invoked" ]; then
+    echo "FATAL: Check 2 ran over a different set than Check 2b enumerated." >&2
+    echo "  enumerated: $(echo $enumerated)" >&2
+    echo "  Check 2 ran: $(echo $invoked)" >&2
+    echo "  Either a publish group was dropped or a Check 2 invocation was deleted." >&2
+    return 2
+  fi
 }
 
 # --negative-control — drive the SAME check code with deliberately broken fixtures and
@@ -559,6 +933,175 @@ PY
   _expect_rc 1 "Check 3 (per-package release = true override)" \
     metadata_checks "$tmp/stub.json" "$override_rp" "paigasus-kernel" "$fix_snap"
 
+  # --- Check 1c fixtures ---------------------------------------------------------
+  printf '[package]\nname = "f"\n[lints]\nworkspace = true\n' >"$tmp/lints-inherit.toml"
+  _expect_rc 1 "Check 1c (inherits workspace lints)" \
+    assert_lint_table "$tmp/lints-inherit.toml"
+
+  printf '[package]\nname = "f"\n' >"$tmp/lints-absent.toml"
+  _expect_rc 1 "Check 1c (no lint table at all)" \
+    assert_lint_table "$tmp/lints-absent.toml"
+
+  # `workspace = false` is valid TOML and equivalent to omitting the key — it declares no
+  # local namespace. Before this row it reached the level checks, found no rust/clippy key,
+  # and PASSED. Two shapes, because they fail on different halves of the same rule.
+  printf '[package]\nname = "f"\n[lints]\nworkspace = false\n' >"$tmp/lints-ws-false.toml"
+  _expect_rc 1 "Check 1c (workspace = false declares no local namespace)" \
+    assert_lint_table "$tmp/lints-ws-false.toml"
+
+  printf '[package]\nname = "f"\n[lints]\nworkspace = false\n[lints.rust]\nwarnings = "warn"\n' \
+    >"$tmp/lints-ws-false-plus-local.toml"
+  _expect_rc 0 "Check 1c (workspace = false WITH a local table — passes)" \
+    assert_lint_table "$tmp/lints-ws-false-plus-local.toml"
+
+  # A present-but-EMPTY namespace is the same vacuity in a different shape: it satisfies
+  # "has a local table" while setting no lint at all.
+  printf '[package]\nname = "f"\n[lints.rust]\n' >"$tmp/lints-empty-ns.toml"
+  _expect_rc 1 "Check 1c (present but EMPTY [lints.rust] sets no lint)" \
+    assert_lint_table "$tmp/lints-empty-ns.toml"
+
+  printf '[package]\nname = "f"\n[lints.rust]\nwarnings = "deny"\n' >"$tmp/lints-deny-str.toml"
+  _expect_rc 1 "Check 1c (own table but warnings = deny, string form)" \
+    assert_lint_table "$tmp/lints-deny-str.toml"
+
+  printf '[package]\nname = "f"\n[lints.rust]\nwarnings = { level = "forbid", priority = -1 }\n' \
+    >"$tmp/lints-forbid-tbl.toml"
+  _expect_rc 1 "Check 1c (own table but warnings = forbid, table form)" \
+    assert_lint_table "$tmp/lints-forbid-tbl.toml"
+
+  printf '[package]\nname = "f"\n[lints.rust]\nwarnings = "warn"\n[lints.clippy]\nall = "deny"\n' \
+    >"$tmp/lints-clippy-deny.toml"
+  _expect_rc 1 "Check 1c (clippy.all = deny)" \
+    assert_lint_table "$tmp/lints-clippy-deny.toml"
+
+  printf '[package]\nname = "f"\n[lints.rust]\nwarnings = "warn"\n[lints.clippy]\nall = "warn"\n' \
+    >"$tmp/lints-good.toml"
+  _expect_rc 0 "Check 1c (own table, warn — passes)" \
+    assert_lint_table "$tmp/lints-good.toml"
+
+  _expect_rc 2 "Check 1c (malformed TOML is infra, not a repo defect)" \
+    assert_lint_table "$tmp/does-not-exist.toml"
+
+  # --- Check 1d fixtures ---------------------------------------------------------
+  printf '[package]\nname = "f"\n' >"$tmp/inc-absent.toml"
+  _expect_rc 1 "Check 1d (no include key)" \
+    assert_include_allowlist "$tmp/inc-absent.toml"
+
+  printf '[package]\nname = "f"\ninclude = []\n' >"$tmp/inc-empty.toml"
+  _expect_rc 1 "Check 1d (empty include)" \
+    assert_include_allowlist "$tmp/inc-empty.toml"
+
+  printf '[package]\nname = "f"\n[package.include]\nworkspace = true\n' >"$tmp/inc-inherit.toml"
+  _expect_rc 1 "Check 1d (include.workspace = true is not an allowlist)" \
+    assert_include_allowlist "$tmp/inc-inherit.toml"
+
+  printf '[package]\nname = "f"\ninclude = ["src/**/*.rs", "Cargo.toml", "README.md"]\n' \
+    >"$tmp/inc-no-license.toml"
+  _expect_rc 1 "Check 1d (include omits LICENSE)" \
+    assert_include_allowlist "$tmp/inc-no-license.toml"
+
+  printf '[package]\nname = "f"\ninclude = ["**/*"]\n' >"$tmp/inc-wildcard.toml"
+  _expect_rc 1 "Check 1d (a wildcard is not literal membership)" \
+    assert_include_allowlist "$tmp/inc-wildcard.toml"
+
+  # The bare wildcard above fails on literal membership. This one SATISFIES membership and
+  # must still fail: a catch-all beside the required literals packages everything anyway.
+  printf '[package]\nname = "f"\ninclude = ["Cargo.toml", "README.md", "LICENSE", "**/*"]\n' \
+    >"$tmp/inc-catchall-plus-literals.toml"
+  _expect_rc 1 "Check 1d (catch-all alongside the required literals)" \
+    assert_include_allowlist "$tmp/inc-catchall-plus-literals.toml"
+
+  # One row per MEASURED root-wide pattern. Three of these (`/**`, `/*`, `**/`) bypassed the
+  # first version of this check, so the set is pinned by fixture rather than by memory.
+  for _pat in '/**' '/*' '**/'; do
+    printf '[package]\nname = "f"\ninclude = ["README.md", "LICENSE", "%s"]\n' "$_pat" \
+      >"$tmp/inc-rootwide.toml"
+    _expect_rc 1 "Check 1d (root-wide pattern '$_pat' alongside the literals)" \
+      assert_include_allowlist "$tmp/inc-rootwide.toml"
+  done
+
+  # A SCOPED glob must still pass — the check rejects catch-alls, not globs.
+  printf '[package]\nname = "f"\ninclude = ["src/**/*.rs", "README.md", "LICENSE"]\n' \
+    >"$tmp/inc-scoped-glob.toml"
+  _expect_rc 0 "Check 1d (scoped glob is not a catch-all — passes)" \
+    assert_include_allowlist "$tmp/inc-scoped-glob.toml"
+
+  # --- Check 2c fixtures — the BEHAVIOURAL catch-all detector ----------------------
+  # 1d's denylist can never enumerate every glob that matches everything; 2c catches the
+  # outcome instead. These sets are synthetic because a git-tracked directory cannot be
+  # fixtured cheaply.
+  printf 'Cargo.toml\nREADME.md\nLICENSE\nmoon.yml\nsrc/lib.rs\n' >"$tmp/tracked.txt"
+
+  # Packaged == tracked: the include matched everything. Must red whatever it was spelled.
+  printf 'Cargo.toml\nREADME.md\nLICENSE\nmoon.yml\nsrc/lib.rs\n' >"$tmp/pkg-everything.txt"
+  _expect_rc 1 "Check 2c (packaged set equals the tracked set — a catch-all)" \
+    assert_not_catch_all "$tmp/pkg-everything.txt" "$tmp/tracked.txt" f
+
+  # Cargo's own synthesized entries must NOT make the sets differ — otherwise a real
+  # catch-all would slip through simply because the tarball carries Cargo.lock.
+  printf 'Cargo.lock\nCargo.toml\nCargo.toml.orig\n.cargo_vcs_info.json\nREADME.md\nLICENSE\nmoon.yml\nsrc/lib.rs\n' \
+    >"$tmp/pkg-everything-plus-generated.txt"
+  _expect_rc 1 "Check 2c (cargo-generated entries do not mask a catch-all)" \
+    assert_not_catch_all "$tmp/pkg-everything-plus-generated.txt" "$tmp/tracked.txt" f
+
+  # REGRESSION ROW. The first version of 2c compared the sets for EQUALITY and this shape
+  # slipped through: a catch-all that ALSO sweeps files outside the tracked set (measured —
+  # a probe under --allow-dirty pulled .git/** in) makes packaged a strict SUPERSET, so the
+  # sets are unequal while every tracked file still shipped. The subset test catches it.
+  printf 'Cargo.toml\nREADME.md\nLICENSE\nmoon.yml\nsrc/lib.rs\n.git/HEAD\n.git/index\nstray.tmp\n' \
+    >"$tmp/pkg-superset.txt"
+  _expect_rc 1 "Check 2c (catch-all that also sweeps extras — superset, not equal)" \
+    assert_not_catch_all "$tmp/pkg-superset.txt" "$tmp/tracked.txt" f
+
+  # A real allowlist excludes something — here moon.yml. Must pass.
+  printf 'Cargo.lock\nCargo.toml\nCargo.toml.orig\nREADME.md\nLICENSE\nsrc/lib.rs\n' \
+    >"$tmp/pkg-subset.txt"
+  _expect_rc 0 "Check 2c (a real allowlist excludes something — passes)" \
+    assert_not_catch_all "$tmp/pkg-subset.txt" "$tmp/tracked.txt" f
+
+  # Non-vacuity: an empty tracked set must be infrastructure, not a silent pass.
+  : >"$tmp/tracked-empty.txt"
+  _expect_rc 2 "Check 2c (empty tracked set is infra, not a pass)" \
+    assert_not_catch_all "$tmp/pkg-subset.txt" "$tmp/tracked-empty.txt" f
+
+  _expect_rc 2 "Check 2c (unreadable listing is infra)" \
+    assert_not_catch_all "$tmp/pkg-subset.txt" "$tmp/does-not-exist.txt" f
+
+  printf '[package]\nname = "f"\ninclude = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE"]\n' \
+    >"$tmp/inc-good.toml"
+  _expect_rc 0 "Check 1d (proper allowlist — passes)" \
+    assert_include_allowlist "$tmp/inc-good.toml"
+
+  _expect_rc 2 "Check 1d (malformed TOML is infra, not a repo defect)" \
+    assert_include_allowlist "$tmp/does-not-exist.toml"
+
+  # --- Check 2 grouping + invoked-set fixtures -----------------------------------
+  _expect_rc 2 "Check 2 (empty package list is non-vacuous)" \
+    check_publish_group
+
+  # The invoked-set assertion must fire when Check 2 covered less than 2b enumerated.
+  CHECK2_INVOKED=("paigasus-kernel")
+  _expect_rc 2 "Check 2 (invoked set shorter than the enumerated set)" \
+    assert_check2_covered_everything "paigasus-kernel" "paigasus-proto"
+  CHECK2_INVOKED=("paigasus-kernel" "paigasus-proto")
+  _expect_rc 0 "Check 2 (invoked set matches the enumerated set)" \
+    assert_check2_covered_everything "paigasus-proto" "paigasus-kernel"
+  CHECK2_INVOKED=()
+
+  # publish_groups must separate independent crates and join dependent ones.
+  printf '%s' '{"packages":[
+    {"name":"a","dependencies":[]},
+    {"name":"b","dependencies":[{"name":"c"}]},
+    {"name":"c","dependencies":[]}]}' >"$tmp/groups.json"
+  local got_groups
+  got_groups="$(publish_groups "$tmp/groups.json" "a,b,c")"
+  if [ "$got_groups" != "$(printf 'a\nb\tc')" ]; then
+    echo "NEGATIVE CONTROL FAILED: publish_groups — expected 'a' and 'b<TAB>c', got: $got_groups" >&2
+    failures=$((failures + 1))
+  else
+    echo "  ok — publish_groups separates independent crates and joins dependent ones"
+  fi
+
   # Check 2b — a listing missing LICENSE, and one containing moon.yml.
   printf 'Cargo.toml\nREADME.md\nsrc/lib.rs\n' >"$tmp/missing-license.txt"
   _expect_rc 1 "Check 2b (LICENSE not packaged)" \
@@ -655,18 +1198,44 @@ main() {
   local publishable
   publishable="$(metadata_checks "$meta_json" "$RS_DIR/release-plz.toml" "$expected_csv" "$SNAPSHOT")" \
     || status=$?
+  [ "$status" -eq 0 ] || { rm -f "$meta_json"; exit "$status"; }
+
+  local groups
+  groups="$(publish_groups "$meta_json" "$expected_csv")" || status=$?
   rm -f "$meta_json"
   [ "$status" -eq 0 ] || exit "$status"
 
-  local name dir
-  # Read on FD 3, not stdin (the ci/release-parity/run.sh idiom): a loop-body subprocess
-  # that reads stdin can swallow rows silently, and a silent skip reads as a false green.
-  # Not a live bug today — cargo never touches stdin here, all 3/3 iterations verified —
-  # but it becomes one the day SMA-388 adds a second publishable crate.
+  # Checks 1c, 1d and 2b — per package. Read on FD 3, not stdin (the
+  # ci/release-parity/run.sh idiom): a loop-body subprocess that reads stdin can swallow
+  # rows silently, and a silent skip reads as a false green. Not a live bug — cargo never
+  # touches stdin here, all 3/3 iterations verified — but SMA-577 is what made it matter:
+  # it added paigasus-proto and paigasus-proto-derive as the second and third publishable
+  # crates (absorbing SMA-388), so this loop now actually runs multiple iterations instead
+  # of one.
+  local name dir enumerated=()
   while IFS=$'\t' read -r -u 3 name dir; do
     [ -n "$name" ] || continue
-    check_package "$name" "$dir"
+    enumerated+=("$name")
+    PKG_DIR[$name]="$dir"
+    status=0; assert_lint_table "$dir/Cargo.toml" || status=$?
+    [ "$status" -eq 0 ] || exit "$status"
+    status=0; assert_include_allowlist "$dir/Cargo.toml" || status=$?
+    [ "$status" -eq 0 ] || exit "$status"
+    status=0; check_package_list "$name" "$dir" || status=$?
+    [ "$status" -eq 0 ] || exit "$status"
   done 3<<<"$publishable"
+
+  # Check 2 — one dry-run per publish group.
+  local group_line
+  while IFS= read -r -u 3 group_line; do
+    [ -n "$group_line" ] || continue
+    local group_pkgs
+    IFS=$'\t' read -r -a group_pkgs <<<"$group_line"
+    status=0; check_publish_group "${group_pkgs[@]}" || status=$?
+    [ "$status" -eq 0 ] || exit "$status"
+  done 3<<<"$groups"
+
+  assert_check2_covered_everything "${enumerated[@]}" || exit $?
 
   echo "publish-metadata: all checks passed"
 }

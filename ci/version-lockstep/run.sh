@@ -34,12 +34,14 @@ SITES=(
   "kernel|cargo-lock|rs/Cargo.lock"
   "kernel|uv-lock|py/uv.lock"
   "kernel|napi-glue|rs/crates/bindings/paigasus-node-bindings/index.js"
+  "proto|cargo-lock|rs/Cargo.lock"
+  "proto|uv-lock|py/uv.lock"
 )
 
 # Non-vacuity anchor (SMA-576 review finding 2): `run_check`'s own "checked == ${#SITES[@]}"
 # guard is SELF-REFERENTIAL — deleting a row shrinks SITES and the expectation together, so it
 # was measured to let a deleted row (e.g. napi-glue) through silently, printing
-# "== all 17 … agree ==" and exiting 0 with the negative control and every other gate still
+# "== all 19 … agree ==" and exiting 0 with the negative control and every other gate still
 # green. This literal is the anchor: it ties SITES to a number recorded OUTSIDE this array, so
 # a deleted (or accidentally duplicated) row now fails loudly instead. It can only ever
 # FALSE-RED — forgetting to bump it after a deliberate SITES edit — never silently absorb a
@@ -49,10 +51,11 @@ SITES=(
 # `moon` binary or a YAML parser): update it ONLY together with a deliberate SITES edit. The
 # other half of this pin lives outside this file entirely, in
 # ci_targets.py's SELF_TASK_EXPECTED_GLOBS["version-lockstep"] (part of repo:affected-smoke),
-# which independently asserts moon.yml's own `inputs:` list — the paths SITES reads (15
-# distinct, since two rows share py/packages/paigasus-kernel/pyproject.toml) plus rs/Cargo.toml
-# (read by the cargo-wsdep kind by name, not by a SITES path) plus this script itself.
-EXPECTED_SITE_COUNT=18
+# which independently asserts moon.yml's own `inputs:` list — the paths SITES reads (14
+# distinct: py/packages/paigasus-kernel/pyproject.toml, rs/Cargo.lock, and py/uv.lock are each
+# read by two rows) plus rs/Cargo.toml (read by the cargo-wsdep kind by name, not by a SITES
+# path) plus this script itself — 16 total, matching moon.yml's inputs: list.
+EXPECTED_SITE_COUNT=20
 
 # Source of truth per group.
 declare -A SOURCE_OF_TRUTH=(
@@ -60,15 +63,28 @@ declare -A SOURCE_OF_TRUTH=(
   [proto]="rs/crates/libs/paigasus-proto/Cargo.toml"
 )
 
+# Lock-file membership, keyed <group>:<kind> — NOT by group alone, BECAUSE THE TWO KINDS
+# SPAN TWO NAMESPACES. cargo-lock names are Cargo crate names; uv-lock names are Python
+# distribution names. paigasus-node-bindings and paigasus-wasm are npm artifacts that
+# appear nowhere in py/uv.lock, and paigasus-proto-derive is a proc-macro crate with no
+# Python distribution at all. A single per-group set would demand it in py/uv.lock — a
+# permanent false red — or silently weaken the check.
+declare -A LOCK_MEMBERS=(
+  [kernel:cargo-lock]="paigasus-kernel paigasus-py-bindings paigasus-node-bindings paigasus-wasm"
+  [kernel:uv-lock]="paigasus-kernel paigasus-py-bindings"
+  [proto:cargo-lock]="paigasus-proto paigasus-proto-derive"
+  [proto:uv-lock]="paigasus-proto"
+)
+
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=1   # site_verdict
+SELF_TEST_COUNT=2   # site_verdict, lock_reader
 
 site_verdict() { # $1 expected  $2 actual
   if [ -n "$2" ] && [ "$1" = "$2" ]; then printf 'OK'; else printf 'MISMATCH'; fi
 }
 
-read_version() { # $1 kind  $2 path-or-name
-  local kind="$1" target="$2" abs="$REPO_ROOT/$2"
+read_version() { # $1 kind  $2 path-or-name  $3 group (required for lock kinds)
+  local kind="$1" target="$2" group="${3:-}" abs="$REPO_ROOT/$2"
   case "$kind" in
     cargo-package)
       [ -r "$abs" ] || die_infra "cannot read $target"
@@ -154,10 +170,12 @@ PY
       # An unreadable or undecodable lockfile is a DIFFERENT failure mode — infrastructure,
       # not drift — and exits 2 instead.
       [ -r "$abs" ] || die_infra "cannot read $target"
-      python3 - "$abs" <<'PY'
+      [ -n "$group" ] || die_infra "cargo-lock site for '$target' was read without a group"
+      local members="${LOCK_MEMBERS[$group:cargo-lock]:-}"
+      [ -n "$members" ] || die_infra "no LOCK_MEMBERS entry for '$group:cargo-lock'"
+      python3 - "$abs" "$members" <<'PY'
 import re, sys
-p = sys.argv[1]
-names = {"paigasus-kernel", "paigasus-py-bindings", "paigasus-node-bindings", "paigasus-wasm"}
+p, names = sys.argv[1], set(sys.argv[2].split())
 try:
     text = open(p, encoding="utf-8").read()
 except Exception as e:
@@ -179,10 +197,12 @@ PY
       # same SMA-576 review finding 4: a name missing from the lock entirely must not be
       # masked by the survivors' versions happening to agree.
       [ -r "$abs" ] || die_infra "cannot read $target"
-      python3 - "$abs" <<'PY'
+      [ -n "$group" ] || die_infra "uv-lock site for '$target' was read without a group"
+      local members="${LOCK_MEMBERS[$group:uv-lock]:-}"
+      [ -n "$members" ] || die_infra "no LOCK_MEMBERS entry for '$group:uv-lock'"
+      python3 - "$abs" "$members" <<'PY'
 import re, sys
-p = sys.argv[1]
-names = {"paigasus-kernel", "paigasus-py-bindings"}
+p, names = sys.argv[1], set(sys.argv[2].split())
 try:
     text = open(p, encoding="utf-8").read()
 except Exception as e:
@@ -230,9 +250,45 @@ site_verdict_self_test() {
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 }
 
+# L2 closure for the lock readers: EXPECTED_SITE_COUNT cannot see a WRONG name set, and the
+# negative control drifts a packagejson site, so before this table neither lock arm was
+# exercised at all. Dropping paigasus-proto-derive from [proto:cargo-lock] would have been
+# a silent false-green on the very change that introduced the table.
+lock_reader_self_test() {
+  local tmp got
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/rs" "$tmp/py"
+
+  # All members present at a uniform version -> that version.
+  printf '[[package]]\nname = "paigasus-proto"\nversion = "0.1.0"\n\n[[package]]\nname = "paigasus-proto-derive"\nversion = "0.1.0"\n' \
+    >"$tmp/rs/Cargo.lock"
+  got="$(REPO_ROOT="$tmp" read_version cargo-lock rs/Cargo.lock proto)"
+  [ "$got" = "0.1.0" ] || { fail "self-test: uniform proto cargo-lock should read 0.1.0, got '$got'"; rm -rf "$tmp"; return 1; }
+
+  # A MEMBER MISSING must read as "" (MISMATCH), not as the survivor's version.
+  printf '[[package]]\nname = "paigasus-proto"\nversion = "0.1.0"\n' >"$tmp/rs/Cargo.lock"
+  got="$(REPO_ROOT="$tmp" read_version cargo-lock rs/Cargo.lock proto)"
+  [ -z "$got" ] || { fail "self-test: a missing cargo-lock member must read '', got '$got'"; rm -rf "$tmp"; return 1; }
+
+  # Non-uniform versions must read "".
+  printf '[[package]]\nname = "paigasus-proto"\nversion = "0.1.0"\n\n[[package]]\nname = "paigasus-proto-derive"\nversion = "0.2.0"\n' \
+    >"$tmp/rs/Cargo.lock"
+  got="$(REPO_ROOT="$tmp" read_version cargo-lock rs/Cargo.lock proto)"
+  [ -z "$got" ] || { fail "self-test: a non-uniform cargo-lock must read '', got '$got'"; rm -rf "$tmp"; return 1; }
+
+  # The uv-lock arm reads its OWN namespace: proto's uv membership is one name.
+  printf '[[package]]\nname = "paigasus-proto"\nversion = "0.1.0"\n' >"$tmp/py/uv.lock"
+  got="$(REPO_ROOT="$tmp" read_version uv-lock py/uv.lock proto)"
+  [ "$got" = "0.1.0" ] || { fail "self-test: proto uv-lock should read 0.1.0, got '$got'"; rm -rf "$tmp"; return 1; }
+
+  rm -rf "$tmp"
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+}
+
 run_self_tests() {
   SELF_TESTS_RAN=0
   site_verdict_self_test
+  lock_reader_self_test
   [ "$SELF_TESTS_RAN" -eq "$SELF_TEST_COUNT" ] \
     || die_infra "self-tests ran $SELF_TESTS_RAN, expected $SELF_TEST_COUNT"
   printf '== version-lockstep self-tests passed (%d tables) ==\n' "$SELF_TESTS_RAN"
@@ -258,7 +314,7 @@ run_check() {
   for entry in "${SITES[@]}"; do
     IFS='|' read -r group kind target <<<"$entry"
     expected="$(read_version cargo-package "${SOURCE_OF_TRUTH[$group]}")" || return 2
-    actual="$(read_version "$kind" "$target")" || return 2
+    actual="$(read_version "$kind" "$target" "$group")" || return 2
     verdict="$(site_verdict "$expected" "$actual")"
     checked=$((checked + 1))
     if [ "$verdict" != OK ]; then
@@ -275,31 +331,44 @@ run_check() {
   return "$rc"
 }
 
-# Copy the tree's version-carrying files into a scratch dir, drift ONE site, and assert the
-# checker reports red. Driving the real run_check (not a reimplementation) is what makes this
-# a control rather than a second, differently-wrong checker.
-negative_control() {
-  local tmp
-  tmp="$(mktemp -d)" || die_infra "cannot create a scratch dir"
-  # shellcheck disable=SC2064
-  trap "rm -rf '$tmp'" RETURN
-
-  # Stage exactly the files the SITES table names, plus rs/Cargo.toml (which the cargo-wsdep
-  # kind reads by name rather than by path). Deriving the list from SITES rather than from a
-  # hand-written glob keeps the control honest when a site is added: a new site is staged
-  # automatically, so the control cannot quietly stop covering it.
-  local entry kind target
+# Stage exactly the files the SITES table names, plus rs/Cargo.toml (which the cargo-wsdep
+# kind reads by name rather than by path), into a PRISTINE copy at $1. Deriving the list from
+# SITES rather than from a hand-written glob keeps the control honest when a site is added: a
+# new site is staged automatically, so the control cannot quietly stop covering it.
+#
+# A shared function called once per drift — rather than one scratch dir reused across both
+# drifts — because reuse left the FIRST drift still present in the tree while the SECOND
+# run_check ran: run_check's loop fails on any mismatched site and keeps checking the rest, so
+# the second run_check's rc=1 was guaranteed by the still-present first drift regardless of
+# whether the lock-row drift landed at all (SMA-577 review, Critical). Each drift now gets its
+# own pristine tree, so a later drift added to this control automatically gets isolation
+# instead of silently inheriting the same bug.
+stage_pristine_tree() { # $1 destination dir
+  local dest="$1" entry kind target
   {
     printf 'rs/Cargo.toml\n'
     for entry in "${SITES[@]}"; do
       IFS='|' read -r _ kind target <<<"$entry"
       [ "$kind" = cargo-wsdep ] || printf '%s\n' "$target"
     done
-  } | sort -u | ( cd "$REPO_ROOT" && tar -cf - -T - ) | ( cd "$tmp" && tar -xf - ) \
+  } | sort -u | ( cd "$REPO_ROOT" && tar -cf - -T - ) | ( cd "$dest" && tar -xf - ) \
     || die_infra "cannot stage a scratch copy of the version-carrying files"
+}
+
+# Drift ONE site in its OWN pristine scratch tree, and assert the checker reports red. Driving
+# the real run_check (not a reimplementation) is what makes this a control rather than a
+# second, differently-wrong checker.
+negative_control() {
+  local tmp1 tmp2
+  tmp1="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  tmp2="$(mktemp -d)" || die_infra "cannot create a scratch dir"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp1' '$tmp2'" RETURN
+
+  stage_pristine_tree "$tmp1"
 
   # Drift site 13 (@paigasus/node-bindings) to a version no group member carries.
-  python3 - "$tmp/rs/crates/bindings/paigasus-node-bindings/package.json" <<'PY'
+  python3 - "$tmp1/rs/crates/bindings/paigasus-node-bindings/package.json" <<'PY'
 import json, sys
 p = sys.argv[1]
 d = json.load(open(p))
@@ -308,20 +377,55 @@ json.dump(d, open(p, "w"), indent=2)
 PY
 
   local ec=0
-  REPO_ROOT="$tmp" run_check >/dev/null 2>&1 || ec=$?
-  if [ "$ec" -eq 1 ]; then
-    printf '== negative control: version-lockstep reported red as expected ==\n'
-    return 0
-  fi
+  REPO_ROOT="$tmp1" run_check >/dev/null 2>&1 || ec=$?
   if [ "$ec" -eq 2 ]; then
     fail "negative control: run_check hit an infrastructure failure (exit 2) instead of
       reporting the drift. The scratch staging is incomplete or a site went unreadable —
       that is a broken control, not proof the gate can report red."
     return 1
   fi
-  fail "negative control: a drifted site was ACCEPTED (run_check exited $ec, expected 1).
+  if [ "$ec" -ne 1 ]; then
+    fail "negative control: a drifted site was ACCEPTED (run_check exited $ec, expected 1).
       The gate can no longer report red and is green exactly when it matters."
-  return 1
+    return 1
+  fi
+  # First drift correctly reported red — fall through (rather than returning) so the second,
+  # lock-row drift below is exercised too, instead of returning early on the first success.
+  printf '== negative control: version-lockstep reported red as expected ==\n'
+
+  stage_pristine_tree "$tmp2"
+
+  # Second drift: a LOCK row, run against its OWN pristine tree (SMA-577 review, Critical) so
+  # this run_check's red proves the lock drift specifically — not a leftover from the first
+  # drift above, which no longer exists in $tmp2. The packagejson drift above exercises no
+  # lock handler, so without this the new LOCK_MEMBERS table has no end-to-end control
+  # coverage.
+  python3 - "$tmp2/rs/Cargo.lock" <<'PY'
+import re, sys
+p = sys.argv[1]
+text = open(p, encoding="utf-8").read()
+# Drift ONE proto member so the set is non-uniform -> the reader must print "".
+text = re.sub(
+    r'(\[\[package\]\]\nname = "paigasus-proto-derive"\nversion = ")[^"]+(")',
+    r"\g<1>99.99.99\g<2>", text, count=1)
+open(p, "w", encoding="utf-8").write(text)
+PY
+
+  local ec2=0
+  REPO_ROOT="$tmp2" run_check >/dev/null 2>&1 || ec2=$?
+  if [ "$ec2" -eq 2 ]; then
+    fail "negative control: run_check hit an infrastructure failure (exit 2) instead of
+      reporting the lock-row drift. The scratch staging is incomplete or a site went
+      unreadable — that is a broken control, not proof the gate can report red."
+    return 1
+  fi
+  if [ "$ec2" -ne 1 ]; then
+    fail "negative control: a drifted cargo-lock member was ACCEPTED (run_check exited $ec2, expected 1).
+      The LOCK_MEMBERS table or the cargo-lock reader can no longer report red."
+    return 1
+  fi
+  printf '== negative control: version-lockstep reported red on both a packagejson and a lock drift ==\n'
+  return 0
 }
 
 write_site() { # $1 kind  $2 target  $3 version  -> prints 1 if it changed the file, else 0
@@ -473,7 +577,9 @@ run_write() {
     wrote=$((wrote + changed))
   done
 
-  # Regenerate the three derived sites (16-18). Each is owned by a tool, not by this script.
+  # Regenerate the three derived files (SITES rows 16-20 — kernel's and proto's cargo-lock and
+  # uv-lock rows each point at the same file, so five rows resolve to three files). Each file is
+  # owned by a tool, not by this script.
   ( cd "$REPO_ROOT/rs" && cargo update -w --offline >/dev/null 2>&1 ) \
     || ( cd "$REPO_ROOT/rs" && cargo update -w >/dev/null ) \
     || die_infra "cargo update -w failed (site 16)"

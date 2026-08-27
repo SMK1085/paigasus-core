@@ -304,6 +304,20 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   the acceptance evidence" does not hold for the first run. The real hazard here is name
   squatting — release-plz performs a crates.io lookup for every workspace member name, so a
   squatted name silently becomes the comparison baseline — not a runaway version proposal.
+- Any crate flipping `publish = true` must carry **its own `[lints.*]` table** and **its own
+  `include` allowlist** — enforced by `repo:publish-metadata` Checks 1c/1d (SMA-577). Cargo
+  inlines the resolved lint table into the published manifest and docs.rs builds published
+  crates as the root package on nightly, where `--cap-lints allow` does NOT apply, so an
+  inherited `warnings = "deny"` silently kills docs.rs builds on the first new rustc lint —
+  months after the PR. 1d's membership is LITERAL: `include = ["**/*"]` is rejected, since it
+  would "cover" README.md/LICENSE while reinstating the `moon.yml` leak Check 2b catches.
+  Check 2 runs one `cargo publish --dry-run` per **publish group** (a connected component of
+  the in-set dependency graph), NOT per package: a per-package dry-run of `paigasus-proto`
+  exits 101 (`no matching package named 'paigasus-proto-derive'`) until the derive crate is on
+  crates.io, while `-p paigasus-proto-derive -p paigasus-proto` exits 0. That combined form is
+  registry-faithful, not a workspace shortcut — measured by breaking the derive crate's
+  `include` and watching the run fail. Grouping keeps `paigasus-kernel` in a group of one so
+  it retains its standalone assertion.
 
 ## Workflow
 

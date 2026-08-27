@@ -605,7 +605,7 @@ source = { editable = "packages/paigasus-ml" }
 
 [[package]]
 name = "paigasus-proto"
-version = "0.0.0"
+version = "0.1.0"
 source = { editable = "packages/paigasus-proto" }
 dependencies = [
     { name = "betterproto2", extra = ["grpclib"] },

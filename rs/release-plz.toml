@@ -46,23 +46,31 @@ name = "paigasus-wasm"
 version_group = "kernel"
 release = true
 
+# --- Releasable: the proto family (ADR-0011 S1) --------------------------------------------
+# One version across the two crates, ordered derive -> proto (paigasus-proto depends on
+# paigasus-proto-derive). Its lockstep is realized structurally: the generated Rust lives
+# inside paigasus-proto/src/generated, so a contracts/ change regenerates it, changes the
+# crate's files, and release-plz attributes the bump BY FILE PATH (ADR-0011 S5). No contract
+# version is introduced. Nothing publishes until SMA-580 flips PAIGASUS_RELEASE_ENABLED;
+# `release = true` here only makes them eligible for the release PR.
+[[package]]
+name = "paigasus-proto"
+version_group = "proto"
+release = true
+
+[[package]]
+name = "paigasus-proto-derive"
+version_group = "proto"
+release = true
+
 # --- Not releasable ------------------------------------------------------------------------
 # Every other member. `release = false` removes a package from the release-PR proposal
 # ENTIRELY (measured: it is neither bumped nor listed), which is what keeps the
 # dependencies_update cascade from bumping and permanently tagging crates nobody released.
 #
-# paigasus-proto / paigasus-proto-derive join the "proto" version_group in SMA-577, once they
-# carry publishable metadata. paigasus-gateway / paigasus-iam stay at 0.0.0 deliberately:
-# their `env!("CARGO_PKG_VERSION")` feeds the ServiceInfo descriptor, and ADR-0020 skew
+# paigasus-gateway / paigasus-iam stay at 0.0.0 deliberately: their
+# `env!("CARGO_PKG_VERSION")` feeds the ServiceInfo descriptor, and ADR-0020 skew
 # reporting is parked on that value (SMA-505 R7).
-[[package]]
-name = "paigasus-proto"
-release = false
-
-[[package]]
-name = "paigasus-proto-derive"
-release = false
-
 [[package]]
 name = "paigasus-iam-core"
 release = false
