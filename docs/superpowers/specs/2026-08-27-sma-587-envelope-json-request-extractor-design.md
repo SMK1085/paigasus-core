@@ -7,8 +7,10 @@
 ## Problem
 
 `adapters::http::authn::EnvelopeJson` exists so a body axum refuses is rejected inside IAM's
-stable `{"error":{code,message}}` envelope with a registered `reason`. **Only two request
-extractors use it**: `api_keys::introspect` and `system_retirement::retire`.
+stable `{"error":{code,message}}` envelope with a registered `reason`. **Only three request
+extractors use it**: `authn::introspect` (the extractor's own original home route),
+`api_keys::introspect`, and `system_retirement::retire` (corrected from "two" — see
+§ *Review corrections*).
 
 The other **fourteen** take plain `axum::Json<T>`, so axum's own rejection escapes — a
 plain-text body carrying no `error.code` at all. The route answers outside its own error
@@ -165,11 +167,12 @@ is the only way to reach a genuine `LengthLimitError`.
 
 #### D1.2 — Two consequences stated rather than discovered
 
-- **This also narrows the two routes already on `EnvelopeJson`.** `api_keys::introspect` and
-  `system_retirement::retire` today answer 415 and 422 with `invalid-request-body`; after this
-  they answer `unsupported-content-type` and `invalid-request-schema`. Intended — one extractor,
-  one taxonomy — but the wire change is **sixteen** routes, not fourteen, and it supersedes a
-  live assertion (§ *Tests that must change*).
+- **This also narrows the three routes already on `EnvelopeJson`.** `authn::introspect`,
+  `api_keys::introspect`, and `system_retirement::retire` today answer 415 and 422 with
+  `invalid-request-body`; after this they answer `unsupported-content-type` and
+  `invalid-request-schema`. Intended — one extractor, one taxonomy — but the wire change is
+  **seventeen** routes, not fourteen (corrected from "sixteen" — see § *Review corrections*), and
+  it supersedes a live assertion (§ *Tests that must change*).
 - **error.proto's 901 comment stops being true.** It reads "covers IAM's `invalid_request`
   extractor rejection and the gateway's `invalid_request_body`, merged". IAM's half is now
   narrower than the gateway's, which keeps emitting 901 from its own `Bytes` funnel
@@ -441,7 +444,7 @@ staled it. This change invalidates three sites:
    HTTP half of that divergence row is **asserted**, closing the gap SMA-586 left open.
 2. **`authn.rs`'s doc comments** on `EnvelopeJson` and `RejectionKind` (`:82-87`, `:296-311`),
    which name the two users individually and describe the two-code taxonomy. They move with the
-   code and are rewritten for four kinds and sixteen routes.
+   code and are rewritten for four kinds and seventeen routes.
 3. **`error.proto`'s 901 comment** (D1.2).
 
 ## Cross-transport divergence
@@ -495,11 +498,13 @@ the asymmetry is an assertion rather than an omission.
 ## Compatibility
 
 - **No status changes on any route.** `envelope_rejection` renders `rejection.status()`.
-- **Bodies change on sixteen routes.** Fourteen move from plain text to a registered reason —
-  strictly additive for a client, which previously had nothing parseable to branch on.
-- **Two routes are a breaking change for a `reason`-branching client**, and this is stated
-  plainly rather than buried: `api_keys::introspect` and `system_retirement::retire` reassign
-  their 415 and 422 responses from `invalid-request-body` to the two new codes. SMA-586's
+- **Bodies change on seventeen routes** (corrected from "sixteen" — see § *Review corrections*).
+  Fourteen move from plain text to a registered reason — strictly additive for a client, which
+  previously had nothing parseable to branch on.
+- **Three routes are a breaking change for a `reason`-branching client**, and this is stated
+  plainly rather than buried: `authn::introspect`, `api_keys::introspect`, and
+  `system_retirement::retire` reassign their 415 and 422 responses from `invalid-request-body` to
+  the two new codes. SMA-586's
   Compatibility section classified exactly this operation as "For a consumer branching on
   `reason`, this is a breaking change" (586 spec:470-474), and the same classification applies
   here. The mitigation is timing: no released SDK branches on these yet, which is the whole
@@ -548,6 +553,11 @@ Folded in from the adversarial review of the first draft, in the order they matt
   § *Cross-transport divergence*, § *Out of scope*, and § *Tests that must change*.
 - D2.1 (the `json.rs`/`path.rs` funnel asymmetry) and D1.3 (naming and range) were invisible
   decisions; both are now stated with their rejected alternatives.
+- **The extractor-count was wrong** (Task 6 cleanup, found by the controller): only two routes —
+  `api_keys::introspect` and `system_retirement::retire` — were named as already on
+  `EnvelopeJson`. `authn::introspect`, the extractor's own original home route, is a third. The
+  wire change therefore touches **seventeen** routes, not sixteen. Corrected everywhere that
+  count appeared (Problem, D1.2, § *Tests that must change*, § *Compatibility*).
 
 **Rejected from the review:** nothing outright. The 415-granularity point was accepted but
 resolved in the opposite direction to the suggestion (down to two assertions rather than

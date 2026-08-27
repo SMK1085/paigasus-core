@@ -774,7 +774,7 @@ two assertions per route, same trailing well-formed-body control. The per-suite 
 http_users.rs             POST   /v1/users
 http_memberships.rs       POST   /v1/memberships
 http_authz.rs             POST   /v1/authz/is-authorized
-                          PUT    /v1/authz/policies
+                          POST   /v1/authz/policies
                           POST   /v1/authz/role-grants
 http_dead_letters.rs      POST   /v1/outbox/dead-letters/replay
 http_service_accounts.rs  POST   /v1/service-accounts

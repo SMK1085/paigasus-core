@@ -157,9 +157,10 @@ mod tests {
             let (_, _, body) = rendered(err).await;
             codes.push(body["error"]["code"].as_str().expect("a code").to_owned());
         }
-        for code in codes {
-            assert!(ErrorReason::from_wire_reason(&code).is_some(), "{code} is not declared in common/v1/error.proto");
+        for code in &codes {
+            assert!(ErrorReason::from_wire_reason(code).is_some(), "{code} is not declared in common/v1/error.proto");
         }
+        assert!(!codes.is_empty(), "all_authn_errors() must yield at least one code, or this test asserts nothing");
     }
 
     /// D4: the header is present on EVERY error response, carrying the literal `false` where the

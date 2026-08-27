@@ -91,6 +91,13 @@ fn envelope(kind: RejectionKind, status: StatusCode) -> Response {
 /// Restructured from a straight `match &rejection { … }` to compute `kind` first: matching on
 /// `&rejection` while also moving `rejection` into the fallback arm (`rejection.into_response()`)
 /// is a borrow conflict. Behaviour is identical to the variant-then-status rule described above.
+///
+/// The three named arms are not load-bearing today: `classify` alone already maps their statuses
+/// (400/415/422) to the same `RejectionKind`s, so deleting the arms and falling through to
+/// `classify(status)` would leave every test in this module green right now. They exist so that
+/// an upstream axum status change for one of these variants can't silently relabel this case —
+/// the variant match pins the KIND to the rejection's identity, not to whatever status axum
+/// happens to attach to it this release.
 fn envelope_rejection(rejection: JsonRejection) -> Response {
     let status = rejection.status();
     let kind = match &rejection {
