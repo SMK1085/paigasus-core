@@ -409,7 +409,13 @@ else:
     # listed: `["README.md", "LICENSE", "**/*"]` satisfies literal membership while
     # packaging the whole directory, reinstating the exact moon.yml leak Check 2b exists
     # to catch. Rejecting the bare `["**/*"]` shape via literal membership was not enough.
-    catch_alls = [e for e in include if isinstance(e, str) and e in ("**/*", "**", "*")]
+    # MEASURED against cargo 1.95.0, not guessed. A probe crate carrying `private/secret.txt`
+    # plus `include = ["README.md", "LICENSE", <pattern>]` was packaged for each candidate;
+    # these six ship the secret, `./**` and a scoped `src/**/*.rs` do not. `/*` is the
+    # counter-intuitive one — cargo applies it recursively, unlike strict gitignore reading —
+    # and `/**` is what a reviewer found bypassing the original three-entry list.
+    CATCH_ALLS = ("**/*", "**", "*", "/**", "/*", "**/")
+    catch_alls = [e for e in include if isinstance(e, str) and e.strip() in CATCH_ALLS]
     if catch_alls:
         errors.append(
             f"{name}: `include` contains the catch-all {catch_alls[0]!r}, which packages the "
@@ -922,6 +928,21 @@ PY
     >"$tmp/inc-catchall-plus-literals.toml"
   _expect_rc 1 "Check 1d (catch-all alongside the required literals)" \
     assert_include_allowlist "$tmp/inc-catchall-plus-literals.toml"
+
+  # One row per MEASURED root-wide pattern. Three of these (`/**`, `/*`, `**/`) bypassed the
+  # first version of this check, so the set is pinned by fixture rather than by memory.
+  for _pat in '/**' '/*' '**/'; do
+    printf '[package]\nname = "f"\ninclude = ["README.md", "LICENSE", "%s"]\n' "$_pat" \
+      >"$tmp/inc-rootwide.toml"
+    _expect_rc 1 "Check 1d (root-wide pattern '$_pat' alongside the literals)" \
+      assert_include_allowlist "$tmp/inc-rootwide.toml"
+  done
+
+  # A SCOPED glob must still pass — the check rejects catch-alls, not globs.
+  printf '[package]\nname = "f"\ninclude = ["src/**/*.rs", "README.md", "LICENSE"]\n' \
+    >"$tmp/inc-scoped-glob.toml"
+  _expect_rc 0 "Check 1d (scoped glob is not a catch-all — passes)" \
+    assert_include_allowlist "$tmp/inc-scoped-glob.toml"
 
   printf '[package]\nname = "f"\ninclude = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE"]\n' \
     >"$tmp/inc-good.toml"

@@ -295,7 +295,11 @@ else:
     # ADDED DURING PR REVIEW. Literal membership rejects the BARE `["**/*"]` shape, but a
     # catch-all listed ALONGSIDE the required literals satisfies membership while packaging
     # the whole directory — reinstating the exact moon.yml leak Check 2b exists to catch.
-    catch_alls = [e for e in include if isinstance(e, str) and e in ("**/*", "**", "*")]
+    # MEASURED against cargo 1.95.0: each of these six ships a probe crate's private file
+    # when listed beside the required literals; `./**` and a scoped `src/**/*.rs` do not.
+    # `/*` is applied recursively by cargo, and `/**` bypassed the original three-entry list.
+    CATCH_ALLS = ("**/*", "**", "*", "/**", "/*", "**/")
+    catch_alls = [e for e in include if isinstance(e, str) and e.strip() in CATCH_ALLS]
     if catch_alls:
         errors.append(
             f"{name}: `include` contains the catch-all {catch_alls[0]!r}, which packages the "
