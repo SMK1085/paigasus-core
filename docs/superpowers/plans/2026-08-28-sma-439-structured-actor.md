@@ -493,7 +493,7 @@ Leave the other two tests untouched — they assert Protocol structure, not fiel
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-moon run paigasus-proto-py:test
+moon run py:test
 moon run ts:fmt
 ```
 
@@ -517,7 +517,7 @@ git commit -m "feat(ts): export Actor and port the audit tests to it (SMA-439)"
 
 **Interfaces:**
 - Consumes: the retyped `AuditMetadata` from Task 1.
-- Produces: `pub fn audit(created: DateTime<Utc>, updated: DateTime<Utc>) -> AuditMetadata` — signature **unchanged**. Its seven call sites are untouched.
+- Produces: `pub fn audit(created: DateTime<Utc>, updated: DateTime<Utc>) -> AuditMetadata` — signature **unchanged**. Its six call sites are untouched.
 
 - [ ] **Step 1: Write the failing test**
 
