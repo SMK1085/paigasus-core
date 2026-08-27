@@ -30,6 +30,7 @@ use paigasus_iam_core::authz::model::root_prn;
 use super::AppState;
 use super::dto::{CreateNodeBody, CreateOrgResponse, OrgDto, PageQuery, RenameBody, TeamDto};
 use super::error::ApiError;
+use super::json::EnvelopeJson;
 use super::path::{OrganizationId, UuidPath};
 use crate::adapters::auth::AuthContext;
 use crate::application::pagination::Page;
@@ -49,7 +50,7 @@ fn actor_prn(ctx: &AuthContext) -> paigasus_kernel::Prn {
     ctx.principal_id.prn().clone()
 }
 
-async fn create_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Json(b): Json<CreateNodeBody>) -> Result<(StatusCode, Json<CreateOrgResponse>), ApiError> {
+async fn create_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeJson(b): EnvelopeJson<CreateNodeBody>) -> Result<(StatusCode, Json<CreateOrgResponse>), ApiError> {
     if s.enforce_tenancy {
         s.authorize.check(&actor_prn(&ctx), Action::CreateOrganization, &root_prn()).await?;
     }
@@ -77,7 +78,7 @@ async fn get_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContex
     Ok(Json(view.into()))
 }
 
-async fn rename_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<OrganizationId>, Json(b): Json<RenameBody>) -> Result<Json<OrgDto>, ApiError> {
+async fn rename_org(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<OrganizationId>, EnvelopeJson(b): EnvelopeJson<RenameBody>) -> Result<Json<OrgDto>, ApiError> {
     let id = path.id;
     if s.enforce_tenancy {
         let view = s.orgs.get(id).await?;
@@ -111,7 +112,7 @@ async fn create_team(
     State(s): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
     path: UuidPath<OrganizationId>,
-    Json(b): Json<CreateNodeBody>,
+    EnvelopeJson(b): EnvelopeJson<CreateNodeBody>,
 ) -> Result<(StatusCode, Json<TeamDto>), ApiError> {
     let org_id = path.id;
     if s.enforce_tenancy {

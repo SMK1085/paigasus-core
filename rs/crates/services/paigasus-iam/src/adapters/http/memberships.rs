@@ -33,6 +33,7 @@ use paigasus_kernel::Prn;
 use super::AppState;
 use super::dto::{CreateMembershipBody, MembershipDto, MembershipQuery};
 use super::error::ApiError;
+use super::json::EnvelopeJson;
 use super::path::{MembershipId, UuidPath};
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
@@ -65,7 +66,7 @@ async fn resolve_node(s: &AppState, node: &TenancyNodeRef) -> Result<Prn, Tenanc
     })
 }
 
-async fn create_membership(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Json(b): Json<CreateMembershipBody>) -> Result<(StatusCode, Json<MembershipDto>), ApiError> {
+async fn create_membership(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeJson(b): EnvelopeJson<CreateMembershipBody>) -> Result<(StatusCode, Json<MembershipDto>), ApiError> {
     if s.enforce_tenancy {
         let node = parse_node_prn(&b.node_prn)?;
         let resource = resolve_node(&s, &node).await?;

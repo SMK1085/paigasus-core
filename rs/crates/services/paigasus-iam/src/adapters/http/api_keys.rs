@@ -80,7 +80,7 @@ async fn issue(
     State(s): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
     path: UuidPath<ServiceAccountId>,
-    Json(body): Json<IssueApiKeyBody>,
+    EnvelopeJson(body): EnvelopeJson<IssueApiKeyBody>,
 ) -> Result<(StatusCode, Json<IssueApiKeyResponseDto>), ApiError> {
     let actor = actor_prn(&ctx);
     let sa_id = service_account_id(path.id);

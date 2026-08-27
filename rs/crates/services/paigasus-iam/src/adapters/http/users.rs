@@ -28,6 +28,7 @@ use paigasus_iam_core::authz::model::root_prn;
 use super::AppState;
 use super::dto::{CreateUserBody, CreateUserResponse};
 use super::error::ApiError;
+use super::json::EnvelopeJson;
 use crate::adapters::auth::AuthContext;
 use crate::application::create_user::NewUser;
 
@@ -56,7 +57,7 @@ pub(crate) fn to_command(b: CreateUserBody) -> NewUser {
     }
 }
 
-async fn create_user(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Json(b): Json<CreateUserBody>) -> Result<(StatusCode, Json<CreateUserResponse>), ApiError> {
+async fn create_user(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeJson(b): EnvelopeJson<CreateUserBody>) -> Result<(StatusCode, Json<CreateUserResponse>), ApiError> {
     if s.enforce_tenancy {
         s.authorize.check(&actor_prn(&ctx), Action::CreateUser, &root_prn()).await?;
     }
