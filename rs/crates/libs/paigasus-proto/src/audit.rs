@@ -87,7 +87,10 @@ mod tests {
         // and with the Python/TS surfaces. This test is the tripwire for that.
         let dto = AuditableExample {
             id: "z".to_string(),
-            audit: Some(AuditMetadata { creator: Some(Actor::default()), ..Default::default() }),
+            audit: Some(AuditMetadata {
+                creator: Some(Actor::default()),
+                ..Default::default()
+            }),
         };
         assert_eq!(dto.creator(), Some(&Actor::default()));
     }
