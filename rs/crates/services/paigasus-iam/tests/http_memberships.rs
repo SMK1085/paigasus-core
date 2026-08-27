@@ -141,19 +141,19 @@ async fn list_memberships_requires_exactly_one_filter() {
     // the authorization cases.
     provision_platform_admin(&state, &token).await;
 
-    // Neither `principal` nor `node` set: 400 `invalid-prn`. (`TenancyError::InvalidPrn`'s
-    // `Display` is a fixed, generic message across every construction site — the same
-    // convention as `parse_principal_prn`/`parse_node_prn` in `application::memberships` — so
-    // only the stable `code` is asserted here, matching `http_tenancy.rs`'s convention.)
+    // Neither `principal` nor `node` set: 400 `missing-required-field`. These two cases used
+    // to share one reason (`invalid-prn`); SMA-586 D6 split them, because "you omitted a
+    // filter" and "you sent two" are different mistakes with different fixes.
     let (status, err) = send(&app, "GET", "/v1/memberships", None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
-    assert_eq!(err["error"]["code"], "invalid-prn");
+    assert_eq!(err["error"]["code"], "missing-required-field");
 
-    // Both set: 400 `invalid-prn`.
+    // Both set: 400 `mutually-exclusive-fields`. HTTP is the only surface that can produce
+    // this — the gRPC twin models the choice as a `oneof`, which cannot carry two values.
     let user_prn = create_user(&app, &token, "carol@example.com").await;
     let (status, err) = send(&app, "GET", &format!("/v1/memberships?principal={user_prn}&node={user_prn}"), None, Some(token.as_str())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
-    assert_eq!(err["error"]["code"], "invalid-prn");
+    assert_eq!(err["error"]["code"], "mutually-exclusive-fields");
 }
 
 #[tokio::test]

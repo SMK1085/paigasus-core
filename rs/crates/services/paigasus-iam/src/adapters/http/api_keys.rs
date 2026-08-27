@@ -18,7 +18,7 @@
 //! [`introspect_router`], a SEPARATE `Router` from [`router`]'s management routes so `mod.rs`
 //! can merge each into the correct half of the HTTP surface.
 
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Extension, Json, Router};
@@ -30,6 +30,7 @@ use super::AppState;
 use super::authn::{AuthnApiError, EnvelopeJson};
 use super::dto::{ApiKeyDto, IntrospectApiKeyRequestBody, IntrospectApiKeyResponseDto, IssueApiKeyBody, IssueApiKeyResponseDto, PageQuery};
 use super::error::ApiError;
+use super::path::{ApiKeyId as ApiKeyIdField, ServiceAccountId, UuidPath, UuidPathPair};
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
@@ -77,12 +78,12 @@ fn service_account_id(uuid: Uuid) -> PrincipalId {
 async fn issue(
     State(s): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
-    Path(sa): Path<Uuid>,
+    path: UuidPath<ServiceAccountId>,
     Json(body): Json<IssueApiKeyBody>,
 ) -> Result<(StatusCode, Json<IssueApiKeyResponseDto>), ApiError> {
     let actor = actor_prn(&ctx);
-    let sa_id = service_account_id(sa);
-    let scope_prn = body.scope_prn.ok_or_else(|| TenancyError::InvalidPrn("scope_prn is required".to_string()))?;
+    let sa_id = service_account_id(path.id);
+    let scope_prn = body.scope_prn.filter(|s| !s.trim().is_empty()).ok_or(TenancyError::MissingRequiredField("scope_prn"))?;
     let scope = parse_node_prn(&scope_prn)?;
     let scope_actions = body
         .scope_actions
@@ -95,9 +96,9 @@ async fn issue(
 
 /// `GET /v1/service-accounts/{sa}/api-keys`: lists the SA's keys — NEVER a secret/hash
 /// (`ApiKeyDto`'s own doc; `ApiKey` structurally has neither field).
-async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(sa): Path<Uuid>, Query(q): Query<PageQuery>) -> Result<Json<Vec<ApiKeyDto>>, ApiError> {
+async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<ServiceAccountId>, Query(q): Query<PageQuery>) -> Result<Json<Vec<ApiKeyDto>>, ApiError> {
     let actor = actor_prn(&ctx);
-    let sa_id = service_account_id(sa);
+    let sa_id = service_account_id(path.id);
     let page = Page::new(q.limit, q.offset)?;
     let keys = s.api_keys.list(&actor, &sa_id, page).await?;
     Ok(Json(keys.into_iter().map(ApiKeyDto::from).collect()))
@@ -109,9 +110,15 @@ async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>,
 /// re-checked against the key's actual owner here — `ApiKeyService::revoke` looks the key up
 /// by `{id}` alone and authorizes against ITS OWN service account's owner node, exactly like
 /// `RevokeApiKeyRequest` (spec §10.1: `string id = 1`, no service-account field at all); the
-/// path segment exists purely for REST nesting.
-async fn revoke(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path((_sa, id)): Path<(Uuid, Uuid)>) -> Result<StatusCode, ApiError> {
+/// path segment exists purely for REST nesting. It IS still validated as a uuid, and a
+/// malformed `{sa}` reports `service_account_id` — one marker per segment (SMA-586 fix round
+/// 2); the single-marker form this replaced named `api_key_id` for both.
+async fn revoke(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPathPair<ServiceAccountId, ApiKeyIdField>) -> Result<StatusCode, ApiError> {
     let actor = actor_prn(&ctx);
+    // `first` (the `{sa}` segment) is intentionally unused — see the doc comment above: the
+    // path segment exists purely for REST nesting, not for re-checking key ownership here.
+    let _sa = path.first;
+    let id = path.second;
     s.api_keys.revoke(&actor, ApiKeyId::from_uuid(id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }

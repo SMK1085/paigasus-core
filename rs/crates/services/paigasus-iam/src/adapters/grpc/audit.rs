@@ -54,24 +54,24 @@ fn opt_string(raw: String) -> Option<String> {
 }
 
 /// Parses the wire `outcome` filter: empty means unfiltered; a non-empty value must name a
-/// known [`AuditOutcome`]. `InvalidPrn`-as-sentinel (mirrors `RevokeApiKeyRequest.id`'s/
-/// `IssueApiKeyRequest.expires_at`'s identical posture in `grpc::service_accounts`) — there is
-/// no dedicated error code for "not a valid outcome" either.
-fn parse_outcome(raw: &str) -> Result<Option<AuditOutcome>, TenancyError> {
+/// known [`AuditOutcome`]. The caller's raw value is deliberately NOT echoed back — the
+/// `&'static str` payload cannot carry it (SMA-586).
+pub(crate) fn parse_outcome(raw: &str) -> Result<Option<AuditOutcome>, TenancyError> {
     if raw.is_empty() {
         return Ok(None);
     }
-    AuditOutcome::parse(raw).map(Some).ok_or_else(|| TenancyError::InvalidPrn(format!("unknown audit outcome: {raw}")))
+    AuditOutcome::parse(raw).map(Some).ok_or(TenancyError::InvalidAuditOutcome("outcome"))
 }
 
 /// Parses the wire `cursor`: empty means "first page" (`None`); a non-empty value must be a
-/// valid uuid. `InvalidPrn`-as-sentinel, mirrors `RevokeRoleRequest.id`/`RevokeApiKeyRequest.id`
-/// 's identical "not a uuid" posture (`grpc::authz`/`grpc::service_accounts`).
-fn parse_cursor(raw: &str) -> Result<Option<Uuid>, TenancyError> {
+/// valid uuid. `InvalidCursor` rather than `InvalidUuid`: a cursor is server-issued, so a
+/// client recovers by restarting pagination rather than by asking the user to fix input
+/// (SMA-586).
+pub(crate) fn parse_cursor(raw: &str) -> Result<Option<Uuid>, TenancyError> {
     if raw.is_empty() {
         return Ok(None);
     }
-    Uuid::parse_str(raw).map(Some).map_err(|_| TenancyError::InvalidPrn("cursor must be a uuid".to_string()))
+    Uuid::parse_str(raw).map(Some).map_err(|_| TenancyError::InvalidCursor("cursor"))
 }
 
 /// Maps the wire request into the kernel [`AuditFilter`] `AuditQueryService::list` consumes.
@@ -86,7 +86,7 @@ fn parse_cursor(raw: &str) -> Result<Option<Uuid>, TenancyError> {
 /// Timestamps go through [`convert::parse_opt_ts`], NOT `and_then(convert::from_ts)`: the
 /// latter maps an unrepresentable value to `None`, which on a filter field means UNFILTERED
 /// (SMA-583).
-fn to_filter(req: ListAuditEntriesRequest) -> Result<AuditFilter, TenancyError> {
+pub(crate) fn to_filter(req: ListAuditEntriesRequest) -> Result<AuditFilter, TenancyError> {
     Ok(AuditFilter {
         actor_prn: opt_string(req.actor_prn),
         resource_prn: opt_string(req.resource_prn),
@@ -207,7 +207,7 @@ mod tests {
             ..default_request()
         })
         .unwrap_err();
-        assert!(matches!(err, TenancyError::InvalidPrn(_)));
+        assert!(matches!(err, TenancyError::InvalidAuditOutcome(_)));
     }
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
             ..default_request()
         })
         .unwrap_err();
-        assert!(matches!(err, TenancyError::InvalidPrn(_)));
+        assert!(matches!(err, TenancyError::InvalidCursor(_)));
     }
 
     /// The case that catches a fix which rejects malformed bounds but drops VALID ones: both
@@ -249,7 +249,7 @@ mod tests {
             ..default_request()
         })
         .unwrap_err();
-        assert!(matches!(err, TenancyError::InvalidPrn(_)), "{err:?}");
+        assert!(matches!(err, TenancyError::InvalidTimestamp(_)), "{err:?}");
     }
 
     /// The `to` half, with `from` absent for the same reason the previous test leaves `to`
@@ -262,7 +262,7 @@ mod tests {
             ..default_request()
         })
         .unwrap_err();
-        assert!(matches!(err, TenancyError::InvalidPrn(_)), "{err:?}");
+        assert!(matches!(err, TenancyError::InvalidTimestamp(_)), "{err:?}");
     }
 
     #[test]
