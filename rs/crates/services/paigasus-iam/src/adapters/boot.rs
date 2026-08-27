@@ -52,20 +52,24 @@ impl std::error::Error for AlreadyInstalled {}
 /// necessarily derived from the SAME `AppState` — see the module doc.
 pub struct Serving {
     http: Router,
+    grpc: crate::adapters::grpc::authn::AuthEnforce<tonic::service::Routes>,
     state: AppState,
 }
 
 impl Serving {
-    /// Derives the full HTTP router from `state`. The router deliberately carries NO
-    /// `/healthz`, `/readyz` or `/metrics` route: those live on [`boot_http_router`] permanently,
-    /// outside `TraceLayer`/`TimeoutLayer`/`http_metrics_layer`, exactly as `serve_http` has
-    /// always arranged them.
-    /// `async` from the start even though this body awaits nothing yet: Task 3 adds the gRPC
-    /// field, and `grpc::routes` is `async`. Declaring it now keeps the signature stable across
-    /// tasks. An `async fn` with no `await` is not a warning.
+    /// Derives the full HTTP and gRPC routers from `state`. Neither carries the boot-time
+    /// probes/health: `/healthz`, `/readyz` and `/metrics` live on [`boot_http_router`]
+    /// permanently, and gRPC health lives on [`boot_grpc_routes`] — both outlive `Serving` and
+    /// keep answering across a future re-migration, which `Serving` itself is not built to
+    /// survive.
     pub async fn new(state: AppState, request_timeout: Duration) -> Self {
         let http = crate::adapters::http::traced_app_routes(state.clone(), request_timeout);
-        Self { http, state }
+        // `AuthLayer` moves HERE from the tonic `Server`'s layer stack (see `grpc::router`),
+        // because it needs `AppState` and the boot-time server has none. Behaviour is
+        // unchanged: health and the two introspect RPCs are `:path`-exempt
+        // (`grpc::authn::is_exempt`) and every non-exempt RPC lives inside these routes.
+        let grpc = crate::adapters::grpc::authn::AuthLayer::new(state.clone()).layer(crate::adapters::grpc::routes(state.clone()).await);
+        Self { http, grpc, state }
     }
 }
 
@@ -175,4 +179,55 @@ async fn deferred_fallback(State(slot): State<BootSlot>, req: axum::extract::Req
 /// function's doc.
 async fn migrating_response(_req: axum::extract::Request) -> Result<axum::response::Response, std::convert::Infallible> {
     Ok((StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({ "status": "migrating" }))).into_response())
+}
+
+/// The gRPC routes bound BEFORE the migration: the health service (reporting whatever
+/// `slot`'s reporter says — `NOT_SERVING` until [`BootSlot::install`] flips it) plus a catch-all
+/// that answers a well-formed `UNAVAILABLE` while the slot is empty and delegates to the real,
+/// `AuthLayer`-wrapped routes afterwards.
+///
+/// **Why a nested `Router<BootSlot>`, not `.fallback()` chained straight onto
+/// `into_axum_router()`.** `Routes::into_axum_router` hands back an `axum::Router<()>` — its
+/// state is fixed at `()`. [`deferred_grpc_fallback`] needs `State<BootSlot>`, which only
+/// type-checks against a router whose state IS `BootSlot`. So the fallback is built as its own
+/// small `Router<BootSlot>`, `with_state`'d down to `Router<()>` (exactly the
+/// `deferred`/`app` split [`boot_http_router`] already uses for the HTTP side), and attached via
+/// `fallback_service` rather than `fallback`.
+///
+/// **Why the override must exist at all.** `Routes::default()`'s own fallback answers
+/// `UNIMPLEMENTED` — and `paigasus-gateway`'s readiness probe
+/// (`gateway/src/adapters/http/mod.rs:146-150`) reads `UNIMPLEMENTED` as READY. Left in place, a
+/// migrating replica would look ready to the gateway: AC 2 broken, while looking like a fix (see
+/// `the_grpc_fallback_is_a_wellformed_unavailable_not_unimplemented`).
+pub fn boot_grpc_routes<H>(slot: BootSlot, health: tonic_health::pb::health_server::HealthServer<H>) -> tonic::service::Routes
+where
+    H: tonic_health::pb::health_server::Health,
+{
+    // Health is mounted HERE, on the boot routes, so it answers during the deferred phase and
+    // reports whatever `BootSlot`'s reporter says. Note `grpc::routes(state)` mounts a health
+    // service of its own with its own (dropped, statically SERVING) reporter — in production
+    // that one is unreachable, because a health request matches THIS route and never falls
+    // through to the fallback. `router()` still needs its own, which is why `routes()` keeps it.
+    let routes = tonic::service::Routes::new(health);
+    let deferred = Router::new().fallback(deferred_grpc_fallback).with_state(slot);
+    let inner = routes.into_axum_router().fallback_service(deferred);
+    tonic::service::Routes::from(inner)
+}
+
+/// Every gRPC RPC that isn't the boot-time health service, while the slot is empty vs. once it
+/// is full. The gRPC counterpart of [`deferred_fallback`].
+async fn deferred_grpc_fallback(State(slot): State<BootSlot>, req: axum::extract::Request) -> axum::response::Response {
+    match slot.get() {
+        // HTTP 200 + `content-type: application/grpc` + `grpc-status: 14`, via
+        // `Status::into_http` — a bare 503 is not a gRPC status and no client can interpret it.
+        // Mirrors `grpc::authn::reject`.
+        None => tonic::Status::unavailable("migrating").into_http::<axum::body::Body>(),
+        Some(serving) => {
+            // `AuthEnforce` is a `Service<Request<tonic::body::Body>>` while axum hands us
+            // `Request<axum::body::Body>` — two distinct body types. Mirrors
+            // `Routes::add_service`'s own `map_request` (tonic-0.14.6/src/service/router.rs:91).
+            let req = req.map(tonic::body::Body::new);
+            serving.grpc.clone().oneshot(req).await.expect("AuthEnforce is Infallible").map(axum::body::Body::new)
+        }
+    }
 }

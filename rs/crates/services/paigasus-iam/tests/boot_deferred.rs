@@ -7,7 +7,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use paigasus_iam::adapters::boot::{BootSlot, boot_http_router};
+use paigasus_iam::adapters::boot::{BootSlot, boot_grpc_routes, boot_http_router};
 use tower::ServiceExt; // for `oneshot`
 
 async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -61,7 +61,68 @@ async fn the_deferred_503_carries_correlation_headers_but_the_probes_do_not() {
     let app = empty_slot_router().await;
     let resp = app.clone().oneshot(Request::builder().uri("/v1/organizations").body(Body::empty()).unwrap()).await.unwrap();
     assert!(resp.headers().contains_key("paigasus-request-id"), "the deferred fallback is inside CorrelationLayer");
+    // SMA-571 Task 3 review carry-over: `CorrelationLayer` fills in `paigasus-retryable` for any
+    // error response no renderer already stamped one on (`correlation.rs`'s `Retryable::from_status`),
+    // and nothing pinned it here before. A 503 maps to `"true"` — this IS the response a caller
+    // most wants to retry, so getting this wrong would be a silent regression.
+    assert_eq!(resp.headers()["paigasus-retryable"], "true", "a 503 is retryable and no renderer here supplies the header itself");
 
     let resp = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
     assert!(!resp.headers().contains_key("paigasus-request-id"), "/readyz stays outside the API surface (D10)");
+}
+
+/// SMA-571 D7 — the single most consequential assertion in this change.
+///
+/// `paigasus-gateway`'s readiness probe classifies IAM's gRPC replies
+/// (`gateway/src/adapters/http/mod.rs:146-150`): `Unavailable`/`DeadlineExceeded`/`Internal` mean
+/// NOT ready, and **anything else — including `Unimplemented` — means READY**. `Routes::default()`
+/// installs an `unimplemented` fallback, so a boot router that merely mounts health would make the
+/// gateway report ready against a migrating IAM: AC 2 broken, and it would look like a fix.
+///
+/// A bare HTTP 503 is equally wrong — no gRPC client can interpret it. So this asserts the wire
+/// shape, not a status code.
+#[tokio::test]
+async fn the_grpc_fallback_is_a_wellformed_unavailable_not_unimplemented() {
+    let (reporter, health) = paigasus_iam::adapters::grpc::health_service().await;
+    let routes = boot_grpc_routes(BootSlot::new(reporter), health);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/paigasus.iam.v1.TenancyService/CreateOrganization")
+        .header("content-type", "application/grpc")
+        .body(tonic::body::Body::empty())
+        .unwrap();
+    let resp = routes.oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK, "a gRPC status rides on HTTP 200, never a bare 503");
+    assert_eq!(resp.headers()["content-type"], "application/grpc");
+    assert_eq!(
+        resp.headers()["grpc-status"],
+        "14",
+        "must be UNAVAILABLE (14). UNIMPLEMENTED (12) is Routes::default()'s own fallback and the \
+         gateway reads it as READY — see gateway/src/adapters/http/mod.rs:150"
+    );
+}
+
+/// Health must answer during the deferred phase, and answer NOT_SERVING — a `grpc_health_probe`
+/// readiness probe is the gRPC-side equivalent of `/readyz` 503 `migrating`.
+#[tokio::test]
+async fn grpc_health_answers_not_serving_while_the_slot_is_empty() {
+    let (reporter, health) = paigasus_iam::adapters::grpc::health_service().await;
+    reporter.set_service_status("", tonic_health::ServingStatus::NotServing).await;
+    let routes = boot_grpc_routes(BootSlot::new(reporter.clone()), health);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/grpc.health.v1.Health/Check")
+        .header("content-type", "application/grpc")
+        .body(tonic::body::Body::empty())
+        .unwrap();
+    let resp = routes.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_ne!(
+        resp.headers().get("grpc-status").map(|v| v.to_str().unwrap()),
+        Some("14"),
+        "health must be served by the boot routes, not swallowed by the migrating fallback"
+    );
 }
