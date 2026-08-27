@@ -308,14 +308,16 @@ gate: `repo:redis-connect-single-site`, `repo:error-code-single-site` and
 `repo:iam-docker-policy-single-site` are all this shape.
 
 **Named for the class, not for `Json`.** The gate carries a **banned-extractor table**, one row
-per extractor type, so closing the `Query`/`Path<String>` instances later is a table row rather
-than a second gate:
+per extractor type with an explicit on/off flag, so closing the `Query`/`Path<String>` instances
+later flips a flag rather than designing a second gate. Only the `Json` row is switched on here;
+the other two are reserved with no replacement chosen — that choice belongs to the follow-up, not
+to this spec:
 
 | extractor | banned in request position | required replacement |
 | -- | -- | -- |
 | `Json<T>` | yes (this ticket) | `EnvelopeJson<T>` |
-| `Query<T>` | not yet — follow-up | *(tbd)* |
-| `Path<T>` | not yet — follow-up | `UuidPath` / *(tbd)* |
+| `Query<T>` | no — row reserved, off by default | decided by the follow-up |
+| `Path<T>` (non-uuid) | no — row reserved, off by default | decided by the follow-up |
 
 Scope: `rs/crates/services/*/src/adapters/http/**/*.rs`. Services-wide, not iam-only — the
 gateway is clean today (it takes `Bytes` and maps failures in its own funnel), so the gate is
