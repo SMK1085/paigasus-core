@@ -21,6 +21,9 @@ describe('Auditable', () => {
       }),
     );
     expect(dto.audit?.creator?.prn).toBe(prn);
+    // SMA-439: `modified_by` used to be `''`; it is now an absent `modifier`. Mirrors the
+    // Rust `audit().is_some()` + `modifier().is_none()` pairing in audit.rs's tests.
+    expect(dto.audit?.modifier).toBeUndefined();
   });
 
   it('audit is optional', () => {

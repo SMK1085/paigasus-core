@@ -13,7 +13,8 @@ pub trait Auditable {
     /// The embedded audit metadata, if present.
     fn audit(&self) -> Option<&AuditMetadata>;
 
-    /// Who created the entity, or `None` if unknown/system.
+    /// Who created the entity, or `None` if there is no audit metadata at all, or the
+    /// embedded `creator` is itself absent (unknown/system).
     ///
     /// Per `Actor`'s contract an empty or unparseable `prn` ALSO means unknown, but this
     /// accessor deliberately does not normalise that away: the rule is a producer
@@ -23,7 +24,8 @@ pub trait Auditable {
     fn creator(&self) -> Option<&Actor> {
         self.audit().and_then(|a| a.creator.as_ref())
     }
-    /// Who last modified the entity, or `None` if unknown/system. See [`Auditable::creator`].
+    /// Who last modified the entity, or `None` if there is no audit metadata at all, or the
+    /// embedded `modifier` is itself absent (unknown/system). See [`Auditable::creator`].
     fn modifier(&self) -> Option<&Actor> {
         self.audit().and_then(|a| a.modifier.as_ref())
     }
@@ -75,5 +77,18 @@ mod tests {
         assert_eq!(dto.modifier(), None);
         assert_eq!(dto.created_at(), None);
         assert_eq!(dto.modified_at(), None);
+    }
+
+    #[test]
+    fn an_empty_prn_is_still_a_present_actor() {
+        // The "empty prn means unknown" rule is a PRODUCER obligation stated once in
+        // actor.proto — the accessor deliberately does not enforce it (SMA-439 spec D2).
+        // Normalising here would make this trait disagree with a direct `.creator` read
+        // and with the Python/TS surfaces. This test is the tripwire for that.
+        let dto = AuditableExample {
+            id: "z".to_string(),
+            audit: Some(AuditMetadata { creator: Some(Actor::default()), ..Default::default() }),
+        };
+        assert_eq!(dto.creator(), Some(&Actor::default()));
     }
 }

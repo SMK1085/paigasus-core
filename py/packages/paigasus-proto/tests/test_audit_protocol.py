@@ -21,6 +21,9 @@ def test_generated_example_satisfies_auditable() -> None:
     assert obj.audit is not None
     assert obj.audit.creator is not None
     assert obj.audit.creator.prn == prn
+    # SMA-439: `modified_by` used to be `""`; it is now an absent `modifier`. Mirrors the
+    # Rust `audit().is_some()` + `modifier().is_none()` pairing in audit.rs's tests.
+    assert obj.audit.modifier is None
 
 
 def test_example_with_no_audit_still_satisfies() -> None:

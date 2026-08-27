@@ -51,9 +51,13 @@ fn absent_audit_yields_none_accessors() {
 
 // ─── Generated messages (SMA-438) ────────────────────────────────────────────────────────────
 //
-// Each type is built with a DISTINCT actor PRN in `creator` and asserted to return exactly
-// that. A bare `fn assert_auditable<T: Auditable>()` bound would prove only that an impl
-// EXISTS — a derive emitting `{ None }` would satisfy it for six of the seven types.
+// Each type is built with a specific NON-DEFAULT sentinel PRN in `creator` and asserted to
+// round-trip through the accessor exactly. A bare `fn assert_auditable<T: Auditable>()` bound
+// would prove only that an impl EXISTS — a derive emitting `{ None }` would satisfy it for six
+// of the seven types; only a real, non-default value forces the accessor to have actually read
+// the field. The per-row integer isn't a uniqueness guarantee (a copy-pasted duplicate would
+// not be caught) — it just keeps each row's sentinel independently identifiable in a failure
+// message.
 
 use paigasus_proto::paigasus::common::v1::AuditableExample;
 use paigasus_proto::paigasus::iam::v1::{ApiKey, Membership, Organization, Project, ServiceAccount, Team};

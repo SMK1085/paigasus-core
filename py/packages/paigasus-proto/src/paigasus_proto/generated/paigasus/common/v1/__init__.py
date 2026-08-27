@@ -617,10 +617,11 @@ class Actor(betterproto2.Message):
     what stops that from becoming a second spelling of "unknown".
 
     Deliberately carries no `kind` enum: the PRN's resource-type segment already
-    encodes it (user / service-account / principal), and `prnResourceType` is
-    exported from the kernel bindings in every language, so branching on kind does
-    not require a duplicated field. It also carries no `display_name`: adding a
-    proto field is non-breaking, so it can land the day a consumer needs one.
+    encodes it (user / service-account / principal), and the resource-type accessor is
+    exported from the kernel bindings in every language (`prnResourceType` in TS/JS,
+    `prn_resource_type` in Rust/Python), so branching on kind does not require a
+    duplicated field. It also carries no `display_name`: adding a proto field is
+    non-breaking, so it can land the day a consumer needs one.
     """
 
     prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
