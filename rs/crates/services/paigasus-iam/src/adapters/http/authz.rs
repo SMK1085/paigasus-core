@@ -36,11 +36,11 @@ use chrono::Utc;
 use paigasus_iam_core::authz::model::{ContextValue, PolicyKind};
 use paigasus_iam_core::{AccessRequest, Action, Effect, PolicyDocument, RequestContext};
 use paigasus_kernel::Prn;
-use uuid::Uuid;
 
 use super::AppState;
 use super::dto::{GrantRoleBody, IsAuthorizedBody, IsAuthorizedResponseDto, PageQuery, PolicyDto, PutPolicyBody, RoleGrantDto, RoleGrantQuery};
 use super::error::ApiError;
+use super::path::{RoleGrantId, UuidPath};
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
@@ -142,13 +142,13 @@ async fn create_role_grant(State(s): State<AppState>, Extension(ctx): Extension<
 
 async fn list_role_grants(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Query(q): Query<RoleGrantQuery>) -> Result<Json<Vec<RoleGrantDto>>, ApiError> {
     let actor = actor_prn(&ctx);
-    let principal_prn = q.principal_prn.ok_or_else(|| TenancyError::InvalidPrn("principal_prn query parameter is required".to_string()))?;
+    let principal_prn = q.principal_prn.filter(|s| !s.trim().is_empty()).ok_or(TenancyError::MissingRequiredField("principal_prn"))?;
     let grants = s.roles.list(&actor, &principal_prn).await?;
     Ok(Json(grants.into_iter().map(RoleGrantDto::from).collect()))
 }
 
-async fn revoke_role_grant(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
+async fn revoke_role_grant(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<RoleGrantId>) -> Result<StatusCode, ApiError> {
     let actor = actor_prn(&ctx);
-    s.roles.revoke(&actor, id).await?;
+    s.roles.revoke(&actor, path.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

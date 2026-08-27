@@ -256,3 +256,35 @@ async fn create_get_list_archive_lifecycle_over_http() {
     assert_eq!(after_items.len(), 1);
     assert_eq!(after_items[0]["status"], "disabled", "{after_list}");
 }
+
+/// SMA-586 fix round 2 (Fix 4), end-to-end on the ONE real two-segment route: each segment of
+/// `/v1/service-accounts/{sa}/api-keys/{id}` reports its OWN field.
+///
+/// Before the fix, `revoke` took a single-marker `UuidPathPair<ApiKeyId>`, so a malformed `{sa}`
+/// answered `api_key_id must be a uuid` — a guess presented as fact, and one no synthetic
+/// extractor test could see because the marker choice lives on the handler, not the extractor.
+#[tokio::test]
+async fn each_segment_of_the_api_key_route_names_its_own_field() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("path-sa-user", Some("path-sa@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &token).await;
+
+    // Any well-formed uuid: these requests never reach the handler, so it need not exist.
+    let valid = "0192f1c0-0000-7000-8000-000000000001";
+    let cases = [
+        ("DELETE", format!("/v1/service-accounts/not-a-uuid/api-keys/{valid}"), "service_account_id"),
+        ("DELETE", format!("/v1/service-accounts/{valid}/api-keys/not-a-uuid"), "api_key_id"),
+        // The single-segment sibling routes on the same prefix, for the same marker.
+        ("GET", "/v1/service-accounts/not-a-uuid/api-keys".to_string(), "service_account_id"),
+        ("GET", "/v1/service-accounts/not-a-uuid".to_string(), "service_account_id"),
+    ];
+    for (method, uri, field) in cases {
+        let (status, err) = send(&app, method, &uri, None, Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {uri}: {err}");
+        assert_eq!(err["error"]["code"], "invalid-uuid", "{method} {uri}: {err}");
+        assert_eq!(err["error"]["message"], format!("{field} must be a uuid"), "{method} {uri}: {err}");
+    }
+}

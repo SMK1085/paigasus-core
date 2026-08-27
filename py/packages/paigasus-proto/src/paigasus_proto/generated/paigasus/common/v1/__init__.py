@@ -353,6 +353,56 @@ class ErrorReason(betterproto2.Enum):
     "decision-change-unacknowledged" — retiring a static policy needs acknowledgement.
     """
 
+    INVALID_TIMESTAMP = 33
+    """
+    ---- IAM: request validation (1-299) -------------------------------------
+    SMA-586. These six replace `invalid-prn`'s use as a catch-all sentinel for
+    any validation failure lacking a dedicated code; `invalid-prn` now means a
+    genuine PRN parse or shape failure and nothing else.
+
+    "invalid-timestamp" — a timestamp field could not be parsed or represented.
+    """
+
+    INVALID_UUID = 34
+    """
+    "invalid-uuid" — a field that must be a uuid was not one.
+    """
+
+    INVALID_CURSOR = 35
+    """
+    "invalid-cursor" — an opaque pagination cursor was not a well-formed token.
+    Distinct from invalid-uuid on purpose: a cursor is server-issued, so a
+    client can recover by restarting pagination without any user action.
+    """
+
+    INVALID_AUDIT_OUTCOME = 36
+    """
+    "invalid-audit-outcome" — the audit `outcome` filter did not name a known
+    outcome. Named for its surface rather than the bare word "outcome", which
+    is already an overloaded token (a metric label, and RetireOutcome).
+    """
+
+    MISSING_REQUIRED_FIELD = 37
+    """
+    "missing-required-field" — a field the server explicitly checks for
+    presence was absent or empty. NOT a blanket guarantee for every required
+    field: an omitted PRN field on create_service_account, is_authorized,
+    attach_membership, grant_role and put_policy still surfaces as invalid-prn
+    (symmetrically on both transports), because those sites parse the value
+    rather than test for presence first. Widening that is a follow-up; this
+    comment describes what the code emits today.
+    """
+
+    MUTUALLY_EXCLUSIVE_FIELDS = 38
+    """
+    "mutually-exclusive-fields" — two fields were set that may not both be.
+    HTTP-only, structurally: the gRPC surface expresses the same choice as a
+    proto3 `oneof`, which cannot carry two values, so its only failure mode is
+    "neither set" — which is missing-required-field, not this.
+    Deliberately NOT named "*-conflict": every other conflict-named reason in
+    this registry is a 409, and this is a 400.
+    """
+
     MISSING_AUTHORIZATION = 300
     """
     ---- Gateway (300-599) ---------------------------------------------------
@@ -473,6 +523,12 @@ class ErrorReason(betterproto2.Enum):
             30: "ERROR_REASON_AUTHN_UNAVAILABLE",
             31: "ERROR_REASON_GRANTS_SURVIVE",
             32: "ERROR_REASON_DECISION_CHANGE_UNACKNOWLEDGED",
+            33: "ERROR_REASON_INVALID_TIMESTAMP",
+            34: "ERROR_REASON_INVALID_UUID",
+            35: "ERROR_REASON_INVALID_CURSOR",
+            36: "ERROR_REASON_INVALID_AUDIT_OUTCOME",
+            37: "ERROR_REASON_MISSING_REQUIRED_FIELD",
+            38: "ERROR_REASON_MUTUALLY_EXCLUSIVE_FIELDS",
             300: "ERROR_REASON_MISSING_AUTHORIZATION",
             301: "ERROR_REASON_INVALID_API_KEY",
             302: "ERROR_REASON_INSUFFICIENT_PERMISSIONS",
@@ -525,6 +581,12 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_AUTHN_UNAVAILABLE": 30,
             "ERROR_REASON_GRANTS_SURVIVE": 31,
             "ERROR_REASON_DECISION_CHANGE_UNACKNOWLEDGED": 32,
+            "ERROR_REASON_INVALID_TIMESTAMP": 33,
+            "ERROR_REASON_INVALID_UUID": 34,
+            "ERROR_REASON_INVALID_CURSOR": 35,
+            "ERROR_REASON_INVALID_AUDIT_OUTCOME": 36,
+            "ERROR_REASON_MISSING_REQUIRED_FIELD": 37,
+            "ERROR_REASON_MUTUALLY_EXCLUSIVE_FIELDS": 38,
             "ERROR_REASON_MISSING_AUTHORIZATION": 300,
             "ERROR_REASON_INVALID_API_KEY": 301,
             "ERROR_REASON_INSUFFICIENT_PERMISSIONS": 302,

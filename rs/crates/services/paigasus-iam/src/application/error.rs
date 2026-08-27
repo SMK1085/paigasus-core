@@ -40,6 +40,39 @@ pub enum TenancyError {
     InvalidName(String),
     #[error("invalid resource prn")]
     InvalidPrn(String),
+    /// SMA-586. The six variants below replace `InvalidPrn`'s former use as a catch-all
+    /// sentinel for any validation failure without a dedicated code. Each carries a
+    /// `&'static str` naming the offending field, interpolated into `Display` and emitted as
+    /// `ErrorInfo.metadata["field"]` on gRPC. That name is usually the literal wire field but
+    /// is deliberately descriptive where the wire name would be ambiguous — see
+    /// [`TenancyError::field`].
+    ///
+    /// The payload type is load-bearing: a `&'static str` cannot hold caller-supplied input,
+    /// so "never reflect untrusted input into an error body" is enforced by the type rather
+    /// than remembered by each call site. The pre-SMA-586 sites passed a `format!` carrying
+    /// the caller's raw value; that is now unrepresentable. `Box::leak`/`String::leak` would
+    /// defeat exactly that invariant — they mint a `&'static str` from runtime input, and
+    /// leak memory per request while doing it — so they must never be used to reach these
+    /// constructors.
+    #[error("invalid timestamp for {0}")]
+    InvalidTimestamp(&'static str),
+    #[error("{0} must be a uuid")]
+    InvalidUuid(&'static str),
+    /// Distinct from [`TenancyError::InvalidUuid`] on purpose: a cursor is an opaque,
+    /// server-issued token, so a client can recover by restarting pagination without
+    /// involving the user. Collapsing the two would make that indistinguishable from
+    /// "your input is wrong".
+    #[error("{0} is not a valid pagination cursor")]
+    InvalidCursor(&'static str),
+    #[error("{0} is not a known audit outcome")]
+    InvalidAuditOutcome(&'static str),
+    #[error("{0} is required")]
+    MissingRequiredField(&'static str),
+    /// HTTP-only, structurally — see the registry comment on
+    /// `ERROR_REASON_MUTUALLY_EXCLUSIVE_FIELDS`: the gRPC surface models the same choice as a
+    /// proto3 `oneof`, which cannot carry two values.
+    #[error("provide exactly one of {0}")]
+    MutuallyExclusiveFields(&'static str),
     #[error("prn does not match stored resource")]
     PrnMismatch,
     #[error("invalid pagination parameters")]
@@ -128,6 +161,12 @@ impl TenancyError {
             Self::InvalidSlug(_) => "invalid-slug",
             Self::InvalidName(_) => "invalid-name",
             Self::InvalidPrn(_) => "invalid-prn",
+            Self::InvalidTimestamp(_) => "invalid-timestamp",
+            Self::InvalidUuid(_) => "invalid-uuid",
+            Self::InvalidCursor(_) => "invalid-cursor",
+            Self::InvalidAuditOutcome(_) => "invalid-audit-outcome",
+            Self::MissingRequiredField(_) => "missing-required-field",
+            Self::MutuallyExclusiveFields(_) => "mutually-exclusive-fields",
             Self::PrnMismatch => "prn-mismatch",
             Self::InvalidPagination => "invalid-pagination",
             Self::NothingToRename => "nothing-to-rename",
@@ -156,6 +195,12 @@ impl TenancyError {
             | Self::InvalidSlug(_)
             | Self::InvalidName(_)
             | Self::InvalidPrn(_)
+            | Self::InvalidTimestamp(_)
+            | Self::InvalidUuid(_)
+            | Self::InvalidCursor(_)
+            | Self::InvalidAuditOutcome(_)
+            | Self::MissingRequiredField(_)
+            | Self::MutuallyExclusiveFields(_)
             | Self::PrnMismatch
             | Self::InvalidPagination
             | Self::NothingToRename
@@ -169,6 +214,55 @@ impl TenancyError {
             Self::ParentArchived | Self::NodeArchived | Self::MissingOrgMembership | Self::SystemImmutable(_) | Self::NotSystemOwned(_) | Self::FleetNotConverged => ErrorClass::Precondition,
             Self::Forbidden => ErrorClass::Forbidden,
             Self::Internal => ErrorClass::Internal,
+        }
+    }
+
+    /// The field name this error names, for `ErrorInfo.metadata["field"]` (SMA-586).
+    ///
+    /// Usually the literal wire field, but deliberately not always: where the wire name would
+    /// be ambiguous out of context the DESCRIPTIVE name wins, because this value is what a
+    /// client reads to decide which input to blame. `RevokeApiKeyRequest.id` reports
+    /// `"api_key_id"`, not `"id"`; all 26 HTTP path segments report the resource they identify
+    /// (`{sa}` -> `"service_account_id"`) rather than the URL's placeholder name. Four gRPC
+    /// sites do the same.
+    ///
+    /// `None` for every variant that does not carry one — including `InvalidPrn`, whose
+    /// `String` payload is a PRN error-kind token or a canonical PRN, not a field name.
+    /// Returning it here rather than matching on variants inside `status_to_grpc` keeps the
+    /// transport layer free of variant knowledge.
+    ///
+    /// EXHAUSTIVE, with no catch-all — matching `code()` and `class()` above. A future
+    /// field-carrying variant must choose here rather than silently losing its
+    /// `metadata["field"]` to a `_ => None` arm (SMA-586 fix round 2).
+    pub fn field(&self) -> Option<&'static str> {
+        match self {
+            Self::InvalidTimestamp(f) | Self::InvalidUuid(f) | Self::InvalidCursor(f) | Self::InvalidAuditOutcome(f) | Self::MissingRequiredField(f) | Self::MutuallyExclusiveFields(f) => Some(f),
+            Self::SlugConflict
+            | Self::DuplicateMembership
+            | Self::EmailConflict
+            | Self::ServiceAccountNameConflict
+            | Self::InvalidEmail(_)
+            | Self::InvalidSlug(_)
+            | Self::InvalidName(_)
+            | Self::InvalidPrn(_)
+            | Self::PrnMismatch
+            | Self::InvalidPagination
+            | Self::NothingToRename
+            | Self::NotFound
+            | Self::ParentArchived
+            | Self::NodeArchived
+            | Self::MissingOrgMembership
+            | Self::Forbidden
+            | Self::UnknownRole(_)
+            | Self::InvalidScope(_)
+            | Self::SystemImmutable(_)
+            | Self::PolicyInvalid(_)
+            | Self::PolicyConflict(_)
+            | Self::InvalidAction(_)
+            | Self::InvalidBulkReplay
+            | Self::NotSystemOwned(_)
+            | Self::FleetNotConverged
+            | Self::Internal => None,
         }
     }
 }
@@ -357,5 +451,46 @@ mod tests {
 
         assert_eq!(TenancyError::NotSystemOwned("p1".to_string()).code(), "not-system-owned");
         assert_eq!(TenancyError::FleetNotConverged.code(), "fleet-not-converged");
+    }
+
+    /// SMA-586: the six reasons that replace `invalid-prn`'s catch-all duty. All are
+    /// `Validation` — the sites they migrate are 400/InvalidArgument today and must stay so.
+    #[test]
+    fn the_request_validation_codes_are_stable_and_all_validation() {
+        for (err, code) in [
+            (TenancyError::InvalidTimestamp("from"), "invalid-timestamp"),
+            (TenancyError::InvalidUuid("membership_id"), "invalid-uuid"),
+            (TenancyError::InvalidCursor("cursor"), "invalid-cursor"),
+            (TenancyError::InvalidAuditOutcome("outcome"), "invalid-audit-outcome"),
+            (TenancyError::MissingRequiredField("owner_prn"), "missing-required-field"),
+            (TenancyError::MutuallyExclusiveFields("principal|node"), "mutually-exclusive-fields"),
+        ] {
+            assert_eq!(err.code(), code);
+            assert_eq!(err.class(), ErrorClass::Validation, "{code} must stay a 400");
+        }
+    }
+
+    /// The field name reaches `Display` — the inverse of the pre-SMA-586 behaviour, where every
+    /// call site passed a detail and `InvalidPrn`'s static Display threw it away.
+    #[test]
+    fn the_request_validation_displays_carry_their_field_name() {
+        assert_eq!(TenancyError::InvalidTimestamp("parked_to").to_string(), "invalid timestamp for parked_to");
+        assert_eq!(TenancyError::InvalidUuid("api_key_id").to_string(), "api_key_id must be a uuid");
+        assert_eq!(TenancyError::InvalidCursor("cursor").to_string(), "cursor is not a valid pagination cursor");
+        assert_eq!(TenancyError::InvalidAuditOutcome("outcome").to_string(), "outcome is not a known audit outcome");
+        assert_eq!(TenancyError::MissingRequiredField("scope_prn").to_string(), "scope_prn is required");
+        assert_eq!(TenancyError::MutuallyExclusiveFields("principal|node").to_string(), "provide exactly one of principal|node");
+    }
+
+    /// `field()` is what `status_to_grpc` uses to populate `ErrorInfo.metadata["field"]` without
+    /// matching on variants at the transport layer. It is `None` for everything else — including
+    /// `InvalidPrn`, whose `String` payload is deliberately NOT a field name.
+    #[test]
+    fn field_is_some_only_for_the_request_validation_variants() {
+        assert_eq!(TenancyError::InvalidTimestamp("from").field(), Some("from"));
+        assert_eq!(TenancyError::MutuallyExclusiveFields("a|b").field(), Some("a|b"));
+        assert_eq!(TenancyError::InvalidPrn("iam:bad".to_string()).field(), None);
+        assert_eq!(TenancyError::NotFound.field(), None);
+        assert_eq!(TenancyError::Internal.field(), None);
     }
 }

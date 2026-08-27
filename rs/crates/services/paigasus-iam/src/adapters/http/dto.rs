@@ -175,8 +175,9 @@ pub struct CreateMembershipBody {
     pub node_prn: String,
 }
 
-/// Query params for `GET /v1/memberships`: exactly one of `principal`/`node` must be set
-/// (else `TenancyError::InvalidPrn` — mirrors the proto oneof rule).
+/// Query params for `GET /v1/memberships`: exactly one of `principal`/`node` must be set —
+/// neither set yields `TenancyError::MissingRequiredField`, both set yields
+/// `TenancyError::MutuallyExclusiveFields` (mirrors the proto oneof rule).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MembershipQuery {
     pub principal: Option<String>,
@@ -361,9 +362,9 @@ impl From<RoleGrant> for RoleGrantDto {
 /// Query params for `GET /v1/authz/role-grants`: `principal_prn` is REQUIRED (unlike
 /// `PageQuery`'s fields) — `RoleService::list` always lists exactly one principal's grants,
 /// there is no list-everyone mode over HTTP. Kept `Option` here (rather than a bare
-/// `String`) so a missing param maps through `http/authz.rs`'s own `TenancyError::InvalidPrn`
-/// funnel — the same `{"error":{code,message}}` envelope every other validation error uses —
-/// instead of axum's default plain-text query-rejection.
+/// `String`) so a missing param maps through `http/authz.rs`'s own
+/// `TenancyError::MissingRequiredField` funnel — the same `{"error":{code,message}}` envelope
+/// every other validation error uses — instead of axum's default plain-text query-rejection.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoleGrantQuery {
     pub principal_prn: Option<String>,
@@ -411,8 +412,8 @@ pub struct CreateServiceAccountBody {
 
 /// Query params for `GET /v1/service-accounts`: `owner_prn` is REQUIRED (mirrors
 /// `RoleGrantQuery::principal_prn` — kept `Option` so a missing param funnels through the
-/// `TenancyError::InvalidPrn` `{"error":{code,message}}` envelope instead of axum's default
-/// plain-text query rejection).
+/// `TenancyError::MissingRequiredField` `{"error":{code,message}}` envelope instead of axum's
+/// default plain-text query rejection).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServiceAccountQuery {
     pub owner_prn: Option<String>,
@@ -454,8 +455,9 @@ impl From<ApiKey> for ApiKeyDto {
 
 /// Body for `POST /v1/service-accounts/{sa}/api-keys` (spec §10.2's `IssueApiKeyRequest`,
 /// minus the path-carried `service_account_prn`). `scope_prn` is `Option` only so a missing
-/// value funnels through `TenancyError::InvalidPrn` (mirrors `ServiceAccountQuery::owner_prn`)
-/// rather than axum's default JSON-rejection body — it is semantically REQUIRED, exactly like
+/// value funnels through `TenancyError::MissingRequiredField` (mirrors
+/// `ServiceAccountQuery::owner_prn`) rather than axum's default JSON-rejection body — it is
+/// semantically REQUIRED, exactly like
 /// the proto's plain (non-`optional`) `string scope_prn` field. `expires_at` unset means
 /// non-expiring (or the configured `default_expiry_days` fallback, `ApiKeyService::issue`).
 #[derive(Debug, Clone, Deserialize)]
@@ -585,9 +587,9 @@ pub struct AuditListResponseDto {
 /// Query params for `GET /v1/audit` (SMA-446 Task A11): every field optional. `from`/`to` are
 /// RFC3339 timestamp strings. Kept as raw `Option<String>` (rather than e.g. `Option<DateTime
 /// <Utc>>`/a typed enum) so a parse failure funnels through `http::audit::to_filter`'s
-/// `TenancyError::InvalidPrn` `{"error":{code,message}}` envelope — mirrors
-/// `RoleGrantQuery`/`ServiceAccountQuery`'s identical "keep it a string, let the handler
-/// validate" posture for their own required fields.
+/// `TenancyError::InvalidTimestamp`/`InvalidCursor`/`InvalidAuditOutcome` `{"error":
+/// {code,message}}` envelope — mirrors `RoleGrantQuery`/`ServiceAccountQuery`'s identical "keep
+/// it a string, let the handler validate" posture for their own required fields.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuditQuery {
     pub actor: Option<String>,
