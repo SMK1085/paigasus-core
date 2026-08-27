@@ -364,7 +364,7 @@ mandatory". **They are not.** `SELF_TASK_EXPECTED_GLOBS` holds only `input-liven
 either.**
 
 This gate follows the single-site precedent and is **not** script-pinned. Consequently it does
-**not** need a `repo:affected-smoke` `inputs` entry for `ci/envelope-json/**/*` — that entry is
+**not** need a `repo:affected-smoke` `inputs` entry for `ci/http-extractor/**/*` — that entry is
 what makes a *script pin* reachable, and there is no script pin. What it does need:
 
 - a task on the root `repo` project, `toolchain: 'system'`, shaped like
