@@ -61,38 +61,27 @@ pub async fn health_service() -> (
     (reporter, service)
 }
 
-/// A tonic `Server` router with the health service, the `TenancyService` (Task 16), the
-/// `AuthnService` (Task 12), the `AuthorizationService` (SMA-444 Task 19), the
-/// `ServiceAccountService` (SMA-445 Task 21), the `ServiceInfoService` (SMA-505, always
-/// mounted), the `UserService` (SMA-501, always mounted), the `OutboxService` (SMA-501, ALWAYS
-/// mounted — a break-glass surface must not be disable-able, unlike the read-only
-/// `AuditService` below it; see `dead_letters` module doc), and — when `iam.audit` is enabled —
-/// the `AuditService` (SMA-446 Task A10) mounted, serving a static `SERVING` health status (see
-/// `health_service`). [`CorrelationLayer`] (SMA-504) and `AuthLayer` both wrap the whole server,
-/// `CorrelationLayer` applied FIRST so it is outermost among our two — a bearer rejection still
-/// carries request/correlation ids. It is NOT outermost overall: tonic wraps the whole user
-/// stack in its own `RecoverError`/`LoadShed`/`ConcurrencyLimit`/`GrpcTimeout`, so a
-/// `Server::timeout` `Status` is produced outside `CorrelationLayer` and carries no ids — an
-/// accepted gap (closing it would mean reimplementing tonic's timeout). Health and
-/// `AuthnService.Introspect`/`IntrospectApiKey` are `:path`-exempt from bearer enforcement,
-/// every `TenancyService`/`AuthorizationService`/`ServiceAccountService`/`ServiceInfoService`/
-/// `UserService`/`OutboxService`/`AuditService` RPC is not (spec §7.4, D14) —
-/// `UserService.CreateUser` is bearer-required AND authorizes `Action::CreateUser` at `Root`,
-/// mirroring `POST /v1/users` (SMA-584, see `users` module doc). `main` calls
-/// `.serve_with_shutdown`. The reporter is dropped here —
-/// dynamic readiness is deferred to M1.
-pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRouter<Stack<AuthLayer, Stack<CorrelationLayer, Identity>>> {
+/// The single service-registration site (SMA-571 D8). Both [`router`] — which the Docker-gated
+/// integration suites drive — and production's deferred path (`adapters::boot::Serving`) build
+/// from THIS function, because tonic's `Router` keeps its `Routes` private and cannot be
+/// decomposed. Adding a service here mounts it on both; adding it anywhere else mounts it on
+/// exactly one, which `service_registration_lives_at_one_site` exists to prevent.
+///
+/// Mounts the health service, the `TenancyService` (Task 16), the `AuthnService` (Task 12), the
+/// `AuthorizationService` (SMA-444 Task 19), the `ServiceAccountService` (SMA-445 Task 21), the
+/// `ServiceInfoService` (SMA-505, always mounted), the `UserService` (SMA-501, always mounted),
+/// the `OutboxService` (SMA-501, ALWAYS mounted — a break-glass surface must not be
+/// disable-able, unlike the read-only `AuditService` below it; see `dead_letters` module doc),
+/// and — when `iam.audit` is enabled — the `AuditService` (SMA-446 Task A10), serving a static
+/// `SERVING` health status (see `health_service`).
+///
+/// Carries no layers: `CorrelationLayer` and `AuthLayer` are applied by the caller, because
+/// production applies them at two different levels (`CorrelationLayer` on the tonic `Server`,
+/// `AuthLayer` on these routes) while `router` applies both on the `Server`.
+pub async fn routes(state: AppState) -> tonic::service::Routes {
     let (_reporter, health) = health_service().await;
     let audit_enabled = state.capabilities.audit_query;
-    let mut router = Server::builder()
-        .timeout(timeout)
-        // SMA-504: applied BEFORE `AuthLayer`, so it is outermost among OUR layers and a bearer
-        // rejection still carries ids. It is NOT outermost overall: tonic wraps the whole user
-        // stack in RecoverError/LoadShed/ConcurrencyLimit/GrpcTimeout, so a `Server::timeout`
-        // Status is produced outside this layer and carries no ids and no ErrorInfo. Accepted
-        // gap — closing it would mean reimplementing tonic's timeout.
-        .layer(CorrelationLayer)
-        .layer(AuthLayer::new(state.clone()))
+    let mut routes = tonic::service::Routes::default()
         .add_service(health)
         .add_service(TenancyServiceServer::new(TenancyGrpc::new(state.clone())))
         .add_service(AuthnServiceServer::new(AuthnGrpc::new(state.clone())))
@@ -113,16 +102,78 @@ pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRoute
         .add_service(OutboxServiceServer::new(OutboxGrpc::new(state.clone())));
     // `AuditService` is WHOLLY within `iam.audit`, so it is not registered at all when the
     // capability is off — a client then gets `UNIMPLEMENTED`, exactly as it would from a build
-    // predating the service. `add_service` returns `Self`, so this does not disturb the
-    // concrete `TonicRouter<Stack<AuthLayer, Stack<CorrelationLayer, Identity>>>` return type.
+    // predating the service.
     if audit_enabled {
-        router = router.add_service(AuditServiceServer::new(AuditGrpc::new(state)));
+        routes = routes.add_service(AuditServiceServer::new(AuditGrpc::new(state)));
     }
-    router
+    routes
+}
+
+/// A tonic `Server` router built from [`routes`] (SMA-571 D8; see that function's doc for the
+/// full service inventory), with [`CorrelationLayer`] (SMA-504) and `AuthLayer` both wrapping
+/// the whole server, `CorrelationLayer` applied FIRST so it is outermost among our two — a
+/// bearer rejection still carries request/correlation ids. It is NOT outermost overall: tonic
+/// wraps the whole user stack in its own
+/// `RecoverError`/`LoadShed`/`ConcurrencyLimit`/`GrpcTimeout`, so a `Server::timeout` `Status`
+/// is produced outside `CorrelationLayer` and carries no ids — an accepted gap (closing it
+/// would mean reimplementing tonic's timeout). Health and `AuthnService.Introspect`/
+/// `IntrospectApiKey` are `:path`-exempt from bearer enforcement, every
+/// `TenancyService`/`AuthorizationService`/`ServiceAccountService`/`ServiceInfoService`/
+/// `UserService`/`OutboxService`/`AuditService` RPC is not (spec §7.4, D14) —
+/// `UserService.CreateUser` is bearer-required AND authorizes `Action::CreateUser` at `Root`,
+/// mirroring `POST /v1/users` (SMA-584, see `users` module doc). `main` calls
+/// `.serve_with_shutdown`. The reporter is dropped here —
+/// dynamic readiness is deferred to M1.
+pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRouter<Stack<AuthLayer, Stack<CorrelationLayer, Identity>>> {
+    let routes = routes(state.clone()).await;
+    let mut server = Server::builder()
+        .timeout(timeout)
+        // SMA-504: applied BEFORE `AuthLayer`, so it is outermost among OUR layers and a bearer
+        // rejection still carries ids. It is NOT outermost overall: tonic wraps the whole user
+        // stack in RecoverError/LoadShed/ConcurrencyLimit/GrpcTimeout, so a `Server::timeout`
+        // Status is produced outside this layer and carries no ids and no ErrorInfo. Accepted
+        // gap — closing it would mean reimplementing tonic's timeout.
+        .layer(CorrelationLayer)
+        .layer(AuthLayer::new(state));
+    server.add_routes(routes)
 }
 
 /// Serve gRPC on `addr` until `shutdown` resolves. gRPC health is a static `SERVING` for M0
 /// (see `health_service`); dynamic readiness is a deferred M1 concern.
 pub async fn serve(addr: SocketAddr, state: AppState, timeout: std::time::Duration, shutdown: impl std::future::Future<Output = ()> + Send + 'static) -> Result<(), tonic::transport::Error> {
     router(state, timeout).await.serve_with_shutdown(addr, shutdown).await
+}
+
+#[cfg(test)]
+mod tests {
+    /// SMA-571 D8: service registration must live at exactly ONE site. tonic's `Router` keeps its
+    /// `Routes` private, so production's deferred path (`adapters::boot`) cannot reuse `router()` —
+    /// it consumes `routes()` instead. If a future service is added to `router()` directly, it
+    /// mounts for the eleven Docker-gated suites that drive `router()` and is ABSENT in production,
+    /// with CI green. `include_str!` rather than a `repo:*` gate for the same reason
+    /// `migration_lock.rs`'s composition-root guard is: one call site does not justify a `T`-array
+    /// entry plus an `:affected-smoke` re-baseline.
+    #[test]
+    fn service_registration_lives_at_one_site() {
+        const ME: &str = include_str!("mod.rs");
+        // This test module itself quotes `.add_service(`/`.add_routes(` as string literals
+        // (the match patterns and assert messages below), so counting over the WHOLE file
+        // would self-match and corrupt every count. Slice them off first.
+        let production = ME.split("\n#[cfg(test)]").next().expect("module must have a #[cfg(test)] block");
+        let registrations = production.matches(".add_service(").count();
+        let in_routes = production
+            .split("async fn routes(")
+            .nth(1)
+            .expect("an `async fn routes(` must exist")
+            .split("\npub ")
+            .next()
+            .expect("routes() must be followed by another item or EOF")
+            .matches(".add_service(")
+            .count();
+        assert_eq!(
+            registrations, in_routes,
+            "every .add_service( must be inside `routes()` — found {registrations} total but only {in_routes} in routes()"
+        );
+        assert!(production.contains(".add_routes("), "router() must build from routes() via Server::add_routes");
+    }
 }
