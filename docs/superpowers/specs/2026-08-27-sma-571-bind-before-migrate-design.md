@@ -1,6 +1,6 @@
 # SMA-571 — Bind and ready-gate the listeners before migrating
 
-**Issue:** [SMA-571](https://linear.app/smaschek/issue/SMA-571/) · **Status:** revised after one adversarial pass
+**Issue:** [SMA-571](https://linear.app/smaschek/issue/SMA-571/) · **Status:** approved, revised after one adversarial pass
 **Related:** [SMA-559](https://linear.app/smaschek/issue/SMA-559/) (advisory lock — this was split out
 of it, and this issue retires the coupling SMA-559 could only document), SMA-500 (container images,
 owns `rs/Dockerfile` and `ci/images/run.sh`), SMA-513 (Helm chart, consumes the relaxed
