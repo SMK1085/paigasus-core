@@ -918,8 +918,22 @@ async fn healthz() -> impl IntoResponse {
 }
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
-    let ping = state.db.execute(Statement::from_string(state.db.get_database_backend(), "SELECT 1")).await;
-    match ping {
+    ping_readiness(&state).await
+}
+
+/// `app_routes` under the production `TraceLayer`/`TimeoutLayer` — extracted verbatim from
+/// `serve_http`'s body so `adapters::boot::Serving` builds the SAME value the listener used to
+/// build inline (SMA-571). `/healthz`, `/readyz` and `/metrics` stay outside it, as always.
+pub fn traced_app_routes(state: AppState, request_timeout: Duration) -> Router {
+    app_routes(state)
+        .layer(TraceLayer::new_for_http())
+        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, request_timeout))
+}
+
+/// The database-ping half of readiness, split out of [`readyz`] so `adapters::boot`'s
+/// slot-aware handler can reuse it rather than duplicate the ping and its logging (SMA-571).
+pub async fn ping_readiness(state: &AppState) -> (StatusCode, Json<serde_json::Value>) {
+    match state.db.execute(Statement::from_string(state.db.get_database_backend(), "SELECT 1")).await {
         Ok(_) => (StatusCode::OK, Json(json!({ "status": "ready" }))),
         Err(e) => {
             tracing::warn!(error = %e, "readiness check failed: database ping error");
@@ -947,9 +961,7 @@ pub async fn serve_http(
 ) -> std::io::Result<()> {
     // `TimeoutLayer::new` is deprecated since tower-http 0.6.7 in favor of
     // `with_status_code`; `REQUEST_TIMEOUT` (408) reproduces `new`'s prior default.
-    let traced = app_routes(state.clone())
-        .layer(TraceLayer::new_for_http())
-        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, request_timeout));
+    let traced = traced_app_routes(state.clone(), request_timeout);
     let mut app = health_router().merge(readyz_router(state)).merge(traced);
     if let Some(metrics_router) = metrics_router {
         app = app.merge(metrics_router);
