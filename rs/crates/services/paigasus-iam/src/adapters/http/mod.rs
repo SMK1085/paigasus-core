@@ -27,6 +27,9 @@ pub mod authz_middleware;
 pub(crate) mod dead_letters;
 pub mod dto;
 pub mod error;
+/// `pub(crate)` for the same reason `path` is: the extractor is used by handler modules across
+/// this adapter, and `grpc::convert`'s transport parity guard drives it directly (SMA-587 D6).
+pub(crate) mod json;
 pub(crate) mod memberships;
 mod organizations;
 // `pub(crate)` for the same reason as `audit`/`dead_letters`/`memberships` above: `grpc::convert`'s

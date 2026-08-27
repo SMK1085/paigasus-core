@@ -27,9 +27,10 @@ use paigasus_kernel::Prn;
 use uuid::Uuid;
 
 use super::AppState;
-use super::authn::{AuthnApiError, EnvelopeJson};
+use super::authn::AuthnApiError;
 use super::dto::{ApiKeyDto, IntrospectApiKeyRequestBody, IntrospectApiKeyResponseDto, IssueApiKeyBody, IssueApiKeyResponseDto, PageQuery};
 use super::error::ApiError;
+use super::json::EnvelopeJson;
 use super::path::{ApiKeyId as ApiKeyIdField, ServiceAccountId, UuidPath, UuidPathPair};
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;

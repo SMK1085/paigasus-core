@@ -7,8 +7,8 @@
 //! (across 25 handlers) answered outside their own error contract, and `invalid-uuid` had no
 //! HTTP emitter at all while its gRPC twins did (AC-1). This closes both.
 //!
-//! Mirrors `authn::EnvelopeJson`, including the half that matters most: `authn::
-//! envelope_rejection` does NOT flatten every rejection into one client error — it keeps
+//! Mirrors `json::EnvelopeJson` (SMA-587), including the half that matters most: its
+//! `envelope_rejection` does NOT flatten every rejection into one client error — it keeps
 //! `rejection.status()` and branches on the kind. So does this module. A `PathRejection` axum
 //! classes `500` — `MissingPathParams`, and the `WrongNumberOfParameters` / `UnsupportedType`
 //! kinds inside `FailedToDeserializePathParams` — means the route's pattern stopped matching
