@@ -162,7 +162,13 @@ In `negative_control()`, after the last existing Check-1 row and before the Chec
   _expect_rc 0 "Check 1c (own table, warn — passes)" \
     assert_lint_table "$tmp/lints-good.toml"
 
-  # Added during PR review — see the amendment note under Step 4.
+  # Added during PR review — see the amendment note under Step 4. A present-but-EMPTY
+  # namespace is the same vacuity as `workspace = false` in a different shape: it satisfies
+  # "declares its own table" while setting no lint at all.
+  printf '[package]\nname = "f"\n[lints.rust]\n' >"$tmp/lints-empty-ns.toml"
+  _expect_rc 1 "Check 1c (present but EMPTY [lints.rust] sets no lint)" \
+    assert_lint_table "$tmp/lints-empty-ns.toml"
+
   printf '[package]\nname = "f"\n[lints]\nworkspace = false\n' >"$tmp/lints-ws-false.toml"
   _expect_rc 1 "Check 1c (workspace = false declares no local namespace)" \
     assert_lint_table "$tmp/lints-ws-false.toml"
@@ -184,7 +190,7 @@ cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-577
 bash ci/publish-metadata/run.sh --negative-control
 ```
 
-Expected: exit 0, with nine new `ok — Check 1c (…)` lines and **no** `NEGATIVE CONTROL FAILED`.
+Expected: exit 0, with ten new `ok — Check 1c (…)` lines and **no** `NEGATIVE CONTROL FAILED`.
 
 > **Amended during PR review.** This task originally shipped seven fixtures. CodeRabbit found
 > that `[lints] workspace = false` — valid TOML, and per cargo's reference equivalent to omitting
@@ -327,6 +333,14 @@ Immediately after Task 1's fixture block:
   _expect_rc 1 "Check 1d (a wildcard is not literal membership)" \
     assert_include_allowlist "$tmp/inc-wildcard.toml"
 
+  # Added during PR review. The bare wildcard above fails on literal MEMBERSHIP; this one
+  # satisfies membership and must still fail, because a catch-all beside the required
+  # literals packages everything anyway.
+  printf '[package]\nname = "f"\ninclude = ["Cargo.toml", "README.md", "LICENSE", "**/*"]\n' \
+    >"$tmp/inc-catchall-plus-literals.toml"
+  _expect_rc 1 "Check 1d (catch-all alongside the required literals)" \
+    assert_include_allowlist "$tmp/inc-catchall-plus-literals.toml"
+
   printf '[package]\nname = "f"\ninclude = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE"]\n' \
     >"$tmp/inc-good.toml"
   _expect_rc 0 "Check 1d (proper allowlist — passes)" \
@@ -343,7 +357,12 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 bash ci/publish-metadata/run.sh --negative-control
 ```
 
-Expected: exit 0, seven new `ok — Check 1d (…)` lines, no failures.
+Expected: exit 0, eight new `ok — Check 1d (…)` lines, no failures.
+
+> **Amended during PR review.** An eighth fixture was added: a catch-all (`**/*`) listed
+> *alongside* the required literals. The bare `["**/*"]` row above fails on literal membership,
+> not on being a catch-all, so a list carrying both walked straight through and packaged the
+> whole directory. See the amendment note under Task 1 Step 4 for the parallel Check 1c case.
 
 - [ ] **Step 5: Run the real gate**
 
@@ -1175,7 +1194,7 @@ EOF
 
 Add to the check inventory in the comment at lines 4-26, after the Check 1b entry:
 
-```
+```text
 #   Check 1c each publishable crate declares its OWN [lints.*] table and does not deny.
 #            Cargo inlines the resolved table into the published manifest and docs.rs builds
 #            on nightly as the root package, where --cap-lints allow does not apply — so an
