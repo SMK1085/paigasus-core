@@ -4,6 +4,7 @@ syntax = "proto3";
 package paigasus.common.v1;
 
 import "google/protobuf/timestamp.proto";
+import "paigasus/common/v1/actor.proto";
 
 // Shared audit metadata for auditable entities and DTOs across all Paigasus
 // services and languages. Carried by *embedding* this message as a field
@@ -17,10 +18,17 @@ message AuditMetadata {
   // When the entity was last modified (UTC). Equals created_at on first write.
   google.protobuf.Timestamp modified_at = 2;
 
-  // Opaque identifier of the actor that created the entity (user id / subject
-  // claim / service name). Empty = unknown/system, pending a structured Actor.
-  string created_by = 3;
+  // RESERVED PERMANENTLY. These held opaque actor strings until SMA-439 replaced
+  // them with `Actor`. buf keys its field-deletion check on the NUMBER, so
+  // retiring them requires reserving the names too — which means `created_by` and
+  // `modified_by` can never again name a field in this message, in any language.
+  reserved 3, 4;
+  reserved "created_by", "modified_by";
 
-  // Opaque identifier of the actor that last modified the entity.
-  string modified_by = 4;
+  // Who created the entity. ABSENT means unknown-or-system; see Actor's contract,
+  // under which an empty or unparseable `prn` means the same thing.
+  Actor creator = 5;
+
+  // Who last modified the entity. Same absence semantics as `creator`.
+  Actor modifier = 6;
 }
