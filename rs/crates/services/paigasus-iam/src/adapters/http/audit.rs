@@ -44,38 +44,38 @@ fn opt_non_empty(raw: Option<String>) -> Option<String> {
 }
 
 /// Parses the `outcome` query param: absent/empty means unfiltered; a present value must name
-/// a known [`AuditOutcome`]. `InvalidPrn`-as-sentinel — mirrors `grpc::audit::parse_outcome`'s
-/// identical posture (there is no dedicated error code for "not a valid outcome" either).
-fn parse_outcome(raw: Option<String>) -> Result<Option<AuditOutcome>, TenancyError> {
+/// a known [`AuditOutcome`]. The caller's raw value is not echoed back — `InvalidAuditOutcome`
+/// carries a `&'static str`, which cannot hold it (SMA-586).
+pub(crate) fn parse_outcome(raw: Option<String>) -> Result<Option<AuditOutcome>, TenancyError> {
     match opt_non_empty(raw) {
         None => Ok(None),
-        Some(s) => AuditOutcome::parse(&s).map(Some).ok_or_else(|| TenancyError::InvalidPrn(format!("unknown audit outcome: {s}"))),
+        Some(s) => AuditOutcome::parse(&s).map(Some).ok_or(TenancyError::InvalidAuditOutcome("outcome")),
     }
 }
 
 /// Parses the `cursor` query param: absent/empty means "first page" (`None`); a present value
-/// must be a valid uuid. Mirrors `grpc::audit::parse_cursor`'s identical "not a uuid" posture.
-fn parse_cursor(raw: Option<String>) -> Result<Option<Uuid>, TenancyError> {
+/// must be a valid uuid. `InvalidCursor` rather than `InvalidUuid` — a cursor is server-issued,
+/// so a client recovers by restarting pagination (SMA-586). Mirrors `grpc::audit::parse_cursor`.
+pub(crate) fn parse_cursor(raw: Option<String>) -> Result<Option<Uuid>, TenancyError> {
     match opt_non_empty(raw) {
         None => Ok(None),
-        Some(s) => Uuid::parse_str(&s).map(Some).map_err(|_| TenancyError::InvalidPrn("cursor must be a uuid".to_string())),
+        Some(s) => Uuid::parse_str(&s).map(Some).map_err(|_| TenancyError::InvalidCursor("cursor")),
     }
 }
 
 /// Parses an RFC3339 `from`/`to` query param: absent/empty means unfiltered; a present value
-/// must parse as RFC3339. `InvalidPrn`-as-sentinel, mirroring `parse_outcome`/`parse_cursor`
-/// above — there is no dedicated error code for "not a valid timestamp" either.
+/// must parse as RFC3339. `field` names which bound failed and reaches the client (SMA-586) —
+/// before, both bounds produced the identical static message.
 ///
-/// The gRPC twin has the SAME three-case split, contrary to what this comment claimed before
-/// SMA-583: a `prost_types::Timestamp` cannot fail to *parse*, but it can fail to *convert*
-/// (a negative `nanos`, or a `seconds` outside `chrono`'s range), and `grpc::audit::to_filter`
-/// now rejects that via `convert::parse_opt_ts` exactly as this does.
-fn parse_ts(raw: Option<String>) -> Result<Option<DateTime<Utc>>, TenancyError> {
+/// The gRPC twin has the SAME three-case split: a `prost_types::Timestamp` cannot fail to
+/// *parse*, but it can fail to *convert*, and `grpc::audit::to_filter` rejects that via
+/// `convert::parse_opt_ts` exactly as this does (SMA-583).
+pub(crate) fn parse_ts(raw: Option<String>, field: &'static str) -> Result<Option<DateTime<Utc>>, TenancyError> {
     match opt_non_empty(raw) {
         None => Ok(None),
         Some(s) => DateTime::parse_from_rfc3339(&s)
             .map(|dt| Some(dt.with_timezone(&Utc)))
-            .map_err(|_| TenancyError::InvalidPrn(format!("invalid RFC3339 timestamp: {s}"))),
+            .map_err(|_| TenancyError::InvalidTimestamp(field)),
     }
 }
 
@@ -92,14 +92,14 @@ fn parse_ts(raw: Option<String>) -> Result<Option<DateTime<Utc>>, TenancyError> 
 /// that a shared helper would need its own translation layer on both sides anyway — mirrors
 /// `grpc::audit::actor_context`'s explicit "duplicated rather than shared across a
 /// transport-internal module boundary" posture for the identical reason.
-fn to_filter(q: AuditQuery) -> Result<AuditFilter, TenancyError> {
+pub(crate) fn to_filter(q: AuditQuery) -> Result<AuditFilter, TenancyError> {
     Ok(AuditFilter {
         actor_prn: opt_non_empty(q.actor),
         resource_prn: opt_non_empty(q.resource),
         action: opt_non_empty(q.action),
         outcome: parse_outcome(q.outcome)?,
-        from: parse_ts(q.from)?,
-        to: parse_ts(q.to)?,
+        from: parse_ts(q.from, "from")?,
+        to: parse_ts(q.to, "to")?,
         cursor: parse_cursor(q.cursor)?,
         limit: match q.limit {
             None | Some(0) => DEFAULT_LIMIT,
@@ -195,7 +195,7 @@ mod tests {
             ..default_query()
         })
         .unwrap_err();
-        assert!(matches!(err, TenancyError::InvalidPrn(_)));
+        assert!(matches!(err, TenancyError::InvalidAuditOutcome(_)));
     }
 
     #[test]
@@ -205,7 +205,7 @@ mod tests {
             ..default_query()
         })
         .unwrap_err();
-        assert!(matches!(err, TenancyError::InvalidPrn(_)));
+        assert!(matches!(err, TenancyError::InvalidCursor(_)));
     }
 
     #[test]
@@ -215,7 +215,17 @@ mod tests {
             ..default_query()
         })
         .unwrap_err();
-        assert!(matches!(err, TenancyError::InvalidPrn(_)));
+        assert!(matches!(err, TenancyError::InvalidTimestamp(_)));
+    }
+
+    /// SMA-586: each audit query param now names itself, and the two timestamp bounds are
+    /// distinguishable — `from` and `to` used to yield the identical response.
+    #[test]
+    fn the_audit_query_params_each_get_their_own_reason() {
+        assert_eq!(parse_ts(Some("nope".into()), "from").unwrap_err(), TenancyError::InvalidTimestamp("from"));
+        assert_eq!(parse_ts(Some("nope".into()), "to").unwrap_err(), TenancyError::InvalidTimestamp("to"));
+        assert_eq!(parse_cursor(Some("nope".into())).unwrap_err(), TenancyError::InvalidCursor("cursor"));
+        assert_eq!(parse_outcome(Some("maybe".into())).unwrap_err(), TenancyError::InvalidAuditOutcome("outcome"));
     }
 
     #[test]

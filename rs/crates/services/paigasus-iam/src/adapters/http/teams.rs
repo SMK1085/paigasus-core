@@ -11,16 +11,16 @@
 //! two fetch the team first (`s.teams.get`), which doubles as the pre-existing NotFound-on-
 //! missing-team behavior every service call already had.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use paigasus_iam_core::Action;
-use uuid::Uuid;
 
 use super::AppState;
 use super::dto::{CreateNodeBody, PageQuery, ProjectDto, RenameBody, TeamDto};
 use super::error::ApiError;
+use super::path::{TeamId, UuidPath};
 use crate::adapters::auth::AuthContext;
 use crate::application::pagination::Page;
 
@@ -36,7 +36,8 @@ fn actor_prn(ctx: &AuthContext) -> paigasus_kernel::Prn {
     ctx.principal_id.prn().clone()
 }
 
-async fn get_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<TeamDto>, ApiError> {
+async fn get_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<TeamId>) -> Result<Json<TeamDto>, ApiError> {
+    let id = path.id;
     let view = s.teams.get(id).await?;
     if s.enforce_tenancy {
         s.authorize.check(&actor_prn(&ctx), Action::GetTeam, view.node.id.prn()).await?;
@@ -44,7 +45,8 @@ async fn get_team(State(s): State<AppState>, Extension(ctx): Extension<AuthConte
     Ok(Json(view.into()))
 }
 
-async fn rename_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>, Json(b): Json<RenameBody>) -> Result<Json<TeamDto>, ApiError> {
+async fn rename_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<TeamId>, Json(b): Json<RenameBody>) -> Result<Json<TeamDto>, ApiError> {
+    let id = path.id;
     if s.enforce_tenancy {
         let view = s.teams.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RenameTeam, view.node.id.prn()).await?;
@@ -53,7 +55,8 @@ async fn rename_team(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
     Ok(Json(view.into()))
 }
 
-async fn archive_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<TeamDto>, ApiError> {
+async fn archive_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<TeamId>) -> Result<Json<TeamDto>, ApiError> {
+    let id = path.id;
     if s.enforce_tenancy {
         let view = s.teams.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::ArchiveTeam, view.node.id.prn()).await?;
@@ -62,7 +65,8 @@ async fn archive_team(State(s): State<AppState>, Extension(ctx): Extension<AuthC
     Ok(Json(view.into()))
 }
 
-async fn restore_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(id): Path<Uuid>) -> Result<Json<TeamDto>, ApiError> {
+async fn restore_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<TeamId>) -> Result<Json<TeamDto>, ApiError> {
+    let id = path.id;
     if s.enforce_tenancy {
         let view = s.teams.get(id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::RestoreTeam, view.node.id.prn()).await?;
@@ -71,12 +75,8 @@ async fn restore_team(State(s): State<AppState>, Extension(ctx): Extension<AuthC
     Ok(Json(view.into()))
 }
 
-async fn create_project(
-    State(s): State<AppState>,
-    Extension(ctx): Extension<AuthContext>,
-    Path(team_id): Path<Uuid>,
-    Json(b): Json<CreateNodeBody>,
-) -> Result<(StatusCode, Json<ProjectDto>), ApiError> {
+async fn create_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<TeamId>, Json(b): Json<CreateNodeBody>) -> Result<(StatusCode, Json<ProjectDto>), ApiError> {
+    let team_id = path.id;
     if s.enforce_tenancy {
         let team_view = s.teams.get(team_id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::CreateProject, team_view.node.id.prn()).await?;
@@ -85,7 +85,8 @@ async fn create_project(
     Ok((StatusCode::CREATED, Json(view.into())))
 }
 
-async fn list_projects(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(team_id): Path<Uuid>, Query(q): Query<PageQuery>) -> Result<Json<Vec<ProjectDto>>, ApiError> {
+async fn list_projects(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<TeamId>, Query(q): Query<PageQuery>) -> Result<Json<Vec<ProjectDto>>, ApiError> {
+    let team_id = path.id;
     if s.enforce_tenancy {
         let team_view = s.teams.get(team_id).await?;
         s.authorize.check(&actor_prn(&ctx), Action::ListProjects, team_view.node.id.prn()).await?;
