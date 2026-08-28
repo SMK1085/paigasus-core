@@ -432,7 +432,14 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import glob, sys, zipfile
+          import email.parser, glob, sys, zipfile
+
+          # PARSE the headers; do not substring-search the raw text. METADATA is an RFC 822
+          # document whose body is the rendered README, so `"Summary:" in text` is satisfied by
+          # a README that merely CONTAINS that word, and it accepts a present-but-empty header
+          # too. Either way the check passes while the field it names is missing — the same
+          # vacuity the tag assertions above are written to avoid.
+          REQUIRED = ("Summary", "License-Expression", "Description-Content-Type", "Classifier")
 
           wheels = sorted(glob.glob("dist/*.whl"))
           if not wheels:
@@ -443,14 +450,19 @@ jobs:
               names = zf.namelist()
               meta = next(n for n in names if n.endswith(".dist-info/METADATA"))
               text = zf.read(meta).decode("utf-8")
-              for required in ("Summary:", "License-Expression:", "Description-Content-Type:", "Classifier:"):
-                  if required not in text:
-                      print(f"FAIL: {whl} METADATA lacks {required}\n---\n{text}", file=sys.stderr)
+              # headersonly stops at the blank line, so the README body cannot contribute.
+              msg = email.parser.Parser().parsestr(text, headersonly=True)
+              for field in REQUIRED:
+                  values = [v.strip() for v in msg.get_all(field) or []]
+                  if not any(values):
+                      print(f"FAIL: {whl} METADATA has no non-empty {field}\n"
+                            f"      headers present: {sorted(set(msg.keys()))}", file=sys.stderr)
                       raise SystemExit(1)
               if not any("/licenses/LICENSE" in n for n in names):
                   print(f"FAIL: no license file in {whl}: {names}", file=sys.stderr)
                   raise SystemExit(1)
-              print(f"OK: {whl} METADATA complete ({len(text)} bytes)")
+              print(f"OK: {whl} METADATA complete "
+                    f"({len(text)} bytes, {len(msg.get_all('Classifier') or [])} classifiers)")
           PY
 
       # One wheel per artifact: both darwin wheels land in the same dist/, so a `dist/*.whl`
