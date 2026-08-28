@@ -220,22 +220,23 @@ SELF_TASK_EXPECTED_GLOBS = {
     # error-code's broad rs/crates/**/src/**/*.rs ("the one case it exists for would be the one
     # case it never runs on"; moon.yml:628-630). Both sets are STATIC — no runtime discovery —
     # so exact match is affordable, exactly as for version-lockstep's sixteen.
-    # The five py/ and workflow entries below arrived with SMA-578's Python arm (P0/P1/P2 and
-    # the wheels.yml credential check) and are load-bearing, not incidental: P0 discovers the
-    # PyPI-bound set by globbing py/packages/*/pyproject.toml, P2 asserts the README/LICENSE
-    # those manifests declare exist on disk, and P-D6 reads .github/workflows/wheels.yml. Drop
-    # any of them and the gate stops being scheduled by a change to the very files it reads —
-    # the drift this pin exists to catch. They are globs rather than the literal paths the rest
-    # of this tuple uses because the scan set is discovered at runtime: a literal list could not
-    # select the task for a py package that does not exist yet, which was itself a review
-    # finding (a new PyPI-marked package otherwise passed green).
+    # The three py/ entries below arrived with SMA-578's Python arm (P0/P1/P2) and are
+    # load-bearing, not incidental: P0 discovers the PyPI-bound set by globbing
+    # py/packages/*/pyproject.toml, and P2 asserts the README/LICENSE those manifests
+    # declare exist on disk. Drop either and the gate stops being scheduled by a change to
+    # the very files it reads — the drift this pin exists to catch. They are globs rather
+    # than the literal paths the rest of this tuple uses because the scan set is discovered
+    # at runtime: a literal list could not select the task for a py package that does not
+    # exist yet, which was itself a review finding (a new PyPI-marked package otherwise
+    # passed green). .github/workflows/wheels.yml was a fourth such entry until SMA-593:
+    # P-D6 read it, and P-D6 now lives in repo:workflow-credentials, which declares its own
+    # inputs. security-scan.yml stays — Check 4 still asserts on it.
     "publish-metadata": (
         "py/packages/*/LICENSE",
         "py/packages/*/README.md",
         "py/packages/*/pyproject.toml",
         "rs/crates/**/*",
         ".github/workflows/security-scan.yml",
-        ".github/workflows/wheels.yml",
         ".gitignore",
         "ci/publish-metadata/categories.py",
         "ci/publish-metadata/crates-io-categories.txt",

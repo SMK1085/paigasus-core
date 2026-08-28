@@ -394,7 +394,9 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   plus a source-verified sdist**, built by `.github/workflows/wheels.yml` (SMA-578) — a
   *reusable* workflow (`on: workflow_call`) that SMA-579's gated `release` job will consume. It
   must **never** declare `secrets:` or `id-token: write`: it carries a `pull_request` trigger, so
-  a same-repo PR would receive the credential — `repo:publish-metadata` asserts this. Four facts
+  a same-repo PR would receive the credential — `repo:workflow-credentials` asserts this, and it
+  applies the same ban to EVERY `pull_request`/`pull_request_target`-triggered workflow, not to
+  `wheels.yml` alone (SMA-593; it was `repo:publish-metadata`'s P-D6 until then). Four facts
   that cost a measurement each: (1) maturin injects the apple-darwin `-undefined dynamic_lookup`
   args **itself**, so an sdist builds on macOS without `rs/.cargo/config.toml` — that file exists
   for plain `cargo build`, as its own comment says, and the old "no sdist" rule rested on a false

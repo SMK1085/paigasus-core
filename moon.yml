@@ -518,7 +518,7 @@ tasks:
       - '.proto/plugins/promtool.toml'
 
   publish-metadata:
-    description: 'Assert every publishable crate carries crates.io-valid metadata, packages exactly the intended files, and cannot be released by release-plz while still at the 0.0.0 stub floor (SMA-376); and that every PyPI-bound distribution carries PyPI-valid metadata whose declared README/LICENSE files exist, while wheels.yml stays credential-free (SMA-578).'
+    description: 'Assert every publishable crate carries crates.io-valid metadata, packages exactly the intended files, and cannot be released by release-plz while still at the 0.0.0 stub floor (SMA-376); and that every PyPI-bound distribution carries PyPI-valid metadata whose declared README/LICENSE files exist (SMA-578).'
     # The self-test runs FIRST: a gate that cannot report red is worse than no gate, and it
     # is sub-second, so paying for it before the real (network + compile) checks is free.
     # Moon does not enable errexit for `script:` blocks — same latent defect as the
@@ -553,23 +553,19 @@ tasks:
       - 'rs/.cargo/config.toml'
       - 'rs/release-plz.toml'
       - '.gitignore'
-      # The PyPI arm (SMA-578). wheels.yml is an input because Check P-D6 ASSERTS ON IT;
-      # without it the credential ban would serve a cached pass on exactly the PR that
-      # adds a registry credential.
-      #
-      # The py/ entries are SINGLE-LEVEL GLOBS, matching run.sh's PYPI_SCAN_GLOB. They
-      # were literal per-package paths until SMA-578 review I1 measured the hole that
-      # leaves: a PR ADDING a PyPI-bound package under py/packages/ touches no listed
-      # input, so Moon never selects this task and the new package's metadata is never
-      # checked at all. A glob selects the task for a package that does not exist yet;
-      # a literal list cannot. ONE level, never `**/`: a recursive glob would sweep in
-      # py/pyproject.toml (a uv virtual root with no [project] table) and node-gyp's
-      # copy under ts/node_modules in a provisioned tree — `py/packages/*/` matches
-      # neither. README/LICENSE are globbed because Check P2 asserts they EXIST, so
-      # deleting one must select this task rather than replay a cached pass. The
-      # bindings crate's pyproject/README/LICENSE are already covered by
-      # 'rs/crates/**/*' above.
-      - '.github/workflows/wheels.yml'
+      # The PyPI arm (SMA-578). The py/ entries are SINGLE-LEVEL GLOBS, matching
+      # run.sh's PYPI_SCAN_GLOB. They were literal per-package paths until SMA-578
+      # review I1 measured the hole that leaves: a PR ADDING a PyPI-bound package
+      # under py/packages/ touches no listed input, so Moon never selects this task
+      # and the new package's metadata is never checked at all. A glob selects the
+      # task for a package that does not exist yet; a literal list cannot. ONE
+      # level, never `**/`: a recursive glob would sweep in py/pyproject.toml (a uv
+      # virtual root with no [project] table) and node-gyp's copy under
+      # ts/node_modules in a provisioned tree — `py/packages/*/` matches neither.
+      # README/LICENSE are globbed because Check P2 asserts they EXIST, so deleting
+      # one must select this task rather than replay a cached pass. The bindings
+      # crate's pyproject/README/LICENSE are already covered by 'rs/crates/**/*'
+      # above.
       - 'py/packages/*/pyproject.toml'
       - 'py/packages/*/README.md'
       - 'py/packages/*/LICENSE'
