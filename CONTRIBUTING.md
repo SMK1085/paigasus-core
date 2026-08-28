@@ -99,10 +99,18 @@ docs(py): document uv workspace setup
 or `workspace` for repo-wide changes). Note: a blank line is required before
 any commit footer (e.g. `Closes #12`).
 
+**One exception (SMA-579):** the release commit that release-plz writes on its
+own release PR — `chore: release`, `chore: release v<version>`, or
+`chore(<package>): release v<version>` — is exempt, because release-plz builds
+that message itself and none of the three shapes carries an allowed scope. The
+exemption matches the whole message, so it applies only to a commit with an
+empty body; write your own commits the normal way.
+
 > **Maintenance rule (SMA-371):** these type and scope lists are enforced by
 > `@paigasus/commitlint-config` (in `ts/packages/commitlint-config/index.cjs`),
-> which is the source of truth. When you change either list, update the config
-> package **and** this section in the same PR.
+> which is the source of truth. When you change either list — or the release-plz
+> exemption above — update the config package **and** this section in the same
+> PR.
 
 ## Code conventions
 
