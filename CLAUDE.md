@@ -62,7 +62,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   SMA-592, which captured its output. The two are matched on SYMPTOM SHAPE alone — a sub-3s abort
   under a concurrent `moon ci` — so nothing proves they are one and the same failure. Neither
   session reproduced it: four attempts on SMA-595 (warm, cold `.moon/cache`, cold `MOON_HOME`, and
-  cold `rs/target` with cargo compiling alongside), and four more on SMA-592. An inherited
+  cold `rs/target` with cargo compiling alongside), and three more on SMA-592. An inherited
   `MOON_BASE` was tested and ruled out (the gate passes with it set). The gate is otherwise green
   everywhere. If you see a sub-3s `affected-smoke` failure, capture the full task output before
   re-running, because a re-run passes and destroys the evidence.

@@ -99,7 +99,8 @@ tasks:
     #                           every cargo run whose cwd is inside `rs/` on darwin, clippy
     #                           included. It is the one entry here that is ALSO on
     #                           build/build-release/test — see the `build` comment above.
-    # The first three are deliberately NOT on build/test/fmt: `clippy --all-targets` is a
+    # The first three are deliberately not on build/test; `rust-toolchain.toml` is also on
+    # `fmt`, for the reason `fmt`'s own comment gives. `clippy --all-targets` is a
     # superset of `check --all-targets`, so it already type-checks libs, bins and tests; adding
     # `test` would put the Docker-gated IAM container suites on every Dependabot PR. Clippy
     # still neither links the cdylibs nor compiles wasm32 — but that gap is CLOSED for the FFI
