@@ -1,0 +1,301 @@
+subagent
+
+---
+
+<task-notification>
+<task-id>a3e11139124aea3c8</task-id>
+<tool-use-id>toolu_01KwiXu33ygVC3fNaSKZyAVC</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/a3e11139124aea3c8.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 1: Rust task input gaps" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Status: DONE
+Commit: `4d2aa0533d26c4a6cd9c36afa721992437532bb8`
+Test summary: build.rs probe now affects `paigasus-node-bindings-rs:{build,build-release,fmt,lint,test}`; rustfmt.toml probe now affects exactly 13 `*:fmt` tasks; graph loads; parity gate self-test and real run both PASS.
+Concerns: none.</result>
+<usage><subagent_tokens>70936</subagent_tokens><tool_uses>11</tool_uses><duration_ms>88065</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>aa9716909376b07d7</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/aa9716909376b07d7.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 2: generalize A4" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Task 2 complete.
+
+Status: DONE
+Commit SHA: 4eb0a1d
+Test summary: self-test exits 0 (all six assertions fire); real-graph run exits 0 (PASS, 13 crates); the `.moon/tasks/rust.yml` mutation drill produced exactly 13 `…:fmt inputs omit tests/**/*` rows and exit 1, then clean exit 0 after restore+touch.
+
+Concerns: none. Applied the controller's ruling verbatim for the `missing` computation (suffix fallback only for non-`rs/`-prefixed entries) and updated the docstring accordingly. Also had to update five pre-existing self-test call sites (`check_lint_inputs` → `check_task_inputs(..., "lint", WORKSPACE_LINT_INPUTS)`) that the brief didn't mention but would otherwise NameError on rename. Full report at `.superpowers/sdd/2026-08-28-sma-560-cross-stack-input-affectedness/task-2-report.md`, code at `ci/affected-graph/cargo_moon_parity.py`.</result>
+<usage><subagent_tokens>87431</subagent_tokens><tool_uses>24</tool_uses><duration_ms>147009</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ae3301507f931088f</task-id>
+<tool-use-id>toolu_01R9fnrF1ygjJ9LDPRBi3JBP</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/ae3301507f931088f.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 2" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Only one stale reference found, confirmed above.
+
+## Spec compliance: ✅
+
+All required items are present:
+- `check_task_inputs(projects, crates, task, required)` — exact signature, replaces `check_lint_inputs` (line 208).
+- Unions both moon buckets: `observed = set(files) | set(globs)`.
+- `None` in either bucket is a violation, never a skip: `if files is None or globs is None:` appends a row.
+- New module constant `FMT_TASK_INPUTS` with a self-test row asserting non-emptiness.
+- No new `repo:*` task, no `.github/workflows/ci.yml`, CLAUDE.md, `repo:affected-smoke` inputs, or `.moon/` file touched — diff stat confirms only `cargo_moon_parity.py` changed.
+- The controller's ruling is correctly implemented: the suffix fallback (`any(o.endswith(f"/{f}") for o in observed)`) applies only when `not f.startswith("rs/")`; `rs/`-prefixed entries fall through to require an exact `f in observed` match. The docstring was rewritten to state this split explicitly and no longer describes the brief's looser behavior.
+- Nothing present-but-not-required beyond what Task 4 is explicitly told will consume (`a4_fmt` wiring into `main()`, per the brief's own step 5).
+
+## Task quality: Issues
+
+- **Minor**: the comment above `FMT_TASK_INPUTS` (line 85) still says "...does not simply reuse `check_lint_inputs`' one-bucket read" — `check_lint_inputs` no longer exists in the file; it was renamed to `check_task_inputs` in this same commit. This is exactly the kind of stale reference the review was asked to check for. It costs a future reader a moment of confusion (or a failed grep) but does not affect behavior. Should be reworded to say "a one-bucket read" or reference `check_task_inputs`'s prior single-bucket form.
+
+Everything else checked out:
+- The five pre-existing self-test call sites were confirmed to be mechanical renames only — each still passes `"lint"` and `WORKSPACE_LINT_INPUTS`, and none of the assertion strings or fixture data changed (only reflowed onto multiple lines for width).
+- The two new A4-fmt failure rows assert specific violation substrings (`"tests/**/*"`, `"rustfmt.toml"`), not mere non-emptiness; the third new row is a positive control (clean fixture yields `[]`), consistent with the equivalent existing A4-lint pattern.
+- No other stale references to `check_lint_inputs` or removed behavior found elsewhere in the file.
+- Commit message is a valid conventional commit: `ci(repo): ...`, lowercase subject, under 100 chars, no `word:`-prefixed body line.
+
+No items require "⚠️ Cannot verify from diff" — the diff and file dump together were sufficient to check every listed constraint.</result>
+<usage><subagent_tokens>70311</subagent_tokens><tool_uses>6</tool_uses><duration_ms>62093</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a94e717ba90ad117e</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/a94e717ba90ad117e.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 3: split derive_ffi_tasks" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>STATUS: DONE
+Commit SHA: c5ac4d227663f1b6bf1e0fb6c495c9654fc6bd58
+Test summary: `--self-test` and the real check both pass (exit 0); all pre-existing A5 rows unchanged.
+Concerns: none.</result>
+<usage><subagent_tokens>64660</subagent_tokens><tool_uses>12</tool_uses><duration_ms>60285</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a75e2c7871172ad68</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/a75e2c7871172ad68.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 3" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>"napi build" matches "w-ts" fixture (invocation contains "napi build"), "cargo build" doesn't match any marker — fixture and expected result `{"w-ts:build"}` are correct. Verified against actual `FFI_MARKERS` constant.
+
+## Spec compliance: ✅
+
+All required behavior is preserved:
+- **`MoonOutputError` path**: same `if blob is None: raise` condition, checked before the marker filter (fires even for non-FFI-matching tasks, same as original), message still names the offending `pid:task`.
+- **Floor half**: `for target in sorted(set(floor) - matched)` is byte-identical to the original, now fed by the derived set.
+- **`None` `inputFiles`**: still appended as a violation, never skipped — unchanged.
+- **No pre-existing A5 self-test row was touched** — the diff only adds one new row; all five original A5 rows (clean fixture, missing-input fire, `inputFiles`-None fire, anti-vacuity floor row, `MoonOutputError` fire, unrelated-task-outside-floor fire) are untouched and still exercise `check_ffi_inputs` exactly as before.
+- New self-test fixture and expected `{"w-ts:build"}` result are correct against the real `FFI_MARKERS` constant.
+- No `.moon/` file, `ci.yml`, or CLAUDE.md touched; commit is a single conventional-commit change scoped to `ci(repo)`, subject lowercase, header 70 chars, footer trailers well-formed.
+
+## Task quality: Approved, with one Minor note
+
+- **Minor — latent ordering divergence.** The original built `a5` inline while iterating `sorted(pid)` → `sorted(name)`, guaranteeing pid-major then name-minor order. The refactor instead does `sorted(matched)` over the flat `"pid:task"` strings. These two orderings are provably identical *unless* one project id is an exact prefix of another and the next character in the longer id sorts before `:` (0x3A) — e.g. `-` (0x2D) or a digit. I checked every current Moon project id (`grep -h "^id:" $(find rs ts py -name moon.yml)`) and confirmed no such prefix pair exists today, so present output is unaffected and remains fully deterministic across runs (the brief's stated concern). But this is a real, silent algorithm change that could reorder A5's failure rows if a future project id becomes a prefix of another (e.g. `foo-rs` and `foo-rs-e2e`). Not blocking, but worth a one-line comment noting the assumption, or reverting `check_ffi_inputs` to iterate `sorted(matched, key=...)` split on the last `:` — not required by the brief, and no test currently would catch a regression here.
+
+No other issues found. The comments are appropriately reasoned (the shared-derivation rationale in `derive_ffi_tasks`'s docstring and the new self-test's "if they ever diverge, A7 silently stops examining a wrapper" comment both meet the bar of stopping a future engineer from repeating a mistake).
+
+⚠️ Cannot verify from diff alone: actual `--self-test` / real-check exit codes (report says both exit 0; per instructions I did not re-run, and the controller already re-ran independently).</result>
+<usage><subagent_tokens>74393</subagent_tokens><tool_uses>11</tool_uses><duration_ms>140553</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>aa6177d07d155d38c</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/aa6177d07d155d38c.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 4: restructure main()" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Task 4 complete.
+
+**Status:** DONE
+**Commit:** a1e8ddfb39f46d10ecab6a7452f6feff2d7947c8
+**Test summary:** `--self-test` passes and the real check passes (13 crates); mutation drills confirm both the self-test guard and the FAIL report path fire correctly.
+**Concerns:** The brief's Step 5 mutation example (dropping `- 'build.rs'` from `fileGroups.sources`) does not actually trigger a violation — `FMT_TASK_INPUTS` doesn't key on that line. I substituted a mutation that does (dropping `/rs/rustfmt.toml` from the fmt task's inputs) to verify the FAIL report path, restored the file, and confirmed a clean re-pass. No code change was needed for this — it's a documentation gap in the brief's example, not a defect in `main()` or the checks. Full details in the report file.</result>
+<usage><subagent_tokens>90748</subagent_tokens><tool_uses>36</tool_uses><duration_ms>243958</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a1ba50f0819528114</task-id>
+<tool-use-id>toolu_01QkgAESkiqTjgq6aaw5QzQp</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/a1ba50f0819528114.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 4" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Blank lines separate subject/body/footer correctly. Commit format is compliant.
+
+**Spec compliance: ✅**
+
+- **One list, two consumers**: confirmed. `findings` is built once (lines with `check_task_inputs(...)` inlined for lint/fmt, `a1/a2/a3/a5/check_upstream_inputs(projects)` for the rest), and both `if not any(rows for rows, _ in findings)` and the report loop `for rows, title in findings` read that same list. No separate guard/report expression survives — structurally impossible to diverge again.
+- **`a5` placement**: confirmed. `a5 = check_ffi_inputs(projects)` is unchanged, still inside the original `try:`/`except INFRA_ERRORS` block, not moved into the list literal.
+- **No check lost**: diffed against `c5ac4d2`. All seven (a1, a2, a3, a4/lint, a4_fmt/fmt, a5, a6) reach the report with identical title text, byte-for-byte, including the multi-line fix instructions. Only the PASS-path summary sentence was reworded ("every lint keys" → "every lint and fmt keys on the files its command reads") to reflect that fmt is now reported too — a factual improvement, not a loss.
+- **New self-test row**: reads `inspect.getsource(main)` (not the whole module) and checks each `check_*` name in `globals()` for a `f"{name}("` call-site substring. It would fire if a check were defined but never called in `main`. Implementer's report states a mutation drill (`a6 = []`) reproduced exit 1 naming `check_upstream_inputs` — plausible and consistent with the logic, though I did not re-run it myself (controller already confirmed self-test and real check both exit 0).
+- **Exit codes**: 0/1/2 paths all intact, unchanged control flow around `return 0` / `return 1` / `return 2`.
+- **Controller ruling honored**: the report explains the Step 5 brief mutation doesn't fire (no `build.rs` in `FMT_TASK_INPUTS`) and substitutes a working mutation (dropping `/rs/rustfmt.toml`) — matches the accepted ruling, correctly not treated as a defect.
+- **Global constraints**: no `.moon/` files, `ci.yml`, or CLAUDE.md touched in the diff (both drill files were restored, per the report). Commit header `ci(repo): …`, lowercase subject, under 100 chars, no stray `word:` body line, proper blank-line separation before the footer.
+
+**Task quality: Approved**
+
+No issues. The restructuring is minimal and faithful to the brief, the new self-test row is generic (would catch a future A8 too, as its comment states), and the reasoning comments explain the SMA-542 parallel for a future reader rather than just restating what the code does.
+
+⚠️ Cannot verify from diff alone: that the self-test mutation drill and Step 5 fmt-mutation drill were actually run as described (I did not re-execute them; controller already re-ran self-test and real check independently and reports both green).</result>
+<usage><subagent_tokens>65482</subagent_tokens><tool_uses>6</tool_uses><duration_ms>32144</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a2ca85bd83e3aced0</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/a2ca85bd83e3aced0.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 5: A7 + wrapper fixes" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>**Status: DONE**
+**Commit: `1d73b34cc4bdbf1fbaa5d2ff7e4e539d86eaf28e`**
+
+Step 6 produced EXACTLY the five expected rows, exit 1, no others. Nothing was tuned to reach that set.
+
+Tests: self-test 7/7 assertions fire (rc 0); parity gate PASS on the real graph after the fixes; `run.sh` rc 0 (16 cases); `moon run repo:{affected-smoke,input-liveness,actionlint}` rc 0 — that is the whole affected set.
+
+Step 10 mutation (wasm glob removed from `test` only): parity gate reported exactly one row on `test`, proving the per-task read; `run.sh` red with the parity gate as the ONLY FAIL line — every expected-set case, `binding-oneway-wasm` included, still passed. Restored with `mv` + `touch`, tree clean.
+
+Concerns:
+- Two string-only deviations, both truthfulness fixes: self-test "six" → "seven" assertions, and `main()`'s PASS line now mentions the wrapper clause. Neither string is pinned by any gate (grepped `ci/` and `.moon/`).
+- `ci/affected-graph/README.md` documents A1–A6 and has no A7 section. I left it for Task 6.
+
+Full report: `/Users/smaschek/dev/paigasus/paigasus-core/.superpowers/sdd/2026-08-28-sma-560-cross-stack-input-affectedness/task-5-report.md`</result>
+<usage><subagent_tokens>102818</subagent_tokens><tool_uses>41</tool_uses><duration_ms>495552</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a0edb22a57c629c22</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/a0edb22a57c629c22.output</output-file>
+<status>completed</status>
+<summary>Agent "Review Task 5" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Spec compliance: ✅
+
+All eleven steps landed. Three files only (`cargo_moon_parity.py`, both wrapper `moon.yml`s) in **one commit** `1d73b34`; no `repo:*` task added, no `ci.yml` / CLAUDE.md / `affected-smoke` inputs touched. Header 74 chars, lowercase subject, scope `ci`; no body line starts `word:` except the trailers. `rust_closure` is called twice and modified nowhere (verified against the file, not just the diff). A7 is called **inline in the `findings` list literal**, no intermediate variable, no separate guard — and Task 4's `unreferenced` self-test row automatically pins that wiring.
+
+**Anti-vacuity — the thing I was asked to interrogate hardest.** It holds:
+- The floor loop runs **before** the per-wrapper loop and is independent of it: it iterates `floor`, not `examined`, so an empty `examined` still produces rows. Every row is `FLOOR:`-prefixed.
+- Three distinct floor branches: absent project, present-but-not-examined (FFI marker stopped matching), and closure no longer deriving a required edge. None is a silent skip — each `append`s then `continue`s.
+- `if not REQUIRED_WRAPPER_CLOSURE` self-test row asserts the constant is non-empty.
+- `files is None or globs is None` in **either** bucket appends a violation and `continue`s — never skipped, and the message says so.
+- `observed = set(files) | set(globs)` is computed **inside** `for task in sorted(tasks)`, from that task's own two buckets. `want` (closure-derived, task-invariant) is correctly hoisted; the observed side is not. The per-task property the headline mutation tests is structurally present.
+- A7-a / A7-b assert specific substrings (`rs/crates/bindings/nb/src/**/*`, `rs/crates/libs/kern/Cargo.toml`), not merely non-emptiness. A7-c asserts `== []` on a Rust-language fixture.
+
+**Wrapper fixes** are pure additions — every changed line in both `moon.yml`s is a `+`. No existing input removed, and Moon input order is not semantic, so the interleaving is meaning-preserving. Both new paths are real tracked files, so `repo:input-liveness` stays green.
+
+## Task quality: Approved
+
+**Minor — A7-f cannot distinguish which floor branch fired.** `A7-f` asserts only `row.startswith("FLOOR:")`. Delete the `if pid not in projects` branch entirely and `ghost-ts` falls through to `pid not in examined`, which emits a `FLOOR:` row too — so A7-f still passes with the branch it names removed. A7-e has the same shape in reverse. Tightening both to their own message substrings (`"is not in the graph at all"` / `"no task matched by an FFI marker"`) would close it. This is inherited verbatim from the brief, not an implementer deviation, and the contract-level assertion (absent floor entry ⇒ violation) does hold. Worth a follow-up note, not a block.
+
+**Minor — the `build.rs` branch is unreachable in `self_test()`.** `root is not None and (root / src / "build.rs").is_file()` means the fixture never exercises it; only the real-graph run does. The report says this plainly and points at the two Step-6 `build.rs` rows as the evidence, which is honest and sufficient — but a future `root=` regression is caught by the real run only, never by `--self-test`.
+
+**Comments.** They meet this repo's bar. The `REQUIRED_WRAPPER_CLOSURE` header states *why* the floor is edge-based rather than a task list (a task-name floor cannot see an emptied `want`, because the tasks are still examined) — that is the exact reasoning a future engineer would otherwise re-derive wrongly. The docstring's three-differences block names the failure mode of each alternative, and the ts `build.rs` comment ("`napi build` COMPILES it … nothing keyed on it") explains a non-obvious link. None is decorative.
+
+⚠️ Cannot verify from diff alone: that the floor's five project ids (`paigasus-py-bindings-rs`, `paigasus-wasm-rs`, etc.) match live Moon project ids — I confirmed `REQUIRED_FFI_TASKS` agrees on the task half and the py `test` script matches `--reinstall-package`, but the id spelling rests on the report's green run, which the controller independently reproduced.</result>
+<usage><subagent_tokens>72140</subagent_tokens><tool_uses>7</tool_uses><duration_ms>85250</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a2ca85bd83e3aced0</task-id>
+<tool-use-id>toolu_019LhMQpyMgwuMmueHAe452r</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/a2ca85bd83e3aced0.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 5: A7 + wrapper fixes" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>**Status: DONE**
+**Commit: `e7bea7478da8ae8c715b4ae917c0beda8adfce5a`** (fix round 1; Task 5 itself remains `1d73b34`)
+
+Tests: self-test rc 0 (7 assertions), real parity run rc 0, `run.sh` rc 0, `moon run repo:affected-smoke repo:input-liveness` rc 0.
+
+Mutation battery, measured on file copies (production file never mutated):
+```
+OLD + delete F1 absent-project  -&gt; rc=0 PASSED (blind)   &lt;- the real gap
+OLD + delete F2 no-FFI-marker   -&gt; rc=1 CAUGHT
+OLD + delete F3 closure-derives -&gt; rc=1 CAUGHT
+NEW + delete F1/F2/F3           -&gt; rc=1 CAUGHT (all three)
+```
+
+Concerns — one correction to the ruling, reported rather than papered over:
+- **F1 confirmed exactly as you described.** Deleting `if pid not in projects:` let `ghost-ts` fall to the `pid not in examined` branch, which emits its own `FLOOR:` row, and A7-f stayed green. Now caught.
+- **"A7-e has the same shape in reverse" did not reproduce.** Deleting F2 makes `k-ts` fall to F3, where the closure still derives both upstreams, so `required - derived` is empty and no floor row is emitted at all — the bare prefix already failed. I tightened A7-e and A7-d regardless, because their discrimination was incidental to the fixtures rather than structural.
+- All three now assert the `FLOOR:` prefix plus their own branch's message substring. Substrings were read off the production code; no production message changed.
+- Scope note: A6's floor controls have a similar looseness. Left untouched — outside this task's diff.</result>
+<usage><subagent_tokens>111715</subagent_tokens><tool_uses>5</tool_uses><duration_ms>195659</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a7ce997def4bf16ea</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/a7ce997def4bf16ea.output</output-file>
+<status>completed</status>
+<summary>Agent "Scoped re-review of Task 5 fix" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Verdict: **ADDRESSED**.
+
+- No production message changed. The diff (`ci/affected-graph/cargo_moon_parity.py`) touches only the three assertion lines inside `self_test()` (lines 833, 847, 856); `check_wrapper_upstream_inputs`'s emitted strings (lines 514, 518, 524) are untouched.
+- Discrimination is real. The three floor branches emit distinct, non-overlapping substrings: `"is not in the graph at all"` (branch 1, `pid not in projects`), `"has no task matched by an FFI marker"` (branch 2, `pid not in examined`), `"dependsOn closure no longer derives"` (branch 3, missing-derive). Each self-test row now asserts the substring unique to the branch it targets, so the exact mutation the controller demonstrated (deleting the `pid not in projects` branch, letting `ghost-ts` fall to branch 2) now fails because branch 2's message lacks `"is not in the graph at all"`.
+- `FLOOR:` prefix check is retained alongside the substring check on all three rows (`row.startswith("FLOOR:") and "..." in row`) — discrimination was added, not swapped in.
+
+On the "A7-e same shape in reverse" correction: the implementer's reasoning is **correct**. Deleting the `pid not in examined` branch (no-FFI-marker check) makes the mutated fixture fall through to the closure-derivation code (branch 3) unconditionally. Since that mutation (`invocations.build = "echo nothing"`) never touches `dependsOn` edges, `rust_closure(projects, "k-ts")` still yields `kern-rs`, so `required - derived` is empty and no `FLOOR:` row is emitted at all for `k-ts`. That means even the original bare-prefix assertion (`not any(row.startswith("FLOOR:") ...)`) already fails correctly on this mutation — the vulnerability the controller described does not reproduce for A7-e. The implementer tightened A7-d/A7-e anyway, which is harmless and improves precision without being required by this specific claim.
+
+No new Critical/Important breakage: this is a test-only diff (9 insertions/3 deletions, all within `self_test`), no production code path is touched.</result>
+<usage><subagent_tokens>58820</subagent_tokens><tool_uses>3</tool_uses><duration_ms>37722</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>aa98e545da2626a91</task-id>
+<tool-use-id>toolu_01R8QM1wN2GVtJYtAjHPh1Su</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/aa98e545da2626a91.output</output-file>
+<status>completed</status>
+<summary>Agent "Task 6: docs + full verification" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I'll stop issuing tool calls now and wait for the Monitor's completion notification for the full-graph `moon ci` run before proceeding.</result>
+<usage><subagent_tokens>102242</subagent_tokens><tool_uses>36</tool_uses><duration_ms>816560</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>bq0c2tgt7</task-id>
+<tool-use-id>toolu_01WuPiiUhvt45Dqjtz4Fwhwi</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-smaschek-dev-paigasus-paigasus-core/072a35f4-ddf1-4d33-9ed9-9df4bba26580/tasks/bq0c2tgt7.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for the full-graph run to finish" completed (exit code 0)</summary>
+</task-notification>
