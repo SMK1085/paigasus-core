@@ -414,7 +414,7 @@ already-caught inputs; the 6 honest passes; `format('{0}', secrets.X)`; `toJSON(
 the three R4 false-positive strings from §4.3, which must **pass**; a duplicate-key document;
 a non-mapping document; and a bare `on:`.
 
-**Count, as shipped: 54 rows, not the ~34 this list enumerates.** The list above describes the
+**Count, as shipped: 55 rows, not the ~34 this list enumerates.** The list above describes the
 plan; implementation and the two reviews added rows to it, and the total is what
 `--self-test` prints. The 54 split across four tables: **37** `RULE_CASES` (the enumeration
 above, plus the four bare/wrapped `if:` rows from ruling 8 and the two literal-aware span rows

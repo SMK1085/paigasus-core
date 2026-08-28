@@ -107,6 +107,14 @@ def load_documents(path: str) -> list:
             return list(yaml.load_all(handle, Loader=_StrictLoader))
     except OSError as exc:
         raise InfraError(f"cannot read {path}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        # NOT an OSError and NOT a YAMLError — it is a ValueError, so without this clause it
+        # reached the generic handler and reported rc 2, "re-run the job". A workflow that is
+        # not UTF-8 is an authorial mistake, and ci_targets.py:28-36 states the repo's rule for
+        # those: "a red with a fix, not a broken tool". Same misclassification the zero-match
+        # split fixed, in a second place (SMA-593, CodeRabbit pass 2).
+        raise AssertionFailure(
+            f"{os.path.basename(path)} is not valid UTF-8: {exc}") from exc
     except yaml.YAMLError as exc:
         raise AssertionFailure(f"{os.path.basename(path)} is not valid YAML: {exc}") from exc
 
@@ -394,7 +402,7 @@ def check(root: str) -> int:
 # covers both extensions. Two cover the stale-allowlist guard (Finding 2): PR_CREDENTIAL_ALLOWED
 # is this gate's only escape hatch and was otherwise untested — an entry naming a workflow that
 # is not a subject must raise AssertionFailure, and an empty allowlist must not.
-FILESYSTEM_CASES = 6
+FILESYSTEM_CASES = 7
 
 
 def _self_test_filesystem() -> tuple[int, int]:
@@ -518,6 +526,25 @@ def _self_test_filesystem() -> tuple[int, int]:
         finally:
             PR_CREDENTIAL_ALLOWED.clear()
             PR_CREDENTIAL_ALLOWED.update(saved_allowed)
+
+    # 7. A workflow that is not UTF-8 -> authorial, so AssertionFailure (rc 1), never rc 2.
+    rows += 1
+    with tempfile.TemporaryDirectory() as root:
+        wf = os.path.join(root, ".github", "workflows")
+        os.makedirs(wf)
+        with open(os.path.join(wf, "x.yml"), "wb") as handle:
+            handle.write(b'on:\n  pull_request:\njobs:\n  a:\n    name: "\xff\xfe"\n')
+        try:
+            discover(root)
+            print("  FAIL discover/non-utf8: expected AssertionFailure, got no exception",
+                  file=sys.stderr)
+            failures += 1
+        except AssertionFailure:
+            pass
+        except Exception as exc:
+            print(f"  FAIL discover/non-utf8: expected AssertionFailure, "
+                  f"got {type(exc).__name__}", file=sys.stderr)
+            failures += 1
 
     return failures, rows
 

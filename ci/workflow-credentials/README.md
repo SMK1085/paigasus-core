@@ -13,7 +13,7 @@ with no `pull_request` or `pull_request_target` trigger instead.
 `run.sh` runs the checker, `workflow_credentials.py`, in three modes:
 
 - a bare check of the real tree;
-- `--self-test`, an in-process table of 54 rows;
+- `--self-test`, an in-process table of 55 rows;
 - `--negative-control`, which asserts against the real tree. It covers the `release.yml`
   exclusion and the exit-code mapping below.
 
@@ -54,8 +54,8 @@ default keeps only the second of two duplicate keys and drops the first silently
 **A merge key plus an explicit override is rejected, and that is accepted.** The strict
 loader expands a `<<: *anchor` merge key before it checks for duplicate keys. If the same
 mapping also sets one of the merged keys by name, the loader now sees two keys with that
-name and raises a duplicate-key error — even for a legal override, one the YAML 1.2 spec
-allows. The gate keeps this over-rejection on purpose. GitHub Actions does not support
+name and raises a duplicate-key error — even for a legal override, one the YAML 1.1 merge-key
+type allows. The gate keeps this over-rejection on purpose. GitHub Actions does not support
 merge keys at all: Actions added anchor and alias support on 2025-09-18, but merge keys
 are not part of the YAML 1.2 spec Actions follows. A workflow using `<<:` never runs on
 GitHub, so this rejection can only ever fire on an input Actions itself would already

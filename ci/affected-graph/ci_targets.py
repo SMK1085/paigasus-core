@@ -275,6 +275,10 @@ SELF_TASK_EXPECTED_GLOBS = {
     "workflow-credentials": (
         ".github/workflows/*.y*ml",
         "ci/workflow-credentials/**/*",
+        # A LITERAL path, so moon resolves it into inputFiles and it sorts after both globs
+        # (measured on 2.5.3). The gate shells out to `uv`, pinned in .prototools, so without
+        # this input a uv bump could not invalidate a cached PASS.
+        ".prototools",
     ),
 }
 

@@ -761,3 +761,6 @@ tasks:
     inputs:
       - '.github/workflows/*.y*ml'
       - 'ci/workflow-credentials/**/*'
+      # The gate shells out to `uv`, whose version is pinned here — without this input a uv
+      # bump would not invalidate a cached PASS, exactly as the release-parity tasks list it.
+      - '.prototools'
