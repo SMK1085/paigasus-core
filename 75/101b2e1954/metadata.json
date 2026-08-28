@@ -3,7 +3,7 @@
   "checkpoint_id": "75101b2e1954",
   "strategy": "manual-commit",
   "branch": "feature/sma-560-assert-cross-stack-input-affectedness",
-  "checkpoints_count": 5,
+  "checkpoints_count": 6,
   "files_touched": [
     ".moon/tasks/rust.yml",
     "ci/affected-graph/cargo_moon_parity.py",
@@ -23,14 +23,21 @@
       "compact_transcript": "/75/101b2e1954/1/transcript.jsonl",
       "content_hash": "/75/101b2e1954/1/content_hash.txt",
       "prompt": "/75/101b2e1954/1/prompt.txt"
+    },
+    {
+      "metadata": "/75/101b2e1954/2/metadata.json",
+      "transcript": "/75/101b2e1954/2/full.jsonl",
+      "compact_transcript": "/75/101b2e1954/2/transcript.jsonl",
+      "content_hash": "/75/101b2e1954/2/content_hash.txt",
+      "prompt": "/75/101b2e1954/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 84,
-    "cache_creation_tokens": 220021,
-    "cache_read_tokens": 13440446,
-    "output_tokens": 30804,
-    "api_call_count": 43,
+    "input_tokens": 774,
+    "cache_creation_tokens": 990367,
+    "cache_read_tokens": 163868677,
+    "output_tokens": 311026,
+    "api_call_count": 388,
     "subagent_tokens": {
       "input_tokens": 0,
       "cache_creation_tokens": 0,
