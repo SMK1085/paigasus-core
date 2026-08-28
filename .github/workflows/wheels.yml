@@ -481,12 +481,29 @@ jobs:
           name: sdist
           path: dist
 
-      # No `actions/checkout` in this job on purpose: the sdist ships no rust-toolchain.toml,
-      # and rustup walks up from CWD looking for one when no override is active. A checked-out
-      # repo tree (which DOES carry rust-toolchain.toml) sitting above the build directory
-      # would silently reinstate the pinned 1.95.0 regardless of what `rustup default` below
-      # sets, making this leg pass even with a broken MSRV. An empty GITHUB_WORKSPACE keeps
-      # `rustup default` authoritative.
+      # This job has NO moonrepo/setup-toolchain, so Task 4's "setup-python MUST STAY AFTER
+      # setup-toolchain" ordering constraint does not bind here — there is no ~/.proto/shims
+      # write to race against. It still needs a PINNED interpreter: this job sets up no
+      # toolchain of any kind, and wheels.yml:114-116 already documents that the runner
+      # images' default Python moves without notice and that `python3` specifically is not
+      # reliably present on the Windows image. The distribution also declares
+      # `requires-python = ">=3.12"`, so an unpinned default could be too old even where one
+      # exists. Same action/SHA/version as the `build` job's "Set up Python 3.12" step.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # No `actions/checkout` in this job on purpose: the sdist ships no rust-toolchain.toml
+      # (MEASURED: its Cargo `include` allowlist doesn't list it). The real insulation isn't
+      # the missing checkout, though — `pip install <local-sdist>` uses pip's build isolation,
+      # which unpacks the sdist and runs the build entirely under the OS temp root (MEASURED
+      # locally: `/private/var/.../T/pip-req-build-*`), a directory tree that is not an
+      # ancestor or descendant of $GITHUB_WORKSPACE. So rustup's upward directory walk from
+      # that build dir would never reach a checked-out rust-toolchain.toml even if this job
+      # did add a checkout step — `rustup default` below stays authoritative either way. The
+      # checkout is omitted because this job simply doesn't need repo source, not as a load-
+      # bearing MSRV precaution.
       - name: Use rustc at the declared MSRV
         if: ${{ matrix.msrv }}
         run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
@@ -495,7 +512,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m venv venv
+          python -m venv venv
           # Windows lays a venv out as Scripts/, POSIX as bin/. Probe for the interpreter and
           # FAIL LOUDLY when neither exists — a smoke test that quietly does nothing is the
           # one outcome this step must never produce (Task 4's precedent for this exact trap).
