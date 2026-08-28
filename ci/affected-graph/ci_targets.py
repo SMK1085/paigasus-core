@@ -260,6 +260,33 @@ SELF_TASK_EXPECTED_GLOBS = {
     ),
 }
 
+# SMA-592. contracts:generate's inputs, pinned to exact equality. This task is not a repo:* gate,
+# but ci.yml:249-262's codegen-drift step delegates its freshness to it: the step runs
+# `moon run contracts:generate` and diffs the three generated dirs, so a dropped input makes the
+# step compare the committed output against itself and pass having asserted nothing.
+#
+# Globs first, then files, each alphabetically — the order check_contracts_generate_inputs
+# compares in, mirroring check_gate_inputs. The injected .moon/* glob is filtered before
+# comparison and is deliberately absent here.
+#
+# The values are WORKSPACE-relative, as `moon query tasks` resolves them: a project-relative entry
+# in contracts/moon.yml (`proto/**/*`) is reported prefixed with the project source
+# (`contracts/proto/**/*`), while a `/`-prefixed workspace-relative entry (`/py/uv.lock`) is
+# reported bare (`py/uv.lock`). SELF_TASK_EXPECTED_GLOBS above needs no such distinction because
+# the `repo` project's source IS the workspace root, so both forms coincide there. Measured, not
+# reasoned about — the two forms are indistinguishable in the authored moon.yml.
+#
+# The trade-off is accepted deliberately: a legitimate edit to these inputs reds the gate until
+# this constant is updated. An edit to how the repo's codegen is keyed SHOULD stop a human.
+CONTRACTS_GENERATE_INPUTS = (
+    "contracts/proto/**/*",
+    ".prototools",
+    "contracts/buf.gen.yaml",
+    "contracts/buf.lock",
+    "contracts/buf.yaml",
+    "py/uv.lock",
+)
+
 # C3 checks the flag tail too. The first spec draft omitted it on the stated grounds that
 # assert_include_relations "already owns the flag question" — it does not: that function greps
 # ci.yml only (run.sh:126) and never opens CLAUDE.md. Without this, the documented command could
@@ -1089,6 +1116,37 @@ def check_gate_inputs(projects, expected_table=SELF_TASK_EXPECTED_GLOBS):
     return rows
 
 
+def check_contracts_generate_inputs(projects, expected=CONTRACTS_GENERATE_INPUTS):
+    """SMA-592. Rows when contracts:generate's authored inputs have drifted.
+
+    A sibling of check_gate_inputs rather than a generalisation of it. That function hardcodes
+    `projects.get("repo")` and carries a default-table assertion plus self-test rows that name
+    SELF_TASK_EXPECTED_GLOBS explicitly; widening its signature would put the guard-the-guard
+    machinery at risk for no gain. The comparison logic below is deliberately identical — globs
+    then files, each sorted, injected glob filtered.
+    """
+    entry = (projects.get("contracts") or {}).get("generate")
+    if not isinstance(entry, dict):
+        return ["contracts:generate is absent from the graph, so its inputs cannot be checked"]
+    globs_raw, files_raw = entry.get("inputGlobs"), entry.get("inputFiles")
+    for name, raw in (("inputGlobs", globs_raw), ("inputFiles", files_raw)):
+        if raw is not None and not isinstance(raw, dict):
+            raise MoonOutputError(
+                f"`moon query tasks` reported contracts:generate's `{name}` as "
+                f"{type(raw).__name__}, expected an object"
+            )
+    got = tuple(g for g in sorted(globs_raw or {})
+                if g != ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}")
+    files = tuple(sorted(files_raw or {}))
+    if got + files == tuple(expected):
+        return []
+    return [
+        f"contracts:generate's authored inputs are {list(got) + list(files)}, "
+        f"expected exactly {list(expected)} — dropping one makes ci.yml's codegen-drift gate "
+        "compare the committed output against itself and pass vacuously (SMA-592)"
+    ]
+
+
 def check_registry_pairing(scheduled=None, globs=None, exempt=None):
     """SMA-530. The three self-scheduled-gate registries must stay consistent.
 
@@ -1914,6 +1972,46 @@ def self_test():
         ),
     )
 
+    # SMA-592. contracts:generate is not a repo:* gate, so check_gate_inputs cannot reach it —
+    # that function hardcodes projects.get("repo"). This pin exists because the ci.yml
+    # codegen-drift gate delegates its freshness to this task's cache key: drop an input and the
+    # gate goes vacuous while still printing green.
+    # The fixture carries the workspace-relative forms `moon query tasks` actually emits — the
+    # project-relative entries prefixed with the project source, the `/`-prefixed ones bare.
+    cg_ok = {"contracts": {"generate": {
+        "inputGlobs": {"contracts/proto/**/*": {},
+                       ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {}},
+        "inputFiles": {"contracts/buf.gen.yaml": {}, "contracts/buf.lock": {},
+                       "contracts/buf.yaml": {}, ".prototools": {}, "py/uv.lock": {}},
+    }}}
+    if check_contracts_generate_inputs(cg_ok):
+        failures.append("contracts:generate pin reported drift on the clean fixture")
+
+    # The dangerous direction: a dropped input.
+    cg_broken = json.loads(json.dumps(cg_ok))
+    del cg_broken["contracts"]["generate"]["inputFiles"]["py/uv.lock"]
+    if not any("py/uv.lock" in row for row in check_contracts_generate_inputs(cg_broken)):
+        failures.append("contracts:generate pin did not fire on a dropped input")
+
+    # ...and an ADDED one, so the pin is equality and not containment.
+    cg_broken = json.loads(json.dumps(cg_ok))
+    cg_broken["contracts"]["generate"]["inputFiles"]["stray.txt"] = {}
+    if not check_contracts_generate_inputs(cg_broken):
+        failures.append("contracts:generate pin did not fire on an added input")
+
+    # The whole project going missing must FIRE, never skip — a moon reshape would otherwise
+    # turn this pin into a vacuous pass, the exact failure mode it exists to prevent.
+    if not check_contracts_generate_inputs({"repo": {}}):
+        failures.append("contracts:generate pin did not fire when the project was absent")
+
+    # A wrong-typed bucket is a moon output shape change, not authored drift: rc 2, not rc 1.
+    expect_infra(
+        "check_contracts_generate_inputs[non-dict-inputGlobs]",
+        lambda: check_contracts_generate_inputs(
+            {"contracts": {"generate": {"inputGlobs": ["proto/**/*"]}}}
+        ),
+    )
+
     if failures:
         print("ci-targets self-test FAILED:", file=sys.stderr)
         for f in failures:
@@ -1951,6 +2049,7 @@ def main():
         # below so the try block stays the single place these two extractors are invoked.
         scripts = _scripts(raw_tasks)
         bad_gate_inputs = check_gate_inputs(raw_tasks)
+        bad_generate_inputs = check_contracts_generate_inputs(raw_tasks)
     except GateAssertionError as exc:
         # An authorial mistake, NOT a broken tool: rc 1 so run.sh records a red suite instead of
         # aborting the whole affected-graph guard and losing every other assertion's output (D2).
@@ -1966,7 +2065,8 @@ def main():
     bad_invocation = check_invocation(ci_yml)
 
     if not (floor or missing or unexpected or bad_exempt or stale_exempt or dead or doc_problems
-            or missing_sites or bad_invocation or bad_gate_inputs):
+            or missing_sites or bad_invocation or bad_gate_inputs
+            or bad_generate_inputs):
         print(
             f"PASS  {'ci-targets':<18} -> {len(t_targets)} targets: every CI-eligible repo task is "
             "in ci.yml's T, every entry resolves, CLAUDE.md mirrors it"
@@ -2053,6 +2153,12 @@ def main():
          "    second, independently-scheduled copy of an assertion that gate also makes about\n"
          "    itself — it exists so the gate is not the sole judge of its own configuration.\n"
          "    Fix: restore `inputs: ['**/*']` on the task in moon.yml."),
+        (bad_generate_inputs,
+         "contracts:generate's inputs have drifted, so ci.yml's codegen-drift gate can serve a\n"
+         "    cached pass and compare the committed generated code against itself (SMA-592).\n"
+         "    Fix: restore the inputs in contracts/moon.yml, or update\n"
+         "    CONTRACTS_GENERATE_INPUTS in ci/affected-graph/ci_targets.py if the change is\n"
+         "    intended."),
     ):
         if rows:
             print(f"  {title}", file=sys.stderr)
