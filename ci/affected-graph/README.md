@@ -122,12 +122,14 @@ It also runs several checks that the per-case project sets structurally **cannot
   (`RUN_SH_CALL_SITES`, substring-matched, each already carrying its own `|| RC=1` propagation
   suffix); a self-scheduled gate's invocation inside its own `moon.yml` task script
   (`SELF_SCHEDULED_GATES`, whole-line-matched — `repo:input-liveness`'s, the three
-  `repo:release-parity*`, `repo:version-lockstep`'s, and (SMA-572) `repo:affected-smoke`'s,
-  `repo:publish-metadata`'s, `repo:error-code-single-site`'s and `repo:actionlint`'s;
+  `repo:release-parity*`, `repo:version-lockstep`'s, (SMA-572) `repo:affected-smoke`'s,
+  `repo:publish-metadata`'s, `repo:error-code-single-site`'s and `repo:actionlint`'s, and
+  (SMA-587/SMA-572) `repo:http-extractor-envelope`'s;
   SMA-553 / SMA-530 / SMA-576 / SMA-572, each pinning `set -euo pipefail` alongside every one
   of its invocations — two for `repo:input-liveness` and the `repo:release-parity*` tasks,
   three for `repo:version-lockstep` (which also invokes `--self-test`), three each for
-  `repo:affected-smoke`, `repo:publish-metadata` and `repo:error-code-single-site`, and one
+  `repo:affected-smoke`, `repo:publish-metadata`, `repo:error-code-single-site` and
+  `repo:http-extractor-envelope`, and one
   bare invocation line for `repo:actionlint` — `ci/actionlint/run.sh`, no `set -euo pipefail`
   to pin, since a single command's status IS the script's status); `repo:actionlint`'s own
   self-test and mutation-battery calls inside `ci/actionlint/run.sh`, and — as of SMA-572/
@@ -190,6 +192,13 @@ It also runs several checks that the per-case project sets structurally **cannot
   grows. Enforcement instead lives in check 8e of `ci/actionlint/run.sh`, a gate scheduled
   independently of this one, whose production call site and two table arity floors are pinned
   back here by `ACTIONLINT_SH_CALL_SITES`.
+
+  SMA-587/SMA-572 added a fifth script-pinned gate to this pairing after the original four:
+  `repo:http-extractor-envelope` (SMA-587), which also carries an exact
+  `SELF_TASK_EXPECTED_GLOBS` entry — its whole authored input set, two globs. `moon.yml`'s own
+  comment on the task says the first glob is DELIBERATELY IDENTICAL to
+  `ci/http-extractor/check.py`'s `SCAN_GLOB`, so an exact pin is what stops scheduling and
+  scanning from drifting apart.
 
   Put plainly: `SELF_SCHEDULED_GATES["affected-smoke"]`'s third line — the bare
   `ci/affected-graph/run.sh` invocation — has NO true-positive coverage from this file. Any

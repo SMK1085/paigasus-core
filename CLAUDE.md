@@ -245,7 +245,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   and both running inside `repo:affected-smoke`: `SELF_SCHEDULED_GATES` pins every
   self-scheduled gate's `moon.yml` invocation lines — `set -euo pipefail` included — for
   `input-liveness`, the three `release-parity*` tasks, `version-lockstep`,
-  `publish-metadata`, `error-code-single-site`, `affected-smoke` and `actionlint` (whole
+  `publish-metadata`, `error-code-single-site`, `affected-smoke`, `actionlint` and (SMA-587)
+  `http-extractor-envelope` (whole
   lines, compared after stripping — reordering a flag or adding a trailing comment still
   reds it; a bare number here would only rot again as the registry grows, which is why this
   names its current membership instead), and `RELEASE_PARITY_SH_CALL_SITES` pins five discrete

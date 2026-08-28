@@ -157,7 +157,8 @@ under `ci/release-parity/` schedule all three at once. Net measured cost
 adapter coverage.
 
 **What guards it.** `ci/affected-graph/ci_targets.py` pins the nine `moon.yml` lines **of these
-three tasks** — `SELF_SCHEDULED_GATES` is a registry spanning nine gates in all, of which
+three tasks** — `SELF_SCHEDULED_GATES` is a registry spanning ten gates in all (SMA-587's
+`repo:http-extractor-envelope` joined it as the tenth), of which
 `release-parity`, `release-parity-py` and `release-parity-ts` contribute three lines apiece; the
 "nine" here is those three tasks' own lines, not the registry's total — and five discrete lines
 inside `run.sh` itself
