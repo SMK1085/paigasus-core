@@ -3231,6 +3231,26 @@ missing-input CLAUDE.md' "$no_claude"
     'stale-skip ci/actionlint/**' "$wired"
   REQUIRED_INPUT_SKIP=(${saved_skip+"${saved_skip[@]}"})
 
+  # The INPUT membership test must be anchored at BOTH ends, not merely at the start: a declared
+  # glob that only EXTENDS a required one (`ci/actionlint/**/*.sh` for the required
+  # `ci/actionlint/**/*`) must still be reported missing. Losing the trailing newline anchor turns
+  # the required glob into a mere PREFIX match, which is exactly the cost-driven "narrow the
+  # gate's inputs" edit CLAUDE.md already warns about.
+  expect_smoke_block 'an input that only EXTENDS a required glob does not satisfy it' \
+    'missing-input ci/actionlint/**/*' \
+    "$(rewrite_line "$wired" "      - ${q}ci/actionlint/**/*${q}" \
+                             "      - ${q}ci/actionlint/**/*.sh${q}")"
+
+  # The ERR record match must be anchored to the START of a record, not merely present anywhere in
+  # the haystack. Losing that anchor lets a SCRIPT line whose own text happens to contain
+  # `ERR<TAB>` be misread as an actual ERR record, which short-circuits the verdict to empty
+  # before missing-input/missing-script are ever checked — silently waiving every requirement.
+  local t; t="$(printf '\t')"
+  expect_smoke_block 'a script line containing ERR<TAB> does not silence the verdict' \
+    'missing-input CLAUDE.md' \
+    "$(rewrite_line "$no_claude" '      set -euo pipefail' "      set -euo pipefail
+      echo \"ERR${t}x\"")"
+
   # File-level verdicts, mirroring affected_graph_wiring_self_test's own two rows. The directory
   # case is portable because the guard is a bash builtin `test`, reached before any grep — there
   # is no BSD/GNU grep-on-a-directory split to disagree across platforms here.
