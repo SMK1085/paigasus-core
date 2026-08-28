@@ -627,16 +627,38 @@ Expected: exit 0.
 
 - [ ] **Step 7: Prove it reds, and prove the clause is not vacuous**
 
+Two things get proven here, and BOTH must be read off the same FAILING run.
+
+Do not grep for the finding key `a7`. The reporter prints each finding's title and its rows and
+never the key (`cargo_moon_parity.py:1459-1463`), so `grep "a7"` matches nothing on any tree —
+it is a probe that cannot fail. Grep the real row text instead.
+
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
+cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-592
+OUT=".superpowers/sdd/2026-08-28-sma-592-codegen-and-input-affectedness-residue/a7-probe.txt"
+
+cp py/packages/paigasus-kernel/moon.yml py/packages/paigasus-kernel/moon.yml.probe-backup
 sed -i '' "/paigasus_py_bindings.pyi'$/d" py/packages/paigasus-kernel/moon.yml
-python3 ci/affected-graph/cargo_moon_parity.py 2>&1 | grep "a7"
+python3 ci/affected-graph/cargo_moon_parity.py > "$OUT" 2>&1; echo "exit: $? (expect 1)"
+
+# 1. The gap IS reported, by its real row text.
+grep -c "paigasus-kernel-py:test inputs omit rs/crates/bindings/paigasus-py-bindings/paigasus_py_bindings.pyi" "$OUT"   # expect 1
+
+# 2. No FALSE demand on the ts wrapper, whose closure is the kernel plus the node and wasm
+#    bindings — none of which carries a .pyi. This MUST be read off the failing output above,
+#    where a wrongly-demanded row would appear. Checking a PASSING run for absence proves
+#    nothing: a passing run prints only its one-line PASS banner.
+grep -c "paigasus-kernel-ts.*\.pyi" "$OUT" || true   # expect 0
+
+mv py/packages/paigasus-kernel/moon.yml.probe-backup py/packages/paigasus-kernel/moon.yml
+python3 ci/affected-graph/cargo_moon_parity.py; echo "exit: $? (expect 0)"
+rm -f "$OUT"
+git status --short   # expect: no .probe-backup and no a7-probe.txt left behind
 ```
 
-Expected: the one named row. Restore by hand and re-run to exit 0.
-
-Then confirm the clause creates no false demand: A7 must still pass for `paigasus-kernel-ts`,
-whose closure is the kernel plus the node and wasm bindings, none of which carries a `.pyi`.
-Grep the passing output for `paigasus-kernel-ts.*pyi` and expect zero matches.
+Step 5 is uncommitted at this point, so `git checkout --` would discard the fix along with the
+probe. The `cp`/`mv` pair above is why.
 
 - [ ] **Step 8: Commit**
 
