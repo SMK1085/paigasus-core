@@ -229,12 +229,24 @@ expect_status() {
 #
 # Mirrors wait_healthy's "container is gone" early-out (SMA-571 final review): the most likely
 # NEW way this loop fails is a migration failure AFTER `healthy` — the boot-phase drain now runs
-# and the container exits 1 — and without this check that burns the full 120-iteration budget
-# (each iteration spawning a `docker run`) before ever reporting anything more useful than
-# "last /readyz status: 000".
+# and the container exits 1 — and without this check that burns the full budget (each iteration
+# spawning a `docker run`) before ever reporting anything more useful than "last /readyz status:
+# 000".
+#
+# Driven off an ABSOLUTE deadline (CodeRabbit, PR 167), not an iteration count: the old
+# `seq 1 120` + `sleep 1` shape claimed a "never became ready" 120s budget in its error message,
+# but each iteration also spends up to `--max-time 5` on the request itself — so a run where every
+# request times out takes up to 120 * (5 + 1) =~ 12 minutes wall-clock, six times what the message
+# says. `$SECONDS` (reset at function entry) tracks elapsed wall-clock directly; each request's
+# `--max-time` and the trailing `sleep` are both capped at whatever of the budget remains, so
+# neither can itself carry the loop past the deadline it is supposed to enforce.
 wait_ready() {
-  local name="$1" url="$2" i code status
-  for i in $(seq 1 120); do
+  local name="$1" url="$2" budget="${3:-120}" code=000 status start elapsed remaining req_timeout sleep_for
+  start=$SECONDS
+  while :; do
+    elapsed=$((SECONDS - start))
+    remaining=$((budget - elapsed))
+    [ "$remaining" -le 0 ] && break
     status="$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo missing)"
     if [ "$status" != "running" ]; then
       echo "::error::$name is gone (status: $status); logs follow" >&2
@@ -242,13 +254,18 @@ wait_ready() {
       return 1
     fi
     # `--connect-timeout`/`--max-time`: this is a POLLING loop, so a single hung request would
-    # stall every remaining iteration rather than just costing one. Bounded well under the 1s
-    # cadence budget so the loop's wall-clock stays roughly its iteration count.
-    code="$(docker run --rm --network "$NET" "$CURL_8_11_1_DIGEST" -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$url" || echo 000)"
-    [ "$code" = "200" ] && { echo "  $name is ready (${i}s)"; return 0; }
-    sleep 1
+    # otherwise stall past the deadline rather than just costing one iteration. Capped at whatever
+    # of the budget remains (and never below 1s), not a fixed 5s.
+    req_timeout=$((remaining < 5 ? remaining : 5))
+    [ "$req_timeout" -lt 1 ] && req_timeout=1
+    code="$(docker run --rm --network "$NET" "$CURL_8_11_1_DIGEST" -s --connect-timeout 2 --max-time "$req_timeout" -o /dev/null -w '%{http_code}' "$url" || echo 000)"
+    [ "$code" = "200" ] && { echo "  $name is ready (${elapsed}s)"; return 0; }
+    remaining=$((budget - (SECONDS - start)))
+    [ "$remaining" -le 0 ] && break
+    sleep_for=$((remaining < 1 ? remaining : 1))
+    sleep "$sleep_for"
   done
-  echo "::error::$name never became ready (last /readyz status: $code)" >&2
+  echo "::error::$name never became ready within ${budget}s (last /readyz status: $code)" >&2
   docker logs "$name" 2>&1 | tail -30 >&2
   return 1
 }
