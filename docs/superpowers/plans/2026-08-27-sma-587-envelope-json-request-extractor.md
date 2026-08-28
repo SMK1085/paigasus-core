@@ -973,9 +973,14 @@ restoring a file with an older mtime lets cargo reuse the binary built from the 
 - [ ] **Step 6: Write the README's Limitations section**
 
 Create `ci/http-extractor/README.md` stating what is gated, and — per `ci/actionlint/README.md`'s
-precedent — the residuals it cannot see: an aliased import (`use axum::Json as J`), a
-fully-qualified `axum::Json<T>`, and bodies taken as `Bytes`/`String`. Naming them is the point;
+precedent — the residuals it cannot see: an aliased import (`use axum::Json as J`), a re-export
+renamed on the way through, and bodies taken as `Bytes`/`String`. Naming them is the point;
 a gate that fails open is worse than no gate.
+
+*(This step originally predicted a fourth residual — a fully-qualified `axum::Json<T>`. It is not
+one: the shipped scan matches on an identifier boundary, so `axum::Json<T>` and any other
+`…::Json<T>` are caught. Corrected here so the plan, the design doc and the shipped README state
+one limitation contract rather than three.)*
 
 - [ ] **Step 7: Add the Moon task**
 
