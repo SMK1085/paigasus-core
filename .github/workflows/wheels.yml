@@ -301,6 +301,17 @@ jobs:
             case "$whl" in
               *arm64*)
                 [ "$archs" = "arm64" ] || { echo "::error::$whl is not pure arm64: [$archs]"; exit 1; }
+                # The arm64 slice needs its deployment target checked too, for the same reason
+                # the x86_64 one does: the wheel is TAGGED macosx_11_0_arm64, and a tag is not a
+                # binary. If the SDK ever raised `minos` above 11.0 the loader would reject the
+                # wheel on macOS 11 while the filename still promised it. arm64 emits
+                # LC_BUILD_VERSION (whose field is `minos`), NOT the legacy LC_VERSION_MIN_MACOSX
+                # the x86_64 branch parses — so it needs its own parse, not a shared one.
+                otool -l "$so" | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+                minos="$(otool -l "$so" | awk '/LC_BUILD_VERSION/{f=1} f&&/^ *minos/{print $2; exit}')"
+                [ -n "$minos" ] || { echo "::error::could not read LC_BUILD_VERSION minos from $so"; exit 1; }
+                [ "$minos" = "11.0" ] || { echo "::error::arm64 minimum macOS is [$minos], but the wheel is tagged macosx_11_0 — re-pin this constant if [$minos] is correct, never relax the check"; exit 1; }
+                echo "darwin-arm64 minimum macOS: [$minos] — agrees with the tag"
                 ;;
               *x86_64*)
                 [ "$archs" = "x86_64" ] || { echo "::error::$whl is not pure x86_64: [$archs]"; exit 1; }
