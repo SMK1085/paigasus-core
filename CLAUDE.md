@@ -57,24 +57,30 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   local run. CI has no agent detection, so it never shows there. This is NOT new in proto 0.61.1;
   0.58.1 behaves identically (measured both, SMA-595). To verify those gates locally, `unset
   AI_AGENT CLAUDECODE CLAUDE_CODE_ENTRYPOINT` first — with that, all three pass.
-- `repo:affected-smoke` failed **once** under a concurrent `moon ci` on 2.5.3, aborting at 2.4s
-  against its usual 6–8s (SMA-595). It did not reproduce in four attempts: warm, cold
-  `.moon/cache`, cold `MOON_HOME`, and cold `rs/target` with cargo compiling alongside. An
-  inherited `MOON_BASE` was tested and ruled out (the gate passes with it set). The gate is
-  otherwise green everywhere. If you see a sub-3s `affected-smoke` failure, it is this — capture
-  the full task output before re-running, because a re-run passes and destroys the evidence.
-  **SMA-592 reproduced it once and captured that output.** The failure is an infrastructure ABORT,
-  not a red verdict: the gate's own nested `moon query projects` dies with `Error: proto-shim:
+- `repo:affected-smoke` has aborted **twice**, both times under a concurrent `moon ci` on 2.5.3,
+  at ~2.4s against its usual 6–8s: once on SMA-595, which captured no output, and once on
+  SMA-592, which captured its output. The two are matched on SYMPTOM SHAPE alone — a sub-3s abort
+  under a concurrent `moon ci` — so nothing proves they are one and the same failure. Neither
+  session reproduced it: four attempts on SMA-595 (warm, cold `.moon/cache`, cold `MOON_HOME`, and
+  cold `rs/target` with cargo compiling alongside), and four more on SMA-592. An inherited
+  `MOON_BASE` was tested and ruled out (the gate passes with it set). The gate is otherwise green
+  everywhere. If you see a sub-3s `affected-smoke` failure, capture the full task output before
+  re-running, because a re-run passes and destroys the evidence.
+  **The mechanism below is measured on the ONE session that captured output (SMA-592), not on
+  both.** In that occurrence the failure is an infrastructure ABORT, not a red verdict: the gate's
+  own nested `moon query projects` dies with `Error: proto-shim:
   Failed to execute proto for the shimmed command: Permission denied (os error 13)`, writes
   nothing to stdout, and the reader then raises `JSONDecodeError: Expecting value: line 1 column
   1`, so `run.sh` prints `FATAL [contracts->proto]: moon query failed` and
-  `== affected-graph guard ABORTED: infrastructure error (rc=2) ==`. So the proximate cause is the
-  **proto shim failing to exec `proto` with EACCES** while a `moon ci` runs concurrently — why the
-  shim is briefly non-executable is still unknown, and the four ruled-out hypotheses above stand.
+  `== affected-graph guard ABORTED: infrastructure error (rc=2) ==`. So the proximate cause THERE
+  is the **proto shim failing to exec `proto` with EACCES** while a `moon ci` runs concurrently —
+  why the shim is briefly non-executable is still unknown, and SMA-595's four hypotheses above
+  stay ruled out.
   Two consequences. The gate FAILS SAFE — rc=2 is distinct from rc=1, and it never reports a false
-  green. And the tell is the `proto-shim` line, so grep the captured output for it before
-  believing a sub-3s `affected-smoke` failure is about the affected graph at all: it is not, and
-  re-running the task alone (`moon run repo:affected-smoke --force`) passes in the usual 6s.
+  green. And the `proto-shim` line is the tell, so grep the captured output for it: if that line
+  is there, the failure is not about the affected graph at all, and re-running the task alone
+  (`moon run repo:affected-smoke --force`) passes in the usual 6s. If it is absent, this entry
+  does not explain your failure — diagnose it on its own terms.
   The NDJSON entry above is the same root tool, a different symptom; both mean a `moon`/`proto`
   call inside a gate is the fragile part of an agent-driven local run, never in CI.
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
@@ -462,12 +468,17 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `uv run` executes the installed `py/.venv`, not `py/uv.lock`, and `contracts:generate` declares
   no `deps:` that syncs `py`. A stale venv can still run a different betterproto2 than the key
   implies.
-- `rs/.cargo/config.toml` is now an input of every task that runs cargo from `rs/` — all thirteen
+- `rs/.cargo/config.toml` is now an input of every task that runs cargo from `rs/`: all thirteen
   crates' `build`/`build-release`/`test`/`lint`, the three FFI wrapper tasks, and three `repo:*`
   gates that shell out to cargo (`repo:parity-corpus-drift`, `repo:observability-drift`,
-  `repo:nats-permissions`) — asserted by A4 (via `WORKSPACE_LINT_INPUTS`) and A5 (via the
-  `FFI_TASK_INPUTS` splat). Editing it selects 61 tasks against 3 before. It is deliberately NOT
-  on `fmt`: `cargo fmt --check` neither compiles nor links, so rustflags cannot change its result.
+  `repo:nats-permissions`). Editing it selects 61 tasks against 3 before — the 52 crate tasks, the
+  3 FFI tasks, and 6 `repo:*` gates (those three, plus `repo:actionlint`, `repo:input-liveness`
+  and `repo:publish-metadata`, which select on everything). **Only 16 of those 61 declarations are
+  asserted**: A4 (via `WORKSPACE_LINT_INPUTS`) covers the thirteen `lint` declarations and A5 (via
+  the `FFI_TASK_INPUTS` splat) the three FFI tasks, because `check_task_inputs` is called for
+  `lint` and `fmt` only. The 39 `build`/`build-release`/`test` declarations and the three gates
+  are declared by hand and asserted by nothing — delete one and CI stays green. It is deliberately
+  NOT on `fmt`: `cargo fmt --check` neither compiles nor links, so rustflags cannot change its result.
   `repo:wasm-getrandom-free` is excluded for the same kind of reason — it runs `cargo tree`, which
   resolves the dependency graph and never applies rustflags. This REVERSES SMA-546's deliberate
   exclusion, which reasoned that CI is Linux and the darwin flags are inert there. Both are true;

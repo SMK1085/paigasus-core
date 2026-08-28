@@ -208,6 +208,16 @@ FFI_TASK_INPUTS = (*WORKSPACE_LINT_INPUTS, ".prototools")
 A4 then asserts it on all thirteen crates' `lint`, and A5 on all three FFI tasks. No new
 assertion, no new constant, no exemption.
 
+The DECLARATION is wider than the assertion. D2 below puts the file on `build`, `build-release`
+and `test` as well, and three cargo-invoking `repo:*` gates gained it after a review finding, so
+an edit to the file selects **61** tasks (measured): 52 crate tasks (13 crates ×
+`build`/`build-release`/`test`/`lint`), the 3 FFI tasks, and 6 `repo:*` gates —
+`repo:parity-corpus-drift`, `repo:observability-drift` and `repo:nats-permissions`, plus
+`repo:actionlint`, `repo:input-liveness` and `repo:publish-metadata`, which select on everything.
+A4 and A5 assert 16 of those 61: the thirteen `lint` declarations and the three FFI tasks. The
+other 39 crate declarations and the 6 gates are declared but asserted by nothing; the one rule
+of D1 is a convention, not an enforced invariant.
+
 ### 3.3 D2. Declared on build / build-release / test / lint, **not** `fmt`
 
 `cargo fmt --check` neither compiles nor links, and `rustflags` cannot change formatting. The
@@ -307,8 +317,13 @@ separate decision; it is not blocked by anything here.
 Every change is an `inputs` addition, so the test for each is the same shape: **the affected set
 must grow, and the guard must be proven to red.**
 
-1. **Re-run §1's five measurements.** Expected movement, and nothing else:
-   * `rs/.cargo/config.toml` gains all thirteen crates' `lint` (A4) and the three FFI tasks (A5).
+1. **Re-run §1's five measurements.** Expected movement, measured:
+   * `rs/.cargo/config.toml` goes from 3 tasks to **61**: 52 crate tasks (13 crates ×
+     `build`/`build-release`/`test`/`lint`), the 3 FFI tasks (A5), and 6 `repo:*` gates — the
+     three cargo-invoking gates added after a review finding (`repo:parity-corpus-drift`,
+     `repo:observability-drift`, `repo:nats-permissions`) plus `repo:actionlint`,
+     `repo:input-liveness` and `repo:publish-metadata`, which select on everything. Of those,
+     A4 asserts the thirteen `lint` declarations and A5 the three FFI tasks.
    * the `.pyi` gains `paigasus-kernel-py:test`.
    * `.prototools` and `py/uv.lock` each gain `contracts:generate`.
 2. **Prove A4/A5 red.** Remove `rs/.cargo/config.toml` from `WORKSPACE_LINT_INPUTS`, confirm the

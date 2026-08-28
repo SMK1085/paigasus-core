@@ -173,7 +173,15 @@ It also runs several checks that the per-case project sets structurally **cannot
   — SMA-530); **C5** every
   `moon ci` invocation in `ci.yml` is handed the WHOLE array — C1-C4 assert what is *in* `T`,
   and a subsetted `"${T[@]:0:5}"` leaves all four green while switching most of the graph
-  off. C5's line matcher is deliberately BROADER than
+  off; **C6** (SMA-592) `contracts:generate`'s authored `inputs` still equal
+  `CONTRACTS_GENERATE_INPUTS` exactly — strict equality, both moon input buckets, the injected
+  `.moon/*` glob filtered first. That task is not a `repo:*` task, so C1 and C2 never look at it,
+  but `ci.yml`'s codegen-drift step delegates its freshness to that task's cache key: the step
+  runs `moon run contracts:generate` and diffs the three generated dirs, so an input dropped from
+  the task makes the step regenerate nothing and diff the committed output against itself — a
+  vacuous PASS. Exact equality, not containment: an edit to how the repo's codegen is keyed
+  should stop a human, and the constant is cheap to update deliberately. C5's line matcher is
+  deliberately BROADER than
   `assert_include_relations`' `moon ci +"` grep: mirroring it left both blind to a subsetted array
   behind a leading flag (`moon ci --base origin/main "${T[@]:0:5}"`). `moon ci` exits **0** on a target that resolves to nothing —
   measured, including the mixed case — so without C2 a renamed or mistyped entry is a silent no-op
@@ -189,7 +197,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   under `CI=true` (`ts/moon.yml`). `REQUIRED_REPO_TASKS` is the floor that stops the comparison
   degrading to two empty sets. **`:affected-smoke` is load-bearing for every assertion in this
   file**: this gate runs *inside* it, so removing that one entry from `T` (and from CLAUDE.md)
-  passes C1-C5 by never executing them, and takes the eight project cascade cases, the five task
+  passes C1-C6 by never executing them, and takes the eight project cascade cases, the five task
   cases, A1-A7 and `assert_include_relations` with it. Never exempt or drop it — see the design
   doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
