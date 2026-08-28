@@ -9,7 +9,9 @@ generator bump, a macOS link-flag edit and a PyO3 stub edit each stop replaying 
 rotting. No new Moon task and no new CI job. Two assertions are extended (`WORKSPACE_LINT_INPUTS`
 feeding A4/A5; A7's derived `want` set) and one is added (`check_contracts_generate_inputs`).
 
-**Tech Stack:** Moon 2.3.2, buf 1.70.0, Python 3.12 (the `ci/affected-graph` gates), bash.
+**Tech Stack:** Moon 2.5.3, buf 1.70.0, Python 3.12 (the `ci/affected-graph` gates), bash.
+(Written against Moon 2.3.2; the branch was rebased onto the 2.5.3 upgrade mid-flight and
+every measurement re-taken there. Treat any 2.3.2 figure below as superseded.)
 
 **Spec:** `docs/superpowers/specs/2026-08-28-sma-592-codegen-and-input-affectedness-residue-design.md`
 
@@ -214,12 +216,16 @@ In `ci/affected-graph/ci_targets.py`, beside `SELF_TASK_EXPECTED_GLOBS`:
 #
 # The trade-off is accepted deliberately: a legitimate edit to these inputs reds the gate until
 # this constant is updated. An edit to how the repo's codegen is keyed SHOULD stop a human.
+# WORKSPACE-relative, exactly as moon RESOLVES them — a project-relative `inputs:` entry
+# comes back PREFIXED (contracts/proto/**/*) and a `/`-prefixed one comes back BARE
+# (py/uv.lock). Globs first, then files, each sorted: the order check_contracts_generate_inputs
+# compares in. Writing these project-relative reds the gate on a CLEAN graph.
 CONTRACTS_GENERATE_INPUTS = (
-    "proto/**/*",
+    "contracts/proto/**/*",
     ".prototools",
-    "buf.gen.yaml",
-    "buf.lock",
-    "buf.yaml",
+    "contracts/buf.gen.yaml",
+    "contracts/buf.lock",
+    "contracts/buf.yaml",
     "py/uv.lock",
 )
 ```
@@ -261,6 +267,7 @@ def check_contracts_generate_inputs(projects, expected=CONTRACTS_GENERATE_INPUTS
 - [ ] **Step 8: Run the self-test and watch it pass**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 ci/affected-graph/ci_targets.py --self-test
 ```
 
@@ -320,6 +327,7 @@ python3 ci/affected-graph/ci_targets.py; echo "exit: $?"
 Expected: exit 1, and the output names `py/uv.lock` and `CONTRACTS_GENERATE_INPUTS`.
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 mv contracts/moon.yml.probe-backup contracts/moon.yml
 python3 ci/affected-graph/ci_targets.py; echo "exit: $?"    # expect 0
 git status --short   # expect: no .probe-backup file left behind
@@ -463,6 +471,7 @@ the file still influences any darwin build from rs/, which is the criterion for 
 - [ ] **Step 7: Run both checks and watch them pass**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 ci/affected-graph/cargo_moon_parity.py --self-test; echo "self-test exit: $?"
 python3 ci/affected-graph/cargo_moon_parity.py; echo "live exit: $?"
 ```
@@ -476,6 +485,7 @@ probe. Back each file up first. Note the `sed` deletes the line from ALL FOUR ta
 `rust.yml`, which is what makes A4 fire for every crate.
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 # A4: drop it from the shared Rust tasks.
 cp .moon/tasks/rust.yml .moon/tasks/rust.yml.probe-backup
 sed -i '' "/^      - '\/rs\/.cargo\/config.toml'$/d" .moon/tasks/rust.yml
@@ -591,12 +601,14 @@ Append:
 - [ ] **Step 4: Run the self-test and watch it pass**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 ci/affected-graph/cargo_moon_parity.py --self-test
 ```
 
 Expected: `OK`. Then run the live check:
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 ci/affected-graph/cargo_moon_parity.py; echo "exit: $?"
 ```
 
@@ -620,6 +632,7 @@ In `py/packages/paigasus-kernel/moon.yml`, task `test`, beside the binding's oth
 - [ ] **Step 6: Run the live check and watch it pass**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 ci/affected-graph/cargo_moon_parity.py; echo "exit: $?"
 ```
 
@@ -684,8 +697,12 @@ cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-592
 for f in "rs/crates/bindings/paigasus-py-bindings/paigasus_py_bindings.pyi" \
          "rs/.cargo/config.toml" ".prototools" "py/uv.lock" "contracts/buf.gen.yaml"; do
   echo "=== $f ==="
+  # Parse the JSON and emit one target per tasks[project][task]. Do NOT grep for
+  # `"target"`: the payload also carries deps[].target for each scheduled upstream, so a
+  # grep counts dependencies as selections. MEASURED on rs/.cargo/config.toml — grep: 129,
+  # correct parse: 61. That inflation is what made this plan's first baseline table wrong.
   echo "$f" | moon query tasks --affected 2>/dev/null \
-    | grep -o '"target": "[^"]*"' | sed 's/"target": //' | tr -d '"' | sort | tr '\n' ' '
+    | python3 -c 'import json,sys; d=json.load(sys.stdin)["tasks"]; print(" ".join(sorted(f"{p}:{t}" for p in d for t in d[p])))'
   echo; echo
 done
 ```
@@ -715,6 +732,7 @@ source files, none on a workflow file, so their gate should not move any expecte
 - [ ] **Step 2: Run the affected-graph guard and check for expected-set movement**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 bash ci/affected-graph/run.sh; echo "exit: $?"
 ```
 
@@ -726,6 +744,7 @@ would mean one of the new inputs is broader than intended.
 - [ ] **Step 3: Time `buf generate` and answer the spec's open question 1**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 time (cd contracts && buf generate)
 git checkout -- rs/crates/libs/paigasus-proto/src/generated \
                 py/packages/paigasus-proto/src/paigasus_proto/generated \
@@ -733,8 +752,10 @@ git checkout -- rs/crates/libs/paigasus-proto/src/generated \
 ```
 
 Record the wall-clock. Then update §9 of the spec with the answer, including the churn figures
-already measured on `main`'s 162 commits: `contracts/proto/**` 21 commits (13%), `py/uv.lock` 21
-(13%), `.prototools` 13 (8%). State the conclusion: the drift step already runs
+already measured on `main`: over its 163 commits, `contracts/proto` 21 (12%), `py/uv.lock` 21
+(12%), `.prototools` 14 (8%). (An earlier draft of this plan said 162 commits and 13
+`.prototools` touches, measured before the Moon-upgrade commit landed; the design doc's §9
+carries the current figures and is authoritative.) State the conclusion: the drift step already runs
 `moon run contracts:generate` on every CI run, so the marginal cost is only the runs where the
 cache would otherwise have hit — roughly 20% more PRs paying one `buf generate`.
 

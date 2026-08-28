@@ -135,8 +135,11 @@ Add a literal pin in `ci/affected-graph/ci_targets.py`, run by `repo:affected-sm
 
 ```python
 CONTRACTS_GENERATE_INPUTS = (
-    "buf.gen.yaml", "buf.lock", "buf.yaml", "proto/**/*",
-    ".prototools", "py/uv.lock",
+    # Workspace-relative, globs first then files, each sorted — the shape moon RESOLVES
+    # and the order the comparison uses. Project-relative paths red the gate on a clean graph.
+    "contracts/proto/**/*",
+    ".prototools", "contracts/buf.gen.yaml", "contracts/buf.lock",
+    "contracts/buf.yaml", "py/uv.lock",
 )
 ```
 
