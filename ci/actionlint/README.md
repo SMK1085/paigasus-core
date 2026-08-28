@@ -444,8 +444,8 @@ of the `--self-test` cost and roughly half of the full gate's.
 
 **The remaining cost is ACCEPTED, and the budget was NOT met — say so rather than rounding it
 away.** The design doc's trigger is "reconsider above baseline + 10%"; on the figures above the
-full gate sits ~15% over base and `--self-test` ~17% over, so the trigger fires and this
-paragraph is the reconsideration it asks for. Accepted on three grounds: the gate's ABSOLUTE time
+full gate sits ~21% over base (sweep A ~27%, sweep B ~15%) and `--self-test` ~17% over, so the
+trigger fires and this paragraph is the reconsideration it asks for. Accepted on three grounds: the gate's ABSOLUTE time
 stays around 17–19s, well inside the range this section has treated as ordinary for it; the added
 work is exactly what buys this branch's central guarantee, that `repo:affected-smoke` still
 declares the inputs which schedule every pin in `ci_targets.py` and still runs both halves of its

@@ -370,8 +370,9 @@ a stuck one (`ci/actionlint/run.sh:2065-2066`, SMA-466). On the unmutated tree:
   that narrowing `repo:actionlint` to `.github/workflows/**` now reds;
 - check 8e's 19 required inputs and 3 required script lines, via `ci/actionlint/run.sh`,
   plus a reorder case (move `set -euo pipefail` last) and an emptied-table case;
-- the two new `ACTIONLINT_SH_CALL_SITES` entries, by deleting check 8e's production line
-  and by deleting its arity floor.
+- the three new `ACTIONLINT_SH_CALL_SITES` entries, by deleting check 8e's production
+  line, by deleting its input-table arity floor, and by deleting its script-table arity
+  floor.
 
 **The `moon.yml` and real-run cases get a three-part demonstration**, because the obvious
 version of each passes vacuously. Deleting `ci/affected-graph/run.sh` from the script block

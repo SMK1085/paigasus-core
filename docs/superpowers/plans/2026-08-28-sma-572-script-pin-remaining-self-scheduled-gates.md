@@ -34,6 +34,30 @@ containment and its script lines in order. Neither gate is the sole judge of its
 - Do **not** touch `T` in `.github/workflows/ci.yml` or CLAUDE.md's marker-delimited command.
   Adding a second copy of either marker anywhere in CLAUDE.md reds `repo:affected-smoke`.
 
+## Superseded during execution
+
+This plan is a historical execution artifact; the steps below are left as originally written,
+but were overridden by rulings made during execution:
+
+- **Task 2, Step 6's expected message is wrong.** Deleting a self-test *invocation* while
+  keeping its *definition* leaves definitions == `SELF_TEST_COUNT`, so the definition-count
+  check passes. What actually fires under `--self-test` is `assert_self_tests_ran` (N ran, N+1
+  expected); under a full run, check 9's invocation-count precondition also fires.
+- **Task 3 pins THREE `ACTIONLINT_SH_CALL_SITES` entries, not two.** The
+  `T_AFFECTED_SMOKE_REQUIRED_SCRIPT` arity floor was added during review: without it, deleting
+  that floor and emptying the script table in one edit silently drops check 8e's script-line
+  ORDER assertion — the one property `ci_targets.py`'s `SELF_SCHEDULED_GATES` cannot cover,
+  since it compares an unordered set.
+- **Tasks 4 and 5 were executed in the order 5 then 4.** Task 5 edits `moon.yml` and
+  `CLAUDE.md`, both inputs to `repo:affected-smoke`; running Task 4's acceptance evidence first
+  would have produced evidence for a tree that is not the one that shipped.
+- **Task 4's Step 1 expectation was stale** and was replaced by a direct measurement (an
+  emptied required-inputs table produces zero verdicts against the live `moon.yml`), because
+  several fixture rows hard-code literal globs and notice an emptied array incidentally.
+- **The cost budget was NOT met.** The design's "reconsider above baseline + 10%" trigger
+  fired; the regression was measured, partly recovered by making the verdict fork-free, and the
+  remainder explicitly accepted. See `ci/actionlint/README.md`.
+
 ---
 
 ## File Structure
