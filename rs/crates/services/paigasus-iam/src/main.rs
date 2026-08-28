@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! paigasus-iam composition root: load config, init logging, connect + migrate the DB,
-//! serve HTTP + gRPC health on two ports, and shut down gracefully on SIGINT/SIGTERM.
+//! paigasus-iam composition root: load config, init logging, connect to the DB, BIND all three
+//! listeners, then migrate and build `AppState` behind them (SMA-571), and shut down gracefully
+//! on SIGINT/SIGTERM.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use paigasus_iam::adapters::boot;
 use paigasus_iam::adapters::events::{NatsEventPublisher, OutboxRelay, TracingEventPublisher};
 use paigasus_iam::adapters::grpc;
 use paigasus_iam::adapters::http::{AppState, serve_http};
-use paigasus_iam::adapters::persistence::migration_lock::{IMAGE_START_PERIOD_SECS, MIGRATION_BUDGET_SECS};
 use paigasus_iam::adapters::persistence::{OutboxRetentionPolicy, PgOutboxListener, PgOutboxMaintainer, PgPartitionMaintainer, RetentionPolicy, migrate_under_lock};
 use paigasus_iam::config::{IamConfig, PublisherBackend};
 use paigasus_iam_core::EventPublisher;
@@ -106,18 +107,205 @@ async fn serve() -> anyhow::Result<()> {
     }
 
     let db = Database::connect(config.database_url.as_str()).await?;
-    // SMA-559: serialised against a concurrently starting replica by a transaction-scoped
-    // advisory lock. A waiter blocks here with NO listener bound — see the probe-budget note in
-    // docs/ops/RUNBOOK-containers.md, and SMA-571 for the bind-first fix that removes the
-    // coupling entirely.
-    if config.migration.lock_wait_secs + MIGRATION_BUDGET_SECS > IMAGE_START_PERIOD_SECS {
-        tracing::warn!(
-            lock_wait_secs = config.migration.lock_wait_secs,
-            start_period_secs = IMAGE_START_PERIOD_SECS,
-            "migration.lock_wait_secs plus the migration budget exceeds the container image's HEALTHCHECK start period — a waiting replica may be reported unhealthy before it finishes waiting"
-        );
+
+    // SMA-571: bind BEFORE migrating, so a replica that is migrating — or, since SMA-559, waiting
+    // up to `migration.lock_wait_secs` for the lock — is visibly UNREADY to its orchestrator
+    // rather than absent. Bound HERE, synchronously, and not inside the spawned tasks below:
+    // `servers.spawn` gives no ordering guarantee that a socket is listening before the `await`
+    // that follows it, and it would defer an `EADDRINUSE` past the whole migration window,
+    // surfacing the migration's error rather than the bind's.
+    let (health_reporter, health_server) = grpc::health_service().await;
+    // `health_service` hands the reporter back already flipped to SERVING (its M0 static
+    // posture). Lower it before anything is bound: for the whole deferred window a
+    // `grpc_health_probe` readiness check is the gRPC-side twin of `/readyz` 503 `migrating`,
+    // and `BootSlot::install` is the ONLY thing that raises it again — see `boot.rs`.
+    health_reporter.set_service_status("", tonic_health::ServingStatus::NotServing).await;
+    let slot = boot::BootSlot::new(health_reporter);
+
+    let http_listener = tokio::net::TcpListener::bind(config.http_addr).await?;
+    // `TcpIncoming::bind` is synchronous and public, so the gRPC socket is listening at THIS
+    // line rather than somewhere inside `serve_with_shutdown`'s own future. NOTE
+    // `serve_with_incoming*` "discards any provided `Server` TCP configuration"
+    // (tonic transport/server/mod.rs:1062,1091) and `Server::default()` sets `tcp_nodelay: true`
+    // (mod.rs:132) — so the nodelay must be re-applied HERE, on the incoming, or Nagle is
+    // silently re-enabled on every gRPC connection and no test in this repo would catch it.
+    let grpc_incoming = tonic::transport::server::TcpIncoming::bind(config.grpc_addr)?.with_nodelay(Some(true));
+    // Separate metrics listener (SMA-446 Unit 3), only when metrics are enabled AND
+    // `metrics.addr` is configured — bound here with the other two for the same reason.
+    let metrics_listener = match config.metrics.addr {
+        Some(addr) if metrics_handle.is_some() => Some((tokio::net::TcpListener::bind(addr).await?, addr)),
+        _ => None,
+    };
+
+    let request_timeout = Duration::from_secs(30);
+    let (tx, rx) = tokio::sync::watch::channel(());
+    let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
+
+    // Same-port `/metrics` (SMA-446 Unit 3): merged into the boot router below, only when
+    // enabled AND no separate `metrics.addr` is configured — `metrics.enabled = false`, or a
+    // separate `addr`, leaves this `None` (in the `addr` case `/metrics` is served on its own
+    // listener, spawned separately below instead).
+    let http_metrics_router = match (&metrics_handle, config.metrics.addr) {
+        (Some(handle), None) => Some(paigasus_observability::metrics_router(handle.clone())),
+        _ => None,
+    };
+    {
+        let mut rx = rx.clone();
+        // The boot router is the SINGLE, PERMANENT service on this listener: it owns
+        // `/healthz`, `/readyz` and `/metrics` for the life of the process and falls through to
+        // the slot for everything else. It is never rebuilt or replaced — `BootSlot::install`
+        // fills the slot the router already points at.
+        let app = boot::boot_http_router(slot.clone(), http_metrics_router);
+        servers.spawn(async move {
+            serve_http(http_listener, app, async move {
+                let _ = rx.changed().await;
+            })
+            .await
+            .map_err(anyhow::Error::from)
+        });
     }
-    let migration = migrate_under_lock(&db, config.migration.lock_wait()).await?;
+    if let Some((listener, metrics_addr)) = metrics_listener {
+        // Keeps `/metrics` off the port that also serves the tenancy/authn/authz HTTP API. On
+        // the SAME shutdown-watch every other task in this `JoinSet` uses, so it stops
+        // gracefully alongside the HTTP/gRPC servers rather than lingering past them.
+        let mut rx = rx.clone();
+        let metrics_app = paigasus_observability::metrics_router(metrics_handle.clone().expect("guarded by the bind above"));
+        servers.spawn(async move {
+            tracing::info!(%metrics_addr, "paigasus-iam metrics listener started");
+            axum::serve(listener, metrics_app)
+                .with_graceful_shutdown(async move {
+                    let _ = rx.changed().await;
+                })
+                .await
+                .map_err(anyhow::Error::from)
+        });
+    }
+    {
+        let mut rx = rx.clone();
+        // As with HTTP: the object `boot_grpc_routes` returns is the single, permanent service
+        // bound to this listener — health as a matched route plus an `UNAVAILABLE` catch-all
+        // that delegates to the real, `AuthLayer`-wrapped routes once the slot is filled.
+        // `AuthLayer` is deliberately NOT on this `Server`'s layer stack (unlike `grpc::router`):
+        // it needs `AppState`, which does not exist yet, so it lives inside `boot::Serving`.
+        let routes = boot::boot_grpc_routes(slot.clone(), health_server);
+        servers.spawn(async move {
+            tonic::transport::Server::builder()
+                .timeout(request_timeout)
+                .layer(paigasus_observability::CorrelationLayer)
+                .serve_with_incoming_shutdown(routes.prepare(), grpc_incoming, async move {
+                    let _ = rx.changed().await;
+                })
+                .await
+                .map_err(anyhow::Error::from)
+        });
+    }
+    tracing::info!(%config.http_addr, %config.grpc_addr, "paigasus-iam listeners bound; migrating");
+
+    // SMA-571 §4.6: the whole post-bind boot is ONE fallible function so `?` can be used freely
+    // inside it and the drain is structural rather than per-`?`. Adding a fallible step there can
+    // no longer skip the graceful shutdown.
+    let mut shutting_down = false;
+    let outcome = tokio::select! {
+        r = boot_deferred(&db, &config, &slot, &mut servers, &rx, request_timeout, metrics_handle.clone()) => r,
+        () = shutdown_signal() => {
+            // This window was unhandled before SMA-571 — but the pod is now PRESENT-and-unready
+            // rather than absent, so a rolling update is far more likely to land here. Ignoring
+            // SIGTERM for `lock_wait_secs` and then taking SIGKILL is the stranded-lock scenario
+            // in RUNBOOK-containers.md. Cancelling `migrate_under_lock` between polls is safe,
+            // and cancelling inside the sea-orm migrator's `up` rolls the transaction back and
+            // releases the transaction-scoped lock by construction. (Spelled that way on
+            // purpose: `migration_lock.rs`'s composition-root guard greps THIS file for the
+            // bare `Migrator` + `up` call as a banned pattern, and a prose mention would trip
+            // it.)
+            tracing::info!("shutdown signal received during boot");
+            shutting_down = true;
+            Ok(())
+        }
+    };
+    if outcome.is_err() || shutting_down {
+        if let Err(e) = &outcome {
+            tracing::error!(error = %e, "boot failed after the listeners were bound; draining");
+        }
+        let _ = tx.send(());
+        let outstanding = drain_bounded(&mut servers, DRAIN_TIMEOUT).await;
+        if outstanding > 0 {
+            tracing::warn!(outstanding, "drain timed out with tasks still running");
+        }
+        return outcome;
+    }
+
+    tracing::info!(%config.http_addr, %config.grpc_addr, "paigasus-iam started");
+
+    // Stop on the first of: shutdown signal, or a server task ending.
+    let early_error: Option<anyhow::Error> = tokio::select! {
+        () = shutdown_signal() => {
+            tracing::info!("shutdown signal received");
+            None
+        }
+        Some(joined) = servers.join_next() => {
+            match joined {
+                Ok(Ok(())) => {
+                    tracing::warn!("a server task exited before shutdown was requested");
+                    None
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "a server task failed");
+                    Some(e)
+                }
+                Err(join_err) => {
+                    tracing::error!(error = %join_err, "a server task panicked");
+                    Some(join_err.into())
+                }
+            }
+        }
+    };
+
+    // Ask any still-running server to shut down gracefully.
+    let _ = tx.send(());
+
+    // Drain the remaining server task(s); surface the first error.
+    let mut result = early_error.map_or(Ok(()), Err);
+    while let Some(joined) = servers.join_next().await {
+        match joined {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) if result.is_ok() => result = Err(e),
+            Ok(Err(_)) => {}
+            Err(join_err) if result.is_ok() => result = Err(join_err.into()),
+            Err(_) => {}
+        }
+    }
+    result
+}
+
+/// How long the boot-failure drain waits before giving up and returning anyway. Bounded because
+/// an unbounded drain turns a boot failure into a process that serves 503 forever (SMA-571 §4.6).
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Everything between the bind and "ready": the migration, `AppState::new`, the publisher dial,
+/// and every background task. Returns `Err` rather than `?`-ing out of `serve()` so its single
+/// caller can drain the already-bound listeners gracefully (SMA-571 AC 3).
+///
+/// Lives in `main.rs` deliberately: `migration_lock.rs`'s `the_composition_root_still_migrates_
+/// under_the_lock` guard reads THIS file for `migrate_under_lock(` and `config.migration.lock_wait()`.
+///
+/// Panics are NOT drained — a panic unwinds through `#[tokio::main]` and aborts in-flight
+/// requests. `catch_unwind` across this body would need `AssertUnwindSafe` and buys little: the
+/// route-registration panic class is already covered by
+/// `protected_router_merge_has_no_path_conflicts_in_any_capability_combination`.
+async fn boot_deferred(
+    db: &sea_orm::DatabaseConnection,
+    config: &IamConfig,
+    slot: &boot::BootSlot,
+    servers: &mut JoinSet<anyhow::Result<()>>,
+    rx: &tokio::sync::watch::Receiver<()>,
+    request_timeout: Duration,
+    metrics_handle: Option<paigasus_observability::PrometheusHandle>,
+) -> anyhow::Result<()> {
+    // SMA-559: serialised against a concurrently starting replica by a transaction-scoped
+    // advisory lock. A waiter blocks here — but since SMA-571 it does so with all three
+    // listeners already bound, answering `/readyz` 503 `migrating` and gRPC `UNAVAILABLE`
+    // throughout, so the wait is visible to the orchestrator rather than an absent process.
+    let migration = migrate_under_lock(db, config.migration.lock_wait()).await?;
     tracing::info!(
         waited = ?migration.waited,
         polls = migration.polls,
@@ -131,33 +319,33 @@ async fn serve() -> anyhow::Result<()> {
     // Redis JWKS cache is configured but unreachable; JWKS themselves are fetched lazily
     // on first use, so startup stays independent of IdP availability (spec §6.4).
     //
-    // `db` itself (the original handle, not this clone) is kept alive below to build the
+    // `db` itself (the borrowed handle, not this clone) is also cloned below to build the
     // outbox relay (SMA-446 Slice B, Task B9) directly off the same connection pool — the
     // relay is wired straight in `main.rs` rather than through `AppState`, so `AppState::new`'s
     // signature stays unchanged.
-    let state = AppState::new(db.clone(), &config).await?;
+    let state = AppState::new(db.clone(), config).await?;
 
-    // Kept for the partition-maintenance task (SMA-467), spawned below; cloned before the outbox
-    // relay block consumes the original `db` handle.
+    // Kept for the partition-maintenance task (SMA-467), spawned below.
     let db_for_maintenance = db.clone();
 
-    // Kept for the outbox retention sweep (SMA-469), spawned below — cloned here for the same
-    // reason `db_for_maintenance` is: the outbox-relay block consumes the original `db` handle.
+    // Kept for the outbox retention sweep (SMA-469), spawned below — for the same reason
+    // `db_for_maintenance` is: `db` is borrowed here, so every consumer takes its own handle.
     let db_for_outbox_retention = db.clone();
 
-    let request_timeout = Duration::from_secs(30);
-    let (tx, rx) = tokio::sync::watch::channel(());
-    let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
-
     // SMA-471: the outbox relay's delivery sink, selected and — for the `nats` backend —
-    // actually DIALLED here, before the first `servers.spawn` below binds a port. Constructing
-    // it inside the relay block further down (where it would otherwise naturally belong) would
-    // put this `?` after the HTTP, metrics and gRPC listeners are already live: an early return
-    // at that point would skip the graceful-shutdown `tx.send(())` and abort those listeners'
-    // in-flight requests instead of never having accepted one. The whole point of fail-fast boot
-    // is that it fails with nothing bound.
+    // actually DIALLED here, inside the outbox block where it naturally belongs.
     //
-    // `config.validate()` (called above, before this point) already rejects `relay_enabled =
+    // It used to be hoisted above the first `servers.spawn` instead, because back then that
+    // spawn was what bound a port: an early `?` from this dial would have returned past three
+    // live listeners, skipping the graceful-shutdown `tx.send(())` and aborting their in-flight
+    // requests rather than never having accepted one. That reason is gone. SMA-571 binds before
+    // any of this runs, so a live listener at this point is the DESIGN, not an accident — and
+    // `boot_deferred`'s caller now drains them bounded on any `Err` from this function, which is
+    // strictly better than the hoist ever was: it covers every fallible step here, not just this
+    // one. The hoist is therefore no longer needed, and keeping it would put the NATS dial in
+    // front of a `relay_enabled = false` deployment that never uses it.
+    //
+    // `config.validate()` (called in `serve()`, before the bind) already rejects `relay_enabled =
     // false` together with `backend = "nats"`, so the `Tracing` arm below is reachable both when
     // the relay is enabled AND when it's disabled — never a live NATS backend with no relay to
     // drain into it.
@@ -181,59 +369,6 @@ async fn serve() -> anyhow::Result<()> {
         PublisherBackend::Tracing => Arc::new(TracingEventPublisher),
     };
 
-    // Same-port `/metrics` (SMA-446 Unit 3): built here, threaded into `serve_http` below, only
-    // when enabled AND no separate `metrics.addr` is configured — `metrics.enabled = false`, or a
-    // separate `addr`, leaves this `None` (in the `addr` case `/metrics` is served on its own
-    // listener, spawned separately below instead).
-    let http_metrics_router = match (&metrics_handle, config.metrics.addr) {
-        (Some(handle), None) => Some(paigasus_observability::metrics_router(handle.clone())),
-        _ => None,
-    };
-
-    {
-        let mut rx = rx.clone();
-        let state = state.clone();
-        let addr = config.http_addr;
-        servers.spawn(async move {
-            serve_http(addr, state, request_timeout, http_metrics_router, async move {
-                let _ = rx.changed().await;
-            })
-            .await
-            .map_err(anyhow::Error::from)
-        });
-    }
-    {
-        // Separate metrics listener (SMA-446 Unit 3), only when both enabled AND `metrics.addr`
-        // is configured — keeps `/metrics` off the port that also serves the tenancy/authn/authz
-        // HTTP API. On the SAME shutdown-watch every other task in this `JoinSet` uses, so it
-        // stops gracefully alongside the HTTP/gRPC servers rather than lingering past them.
-        if let (Some(handle), Some(metrics_addr)) = (metrics_handle.clone(), config.metrics.addr) {
-            let mut rx = rx.clone();
-            let metrics_app = paigasus_observability::metrics_router(handle);
-            servers.spawn(async move {
-                let listener = tokio::net::TcpListener::bind(metrics_addr).await?;
-                tracing::info!(%metrics_addr, "paigasus-iam metrics listener started");
-                axum::serve(listener, metrics_app)
-                    .with_graceful_shutdown(async move {
-                        let _ = rx.changed().await;
-                    })
-                    .await
-                    .map_err(anyhow::Error::from)
-            });
-        }
-    }
-    {
-        let mut rx = rx.clone();
-        let state = state.clone();
-        let addr = config.grpc_addr;
-        servers.spawn(async move {
-            grpc::serve(addr, state, request_timeout, async move {
-                let _ = rx.changed().await;
-            })
-            .await
-            .map_err(anyhow::Error::from)
-        });
-    }
     {
         // Periodic Prometheus upkeep (CodeRabbit round-1 fix, mirrors
         // `paigasus-gateway::main`'s identical fix): `PrometheusBuilder::install_recorder()`
@@ -244,7 +379,7 @@ async fn serve() -> anyhow::Result<()> {
         // plain `#[test]` code with no Tokio runtime), so the spawn lives here instead, into the
         // same `JoinSet` on the same shutdown-watch as every other server task, only when
         // metrics are enabled.
-        if let Some(handle) = metrics_handle.clone() {
+        if let Some(handle) = metrics_handle {
             let mut rx = rx.clone();
             servers.spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -309,11 +444,11 @@ async fn serve() -> anyhow::Result<()> {
         // The outbox relay (SMA-446 Slice B, Task B9): drains `event_outbox` rows — written by
         // `PgOutbox::enqueue` inside each triggering mutation's own transaction (Task B2) — into
         // calls on the `publisher` selected and constructed above, on the same shutdown-watch as
-        // every other task here. Built directly off the `db` handle kept alive above (not through
-        // `AppState`) so `AppState::new`'s signature stays unchanged. `publisher` is either the
-        // real NATS JetStream sink (SMA-471, ADR-0016) or `TracingEventPublisher` (Task B8, a
-        // logging-only sink for deployments with no broker configured) — never constructed here;
-        // this block only consumes whichever one boot already selected.
+        // every other task here. Built directly off the `db` handle borrowed by this function
+        // (not through `AppState`) so `AppState::new`'s signature stays unchanged. `publisher` is
+        // either the real NATS JetStream sink (SMA-471, ADR-0016) or `TracingEventPublisher`
+        // (Task B8, a logging-only sink for deployments with no broker configured) — never
+        // constructed here; this block only consumes whichever one boot already selected.
         //
         // `max_attempts` is `u32` in config (a natural "count" type for an operator to read/
         // write) but `i32` in `OutboxRelay::new` (mirroring the `event_outbox.attempts` Postgres
@@ -330,7 +465,7 @@ async fn serve() -> anyhow::Result<()> {
             // NATS connection-gauge sampler above uses for the same reason.
             let mut relay_rx = rx.clone();
             let relay = OutboxRelay::new(
-                db,
+                db.clone(),
                 Duration::from_secs(config.outbox.poll_interval_secs),
                 config.outbox.batch_size,
                 i32::try_from(config.outbox.max_attempts).unwrap_or(i32::MAX),
@@ -466,47 +601,25 @@ async fn serve() -> anyhow::Result<()> {
         });
     }
 
-    tracing::info!(%config.http_addr, %config.grpc_addr, "paigasus-iam started");
+    slot.install(boot::Serving::new(state, request_timeout).await).await?;
+    tracing::info!("boot slot installed; serving");
+    Ok(())
+}
 
-    // Stop on the first of: shutdown signal, or a server task ending.
-    let early_error: Option<anyhow::Error> = tokio::select! {
-        () = shutdown_signal() => {
-            tracing::info!("shutdown signal received");
-            None
-        }
-        Some(joined) = servers.join_next() => {
+/// Drain `servers`, bounded. Returns how many tasks were STILL running at the timeout so the
+/// caller can log it — a silent give-up would hide exactly the wedged task worth naming.
+async fn drain_bounded(servers: &mut JoinSet<anyhow::Result<()>>, budget: Duration) -> usize {
+    let _ = tokio::time::timeout(budget, async {
+        while let Some(joined) = servers.join_next().await {
             match joined {
-                Ok(Ok(())) => {
-                    tracing::warn!("a server task exited before shutdown was requested");
-                    None
-                }
-                Ok(Err(e)) => {
-                    tracing::error!(error = %e, "a server task failed");
-                    Some(e)
-                }
-                Err(join_err) => {
-                    tracing::error!(error = %join_err, "a server task panicked");
-                    Some(join_err.into())
-                }
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(error = %e, "a server task failed during drain"),
+                Err(join_err) => tracing::warn!(error = %join_err, "a server task panicked during drain"),
             }
         }
-    };
-
-    // Ask any still-running server to shut down gracefully.
-    let _ = tx.send(());
-
-    // Drain the remaining server task(s); surface the first error.
-    let mut result = early_error.map_or(Ok(()), Err);
-    while let Some(joined) = servers.join_next().await {
-        match joined {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) if result.is_ok() => result = Err(e),
-            Ok(Err(_)) => {}
-            Err(join_err) if result.is_ok() => result = Err(join_err.into()),
-            Err(_) => {}
-        }
-    }
-    result
+    })
+    .await;
+    servers.len()
 }
 
 /// Registers `# HELP`/`# TYPE` exposition text for the 38 metric families `paigasus-iam` emits
@@ -678,5 +791,52 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SMA-571 §4.6: the boot-failure drain MUST be bounded. `main.rs`'s shutdown-path drain has
+    /// no timeout; reused unchanged for a boot failure, a task that never observes the watch would
+    /// hang the process with three listening sockets serving 503 FOREVER — CrashLoopBackOff never
+    /// happens and the replica is indistinguishable from a slow migration, which is exactly the
+    /// state D4 rejects.
+    #[tokio::test]
+    async fn drain_bounded_returns_at_the_timeout_when_a_task_ignores_the_watch() {
+        let (tx, rx) = tokio::sync::watch::channel(());
+        let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
+        let mut good = rx.clone();
+        servers.spawn(async move {
+            let _ = good.changed().await;
+            Ok(())
+        });
+        servers.spawn(async move {
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        let _ = tx.send(());
+        let started = tokio::time::Instant::now();
+        let outstanding = drain_bounded(&mut servers, Duration::from_millis(200)).await;
+        assert!(started.elapsed() < Duration::from_secs(2), "must return at the timeout, not hang");
+        assert_eq!(outstanding, 1, "the task that ignored the watch is reported, not silently dropped");
+    }
+
+    /// The cooperative case: every task observes the watch, so the drain joins them all well
+    /// inside its budget and reports nothing outstanding.
+    #[tokio::test]
+    async fn drain_bounded_joins_cooperative_tasks_and_reports_none_outstanding() {
+        let (tx, rx) = tokio::sync::watch::channel(());
+        let mut servers: JoinSet<anyhow::Result<()>> = JoinSet::new();
+        for _ in 0..3 {
+            let mut r = rx.clone();
+            servers.spawn(async move {
+                let _ = r.changed().await;
+                Ok(())
+            });
+        }
+        let _ = tx.send(());
+        assert_eq!(drain_bounded(&mut servers, Duration::from_secs(5)).await, 0);
     }
 }
