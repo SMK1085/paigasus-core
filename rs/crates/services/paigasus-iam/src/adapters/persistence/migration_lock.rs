@@ -252,12 +252,22 @@ mod tests {
     /// `main.rs` to a bare `Migrator::up` would leave the whole suite green while un-shipping the
     /// feature. `include_str!` is deliberate: a `repo:*` gate for one call site would cost a `T`-array
     /// entry, the CLAUDE.md marker block and an `:affected-smoke` re-baseline.
+    ///
+    /// Comments are STRIPPED before matching (SMA-571 fix round 1). A substring match over the raw
+    /// file is satisfied by PROSE: `boot_deferred`'s own doc comment names `migrate_under_lock(`
+    /// and `config.migration.lock_wait()` while explaining this very guard, so both positive
+    /// assertions would have stayed green with the real call deleted — and the negative one fired
+    /// on a comment that merely MENTIONED the banned call, which is why that comment previously had
+    /// to be spelled around it. Stripping is line-granular and deliberately naive (a `//` opening a
+    /// string literal would be over-stripped); that direction only ever makes the positive
+    /// assertions stricter, never looser.
     #[test]
     fn the_composition_root_still_migrates_under_the_lock() {
         const MAIN: &str = include_str!("../../main.rs");
-        assert!(MAIN.contains("migrate_under_lock("), "main.rs must call migrate_under_lock");
-        assert!(!MAIN.contains("Migrator::up"), "main.rs must not call Migrator::up bare — use migrate_under_lock");
-        assert!(MAIN.contains("config.migration.lock_wait()"), "main.rs must pass the CONFIGURED wait, not a hardcoded Duration");
+        let code = MAIN.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        assert!(code.contains("migrate_under_lock("), "main.rs must call migrate_under_lock");
+        assert!(!code.contains("Migrator::up"), "main.rs must not call Migrator::up bare — use migrate_under_lock");
+        assert!(code.contains("config.migration.lock_wait()"), "main.rs must pass the CONFIGURED wait, not a hardcoded Duration");
     }
 
     /// The container's health-check start period must cover the configured wait plus the migration,

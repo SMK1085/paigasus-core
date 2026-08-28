@@ -121,9 +121,13 @@ pub async fn routes(state: AppState) -> tonic::service::Routes {
 /// `TenancyService`/`AuthorizationService`/`ServiceAccountService`/`ServiceInfoService`/
 /// `UserService`/`OutboxService`/`AuditService` RPC is not (spec §7.4, D14) —
 /// `UserService.CreateUser` is bearer-required AND authorizes `Action::CreateUser` at `Root`,
-/// mirroring `POST /v1/users` (SMA-584, see `users` module doc). `main` calls
-/// `.serve_with_shutdown`. The reporter is dropped here —
-/// dynamic readiness is deferred to M1.
+/// mirroring `POST /v1/users` (SMA-584, see `users` module doc).
+///
+/// **Test-only since SMA-571.** `main` no longer calls this at all: production binds
+/// `adapters::boot::boot_grpc_routes` — which consumes [`routes`] directly and applies
+/// `AuthLayer` inside `boot::Serving` instead of on the `Server` — so the only remaining callers
+/// are `serve` and the Docker-gated suites. The reporter is dropped here; production's dynamic
+/// readiness comes from the one `health_service` reporter `main` hands to `BootSlot`.
 pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRouter<Stack<AuthLayer, Stack<CorrelationLayer, Identity>>> {
     let routes = routes(state.clone()).await;
     let mut server = Server::builder()

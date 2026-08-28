@@ -124,11 +124,13 @@ async fn serve() -> anyhow::Result<()> {
 
     let http_listener = tokio::net::TcpListener::bind(config.http_addr).await?;
     // `TcpIncoming::bind` is synchronous and public, so the gRPC socket is listening at THIS
-    // line rather than somewhere inside `serve_with_shutdown`'s own future. NOTE
-    // `serve_with_incoming*` "discards any provided `Server` TCP configuration"
-    // (tonic transport/server/mod.rs:1062,1091) and `Server::default()` sets `tcp_nodelay: true`
-    // (mod.rs:132) — so the nodelay must be re-applied HERE, on the incoming, or Nagle is
-    // silently re-enabled on every gRPC connection and no test in this repo would catch it.
+    // line rather than somewhere inside `serve_with_shutdown`'s own future. NOTE the `Server`
+    // overload used below documents that "the `tcp_nodelay` and `tcp_keepalive` settings are
+    // ignored when using this method" (tonic transport/server/mod.rs:701, covering both
+    // `serve_with_incoming` and `serve_with_incoming_shutdown` — they share `serve_internal`),
+    // while `Server::default()` sets `tcp_nodelay: true` (mod.rs:132). So the nodelay must be
+    // re-applied HERE, on the incoming, or Nagle is silently re-enabled on every gRPC connection
+    // and no test in this repo would catch it.
     let grpc_incoming = tonic::transport::server::TcpIncoming::bind(config.grpc_addr)?.with_nodelay(Some(true));
     // Separate metrics listener (SMA-446 Unit 3), only when metrics are enabled AND
     // `metrics.addr` is configured — bound here with the other two for the same reason.
@@ -181,6 +183,37 @@ async fn serve() -> anyhow::Result<()> {
         });
     }
     {
+        // Periodic Prometheus upkeep (CodeRabbit round-1 fix, mirrors
+        // `paigasus-gateway::main`'s identical fix): `PrometheusBuilder::install_recorder()`
+        // (unlike `install()`) does NOT spawn the maintenance task
+        // `PrometheusHandle::run_upkeep()` needs to periodically drain/decay histograms —
+        // without calling it ourselves, memory grows unbounded over the life of the process.
+        // `paigasus_observability::init()` itself stays runtime-agnostic (it's also called from
+        // plain `#[test]` code with no Tokio runtime), so the spawn lives here instead, into the
+        // same `JoinSet` on the same shutdown-watch as every other server task, only when
+        // metrics are enabled.
+        //
+        // Spawned HERE, alongside the binds, rather than inside `boot_deferred` (SMA-571 fix
+        // round 1): `/metrics` is live from the moment the HTTP listener binds, so leaving decay
+        // to start only after the migration would mean no decay at all for a window that can be
+        // `migration.lock_wait_secs` long. It also keeps `PrometheusHandle` — a
+        // `metrics-exporter-prometheus` type this crate does not depend on directly — out of
+        // `boot_deferred`'s signature, which is the only thing that made it unnameable.
+        if let Some(handle) = metrics_handle {
+            let mut rx = rx.clone();
+            servers.spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => handle.run_upkeep(),
+                        _ = rx.changed() => break,
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+    {
         let mut rx = rx.clone();
         // As with HTTP: the object `boot_grpc_routes` returns is the single, permanent service
         // bound to this listener — health as a matched route plus an `UNAVAILABLE` catch-all
@@ -204,19 +237,26 @@ async fn serve() -> anyhow::Result<()> {
     // SMA-571 §4.6: the whole post-bind boot is ONE fallible function so `?` can be used freely
     // inside it and the drain is structural rather than per-`?`. Adding a fallible step there can
     // no longer skip the graceful shutdown.
+    //
+    // ONE signal registration, kept alive across BOTH phases (SMA-571 fix round 1). Building a
+    // fresh `shutdown_signal()` for the steady-state `select!` below would LOSE a SIGTERM that
+    // landed in the gap between the two: tokio 1.53.1's signal driver `broadcast()` does
+    // `pending.swap(false)` unconditionally and ignores the send error when there is no `Signal`
+    // receiver, so a signal delivered while zero receivers are alive is consumed and never
+    // redelivered to one created afterwards. The pod would then ignore its only SIGTERM and hang
+    // until `terminationGracePeriodSeconds` expired into SIGKILL — precisely the stranded-lock
+    // shape the arm below warns about.
+    let mut shutdown = std::pin::pin!(shutdown_signal());
     let mut shutting_down = false;
     let outcome = tokio::select! {
-        r = boot_deferred(&db, &config, &slot, &mut servers, &rx, request_timeout, metrics_handle.clone()) => r,
-        () = shutdown_signal() => {
+        r = boot_deferred(&db, &config, &slot, &mut servers, &rx, request_timeout) => r,
+        () = &mut shutdown => {
             // This window was unhandled before SMA-571 — but the pod is now PRESENT-and-unready
             // rather than absent, so a rolling update is far more likely to land here. Ignoring
             // SIGTERM for `lock_wait_secs` and then taking SIGKILL is the stranded-lock scenario
             // in RUNBOOK-containers.md. Cancelling `migrate_under_lock` between polls is safe,
-            // and cancelling inside the sea-orm migrator's `up` rolls the transaction back and
-            // releases the transaction-scoped lock by construction. (Spelled that way on
-            // purpose: `migration_lock.rs`'s composition-root guard greps THIS file for the
-            // bare `Migrator` + `up` call as a banned pattern, and a prose mention would trip
-            // it.)
+            // and cancelling inside `Migrator::up` rolls the transaction back and releases the
+            // transaction-scoped lock by construction.
             tracing::info!("shutdown signal received during boot");
             shutting_down = true;
             Ok(())
@@ -229,7 +269,7 @@ async fn serve() -> anyhow::Result<()> {
         let _ = tx.send(());
         let outstanding = drain_bounded(&mut servers, DRAIN_TIMEOUT).await;
         if outstanding > 0 {
-            tracing::warn!(outstanding, "drain timed out with tasks still running");
+            tracing::warn!(unreaped = outstanding, "drain timed out with tasks not yet joined");
         }
         return outcome;
     }
@@ -238,7 +278,7 @@ async fn serve() -> anyhow::Result<()> {
 
     // Stop on the first of: shutdown signal, or a server task ending.
     let early_error: Option<anyhow::Error> = tokio::select! {
-        () = shutdown_signal() => {
+        () = &mut shutdown => {
             tracing::info!("shutdown signal received");
             None
         }
@@ -299,7 +339,6 @@ async fn boot_deferred(
     servers: &mut JoinSet<anyhow::Result<()>>,
     rx: &tokio::sync::watch::Receiver<()>,
     request_timeout: Duration,
-    metrics_handle: Option<paigasus_observability::PrometheusHandle>,
 ) -> anyhow::Result<()> {
     // SMA-559: serialised against a concurrently starting replica by a transaction-scoped
     // advisory lock. A waiter blocks here — but since SMA-571 it does so with all three
@@ -369,30 +408,6 @@ async fn boot_deferred(
         PublisherBackend::Tracing => Arc::new(TracingEventPublisher),
     };
 
-    {
-        // Periodic Prometheus upkeep (CodeRabbit round-1 fix, mirrors
-        // `paigasus-gateway::main`'s identical fix): `PrometheusBuilder::install_recorder()`
-        // (unlike `install()`) does NOT spawn the maintenance task
-        // `PrometheusHandle::run_upkeep()` needs to periodically drain/decay histograms —
-        // without calling it ourselves, memory grows unbounded over the life of the process.
-        // `paigasus_observability::init()` itself stays runtime-agnostic (it's also called from
-        // plain `#[test]` code with no Tokio runtime), so the spawn lives here instead, into the
-        // same `JoinSet` on the same shutdown-watch as every other server task, only when
-        // metrics are enabled.
-        if let Some(handle) = metrics_handle {
-            let mut rx = rx.clone();
-            servers.spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(5));
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => handle.run_upkeep(),
-                        _ = rx.changed() => break,
-                    }
-                }
-                Ok(())
-            });
-        }
-    }
     {
         // The policy-snapshot background reload (SMA-444 Task 15, spec §7/D11 AC3): bounds
         // staleness even when `policy_gen` never visibly advances on this replica.
@@ -606,8 +621,13 @@ async fn boot_deferred(
     Ok(())
 }
 
-/// Drain `servers`, bounded. Returns how many tasks were STILL running at the timeout so the
+/// Drain `servers`, bounded. Returns how many tasks were still UNREAPED at the timeout so the
 /// caller can log it — a silent give-up would hide exactly the wedged task worth naming.
+///
+/// Unreaped, not "still running": `JoinSet::len` counts tasks this function has not yet pulled
+/// out with `join_next`, so a task that finished microseconds before the budget expired is
+/// counted too. The number is an upper bound on what is genuinely wedged, which is the right
+/// direction for a diagnostic — it can over-report, never under-report.
 async fn drain_bounded(servers: &mut JoinSet<anyhow::Result<()>>, budget: Duration) -> usize {
     let _ = tokio::time::timeout(budget, async {
         while let Some(joined) = servers.join_next().await {

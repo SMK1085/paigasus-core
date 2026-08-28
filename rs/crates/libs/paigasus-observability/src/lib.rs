@@ -13,17 +13,11 @@ pub mod names;
 pub use correlation::{CorrelationLayer, RequestIds, Retryable, current_ids};
 pub use grpc::{describe_grpc, record_grpc};
 pub use http::http_metrics_layer;
-/// Re-exported because it is already unavoidably part of this crate's public API — [`init`]
-/// returns one and [`metrics_router`] takes one — while `metrics-exporter-prometheus` is a
-/// dependency of THIS crate, not of its consumers. Without the re-export a service could hold a
-/// handle but never NAME its type, which is exactly what `paigasus-iam`'s `boot_deferred`
-/// signature needs (SMA-571).
-pub use metrics_exporter_prometheus::PrometheusHandle;
 
 use std::sync::OnceLock;
 
 use axum::{Router, http::header, response::IntoResponse, routing::get};
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
 /// Default latency histogram buckets (seconds) for every `*_seconds` family.
 const LATENCY_BUCKETS: &[f64] = &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
