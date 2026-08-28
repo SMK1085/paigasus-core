@@ -1,7 +1,6 @@
 {
   "name": "@paigasus/node-bindings",
   "version": "0.1.0",
-  "private": true,
   "license": "Apache-2.0",
   "description": "Node-API (napi-rs) binding for the Paigasus Rust kernel.",
   "keywords": ["paigasus", "napi", "napi-rs", "node-api", "ffi", "rust"],

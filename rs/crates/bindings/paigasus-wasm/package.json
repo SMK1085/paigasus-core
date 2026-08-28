@@ -1,9 +1,16 @@
 {
   "name": "@paigasus/wasm",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "license": "Apache-2.0",
+  "description": "WebAssembly binding for the Paigasus Rust kernel.",
+  "keywords": ["paigasus", "wasm", "webassembly", "wasm-bindgen", "rust"],
+  "homepage": "https://github.com/SMK1085/paigasus-core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SMK1085/paigasus-core.git",
+    "directory": "rs/crates/bindings/paigasus-wasm"
+  },
   "main": "paigasus_wasm.js",
   "module": "paigasus_wasm.js",
   "types": "paigasus_wasm.d.ts",
@@ -14,5 +21,8 @@
     "paigasus_wasm_bg.wasm",
     "paigasus_wasm.d.ts",
     "paigasus_wasm_bg.wasm.d.ts"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

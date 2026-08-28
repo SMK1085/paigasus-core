@@ -457,3 +457,132 @@ jobs:
         with:
           packages-dir: dist-proto
           skip-existing: true
+
+  publish-npm:
+    name: publish to npm
+    needs: [prebuild, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release-publish
+    permissions:
+      id-token: write    # npm provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install JS workspace deps
+        run: pnpm --dir ts install --frozen-lockfile
+
+      # See publish-pypi's "Read the released version" step for the JSON shape. Only the
+      # version is needed here — the family is version-locked, so paigasus-kernel's number
+      # binds every @paigasus/* package too.
+      - name: Read the released version
+        id: relinfo
+        env:
+          RELEASED: ${{ needs.release.outputs.released }}
+        run: |
+          set -euo pipefail
+          KERNEL_VERSION="$(jq -r '.releases[] | select(.package_name == "paigasus-kernel") | .version' <<<"$RELEASED")"
+          [ -n "$KERNEL_VERSION" ] || { echo "::error::paigasus-kernel not found in released output: $RELEASED"; exit 1; }
+          echo "kernel_version=$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download the node addons
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: prebuild-*
+          merge-multiple: true
+          path: rs/crates/bindings/paigasus-node-bindings/artifacts
+
+      - name: Download the assembled npm dirs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: npm-dirs
+          path: rs/crates/bindings/paigasus-node-bindings/npm
+
+      - name: Download the wasm distribution
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: wasm-dist
+          path: wasm-dist
+
+      # npm has no --skip-existing, and napi prepublish publishes several packages. A re-run
+      # after a partial success would hit 403 "cannot publish over the previously published
+      # versions" on the ones that landed, so the retry could never succeed unaided — the same
+      # argument skip-existing answers for PyPI. Give npm those semantics by hand.
+      - name: Skip packages already at this version
+        id: npmstate
+        env:
+          VERSION: ${{ steps.relinfo.outputs.kernel_version }}
+        run: |
+          set -euo pipefail
+          published () { npm view "$1@$2" version >/dev/null 2>&1; }
+          if published "@paigasus/wasm" "$VERSION"; then
+            echo "wasm=skip" >> "$GITHUB_OUTPUT"
+          else
+            echo "wasm=publish" >> "$GITHUB_OUTPUT"
+          fi
+          if published "@paigasus/node-bindings" "$VERSION"; then
+            echo "node=skip" >> "$GITHUB_OUTPUT"
+          else
+            echo "node=publish" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --no-gh-release IS REQUIRED and is NOT in --help (prebuild.yml records this; ghRelease
+      # defaults ON). release-plz owns every tag — ADR-0011 S3, "the tool owns every tag",
+      # singular. ci/actionlint/release_guard.py's V5 fails if this flag is ever dropped.
+      # `--no-gh-release` immediately after the subcommand, per the task-89 header: the guard
+      # splits a `run:` line on shell separators and drops anything after a `#`, and a quoted
+      # argument containing `#` placed BEFORE the flag would truncate the segment and produce a
+      # false red — putting the flag first makes that unreachable.
+      #
+      # Auth: npm Trusted Publishing (OIDC) cannot be configured before a package's first-ever
+      # publish, and all three @paigasus/* packages are unpublished (measured: `npm view` 404s
+      # for each) — so NPM_TOKEN stays for now, becoming unnecessary after the first release.
+      # Confined to this step's own env (never job- or workflow-level) and written to the HOME
+      # npmrc rather than the committed ts/.npmrc so every per-target `npm publish` napi shells
+      # out to, regardless of its own cwd under --npm-dir, resolves it.
+      - name: Publish the node addon and its platform packages
+        if: steps.npmstate.outputs.node == 'publish'
+        working-directory: ts/packages/paigasus-kernel
+        env:
+          NPM_CONFIG_PROVENANCE: 'true'
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
+          pnpm exec napi prepublish --no-gh-release --npm-dir npm \
+            --cwd ../../../rs/crates/bindings/paigasus-node-bindings
+
+      # Assert the TARBALL, not the working tree: `files` membership is what npm actually ships.
+      # A wasm-less package installs cleanly and fails at import.
+      - name: Assert the wasm tarball carries its binary
+        if: steps.npmstate.outputs.wasm == 'publish'
+        working-directory: wasm-dist
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --json > /tmp/pack.json
+          python3 - <<'PY'
+          import json, sys
+          files = {f["path"] for f in json.load(open("/tmp/pack.json"))[0]["files"]}
+          if "paigasus_wasm_bg.wasm" not in files:
+              print("::error::the wasm tarball ships no binary:", sorted(files))
+              sys.exit(1)
+          print("OK: tarball carries paigasus_wasm_bg.wasm")
+          PY
+
+      - name: Publish @paigasus/wasm
+        if: steps.npmstate.outputs.wasm == 'publish'
+        working-directory: wasm-dist
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
+          npm publish --provenance --access public
