@@ -382,6 +382,14 @@ jobs:
           # must gate that family's steps off instead, so a run where NEITHER family released
           # still completes having uploaded nothing. `.releases[]?` (not `.releases[]`) so an
           # empty `{"releases":[]}` array yields "" rather than a jq error under `pipefail`.
+          # Fix round 2 (Important): `?` also swallows a STRUCTURALLY WRONG payload (release-plz
+          # schema drift, or `$RELEASED` wired to the wrong key) — `.releases[]?` on `null`,
+          # `{"unexpected":1}` or `{"releases":null}` would silently report both families absent
+          # and the job would exit 0 having uploaded nothing. Validate the shape explicitly
+          # first, so `?` is doing only the job it was added for (a legitimately empty or
+          # absent-key `releases` array), not hiding a wiring bug as a quiet no-op.
+          jq -e 'has("releases") and (.releases | type == "array")' <<<"$RELEASED" >/dev/null \
+            || { echo "::error::malformed release output from release-plz: $RELEASED"; exit 1; }
           KERNEL_VERSION="$(jq -r '.releases[]? | select(.package_name == "paigasus-kernel") | .version' <<<"$RELEASED")"
           PROTO_VERSION="$(jq -r '.releases[]? | select(.package_name == "paigasus-proto") | .version' <<<"$RELEASED")"
           if [ -n "$KERNEL_VERSION" ]; then
@@ -506,6 +514,11 @@ jobs:
           RELEASED: ${{ needs.release.outputs.released }}
         run: |
           set -euo pipefail
+          # Fix round 2 (Important): validate the shape before the family filter — see
+          # publish-pypi's identical guard for why `.releases[]?` alone would silently report
+          # kernel_release=false on a structurally wrong payload instead of failing loudly.
+          jq -e 'has("releases") and (.releases | type == "array")' <<<"$RELEASED" >/dev/null \
+            || { echo "::error::malformed release output from release-plz: $RELEASED"; exit 1; }
           KERNEL_VERSION="$(jq -r '.releases[]? | select(.package_name == "paigasus-kernel") | .version' <<<"$RELEASED")"
           if [ -n "$KERNEL_VERSION" ]; then
             echo "kernel_release=true" >> "$GITHUB_OUTPUT"
