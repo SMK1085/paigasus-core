@@ -60,10 +60,42 @@ async fn the_swap_takes_effect_on_an_already_built_router() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "503 -> 401 is what proves delegation happened");
 }
 
-/// AC 4's third clause. `OnceLock::get` is taken once at dispatch, so a request that started
-/// before the install completes against the value it started with.
+/// AC 4's third clause: `OnceLock::get` is taken ONCE at dispatch, so a request whose handling
+/// started before an `install` must resolve against the value it started with, never tearing
+/// across the swap.
+///
+/// **Honest scope (SMA-571 Task 5 review round 1).** `deferred_fallback`'s `None` arm
+/// (`CorrelationLayer` + `migrating_response`) has no genuine async wait of its own — no I/O, no
+/// timer, no lock — so it resolves within a handful of scheduler ticks. Verified by mutation:
+/// injecting `tokio::time::sleep(Duration::from_millis(200))` before `slot.get()` in
+/// `deferred_fallback` makes this test FAIL as expected (the request observes the post-install
+/// state and gets 401, not 503); injecting a single `tokio::task::yield_now().await` in the SAME
+/// spot does NOT — one scheduler tick is not enough real delay to matter at any timescale a human
+/// would call a "race". So under UNMUTATED code, the spawned request below has almost certainly
+/// already read the slot and computed its response well before the `sleep`/`install()` below run:
+/// this test does not exercise, and is not proof of, a genuine tight race. What it actually
+/// guards is a regression that inserts real async work (a network call, a lock, a sleep) between
+/// dispatch and the `slot.get()` read, which would let a concurrent `install()` win and delegate a
+/// request that should have resolved pre-swap. Read this test's name and this doc as "no
+/// regression introduces a real delay before the slot read" — never as "concurrent access to the
+/// slot is race-free".
+///
+/// **Why the `sleep` stays, deliberately, rather than a "clean" primitive.** All this test needs
+/// to know is whether the spawned request has already performed its (unobservable, synchronous,
+/// checkpoint-free) `slot.get()` read before `install()` runs — and that read has no external
+/// signal in production code today, so no `Notify`/`Barrier`/channel can observe it without one
+/// being added. Adding a synthetic signal/slow-path INTO production code, purely to make a test
+/// deterministic, is a worse outcome than the coverage gap it would close, so that is ruled out.
+/// The one primitive that IS available without touching production code — awaiting the spawned
+/// `JoinHandle` BEFORE calling `install()` — was tried and rejected: it turns the ORDER (fully
+/// resolve, then install) into a structural guarantee rather than a race, which makes the
+/// assertion pass UNCONDITIONALLY regardless of implementation. Verified: with that ordering, the
+/// SAME 200ms mutation above no longer fails the test at all (`install()` never runs until the
+/// spawned request has already returned, so the response can only ever be the pre-swap value). A
+/// vacuous test is strictly worse than a timing-dependent one that can still fail, so the
+/// wall-clock `sleep` — the only mechanism left that keeps this test able to fail — stays.
 #[tokio::test]
-async fn a_request_in_flight_across_the_install_completes_against_its_pre_swap_value() {
+async fn a_request_dispatched_before_install_completes_against_its_pre_swap_value() {
     let Some((_node, slot, router, state)) = slot_and_router().await else {
         return;
     };
@@ -72,7 +104,8 @@ async fn a_request_in_flight_across_the_install_completes_against_its_pre_swap_v
         let router = router.clone();
         async move { router.oneshot(Request::builder().uri("/v1/organizations").body(Body::empty()).unwrap()).await.unwrap() }
     });
-    // Let the request reach dispatch before the slot changes under it.
+    // Best-effort head start, not a synchronization guarantee — see this test's doc for why no
+    // clean primitive can observe the unmutated handler's checkpoint-free slot read.
     tokio::time::sleep(Duration::from_millis(50)).await;
     slot.install(Serving::new(state, Duration::from_secs(30)).await).await.expect("install");
 
