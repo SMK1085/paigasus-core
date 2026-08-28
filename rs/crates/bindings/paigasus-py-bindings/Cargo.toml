@@ -7,6 +7,21 @@ rust-version.workspace = true
 authors.workspace = true
 publish = false
 
+# Sdist allowlist. maturin builds the sdist from `cargo package --list`, so THIS list is
+# what controls its contents — MEASURED 2026-08-28: without it the sdist ships moon.yml,
+# the same repo-internal leak repo:publish-metadata Check 2b catches on the Cargo side.
+# Checks 1d/2b/2c do not reach this crate (it is `publish = false`), so the assertion
+# that holds this list honest lives in .github/workflows/wheels.yml, not in the gate.
+# Membership is literal: never "**/*", which would reinstate the leak.
+include = [
+  "src/**/*.rs",
+  "Cargo.toml",
+  "pyproject.toml",
+  "paigasus_py_bindings.pyi",
+  "README.md",
+  "LICENSE",
+]
+
 [lib]
 # Only cdylib: Python loads this artifact; no other Rust crate consumes it.
 crate-type = ["cdylib"]
@@ -27,5 +42,15 @@ paigasus-kernel.workspace = true
 # called directly and needs no ignore.
 ignored = ["pyo3"]
 
-[lints]
-workspace = true
+# NOT `workspace = true`. maturin ships the workspace Cargo.toml verbatim in the sdist
+# (measured), including `[workspace.lints.rust] warnings = "deny"`, and an sdist consumer
+# builds this crate as the ROOT package, where `--cap-lints allow` does not apply. An
+# inherited deny would make the first new rustc lint break `pip install` from sdist for
+# every macOS/Windows/musl user, on an already-published version. Same reasoning, and the
+# same fix, as paigasus-kernel's own table (SMA-577 Check 1c). CI strictness is
+# unaffected: the Moon `lint` task passes `-D warnings` explicitly.
+[lints.rust]
+warnings = "warn"
+
+[lints.clippy]
+all = "warn"

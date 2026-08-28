@@ -1,16 +1,47 @@
 [project]
 name = "paigasus-py-bindings"
 version = "0.1.0"
+description = "PyO3 bindings for the Paigasus behavioral kernel."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Paigasus contributors" }]
 requires-python = ">=3.12"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Rust",
+  "Intended Audience :: Developers",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
 
+# PyPI-bound. This marker — NOT the version field — is what repo:publish-metadata's
+# Python arm reads to decide the publishable set (SMA-578 review M7): in this repo
+# `version` means "in a lockstep family" (repo:version-lockstep writes it), and this
+# crate is simultaneously `publish = false` on the Cargo side and PyPI-bound.
+[tool.paigasus]
+pypi = true
+
+# Floor raised from 1.7 to the version the sdist's macOS build was actually MEASURED on
+# (SMA-578 §2/review M2). An sdist consumer resolving maturin 1.7 would build on a
+# version that behaviour was never verified against.
 [build-system]
-requires = ["maturin>=1.7,<2"]
+requires = ["maturin>=1.9.6,<2"]
 build-backend = "maturin"
 
 [tool.maturin]
 # Cargo.toml is co-located (same dir) → no manifest-path. Keeping this pyproject INSIDE
 # rs/ means maturin runs cargo from within rs/, so rs/.cargo/config.toml's apple-darwin
-# link flags resolve and the extension-module cdylib links on macOS (SMA-419; Polyglot
-# Monorepo Scoping §1/§3 co-located fallback). NOTE (publish deferred): a published sdist
-# won't carry rs/.cargo/config.toml — revisit packaging when flipping publish off 0.0.0.
+# link flags resolve and the extension-module cdylib links on macOS without maturin
+# (SMA-419; Polyglot Monorepo Scoping §1/§3 co-located fallback).
+#
+# MEASURED 2026-08-28 (SMA-578 §2), correcting the caveat that stood here: a published
+# sdist does NOT need rs/.cargo/config.toml. The sdist was extracted to a directory with
+# no .cargo/config.toml anywhere on cargo's upward walk and `maturin build` linked
+# cleanly on macOS — maturin supplies the `-undefined dynamic_lookup` arguments itself.
+# The control: plain `cargo build` in that same directory FAILS with undefined _Py*
+# symbols, which is exactly what rs/.cargo/config.toml exists for ("WITHOUT maturin").
+# The sdist is therefore a supported install path, verified per-platform in
+# .github/workflows/wheels.yml.
 module-name = "paigasus_py_bindings"
