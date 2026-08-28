@@ -23,6 +23,7 @@ class InfraError(Exception):
 import glob
 import os
 import re
+import tempfile
 
 import yaml
 
@@ -186,10 +187,12 @@ def _self_test() -> int:
                   file=sys.stderr)
             failures += 1
 
+    failures += _self_test_filesystem()
+
     if failures:
         print(f"self-test: {failures} of {len(RULE_CASES)} rows failed", file=sys.stderr)
         return RC_ASSERT
-    total = len(RULE_CASES) + len(TRIGGER_CASES) + len(PARSE_CASES)
+    total = len(RULE_CASES) + len(TRIGGER_CASES) + len(PARSE_CASES) + FILESYSTEM_CASES
     print(f"== workflow-credentials self-test passed ({total} rows) ==")
     return RC_OK
 
@@ -233,11 +236,23 @@ def triggers(doc) -> set[str]:
 
 def discover(root: str) -> list[str]:
     """Basenames of every workflow whose triggers make it a subject."""
+    workflows_dir = os.path.join(root, ".github", "workflows")
     paths = sorted(glob.glob(os.path.join(root, SCAN_GLOB)))
     if not paths:
-        raise InfraError(
-            f"{SCAN_GLOB} matched no file under {root} — the scan root moved and this gate "
-            "would assert nothing")
+        # SPLIT, deliberately (SMA-593, controller ruling 10). Two different causes hide in
+        # "no files matched", and they triage differently. An ABSENT .github/workflows means
+        # the checker was handed the wrong root — a broken tool, rc 2. A PRESENT directory
+        # with no .y*ml in it means someone deleted or renamed the workflows — an authorial
+        # act, and ci_targets.py:28-36 states the repo's rule for exactly that: "someone
+        # edited a file into a shape this gate cannot read ... is a red with a fix, not a
+        # broken tool", so rc 1. Collapsing both into rc 2 tells a contributor to re-run a
+        # job that will never go green.
+        if not os.path.isdir(workflows_dir):
+            raise InfraError(
+                f"{workflows_dir} does not exist — the checker was given the wrong repo root")
+        raise AssertionFailure(
+            f"{SCAN_GLOB} matched no file under {root}, but .github/workflows/ exists — the "
+            "workflows were removed or renamed, and this gate would assert nothing")
     subjects = []
     for path in paths:
         docs = load_documents(path)
@@ -290,6 +305,114 @@ def check(root: str) -> int:
     print(f"workflow-credentials: {len(subjects)} pull-request-triggered workflow(s) "
           "carry no credential")
     return RC_OK
+
+
+# Five rows exercised against a real filesystem, not a YAML string, so they cannot live in
+# RULE_CASES/TRIGGER_CASES/PARSE_CASES. Three cover the zero-match SPLIT (Finding 1, SMA-593
+# controller ruling 10): discover() must raise InfraError when .github/workflows/ is absent
+# (the checker was handed the wrong root) but AssertionFailure when it exists and is merely
+# empty (someone deleted or renamed the workflows — authorial, not infra), and a `.yaml`
+# (not `.yml`) workflow must still be discovered, proving SCAN_GLOB's `*.y*ml` covers both
+# extensions. Two cover the stale-allowlist guard (Finding 2): PR_CREDENTIAL_ALLOWED is this
+# gate's only escape hatch and was otherwise untested — an entry naming a workflow that is
+# not a subject must raise AssertionFailure, and an empty allowlist must not.
+FILESYSTEM_CASES = 5
+
+
+def _self_test_filesystem() -> int:
+    failures = 0
+
+    # 1. .github/workflows/ absent entirely -> the checker was given the wrong root: InfraError.
+    with tempfile.TemporaryDirectory() as root:
+        try:
+            discover(root)
+            print("  FAIL discover/missing workflows dir: expected InfraError, "
+                  "got no exception", file=sys.stderr)
+            failures += 1
+        except InfraError:
+            pass
+        except Exception as exc:
+            print(f"  FAIL discover/missing workflows dir: expected InfraError, "
+                  f"got {type(exc).__name__}", file=sys.stderr)
+            failures += 1
+
+    # 2. .github/workflows/ present but empty -> workflows were deleted/renamed: AssertionFailure.
+    with tempfile.TemporaryDirectory() as root:
+        os.makedirs(os.path.join(root, ".github", "workflows"))
+        try:
+            discover(root)
+            print("  FAIL discover/empty workflows dir: expected AssertionFailure, "
+                  "got no exception", file=sys.stderr)
+            failures += 1
+        except AssertionFailure:
+            pass
+        except Exception as exc:
+            print(f"  FAIL discover/empty workflows dir: expected AssertionFailure, "
+                  f"got {type(exc).__name__}", file=sys.stderr)
+            failures += 1
+
+    # 3. a `.yaml` (not `.yml`) pull_request workflow is still discovered.
+    with tempfile.TemporaryDirectory() as root:
+        wf_dir = os.path.join(root, ".github", "workflows")
+        os.makedirs(wf_dir)
+        with open(os.path.join(wf_dir, "x.yaml"), "w", encoding="utf-8") as handle:
+            handle.write("on:\n  pull_request:\njobs: {}\n")
+        try:
+            subjects = discover(root)
+            if subjects != ["x.yaml"]:
+                print(f"  FAIL discover/.yaml extension: expected ['x.yaml'], got {subjects}",
+                      file=sys.stderr)
+                failures += 1
+        except Exception as exc:
+            print(f"  FAIL discover/.yaml extension: unexpected {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            failures += 1
+
+    # 4 & 5. The stale-allowlist guard, exercised through check() with a root whose subjects
+    # exactly match EXPECTED_PR_SUBJECTS so the subject-pin comparison clears and the guard is
+    # actually reached.
+    with tempfile.TemporaryDirectory() as root:
+        wf_dir = os.path.join(root, ".github", "workflows")
+        os.makedirs(wf_dir)
+        for name in EXPECTED_PR_SUBJECTS:
+            with open(os.path.join(wf_dir, name), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "on:\n  pull_request:\njobs:\n  a:\n    permissions:\n      contents: read\n")
+
+        saved_allowed = dict(PR_CREDENTIAL_ALLOWED)
+        try:
+            # 4. An allowlist entry naming a workflow that is NOT a subject: AssertionFailure.
+            PR_CREDENTIAL_ALLOWED.clear()
+            PR_CREDENTIAL_ALLOWED[("release.yml", "R1")] = "test: not a subject"
+            try:
+                check(root)
+                print("  FAIL check/stale allowlist entry: expected AssertionFailure, "
+                      "got no exception", file=sys.stderr)
+                failures += 1
+            except AssertionFailure:
+                pass
+            except Exception as exc:
+                print(f"  FAIL check/stale allowlist entry: expected AssertionFailure, "
+                      f"got {type(exc).__name__}", file=sys.stderr)
+                failures += 1
+
+            # 5. An empty allowlist must NOT fire the guard.
+            PR_CREDENTIAL_ALLOWED.clear()
+            try:
+                rc = check(root)
+                if rc != RC_OK:
+                    print(f"  FAIL check/empty allowlist: expected RC_OK, got {rc}",
+                          file=sys.stderr)
+                    failures += 1
+            except Exception as exc:
+                print(f"  FAIL check/empty allowlist: unexpected {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+                failures += 1
+        finally:
+            PR_CREDENTIAL_ALLOWED.clear()
+            PR_CREDENTIAL_ALLOWED.update(saved_allowed)
+
+    return failures
 
 
 def main(argv: list[str]) -> int:
