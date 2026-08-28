@@ -155,7 +155,7 @@ pub struct Serving {
 }
 
 impl Serving {
-    pub fn new(state: AppState, request_timeout: Duration) -> Self { /* derives all three */ }
+    pub async fn new(state: AppState, request_timeout: Duration) -> Self { /* derives all three */ }
 }
 
 #[derive(Clone)]
@@ -283,14 +283,14 @@ break-glass and `UserService.CreateUser`, that is not an acceptable failure mode
 Hence D8. Registration is extracted to a single site:
 
 ```rust
-pub fn routes(state: AppState) -> tonic::service::Routes   // the nine services + conditional audit
+pub async fn routes(state: AppState) -> tonic::service::Routes   // the nine services + conditional audit
 ```
 
 * `grpc::router(state, timeout)` — unchanged externally — becomes
   `Server::builder().timeout(t).layer(CorrelationLayer).layer(AuthLayer::new(state.clone()))
-  .add_routes(routes(state))` (`add_routes` at `mod.rs:556`). All eleven suites keep working
+  .add_routes(routes(state).await)` (`add_routes` at `mod.rs:556`). All eleven suites keep working
   against identical behaviour.
-* `Serving.grpc` is `AuthLayer::new(state).layer(routes(state))` → `AuthEnforce<Routes>`.
+* `Serving.grpc` is `AuthLayer::new(state).layer(routes(state).await)` → `AuthEnforce<Routes>`.
 
 A test asserts both paths mount the same method set, so the fork cannot silently reopen.
 
