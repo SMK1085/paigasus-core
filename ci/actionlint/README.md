@@ -293,6 +293,18 @@ block a second time rather than switched the gate off, and the real block is sti
 The extractor is deliberately left alone; tightening it to require `tasks:` would buy nothing that
 the cost of defeating it does not already buy.
 
+**L19 — two of `affected_smoke_block_verdict`'s own membership tests are anchor-dependent, and
+both anchors are now fixture-covered.** The `INPUT` needle is anchored at BOTH ends
+(`${nl}INPUT${tab}${glob}${nl}`), not just the leading one, so a declared glob that merely EXTENDS
+a required one (`ci/actionlint/**/*.sh` against the required `ci/actionlint/**/*`) is still
+reported missing rather than silently satisfying it. The `ERR` needle is anchored to the START of
+a record (`${nl}ERR${tab}`), so a `SCRIPT` line whose own text happens to contain `ERR<TAB>` is not
+misread as an ERR record — which would otherwise short-circuit the verdict to empty before any
+`missing-input`/`missing-script` check runs, waiving all requirements at once. Losing either anchor
+is exactly the kind of narrowing edit L15's same-size-swap gap does not catch; the two rows added
+alongside this entry (SMA-572 follow-up) close it by mutating each anchor in turn and asserting the
+row fails.
+
 ## Cost
 
 `inputs: ['**/*']` is deliberate (see the WHY comment on the `actionlint:` task in `moon.yml`),
