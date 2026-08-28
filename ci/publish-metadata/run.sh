@@ -46,6 +46,35 @@
 #            it with continue-on-error or if:. Nothing else guards a workflow job:
 #            repo:actionlint's call-site machinery is keyed on ci.yml only (SMA-529).
 #
+# The P* checks are the PYTHON arm (SMA-578). The crates.io half above is discovered from
+# Cargo's `publish` flag; PyPI has no equivalent, and in this repo the version field means
+# "in a lockstep family" rather than "publishable" — paigasus-py-bindings is `publish =
+# false` on the Cargo side and PyPI-bound at the same time. So the Python set is discovered
+# from an explicit `[tool.paigasus] pypi = true` MARKER: the publish decision itself.
+#
+#   Check P0 the PyPI-bound set EQUALS EXPECTED_PYPI_PUBLISHABLE — this arm's non-vacuity
+#            control, mirroring Check 0.
+#   Check P1 each PyPI-bound distribution carries the [project] metadata PyPI needs, does
+#            not pair an SPDX license expression with a `License ::` trove classifier (PyPI
+#            hard-rejects that, SMA-378), and — for the crates whose SOURCES SHIP IN AN
+#            SDIST — carries Check 1c's own non-denying lint table. 1c cannot see those
+#            crates: it iterates the `publish = true` set, and paigasus-py-bindings is not
+#            in it, yet maturin ships the workspace Cargo.toml verbatim so an sdist consumer
+#            compiles it as the ROOT package where `--cap-lints allow` does not apply.
+#   Check P2 the files those fields NAME exist on disk. uv_build does not auto-glob license
+#            files (SMA-378), so a declared-but-absent LICENSE ships a wheel with no licence
+#            text and nothing else notices.
+#   Check P-D6 .github/workflows/wheels.yml declares neither `secrets:` nor
+#            `id-token: write`. It is pull_request-triggered and same-repo PRs receive
+#            repository secrets, so moving the upload into it — the natural refactor once
+#            the artifacts are there — would reopen SMA-407 §7 review M2. wheels.yml's own
+#            header comment cites this gate; that check is what makes the citation true.
+#
+# The Python arm is deliberately SPELLING-LEVEL and pure-Python: this gate is in ci.yml's
+# required `moon ci` target list under `toolchain: 'system'`, which installs no maturin, so
+# no check here may build an artifact. Behavioural wheel/sdist assertions live in
+# .github/workflows/wheels.yml (SMA-578 review M6).
+#
 # Exit codes: 0 pass | 1 assertion failed (the repo is wrong) | 2 infrastructure failed.
 # A broken invocation must NEVER read as "all checks passed".
 #
@@ -71,6 +100,38 @@ EXPECTED_PUBLISHABLE=("paigasus-kernel" "paigasus-proto" "paigasus-proto-derive"
 # What a published artifact must and must not contain.
 REQUIRED_PACKAGED=("README.md" "LICENSE")
 FORBIDDEN_PACKAGED=("moon.yml")
+
+# --- SMA-578: the PyPI arm ---------------------------------------------------------
+# The PyPI-bound set, discovered from the `[tool.paigasus] pypi` MARKER — not from the
+# version field. In this repo `version != "0.0.0"` means "in a lockstep family"
+# (repo:version-lockstep writes it), and paigasus-py-bindings is simultaneously
+# `publish = false` on the Cargo side and PyPI-bound (SMA-578 review M7).
+#
+# py/packages/paigasus-proto is DELIBERATELY absent: it is version-locked with the proto
+# family and its name is reserved on PyPI, but no publish path uploads it yet. SMA-579
+# owns that decision (SMA-578 §9.3) — it must be recorded, not made by omission.
+EXPECTED_PYPI_PUBLISHABLE=("paigasus-kernel" "paigasus-py-bindings")
+
+# The scan set, as literal paths. NOT a filesystem `**/pyproject.toml` glob: that sweeps in
+# py/pyproject.toml (a uv virtual root with NO [project] table) and, in a provisioned tree,
+# ts/node_modules/.pnpm/…/node-gyp/gyp/pyproject.toml.
+PYPI_SCAN=(
+  "py/packages/paigasus-kernel/pyproject.toml"
+  "py/packages/paigasus-ml/pyproject.toml"
+  "py/packages/paigasus-proto/pyproject.toml"
+  "py/packages/paigasus-workflows/pyproject.toml"
+  "rs/crates/bindings/paigasus-py-bindings/pyproject.toml"
+)
+
+# Required [project] keys for a PyPI-bound distribution.
+PYPI_REQUIRED_FIELDS=("description" "readme" "license" "license-files" "authors" "classifiers")
+
+# Check P1 (continued) — Check 1c's rule, extended to crates whose SOURCES SHIP IN A
+# PUBLISHED SDIST rather than only to `publish = true` crates. maturin ships the workspace
+# Cargo.toml verbatim (measured), so an sdist consumer compiles as the ROOT package where
+# `--cap-lints allow` does not apply. Check 1c misses paigasus-py-bindings precisely
+# because that crate is `publish = false` (SMA-578 review B2).
+SDIST_SHIPPED_CRATES=("rs/crates/bindings/paigasus-py-bindings" "rs/crates/libs/paigasus-kernel")
 
 die_infra() { printf '%s\n' "$*" >&2; exit 2; }
 
@@ -772,6 +833,143 @@ assert_check2_covered_everything() { # $@ the names the per-package loop enumera
 # assert each reports red. Without this, a refactor can quietly turn the gate vacuous and
 # every CI run stays green. Uses fixtures rather than mutating the repo, so it is fast,
 # deterministic, and cannot leave the tree dirty.
+# Checks P0/P1/P2 — the PyPI packaging-metadata arm (SMA-578 §8).
+#
+#   Check P0  the PyPI-bound set EQUALS EXPECTED_PYPI_PUBLISHABLE. The non-vacuity control
+#             for this arm, mirroring Check 0: the set is discovered from the very marker
+#             this gate protects, so a shrunken set must be a hard failure rather than a
+#             green run over nothing.
+#   Check P1  each PyPI-bound distribution carries the metadata PyPI needs, and does NOT
+#             supply an SPDX license expression alongside a `License ::` trove classifier —
+#             PyPI hard-rejects that combination (SMA-378).
+#   Check P2  the files those fields NAME exist on disk. uv_build does not auto-glob license
+#             files (SMA-378), so a declared-but-absent LICENSE means a wheel that ships no
+#             license text — and nothing else notices.
+#
+# Takes the pyproject paths as arguments so --negative-control drives the SAME code with
+# fixtures. Exit: 0 pass | 1 the repo is wrong | 2 infrastructure.
+#
+# NOTE: this arm is SPELLING-LEVEL and pure-Python by design. It runs inside `moon ci`'s
+# required check under `toolchain: 'system'`, where no maturin is installed, so it must
+# never build an artifact; the behavioural wheel/sdist assertions live in
+# .github/workflows/wheels.yml (SMA-578 review M6).
+assert_pypi_metadata() { # $@ pyproject paths
+  # The rule sets are exported HERE rather than at the call site so main() and
+  # negative_control()'s direct fixture calls both see them. A caller that forgot would
+  # make the heredoc raise KeyError and exit 1 — a broken invocation reading as "the repo
+  # is wrong", the exact 1-vs-2 confusion this file's exit-code contract rules out.
+  EXPECTED_PYPI_PUBLISHABLE="${EXPECTED_PYPI_PUBLISHABLE[*]}" \
+  PYPI_REQUIRED_FIELDS="${PYPI_REQUIRED_FIELDS[*]}" \
+  python3 - "$@" <<'PY'
+import os, sys, tomllib
+
+expected = set(os.environ.get("EXPECTED_PYPI_PUBLISHABLE", "").split())
+required = os.environ.get("PYPI_REQUIRED_FIELDS", "").split()
+paths, errors, found = sys.argv[1:], [], {}
+
+if not paths:
+    print("FATAL: no pyproject paths given — this check would pass vacuously", file=sys.stderr)
+    raise SystemExit(2)
+if not expected or not required:
+    print("FATAL: empty rule set — this check would pass vacuously", file=sys.stderr)
+    raise SystemExit(2)
+
+for p in paths:
+    try:
+        with open(p, "rb") as fh:
+            doc = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        # Infrastructure, not "the repo is wrong": an unreadable or unparsable manifest is
+        # a different failure mode from a manifest that is present and wrong.
+        print(f"FATAL: cannot read {p}: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    proj = doc.get("project")
+    if not isinstance(proj, dict) or "name" not in proj:
+        print(f"FATAL: {p} has no [project] table with a name", file=sys.stderr)
+        raise SystemExit(2)
+    name = proj["name"]
+    if doc.get("tool", {}).get("paigasus", {}).get("pypi") is True:
+        found[name] = (p, proj)
+
+# P0 — strict equality. The set is discovered from the very marker this gate protects, so
+# a shrunken set must be a hard failure, not a green run over nothing (mirrors Check 0).
+if set(found) != expected:
+    errors.append(
+        f"Check P0 FAILED: PyPI-bound set is {sorted(found)}, expected {sorted(expected)}"
+    )
+
+for name, (p, proj) in sorted(found.items()):
+    # P1 — required metadata.
+    for field in required:
+        if not proj.get(field):
+            errors.append(f"Check P1 FAILED: {name} ({p}) has no [project] {field}")
+    # P1 — the SPDX-vs-classifier rule (SMA-378): PyPI hard-rejects an SPDX license
+    # expression supplied ALONGSIDE a License :: trove classifier.
+    if proj.get("license") and any(
+        str(c).startswith("License ::") for c in proj.get("classifiers", [])
+    ):
+        errors.append(
+            f"Check P1 FAILED: {name} supplies an SPDX license AND a 'License ::' "
+            f"classifier — PyPI rejects the combination; drop the classifier"
+        )
+    # P2 — the files those fields name must EXIST. uv_build does not auto-glob license
+    # files (SMA-378), so a missing file means a wheel that ships no license text.
+    base = os.path.dirname(p)
+    for rel in [proj.get("readme")] + list(proj.get("license-files") or []):
+        if isinstance(rel, str) and not os.path.isfile(os.path.join(base, rel)):
+            errors.append(
+                f"Check P2 FAILED: {name} declares {rel!r} but {base}/{rel} does not exist"
+            )
+
+for e in errors:
+    print(e, file=sys.stderr)
+raise SystemExit(1 if errors else 0)
+PY
+}
+
+# Check P1 (continued) — apply assert_lint_table (Check 1c's rule) to the crates whose
+# sources ship inside a published sdist. Reuses the existing checker rather than carrying a
+# second copy, so its findings print under the "Check 1c FAILED" banner; the crate name in
+# the message identifies which arm selected it.
+assert_sdist_lint_tables() {
+  local dir rc=0
+  [ "${#SDIST_SHIPPED_CRATES[@]}" -gt 0 ] \
+    || die_infra "SDIST_SHIPPED_CRATES is empty — this check would pass vacuously"
+  for dir in "${SDIST_SHIPPED_CRATES[@]}"; do
+    assert_lint_table "$REPO_ROOT/$dir/Cargo.toml" || rc=$?
+    [ "$rc" -ne 2 ] || return 2
+  done
+  return "$rc"
+}
+
+# Check P-D6 — assert wheels.yml never gains registry credentials (SMA-578 D6). It carries
+# a pull_request trigger, and same-repo PRs receive repository secrets — moving the upload
+# into it, the natural refactor once the artifacts are there, would reopen SMA-407 §7/M2.
+# The workflow's own header comment claims this gate asserts it; this function is what makes
+# that claim true. `secrets:` is banned in BOTH shapes it can take here: a job-level
+# `secrets:` pass-through and a `workflow_call` secrets declaration.
+assert_wheels_has_no_credentials() { # $1 workflow path
+  python3 - "$1" <<'PY'
+import re, sys
+try:
+    text = open(sys.argv[1], encoding="utf-8").read()
+except OSError as exc:
+    print(f"FATAL: cannot read {sys.argv[1]}: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+bad = []
+if re.search(r'(?m)^\s*id-token\s*:\s*write', text):
+    bad.append("declares `id-token: write`")
+if re.search(r'(?m)^\s*secrets\s*:', text):
+    bad.append("declares `secrets:`")
+if bad:
+    print("Check P-D6 FAILED: wheels.yml " + " and ".join(bad) +
+          " — it is pull_request-triggered, so a same-repo PR would receive the "
+          "credential. Publishing belongs in release.yml (SMA-407 §7 review M2).",
+          file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 negative_control() {
   local tmp failures=0
   tmp="$(mktemp -d)"
@@ -1160,6 +1358,102 @@ PY
   _expect_rc 0 "Check 4 (the real security-scan.yml passes)" \
     assert_freshness_call_site "$REPO_ROOT/.github/workflows/security-scan.yml"
 
+
+  # --- SMA-578: the PyPI arm must be able to report red -------------------------------
+  local pyd="$tmp/py"; mkdir -p "$pyd"
+
+  # A well-formed, PyPI-bound distribution. Rows below mutate a copy of it with sed, so
+  # each fixture differs from the passing baseline in exactly the one way it names.
+  _pyproj() { # $1 dir
+    mkdir -p "$1"
+    { printf '[project]\nname = "paigasus-kernel"\nversion = "0.1.0"\n'
+      printf 'description = "d"\nreadme = "README.md"\nlicense = "Apache-2.0"\n'
+      printf 'license-files = ["LICENSE"]\nauthors = [{ name = "a" }]\n'
+      printf 'classifiers = ["Typing :: Typed"]\n'
+      printf '\n[tool.paigasus]\npypi = true\n'
+    } >"$1/pyproject.toml"
+  }
+  # A second marked distribution, so the P0 set matches EXPECTED and the rows below fail
+  # on the rule they NAME rather than on P0.
+  _pybind() { _pyproj "$1"; sed -i.bak 's/paigasus-kernel/paigasus-py-bindings/' "$1/pyproject.toml"; }
+
+  _pyproj "$pyd/ok"; : >"$pyd/ok/README.md"; : >"$pyd/ok/LICENSE"
+  _pybind "$pyd/ok2"; : >"$pyd/ok2/README.md"; : >"$pyd/ok2/LICENSE"
+  _expect_rc 0 "Check P0/P1/P2 (a well-formed pair passes — not vacuously red)" \
+    assert_pypi_metadata "$pyd/ok/pyproject.toml" "$pyd/ok2/pyproject.toml"
+
+  # P0 — one distribution short of EXPECTED_PYPI_PUBLISHABLE.
+  _expect_rc 1 "Check P0 (shrunken publishable set)" \
+    assert_pypi_metadata "$pyd/ok/pyproject.toml"
+
+  # P1 — a required [project] key is absent.
+  _pyproj "$pyd/nodesc"; : >"$pyd/nodesc/README.md"; : >"$pyd/nodesc/LICENSE"
+  sed -i.bak '/^description = /d' "$pyd/nodesc/pyproject.toml"
+  _pybind "$pyd/nodesc2"; : >"$pyd/nodesc2/README.md"; : >"$pyd/nodesc2/LICENSE"
+  _expect_rc 1 "Check P1 (a required [project] field is missing)" \
+    assert_pypi_metadata "$pyd/nodesc/pyproject.toml" "$pyd/nodesc2/pyproject.toml"
+
+  # P2 — declared LICENSE does not exist on disk.
+  _pyproj "$pyd/nolicfile"; : >"$pyd/nolicfile/README.md"
+  _pybind "$pyd/nolic2"; : >"$pyd/nolic2/README.md"; : >"$pyd/nolic2/LICENSE"
+  _expect_rc 1 "Check P2 (declared-but-absent LICENSE)" \
+    assert_pypi_metadata "$pyd/nolicfile/pyproject.toml" "$pyd/nolic2/pyproject.toml"
+
+  # P1 — SPDX expression AND a License:: trove classifier. The classifier REPLACES the
+  # baseline line rather than being appended: a second `classifiers =` key is a TOML
+  # duplicate-key error, which this arm reports as rc 2 (infrastructure) — the fixture
+  # would then fail before ever reaching the rule it names.
+  _pyproj "$pyd/spdxclash"
+  sed -i.bak 's|^classifiers = .*|classifiers = ["License :: OSI Approved :: Apache Software License"]|' \
+    "$pyd/spdxclash/pyproject.toml"
+  : >"$pyd/spdxclash/README.md"; : >"$pyd/spdxclash/LICENSE"
+  _pybind "$pyd/spdx2"; : >"$pyd/spdx2/README.md"; : >"$pyd/spdx2/LICENSE"
+  _expect_rc 1 "Check P1 (SPDX license alongside a License:: classifier)" \
+    assert_pypi_metadata "$pyd/spdxclash/pyproject.toml" "$pyd/spdx2/pyproject.toml"
+
+  # Infrastructure, not assertion: no [project] table at all (py/pyproject.toml's shape).
+  printf '[tool.uv.workspace]\nmembers = ["packages/*"]\n' >"$pyd/virtual.toml"
+  _expect_rc 2 "Check P0 (a manifest with no [project] table is INFRA, rc 2, not rc 1)" \
+    assert_pypi_metadata "$pyd/virtual.toml"
+
+  # Infrastructure: no paths at all. Without this the arm would pass over nothing.
+  _expect_rc 2 "Check P0 (an empty scan set is INFRA, rc 2, not a vacuous pass)" \
+    assert_pypi_metadata
+
+  # Infrastructure: unparsable TOML.
+  printf 'this is not = = toml\n' >"$pyd/broken.toml"
+  _expect_rc 2 "Check P0 (unparsable manifest is INFRA, not a repo defect)" \
+    assert_pypi_metadata "$pyd/broken.toml"
+
+  # The sdist lint-table rule, on a crate that inherits the workspace's denying table.
+  # assert_sdist_lint_tables delegates to assert_lint_table, so this drives the verdict
+  # function the same way the Check 1c rows above do.
+  printf '[package]\nname = "x"\n\n[lints]\nworkspace = true\n' >"$tmp/deny-Cargo.toml"
+  _expect_rc 1 "Check P1 (the sdist lint rule rejects an inherited workspace table)" \
+    assert_lint_table "$tmp/deny-Cargo.toml"
+
+  # The REAL sdist-shipped crates must satisfy that same assertion.
+  _expect_rc 0 "Check P1 (the real sdist-shipped crates carry their own lint tables)" \
+    assert_sdist_lint_tables
+
+  # D6 — wheels.yml must never carry registry credentials.
+  printf 'on:\n  pull_request:\njobs:\n  a:\n    permissions:\n      id-token: write\n' \
+    >"$tmp/bad-wheels.yml"
+  _expect_rc 1 "Check P-D6 (id-token: write in wheels.yml)" \
+    assert_wheels_has_no_credentials "$tmp/bad-wheels.yml"
+  printf 'on:\n  workflow_call:\n    secrets:\n      PYPI_TOKEN:\n' >"$tmp/secrets-wheels.yml"
+  _expect_rc 1 "Check P-D6 (a workflow_call secrets: declaration in wheels.yml)" \
+    assert_wheels_has_no_credentials "$tmp/secrets-wheels.yml"
+  printf 'on:\n  pull_request:\njobs:\n  a:\n    permissions:\n      contents: read\n' \
+    >"$tmp/good-wheels.yml"
+  _expect_rc 0 "Check P-D6 (a credential-free wheels.yml passes)" \
+    assert_wheels_has_no_credentials "$tmp/good-wheels.yml"
+  _expect_rc 2 "Check P-D6 (workflow file unreadable is INFRA)" \
+    assert_wheels_has_no_credentials "$tmp/no-such-wheels.yml"
+  # The REAL workflow must satisfy the same assertion the fixtures do — this is what makes
+  # wheels.yml's own "repo:publish-metadata asserts this" header comment true.
+  _expect_rc 0 "Check P-D6 (the real wheels.yml passes)" \
+    assert_wheels_has_no_credentials "$REPO_ROOT/.github/workflows/wheels.yml"
   # Positive control: a clean fixture must pass, or every "red" above is meaningless.
   _meta "$tmp/good.json" "$(printf '%s' "$base" | sed 's/"version":"0.0.0"/"version":"0.1.0"/')"
   _expect_rc 0 "clean fixture passes (checks are not vacuously red)" \
@@ -1236,6 +1530,15 @@ main() {
   done 3<<<"$groups"
 
   assert_check2_covered_everything "${enumerated[@]}" || exit $?
+
+
+  # --- SMA-578: the PyPI arm. Paths are absolute because main() runs from rs/. ---------
+  status=0; assert_pypi_metadata "${PYPI_SCAN[@]/#/$REPO_ROOT/}" || status=$?
+  [ "$status" -eq 0 ] || exit "$status"
+  status=0; assert_sdist_lint_tables || status=$?
+  [ "$status" -eq 0 ] || exit "$status"
+  status=0; assert_wheels_has_no_credentials "$REPO_ROOT/.github/workflows/wheels.yml" || status=$?
+  [ "$status" -eq 0 ] || exit "$status"
 
   echo "publish-metadata: all checks passed"
 }

@@ -494,7 +494,7 @@ tasks:
       - '.proto/plugins/promtool.toml'
 
   publish-metadata:
-    description: 'Assert every publishable crate carries crates.io-valid metadata, packages exactly the intended files, and cannot be released by release-plz while still at the 0.0.0 stub floor (SMA-376).'
+    description: 'Assert every publishable crate carries crates.io-valid metadata, packages exactly the intended files, and cannot be released by release-plz while still at the 0.0.0 stub floor (SMA-376); and that every PyPI-bound distribution carries PyPI-valid metadata whose declared README/LICENSE files exist, while wheels.yml stays credential-free (SMA-578).'
     # The self-test runs FIRST: a gate that cannot report red is worse than no gate, and it
     # is sub-second, so paying for it before the real (network + compile) checks is free.
     # Moon does not enable errexit for `script:` blocks — same latent defect as the
@@ -529,6 +529,28 @@ tasks:
       - 'rs/.cargo/config.toml'
       - 'rs/release-plz.toml'
       - '.gitignore'
+      # The PyPI arm (SMA-578). wheels.yml is an input because Check P-D6 ASSERTS ON IT;
+      # without it the credential ban would serve a cached pass on exactly the PR that
+      # adds `secrets:`. The py/ manifests are the P0 scan set, enumerated LITERALLY —
+      # a `**/pyproject.toml` glob would sweep in py/pyproject.toml (a uv virtual root
+      # with no [project] table) and node-gyp's copy under ts/node_modules in a
+      # provisioned tree. The README/LICENSE files are inputs because Check P2 asserts
+      # they EXIST, so deleting one must select this task rather than replay a cached
+      # pass. paigasus-ml and paigasus-workflows are listed even though they carry no
+      # pypi marker: Check P0 is strict equality, so gaining one is what it must catch.
+      # The bindings crate's pyproject/README/LICENSE are already covered by
+      # 'rs/crates/**/*' above.
+      - '.github/workflows/wheels.yml'
+      - 'py/packages/paigasus-kernel/pyproject.toml'
+      - 'py/packages/paigasus-kernel/README.md'
+      - 'py/packages/paigasus-kernel/LICENSE'
+      - 'py/packages/paigasus-ml/pyproject.toml'
+      - 'py/packages/paigasus-ml/README.md'
+      - 'py/packages/paigasus-ml/LICENSE'
+      - 'py/packages/paigasus-proto/pyproject.toml'
+      - 'py/packages/paigasus-workflows/pyproject.toml'
+      - 'py/packages/paigasus-workflows/README.md'
+      - 'py/packages/paigasus-workflows/LICENSE'
 
   version-lockstep:
     description: "Assert every version-carrying site in the kernel and proto lockstep families agrees with that family's source-of-truth Cargo crate (SMA-576)."
