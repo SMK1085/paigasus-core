@@ -137,9 +137,12 @@ build itself — they bite the first operator who deploys without reading this s
   Service's endpoint list until it flips. **A failing `readinessProbe` never restarts a pod — it
   only removes it from the Service's endpoints** — and liveness is unconditional from process
   start (`/healthz` never depends on migration state), so nothing in this design restarts a
-  slow-migrating pod at all. Size `readinessProbe.failureThreshold × periodSeconds` above your
-  worst-case `lock_wait_secs` + migration + `AppState::new` so the replica is not flapped in and
-  out of the endpoint list for the whole migration window.
+  slow-migrating pod at all. Note there is also nothing to *size* for the migration window: a
+  replica that has never been ready is simply absent from the endpoint list until `/readyz`
+  first succeeds, however long that takes, and `readinessProbe.failureThreshold ×
+  periodSeconds` does not extend or shorten it. That threshold governs only how much
+  consecutive failure an *already-ready* replica tolerates before it is withdrawn — size it for
+  a database blip in steady state, not for the boot migration.
 
   `/readyz` has three bodies and they are not interchangeable: `migrating` means the schema is not
   yet applied, `unready` means the schema is there but the database ping failed, `ready` means

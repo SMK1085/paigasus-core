@@ -241,7 +241,10 @@ wait_ready() {
       docker logs "$name" 2>&1 | tail -30 >&2
       return 1
     fi
-    code="$(docker run --rm --network "$NET" "$CURL_8_11_1_DIGEST" -s -o /dev/null -w '%{http_code}' "$url" || echo 000)"
+    # `--connect-timeout`/`--max-time`: this is a POLLING loop, so a single hung request would
+    # stall every remaining iteration rather than just costing one. Bounded well under the 1s
+    # cadence budget so the loop's wall-clock stays roughly its iteration count.
+    code="$(docker run --rm --network "$NET" "$CURL_8_11_1_DIGEST" -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$url" || echo 000)"
     [ "$code" = "200" ] && { echo "  $name is ready (${i}s)"; return 0; }
     sleep 1
   done
