@@ -348,3 +348,112 @@ jobs:
           OUT="$(release-plz release --output json)"
           echo "$OUT"
           echo "json=$OUT" >> "$GITHUB_OUTPUT"
+
+  # THE THIRD AND FOURTH IRREVERSIBLE STAGES. There is no `plan` job (see the file-header
+  # decision) — the version and per-family flags are read straight out of `release`'s own
+  # `released` output rather than from a job that does not exist. Both jobs only download,
+  # assert and upload; the corollary above forbids anything that compiles, fetches or
+  # generates here.
+  publish-pypi:
+    name: publish to PyPI
+    needs: [wheels, proto-dist, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release-publish
+    permissions:
+      id-token: write    # PyPI trusted publishing; the claim binds to THIS file's name
+    steps:
+      # `release`'s `released` output is release-plz's own `--output json`, shaped
+      # `{"releases":[{"package_name":...,"version":...}]}` (measured against release_plz_core
+      # 0.36.14 — "releases"/"package_name", NOT "prs"/"package", which is the OTHER command's
+      # shape). paigasus-py-bindings is Cargo `publish = false`, so release-plz never reports
+      # it — bind against paigasus-kernel instead, which it definitely reports and which
+      # version_group holds to the identical number (repo:version-lockstep asserts that).
+      - name: Read the released version
+        id: relinfo
+        env:
+          RELEASED: ${{ needs.release.outputs.released }}
+        run: |
+          set -euo pipefail
+          KERNEL_VERSION="$(jq -r '.releases[] | select(.package_name == "paigasus-kernel") | .version' <<<"$RELEASED")"
+          [ -n "$KERNEL_VERSION" ] || { echo "::error::paigasus-kernel not found in released output: $RELEASED"; exit 1; }
+          echo "kernel_version=$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
+          # This keys on the RUST crate `paigasus-proto` reported by release-plz. What gets
+          # uploaded below under this flag is the PYTHON distribution built from
+          # py/packages/paigasus-proto — same name, two different artifacts.
+          if jq -e '.releases[] | select(.package_name == "paigasus-proto")' <<<"$RELEASED" >/dev/null; then
+            echo "proto_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "proto_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # THREE downloads, not one. wheels.yml deliberately keeps face-paigasus-kernel OUTSIDE the
+      # wheel-* namespace precisely so a single `pattern: wheel-*` + merge-multiple cannot
+      # collapse them: paigasus-py-bindings MUST reach PyPI before paigasus-kernel, because the
+      # face pins `==` and the reverse order leaves it uninstallable in between.
+      - name: Download the bindings wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist-bindings
+
+      - name: Download the bindings sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sdist
+          path: dist-bindings
+
+      - name: Download the kernel face
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: face-paigasus-kernel
+          path: dist-face
+
+      - name: Download the proto distribution
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: proto-dist-py
+          path: dist-proto
+
+      # Binds the artifact to the release. Without this a re-run against a moved main could
+      # publish a stale wheel under the wrong version.
+      - name: Assert the wheels match the released version
+        env:
+          KERNEL_VERSION: ${{ steps.relinfo.outputs.kernel_version }}
+        run: |
+          set -euo pipefail
+          [ -n "$KERNEL_VERSION" ] || { echo "::error::no kernel version from relinfo"; exit 1; }
+          found=0
+          for w in dist-bindings/*.whl; do
+            case "$(basename "$w")" in
+              paigasus_py_bindings-"$KERNEL_VERSION"-*) found=$((found+1)) ;;
+              *) echo "::error::unexpected wheel $(basename "$w") — expected version $KERNEL_VERSION"; exit 1 ;;
+            esac
+          done
+          [ "$found" -ge 7 ] || { echo "::error::found $found wheels, expected at least 7"; exit 1; }
+          echo "OK: $found wheels at $KERNEL_VERSION"
+
+      # ORDER IS LOAD-BEARING: bindings, then the face. skip-existing makes a partial failure
+      # re-runnable — PyPI returns 400 "file already exists" otherwise, so an un-skipped retry can
+      # never succeed unaided. PyPI is delete-but-never-reuse.
+      - name: Publish paigasus-py-bindings
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: dist-bindings
+          skip-existing: true
+
+      - name: Publish paigasus-kernel
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: dist-face
+          skip-existing: true
+
+      # Independent cadence: release-plz sees the RUST crate `paigasus-proto`; what uploads here
+      # is the PYTHON distribution built from py/packages/paigasus-proto. Same name, two things.
+      - name: Publish paigasus-proto
+        if: steps.relinfo.outputs.proto_release == 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: dist-proto
+          skip-existing: true
