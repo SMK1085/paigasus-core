@@ -53,8 +53,17 @@ jobs:
       # enough for both consumers below.
       #
       # Scoped to THIS repository (the action defaults `repositories` to the current repo) and
-      # carrying only what the App is granted: contents:write for the stamping push, and
-      # pull-requests:write for release-plz opening/updating the PR.
+      # to exactly two permissions, requested EXPLICITLY below rather than inherited. Without
+      # the `permission-*` inputs a minted token carries every permission the App installation
+      # holds, so granting the App an unrelated scope later would silently widen this token
+      # (zizmor: github-app, "app token inherits blanket installation permissions").
+      #
+      #   contents:write      — the stamping step's push
+      #   pull-requests:write — release-plz opening/updating the release PR
+      #
+      # Both must genuinely be granted to the installation: the action ERRORS when asked for a
+      # permission the App does not hold. That is the right direction — an under-granted App
+      # reds here rather than half-working further down.
       #
       # The action registers the token as a log mask and revokes it in its post-step, so it
       # does not outlive the run.
@@ -65,6 +74,8 @@ jobs:
         with:
           app-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
           private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
 
       - name: Checkout
         if: steps.preflight.outputs.configured == 'true'
