@@ -134,9 +134,10 @@ It also runs several checks that the per-case project sets structurally **cannot
   wrapper's tasks: `Cargo.toml` lands in `inputFiles`, `src/**/*` in `inputGlobs`, and a wrapper's
   `build` and `test` declare different sets, so a one-bucket or task-unioned read would pass the
   very under-declaration this check exists to catch. Per closure member it demands
-  `<upstream>/src/**/*`, `<upstream>/Cargo.toml`, and `<upstream>/build.rs` when one exists ON
-  DISK — which is why the repo `root` is a REQUIRED positional argument and never defaults: a
-  `root=None` default made the build.rs half opt-in, so a call site that stopped passing it went
+  `<upstream>/src/**/*`, `<upstream>/Cargo.toml`, and — each when one exists ON DISK —
+  `<upstream>/build.rs` plus any `<upstream>/*.pyi` stub (SMA-594') — which is why the repo
+  `root` is a REQUIRED positional argument and never defaults: a `root=None` default made the
+  build.rs half opt-in, so a call site that stopped passing it went
   on printing PASS while the two `paigasus-node-bindings/build.rs` lines could be deleted from
   `ts/packages/paigasus-kernel/moon.yml` for free. `REQUIRED_WRAPPER_CLOSURE` is its
   anti-vacuity floor, and it is edge-based rather than a task-name list for a reason specific to

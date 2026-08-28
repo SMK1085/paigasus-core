@@ -564,6 +564,11 @@ def check_wrapper_upstream_inputs(projects, root, floor=REQUIRED_WRAPPER_CLOSURE
             # validates it keyed on it. Disk-conditional and globbed, mirroring build.rs above:
             # conditional so the twelve crates without a stub gain no dead demand, globbed so a
             # second stub is covered the day it appears rather than needing a hand-maintained list.
+            # Deliberately NOT scoped to py wrappers: a stub at the root of a crate in BOTH
+            # closures — paigasus-kernel is the live candidate — would also be demanded of
+            # paigasus-kernel-ts, which never reads it. That over-approximation is accepted.
+            # A7 asserts CONTAINMENT, so the cost is one extra declared input, not a failure,
+            # and a language guard would need its own fixture to prove it fires.
             for stub in sorted((root / src).glob("*.pyi")):
                 want.add(f"{src}/{stub.name}")
         for task in sorted(tasks):
@@ -1035,7 +1040,7 @@ def self_test():
                 failures.append(f"A7 did not demand nb's .pyi of k-ts:{task}")
         # An upstream with NO stub must not be demanded one, or every wrapper gains an
         # unsatisfiable row the day this branch is written wrong.
-        if any("rs/crates/libs/kern" in row and ".pyi" in row for row in rows):
+        if any(row.endswith(".pyi") and "rs/crates/libs/kern/" in row for row in rows):
             failures.append("A7 demanded a .pyi for an upstream that has none on disk")
 
     a1, a2, a3 = check(ok, crates)
@@ -1461,7 +1466,8 @@ def collect_findings(projects, crates, root):
              "    silently stops running on it (SMA-560).\n"
              "    Fix: add the missing entry to that task's `inputs` in the wrapper's own\n"
              "    moon.yml — `/<src_dir>/src/**/*` and `/<src_dir>/Cargo.toml` for every crate in\n"
-             "    its TRANSITIVE dependsOn closure, plus `/<src_dir>/build.rs` where one exists.\n"
+             "    its TRANSITIVE dependsOn closure, plus `/<src_dir>/build.rs` and any\n"
+             "    `/<src_dir>/*.pyi` stub, each where one exists on disk.\n"
              "    Extra inputs beyond the closure are ALLOWED (this is containment, unlike A6).\n"
              "    A `FLOOR:` row means the check itself cannot be trusted — the wrapper is\n"
              "    missing, its closure derivation broke, or its task stopped matching an FFI\n"
