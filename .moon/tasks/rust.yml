@@ -91,9 +91,13 @@ tasks:
       - '@group(upstreams)'
   fmt:
     command: 'cargo fmt --check'
-    # SMA-537. `cargo fmt --check` formats EVERY target in the package — src/, tests/, benches/
-    # and build.rs — but this task keyed on @group(sources) alone, so a misformatted integration
-    # test could merge green and red `main` on an unrelated later src edit.
+    # SMA-537. `cargo fmt --check` formats EVERY target in the package, but this task keyed on
+    # @group(sources) alone, so a misformatted integration test could merge green and red `main`
+    # on an unrelated later src edit. The groups below cover src/, build.rs and tests/.
+    # NOT COVERED: benches/ and examples/. rustfmt formats both, and no glob here matches them.
+    # No crate in this workspace has either directory today, so a glob for them would be a dead
+    # input that `repo:input-liveness` reds. Add `benches/**/*` / `examples/**/*` here in the SAME
+    # change that creates the first such directory (SMA-560 M4).
     #   @group(sources)         now includes build.rs (see fileGroups above)
     #   @group(tests)           tests/ is formatted too; an empty group matches nothing, which is
     #                           already true for `test`/`lint` on crates without a tests/ dir

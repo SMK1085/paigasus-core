@@ -117,7 +117,10 @@ It also runs several checks that the per-case project sets structurally **cannot
 - **A7** (in `cargo_moon_parity.py`, SMA-560) is A6's cross-stack twin: the py/ts wrapper
   projects — `paigasus-kernel-py`, `paigasus-kernel-ts` — carry hand-written `/rs/...` globs
   that ARE the ADR-0005 cross-binding guarantee, but A6 iterates `language == "rust"` only, so
-  those wrappers were asserted by nothing. A7 does not hand-write its task set either: it derives
+  those wrappers were asserted by nothing generic. The kernel->wrapper edge specifically WAS
+  already covered, by one hand-written `run.sh` case (`kernel->consumer-tasks`); what nothing
+  covered is every OTHER upstream in a wrapper's closure, any new wrapper, and the
+  under-declarations A7's first run found. A7 does not hand-write its task set either: it derives
   it from `derive_ffi_tasks()`, shared with A5, so a new wrapper's `napi build` (or equivalent) is
   examined on day one, even while it still declares zero inputs — the exact shape a hand-written
   list could not catch. Unlike A6, A7 asserts CONTAINMENT (`want <= observed`), not strict
@@ -127,7 +130,12 @@ It also runs several checks that the per-case project sets structurally **cannot
   violations. It reads BOTH moon input buckets, PER `(project, task)`, never unioned across a
   wrapper's tasks: `Cargo.toml` lands in `inputFiles`, `src/**/*` in `inputGlobs`, and a wrapper's
   `build` and `test` declare different sets, so a one-bucket or task-unioned read would pass the
-  very under-declaration this check exists to catch. `REQUIRED_WRAPPER_CLOSURE` is its
+  very under-declaration this check exists to catch. Per closure member it demands
+  `<upstream>/src/**/*`, `<upstream>/Cargo.toml`, and `<upstream>/build.rs` when one exists ON
+  DISK — which is why the repo `root` is a REQUIRED positional argument and never defaults: a
+  `root=None` default made the build.rs half opt-in, so a call site that stopped passing it went
+  on printing PASS while the two `paigasus-node-bindings/build.rs` lines could be deleted from
+  `ts/packages/paigasus-kernel/moon.yml` for free. `REQUIRED_WRAPPER_CLOSURE` is its
   anti-vacuity floor, and it is edge-based rather than a task-name list for a reason specific to
   containment: a containment check whose `want` set empties is VACUOUSLY satisfied — it prints
   PASS having asserted nothing — and a task-name floor cannot see that, because the tasks are
