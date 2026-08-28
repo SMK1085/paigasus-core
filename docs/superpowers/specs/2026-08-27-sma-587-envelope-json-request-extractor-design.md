@@ -354,9 +354,14 @@ minimum `adapters/http/json.rs`, reason: *the extractor's own definition site; i
 `axum::Json` by construction*. Each row states a reason, per the other gates' convention.
 
 **Residuals go in a README Limitations section**, per `ci/actionlint/README.md`'s precedent:
-an aliased import (`use axum::Json as J`), a fully-qualified `axum::Json<T>`, and bodies taken as
-`Bytes`/`String` all escape the scan. Naming them is the point — a gate that fails open is worse
-than no gate (`check.py:73-77`).
+an aliased import (`use axum::Json as J`), a re-export renamed on the way through, and bodies
+taken as `Bytes`/`String` all escape the scan. Naming them is the point — a gate that fails open
+is worse than no gate (`check.py:73-77`).
+
+*(This design predicted a fourth residual — a fully-qualified `axum::Json<T>` — that turned out
+not to be one. The implemented scan matches on an identifier boundary, so `axum::Json<T>` and any
+other `…::Json<T>` are caught; only a rename defeats it. Corrected against the shipped gate rather
+than left as a claim the README contradicts; see `ci/http-extractor/README.md`'s L2.)*
 
 #### D4.2 — Plumbing: what is actually required
 
