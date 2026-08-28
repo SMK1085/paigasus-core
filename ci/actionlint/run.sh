@@ -2293,7 +2293,7 @@ affected_smoke_block_verdict() {
   # unquoting one would make `ci/**` match anything, which is why they are never bare.
   recs_hay="$nl$recs$nl"
 
-  # A block we could not parse cannot support a per-line answer, and nineteen missing-input rows
+  # A block we could not parse cannot support a per-line answer, and twenty missing-input rows
   # on top of the real problem would bury it. Report the structural verdict alone.
   case "$recs_hay" in
     *"${nl}ERR${tab}"*)
@@ -3031,7 +3031,7 @@ affected_smoke_block_self_test() {
   }
 
   # `q` rather than the '"'"' idiom: these fixtures are almost entirely single-quoted YAML
-  # scalars, and the escaped form is unreadable nineteen entries deep.
+  # scalars, and the escaped form is unreadable twenty entries deep.
   local q="'" wired glob line
 
   wired="tasks:
@@ -3147,7 +3147,7 @@ out-of-order-script ci/affected-graph/run.sh' "$reordered"
       - ${q}CLAUDE.md${q}")"
 
   # Shapes this extractor refuses to guess at. Each reports its OWN token and nothing else: a
-  # block we could not parse cannot support a per-line answer, and nineteen missing-input rows on
+  # block we could not parse cannot support a per-line answer, and twenty missing-input rows on
   # top would bury the real problem.
   expect_smoke_block 'a folded script scalar fires bad-script-form' 'bad-script-form' \
     "$(rewrite_line "$wired" '    script: |' '    script: >')"

@@ -1698,7 +1698,6 @@ main() {
 
   assert_check2_covered_everything "${enumerated[@]}" || exit $?
 
-
   # --- SMA-578: the PyPI arm. Absolute paths throughout, because main() runs from rs/. -
   status=0; run_pypi_arm "$REPO_ROOT" || status=$?
   [ "$status" -eq 0 ] || exit "$status"
