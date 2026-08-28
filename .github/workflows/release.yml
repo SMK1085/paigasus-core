@@ -289,6 +289,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: release-publish
+    # The irreversible step, serialized. Two merges to main in quick succession would otherwise
+    # run two `release-plz release` invocations concurrently, racing the same crates.io publish
+    # and the same tag push. NEVER cancel-in-progress here: a cancelled release can leave
+    # crates.io half-published with tags partially cut, which is precisely the split state the
+    # job ORDER above exists to prevent. A queued second run is safe — release-plz is idempotent
+    # and skips packages already published at that version.
+    #
+    # The build jobs deliberately carry no group: they only produce artifacts, so concurrent
+    # runs are harmless, and serializing them would put every push to main behind a full
+    # 12-leg matrix.
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
     permissions:
       id-token: write    # crates.io OIDC exchange
       contents: read     # the App token below does the writing, not GITHUB_TOKEN

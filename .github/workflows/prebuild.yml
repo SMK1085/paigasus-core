@@ -252,15 +252,24 @@ jobs:
           path: rs/crates/bindings/paigasus-node-bindings/npm/
           if-no-files-found: error
 
+      # wasm-pack is a proto-plugin-pinned CLI (.prototools), NOT a Moon-managed toolchain — and
+      # `moon setup` provisions toolchains and components but NOT bins. That distinction already
+      # cost this repo a wave of "no such command: nextest" failures; see .moon/toolchains.yml's
+      # comment. Narrow install (not a bare `proto install`): this job needs none of
+      # actionlint/buf/deny/machete/nextest/promtool/release-plz.
+      - name: Install pinned wasm-pack CLI
+        run: proto install wasm-pack
+
       # A THIRD scratch dir. wasm-pack CLEANS --out-dir and deletes package.json, so it must
       # never run in the crate root (see that crate's .gitignore). ts/packages/paigasus-kernel's
       # build task owns .wasmpack-out and its test task owns .wasmpack-test-out; this needs its
-      # own name so a concurrent moon ci cannot race it.
+      # own name so a concurrent moon ci cannot race it. The wasm32-unknown-unknown target is
+      # already provisioned by the "Install Moon-managed toolchains" step above (declared in
+      # .moon/toolchains.yml's rust.targets), so no `rustup target add` is needed here.
       - name: Build the wasm distribution
         run: |
           set -euo pipefail
           cd rs/crates/bindings/paigasus-wasm
-          rustup target add wasm32-unknown-unknown
           wasm-pack build . --target bundler --release --no-pack \
             --out-dir .wasmpack-release-out --out-name paigasus_wasm
           test -s .wasmpack-release-out/paigasus_wasm_bg.wasm \
