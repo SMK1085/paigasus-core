@@ -291,9 +291,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `run_self_tests` and `selftest_mutation_battery` as **whole lines** in `run.sh` (a substring
   match would survive deleting the call, since the name is a prefix of its own definition). That
   pin only works because `repo:affected-smoke` lists `ci/actionlint/**/*` in its `inputs` — remove
-  that and the pin stays green on exactly the PR that breaks it. Adding an eleventh-and-later
-  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 10): the gate asserts invocations
-  AND definitions. The cycle's second half is now closed too (SMA-542 residual closure): check 8c
+  that and the pin stays green on exactly the PR that breaks it. Adding a twelfth-and-later
+  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 11, SMA-579 added the eleventh —
+  `release_guard_self_test`, check 10): the gate asserts invocations AND definitions. The cycle's
+  second half is now closed too (SMA-542 residual closure): check 8c
   in `ci/actionlint/run.sh` pins `ci/affected-graph/run.sh`'s own two call sites into
   `ci_targets.py`, mirroring `ci_targets.py`'s `RUN_SH_CALL_SITES` from the other, independently
   scheduled file — see `ci/actionlint/README.md`'s Limitations section (L6) for what residual
@@ -549,6 +550,50 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   because scheduled-vs-selected is the exact distinction every affectedness measurement in this
   repo turns on; an extraction that conflates the two cannot measure it. It inflated this branch's
   own spec table before the numbers were re-derived.
+- release-plz owns every tag (`<package>-v<version>`, its default). `napi prepublish` always
+  carries `--no-gh-release` (`.github/workflows/release.yml:572,595`) — a flag its own `--help`
+  does not list. `ci/actionlint/release_guard.py`'s V5 asserts every `napi prepublish` invocation
+  carries it. Exactly two GitHub Releases land per release commit — the two family heads — not
+  one per published package (SMA-579).
+- `release-plz release` requires `publish = false` in `rs/release-plz.toml` for every package
+  whose Cargo manifest already says so. An absent key reads as `publish = true` and hard-errors.
+  This blocked `release-plz release` entirely and stayed invisible because `release-pr` never
+  reaches that validation. Ten packages needed the key added. `release = false` stops the
+  release-PR proposal; `publish = false` is what `release-plz release` itself checks — the two
+  settings govern different phases, and neither substitutes for the other (SMA-579).
+- `release-plz release --dry-run` creates **no** tags: `create_git_tag_and_release` is reachable
+  only from the non-dry-run arm (`release_plz_core` 0.36.14, `release.rs:888` and `:959`) — but it
+  still **requires a git token**, because `get_git_client()` runs unconditionally at
+  `release.rs:543`. `git_release_enable = false` does not remove that requirement (SMA-579).
+- The dry-run cannot pass until `paigasus-proto-derive` is published on crates.io: a per-package
+  `cargo publish --dry-run` cannot resolve a workspace sibling absent from the index. This is why
+  the release job graph carries no `plan`-stage dry-run. A live run is expected to work, since
+  derive publishes before proto — which makes the first live release the first genuine test of
+  that path (SMA-579).
+- `release-plz release --output json` is `{"releases":[{package_name,prs,tag,version}]}` — key
+  `releases`, field `package_name`. This is **not** `release-pr`'s `prs`/`package` shape. A
+  package with Cargo `publish = false` never appears in `releases`, which is why any version
+  assertion in `release.yml` binds to `paigasus-kernel` (SMA-579).
+- PyYAML coerces five shapes every workflow parser in `ci/` must handle: a bare `on:` key parses
+  as the boolean `True`; `if: false` and `continue-on-error: false` parse as the boolean `False`;
+  `continue-on-error: "false"` (quoted) parses as the **string** `"false"`, not the boolean;
+  `needs:` may be a scalar string rather than a list, and iterating a string in Python yields its
+  **characters**, not the string itself (SMA-579).
+- `wasm-pack build` **deletes `package.json`** in its `--out-dir`, even with `--no-pack`
+  (`rs/crates/bindings/paigasus-wasm/.gitignore:4-10` records the measured behaviour). Never run
+  it in the crate root. The release path builds into `.wasmpack-release-out`, a third scratch
+  directory beside `build`'s `.wasmpack-out` and `test`'s `.wasmpack-test-out` (SMA-579).
+- `wasm-pack` is **proto-pinned, not Moon-managed** — `moon setup` does not install it. Any job
+  invoking `wasm-pack` needs an explicit `proto install wasm-pack` step first, the same class of
+  gap the documented nextest trap already records for a different tool (SMA-579).
+- `proto` emits NDJSON on stdout inside an agent session — it keys on the `AI_AGENT`,
+  `CLAUDECODE`, and `CLAUDE_CODE_ENTRYPOINT` env vars — which breaks `$(proto bin …)` capture. All
+  three `repo:release-parity*` gates therefore abort **INCONCLUSIVE at rc=2, not red**, inside such
+  a session. Unset those three vars before running a `release-parity` command locally, or an
+  inconclusive abort reads as a pass (SMA-579).
+- `release.yml` must never gain a `pull_request` or `pull_request_target` trigger (SMA-579).
+- GitHub Actions supports YAML **anchors and aliases** (since 2025-09-18) but **not merge keys**
+  (`<<:`) — a workflow using one keeps the literal, unmerged key rather than erroring (SMA-579).
 
 ## Workflow
 

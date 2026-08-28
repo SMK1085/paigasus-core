@@ -631,15 +631,18 @@ tasks:
     # docs/superpowers/specs/2026-08-19-sma-540-branches-filter-gate-design.md.
     #
     # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
-    # (cargo nextest, next typegen). This one is ~17-19s standalone and warm (measured via
-    # interleaved base/branch A/B sweeps — sequential min-of-N is invalid on this shared host, see
-    # the measured table in ci/actionlint/README.md; supersedes an earlier ~14.42s min-of-7 figure,
-    # which predated this wave's tenth self-test — was ~1.0s before SMA-542 added checks 8-9,
-    # ~6.33s before the SMA-542 residual-closure wave added check 8d, ~14.42s before this wave added
-    # check 8e): six actionlint invocations — one over the real workflows, five stdin fixtures —
-    # and ten fixture tables (extractor,
+    # (cargo nextest, next typegen). This one is ~15-20s standalone and warm — RE-MEASURED for
+    # SMA-579 (which added the release guard, check 10, as an ELEVENTH self-test) via five
+    # INTERLEAVED `--self-test`/full-gate pairs on moon 2.5.3: full gate 17.86 / 20.32 / 15.40 /
+    # 16.03 / 19.48s, `--self-test` 4.20 / 4.49 / 3.61 / 3.59 / 4.29s (sequential min-of-N is
+    # invalid on this shared host, see the measured table in ci/actionlint/README.md). The prior
+    # ~17-19s figure predated the eleventh self-test AND the moon 2.3.2 -> 2.5.3 bump (SMA-595)
+    # under this branch, so it is treated as an unusable baseline, not a value this re-measurement
+    # is compared against: six actionlint invocations — one over the real workflows, five stdin
+    # fixtures — and eleven fixture tables (extractor,
     # path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation
-    # allowlist, affected-graph wiring, block execution, kill predicate, affected-smoke block).
+    # allowlist, affected-graph wiring, block execution, kill predicate, affected-smoke block,
+    # release guard).
     # TWO DIFFERENT `git ls-files` counts, for two different walks, are worth keeping distinct
     # rather than merging into one number (measured via `bash -x`, CodeRabbit PR 150 finding F2 —
     # a merged "26" here previously read as the SAME walk check 9 re-runs, when it is not): the
@@ -652,7 +655,8 @@ tasks:
     # 9's mutation battery re-runs the SECOND of those — the whole of `--self-test`, 9
     # `git ls-files` calls included — PLUS check 8d's own dynamic execution of the
     # moon-ci-affected-graph step's `run:` block against a stubbed `moon`, once per event path, all
-    # once per self-test invocation plus once unmutated, eleven concurrent subprocesses. That dynamic
+    # once per self-test invocation plus once unmutated, twelve concurrent subprocesses (eleven
+    # mutants + the unmutated control — SMA-579's release-guard self-test added the twelfth). That dynamic
     # execution is most of check 8d's OWN standalone cost (~1.5s of the ~2.01s -> ~3.52s
     # `--self-test` jump): each of the EIGHT fixtures that reach the per-event-path loop (the
     # healthy control, the if-false mutant, two healthy rechecks, the subset mutant, the
@@ -660,10 +664,12 @@ tasks:
     # other fixture returns before the loop) spawns a handful of real subprocesses (a scratch
     # `mktemp -d`, then per event path a `bash -c` running the extracted block, which itself shells
     # out to `grep` and the stubbed `moon`) rather than a `grep`/`sed` pass over text. That
-    # ~2.01s -> ~3.52s figure is itself now historical: this wave's tenth self-test
+    # ~2.01s -> ~3.52s figure is itself now historical: the SMA-572/SMA-573 wave's tenth self-test
     # (`affected_smoke_block_self_test`, check 8e) took standalone `--self-test` to ~3.85s
-    # (interleaved base/branch measurement, base ~3.3s) — a different number from the full-gate
-    # ~17-19s above, not a restatement of it.
+    # (interleaved base/branch measurement, base ~3.3s). SMA-579 then added the ELEVENTH self-test
+    # (`release_guard_self_test`, check 10) — re-measured standalone `--self-test` at
+    # 4.20 / 4.49 / 3.61 / 3.59 / 4.29s above, a different number from the full-gate range above
+    # it, not a restatement of it.
     # See the measured table in ci/actionlint/README.md.
     # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
     # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
