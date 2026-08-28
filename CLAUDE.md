@@ -347,7 +347,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   emitting a PyPI-rejected `linux_*` tag, and set `-C target-feature=-crt-static` on musl (the
   target defaults to a static CRT a cdylib cannot use). A wheel's **tag is not its binary**:
   assert the compressed tag *set* (split on `.` — `manylinux_2_17_x86_64.manylinux2014_x86_64` is
-  one tag), and separately assert the binary via `otool -l`'s minimum-macOS on darwin and a
+  ONE platform FIELD carrying TWO tags, so a cardinality check that counts fields as tags is
+  wrong), and separately assert the binary via `otool -l`'s minimum-macOS on darwin and a
   max-`GLIBC_` symbol check on manylinux. An ELF-class check proves only the machine type and
   passes for a wheel that fails at import. **Only the `aarch64-apple-darwin` wheel and the macOS
   sdist path have been built locally.** The macOS / Windows / manylinux / musllinux tag sets, the
@@ -356,8 +357,11 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   the true maximum may legitimately be lower. When one reds, read what the tool produced, confirm
   it is correct, and re-pin the constant — never loosen the comparison.
 - `moon query projects --json` **errors** on Moon 2.3.2 (`unexpected argument '--json' found`) —
-  bare `moon query projects` already emits JSON. It exits 2 and writes the usage text to stderr,
-  so a `| jq` pipeline fails on empty input rather than on the flag.
+  bare `moon query projects` already emits JSON. **Measure its exit status UNPIPED (2):** `jq`
+  returns 0 on empty input, so `moon query projects --json | jq …` reports 0 unless `pipefail`
+  is set, and the failure reads as "the reader found nothing" rather than "the flag is invalid".
+  That is not hypothetical — it cost a cycle on this very branch, where the first measurement
+  read `head`'s status through a pipe and recorded exit 0.
 
 ## Workflow
 

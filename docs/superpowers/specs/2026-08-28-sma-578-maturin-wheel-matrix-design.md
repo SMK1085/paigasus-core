@@ -171,8 +171,8 @@ Six jobs, seven wheels, every one `cp312-abi3`:
 | --- | --- | --- | --- |
 | darwin | `macos-latest` | both apple triples in one job | `macosx_11_0_arm64`, `macosx_10_12_x86_64` |
 | win-x64 | `windows-latest` | `x86_64-pc-windows-msvc` | `win_amd64` |
-| linux-x64-gnu | `ubuntu-latest` | `x86_64-unknown-linux-gnu` (zig) | `manylinux_2_17_x86_64` (compressed set — §5.4) |
-| linux-arm64-gnu | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` (zig) | `manylinux_2_17_aarch64` |
+| linux-x64-gnu | `ubuntu-latest` | `x86_64-unknown-linux-gnu.2.17` (zig) | `manylinux_2_17_x86_64` (compressed set — §5.4) |
+| linux-arm64-gnu | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu.2.17` (zig) | `manylinux_2_17_aarch64` |
 | linux-x64-musl | `ubuntu-latest` | `x86_64-unknown-linux-musl` (zig) | `musllinux_1_2_x86_64` |
 | linux-arm64-musl | `ubuntu-latest` | `aarch64-unknown-linux-musl` (zig) | `musllinux_1_2_aarch64` |
 
@@ -186,7 +186,10 @@ ships glibc 2.39, so a native build tags `manylinux_2_39`, which almost no consu
 Three specifics the first draft glossed (review **M3**):
 
 - The glibc floor comes from a **triple suffix** (`x86_64-unknown-linux-gnu.2.17`), not from a
-  bare `--zig` flag.
+  bare `--zig` flag. `rustup target add` **rejects** that suffixed name, so the matrix carries a
+  second key, `rustup_target`, holding the bare triple for that step while `matrix.target` keeps
+  the suffix for maturin. Not a `${TARGET%%.*}` strip: a future target name could legitimately
+  contain a dot, and per-leg values belong in the matrix.
 - `--compatibility manylinux2014` / `--compatibility musllinux_1_2` is passed **explicitly**, so
   maturin's built-in auditwheel **errors** rather than silently emitting a `linux_*` tag PyPI
   rejects.

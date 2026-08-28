@@ -9,9 +9,12 @@ Python-facing wrapper, rather than this extension module directly.
 
 ## Installation
 
-Wheels are published for CPython 3.12+ on macOS (arm64, x86_64), Windows (x86_64) and
-Linux (x86_64 and aarch64, glibc and musl). They are `abi3` wheels, so one wheel per
-platform covers every CPython from 3.12 onward.
+Wheels are built for CPython 3.12+ on macOS (arm64, x86_64), Windows (x86_64) and Linux
+(x86_64 and aarch64, glibc and musl). They are `abi3` wheels, so one wheel per platform
+covers every CPython from 3.12 onward.
+
+**Not yet on PyPI.** CI builds and verifies these artifacts, but no release job publishes
+them yet; the commands below apply once a release is cut.
 
 ## Building from source
 
