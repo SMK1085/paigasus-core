@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 name: wheels
 
-# Builds the PyO3 extension wheels for paigasus-py-bindings. NOTHING here publishes:
-# SMA-579's gated `release` job consumes this workflow via `uses:` and does the uploading.
+# Builds the PyO3 extension wheels for paigasus-py-bindings, builds and verifies the sdist
+# from source on three platforms, and builds the pure-Python paigasus-kernel wrapper. NOTHING
+# here publishes: SMA-579's gated `release` job consumes this workflow via `uses:` and does
+# the uploading.
 #
 # DECISION (SMA-578 D6): this workflow must NEVER declare `secrets:` or `id-token: write`.
 # It carries a `pull_request` trigger, and same-repo PRs receive repository secrets — putting
@@ -403,4 +405,171 @@ jobs:
         with:
           name: wheel-${{ matrix.extra_platform }}
           path: ${{ steps.tag_set_extra.outputs.wheel }}
+          if-no-files-found: error
+
+  sdist:
+    name: build sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install Moon-managed toolchains
+        run: moon setup
+
+      - name: Install pinned maturin
+        run: proto install maturin
+
+      - name: Build the sdist
+        working-directory: rs
+        run: maturin sdist -m crates/bindings/paigasus-py-bindings/Cargo.toml --out ../dist
+
+      # The `include` allowlist in the crate's Cargo.toml is what keeps moon.yml out
+      # (MEASURED: without it the sdist ships it). Checks 1d/2b/2c in
+      # repo:publish-metadata do NOT reach this crate — it is `publish = false` — so this
+      # assertion is the only thing holding the allowlist honest.
+      - name: Assert the sdist ships nothing repo-internal
+        run: |
+          set -euo pipefail
+          listing="$(tar tzf dist/*.tar.gz)"
+          echo "$listing"
+          if printf '%s\n' "$listing" | grep -q 'moon\.yml'; then
+            echo "::error::sdist ships moon.yml — the Cargo include allowlist has regressed"; exit 1
+          fi
+          for required in README.md LICENSE pyproject.toml Cargo.lock; do
+            printf '%s\n' "$listing" | grep -q "/$required$" \
+              || { echo "::error::sdist is missing $required"; exit 1; }
+          done
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  sdist-verify:
+    name: verify sdist on ${{ matrix.runner }}${{ matrix.msrv && ' (MSRV 1.95)' || '' }}
+    needs: sdist
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS is THE control for SMA-578 §2: it is the only platform where the
+          # -undefined dynamic_lookup question exists at all. A Linux-only verification
+          # would be vacuous with respect to the claim that retired the "no sdist" rule.
+          - { runner: macos-latest, msrv: false }
+          - { runner: windows-latest, msrv: false }
+          - { runner: ubuntu-latest, msrv: false }
+          # The sdist ships NO rust-toolchain.toml, so a consumer builds with whatever
+          # rustc they have. This leg proves the advertised MSRV is real.
+          - { runner: ubuntu-latest, msrv: true }
+    steps:
+      - name: Download the sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sdist
+          path: dist
+
+      # No `actions/checkout` in this job on purpose: the sdist ships no rust-toolchain.toml,
+      # and rustup walks up from CWD looking for one when no override is active. A checked-out
+      # repo tree (which DOES carry rust-toolchain.toml) sitting above the build directory
+      # would silently reinstate the pinned 1.95.0 regardless of what `rustup default` below
+      # sets, making this leg pass even with a broken MSRV. An empty GITHUB_WORKSPACE keeps
+      # `rustup default` authoritative.
+      - name: Use rustc at the declared MSRV
+        if: ${{ matrix.msrv }}
+        run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
+
+      - name: Install from source into a clean venv, import and call
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv venv
+          # Windows lays a venv out as Scripts/, POSIX as bin/. Probe for the interpreter and
+          # FAIL LOUDLY when neither exists — a smoke test that quietly does nothing is the
+          # one outcome this step must never produce (Task 4's precedent for this exact trap).
+          if [ -f venv/bin/python ]; then
+            vpy="venv/bin/python"
+            vpip="venv/bin/pip"
+          elif [ -f venv/Scripts/python.exe ]; then
+            vpy="venv/Scripts/python.exe"
+            vpip="venv/Scripts/pip.exe"
+          else
+            echo "::error::no interpreter under venv"
+            ls -R venv
+            exit 1
+          fi
+          # NOT --no-binary :all: — that forces source builds of BUILD dependencies too,
+          # maturin included. Installing a local sdist never consults a wheel for the
+          # package itself, so the plain form already proves the source build.
+          "$vpip" install dist/*.tar.gz
+          # Exercises real kernel logic, not just the loader: same assertion Task 4 Step 7
+          # settled on. The PRN below is vector 0 of
+          # rs/crates/libs/paigasus-kernel-parity/vectors/prn_canonical.json, whose
+          # `canonical` equals its `input`.
+          "$vpy" - <<'PY'
+          import paigasus_py_bindings as k
+
+          assert k.sum_as_string(2, 3) == "5", k.sum_as_string(2, 3)
+          p = "prn:pgs:iam:::organization/0190a1e5-0000-7000-8000-000000000000"
+          assert k.prn_canonicalize(p) == p, k.prn_canonicalize(p)
+          print("sdist source build + FFI call OK")
+          PY
+
+  face:
+    name: build paigasus-kernel (pure python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install Moon-managed toolchains
+        run: moon setup
+
+      - name: Build the wrapper distribution
+        working-directory: py
+        run: uv build --package paigasus-kernel --out-dir ../dist
+
+      # [tool.uv.sources] is DEVELOPMENT-ONLY metadata that uv strips from the built
+      # wheel, so the published wrapper depends on the `==` pin alone. Assert the pin
+      # survived: without it the wrapper would float against any bindings version.
+      - name: Assert the exact dependency pin shipped
+        run: |
+          set -euo pipefail
+          meta="$(python3 -c "
+          import glob, zipfile
+          w = sorted(glob.glob('dist/paigasus_kernel-*.whl'))[0]
+          z = zipfile.ZipFile(w)
+          n = next(i for i in z.namelist() if i.endswith('.dist-info/METADATA'))
+          print(z.read(n).decode())")"
+          printf '%s\n' "$meta" | grep -qE '^Requires-Dist: paigasus-py-bindings==' \
+            || { echo "::error::the wrapper lost its == pin on paigasus-py-bindings"; printf '%s\n' "$meta"; exit 1; }
+          echo "OK: exact pin present"
+
+      - name: Upload the face distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wheel-paigasus-kernel
+          path: |
+            dist/paigasus_kernel-*.whl
+            dist/paigasus_kernel-*.tar.gz
           if-no-files-found: error
