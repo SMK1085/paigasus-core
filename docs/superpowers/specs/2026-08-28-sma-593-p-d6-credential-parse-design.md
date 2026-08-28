@@ -5,7 +5,7 @@ REWORK. This revision folds in every justified finding from both reviews.
 **Date:** 2026-08-28
 **Linear:** [SMA-593](https://linear.app/smaschek/issue/SMA-593/ci-repopublish-metadatas-p-d6-credential-guard-misses-five-ordinary)
 **Branch:** `feature/sma-593-close-p-d6-credential-spelling-gaps`
-**Targets:** `main` (currently `82fe78e`).
+**Targets:** `main` (currently `4f0d9b2`; the branch was rebased onto it after SMA-595 landed the moon 2.5.3 / proto 0.61.1 bump).
 **References:** SMA-407 §7 review M2 (the rule); SMA-578 (which added P-D6); SMA-542
 (guard-the-guard); SMA-529/SMA-530 (negative controls); SMA-541 (the `T` array and its
 marker-delimited twin); SMA-553/SMA-572/SMA-576 (gate bookkeeping); SMA-579.
@@ -119,7 +119,16 @@ parser depend on a working Rust toolchain.
 
 The dedicated project has neither problem, and it keeps both benefits: the pin is in a
 lockfile that Dependabot reads and `repo:osv` scans, and the gate's own lockfile is its cache
-key. **Measured on this host:** the lock resolves to 2 packages; cold, with no virtualenv,
+key.
+
+> **Correction, folded in after the final branch review (F8c).** The clause "a lockfile that
+> Dependabot reads and `repo:osv` scans" was **not true when this paragraph was written**.
+> Neither tool watched `ci/workflow-credentials/uv.lock`: Dependabot had no entry for the
+> directory, and the file was absent from `repo:osv`'s `LOCKFILES` list. Writing a lockfile
+> does not by itself enlist a watcher. The claim is true **now**, and only because this branch
+> added both — the `dependabot.yml` entry and the `LOCKFILES` entry — as separate, deliberate
+> work items. Read the sentence as a requirement this decision imposed, not as a property the
+> decision inherited. A future gate that copies this pattern must add both entries too. **Measured on this host:** the lock resolves to 2 packages; cold, with no virtualenv,
 `uv run` takes **0.959 s** (venv creation plus a 3 ms install); warm it takes **0.073 s**. No
 cargo and no maturin are invoked.
 
@@ -211,6 +220,27 @@ single- and double-quoted string literals from the span; then searches what rema
 sits outside the literal. `re.IGNORECASE` is correct here and only here: Actions expression
 context names are case-insensitive, while workflow schema keys are not.
 
+**R4 also matches a bare `if:` expression (controller ruling 8, added during
+implementation).** GitHub evaluates an `if:` value as an expression even without the
+`${{ }}` wrapper, so `if: secrets.TOKEN != ''` reads the secrets context with no span for the
+scan above to extract. R4 therefore makes a second pass over every `if:` key whose value is a
+string: it removes any wrapped `${{ … }}` part first — that part was already reported by the
+span loop, and leaving it would double-count — then strips literals from what remains and
+applies the same tight boundary. Rows I, J, K and L pin it: a bare read, an uppercase bare
+read, a wrapped read (reported once, not twice), and an `if:` with no secrets reference that
+must pass.
+
+**The span pattern is literal-aware (F2, added during the final review).** `\$\{\{(.*?)\}\}`
+is non-greedy over raw text, so a `}}` inside a string literal ends the span early:
+`${{ format('{0} }}', secrets.PYPI) }}` never reached `secrets`, and the read went unseen
+(measured). The repeat now consumes a whole quoted literal atomically, or one character that
+does not begin an unquoted `}}`, so it can stop only at a real span end. The obvious
+alternative — stripping literals from the whole scalar **before** extracting spans — was
+measured and rejected: it deletes a shell-quoted expression whole, so `run: echo
+"${{ secrets.X }}"` stops matching, which is the commonest shape a real secret read takes and
+one this repo already carries at `.github/workflows/wheels.yml:233` and `:262`. Rows M and N
+pin both directions.
+
 **No `secrets.GITHUB_TOKEN` exemption.** Revision 2 proposed one. It is dropped for two
 measured reasons. First, `secrets.GITHUB_TOKEN` appears **nowhere** in this repo's six
 workflows — the idiom is `${{ github.token }}` (`.github/workflows/ci.yml:58`) — so the
@@ -254,7 +284,12 @@ Trigger parsing has two traps and one edge:
 - **The YAML 1.1 boolean trap.** PyYAML parses the `on:` key as the boolean `True`, so
   `doc.get("on")` returns `None`. Read both `"on"` and `True`. Measured on `release.yml`: its
   top-level keys are `['name', True, 'concurrency', 'permissions', 'jobs']`, `'on' in d` is
-  `False`, `True in d` is `True`.
+  `False`, `True in d` is `True`. **Union the two, never prefer one (F3, final review.)** A
+  document can hold both keys at once — `"on": push` is the string key, a bare
+  `on: pull_request` is the boolean — and they are distinct dict keys, so the strict loader
+  finds no duplicate to reject. `doc.get("on", doc.get(True))` returned `{'push'}` for such a
+  document (measured on keys `['on', True, 'jobs']`), and the workflow silently left the
+  subject set with its grants unchecked.
 - **Three shapes.** `on:` appears as a string, a list, or a mapping; all normalise to a set.
 - **A bare `on:`** parses to `None`. That is an empty trigger set, so the workflow is not a
   subject.
@@ -319,6 +354,18 @@ re-run a job that can never go green. This split is orthogonal to the "zero of N
 carrying a pull-request trigger" case above, which stays rc 1 via the `EXPECTED_PR_SUBJECTS`
 equality check in `check()` and needs no change.
 
+**Corrected (F9, final review): the discriminator is `.github/`, not `.github/workflows/`.**
+As written above, the split did not survive git. Git tracks no empty directory, so "the
+workflows directory is present and holds no `.y*ml`" is essentially unreachable in a CI
+checkout. The reachable authorial act — a pull request deleting every workflow — removes the
+directory along with its files, which landed on the **absent** branch and therefore on rc 2:
+"re-run the job", for a job that can never go green. That is precisely the misclassification
+the split exists to prevent. The test is now `.github/` itself. Absent means the wrong root,
+rc 2. Present, with no `.y*ml` matched, means the workflows went missing, rc 1 — and it covers
+both shapes, the deleted directory and the empty one. `.github/` survives such a pull request,
+because `CODEOWNERS`, the issue templates and `dependabot.yml` all live there. Both shapes
+carry a filesystem self-test row (rows 2a and 2b).
+
 **The red output contract.** A red names the workflow file, the rule, and the YAML path to the
 offending node. With six files and four rules, triage is otherwise a manual re-run.
 
@@ -341,10 +388,18 @@ The gate asserts **declaration**, not that no credential can reach a workflow by
   catch that case. Two measured reasons. First, `.github/workflows/ci.yml:58` already reads
   `GH_TOKEN: ${{ github.token }}` deliberately, so a rule against `github.token` would red
   the gate on day one against correct usage. Second, `github.token` is ephemeral and bounded
-  by the workflow's own `permissions:` block, and `repo:actionlint` and zizmor already govern
-  `permissions:` for least privilege. Broadening R3 from `write-all` to any write scope would
-  turn a registry-credential-declaration gate into a least-privilege audit — a different job.
-  This is a named boundary, stated here and in the README, not a silent gap.
+  by the workflow's own `permissions:` block. Broadening R3 from `write-all` to any write scope
+  would turn a registry-credential-declaration gate into a least-privilege audit — a different
+  job. This is a named boundary, stated here and in the README, not a silent gap.
+  **Correction (F4).** An earlier draft of this bullet added "and `repo:actionlint` and zizmor
+  already govern `permissions:` for least privilege". That was false and is withdrawn. zizmor
+  runs nowhere in this repository — nothing pins it, installs it or calls it; the name occurs
+  only in prose and in one comment in `.github/workflows/release.yml`. `ci/actionlint/run.sh`
+  audits trigger filters and gate wiring, and holds no check on `permissions:` at all. **No
+  control in this repository catches an individual write-scope grant on a
+  pull-request-triggered workflow, and this gate deliberately does not either.** The boundary
+  rests on the scope decision alone. Adding such a rule is out of scope for SMA-593; only the
+  false justification is removed.
 
 The README states these, and states R4's residual false-positive surface, so the gate does
 not overclaim.
@@ -359,14 +414,25 @@ already-caught inputs; the 6 honest passes; `format('{0}', secrets.X)`; `toJSON(
 the three R4 false-positive strings from §4.3, which must **pass**; a duplicate-key document;
 a non-mapping document; and a bare `on:`.
 
+**Count, as shipped: 54 rows, not the ~34 this list enumerates.** The list above describes the
+plan; implementation and the two reviews added rows to it, and the total is what
+`--self-test` prints. The 54 split across four tables: **37** `RULE_CASES` (the enumeration
+above, plus the four bare/wrapped `if:` rows from ruling 8 and the two literal-aware span rows
+from F2), **8** `TRIGGER_CASES` (the six trigger shapes, the no-`on:` document, and the
+dual-key document from F3), **3** `PARSE_CASES`, and **6** filesystem rows that need a real
+directory. Each of the first three tables carries an **arity floor** checked before any row
+runs, and the filesystem count is asserted against `FILESYSTEM_CASES`, so an emptied table
+raises rather than printing a vacuous pass (F6). The floors are floors: adding a row needs no
+edit, removing one is deliberate.
+
 **It is invoked through `run.sh --self-test`, not directly.** Running
 `python3 workflow_credentials.py --self-test` under system python3 would fail on `import
 yaml`; every mode must go through the wrapper so it gets the `uv` invocation and the
 preflight.
 
 **In `run.sh --negative-control`.** Only rows needing the real tree: discovery over the real
-workflows; `release.yml` excluded; the strict-equality mismatch path; the glob-matches-nothing
-rc 2; a stale allowlist entry rc 1; the `uv` preflight rc 2 path; and the `3 → 1` mapping.
+workflows; `release.yml` excluded; the strict-equality mismatch path; the no-`.github/`
+rc 2 (the discriminator is `.github/`, not `.github/workflows/` — see F9 below); a stale allowlist entry rc 1; the `uv` preflight rc 2 path; and the `3 → 1` mapping.
 
 At least one rc-0 row stays in each table, so a checker that fails unconditionally cannot
 satisfy either.
