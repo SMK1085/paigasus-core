@@ -2267,27 +2267,54 @@ affected_smoke_block_extract() {
 # would finish rc 0 having asserted nothing. Echo a token and `return`, always. (Same bug
 # CodeRabbit found on invocation_allowlist_verdict; see the comment above that function.)
 affected_smoke_block_verdict() {
-  local f="$1" recs glob line s idx prev=0 script_lines tab
+  local f="$1" recs glob line s idx prev=0 tab nl entry sl i
+  local recs_hay required_hay script_lines
 
   [ -f "$f" ] && [ -r "$f" ] || { echo 'no-file'; return; }
 
   tab="$(printf '\t')"
+  nl='
+'
   recs="$(affected_smoke_block_extract "$f")"
+
+  # EVERY membership test below is bash pattern matching against a newline-DELIMITED haystack,
+  # not one `printf … | grep -qxF` subshell per entry. Nineteen required inputs plus three
+  # required script lines meant ~50 forks per verdict call, ~45 verdict calls per `--self-test`,
+  # and check 9's battery runs eleven of those concurrently — those forks, not the awk pass,
+  # dominated this gate's wall clock (measured in the SMA-572 fix wave; see README's cost note).
+  #
+  # The semantics are IDENTICAL to `grep -qxF`, not merely close, and that is load-bearing:
+  # wrapping BOTH the haystack and the needle in newlines is what makes each match WHOLE-LINE,
+  # so a declared glob that is a strict PREFIX of a required one (`ci/actionlint/**` against the
+  # required `ci/actionlint/**/*`) still reports missing — the exact-match property the fixture
+  # table pins in both directions. The needles are QUOTED inside every `case` pattern, so the
+  # `*` and `?` characters a glob is made of are matched literally rather than as wildcards;
+  # unquoting one would make `ci/**` match anything, which is why they are never bare.
+  recs_hay="$nl$recs$nl"
 
   # A block we could not parse cannot support a per-line answer, and nineteen missing-input rows
   # on top of the real problem would bury it. Report the structural verdict alone.
-  if printf '%s\n' "$recs" | grep -q "^ERR$tab"; then
-    printf '%s\n' "$recs" | sed -n "s/^ERR$tab//p"
-    return
-  fi
+  case "$recs_hay" in
+    *"${nl}ERR${tab}"*)
+      printf '%s\n' "$recs" | sed -n "s/^ERR$tab//p"
+      return
+      ;;
+  esac
+
+  required_hay="$nl"
+  for entry in "${T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}"; do
+    required_hay="$required_hay$entry$nl"
+  done
 
   # Stale and reasonless skips are reported before the requirements they claim to waive, so a
   # typo'd entry cannot silently un-require a glob.
   for s in ${REQUIRED_INPUT_SKIP+"${REQUIRED_INPUT_SKIP[@]}"}; do
     glob="${s%%#*}"; glob="${glob%"${glob##*[![:space:]]}"}"
     [ -n "$glob" ] || continue
-    printf '%s\n' "${T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" | grep -qxF -e "$glob" \
-      || echo "stale-skip $glob"
+    case "$required_hay" in
+      *"$nl$glob$nl"*) ;;
+      *) echo "stale-skip $glob" ;;
+    esac
   done
 
   for glob in "${T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}"; do
@@ -2296,13 +2323,28 @@ affected_smoke_block_verdict() {
       0) continue ;;
       2) echo "skip-without-reason $glob" ;;
     esac
-    printf '%s\n' "$recs" | grep -qxF -e "INPUT$tab$glob" \
-      || echo "missing-input $glob"
+    case "$recs_hay" in
+      *"${nl}INPUT${tab}${glob}${nl}"*) ;;
+      *) echo "missing-input $glob" ;;
+    esac
   done
 
-  script_lines="$(printf '%s\n' "$recs" | sed -n "s/^SCRIPT$tab//p")"
+  # The SCRIPT records, in file order, as an indexed array — the same 1-based numbering the
+  # `grep -nxF | head -1 | cut` pipeline this replaces produced, so the `-le "$prev"` ordering
+  # comparison below is unchanged. `IFS= read -r` splits on newlines only and keeps backslashes
+  # literal, so every element is one WHOLE line and `=` below is again a whole-line comparison.
+  script_lines=()
+  while IFS= read -r sl; do
+    case "$sl" in
+      "SCRIPT$tab"*) script_lines+=("${sl#"SCRIPT$tab"}") ;;
+    esac
+  done <<<"$recs"
+
   for line in "${T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}"; do
-    idx="$(printf '%s\n' "$script_lines" | grep -nxF -e "$line" | head -1 | cut -d: -f1)"
+    idx=''
+    for ((i = 0; i < ${#script_lines[@]}; i++)); do
+      if [ "${script_lines[i]}" = "$line" ]; then idx=$((i + 1)); break; fi
+    done
     if [ -z "$idx" ]; then
       echo "missing-script $line"
     elif [ "$idx" -le "$prev" ]; then
@@ -2953,7 +2995,7 @@ affected_smoke_block_self_test() {
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
   local rc=0 tmp got saved_skip
 
-  expect_block() {
+  expect_smoke_block() {
     local name="$1" expected="$2" body="$3"
     tmp="$(mktemp)"
     printf '%s' "$body" > "$tmp"
@@ -3014,12 +3056,12 @@ affected_smoke_block_self_test() {
     script: ${q}true${q}
 "
 
-  expect_block 'a fully wired block is clean' '' "$wired"
+  expect_smoke_block 'a fully wired block is clean' '' "$wired"
 
   # Each required input deleted in turn. Driven from the array so a twentieth-and-later entry is
   # covered automatically.
   for glob in "${T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}"; do
-    expect_block "required input '$glob' deleted fires" "missing-input $glob" \
+    expect_smoke_block "required input '$glob' deleted fires" "missing-input $glob" \
       "$(drop_line "$wired" "      - ${q}${glob}${q}")"
   done
 
@@ -3028,7 +3070,7 @@ affected_smoke_block_self_test() {
   # deletion that matters most, since run.sh exits inside the control branch and the control alone
   # exits 0 having asserted only against synthetic fixtures.
   for line in "${T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}"; do
-    expect_block "required script line '$line' deleted fires" "missing-script $line" \
+    expect_smoke_block "required script line '$line' deleted fires" "missing-script $line" \
       "$(drop_line "$wired" "      $line")"
   done
 
@@ -3054,13 +3096,13 @@ affected_smoke_block_self_test() {
     reordered="$reordered      - ${q}${glob}${q}
 "
   done
-  expect_block 'set -euo pipefail moved below the invocations fires out-of-order' \
+  expect_smoke_block 'set -euo pipefail moved below the invocations fires out-of-order' \
     'out-of-order-script ci/affected-graph/run.sh --negative-control
 out-of-order-script ci/affected-graph/run.sh' "$reordered"
 
   # A commented-out required line must report MISSING. This is the property whole-line matching
   # buys: commenting a line out does not remove its text, only prefix it.
-  expect_block 'a commented-out required script line still fires' \
+  expect_smoke_block 'a commented-out required script line still fires' \
     'missing-script ci/affected-graph/run.sh' \
     "$(rewrite_line "$wired" '      ci/affected-graph/run.sh' '      # ci/affected-graph/run.sh')"
 
@@ -3069,57 +3111,57 @@ out-of-order-script ci/affected-graph/run.sh' "$reordered"
   # — would read this as wired.
   local no_claude
   no_claude="$(drop_line "$wired" "      - ${q}CLAUDE.md${q}")"
-  expect_block 'an inputs entry planted in the script body does not satisfy the inputs table' \
+  expect_smoke_block 'an inputs entry planted in the script body does not satisfy the inputs table' \
     'missing-input CLAUDE.md' \
     "$(rewrite_line "$no_claude" '      set -euo pipefail' "      set -euo pipefail
       - ${q}CLAUDE.md${q}")"
 
   # Quote styles: moon accepts all three, so all three must be recognised.
-  expect_block 'a double-quoted input is recognised' '' \
+  expect_smoke_block 'a double-quoted input is recognised' '' \
     "$(rewrite_line "$wired" "      - ${q}CLAUDE.md${q}" '      - "CLAUDE.md"')"
-  expect_block 'an unquoted input is recognised' '' \
+  expect_smoke_block 'an unquoted input is recognised' '' \
     "$(rewrite_line "$wired" "      - ${q}CLAUDE.md${q}" '      - CLAUDE.md')"
-  expect_block 'a trailing comment on an unquoted input is stripped' '' \
+  expect_smoke_block 'a trailing comment on an unquoted input is stripped' '' \
     "$(rewrite_line "$wired" "      - ${q}CLAUDE.md${q}" '      - CLAUDE.md  # the docs pin')"
   # The QUOTED arm strips its trailing comment through a DIFFERENT sub() than the unquoted arm
   # above (the quoted one has to close the quote first, so a `#` inside the glob stays part of the
   # pattern). Without this row that second sub() is uncovered, and the live moon.yml carries
   # exactly this shape — a single-quoted glob followed by an SMA reference.
-  expect_block 'a trailing comment on a QUOTED input is stripped' '' \
+  expect_smoke_block 'a trailing comment on a QUOTED input is stripped' '' \
     "$(rewrite_line "$wired" "      - ${q}CLAUDE.md${q}" "      - ${q}CLAUDE.md${q}  # SMA-541")"
 
   # A blank line inside the `script: |` literal block is legal YAML and legal bash, and separating
   # `set -euo pipefail` from the invocations for readability is a plausible edit. The extractor
   # skips it explicitly; without this row, deleting that skip closes the block on the blank line
   # and every script line after it reads as missing — a red on a change that broke nothing.
-  expect_block 'a blank line inside the script block is tolerated' '' \
+  expect_smoke_block 'a blank line inside the script block is tolerated' '' \
     "$(rewrite_line "$wired" '      set -euo pipefail' '      set -euo pipefail
 ')"
 
   # An interleaved YAML comment inside the sequence is not an entry. The live file carries several
   # of these (moon.yml's `# SMA-542 …`, `# SMA-530 …` and `# SMA-541 …` blocks all sit between
   # sequence entries), so "any six-space line" is not a sufficient rule.
-  expect_block 'an interleaved comment in the inputs block is skipped' '' \
+  expect_smoke_block 'an interleaved comment in the inputs block is skipped' '' \
     "$(rewrite_line "$wired" "      - ${q}CLAUDE.md${q}" "      # SMA-541 — do not remove
       - ${q}CLAUDE.md${q}")"
 
   # Shapes this extractor refuses to guess at. Each reports its OWN token and nothing else: a
   # block we could not parse cannot support a per-line answer, and nineteen missing-input rows on
   # top would bury the real problem.
-  expect_block 'a folded script scalar fires bad-script-form' 'bad-script-form' \
+  expect_smoke_block 'a folded script scalar fires bad-script-form' 'bad-script-form' \
     "$(rewrite_line "$wired" '    script: |' '    script: >')"
-  expect_block 'an inline inputs sequence fires bad-inputs-form' 'bad-inputs-form' \
+  expect_smoke_block 'an inline inputs sequence fires bad-inputs-form' 'bad-inputs-form' \
 "tasks:
   affected-smoke:
     script: |
       set -euo pipefail
     inputs: [moon.yml]
 "
-  expect_block 'a non-comment tail on the task key fires bad-task-form' 'bad-task-form' \
+  expect_smoke_block 'a non-comment tail on the task key fires bad-task-form' 'bad-task-form' \
     "$(rewrite_line "$wired" '  affected-smoke:' '  affected-smoke: &anchor')"
-  expect_block 'a trailing comment on the task key is tolerated' '' \
+  expect_smoke_block 'a trailing comment on the task key is tolerated' '' \
     "$(rewrite_line "$wired" '  affected-smoke:' '  affected-smoke:  # the cascade gate')"
-  expect_block 'a second inputs key fires duplicate-key' 'duplicate-key inputs' \
+  expect_smoke_block 'a second inputs key fires duplicate-key' 'duplicate-key inputs' \
 "tasks:
   affected-smoke:
     script: |
@@ -3131,7 +3173,7 @@ out-of-order-script ci/affected-graph/run.sh' "$reordered"
     inputs:
       - ${q}moon.yml${q}
 "
-  expect_block 'a second script key fires duplicate-key' 'duplicate-key script' \
+  expect_smoke_block 'a second script key fires duplicate-key' 'duplicate-key script' \
 "tasks:
   affected-smoke:
     script: |
@@ -3141,7 +3183,7 @@ out-of-order-script ci/affected-graph/run.sh' "$reordered"
     inputs:
       - ${q}moon.yml${q}
 "
-  expect_block 'the task being absent entirely fires no-task' 'no-task' \
+  expect_smoke_block 'the task being absent entirely fires no-task' 'no-task' \
 "tasks:
   other-task:
     script: ${q}true${q}
@@ -3156,17 +3198,17 @@ out-of-order-script ci/affected-graph/run.sh' "$reordered"
     inputs:
       - ${q}CLAUDE.md${q}
 "
-  expect_block 'a required input declared on a DIFFERENT task does not count' \
+  expect_smoke_block 'a required input declared on a DIFFERENT task does not count' \
     'missing-input CLAUDE.md' "$elsewhere"
 
   # REQUIRED_INPUT_SKIP, both directions.
   saved_skip=(${REQUIRED_INPUT_SKIP+"${REQUIRED_INPUT_SKIP[@]}"})
   REQUIRED_INPUT_SKIP=("CLAUDE.md # moved to a different gate, verified by X")
-  expect_block 'a skipped required input is not reported' '' "$no_claude"
-  expect_block 'a skip does not leak to a different glob' 'missing-input moon.yml' \
+  expect_smoke_block 'a skipped required input is not reported' '' "$no_claude"
+  expect_smoke_block 'a skip does not leak to a different glob' 'missing-input moon.yml' \
     "$(drop_line "$wired" "      - ${q}moon.yml${q}")"
   REQUIRED_INPUT_SKIP=("CLAUDE.md")
-  expect_block 'a skip with no reason is rejected' \
+  expect_smoke_block 'a skip with no reason is rejected' \
     'skip-without-reason CLAUDE.md
 missing-input CLAUDE.md' "$no_claude"
   # The `#`-present-but-empty form is a SECOND, distinct `return 2` in is_required_input_skipped,
@@ -3174,18 +3216,18 @@ missing-input CLAUDE.md' "$no_claude"
   # cleanup folding the two paths together — after which `"moon.yml #"` would read as a stated
   # reason and silently un-require the one glob that schedules this whole family of pins.
   REQUIRED_INPUT_SKIP=("CLAUDE.md #")
-  expect_block 'a skip whose reason is blank is rejected too' \
+  expect_smoke_block 'a skip whose reason is blank is rejected too' \
     'skip-without-reason CLAUDE.md
 missing-input CLAUDE.md' "$no_claude"
   REQUIRED_INPUT_SKIP=("ops/**/* # names a glob that is not required")
-  expect_block 'a skip naming a non-required glob is reported stale' \
+  expect_smoke_block 'a skip naming a non-required glob is reported stale' \
     'stale-skip ops/**/*' "$wired"
   # The row above cannot see whether the stale-skip match is EXACT: `ops/**/*` is not a substring
   # of any required entry, so `grep -qxF` degraded to `grep -qF` still reports it. This one is a
   # strict PREFIX of the required `ci/actionlint/**/*` — the shape a typo'd or half-updated waiver
   # actually takes — so it is reported stale only while the match stays whole-line.
   REQUIRED_INPUT_SKIP=("ci/actionlint/** # a mere PREFIX of a required glob, not one of them")
-  expect_block 'a stale skip that is a SUBSTRING of a required glob is still reported' \
+  expect_smoke_block 'a stale skip that is a SUBSTRING of a required glob is still reported' \
     'stale-skip ci/actionlint/**' "$wired"
   REQUIRED_INPUT_SKIP=(${saved_skip+"${saved_skip[@]}"})
 
