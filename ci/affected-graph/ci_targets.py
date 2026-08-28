@@ -528,6 +528,22 @@ ACTIONLINT_SH_CALL_SITES = (
     # `block_execution_verdict /nonexistent/ci.yml`, ...), so a substring test would be satisfied
     # by those and survive deleting this exact production line.
     "done < <(block_execution_verdict .github/workflows/ci.yml)",
+    # Check 8e's production call site (SMA-572/SMA-573) — the pin that makes
+    # SELF_TASK_GLOBS_EXEMPT["affected-smoke"] a delegation rather than a skip. Same shape as
+    # the four entries above it: `affected_smoke_block_verdict` is also called from inside its
+    # own self-test fixtures (`affected_smoke_block_verdict "$tmp"`,
+    # `affected_smoke_block_verdict /nonexistent/moon.yml`), so a substring test would be
+    # satisfied by those and survive deleting this exact production line.
+    "done < <(affected_smoke_block_verdict moon.yml)",
+    # ...and the INPUT table's arity floor, which is a second, different hole. The verdict
+    # function iterates its table, so an EMPTIED table emits zero verdicts and the gate passes
+    # having asserted nothing — MEASURED before this floor existed: with the array replaced by
+    # `()`, `affected_smoke_block_verdict moon.yml` emitted 0 lines against the real, fully
+    # wired file. Check 8c never needed this because its table is a verbatim dual copy of
+    # RUN_SH_CALL_SITES above and the other copy still asserts the lines; 8e deliberately keeps
+    # its set at one site, so the floor is what makes shrinking it a two-file edit across two
+    # independently scheduled gates.
+    '[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 19 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 19"',
 )
 
 # SMA-530. The moon.yml pins above prove the CONTROL IS INVOKED; these prove it still DOES
@@ -1453,6 +1469,12 @@ def self_test():
         # README L12) — same shape again: `block_execution_verdict` is also called from inside its
         # own self-test fixtures, so this MUST be whole-line matched too.
         'done < <(block_execution_verdict .github/workflows/ci.yml)\n'
+        # Check 8e's production call site and its input-table arity floor (SMA-572) — both
+        # whole-line matched at column 0, for the same reason as the four entries above: each
+        # appears in substring form elsewhere (the verdict function inside its own fixtures; the
+        # array name in its own declaration), so only the whole line proves the PRODUCTION use.
+        'done < <(affected_smoke_block_verdict moon.yml)\n'
+        '[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 19 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 19"\n'
     )
     wired_release_parity = (
         '    --negative-control) NEGATIVE=1; shift ;;\n'

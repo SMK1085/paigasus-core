@@ -2180,9 +2180,11 @@ affected_smoke_block_extract() {
   awk '
     function err(tok) { print "ERR\t" tok }
 
-    # A task key sits at EXACTLY two spaces. Matching every such line — not just this task’s — is
-    # what closes the block when the NEXT task starts; without it a required input declared on a
-    # later task would satisfy this one.
+    # A task key sits at EXACTLY two spaces. Matching every such line — not only the one for this
+    # task — is what closes the block when the NEXT task starts; without it a required input
+    # declared on a later task would satisfy this one. (Worded to avoid an apostrophe on purpose:
+    # this whole awk program is single-quoted, so a straight one would terminate it mid-program —
+    # the same constraint the \047 note below spells out. Comments in here are not free text.)
     /^  [^ \t#][^:]*:/ {
       intask = 0; inscript = 0; ininputs = 0
       key = $0; sub(/^  /, "", key); sub(/:.*$/, "", key)
@@ -3079,6 +3081,20 @@ out-of-order-script ci/affected-graph/run.sh' "$reordered"
     "$(rewrite_line "$wired" "      - ${q}CLAUDE.md${q}" '      - CLAUDE.md')"
   expect_block 'a trailing comment on an unquoted input is stripped' '' \
     "$(rewrite_line "$wired" "      - ${q}CLAUDE.md${q}" '      - CLAUDE.md  # the docs pin')"
+  # The QUOTED arm strips its trailing comment through a DIFFERENT sub() than the unquoted arm
+  # above (the quoted one has to close the quote first, so a `#` inside the glob stays part of the
+  # pattern). Without this row that second sub() is uncovered, and the live moon.yml carries
+  # exactly this shape — a single-quoted glob followed by an SMA reference.
+  expect_block 'a trailing comment on a QUOTED input is stripped' '' \
+    "$(rewrite_line "$wired" "      - ${q}CLAUDE.md${q}" "      - ${q}CLAUDE.md${q}  # SMA-541")"
+
+  # A blank line inside the `script: |` literal block is legal YAML and legal bash, and separating
+  # `set -euo pipefail` from the invocations for readability is a plausible edit. The extractor
+  # skips it explicitly; without this row, deleting that skip closes the block on the blank line
+  # and every script line after it reads as missing — a red on a change that broke nothing.
+  expect_block 'a blank line inside the script block is tolerated' '' \
+    "$(rewrite_line "$wired" '      set -euo pipefail' '      set -euo pipefail
+')"
 
   # An interleaved YAML comment inside the sequence is not an entry. The live file carries several
   # of these (moon.yml's `# SMA-542 …`, `# SMA-530 …` and `# SMA-541 …` blocks all sit between
@@ -3153,9 +3169,24 @@ out-of-order-script ci/affected-graph/run.sh' "$reordered"
   expect_block 'a skip with no reason is rejected' \
     'skip-without-reason CLAUDE.md
 missing-input CLAUDE.md' "$no_claude"
+  # The `#`-present-but-empty form is a SECOND, distinct `return 2` in is_required_input_skipped,
+  # and the row above exercises only the first (no `#` at all). Covering it is what stops a later
+  # cleanup folding the two paths together — after which `"moon.yml #"` would read as a stated
+  # reason and silently un-require the one glob that schedules this whole family of pins.
+  REQUIRED_INPUT_SKIP=("CLAUDE.md #")
+  expect_block 'a skip whose reason is blank is rejected too' \
+    'skip-without-reason CLAUDE.md
+missing-input CLAUDE.md' "$no_claude"
   REQUIRED_INPUT_SKIP=("ops/**/* # names a glob that is not required")
   expect_block 'a skip naming a non-required glob is reported stale' \
     'stale-skip ops/**/*' "$wired"
+  # The row above cannot see whether the stale-skip match is EXACT: `ops/**/*` is not a substring
+  # of any required entry, so `grep -qxF` degraded to `grep -qF` still reports it. This one is a
+  # strict PREFIX of the required `ci/actionlint/**/*` — the shape a typo'd or half-updated waiver
+  # actually takes — so it is reported stale only while the match stays whole-line.
+  REQUIRED_INPUT_SKIP=("ci/actionlint/** # a mere PREFIX of a required glob, not one of them")
+  expect_block 'a stale skip that is a SUBSTRING of a required glob is still reported' \
+    'stale-skip ci/actionlint/**' "$wired"
   REQUIRED_INPUT_SKIP=(${saved_skip+"${saved_skip[@]}"})
 
   # File-level verdicts, mirroring affected_graph_wiring_self_test's own two rows. The directory
@@ -4310,6 +4341,94 @@ while IFS= read -r verdict; do
   esac
 done < <(block_execution_verdict .github/workflows/ci.yml)
 fi
+
+# ---------------------------------------------------------------------------------------------
+# Check 8e — repo:affected-smoke still declares the inputs that schedule every pin in
+# ci/affected-graph/ci_targets.py, and still runs both halves of its own script, in order.
+# Rationale, tables and fixtures are with affected_smoke_block_verdict above.
+#
+# UNCONDITIONAL, deliberately — NOT inside the `if [ "$CI_YML_MISSING" -eq 0 ]` that guards
+# checks 8b/8d just above. That guard is a de-dup about ci.yml's existence; this check reads
+# moon.yml, so gating it on ci.yml would switch it off for a wholly unrelated reason. Check 8c is
+# unconditional for exactly the same reason and is the precedent here.
+#
+# THE ARITY FLOORS ARE PART OF THE CHECK, not a sanity nicety. affected_smoke_block_verdict
+# iterates its tables, so an EMPTIED table emits zero verdicts and passes — the "green while
+# asserting nothing" failure this whole registry exists to prevent (MEASURED: with
+# T_AFFECTED_SMOKE_REQUIRED_INPUTS replaced by `()`, affected_smoke_block_verdict moon.yml emitted
+# 0 lines against the real, wired file). Check 8c is immune to that only because its table is a
+# verbatim dual copy of ci_targets.py's RUN_SH_CALL_SITES and the other copy still asserts the
+# same lines; 8e keeps its set at ONE site (a second copy would add drift risk with no added
+# coverage, since repo:actionlint runs on every PR), so it buys non-emptiability this way instead.
+# Both floors are pinned from ci_targets.py's ACTIONLINT_SH_CALL_SITES, which makes shrinking
+# either table a two-file edit across two independently scheduled gates. `-ge`, not `-eq`, so
+# honest GROWTH needs no second edit.
+#
+# COLUMN 0 for both floor lines: ACTIONLINT_SH_CALL_SITES matches its entries with no leading
+# whitespace, so indenting either one (by wrapping this block in a conditional, say) reds that pin
+# rather than silently satisfying it.
+# ---------------------------------------------------------------------------------------------
+[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 19 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 19"
+[ "${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}" -ge 3 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_SCRIPT has ${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]} entries, expected at least 3"
+
+while IFS= read -r verdict; do
+  case "$verdict" in
+    '') ;;
+    no-file)
+      fail "moon.yml does not exist, or is not a readable regular file, so this gate cannot
+      confirm repo:affected-smoke still declares the inputs that schedule every pin in
+      ci/affected-graph/ci_targets.py. If it was renamed, update check 8e in $0." ;;
+    no-task)
+      fail "moon.yml no longer declares a task named 'affected-smoke'. That task is where
+      ci_targets.py runs, so removing it switches off C1-C5, the cascade cases, A1-A6 and every
+      call-site pin in that file at once." ;;
+    bad-task-form|bad-script-form|bad-inputs-form)
+      fail "check 8e could not parse repo:affected-smoke's block in moon.yml ($verdict). The
+      extractor is held to this file's block style — task keys at two spaces, fields at four,
+      'script: |' as a literal block and 'inputs:' as a block sequence. It fails loudly rather
+      than skipping in silence, because a parser that skips quietly makes this check vacuous.
+      Restore the block style, or teach affected_smoke_block_extract the new one (with a
+      fixture)." ;;
+    'duplicate-key '*)
+      fail "repo:affected-smoke declares '${verdict#duplicate-key }' twice in moon.yml. Which one
+      moon honours is not something this check will guess at — merge them." ;;
+    'missing-input '*)
+      fail "repo:affected-smoke no longer declares the input '${verdict#missing-input }'. Every
+      pin in ci/affected-graph/ci_targets.py fires only when this task is SCHEDULED, and its
+      inputs are what schedule it — so dropping one silently un-reaches a whole family of pins
+      for every later PR. The 'moon.yml' entry is the worst case: removing it is itself a
+      root-moon.yml edit, and afterwards nothing in this task's remaining globs matches that
+      file, so the removal PR is the last one that would have noticed. Restore the entry, or add
+      a reasoned REQUIRED_INPUT_SKIP entry in $0 saying what covers it instead." ;;
+    'missing-script '*)
+      fail "repo:affected-smoke's script no longer contains the exact line
+      '${verdict#missing-script }' (a commented-out copy counts as absent). Moon takes a script
+      block's status from its LAST command, so all three lines are load-bearing: without
+      'set -euo pipefail' a failing negative control is swallowed, and without the bare
+      'ci/affected-graph/run.sh' only the control runs — which asserts against synthetic
+      fixtures and exits 0. ci_targets.py cannot catch that last one: it is what would have run
+      the checker. This check is scheduled independently, so it survives the deletion." ;;
+    'out-of-order-script '*)
+      fail "repo:affected-smoke's script line '${verdict#out-of-order-script }' appears at or
+      before a required line that must precede it. ci_targets.py compares a set of lines and
+      cannot see order, so moving 'set -euo pipefail' below the invocations leaves it green while
+      errexit stops applying to them. The required order is:
+$(printf '        %s\n' "${T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}")
+      Compare the block against that order rather than assuming the line named above is itself
+      the one that moved: the scan walks the table forwards and reports every line landing at or
+      before the previously-matched one, so ONE displaced line is commonly reported as several." ;;
+    'skip-without-reason '*)
+      fail "REQUIRED_INPUT_SKIP entry for '${verdict#skip-without-reason }' states no reason.
+      Write it as \"<glob> # why, and what verifies it instead\" — an unexplained waiver is
+      indistinguishable from the deletion this check exists to catch." ;;
+    'stale-skip '*)
+      fail "REQUIRED_INPUT_SKIP names '${verdict#stale-skip }', which is not in
+      T_AFFECTED_SMOKE_REQUIRED_INPUTS. A waiver that has outlived its requirement hides the next
+      one; delete it." ;;
+    *)
+      infra "unhandled affected-smoke-block verdict '$verdict'" ;;
+  esac
+done < <(affected_smoke_block_verdict moon.yml)
 
 # Guard lives here, AFTER the --self-test early exit: --self-test never shells out to actionlint,
 # so it must not infra-exit on a machine that simply doesn't have the binary on PATH yet.
