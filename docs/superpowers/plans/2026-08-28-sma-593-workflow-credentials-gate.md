@@ -608,6 +608,10 @@ def check(root: str) -> int:
             + "\n  A same-repo pull request receives repository secrets, so this is readable "
               "by any code the PR introduces. Publishing belongs in a workflow with no "
               "pull_request trigger (SMA-407 §7 review M2).")
+    # The NAMES, not just a count. ci/workflow-credentials/run.sh --negative-control greps
+    # this line to assert release.yml is absent from the subject set; a count alone would
+    # make that row match nothing and assert nothing. (Pre-flight ruling 2.)
+    print(f"workflow-credentials: subjects: {' '.join(subjects)}")
     print(f"workflow-credentials: {len(subjects)} pull-request-triggered workflow(s) "
           "carry no credential")
     return RC_OK
@@ -731,8 +735,14 @@ negative_control() {
     printf '  FAIL release.yml no longer reads a secret — re-baseline this control row\n' >&2
     failures=$((failures + 1))
   fi
-  if bash "$0" 2>/dev/null | grep -q 'release.yml'; then
+  # Greps the `subjects:` line the checker prints (pre-flight ruling 2). A count-only line
+  # would make this row match nothing and assert nothing regardless of what discovery did.
+  if bash "$0" 2>/dev/null | grep '^workflow-credentials: subjects:' | grep -q 'release.yml'; then
     printf '  FAIL release.yml appeared in the subject set; it has no pull_request trigger\n' >&2
+    failures=$((failures + 1))
+  fi
+  if ! bash "$0" 2>/dev/null | grep -q '^workflow-credentials: subjects:'; then
+    printf '  FAIL the checker printed no subjects line — the row above cannot assert\n' >&2
     failures=$((failures + 1))
   fi
 
@@ -862,8 +872,14 @@ In `SELF_SCHEDULED_GATES`, add:
 
 In `REQUIRED_REPO_TASKS`, add `"workflow-credentials"` in alphabetical position (last).
 
-In `SELF_TASK_EXPECTED_GLOBS["publish-metadata"]`, **delete** the line
-`".github/workflows/wheels.yml",` and rewrite the explaining comment at `:218-226` so it no longer says P-D6 reads that file. Leave every other line of that tuple byte-identical — a peer session is editing this file.
+**Do NOT touch `SELF_TASK_EXPECTED_GLOBS["publish-metadata"]` in this task.** That tuple is
+compared against Moon's *resolved* inputs, and `moon.yml` still declares
+`.github/workflows/wheels.yml` for `publish-metadata` until Task 7. Shrinking the registry here
+would red `repo:affected-smoke` at the end of this task. The registry edit and the `moon.yml`
+inputs edit must land in the same commit; both are in Task 7. (Pre-flight ruling 1.)
+
+Leave every other line of `ci_targets.py` byte-identical — two peer sessions are editing this
+file concurrently.
 
 - [ ] **Step 4: Pin the negative-control body**
 
@@ -872,13 +888,31 @@ Add a `WORKFLOW_CREDENTIALS_SH_CALL_SITES` tuple next to `RELEASE_PARITY_SH_CALL
 ```python
 WORKFLOW_CREDENTIALS_SH_CALL_SITES = (
     "--negative-control) MODE=negctl;   shift ;;",
-    'negctl)   negative_control ;;',
+    "negctl)   negative_control ;;",
     'if [ "$failures" -gt 0 ]; then',
-    "exit 1",
+    "printf 'workflow-credentials negative control: %d row(s) failed\\n' \"$failures\" >&2",
 )
 ```
 
-Wire it into the same check that consumes `RELEASE_PARITY_SH_CALL_SITES`, following that function exactly.
+The bare `exit 1` was rejected as a pin: it is not distinctive, and a pin satisfied by an
+occurrence the deletion never touched is the substring hazard `ACTIONLINT_SH_CALL_SITES`
+documents. **Before committing, verify every pinned line occurs EXACTLY once:**
+
+```bash
+while IFS= read -r line; do
+  printf '%s -> %s\n' "$(grep -cF "$line" ci/workflow-credentials/run.sh)" "$line"
+done <<'LINES'
+--negative-control) MODE=negctl;   shift ;;
+negctl)   negative_control ;;
+if [ "$failures" -gt 0 ]; then
+LINES
+```
+
+Expected: every count is `1`. A `0` means the pin text drifted from the script; a `2` or more
+means the pin is ambiguous and must be made more specific.
+
+Wire it into the same check that consumes `RELEASE_PARITY_SH_CALL_SITES`, following that
+function exactly.
 
 - [ ] **Step 5: Make the pin reachable, and floor it**
 
@@ -921,6 +955,7 @@ git commit -m "ci(repo): schedule repo:workflow-credentials and pin its registri
 - Modify: `moon.yml:497` and the `publish-metadata` inputs
 - Modify: `CLAUDE.md:351`
 - Modify: `.github/workflows/wheels.yml:12`
+- Modify: `ci/affected-graph/ci_targets.py` (the `publish-metadata` tuple only)
 
 - [ ] **Step 1: Delete the four regions of `ci/publish-metadata/run.sh`**
 
@@ -943,6 +978,7 @@ Expected: only hits under `ci/workflow-credentials/` and prose in the spec and p
 
 - `moon.yml:497` — the `publish-metadata` `description:` ends `while wheels.yml stays credential-free (SMA-578)`. Remove that clause.
 - `moon.yml` — remove `'.github/workflows/wheels.yml'` from `publish-metadata`'s `inputs` **and** the comment explaining why it was there.
+- `ci/affected-graph/ci_targets.py` — in `SELF_TASK_EXPECTED_GLOBS["publish-metadata"]`, delete the line `".github/workflows/wheels.yml",` and rewrite the explaining comment at `:218-226` so it no longer says P-D6 reads that file. **This must land in the same commit as the `moon.yml` inputs removal above** — the tuple is compared against Moon's resolved inputs, so doing either alone reds `repo:affected-smoke` (pre-flight ruling 1). Leave every other line of that tuple byte-identical; two peer sessions are editing this file.
 - `CLAUDE.md:351` — reads "`repo:publish-metadata` asserts this". Change to `repo:workflow-credentials`, and note the guard now covers every pull-request-triggered workflow.
 - `.github/workflows/wheels.yml:12` — reads "`repo:publish-metadata` asserts this". Same correction. Leave the ban itself at `:9-10` alone.
 - `ci/publish-metadata/README.md` — its check table has **no** P-D6 row to remove; it is already stale for the whole Python arm (no P0/P1/P2 rows). Add the missing rows, or add one line recording the staleness. Do not leave it silently wrong.
