@@ -63,7 +63,9 @@ It also runs several checks that the per-case project sets structurally **cannot
   Both differences from a bare `--affected` query are benign for these cases — the `T` filter only
   removes tasks none of them assert (`build-release`), and the upstream-dep closure only adds
   builds. RE-MEASURE THIS ON A MOON BUMP, alongside A4's `inputFiles` shape, A5's
-  command/args/script shape and A6's `inputGlobs` shape.
+  command/args/script shape, A6's `inputGlobs` shape, and A7's reliance on all of those at once —
+  it reuses A5's `command`/`args`/`script` derivation and reads both the `inputFiles` and
+  `inputGlobs` buckets the way A4 does.
 - **`lockfile->all-lint`** asserts that a `rs/Cargo.lock` touch schedules **every** crate's `lint`
   **and** the three tasks that compile the FFI cdylibs (`paigasus-kernel-ts:{build,test}`,
   `paigasus-kernel-py:test`). `rs/` has no Moon project, so the workspace files belong to `repo`
@@ -112,6 +114,24 @@ It also runs several checks that the per-case project sets structurally **cannot
   the crates named in `REQUIRED_CLOSURE_EDGES`. The general backstop is A4, which enumerates Cargo
   manifests from disk rather than trusting moon's `language` field, and `run.sh`'s
   `lockfile->all-lint` set, which lists every crate by hand.
+- **A7** (in `cargo_moon_parity.py`, SMA-560) is A6's cross-stack twin: the py/ts wrapper
+  projects — `paigasus-kernel-py`, `paigasus-kernel-ts` — carry hand-written `/rs/...` globs
+  that ARE the ADR-0005 cross-binding guarantee, but A6 iterates `language == "rust"` only, so
+  those wrappers were asserted by nothing. A7 does not hand-write its task set either: it derives
+  it from `derive_ffi_tasks()`, shared with A5, so a new wrapper's `napi build` (or equivalent) is
+  examined on day one, even while it still declares zero inputs — the exact shape a hand-written
+  list could not catch. Unlike A6, A7 asserts CONTAINMENT (`want <= observed`), not strict
+  equality: a wrapper's globs are hand-written per task and legitimately mixed with non-closure
+  entries under `rs/crates/` — the SMA-433 parity-vector corpus, and each binding's
+  `package.json` / `pyproject.toml` — so strict equality would report those correct entries as
+  violations. It reads BOTH moon input buckets, PER `(project, task)`, never unioned across a
+  wrapper's tasks: `Cargo.toml` lands in `inputFiles`, `src/**/*` in `inputGlobs`, and a wrapper's
+  `build` and `test` declare different sets, so a one-bucket or task-unioned read would pass the
+  very under-declaration this check exists to catch. `REQUIRED_WRAPPER_CLOSURE` is its
+  anti-vacuity floor, and it is edge-based rather than a task-name list for a reason specific to
+  containment: a containment check whose `want` set empties is VACUOUSLY satisfied — it prints
+  PASS having asserted nothing — and a task-name floor cannot see that, because the tasks are
+  still examined even when their required upstream edges have gone missing.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
@@ -158,7 +178,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   degrading to two empty sets. **`:affected-smoke` is load-bearing for every assertion in this
   file**: this gate runs *inside* it, so removing that one entry from `T` (and from CLAUDE.md)
   passes C1-C5 by never executing them, and takes the eight project cascade cases, the five task
-  cases, A1-A6 and `assert_include_relations` with it. Never exempt or drop it — see the design
+  cases, A1-A7 and `assert_include_relations` with it. Never exempt or drop it — see the design
   doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
   design doc's L3.
@@ -273,7 +293,11 @@ The expected sets are a snapshot of `moon query --affected --downstream deep` ou
 **pinned moon version** (currently 2.3.2). A4 additionally depends on `moon query projects`
 emitting per-task `inputFiles` as a path-keyed object, A5 on it emitting per-task `command`,
 `args` and `script`, and A6 on it emitting per-task `inputGlobs` the same shape as `inputFiles` and
-per-project `language`. A moon upgrade that changes any of `inputFiles`, `inputGlobs`, `language`,
-`command`, `args` or `script` — even benignly — will fail the guard, so re-grounding is a known step
-of any moon bump. All three treat a missing key as a violation or an infrastructure error rather
-than skipping, precisely so such a change cannot turn into a silent pass.
+per-project `language`. A7 depends on all four at once — it reuses A5's `command`/`args`/`script`
+derivation to find its task set, reads the same `inputFiles`/`inputGlobs` pair A4 and A6 read (both
+buckets, not one), and reads `language` to exclude the Rust projects A6 already covers — so it has
+no assumption of its own beyond what A4-A6 already state. A moon upgrade that changes any of
+`inputFiles`, `inputGlobs`, `language`, `command`, `args` or `script` — even benignly — will fail
+the guard, so re-grounding is a known step of any moon bump. All four treat a missing key as a
+violation or an infrastructure error rather than skipping, precisely so such a change cannot turn
+into a silent pass.
