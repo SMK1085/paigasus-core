@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.10.3",
+  "checkpoint_id": "9a1da9ab5c89",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-560-assert-cross-stack-input-affectedness",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "docs/superpowers/specs/2026-08-28-sma-560-cross-stack-input-affectedness-design.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9a/1da9ab5c89/0/metadata.json",
+      "transcript": "/9a/1da9ab5c89/0/full.jsonl",
+      "compact_transcript": "/9a/1da9ab5c89/0/transcript.jsonl",
+      "content_hash": "/9a/1da9ab5c89/0/content_hash.txt",
+      "prompt": "/9a/1da9ab5c89/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 248,
+    "cache_creation_tokens": 296919,
+    "cache_read_tokens": 25258287,
+    "output_tokens": 111994,
+    "api_call_count": 124
+  }
+}
