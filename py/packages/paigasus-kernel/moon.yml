@@ -44,6 +44,11 @@ tasks:
       # edit must bust this task's Moon cache too (review F4) — Moon hashes only listed inputs, and an
       # upstream `^:build` recompile alone does not re-key this task.
       - '/rs/crates/libs/paigasus-kernel/src/**/*'
+      # The kernel's manifest, not just its sources (SMA-560). A `[features]` toggle there can
+      # change what this wheel links without any src diff — the same hazard
+      # repo:parity-corpus-drift already lists this file for. A6 demands the src+manifest PAIR of
+      # every Rust crate; A7 now demands it here too.
+      - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
       - '/rs/crates/bindings/paigasus-py-bindings/src/**/*'
       # ...and the binding's manifests, so a maturin-config (pyproject.toml) or dependency
       # (Cargo.toml) change re-keys the guard even without a Rust src diff (cache-input completeness).

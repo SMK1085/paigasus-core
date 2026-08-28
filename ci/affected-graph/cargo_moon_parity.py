@@ -142,6 +142,20 @@ REQUIRED_CLOSURE_EDGES = {
     "paigasus-kernel-parity-rs": {"paigasus-kernel-rs"},
 }
 
+# A7's anti-vacuity floor (SMA-560), and the reason it is EDGE-based rather than a task list.
+# A7 asserts CONTAINMENT (`want <= observed`), and a containment check whose `want` empties is
+# VACUOUSLY SATISFIED — it prints PASS having asserted nothing. A moon rename, a `dependencies`
+# reshape or a `language` field change on a binding crate would each do that. A task-name floor
+# cannot see it, because the tasks are still examined; only these edges can.
+# The task SET needs no floor of its own: A7 derives it from derive_ffi_tasks(), whose own floor
+# is REQUIRED_FFI_TASKS, already asserted by A5.
+REQUIRED_WRAPPER_CLOSURE = {
+    "paigasus-kernel-py": {"paigasus-kernel-rs", "paigasus-py-bindings-rs"},
+    "paigasus-kernel-ts": {
+        "paigasus-kernel-rs", "paigasus-node-bindings-rs", "paigasus-wasm-rs",
+    },
+}
+
 # "moon reported no such task key at all", distinct from both None and []. A unique object, never a
 # string: a string default flows into `set(declared or [])` and is iterated CHARACTER-WISE, turning
 # a half-reported task into eight bogus single-letter entries instead of one honest violation.
@@ -460,6 +474,81 @@ def check_upstream_inputs(
     return a6
 
 
+def check_wrapper_upstream_inputs(projects, root=None, floor=REQUIRED_WRAPPER_CLOSURE):
+    """Return the A7 violation list: py/ts wrappers that do not key on their upstream crates.
+
+    The cross-stack half of A6. A6 iterates `language == "rust"` only, so the py/ts wrappers —
+    whose hand-written `/rs/...` globs ARE the ADR-0005 cross-binding guarantee — were asserted
+    by nothing. Note the kernel->wrapper edge specifically IS covered, by one hand-written
+    `run.sh` case (`kernel->consumer-tasks`); what was uncovered is every OTHER upstream, any new
+    wrapper, and the under-declarations this check's first run found.
+
+    Three deliberate differences from A6:
+
+    * DERIVED TASK SET, not a hand-written one. `derive_ffi_tasks` already finds exactly these
+      tasks for A5, so a new wrapper's `napi build` is examined on day one even if it declares no
+      inputs at all — which is precisely the bug a hand-written list could not detect.
+    * CONTAINMENT, not strict equality. A6's strict equality is right for `fileGroups.upstreams`,
+      a mechanical mirror of the closure where anything extra is waste. The wrapper globs are
+      hand-written per task and legitimately mixed with non-closure inputs under `rs/crates/` —
+      the SMA-433 parity vectors, and each binding's `package.json` / `pyproject.toml`. Strict
+      equality would report those correct entries as violations.
+    * BOTH BUCKETS, PER TASK. `Cargo.toml` is a path (`inputFiles`), `src/**/*` is a glob
+      (`inputGlobs`), and a wrapper's `build` and `test` declare different sets — so a
+      one-bucket read, or one that unions across a wrapper's tasks, passes the very mutations
+      this check exists to catch.
+    """
+    a7 = []
+    examined = {}
+    for target in sorted(derive_ffi_tasks(projects)):
+        pid, _, task = target.partition(":")
+        proj = projects.get(pid)
+        if proj is None or proj.get("language") == "rust":
+            continue
+        examined.setdefault(pid, []).append(task)
+
+    # FLOOR first: if the derivation broke, every per-wrapper check below is vacuous. Rows are
+    # `FLOOR:`-prefixed so a control can tell a floor failure from a per-wrapper one.
+    for pid, required in sorted((floor or {}).items()):
+        if pid not in projects:
+            a7.append(f"FLOOR: {pid} is not in the graph at all")
+            continue
+        if pid not in examined:
+            a7.append(
+                f"FLOOR: {pid} has no task matched by an FFI marker, so A7 examines nothing for "
+                f"it — either restore the invocation or update FFI_MARKERS"
+            )
+            continue
+        derived = rust_closure(projects, pid)
+        for missing in sorted(required - derived):
+            a7.append(f"FLOOR: {pid}'s dependsOn closure no longer derives {missing}")
+
+    for pid, tasks in sorted(examined.items()):
+        want = set()
+        for upstream in sorted(rust_closure(projects, pid)):
+            src = projects[upstream]["source_dir"]
+            want.add(f"{src}/src/**/*")
+            want.add(f"{src}/Cargo.toml")
+            # A build script is compiled by the wrapper's own `napi build`/`maturin` invocation,
+            # so a change to it changes what the wrapper links. Only demanded when one exists.
+            if root is not None and (root / src / "build.rs").is_file():
+                want.add(f"{src}/build.rs")
+        for task in sorted(tasks):
+            files = (projects[pid].get("task_inputs") or {}).get(task)
+            globs = (projects[pid].get("task_input_globs") or {}).get(task)
+            if files is None or globs is None:
+                a7.append(
+                    f"{pid}:{task} reported no `inputFiles`/`inputGlobs` — moon's output shape "
+                    f"changed, so this assertion cannot be evaluated (treated as a violation, "
+                    f"never skipped)"
+                )
+                continue
+            observed = set(files) | set(globs)
+            for entry in sorted(want - observed):
+                a7.append(f"{pid}:{task} inputs omit {entry}")
+    return a7
+
+
 def moon_projects():
     """Moon's own resolved graph. Never parse moon.yml — Moon already resolved it.
 
@@ -673,6 +762,95 @@ def self_test():
             f"main() never calls {', '.join(unreferenced)} — a check that is defined but not "
             f"invoked asserts nothing (SMA-542)"
         )
+
+    if not REQUIRED_WRAPPER_CLOSURE:
+        failures.append("REQUIRED_WRAPPER_CLOSURE is empty — A7's floor would assert nothing")
+
+    # A7 fixture: a ts wrapper depending on a binding crate that depends on the kernel. The
+    # wrapper declares the manifest as a literal and the sources as a glob — the same two-bucket
+    # split A6 spans — plus one legitimate extra outside its closure (the parity corpus), which
+    # containment must ALLOW and strict equality would have wrongly flagged.
+    wrap = {
+        "k-ts": {
+            "source_dir": "ts/packages/k", "deps": {"nb-rs": "explicit"}, "language": "typescript",
+            "tasks": {"build": []},
+            "task_inputs": {"build": ["rs/crates/libs/kern/Cargo.toml",
+                                      "rs/crates/bindings/nb/Cargo.toml"]},
+            "task_input_globs": {"build": ["rs/crates/libs/kern/src/**/*",
+                                           "rs/crates/bindings/nb/src/**/*",
+                                           "rs/crates/libs/parity/vectors/**/*"]},
+            "invocations": {"build": "pnpm exec napi build --platform"},
+        },
+        "nb-rs": {
+            "source_dir": "rs/crates/bindings/nb", "deps": {"kern-rs": "explicit"},
+            "language": "rust", "tasks": {"build": []}, "task_inputs": {"build": []},
+            "task_input_globs": {"build": []}, "invocations": {"build": "cargo build"},
+        },
+        "kern-rs": {
+            "source_dir": "rs/crates/libs/kern", "deps": {}, "language": "rust",
+            "tasks": {"build": []}, "task_inputs": {"build": []},
+            "task_input_globs": {"build": []}, "invocations": {"build": "cargo build"},
+        },
+    }
+    wrap_floor = {"k-ts": {"kern-rs", "nb-rs"}}
+    if check_wrapper_upstream_inputs(wrap, floor=wrap_floor) != []:
+        failures.append(
+            f"A7 reported violations on a complete fixture: "
+            f"{check_wrapper_upstream_inputs(wrap, floor=wrap_floor)}"
+        )
+
+    # A7-a: a MISSING upstream glob is the dangerous direction and must fire.
+    broken = json.loads(json.dumps(wrap))
+    broken["k-ts"]["task_input_globs"]["build"] = ["rs/crates/libs/kern/src/**/*"]
+    if not any(
+        "rs/crates/bindings/nb/src/**/*" in row
+        for row in check_wrapper_upstream_inputs(broken, floor=wrap_floor)
+    ):
+        failures.append("A7 did not fire on a wrapper task missing an upstream's sources")
+
+    # A7-b: the manifest half, which lives in the OTHER bucket. A one-bucket A7 passes this.
+    broken = json.loads(json.dumps(wrap))
+    broken["k-ts"]["task_inputs"]["build"] = ["rs/crates/bindings/nb/Cargo.toml"]
+    if not any(
+        "rs/crates/libs/kern/Cargo.toml" in row
+        for row in check_wrapper_upstream_inputs(broken, floor=wrap_floor)
+    ):
+        failures.append("A7 did not fire on a wrapper task missing an upstream's Cargo.toml")
+
+    # A7-c: Rust projects belong to A6, never A7. Double-covering them would make A6's strict
+    # equality and A7's containment disagree on the same task.
+    rusty = json.loads(json.dumps(wrap))
+    rusty["k-ts"]["language"] = "rust"
+    if check_wrapper_upstream_inputs(rusty, floor={}) != []:
+        failures.append("A7 examined a Rust project, which is A6's job")
+
+    # A7-d: the FLOOR must fire when the closure derivation degrades to empty. Emptying `deps`
+    # also empties `want`, so the per-task loop goes quiet by itself — this MUST match the
+    # `FLOOR:` prefix or it passes with the whole floor block deleted (A6-e's lesson).
+    broken = json.loads(json.dumps(wrap))
+    broken["k-ts"]["deps"] = {}
+    if not any(
+        row.startswith("FLOOR:")
+        for row in check_wrapper_upstream_inputs(broken, floor=wrap_floor)
+    ):
+        failures.append("A7 floor did not fire on a neutered closure derivation")
+
+    # A7-e: a floor entry naming a project that is not examined at all is a FLOOR violation,
+    # never a silent skip — the wrapper's task could have stopped matching an FFI marker.
+    broken = json.loads(json.dumps(wrap))
+    broken["k-ts"]["invocations"]["build"] = "echo nothing"
+    if not any(
+        row.startswith("FLOOR:")
+        for row in check_wrapper_upstream_inputs(broken, floor=wrap_floor)
+    ):
+        failures.append("A7 floor did not fire when a wrapper stopped matching any FFI marker")
+
+    # A7-f: a floor entry naming an absent project is a FLOOR violation.
+    if not any(
+        row.startswith("FLOOR:")
+        for row in check_wrapper_upstream_inputs(wrap, floor={"ghost-ts": {"kern-rs"}})
+    ):
+        failures.append("A7 floor did not fire on a floor entry naming an absent project")
 
     a1, a2, a3 = check(ok, crates)
     if (a1, a2, a3) != ([], [], []):
@@ -999,7 +1177,7 @@ def self_test():
     if failures:
         print("negative-control FAILED: the parity gate can pass vacuously", file=sys.stderr)
         return 1
-    print("  OK   [parity] all six assertions fire on synthetic violations")
+    print("  OK   [parity] all seven assertions fire on synthetic violations")
     return 0
 
 
@@ -1064,6 +1242,17 @@ def main():
              "    from the graph, it dropped out of A6's examined set (e.g. stopped reporting\n"
              "    `language: rust`), or its dependsOn closure derivation is broken — fix that\n"
              "    first, every other A6 row is meaningless until it passes."),
+        (check_wrapper_upstream_inputs(projects, root=root),
+             "A py/ts wrapper's FFI task does not key on an upstream Rust crate's sources, so a\n"
+             "    change there SELECTS NOTHING for that wrapper and the ADR-0005 parity replay\n"
+             "    silently stops running on it (SMA-560).\n"
+             "    Fix: add the missing entry to that task's `inputs` in the wrapper's own\n"
+             "    moon.yml — `/<src_dir>/src/**/*` and `/<src_dir>/Cargo.toml` for every crate in\n"
+             "    its TRANSITIVE dependsOn closure, plus `/<src_dir>/build.rs` where one exists.\n"
+             "    Extra inputs beyond the closure are ALLOWED (this is containment, unlike A6).\n"
+             "    A `FLOOR:` row means the check itself cannot be trusted — the wrapper is\n"
+             "    missing, its closure derivation broke, or its task stopped matching an FFI\n"
+             "    marker — fix that first, every other A7 row is meaningless until it passes."),
     ]
 
     if not any(rows for rows, _ in findings):
@@ -1071,7 +1260,8 @@ def main():
             f"PASS  {'cargo-moon-parity':<18} -> "
             f"{len(crates)} crates: every Cargo dep has a Moon edge that schedules its build, "
             f"every lint and fmt keys on the files its command reads, every FFI build task does "
-            f"too, and every crate keys on its upstream sources"
+            f"too, every crate keys on its upstream sources, and every py/ts wrapper keys on the "
+            f"Rust crates it builds"
         )
         return 0
 
