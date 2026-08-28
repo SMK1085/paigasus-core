@@ -277,9 +277,9 @@ async fn sigterm_during_the_deferred_phase_exits_promptly() {
     assert!(status.success(), "kill -TERM {pid} failed: {status:?}");
 
     let started = std::time::Instant::now();
-    loop {
-        if child.child.try_wait().expect("try_wait").is_some() {
-            break;
+    let exit_status = loop {
+        if let Some(exit_status) = child.child.try_wait().expect("try_wait") {
+            break exit_status;
         }
         assert!(
             started.elapsed() < Duration::from_secs(20),
@@ -287,5 +287,28 @@ async fn sigterm_during_the_deferred_phase_exits_promptly() {
             child.tail()
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    };
+
+    // The 20s bound above only proves the process died PROMPTLY — it does not prove it died
+    // GRACEFULLY, and those are not the same thing. `shutdown_signal()`'s
+    // `tokio::signal::unix::signal(SignalKind::terminate())` registration (the call that installs
+    // our own SIGTERM handler) only runs once its future is first polled; if a future regression
+    // ever dropped `shutdown` from the boot-phase `select!`'s branch list, that handler would
+    // never be installed during the deferred phase, and the OS's DEFAULT disposition for SIGTERM
+    // (terminate immediately) would kill the process instead — which also happens well inside
+    // this 20s window. Measured directly on that exact mutation (SMA-571 task 6 fix round 1):
+    // `ExitStatus(unix_wait_status(15))` at ~102ms — a signal-terminated exit, not a normal
+    // return from `main()` — yet a bare "exited within 20s" check passed anyway. `code()` is
+    // `Some(_)` only for a normal exit (`ExitStatusExt::signal()` would report `Some(15)` for the
+    // regression above); asserting it is `Some(0)` is what actually distinguishes "caught SIGTERM
+    // and drained gracefully" from "nothing was listening and the kernel killed it". Do not
+    // "simplify" this back to a bare promptness check — that is precisely the check that already
+    // passed for the wrong reason once.
+    assert_eq!(
+        exit_status.code(),
+        Some(0),
+        "the process must exit NORMALLY (via main()'s own Ok return), not be signal-terminated by \
+         an unhandled default SIGTERM disposition; status = {exit_status:?}, stderr:\n{}",
+        child.tail()
+    );
 }
