@@ -1,6 +1,7 @@
 # SMA-578 — Release activation C: maturin cross-platform wheel matrix for `paigasus-py-bindings`
 
-**Status:** Draft, **adversarial review incorporated 2026-08-28 (B1–B4, M1–M16, N1–N8)**
+**Status:** Approved (gate 1, 2026-08-28); implemented by this branch.
+**Review:** **adversarial review incorporated 2026-08-28 (B1–B4, M1–M16, N1–N8)**
 **Date:** 2026-08-28
 **Linear:** [SMA-578](https://linear.app/smaschek/issue/SMA-578/release-activation-c-maturin-cross-platform-wheel-matrix-for-paigasus)
 — child of [SMA-407](https://linear.app/smaschek/issue/SMA-407), unblocked by SMA-576 (Done).
@@ -525,13 +526,21 @@ its narrowed `paths:` filter does not select it on most PRs. This PR touches
 
 ## 14. Open questions for the plan
 
-1. **Does maturin honour Cargo's `include` for the sdist file list, or does it need
-   `[tool.maturin] include`?** The probe shows the sdist is produced from `cargo package --list`,
-   which suggests Cargo's allowlist suffices — but this is a **design fork, not a detail**
-   (review **Q6**): if the answer is no, §7.1's mechanism and §6 step 2's assertion both change.
-   **Measure before writing §7.1's implementation.**
-2. With an `include` allowlist added, what asserts it stays correct as the crate dir gains files?
-   Checks 1d/2c do not reach a `publish = false` crate (review **Q7**).
+1. ~~**Does maturin honour Cargo's `include` for the sdist file list, or does it need
+   `[tool.maturin] include`?**~~ **Answered — yes, Cargo's allowlist alone suffices**
+   (measured 2026-08-28, maturin 1.9.6). maturin builds the sdist from `cargo package --list`,
+   so the crate's **Cargo** `include` controls its contents; adding one removed `moon.yml`. No
+   `[tool.maturin] include` is needed, and §7.1's mechanism and §6 step 2's assertion stand as
+   designed.
+   A second measurement matters for that assertion: maturin relocates `pyproject.toml` to the
+   **archive root**, not to the crate directory, even though the crate is nested under
+   `crates/bindings/`. `wheels.yml`'s presence assertion therefore matches on basename
+   (`grep -q "/$required$"`) rather than on a fixed path.
+2. ~~With an `include` allowlist added, what asserts it stays correct as the crate dir gains
+   files?~~ **Answered — `wheels.yml`'s "Assert the sdist ships nothing repo-internal" step,
+   and nothing else.** Review **Q7** is confirmed: Checks 1c/1d/2b/2c never reach this crate
+   because it is `publish = false`, so that workflow step is the sole standing guard on the
+   allowlist. It is recorded as such in the step's own comment and in CLAUDE.md.
 3. Does `release-plz release --output json` report released packages in a usable shape at the
    pinned `0.3.158`? Read the source at the pinned tag, as SMA-576 did for `release_pr`.
    *(SMA-579's question; recorded here because §9.1 depends on it.)*
