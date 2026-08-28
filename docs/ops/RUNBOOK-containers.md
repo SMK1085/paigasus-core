@@ -140,11 +140,10 @@ build itself — they bite the first operator who deploys without reading this s
   serving. Alert on sustained `migrating`, page on `unready`.
 
   **Chart defaults (handoff to SMA-513).** `strategy.rollingUpdate.maxSurge` need no longer be
-  pinned to `0`, subject to the two exceptions above; set `startupProbe` from the formula; expose
-  `IAM_MIGRATION__LOCK_WAIT_SECS`.
-  `startupProbe` no longer needs sizing against `IAM_MIGRATION__LOCK_WAIT_SECS` (SMA-571 removed
-  the `start-period` coupling entirely — see the probe budgets above), but still expose the env
-  var so a slow migration can be given more room. **Precondition to confirm before relaxing `maxSurge`:**
+  pinned to `0`, subject to the two exceptions above. `startupProbe` no longer needs sizing
+  against `IAM_MIGRATION__LOCK_WAIT_SECS` (SMA-571 removed the `start-period` coupling entirely —
+  see the probe budgets above), but still expose the env var so a slow migration can be given more
+  room. **Precondition to confirm before relaxing `maxSurge`:**
   `AppState::new`'s `reconcile_starter` (`src/adapters/http/mod.rs` around :396) writes system
   policies and roles on every boot with no advisory lock of its own and has never been tested
   under concurrency — pre-existing and out of scope for SMA-559, but SMA-513 should confirm it is
