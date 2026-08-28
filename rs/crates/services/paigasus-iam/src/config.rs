@@ -676,9 +676,10 @@ pub struct MigrationConfig {
     /// *never / unbounded* (see [`OutboxRetentionConfig`]); a second reading of `0` here would be
     /// exactly the trap that doc warns about. Write `1` for fail-fast.
     ///
-    /// The ceiling is operational, not arithmetic: a wait the container's `HEALTHCHECK
-    /// --start-period` cannot accommodate is not usable, so boot additionally warns when
-    /// `lock_wait_secs + MIGRATION_BUDGET_SECS` exceeds `IMAGE_START_PERIOD_SECS`.
+    /// There is no static ceiling any more. Before SMA-571 the container's `HEALTHCHECK
+    /// --start-period` had to cover this wait, because a waiting replica had no listener bound
+    /// and was invisible; now it is bound and answers `/readyz` 503 `migrating`, so overrunning
+    /// this wait is a visible unready replica rather than an absent one.
     pub lock_wait_secs: u64,
 }
 

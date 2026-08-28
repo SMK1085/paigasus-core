@@ -21,7 +21,6 @@ pub mod service_info;
 pub mod tenancy;
 pub mod users;
 
-use std::net::SocketAddr;
 use tonic::transport::Server;
 use tonic::transport::server::Router as TonicRouter;
 use tonic_health::ServingStatus;
@@ -126,8 +125,8 @@ pub async fn routes(state: AppState) -> tonic::service::Routes {
 /// **Test-only since SMA-571.** `main` no longer calls this at all: production binds
 /// `adapters::boot::boot_grpc_routes` — which consumes [`routes`] directly and applies
 /// `AuthLayer` inside `boot::Serving` instead of on the `Server` — so the only remaining callers
-/// are `serve` and the Docker-gated suites. The reporter is dropped here; production's dynamic
-/// readiness comes from the one `health_service` reporter `main` hands to `BootSlot`.
+/// are the Docker-gated suites. The reporter is dropped here; production's dynamic readiness
+/// comes from the one `health_service` reporter `main` hands to `BootSlot`.
 pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRouter<Stack<AuthLayer, Stack<CorrelationLayer, Identity>>> {
     let routes = routes(state.clone()).await;
     let mut server = Server::builder()
@@ -140,12 +139,6 @@ pub async fn router(state: AppState, timeout: std::time::Duration) -> TonicRoute
         .layer(CorrelationLayer)
         .layer(AuthLayer::new(state));
     server.add_routes(routes)
-}
-
-/// Serve gRPC on `addr` until `shutdown` resolves. gRPC health is a static `SERVING` for M0
-/// (see `health_service`); dynamic readiness is a deferred M1 concern.
-pub async fn serve(addr: SocketAddr, state: AppState, timeout: std::time::Duration, shutdown: impl std::future::Future<Output = ()> + Send + 'static) -> Result<(), tonic::transport::Error> {
-    router(state, timeout).await.serve_with_shutdown(addr, shutdown).await
 }
 
 #[cfg(test)]
