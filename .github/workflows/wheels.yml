@@ -104,7 +104,13 @@ jobs:
           # "--zig … Default to manylinux2014/manylinux_2_17 if you do not specify a
           # --compatibility". It does NOT come from a decorated target triple — see the
           # measured failure recorded above the darwin row.
-          - { platform: manylinux-x86_64,  target: x86_64-unknown-linux-gnu,       rustup_target: x86_64-unknown-linux-gnu,  runner: ubuntu-latest,    zig: true, compat: manylinux2014, expect_tag: 'manylinux_2_17_x86_64.manylinux2014_x86_64', expect_glibc: 'GLIBC_2.17' }
+          # expect_glibc is MEASURED per row and the two arches legitimately differ — do not
+          # "harmonise" them. x86_64 tops out at GLIBC_2.14 (its base is GLIBC_2.2.5; 2.14 is
+          # memcpy's versioned symbol), while aarch64 reaches 2.17. A wheel needing LESS than
+          # its manylinux_2_17 tag promises is correct: the tag declares a minimum platform, so
+          # requiring less is installable everywhere the tag allows. Both values come from the
+          # first green run of this workflow, not from a guess.
+          - { platform: manylinux-x86_64,  target: x86_64-unknown-linux-gnu,       rustup_target: x86_64-unknown-linux-gnu,  runner: ubuntu-latest,    zig: true, compat: manylinux2014, expect_tag: 'manylinux_2_17_x86_64.manylinux2014_x86_64', expect_glibc: 'GLIBC_2.14' }
           # ubuntu-24.04-arm is kept for this leg specifically so that ONE aarch64 wheel is
           # actually EXECUTED rather than merely inspected — otherwise that arch family, three
           # of the seven wheels, has no runtime verification at all.

@@ -356,10 +356,14 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   max-`GLIBC_` symbol check on manylinux. An ELF-class check proves only the machine type and
   passes for a wheel that fails at import. **Only the `aarch64-apple-darwin` wheel and the macOS
   sdist path have been built locally.** The macOS / Windows / manylinux / musllinux tag sets, the
-  `macosx_10_12` minimum-macOS value and `GLIBC_2.17` are **predictions to be measured on the
-  first CI run** — `GLIBC_2.17` is the likeliest to red, since x86_64's base is `GLIBC_2.2.5` and
-  the true maximum may legitimately be lower. When one reds, read what the tool produced, confirm
-  it is correct, and re-pin the constant — never loosen the comparison.
+  `macosx_10_12` minimum-macOS value have all now been **MEASURED green on CI**. The GLIBC floor
+  is per-arch and the two values legitimately differ: x86_64 tops out at **`GLIBC_2.14`** (its
+  base is `GLIBC_2.2.5`; 2.14 is `memcpy`'s versioned symbol) while aarch64 reaches
+  **`GLIBC_2.17`** — do not harmonise them. x86_64 was pinned at 2.17 on the first run and the
+  assertion red with *"needs only [GLIBC_2.14] … safe, but re-pin"*, which is the intended
+  behaviour: a wheel needing LESS than its `manylinux_2_17` tag promises is correct, since the
+  tag declares a minimum platform. When one of these reds, read what the tool produced, confirm
+  it is correct, and re-pin the constant — never loosen the comparison to an inequality.
 - `moon query projects --json` **errors** on Moon 2.3.2 (`unexpected argument '--json' found`) —
   bare `moon query projects` already emits JSON. **Measure its exit status UNPIPED (2):** `jq`
   returns 0 on empty input, so `moon query projects --json | jq …` reports 0 unless `pipefail`
