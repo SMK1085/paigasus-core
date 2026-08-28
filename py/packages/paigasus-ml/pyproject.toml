@@ -1,6 +1,12 @@
 [project]
 name = "paigasus-ml"
 version = "0.0.0"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+classifiers = [
+  "Private :: Do Not Upload",
+]
 requires-python = ">=3.12"
 dependencies = []
 
