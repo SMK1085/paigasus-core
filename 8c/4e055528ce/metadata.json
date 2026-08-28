@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.10.3",
+  "checkpoint_id": "8c4e055528ce",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-589-release-mint-the-app-installation-token-in-workflow",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".github/workflows/release.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/8c/4e055528ce/0/metadata.json",
+      "transcript": "/8c/4e055528ce/0/full.jsonl",
+      "compact_transcript": "/8c/4e055528ce/0/transcript.jsonl",
+      "content_hash": "/8c/4e055528ce/0/content_hash.txt",
+      "prompt": "/8c/4e055528ce/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 84,
+    "cache_creation_tokens": 153582,
+    "cache_read_tokens": 5647620,
+    "output_tokens": 32619,
+    "api_call_count": 42
+  }
+}

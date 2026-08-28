@@ -1,0 +1,61 @@
+{
+  "cli_version": "0.10.3",
+  "checkpoint_id": "8c4e055528ce",
+  "session_id": "072a35f4-ddf1-4d33-9ed9-9df4bba26580",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-28T11:58:32.976688Z",
+  "branch": "feature/sma-589-release-mint-the-app-installation-token-in-workflow",
+  "checkpoints_count": 4,
+  "save_step_count": 1,
+  "files_touched": [
+    ".github/workflows/release.yml"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-5",
+  "turn_id": "dcf084ff11d0",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 84,
+    "cache_creation_tokens": 153582,
+    "cache_read_tokens": 5647620,
+    "output_tokens": 32619,
+    "api_call_count": 42
+  },
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-08-28T11:58:32.947992Z",
+    "agent_lines": 39,
+    "agent_removed": 14,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 39,
+    "total_lines_changed": 53,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 84,
+      "user_lines_removed": 0,
+      "agent_lines_added": 39,
+      "agent_lines_removed": 14,
+      "user_added_per_file": {
+        ".claude/settings.json": 84
+      }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+Check which open issues from Linear's Paigasus Polyglot project from the MVP milestone we should do next, especially if we can combine some of them in one pass
+
+---
+
+okay close 388/551 now
+
+---
+
+walk me through how to create RELEASE_PLZ_TOKEN
+
+---
+
+go with path A, do the release.yml edit, the secrets are configured in the repo
