@@ -36,8 +36,9 @@
 //! RetireBody>>` plus `#[serde(default)]` on the one field collapses "didn't say" and "said no"
 //! into the identical `false`. A body that DOES declare `Content-Type: application/json` but
 //! fails to parse still gets the crate's stable `{"error":{code,message}}` envelope, via the
-//! SAME `EnvelopeJson` (`http::authn`) `http::authn::introspect`/`http::api_keys::introspect`
-//! already reuse for exactly this normalisation, rather than axum's bare `JsonRejection` text.
+//! SAME `EnvelopeJson` (`http::json`, SMA-587) `http::authn::introspect`/
+//! `http::api_keys::introspect` already reuse for exactly this normalisation, rather than
+//! axum's bare `JsonRejection` text.
 //!
 //! **The outcome -> response mapping is its own pure function (`response_for`), not inlined in
 //! the handler.** A fix-round review changed `Retired`'s status to `204` in an earlier revision
@@ -58,8 +59,8 @@ use paigasus_kernel::Prn;
 use serde_json::json;
 
 use super::AppState;
-use super::authn::EnvelopeJson;
 use super::error::ApiError;
+use super::json::EnvelopeJson;
 use crate::adapters::auth::AuthContext;
 
 pub fn router() -> Router<AppState> {

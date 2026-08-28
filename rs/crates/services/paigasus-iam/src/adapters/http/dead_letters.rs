@@ -35,6 +35,7 @@ use uuid::Uuid;
 use super::AppState;
 use super::dto::{BulkReplayBody, BulkReplayResponseDto, DeadLetterEntryDto, DeadLetterListResponseDto, DeadLetterQuery};
 use super::error::ApiError;
+use super::json::EnvelopeJson;
 use super::path::{DeadLetterId, UuidPath};
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
@@ -137,7 +138,7 @@ async fn discard_one(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
 /// `POST /v1/outbox/dead-letters/replay`: Root-only. A missing or zero `max_rows` is rejected
 /// with `400 invalid-bulk-replay` before any store access (`DeadLetterService::replay_matching`)
 /// — the explicit row budget is the guard on blast radius, never defaulted to anything usable.
-async fn replay_matching(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Json(body): Json<BulkReplayBody>) -> Result<Json<BulkReplayResponseDto>, ApiError> {
+async fn replay_matching(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeJson(body): EnvelopeJson<BulkReplayBody>) -> Result<Json<BulkReplayResponseDto>, ApiError> {
     let req = body.into_request()?;
     let replayed = s.dead_letters.replay_matching(&actor_prn(&ctx), req).await?;
     Ok(Json(BulkReplayResponseDto { replayed }))

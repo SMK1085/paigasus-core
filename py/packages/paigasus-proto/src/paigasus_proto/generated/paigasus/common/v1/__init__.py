@@ -465,8 +465,12 @@ class ErrorReason(betterproto2.Enum):
 
     INVALID_REQUEST_BODY = 901
     """
-    "invalid-request-body" — the request body could not be deserialized; covers IAM's
-    invalid_request extractor rejection and the gateway's invalid_request_body, merged.
+    "invalid-request-body" — the request body could not be read or deserialized. NOTE the two
+    services scope this differently since SMA-587: IAM's HTTP extractor emits it only for a
+    MALFORMED body (a JSON syntax error, or a body that failed to buffer), having split the
+    wrong-content-type and schema-mismatch cases out to 905 and 906; the gateway's own funnel
+    (`adapters/http/error.rs`) still emits it for ANY deserialization failure. Reconverging the
+    two is SMA-588, not an accident (amends ADR-0019 A1.3).
     """
 
     REQUEST_TOO_LARGE = 902
@@ -486,6 +490,21 @@ class ErrorReason(betterproto2.Enum):
     "capability-disabled" — the RPC belongs to a capability this deployment
     has switched off. The capability name rides in
     ErrorInfo.metadata["capability"], so a new capability needs no new reason.
+    """
+
+    UNSUPPORTED_CONTENT_TYPE = 905
+    """
+    "unsupported-content-type" — the request declared a Content-Type the endpoint does not
+    accept, so the body was never read. HTTP-only, structurally: tonic negotiates
+    `application/grpc` at the transport layer, so a gRPC client cannot present a wrong
+    content type to a handler.
+    """
+
+    INVALID_REQUEST_SCHEMA = 906
+    """
+    "invalid-request-schema" — the body was syntactically valid JSON but did not match the
+    target type. HTTP-only, structurally: proto3 decoding has no "syntactically valid but
+    schema-invalid" state, since unknown fields are skipped by design.
     """
 
     @classmethod
@@ -544,6 +563,8 @@ class ErrorReason(betterproto2.Enum):
             902: "ERROR_REASON_REQUEST_TOO_LARGE",
             903: "ERROR_REASON_MISSING_AUTH_CONTEXT",
             904: "ERROR_REASON_CAPABILITY_DISABLED",
+            905: "ERROR_REASON_UNSUPPORTED_CONTENT_TYPE",
+            906: "ERROR_REASON_INVALID_REQUEST_SCHEMA",
         }
 
     @classmethod
@@ -602,6 +623,8 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_REQUEST_TOO_LARGE": 902,
             "ERROR_REASON_MISSING_AUTH_CONTEXT": 903,
             "ERROR_REASON_CAPABILITY_DISABLED": 904,
+            "ERROR_REASON_UNSUPPORTED_CONTENT_TYPE": 905,
+            "ERROR_REASON_INVALID_REQUEST_SCHEMA": 906,
         }
 
 

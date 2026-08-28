@@ -15,6 +15,7 @@ use paigasus_iam_core::Action;
 use super::AppState;
 use super::dto::{ProjectDto, RenameBody};
 use super::error::ApiError;
+use super::json::EnvelopeJson;
 use super::path::{ProjectId, UuidPath};
 use crate::adapters::auth::AuthContext;
 
@@ -38,7 +39,7 @@ async fn get_project(State(s): State<AppState>, Extension(ctx): Extension<AuthCo
     Ok(Json(view.into()))
 }
 
-async fn rename_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<ProjectId>, Json(b): Json<RenameBody>) -> Result<Json<ProjectDto>, ApiError> {
+async fn rename_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<ProjectId>, EnvelopeJson(b): EnvelopeJson<RenameBody>) -> Result<Json<ProjectDto>, ApiError> {
     let id = path.id;
     if s.enforce_tenancy {
         let view = s.projects.get(id).await?;

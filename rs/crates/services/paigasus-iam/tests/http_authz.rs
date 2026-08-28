@@ -24,7 +24,7 @@ use paigasus_iam_core::OrganizationId;
 use paigasus_iam_core::authz::engine::DEFAULT_DENY_MARKER;
 use paigasus_iam_core::authz::model::root_prn;
 use serde_json::json;
-use support::{app_with_state, seed_platform_admin, send};
+use support::{app_with_state, provision_platform_admin, seed_platform_admin, send};
 use uuid::Uuid;
 
 /// Resolves `token`'s principal directly through `state.authn` (SMA-444 Task 20's
@@ -256,4 +256,58 @@ async fn is_authorized_self_query_against_a_nonexistent_resource_denies_not_500(
     assert_eq!(body["allowed"], false);
     assert_eq!(body["reason"], "denied");
     assert_eq!(body["determining_policies"], json!(["resource-not-found"]));
+}
+
+/// HTTP-body-envelope coverage for the three `/v1/authz/*` routes that take a body (SMA-587
+/// Task 5), mirroring `tests/http_tenancy.rs::a_refused_body_answers_in_the_error_envelope`'s
+/// shape. `PUT /v1/authz/policies` from the task-5 brief's route table does NOT match the
+/// real router (`authz::admin_router` mounts `POST .../policies`, not `PUT`) — verified against
+/// `src/adapters/http/authz.rs`'s `admin_router` directly rather than trusted on sight.
+/// `put_policy`/`create_role_grant` live behind `authz::admin_router`, mounted only when
+/// `caps.authz_admin` — `test_config`'s `AuthzConfig::default()` has `admin_enabled: true`, so
+/// `app_with_state` already mounts it (this file's other tests exercise both routes with plain
+/// `app_with_state`, confirming the capability is on by default here).
+#[tokio::test]
+async fn a_refused_body_answers_in_the_error_envelope() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("envelope-authz-admin", Some("envelope-authz-admin@example.com"), "paigasus", 3600);
+    let principal_prn = provision_platform_admin(&state, &token).await;
+
+    // (method, uri, malformed-schema body) for every authz route that takes a body.
+    let cases: Vec<(&str, &str, &[u8])> = vec![
+        ("POST", "/v1/authz/is-authorized", br#"{"principal_prn": 1, "action": 2, "resource_prn": 3}"#),
+        ("POST", "/v1/authz/policies", br#"{"policy_id": 1, "kind": 2, "source": 3, "description": 4}"#),
+        ("POST", "/v1/authz/role-grants", br#"{"principal_prn": 1, "role_key": 2, "scope_prn": 3}"#),
+    ];
+
+    for (method, uri, schema_body) in &cases {
+        // 400: not JSON at all.
+        let (status, err) = support::send_bytes(&app, method, uri, Some("application/json"), b"{not json", Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {uri}: {err}");
+        assert_eq!(err["error"]["code"], "invalid-request-body", "{method} {uri}: {err}");
+
+        // 422: valid JSON, wrong shape — every field on all three body DTOs is a required
+        // `String`, so a number in any slot is a genuine type mismatch.
+        let (status, err) = support::send_bytes(&app, method, uri, Some("application/json"), schema_body, Some(token.as_str())).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{method} {uri}: {err}");
+        assert_eq!(err["error"]["code"], "invalid-request-schema", "{method} {uri}: {err}");
+    }
+
+    // A well-formed body on the same route still reaches the handler.
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/v1/authz/is-authorized",
+        Some(json!({
+            "principal_prn": principal_prn,
+            "action": "ListOrganizations",
+            "resource_prn": root_prn().canonical(),
+        })),
+        Some(token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

@@ -148,3 +148,41 @@ async fn the_http_guard_is_bound_to_create_user_specifically() {
     let (status, body) = send(&app, "POST", "/v1/organizations", Some(json!({"slug": "bound-org", "name": "Bound Org"})), Some(subject_token.as_str())).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "the CreateUser-only policy must not permit CreateOrganization: {body}");
 }
+
+/// HTTP-body-envelope coverage for `POST /v1/users` (SMA-587 Task 5), mirroring
+/// `tests/http_tenancy.rs::a_refused_body_answers_in_the_error_envelope`'s shape exactly: a
+/// malformed body still answers inside the `{"error":{code,message}}` envelope rather than
+/// axum's plain-text rejection.
+#[tokio::test]
+async fn a_refused_body_answers_in_the_error_envelope() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("envelope-user", Some("envelope-user@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &token).await;
+
+    // 400: not JSON at all.
+    let (status, err) = support::send_bytes(&app, "POST", "/v1/users", Some("application/json"), b"{not json", Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-request-body", "{err}");
+
+    // 422: valid JSON, wrong shape. `CreateUserBody::email`/`display_name` are required
+    // `String`s (unlike `locale`/`timezone`, which are `Option`), so a number in either slot
+    // is a genuine type mismatch that reaches `JsonDataError` rather than a missing-field one.
+    let (status, err) = support::send_bytes(&app, "POST", "/v1/users", Some("application/json"), br#"{"email": 1, "display_name": 2}"#, Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-request-schema", "{err}");
+
+    // A well-formed body on the same route still reaches the handler — the row above is an
+    // assertion about the BODY's shape, not about the route being broken.
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/v1/users",
+        Some(json!({"email": "still-works@example.com", "display_name": "Still Works"})),
+        Some(token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}

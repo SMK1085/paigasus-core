@@ -20,6 +20,7 @@ use paigasus_iam_core::Action;
 use super::AppState;
 use super::dto::{CreateNodeBody, PageQuery, ProjectDto, RenameBody, TeamDto};
 use super::error::ApiError;
+use super::json::EnvelopeJson;
 use super::path::{TeamId, UuidPath};
 use crate::adapters::auth::AuthContext;
 use crate::application::pagination::Page;
@@ -45,7 +46,7 @@ async fn get_team(State(s): State<AppState>, Extension(ctx): Extension<AuthConte
     Ok(Json(view.into()))
 }
 
-async fn rename_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<TeamId>, Json(b): Json<RenameBody>) -> Result<Json<TeamDto>, ApiError> {
+async fn rename_team(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<TeamId>, EnvelopeJson(b): EnvelopeJson<RenameBody>) -> Result<Json<TeamDto>, ApiError> {
     let id = path.id;
     if s.enforce_tenancy {
         let view = s.teams.get(id).await?;
@@ -75,7 +76,12 @@ async fn restore_team(State(s): State<AppState>, Extension(ctx): Extension<AuthC
     Ok(Json(view.into()))
 }
 
-async fn create_project(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, path: UuidPath<TeamId>, Json(b): Json<CreateNodeBody>) -> Result<(StatusCode, Json<ProjectDto>), ApiError> {
+async fn create_project(
+    State(s): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    path: UuidPath<TeamId>,
+    EnvelopeJson(b): EnvelopeJson<CreateNodeBody>,
+) -> Result<(StatusCode, Json<ProjectDto>), ApiError> {
     let team_id = path.id;
     if s.enforce_tenancy {
         let team_view = s.teams.get(team_id).await?;

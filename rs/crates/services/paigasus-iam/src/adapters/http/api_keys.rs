@@ -27,9 +27,10 @@ use paigasus_kernel::Prn;
 use uuid::Uuid;
 
 use super::AppState;
-use super::authn::{AuthnApiError, EnvelopeJson};
+use super::authn::AuthnApiError;
 use super::dto::{ApiKeyDto, IntrospectApiKeyRequestBody, IntrospectApiKeyResponseDto, IssueApiKeyBody, IssueApiKeyResponseDto, PageQuery};
 use super::error::ApiError;
+use super::json::EnvelopeJson;
 use super::path::{ApiKeyId as ApiKeyIdField, ServiceAccountId, UuidPath, UuidPathPair};
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
@@ -79,7 +80,7 @@ async fn issue(
     State(s): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
     path: UuidPath<ServiceAccountId>,
-    Json(body): Json<IssueApiKeyBody>,
+    EnvelopeJson(body): EnvelopeJson<IssueApiKeyBody>,
 ) -> Result<(StatusCode, Json<IssueApiKeyResponseDto>), ApiError> {
     let actor = actor_prn(&ctx);
     let sa_id = service_account_id(path.id);

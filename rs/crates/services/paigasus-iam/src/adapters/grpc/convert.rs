@@ -1174,41 +1174,76 @@ mod tests {
         assert_eq!(gdl::parse_id("not-a-uuid").unwrap_err().code(), wire, "gRPC reason");
     }
 
-    /// The counterpart to the agreement table: the transport divergences this branch ACCEPTS,
-    /// each pinned as an assertion so a change breaks this test rather than slipping through as
-    /// an omission — the failure mode the SMA-586 spec review caught in its own first draft.
+    /// The counterpart to the agreement table: the transport divergences this branch ACCEPTS.
+    /// Rows 1-2 are each pinned as an assertion right here, so a change to either breaks this
+    /// test rather than slipping through as an omission — the failure mode the SMA-586 spec
+    /// review caught in its own first draft. Rows 3-4 are recorded below only as comments, not
+    /// assertions in this test: row 3's HTTP half (`unsupported-content-type`) is pinned in
+    /// `http/json.rs`'s own unit tests; row 4's HTTP half (`invalid-request-schema`) is pinned
+    /// incidentally inside row 1's block below — the same `not-a-timestamp` body that exercises
+    /// row 1 also happens to trigger row 4's code — and independently again in `http/json.rs`'s
+    /// unit tests.
     ///
-    /// The name says "recorded", not "exactly these two", because nothing here enumerates the
-    /// transports' failure modes: this test asserts that the two recorded divergences still
-    /// hold, and CANNOT observe a third one appearing (SMA-586 fix round 2, Fix 7).
+    /// The name says "recorded", not "exactly these four", because nothing here enumerates the
+    /// transports' failure modes: this test asserts that the recorded divergences still hold,
+    /// and CANNOT observe a new one appearing (SMA-586 fix round 2, Fix 7).
     ///
-    /// Divergence 1 asserts only its gRPC half — see the comment on that assertion for why
-    /// (SMA-586 fix round 1, Finding 2: the HTTP half of the original claim turned out false).
-    #[test]
-    fn the_recorded_transport_divergences_still_hold() {
+    /// Divergence 1 used to assert only its gRPC half, because the HTTP route ran through axum's
+    /// plain `Json` and the failure never reached the IAM error envelope (SMA-586 fix round 1,
+    /// Finding 2). SMA-587 swapped that route onto `EnvelopeJson`, so both halves are asserted
+    /// below now — see the comment on that assertion for why the two codes legitimately differ.
+    /// Divergences 3 and 4 are new in SMA-587: the two codes it added are HTTP-only
+    /// structurally, the same way divergence 2 is.
+    #[tokio::test]
+    async fn the_recorded_transport_divergences_still_hold() {
         use paigasus_proto::paigasus::common::v1::ErrorReason;
 
-        // 1. `IssueApiKey.expires_at`, gRPC half: `prost_types::Timestamp` fails to CONVERT (it
-        //    cannot fail to parse — it's already a struct), and gRPC classifies that itself via
-        //    `parse_opt_ts`, asserted below.
+        // 1. `IssueApiKey.expires_at` diverges on WHY it fails, not just which transport asserts
+        //    it — both halves are asserted below, and the divergence is the codes themselves.
         //
-        //    The HTTP half is NOT asserted here. The original claim was that HTTP's typed
-        //    `DateTime<Utc>` field fails inside serde and yields `invalid-request-body` — verified
-        //    FALSE against the real route: `issue`'s `Json<IssueApiKeyBody>` parameter
-        //    (`http/api_keys.rs`) is axum's plain `Json`, not `http::authn::EnvelopeJson`, so a
-        //    malformed body never reaches the IAM error envelope or the registry at all. Driving
-        //    the real extractor with `{"expires_at":"not-a-timestamp",...}` produces axum's own
-        //    non-JSON 422 rejection text, with no `error.code` field to compare against
-        //    `ErrorReason::InvalidRequestBody` in the first place — there is nothing for this test
-        //    to assert without either changing production code (out of scope for SMA-586 Task 8,
-        //    which makes test/visibility changes only) or hardcoding today's accidental
-        //    non-contract response shape as though it were the intended one, which would be worse
-        //    than asserting nothing. Flagged for a follow-up ticket rather than fixed here.
+        //    gRPC half: `prost_types::Timestamp` fails to CONVERT — it's already a struct, so it
+        //    cannot fail to *parse* — and gRPC classifies that itself via `parse_opt_ts`.
         let wire = |r: ErrorReason| r.as_wire_reason().expect("not the Unspecified sentinel");
         assert_eq!(
             parse_opt_ts(Some(prost_types::Timestamp { seconds: 0, nanos: -1 }), "expires_at").unwrap_err().code(),
             wire(ErrorReason::InvalidTimestamp),
         );
+
+        //    HTTP half: `expires_at` is typed `Option<DateTime<Utc>>` (`http/dto.rs`), so a
+        //    syntactically valid JSON string that isn't an RFC3339 timestamp fails inside serde
+        //    DURING deserialization, before `IssueApiKeyBody` even exists as a value — a
+        //    `JsonDataError`, which `http::json::envelope_rejection` maps to 422
+        //    `invalid-request-schema`. This is no longer the impossible-to-assert case the SMA-586
+        //    comment here used to describe: `issue`'s route (`http/api_keys.rs`) now takes
+        //    `EnvelopeJson<IssueApiKeyBody>` (SMA-587), so the real extractor is drivable
+        //    end-to-end exactly like the `EnvelopeJson` tests in `http/json.rs` do.
+        //
+        //    The two codes are NOT an inconsistency: they are different failures at different
+        //    layers, on either side of the same string. gRPC's `Timestamp` is already a decoded
+        //    struct — it fails to *convert* into a domain value. HTTP's `expires_at` is still a
+        //    JSON string at the point of failure — it fails to *deserialize* into that struct in
+        //    the first place.
+        {
+            use axum::extract::FromRequest;
+            use axum::http::StatusCode;
+
+            use crate::adapters::http::dto::IssueApiKeyBody;
+            use crate::adapters::http::json::EnvelopeJson;
+
+            let req = axum::extract::Request::builder()
+                .method("POST")
+                .uri("/")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"expires_at":"not-a-timestamp"}"#))
+                .unwrap();
+            let rejection = <EnvelopeJson<IssueApiKeyBody> as FromRequest<()>>::from_request(req, &())
+                .await
+                .expect_err("a body that fails to deserialize must be rejected");
+            assert_eq!(rejection.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let bytes = axum::body::to_bytes(rejection.into_body(), usize::MAX).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["code"], serde_json::json!(wire(ErrorReason::InvalidRequestSchema)));
+        }
 
         // 2. `mutually-exclusive-fields` is HTTP-only and STRUCTURALLY so: the gRPC surface models
         //    the same choice as a proto3 `oneof`, which cannot carry two values. Its only failure
@@ -1216,5 +1251,18 @@ mod tests {
         use crate::adapters::http::memberships::membership_filter;
         assert_eq!(membership_filter(Some("a".into()), Some("b".into())).unwrap_err().code(), wire(ErrorReason::MutuallyExclusiveFields));
         // There is no gRPC expression of "both set" to compare against — that is the point.
+
+        // 3. `unsupported-content-type` is HTTP-only and STRUCTURALLY so: tonic negotiates
+        //    `application/grpc` (or `+proto`/`+json`) at the transport layer itself, before a
+        //    request ever reaches a service method — a gRPC client has no way to present a wrong
+        //    content type for a unary call to fail on. There is no gRPC expression of this case
+        //    to compare against, the same shape as divergence 2.
+        //
+        // 4. `invalid-request-schema` is HTTP-only and STRUCTURALLY so: proto3 wire decoding has
+        //    no "syntactically valid but schema-invalid" state to land in — unknown fields are
+        //    skipped by design (proto3's forward-compatibility rule) and a field's wire type is
+        //    checked at decode time, not layered on top of an already-succeeded parse the way
+        //    `serde_json::from_slice` then `Deserialize::deserialize` are. There is nothing for a
+        //    gRPC counterpart to assert here either.
     }
 }

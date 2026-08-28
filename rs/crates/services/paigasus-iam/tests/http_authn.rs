@@ -169,7 +169,9 @@ async fn introspect_wrong_content_type_is_enveloped() {
     assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["error"]["code"], "invalid-request-body");
+    // SMA-587 split this out of `invalid-request-body`: a wrong content type means the body was
+    // never read, which is not the same failure as a body that could not be parsed.
+    assert_eq!(body["error"]["code"], "unsupported-content-type");
 }
 
 // --- Task 11: bearer enforcement on the protected `/v1` surface (D14, spec §7.4) ---

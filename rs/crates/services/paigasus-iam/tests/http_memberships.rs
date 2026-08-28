@@ -193,3 +193,50 @@ async fn create_user_rejects_invalid_email() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
     assert_eq!(err["error"]["code"], "invalid-email");
 }
+
+/// HTTP-body-envelope coverage for `POST /v1/memberships` (SMA-587 Task 5), mirroring
+/// `tests/http_tenancy.rs::a_refused_body_answers_in_the_error_envelope`'s shape exactly.
+#[tokio::test]
+async fn a_refused_body_answers_in_the_error_envelope() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (app, state, idp) = app_with_state(db).await;
+    let token = idp.bearer("envelope-membership-user", Some("envelope-membership@example.com"), "paigasus", 3600);
+    provision_platform_admin(&state, &token).await;
+
+    // 400: not JSON at all.
+    let (status, err) = support::send_bytes(&app, "POST", "/v1/memberships", Some("application/json"), b"{not json", Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-request-body", "{err}");
+
+    // 422: valid JSON, wrong shape. `CreateMembershipBody`'s `principal_prn`/`node_prn` are
+    // both required `String`s, so a number in either slot is a genuine type mismatch.
+    let (status, err) = support::send_bytes(
+        &app,
+        "POST",
+        "/v1/memberships",
+        Some("application/json"),
+        br#"{"principal_prn": 1, "node_prn": 2}"#,
+        Some(token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert_eq!(err["error"]["code"], "invalid-request-schema", "{err}");
+
+    // A well-formed body on the same route still reaches the handler — seed a real user +
+    // org so the control attach succeeds rather than failing on an unrelated validation error.
+    let user_prn = create_user(&app, &token, "envelope-membership-target@example.com").await;
+    let (status, org_body) = send(
+        &app,
+        "POST",
+        "/v1/organizations",
+        Some(json!({"slug": "envelope-membership", "name": "Envelope Membership"})),
+        Some(token.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{org_body}");
+    let org_prn = org_body["organization"]["prn"].as_str().unwrap().to_string();
+    let (status, body) = send(&app, "POST", "/v1/memberships", Some(json!({"principal_prn": user_prn, "node_prn": org_prn})), Some(token.as_str())).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}

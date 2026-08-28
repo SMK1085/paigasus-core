@@ -40,6 +40,7 @@ use paigasus_kernel::Prn;
 use super::AppState;
 use super::dto::{GrantRoleBody, IsAuthorizedBody, IsAuthorizedResponseDto, PageQuery, PolicyDto, PutPolicyBody, RoleGrantDto, RoleGrantQuery};
 use super::error::ApiError;
+use super::json::EnvelopeJson;
 use super::path::{RoleGrantId, UuidPath};
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
@@ -82,7 +83,7 @@ fn parse_policy_kind(raw: &str) -> Result<PolicyKind, TenancyError> {
 
 /// `POST /v1/authz/is-authorized`: see the module docs for the self/admin exposure rule
 /// (enforced by [`Authorize::decide_gated`]).
-async fn is_authorized(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Json(body): Json<IsAuthorizedBody>) -> Result<Json<IsAuthorizedResponseDto>, ApiError> {
+async fn is_authorized(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeJson(body): EnvelopeJson<IsAuthorizedBody>) -> Result<Json<IsAuthorizedResponseDto>, ApiError> {
     let actor = actor_prn(&ctx);
     let action = Action::parse(&body.action).ok_or_else(|| TenancyError::InvalidAction(body.action.clone()))?;
     let principal = parse_prn(&body.principal_prn)?;
@@ -104,7 +105,7 @@ async fn is_authorized(State(s): State<AppState>, Extension(ctx): Extension<Auth
 
 /// `POST /v1/authz/policies`: upsert. `system` is always `false` for a client-authored
 /// document — the store itself separately rejects mutating an already-persisted system row.
-async fn put_policy(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Json(body): Json<PutPolicyBody>) -> Result<(StatusCode, Json<PolicyDto>), ApiError> {
+async fn put_policy(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeJson(body): EnvelopeJson<PutPolicyBody>) -> Result<(StatusCode, Json<PolicyDto>), ApiError> {
     let actor = actor_prn(&ctx);
     let kind = parse_policy_kind(&body.kind)?;
     let now = Utc::now();
@@ -134,7 +135,7 @@ async fn delete_policy(State(s): State<AppState>, Extension(ctx): Extension<Auth
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn create_role_grant(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Json(body): Json<GrantRoleBody>) -> Result<(StatusCode, Json<RoleGrantDto>), ApiError> {
+async fn create_role_grant(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeJson(body): EnvelopeJson<GrantRoleBody>) -> Result<(StatusCode, Json<RoleGrantDto>), ApiError> {
     let actor = actor_prn(&ctx);
     let grant = s.roles.grant(&actor, &body.principal_prn, &body.role_key, &body.scope_prn).await?;
     Ok((StatusCode::CREATED, Json(grant.into())))
