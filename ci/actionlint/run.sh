@@ -2072,7 +2072,7 @@ affected_graph_wiring_verdict() {
 # `- 'moon.yml'` is self-concealing: the removal is itself a root-moon.yml edit, and afterwards
 # the task's remaining globs do not match that file (`*/moon.yml` matches rs/moon.yml, not
 # moon.yml; `.moon/**/*` does not match it either), so the removal PR does not schedule the gate
-# and every later PR can delete a pinned line with nothing red. MEASURED at moon 2.3.2: the root
+# and every later PR can delete a pinned line with nothing red. MEASURED at moon 2.5.3: the root
 # moon.yml is NOT an implicit input to the repo project's own tasks (repo:deny resolves to
 # inputFiles ['rs/Cargo.lock','rs/deny.toml'] and no moon.yml), so there is no fallback.
 #

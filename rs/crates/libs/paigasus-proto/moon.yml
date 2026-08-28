@@ -4,7 +4,7 @@ id: 'paigasus-proto-rs'
 layer: 'library'
 language: 'rust'
 
-# paigasus-proto-derive is a `workspace = true` dep (Cargo.toml:24), and Moon 2.3.2 does not resolve
+# paigasus-proto-derive is a `workspace = true` dep (Cargo.toml:24), and Moon 2.5.3 does not resolve
 # workspace-inherited deps into the project graph — only `path = "..."` ones — so this edge must be
 # hand-declared. `dependsOn` creates the project edge; the task-level `^:build` is what schedules the
 # derive crate's build under `moon ci --include-relations`. Both are required; neither implies the

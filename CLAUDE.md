@@ -13,9 +13,10 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - `moon ci :build` / `moon ci :test` — affected build/test graph. **Moon 2.x needs explicit
   targets**; bare `moon ci` errors in non-TTY.
 - Task output style is set in `.moon/tasks.yml` (`taskOptions.outputStyle`,
-  currently `buffer-only-failure`). Moon 2.3.2 has no per-invocation CLI flag
-  for it; to stream a specific task locally, set `options.outputStyle: 'stream'`
-  on the task definition.
+  currently `buffer-only-failure`). Moon 2.5.3 still has no per-invocation CLI flag
+  for it (re-checked on the 2.5.3 bump, SMA-595); to stream a specific task locally, set
+  `options.outputStyle: 'stream'` on the task definition. Note moon 2.4.3 changed the
+  setting to apply only to TRANSITIVE targets, not the primary one you name.
 - Rust (in `rs/`): `cargo build --workspace`, `cargo fmt --check`,
   `cargo clippy --workspace -- -D warnings`, `cargo nextest run --workspace`.
 
@@ -40,8 +41,29 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 
 ## Gotchas
 
-- Moon is 2.3.2: `vcs.client` (not `manager`), `codeowners.sync` (not `syncOnRun`),
-  Python/uv toolchains keyed `unstable_python` + a separate `unstable_uv`.
+- Moon is 2.5.3 and proto is 0.61.1 (SMA-595): `vcs.client` (not `manager`), `codeowners.sync`
+  (not `syncOnRun`), Python/uv toolchains keyed `unstable_python` + a separate `unstable_uv`.
+  The two pins are **coupled**: moon 2.5.3's Python toolchain plugin requires proto >= 0.60.0,
+  and moon reads the proto CLI at the fixed path `~/.proto/bin/proto` — neither `PATH` order nor
+  the `.prototools` pin overrides that, so a moon bump can hard-fail with
+  `proto::tool::minimum_version_requirement` until the local proto BINARY moves. `proto upgrade`
+  reports the target version and then no-ops inside an agent session; upgrade it from a normal
+  shell, or set `PROTO_HOME` to an isolated root and `proto install` into it.
+- `proto` prints **NDJSON on stdout** when it detects an agent environment (`AI_AGENT`,
+  `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`), including a `Detected an AI agent environment…`
+  preamble line. That breaks every `$(proto bin <tool>)` capture: the variable becomes a JSON
+  blob, not a path. `ci/release-parity/ecosystems/release-plz.sh` does exactly this, so all three
+  `repo:release-parity*` gates abort `INCONCLUSIVE (rc=2)` — **not red** — in any agent-driven
+  local run. CI has no agent detection, so it never shows there. This is NOT new in proto 0.61.1;
+  0.58.1 behaves identically (measured both, SMA-595). To verify those gates locally, `unset
+  AI_AGENT CLAUDECODE CLAUDE_CODE_ENTRYPOINT` first — with that, all three pass.
+- `repo:affected-smoke` failed **once** under a concurrent `moon ci` on 2.5.3, aborting at 2.4s
+  against its usual 6–8s (SMA-595). It did not reproduce in four attempts: warm, cold
+  `.moon/cache`, cold `MOON_HOME`, and cold `rs/target` with cargo compiling alongside. An
+  inherited `MOON_BASE` was tested and ruled out (the gate passes with it set). Cause unknown and
+  the gate is otherwise green everywhere. If you see a sub-3s `affected-smoke` failure, it is
+  this — capture the full task output before re-running, because a re-run passes and destroys the
+  evidence.
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
 - `.github/CODEOWNERS` is Moon-generated — don't hand-edit.
 - `vcs.hooks` is intentionally empty; lefthook will own `.git/hooks` (SMA-371).
@@ -100,7 +122,7 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `overrides:` selector or `uv lock --upgrade-package` — or a justified `osv-scanner.toml`
   waiver; a dep consumed only by a later commit needs a temporary
   `[package.metadata.cargo-machete] ignored` allowlist (prune once consumed).
-- Moon 2.3.2's Rust toolchain resolves `path = "…"` Cargo deps into the project graph **automatically**
+- Moon 2.5.3's Rust toolchain resolves `path = "…"` Cargo deps into the project graph **automatically**
   (`moon query projects` labels them `source=implicit`), but does **not** resolve `workspace = true`
   inheritance. So a `{ workspace = true }` in-tree dep — the repo's default form — **must** be
   hand-declared in `dependsOn`, while a `path` dep needs nothing. This is why the drift was scattered
@@ -112,10 +134,14 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   (`ci/affected-graph/cargo_moon_parity.py`), so a new in-tree dep that forgets either one reds CI
   instead of silently under-building (SMA-524).
   Neither is enough on its own either: task `inputs` are the **only** thing that confers
-  affectedness in Moon 2.3.2. `dependsOn` and `^:build` schedule an upstream's build but never
-  **select** a downstream — a dependent runs only if independently affected, and neither
-  `--include-relations` nor `--downstream` changes that for `moon ci` (measured at the full
-  24-target shape: identical action sets with and without both, SMA-528). Every Rust crate therefore
+  affectedness in Moon 2.5.3. `dependsOn` and `^:build` schedule an upstream's build but never
+  **select** a downstream — a dependent runs only if independently affected. `--include-relations`
+  is very nearly, but no longer entirely, inert: re-measured at the full 27-target shape on 2.5.3
+  (SMA-595) it selects exactly ONE task the same command without it does not,
+  `paigasus-kernel-py:build` — 44 RunTasks against 43, stable across repeated runs. On 2.3.2 the
+  two sets were byte-identical (SMA-528). One added `build` is NOT a dependent closure, so the rule
+  above still holds; do not read the flag as a working cascade. **Re-run that A/B on the next moon
+  bump** — the delta moved once and can move again. Every Rust crate therefore
   declares its transitive upstream sources in `fileGroups.upstreams`, consumed by build/test/lint via
   `@group(upstreams)` in `.moon/tasks/rust.yml`. Omitting the group is a hard graph-load error
   (`project::unknown_file_group`) for every moon command; mis-declaring it reds
@@ -390,7 +416,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   behaviour: a wheel needing LESS than its `manylinux_2_17` tag promises is correct, since the
   tag declares a minimum platform. When one of these reds, read what the tool produced, confirm
   it is correct, and re-pin the constant — never loosen the comparison to an inequality.
-- `moon query projects --json` **errors** on Moon 2.3.2 (`unexpected argument '--json' found`) —
+- `moon query projects --json` **errors** on Moon 2.5.3 too (`unexpected argument '--json' found`,
+  re-checked on the 2.5.3 bump, SMA-595) —
   bare `moon query projects` already emits JSON. **Measure its exit status UNPIPED (2):** `jq`
   returns 0 on empty input, so `moon query projects --json | jq …` reports 0 unless `pipefail`
   is set, and the failure reads as "the reader found nothing" rather than "the flag is invalid".

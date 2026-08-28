@@ -93,7 +93,7 @@ FMT_TASK_INPUTS = (
 )
 
 # Substrings that mean "this task shells out to a Rust build". Matched against the task's resolved
-# `command` + `args` + `script` joined — NOT `command` alone: measured on moon 2.3.2, a
+# `command` + `args` + `script` joined — NOT `command` alone: measured on moon 2.5.3, a
 # command-form task reports command='cargo' with the verb in args (paigasus-kernel-rs:lint ->
 # args=['clippy', '--locked', ...], script=None), so a `command: 'napi'` + `args: ['build', ...]`
 # task would be invisible to a command-only scan.
