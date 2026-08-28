@@ -375,13 +375,25 @@ jobs:
           RELEASED: ${{ needs.release.outputs.released }}
         run: |
           set -euo pipefail
-          KERNEL_VERSION="$(jq -r '.releases[] | select(.package_name == "paigasus-kernel") | .version' <<<"$RELEASED")"
-          [ -n "$KERNEL_VERSION" ] || { echo "::error::paigasus-kernel not found in released output: $RELEASED"; exit 1; }
+          # Fix round 1 (Critical 2): `paigasus-kernel` (group `kernel`) and `paigasus-proto`
+          # (group `proto`) are INDEPENDENTLY triggered release-plz version groups — a
+          # contracts-only commit legitimately releases proto with no kernel entry in
+          # `$RELEASED`, and vice versa. A missing family must never hard-fail the job: it
+          # must gate that family's steps off instead, so a run where NEITHER family released
+          # still completes having uploaded nothing. `.releases[]?` (not `.releases[]`) so an
+          # empty `{"releases":[]}` array yields "" rather than a jq error under `pipefail`.
+          KERNEL_VERSION="$(jq -r '.releases[]? | select(.package_name == "paigasus-kernel") | .version' <<<"$RELEASED")"
+          PROTO_VERSION="$(jq -r '.releases[]? | select(.package_name == "paigasus-proto") | .version' <<<"$RELEASED")"
+          if [ -n "$KERNEL_VERSION" ]; then
+            echo "kernel_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "kernel_release=false" >> "$GITHUB_OUTPUT"
+          fi
           echo "kernel_version=$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
           # This keys on the RUST crate `paigasus-proto` reported by release-plz. What gets
           # uploaded below under this flag is the PYTHON distribution built from
           # py/packages/paigasus-proto — same name, two different artifacts.
-          if jq -e '.releases[] | select(.package_name == "paigasus-proto")' <<<"$RELEASED" >/dev/null; then
+          if [ -n "$PROTO_VERSION" ]; then
             echo "proto_release=true" >> "$GITHUB_OUTPUT"
           else
             echo "proto_release=false" >> "$GITHUB_OUTPUT"
@@ -419,6 +431,7 @@ jobs:
       # Binds the artifact to the release. Without this a re-run against a moved main could
       # publish a stale wheel under the wrong version.
       - name: Assert the wheels match the released version
+        if: steps.relinfo.outputs.kernel_release == 'true'
         env:
           KERNEL_VERSION: ${{ steps.relinfo.outputs.kernel_version }}
         run: |
@@ -438,12 +451,14 @@ jobs:
       # re-runnable — PyPI returns 400 "file already exists" otherwise, so an un-skipped retry can
       # never succeed unaided. PyPI is delete-but-never-reuse.
       - name: Publish paigasus-py-bindings
+        if: steps.relinfo.outputs.kernel_release == 'true'
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           packages-dir: dist-bindings
           skip-existing: true
 
       - name: Publish paigasus-kernel
+        if: steps.relinfo.outputs.kernel_release == 'true'
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           packages-dir: dist-face
@@ -480,17 +495,23 @@ jobs:
       - name: Install JS workspace deps
         run: pnpm --dir ts install --frozen-lockfile
 
-      # See publish-pypi's "Read the released version" step for the JSON shape. Only the
-      # version is needed here — the family is version-locked, so paigasus-kernel's number
-      # binds every @paigasus/* package too.
+      # See publish-pypi's "Read the released version" step for the JSON shape and for why a
+      # missing family must gate its steps off rather than fail (Fix round 1, Critical 2):
+      # `paigasus-kernel` and `paigasus-proto` are independently triggered release-plz version
+      # groups, so a proto-only release legitimately has no kernel entry here. Every @paigasus/*
+      # npm package is in the kernel family, so `kernel_release` alone governs this whole job.
       - name: Read the released version
         id: relinfo
         env:
           RELEASED: ${{ needs.release.outputs.released }}
         run: |
           set -euo pipefail
-          KERNEL_VERSION="$(jq -r '.releases[] | select(.package_name == "paigasus-kernel") | .version' <<<"$RELEASED")"
-          [ -n "$KERNEL_VERSION" ] || { echo "::error::paigasus-kernel not found in released output: $RELEASED"; exit 1; }
+          KERNEL_VERSION="$(jq -r '.releases[]? | select(.package_name == "paigasus-kernel") | .version' <<<"$RELEASED")"
+          if [ -n "$KERNEL_VERSION" ]; then
+            echo "kernel_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "kernel_release=false" >> "$GITHUB_OUTPUT"
+          fi
           echo "kernel_version=$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download the node addons
@@ -518,6 +539,7 @@ jobs:
       # argument skip-existing answers for PyPI. Give npm those semantics by hand.
       - name: Skip packages already at this version
         id: npmstate
+        if: steps.relinfo.outputs.kernel_release == 'true'
         env:
           VERSION: ${{ steps.relinfo.outputs.kernel_version }}
         run: |
@@ -559,6 +581,23 @@ jobs:
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
           pnpm exec napi prepublish --no-gh-release --npm-dir npm \
             --cwd ../../../rs/crates/bindings/paigasus-node-bindings
+
+      # Fix round 1, Critical 1: `napi prepublish` publishes ONLY the seven per-platform
+      # packages — its single `npm publish` call runs with `cwd: pkgDir` inside its target
+      # loop (verified in @napi-rs/cli 3.7.2, dist/index.js:3441-3452). It never publishes the
+      # crate root. Without this step the platform packages land as orphans referenced by
+      # nothing installable, and `npm install @paigasus/node-bindings` 404s forever. Must run
+      # AFTER napi prepublish: the main package's optionalDependencies point at the platform
+      # packages, which must already exist on the registry.
+      - name: Publish @paigasus/node-bindings (the main package)
+        if: steps.npmstate.outputs.node == 'publish'
+        working-directory: rs/crates/bindings/paigasus-node-bindings
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
+          npm publish --provenance --access public
 
       # Assert the TARBALL, not the working tree: `files` membership is what npm actually ships.
       # A wasm-less package installs cleanly and fails at import.
