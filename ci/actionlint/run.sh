@@ -4773,10 +4773,28 @@ done
 # ---------------------------------------------------------------------------------------------
 # Check 10 — the release guard, over the real workflow. Runs here (not in --self-test) because it
 # reads the actual .github/workflows tree, like checks 5/6.
+#
+# UNLIKE every other `done < <(verdict)` call site in this file, the verdict here is an EXTERNAL
+# PROCESS whose fail-closed contract is a process exit, not an echoed token. Process substitution
+# discards that status (and `set -uo pipefail` above does not cover a redirection), so reading it
+# through `< <(...)` would let an exit 2 — unreadable file, unparseable YAML, missing uv — finish
+# the gate rc 0 having asserted nothing. That is the bug the comment on affected_graph_wiring_verdict
+# (~line 2050) records for the bash verdicts; it applies with more force here, since there is no
+# way to make an external process "echo and return" instead of exiting. Capture to a file, inspect
+# the status, THEN read.
 # ---------------------------------------------------------------------------------------------
+RG_OUT="$(mktemp)" || infra "check 10: mktemp failed"
+release_guard_py .github/workflows/release.yml > "$RG_OUT"
+rg_rc=$?
+if [ "$rg_rc" -eq 2 ]; then
+  rm -f "$RG_OUT"
+  infra "check 10: release_guard.py aborted (exit 2) — its stderr is above. The guard failed
+      closed, as designed; the workflow could not be read or parsed."
+fi
 while IFS= read -r v; do
   [ -n "$v" ] && fail "check 10: $v"
-done < <(release_guard_py .github/workflows/release.yml)
+done < "$RG_OUT"
+rm -f "$RG_OUT"
 
 selftest_mutation_battery
 
