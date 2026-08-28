@@ -26,25 +26,45 @@ dependencies_update = true
 # apply to crates whose Cargo manifest says `publish = false` (measured) — which is exactly
 # what the three binding crates need, since they ship as maturin/napi/wasm byproducts rather
 # than to crates.io. `repo:version-lockstep` asserts the non-Cargo manifests follow.
+# GITHUB RELEASES (SMA-579 §2.1). release-plz creates one per released package by default, which
+# would mean SIX release pages per release commit for two lockstep families. Only the two family
+# HEADS carry one, each with its family's changelog. TAGS are unaffected — every package still
+# gets `<package>-v<version>`, because release-plz owns every tag (ADR-0011 S3) and napi is
+# barred from cutting any (`--no-gh-release`, asserted by ci/actionlint/release_guard.py V5).
 [[package]]
 name = "paigasus-kernel"
 version_group = "kernel"
 release = true
 
+# publish = false MIRRORS each crate's Cargo manifest. release-plz reads an ABSENT publish key as
+# `publish = true` and hard-errors on the contradiction ("has `publish = false` ... in the
+# Cargo.toml, but it has `publish = true` in the release-plz configuration"), which blocked
+# `release-plz release` entirely — measured on this repo before SMA-579 fixed it. `release = true`
+# stays: it keeps these crates in the version group repo:version-lockstep asserts, and lets
+# release-plz TAG them. Tagged and version-grouped, but never uploaded to crates.io — they ship as
+# maturin/napi/wasm byproducts to PyPI and npm instead.
 [[package]]
 name = "paigasus-py-bindings"
 version_group = "kernel"
 release = true
+publish = false
+# Not a family head (see GITHUB RELEASES comment above paigasus-kernel) — one release page per
+# family, not per package.
+git_release_enable = false
 
 [[package]]
 name = "paigasus-node-bindings"
 version_group = "kernel"
 release = true
+publish = false
+git_release_enable = false
 
 [[package]]
 name = "paigasus-wasm"
 version_group = "kernel"
 release = true
+publish = false
+git_release_enable = false
 
 # --- Releasable: the proto family (ADR-0011 S1) --------------------------------------------
 # One version across the two crates, ordered derive -> proto (paigasus-proto depends on
@@ -53,6 +73,8 @@ release = true
 # crate's files, and release-plz attributes the bump BY FILE PATH (ADR-0011 S5). No contract
 # version is introduced. Nothing publishes until SMA-580 flips PAIGASUS_RELEASE_ENABLED;
 # `release = true` here only makes them eligible for the release PR.
+# GITHUB RELEASES: same policy as paigasus-kernel above (SMA-579 §2.1). paigasus-proto is this
+# family's head, so it keeps its GitHub release; paigasus-proto-derive below does not.
 [[package]]
 name = "paigasus-proto"
 version_group = "proto"
@@ -62,6 +84,7 @@ release = true
 name = "paigasus-proto-derive"
 version_group = "proto"
 release = true
+git_release_enable = false
 
 # --- Not releasable ------------------------------------------------------------------------
 # Every other member. `release = false` removes a package from the release-PR proposal
@@ -71,33 +94,55 @@ release = true
 # paigasus-gateway / paigasus-iam stay at 0.0.0 deliberately: their
 # `env!("CARGO_PKG_VERSION")` feeds the ServiceInfo descriptor, and ADR-0020 skew
 # reporting is parked on that value (SMA-505 R7).
+#
+# publish = false MIRRORS each crate's Cargo manifest, same contradiction as the kernel-family
+# bindings above (SMA-579): all seven of these carry `publish = false` in Cargo.toml, and an
+# absent `publish` key here still reads as `publish = true` to release-plz — which errors even
+# though `release = false` already excludes the package from the release PR. `release = false`
+# stops the release-PR proposal; `publish = false` is what `release-plz release` itself checks.
+# Measured: `paigasus-iam-core` was the first of these seven to trip the same hard error the
+# kernel-family bindings did, once that contradiction was fixed above.
 [[package]]
 name = "paigasus-iam-core"
 release = false
+publish = false
+git_release_enable = false
 
 [[package]]
 name = "paigasus-kernel-parity"
 release = false
+publish = false
+git_release_enable = false
 
 [[package]]
 name = "paigasus-logging"
 release = false
+publish = false
+git_release_enable = false
 
 [[package]]
 name = "paigasus-observability"
 release = false
+publish = false
+git_release_enable = false
 
 [[package]]
 name = "paigasus-service-info"
 release = false
+publish = false
+git_release_enable = false
 
 [[package]]
 name = "paigasus-gateway"
 release = false
+publish = false
+git_release_enable = false
 
 [[package]]
 name = "paigasus-iam"
 release = false
+publish = false
+git_release_enable = false
 
 [changelog]
 sort_commits = "newest"
