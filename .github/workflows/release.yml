@@ -8,22 +8,49 @@ on:
     branches:
       - main
 
-# release-plz force-updates its PR branch on every run, so two rapid merges to main would
-# race. Do NOT cancel in progress: a cancelled run can leave the branch half-written.
-concurrency:
-  group: release-pr
-  cancel-in-progress: false
-
 # Least privilege for the auto GITHUB_TOKEN, matching every other workflow here: it is never
 # used for the push/PR below (that goes through the App installation token — see "Mint").
 permissions:
   contents: read
+
+# JOB ORDER IS LOAD-BEARING, and it is the reverse of the obvious one (SMA-578 review B3).
+# Everything REVERSIBLE runs before the first IRREVERSIBLE step:
+#
+#   {wheels, prebuild, proto-dist} -> release -> {publish-pypi, publish-npm}
+#
+# The draft this replaced ran `release` FIRST, so release-plz published to crates.io and cut six
+# tags before a single wheel was built. A zig regression or a runner-image change in the 12-leg
+# matrix then left crates.io permanently published, tags permanently cut, and paigasus-kernel
+# missing from PyPI while pinning paigasus-py-bindings==X.Y.Z. Nothing forces that order: the
+# release commit on main already carries the bumped versions, so the artifacts can be built first.
+#
+# COROLLARY, equally load-bearing: NO JOB DOWNSTREAM OF `release` MAY BUILD ANYTHING. publish-pypi
+# and publish-npm only download, assert and upload. A wasm-pack or uv build after the crates.io
+# upload reintroduces exactly the half-published state this order exists to prevent.
+#
+# NO `plan` JOB EXISTS (SMA-579 Task 6+7 decision). The original design had a `plan` job run
+# `release-plz release --dry-run` first, so a push with nothing to release could skip the 12-leg
+# matrix. Measured against the real repository: the dry-run FAILS every time, with `no matching
+# package named paigasus-proto-derive` — a dry run never publishes the derive crate to crates.io,
+# so the dependent `paigasus-proto` dry-run can never resolve it. That failure is permanent until
+# a LIVE release publishes the derive crate first. A `plan` job built on that dry-run would red
+# the whole graph on every push to main. So `wheels`, `prebuild` and `proto-dist` each carry
+# `if: vars.PAIGASUS_RELEASE_ENABLED == 'true'` directly, and `approve-release`/`release` are
+# gated only TRANSITIVELY through their `needs:` chain. The accepted cost: once the flag is on,
+# every push to main builds the full wheel and napi matrices even when nothing is releasable. Do
+# not "fix" this by reintroducing a dry-run-based `plan` job without first re-verifying that
+# release-plz's dry-run can resolve the derive-crate dependency.
 
 jobs:
   release-pr:
     name: release PR
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # release-plz force-updates its PR branch on every run, so two rapid merges to main would
+    # race. Do NOT cancel in progress: a cancelled run can leave the branch half-written.
+    concurrency:
+      group: release-pr
+      cancel-in-progress: false
     steps:
       # The App credentials may not exist yet (a human must create them — see the workflow's
       # own doc). A job-level `if:` cannot see whether a secret is set: per GitHub's own
@@ -198,3 +225,113 @@ jobs:
           git add -A
           git commit -m "chore(rs): stamp the non-Cargo manifests to the release version"
           git push "$AUTH_REMOTE" "HEAD:$BRANCH"
+
+  # THE REVERSIBLE STAGE. Everything below `release` only downloads what these produce.
+  wheels:
+    name: build wheels
+    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    uses: ./.github/workflows/wheels.yml
+
+  prebuild:
+    name: build node addons and wasm
+    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    uses: ./.github/workflows/prebuild.yml
+
+  proto-dist:
+    name: build the Python proto distribution
+    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install Moon-managed toolchains
+        run: moon setup
+
+      - name: Build the distribution
+        working-directory: py
+        run: uv build --package paigasus-proto --out-dir ../dist
+
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: proto-dist-py
+          path: |
+            dist/paigasus_proto-*.whl
+            dist/paigasus_proto-*.tar.gz
+          if-no-files-found: error
+
+  # The ONE place a human approval can be inserted, by adding required reviewers to the
+  # `release-approval` environment in repo settings. It must NOT go on the publishing jobs:
+  # GitHub pauses EACH job entering an environment, so reviewers on release-publish would stop
+  # the run again between crates.io and PyPI — leaving crates.io published and PyPI empty if the
+  # second approval is rejected or times out (30 days). That is the split state the job order
+  # above exists to prevent. SMA-580: add reviewers HERE, never to release-publish.
+  approve-release:
+    name: approve the release
+    needs: [wheels, prebuild, proto-dist]
+    runs-on: ubuntu-latest
+    environment: release-approval
+    steps:
+      - run: echo "Approved. Everything below this point is irreversible."
+
+  release:
+    name: publish to crates.io and cut tags
+    needs: [wheels, prebuild, proto-dist, approve-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release-publish
+    permissions:
+      id-token: write    # crates.io OIDC exchange
+      contents: read     # the App token below does the writing, not GITHUB_TOKEN
+    outputs:
+      released: ${{ steps.rel.outputs.json }}
+    steps:
+      - name: Authenticate with crates.io
+        id: cratesio
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18  # v1.0.5
+
+      # A SECOND mint: tokens are per-job and live one hour. Every checkout in this repo sets
+      # persist-credentials: false, so there are no ambient git credentials and release-plz's
+      # tag push needs this explicitly.
+      - name: Mint the App installation token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
+          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install pinned release-plz CLI
+        run: proto install release-plz
+
+      - name: Release
+        id: rel
+        working-directory: rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.cratesio.outputs.token }}
+          GIT_TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          OUT="$(release-plz release --output json)"
+          echo "$OUT"
+          echo "json=$OUT" >> "$GITHUB_OUTPUT"

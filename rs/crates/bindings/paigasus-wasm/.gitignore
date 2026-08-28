@@ -11,3 +11,4 @@
 *.wasm
 .wasmpack-out/
 .wasmpack-test-out/
+.wasmpack-release-out/

@@ -1,6 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
 name: prebuild
 
 on:
+  # Consumed by release.yml's reversible stage (SMA-579). This workflow must NEVER declare
+  # `secrets:` or `id-token: write` — it keeps a pull_request trigger, and same-repo PRs receive
+  # repository secrets. Publishing happens in release.yml, which downloads these artifacts.
+  workflow_call:
+
   workflow_dispatch:
 
   # POST-merge verification of Rust changes. Deliberately excludes every `ts/` path:
@@ -42,7 +48,10 @@ on:
 
 # Build-only verification: read the repo, build addons, run dry-run packaging. No publish, and no
 # GitHub release is created (the assemble job omits napi's opt-in --gh-release flag), so no
-# contents:write is needed. SMA-407 adds publish creds at activation.
+# contents:write is needed.
+# No publish, and no GitHub release (the assemble job omits napi's opt-in --gh-release flag).
+# Credentials are NOT added here and never will be: this workflow carries a pull_request trigger.
+# release.yml owns every credential and downloads these artifacts (SMA-579 §4).
 permissions:
   contents: read
 
@@ -235,6 +244,35 @@ jobs:
           CRATE=../../../rs/crates/bindings/paigasus-node-bindings
           pnpm exec napi create-npm-dirs --cwd "$CRATE"
           pnpm exec napi artifacts --cwd "$CRATE" --npm-dir npm
+
+      - name: Upload the assembled npm dirs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: npm-dirs
+          path: rs/crates/bindings/paigasus-node-bindings/npm/
+          if-no-files-found: error
+
+      # A THIRD scratch dir. wasm-pack CLEANS --out-dir and deletes package.json, so it must
+      # never run in the crate root (see that crate's .gitignore). ts/packages/paigasus-kernel's
+      # build task owns .wasmpack-out and its test task owns .wasmpack-test-out; this needs its
+      # own name so a concurrent moon ci cannot race it.
+      - name: Build the wasm distribution
+        run: |
+          set -euo pipefail
+          cd rs/crates/bindings/paigasus-wasm
+          rustup target add wasm32-unknown-unknown
+          wasm-pack build . --target bundler --release --no-pack \
+            --out-dir .wasmpack-release-out --out-name paigasus_wasm
+          test -s .wasmpack-release-out/paigasus_wasm_bg.wasm \
+            || { echo "::error::wasm-pack produced no binary"; exit 1; }
+          cp package.json .wasmpack-release-out/package.json
+
+      - name: Upload the wasm distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wasm-dist
+          path: rs/crates/bindings/paigasus-wasm/.wasmpack-release-out/
+          if-no-files-found: error
 
       # Dry-run prepublish: assert os/cpu/libc + main paths + optionalDependencies resolve, touching
       # nothing. `--no-gh-release` IS REQUIRED — ghRelease defaults ON, so without it prepublish enters
