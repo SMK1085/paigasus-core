@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.10.3",
+  "checkpoint_id": "16e1e4960969",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".superpowers/sdd/2026-08-22-sma-530-release-parity-negative-control/final-fix-report.md",
+    ".superpowers/sdd/2026-08-22-sma-530-release-parity-negative-control/task-1-report.md",
+    ".superpowers/sdd/2026-08-22-sma-530-release-parity-negative-control/task-2-report.md",
+    ".superpowers/sdd/2026-08-22-sma-530-release-parity-negative-control/task-3-report.md",
+    ".superpowers/sdd/2026-08-22-sma-530-release-parity-negative-control/task-4-report.md",
+    ".superpowers/sdd/2026-08-22-sma-530-release-parity-negative-control/task-5-report.md",
+    ".superpowers/sdd/2026-08-22-sma-530-release-parity-negative-control/task-6-report.md",
+    "CLAUDE.md",
+    "ci/affected-graph/README.md",
+    "ci/affected-graph/ci_targets.py",
+    "moon.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/16/e1e4960969/0/metadata.json",
+      "transcript": "/16/e1e4960969/0/full.jsonl",
+      "compact_transcript": "/16/e1e4960969/0/transcript.jsonl",
+      "content_hash": "/16/e1e4960969/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 394,
+    "cache_creation_tokens": 618099,
+    "cache_read_tokens": 56111520,
+    "output_tokens": 202923,
+    "api_call_count": 197,
+    "subagent_tokens": {
+      "input_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 0,
+      "api_call_count": 0
+    }
+  }
+}
