@@ -30,12 +30,13 @@ the required check. See SMA-540 and
 | 4 | A healthy stdin fixture must pass — the control for check 3 |
 | 5 | Every `paths:` glob is in the supported vocabulary and matches the tracked tree, and every `branches:` entry resolves as a ref or is skip-listed |
 | 6 | Every extracted filter key carries at least one sequence entry; a `paths:`/`branches:` key must also have at least one of them positive (the `-ignore` variants are exempt) |
-| 7 | Nine self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation allowlist, affected-graph wiring, block execution, kill predicate — plus a counter (`SELF_TESTS_RAN`/`SELF_TEST_COUNT`) asserting all nine ran, and a definition-count check catching a tenth table that is defined but never wired into `run_self_tests` (`run.sh --self-test`) |
+| 7 | Ten self-tests against fixture tables — extractor, path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation allowlist, affected-graph wiring, block execution, kill predicate, affected-smoke block — plus a counter (`SELF_TESTS_RAN`/`SELF_TEST_COUNT`) asserting all ten ran, and a definition-count check catching an eleventh table that is defined but never wired into `run_self_tests` (`run.sh --self-test`) |
 | 8 | `ci.yml`'s `T=(…)` still schedules the gate that guards `T` itself, and nothing silences that gate's result. Six verdict families: **(a)** the floor — `:affected-smoke` present in `T` (`missing`), or the array can't even be read (`no-array`/`no-file`); **(b)** no `moon` command line is continued onto another physical line, where a discarded exit status would be invisible to this check (`continued`); **(c)** no single-line `moon` command line discards its own exit status (`swallowed`), with `SWALLOWED_SKIP` as the escape hatch for an unrelated `moon` line this check cannot know is harmless; **(d)** no line CLOSING a block (`fi`/`done`/`}`) discards its own exit status either, the same tail on a different line (`block-swallowed`), sharing `SWALLOWED_SKIP`; **(e)** no `moon ci`/`moon run` invocation sits behind a known command wrapper (`command`/`env`/`time`/`eval`/`exec`/`if`/`while`/`until`/`!`) on the same line, where propagation cannot be confirmed (`wrapped`), sharing `SWALLOWED_SKIP` as its escape hatch; **(f)** no step's `continue-on-error:` value suppresses it — any spelling but the literal `false` (`continue-on-error`), with `COE_SKIP` as the escape hatch for an unrelated later step |
 | 8b | Every line in `ci.yml` carrying the target-array expansion `"${T[@]}"` matches one of `T_INVOCATION_ALLOWLIST` (declared with `T_FLOOR`) **exactly** — indentation included — and the number of such lines matches the array's length. This is the PRIMARY guard on the INVOCATION LINES themselves (SMA-542 CodeRabbit round 3, finding B — a bare `VAR=value` assignment prefix defeated BOTH check 8's `swallowed` and `wrapped`, since it has neither `moon` at column 0 nor a recognized wrapper token there); check 8's `continued`/`swallowed`/`block-swallowed`/`wrapped` stay for their more specific diagnostics and are consulted first, so a line they already explain is not also reported here as `not-allowlisted`. It matches each LINE against a SET of allowed forms, with no notion of which branch a line sits under, so it is NOT a complete guard on the step's control flow — check 8d, below, closes the concretely-identified gaps; see L12 for what (if anything) still isn't |
 | 8c | `ci/affected-graph/run.sh` still contains its own two call sites into `ci_targets.py` — `assert_ci_targets \|\| SUITE_RC=1` and `"$HERE/ci_targets.py" --self-test \|\| NEG_RC=1` — WITH each `\|\| RC=1` propagation suffix intact (`missing <site>`), and that the file itself exists and is readable (`no-file`). Closes L6 (SMA-542 residual closure, PR 150 follow-up): check 8 above pins only `:affected-smoke`'s *scheduling*; this pins the two lines that actually INVOKE the gate which, in turn, pins THIS file's own call sites back (`ci_targets.py`'s `ACTIONLINT_SH_CALL_SITES`). Scheduled independently of `ci/affected-graph/`, so it survives a deletion there that would otherwise green both directions of the cycle silently |
 | 8d | The `"moon ci (affected graph)"` step's `run:` block — extracted from `ci.yml`, dedented, then EXECUTED once per GitHub event path (`pull_request`; `push` with a real `BEFORE` sha; `push` with the all-zero `BEFORE`; `push` with an empty `BEFORE`) against a `moon` stubbed in a `mktemp -d` bin directory placed first on a minimal PATH. Each path must invoke `moon` **exactly once**, with the exact subcommand + the WHOLE `T` array + the `--base`/`--include-relations` shape that path requires (`no-step`/`multi-step <n>` when the step can't be found unambiguously, `no-run-block` when its `run:` block can't be extracted, `no-target-array` when `T` can't either, `zero-invocations <path>`, `wrong-count <path> <n>`, `bad-args <path>`). Closes README L12 (SMA-542 residual closure, PR 150 follow-up): 8b matches invocation LINES; this proves the CONTROL FLOW around them actually reaches one, on every path — an outer `if false; then … fi` (byte-identical lines, zero executions) now reds, and so does a `"${T[@]}"` line moved to the wrong branch (individually allowlisted, wrong condition) |
-| 9 | A mutation battery, full-gate only: each of the nine self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message (a kill predicate driven by its own fixture table, not merely "non-zero"), or the battery itself reds |
+| 8e | `moon.yml`'s `repo:affected-smoke` task still declares every input that schedules a pin in `ci/affected-graph/ci_targets.py`, and still runs its `set -euo pipefail` / `--negative-control` / real-run script lines in the right order (SMA-572/SMA-573). Two tables: `T_AFFECTED_SMOKE_REQUIRED_INPUTS` (19 globs/files) is matched by **containment** — the block's `inputs:` sequence must be a superset, since the list legitimately grows every time a gate keys on a new directory — while `T_AFFECTED_SMOKE_REQUIRED_SCRIPT` (3 lines) is matched **whole-line, in order**: unlike the inputs table, a set-membership check would accept `set -euo pipefail` moved below the invocations, and Moon takes a `script:` block's status from its LAST command, so that reordering silently stops a failing `--negative-control` from propagating. Verdicts: `no-file`/`no-task`/`bad-task-form`/`bad-script-form`/`bad-inputs-form`/`duplicate-key <name>` (the block could not be parsed — `no-task` means the extractor saw no key at exactly two spaces of indentation whose name is `affected-smoke`; it identifies the task by INDENTATION AND NAME ONLY and never checks that the key is nested under a `tasks:` mapping, see L18), `missing-input <glob>`, `missing-script <line>` (a commented-out copy counts as absent), `out-of-order-script <line>`, `skip-without-reason <glob>`, `stale-skip <glob>`. Each table carries an `-ge` arity floor (19 / 3, pinned back from `ci_targets.py`'s `ACTIONLINT_SH_CALL_SITES`) so an EMPTIED table cannot pass by asserting nothing — `check_self_invocation` alone cannot buy this, since 8e's tables are not a dual copy of anything else the way check 8c's is. `REQUIRED_INPUT_SKIP` is the escape hatch for a legitimately-removed input, mirroring `COE_SKIP`/`SWALLOWED_SKIP`/`BRANCH_SKIP`: an entry with no stated reason is reported (`skip-without-reason`), and one naming a glob no longer required is reported too (`stale-skip`), so a waiver cannot outlive its glob. Unconditional, like check 8c — it reads `moon.yml`, not `ci.yml`, so gating it on `ci.yml`'s existence would switch it off for an unrelated reason — and COLUMN 0 for both floor lines, the same discipline as checks 8/8b/8c/8d's own call-site pins |
+| 9 | A mutation battery, full-gate only: each of the ten self-test invocations inside `run_self_tests`, deleted one at a time, run concurrently against the real unmutated control — every mutant must die at the counter's own message (a kill predicate driven by its own fixture table, not merely "non-zero"), or the battery itself reds |
 
 Only a `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` key **two levels deep** inside
 `on:` — `on.<event>.paths` — is a filter. A workflow input may legitimately be *named* `paths` or
@@ -144,7 +145,10 @@ This is the same shape L1 already names for `T`'s own two entries: two independe
 gates are the most the graph offers, and closing a combined deletion needs a third, which only
 moves the same problem one level out. Bounded for the same reason L1 is: the two lines this
 residual depends on sit next to each other inside a five-line function, not scattered across the
-tree.
+tree. Check 8e (SMA-572/SMA-573) is the same bounded two-gate shape one more time: deleting its
+whole block from `run.sh` *and* both of its `ACTIONLINT_SH_CALL_SITES` entries (the production
+call site and the `_INPUTS` arity floor — or, for the `_SCRIPT` floor, that entry instead) from
+`ci_targets.py`, in one edit, silences both directions of that pair at once too.
 
 **L7 — `COE_SKIP` and `SWALLOWED_SKIP` are exact-text, not semantic.** Each entry is keyed by both
 line number and the matched line's exact text (leading blanks included), so a later reformat of
@@ -245,6 +249,62 @@ step's own content. Closing either needs simulating the surrounding job, not jus
 block — the same reachability-analysis line every other limitation in this file (L9, L11,
 ci_targets.py's L10) declines to cross, one level further out.
 
+**L13 — Check 8e matches lines, not reachability.** Same class as L3's and L10's residual: a
+required input or script line parked in an unindented never-executed block (an `if false; then …
+fi`, an unindented heredoc) still sits at column 0 and still satisfies the pin even though it
+never executes. Deliberate for the same reason L10 states it — genuine bash-reachability analysis
+in Python is fragile and out of scope.
+
+**L14 — `REQUIRED_INPUT_SKIP` is an unguarded escape hatch**, exactly as `COE_SKIP`,
+`SWALLOWED_SKIP` (L7) and `BRANCH_SKIP` are. Nothing stops an entry with a plausible-sounding
+reason waiving a glob that is still genuinely load-bearing. The defence is human review at the
+point the entry is added, not an automated check; the value it buys is that a waiver is explicit
+and greppable, not that it is correct.
+
+**L15 — the `-ge` arity floors catch a SHRUNK table, not a same-size SWAP.** They assert count
+only. Replacing all nineteen entries of `T_AFFECTED_SMOKE_REQUIRED_INPUTS` with nineteen
+different globs — or all three of `T_AFFECTED_SMOKE_REQUIRED_SCRIPT`'s — passes both floors
+unchanged; only the per-entry `missing-input`/`missing-script` verdicts would catch that, and
+only for globs still named somewhere in the (now-different) table.
+
+**L16 — `ACTIONLINT_SH_CALL_SITES` itself has no arity floor**, the same hole one level up.
+Deleting an entry from that tuple un-pins only the one line it names — every OTHER pinned line
+keeps its own production effect — so the hole is bounded, not compounding, and a floor here would
+itself need a pin to be honest, which does not terminate the regress, only moves it out one more
+level. Recorded rather than closed, deliberately (SMA-572).
+
+**L17 — five of check 8e's fixture rows hard-code the literal globs `CLAUDE.md` / `moon.yml`**,
+rather than deriving them from `T_AFFECTED_SMOKE_REQUIRED_INPUTS` the way the nineteen per-glob
+deletion rows do. They must: the fixture compares exact verdict strings, and deriving the
+expectation from the same table the production code reads would make the fixture adapt to
+whatever the table says — the self-referentiality the arity floors exist to break. Cost:
+legitimately dropping either glob from the table requires re-baselining those five rows by hand,
+which fails loudly (a red self-test), not silently.
+
+**L18 — check 8e identifies its task by indentation and name, not by nesting.** The extractor's
+task-key rule is `/^  [^ \t#][^:]*:/` — any key at exactly two spaces — and it then compares that
+key's text to `affected-smoke`; nothing requires the key to sit under `tasks:`. A two-space
+`affected-smoke:` key under some other top-level mapping would therefore be read as the task, and
+`no-task` means only "no such two-space key was found", not "moon.yml declares no such task".
+This is a precision-of-documentation point rather than a rot path, and is recorded on those terms:
+to green the check through a decoy key you would have to reproduce all nineteen `inputs:` entries
+and all three `script:` lines, in order, underneath it — at which point you have written the real
+block a second time rather than switched the gate off, and the real block is still whatever it is.
+The extractor is deliberately left alone; tightening it to require `tasks:` would buy nothing that
+the cost of defeating it does not already buy.
+
+**L19 — two of `affected_smoke_block_verdict`'s own membership tests are anchor-dependent, and
+both anchors are now fixture-covered.** The `INPUT` needle is anchored at BOTH ends
+(`${nl}INPUT${tab}${glob}${nl}`), not just the leading one, so a declared glob that merely EXTENDS
+a required one (`ci/actionlint/**/*.sh` against the required `ci/actionlint/**/*`) is still
+reported missing rather than silently satisfying it. The `ERR` needle is anchored to the START of
+a record (`${nl}ERR${tab}`), so a `SCRIPT` line whose own text happens to contain `ERR<TAB>` is not
+misread as an ERR record — which would otherwise short-circuit the verdict to empty before any
+`missing-input`/`missing-script` check runs, waiving all requirements at once. Losing either anchor
+is exactly the kind of narrowing edit L15's same-size-swap gap does not catch; the two rows added
+alongside this entry (SMA-572 follow-up) close it by mutating each anchor in turn and asserting the
+row fails.
+
 ## Cost
 
 `inputs: ['**/*']` is deliberate (see the WHY comment on the `actionlint:` task in `moon.yml`),
@@ -267,7 +327,7 @@ Without that filter it costs **~87s**. Alternating `moon run repo:actionlint --f
 Narrowing this task's inputs would not meaningfully help; do not do it without also revisiting
 `hasher.ignorePatterns`.
 
-**Standalone cost, since SMA-542.** Check 9's mutation battery — nine mutants plus an
+**Standalone cost, since SMA-542.** Check 9's mutation battery — ten mutants plus an
 unmutated control, each a full `--self-test` invocation, run concurrently, full-gate only — is the
 dominant addition; check 8's floor/`continued`/`swallowed`/`continue-on-error` assertions, check
 8b's allowlist/count assertions and check 8c's two-call-site assertion are a handful of
@@ -305,7 +365,8 @@ subprocesses, control included) — superseded by the fourth table below; number
 before/after narrative, not as current figures. A still later wave (SMA-542 residual closure, PR
 150 follow-up — closing L12) added the NINTH self-test (`block_execution_self_test`) and check
 8d's block-execution assertion, taking the mutant count to nine (ten concurrent `--self-test`
-subprocesses, control included) — this is the CURRENT state.
+subprocesses, control included) — superseded by the fifth table below; numbers kept here for the
+before/after narrative, not as current figures.
 
 State: seven fixture tables, seven mutants (superseded by the fourth table below; kept for the
 before/after narrative, not as current numbers; load averages 2.87/2.49/2.79 immediately before):
@@ -325,10 +386,11 @@ box's shared-session spikes):
 | `ci/actionlint/run.sh` (full gate, with the battery) | ~6.33s |
 | `ci/actionlint/run.sh --self-test` (eight fixture tables, no battery) | ~2.01s |
 
-State: CURRENT — nine fixture tables, nine mutants (load averages 4.23/4.93/4.47 immediately
-before this table's full-gate runs and 8.52/5.86/4.86 before the `--self-test` runs — this box had
-two peer sessions actively `busy` throughout, per the shared-session-spikes gotcha; min-of-7 is
-chosen specifically because it is far less sensitive to that than a mean would be):
+State: nine fixture tables, nine mutants (superseded by SMA-572, below; kept for the before/after
+narrative, not as current numbers; load averages 4.23/4.93/4.47 immediately before this table's
+full-gate runs and 8.52/5.86/4.86 before the `--self-test` runs — this box had two peer sessions
+actively `busy` throughout, per the shared-session-spikes gotcha; min-of-7 is chosen specifically
+because it is far less sensitive to that than a mean would be):
 
 | Invocation | Min-of-7 |
 |---|---|
@@ -340,6 +402,57 @@ this file that spawns real subprocesses per fixture (a scratch `mktemp -d`, then
 event path, itself shelling out to `grep` and a stubbed `moon`) rather than staying at the
 `grep`/`sed`/`awk` text-scanning level every earlier check used — see the WHY comment on the
 `actionlint:` task in `moon.yml` for the breakdown.
+
+State: CURRENT — ten fixture tables, ten mutants (SMA-572/SMA-573 added the TENTH self-test,
+`affected_smoke_block_self_test`, and check 8e's inputs/script verdict plus its two `-ge`
+arity-floor assertions).
+
+**Measured by INTERLEAVING the arms, not by min-of-N per arm.** Every table above times one arm
+as a contiguous block and then the other; on this box — whose load average wanders between about
+11 and 42 while peer sessions work — that samples the two arms under different load, and it
+produced a WRONG number here. The first figure recorded for this wave was a single unaveraged
+`ci/actionlint/run.sh` run at ~20.85s, read as "comfortably under the ~38.1s budget". The
+sequential comparison it was read against was the error: measured properly, the branch is ~50%
+slower than its merge-base, not comfortably inside anything. The runs below therefore alternate
+base, branch, base, branch within a single sweep, so host load lands on both arms alike and the
+DELTA is trustworthy even where neither absolute is. `base` is `af09a4a`, this branch's
+merge-base; `pre-fix-wave` is `c03b44b`, check 8e as first written; `current` is the same check
+with `affected_smoke_block_verdict`'s membership tests rewritten fork-free (below).
+
+| Invocation | base | pre-fix-wave | current |
+|---|---|---|---|
+| `run.sh --self-test` | 3.31 / 3.32 / 3.33 | 5.92 / 5.96 / 5.64 | 3.90 / 3.87 / 3.83 |
+| `run.sh` (full gate, sweep A) | 15.24 / 14.76 / 15.40 | 22.58 / 23.02 / 25.56 | 16.57 / 18.94 / 22.17 |
+| `run.sh` (full gate, sweep B) | 16.26 / 15.07 / 14.88 | 25.83 / 23.45 / 22.15 | 17.68 / 18.87 / 16.78 |
+
+Read column-wise within a row: each triple is the three runs of one arm in one interleaved sweep,
+so `base`'s first run and `pre-fix-wave`'s first run are adjacent in time, and so on. The full
+gate's `current` column is the noisiest of the three because check 9's battery runs eleven
+`--self-test` subprocesses concurrently and is therefore the most load-sensitive arm; its two
+sweeps bracket the same ~17–19s centre.
+
+Where the added time GOES, and what removed most of it: check 8e's fixture table is ~40 rows,
+each a `mktemp` plus an awk pass plus — as first written — one `printf … | grep -qxF` subshell per
+required input and a four-process `grep -nxF | head | cut` pipeline per required script line, so
+roughly fifty forks per verdict call, ~45 verdict calls per `--self-test`, times eleven concurrent
+mutants in the battery. The fix wave replaced every one of those membership tests with bash
+pattern matching against a newline-delimited haystack (see the comment in
+`affected_smoke_block_verdict`); the two implementations were proved equivalent over 4,548
+differential comparisons across two mutation corpora, and shown to have an identical
+mutation-detection profile row-for-row against the fixture table. That recovered about two thirds
+of the `--self-test` cost and roughly half of the full gate's.
+
+**The remaining cost is ACCEPTED, and the budget was NOT met — say so rather than rounding it
+away.** The design doc's trigger is "reconsider above baseline + 10%"; on the figures above the
+full gate sits ~21% over base (sweep A ~27%, sweep B ~15%) and `--self-test` ~17% over, so the
+trigger fires and this paragraph is the reconsideration it asks for. Accepted on three grounds: the gate's ABSOLUTE time
+stays around 17–19s, well inside the range this section has treated as ordinary for it; the added
+work is exactly what buys this branch's central guarantee, that `repo:affected-smoke` still
+declares the inputs which schedule every pin in `ci_targets.py` and still runs both halves of its
+script in order — a guarantee with no cheaper implementation that keeps the fixture table honest;
+and a gate that quietly passed a budget check it had not actually met would be the very thing
+this branch exists to stop. A future wave that wants the last ~15% back should look at the
+per-row `mktemp` and the per-row awk pass, not at thinning the fixture table.
 
 **Do not conclude `hasher.ignorePatterns` is inert from the log.** It does *not* silence the
 ~2000 `only files can be hashed` warnings about pnpm's symlinked store — those appear identically
@@ -353,10 +466,10 @@ export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"   # proto CLIs (moon, ac
                                                             # on a default shell PATH
 moon run repo:actionlint      # via Moon, as CI does
 ci/actionlint/run.sh          # directly, bypassing the Moon cache
-ci/actionlint/run.sh --self-test   # the nine fixture tables only, for fast iteration
+ci/actionlint/run.sh --self-test   # the ten fixture tables only, for fast iteration
 ```
 
-`--self-test` runs the nine fixture tables and nothing else — check 9's mutation battery is
+`--self-test` runs the ten fixture tables and nothing else — check 9's mutation battery is
 full-gate-only, which is what keeps `--self-test` the fast path and what makes the battery's own
 mutants (each internally invoked with `--self-test`) unable to recurse into a battery of their
 own.

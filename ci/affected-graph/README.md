@@ -122,12 +122,20 @@ It also runs several checks that the per-case project sets structurally **cannot
   (`RUN_SH_CALL_SITES`, substring-matched, each already carrying its own `|| RC=1` propagation
   suffix); a self-scheduled gate's invocation inside its own `moon.yml` task script
   (`SELF_SCHEDULED_GATES`, whole-line-matched — `repo:input-liveness`'s, the three
-  `repo:release-parity*`, and `repo:version-lockstep`'s; SMA-553 / SMA-530 / SMA-576, each
-  pinning `set -euo pipefail` alongside every one of its invocations — two for
-  `repo:input-liveness` and the `repo:release-parity*` tasks, three for
-  `repo:version-lockstep`, which also invokes `--self-test`); `repo:actionlint`'s own
-  self-test and mutation-battery calls inside `ci/actionlint/run.sh`
-  (`ACTIONLINT_SH_CALL_SITES`, whole-line-matched — SMA-542); and
+  `repo:release-parity*`, `repo:version-lockstep`'s, (SMA-572) `repo:affected-smoke`'s,
+  `repo:publish-metadata`'s, `repo:error-code-single-site`'s and `repo:actionlint`'s, and
+  (SMA-587/SMA-572) `repo:http-extractor-envelope`'s;
+  SMA-553 / SMA-530 / SMA-576 / SMA-572, each pinning `set -euo pipefail` alongside every one
+  of its invocations — two for `repo:input-liveness` and the `repo:release-parity*` tasks,
+  three for `repo:version-lockstep` (which also invokes `--self-test`), three each for
+  `repo:affected-smoke`, `repo:publish-metadata`, `repo:error-code-single-site` and
+  `repo:http-extractor-envelope`, and one
+  bare invocation line for `repo:actionlint` — `ci/actionlint/run.sh`, no `set -euo pipefail`
+  to pin, since a single command's status IS the script's status); `repo:actionlint`'s own
+  self-test and mutation-battery calls inside `ci/actionlint/run.sh`, and — as of SMA-572/
+  SMA-573 — check 8e's own production call site AND its two tables' `-ge` arity floors
+  (`ACTIONLINT_SH_CALL_SITES`, whole-line-matched, column 0 — SMA-542/SMA-572, now nine
+  entries); and
   `ci/release-parity/run.sh`'s own `--negative-control` logic — the flag parse, the guard,
   the assertion and the two report arms (`RELEASE_PARITY_SH_CALL_SITES`, whole-line-matched
   — SMA-530); **C5** every
@@ -170,6 +178,36 @@ It also runs several checks that the per-case project sets structurally **cannot
   `inputFiles`: `repo:version-lockstep` (SMA-576) declares sixteen literal paths and no glob
   at all, so the glob-only comparison this replaced would have read every one of them as
   absent — and, being `got != expected or files`, was unsatisfiable for a file-only gate.
+
+  SMA-572 added four more script-pinned gates to this pairing. Three carry exact
+  `SELF_TASK_EXPECTED_GLOBS` entries — `repo:publish-metadata` (eleven literal paths/globs),
+  `repo:error-code-single-site` (three) and `repo:actionlint` (`("**/*",)`, the premise every
+  check in `ci/actionlint/run.sh` — 8, 8b, 8c, 8d and 8e — relies on, itself pinned back from
+  `SELF_TASK_EXPECTED_GLOBS["actionlint"]`). The fourth, `repo:affected-smoke`, is instead
+  registered in `SELF_TASK_GLOBS_EXEMPT` with a delegation reason: its own nineteen inputs are
+  the most load-bearing list in the repo — every pin in this file is reachable only because
+  `moon.yml` still lists `moon.yml` itself among them — so an exact-match copy here would make
+  `repo:affected-smoke` the sole judge of its own reachability, the exact defect the delegation
+  exists to avoid, and would red on every legitimate glob addition, since the list genuinely
+  grows. Enforcement instead lives in check 8e of `ci/actionlint/run.sh`, a gate scheduled
+  independently of this one, whose production call site and two table arity floors are pinned
+  back here by `ACTIONLINT_SH_CALL_SITES`.
+
+  SMA-587/SMA-572 added a fifth script-pinned gate to this pairing after the original four:
+  `repo:http-extractor-envelope` (SMA-587), which also carries an exact
+  `SELF_TASK_EXPECTED_GLOBS` entry — its whole authored input set, two globs. `moon.yml`'s own
+  comment on the task says the first glob is DELIBERATELY IDENTICAL to
+  `ci/http-extractor/check.py`'s `SCAN_GLOB`, so an exact pin is what stops scheduling and
+  scanning from drifting apart.
+
+  Put plainly: `SELF_SCHEDULED_GATES["affected-smoke"]`'s third line — the bare
+  `ci/affected-graph/run.sh` invocation — has NO true-positive coverage from this file. Any
+  state in which that line is missing is a state in which `check_registry_pairing`, and every
+  other assertion in `ci_targets.py`, never runs at all: `ci/affected-graph/run.sh` exits
+  inside its own `--negative-control` branch, before reaching the real suite, so deleting the
+  bare invocation line leaves only the control — which asserts against synthetic fixtures and
+  exits 0 — with nothing in this file able to see the deletion. Its real enforcement is check
+  8e's `T_AFFECTED_SMOKE_REQUIRED_SCRIPT`, read IN ORDER for exactly this reason.
 - **`task-inputs`** (`task_inputs.py`, SMA-553) asserts every `repo:*` task's declared `inputs`
   still match a tracked file — the layer below `ci-targets`, which proves only that a gate is
   *wired*. **I1** no glob matches zero tracked files; **I2** every file input is tracked, by exact

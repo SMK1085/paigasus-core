@@ -229,8 +229,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `run_self_tests` and `selftest_mutation_battery` as **whole lines** in `run.sh` (a substring
   match would survive deleting the call, since the name is a prefix of its own definition). That
   pin only works because `repo:affected-smoke` lists `ci/actionlint/**/*` in its `inputs` — remove
-  that and the pin stays green on exactly the PR that breaks it. Adding a tenth-and-later
-  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 9): the gate asserts invocations
+  that and the pin stays green on exactly the PR that breaks it. Adding an eleventh-and-later
+  `*_self_test` table means bumping `SELF_TEST_COUNT` (currently 10): the gate asserts invocations
   AND definitions. The cycle's second half is now closed too (SMA-542 residual closure): check 8c
   in `ci/actionlint/run.sh` pins `ci/affected-graph/run.sh`'s own two call sites into
   `ci_targets.py`, mirroring `ci_targets.py`'s `RUN_SH_CALL_SITES` from the other, independently
@@ -242,9 +242,14 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   own control because their *ecosystem-specific* `inputs` are distinct — a PR touching only
   a `.releaserc.json` selects `-ts` alone. They are not disjoint overall: all three also
   list `ci/release-parity/**/*` and `.prototools`, so an edit there schedules all three. Two pins guard it, both living in `ci/affected-graph/ci_targets.py`
-  and both running inside `repo:affected-smoke`: `SELF_SCHEDULED_GATES` pins the nine
-  `moon.yml` lines (whole lines, compared after stripping — reordering a flag or adding a
-  trailing comment still reds it), and `RELEASE_PARITY_SH_CALL_SITES` pins five discrete
+  and both running inside `repo:affected-smoke`: `SELF_SCHEDULED_GATES` pins every
+  self-scheduled gate's `moon.yml` invocation lines — `set -euo pipefail` included — for
+  `input-liveness`, the three `release-parity*` tasks, `version-lockstep`,
+  `publish-metadata`, `error-code-single-site`, `affected-smoke`, `actionlint` and (SMA-587)
+  `http-extractor-envelope` (whole
+  lines, compared after stripping — reordering a flag or adding a trailing comment still
+  reds it; a bare number here would only rot again as the registry grows, which is why this
+  names its current membership instead), and `RELEASE_PARITY_SH_CALL_SITES` pins five discrete
   lines inside `run.sh` itself — the flag parse, the `NEGATIVE` guard, the assertion body,
   and both report arms — because pinning the span as one block left two MEASURED bypasses
   with different failure shapes: neutering the flag parse (dropping `NEGATIVE=1`) leaves
@@ -262,6 +267,14 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   `SELF_TASK_GLOBS_EXEMPT` one. Note a `moon.yml`-only edit does NOT select the
   `release-parity*` tasks (their own `script:` is not among their inputs), so a PR changing
   those blocks should also touch `ci/release-parity/**` if it wants CI to execute them.
+  `repo:affected-smoke`'s OWN `moon.yml` block is the one member of that registry pinned
+  twice over (SMA-572/SMA-573): its invocation lines are pinned here as above, but its
+  `inputs` are deliberately NOT — those, and its invocation lines' ORDER, are pinned instead
+  by check 8e in `ci/actionlint/run.sh`, a gate scheduled independently of
+  `repo:affected-smoke` itself, since a pin living inside `ci_targets.py` would make that gate
+  the sole judge of its own reachability; `repo:actionlint`'s own `inputs: ['**/*']` — the
+  premise check 8e (and 8/8b/8c/8d) runs on every PR at all — is pinned the ordinary way, from
+  `SELF_TASK_EXPECTED_GLOBS["actionlint"]` in `ci_targets.py`.
 - The kernel family (`paigasus-kernel` + the three binding crates + their `pyproject.toml` /
   `package.json` faces) carries **one version** across eighteen sites, asserted by
   `repo:version-lockstep` (`ci/version-lockstep/run.sh`). release-plz owns every Cargo
@@ -300,10 +313,23 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - release-plz's version baseline is the **crates.io registry**, not git tags (no `git_only` is
   set in `rs/release-plz.toml`). Measured on this repo at the `0.1.0` floor: it logs `WARN
   Package 'paigasus-kernel@*.*.*' not found`, then proposes `next version is 0.1.0` — the
-  manifest version, no bump. So the **first release PR will be empty**, and "the release PR is
-  the acceptance evidence" does not hold for the first run. The real hazard here is name
+  manifest version, no bump. Measured live on 2026-08-28: it still OPENS a PR (`chore: release
+  v0.1.0`) listing all three packages — "empty" means it proposes no version CHANGE, not that no
+  PR appears — so "the release PR is the acceptance evidence" does not hold for the first run. The real hazard here is name
   squatting — release-plz performs a crates.io lookup for every workspace member name, so a
   squatted name silently becomes the comparison baseline — not a runaway version proposal.
+- `release.yml` authenticates with a **GitHub App installation token minted per run**
+  (`actions/create-github-app-token`), never a stored secret: an installation token lives one
+  hour, so it CANNOT be a repository secret, and the original `RELEASE_PLZ_TOKEN` shape could
+  only ever have held a long-lived PAT (SMA-589). Three traps. The secret `PAIGASUS_BOT_APP_ID`
+  holds the App's **Client ID**, not the numeric App ID — the NAME is the only stale thing about
+  it, so do not "correct" it by storing the numeric id. The token must request
+  `permission-contents: write` + `permission-pull-requests: write` **explicitly**: without the
+  `permission-*` inputs it inherits every permission the installation holds, so granting the App
+  an unrelated scope later silently widens it (zizmor `github-app`) — and because the requested
+  set must actually be granted, an under-granted App reds at mint time rather than half-working
+  later. And the preflight makes the whole job skip **green** when the App id is absent, so a
+  broken token path is invisible in CI: the only proof is a real run on `main`.
 - Any crate flipping `publish = true` must carry **its own `[lints.*]` table** and **its own
   `include` allowlist** — enforced by `repo:publish-metadata` Checks 1c/1d (SMA-577). Cargo
   inlines the resolved lint table into the published manifest and docs.rs builds published

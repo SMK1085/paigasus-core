@@ -156,8 +156,12 @@ under `ci/release-parity/` schedule all three at once. Net measured cost
 *subset* of the real run's — the argument is affectedness and symmetry, not extra
 adapter coverage.
 
-**What guards it.** `ci/affected-graph/ci_targets.py` pins the nine `moon.yml` lines
-(`SELF_SCHEDULED_GATES`) and five discrete lines inside `run.sh` itself
+**What guards it.** `ci/affected-graph/ci_targets.py` pins the nine `moon.yml` lines **of these
+three tasks** — `SELF_SCHEDULED_GATES` is a registry spanning ten gates in all (SMA-587's
+`repo:http-extractor-envelope` joined it as the tenth), of which
+`release-parity`, `release-parity-py` and `release-parity-ts` contribute three lines apiece; the
+"nine" here is those three tasks' own lines, not the registry's total — and five discrete lines
+inside `run.sh` itself
 (`RELEASE_PARITY_SH_CALL_SITES`: the flag parse `--negative-control) NEGATIVE=1; shift ;;`,
 the `if [ "$NEGATIVE" = 1 ]; then` guard, the assertion body `check_case "neg-fix-bang" …`,
 and both report arms — the `exit 0` on "reported red as expected" and the `exit 1` on
@@ -176,18 +180,24 @@ reachable.
 
 ### Limitations
 
-- **L1 — `repo:affected-smoke`'s own inputs are unpinned.** Every pin above depends on that
-  task being scheduled at all, and NONE of its `inputs` entries is itself pinned by anything —
-  including `- 'ci/release-parity/**/*'` (`moon.yml:187`), the entry this branch adds and the
-  one `RELEASE_PARITY_SH_CALL_SITES` is reachable through. Deleting that entry is green today
-  and would silently un-reach `RELEASE_PARITY_SH_CALL_SITES` for every later PR under
-  `ci/release-parity/`. The same is true of `- 'moon.yml'` (`moon.yml:164`): deleting it is
-  itself a root `moon.yml` edit, and afterwards the task's remaining globs do not match the
-  root file (`*/moon.yml` matches `rs/moon.yml`, not `moon.yml`; `.moon/**/*` does not match
-  it), so the removal PR would not schedule the gate. Pre-existing — the `input-liveness` pin
-  rests on the same `moon.yml` entry, and matches the accepted `ci/actionlint/**/*` precedent —
-  and closing it needs a *containment* variant of `SELF_TASK_EXPECTED_GLOBS`, which is today an
-  exact match.
+- **L1 — CLOSED (SMA-572/SMA-573).** This used to read "`repo:affected-smoke`'s own inputs are
+  unpinned": every pin in this file depends on that task being scheduled at all, and none of its
+  `inputs` entries — including `- 'ci/release-parity/**/*'` (`moon.yml`), the entry
+  `RELEASE_PARITY_SH_CALL_SITES` is reachable through, and `- 'moon.yml'` itself, whose removal is
+  self-concealing (a root `moon.yml` edit whose own remaining globs no longer match the removed
+  file) — was pinned by anything. It now is: check 8e in `ci/actionlint/run.sh` asserts
+  `repo:affected-smoke`'s `moon.yml` block still declares its whole nineteen-entry `inputs` list
+  (`T_AFFECTED_SMOKE_REQUIRED_INPUTS`, matched by containment, since the list legitimately grows)
+  and still runs its `set -euo pipefail` / `--negative-control` / real-run script lines in order
+  (`T_AFFECTED_SMOKE_REQUIRED_SCRIPT`). It lives there rather than in `ci_targets.py` for the same
+  reason `ci_targets.py`'s own call sites are pinned from `ci/actionlint/run.sh` and not from
+  themselves: a pin inside the file it protects would make `repo:affected-smoke` the sole judge of
+  its own reachability. `ci_targets.py`'s `SELF_TASK_GLOBS_EXEMPT["affected-smoke"]` records the
+  delegation, and `ACTIONLINT_SH_CALL_SITES` pins check 8e's own production call site plus its two
+  tables' `-ge` arity floors back from the other side, so the delegation itself cannot rot
+  silently. See `ci/actionlint/README.md`'s check 8e row and its L13-L17 for what this new check
+  does and does not close — in particular, it is line-matching, not reachability analysis (L13),
+  the same residual this file's own L2 and L5 already carry for the pins below.
 - **L2 — the task-script haystack strips both sides** (`ci_targets.py:792`), so an
   indented copy inside `if false; then … fi` satisfies the pin. The column-0 rule that
   rejects this for the actionlint haystack is unavailable here: Moon task scripts are

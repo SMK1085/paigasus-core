@@ -611,30 +611,39 @@ tasks:
     # docs/superpowers/specs/2026-08-19-sma-540-branches-filter-gate-design.md.
     #
     # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
-    # (cargo nextest, next typegen). This one is ~14.42s standalone and warm (measured, min-of-7,
-    # re-measured after the SMA-542 residual closure (PR 150 follow-up) added a ninth self-test
-    # rather than paired with a stale figure from an earlier fixture-table count — was ~1.0s before
-    # SMA-542 added checks 8-9, ~6.33s before this wave added check 8d): six actionlint invocations
-    # — one over the real workflows, five stdin fixtures — and nine fixture tables (extractor,
+    # (cargo nextest, next typegen). This one is ~17-19s standalone and warm (measured via
+    # interleaved base/branch A/B sweeps — sequential min-of-N is invalid on this shared host, see
+    # the measured table in ci/actionlint/README.md; supersedes an earlier ~14.42s min-of-7 figure,
+    # which predated this wave's tenth self-test — was ~1.0s before SMA-542 added checks 8-9,
+    # ~6.33s before the SMA-542 residual-closure wave added check 8d, ~14.42s before this wave added
+    # check 8e): six actionlint invocations — one over the real workflows, five stdin fixtures —
+    # and ten fixture tables (extractor,
     # path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation
-    # allowlist, affected-graph wiring, block execution, kill predicate). TWO DIFFERENT `git
-    # ls-files` counts, for two different walks, are worth keeping distinct rather than merging
-    # into one number (measured via `bash -x`, CodeRabbit PR 150 finding F2 — a merged "26" here
-    # previously read as the SAME walk check 9 re-runs, when it is not): the FULL GATE (checks 5/6
-    # scanning the real workflow files' `paths:`/`branches:` filters, on top of everything
-    # `--self-test` already does) makes 27; `--self-test` ALONE (the fixture tables' own synthetic
-    # `pattern_verdict`/`tracked_exact`/branch-resolution calls, never touching the real workflow
-    # files) makes 9. Check 9's mutation battery re-runs the SECOND of those — the whole of
-    # `--self-test`, 9 `git ls-files` calls included — PLUS check 8d's own dynamic execution of the
+    # allowlist, affected-graph wiring, block execution, kill predicate, affected-smoke block).
+    # TWO DIFFERENT `git ls-files` counts, for two different walks, are worth keeping distinct
+    # rather than merging into one number (measured via `bash -x`, CodeRabbit PR 150 finding F2 —
+    # a merged "26" here previously read as the SAME walk check 9 re-runs, when it is not): the
+    # FULL GATE (checks 5/6 scanning the real workflow files' `paths:`/`branches:` filters, on top
+    # of everything `--self-test` already does) makes 27; `--self-test` ALONE (the fixture tables'
+    # own synthetic `pattern_verdict`/`tracked_exact`/branch-resolution calls, never touching the
+    # real workflow files) makes 9 — unchanged by SMA-572's tenth table, since
+    # `affected_smoke_block_self_test` builds its fixtures from an in-memory `moon.yml` string and
+    # never calls `git ls-files` at all (re-measured the same way after SMA-572: still 9). Check
+    # 9's mutation battery re-runs the SECOND of those — the whole of `--self-test`, 9
+    # `git ls-files` calls included — PLUS check 8d's own dynamic execution of the
     # moon-ci-affected-graph step's `run:` block against a stubbed `moon`, once per event path, all
-    # once per self-test invocation plus once unmutated, ten concurrent subprocesses. That dynamic
+    # once per self-test invocation plus once unmutated, eleven concurrent subprocesses. That dynamic
     # execution is most of check 8d's OWN standalone cost (~1.5s of the ~2.01s -> ~3.52s
     # `--self-test` jump): each of the EIGHT fixtures that reach the per-event-path loop (the
     # healthy control, the if-false mutant, two healthy rechecks, the subset mutant, the
     # branch-swap mutant, the duplicate-invocation mutant, and the final aggregate re-run — every
     # other fixture returns before the loop) spawns a handful of real subprocesses (a scratch
     # `mktemp -d`, then per event path a `bash -c` running the extracted block, which itself shells
-    # out to `grep` and the stubbed `moon`) rather than a `grep`/`sed` pass over text.
+    # out to `grep` and the stubbed `moon`) rather than a `grep`/`sed` pass over text. That
+    # ~2.01s -> ~3.52s figure is itself now historical: this wave's tenth self-test
+    # (`affected_smoke_block_self_test`, check 8e) took standalone `--self-test` to ~3.85s
+    # (interleaved base/branch measurement, base ~3.3s) — a different number from the full-gate
+    # ~17-19s above, not a restatement of it.
     # See the measured table in ci/actionlint/README.md.
     # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
     # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
