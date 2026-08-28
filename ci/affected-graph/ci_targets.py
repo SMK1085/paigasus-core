@@ -713,8 +713,8 @@ RELEASE_PARITY_SH_CALL_SITES = (
 # the moon.yml INVOCATION only, so neutering the flag parse makes `--negative-control` fall
 # through to the real check and exit 0 — the control then runs the suite twice and proves nothing —
 # while gutting the report arm leaves a control that exits 0 no matter how many rows failed.
-# Four discrete lines rather than one span, for the reason recorded above: a span pin is satisfied
-# by any single surviving copy, and the two bypasses have different shapes.
+# Five discrete lines rather than one span, for the reason recorded above: a span pin is satisfied
+# by any single surviving copy, and the three bypasses have different shapes.
 #
 # The bare `exit 1` inside the report arm is deliberately NOT pinned: it is not distinctive, and a
 # pin satisfied by an occurrence the deletion never touched is exactly the substring hazard
@@ -729,9 +729,17 @@ RELEASE_PARITY_SH_CALL_SITES = (
 # Matched as stripped WHOLE LINES, like the release-parity haystack and for both of its reasons:
 # the `case` arms and the `if` are conventionally indented, so a column-0 rule would reject the
 # real executing lines, while a substring rule would let a COMMENTED-OUT copy satisfy the pin.
+#
+# The fifth entry is an ASSERTION line, added after the first four were measured to be
+# insufficient: deleting every `_expect` and `grep` row inside negative_control() left all four
+# byte-identical, so the control exited 0 having asserted nothing — the "control that actively
+# lies" shape, not a mere no-op. The release.yml subject-set row is the one pinned because it is
+# the control's key row: it proves the trigger filter excludes a workflow that genuinely fails the
+# credential rules.
 WORKFLOW_CREDENTIALS_SH_CALL_SITES = (
     "--negative-control) MODE=negctl;   shift ;;",
     "negctl)   negative_control ;;",
+    "if bash \"$0\" 2>/dev/null | grep '^workflow-credentials: subjects:' | grep -q 'release.yml'; then",
     'if [ "$failures" -gt 0 ]; then',
     "printf 'workflow-credentials negative control: %d row(s) failed\\n' \"$failures\" >&2",
 )
@@ -1075,7 +1083,8 @@ def check_self_invocation(
 
     Five haystacks, matched TWO different ways. run.sh sites are substrings, because they are
     indented and one is a mid-line fragment, and their `|| RC=1` suffixes already make them
-    unambiguous. Task-script, actionlint and release-parity sites are whole stripped LINES —
+    unambiguous. Task-script, actionlint, release-parity and workflow-credentials sites are
+    whole stripped LINES —
     membership is checked against the set of a line's OWN full stripped text, not "does this
     substring appear anywhere in the file" — but for two DIFFERENT reasons, not one shared
     rationale. For task-script and actionlint, a required token is a strict PREFIX of something
@@ -1684,6 +1693,10 @@ def self_test():
     # file indents these lines, so the stripped-whole-line rule is exercised on realistic text
     # rather than on a column-0 idealisation the production file never produces.
     wired_workflow_credentials = (
+        # The assertion line (SMA-593 F1). Indented in the real script, so it also exercises the
+        # stripped-whole-line matching this haystack uses.
+        '  if bash "$0" 2>/dev/null | grep \'^workflow-credentials: subjects:\' '
+        "| grep -q 'release.yml'; then\n"
         '  if [ "$failures" -gt 0 ]; then\n'
         "    printf 'workflow-credentials negative control: %d row(s) failed\\n' \"$failures\" >&2\n"
         '    exit 1\n'
