@@ -218,6 +218,11 @@ tasks:
       - 'rs/crates/libs/paigasus-kernel-parity/src/**/*'
       - 'rs/crates/libs/paigasus-kernel-parity/Cargo.toml'
       - 'rs/crates/libs/paigasus-kernel-parity/vectors/**/*'
+      # The script's own comment above says it runs from `rs/` precisely SO this file is in scope,
+      # which is a statement that the file influences the output — the criterion for a cache input
+      # (SMA-594). No leading slash: `repo` is the root project, so its inputs are already
+      # repo-relative, unlike the `/rs/...` form the crate tasks in .moon/tasks/rust.yml use.
+      - 'rs/.cargo/config.toml'
 
   observability-drift:
     description: 'Assert the committed Grafana dashboards + Prometheus rules reference only registered metric families (SMA-466).'
@@ -232,6 +237,9 @@ tasks:
       - 'ops/observability/prometheus/rules/**/*'
       - 'ops/observability/grafana/dashboards/**/*'
       - 'rs/crates/libs/paigasus-observability/**/*'
+      # Compiles and links from inside `rs/`, so cargo reads this file on its upward walk and it
+      # influences this task's output (SMA-594). Same argument as parity-corpus-drift above.
+      - 'rs/.cargo/config.toml'
 
   nats-permissions:
     description: 'Assert the committed ops/nats permission set is exactly sufficient for the IAM publisher and the gateway consumer, and no broader (SMA-493).'
@@ -290,6 +298,10 @@ tasks:
       - 'rs/crates/services/paigasus-iam/Cargo.toml'
       - 'rs/Cargo.lock'
       - 'rs/.config/nextest.toml'
+      # Compiles and links from inside `rs/`, so cargo reads this file on its upward walk and it
+      # influences this task's output (SMA-594). Same argument as parity-corpus-drift above. Also
+      # NOT inherited from .moon/tasks/rust.yml, for the same reason nextest.toml above is not.
+      - 'rs/.cargo/config.toml'
 
   wasm-getrandom-free:
     description: 'Assert the wasm binding pulls no `getrandom` — the kernel mints UUIDv7 from injected bytes, so wasm32-unknown-unknown stays buildable (SMA-448).'
@@ -314,6 +326,9 @@ tasks:
       - 'rs/crates/libs/paigasus-kernel/src/**/*'
       - 'rs/crates/bindings/paigasus-wasm/Cargo.toml'
       - 'rs/crates/bindings/paigasus-wasm/src/**/*'
+      # NOT 'rs/.cargo/config.toml' (SMA-594), although this task does run cargo from `rs/`:
+      # `cargo tree` resolves the dependency graph and never compiles or links, so the
+      # apple-darwin rustflags in that file cannot change what it prints.
 
   redis-connect-single-site:
     description: 'Assert the redis `ConnectionManager` type name, and the known unnamed-connection constructors, never appear outside `adapters::redis_conn`, so no known call site can bypass the circuit breaker (SMA-473, SMA-476).'

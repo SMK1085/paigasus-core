@@ -13,8 +13,8 @@
 # five sound edges as phantom.
 #
 # It also carries A4 (SMA-534), which is about task INPUTS rather than edges: every crate's `lint`
-# must key on the workspace-level files (Cargo.lock, Cargo.toml, rust-toolchain.toml), since `rs/`
-# has no Moon project for a dependency edge to point at. A4 reads moon's RESOLVED `inputFiles`, so
+# must key on the workspace-level files (Cargo.lock, Cargo.toml, rust-toolchain.toml and, since
+# SMA-594, .cargo/config.toml), since `rs/` has no Moon project for a dependency edge to point at. A4 reads moon's RESOLVED `inputFiles`, so
 # it stays inside the "never parse YAML" rule above.
 #
 # usage: cargo_moon_parity.py [--self-test]
@@ -1368,6 +1368,12 @@ def collect_findings(projects, crates, root):
     # these two hints named three files while the checks already demanded four, so a developer who
     # followed the advice verbatim was left with a still-red gate. `/`-prefixed because that is the
     # form the YAML `inputs` take (the checks compare the resolved, slash-free form).
+    #
+    # Do NOT extend this to the `a4-fmt` hint below. Every member of these two constants is
+    # WORKSPACE-relative, which is what makes a blanket `/` prefix right. FMT_TASK_INPUTS is mixed:
+    # `rs/rustfmt.toml` is workspace-relative but `Cargo.toml`, `src/**/*` and `tests/**/*` are
+    # PROJECT-relative, so the same one-liner would emit `/Cargo.toml` and `/src/**/*` and send the
+    # reader to paths that do not exist. That hint stays hand-listed on purpose.
     want_lint_inputs = ", ".join(f"/{f}" for f in WORKSPACE_LINT_INPUTS)
     want_ffi_inputs = ", ".join(f"/{f}" for f in FFI_TASK_INPUTS)
     findings = [

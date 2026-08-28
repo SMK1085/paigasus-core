@@ -86,16 +86,17 @@ It also runs several checks that the per-case project sets structurally **cannot
   case — which is how SMA-524's bug survived a full review cycle. Edges intentionally declared without
   Cargo backing live in its `ALLOW_NO_CARGO_BACKING` table with a required reason string.
 - **A4** (in `cargo_moon_parity.py`) is the generic twin of `lockfile->all-lint`: for every crate,
-  moon's **resolved** `lint` `inputFiles` must contain `rs/Cargo.lock`, `rs/Cargo.toml` and
-  `rs/rust-toolchain.toml`. The behavioural case proves the inputs take effect; A4 proves they are
+  moon's **resolved** `lint` `inputFiles` must contain `rs/Cargo.lock`, `rs/Cargo.toml`,
+  `rs/rust-toolchain.toml` and `rs/.cargo/config.toml` (the fourth added by SMA-594 — cargo reads
+  it by walking up from a cwd inside `rs/`, so it influences every compile and link). The behavioural case proves the inputs take effect; A4 proves they are
   declared for crates no case names. It iterates every crate unconditionally — unlike A1-A3, which
   are guarded by `if want:` and so never reach the four crates with no in-tree dependencies.
 - **A5** (in `cargo_moon_parity.py`) is A4's cross-stack twin (SMA-546): the tasks that COMPILE the
   FFI cdylibs live in the ts/py stacks, where A4's per-crate loop cannot reach them. A5 **derives**
   its targets — any task whose resolved `command` + `args` + `script` mentions `napi build`,
   `wasm-pack`, `maturin` or `--reinstall-package` — and requires each to declare `rs/Cargo.lock`,
-  `rs/Cargo.toml`, `rs/rust-toolchain.toml` and `.prototools`. Deriving covers a future fourth
-  binding task on day one; a `REQUIRED_FFI_TASKS` **floor** stops the derivation degrading to a
+  `rs/Cargo.toml`, `rs/rust-toolchain.toml`, `rs/.cargo/config.toml` and `.prototools`. Deriving
+  covers a future fourth binding task on day one; a `REQUIRED_FFI_TASKS` **floor** stops the derivation degrading to a
   vacuous PASS if a task ever stops matching the markers. A task with none of a `command`, a
   `script`, or any `args` aborts as infra (rc 2), never as a silent skip.
 - **A6** (in `cargo_moon_parity.py`, SMA-528) asserts every crate's `build`/`test`/`lint` keys on its
