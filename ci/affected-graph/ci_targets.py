@@ -201,6 +201,50 @@ SELF_TASK_EXPECTED_GLOBS = {
         "rs/crates/libs/paigasus-proto-derive/Cargo.toml",
         "rs/crates/libs/paigasus-proto/Cargo.toml",
     ),
+    # SMA-572. repo:actionlint's whole authored declaration, and the reason the rest of this
+    # file's pins are reachable at all. Checked from ci_targets.py, which runs inside
+    # repo:affected-smoke — a DIFFERENT gate — so this is not self-judging: narrowing
+    # repo:actionlint's inputs is a root-moon.yml edit, which schedules affected-smoke.
+    "actionlint": ("**/*",),
+    # SMA-572. These two were exempted in this design's first draft on the grounds that
+    # repo:input-liveness asserts declared-glob liveness generically. That is wrong, and an
+    # adversarial review caught it: task_inputs.py asserts a DECLARED glob still matches a
+    # tracked file — it cannot see a REMOVED DECLARATION. Both lists carry entries whose
+    # deletion moon.yml itself documents as fatal: publish-metadata's
+    # .github/workflows/security-scan.yml ("Check 4 ASSERTS ON IT"; moon.yml:520-521) and
+    # error-code's broad rs/crates/**/src/**/*.rs ("the one case it exists for would be the one
+    # case it never runs on"; moon.yml:628-630). Both sets are STATIC — no runtime discovery —
+    # so exact match is affordable, exactly as for version-lockstep's sixteen.
+    "publish-metadata": (
+        "rs/crates/**/*",
+        ".github/workflows/security-scan.yml",
+        ".gitignore",
+        "ci/publish-metadata/categories.py",
+        "ci/publish-metadata/crates-io-categories.txt",
+        "ci/publish-metadata/run.sh",
+        "rs/.cargo/config.toml",
+        "rs/Cargo.lock",
+        "rs/Cargo.toml",
+        "rs/release-plz.toml",
+        "rs/rust-toolchain.toml",
+    ),
+    "error-code-single-site": (
+        "ci/error-registry/**/*",
+        "rs/crates/**/src/**/*.rs",
+        "contracts/proto/paigasus/common/v1/error.proto",
+    ),
+    # SMA-587/SMA-572. An EXPECTED entry, not an exemption: unlike release-parity's
+    # ecosystem-specific globs, this gate's whole authored input set is two static globs, so an
+    # exact-match pin is cheap and does not fight a legitimately growing list. moon.yml's own
+    # comment on this task says the first glob is DELIBERATELY IDENTICAL to check.py's SCAN_GLOB —
+    # "scheduling and scanning must not be able to drift apart" — which makes that glob's exact
+    # text load-bearing here too: narrowing or renaming it silently reopens the gap it exists to
+    # close (the one case this gate exists for — a NEW handler in a NEW file — becomes the one
+    # case it never runs on).
+    "http-extractor-envelope": (
+        "ci/http-extractor/**/*",
+        "rs/crates/services/*/src/adapters/http/**/*.rs",
+    ),
 }
 
 # C3 checks the flag tail too. The first spec draft omitted it on the stated grounds that
@@ -323,6 +367,58 @@ SELF_SCHEDULED_GATES = {
         "bash ci/version-lockstep/run.sh --negative-control",
         "bash ci/version-lockstep/run.sh",
     ),
+    # SMA-572 — the three gates SMA-530 left out, plus repo:actionlint. Same three-line shape
+    # and the same reasoning: Moon takes a `script:` block's status from its LAST command, so
+    # `set -euo pipefail` is exactly as load-bearing as either invocation. Whole-line matched,
+    # which is what makes the first two safe — `bash ci/publish-metadata/run.sh` is a strict
+    # PREFIX of its own --negative-control line, so a substring test would report the script
+    # fully wired after the REAL RUN had been deleted.
+    #
+    # repo:affected-smoke's third entry has NO TRUE-POSITIVE COVERAGE and that is deliberate:
+    # any state in which the bare `ci/affected-graph/run.sh` line is absent is a state in which
+    # THIS function never runs (run.sh:405-409 exits inside the --negative-control branch,
+    # before run_suite at :412). Its real enforcement is check 8e in ci/actionlint/run.sh,
+    # which is scheduled independently. It is kept here so the table's contract stays "every
+    # line, one rule" — do not read it as coverage.
+    "affected-smoke": (
+        "set -euo pipefail",
+        "ci/affected-graph/run.sh --negative-control",
+        "ci/affected-graph/run.sh",
+    ),
+    "publish-metadata": (
+        "set -euo pipefail",
+        "bash ci/publish-metadata/run.sh --negative-control",
+        "bash ci/publish-metadata/run.sh",
+    ),
+    # No prefix hazard here (--self-test and --single-site are distinct suffixes), but matched
+    # whole-line like every other entry: the table's contract is one rule, not per-entry rules.
+    "error-code-single-site": (
+        "set -euo pipefail",
+        "python3 ci/error-registry/check.py --self-test",
+        "python3 ci/error-registry/check.py --single-site",
+    ),
+    # SMA-587/SMA-572 — repo:http-extractor-envelope, same three-line shape as
+    # error-code-single-site above: `--self-test` runs first in the same script block (moon.yml's
+    # own comment on this task: "a rotted checker must red rather than ship green"), and
+    # `set -euo pipefail` is exactly as load-bearing as either invocation, since Moon takes a
+    # `script:` block's status from its LAST command — without it a failing `--self-test` would be
+    # masked by a passing `--check`. Its real-run line (`--check`) is NOT a prefix of its
+    # self-test line, so unlike error-code-single-site's sibling entries there is no prefix hazard
+    # here either, but it is matched whole-line like every other entry because the table's contract
+    # is one rule, not per-entry rules.
+    "http-extractor-envelope": (
+        "set -euo pipefail",
+        "python3 ci/http-extractor/check.py --self-test",
+        "python3 ci/http-extractor/check.py --check",
+    ),
+    # One command, so the script's status IS its status — there is no pipefail line to pin.
+    # Registered mainly so its `inputs` pin below is not an orphan_globs row: repo:actionlint's
+    # `['**/*']` is the premise that every check in ci/actionlint/run.sh (8, 8b, 8c, 8d and the
+    # new 8e) runs on every PR, and until SMA-572 nothing asserted it. Narrowing it to
+    # `.github/workflows/**` was a green edit that silently switched all five off.
+    "actionlint": (
+        "ci/actionlint/run.sh",
+    ),
 }
 
 # SMA-530. A script-pinned gate whose `inputs` are NOT separately pinned must say so here,
@@ -342,6 +438,21 @@ SELF_TASK_GLOBS_EXEMPT = {
     ),
     "release-parity-py": "as release-parity",
     "release-parity-ts": "as release-parity",
+    # SMA-572/SMA-573. NOT a skip — a delegation, and the harder half of this issue. This gate's
+    # nineteen inputs are the most load-bearing list in the repo (every pin in this file is
+    # reachable only because it lists `moon.yml`), so they ARE pinned — by check 8e in
+    # ci/actionlint/run.sh, which is scheduled independently of this gate. An entry in
+    # SELF_TASK_EXPECTED_GLOBS instead would make repo:affected-smoke the sole judge of its own
+    # reachability, which is the exact defect SMA-573 exists to close; it would also be an exact
+    # match against a list that legitimately grows every time a gate keys on a new directory.
+    # ACTIONLINT_SH_CALL_SITES pins check 8e's production call site AND its table's arity floor,
+    # so this delegation cannot rot silently.
+    "affected-smoke": (
+        "inputs pinned by check 8e in ci/actionlint/run.sh instead — an entry here would make "
+        "this gate the sole judge of its own reachability, and exact-match a nineteen-entry "
+        "list that legitimately grows; ACTIONLINT_SH_CALL_SITES pins 8e's call site and arity "
+        "floor so the delegation cannot rot (SMA-572/SMA-573)"
+    ),
 }
 
 # C4, actionlint half (SMA-542). repo:actionlint's self-tests, mutation battery, and the check-8,
@@ -410,7 +521,7 @@ SELF_TASK_GLOBS_EXEMPT = {
 #
 # PROPAGATION CONTRACT — these entries carry no `|| RC=1` suffix, and that is not the hole
 # RUN_SH_CALL_SITES' suffixes close. `run_self_tests` and `selftest_mutation_battery` report through
-# run.sh's global `FAILED`, as its nine self-tests already do (run.sh:43-46); NONE of the four
+# run.sh's global `FAILED`, as its ten self-tests already do (run.sh:43-46); NONE of the four
 # `done < <(...)` lines has anything to propagate — each is the tail of a `while` loop whose body
 # already calls `fail()` per verdict. The consequence is that a future `run_self_tests || FAILED=1` (or an
 # equally harmless reformat of any `done < <(...)` line) would red this check even though it is
@@ -443,6 +554,34 @@ ACTIONLINT_SH_CALL_SITES = (
     # `block_execution_verdict /nonexistent/ci.yml`, ...), so a substring test would be satisfied
     # by those and survive deleting this exact production line.
     "done < <(block_execution_verdict .github/workflows/ci.yml)",
+    # Check 8e's production call site (SMA-572/SMA-573) — the pin that makes
+    # SELF_TASK_GLOBS_EXEMPT["affected-smoke"] a delegation rather than a skip. Same shape as
+    # the four entries above it: `affected_smoke_block_verdict` is also called from inside its
+    # own self-test fixtures (`affected_smoke_block_verdict "$tmp"`,
+    # `affected_smoke_block_verdict /nonexistent/moon.yml`), so a substring test would be
+    # satisfied by those and survive deleting this exact production line.
+    "done < <(affected_smoke_block_verdict moon.yml)",
+    # ...and the INPUT table's arity floor, which is a second, different hole. The verdict
+    # function iterates its table, so an EMPTIED table emits zero verdicts and the gate passes
+    # having asserted nothing — MEASURED before this floor existed: with the array replaced by
+    # `()`, `affected_smoke_block_verdict moon.yml` emitted 0 lines against the real, fully
+    # wired file. Check 8c never needed this because its table is a verbatim dual copy of
+    # RUN_SH_CALL_SITES above and the other copy still asserts the lines; 8e deliberately keeps
+    # its set at one site, so the floor is what makes shrinking it a two-file edit across two
+    # independently scheduled gates.
+    '[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 19 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 19"',
+    # ...and the SCRIPT table's arity floor, the same hole one table over — but closing a
+    # strictly narrower gap, which is why it is worth its own entry rather than being read as
+    # a duplicate of the line above. SELF_SCHEDULED_GATES["affected-smoke"] already asserts
+    # the three script lines EXIST, as an unordered set of stripped lines; what it structurally
+    # cannot see is their ORDER, and reading them in order is the one thing check 8e was added
+    # to contribute. Empty T_AFFECTED_SMOKE_REQUIRED_SCRIPT and 8e's loop iterates nothing, so
+    # `set -euo pipefail` moved below the invocations stops being caught by ANY gate — moon
+    # takes a script block's status from its LAST command, so the negative control's failure is
+    # then swallowed. Without this entry that deletion plus the emptying is a ONE-FILE edit;
+    # with it, it is a two-file edit across two independently scheduled gates, which is exactly
+    # what the comment above the floors in run.sh claims of BOTH of them.
+    '[ "${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}" -ge 3 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_SCRIPT has ${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]} entries, expected at least 3"',
 )
 
 # SMA-530. The moon.yml pins above prove the CONTROL IS INVOKED; these prove it still DOES
@@ -1368,6 +1507,13 @@ def self_test():
         # README L12) — same shape again: `block_execution_verdict` is also called from inside its
         # own self-test fixtures, so this MUST be whole-line matched too.
         'done < <(block_execution_verdict .github/workflows/ci.yml)\n'
+        # Check 8e's production call site and its input-table arity floor (SMA-572) — both
+        # whole-line matched at column 0, for the same reason as the four entries above: each
+        # appears in substring form elsewhere (the verdict function inside its own fixtures; the
+        # array name in its own declaration), so only the whole line proves the PRODUCTION use.
+        'done < <(affected_smoke_block_verdict moon.yml)\n'
+        '[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 19 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 19"\n'
+        '[ "${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}" -ge 3 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_SCRIPT has ${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]} entries, expected at least 3"\n'
     )
     wired_release_parity = (
         '    --negative-control) NEGATIVE=1; shift ;;\n'
