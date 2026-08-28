@@ -544,6 +544,18 @@ ACTIONLINT_SH_CALL_SITES = (
     # its set at one site, so the floor is what makes shrinking it a two-file edit across two
     # independently scheduled gates.
     '[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 19 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 19"',
+    # ...and the SCRIPT table's arity floor, the same hole one table over — but closing a
+    # strictly narrower gap, which is why it is worth its own entry rather than being read as
+    # a duplicate of the line above. SELF_SCHEDULED_GATES["affected-smoke"] already asserts
+    # the three script lines EXIST, as an unordered set of stripped lines; what it structurally
+    # cannot see is their ORDER, and reading them in order is the one thing check 8e was added
+    # to contribute. Empty T_AFFECTED_SMOKE_REQUIRED_SCRIPT and 8e's loop iterates nothing, so
+    # `set -euo pipefail` moved below the invocations stops being caught by ANY gate — moon
+    # takes a script block's status from its LAST command, so the negative control's failure is
+    # then swallowed. Without this entry that deletion plus the emptying is a ONE-FILE edit;
+    # with it, it is a two-file edit across two independently scheduled gates, which is exactly
+    # what the comment above the floors in run.sh claims of BOTH of them.
+    '[ "${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}" -ge 3 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_SCRIPT has ${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]} entries, expected at least 3"',
 )
 
 # SMA-530. The moon.yml pins above prove the CONTROL IS INVOKED; these prove it still DOES
@@ -1475,6 +1487,7 @@ def self_test():
         # array name in its own declaration), so only the whole line proves the PRODUCTION use.
         'done < <(affected_smoke_block_verdict moon.yml)\n'
         '[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 19 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 19"\n'
+        '[ "${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}" -ge 3 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_SCRIPT has ${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]} entries, expected at least 3"\n'
     )
     wired_release_parity = (
         '    --negative-control) NEGATIVE=1; shift ;;\n'
