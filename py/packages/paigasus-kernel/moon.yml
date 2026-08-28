@@ -63,7 +63,12 @@ tasks:
       # for the full rationale. `--reinstall-package` forces maturin to relink the cdylib, so this
       # task's result depends on the resolution these files pin. `/.prototools` on THIS path pins
       # `uv` (which drives maturin) rather than wasm-pack — nothing on the py path invokes wasm-pack.
+      #   /rs/.cargo/config.toml  read by maturin's cargo (cwd is inside rs/). maturin injects these
+      #                           link args ITSELF (SMA-578, measured), so the wheel does not NEED
+      #                           them — but the file still influences any darwin build from rs/,
+      #                           which is the criterion for a cache input.
       - '/rs/Cargo.lock'
       - '/rs/Cargo.toml'
       - '/rs/rust-toolchain.toml'
       - '/.prototools'
+      - '/rs/.cargo/config.toml'

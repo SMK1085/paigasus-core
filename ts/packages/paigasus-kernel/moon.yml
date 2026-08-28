@@ -89,10 +89,14 @@ tasks:
       #                           precisely so this file's 1.95.0 override wins)
       #   /.prototools            pins wasm-pack itself — the OTHER half of the rs/Cargo.toml:90-97
       #                           invariant, which is bidirectional ("bump the two together")
+      #   /rs/.cargo/config.toml  the -undefined dynamic_lookup flags napi's cdylib link needs on
+      #                           macOS; the `--cwd` above exists to bring this file into cargo's
+      #                           upward walk
       - '/rs/Cargo.lock'
       - '/rs/Cargo.toml'
       - '/rs/rust-toolchain.toml'
       - '/.prototools'
+      - '/rs/.cargo/config.toml'
     outputs:
       # Glob the platform-suffixed .node (darwin-arm64 on dev, linux-x64-gnu on CI, …) so the
       # declared output exists on EVERY host — a hardcoded triple fails Moon's output check on Linux.
@@ -162,3 +166,4 @@ tasks:
       - '/rs/Cargo.toml'
       - '/rs/rust-toolchain.toml'
       - '/.prototools'
+      - '/rs/.cargo/config.toml'

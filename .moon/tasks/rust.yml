@@ -33,10 +33,23 @@ fileGroups:
 tasks:
   build:
     command: 'cargo build'
-    inputs: ['@group(sources)', 'Cargo.toml', '@group(upstreams)']
+    # `/rs/.cargo/config.toml` (SMA-594) sets rustflags for the two *-apple-darwin targets, and
+    # cargo reads it by walking up from the cwd — which for every task here is inside `rs/`. It is
+    # on build/build-release/test/lint and deliberately NOT on `fmt`: `cargo fmt --check` neither
+    # compiles nor links, and rustflags cannot change formatting. That mirrors how `fmt` already
+    # omits @group(upstreams) and the workspace lock. CI is Linux, where the flags are inert, so
+    # this is a cache-correctness fix for macOS developers, not a CI-correctness one.
+    inputs:
+      - '@group(sources)'
+      - 'Cargo.toml'
+      - '@group(upstreams)'
+      - '/rs/.cargo/config.toml'
   build-release:
     command: 'cargo build --release'
-    inputs: ['@group(sources)', 'Cargo.toml']
+    inputs:
+      - '@group(sources)'
+      - 'Cargo.toml'
+      - '/rs/.cargo/config.toml'
   test:
     command: 'cargo nextest run --no-tests=pass'
     # `/rs/.config/nextest.toml` is workspace-relative (leading `/`). Required because `rs/` is
@@ -45,7 +58,13 @@ tasks:
     # `implicitInputs` covers only `.moon/*`. Without this, editing the retry policy would not
     # bust this task's cache (stale PASS) and a profile-only PR would not select it under
     # `moon ci --affected`.
-    inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml', '/rs/.config/nextest.toml', '@group(upstreams)']
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'Cargo.toml'
+      - '/rs/.config/nextest.toml'
+      - '@group(upstreams)'
+      - '/rs/.cargo/config.toml'
   lint:
     # `--locked` so clippy lints the resolution the PR actually SHIPS. Without it cargo silently
     # re-resolves and rewrites an inconsistent Cargo.lock, and the thirteen lints below would
@@ -89,6 +108,7 @@ tasks:
       - '/rs/Cargo.lock'
       - '/rs/rust-toolchain.toml'
       - '@group(upstreams)'
+      - '/rs/.cargo/config.toml'
   fmt:
     command: 'cargo fmt --check'
     # SMA-537. `cargo fmt --check` formats EVERY target in the package, but this task keyed on
