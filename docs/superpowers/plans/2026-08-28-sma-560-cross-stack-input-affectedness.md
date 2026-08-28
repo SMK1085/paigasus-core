@@ -294,6 +294,7 @@ and add `a4_fmt` to the aggregate guard `if not (a1 or a2 or a3 or a4 or a5 or a
 - [ ] **Step 6: Run the self-test to verify it passes**
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 python3 ci/affected-graph/cargo_moon_parity.py --self-test && \
 python3 ci/affected-graph/cargo_moon_parity.py
 ```
@@ -671,6 +672,15 @@ MSG
 **Interfaces:**
 - Consumes: `derive_ffi_tasks` (Task 3), `rust_closure` (existing, unmodified), the `findings` list (Task 4).
 - Produces: `REQUIRED_WRAPPER_CLOSURE` and `check_wrapper_upstream_inputs(projects, root=None, floor=REQUIRED_WRAPPER_CLOSURE) -> list[str]`.
+
+> **Amended after this plan was executed.** `root` is now a **required** positional parameter —
+> `check_wrapper_upstream_inputs(projects, root, floor=REQUIRED_WRAPPER_CLOSURE)`. The final
+> whole-branch review measured that with `root` defaulting to `None`, deleting BOTH
+> `build.rs` lines from `ts/packages/paigasus-kernel/moon.yml` left the real run **green** — the
+> default silently un-asserted A7's `build.rs` half, unpinning this plan's own headline fix.
+> The `root is not None` guard is gone with it. Every call below that omits `root` now raises
+> `TypeError`, which is the point: the omission is loud rather than silent. The plan text is
+> left as written elsewhere, as the record of what was planned.
 
 **One commit.** A7 must red on the pre-existing under-declarations before they are fixed — that is the genuine failing test — but the two must land together so history never contains a state where A7 fails on `main`.
 

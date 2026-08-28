@@ -99,6 +99,11 @@ tasks:
     # input that `repo:input-liveness` reds. Add `benches/**/*` / `examples/**/*` here in the SAME
     # change that creates the first such directory (SMA-560 M4).
     #   @group(sources)         now includes build.rs (see fileGroups above)
+    #   Cargo.toml              `cargo fmt` DISCOVERS its targets from the manifest — [[bin]], [lib],
+    #                           [[example]] and the package `edition` it parses with — so a
+    #                           manifest-only change alters WHAT gets formatted with no src diff.
+    #                           build/build-release/test/lint all key on it; fmt was the only one
+    #                           that did not (CodeRabbit, PR 174).
     #   @group(tests)           tests/ is formatted too; an empty group matches nothing, which is
     #                           already true for `test`/`lint` on crates without a tests/ dir
     #   /rs/rustfmt.toml        the format config itself (max_width = 200); changing it must
@@ -108,4 +113,4 @@ tasks:
     # Deliberately NOT @group(upstreams): `cargo fmt --check` reads only the crate's own files,
     # so it cannot be broken by an upstream crate edit (SMA-526 rejected that propagation, and
     # that rejection was correct). This is a CONFIG-edit hole, which is a different defect.
-    inputs: ['@group(sources)', '@group(tests)', '/rs/rustfmt.toml', '/rs/rust-toolchain.toml']
+    inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml', '/rs/rustfmt.toml', '/rs/rust-toolchain.toml']

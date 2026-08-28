@@ -87,6 +87,7 @@ FFI_TASK_INPUTS = (*WORKSPACE_LINT_INPUTS, ".prototools")
 FMT_TASK_INPUTS = (
     "rs/rustfmt.toml",
     "rs/rust-toolchain.toml",
+    "Cargo.toml",
     "src/**/*",
     "tests/**/*",
 )
@@ -717,7 +718,9 @@ def self_test():
     # while blind to half its own required set — the split A6 already exists because of.
     fmt_ok = json.loads(json.dumps(ok))
     for pid in ("a-rs", "b-rs"):
-        fmt_ok[pid]["task_inputs"]["fmt"] = ["rs/rustfmt.toml", "rs/rust-toolchain.toml"]
+        fmt_ok[pid]["task_inputs"]["fmt"] = [
+            "rs/rustfmt.toml", "rs/rust-toolchain.toml", f"{fmt_ok[pid]['source_dir']}/Cargo.toml",
+        ]
         src = fmt_ok[pid]["source_dir"]
         fmt_ok[pid]["task_input_globs"]["fmt"] = [f"{src}/src/**/*", f"{src}/tests/**/*"]
     if check_task_inputs(fmt_ok, crates, "fmt", FMT_TASK_INPUTS) != []:
@@ -730,6 +733,16 @@ def self_test():
         for row in check_task_inputs(broken, crates, "fmt", FMT_TASK_INPUTS)
     ):
         failures.append("A4-fmt did not fire on a fmt task missing @group(tests)")
+
+    # A4-fmt: the manifest half. `cargo fmt` reads Cargo.toml for its target list and edition, so
+    # a fmt task blind to it can serve a cached PASS across a [[bin]] addition (CodeRabbit, PR 174).
+    broken = json.loads(json.dumps(fmt_ok))
+    broken["a-rs"]["task_inputs"]["fmt"] = ["rs/rustfmt.toml", "rs/rust-toolchain.toml"]
+    if not any(
+        "Cargo.toml" in row
+        for row in check_task_inputs(broken, crates, "fmt", FMT_TASK_INPUTS)
+    ):
+        failures.append("A4-fmt did not fire on a fmt task missing its crate's Cargo.toml")
 
     broken = json.loads(json.dumps(fmt_ok))
     broken["a-rs"]["task_inputs"]["fmt"] = ["rs/rust-toolchain.toml"]
