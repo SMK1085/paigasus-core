@@ -201,6 +201,38 @@ SELF_TASK_EXPECTED_GLOBS = {
         "rs/crates/libs/paigasus-proto-derive/Cargo.toml",
         "rs/crates/libs/paigasus-proto/Cargo.toml",
     ),
+    # SMA-572. repo:actionlint's whole authored declaration, and the reason the rest of this
+    # file's pins are reachable at all. Checked from ci_targets.py, which runs inside
+    # repo:affected-smoke — a DIFFERENT gate — so this is not self-judging: narrowing
+    # repo:actionlint's inputs is a root-moon.yml edit, which schedules affected-smoke.
+    "actionlint": ("**/*",),
+    # SMA-572. These two were exempted in this design's first draft on the grounds that
+    # repo:input-liveness asserts declared-glob liveness generically. That is wrong, and an
+    # adversarial review caught it: task_inputs.py asserts a DECLARED glob still matches a
+    # tracked file — it cannot see a REMOVED DECLARATION. Both lists carry entries whose
+    # deletion moon.yml itself documents as fatal: publish-metadata's
+    # .github/workflows/security-scan.yml ("Check 4 ASSERTS ON IT"; moon.yml:520-521) and
+    # error-code's broad rs/crates/**/src/**/*.rs ("the one case it exists for would be the one
+    # case it never runs on"; moon.yml:628-630). Both sets are STATIC — no runtime discovery —
+    # so exact match is affordable, exactly as for version-lockstep's sixteen.
+    "publish-metadata": (
+        "rs/crates/**/*",
+        ".github/workflows/security-scan.yml",
+        ".gitignore",
+        "ci/publish-metadata/categories.py",
+        "ci/publish-metadata/crates-io-categories.txt",
+        "ci/publish-metadata/run.sh",
+        "rs/.cargo/config.toml",
+        "rs/Cargo.lock",
+        "rs/Cargo.toml",
+        "rs/release-plz.toml",
+        "rs/rust-toolchain.toml",
+    ),
+    "error-code-single-site": (
+        "ci/error-registry/**/*",
+        "rs/crates/**/src/**/*.rs",
+        "contracts/proto/paigasus/common/v1/error.proto",
+    ),
 }
 
 # C3 checks the flag tail too. The first spec draft omitted it on the stated grounds that
@@ -323,6 +355,44 @@ SELF_SCHEDULED_GATES = {
         "bash ci/version-lockstep/run.sh --negative-control",
         "bash ci/version-lockstep/run.sh",
     ),
+    # SMA-572 — the three gates SMA-530 left out, plus repo:actionlint. Same three-line shape
+    # and the same reasoning: Moon takes a `script:` block's status from its LAST command, so
+    # `set -euo pipefail` is exactly as load-bearing as either invocation. Whole-line matched,
+    # which is what makes the first two safe — `bash ci/publish-metadata/run.sh` is a strict
+    # PREFIX of its own --negative-control line, so a substring test would report the script
+    # fully wired after the REAL RUN had been deleted.
+    #
+    # repo:affected-smoke's third entry has NO TRUE-POSITIVE COVERAGE and that is deliberate:
+    # any state in which the bare `ci/affected-graph/run.sh` line is absent is a state in which
+    # THIS function never runs (run.sh:405-409 exits inside the --negative-control branch,
+    # before run_suite at :412). Its real enforcement is check 8e in ci/actionlint/run.sh,
+    # which is scheduled independently. It is kept here so the table's contract stays "every
+    # line, one rule" — do not read it as coverage.
+    "affected-smoke": (
+        "set -euo pipefail",
+        "ci/affected-graph/run.sh --negative-control",
+        "ci/affected-graph/run.sh",
+    ),
+    "publish-metadata": (
+        "set -euo pipefail",
+        "bash ci/publish-metadata/run.sh --negative-control",
+        "bash ci/publish-metadata/run.sh",
+    ),
+    # No prefix hazard here (--self-test and --single-site are distinct suffixes), but matched
+    # whole-line like every other entry: the table's contract is one rule, not per-entry rules.
+    "error-code-single-site": (
+        "set -euo pipefail",
+        "python3 ci/error-registry/check.py --self-test",
+        "python3 ci/error-registry/check.py --single-site",
+    ),
+    # One command, so the script's status IS its status — there is no pipefail line to pin.
+    # Registered mainly so its `inputs` pin below is not an orphan_globs row: repo:actionlint's
+    # `['**/*']` is the premise that every check in ci/actionlint/run.sh (8, 8b, 8c, 8d and the
+    # new 8e) runs on every PR, and until SMA-572 nothing asserted it. Narrowing it to
+    # `.github/workflows/**` was a green edit that silently switched all five off.
+    "actionlint": (
+        "ci/actionlint/run.sh",
+    ),
 }
 
 # SMA-530. A script-pinned gate whose `inputs` are NOT separately pinned must say so here,
@@ -342,6 +412,21 @@ SELF_TASK_GLOBS_EXEMPT = {
     ),
     "release-parity-py": "as release-parity",
     "release-parity-ts": "as release-parity",
+    # SMA-572/SMA-573. NOT a skip — a delegation, and the harder half of this issue. This gate's
+    # nineteen inputs are the most load-bearing list in the repo (every pin in this file is
+    # reachable only because it lists `moon.yml`), so they ARE pinned — by check 8e in
+    # ci/actionlint/run.sh, which is scheduled independently of this gate. An entry in
+    # SELF_TASK_EXPECTED_GLOBS instead would make repo:affected-smoke the sole judge of its own
+    # reachability, which is the exact defect SMA-573 exists to close; it would also be an exact
+    # match against a list that legitimately grows every time a gate keys on a new directory.
+    # ACTIONLINT_SH_CALL_SITES pins check 8e's production call site AND its table's arity floor,
+    # so this delegation cannot rot silently.
+    "affected-smoke": (
+        "inputs pinned by check 8e in ci/actionlint/run.sh instead — an entry here would make "
+        "this gate the sole judge of its own reachability, and exact-match a nineteen-entry "
+        "list that legitimately grows; ACTIONLINT_SH_CALL_SITES pins 8e's call site and arity "
+        "floor so the delegation cannot rot (SMA-572/SMA-573)"
+    ),
 }
 
 # C4, actionlint half (SMA-542). repo:actionlint's self-tests, mutation battery, and the check-8,
