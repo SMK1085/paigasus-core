@@ -552,8 +552,8 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   own spec table before the numbers were re-derived.
 - release-plz owns every tag (`<package>-v<version>`, its default). `napi prepublish` always
   carries `--no-gh-release` — a flag its own `--help` does not list. Two invocations exist:
-  `.github/workflows/release.yml:596` (the real publish; the requirement is recorded in the
-  comment at `:573`) and `.github/workflows/prebuild.yml:295` (the dry run).
+  the real publish in `release.yml`'s `publish-npm` job, with the requirement recorded in the
+  comment directly above it; and the dry run in `prebuild.yml`'s `assemble` job.
   `ci/actionlint/release_guard.py`'s V5 asserts **both** carry it. That sentence used to be
   aspirational: V5 was inlined in `check_main`, which `main()` runs on `argv[0]` only, so every
   CALLED workflow — `prebuild.yml` included — got `check_called`, which had no V5 at all. It is
