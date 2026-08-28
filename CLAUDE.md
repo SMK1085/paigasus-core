@@ -313,10 +313,23 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - release-plz's version baseline is the **crates.io registry**, not git tags (no `git_only` is
   set in `rs/release-plz.toml`). Measured on this repo at the `0.1.0` floor: it logs `WARN
   Package 'paigasus-kernel@*.*.*' not found`, then proposes `next version is 0.1.0` — the
-  manifest version, no bump. So the **first release PR will be empty**, and "the release PR is
-  the acceptance evidence" does not hold for the first run. The real hazard here is name
+  manifest version, no bump. Measured live on 2026-08-28: it still OPENS a PR (`chore: release
+  v0.1.0`) listing all three packages — "empty" means it proposes no version CHANGE, not that no
+  PR appears — so "the release PR is the acceptance evidence" does not hold for the first run. The real hazard here is name
   squatting — release-plz performs a crates.io lookup for every workspace member name, so a
   squatted name silently becomes the comparison baseline — not a runaway version proposal.
+- `release.yml` authenticates with a **GitHub App installation token minted per run**
+  (`actions/create-github-app-token`), never a stored secret: an installation token lives one
+  hour, so it CANNOT be a repository secret, and the original `RELEASE_PLZ_TOKEN` shape could
+  only ever have held a long-lived PAT (SMA-589). Three traps. The secret `PAIGASUS_BOT_APP_ID`
+  holds the App's **Client ID**, not the numeric App ID — the NAME is the only stale thing about
+  it, so do not "correct" it by storing the numeric id. The token must request
+  `permission-contents: write` + `permission-pull-requests: write` **explicitly**: without the
+  `permission-*` inputs it inherits every permission the installation holds, so granting the App
+  an unrelated scope later silently widens it (zizmor `github-app`) — and because the requested
+  set must actually be granted, an under-granted App reds at mint time rather than half-working
+  later. And the preflight makes the whole job skip **green** when the App id is absent, so a
+  broken token path is invisible in CI: the only proof is a real run on `main`.
 - Any crate flipping `publish = true` must carry **its own `[lints.*]` table** and **its own
   `include` allowlist** — enforced by `repo:publish-metadata` Checks 1c/1d (SMA-577). Cargo
   inlines the resolved lint table into the published manifest and docs.rs builds published
