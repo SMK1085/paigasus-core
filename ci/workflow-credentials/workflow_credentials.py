@@ -168,17 +168,136 @@ def _self_test() -> int:
             got = ",".join(sorted({f[0] for f in findings})) or "pass"
             print(f"  FAIL {label}: expected {want}, got {got}", file=sys.stderr)
             failures += 1
+
+    for label, source, expected in TRIGGER_CASES:
+        docs = list(yaml.load_all(source, Loader=_StrictLoader))
+        got = any(triggers(d) & PR_TRIGGERS for d in docs if isinstance(d, dict))
+        if got != expected:
+            print(f"  FAIL trigger/{label}: expected {expected}, got {got}", file=sys.stderr)
+            failures += 1
+
+    for label, source in PARSE_CASES:
+        try:
+            docs = list(yaml.load_all(source, Loader=_StrictLoader))
+        except yaml.YAMLError:
+            continue  # rejected at parse time, which is what we want
+        if all(isinstance(d, dict) for d in docs if d is not None):
+            print(f"  FAIL parse/{label}: accepted a document that must be rejected",
+                  file=sys.stderr)
+            failures += 1
+
     if failures:
         print(f"self-test: {failures} of {len(RULE_CASES)} rows failed", file=sys.stderr)
         return RC_ASSERT
-    print(f"== workflow-credentials self-test passed ({len(RULE_CASES)} rows) ==")
+    total = len(RULE_CASES) + len(TRIGGER_CASES) + len(PARSE_CASES)
+    print(f"== workflow-credentials self-test passed ({total} rows) ==")
+    return RC_OK
+
+
+PR_TRIGGERS = frozenset({"pull_request", "pull_request_target"})
+
+# The subject set, pinned by STRICT EQUALITY. run.sh's sibling gate holds two discovered sets
+# the same way (EXPECTED_PUBLISHABLE, EXPECTED_PYPI_PUBLISHABLE) and Check P0 states the
+# reason: a stale list silently SHRINKS the gate rather than reporting red. A new
+# pull-request-triggered workflow reds here until someone adds it, deliberately. (spec §5.2)
+EXPECTED_PR_SUBJECTS = (
+    "ci.yml",
+    "images.yml",
+    "prebuild.yml",
+    "security-scan.yml",
+    "wheels.yml",
+)
+
+# (workflow filename, rule id) -> why a human accepted it. Keyed by BOTH, never by filename
+# alone: a file-level key would let the entry permitting one build-arg also permit
+# `id-token: write` and a token read in the same file, silently and forever. (spec §5.2)
+PR_CREDENTIAL_ALLOWED: dict[tuple[str, str], str] = {}
+
+
+def triggers(doc) -> set[str]:
+    """The trigger names in one document.
+
+    YAML 1.1 parses the `on:` KEY as the boolean True, so doc.get("on") returns None.
+    MEASURED on release.yml: top-level keys are ['name', True, 'concurrency', 'permissions',
+    'jobs']; `'on' in doc` is False and `True in doc` is True. Read both. (spec §5.1)
+    """
+    if not isinstance(doc, dict):
+        return set()
+    on = doc.get("on", doc.get(True))
+    if isinstance(on, str):
+        return {on}
+    if isinstance(on, (list, dict)):
+        return {str(x) for x in on}
+    return set()
+
+
+def discover(root: str) -> list[str]:
+    """Basenames of every workflow whose triggers make it a subject."""
+    paths = sorted(glob.glob(os.path.join(root, SCAN_GLOB)))
+    if not paths:
+        raise InfraError(
+            f"{SCAN_GLOB} matched no file under {root} — the scan root moved and this gate "
+            "would assert nothing")
+    subjects = []
+    for path in paths:
+        docs = load_documents(path)
+        for doc in docs:
+            if doc is not None and not isinstance(doc, dict):
+                raise AssertionFailure(
+                    f"{os.path.basename(path)}: top-level YAML is not a mapping")
+        if any(triggers(d) & PR_TRIGGERS for d in docs if isinstance(d, dict)):
+            subjects.append(os.path.basename(path))
+    return subjects
+
+
+def check(root: str) -> int:
+    subjects = discover(root)
+    # Compared BEFORE any allowlist: the allowlist suppresses rule verdicts, never
+    # membership. Counting after it would let "allowlist everything" pass. (spec §5.2)
+    if tuple(subjects) != EXPECTED_PR_SUBJECTS:
+        raise AssertionFailure(
+            f"pull-request-triggered workflows are {subjects}, expected "
+            f"{list(EXPECTED_PR_SUBJECTS)} — re-baseline EXPECTED_PR_SUBJECTS deliberately")
+
+    stale = [name for (name, _rule) in PR_CREDENTIAL_ALLOWED if name not in subjects]
+    if stale:
+        raise AssertionFailure(
+            f"PR_CREDENTIAL_ALLOWED names workflows that are not subjects: {sorted(set(stale))}")
+
+    reds: list[str] = []
+    for name in subjects:
+        for doc in load_documents(os.path.join(root, ".github", "workflows", name)):
+            if not isinstance(doc, dict):
+                continue
+            for rule, where, message in rule_findings(doc):
+                reason = PR_CREDENTIAL_ALLOWED.get((name, rule))
+                if reason:
+                    print(f"  allowed {name} [{rule}] at {where}: {reason}")
+                    continue
+                reds.append(f"  {name} [{rule}] at {where}: {message}")
+    if reds:
+        raise AssertionFailure(
+            "a pull-request-triggered workflow can obtain a repository credential:\n"
+            + "\n".join(reds)
+            + "\n  A same-repo pull request receives repository secrets, so this is readable "
+              "by any code the PR introduces. Publishing belongs in a workflow with no "
+              "pull_request trigger (SMA-407 §7 review M2)."
+        )
+    # The NAMES, not just a count. ci/workflow-credentials/run.sh --negative-control greps
+    # this line to assert release.yml is absent from the subject set; a count alone would
+    # make that row match nothing and assert nothing. (Pre-flight ruling 2.)
+    print(f"workflow-credentials: subjects: {' '.join(subjects)}")
+    print(f"workflow-credentials: {len(subjects)} pull-request-triggered workflow(s) "
+          "carry no credential")
     return RC_OK
 
 
 def main(argv: list[str]) -> int:
     if argv[1:2] == ["--self-test"]:
         return _self_test()
-    raise InfraError("not implemented yet")
+    if len(argv) != 2:
+        raise InfraError("usage: workflow_credentials.py <repo-root> | --self-test")
+    return check(argv[1])
 
 
 H = "on:\n  pull_request:\njobs:\n  a:\n"
@@ -226,6 +345,28 @@ RULE_CASES: tuple[tuple[str, str, bool], ...] = (
     ("P7 inputs.secrets-file", H + "    env:\n      T: ${{ inputs.secrets-file }}\n", False),
     ("P8 outputs.secrets",   H + "    env:\n      T: ${{ steps.x.outputs.secrets }}\n", False),
     ("P9 hashFiles literal", H + "    env:\n      T: ${{ hashFiles('secrets.txt') }}\n", False),
+)
+
+TRIGGER_CASES: tuple[tuple[str, str, bool], ...] = (
+    ("mapping form",    "on:\n  pull_request:\njobs: {}\n", True),
+    ("list form",       "on: [push, pull_request]\njobs: {}\n", True),
+    ("string form",     "on: pull_request\njobs: {}\n", True),
+    ("pull_request_target", "on:\n  pull_request_target:\njobs: {}\n", True),
+    ("push only",       "on:\n  push:\n    branches:\n      - main\njobs: {}\n", False),
+    ("bare on",         "on:\njobs: {}\n", False),
+    ("no on key",       "jobs: {}\n", False),
+)
+
+# Documents that must not reach the rules at all. Each must raise, and raise the RIGHT class:
+# these are the repo being wrong, not infrastructure. The duplicate-key row is the important
+# one — PyYAML's default is LAST WINS, so without the strict loader the first `permissions`
+# block below is silently discarded and R2 never sees the grant that the OLD regex caught.
+PARSE_CASES: tuple[tuple[str, str], ...] = (
+    ("duplicate key drops a grant",
+     "on:\n  pull_request:\njobs:\n  a:\n    permissions:\n      id-token: write\n"
+     "    permissions:\n      contents: read\n"),
+    ("top-level sequence", "- on: pull_request\n"),
+    ("malformed yaml", "on:\n  pull_request:\n  bad: [unclosed\n"),
 )
 
 
