@@ -679,6 +679,21 @@ ACTIONLINT_SH_CALL_SITES = (
     # is a one-line edit that silently restores the swallow: the gate keeps running, keeps
     # reporting violations, and stops failing closed.
     'if [ "$rg_rc" -eq 2 ]; then',
+    # ...and the CAPTURE of that status (SMA-579 fix round 3, Minor 7). The line above is only as
+    # good as the variable it reads. `rg_rc=$?` is not a call site, but replacing it with
+    # `rg_rc=0` — a single-token edit — deadens BOTH routing lines below it while leaving their
+    # text byte-identical, so every other pin in this registry stays satisfied. That is strictly
+    # narrower than the "dead copy in a never-executed block" residual its siblings accept, which
+    # is why it is worth its own entry rather than being read as over-pinning.
+    "rg_rc=$?",
+    # ...and the CATCH-ALL arm (SMA-579 fix round 3, Critical 1). Routing only rc 2 left the gate
+    # failing OPEN on every other non-zero status: run.sh is `set -uo pipefail` with NO -e, so an
+    # unrouted status leaves $RG_OUT empty, the read loop finds nothing and FAILED stays 0.
+    # MEASURED: with the production call replaced by `( exit 127 )` — the status a missing `uv`
+    # produces from the WRAPPER, which is NOT the guard's own 2 — the full gate exited 0 before
+    # this arm existed and exits 2 after it. Deleting this one line restores that fail-open while
+    # every other entry here stays green, which is exactly the shape this registry exists to catch.
+    'elif [ "$rg_rc" -ne 0 ] && [ "$rg_rc" -ne 1 ]; then',
 )
 
 # SMA-579 — check 10's two remaining call sites, pinned SEPARATELY from ACTIONLINT_SH_CALL_SITES
@@ -1745,7 +1760,9 @@ def self_test():
         # whole-line matched at column 0, exactly like check 8e's pair above: this sits at
         # run.sh's top level, outside any function.
         'release_guard_py .github/workflows/release.yml > "$RG_OUT"\n'
+        'rg_rc=$?\n'
         'if [ "$rg_rc" -eq 2 ]; then\n'
+        'elif [ "$rg_rc" -ne 0 ] && [ "$rg_rc" -ne 1 ]; then\n'
         # ...and check 10's fixture-table arity floor and self-test invocation (SMA-579),
         # matched via ACTIONLINT_SH_INDENTED_CALL_SITES instead: both sit inside
         # release_guard_self_test(), so they carry real, executing leading whitespace.

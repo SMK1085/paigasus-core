@@ -54,11 +54,14 @@ infra() {
 usage() {
   echo "usage: $(basename "$0") [--self-test]" >&2
   echo "  (no argument)  run the full gate" >&2
-  echo "  --self-test    run the ten fixture tables only — extractor, path-filter verdicts," >&2
+  echo "  --self-test    run the eleven fixture tables only — extractor, path-filter verdicts," >&2
   echo "                 branch-filter verdicts, config allowlist, ci-target floor, invocation" >&2
   echo "                 allowlist, affected-graph wiring, block execution, kill predicate," >&2
-  echo "                 affected-smoke block. No actionlint binary is required, but the" >&2
-  echo "                 branch-filter table needs a git repo carrying refs/remotes/origin/main." >&2
+  echo "                 affected-smoke block, release guard. No actionlint binary is required," >&2
+  echo "                 but the branch-filter table needs a git repo carrying" >&2
+  echo "                 refs/remotes/origin/main, and the release-guard table shells out to" >&2
+  echo "                 'uv run --locked --project py', so it needs uv on PATH and a py" >&2
+  echo "                 workspace whose uv.lock is up to date." >&2
   echo "                 The check-9 mutation battery is NOT part of this — full gate only." >&2
   exit 2
 }
@@ -4007,8 +4010,14 @@ kill_predicate_self_test() {
 # lines inside run_self_tests — both see bash only. A Python fixture table is invisible to them,
 # so EMPTYING it would leave this gate passing having asserted nothing. The arity floor below is
 # what closes that, exactly as check 8e's two floors do for its own tables.
+# `--locked` (Minor 5, fix round 3): a bare `uv run --project py` RE-LOCKS py/uv.lock as a side
+# effect of running the gate. CLAUDE.md already records py/uv.lock as one of the two sites that
+# drift SILENTLY, and a lint gate that rewrites a lockfile it is not asserting is exactly that
+# drift. `--locked` makes uv fail instead of writing. That failure is nonzero but not 2, which is
+# precisely the class check 10's `elif` arm now routes — before it, a stale lock would have made
+# this gate pass having asserted nothing.
 release_guard_py() {
-  uv run --project py python3 ci/actionlint/release_guard.py "$@"
+  uv run --locked --project py python3 ci/actionlint/release_guard.py "$@"
 }
 
 release_guard_self_test() {
@@ -4777,11 +4786,28 @@ done
 # UNLIKE every other `done < <(verdict)` call site in this file, the verdict here is an EXTERNAL
 # PROCESS whose fail-closed contract is a process exit, not an echoed token. Process substitution
 # discards that status (and `set -uo pipefail` above does not cover a redirection), so reading it
-# through `< <(...)` would let an exit 2 — unreadable file, unparseable YAML, missing uv — finish
-# the gate rc 0 having asserted nothing. That is the bug the comment on affected_graph_wiring_verdict
+# through `< <(...)` would let an exit 2 — an unreadable file or unparseable YAML — finish the gate
+# rc 0 having asserted nothing. That is the bug the comment on affected_graph_wiring_verdict
 # (~line 2050) records for the bash verdicts; it applies with more force here, since there is no
 # way to make an external process "echo and return" instead of exiting. Capture to a file, inspect
 # the status, THEN read.
+#
+# ROUTE EVERY STATUS, NOT JUST 2 (fix round 3, Critical 1). This block first shipped routing only
+# rc 2, and the earlier version of this very comment claimed a "missing uv" was among the cases it
+# covered. It was not, and the wording is now corrected: a missing `uv` makes the WRAPPER exit 127,
+# which is not the guard's own 2 and was therefore unrouted. MEASURED on this branch: with the
+# production call replaced by `( exit 127 )`, the full gate exited 0 — $RG_OUT empty, the read loop
+# below saw nothing, FAILED stayed 0. The `elif` arm closes that for 127 and for every other
+# unexpected status (a 137 kill, a `uv run` resolution failure). The rc-1-with-empty-output arm
+# below closes the remaining shape: rc 1 means "violations found", so producing none contradicts
+# the guard's contract and must not read as a clean run.
+#
+# What the full gate ALSO catches, and what it does not: `release_guard_self_test` above runs
+# `release_guard_py --fixture-count` under `|| infra`, so on the full-gate path a missing `uv`
+# already aborts there, before this block is reached. That does not make this routing redundant —
+# it is what covers a status that appears only at the production call (a transient, a kill, an
+# interpreter that resolves for one invocation and not the next), and it is what makes the claim
+# in ci/actionlint/README.md's row 10 true of this block rather than of a different check.
 # ---------------------------------------------------------------------------------------------
 RG_OUT="$(mktemp)" || infra "check 10: mktemp failed"
 release_guard_py .github/workflows/release.yml > "$RG_OUT"
@@ -4790,6 +4816,19 @@ if [ "$rg_rc" -eq 2 ]; then
   rm -f "$RG_OUT"
   infra "check 10: release_guard.py aborted (exit 2) — its stderr is above. The guard failed
       closed, as designed; the workflow could not be read or parsed."
+elif [ "$rg_rc" -ne 0 ] && [ "$rg_rc" -ne 1 ]; then
+  rm -f "$RG_OUT"
+  infra "check 10: release_guard.py exited $rg_rc, which is none of its three documented statuses
+      (0 clean, 1 violations, 2 infra). This file is 'set -uo pipefail' with NO -e, so an
+      unrouted status left \$RG_OUT empty, the read loop below saw nothing, and the gate finished
+      rc 0 having asserted nothing — MEASURED at rc 127. A missing 'uv' produces 127 from the
+      WRAPPER, not the guard's own 2, so routing 2 alone was not enough."
+fi
+if [ "$rg_rc" -eq 1 ] && [ ! -s "$RG_OUT" ]; then
+  rm -f "$RG_OUT"
+  infra "check 10: release_guard.py exited 1 (its 'violations found' status) but printed nothing.
+      That contradicts the guard's own contract, so the loop below would report zero findings for
+      a run that found some. Treat it as infra, never as a pass."
 fi
 while IFS= read -r v; do
   [ -n "$v" ] && fail "check 10: $v"
