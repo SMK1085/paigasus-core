@@ -7,7 +7,10 @@
 //! listener with no `AppState` behind it. This module is what it serves: `/healthz` 200,
 //! `/readyz` 503 `{"status":"migrating"}`, and — for every other path — a 503 carrying the house
 //! error envelope, `{"error":{"code":"service-migrating",…}}`, swapped atomically for the real
-//! routers once `AppState::new` returns.
+//! routers once `AppState::new` returns. gRPC's deferred fallback carries the SAME registered
+//! reason as `ErrorInfo` (via [`convert::iam_status`]) rather than a bare `UNAVAILABLE` — see
+//! [`deferred_grpc_fallback`] — so a client cannot see two different machine-readable pictures of
+//! the identical condition depending on which transport it used.
 //!
 //! **Why the two bodies differ.** The probes are not part of the API surface: they sit outside
 //! `CorrelationLayer` and the metrics layer, and `/readyz`'s three `status` values
@@ -33,11 +36,14 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
+use paigasus_observability::Retryable;
 use serde_json::json;
+use tonic::Code;
 use tonic_health::ServingStatus;
 use tonic_health::server::HealthReporter;
 use tower::{Layer, ServiceExt};
 
+use crate::adapters::grpc::convert;
 use crate::adapters::http::AppState;
 
 /// Returned by [`BootSlot::install`] when the slot was already filled. A wiring defect rather
@@ -181,9 +187,12 @@ async fn deferred_fallback(State(slot): State<BootSlot>, req: axum::extract::Req
     }
 }
 
-/// The registered reason this module's app-route 503 carries, and its static, caller-safe
-/// message. Kept next to the renderer rather than inline so the membership test below can assert
-/// the code against the canonical registry without restating the literal.
+/// The registered reason this module's deferred-phase failures carry, and its static,
+/// caller-safe message — shared by the HTTP app-route 503 ([`migrating_response`]) AND the gRPC
+/// fallback ([`deferred_grpc_fallback`]), so the two transports cannot drift onto different wire
+/// strings for the identical condition. Kept next to the renderer rather than inline so the
+/// membership test below can assert the code against the canonical registry without restating
+/// the literal.
 ///
 /// The code lives here as a literal, not as `ErrorReason::ServiceMigrating.as_wire_reason()`,
 /// for the same reason `http/json.rs` carries literals: this module is the ONLY thing serving
@@ -258,7 +267,21 @@ async fn deferred_grpc_fallback(State(slot): State<BootSlot>, req: axum::extract
         // HTTP 200 + `content-type: application/grpc` + `grpc-status: 14`, via
         // `Status::into_http` — a bare 503 is not a gRPC status and no client can interpret it.
         // Mirrors `grpc::authn::reject`.
-        None => tonic::Status::unavailable("migrating").into_http::<axum::body::Body>(),
+        //
+        // Built through `convert::iam_status` — the same single construction point every OTHER
+        // IAM gRPC error goes through (`grpc/convert.rs`'s module doc: "no site can forget the
+        // details") — carrying the SAME registered `MIGRATING` reason the HTTP fallback puts in
+        // its error envelope, so the two transports report one machine-readable picture of the
+        // same condition rather than an HTTP client getting a decodable code and a gRPC client
+        // getting nothing. `Code::Unavailable` is non-negotiable: `paigasus-gateway`'s readiness
+        // probe (`gateway/src/adapters/http/mod.rs:146-150`) classifies `Unavailable` as NOT
+        // ready and everything else — `Unimplemented` included — as ready, and `ErrorDetails`
+        // rides in a trailer/header that classification never inspects, so attaching it cannot
+        // change which arm the gateway takes.
+        None => {
+            let (reason, message) = MIGRATING;
+            convert::iam_status(Code::Unavailable, reason, message, Retryable::Yes, &[]).into_http::<axum::body::Body>()
+        }
         Some(serving) => {
             // `AuthEnforce` is a `Service<Request<tonic::body::Body>>` while axum hands us
             // `Request<axum::body::Body>` — two distinct body types. Mirrors

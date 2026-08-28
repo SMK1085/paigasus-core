@@ -318,10 +318,13 @@ Two consequences to handle rather than discover:
 **The fallback must emit a real gRPC status.** `Routes` has no `fallback_service`; the override goes
 through `axum_router_mut()`/`into_axum_router()` plus `From<axum::Router> for Routes`
 (`router.rs:106-136`), and it must *replace* `Routes::default()`'s existing `unimplemented`
-fallback. The response is `Status::unavailable("migrating").into_http()` — HTTP **200** with
-`content-type: application/grpc` and `grpc-status: 14` (`status.rs:607-615`; precedent at
-`grpc/authn.rs:199-201`) — **not** an HTTP 503, which no gRPC client can interpret and which would
-silently defeat D7.
+fallback. The response is `convert::iam_status(Code::Unavailable, reason, message,
+Retryable::Yes, &[]).into_http()` — the same single construction point every other IAM gRPC
+error goes through, carrying the registered `service-migrating` `ErrorInfo` reason (§7) — HTTP
+**200** with `content-type: application/grpc` and `grpc-status: 14` (`status.rs:607-615`;
+precedent at `grpc/authn.rs:199-201`) — **not** an HTTP 503, which no gRPC client can interpret
+and which would silently defeat D7. Attaching `ErrorDetails` does not change the classification:
+the gateway's readiness probe reads `status.code()` only (§4.2).
 
 **The health reporter is kept.** `health_service()` currently builds a `HealthReporter` and drops it
 (`grpc/mod.rs:60`), deferring dynamic readiness to M1. We retain it, set `NOT_SERVING` at bind, and
@@ -542,10 +545,14 @@ process exits 0 promptly rather than after `lock_wait_secs`.
 > `ci/error-registry/check.py`'s MANIFEST as an `emits` site with a membership test, and §4.1's
 > table and §6.1's case 1 above are updated. `/healthz` and `/readyz` are unchanged — their
 > `{"status":…}` bodies are AC 1, and they sit outside `CorrelationLayer` and the metrics layer,
-> so they are not part of the API surface the envelope governs. The gRPC half of the deferred
-> phase is also unchanged: it answers a bare `UNAVAILABLE` with no `ErrorInfo`, because the boot
-> router has no `AppState` and none of `grpc/convert.rs`'s detail-building machinery. Making the
-> two transports symmetric on this code is a follow-up, not this branch.
+> so they are not part of the API surface the envelope governs. **Update (post-review, same
+> branch):** the gRPC half of the deferred phase is NOT left asymmetric. `deferred_grpc_fallback`
+> builds its `UNAVAILABLE` status through `grpc/convert.rs`'s `iam_status` — the same single
+> construction point every other IAM gRPC error goes through — carrying the SAME registered
+> `ERROR_REASON_SERVICE_MIGRATING` as `ErrorInfo`, so a client sees one machine-readable picture
+> of the condition on either transport. `Code::Unavailable` is unchanged by this: the gateway's
+> readiness classification (§4.2) keys on `status.code()` alone, which `ErrorDetails` never
+> touches.
 
 * **No new metric family for deferred-phase 503s.** They are outside `http_metrics_layer` (§4.3) and
   therefore invisible in `/metrics`. A family costs `names.rs`, `describe_iam_metrics`,

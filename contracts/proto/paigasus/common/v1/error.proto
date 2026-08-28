@@ -175,10 +175,12 @@ enum ErrorReason {
   // exists — so it never travels through TenancyError or the authn funnel.
 
   // "service-migrating" — this replica has not finished its boot migration and
-  // is not yet serving. HTTP-only in the envelope sense: the gRPC half of the
-  // same deferred phase answers a bare `UNAVAILABLE` status with no ErrorInfo
-  // attached, because the boot router has no AppState and therefore none of
-  // the detail-building machinery `grpc/convert.rs` provides.
+  // is not yet serving. Both transports carry this code: HTTP puts it in the
+  // house error envelope on every /v1/* route, and gRPC attaches it as
+  // ErrorInfo on an UNAVAILABLE status (built through grpc/convert.rs's
+  // `iam_status`, the same construction point every other IAM gRPC error
+  // uses), so a client sees the identical machine-readable reason regardless
+  // of which transport it used.
   ERROR_REASON_SERVICE_MIGRATING = 39;
 
   // ---- Gateway (300-599) ---------------------------------------------------

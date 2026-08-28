@@ -92,6 +92,14 @@ async fn the_deferred_503_carries_correlation_headers_but_the_probes_do_not() {
 ///
 /// A bare HTTP 503 is equally wrong — no gRPC client can interpret it. So this asserts the wire
 /// shape, not a status code.
+///
+/// It also decodes `ErrorInfo` off the response and asserts BOTH `reason` and `domain` (CodeRabbit
+/// review, PR 167): `grpc/convert.rs`'s `iam_status` is documented as "the single construction
+/// point for every IAM gRPC error, so no site can forget the details", and this boot-time fallback
+/// used to build a bare `Status::unavailable("migrating")` — forgetting exactly that. A client
+/// must see the SAME registered reason on gRPC that it sees in the HTTP error envelope
+/// (`an_app_route_is_503_with_the_service_migrating_envelope_while_the_slot_is_empty`, above),
+/// not merely a status code.
 #[tokio::test]
 async fn the_grpc_fallback_is_a_wellformed_unavailable_not_unimplemented() {
     let (reporter, health) = paigasus_iam::adapters::grpc::health_service().await;
@@ -113,6 +121,18 @@ async fn the_grpc_fallback_is_a_wellformed_unavailable_not_unimplemented() {
         "must be UNAVAILABLE (14). UNIMPLEMENTED (12) is Routes::default()'s own fallback and the \
          gateway reads it as READY — see gateway/src/adapters/http/mod.rs:150"
     );
+
+    // Decode the `Status` back off the wire response — `into_http` puts `grpc-status-details-bin`
+    // directly in the headers (not trailers), so `Status::from_header_map` reads it straight off
+    // `resp.headers()`. This proves the wire shape round-trips, not just that the fallback CALLS
+    // `iam_status` — a client-side decoder is exactly what would choke on a malformed trailer.
+    let expected_reason = ErrorReason::ServiceMigrating.as_wire_reason().expect("not the Unspecified sentinel");
+    let status = tonic::Status::from_header_map(resp.headers()).expect("grpc-status-details-bin must decode into a Status");
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    let details = tonic_types::StatusExt::get_error_details(&status);
+    let info = details.error_info().expect("every IAM gRPC status carries ErrorInfo, boot fallback included");
+    assert_eq!(info.reason, expected_reason, "the gRPC fallback must carry the SAME reason the HTTP envelope does");
+    assert_eq!(info.domain, *paigasus_proto::error::IAM_DOMAIN);
 }
 
 /// Health must be ROUTED to the health service during the deferred phase, not swallowed by the
