@@ -495,7 +495,7 @@ SELF_TASK_GLOBS_EXEMPT = {
 #
 # PROPAGATION CONTRACT — these entries carry no `|| RC=1` suffix, and that is not the hole
 # RUN_SH_CALL_SITES' suffixes close. `run_self_tests` and `selftest_mutation_battery` report through
-# run.sh's global `FAILED`, as its nine self-tests already do (run.sh:43-46); NONE of the four
+# run.sh's global `FAILED`, as its ten self-tests already do (run.sh:43-46); NONE of the four
 # `done < <(...)` lines has anything to propagate — each is the tail of a `while` loop whose body
 # already calls `fail()` per verdict. The consequence is that a future `run_self_tests || FAILED=1` (or an
 # equally harmless reformat of any `done < <(...)` line) would red this check even though it is
