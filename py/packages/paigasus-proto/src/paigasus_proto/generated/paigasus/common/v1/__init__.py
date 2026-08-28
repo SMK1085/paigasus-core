@@ -404,6 +404,19 @@ class ErrorReason(betterproto2.Enum):
     this registry is a 409, and this is a 400.
     """
 
+    SERVICE_MIGRATING = 39
+    """
+    ---- IAM: lifecycle (1-299) ----------------------------------------------
+    SMA-571. Emitted by the boot-time deferred router, before any AppState
+    exists — so it never travels through TenancyError or the authn funnel.
+
+    "service-migrating" — this replica has not finished its boot migration and
+    is not yet serving. HTTP-only in the envelope sense: the gRPC half of the
+    same deferred phase answers a bare `UNAVAILABLE` status with no ErrorInfo
+    attached, because the boot router has no AppState and therefore none of
+    the detail-building machinery `grpc/convert.rs` provides.
+    """
+
     MISSING_AUTHORIZATION = 300
     """
     ---- Gateway (300-599) ---------------------------------------------------
@@ -549,6 +562,7 @@ class ErrorReason(betterproto2.Enum):
             36: "ERROR_REASON_INVALID_AUDIT_OUTCOME",
             37: "ERROR_REASON_MISSING_REQUIRED_FIELD",
             38: "ERROR_REASON_MUTUALLY_EXCLUSIVE_FIELDS",
+            39: "ERROR_REASON_SERVICE_MIGRATING",
             300: "ERROR_REASON_MISSING_AUTHORIZATION",
             301: "ERROR_REASON_INVALID_API_KEY",
             302: "ERROR_REASON_INSUFFICIENT_PERMISSIONS",
@@ -609,6 +623,7 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_INVALID_AUDIT_OUTCOME": 36,
             "ERROR_REASON_MISSING_REQUIRED_FIELD": 37,
             "ERROR_REASON_MUTUALLY_EXCLUSIVE_FIELDS": 38,
+            "ERROR_REASON_SERVICE_MIGRATING": 39,
             "ERROR_REASON_MISSING_AUTHORIZATION": 300,
             "ERROR_REASON_INVALID_API_KEY": 301,
             "ERROR_REASON_INSUFFICIENT_PERMISSIONS": 302,

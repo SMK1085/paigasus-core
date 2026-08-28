@@ -17,6 +17,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use paigasus_iam::adapters::boot::{BootSlot, Serving, boot_grpc_routes, boot_http_router};
 use paigasus_iam::adapters::persistence::entities::event_outbox;
+use paigasus_proto::paigasus::common::v1::ErrorReason;
 use paigasus_proto::paigasus::common::v1::GetServiceInfoRequest;
 use paigasus_proto::paigasus::common::v1::service_info_service_client::ServiceInfoServiceClient;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -128,6 +129,16 @@ async fn a_request_dispatched_before_install_completes_against_its_pre_swap_valu
         resp.status(),
         StatusCode::SERVICE_UNAVAILABLE,
         "a request dispatched before the install must finish as 503 migrating, never tear across the swap"
+    );
+    // The status alone cannot tell a pre-swap 503 apart from some OTHER 503 the post-swap router
+    // might produce, so the body is checked too — the registered `service-migrating` code is what
+    // identifies the deferred fallback specifically.
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    assert_eq!(
+        body["error"]["code"],
+        ErrorReason::ServiceMigrating.as_wire_reason().expect("not the Unspecified sentinel"),
+        "the pre-swap response must be the deferred fallback's own envelope, got {body}"
     );
 }
 

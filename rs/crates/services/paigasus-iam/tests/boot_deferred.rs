@@ -8,6 +8,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use paigasus_iam::adapters::boot::{BootSlot, boot_grpc_routes, boot_http_router};
+use paigasus_proto::paigasus::common::v1::ErrorReason;
 use tower::ServiceExt; // for `oneshot`
 
 async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -41,8 +42,15 @@ async fn readyz_is_503_migrating_while_the_slot_is_empty() {
 /// AC 2. The two wrong answers are called out by name because both are plausible bugs: a 404
 /// means the fallback was never attached, a 401 means the real router leaked through and the
 /// bearer layer answered — and a caller would read either as "this replica is up".
+///
+/// The body is the SMA-587 house envelope, not `/readyz`'s `{"status":…}`: `/v1/organizations`
+/// is part of the API surface, so its 503 must be decodable by the same client-side error
+/// decoder every other failure on that route uses. Asserted against
+/// `ErrorReason::ServiceMigrating`'s wire string rather than a restated literal, so a rename in
+/// `error.proto` reds here instead of leaving a stale spelling that still "passes".
 #[tokio::test]
-async fn an_app_route_is_503_migrating_while_the_slot_is_empty() {
+async fn an_app_route_is_503_with_the_service_migrating_envelope_while_the_slot_is_empty() {
+    let expected = ErrorReason::ServiceMigrating.as_wire_reason().expect("not the Unspecified sentinel");
     let app = empty_slot_router().await;
     let resp = app.oneshot(Request::builder().uri("/v1/organizations").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(
@@ -50,7 +58,10 @@ async fn an_app_route_is_503_migrating_while_the_slot_is_empty() {
         StatusCode::SERVICE_UNAVAILABLE,
         "an app route must 503 while migrating — NOT 404 (fallback missing) and NOT 401 (real router leaked)"
     );
-    assert_eq!(body_json(resp).await["status"], "migrating");
+    let body = body_json(resp).await;
+    assert_eq!(body["error"]["code"], expected, "the deferred 503 must carry the registered reason, got {body}");
+    assert!(body["error"]["message"].is_string(), "the envelope always carries a caller-safe message, got {body}");
+    assert!(body.get("status").is_none(), "the app-route body is the error envelope, not /readyz's status body: {body}");
 }
 
 /// SMA-504's cross-service contract: the deferred 503 is exactly the response a caller most wants

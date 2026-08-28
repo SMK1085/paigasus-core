@@ -138,7 +138,7 @@ mod tests {
     /// hand-maintained list. The scan bound (9999) must stay comfortably above the highest
     /// declared number (999, the top of the shared range — see error.proto) or a value added
     /// above the bound goes invisible to every test derived from `all_reasons`/`all_domains`,
-    /// including the `assert_eq!(actual.len(), 54)` anchor and the range-enforcement test.
+    /// including the `assert_eq!(actual.len(), 55)` anchor and the range-enforcement test.
     fn all_reasons() -> Vec<ErrorReason> {
         (0..=9999).filter_map(|i| ErrorReason::try_from(i).ok()).collect()
     }
@@ -194,6 +194,8 @@ mod tests {
         "invalid-audit-outcome",
         "missing-required-field",
         "mutually-exclusive-fields",
+        // IAM: lifecycle (SMA-571)
+        "service-migrating",
         // Gateway
         "missing-authorization",
         "invalid-api-key",
@@ -223,7 +225,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 54, "the registry should hold 54 reasons");
+        assert_eq!(actual.len(), 55, "the registry should hold 55 reasons");
     }
 
     #[test]
@@ -355,5 +357,15 @@ mod tests {
             assert_eq!(variant.as_wire_reason().as_deref(), Some(wire));
             assert_eq!(ErrorReason::from_wire_reason(wire), Some(variant));
         }
+    }
+
+    /// SMA-571: the boot-time deferred router's app-route 503 code. Asserted by wire string for
+    /// the same reason as the request-validation reasons above — `paigasus-iam`'s
+    /// `adapters/boot.rs` puts this exact literal on the wire, and a rename that silently changed
+    /// the kebab spelling would leave that literal resolving to nothing.
+    #[test]
+    fn the_service_migrating_reason_resolves_both_ways() {
+        assert_eq!(ErrorReason::ServiceMigrating.as_wire_reason().as_deref(), Some("service-migrating"));
+        assert_eq!(ErrorReason::from_wire_reason("service-migrating"), Some(ErrorReason::ServiceMigrating));
     }
 }

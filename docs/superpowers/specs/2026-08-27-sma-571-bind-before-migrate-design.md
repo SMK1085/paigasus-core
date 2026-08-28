@@ -199,6 +199,9 @@ Boot then proceeds in three phases:
 `/readyz`'s three bodies are what AC 1 asks for: `migrating` (schema not yet applied) is distinct
 from `unready` (the DB ping failed) is distinct from `ready`.
 
+Every OTHER HTTP path (i.e. every `/v1/*` app route) answers `503` in the house error envelope,
+`{"error":{"code":"service-migrating","message":…}}`, not a `status` body — see §7's first entry.
+
 ### 4.2 gRPC — why symmetry is a correctness requirement
 
 `paigasus-gateway`'s `/readyz` infers IAM reachability from a sentinel `IntrospectApiKey`
@@ -440,7 +443,8 @@ it is now a 503 on a live socket, not an invisible replica.
 * **§5 probe budgets (~lines 129-144).** Rewritten: a waiting replica has live sockets, `/healthz`
   answers 200 within a second of start, and `startupProbe` no longer has to be sized against
   `lock_wait_secs`.
-* **Gateway-facing note (~line 188).** A migrating IAM answers HTTP `503 {"status":"migrating"}` and
+* **Gateway-facing note (~line 188).** A migrating IAM answers HTTP `503` (app routes in the error
+  envelope, `{"error":{"code":"service-migrating",…}}`; `/readyz` with `{"status":"migrating"}`) and
   a well-formed gRPC `UNAVAILABLE` on live sockets rather than refusing; the gateway's existing
   classification already reports not-ready, so no gateway change is required. Add the client-side-LB
   caveat from §4.2.
@@ -464,8 +468,10 @@ the `reconcile_starter` concurrency question stays with SMA-513 unchanged.
 ### 6.1 Docker-free
 
 1. **Empty slot.** `/healthz` → 200; `/readyz` → 503 `{"status":"migrating"}`; an app path
-   (`/v1/organizations`) → 503 `{"status":"migrating"}` — asserting explicitly that it is *not* 404
-   (fallback missing) and *not* 401 (the real router leaked through).
+   (`/v1/organizations`) → 503 `{"error":{"code":"service-migrating",…}}` — asserting the code
+   against `ErrorReason::ServiceMigrating`'s wire string, that the body is *not* the probes'
+   `status` shape, and explicitly that the status is *not* 404 (fallback missing) and *not* 401
+   (the real router leaked through).
 2. **gRPC fallback shape.** HTTP **200** with `content-type: application/grpc` and `grpc-status: 14`
    — asserted on the headers, not on an HTTP status code. Comment names
    `gateway/adapters/http/mod.rs:150` as the consumer and states why `UNIMPLEMENTED` would be wrong,
@@ -524,6 +530,22 @@ leaving two engineers to build two different things; teardown kills the child on
 process exits 0 promptly rather than after `lock_wait_secs`.
 
 ## 7. Non-goals
+
+> **Superseded during implementation — the app-route body IS an error envelope with a new
+> registered code.** This spec was written before SMA-587 landed on `main` and made
+> `{"error":{"code","message"}}` with a registered reason the single error shape for every
+> `/v1/*` route. An earlier draft of this section reasoned that the deferred fallback needed no
+> new error code, which is no longer true: leaving it as `{"status":"migrating"}` would have made
+> the boot window the one case on those routes a client's normal error decoder could not read.
+> `ERROR_REASON_SERVICE_MIGRATING = 39` (wire `service-migrating`) was therefore appended to
+> `contracts/proto/paigasus/common/v1/error.proto`, `adapters/boot.rs` joined
+> `ci/error-registry/check.py`'s MANIFEST as an `emits` site with a membership test, and §4.1's
+> table and §6.1's case 1 above are updated. `/healthz` and `/readyz` are unchanged — their
+> `{"status":…}` bodies are AC 1, and they sit outside `CorrelationLayer` and the metrics layer,
+> so they are not part of the API surface the envelope governs. The gRPC half of the deferred
+> phase is also unchanged: it answers a bare `UNAVAILABLE` with no `ErrorInfo`, because the boot
+> router has no `AppState` and none of `grpc/convert.rs`'s detail-building machinery. Making the
+> two transports symmetric on this code is a follow-up, not this branch.
 
 * **No new metric family for deferred-phase 503s.** They are outside `http_metrics_layer` (§4.3) and
   therefore invisible in `/metrics`. A family costs `names.rs`, `describe_iam_metrics`,

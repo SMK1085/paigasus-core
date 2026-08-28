@@ -170,6 +170,17 @@ enum ErrorReason {
   // this registry is a 409, and this is a 400.
   ERROR_REASON_MUTUALLY_EXCLUSIVE_FIELDS = 38;
 
+  // ---- IAM: lifecycle (1-299) ----------------------------------------------
+  // SMA-571. Emitted by the boot-time deferred router, before any AppState
+  // exists — so it never travels through TenancyError or the authn funnel.
+
+  // "service-migrating" — this replica has not finished its boot migration and
+  // is not yet serving. HTTP-only in the envelope sense: the gRPC half of the
+  // same deferred phase answers a bare `UNAVAILABLE` status with no ErrorInfo
+  // attached, because the boot router has no AppState and therefore none of
+  // the detail-building machinery `grpc/convert.rs` provides.
+  ERROR_REASON_SERVICE_MIGRATING = 39;
+
   // ---- Gateway (300-599) ---------------------------------------------------
   // Emitted snake_case today; SMA-504 recases them. `type` is untouched and
   // keeps its OpenAI semantics.

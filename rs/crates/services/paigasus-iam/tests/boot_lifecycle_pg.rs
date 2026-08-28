@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use paigasus_iam::adapters::persistence::migration_lock::MIGRATION_LOCK_KEY;
+use paigasus_proto::paigasus::common::v1::ErrorReason;
 use paigasus_proto::paigasus::iam::v1::CreateOrganizationRequest;
 use paigasus_proto::paigasus::iam::v1::tenancy_service_client::TenancyServiceClient;
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, Statement};
@@ -165,7 +166,12 @@ fn spawn_iam(db_url: &str, http_port: u16, grpc_port: u16) -> Child {
 }
 
 /// AC 1 and AC 2: while the migration lock is held elsewhere, the replica is BOUND and visibly
-/// unready — not absent. Before SMA-571 both HTTP requests below would be connection-refused.
+/// unready — not absent. Before SMA-571 every HTTP request below would be connection-refused.
+///
+/// The three HTTP probes are deliberately not interchangeable: `/healthz` is 200, `/readyz` is
+/// 503 with its `{"status":"migrating"}` body (AC 1's distinguishability requirement), and an
+/// app route is 503 with the registered `service-migrating` error envelope (the SMA-587 contract
+/// every `/v1/*` error obeys).
 ///
 /// Also proves the D7 gRPC contract end to end: `HealthCheckResponse.status` is decoded (not
 /// merely "not UNAVAILABLE") on both sides of the transition, and a real, unauthenticated
@@ -207,6 +213,20 @@ async fn a_lock_blocked_replica_is_bound_and_reports_migrating() {
     let (status, body) = http_status(http_port, "/readyz").await.expect("readyz");
     assert_eq!(status, 503, "AC 1: /readyz is 503 while migrating");
     assert!(body.contains("migrating"), "AC 1: the body distinguishes migrating from a failed ping, got {body}");
+
+    // An APP route, through the real binary. `/readyz` above keeps its `{"status":…}` body — it
+    // is a probe, outside CorrelationLayer, and its three values ARE AC 1 — but `/v1/*` is the
+    // API surface, so its 503 must speak the SMA-587 envelope with a registered reason. Asserted
+    // end to end here (not only in the in-process suites) because the binary is what an operator
+    // and the gateway actually talk to.
+    let (status, body) = http_status(http_port, "/v1/organizations").await.expect("app route while migrating");
+    assert_eq!(status, 503, "AC 2: an app route is 503 while migrating — not 404 and not 401");
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_else(|e| panic!("the app-route 503 must be JSON ({e}), got {body}"));
+    assert_eq!(
+        parsed["error"]["code"],
+        ErrorReason::ServiceMigrating.as_wire_reason().expect("not the Unspecified sentinel"),
+        "the app-route 503 must carry the registered reason, got {body}"
+    );
 
     // One channel, reused across the whole migrate -> ready transition below — the same
     // connection experiencing both halves, mirroring the manual run in the task-4 report.

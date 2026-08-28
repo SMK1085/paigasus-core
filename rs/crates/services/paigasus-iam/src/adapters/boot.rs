@@ -5,8 +5,15 @@
 //! `paigasus-iam` binds its sockets BEFORE it migrates, so for the whole migration window — and,
 //! since SMA-559, for a lock-race loser's `migration.lock_wait_secs` wait — there is a live
 //! listener with no `AppState` behind it. This module is what it serves: `/healthz` 200,
-//! `/readyz` 503 `migrating`, and 503 `migrating` for every other path, swapped atomically for
-//! the real routers once `AppState::new` returns.
+//! `/readyz` 503 `{"status":"migrating"}`, and — for every other path — a 503 carrying the house
+//! error envelope, `{"error":{"code":"service-migrating",…}}`, swapped atomically for the real
+//! routers once `AppState::new` returns.
+//!
+//! **Why the two bodies differ.** The probes are not part of the API surface: they sit outside
+//! `CorrelationLayer` and the metrics layer, and `/readyz`'s three `status` values
+//! (`migrating`/`unready`/`ready`) ARE SMA-571 AC 1's "a body distinguishing migrating from a
+//! failed database ping". Everything else is a `/v1/*` route, where SMA-587 made the registered
+//! error envelope the single shape every error takes — so the deferred 503 must speak it too.
 //!
 //! **Why one struct.** [`Serving`] carries the HTTP router, the gRPC routes AND the `AppState`
 //! they were derived from, behind a single constructor. There is therefore no API that installs
@@ -174,11 +181,41 @@ async fn deferred_fallback(State(slot): State<BootSlot>, req: axum::extract::Req
     }
 }
 
-/// The bare empty-slot 503 body as a `tower::Service` fn, so [`deferred_fallback`]'s `None` arm
-/// can run it through exactly one `CorrelationLayer` application via `oneshot` — see that
-/// function's doc.
+/// The registered reason this module's app-route 503 carries, and its static, caller-safe
+/// message. Kept next to the renderer rather than inline so the membership test below can assert
+/// the code against the canonical registry without restating the literal.
+///
+/// The code lives here as a literal, not as `ErrorReason::ServiceMigrating.as_wire_reason()`,
+/// for the same reason `http/json.rs` carries literals: this module is the ONLY thing serving
+/// during the deferred phase, so the response must be renderable with no fallible step in it.
+/// `as_wire_reason` returns `Option`, and the only honest handling of a `None` here would be a
+/// panic inside the one router that is supposed to survive a broken boot. The membership test is
+/// what keeps the literal honest, and `repo:error-code-single-site` is what keeps the membership
+/// test from being deleted.
+const MIGRATING: (&str, &str) = ("service-migrating", "this replica is still applying its boot migration");
+
+/// The empty-slot 503 body as a `tower::Service` fn, so [`deferred_fallback`]'s `None` arm can
+/// run it through exactly one `CorrelationLayer` application via `oneshot` — see that function's
+/// doc.
+///
+/// **Why the error envelope and not `{"status":"migrating"}`** (SMA-587 follow-up). This answers
+/// every `/v1/*` path, so it is part of the API surface, and SMA-587 made
+/// `{"error":{"code","message"}}` with a REGISTERED reason the one shape every error on those
+/// routes takes. A bespoke `status` body here would be the only response on `/v1/organizations` a
+/// client could not parse with its normal error decoder — and the deferred phase is precisely
+/// when a client most needs to read the code and decide to retry.
+///
+/// The probes are deliberately NOT changed with it: `/healthz` and `/readyz` sit outside
+/// `CorrelationLayer` and the metrics layer, are not part of the API surface, and `/readyz`'s
+/// `migrating` vs `unready` vs `ready` bodies ARE SMA-571 AC 1. See [`readyz`].
+///
+/// No `paigasus-retryable` header is stamped here on purpose: `CorrelationLayer` fills one in
+/// for any error response that lacks it (`correlation.rs`'s `Retryable::from_status`), and a 503
+/// maps to `"true"` — which is exactly right and is pinned by `tests/boot_deferred.rs`. Stamping
+/// it here would only move the decision without changing it.
 async fn migrating_response(_req: axum::extract::Request) -> Result<axum::response::Response, std::convert::Infallible> {
-    Ok((StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({ "status": "migrating" }))).into_response())
+    let (code, message) = MIGRATING;
+    Ok((StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({ "error": { "code": code, "message": message } }))).into_response())
 }
 
 /// The gRPC routes bound BEFORE the migration: the health service (reporting whatever
@@ -229,5 +266,54 @@ async fn deferred_grpc_fallback(State(slot): State<BootSlot>, req: axum::extract
             let req = req.map(tonic::body::Body::new);
             serving.grpc.clone().oneshot(req).await.expect("AuthEnforce is Infallible").map(axum::body::Body::new)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `repo:error-code-single-site`'s required membership test for this file: every code this
+    /// module can put on the wire must be declared in
+    /// `contracts/proto/paigasus/common/v1/error.proto`, so a typo in [`MIGRATING`] fails here
+    /// rather than shipping a code no consumer can resolve.
+    ///
+    /// Driven off the constant rather than a restated literal — the SMA-507 E3 lesson that
+    /// `http/json.rs` records: a hand-copied list lets an edit escape both this test and the
+    /// gate. There is exactly one code here, so no iterator is needed, but the assertion still
+    /// reads the same value the renderer does.
+    #[test]
+    fn the_deferred_fallback_code_is_in_the_registry() {
+        use paigasus_proto::paigasus::common::v1::ErrorReason;
+
+        let (code, _message) = MIGRATING;
+        assert_eq!(
+            ErrorReason::from_wire_reason(code),
+            Some(ErrorReason::ServiceMigrating),
+            "{code} is not declared in common/v1/error.proto"
+        );
+    }
+
+    /// The renderer itself, so the envelope SHAPE is pinned in the crate that owns it rather
+    /// than only in the integration suites. `/readyz`'s `{"status":…}` body is deliberately NOT
+    /// this shape — see [`readyz`] and SMA-571 AC 1 — so an edit that "unified" the two would
+    /// have to delete an assertion here to pass.
+    #[tokio::test]
+    async fn the_app_route_fallback_renders_the_house_error_envelope() {
+        let req = axum::extract::Request::builder().uri("/v1/organizations").body(axum::body::Body::empty()).unwrap();
+        let resp = migrating_response(req).await.expect("Infallible");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let (code, message) = MIGRATING;
+        assert_eq!(body["error"]["code"], code);
+        assert_eq!(body["error"]["message"], message);
+        let keys: std::collections::BTreeSet<&str> = body["error"].as_object().expect("an object").keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["code", "message"].into_iter().collect::<std::collections::BTreeSet<_>>(),
+            "the error object's key set must match every other IAM error body"
+        );
     }
 }

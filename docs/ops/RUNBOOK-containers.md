@@ -148,6 +148,15 @@ build itself — they bite the first operator who deploys without reading this s
   yet applied, `unready` means the schema is there but the database ping failed, `ready` means
   serving. Alert on sustained `migrating`, page on `unready`.
 
+  **App routes answer differently from the probes, deliberately.** While a replica is migrating,
+  every non-probe path — every `/v1/*` route — returns `503` with the service's standard error
+  envelope, `{"error":{"code":"service-migrating","message":…}}`, plus `paigasus-retryable: true`
+  and the usual correlation headers. That is the same shape every other error on those routes
+  takes (SMA-587), so a client can branch on `error.code` without special-casing the boot window;
+  `service-migrating` is a registered reason in `contracts/proto/paigasus/common/v1/error.proto`.
+  The probes keep their `{"status":…}` bodies because they are not part of the API surface and
+  because `/readyz`'s three values are the distinction above. Do not "unify" the two.
+
   **Chart defaults (handoff to SMA-513).** `strategy.rollingUpdate.maxSurge` need no longer be
   pinned to `0`, subject to the two exceptions above. `startupProbe` no longer needs sizing
   against `IAM_MIGRATION__LOCK_WAIT_SECS` (SMA-571 removed the `start-period` coupling entirely —
@@ -198,7 +207,10 @@ build itself — they bite the first operator who deploys without reading this s
   **outside** its equivalent layers, so this asymmetry between the two services is real, not an
   oversight to normalize away.
 - **A migrating IAM now answers on a live socket rather than refusing the connection** (SMA-571).
-  HTTP returns `503 {"status":"migrating"}`; gRPC returns a well-formed `UNAVAILABLE` (HTTP 200 with
+  HTTP app routes return `503 {"error":{"code":"service-migrating",…}}` — the standard error
+  envelope, so an existing client decoder handles it unchanged — while `/readyz` returns
+  `503 {"status":"migrating"}` (see the probe budgets above for why the two differ); gRPC returns a
+  well-formed `UNAVAILABLE` (HTTP 200 with
   `grpc-status: 14`), and gRPC health reports `NOT_SERVING`. The gateway needs no change: its
   readiness classification already treats `Unavailable` as not-ready, and its channel is built with
   `connect_lazy`, so a dead IAM has always surfaced as `Rpc(Status::Unavailable)` rather than a
