@@ -1,31 +1,37 @@
 # SMA-593 — Parse the workflow YAML, and lift the credential guard into its own gate
 
-**Status:** Revision 2. Revision 1 was challenged and returned NEEDS REWORK. This revision
-folds in every justified finding and three decisions taken at gate 1.
+**Status:** Revision 3. Revisions 1 and 2 were each challenged and each returned NEEDS
+REWORK. This revision folds in every justified finding from both reviews.
 **Date:** 2026-08-28
 **Linear:** [SMA-593](https://linear.app/smaschek/issue/SMA-593/ci-repopublish-metadatas-p-d6-credential-guard-misses-five-ordinary)
-— follow-up from [SMA-578](https://linear.app/smaschek/issue/SMA-578)'s whole-branch review.
 **Branch:** `feature/sma-593-close-p-d6-credential-spelling-gaps`
-**Targets:** `main` (currently `82fe78e`, after SMA-560 landed).
+**Targets:** `main` (currently `82fe78e`).
 **References:** SMA-407 §7 review M2 (the rule); SMA-578 (which added P-D6); SMA-542
-(guard-the-guard); SMA-529/SMA-530 (negative controls); SMA-541 (the `T` array and the
-CLAUDE.md marker command); SMA-553/SMA-572/SMA-576 (gate bookkeeping); SMA-579.
+(guard-the-guard); SMA-529/SMA-530 (negative controls); SMA-541 (the `T` array and its
+marker-delimited twin); SMA-553/SMA-572/SMA-576 (gate bookkeeping); SMA-579.
+
+**Related gate, not redundant with this one.** SMA-579 adds a release guard whose V6 rule
+asserts that a workflow reachable by `uses: ./.github/workflows/*.yml` may carry a
+registry-reaching job only if its `on:` block is `workflow_call` and nothing else. That is a
+**reachability** rule; this gate's is a **trigger** rule. They share no predicate. Both will
+red on `wheels.yml` if it ever gains a publish step, for different and complementary reasons.
+Neither should be deleted as redundant to the other.
 
 ---
 
 ## 1. The rule
 
 `.github/workflows/wheels.yml` carries a `pull_request` trigger. Same-repo pull requests
-receive repository secrets. A registry credential in that workflow is therefore readable by
-any code the pull request introduces. SMA-407 §7 review M2 forbids it.
+receive repository secrets, so a registry credential there is readable by any code the pull
+request introduces. SMA-407 §7 review M2 forbids it.
 
 `assert_wheels_has_no_credentials` in `ci/publish-metadata/run.sh` is the current assertion.
 It strips YAML comments with a hand-written scanner, then applies three regular expressions.
 
 ## 2. The measurement
 
-Every claim comes from driving the real `strip_comments` and `PATTERNS` code. `rc 0` means
-the checker accepted the input, so the workflow leaks and the gate stays silent.
+Every claim comes from driving the real `strip_comments` and `PATTERNS` code
+(`ci/publish-metadata/run.sh:1070-1074`). `rc 0` means the checker accepted the input.
 
 **The five spellings the issue reports. All five confirmed.**
 
@@ -51,16 +57,19 @@ the checker accepted the input, so the workflow leaks and the gate stays silent.
 | 13 | `permissions: write-all` (job level) | 0 | implicit grant |
 | 14 | `x: &w write` … `id-token: *w` | 0 | YAML alias |
 
-Rows 12 and 13 matter most. `write-all` grants every scope, `id-token` included. It is what
-a person writes to make a step work. Row 14 matters differently: the banned value never
-stands next to its key, so no regular expression over raw text reaches it cleanly.
+Rows 12 and 13 matter most: `write-all` grants every scope, `id-token` included, and it is
+what a person writes to make a step work.
+
+**Row 14 is a real hazard, not a theoretical one.** GitHub added YAML anchor and alias
+support on 2025-09-18, so a workflow using the alias form runs. The banned value never
+stands next to its key, so no regular expression over raw text reaches it cleanly. This is
+the single strongest argument for parsing.
 
 **One result that is not a hazard.** `ID-TOKEN: WRITE` also returns rc 0. Actions reads
 workflow schema keys case-sensitively, so that workflow grants nothing. The count of real
 gaps is 14, not 15.
 
-**The already-caught set.** Revision 1 stated this three different ways. Driving the old code
-gives one answer, and it is six inputs, not four:
+**The already-caught set.** Six inputs, verified against the old code:
 
 | Input | Old rc | Note |
 |---|---|---|
@@ -69,55 +78,91 @@ gives one answer, and it is six inputs, not four:
 | `"${{ secrets.X }}"` (quoted value) | 1 | |
 | `permissions: {id-token: write}` | 1 | |
 | `workflow_call` `secrets:` declaration | 1 | |
-| YAML merge key (`<<: *p`) | 1 | **caught by accident** |
+| YAML merge key (`<<: *p`) | 1 | **cannot occur** |
 
-The merge-key row is caught only because the anchor block `x: &p` / `id-token: write`
-appears literally in the text, so the pattern matches the anchor **definition**, not the
-merged result. It is recorded as accidental so a later refactor cannot lose it silently.
-Its near relative, the alias form (row 14), is genuinely uncaught.
+The merge-key row needs care. GitHub's anchor support deliberately **excludes merge keys**,
+because they are not in the YAML 1.2 spec, so a workflow using `<<:` does not run. The old
+code caught it only incidentally — the anchor block's text appears literally, so the pattern
+matched the **definition**, not the merged result. Revision 2 called this "caught by
+accident" and counted it as coverage. That overclaims. It is coverage of an input Actions
+rejects. PyYAML resolves merge keys even though Actions will not, so the new gate red on it
+is harmless over-coverage, and §8 labels its row that way rather than as a closed hole.
 
 **What a parser sees.** Rows 2, 3, 6, 7, 14 and the merge-key form all parse to the identical
-mapping `{'id-token': 'write'}`. One structural test replaces the whole column.
+mapping `{'id-token': 'write'}`.
 
 ## 3. Decisions
 
-Revision 1 proposed extending P-D6 in place. The adversarial review rejected three parts of
-that. Three decisions were taken.
+**Decision A — parse the YAML, with PyYAML from a dedicated one-dependency uv project.**
+`ci/workflow-credentials/pyproject.toml` declares `pyyaml>=6.0.3,<7` as its only dependency
+and carries its own `uv.lock`. Invocation is
+`uv run --project ci/workflow-credentials --python '>=3.12'`.
 
-**Decision A — parse the YAML, and obtain PyYAML from the `py/` workspace.** Add
-`"pyyaml>=6,<7"` to `py/pyproject.toml`'s `[dependency-groups] dev`, and invoke
-`uv run --project py python3`.
+Two earlier routes are withdrawn, each for a measured reason.
 
-Revision 1 proposed `uv run --no-project --with 'pyyaml==6.0.3'`. That is withdrawn. The
-CI uv cache key is `uv-${{ runner.os }}-${{ hashFiles('py/uv.lock') }}`
-(`.github/workflows/ci.yml:167`). PyYAML would not be in `py/uv.lock`, so the key would never
-change, the restore would be an exact primary-key hit, and `actions/cache` skips its save on
-an exact hit. PyYAML would be re-fetched from PyPI on **every CI run, indefinitely**. Putting
-the dependency in `py/uv.lock` changes that key when it lands, so the cache saves. It also
-puts the pin in a lockfile, where Dependabot sees it and `repo:osv` already scans it.
+*Revision 1 proposed `uv run --no-project --with 'pyyaml==6.0.3'`.* The CI uv cache key is
+`uv-${{ runner.os }}-${{ hashFiles('py/uv.lock') }}` (`.github/workflows/ci.yml:167`). A
+`--with` dependency never changes `py/uv.lock`, so the restore is an exact primary-key hit and
+`actions/cache` skips its save. PyYAML would be re-fetched from PyPI on every CI run,
+indefinitely, on a required check. The pin would also sit in no lockfile, invisible to
+Dependabot and to `repo:osv`.
 
-**Decision B — pin the discovered subject set by strict equality.** Revision 1 proposed only
-a non-empty assertion. `ci/publish-metadata/run.sh` already holds two runtime-discovered sets
-behind exact-equality expected lists (`EXPECTED_PUBLISHABLE`, `EXPECTED_PYPI_PUBLISHABLE`),
-and Check P0's comment states the reason: a stale list silently **shrinks** the gate rather
-than reporting red. A bare non-empty assertion does not survive an unbounded allowlist —
-four entries with plausible reasons take the subject set from five to one and stay green.
+*Revision 2 proposed adding PyYAML to `py/pyproject.toml`'s dev group and using
+`uv run --project py`.* That is worse, and it contradicts Decision C. `py/` is a
+`[tool.uv.workspace]` virtual root; its member `py/packages/paigasus-kernel` declares
+`dependencies = ["paigasus-py-bindings==0.1.0"]` with a `[tool.uv.sources]` path into
+`rs/crates/bindings/paigasus-py-bindings`, whose `build-backend` is **maturin**. Syncing that
+workspace compiles a PyO3 cdylib. `ci.yml` has no `uv sync` step and never caches `py/.venv`,
+so the cost would land on every run — of a gate whose inputs are `.github/workflows/*.y*ml`,
+which is precisely the PR shape Decision C exists to keep cheap. It would also make a YAML
+parser depend on a working Rust toolchain.
 
-**Decision C — lift the check into its own gate, `repo:workflow-credentials`.** Revision 1
-widened `repo:publish-metadata`'s inputs to every workflow. `repo:publish-metadata` runs
-`cargo publish --dry-run` per publish group plus a crates.io category check, and `ci.yml` is
-the most-edited workflow in the repo, so every `ci.yml` edit would have paid that cost on a
-required check. The credential check moves out instead, with narrow inputs. P-D6 leaves
-`repo:publish-metadata` entirely.
+The dedicated project has neither problem, and it keeps both benefits: the pin is in a
+lockfile that Dependabot reads and `repo:osv` scans, and the gate's own lockfile is its cache
+key. **Measured on this host:** the lock resolves to 2 packages; cold, with no virtualenv,
+`uv run` takes **0.959 s** (venv creation plus a 3 ms install); warm it takes **0.073 s**. No
+cargo and no maturin are invoked.
+
+**Decision B — pin the discovered subject set by strict equality.**
+`ci/publish-metadata/run.sh` already holds two runtime-discovered sets behind exact-equality
+lists (`EXPECTED_PUBLISHABLE`, `EXPECTED_PYPI_PUBLISHABLE`), and Check P0's comment
+(`:55-62`) states the reason: a stale list silently **shrinks** the gate rather than
+reporting red. A bare non-empty assertion does not survive an unbounded allowlist.
+
+**Decision C — lift the check into its own gate, `repo:workflow-credentials`.**
+`repo:publish-metadata` runs `cargo publish --dry-run` per publish group plus a crates.io
+category check. `ci.yml` is the most-edited workflow in the repo, so widening that gate's
+inputs to every workflow would have made each such PR pay that cost on a required check.
+P-D6 leaves `repo:publish-metadata` entirely.
 
 ## 4. The checker
 
-The checker parses each workflow with `yaml.safe_load_all` and walks every document. It takes
-the repository root as `argv[1]`. It must not rely on the current directory: `run.sh` computes
-`REPO_ROOT` from `BASH_SOURCE` and works relative to it, and a directory-relative glob would
-find zero files and report a false rc 2.
+The checker takes the repository root as `argv[1]`. It must not rely on the current
+directory: `run.sh` computes `REPO_ROOT` from `BASH_SOURCE` (`:93`) and works relative to it,
+so a directory-relative glob would find zero files and report a false infrastructure failure.
 
-Four rules apply to the parsed tree.
+### 4.1 Parsing
+
+Documents are read with `yaml.safe_load_all` under a loader that **rejects duplicate mapping
+keys**. This is not optional. PyYAML's default is last-wins, which is a regression against
+the code being replaced:
+
+```yaml
+permissions: {id-token: write}    # silently discarded
+permissions: {contents: read}
+```
+
+Measured: `safe_load` returns `{'permissions': {'contents': 'read'}}`, so R2 and R3 never see
+the dangerous block, while the old regex matched it. A duplicate-key-rejecting loader was
+measured to reject the same input cleanly. A duplicate key is rc 1 with a named message.
+
+A document that is not a mapping is rc 1 with a named message: an empty `.yml` parses to
+`None` and a top-level sequence parses to a `list`, and `doc.get` on either raises
+`AttributeError`, which Python reports as exit 1 — a lie about which thing broke. A
+`yaml.YAMLError` on a malformed workflow is rc 1: the repo is wrong, and `repo:actionlint`
+owns YAML validity independently.
+
+### 4.2 The four rules
 
 | Rule | Condition | Closes |
 |---|---|---|
@@ -127,45 +172,49 @@ Four rules apply to the parsed tree.
 | R4 | an Actions expression references the `secrets` context | rows 4, 5, 9, 10, 11 |
 
 R2 and R3 compare the parsed value after `str(value).strip().lower()`. Actions rejects a
-case-varied value, so a lowercase comparison only ever adds a conservative red.
+case-varied value, so the lowercase comparison only ever adds a conservative red.
 
-### 4.1 R4 must extract the expression span first
+The walk visits mapping keys, mapping values and sequence items. R4 applies to every scalar
+**string**, wherever it sits, including a key.
 
-Revision 1 specified R4 as the single pattern
-`\$\{\{[^}]*\bsecrets\s*(?:\.|\[)` with `re.IGNORECASE`. **That is withdrawn. It was
-measured to miss two ordinary expressions that read real secrets:**
+### 4.3 R4 must extract the span, strip literals, then match tightly
 
-| Expression | Revision 1 R4 | Why it escapes |
+Revision 1's pattern `\$\{\{[^}]*\bsecrets\s*(?:\.|\[)` was measured to miss two ordinary
+expressions that read real secrets: `${{ format('{0}', secrets.X) }}`, where the `}` inside
+`{0}` stops the character class, and `${{ toJSON(secrets) }}`, the canonical dump-every-secret
+expression, where `secrets` is followed by `)`.
+
+Revision 2 replaced it with span extraction plus a bare `\bsecrets\b`. **That is also
+withdrawn.** Measured false positives on ordinary strings:
+
+| Input | rev 2 bare | with literals stripped and a tight boundary |
 |---|---|---|
-| `${{ format('{0}', secrets.PYPI_API_TOKEN) }}` | **miss** | the `}` inside `{0}` stops `[^}]*` before it reaches `secrets` |
-| `${{ toJSON(secrets) }}` | **miss** | `secrets` is followed by `)`, not `.` or `[` |
+| `${{ inputs.secrets-file }}` | **false positive** | pass |
+| `${{ steps.x.outputs.secrets }}` | **false positive** | pass |
+| `${{ hashFiles('secrets.txt') }}` | **false positive** | pass |
 
-`toJSON(secrets)` is the canonical expression for dumping every secret at once, so missing it
-is not an edge case. Revision 1 argued the whole redesign on the grounds that a pattern table
-"makes the check look complete while it stays incomplete", and then reproduced that failure
-inside the parser design.
+R4 therefore: extracts each `${{ … }}` span with `\$\{\{(.*?)\}\}` under `re.S`; removes
+single- and double-quoted string literals from the span; then searches what remains for
+`(?<![\w.-])secrets(?![\w-])` with `re.IGNORECASE`. Stripping literals is what defeats
+`hashFiles('secrets.txt')`, and it does not weaken `secrets['X']`, because the context name
+sits outside the literal. `re.IGNORECASE` is correct here and only here: Actions expression
+context names are case-insensitive, while workflow schema keys are not.
 
-R4 therefore extracts each `${{ … }}` span with `\$\{\{(.*?)\}\}` under `re.S`, then searches
-the span for `\bsecrets\b` with `re.IGNORECASE` and **no requirement on the following
-character**. Measured: this catches all four inputs above, including both that escaped.
+**No `secrets.GITHUB_TOKEN` exemption.** Revision 2 proposed one. It is dropped for two
+measured reasons. First, `secrets.GITHUB_TOKEN` appears **nowhere** in this repo's six
+workflows — the idiom is `${{ github.token }}` (`.github/workflows/ci.yml:58`) — so the
+exemption would suppress zero occurrences and was justified by assertion, not measurement.
+Second, it would be unsafe: a `pull_request_target` workflow that checks out
+`github.event.pull_request.head.sha` and holds a write-capable token is the textbook
+pwn-request, and §5 deliberately brings that trigger into scope as "strictly more dangerous".
+An exemption by name would apply there uniformly. If R4 ever fires legitimately, the answer
+is a scoped allowlist entry (§5.2), not a blanket rule.
 
-### 4.2 R4 exempts `secrets.GITHUB_TOKEN` by name
+**R1's red means "a human must look".** Revision 2 justified R1 with "such an input does pass
+a secret". That is false for a `with: secrets:` input sourced from `github.token` or from a
+file. R1 keeps the conservative red; the stated reason is corrected.
 
-`${{ secrets.GITHUB_TOKEN }}` is the workflow's own permission-scoped token, not a repository
-secret. It is the most common expression in Actions, and most action READMEs show that
-spelling rather than `${{ github.token }}`. Reding it would be a false positive on a standard,
-safe construct, and a first false positive is how a gate gets allowlisted into irrelevance.
-The exemption is by name, with a stated reason: the token's power is bounded by
-`permissions:`, which `repo:actionlint` already governs.
-
-R1 carries the matching correction. Revision 1's Risk 1 justified a red on any `secrets` key
-with "such an input does pass a secret". That is **false** for `docker/build-push-action`'s
-documented `with: secrets:` input when it is sourced from `github.token` or from a file.
-`images.yml` is `pull_request`-triggered and builds images, so the construct is plausible
-here. R1 keeps the conservative red, but the reason is corrected: the red means "a human
-must look", not "this is a leak".
-
-### 4.3 Comment handling disappears
+### 4.4 Comment handling disappears
 
 PyYAML never returns a comment, so `strip_comments` and its whole defect class leave the
 codebase. Row 1 closes because the escape bug no longer exists, not because the escape rule
@@ -174,199 +223,236 @@ as an ordinary scalar value, so R4 covers `run:` bodies with no special case.
 
 ## 5. Discovery
 
+### 5.1 The glob and the traps
+
 The checker globs `.github/workflows/*.y*ml`. **Both extensions must be covered.** Actions
-accepts `.yaml` equally, and `ci/actionlint/run.sh` already iterates both. Globbing `*.yml`
-alone is a complete bypass that needs no allowlist and no malice: renaming four workflows to
-`.yaml`, or adding one new `publish.yaml` from a template, leaves the remaining `.yml` file
-as the only subject while every registry stays satisfied.
+accepts `.yaml`, and `ci/actionlint/run.sh` already iterates both. Globbing `*.yml` alone is a
+complete bypass needing no allowlist and no malice: renaming workflows to `.yaml`, or adding
+one `publish.yaml` from a template, leaves the rest unguarded with every registry satisfied.
+
+The same string is evaluated by three different matchers — Python `glob` in the checker,
+Moon's wax for scheduling, and git pathspec in `task_inputs.py`'s liveness check. They agree
+on this pattern; the implementation must confirm rather than assume, and `moon.yml`'s comment
+must say the checker's glob and the input glob are deliberately identical.
 
 A workflow is a subject when its triggers include `pull_request` or `pull_request_target`.
-`pull_request_target` is included because it is strictly more dangerous: it runs with the base
-repository's secrets.
+`pull_request_target` is included because it runs with the base repository's secrets.
 
-Two traps must be handled explicitly.
+Trigger parsing has two traps and one edge:
 
 - **The YAML 1.1 boolean trap.** PyYAML parses the `on:` key as the boolean `True`, so
-  `doc.get("on")` returns `None`. The checker reads both the `"on"` key and the `True` key.
-  Measured on `release.yml`: its top-level keys are `['name', True, 'concurrency',
-  'permissions', 'jobs']`, `'on' in d` is `False`, and `True in d` is `True`.
-- **Three trigger shapes.** `on:` appears as a string, as a list, and as a mapping. All three
-  normalise to a set.
+  `doc.get("on")` returns `None`. Read both `"on"` and `True`. Measured on `release.yml`: its
+  top-level keys are `['name', True, 'concurrency', 'permissions', 'jobs']`, `'on' in d` is
+  `False`, `True in d` is `True`.
+- **Three shapes.** `on:` appears as a string, a list, or a mapping; all normalise to a set.
+- **A bare `on:`** parses to `None`. That is an empty trigger set, so the workflow is not a
+  subject.
 
-### 5.1 The subject set is pinned by strict equality
+### 5.2 The subject set, the allowlist, and their order
 
 `EXPECTED_PR_SUBJECTS` names the five subjects: `ci.yml`, `images.yml`, `prebuild.yml`,
-`security-scan.yml`, `wheels.yml`. Discovery that disagrees is rc 1, and the failure message
-says to re-baseline deliberately. A new pull-request-triggered workflow reds until someone
-adds it. That is the same ergonomics the repo already accepts for a new publishable crate.
+`security-scan.yml`, `wheels.yml`.
 
-The non-vacuity count runs **before** the allowlist is applied. Revision 1 left this
-ambiguous, and the two readings are different code: counting after the allowlist would let
-"allowlist everything" pass. An allowlisted subject is still **reported on stdout**, so a
-suppressed subject is visible rather than silent.
+Discovery is compared to `EXPECTED_PR_SUBJECTS` **before any allowlist is applied**. The
+allowlist suppresses **rule verdicts only, never membership**. Revision 2 left this ambiguous
+and added a separate non-vacuity count; that count is dropped, because strict equality
+against five names already implies non-vacuity.
 
-`PR_CREDENTIAL_ALLOWED` maps a filename to a stated reason. It is empty when this lands.
+`PR_CREDENTIAL_ALLOWED` is keyed by **`(filename, rule)`**, not by filename. Revision 2's
+file-level key was an all-or-nothing kill switch: the entry permitting a
+`docker/build-push-action` build-arg under R1 would equally permit `id-token: write` and
+`${{ secrets.PYPI_API_TOKEN }}` in the same file, silently and forever. Each entry states
+what a human verified. The table is empty when this lands, and an allowlisted subject is
+still reported on stdout.
 
-## 6. Exit codes and the dependency preflight
+A stale allowlist entry — one naming a file that does not exist — is **rc 1**. It is an
+authorial mistake, and `ci_targets.py:28-36` states the repo's rule: an authorial mistake is
+rc 1, never rc 2, because rc 2 triages as "re-run the job". Revision 2 had this as rc 2.
 
-| Code | Meaning |
-|---|---|
-| 0 | every subject is credential-free |
-| 1 | a subject declares a credential, or discovery disagrees with `EXPECTED_PR_SUBJECTS` |
-| 2 | infrastructure |
+## 6. Exit codes
 
-Revision 1 claimed "PyYAML unavailable gives rc 2". **That was unproven and is false.**
-Measured:
+The checker and the wrapper use different codes on purpose. Revision 2 proposed a stdout
+sentinel to tell an assertion failure apart from a toolchain failure; that is dropped as
+underspecified and untamper-evident — it overloaded stdout, said nothing about a crash after
+the sentinel was printed, and nothing pinned that `run.sh` still checked it.
 
-| Condition | rc |
-|---|---|
-| `uv` fails to resolve a package, online | **1** |
-| `uv` fails to resolve a package, offline (`UV_OFFLINE=1`) | **1** |
-| `uv` absent from `PATH` | **127** |
-| child exits 2 | 2 (propagated correctly) |
-| child exits 1 | 1 (propagated correctly) |
+**The checker** exits `0` for pass, **`3`** for "a subject declares a credential, or discovery
+disagrees with `EXPECTED_PR_SUBJECTS`, or a document is malformed", and `2` for its own
+infrastructure failures. Its `main()` is wrapped so any unexpected exception becomes rc 2 with
+a named message.
 
-`uv` exits 1 on its own failures, which collides exactly with "1 = the repo is wrong". As
-revision 1 specified it, a PyPI outage would have reported "a subject declares a credential".
+**`run.sh`** maps `0 → 0`, `3 → 1`, and **everything else → 2**. `uv`'s own rc 1 therefore
+cannot be mistaken for an assertion, and there is nothing to pin.
 
-The remedy has three parts. `run.sh` preflights `command -v uv` and maps absence to rc 2. It
-then probes `uv run --project py python3 -c 'import yaml'` and maps any non-zero to rc 2. The
-checker prints a **sentinel line** on stdout, and `run.sh` refuses to trust an rc of 1 unless
-the sentinel is present. Without the sentinel, an rc 1 from the toolchain cannot be told apart
-from an rc 1 from the assertion.
+This matters because it was measured. `uv` exits **1** on a failed resolution, online and with
+`UV_OFFLINE=1`; `uv` absent from `PATH` yields **127**; child codes propagate unchanged. Under
+revision 1's contract a PyPI outage would have reported "a subject declares a credential".
 
-A document that is not a mapping is rc 2 with a named message. An empty `.yml` parses to
-`None` and a top-level sequence parses to a `list`; `doc.get` on either raises
-`AttributeError`, which Python reports as exit 1 — the same lie about which thing broke.
+`run.sh` still preflights `command -v uv` and maps absence to rc 2 with the one-line fix, so
+the common local failure gives a useful message rather than a bare 127.
 
-The interpreter is pinned with `--python 3.12` and `UV_PYTHON_DOWNLOADS=never`, so a host
-without a suitable interpreter fails as a clean rc 2 rather than silently downloading one.
+**Zero subjects.** Revision 2 contradicted itself, saying rc 1 in §6 and rc 2 in §8. The two
+cases are genuinely different and both are kept: the glob matching **zero files** is rc 2,
+because the scan root moved and the gate is scanning nothing; **zero of N files** carrying a
+pull-request trigger is rc 1, because that is a disagreement with `EXPECTED_PR_SUBJECTS`.
 
-**The red output contract.** A red names the workflow file, the rule, and the YAML path to
-the offending node. With six files and four rules, triage is otherwise a manual re-run.
+**The red output contract.** A red names the workflow file, the rule, and the YAML path to the
+offending node. With six files and four rules, triage is otherwise a manual re-run.
+
+The interpreter is selected with `--python '>=3.12'`, matching every package's
+`requires-python`. A bare `--python 3.12` would fail on a host carrying only 3.13.
 
 ## 7. Non-goals
 
-The gate asserts **declaration**. It does not assert that no credential can reach a workflow
-by any path:
+The gate asserts **declaration**, not that no credential can reach a workflow by any path:
 
-- an expression built by concatenation, or laundered through `${{ env.X }}` — both need
-  dataflow analysis;
+- an expression built by concatenation, or laundered through `${{ env.X }}`;
 - a credential a third-party action fetches by itself;
-- `workflow_run` and `merge_group` triggers. Both run with repository secrets, and
-  `workflow_run` is the classic pwn-request vector. Neither is used in this repo today.
-  They are **out of scope by decision, not by oversight**, and the README says so. Adding
-  them later is a one-line change to the trigger set plus two control rows.
+- `workflow_run` and `merge_group` triggers. Both run with repository secrets and
+  `workflow_run` is the classic pwn-request vector. Neither is used here today. They are out
+  of scope **by decision, not by oversight**; adding them is a one-line change to the trigger
+  set plus two control rows.
+
+The README states these, and states R4's residual false-positive surface, so the gate does
+not overclaim.
 
 ## 8. Controls
 
-Revision 1 specified the control table three incompatible ways. This is the single list.
+**In-process, behind `--self-test`.** The rule-level table lives in
+`workflow_credentials.py`, as every other checker in this repo does
+(`categories.py`, `ci/error-registry/check.py`, `ci/http-extractor/check.py`,
+`ci/affected-graph/task_inputs.py`). Rows: each of the 14 bypasses; each of the 6
+already-caught inputs; the 6 honest passes; `format('{0}', secrets.X)`; `toJSON(secrets)`;
+the three R4 false-positive strings from §4.3, which must **pass**; a duplicate-key document;
+a non-mapping document; and a bare `on:`.
 
-**In-process, behind `workflow_credentials.py --self-test`.** Revision 1 would have run about
-29 fixture rows as separate `uv` subprocesses. Every other checker in this repo puts its
-fixture table in-process (`categories.py`, `ci/error-registry/check.py`,
-`ci/http-extractor/check.py`, `ci/affected-graph/task_inputs.py`). The rule-level table goes
-there: one row for each of the 14 bypasses, one for each of the 6 already-caught inputs, the
-6 honest passes, plus `format('{0}', secrets.X)`, `toJSON(secrets)`, `secrets.GITHUB_TOKEN`
-(must pass), and a `with: secrets:` build-arg case.
+**It is invoked through `run.sh --self-test`, not directly.** Running
+`python3 workflow_credentials.py --self-test` under system python3 would fail on `import
+yaml`; every mode must go through the wrapper so it gets the `uv` invocation and the
+preflight.
 
-**In `run.sh --negative-control`.** Only the wiring rows, which need the real tree: discovery
-over the real workflows; `release.yml` excluded; the strict-equality mismatch path; zero
-subjects is rc 2; a stale allowlist entry is rc 2; the `uv` preflight rc 2 paths; the sentinel
-check.
+**In `run.sh --negative-control`.** Only rows needing the real tree: discovery over the real
+workflows; `release.yml` excluded; the strict-equality mismatch path; the glob-matches-nothing
+rc 2; a stale allowlist entry rc 1; the `uv` preflight rc 2 path; and the `3 → 1` mapping.
 
 At least one rc-0 row stays in each table, so a checker that fails unconditionally cannot
 satisfy either.
 
-**The `release.yml` row.** That workflow fails the credential rules and passes the gate only
-because discovery excludes it. A row asserting both halves proves the trigger filter does
-real work rather than decorating. Its failure message must say "re-baseline: `release.yml` no
-longer reads a secret", because an SMA-589 follow-up moving to OIDC would otherwise red this
-gate with no obvious cause.
+**The `release.yml` row.** That workflow fails the credential rules and passes only because
+discovery excludes it, which proves the trigger filter does real work. Its failure message
+must say "re-baseline: `release.yml` no longer reads a secret", so an SMA-589 follow-up moving
+to OIDC does not red this gate with no obvious cause.
 
-**Rows that exercise PyYAML rather than the gate.** Rows 2, 3, 6, 7 and 14 all parse to one
-mapping, as section 2 proves. Their rows are regression pins on the parser, not coverage of
-the gate's own logic, and the table says so rather than implying otherwise.
+**Rows that pin the parser rather than the gate.** Rows 2, 3, 6, 7 and 14 all parse to one
+mapping, and rows 12 and 13 are the same structural test under R3. The merge-key row
+documents an input Actions rejects. All are labelled as regression pins, not as coverage.
 
 ## 9. Files and bookkeeping
 
 | File | Change |
 |---|---|
-| `ci/workflow-credentials/workflow_credentials.py` | new — discovery, four rules, `--self-test` |
-| `ci/workflow-credentials/run.sh` | new — preflight, sentinel, `--negative-control` |
-| `ci/workflow-credentials/README.md` | new — the check, the allowlist, the non-goals |
-| `ci/publish-metadata/run.sh` | **remove** P-D6 and its fixture rows; correct the "pure-Python" header at `:79-82` |
-| `ci/publish-metadata/README.md` | remove the P-D6 row |
-| `py/pyproject.toml` | add `"pyyaml>=6,<7"` to `[dependency-groups] dev` |
-| `py/uv.lock` | regenerate |
-| `moon.yml` | new `repo:workflow-credentials` task; **remove** `.github/workflows/wheels.yml` from `publish-metadata` inputs |
-| `.github/workflows/ci.yml` | add `:workflow-credentials` to the `T=(…)` array |
-| `CLAUDE.md` | add `:workflow-credentials` to the marker-delimited command; record the gotchas |
-| `.github/workflows/wheels.yml` | update the header comment at `:9-10` — it names two banned spellings and cites this gate |
+| `ci/workflow-credentials/workflow_credentials.py` | new — discovery, four rules, `--self-test` table |
+| `ci/workflow-credentials/run.sh` | new — preflight, mode dispatch, rc mapping, `--negative-control` |
+| `ci/workflow-credentials/pyproject.toml` | new — one dependency, `pyyaml>=6.0.3,<7` |
+| `ci/workflow-credentials/uv.lock` | new — generated |
+| `ci/workflow-credentials/README.md` | new — the check, the allowlist, the non-goals, R4's FP surface |
+| `ci/publish-metadata/run.sh` | delete `assert_wheels_has_no_credentials`, `strip_comments`, `PATTERNS`, the six P-D6 fixture rows, and the `Check P-D6` summary entry at `:73-77` |
+| `ci/publish-metadata/README.md` | the check table has **no** P-D6 row to remove; it is already stale for the whole Python arm (no P0/P1/P2 rows). Add the missing rows or record the staleness — do not silently leave it |
+| `moon.yml` | new `repo:workflow-credentials` task; remove `.github/workflows/wheels.yml` from `publish-metadata` inputs **and** its explaining comment; correct the `description:` at `:497`, which still ends "while wheels.yml stays credential-free" |
+| `.github/workflows/ci.yml` | add `:workflow-credentials` to `T=(…)` |
+| `CLAUDE.md` | add `:workflow-credentials` to the marker command **in the same position**; correct `:351`, which says `repo:publish-metadata` asserts the wheels ban; record the gotchas |
+| `.github/workflows/wheels.yml` | the sentence that becomes false is at `:12` ("`repo:publish-metadata` asserts this"), not the ban at `:9-10` |
 | `ci/affected-graph/ci_targets.py` | four edits, below |
+| `moon.yml` (`repo:osv`) | add `ci/workflow-credentials/uv.lock` to its inputs so the new lockfile is scanned |
 
-**`ci_targets.py` obligations.** All four are required, and missing any one reds
-`repo:affected-smoke`:
+All three new source files carry the SPDX header (`#` form).
 
-1. `SELF_TASK_EXPECTED_GLOBS["publish-metadata"]` — **shrinks**. `.github/workflows/wheels.yml`
-   was listed only because P-D6 read it. `.github/workflows/security-scan.yml` stays, because
-   Check 4 asserts on it. Rewrite the comment at `:213-226`, which names `wheels.yml` by
-   reason and goes stale otherwise.
-2. `SELF_TASK_EXPECTED_GLOBS["workflow-credentials"]` — new. Ordering is **globs first
-   (sorted), then literal files (sorted)**, verified at `ci_targets.py:1067-1082`; the
-   injected `.moon/*` glob is filtered before comparison. Confirm with a real
-   `moon query projects` before writing the tuple rather than after CI reports it.
-3. `SELF_SCHEDULED_GATES["workflow-credentials"]` — new, pinning the `moon.yml` invocation
-   lines including `set -euo pipefail`. Note the self-test invocation makes this **four**
-   lines, not three, the same shape as `version-lockstep`.
+**`ci_targets.py` obligations.** Missing any one reds `repo:affected-smoke`:
+
+1. `SELF_TASK_EXPECTED_GLOBS["publish-metadata"]` — **shrinks**; `.github/workflows/wheels.yml`
+   was listed only because P-D6 read it. `security-scan.yml` stays, because Check 4 asserts on
+   it. Rewrite the explaining comment at `:218-226`.
+2. `SELF_TASK_EXPECTED_GLOBS["workflow-credentials"]` — new. Ordering is globs first (sorted),
+   then literal files (sorted), verified at `:1068-1083`; the injected `.moon/*` glob is
+   filtered before comparison. Confirm with a real `moon query projects` before writing it.
+3. `SELF_SCHEDULED_GATES["workflow-credentials"]` — new, pinning the `moon.yml` lines
+   verbatim. There are **four**, all routed through the wrapper:
+   `set -euo pipefail`; `bash ci/workflow-credentials/run.sh --self-test`;
+   `bash ci/workflow-credentials/run.sh --negative-control`;
+   `bash ci/workflow-credentials/run.sh`.
 4. `REQUIRED_REPO_TASKS` — add `workflow-credentials`. That tuple is the floor for gates
-   carrying a negative control, and without an entry the control can be switched off while
-   every other check stays green.
+   carrying a negative control; without an entry the control can be switched off while every
+   other check stays green.
 
-**The scan glob, and why it needs no fifth registry.** `repo:http-extractor-envelope` is the
-precedent for keeping a checker's scan glob identical to its `moon.yml` input glob so that
-"scheduling and scanning cannot drift apart". Its actual coupling is weaker than it reads:
-`SELF_TASK_EXPECTED_GLOBS` pins the `moon.yml` side exactly, but `check.py`'s `SCAN_GLOB` is
-held only by a `moon.yml` comment and by an infra guard that fires when the glob matches no
-file at all. Narrowing it to ONE file would pass.
+**A fifth obligation: pin the negative-control body, and make the pin reachable.**
+`SELF_SCHEDULED_GATES` pins the invocation, and the repo has measured twice that this is not
+enough. `RELEASE_PARITY_SH_CALL_SITES` (`ci_targets.py:600-644`) exists because pinning the
+invocation alone left two bypasses: neutering the flag parse so `--negative-control` falls
+through to the real suite, and gutting the assertion body so the control prints "reported red
+as expected" while calling nothing. A bare `run.sh --negative-control` inherits both. Pin the
+discrete lines the same way — and **`repo:affected-smoke`'s own `inputs` must gain
+`ci/workflow-credentials/**/*`**, or the pin stays green on exactly the PR that breaks it.
+That is why the `ci/actionlint/**/*` and `ci/release-parity/**/*` entries carry do-not-remove
+comments. `T_AFFECTED_SMOKE_REQUIRED_INPUTS` (`ci/actionlint/run.sh:2097-2117`) is a
+containment floor, so adding an input reds nothing.
 
-This gate needs no equivalent pin, because Decision B already closes that hole. Narrowing the
-checker's glob shrinks the discovered subject set, and a shrunk set fails the strict-equality
-comparison against `EXPECTED_PR_SUBJECTS` with rc 1. The subject pin subsumes the glob pin.
-Keep the two glob strings textually identical and say so in `moon.yml`'s comment, but do not
-add a fifth `ci_targets.py` registry for it — that would be ceremony over an assertion that is
-already made.
+**Why no scan-glob registry.** Decision B subsumes it: narrowing the checker's glob shrinks
+the discovered set, which fails the strict-equality comparison. (Revision 2 argued this from a
+claim that `http-extractor`'s `SCAN_GLOB` has one guard. That was wrong — it has four:
+zero-files, no-signature-parsed, no-`EnvelopeJson`, and a self-test scope assertion. The
+conclusion stands; the supporting claim does not.)
+
+**`check_docs` compares `T` and the CLAUDE.md command as ordered sequences**
+(`ci_targets.py:868-881`), so the new target must occupy the same position in both.
 
 **CLAUDE.md hazard.** Do not add a second copy of the ci-targets markers or of the `T=(…)`
-command anywhere in that file. `repo:affected-smoke` counts occurrences, and a second copy —
-even inside backticks in prose — makes the count 2 and reds the gate (SMA-541).
+command anywhere in that file; `repo:affected-smoke` counts occurrences (SMA-541).
 
-**`repo:input-liveness`.** `.github/workflows/*.y*ml` matches six tracked files, so it passes.
-If Moon 2.3.2's matcher rejects `*.y*ml`, declare `*.yml` and `*.yaml` separately and add an
-`ALLOW_DEAD_INPUT` entry for the `.yaml` one with a stated reason, since it matches zero
-tracked files today.
+**`repo:input-liveness`.** `.github/workflows/*.y*ml` matches six tracked files. If Moon's
+matcher rejects the pattern, declare `*.yml` and `*.yaml` separately and add an
+`ALLOW_DEAD_INPUT` entry for the `.yaml` one, which matches zero tracked files today.
+
+**Recorded decision, not an omission.** `workflow-credentials` is *not* added to
+`task_inputs.py`'s `REQUIRED_TASKS` floor (`:90`); that tuple is explicitly non-exhaustive.
+
+**No `py/uv.lock` regeneration.** Decision A's dedicated project means `py/uv.lock` is
+untouched, so `repo:version-lockstep` and `repo:release-parity-py` are not scheduled by this
+change and no lock-drift step is needed.
 
 ## 10. Risks
 
 - **A conservative red on an unrelated `secrets` key.** R1 matches any mapping key named
-  `secrets`, including a third-party action's `with: secrets:` input. The red means "a human
-  must look", not "this is a leak" (section 4.2). The allowlist carries a justified exemption.
-- **The gate now depends on the `py/` workspace.** `uv run --project py` needs a synced
-  environment, and `py`'s `moon.yml` runs bare `uv sync`, not `--locked`. This is the cost of
-  Decision A, accepted in exchange for a cache that saves and a pin Dependabot can see.
-- **SMA-579 topology.** `wheels.yml` carries a `pull_request` trigger, so it stays a subject
-  and must never declare `secrets:` or `id-token: write`. The confirmed topology is that
-  `wheels.yml` builds and uploads artifacts, and `release.yml` downloads them and publishes.
-  `release.yml` has no `pull_request` trigger, so it is not a subject and may hold both the
-  credential and `id-token: write` for Trusted Publishing.
-- **A new gate is new bookkeeping.** Four `ci_targets.py` registries, the `T` array and the
-  CLAUDE.md marker command must all agree. Two peer sessions are editing `ci_targets.py`
-  concurrently and have been told.
+  `secrets`. The red means "a human must look". The `(file, rule)` allowlist carries a scoped
+  exemption.
+- **R4 has a residual false-positive surface.** Stripping literals and tightening the boundary
+  closes the three measured cases, but an expression that names a non-secret identifier
+  `secrets` outside a literal would still red. The README documents it.
+- **The gate depends on `uv` and on PyPI reachability for a cold lock.** Cold cost measured at
+  0.959 s, warm at 0.073 s. A cold-cache PyPI outage reds as rc 2, which triages correctly.
+- **A new gate is new bookkeeping.** Five `ci_targets.py` obligations, the `T` array, the
+  CLAUDE.md marker command and `repo:affected-smoke`'s inputs must all agree. Two peer
+  sessions are editing `ci_targets.py` concurrently and have been told.
 
-## 11. What revision 1 got wrong
+## 11. What earlier revisions got wrong
 
-Recorded so the same mistakes are not repeated. Revision 1 carried a section claiming the
-design was verified and "ALL GREEN". It was green only against a case list that did not
-contain `format()` or `toJSON()`. A verification is worth exactly its inputs, and a green
-result over a self-chosen corpus is not evidence of completeness. The rewritten section 8
-fixes the corpus; it cannot fix the general lesson, which is that the corpus is the claim.
+Recorded in full, because a summary that omits most of the record is what revision 2 did.
+
+**Revision 1** carried five defects, four found by review and one by its own author: R4 missed
+`format()` and `toJSON()`; the rc-2 contract for an unavailable PyYAML was asserted and is
+false, since `uv` exits 1; discovery globbed `.yml` only; the uv cache key never changed, so
+`actions/cache` skipped its save; the control table was specified three inconsistent ways; and
+Risk 1's justification for R1 was factually wrong.
+
+**Revision 2** fixed those and introduced four more: `uv run --project py` drags a maturin
+compile into a gate created to be cheap; the stdout sentinel was underspecified and
+untamper-evident; `--self-test` was placed where it could not run; §6 and §8 disagreed on the
+zero-subject case; the `GITHUB_TOKEN` exemption was unmeasured and unsafe under
+`pull_request_target`; R4's bare `\bsecrets\b` false-positived on three ordinary strings; the
+allowlist was keyed too coarsely; and the removal list mis-cited two line ranges and named a
+README row that does not exist.
+
+**Revision 1's stated lesson was that a green verification is worth exactly its corpus.**
+Revision 2 then repeated the underlying error in a new place: it wrote a removal list from
+memory rather than from the files. The general form is that a claim about the tree must be
+read out of the tree at the moment it is written, and every citation in this revision was
+checked against the file it names.
