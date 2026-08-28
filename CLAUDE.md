@@ -340,9 +340,13 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   assertions match on basename.
 - All four **Linux** wheel legs cross-compile with `--zig` — not only the musl ones, unlike
   `prebuild.yml`. `ubuntu-latest` ships glibc 2.39, so a *native* build tags `manylinux_2_39`,
-  which almost nothing can install; the floor comes from the **triple suffix**
-  (`x86_64-unknown-linux-gnu.2.17`), not from a bare `--zig`, and `rustup target add` rejects that
-  suffixed name — hence a separate `rustup_target` matrix key rather than a `${TARGET%%.*}` strip.
+  which almost nothing can install. The floor comes from **`--zig` together with
+  `--compatibility`, both passed as FLAGS** (maturin's own `--help`: "`--zig` … Default to
+  manylinux2014/manylinux_2_17 if you do not specify a `--compatibility`"). It does **not** come
+  from cargo-zigbuild's decorated triple: maturin hands `--target` straight to `cargo metadata`,
+  so `x86_64-unknown-linux-gnu.2.17` dies with `could not find specification for target` —
+  measured, it failed both manylinux legs on this workflow's first CI run while the other ten
+  jobs passed.
   Pass `--compatibility` explicitly so maturin's auditwheel **errors** instead of silently
   emitting a PyPI-rejected `linux_*` tag, and set `-C target-feature=-crt-static` on musl (the
   target defaults to a static CRT a cdylib cannot use). A wheel's **tag is not its binary**:

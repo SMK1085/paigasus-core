@@ -83,22 +83,32 @@ jobs:
           # Both apple triples in ONE macos-latest job: the macOS SDK ships both slices and
           # merging drops a duplicated toolchain setup (prebuild.yml's precedent, SMA-520).
           #
-          # `rustup_target` is a SEPARATE key from `target` on purpose. The gnu legs' `target`
-          # carries a `.2.17` glibc-floor suffix that maturin/cargo-zigbuild understand and
-          # `rustup target add` REJECTS. Stripping it with `${TARGET%%.*}` would be wrong the
-          # day a legitimate target name contains a dot, so the bare triple is carried
-          # explicitly instead.
+          # `rustup_target` is a SEPARATE key from `target`, and today it is always equal to it.
+          # It is kept because the two answer different questions, and an earlier revision got
+          # that wrong in a way CI caught: the gnu legs briefly carried a `.2.17` glibc-floor
+          # suffix on `target`, on the assumption that maturin took cargo-zigbuild's suffixed
+          # -triple form. It does not — MEASURED on the first CI run of this workflow:
+          #   error loading target specification: could not find specification for target
+          #   "x86_64-unknown-linux-gnu.2.17"
+          # maturin passes --target straight to `cargo metadata`/rustc, which knows only real
+          # triples. The glibc floor comes from `--zig` + `--compatibility` instead (maturin's
+          # own --help: "--zig … Default to manylinux2014/manylinux_2_17 if you do not specify
+          # a --compatibility"). So `target` is always a real triple, and if a future leg ever
+          # does need a decorated build target, this key is already where the bare one lives.
           - { platform: macosx-arm64,      target: aarch64-apple-darwin,           rustup_target: aarch64-apple-darwin,      runner: macos-latest,     zig: false, expect_tag: 'macosx_11_0_arm64', extra_platform: macosx-x86_64, extra_target: x86_64-apple-darwin, extra_expect_tag: 'macosx_10_12_x86_64' }
           - { platform: win-amd64,         target: x86_64-pc-windows-msvc,         rustup_target: x86_64-pc-windows-msvc,    runner: windows-latest,   zig: false, expect_tag: 'win_amd64' }
           # ALL FOUR linux legs use zig, not just musl — the deliberate divergence from
           # prebuild.yml. ubuntu-latest ships glibc 2.39, so a NATIVE build tags
-          # manylinux_2_39, a wheel almost no consumer can install. The floor comes from the
-          # TRIPLE SUFFIX (…-gnu.2.17), not from a bare --zig flag.
-          - { platform: manylinux-x86_64,  target: x86_64-unknown-linux-gnu.2.17,  rustup_target: x86_64-unknown-linux-gnu,  runner: ubuntu-latest,    zig: true, compat: manylinux2014, expect_tag: 'manylinux_2_17_x86_64.manylinux2014_x86_64', expect_glibc: 'GLIBC_2.17' }
+          # manylinux_2_39, a wheel almost no consumer can install. The floor comes from
+          # `--zig` together with `--compatibility`, passed as flags: maturin's own --help says
+          # "--zig … Default to manylinux2014/manylinux_2_17 if you do not specify a
+          # --compatibility". It does NOT come from a decorated target triple — see the
+          # measured failure recorded above the darwin row.
+          - { platform: manylinux-x86_64,  target: x86_64-unknown-linux-gnu,       rustup_target: x86_64-unknown-linux-gnu,  runner: ubuntu-latest,    zig: true, compat: manylinux2014, expect_tag: 'manylinux_2_17_x86_64.manylinux2014_x86_64', expect_glibc: 'GLIBC_2.17' }
           # ubuntu-24.04-arm is kept for this leg specifically so that ONE aarch64 wheel is
           # actually EXECUTED rather than merely inspected — otherwise that arch family, three
           # of the seven wheels, has no runtime verification at all.
-          - { platform: manylinux-aarch64, target: aarch64-unknown-linux-gnu.2.17, rustup_target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, zig: true, compat: manylinux2014, expect_tag: 'manylinux_2_17_aarch64.manylinux2014_aarch64', expect_glibc: 'GLIBC_2.17' }
+          - { platform: manylinux-aarch64, target: aarch64-unknown-linux-gnu,      rustup_target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, zig: true, compat: manylinux2014, expect_tag: 'manylinux_2_17_aarch64.manylinux2014_aarch64', expect_glibc: 'GLIBC_2.17' }
           # `expect_glibc: ''` is a SENTINEL, not an omission: it is what tells the symbol-version
           # step to demand that these cross-built .so files reference NO glibc versioned symbol
           # at all. Deleting the key would read as "no expectation" to a future editor while

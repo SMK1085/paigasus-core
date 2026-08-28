@@ -590,7 +590,7 @@ Copy the checkout / `setup-toolchain` / `moon setup` / cache block from `.github
         run: pip3 install --break-system-packages ziglang
 ```
 
-**Note on `rustup target add` (settled — controller Ruling 2):** the gnu legs' `matrix.target` carries a `.2.17` glibc suffix that cargo-zigbuild needs to set the glibc floor but `rustup target add` **rejects**. The matrix therefore carries a separate `rustup_target` key holding the bare triple, consumed by this step, while `matrix.target` keeps the suffix and feeds maturin. Do **not** strip it with `${TARGET%%.*}`: a future target name could legitimately contain a dot, and the matrix is already where per-leg values belong.
+**Note on the glibc floor (settled by the first CI run, superseding controller Ruling 2):** an earlier revision gave the gnu legs a `.2.17`-suffixed `matrix.target`, assuming maturin accepted cargo-zigbuild's decorated-triple spelling. **It does not.** maturin passes `--target` straight to `cargo metadata`, and rustc answered `could not find specification for target "x86_64-unknown-linux-gnu.2.17"`, failing both manylinux legs while the other ten jobs passed. The floor comes from `--zig` plus `--compatibility`, both flags — maturin's `--help`: *"`--zig` … Default to manylinux2014/manylinux_2_17 if you do not specify a `--compatibility`"*. So `matrix.target` is always a real triple. The `rustup_target` key stays (identical today) because the build target and the rustup target are different questions.
 
 - [ ] **Step 4: Write the build steps**
 
