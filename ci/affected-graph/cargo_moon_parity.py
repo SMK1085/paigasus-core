@@ -558,6 +558,14 @@ def check_wrapper_upstream_inputs(projects, root, floor=REQUIRED_WRAPPER_CLOSURE
             # disk — which is why `root` is required rather than defaulted (see the docstring).
             if (root / src / "build.rs").is_file():
                 want.add(f"{src}/build.rs")
+            # SMA-594'. A hand-written .pyi is the interface contract between a PyO3 cdylib and
+            # every Python consumer, and it is what basedpyright reads INSTEAD of the Rust. It
+            # lives at the crate ROOT, so `{src}/src/**/*` does not match it and nothing that
+            # validates it keyed on it. Disk-conditional and globbed, mirroring build.rs above:
+            # conditional so the twelve crates without a stub gain no dead demand, globbed so a
+            # second stub is covered the day it appears rather than needing a hand-maintained list.
+            for stub in sorted((root / src).glob("*.pyi")):
+                want.add(f"{src}/{stub.name}")
         for task in sorted(tasks):
             files = (projects[pid].get("task_inputs") or {}).get(task)
             globs = (projects[pid].get("task_input_globs") or {}).get(task)
@@ -1005,6 +1013,30 @@ def self_test():
         # gains an unsatisfiable row the day this branch is written wrong.
         if any("rs/crates/libs/kern/build.rs" in row for row in rows):
             failures.append("A7 demanded a build.rs for an upstream that has none on disk")
+
+    # A7-i: the .pyi half (SMA-594'). Same disk-conditional shape as A7-h's build.rs, and it needs
+    # its own tree for the same reason — the `is_file()`/glob branch is only live when a stub
+    # actually exists under an upstream's source_dir.
+    with tempfile.TemporaryDirectory() as tmp:
+        stubbed = Path(tmp)
+        (stubbed / "rs" / "crates" / "bindings" / "nb").mkdir(parents=True)
+        (stubbed / "rs" / "crates" / "bindings" / "nb" / "nb.pyi").write_text("def f() -> int: ...\n")
+        rows = check_wrapper_upstream_inputs(wrap, stubbed, floor=wrap_floor)
+        if not any("inputs omit rs/crates/bindings/nb/nb.pyi" in row for row in rows):
+            failures.append(
+                "A7 did not demand an upstream's .pyi stub that exists on disk — the stub half "
+                "of the check is not asserting anything"
+            )
+        # Demanded of EVERY examined task, not just the first.
+        for task in ("build", "test"):
+            if not any(
+                f"k-ts:{task} inputs omit rs/crates/bindings/nb/nb.pyi" == row for row in rows
+            ):
+                failures.append(f"A7 did not demand nb's .pyi of k-ts:{task}")
+        # An upstream with NO stub must not be demanded one, or every wrapper gains an
+        # unsatisfiable row the day this branch is written wrong.
+        if any("rs/crates/libs/kern" in row and ".pyi" in row for row in rows):
+            failures.append("A7 demanded a .pyi for an upstream that has none on disk")
 
     a1, a2, a3 = check(ok, crates)
     if (a1, a2, a3) != ([], [], []):
