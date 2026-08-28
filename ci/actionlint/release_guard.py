@@ -40,21 +40,55 @@ ACCEPTED_GATE_FORMS = frozenset({GATE_EXPR, "${{ " + GATE_EXPR + " }}"})
 
 # V1: the subject is EVERY job; the exemption is the pin. Inverted from a detection-derived set,
 # which could not see a publish step using an unrecognised mechanism (SMA-579 review).
+#
+# Fix round 3, Critical 2: an exemption here is an exemption from the GATING rule only. It was an
+# exemption from EVERYTHING, and that was measured: a `release-pr` job whose three steps ran
+# `cargo publish`, `npm publish` and `pypa/gh-action-pypi-publish` exited 0 with no violations,
+# while the identical steps in any other job correctly exited 1. `release-pr` runs on every push
+# to `main` with an App installation token, so that hole was live. V7 below now applies the V6
+# publish DETECTOR to every member of this set: a member may skip the gate, but must never
+# contain a publish step. The exemption's premise ("release-pr cannot reach a registry") is now
+# asserted rather than assumed.
 UNGATED_JOBS = frozenset({"release-pr"})
 
 # V3: the real bypass class is any status-check function, not two literal spellings.
 # `success() || failure()`, `!failure()` and `${{ ! cancelled() }}` all evade a two-string test.
 STATUS_FUNCS = ("always", "cancelled", "success", "failure")
 
-# V6: detection, retained ONLY for called workflows where UNGATED_JOBS has no meaning.
+# V6/V7: detection. Used for called workflows (where UNGATED_JOBS has no meaning) and, since fix
+# round 3, for UNGATED_JOBS members in the main workflow too.
+#
+# REGEXES, not substrings, and the first entry is why. `release-plz release` is a strict PREFIX of
+# `release-plz release-pr`, which is exactly what the real, correct `release-pr` job runs. Measured:
+#
+#   'release-plz release' in 'release-plz release-pr --output json'            -> True   (false red)
+#   re.search(r'release-plz\s+release(?![-\w])', <the same string>)            -> False  (correct)
+#   re.search(r'release-plz\s+release(?![-\w])', 'release-plz release --out')  -> True   (correct)
+#
+# A naive substring test here would red the real repository on the very PR that added V7. The
+# `(?![-\w])` boundary is what keeps `release-pr` distinct from `release`.
+#
+# Fix round 3, Important 3: `maturin publish`, `maturin upload`, `uv publish` and `yarn publish`
+# were missing, and this repo's own Python publishing IS maturin — `wheels.yml` carries both
+# `pull_request` and `push` triggers, and `maturin publish` is a one-word edit from the
+# `maturin build` already in it. Spec §8.3 leaves detection as the sole rule for called workflows,
+# so a list omitting the repo's own tooling was the weakest point of that rule.
+#
+# `npm\s+publish` deliberately also matches `pnpm publish` (the substring is contained in it).
+# That is a superset in the safe direction: it detects more publish mechanisms, never fewer.
 PUBLISH_MARKERS = (
-    "release-plz release",
-    "npm publish",
-    "napi prepublish",
-    "twine upload",
-    "gh-action-pypi-publish",
-    "cargo publish",
+    r"release-plz\s+release(?![-\w])",
+    r"npm\s+publish",
+    r"yarn\s+publish",
+    r"napi\s+prepublish",
+    r"twine\s+upload",
+    r"gh-action-pypi-publish",
+    r"cargo\s+publish",
+    r"maturin\s+publish",
+    r"maturin\s+upload",
+    r"uv\s+publish",
 )
+_PUBLISH_RE = re.compile("|".join(PUBLISH_MARKERS))
 
 
 def infra(msg: str) -> "NoReturn":  # type: ignore[valid-type]
@@ -212,9 +246,46 @@ def job_publishes(job: dict) -> bool:
             for segment in command_segments(line):
                 if "--dry-run" in segment:
                     continue
-                if any(m in segment for m in PUBLISH_MARKERS):
+                if _PUBLISH_RE.search(segment):
                     return True
     return False
+
+
+def napi_violations(job: dict, job_id: str, name: str) -> list[str]:
+    """V5: the tagging boundary (spec §2), enforced rather than documented.
+
+    Ruling 8 (fix round 1): applies to EVERY job, including UNGATED_JOBS members — `napi
+    prepublish` cuts a git tag regardless of whether the job that ran it was gated, and release-plz
+    must own every tag (ADR-0011 S3).
+
+    Fix round 1, Important 4: evaluated per LINE, not per whole `run:` block — a comment or
+    unrelated line mentioning the flag must not satisfy a check over the real invocation.
+
+    Fix round 2, Important 1: evaluated per COMMAND SEGMENT (see command_segments), not per whole
+    line — `napi prepublish --npm-dir npm && echo "--no-gh-release"` and a trailing
+    `# remember --no-gh-release` comment must still red, since the flag never reaches the real
+    invocation in either case.
+
+    Fix round 3, Important 4: FACTORED OUT of check_main so check_called can apply it too. It was
+    inlined in check_main, and `main()` runs check_main on argv[0] ONLY — every callee got
+    check_called, which had no V5 at all. So `prebuild.yml:295`, the invocation whose own comment
+    says the flag "IS REQUIRED", was unguarded, while CLAUDE.md claimed V5 asserts *every*
+    invocation carries it. Calling this from both sites is what makes that sentence true.
+    """
+    out: list[str] = []
+    for step in job.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        run = str(step.get("run") or "")
+        for line in run.splitlines():
+            for segment in command_segments(line):
+                if "napi prepublish" in segment and "--no-gh-release" not in segment:
+                    out.append(
+                        f"{name}: job '{job_id}' runs `napi prepublish` without "
+                        f"--no-gh-release. release-plz owns every tag (ADR-0011 S3); napi "
+                        f"must never cut one."
+                    )
+    return out
 
 
 def check_main(doc: dict, name: str) -> list[str]:
@@ -232,30 +303,23 @@ def check_main(doc: dict, name: str) -> list[str]:
         if not isinstance(job, dict):
             infra(f"{name}: job '{job_id}' is not a mapping")
 
-        # V5: the tagging boundary (spec §2), enforced rather than documented. Fix round 1,
-        # Ruling 8: V5 applies to EVERY job, including UNGATED_JOBS members — `napi prepublish`
-        # cuts a git tag regardless of whether the job that ran it was gated, and release-plz must
-        # own every tag (ADR-0011 S3). So this runs BEFORE the UNGATED_JOBS `continue` below.
-        # Fix round 1, Important 4: evaluated per LINE, not per whole `run:` block — a comment or
-        # unrelated line mentioning the flag must not satisfy a check over the real invocation.
-        # Fix round 2, Important 1: evaluated per COMMAND SEGMENT (see command_segments), not per
-        # whole line — `napi prepublish --npm-dir npm && echo "--no-gh-release"` and a trailing
-        # `# remember --no-gh-release` comment must still red, since the flag never reaches the
-        # real invocation in either case.
-        for step in job.get("steps") or []:
-            if not isinstance(step, dict):
-                continue
-            run = str(step.get("run") or "")
-            for line in run.splitlines():
-                for segment in command_segments(line):
-                    if "napi prepublish" in segment and "--no-gh-release" not in segment:
-                        out.append(
-                            f"{name}: job '{job_id}' runs `napi prepublish` without "
-                            f"--no-gh-release. release-plz owns every tag (ADR-0011 S3); napi "
-                            f"must never cut one."
-                        )
+        # V5: the tagging boundary. Applies to EVERY job, UNGATED_JOBS members included, so it
+        # runs BEFORE the `continue` below. See napi_violations for the full rationale.
+        out += napi_violations(job, job_id, name)
 
         if job_id in UNGATED_JOBS:
+            # V7 (fix round 3, Critical 2). The exemption above is from V1 (the gating rule) and
+            # nothing else. Assert the premise that justifies it: a job allowed to run ungated on
+            # every push to `main` must not be able to reach a registry. Without this, a
+            # `release-pr` job carrying `cargo publish` + `npm publish` +
+            # `pypa/gh-action-pypi-publish` passed the whole guard clean — measured, exit 0.
+            if job_publishes(job):
+                out.append(
+                    f"{name}: job '{job_id}' is exempt from the gate (UNGATED_JOBS) but contains a "
+                    f"step that can reach a registry. An exempt job runs on every push to main, "
+                    f"ungated — it may never publish. Remove the publish step, or remove the job "
+                    f"from UNGATED_JOBS and gate it."
+                )
             continue
 
         if not is_gated(job_id, jobs):
@@ -307,6 +371,14 @@ def check_called(doc: dict, name: str) -> list[str]:
     step added to one would run ungated on every PR while the caller's gate stayed green.
     """
     out: list[str] = []
+
+    # V5 also applies here (fix round 3, Important 4). It used to be inlined in check_main, which
+    # main() runs on argv[0] only, so every CALLED workflow escaped it — including prebuild.yml's
+    # own `napi prepublish` invocation, the one whose comment says the flag "IS REQUIRED".
+    for jid, j in doc["jobs"].items():
+        if isinstance(j, dict):
+            out += napi_violations(j, jid, name)
+
     publishing = [jid for jid, j in doc["jobs"].items() if isinstance(j, dict) and job_publishes(j)]
     if not publishing:
         return out
@@ -458,6 +530,59 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
      "jobs:\n  build:\n    steps:\n      - run: |\n          "
      'npm publish && echo "not --dry-run"\n',
      "workflow_call-ONLY"),
+
+    # --- Fix round 3 additions (Critical 2, Important 3, Important 4) ----------------------
+    # Critical 2, both directions. The RED direction is the defect: this exact three-step job was
+    # measured passing the whole guard at exit 0 before V7 existed. The two CLEAN directions are
+    # the false-red controls that keep V7 usable against the real repository.
+    ("R3 Critical 2: an UNGATED_JOBS member containing publish steps reds", "main",
+     _OK_MAIN.replace(
+         "steps: [{run: echo hi}]",
+         "steps:\n      - run: cargo publish -p paigasus-kernel\n"
+         "      - run: npm publish --provenance --access public\n"
+         "      - uses: pypa/gh-action-pypi-publish@v1", 1),
+     "exempt from the gate"),
+    ("R3 Critical 2 CONTROL: `release-plz release-pr` in an UNGATED_JOBS member stays clean",
+     "main",
+     _OK_MAIN.replace("steps: [{run: echo hi}]",
+                      "steps: [{run: release-plz release-pr --output json}]", 1),
+     None),
+    ("R3 Critical 2: the BOUNDED marker still catches a real `release-plz release` when exempt",
+     "main",
+     _OK_MAIN.replace("steps: [{run: echo hi}]",
+                      "steps: [{run: release-plz release --output json}]", 1),
+     "exempt from the gate"),
+
+    # Important 3 — the four publish verbs this repo's own tooling uses, which PUBLISH_MARKERS
+    # omitted. `wheels.yml` IS a maturin workflow carrying pull_request and push.
+    ("R3 Important 3: maturin publish in a non-workflow_call-only callee reds", "called",
+     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+     "jobs:\n  build:\n    steps: [{run: maturin publish --skip-existing}]\n",
+     "workflow_call-ONLY"),
+    ("R3 Important 3: maturin upload reds the same way", "called",
+     "on:\n  workflow_call:\n  push:\n    branches:\n      - main\n"
+     "jobs:\n  build:\n    steps: [{run: maturin upload dist/*}]\n",
+     "workflow_call-ONLY"),
+    ("R3 Important 3: uv publish reds the same way", "called",
+     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+     "jobs:\n  build:\n    steps: [{run: uv publish --trusted-publishing always}]\n",
+     "workflow_call-ONLY"),
+    ("R3 Important 3: yarn publish reds the same way", "called",
+     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+     "jobs:\n  build:\n    steps: [{run: yarn publish --access public}]\n",
+     "workflow_call-ONLY"),
+
+    # Important 4 — V5 on a CALLED workflow. `--dry-run` is present on purpose: it keeps V6/V7
+    # silent, so the only thing this row can be reporting is V5 itself.
+    ("R3 Important 4: V5 now reaches a CALLED workflow's napi prepublish", "called",
+     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+     "jobs:\n  build:\n    steps: [{run: pnpm exec napi prepublish --dry-run --npm-dir npm}]\n",
+     "without --no-gh-release"),
+    ("R3 Important 4 CONTROL: a called workflow carrying the flag stays clean", "called",
+     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+     "jobs:\n  build:\n    steps: [{run: pnpm exec napi prepublish --dry-run --no-gh-release "
+     "--npm-dir npm}]\n",
+     None),
 ]
 
 
