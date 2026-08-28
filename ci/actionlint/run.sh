@@ -37,9 +37,9 @@ FAILED=0
 # Deliberately NOT `readonly`: without `set -e` a reassignment only warns, so readonly buys no
 # protection and would break a future harness that sources this file twice (SMA-542 D3).
 SELF_TESTS_RAN=0
-SELF_TEST_COUNT=10  # extractor, path-filter, branch-filter, config, ci-target-floor,
+SELF_TEST_COUNT=11  # extractor, path-filter, branch-filter, config, ci-target-floor,
                     # invocation-allowlist, affected-graph-wiring, block-execution,
-                    # kill-predicate, affected-smoke-block
+                    # kill-predicate, affected-smoke-block, release-guard
 
 fail() {
   echo "actionlint gate: $*" >&2
@@ -3997,6 +3997,35 @@ kill_predicate_self_test() {
 }
 
 # ---------------------------------------------------------------------------------------------
+# Check 10 (SMA-579) — the release guard. The VERDICT lives in ci/actionlint/release_guard.py
+# because it needs YAML STRUCTURE: a job-level `if:` must be told from the eight identical
+# step-level ones release.yml carries, and `needs:` chains must be walked. Neither is a
+# line-oriented question, and SMA-593 is the standing evidence that a hand-rolled scanner for
+# this class rots into a control that lies.
+#
+# WHY A BASH WRAPPER AT ALL. Check 7 counts bash `*_self_test` DEFINITIONS and check 9 mutates
+# lines inside run_self_tests — both see bash only. A Python fixture table is invisible to them,
+# so EMPTYING it would leave this gate passing having asserted nothing. The arity floor below is
+# what closes that, exactly as check 8e's two floors do for its own tables.
+release_guard_py() {
+  uv run --project py python3 ci/actionlint/release_guard.py "$@"
+}
+
+release_guard_self_test() {
+  local rc=0 n
+  SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
+
+  n="$(release_guard_py --fixture-count)" || infra "check 10: release_guard.py --fixture-count failed"
+  case "$n" in ''|*[!0-9]*) infra "check 10: --fixture-count printed '$n', expected an integer" ;; esac
+  [ "$n" -ge 20 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 20"
+
+  release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken
+      verdict. The release guard is not deciding what it is documented to decide."; rc=1; }
+
+  return $rc
+}
+
+# ---------------------------------------------------------------------------------------------
 # Check 7 — the self-tests, and the counter that proves they were invoked.
 #
 # All ten are defined above so this block can run them from ONE call site, reached by both the
@@ -4027,6 +4056,7 @@ run_self_tests() {
   block_execution_self_test
   kill_predicate_self_test
   affected_smoke_block_self_test
+  release_guard_self_test
 
   assert_self_tests_ran "$SELF_TEST_COUNT"
 
@@ -4741,6 +4771,13 @@ done
 # recursion structurally impossible (mutants are invoked with --self-test and exit before reaching
 # it), and it keeps --self-test the fast iteration path README.md advertises.
 # ---------------------------------------------------------------------------------------------
+# Check 10 — the release guard, over the real workflow. Runs here (not in --self-test) because it
+# reads the actual .github/workflows tree, like checks 5/6.
+# ---------------------------------------------------------------------------------------------
+while IFS= read -r v; do
+  [ -n "$v" ] && fail "check 10: $v"
+done < <(release_guard_py .github/workflows/release.yml)
+
 selftest_mutation_battery
 
 exit "$FAILED"
