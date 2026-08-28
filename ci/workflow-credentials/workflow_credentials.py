@@ -140,6 +140,15 @@ def rule_findings(doc) -> list[tuple[str, str, str]]:
             if SECRETS_CTX.search(STRING_LITERAL.sub("", span)):
                 out.append(("R4", where, "reads the `secrets` context"))
                 break
+    # GitHub evaluates an `if:` value as an expression even WITHOUT the ${{ }} wrapper, so
+    # `if: secrets.TOKEN != ''` references the secrets context with no span for the loop
+    # above to extract. EXPR_SPAN.sub("") first removes any WRAPPED part, which the loop
+    # above already reported — otherwise a wrapped `if:` would be counted twice.
+    for where, key, value in _mapping_entries(doc):
+        if key == "if" and isinstance(value, str):
+            bare = STRING_LITERAL.sub("", EXPR_SPAN.sub("", value))
+            if SECRETS_CTX.search(bare):
+                out.append(("R4", where, "reads the `secrets` context in a bare `if:` expression"))
     return out
 
 
@@ -202,6 +211,10 @@ RULE_CASES: tuple[tuple[str, str, bool], ...] = (
     # Expressions the FIRST design missed. Both read real secrets.
     ("G format()",           H + "    env:\n      T: ${{ format('{0}', secrets.X) }}\n", True),
     ("H toJSON(secrets)",    H + "    env:\n      T: ${{ toJSON(secrets) }}\n", True),
+    ("I bare if secrets",    H + "    steps:\n      - if: secrets.TOKEN != ''\n        run: echo hi\n", True),
+    ("J bare if uppercase",  H + "    steps:\n      - if: SECRETS.TOKEN != ''\n        run: echo hi\n", True),
+    ("K wrapped if",         H + "    steps:\n      - if: ${{ secrets.TOKEN != '' }}\n        run: echo hi\n", True),
+    ("L if without secrets", H + "    steps:\n      - if: github.event_name == 'push'\n        run: echo hi\n", False),
     # Honest passes. A first false positive is how a gate gets allowlisted into irrelevance.
     ("P1 contents read",     H + "    permissions:\n      contents: read\n", False),
     ("P2 header comment",    "# never declare `secrets:` or `id-token: write`\n" + H + "    permissions:\n      contents: read\n", False),
