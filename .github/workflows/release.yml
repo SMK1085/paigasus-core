@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 # Least privilege for the auto GITHUB_TOKEN, matching every other workflow here: it is never
-# used for the push/PR below (that goes through secrets.RELEASE_PLZ_TOKEN — see Checkout).
+# used for the push/PR below (that goes through the App installation token — see "Mint").
 permissions:
   contents: read
 
@@ -25,21 +25,57 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      # RELEASE_PLZ_TOKEN does not exist yet (a human must create it — see the workflow's
-      # own doc). A job-level `if:` cannot see whether it's set: per GitHub's own context-
-      # availability table, `jobs.<job_id>.if` only sees github/needs/vars/inputs, never
-      # secrets. A step's `if:`/`env:` CAN see secrets, so every step below is individually
-      # guarded on this step's output instead. Left unconfigured, this makes the whole job
-      # skip cleanly (green) on every push to main instead of failing loudly forever.
-      - name: Check for the release-plz token
+      # The App credentials may not exist yet (a human must create them — see the workflow's
+      # own doc). A job-level `if:` cannot see whether a secret is set: per GitHub's own
+      # context-availability table, `jobs.<job_id>.if` only sees github/needs/vars/inputs,
+      # never secrets. A step's `if:`/`env:` CAN see secrets, so every step below is
+      # individually guarded on this step's output instead. Left unconfigured, this makes the
+      # whole job skip cleanly (green) on every push to main rather than failing forever.
+      #
+      # Keyed on the App ID rather than the private key purely because an ID is not itself a
+      # credential. Both are required by the mint step below, so a HALF-configured App fails
+      # there instead of skipping — which is correct: that is a real misconfiguration, not a
+      # "not set up yet".
+      - name: Check for the App credentials
         id: preflight
         env:
-          TOKEN_SET: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
+          APP_ID_SET: ${{ secrets.PAIGASUS_BOT_APP_ID != '' }}
         run: |
-          echo "configured=$TOKEN_SET" >> "$GITHUB_OUTPUT"
-          if [ "$TOKEN_SET" != "true" ]; then
-            echo "::notice::RELEASE_PLZ_TOKEN is not set — skipping the release-PR job until a human creates it (see release.yml)."
+          echo "configured=$APP_ID_SET" >> "$GITHUB_OUTPUT"
+          if [ "$APP_ID_SET" != "true" ]; then
+            echo "::notice::PAIGASUS_BOT_APP_ID is not set — skipping the release-PR job until a human creates the App secrets (see release.yml)."
           fi
+
+      # An App INSTALLATION token, minted fresh per run and valid for one hour — which is
+      # exactly why it cannot be a stored repository secret, and why the earlier
+      # RELEASE_PLZ_TOKEN shape could only ever have held a long-lived PAT. This job's
+      # timeout-minutes: 20 keeps the whole run well inside that hour, so one mint here is
+      # enough for both consumers below.
+      #
+      # Scoped to THIS repository (the action defaults `repositories` to the current repo) and
+      # to exactly two permissions, requested EXPLICITLY below rather than inherited. Without
+      # the `permission-*` inputs a minted token carries every permission the App installation
+      # holds, so granting the App an unrelated scope later would silently widen this token
+      # (zizmor: github-app, "app token inherits blanket installation permissions").
+      #
+      #   contents:write      — the stamping step's push
+      #   pull-requests:write — release-plz opening/updating the release PR
+      #
+      # Both must genuinely be granted to the installation: the action ERRORS when asked for a
+      # permission the App does not hold. That is the right direction — an under-granted App
+      # reds here rather than half-working further down.
+      #
+      # The action registers the token as a log mask and revokes it in its post-step, so it
+      # does not outlive the run.
+      - name: Mint the App installation token
+        id: app_token
+        if: steps.preflight.outputs.configured == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
+          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
 
       - name: Checkout
         if: steps.preflight.outputs.configured == 'true'
@@ -106,7 +142,7 @@ jobs:
         if: steps.preflight.outputs.configured == 'true'
         working-directory: rs
         env:
-          GIT_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          GIT_TOKEN: ${{ steps.app_token.outputs.token }}
         run: |
           set -euo pipefail
           OUT="$(release-plz release-pr --output json)"
@@ -130,7 +166,7 @@ jobs:
           # explicit remote URL built from this value. GitHub masks the secret in logs, and
           # the URL is never written to git config (no `remote set-url`), so it does not
           # outlive the commands themselves.
-          GH_TOKEN_FOR_PUSH: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          GH_TOKEN_FOR_PUSH: ${{ steps.app_token.outputs.token }}
         run: |
           set -euo pipefail
           PR_COUNT="$(printf '%s' "$PR_JSON" | jq '.prs | length')"
