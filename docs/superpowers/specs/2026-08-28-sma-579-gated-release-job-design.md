@@ -132,15 +132,39 @@ arm of `if input.dry_run` — at both call sites, `release_package` (line 888) a
 `release_package_git_only` (line 959). Under `--dry-run` the function logs and returns
 `Ok(false)` without touching git. **R1 closes; no fallback needed.**
 
-**(b) Does `--dry-run` succeed at all, and what does it cost? — UNMEASURED.** `release-plz
-release --dry-run` runs `cargo publish --dry-run` per package, i.e. full verify builds on a cold
-runner. Worse, umbrella §14 Q6 records a **measured** `exit 101, no matching package named
-'paigasus-proto-derive'` for exactly this shape before the derive crate exists on crates.io — the
-same first-publish ordering trap `repo:publish-metadata` Check 2 solves by grouping. If the
-dry-run inherits it, `plan` fails on the first push after SMA-580 and takes the whole graph with
-it. **Measure both the wall-clock and the exit status with `paigasus-proto-derive` absent from
-the registry.** If it fails, `plan` cannot use `--dry-run`; fall back to gating `wheels`/
-`prebuild`/`proto-dist` on `PAIGASUS_RELEASE_ENABLED` directly and delete `plan`.
+**(b) Does `--dry-run` succeed at all, and what does it cost? — MEASURED, and the answer is a
+fourth outcome nobody anticipated.** `release-plz release --dry-run --git-token "$(gh auth
+token)"` run from `rs/` against this repo: **exit 1, near-immediate (sub-2-second) failure**,
+before any `cargo publish` build work starts:
+
+```
+ERROR Package `paigasus-node-bindings` has `publish = false` or `publish = []` in the Cargo.toml,
+but it has `publish = true` in the release-plz configuration.
+```
+
+This is **not** the exit-101 derive-crate-ordering risk umbrella §14 Q6 recorded — that code path
+was never reached. The real cause is a **pre-existing defect in the committed
+`rs/release-plz.toml`**: its `[[package]]` entries for the three binding crates
+(`paigasus-node-bindings`, `paigasus-wasm`, `paigasus-py-bindings`) set `release = true` without an
+explicit `publish = false`, even though each crate's `Cargo.toml` sets `publish = false`. An unset
+`publish` field defaults to `true` (`release-plz-0.3.158/src/config.rs:331`), and
+`ReleaseRequest::check_publish_fields()` (`release_plz_core-0.36.14/release.rs:210-225`) — called
+**unconditionally**, before the dry-run/live branch, from `release-plz-0.3.158/src/args/release.rs:134`
+— rejects that combination. `--dry-run` does not protect against it: a live `release-plz release`
+fails identically, at the identical point. This check exists only on the `release` subcommand's
+path; `release-plz release-pr` never calls it, which is why the config's own comment ("`version_group`
+… DOES apply to crates whose Cargo manifest says `publish = false`") — measured against
+`release-pr` in an earlier issue — never caught it.
+
+**Consequence:** this is a hard prerequisite fix (`publish = false` added to the three binding-crate
+`[[package]]` entries in `rs/release-plz.toml`) that blocks `release-plz release` from running at
+all, **independent of which fallback below is chosen** — the `plan`-exists shape and the
+direct-`PAIGASUS_RELEASE_ENABLED`-gate shape both need it. It is out of scope for Task 1 (no
+production code) and must land before whichever task first exercises `plan`/`release` for real.
+**The original exit-101 derive-crate-ordering question is still genuinely unmeasured** — the
+config defect fires first and prevents ever reaching that code path. Re-measure it once the
+`publish = false` fix lands, before trusting `plan`'s `--dry-run` step in production. See
+`docs/superpowers/specs/2026-08-28-sma-579-measurements.md` M1 for the full source trace.
 
 **(c) `release-plz release` requires a git token EVEN under `--dry-run`. — MEASURED, YES.**
 `release()` calls `get_git_client(input)?` **unconditionally** at `src/command/release.rs:543`,
@@ -205,10 +229,13 @@ release commit.
 `paigasus-kernel` and `paigasus-proto`, which each get one carrying that family's changelog. Two
 pages per release commit, each meaningful.
 
-The exact TOML key spelling (`git_release_enable`, per-package) **must be verified** against the
-pinned CLI — the config parser lives in the CLI crate, not in `release_plz_core`, and this spec
-does not assert it from memory. Note that disabling it does **not** remove the token requirement
-(§1.3c).
+The exact TOML key spelling (`git_release_enable`, per-package) **MEASURED**: confirmed exactly as
+spelled, at `release-plz-0.3.158/src/config.rs:414`, a field of `pub struct PackageConfig` (line
+390) whose doc comment states it is "Configuration that can be specified both at the `[workspace]`
+and at the `[[package]]` level." Both `Workspace` and `PackageSpecificConfig` (the `[[package]]`
+shape) flatten this same `PackageConfig`, so `git_release_enable` is valid at **both** scopes — the
+per-package placement this spec assumes is confirmed correct. Note that disabling it does **not**
+remove the token requirement (§1.3c).
 
 **This decision is enforced, not merely documented.** §8.2's guard fails if any `napi prepublish`
 invocation lacks `--no-gh-release`.
@@ -230,8 +257,9 @@ pub struct PackageRelease { package_name: String, prs: Vec<Pr>, tag: String, ver
 So `{"releases": [{"package_name": …, "prs": […], "tag": …, "version": …}, …]}`. **The array key
 is `releases` and the field is `package_name`** — *not* `prs`/`package`, which is `release-pr`'s
 different shape. `release()` returns `Option<Release>` and yields `None` when nothing is
-releasable; **how the CLI serializes `None` still needs confirming** (`release-pr`'s precedent
-wraps `None` as `[]`).
+releasable; **MEASURED (source-confirmed, §5.3): the CLI prints `{"releases":[]}`** for that case
+— `Release` derives `Default`, and `main.rs` does `.unwrap_or_default()` on the `Option`, so
+`None` becomes `Release { releases: vec![] }`, matching `release-pr`'s `{"prs":[]}` precedent.
 
 ### 3.1 Credentials for the tag push
 
@@ -353,6 +381,34 @@ token and enables provenance implicitly.** Whether it applies here is a **Task-1
 If both hold, there is no `NPM_TOKEN` at all. If either fails, `NPM_TOKEN` stays — **and §4.5
 records that it was rejected for a measured reason, not merely unconsidered.**
 
+**MEASURED: both (1) and (2) hold, but `NPM_TOKEN` stays anyway, for a reason neither question
+asked.**
+
+1. **YES.** npm Trusted Publishing (GA since 2025-07-31) explicitly covers "all npm private and
+   public packages, both scoped and unscoped." Requires npm ≥ 11.5.1 / Node ≥ 22.14.0; this repo's
+   pinned toolchain (Node 24.16.0, npm 11.11.0) clears that floor.
+2. **YES, structurally.** `napi prepublish` (measured against the installed `@napi-rs/cli@3.7.2`)
+   shells out with `execSync(\`${npmClient} publish\`, { cwd: pkgDir, env: process.env, stdio:
+   "pipe" })`, `npmClient` defaulting to `"npm"` — a real `npm publish` invocation per per-platform
+   package directory, inheriting the full, unfiltered parent environment. Exactly the shape OIDC
+   auto-detection needs.
+
+**The decisive fact, found while researching (1), not asked by either sub-question:** npm Trusted
+Publishing **cannot be configured for a package that does not yet exist on the registry** — the
+npmjs.com UI used to register a Trusted Publisher requires the package to already exist
+(`npm/cli#8544`, open and unresolved as of 2026 — the issue itself contrasts this with PyPI's
+"pending publisher," which supports pre-registration, the exact mechanism §4.5's PyPI row already
+relies on). **Every npm package this issue would publish is a first-ever publish** —
+`@paigasus/node-bindings`, its seven per-platform packages, and `@paigasus/wasm` have never been on
+the npm registry. Trusted Publishing structurally cannot cover any of their first releases.
+
+**Decision: `NPM_TOKEN` stays**, as a bootstrap credential for the first publish of each package.
+Once every package exists on the registry, a **later, separate** change could migrate subsequent
+releases to Trusted Publishing — nothing else blocks it. See
+`docs/superpowers/specs/2026-08-28-sma-579-measurements.md` M4 for sources, including a 2026-05-20
+npm change (Trusted Publisher registration now requires explicitly selecting at least one allowed
+action) relevant to that future migration, not to this decision.
+
 ### 4.5 What SMA-580's pre-flight must create
 
 | Kind | Name | Purpose |
@@ -362,7 +418,7 @@ records that it was rejected for a measured reason, not merely unconsidered.**
 | Environment | `release-publish` | OIDC claim scope; never gets reviewers |
 | crates.io | Trusted Publisher | repo + `release.yml` (+ environment) |
 | PyPI | pending publisher ×3 | `paigasus-py-bindings`, `paigasus-kernel`, `paigasus-proto`, all against **`release.yml`**; environment field per §12 Q3 |
-| npm | Trusted Publisher **or** `NPM_TOKEN` | per §4.4's measurement |
+| npm | `NPM_TOKEN` | **MEASURED (§4.4): Trusted Publishing cannot cover a package's first-ever publish** (npmjs.com requires the package to already exist before OIDC can be registered), and every npm package here is a first publish. `NPM_TOKEN` is a bootstrap credential; a later, separate change may migrate to Trusted Publishing once every package exists. |
 
 `PAIGASUS_BOT_APP_ID` / `PAIGASUS_BOT_PRIVATE_KEY` are unchanged and now serve `release-pr`,
 `plan` and `release`.
@@ -402,8 +458,25 @@ vacuous, and is exactly the control-that-lies failure this repo has paid for.
 
 **Design:** bind against **`paigasus-kernel`**'s reported version. The family is version-locked by
 `version_group` and asserted by `repo:version-lockstep`, so it is the same number, and it is a
-package release-plz definitely reports. Whether `publish = false` packages appear in the JSON is
-folded into §1.3's measurement; if they do, binding against both is strictly better.
+package release-plz definitely reports.
+
+**MEASURED (source-confirmed, since the live dry-run cannot complete — see §1.3b): a Cargo
+`publish = false` package can never appear in `--output json`'s `releases` array, under any
+release-plz.toml configuration.** `release_packages()` builds its output only from
+`Project::publishable_packages()`, which filters on Cargo's own `publish` manifest field
+(`cargo_metadata::Package.publish`) — a check that runs before release-plz's own per-package
+config is even consulted (`release_plz_core-0.36.14/project.rs:110-115`,
+`next_ver.rs:456-469`). So `paigasus-py-bindings`, `paigasus-node-bindings`, and `paigasus-wasm`
+are structurally excluded. **"Binding against both" is not an available option** — one side of
+that binding can never appear — so `paigasus-kernel` is not merely the better choice, it is the
+only one.
+
+**Also measured, for Task 6's `has_releases` key:** when nothing is releasable, `--output json`
+prints `{"releases":[]}` — not `null`, not empty output. Source-confirmed at both layers: `release_packages()`
+returns `None` when its result vec is empty (`release.rs:613`), and the CLI does
+`release_plz_core::release(&request).await?.unwrap_or_default()` (`main.rs:63-65`) — `Release`
+derives `Default` as `{ releases: vec![] }`, matching the `release-pr`/`{"prs":[]}` precedent
+exactly.
 
 ### 5.4 `py/packages/paigasus-proto` — **published here**
 
@@ -512,12 +585,24 @@ binary" rule §7.2 cites, applied to the artifact that actually leaves the machi
 
 `napi prepublish` exposes no `--provenance` flag, so the seven platform packages would publish
 without provenance while `@paigasus/wasm` gets it. **Likely remedy:** `NPM_CONFIG_PROVENANCE=true`
-in the job env, which napi's internal `npm publish` calls inherit. **Verify against napi 3.x**;
-if it does not work, record the asymmetry rather than leaving it undiscovered.
+in the job env, which napi's internal `npm publish` calls inherit.
+
+**MEASURED against `@napi-rs/cli@3.7.2` (the installed, pinned version): it works.** `napi
+prepublish`'s internal call is `execSync(\`${npmClient} publish\`, { cwd: pkgDir, env: process.env,
+stdio: "pipe" })` — `process.env` is the full, unfiltered parent environment, and npm CLI's
+standard `NPM_CONFIG_<KEY>` env-to-flag mapping treats `NPM_CONFIG_PROVENANCE=true` as equivalent
+to `--provenance`. A job-level `NPM_CONFIG_PROVENANCE=true` reaches all eight `npm publish`
+invocations `napi prepublish` makes (main package + seven platform packages). No asymmetry to
+record — provenance applies uniformly.
 
 Related, and a §12 question: `npm publish --provenance` requires a `repository` field matching the
-building repo. `@paigasus/node-bindings/package.json:9-13` has one; the seven
-`napi create-npm-dirs`-generated children may not.
+building repo. `@paigasus/node-bindings/package.json:9-13` has one. **MEASURED: the seven
+`napi create-npm-dirs`-generated children do too.** Ran `napi create-npm-dirs --cwd
+rs/crates/bindings/paigasus-node-bindings` (napi-rs/cli 3.7.2): all seven generated `package.json`
+files (`darwin-arm64`, `darwin-x64`, `linux-arm64-gnu`, `linux-arm64-musl`, `linux-x64-gnu`,
+`linux-x64-musl`, `win32-x64-msvc`) carry
+`"repository": {"type":"git","url":"git+https://github.com/SMK1085/paigasus-core.git","directory":"rs/crates/bindings/paigasus-node-bindings"}`,
+matching the building repo exactly. No remediation needed here.
 
 ---
 
@@ -819,10 +904,13 @@ Revision 1 had no such section; the umbrella has one and §1.1's whole rationale
 
 ## 12. Open questions for the plan
 
-1. Does `release-plz release --dry-run` **succeed**, and what does it cost, with
-   `paigasus-proto-derive` absent from crates.io? **(§1.3b — blocks `plan`'s existence.)**
-2. Does `--output json` list Cargo `publish = false` packages? **(§5.3 — decides the binding
-   target.)**
+1. ~~Does `release-plz release --dry-run` **succeed**, and what does it cost, with
+   `paigasus-proto-derive` absent from crates.io?~~ **MEASURED, Task 1 (§1.3b) — but not this
+   question.** It fails immediately for an unrelated, more urgent reason (a `release-plz.toml`
+   config defect); the derive-crate ordering question remains unmeasured behind that blocker and
+   must be re-measured once the config fix lands.
+2. ~~Does `--output json` list Cargo `publish = false` packages?~~ **MEASURED (source-confirmed),
+   Task 1 (§5.3): no, never — settling the binding target as `paigasus-kernel`, the only option.**
 3. Does PyPI's pending-publisher registration need the `environment` field set? §4.1 says the
    environment appears in the OIDC claim; §4.5's PyPI row leaves it open. A mismatch fails only at
    first publish.
@@ -830,12 +918,15 @@ Revision 1 had no such section; the umbrella has one and §1.1's whole rationale
    `concurrency:` accepted at all on a `uses:` job? Do artifacts uploaded by a **called** workflow's
    jobs resolve for a sibling job in the **caller**? *(The last is near-certain — same run — but is
    the load-bearing assumption of §5 and §7.)*
-5. Does npm Trusted Publishing cover scoped org packages, and does `napi prepublish` pick it up?
-   **(§4.4 — decides whether `NPM_TOKEN` exists.)**
-6. Does `NPM_CONFIG_PROVENANCE=true` reach napi's internal `npm publish` calls? **(§7.6.)**
-7. Do the seven `napi create-npm-dirs`-generated `package.json` files carry a `repository` field?
-   `--provenance` requires one matching the building repo. **(§7.6.)**
-8. Is the per-package TOML key `git_release_enable`? **(§2.1 — not asserted from memory.)**
+5. ~~Does npm Trusted Publishing cover scoped org packages, and does `napi prepublish` pick it
+   up?~~ **MEASURED, Task 1 (§4.4): yes to both, but `NPM_TOKEN` stays anyway** — Trusted
+   Publishing cannot cover a package's first-ever publish, and every npm package here is one.
+6. ~~Does `NPM_CONFIG_PROVENANCE=true` reach napi's internal `npm publish` calls?~~ **MEASURED,
+   Task 1 (§7.6): yes**, via the full-environment `execSync` call napi makes.
+7. ~~Do the seven `napi create-npm-dirs`-generated `package.json` files carry a `repository`
+   field?~~ **MEASURED, Task 1 (§7.6): yes, all seven do**, matching the building repo.
+8. ~~Is the per-package TOML key `git_release_enable`?~~ **MEASURED, Task 1 (§2.1): yes, confirmed
+   exactly, and valid at both `[workspace]` and `[[package]]` scope.**
 9. What happens on **"Re-run all jobs"** of an older run? `plan`/build jobs re-execute at the old
    commit while `main` has moved. §5.3's version binding catches the PyPI half; nothing catches the
    crates.io or npm half.
