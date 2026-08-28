@@ -667,6 +667,44 @@ ACTIONLINT_SH_CALL_SITES = (
     # with it, it is a two-file edit across two independently scheduled gates, which is exactly
     # what the comment above the floors in run.sh claims of BOTH of them.
     '[ "${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}" -ge 3 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_SCRIPT has ${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]} entries, expected at least 3"',
+    # SMA-579 — check 10's production call site, at run.sh's top level (verified: not nested in
+    # a function, if, or loop) — column 0 like every other entry above. Deleting it stops
+    # release_guard.py from ever being invoked against the real workflow file.
+    'release_guard_py .github/workflows/release.yml > "$RG_OUT"',
+    # ...and the fail-closed exit-2 ROUTING that turns the guard's `infra` exit 2 into a hard
+    # stop. Task 4 shipped with this read through `done < <(…)`, which discards the subprocess
+    # exit status — the guard's exit-2 abort produced no stdout, the read loop saw nothing, and
+    # the gate finished rc 0 having asserted nothing. run.sh:2050 documents that exact class for
+    # affected_graph_wiring_verdict; this pins it closed here too. Deleting just this `if` line
+    # is a one-line edit that silently restores the swallow: the gate keeps running, keeps
+    # reporting violations, and stops failing closed.
+    'if [ "$rg_rc" -eq 2 ]; then',
+)
+
+# SMA-579 — check 10's two remaining call sites, pinned SEPARATELY from ACTIONLINT_SH_CALL_SITES
+# above because they cannot be: both sit INSIDE `release_guard_self_test() { ... }`, so they carry
+# real, executing leading whitespace, and the column-0 haystack above would report them missing
+# even when present. Matched as whole STRIPPED lines instead, the same mechanism
+# RELEASE_PARITY_SH_CALL_SITES uses and for the same reason (its lines are indented inside an
+# `if` body) — the class of false negative that closes (an indented copy of a WHOLE-TEXT
+# substring match) does not apply here since these are compared as complete lines, and the
+# residual it does NOT close (a dead copy at the SAME indentation, e.g. wrapped in
+# `if false; then … fi`) is the same accepted gap already recorded for
+# RELEASE_PARITY_SH_CALL_SITES and SELF_SCHEDULED_GATES.
+ACTIONLINT_SH_INDENTED_CALL_SITES = (
+    # check 10's FIXTURE TABLE arity floor. Same shape as the two check-8e floors in
+    # ACTIONLINT_SH_CALL_SITES, one language over: release_guard.py's verdict is Python and
+    # check 7's definition counter is bash-only, so an emptied FIXTURES table in
+    # release_guard.py is invisible to every other check and this gate would pass having
+    # asserted nothing.
+    '[ "$n" -ge 20 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 20"',
+    # ...and the SELF-TEST invocation. Deleting it leaves the production call (in
+    # ACTIONLINT_SH_CALL_SITES above) running against a verdict function nothing has proved
+    # correct. This is also the one entry across every registry that is a MID-LINE FRAGMENT, not
+    # a complete statement — the actual bash line is a double-quoted string left open across two
+    # physical lines — but it is still this file's own complete physical line, so whole-line
+    # matching still applies cleanly.
+    'release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken',
 )
 
 # SMA-530. The moon.yml pins above prove the CONTROL IS INVOKED; these prove it still DOES
@@ -1089,21 +1127,30 @@ def check_self_invocation(
     """Call sites of the affected-graph, actionlint, release-parity and workflow-credentials
     gates missing from where they must appear.
 
-    Five haystacks, matched TWO different ways. run.sh sites are substrings, because they are
+    Six haystacks, matched THREE different ways. run.sh sites are substrings, because they are
     indented and one is a mid-line fragment, and their `|| RC=1` suffixes already make them
-    unambiguous. Task-script, actionlint, release-parity and workflow-credentials sites are
-    whole stripped LINES —
-    membership is checked against the set of a line's OWN full stripped text, not "does this
-    substring appear anywhere in the file" — but for two DIFFERENT reasons, not one shared
-    rationale. For task-script and actionlint, a required token is a strict PREFIX of something
-    else in the file — `task_inputs.py` of `task_inputs.py --self-test`, and `run_self_tests` of
+    unambiguous. Everything else is matched as a whole LINE — membership is checked against the
+    set of a line's OWN full text, not "does this substring appear anywhere in the file" — and
+    that whole-line rule exists for two DIFFERENT reasons, not one shared rationale. For
+    task-script and actionlint, a required token is a strict PREFIX of something else in the file
+    — `task_inputs.py` of `task_inputs.py --self-test`, and `run_self_tests` of
     `run_self_tests() {` — so a substring-over-the-whole-text match would be satisfied by the
     wrong occurrence. Release-parity and workflow-credentials have no such prefix hazard; there,
     whole-line matching is what makes a COMMENTED-OUT copy of a pinned line
     (e.g. `# if [ "$NEGATIVE" = 1 ]; then`) report missing rather than silently satisfy the pin —
-    a substring-over-the-whole-text version would still find the required text inside the commented
-    line and accept it, since commenting a line out does not remove its text, only prefix it.
+    a substring version would still find the required text inside the commented line and accept
+    it, since commenting a line out does not remove its text, only prefix it.
 
+    The whole-line haystacks split further on WHERE the line may sit, and that distinction is
+    load-bearing. ACTIONLINT_SH_CALL_SITES is matched at COLUMN 0 only (rstrip, no lstrip): an
+    indented copy — say, wrapped in `if false; then … fi` — must not satisfy those pins.
+    ACTIONLINT_SH_INDENTED_CALL_SITES (SMA-579) is stripped on BOTH sides instead, because its
+    entries sit inside `release_guard_self_test() { ... }` and carry real, executing leading
+    whitespace that a column-0 rule would reject outright. Splitting it into its own tuple, rather
+    than loosening the column-0 haystack wholesale, is what keeps the stronger guarantee intact
+    for the entries that can hold it. Task-script, release-parity and workflow-credentials are
+    stripped for the same reason — their real lines are indented inside `case` arms and `if`
+    bodies.
     The five texts are checked SEPARATELY rather than against one concatenated haystack, so a call
     site living in the wrong file cannot satisfy another's requirement.
 
@@ -1116,7 +1163,7 @@ def check_self_invocation(
         present = {line.strip() for line in scripts.get(task, "").splitlines()}
         missing.extend(f"{task} script: {site}" for site in required if site not in present)
     # COLUMN 0 only (rstrip, no lstrip) — see the comment at ACTIONLINT_SH_CALL_SITES above for why
-    # this one haystack, alone of the four, requires the line to carry NO leading whitespace: an
+    # this one haystack, alone of the six, requires the line to carry NO leading whitespace: an
     # indented copy (e.g. wrapped in `if false; then … fi`) must not satisfy the pin.
     actionlint_lines = {
         line.rstrip() for line in actionlint_sh_text.splitlines() if line == line.lstrip()
@@ -1125,6 +1172,15 @@ def check_self_invocation(
         f"ci/actionlint/run.sh: {site}"
         for site in ACTIONLINT_SH_CALL_SITES
         if site not in actionlint_lines
+    )
+    # Stripped both sides, like ACTIONLINT_SH_INDENTED_CALL_SITES' own comment explains: these
+    # two sit inside release_guard_self_test(), so column 0 would reject the real, executing
+    # lines outright.
+    actionlint_lines_stripped = {line.strip() for line in actionlint_sh_text.splitlines()}
+    missing.extend(
+        f"ci/actionlint/run.sh: {site}"
+        for site in ACTIONLINT_SH_INDENTED_CALL_SITES
+        if site not in actionlint_lines_stripped
     )
     # Stripped whole lines, like the task-script haystack and unlike the column-0 actionlint
     # one: these three sit inside run.sh at varying indentation (the `case` arms are indented
@@ -1685,6 +1741,16 @@ def self_test():
         'done < <(affected_smoke_block_verdict moon.yml)\n'
         '[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 20 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 20"\n'
         '[ "${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}" -ge 3 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_SCRIPT has ${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]} entries, expected at least 3"\n'
+        # Check 10's production call site and its fail-closed exit-2 routing (SMA-579) — both
+        # whole-line matched at column 0, exactly like check 8e's pair above: this sits at
+        # run.sh's top level, outside any function.
+        'release_guard_py .github/workflows/release.yml > "$RG_OUT"\n'
+        'if [ "$rg_rc" -eq 2 ]; then\n'
+        # ...and check 10's fixture-table arity floor and self-test invocation (SMA-579),
+        # matched via ACTIONLINT_SH_INDENTED_CALL_SITES instead: both sit inside
+        # release_guard_self_test(), so they carry real, executing leading whitespace.
+        '  [ "$n" -ge 20 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 20"\n'
+        '  release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken\n'
     )
     wired_release_parity = (
         '    --negative-control) NEGATIVE=1; shift ;;\n'
@@ -1836,6 +1902,37 @@ def self_test():
             "check_self_invocation: missed a deleted check-8d production call site "
             "(SMA-542 residual closure, README L12)"
         )
+    # SMA-579 — check 10's four call sites, one row each so a mutant that widens any single
+    # match back to "matches anywhere" is caught regardless of which entry it is tested against.
+    no_rg_production_call = wired_actionlint.replace(
+        'release_guard_py .github/workflows/release.yml > "$RG_OUT"\n', ""
+    )
+    if not check_self_invocation(wired, scripts, no_rg_production_call, wired_release_parity, wired_workflow_credentials):
+        failures.append(
+            "check_self_invocation: missed a deleted check-10 production call site"
+        )
+    no_rg_rc_check = wired_actionlint.replace('if [ "$rg_rc" -eq 2 ]; then\n', "")
+    if not check_self_invocation(wired, scripts, no_rg_rc_check, wired_release_parity, wired_workflow_credentials):
+        failures.append(
+            "check_self_invocation: missed a deleted check-10 fail-closed exit-2 routing "
+            "(the done < <(...) swallow class, run.sh:2050)"
+        )
+    no_rg_arity_call = wired_actionlint.replace(
+        '  [ "$n" -ge 20 ] || infra "check 10: release_guard.py reports $n fixtures, '
+        'expected at least 20"\n',
+        "",
+    )
+    if not check_self_invocation(wired, scripts, no_rg_arity_call, wired_release_parity, wired_workflow_credentials):
+        failures.append("check_self_invocation: missed a deleted check-10 fixture arity floor")
+    no_rg_selftest_call = wired_actionlint.replace(
+        '  release_guard_py --self-test || { fail "check 10: release_guard.py --self-test '
+        "reported a broken\n",
+        "",
+    )
+    if not check_self_invocation(wired, scripts, no_rg_selftest_call, wired_release_parity, wired_workflow_credentials):
+        failures.append(
+            "check_self_invocation: missed a deleted check-10 --self-test invocation"
+        )
     # CodeRabbit (PR 150) — the column-0 requirement itself. Before this fix, `check_self_invocation`
     # matched actionlint call sites by STRIPPED line (both sides), so a required line was satisfied
     # by that exact text appearing anywhere, including indented inside an `if false; then … fi`
@@ -1889,6 +1986,23 @@ def self_test():
     if not check_self_invocation(wired, scripts, indented_check8d_call, wired_release_parity, wired_workflow_credentials):
         failures.append(
             "check_self_invocation: an INDENTED check-8d call site satisfied the column-0 pin"
+        )
+    # SMA-579 — the same column-0 strictness, for check 10's two top-level entries.
+    indented_rg_production_call = wired_actionlint.replace(
+        'release_guard_py .github/workflows/release.yml > "$RG_OUT"\n',
+        '  release_guard_py .github/workflows/release.yml > "$RG_OUT"\n',
+    )
+    if not check_self_invocation(wired, scripts, indented_rg_production_call, wired_release_parity, wired_workflow_credentials):
+        failures.append(
+            "check_self_invocation: an INDENTED check-10 production call site satisfied the "
+            "column-0 pin"
+        )
+    indented_rg_rc_check = wired_actionlint.replace(
+        'if [ "$rg_rc" -eq 2 ]; then\n', '  if [ "$rg_rc" -eq 2 ]; then\n'
+    )
+    if not check_self_invocation(wired, scripts, indented_rg_rc_check, wired_release_parity, wired_workflow_credentials):
+        failures.append(
+            "check_self_invocation: an INDENTED check-10 exit-2 routing satisfied the column-0 pin"
         )
     # Contamination cases, THREE of them (SMA-542 review finding I1, plus a round-2 addition). The
     # obvious "swap the two texts wholesale" version tried first passed unconditionally, because it
