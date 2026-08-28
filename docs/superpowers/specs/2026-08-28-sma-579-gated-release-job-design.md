@@ -264,15 +264,30 @@ that never merges.
 2. **The callee's declaration**, asserted by `repo:publish-metadata`'s P-D6.
 
 > **Constraint for every future editor of `release.yml`:** it must never gain a `pull_request` or
-> `pull_request_target` trigger. It genuinely reads secrets, so under SMA-593's widened P-D6 it
-> would red — correctly. Do not add such a trigger, and do not reach for P-D6's
-> `PR_CREDENTIAL_ALLOWED` escape hatch to silence it.
+> `pull_request_target` trigger. It genuinely reads secrets, so it would red the credential gate —
+> correctly. Do not add such a trigger, and do not reach for that gate's allowlist to silence it.
 
-**R7 dependency, stated honestly:** that widening is **SMA-593's, and is not on `main`.** Today
-`repo:publish-metadata` reads `.github/workflows/wheels.yml` only. Until SMA-593 lands, nothing
-reds when a `pull_request` trigger is added to `release.yml`. **Fallback:** if SMA-593 has not
-landed when this issue is ready, §8's guard adds the trigger assertion itself — it already parses
-`release.yml`'s `on:` block, so the marginal cost is one fixture row.
+**R7 dependency, stated honestly and corrected 2026-08-28.** Revision 1 said SMA-593 *widens*
+`repo:publish-metadata`'s P-D6 arm to every workflow with a `pull_request` trigger. **That is no
+longer what SMA-593 does.** Confirmed directly with the session implementing it: P-D6 is being
+**deleted** from `ci/publish-metadata/run.sh` — `assert_wheels_has_no_credentials`,
+`strip_comments`, the `PATTERNS` table and its six fixture rows — and re-founded as a **new narrow
+gate, `repo:workflow-credentials`**. The reason is cost: widening `repo:publish-metadata`'s
+`inputs` to every workflow would make each `ci.yml` edit pay for a `cargo publish --dry-run` on a
+required check.
+
+Two consequences for this issue:
+
+- The credential assertion protecting `release.yml` will live in `repo:workflow-credentials`, not
+  in `repo:publish-metadata`. Any comment this issue writes must name the new gate.
+- `.github/workflows/wheels.yml` is being **removed** from `repo:publish-metadata`'s `inputs`
+  (`moon.yml:548`), since P-D6 was its only reader — so
+  `SELF_TASK_EXPECTED_GLOBS["publish-metadata"]` **shrinks**. This issue changes neither.
+
+**Neither gate is on `main` yet.** Until one lands, nothing reds when a `pull_request` trigger is
+added to `release.yml`. **Fallback, unchanged:** if SMA-593 has not landed when this issue is
+ready, §8's guard adds the trigger assertion itself — it already parses `release.yml`'s `on:`
+block, so the marginal cost is one fixture row.
 
 ### 4.1 Environments — **two, not one**
 
@@ -702,8 +717,13 @@ Unchanged from umbrella §9 **M12**: the guard asserts the `if:` exists and is n
   strict-equality (Check P0), and the discovery scan is runtime-based, so adding
   `[tool.paigasus] pypi = true` to `py/packages/paigasus-proto/pyproject.toml` reds the gate until
   that array moves. The file's own comment at lines 116-118 says **"SMA-579 owns that decision"** —
-  it was always this issue's edit. It is a **one-line array change**, far from SMA-593's P-D6
-  region. §9.2 records the boundary.
+  it was always this issue's edit. It is a **one-line array change**.
+
+  **The marker and the array entry must land in the SAME COMMIT.** Check P0 compares a runtime
+  discovery scan against the array by strict equality, so either edit alone reds
+  `repo:publish-metadata`. Splitting them across two branches would red `main` for whichever landed
+  first. That is what makes the line structurally this issue's rather than a courtesy hand-off.
+  §9.2 records the boundary.
 - CLAUDE.md gains: the tagging boundary and the two-GitHub-Release decision; the `--dry-run`
   measurements (no tags, but a token still required); the YAML 1.1 coercions; the wasm-pack
   clobber as it applies to the release path; and the "never add a `pull_request` trigger to
@@ -713,9 +733,20 @@ Unchanged from umbrella §9 **M12**: the guard asserts the `if:` exists and is n
 
 `uv run --with 'pyyaml==6.0.3'` as written adds an **unlocked, unscanned, network-dependent** input
 to a required-check gate. `pyyaml` would appear in no lockfile, so `repo:osv` and dependabot cannot
-see it; and `ci.yml:163-169` keys the uv cache on `hashFiles('py/uv.lock')`, so a lockfile change
-or cache eviction makes `repo:actionlint` depend on PyPI being reachable. The 0.068s figure is
-**warm on one host**; the cold path is unmeasured.
+see it. The 0.068s figure is **warm on one host**; the cold path is unmeasured.
+
+**And the cold path is not the rare case — it is every run.** `ci.yml:163-169` keys the uv cache on
+`uv-${{ runner.os }}-${{ hashFiles('py/uv.lock') }}`. Under the `--with` form `py/uv.lock` never
+changes, so that key never changes, so the restore is an **exact primary-key hit** — and
+`actions/cache` **skips its save on an exact hit**. The pyyaml download therefore lands in the
+cache directory and is *never persisted*: every CI run restores a cache without it, refetches it
+from PyPI, and discards it again, permanently. A required check would depend on PyPI's
+availability on every single run. *(Credit: this half was found by the SMA-593 session; it is the
+same `actions/cache` behaviour recorded in this repo's notes as "widening what a cached job builds
+without changing the key means the new output is never saved".)*
+
+Adding `pyyaml` to `py/pyproject.toml` fixes both halves at once: it is then locked and scanned,
+**and** `py/uv.lock`'s hash changes, so the cache key rotates and the save actually happens.
 
 **Design:** add `pyyaml` as a `py/` dev dependency so it is locked by `py/uv.lock` and scanned by
 `repo:osv`, and invoke through the project rather than `--with`. §8.5's fail-closed contract covers
@@ -725,7 +756,7 @@ the residual (a missing interpreter reds; it never skips).
 
 | Session | Issue | Shared file | Resolution |
 |---|---|---|---|
-| paigasus-core-2b | SMA-593 | `ci/publish-metadata/run.sh` | they own the P-D6 region + `workflow_credentials.py`; this issue changes **only** `EXPECTED_PYPI_PUBLISHABLE` (line 119). **Must be renegotiated — revision 1 promised not to touch this file.** |
+| paigasus-core-2b | SMA-593 | `ci/publish-metadata/run.sh` | **Settled.** They **delete** the P-D6 block (~lines 1040-1120, 1711-1760) and re-found it as `repo:workflow-credentials`. This issue changes **only** `EXPECTED_PYPI_PUBLISHABLE` (line 119), ~900 lines clear of the nearest deletion. Agreed directly with that session. |
 | paigasus-core-2b | SMA-593 | `ci/affected-graph/ci_targets.py` | they own `["publish-metadata"]`; this issue owns `SELF_SCHEDULED_GATES`, `ACTIONLINT_SH_CALL_SITES`, `["actionlint"]` |
 | paigasus-core-3c | SMA-594/592/535 | `ci_targets.py`, CLAUDE.md | disjoint regions; whoever lands second rebases |
 
