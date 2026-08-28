@@ -16,7 +16,11 @@ FAIL-CLOSED. Every abnormal condition exits 2 (infra). Never a skip, never a pas
 
 from __future__ import annotations
 
+import contextlib
+import io
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 try:
@@ -64,7 +68,15 @@ def load_workflow(path: Path) -> dict:
     if not path.is_file():
         infra(f"{path}: not a readable file")
     try:
-        docs = [d for d in yaml.safe_load_all(path.read_text(encoding="utf-8")) if d is not None]
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # Fix round 1, Important 5: `path.is_file()` proves the file exists, not that it can be
+        # read. A permission-denied or invalid-UTF-8 file used to raise an unhandled traceback
+        # that `main()` would report as a Python exit status, blurring the 1-vs-2 distinction
+        # spec §8.5 exists to preserve. Both must be infra (2), never treated as "violations found".
+        infra(f"{path}: unreadable: {exc}")
+    try:
+        docs = [d for d in yaml.safe_load_all(text) if d is not None]
     except yaml.YAMLError as exc:
         infra(f"{path}: unparseable YAML: {exc}")
     if len(docs) != 1:
@@ -154,13 +166,23 @@ def gated_path_jobs(job_id: str, jobs: dict, seen: frozenset[str] = frozenset())
 
 
 def job_publishes(job: dict) -> bool:
-    """V6 detection. Used ONLY for called workflows."""
+    """V6 detection. Used ONLY for called workflows.
+
+    Fix round 1, Important 3: evaluated per LINE, not per whole `run:` block. A `--dry-run`
+    occurrence reaches no registry — `napi prepublish --dry-run --no-gh-release` (prebuild.yml)
+    must not trip this, or the gate is unpassable on a correct repository. Checking the whole
+    block would let a `--dry-run` anywhere in a multi-line script silence a REAL invocation on
+    another line; per-line scoping is the same fix shape as V5's Important 4.
+    """
     for step in job.get("steps") or []:
         if not isinstance(step, dict):
             continue
         blob = f"{step.get('run', '')}\n{step.get('uses', '')}"
-        if any(m in blob for m in PUBLISH_MARKERS):
-            return True
+        for line in blob.splitlines():
+            if "--dry-run" in line:
+                continue
+            if any(m in line for m in PUBLISH_MARKERS):
+                return True
     return False
 
 
@@ -169,9 +191,33 @@ def check_main(doc: dict, name: str) -> list[str]:
     out: list[str] = []
     jobs = doc["jobs"]
 
+    if not jobs:
+        # Fix round 1, Minor 9: an empty `jobs: {}` mapping is a valid dict, so it sailed through
+        # load_workflow's isinstance check, then the loop below examined zero jobs and returned
+        # a false-clean []. A check that asserts nothing must not report success.
+        infra(f"{name}: 'jobs:' is empty; nothing to assert")
+
     for job_id, job in jobs.items():
         if not isinstance(job, dict):
             infra(f"{name}: job '{job_id}' is not a mapping")
+
+        # V5: the tagging boundary (spec §2), enforced rather than documented. Fix round 1,
+        # Ruling 8: V5 applies to EVERY job, including UNGATED_JOBS members — `napi prepublish`
+        # cuts a git tag regardless of whether the job that ran it was gated, and release-plz must
+        # own every tag (ADR-0011 S3). So this runs BEFORE the UNGATED_JOBS `continue` below.
+        # Fix round 1, Important 4: evaluated per LINE, not per whole `run:` block — a comment or
+        # unrelated line mentioning the flag must not satisfy a check over the real invocation.
+        for step in job.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            run = str(step.get("run") or "")
+            for line in run.splitlines():
+                if "napi prepublish" in line and "--no-gh-release" not in line:
+                    out.append(
+                        f"{name}: job '{job_id}' runs `napi prepublish` without --no-gh-release. "
+                        f"release-plz owns every tag (ADR-0011 S3); napi must never cut one."
+                    )
+
         if job_id in UNGATED_JOBS:
             continue
 
@@ -184,12 +230,17 @@ def check_main(doc: dict, name: str) -> list[str]:
             continue
 
         # V3/V4 apply to the job AND every job on its needs: path — an always() upstream
-        # un-gates everything downstream of it.
+        # un-gates everything downstream of it. Scoped to gated paths only (Ruling 8): these
+        # verdicts are about defeating a GATE, which has no meaning for a job that cannot publish.
         for pid in gated_path_jobs(job_id, jobs):
             pjob = jobs[pid]
-            txt = if_text(pjob) or ""
+            # Fix round 1, Critical 1: GitHub Actions expression function names are
+            # case-insensitive (confirmed against the repo's pinned actionlint 1.7.12), so
+            # `Always()`, `ALWAYS()` and `!Cancelled()` are all working bypasses. Normalise case
+            # AND strip ALL whitespace (not only U+0020, closing Minor 7's tab case for free).
+            norm = "".join((if_text(pjob) or "").split()).lower()
             for fn in STATUS_FUNCS:
-                if f"{fn}(" in txt.replace(" ", ""):
+                if f"{fn}(" in norm:
                     out.append(
                         f"{name}: job '{pid}' (on '{job_id}'s gated path) uses the status "
                         f"function {fn}() in its if:. That defeats the gate for every job "
@@ -208,17 +259,6 @@ def check_main(doc: dict, name: str) -> list[str]:
                         f"{step.get('continue-on-error')!r}. That hides a failed publish inside a "
                         f"job that still reports success."
                     )
-
-        # V5: the tagging boundary (spec §2), enforced rather than documented.
-        for step in job.get("steps") or []:
-            if not isinstance(step, dict):
-                continue
-            run = str(step.get("run") or "")
-            if "napi prepublish" in run and "--no-gh-release" not in run:
-                out.append(
-                    f"{name}: job '{job_id}' runs `napi prepublish` without --no-gh-release. "
-                    f"release-plz owns every tag (ADR-0011 S3); napi must never cut one."
-                )
     return out
 
 
@@ -318,7 +358,150 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     ("called workflow with no publish step is clean", "called",
      "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
      "jobs:\n  build:\n    steps: [{run: maturin build}]\n", None),
+
+    # --- Fix round 1 additions -------------------------------------------------------------
+    ("Critical 1: case-insensitive Always() bypass", "main",
+     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: Always()"),
+     "status function"),
+    ("Critical 1: case-insensitive ALWAYS() wrapped form", "main",
+     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: ${{ ALWAYS() }}"),
+     "status function"),
+    ("Critical 1: case-insensitive !Cancelled() bypass", "main",
+     _OK_MAIN.replace("    needs: [plan]", "    needs: [plan]\n    if: ${{ !Cancelled() }}"),
+     "status function"),
+    ("Important 3: napi prepublish --dry-run in a called workflow is not a publish", "called",
+     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+     "jobs:\n  build:\n    steps: [{run: pnpm exec napi prepublish --dry-run --no-gh-release "
+     "--npm-dir npm}]\n", None),
+    ("Important 4: V5 is not fooled by a decoy --no-gh-release mention on another line", "main",
+     _OK_MAIN.replace(
+         "steps: [{run: release-plz release}]",
+         "steps:\n      - run: |\n          "
+         "echo \"decoy mention of --no-gh-release here\"\n          "
+         "napi prepublish --npm-dir npm"),
+     "without --no-gh-release"),
+    ("Important 6: V5 still applies to an UNGATED_JOBS member", "main",
+     _OK_MAIN.replace("steps: [{run: echo hi}]", "steps: [{run: napi prepublish --npm-dir npm}]", 1),
+     "without --no-gh-release"),
+    ("Ruling 8: continue-on-error on an UNGATED_JOBS member is not V3/V4's concern", "main",
+     _OK_MAIN.replace(
+         "  release-pr:\n    runs-on: ubuntu-latest\n    steps: [{run: echo hi}]",
+         "  release-pr:\n    runs-on: ubuntu-latest\n    continue-on-error: true\n"
+         "    steps: [{run: echo hi}]"),
+     None),
+    ("Minor 10: explicit !!str tag on the gate expression parses correctly", "main",
+     _OK_MAIN.replace("if: vars.PAIGASUS_RELEASE_ENABLED == 'true'",
+                      "if: !!str vars.PAIGASUS_RELEASE_ENABLED == 'true'"), None),
+    ("Minor 10: folded >- scalar gate form is accepted", "main",
+     _OK_MAIN.replace("    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'",
+                      "    if: >-\n      vars.PAIGASUS_RELEASE_ENABLED == 'true'"), None),
 ]
+
+
+def _critical2_end_to_end() -> str | None:
+    """Regression test for Critical 2 (fix round 1): drives main() through a real `./`-prefixed
+    local `uses:`, so the `uses.removeprefix("./")` fix is exercised end to end.
+
+    self_test()'s FIXTURES loop calls check_main/check_called DIRECTLY and never goes through
+    main() at all — that is exactly how the original `str.lstrip("./")` bug survived undetected;
+    a (name, kind, yaml, want) row cannot express this, since it never touches the filesystem or
+    main()'s callee-resolution loop. The callee directory name starts with a dot (".wf/") on
+    purpose: `lstrip("./")` only mis-strips when a second dot follows the leading "./" — a plain
+    "./callee.yml" would not have reproduced the original bug.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        hidden = tmp_path / ".wf"
+        hidden.mkdir()
+        (hidden / "callee.yml").write_text(
+            "on:\n  workflow_call:\n  pull_request:\n"
+            "jobs:\n  build:\n    steps: [{run: twine upload dist/*}]\n"
+        )
+        main_yaml = _OK_MAIN.replace(
+            "steps: [{run: release-plz release}]", "uses: ./.wf/callee.yml"
+        )
+        (tmp_path / "main.yml").write_text(main_yaml)
+
+        prev_cwd = Path.cwd()
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        rc: int
+        try:
+            os.chdir(tmp_path)
+            try:
+                with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                    rc = main(["main.yml"])
+            except SystemExit as exc:
+                rc = exc.code if isinstance(exc.code, int) else 2
+        finally:
+            os.chdir(prev_cwd)
+
+    out = out_buf.getvalue()
+    if rc != 1 or "workflow_call-ONLY" not in out:
+        return (f"expected exit 1 with 'workflow_call-ONLY' in output, got exit {rc!r}: "
+                f"stdout={out!r} stderr={err_buf.getvalue()!r}")
+    return None
+
+
+def _minor9_empty_jobs_floor() -> str | None:
+    """Regression test for Minor 9: `jobs: {}` must infra (exit 2 via SystemExit), never return
+    a false-clean [] having examined zero jobs. Expressed here, not as a FIXTURES row, because a
+    FIXTURES row expects check_main to RETURN a list — this scenario must instead raise.
+
+    infra() always prints to stderr before raising — that's the wanted, correct behaviour for
+    every OTHER caller, but here it would make a clean `--self-test` run noisy for a check that
+    passed, so stderr is captured and only surfaced on failure.
+    """
+    err_buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err_buf):
+            check_main({"jobs": {}}, "fixture")
+    except SystemExit as exc:
+        if exc.code == 2:
+            return None
+        return f"expected SystemExit(2), got SystemExit({exc.code!r}): {err_buf.getvalue()!r}"
+    return f"check_main returned normally on an empty jobs mapping instead of infra(2): {err_buf.getvalue()!r}"
+
+
+def _important5_regressions() -> list[str]:
+    """Regression tests for Important 5: a file that IS a readable path (`is_file()` True) but
+    cannot actually be read must still infra (exit 2), never surface an unhandled traceback that
+    `main()`'s caller would otherwise see as a bare nonzero exit indistinguishable from exit 1.
+    Stderr is captured per call for the same reason as `_minor9_empty_jobs_floor`."""
+    errs: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        p1 = Path(tmp) / "noperm.yml"
+        p1.write_text("on: push\njobs:\n  a:\n    steps: [{run: echo hi}]\n")
+        p1.chmod(0o000)
+        try:
+            err_buf = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err_buf):
+                    rc = main([str(p1)])
+            except SystemExit as exc:
+                rc = exc.code if isinstance(exc.code, int) else 2
+            if rc != 2:
+                if os.access(p1, os.R_OK):
+                    # Running as root (or similar): permission bits don't block the read, so this
+                    # scenario cannot be reproduced here. Not a guard defect — note and move on.
+                    print("NOTE: mode-000 fixture unreadable-file check skipped — the read "
+                          "succeeded anyway (likely running as root/uid 0)", file=sys.stderr)
+                else:
+                    errs.append(f"unreadable-file (mode 000): expected exit 2, got {rc!r}: "
+                                f"{err_buf.getvalue()!r}")
+        finally:
+            p1.chmod(0o644)
+
+        p2 = Path(tmp) / "badutf8.yml"
+        p2.write_bytes(b"on: push\njobs:\n  a:\n    steps: [{run: \xff\xfe bad}]\n")
+        err_buf2 = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err_buf2):
+                rc = main([str(p2)])
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else 2
+        if rc != 2:
+            errs.append(f"invalid UTF-8: expected exit 2, got {rc!r}: {err_buf2.getvalue()!r}")
+    return errs
 
 
 def self_test() -> int:
@@ -339,6 +522,23 @@ def self_test() -> int:
             print(f"FAIL '{name}': expected a violation containing {want!r}, got: "
                   f"{blob or '(clean)'}", file=sys.stderr)
             rc = 1
+
+    # Regression tests that cannot be expressed as a (name, kind, yaml, want) row: they drive
+    # main() end to end (Critical 2), touch the filesystem (Important 5), or must observe an
+    # infra() SystemExit rather than a returned violation list (Minor 9).
+    for check_name, fn in (
+        ("critical-2 uses: ./ prefix resolution", _critical2_end_to_end),
+        ("minor-9 empty jobs: {} floor", _minor9_empty_jobs_floor),
+    ):
+        err = fn()
+        if err:
+            print(f"FAIL '{check_name}': {err}", file=sys.stderr)
+            rc = 1
+
+    for err in _important5_regressions():
+        print(f"FAIL 'important-5 fail-closed unreadable file': {err}", file=sys.stderr)
+        rc = 1
+
     return rc
 
 
@@ -361,7 +561,12 @@ def main(argv: list[str]) -> int:
     for job in main_doc["jobs"].values():
         uses = str(job.get("uses") or "") if isinstance(job, dict) else ""
         if uses.startswith("./"):
-            p = Path(uses.lstrip("./"))
+            # Fix round 1, Critical 2: `str.lstrip` strips a CHARACTER SET, not a prefix.
+            # "./.github/workflows/wheels.yml".lstrip("./") == "github/workflows/wheels.yml" —
+            # it keeps eating '.' and '/' past the intended two-character prefix, so V6 could
+            # never run against any callee path with a leading dot in its own directory name.
+            # `removeprefix` strips exactly the literal "./" and nothing more.
+            p = Path(uses.removeprefix("./"))
             violations += check_called(load_workflow(p), p.name)
 
     for v in violations:
