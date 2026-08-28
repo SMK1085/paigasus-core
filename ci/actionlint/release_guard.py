@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -165,6 +166,31 @@ def gated_path_jobs(job_id: str, jobs: dict, seen: frozenset[str] = frozenset())
     return out
 
 
+_COMMAND_SEPS = re.compile(r"&&|\|\||;|\|")
+
+
+def command_segments(line: str) -> list[str]:
+    """Split ONE `run:` line into the shell command segments chained by `&&`, `||`, `;` or `|`,
+    then strip a trailing `#` comment from each segment.
+
+    Fix round 2, Important 1: round 1's fix moved from a whole-BLOCK substring test to a
+    whole-LINE one, which closed every fixture reported at the time — but "does this line
+    contain the flag anywhere" is the same class of test, one granularity narrower, and shell
+    chaining on the SAME line defeats it: `napi prepublish --npm-dir npm && echo
+    "--no-gh-release"` reads the flag as present even though the real invocation never received
+    it. Evaluating the SEGMENT that actually contains the invocation closes that, and a comment
+    like `napi prepublish --npm-dir npm  # remember --no-gh-release` must not satisfy the check
+    either.
+
+    NOT a shell parser (Ruling 10, fix round 2): this is a bare regex split with no quote/escape
+    awareness — a `&&`, `|` or `#` inside a quoted string is mishandled, and there is no
+    flag-adjacency analysis. That is a deliberate scope limit: a full tokeniser would close a
+    bypass nobody has demonstrated at the cost of new parsing surface in the one file where a bug
+    is most expensive. The residual is recorded in the spec's limitations, not chased here.
+    """
+    return [seg.split("#", 1)[0] for seg in _COMMAND_SEPS.split(line)]
+
+
 def job_publishes(job: dict) -> bool:
     """V6 detection. Used ONLY for called workflows.
 
@@ -173,16 +199,21 @@ def job_publishes(job: dict) -> bool:
     must not trip this, or the gate is unpassable on a correct repository. Checking the whole
     block would let a `--dry-run` anywhere in a multi-line script silence a REAL invocation on
     another line; per-line scoping is the same fix shape as V5's Important 4.
+
+    Fix round 2, Important 1: evaluated per COMMAND SEGMENT (see command_segments), not per whole
+    line — `npm publish && echo "not --dry-run"` must still count as registry-reaching, since the
+    marker and the `--dry-run` flag are in different chained commands on the same line.
     """
     for step in job.get("steps") or []:
         if not isinstance(step, dict):
             continue
         blob = f"{step.get('run', '')}\n{step.get('uses', '')}"
         for line in blob.splitlines():
-            if "--dry-run" in line:
-                continue
-            if any(m in line for m in PUBLISH_MARKERS):
-                return True
+            for segment in command_segments(line):
+                if "--dry-run" in segment:
+                    continue
+                if any(m in segment for m in PUBLISH_MARKERS):
+                    return True
     return False
 
 
@@ -207,16 +238,22 @@ def check_main(doc: dict, name: str) -> list[str]:
         # own every tag (ADR-0011 S3). So this runs BEFORE the UNGATED_JOBS `continue` below.
         # Fix round 1, Important 4: evaluated per LINE, not per whole `run:` block — a comment or
         # unrelated line mentioning the flag must not satisfy a check over the real invocation.
+        # Fix round 2, Important 1: evaluated per COMMAND SEGMENT (see command_segments), not per
+        # whole line — `napi prepublish --npm-dir npm && echo "--no-gh-release"` and a trailing
+        # `# remember --no-gh-release` comment must still red, since the flag never reaches the
+        # real invocation in either case.
         for step in job.get("steps") or []:
             if not isinstance(step, dict):
                 continue
             run = str(step.get("run") or "")
             for line in run.splitlines():
-                if "napi prepublish" in line and "--no-gh-release" not in line:
-                    out.append(
-                        f"{name}: job '{job_id}' runs `napi prepublish` without --no-gh-release. "
-                        f"release-plz owns every tag (ADR-0011 S3); napi must never cut one."
-                    )
+                for segment in command_segments(line):
+                    if "napi prepublish" in segment and "--no-gh-release" not in segment:
+                        out.append(
+                            f"{name}: job '{job_id}' runs `napi prepublish` without "
+                            f"--no-gh-release. release-plz owns every tag (ADR-0011 S3); napi "
+                            f"must never cut one."
+                        )
 
         if job_id in UNGATED_JOBS:
             continue
@@ -395,6 +432,32 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     ("Minor 10: folded >- scalar gate form is accepted", "main",
      _OK_MAIN.replace("    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'",
                       "    if: >-\n      vars.PAIGASUS_RELEASE_ENABLED == 'true'"), None),
+
+    # --- Fix round 2 additions (Important 1: command-segment scoping) ----------------------
+    ("R2 Important 1: chained && hides the missing flag from a whole-line test", "main",
+     _OK_MAIN.replace(
+         "steps: [{run: release-plz release}]",
+         "steps:\n      - run: |\n          "
+         'napi prepublish --npm-dir npm && echo "always pass --no-gh-release"'),
+     "without --no-gh-release"),
+    ("R2 Important 1 CONTROL: the flag IS in the invocation's own segment, so this stays clean",
+     "main",
+     _OK_MAIN.replace(
+         "steps: [{run: release-plz release}]",
+         "steps:\n      - run: |\n          "
+         "napi prepublish --no-gh-release --npm-dir npm && echo done"),
+     None),
+    ("R2 Important 1: a trailing '# remember --no-gh-release' comment does not count", "main",
+     _OK_MAIN.replace(
+         "steps: [{run: release-plz release}]",
+         "steps:\n      - run: |\n          "
+         "napi prepublish --npm-dir npm  # remember --no-gh-release"),
+     "without --no-gh-release"),
+    ("R2 Important 1: job_publishes sees a real publish chained with a decoy --dry-run", "called",
+     "on:\n  workflow_call:\n  pull_request:\n    branches:\n      - main\n"
+     "jobs:\n  build:\n    steps:\n      - run: |\n          "
+     'npm publish && echo "not --dry-run"\n',
+     "workflow_call-ONLY"),
 ]
 
 
