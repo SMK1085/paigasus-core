@@ -8,6 +8,15 @@ inheritedBy:
 fileGroups:
   sources:
     - 'src/**/*'
+    # SMA-537 — `cargo build` RUNS a crate-root build.rs and `cargo clippy --all-targets`
+    # COMPILES it, but `src/**/*` does not match it, so editing one re-keyed no crate task.
+    # Declared in the shared group rather than per-crate so a new crate cannot forget it — the
+    # same argument .moon/tasks/rust.yml makes for declaring `deps: ['^:build']` centrally.
+    # Reaches build/test/lint/build-release AND fmt, all of which consume @group(sources).
+    # Twelve of thirteen crates have no build.rs; the entry simply matches nothing for them.
+    # It does NOT disturb A6: a crate's own build.rs is `own/`-prefixed and excluded from
+    # `observed` (cargo_moon_parity.py:400-401).
+    - 'build.rs'
   tests:
     - 'tests/**/*'
     - '**/*_test.rs'
@@ -82,4 +91,17 @@ tasks:
       - '@group(upstreams)'
   fmt:
     command: 'cargo fmt --check'
-    inputs: ['@group(sources)']
+    # SMA-537. `cargo fmt --check` formats EVERY target in the package — src/, tests/, benches/
+    # and build.rs — but this task keyed on @group(sources) alone, so a misformatted integration
+    # test could merge green and red `main` on an unrelated later src edit.
+    #   @group(sources)         now includes build.rs (see fileGroups above)
+    #   @group(tests)           tests/ is formatted too; an empty group matches nothing, which is
+    #                           already true for `test`/`lint` on crates without a tests/ dir
+    #   /rs/rustfmt.toml        the format config itself (max_width = 200); changing it must
+    #                           invalidate every crate's fmt, or the tree drifts silently
+    #   /rs/rust-toolchain.toml selects WHICH rustfmt runs — the same argument `lint` already
+    #                           makes for this file
+    # Deliberately NOT @group(upstreams): `cargo fmt --check` reads only the crate's own files,
+    # so it cannot be broken by an upstream crate edit (SMA-526 rejected that propagation, and
+    # that rejection was correct). This is a CONFIG-edit hole, which is a different defect.
+    inputs: ['@group(sources)', '@group(tests)', '/rs/rustfmt.toml', '/rs/rust-toolchain.toml']
