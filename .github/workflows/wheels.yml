@@ -35,6 +35,13 @@ on:
     paths:
       - '.github/workflows/wheels.yml'
       - '.prototools'
+      # The vendored plugin manifest, not just the version pin: `proto install maturin`
+      # resolves the download URL and archive layout from THIS file, so an edit here can
+      # break every leg while .prototools is untouched. Pointedly, the documented fallback
+      # for the plugin's unverified Windows exe-path is an edit to this file — which
+      # without this entry would not run the matrix that proves the fix. Mirrors moon.yml's
+      # release-parity task, which lists .prototools and .proto/plugins/release-plz.toml.
+      - '.proto/plugins/maturin.toml'
       - '.moon/**'
       - 'rs/.cargo/config.toml'
       - 'rs/crates/bindings/paigasus-py-bindings/pyproject.toml'
@@ -49,6 +56,7 @@ on:
       - 'rs/**'
       - '.github/workflows/wheels.yml'
       - '.prototools'
+      - '.proto/plugins/maturin.toml'
       - '.moon/**'
 
 permissions:
