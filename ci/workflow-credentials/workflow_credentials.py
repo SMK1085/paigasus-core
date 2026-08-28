@@ -34,7 +34,24 @@ SCAN_GLOB = ".github/workflows/*.y*ml"
 # secrets['X'], because the context name sits OUTSIDE the literal. The boundary rejects
 # inputs.secrets-file (preceded by '.') and steps.x.outputs.secrets (likewise). All three
 # were MEASURED as false positives against a bare \bsecrets\b. (spec §4.3)
-EXPR_SPAN = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+#
+# EXPR_SPAN is LITERAL-AWARE rather than a plain non-greedy `.*?`, because a `}}` can sit
+# inside a string literal: `${{ format('{0} }}', secrets.PYPI) }}` terminated the non-greedy
+# span at the `}}` INSIDE the literal, so the span never reached `secrets` and the read went
+# unseen (MEASURED, SMA-593 F2). The repeat consumes a whole literal atomically or one
+# character that does not begin an unquoted `}}`, so it can only stop at a real span end.
+#
+# The obvious alternative — stripping literals from the whole scalar BEFORE extracting spans —
+# was measured and REJECTED: it deletes a shell-quoted expression whole, so `run: echo
+# "${{ secrets.X }}"` stops matching. That is the commonest way a workflow actually reads a
+# secret, and this repo already carries the shape (.github/workflows/wheels.yml:233 and :262
+# write `python - "${{ matrix.expect_tag }}"`). Trading a rare true positive for that false
+# negative is a net loss. Row "N shell-quoted expr in run" pins it.
+#
+# The possessive `*+` is load-bearing for cost, not for meaning: an unterminated `${{` with
+# several quotes in the tail backtracks exponentially without it. Python 3.11+ only, and
+# run.sh already demands `--python '>=3.12'`.
+EXPR_SPAN = re.compile(r"\$\{\{((?:'[^']*'|\"[^\"]*\"|(?!\}\}).)*+)\}\}", re.S)
 STRING_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
 SECRETS_CTX = re.compile(r"(?<![\w.-])secrets(?![\w-])", re.IGNORECASE)
 
@@ -154,6 +171,22 @@ def rule_findings(doc) -> list[tuple[str, str, str]]:
 
 
 def _self_test() -> int:
+    # Arity floors, checked BEFORE anything runs (SMA-593 F6). A table emptied to nothing makes
+    # every loop below iterate zero times, so the suite prints "passed" and returns 0 having
+    # asserted nothing — the same vacuous shape the negative control exists to catch in run.sh.
+    # These are FLOORS, not equalities: adding a row must not need an edit here. Lower one only
+    # together with the row you are deliberately retiring.
+    for name, table, floor in (
+        ("RULE_CASES", RULE_CASES, 35),
+        ("TRIGGER_CASES", TRIGGER_CASES, 7),
+        ("PARSE_CASES", PARSE_CASES, 3),
+    ):
+        if len(table) < floor:
+            raise InfraError(
+                f"{name} holds {len(table)} rows, below its floor of {floor} — a shrunken table "
+                "makes this self-test pass vacuously. Lower the floor deliberately, in the same "
+                "commit that removes the row.")
+
     failures = 0
     for label, source, must_be_red in RULE_CASES:
         try:
@@ -177,22 +210,45 @@ def _self_test() -> int:
             print(f"  FAIL trigger/{label}: expected {expected}, got {got}", file=sys.stderr)
             failures += 1
 
+    # Driven through the PRODUCTION entry point, discover(), not a bare yaml.load_all (SMA-593
+    # F5). The old loop called yaml.load_all then isinstance, which is not where any of this
+    # handling lives: the "top-level sequence" row passed with discover()'s non-mapping check
+    # DELETED, and "malformed yaml" passed with load_documents()' YAMLError -> AssertionFailure
+    # mapping gutted, because a bare `except yaml.YAMLError: continue` made any raising row an
+    # automatic pass. There is no such catch now — every row must reach discover() and every row
+    # must come back as AssertionFailure, the class that means "the repo is wrong", never
+    # InfraError and never a silent accept.
     for label, source in PARSE_CASES:
-        try:
-            docs = list(yaml.load_all(source, Loader=_StrictLoader))
-        except yaml.YAMLError:
-            continue  # rejected at parse time, which is what we want
-        if all(isinstance(d, dict) for d in docs if d is not None):
-            print(f"  FAIL parse/{label}: accepted a document that must be rejected",
-                  file=sys.stderr)
-            failures += 1
+        with tempfile.TemporaryDirectory() as root:
+            wf_dir = os.path.join(root, ".github", "workflows")
+            os.makedirs(wf_dir)
+            with open(os.path.join(wf_dir, "x.yml"), "w", encoding="utf-8") as handle:
+                handle.write(source)
+            try:
+                discover(root)
+                print(f"  FAIL parse/{label}: discover() accepted a document that must be "
+                      "rejected", file=sys.stderr)
+                failures += 1
+            except AssertionFailure:
+                pass
+            except Exception as exc:
+                print(f"  FAIL parse/{label}: expected AssertionFailure, got "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                failures += 1
 
-    failures += _self_test_filesystem()
+    fs_failures, fs_rows = _self_test_filesystem()
+    failures += fs_failures
+    # The filesystem rows are counted, not assumed. Without this, deleting one row leaves the
+    # printed total at its old value and the loss is invisible (SMA-593 F6).
+    if fs_rows != FILESYSTEM_CASES:
+        raise InfraError(
+            f"_self_test_filesystem ran {fs_rows} rows, but FILESYSTEM_CASES says "
+            f"{FILESYSTEM_CASES} — a row was added or removed without updating the count")
 
-    if failures:
-        print(f"self-test: {failures} of {len(RULE_CASES)} rows failed", file=sys.stderr)
-        return RC_ASSERT
     total = len(RULE_CASES) + len(TRIGGER_CASES) + len(PARSE_CASES) + FILESYSTEM_CASES
+    if failures:
+        print(f"self-test: {failures} of {total} rows failed", file=sys.stderr)
+        return RC_ASSERT
     print(f"== workflow-credentials self-test passed ({total} rows) ==")
     return RC_OK
 
@@ -223,36 +279,56 @@ def triggers(doc) -> set[str]:
     YAML 1.1 parses the `on:` KEY as the boolean True, so doc.get("on") returns None.
     MEASURED on release.yml: top-level keys are ['name', True, 'concurrency', 'permissions',
     'jobs']; `'on' in doc` is False and `True in doc` is True. Read both. (spec §5.1)
+
+    Both keys are UNIONED, never preferred one over the other (SMA-593 F3). A document can
+    legitimately hold BOTH — `"on": push` is the string key, a bare `on: pull_request` is the
+    boolean True — and they are two distinct dict keys, so the strict loader sees no duplicate
+    to reject. The former `doc.get("on", doc.get(True))` found the string key and never
+    consulted the fallback: MEASURED on keys ['on', True, 'jobs'], it returned {'push'} alone,
+    so the file dropped out of the subject set and its credential grants went unchecked.
     """
     if not isinstance(doc, dict):
         return set()
-    on = doc.get("on", doc.get(True))
-    if isinstance(on, str):
-        return {on}
-    if isinstance(on, (list, dict)):
-        return {str(x) for x in on}
-    return set()
+    out = set()
+    for key in ("on", True):
+        if key not in doc:
+            continue
+        on = doc[key]
+        if isinstance(on, str):
+            out.add(on)
+        elif isinstance(on, (list, dict)):
+            out |= {str(x) for x in on}
+    return out
 
 
 def discover(root: str) -> list[str]:
     """Basenames of every workflow whose triggers make it a subject."""
-    workflows_dir = os.path.join(root, ".github", "workflows")
+    github_dir = os.path.join(root, ".github")
     paths = sorted(glob.glob(os.path.join(root, SCAN_GLOB)))
     if not paths:
         # SPLIT, deliberately (SMA-593, controller ruling 10). Two different causes hide in
-        # "no files matched", and they triage differently. An ABSENT .github/workflows means
-        # the checker was handed the wrong root — a broken tool, rc 2. A PRESENT directory
-        # with no .y*ml in it means someone deleted or renamed the workflows — an authorial
-        # act, and ci_targets.py:28-36 states the repo's rule for exactly that: "someone
-        # edited a file into a shape this gate cannot read ... is a red with a fix, not a
-        # broken tool", so rc 1. Collapsing both into rc 2 tells a contributor to re-run a
-        # job that will never go green.
-        if not os.path.isdir(workflows_dir):
+        # "no files matched", and they triage differently. The wrong repo root is a broken
+        # tool, rc 2. Someone deleting or renaming the workflows is an authorial act, and
+        # ci_targets.py:28-36 states the repo's rule for exactly that: "someone edited a file
+        # into a shape this gate cannot read ... is a red with a fix, not a broken tool", so
+        # rc 1. Collapsing both into rc 2 tells a contributor to re-run a job that will never
+        # go green.
+        #
+        # The discriminator is `.github/`, NOT `.github/workflows/` (SMA-593 F9). Splitting on
+        # the workflows dir put the authorial case on a branch git cannot reach: git tracks no
+        # empty directory, so "directory present, holding no .y*ml" never occurs in a CI
+        # checkout. The one authorial act that DOES occur — a PR deleting every workflow —
+        # removes the now-empty directory along with them, which landed on rc 2 and told the
+        # author to re-run a job that could not go green. That is the exact misclassification
+        # the split exists to prevent. `.github/` survives such a PR (CODEOWNERS, issue
+        # templates, dependabot.yml all live there), so it is the reliable signal for "this IS
+        # the repo root, the workflows are what went missing".
+        if not os.path.isdir(github_dir):
             raise InfraError(
-                f"{workflows_dir} does not exist — the checker was given the wrong repo root")
+                f"{github_dir} does not exist — the checker was given the wrong repo root")
         raise AssertionFailure(
-            f"{SCAN_GLOB} matched no file under {root}, but .github/workflows/ exists — the "
-            "workflows were removed or renamed, and this gate would assert nothing")
+            f"{SCAN_GLOB} matched no file under {root}, but .github/ exists — the workflows "
+            "were removed or renamed, and this gate would assert nothing")
     subjects = []
     for path in paths:
         docs = load_documents(path)
@@ -307,36 +383,65 @@ def check(root: str) -> int:
     return RC_OK
 
 
-# Five rows exercised against a real filesystem, not a YAML string, so they cannot live in
-# RULE_CASES/TRIGGER_CASES/PARSE_CASES. Three cover the zero-match SPLIT (Finding 1, SMA-593
-# controller ruling 10): discover() must raise InfraError when .github/workflows/ is absent
-# (the checker was handed the wrong root) but AssertionFailure when it exists and is merely
-# empty (someone deleted or renamed the workflows — authorial, not infra), and a `.yaml`
-# (not `.yml`) workflow must still be discovered, proving SCAN_GLOB's `*.y*ml` covers both
-# extensions. Two cover the stale-allowlist guard (Finding 2): PR_CREDENTIAL_ALLOWED is this
-# gate's only escape hatch and was otherwise untested — an entry naming a workflow that is
-# not a subject must raise AssertionFailure, and an empty allowlist must not.
-FILESYSTEM_CASES = 5
+# Six rows exercised against a real filesystem, not a YAML string, so they cannot live in
+# RULE_CASES/TRIGGER_CASES/PARSE_CASES. Four cover the zero-match SPLIT (Finding 1, SMA-593
+# controller ruling 10, discriminator corrected by F9): discover() must raise InfraError when
+# .github/ itself is absent (the checker was handed the wrong root) but AssertionFailure in
+# BOTH authorial shapes — .github/ present with the workflows dir deleted along with its files
+# (row 2a, the shape a PR deleting every workflow actually produces, since git tracks no empty
+# directory) and .github/workflows/ present but empty (row 2b, reachable only in a working
+# tree). A `.yaml` (not `.yml`) workflow must still be discovered, proving SCAN_GLOB's `*.y*ml`
+# covers both extensions. Two cover the stale-allowlist guard (Finding 2): PR_CREDENTIAL_ALLOWED
+# is this gate's only escape hatch and was otherwise untested — an entry naming a workflow that
+# is not a subject must raise AssertionFailure, and an empty allowlist must not.
+FILESYSTEM_CASES = 6
 
 
-def _self_test_filesystem() -> int:
+def _self_test_filesystem() -> tuple[int, int]:
+    # Returns (failures, rows_run). The row COUNT is returned rather than assumed so the
+    # caller can assert it against FILESYSTEM_CASES: deleting a row would otherwise leave the
+    # printed total unchanged and the loss invisible (SMA-593 F6). `rows` is incremented once
+    # per row, next to the row it counts, so the two cannot drift apart silently.
     failures = 0
+    rows = 0
 
-    # 1. .github/workflows/ absent entirely -> the checker was given the wrong root: InfraError.
+    # 1. .github/ absent entirely -> the checker was given the wrong root: InfraError.
+    rows += 1
     with tempfile.TemporaryDirectory() as root:
         try:
             discover(root)
-            print("  FAIL discover/missing workflows dir: expected InfraError, "
+            print("  FAIL discover/missing .github dir: expected InfraError, "
                   "got no exception", file=sys.stderr)
             failures += 1
         except InfraError:
             pass
         except Exception as exc:
-            print(f"  FAIL discover/missing workflows dir: expected InfraError, "
+            print(f"  FAIL discover/missing .github dir: expected InfraError, "
                   f"got {type(exc).__name__}", file=sys.stderr)
             failures += 1
 
-    # 2. .github/workflows/ present but empty -> workflows were deleted/renamed: AssertionFailure.
+    # 2a. .github/ present, .github/workflows/ GONE -> workflows deleted: AssertionFailure.
+    # This is the reachable authorial shape. A PR deleting every workflow removes the directory
+    # too, because git cannot track it empty — before F9 this landed on InfraError (rc 2) and
+    # told the author to re-run a job that could never go green.
+    rows += 1
+    with tempfile.TemporaryDirectory() as root:
+        os.makedirs(os.path.join(root, ".github"))
+        try:
+            discover(root)
+            print("  FAIL discover/no workflows dir under .github: expected AssertionFailure, "
+                  "got no exception", file=sys.stderr)
+            failures += 1
+        except AssertionFailure:
+            pass
+        except Exception as exc:
+            print(f"  FAIL discover/no workflows dir under .github: expected AssertionFailure, "
+                  f"got {type(exc).__name__}", file=sys.stderr)
+            failures += 1
+
+    # 2b. .github/workflows/ present but empty -> same verdict, AssertionFailure. Reachable in a
+    # working tree rather than a checkout, and kept so the two shapes cannot diverge.
+    rows += 1
     with tempfile.TemporaryDirectory() as root:
         os.makedirs(os.path.join(root, ".github", "workflows"))
         try:
@@ -352,6 +457,7 @@ def _self_test_filesystem() -> int:
             failures += 1
 
     # 3. a `.yaml` (not `.yml`) pull_request workflow is still discovered.
+    rows += 1
     with tempfile.TemporaryDirectory() as root:
         wf_dir = os.path.join(root, ".github", "workflows")
         os.makedirs(wf_dir)
@@ -371,6 +477,7 @@ def _self_test_filesystem() -> int:
     # 4 & 5. The stale-allowlist guard, exercised through check() with a root whose subjects
     # exactly match EXPECTED_PR_SUBJECTS so the subject-pin comparison clears and the guard is
     # actually reached.
+    rows += 2
     with tempfile.TemporaryDirectory() as root:
         wf_dir = os.path.join(root, ".github", "workflows")
         os.makedirs(wf_dir)
@@ -412,7 +519,7 @@ def _self_test_filesystem() -> int:
             PR_CREDENTIAL_ALLOWED.clear()
             PR_CREDENTIAL_ALLOWED.update(saved_allowed)
 
-    return failures
+    return failures, rows
 
 
 def main(argv: list[str]) -> int:
@@ -457,6 +564,11 @@ RULE_CASES: tuple[tuple[str, str, bool], ...] = (
     ("J bare if uppercase",  H + "    steps:\n      - if: SECRETS.TOKEN != ''\n        run: echo hi\n", True),
     ("K wrapped if",         H + "    steps:\n      - if: ${{ secrets.TOKEN != '' }}\n        run: echo hi\n", True),
     ("L if without secrets", H + "    steps:\n      - if: github.event_name == 'push'\n        run: echo hi\n", False),
+    # SMA-593 F2. A `}}` inside a string literal used to end the span early, so `secrets` was
+    # never reached. Both rows guard EXPR_SPAN's literal-aware form: M is the bug, N is the
+    # regression the rejected "strip literals first" fix would have introduced.
+    ("M }} inside a literal", H + "    env:\n      T: ${{ format('{0} }}', secrets.PYPI) }}\n", True),
+    ("N shell-quoted expr in run", H + '    steps:\n      - run: echo "${{ secrets.X }}"\n', True),
     # Honest passes. A first false positive is how a gate gets allowlisted into irrelevance.
     ("P1 contents read",     H + "    permissions:\n      contents: read\n", False),
     ("P2 header comment",    "# never declare `secrets:` or `id-token: write`\n" + H + "    permissions:\n      contents: read\n", False),
@@ -478,6 +590,10 @@ TRIGGER_CASES: tuple[tuple[str, str, bool], ...] = (
     ("push only",       "on:\n  push:\n    branches:\n      - main\njobs: {}\n", False),
     ("bare on",         "on:\njobs: {}\n", False),
     ("no on key",       "jobs: {}\n", False),
+    # SMA-593 F3. Two DISTINCT dict keys — the string 'on' and the YAML 1.1 boolean True — so
+    # the strict loader has no duplicate to reject. The old `.get("on", .get(True))` returned
+    # {'push'} here and the workflow silently left the subject set.
+    ("dual on keys",    '"on": push\non:\n  pull_request:\njobs: {}\n', True),
 )
 
 # Documents that must not reach the rules at all. Each must raise, and raise the RIGHT class:

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# repo:workflow-credentials — assert no pull-request-triggered workflow can obtain a
-# repository credential. Same-repo pull requests receive repository secrets, so a credential
-# in such a workflow is readable by any code the pull request introduces (SMA-407 §7 M2).
+# repo:workflow-credentials — assert no pull-request-triggered workflow DECLARES a repository
+# credential. Same-repo pull requests receive repository secrets, so a credential in such a
+# workflow is readable by any code the pull request introduces (SMA-407 §7 M2). "Declares" is
+# the true claim and the narrower one: README.md's Non-goals section lists the paths by which a
+# credential could still reach such a workflow without this gate seeing it.
 #
 # Exit codes: 0 pass | 1 the repo is wrong | 2 infrastructure failed.
 #
@@ -57,13 +59,12 @@ negative_control() {
     fi
   }
 
-  # A tree with NO workflows at all is infrastructure, not a pass: the scan root moved.
-  # (Deviation from the brief's verbatim mkdir: `mkdir -p .../.github/workflows` here would
-  # create the dir the checker looks for, which makes it an AssertionFailure (rc 3), not the
-  # InfraError (rc 2) this row's label and _expect both require — measured directly against
-  # the checker; see task-5-report.md.)
+  # A tree with no `.github/` at all is infrastructure, not a pass: the scan root moved.
+  # The mkdir deliberately creates NOTHING under it. Since SMA-593 F9 the discriminator is
+  # `.github/`, so `mkdir -p .../.github` — or `.../.github/workflows` — would make this an
+  # AssertionFailure (rc 3), not the InfraError (rc 2) this row's label and _expect require.
   mkdir -p "$tmp/empty"
-  _expect 2 "an empty workflow dir is INFRA, not a vacuous pass" \
+  _expect 2 "a tree with no .github/ is INFRA, not a vacuous pass" \
     uv run --project "$HERE" --python '>=3.12' python3 \
       "$HERE/workflow_credentials.py" "$tmp/empty"
 
