@@ -23,7 +23,7 @@ It does not validate category slugs, which are a crates.io concept.
 | 4 | The freshness job's call site still exists | 1 / 2 |
 | P0 | The PyPI-bound set equals `EXPECTED_PYPI_PUBLISHABLE`, discovered at runtime | 1 / 2 |
 | P1 | Every PyPI-bound distribution carries the `[project]` metadata PyPI needs, pairs no SPDX expression with a `License ::` classifier, and — for sdist-shipped crates — carries Check 1c's non-denying lint table | 1 / 2 |
-| P2 | The README/LICENSE files those `[project]` fields NAME exist on disk | 1 / 2 |
+| P2 | The README and LICENSE files named by those `[project]` fields exist on disk | 1 / 2 |
 
 The `P*` rows are the Python arm (SMA-578). They were absent from this table until
 SMA-593; the arm was never undocumented in the gate itself — `run.sh`'s own header

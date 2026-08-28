@@ -416,11 +416,12 @@ a non-mapping document; and a bare `on:`.
 
 **Count, as shipped: 56 rows, not the ~34 this list enumerates.** The list above describes the
 plan; implementation and the two reviews added rows to it, and the total is what
-`--self-test` prints. The 54 split across four tables: **37** `RULE_CASES` (the enumeration
+`--self-test` prints. The 56 split across four tables: **37** `RULE_CASES` (the enumeration
 above, plus the four bare/wrapped `if:` rows from ruling 8 and the two literal-aware span rows
 from F2), **8** `TRIGGER_CASES` (the six trigger shapes, the no-`on:` document, and the
-dual-key document from F3), **3** `PARSE_CASES`, and **6** filesystem rows that need a real
-directory. Each of the first three tables carries an **arity floor** checked before any row
+dual-key document from F3), **3** `PARSE_CASES`, and **8** filesystem rows that need a real
+directory (the six from F6 and F9, plus the non-UTF-8 row and the dot-prefixed-workflow row
+the pre-push and PR reviews added). Each of the first three tables carries an **arity floor** checked before any row
 runs, and the filesystem count is asserted against `FILESYSTEM_CASES`, so an emptied table
 raises rather than printing a vacuous pass (F6). The floors are floors: adding a row needs no
 edit, removing one is deliberate.
