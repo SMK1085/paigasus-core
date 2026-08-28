@@ -91,8 +91,12 @@ jobs:
           # actually EXECUTED rather than merely inspected — otherwise that arch family, three
           # of the seven wheels, has no runtime verification at all.
           - { platform: manylinux-aarch64, target: aarch64-unknown-linux-gnu.2.17, rustup_target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, zig: true, compat: manylinux2014, expect_tag: 'manylinux_2_17_aarch64.manylinux2014_aarch64', expect_glibc: 'GLIBC_2.17' }
-          - { platform: musllinux-x86_64,  target: x86_64-unknown-linux-musl,      rustup_target: x86_64-unknown-linux-musl, runner: ubuntu-latest,    zig: true, compat: musllinux_1_2, expect_tag: 'musllinux_1_2_x86_64' }
-          - { platform: musllinux-aarch64, target: aarch64-unknown-linux-musl,     rustup_target: aarch64-unknown-linux-musl, runner: ubuntu-latest,   zig: true, compat: musllinux_1_2, expect_tag: 'musllinux_1_2_aarch64' }
+          # `expect_glibc: ''` is a SENTINEL, not an omission: it is what tells the symbol-version
+          # step to demand that these cross-built .so files reference NO glibc versioned symbol
+          # at all. Deleting the key would read as "no expectation" to a future editor while
+          # behaving identically — keep it written out.
+          - { platform: musllinux-x86_64,  target: x86_64-unknown-linux-musl,      rustup_target: x86_64-unknown-linux-musl, runner: ubuntu-latest,    zig: true, compat: musllinux_1_2, expect_tag: 'musllinux_1_2_x86_64', expect_glibc: '' }
+          - { platform: musllinux-aarch64, target: aarch64-unknown-linux-musl,     rustup_target: aarch64-unknown-linux-musl, runner: ubuntu-latest,   zig: true, compat: musllinux_1_2, expect_tag: 'musllinux_1_2_aarch64', expect_glibc: '' }
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -293,10 +297,22 @@ jobs:
           done
 
       # An ELF-CLASS check reports only the machine type: a wheel tagged _2_17 whose .so needs
-      # GLIBC_2.34 would pass one, install cleanly, and fail at import. Both manylinux legs run
-      # natively on their own arch, so objdump needs no cross binutils.
-      - name: Assert max GLIBC symbol version (manylinux legs)
-        if: ${{ startsWith(matrix.platform, 'manylinux') }}
+      # GLIBC_2.34 would pass one, install cleanly, and fail at import. Runs on ALL FOUR linux
+      # legs, with the expectation carried per matrix row in `expect_glibc`:
+      #   - manylinux: the exact max versioned symbol the tag promises (`GLIBC_2.17`);
+      #   - musllinux: the EMPTY string. A musl-linked .so must reference NO `GLIBC_` versioned
+      #     symbol at all, so any output at all means the wheel is mis-tagged or was linked
+      #     against glibc. Spec §5.4/§12 promise the musl wheels this check, and it is the ONLY
+      #     binary evidence either of them gets: both are cross-built and neither is executed
+      #     anywhere in this workflow.
+      #
+      # `readelf`, not `objdump`: BOTH musl legs run on ubuntu-latest (x86_64) and one of them
+      # carries an aarch64 .so. readelf parses ELF directly instead of through BFD, so it reads
+      # a foreign-arch object; Ubuntu's objdump is configured for x86 targets only and would
+      # answer "file format not recognized" — a hard error rather than a finding. The manylinux
+      # legs use the same tool so there is one code path, not two.
+      - name: Assert max GLIBC symbol version (linux legs)
+        if: ${{ startsWith(matrix.platform, 'manylinux') || startsWith(matrix.platform, 'musllinux') }}
         shell: bash
         env:
           WHEEL: ${{ steps.tag_set.outputs.wheel }}
@@ -307,19 +323,32 @@ jobs:
           unzip -q "$WHEEL" -d "$work"
           so="$(find "$work" -name '*.abi3.so' -print -quit)"
           [ -n "$so" ] || { echo "::error::$WHEEL contains no *.abi3.so"; exit 1; }
-          max="$(objdump -T "$so" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -V -u | tail -1)"
-          echo "max glibc symbol required by $WHEEL: [$max]"
+          syms="$(readelf --dyn-syms -W "$so")"
+          # The trailing `|| true` is load-bearing and is NOT a swallowed failure: grep exits 1
+          # on NO MATCH, which under `pipefail` would abort this step on exactly the musl
+          # PASSING case. The verdict is taken from the captured value below instead, so a musl
+          # wheel that DOES carry GLIBC symbols still reds.
+          max="$(printf '%s\n' "$syms" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -V -u | tail -1 || true)"
+          echo "max glibc symbol required by $WHEEL: [$max] (expected [$EXPECT])"
           if [ "$max" != "$EXPECT" ]; then
-            # Exact equality both ways, on purpose. A max ABOVE the pinned floor is a broken
-            # wheel; a max BELOW it is a safe wheel whose floor moved, and the constant must be
-            # RE-PINNED to the measured value rather than the check relaxed to an inequality.
-            highest="$(printf '%s\n%s\n' "$max" "$EXPECT" | sort -V | tail -1)"
-            if [ "$highest" = "$EXPECT" ]; then
-              echo "::error::wheel needs only [$max], below the pinned [$EXPECT] — safe, but re-pin matrix.expect_glibc to [$max]"
+            if [ -z "$EXPECT" ]; then
+              echo "::error::$WHEEL is tagged musllinux but its .so requires glibc versioned symbols (max [$max]) — mis-tagged, or linked against glibc"
+              printf '%s\n' "$syms" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -V -u || true
             else
-              echo "::error::wheel is tagged manylinux_2_17 but needs [$max]"
+              # Exact equality both ways, on purpose. A max ABOVE the pinned floor is a broken
+              # wheel; a max BELOW it is a safe wheel whose floor moved, and the constant must be
+              # RE-PINNED to the measured value rather than the check relaxed to an inequality.
+              highest="$(printf '%s\n%s\n' "$max" "$EXPECT" | sort -V | tail -1)"
+              if [ "$highest" = "$EXPECT" ]; then
+                echo "::error::wheel needs only [$max], below the pinned [$EXPECT] — safe, but re-pin matrix.expect_glibc to [$max]"
+              else
+                echo "::error::wheel is tagged manylinux_2_17 but needs [$max]"
+              fi
             fi
             exit 1
+          fi
+          if [ -z "$EXPECT" ]; then
+            echo "OK: no GLIBC_ versioned symbols — consistent with the musllinux tag"
           fi
 
       # Only on legs whose arch the runner can EXECUTE: macosx-arm64, win-amd64,
@@ -444,7 +473,26 @@ jobs:
           if printf '%s\n' "$listing" | grep -q 'moon\.yml'; then
             echo "::error::sdist ships moon.yml — the Cargo include allowlist has regressed"; exit 1
           fi
-          for required in README.md LICENSE pyproject.toml Cargo.lock; do
+          # README.md and LICENSE are anchored on the CRATE PATH, not on their basename. The
+          # sdist vendors paigasus-kernel, which ships its OWN README.md and LICENSE, so a
+          # basename grep matched those and passed even with the bindings crate's entries
+          # deleted from the `include` allowlist — vacuous with respect to the very regression
+          # this step exists to catch. pyproject.toml and Cargo.lock stay on the basename:
+          # maturin relocates them to the ARCHIVE ROOT (§14 answer 1), and no vendored crate
+          # contributes a competing copy.
+          #
+          # MEASURED 2026-08-28 (maturin 1.9.6, both entries deleted from `include` and the
+          # sdist rebuilt): the crate-path LICENSE DISAPPEARS, so that anchor binds the
+          # allowlist. The crate-path README.md SURVIVES — cargo infers `readme = "README.md"`
+          # from the file's presence and packages it regardless of `include` — so that anchor
+          # is not allowlist evidence; what it does assert is that the BINDINGS' own README
+          # shipped rather than only the vendored kernel's, which the basename form could not
+          # tell apart.
+          for required in \
+            crates/bindings/paigasus-py-bindings/README.md \
+            crates/bindings/paigasus-py-bindings/LICENSE \
+            pyproject.toml \
+            Cargo.lock; do
             printf '%s\n' "$listing" | grep -q "/$required$" \
               || { echo "::error::sdist is missing $required"; exit 1; }
           done
@@ -582,10 +630,18 @@ jobs:
             || { echo "::error::the wrapper lost its == pin on paigasus-py-bindings"; printf '%s\n' "$meta"; exit 1; }
           echo "OK: exact pin present"
 
+      # DELIBERATELY OUTSIDE the `wheel-*` namespace, and it must stay outside it. `wheel-*` is
+      # the seven paigasus-py-bindings platform wheels; this is a DIFFERENT distribution, and
+      # spec §9.1 requires paigasus-py-bindings to reach PyPI BEFORE paigasus-kernel (the face
+      # pins `==`, so the reverse order leaves it uninstallable in the window between uploads).
+      # The natural SMA-579 implementation — one `download-artifact` with `pattern: wheel-*`
+      # and `merge-multiple: true`, then a single upload — would silently violate that ordering
+      # if this artifact answered to `wheel-*`. It also carries a `.tar.gz`, which a `wheel-`
+      # name would misdescribe. Do not "tidy" it back.
       - name: Upload the face distribution
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: wheel-paigasus-kernel
+          name: face-paigasus-kernel
           path: |
             dist/paigasus_kernel-*.whl
             dist/paigasus_kernel-*.tar.gz

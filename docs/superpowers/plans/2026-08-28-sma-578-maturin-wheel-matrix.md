@@ -781,7 +781,7 @@ git commit -m "ci(repo): add the reusable cross-platform wheel matrix (SMA-578)"
 
 **Interfaces:**
 - Consumes: Task 4's workflow skeleton; Task 1's `include` allowlist.
-- Produces: artifacts `sdist` and `wheel-paigasus-kernel`, which SMA-579's publish job uploads alongside the seven platform wheels.
+- Produces: artifacts `sdist` and `face-paigasus-kernel`, which SMA-579's publish job uploads alongside the seven platform wheels.
 
 **Why three platforms and not one (review B1):** the first draft made this a single platform-independent job. On Linux the `-undefined dynamic_lookup` question does not arise, so the CI proof would have been vacuous with respect to the very claim it exists to protect — and PyPI versions cannot be reused once a user reports the regression. **The macOS leg is the standing control for spec §2.**
 
@@ -933,7 +933,7 @@ Use the same exported symbol Task 4 Step 7 settled on.
       - name: Upload the face distribution
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: wheel-paigasus-kernel
+          name: face-paigasus-kernel
           path: |
             dist/paigasus_kernel-*.whl
             dist/paigasus_kernel-*.tar.gz
@@ -1382,6 +1382,6 @@ git commit -m "docs(repo): correct the sdist premise and record the wheel-matrix
 
 **Spec coverage.** §2 → Task 1 Steps 3/5 (caveat correction) + Task 7 Step 1. §2.1 → Task 1 Steps 4–6 (`include`, lint table). §5.1 triggers → Task 4 Step 1. §5.2 matrix → Task 4 Step 2. §5.3 maturin pin → Task 3. §5.4 verification → Task 4 Steps 5–7. §6 sdist → Task 5 Steps 1–2. §7.1 metadata → Task 1. §7.2 SMA-556 → Task 2. §7.3 lint table → Task 1 Step 4 + Task 6 Step 3. §7.4 MSRV → Task 1 Step 2 (README) + Task 5 Step 2 (MSRV leg). §8 P0/P1/P2 → Task 6 Steps 1–5. §8.1 D6 → Task 6 Step 3. §9 → **deferred to SMA-579 by design**, not implemented here. §10 corrections → Task 7 Steps 1–3. §12 testing → each task's verification steps + Task 7 Step 5.
 
-**Type consistency.** `EXPECTED_PYPI_PUBLISHABLE`, `PYPI_SCAN`, `PYPI_REQUIRED_FIELDS`, `SDIST_SHIPPED_CRATES`, `assert_pypi_metadata`, `assert_sdist_lint_tables`, `assert_wheels_has_no_credentials` are defined in Task 6 Steps 1–3 and called in Step 4 under exactly those names. `assert_lint_table` and `_expect_rc` are pre-existing (`run.sh:293`, `run.sh:~800`) and reused, not redefined. Artifact names `wheel-<platform>`, `sdist`, `wheel-paigasus-kernel` are produced in Tasks 4–5 and are what SMA-579 will download. The matrix keys `platform`, `target`, `runner`, `zig`, `compat`, `expect_tag`, `extra_*` are declared in Task 4 Step 2 and used consistently in Steps 3–8.
+**Type consistency.** `EXPECTED_PYPI_PUBLISHABLE`, `PYPI_SCAN`, `PYPI_REQUIRED_FIELDS`, `SDIST_SHIPPED_CRATES`, `assert_pypi_metadata`, `assert_sdist_lint_tables`, `assert_wheels_has_no_credentials` are defined in Task 6 Steps 1–3 and called in Step 4 under exactly those names. `assert_lint_table` and `_expect_rc` are pre-existing (`run.sh:293`, `run.sh:~800`) and reused, not redefined. Artifact names `wheel-<platform>`, `sdist`, `face-paigasus-kernel` are produced in Tasks 4–5 and are what SMA-579 will download. The matrix keys `platform`, `target`, `runner`, `zig`, `compat`, `expect_tag`, `extra_*` are declared in Task 4 Step 2 and used consistently in Steps 3–8.
 
 **Three deliberate measure-then-pin points**, flagged in place rather than guessed: the maturin asset filenames (Task 3 Step 1), the wheel tag sets and the max-GLIBC value (Task 4 Steps 5–6), and the `rustup target add` handling of the `.2.17` triple suffix (Task 4 Step 3). Each says explicitly: read what the tool produced, confirm it is correct, pin that — never loosen the comparison to make a red go away.

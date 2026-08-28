@@ -229,7 +229,7 @@ Two refinements the first draft got wrong:
 | `manylinux_2_17_x86_64` | same, on `ubuntu-latest` |
 | `manylinux_2_17_aarch64` | same, on `ubuntu-24.04-arm` |
 | `macosx_10_12_x86_64` | `lipo -archs` exact-equality **plus** `prebuild.yml:166-180`'s `otool -l` minimum-macOS assertion ported verbatim, asserting **tag-vs-binary agreement** — a cross-built x64 slice can otherwise inherit the host SDK's floor and silently drop 10.13–10.15 users |
-| the cross-built musl wheels | tag-set assertion **plus** a max-symbol-version check (`objdump -T \| grep GLIBC_ \| sort -V \| tail -1`, or `auditwheel show`) — an ELF-*class* check reports only the machine type, so a wheel tagged `_2_17` whose `.so` needs `GLIBC_2.34` would pass it, install cleanly, and fail at import |
+| the cross-built musl wheels | tag-set assertion **plus** a max-symbol-version check — an ELF-*class* check reports only the machine type, so a wheel tagged `_2_17` whose `.so` needs `GLIBC_2.34` would pass it, install cleanly, and fail at import. On musl the expectation is **zero** `GLIBC_` versioned symbols, so any match at all is a mis-tag; this is the only binary evidence either musl wheel gets, since neither is executed. The extractor is `readelf --dyn-syms \| grep GLIBC_ \| sort -V \| tail -1`, not `objdump`: both musl legs run on an x86_64 runner and one carries an aarch64 `.so`, which Ubuntu's BFD-configured objdump cannot read at all. The no-match case is grep rc 1, so the pipeline must not abort under `pipefail` |
 
 **Wheel `METADATA` is asserted too** (review **M16**). §1's motivating defect — 88 bytes — was
 measured on the **wheel**, and maturin derives wheel `METADATA` from `[project]` through a
@@ -342,10 +342,16 @@ it), and `paigasus-py-bindings` is simultaneously `publish = false` on the Cargo
 PyPI-bound. Instead:
 
 - an **explicit marker**, `[tool.paigasus] pypi = true`, is the publish decision;
-- the **scan set** is defined as `git ls-files`-tracked `pyproject.toml` under `py/packages/*/`
-  plus the one bindings pyproject — not a filesystem `**/pyproject.toml` glob, which would sweep
-  in `py/pyproject.toml` (a uv virtual root with **no `[project]` table**) and, in a provisioned
-  tree, `ts/node_modules/.pnpm/…/node-gyp/gyp/pyproject.toml`;
+- the **scan set** is the **single-level** filesystem glob `py/packages/*/pyproject.toml`
+  (`shopt -s nullglob`, expanded in a subshell `cd`-ed to the repo root) plus the one bindings
+  pyproject, named literally. What matters is that it is single-level and rooted at
+  `py/packages/`: a recursive `**/pyproject.toml` would sweep in `py/pyproject.toml` (a uv
+  virtual root with **no `[project]` table**) and, in a provisioned tree,
+  `ts/node_modules/.pnpm/…/node-gyp/gyp/pyproject.toml`. It is a filesystem walk, **not**
+  `git ls-files`: in CI, on a clean checkout, the two sets are identical, but locally an
+  *untracked* `py/packages/<scratch>/` would enter the scan set and red the gate. That is
+  accepted — the gate reads what is on disk, which is also what a build would package;
+  an empty expansion exits **2**, so the glob cannot silently shrink to nothing;
 - a missing `[project]`/`version` exits **2** (infrastructure), never 1 (the repo is wrong).
 
 | Check | Assertion | Mirrors |
@@ -438,8 +444,19 @@ bypasses are different:
 **The guard is therefore defined as:** *every job that can reach a registry is gated on
 `PAIGASUS_RELEASE_ENABLED`, directly or through an unbroken `needs:` chain from a gated job, and
 no such job carries `if: always()` / `if: !cancelled()`, or a `continue-on-error:` value other
-than the literal `false`.* It parses YAML properly (Python, as `ci/publish-metadata`'s checks
-already do), not bash grep. Both bypasses above become named fixture rows.
+than the literal `false`.* Reaching that verdict needs the workflow's **job structure**, which a
+line-oriented grep cannot supply — a job-level `if:` is not distinguishable from the seven
+step-level ones by shape alone.
+
+**There is no YAML-parsing precedent to inherit.** Nothing under `ci/` imports `yaml`:
+`assert_freshness_call_site` (`ci/publish-metadata/run.sh`) is entirely `grep -nE`, and the
+`wheels.yml` credential check (P-D6) is `re.search` over comment-stripped text. SMA-579 would be
+*introducing* YAML parsing, and that is a design decision with a dependency implication, not a
+free choice: `repo:publish-metadata` runs under `toolchain: 'system'`, where PyYAML is **not
+guaranteed** to be importable. SMA-579 must pick and justify one of — vendor a parse, add a
+guarded import with a hard failure when absent (never a skip), move the guard to a task with a
+managed Python, or accept a structure-aware regex and state its limits. Both bypasses above
+become named fixture rows either way.
 
 Guard-the-guard obligations, unchanged from the first draft except where noted:
 
@@ -497,7 +514,7 @@ by re-cutting the version.
 | Each leg produces the right wheel | Tag-**set** equality per leg (§5.4) |
 | The wheels load | Native import-and-call on darwin-arm64, win_amd64, linux-x64-gnu, **linux-arm64-gnu** |
 | The darwin x64 slice is right | `lipo -archs` + `otool -l` minimum-macOS, asserting tag-vs-binary agreement |
-| The musl wheels are honestly tagged | Max GLIBC symbol-version check, not an ELF-class check |
+| The musl wheels are honestly tagged | Max GLIBC symbol-version check (expectation: **none**), not an ELF-class check |
 | The wheels carry metadata | `METADATA` assertion on ≥1 leg (the defect was measured on the wheel) |
 | The sdist is a real fallback | `pip install <sdist>` + import on **ubuntu, macOS and Windows**; macOS is §2's standing control |
 | The sdist honours its MSRV | One leg at rustc 1.95, not the pinned toolchain |
@@ -532,10 +549,17 @@ its narrowed `paths:` filter does not select it on most PRs. This PR touches
    so the crate's **Cargo** `include` controls its contents; adding one removed `moon.yml`. No
    `[tool.maturin] include` is needed, and §7.1's mechanism and §6 step 2's assertion stand as
    designed.
-   A second measurement matters for that assertion: maturin relocates `pyproject.toml` to the
-   **archive root**, not to the crate directory, even though the crate is nested under
-   `crates/bindings/`. `wheels.yml`'s presence assertion therefore matches on basename
-   (`grep -q "/$required$"`) rather than on a fixed path.
+   Two further measurements shape that assertion. First, maturin relocates `pyproject.toml`
+   (and `Cargo.lock`) to the **archive root**, not to the crate directory, even though the
+   crate is nested under `crates/bindings/` — so those two are matched on basename
+   (`grep -q "/$required$"`). Second, a **basename** match is *vacuous* for `README.md` and
+   `LICENSE`: the sdist vendors `paigasus-kernel`, which ships its own copies of both, so the
+   grep passed with the bindings crate's `include` entries deleted. Those two are therefore
+   anchored on the crate path. Measured with both entries removed and the sdist rebuilt: the
+   crate-path **`LICENSE` disappears** (that anchor binds the allowlist), while the crate-path
+   **`README.md` survives** — cargo infers `readme = "README.md"` from the file's presence and
+   packages it irrespective of `include`, so that anchor asserts the *bindings'* README shipped
+   rather than only the vendored kernel's, which is what the basename form could not tell apart.
 2. ~~With an `include` allowlist added, what asserts it stays correct as the crate dir gains
    files?~~ **Answered — `wheels.yml`'s "Assert the sdist ships nothing repo-internal" step,
    and nothing else.** Review **Q7** is confirmed: Checks 1c/1d/2b/2c never reach this crate
