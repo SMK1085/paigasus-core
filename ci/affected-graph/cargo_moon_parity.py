@@ -264,6 +264,30 @@ def check_task_inputs(projects, crates, task, required):
     return a4
 
 
+def derive_ffi_tasks(projects):
+    """Every `<pid>:<task>` whose resolved invocation shells out to a Rust build.
+
+    Shared by A5 (which asserts those tasks key on the workspace files) and A7 (which asserts the
+    non-Rust ones key on their upstream crates' sources). Sharing it is deliberate: a wrapper that
+    A5 covers and A7 does not — or the reverse — is a hole neither check can see.
+
+    Raises MoonOutputError if a task exposes none of a command, a script, or any args.
+    """
+    matched = set()
+    for pid in sorted(projects):
+        invocations = projects[pid].get("invocations") or {}
+        for name in sorted(invocations):
+            blob = invocations[name]
+            if blob is None:
+                raise MoonOutputError(
+                    f"{pid}:{name} reported none of a `command`, a `script`, or any `args` — "
+                    f"moon's output shape changed, so the FFI derivation cannot be evaluated"
+                )
+            if any(marker in blob for marker in FFI_MARKERS):
+                matched.add(f"{pid}:{name}")
+    return matched
+
+
 def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASKS):
     """Return the A5 violation list: FFI-compiling tasks that do not key on the workspace files.
 
@@ -275,33 +299,23 @@ def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASK
       silently stops matching (a renamed flag, an invocation moved behind a wrapper script, a moon
       upgrade dropping `script`) degrades to an empty set and a vacuous PASS.
 
+    The derivation itself lives in `derive_ffi_tasks`, shared with A7.
+
     Raises MoonOutputError if a task exposes none of a command, a script, or any args.
     """
-    matched, a5 = set(), []
-    for pid in sorted(projects):
-        invocations = projects[pid].get("invocations") or {}
-        declared = projects[pid].get("task_inputs") or {}
-        for name in sorted(invocations):
-            blob = invocations[name]
-            if blob is None:
-                raise MoonOutputError(
-                    f"{pid}:{name} reported none of a `command`, a `script`, or any `args` — "
-                    f"moon's output shape changed, so A5 cannot be evaluated"
-                )
-            if not any(marker in blob for marker in FFI_MARKERS):
-                continue
-            target = f"{pid}:{name}"
-            matched.add(target)
-            resolved = declared.get(name)
-            if resolved is None:
-                a5.append(
-                    f"{target} reported no `inputFiles` — moon's output shape changed, so this "
-                    f"assertion cannot be evaluated (treated as a violation, never skipped)"
-                )
-                continue
-            missing = [f for f in required if f not in resolved]
-            if missing:
-                a5.append(f"{target} inputs omit {', '.join(missing)}")
+    matched, a5 = derive_ffi_tasks(projects), []
+    for target in sorted(matched):
+        pid, _, name = target.partition(":")
+        resolved = (projects[pid].get("task_inputs") or {}).get(name)
+        if resolved is None:
+            a5.append(
+                f"{target} reported no `inputFiles` — moon's output shape changed, so this "
+                f"assertion cannot be evaluated (treated as a violation, never skipped)"
+            )
+            continue
+        missing = [f for f in required if f not in resolved]
+        if missing:
+            a5.append(f"{target} inputs omit {', '.join(missing)}")
     for target in sorted(set(floor) - matched):
         a5.append(
             f"{target} is not matched by any FFI marker — the derived set no longer covers it, "
@@ -622,6 +636,28 @@ def self_test():
         for row in check_task_inputs(broken, crates, "fmt", FMT_TASK_INPUTS)
     ):
         failures.append("A4-fmt did not fire on a fmt task missing the rustfmt config")
+
+    # A5/A7 share one derivation. If they ever diverge, A7 silently stops examining a wrapper
+    # while A5 keeps passing — so assert the split function returns exactly what A5 matches.
+    ffi_fixture = {
+        "w-ts": {
+            "source_dir": "ts/packages/w", "deps": {}, "language": "typescript",
+            "tasks": {"build": []}, "task_inputs": {"build": []},
+            "task_input_globs": {"build": []},
+            "invocations": {"build": "touch ../x && pnpm exec napi build --platform"},
+        },
+        "q-rs": {
+            "source_dir": "rs/crates/libs/q", "deps": {}, "language": "rust",
+            "tasks": {"build": []}, "task_inputs": {"build": []},
+            "task_input_globs": {"build": []},
+            "invocations": {"build": "cargo build"},
+        },
+    }
+    if derive_ffi_tasks(ffi_fixture) != {"w-ts:build"}:
+        failures.append(
+            f"derive_ffi_tasks did not match exactly the FFI-marked task: "
+            f"{sorted(derive_ffi_tasks(ffi_fixture))}"
+        )
 
     a1, a2, a3 = check(ok, crates)
     if (a1, a2, a3) != ([], [], []):
