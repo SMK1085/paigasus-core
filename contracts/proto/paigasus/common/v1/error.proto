@@ -170,6 +170,19 @@ enum ErrorReason {
   // this registry is a 409, and this is a 400.
   ERROR_REASON_MUTUALLY_EXCLUSIVE_FIELDS = 38;
 
+  // ---- IAM: lifecycle (1-299) ----------------------------------------------
+  // SMA-571. Emitted by the boot-time deferred router, before any AppState
+  // exists — so it never travels through TenancyError or the authn funnel.
+
+  // "service-migrating" — this replica has not finished its boot migration and
+  // is not yet serving. Both transports carry this code: HTTP puts it in the
+  // house error envelope on every /v1/* route, and gRPC attaches it as
+  // ErrorInfo on an UNAVAILABLE status (built through grpc/convert.rs's
+  // `iam_status`, the same construction point every other IAM gRPC error
+  // uses), so a client sees the identical machine-readable reason regardless
+  // of which transport it used.
+  ERROR_REASON_SERVICE_MIGRATING = 39;
+
   // ---- Gateway (300-599) ---------------------------------------------------
   // Emitted snake_case today; SMA-504 recases them. `type` is untouched and
   // keeps its OpenAI semantics.

@@ -33,15 +33,6 @@ pub const POLL_BACKOFF: Duration = Duration::from_secs(1);
 /// At most one "still waiting" line per this interval.
 pub const LOG_THROTTLE: Duration = Duration::from_secs(15);
 
-/// The image's `HEALTHCHECK --start-period`, mirrored here so boot can warn when the configured
-/// wait exceeds what the container tolerates. `ci/images/run.sh`'s `assert_pins` asserts this
-/// constant and `rs/Dockerfile` agree.
-pub const IMAGE_START_PERIOD_SECS: u64 = 180;
-
-/// Budget for the migration itself, on top of the lock wait. `IMAGE_START_PERIOD_SECS` is
-/// `lock_wait_secs` default + this.
-pub const MIGRATION_BUDGET_SECS: u64 = 60;
-
 /// What to do after a failed acquisition attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Poll {
@@ -252,24 +243,21 @@ mod tests {
     /// `main.rs` to a bare `Migrator::up` would leave the whole suite green while un-shipping the
     /// feature. `include_str!` is deliberate: a `repo:*` gate for one call site would cost a `T`-array
     /// entry, the CLAUDE.md marker block and an `:affected-smoke` re-baseline.
+    ///
+    /// Comments are STRIPPED before matching (SMA-571 fix round 1). A substring match over the raw
+    /// file is satisfied by PROSE: `boot_deferred`'s own doc comment names `migrate_under_lock(`
+    /// and `config.migration.lock_wait()` while explaining this very guard, so both positive
+    /// assertions would have stayed green with the real call deleted — and the negative one fired
+    /// on a comment that merely MENTIONED the banned call, which is why that comment previously had
+    /// to be spelled around it. Stripping is line-granular and deliberately naive (a `//` opening a
+    /// string literal would be over-stripped); that direction only ever makes the positive
+    /// assertions stricter, never looser.
     #[test]
     fn the_composition_root_still_migrates_under_the_lock() {
         const MAIN: &str = include_str!("../../main.rs");
-        assert!(MAIN.contains("migrate_under_lock("), "main.rs must call migrate_under_lock");
-        assert!(!MAIN.contains("Migrator::up"), "main.rs must not call Migrator::up bare — use migrate_under_lock");
-        assert!(MAIN.contains("config.migration.lock_wait()"), "main.rs must pass the CONFIGURED wait, not a hardcoded Duration");
-    }
-
-    /// The container's health-check start period must cover the configured wait plus the migration,
-    /// or a replica that is correctly WAITING for the lock gets reported unhealthy. `ci/images/run.sh`
-    /// pins `rs/Dockerfile` against `IMAGE_START_PERIOD_SECS`, but `images.yml`'s `pull_request` filter
-    /// excludes `rs/**` — so a raised default alone would not run it. This test does, under `:test`.
-    #[test]
-    fn the_default_wait_plus_the_migration_budget_fits_the_image_start_period() {
-        let default_wait = crate::config::MigrationConfig::default().lock_wait_secs;
-        assert!(
-            default_wait + MIGRATION_BUDGET_SECS <= IMAGE_START_PERIOD_SECS,
-            "default lock_wait_secs ({default_wait}) + MIGRATION_BUDGET_SECS ({MIGRATION_BUDGET_SECS}) exceeds IMAGE_START_PERIOD_SECS ({IMAGE_START_PERIOD_SECS}) — raise rs/Dockerfile's --start-period and the constant together"
-        );
+        let code = MAIN.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        assert!(code.contains("migrate_under_lock("), "main.rs must call migrate_under_lock");
+        assert!(!code.contains("Migrator::up"), "main.rs must not call Migrator::up bare — use migrate_under_lock");
+        assert!(code.contains("config.migration.lock_wait()"), "main.rs must pass the CONFIGURED wait, not a hardcoded Duration");
     }
 }

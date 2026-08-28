@@ -47,7 +47,6 @@ use axum::{Json, Router, extract::State, http::StatusCode, response::IntoRespons
 use paigasus_iam_core::{Authenticator, AuthnError, Authorizer, Issuer, ValidatedClaims};
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde_json::json;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
@@ -834,11 +833,14 @@ pub fn health_router() -> Router {
 
 /// DB-backed readiness alone, on its own `Router<AppState>`-turned-`Router` (mirrors
 /// [`health_router`]'s standalone posture) — split out of the old inline `router()` body so
-/// [`router`] and [`serve_http`] can each merge it in at the top level, OUTSIDE both
-/// [`app_routes`]'s `http_metrics_layer` and (in `serve_http`) `TraceLayer`/`TimeoutLayer`
-/// (SMA-446 Unit 3): a 15s Prometheus scrape hitting `/metrics`, or a liveness/readiness
-/// poller hitting `/healthz`/`/readyz`, must not spam a request-span trace log every tick nor
-/// inflate the RED (rate/errors/duration) metrics with health-check traffic.
+/// [`router`] can merge it in at the top level, OUTSIDE both [`app_routes`]'s
+/// `http_metrics_layer` and `TraceLayer`/`TimeoutLayer` (SMA-446 Unit 3): a 15s Prometheus scrape
+/// hitting `/metrics`, or a liveness/readiness poller hitting `/healthz`/`/readyz`, must not spam
+/// a request-span trace log every tick nor inflate the RED (rate/errors/duration) metrics with
+/// health-check traffic. Since SMA-571, production composes its own `/readyz` differently —
+/// `adapters::boot::boot_http_router`'s `readyz` handler reads the boot slot directly rather
+/// than merging this router — so `serve_http` no longer merges this at all; only `router` (the
+/// test harness) does.
 fn readyz_router(state: AppState) -> Router {
     Router::new().route("/readyz", get(readyz)).with_state(state)
 }
@@ -907,8 +909,9 @@ fn app_routes(state: AppState) -> Router {
 /// Full HTTP surface for the `oneshot`-based test harness: liveness + DB-backed readiness
 /// (outside any layer) merged with [`app_routes`] (the `http_metrics_layer`-wrapped tenancy/
 /// authn API). Deliberately carries no `TraceLayer`/`TimeoutLayer` and no `/metrics` route —
-/// those are [`serve_http`]-only concerns (production wiring), unchanged from before this
-/// crate had any of them.
+/// since SMA-571, `TraceLayer`/`TimeoutLayer` are [`traced_app_routes`]-only concerns and the
+/// `/metrics` merge is [`crate::adapters::boot::boot_http_router`]-only, both production wiring
+/// relocated out of `serve_http` (which no longer composes a router at all — see its doc).
 pub fn router(state: AppState) -> Router {
     health_router().merge(readyz_router(state.clone())).merge(app_routes(state))
 }
@@ -918,8 +921,24 @@ async fn healthz() -> impl IntoResponse {
 }
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
-    let ping = state.db.execute(Statement::from_string(state.db.get_database_backend(), "SELECT 1")).await;
-    match ping {
+    ping_readiness(&state).await
+}
+
+/// `app_routes` under the production `TraceLayer`/`TimeoutLayer` — extracted verbatim from
+/// `serve_http`'s body so `adapters::boot::Serving` builds the SAME value the listener used to
+/// build inline (SMA-571). `/healthz`, `/readyz` and `/metrics` stay outside it, as always.
+pub fn traced_app_routes(state: AppState, request_timeout: Duration) -> Router {
+    // `TimeoutLayer::new` is deprecated since tower-http 0.6.7 in favor of
+    // `with_status_code`; `REQUEST_TIMEOUT` (408) reproduces `new`'s prior default.
+    app_routes(state)
+        .layer(TraceLayer::new_for_http())
+        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, request_timeout))
+}
+
+/// The database-ping half of readiness, split out of [`readyz`] so `adapters::boot`'s
+/// slot-aware handler can reuse it rather than duplicate the ping and its logging (SMA-571).
+pub async fn ping_readiness(state: &AppState) -> (StatusCode, Json<serde_json::Value>) {
+    match state.db.execute(Statement::from_string(state.db.get_database_backend(), "SELECT 1")).await {
         Ok(_) => (StatusCode::OK, Json(json!({ "status": "ready" }))),
         Err(e) => {
             tracing::warn!(error = %e, "readiness check failed: database ping error");
@@ -928,33 +947,19 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-/// Serve the HTTP surface on `addr` until `shutdown` resolves. `TraceLayer`/`TimeoutLayer`
-/// wrap ONLY [`app_routes`] (SMA-446 Unit 3) — `/healthz`/`/readyz` (via [`health_router`]/
-/// [`readyz_router`]) and, when `metrics_router` is `Some` (the same-port merge case,
-/// `[metrics] enabled = true` with `addr` unset — `main.rs` decides which), `/metrics` itself
-/// are merged in AFTER, at the top level, so a 15s Prometheus scrape or a liveness/readiness
-/// poll never emits a request-span trace log, nor counts toward the request-metrics layer's
-/// own RED metrics, every tick. When `main.rs` instead configures a separate `metrics.addr`,
-/// it serves [`metrics_router`](paigasus_observability::metrics_router) on its own listener
-/// rather than passing one here — this parameter is `None` in that case (and whenever
-/// `[metrics] enabled = false`).
-pub async fn serve_http(
-    addr: SocketAddr,
-    state: AppState,
-    request_timeout: Duration,
-    metrics_router: Option<Router>,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> std::io::Result<()> {
-    // `TimeoutLayer::new` is deprecated since tower-http 0.6.7 in favor of
-    // `with_status_code`; `REQUEST_TIMEOUT` (408) reproduces `new`'s prior default.
-    let traced = app_routes(state.clone())
-        .layer(TraceLayer::new_for_http())
-        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, request_timeout));
-    let mut app = health_router().merge(readyz_router(state)).merge(traced);
-    if let Some(metrics_router) = metrics_router {
-        app = app.merge(metrics_router);
-    }
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+/// Serve `app` on an ALREADY-BOUND `listener` until `shutdown` resolves.
+///
+/// The bind moved out to `main.rs` (SMA-571 §3.3): binding inside this function meant binding
+/// inside a spawned task, which gave no ordering guarantee that the socket was listening before
+/// the migration started — and deferred a bind failure (`EADDRINUSE`) until after the whole
+/// migration window, reporting the migration's error rather than the bind's.
+///
+/// Router composition also moved out: `main.rs` now builds
+/// [`boot_http_router`](crate::adapters::boot::boot_http_router), which owns `/healthz`,
+/// `/readyz` and `/metrics` permanently and falls through to the deferred slot — the slot's
+/// delegated arm serving [`traced_app_routes`], which is what this function used to compose
+/// inline together with [`health_router`]/[`readyz_router`] and the same-port `/metrics` merge.
+pub async fn serve_http(listener: tokio::net::TcpListener, app: Router, shutdown: impl std::future::Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await
 }
 

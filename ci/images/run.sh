@@ -113,40 +113,21 @@ assert_pins() {
     echo "$bad_copy" >&2
     return 1
   fi
-  # SMA-559: a replica that loses the migration-lock race waits with NO listener bound, so the
-  # image's start period must cover that wait plus the migration itself. A config default raised
-  # without touching the Dockerfile would silently re-arm the restart-while-waiting bug.
-  local start_period lock_wait budget required
+  local start_period
   start_period="$(grep -oE '\-\-start-period=[0-9]+s' "$dockerfile" | head -1 | grep -oE '[0-9]+' || true)"
-  lock_wait="$(grep -oE 'lock_wait_secs: [0-9]+' "$ROOT/rs/crates/services/paigasus-iam/src/config.rs" | head -1 | grep -oE '[0-9]+' || true)"
-  budget="$(grep -oE 'MIGRATION_BUDGET_SECS: u64 = [0-9]+' "$ROOT/rs/crates/services/paigasus-iam/src/adapters/persistence/migration_lock.rs" | head -1 | grep -oE '[0-9]+$' || true)"
-  if [ -z "$start_period" ] || [ -z "$lock_wait" ] || [ -z "$budget" ]; then
-    echo "::error::could not read the start-period/lock-wait/migration-budget triple (start_period=${start_period:-<missing>} lock_wait=${lock_wait:-<missing>} budget=${budget:-<missing>}); one of the grep anchors moved." >&2
+  if [ -z "$start_period" ]; then
+    echo "::error::could not read the HEALTHCHECK --start-period; the grep anchor moved, or the HEALTHCHECK was removed." >&2
     return 1
   fi
-  required=$((lock_wait + budget))
-  if [ "$start_period" -lt "$required" ]; then
-    echo "::error::rs/Dockerfile's HEALTHCHECK --start-period=${start_period}s is below migration.lock_wait_secs (${lock_wait}) + the migration budget (${budget}) = ${required}s." >&2
-    echo "  A replica waiting on the SMA-559 migration lock binds no listener, so it would be reported unhealthy while correctly waiting. Raise the start period or lower the default wait." >&2
+  # SMA-571 removed the start-period <-> lock_wait_secs coupling: IAM binds before migrating, so
+  # this only has to cover config load + Database::connect + the binds. A floor is kept so that
+  # deleting the HEALTHCHECK, or setting --start-period=0s, is still caught — after the coupling
+  # was removed, nothing else reads this value at all.
+  if [ "$start_period" -lt 30 ]; then
+    echo "::error::rs/Dockerfile's HEALTHCHECK --start-period=${start_period}s is below the 30s floor." >&2
     return 1
   fi
-  # migration_lock.rs's IMAGE_START_PERIOD_SECS doc claims it and rs/Dockerfile's --start-period
-  # agree — make that true rather than aspirational. Without this, bumping the Dockerfile to 300s
-  # while leaving the constant at 180 would pass the required-budget check above (300 >= 180) and
-  # fire the boot warning (`config.migration.lock_wait_secs + MIGRATION_BUDGET_SECS >
-  # IMAGE_START_PERIOD_SECS`) spuriously forever, with CI green throughout.
-  local image_start_period_const
-  image_start_period_const="$(grep -oE 'IMAGE_START_PERIOD_SECS: u64 = [0-9]+' "$ROOT/rs/crates/services/paigasus-iam/src/adapters/persistence/migration_lock.rs" | head -1 | grep -oE '[0-9]+$' || true)"
-  if [ -z "$image_start_period_const" ]; then
-    echo "::error::could not read IMAGE_START_PERIOD_SECS from migration_lock.rs; the grep anchor moved." >&2
-    return 1
-  fi
-  if [ "$image_start_period_const" != "$start_period" ]; then
-    echo "::error::migration_lock.rs's IMAGE_START_PERIOD_SECS (${image_start_period_const}) disagrees with rs/Dockerfile's HEALTHCHECK --start-period (${start_period}s)." >&2
-    echo "  Bump both together, or the boot warning that compares the configured wait against IMAGE_START_PERIOD_SECS no longer reflects what the container actually tolerates." >&2
-    return 1
-  fi
-  echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config, start-period ${start_period}s >= ${required}s, IMAGE_START_PERIOD_SECS == start-period"
+  echo "  pins OK: rustc ${channel}, bookworm builder, ubuntu ${ubuntu_from} == chisel release, no baked service config, start-period ${start_period}s >= 30s"
 }
 
 build_one() {
@@ -242,6 +223,120 @@ expect_status() {
   echo "  ${label}: HTTP ${got}"
 }
 
+# Bounds a single Docker CLI invocation to at most `$1` seconds, so a hung `docker inspect`/
+# `docker run`/`docker logs` (daemon wedged, control-plane stall) cannot itself carry `wait_ready`
+# past its own advertised deadline the way an unbounded call would.
+#
+# GNU `timeout` would do this in one word and IS present on the `ubuntu-latest` runner this
+# script's CI caller uses — but this script is not CI-only: `ci/images/run.sh all` run locally is
+# the ONLY pre-merge exercise of this file (`images.yml` is not a required check), and macOS ships
+# no `timeout` binary at all (a documented constraint in this repo's CLAUDE.md). Reaching for it
+# here would pass on CI and break every local run silently until someone tried one on a Mac. Do
+# NOT "simplify" this back to `timeout "$@"` for that reason.
+#
+# Implemented as background job + a watchdog that escalates TERM then KILL, which needs nothing
+# beyond POSIX job control (`&`, `wait`, `kill`) and behaves identically under bash on macOS and
+# Linux.
+with_deadline() {
+  local secs="$1"
+  shift
+  [ "$secs" -lt 1 ] && secs=1
+  "$@" &
+  local cmd_pid=$!
+  (
+    sleep "$secs"
+    kill -TERM "$cmd_pid" 2>/dev/null
+    sleep 1
+    kill -KILL "$cmd_pid" 2>/dev/null
+  ) &
+  local watchdog_pid=$!
+  local rc=0
+  wait "$cmd_pid" 2>/dev/null || rc=$?
+  # The watchdog either already fired (harmless double-kill of a dead pid) or is still sleeping —
+  # either way it must be reaped so it cannot fire a stray kill at a LATER, unrelated pid that the
+  # OS has since recycled onto `$cmd_pid`'s old number.
+  kill "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
+  return "$rc"
+}
+
+# Caps `$1` at `$2`, floored at 1 — the shared shape every per-call Docker timeout below uses so
+# no single invocation is ever handed more of the budget than `wait_ready` has left.
+cap_timeout() {
+  local v="$1" ceiling="$2"
+  [ "$v" -gt "$ceiling" ] && v="$ceiling"
+  [ "$v" -lt 1 ] && v=1
+  echo "$v"
+}
+
+# SMA-571: `healthy` no longer implies migrated — IAM binds before it migrates, so /healthz
+# answers 200 while /readyz is still 503 "migrating". Without this the very next assertion races
+# a fresh database's full migration set. Its own budget, deliberately separate from wait_healthy's.
+#
+# Mirrors wait_healthy's "container is gone" early-out (SMA-571 final review): the most likely
+# NEW way this loop fails is a migration failure AFTER `healthy` — the boot-phase drain now runs
+# and the container exits 1 — and without this check that burns the full budget (each iteration
+# spawning a `docker run`) before ever reporting anything more useful than "last /readyz status:
+# 000".
+#
+# Driven off an ABSOLUTE deadline (CodeRabbit, PR 167), not an iteration count: the old
+# `seq 1 120` + `sleep 1` shape claimed a "never became ready" 120s budget in its error message,
+# but each iteration also spends up to `--max-time 5` on the request itself — so a run where every
+# request times out takes up to 120 * (5 + 1) =~ 12 minutes wall-clock, six times what the message
+# says. `$SECONDS` (reset at function entry) tracks elapsed wall-clock directly; each request's
+# `--max-time` and the trailing `sleep` are both capped at whatever of the budget remains, so
+# neither can itself carry the loop past the deadline it is supposed to enforce.
+#
+# CodeRabbit round 2 (PR 167): that deadline bounded the LOOP but not the individual Docker calls
+# inside it — `docker inspect`, the `docker run` issuing the request, and the diagnostic
+# `docker logs` were all unbounded, so any ONE hung Docker call could overshoot the advertised
+# budget on its own regardless of how carefully the loop re-checked `remaining` around it. Every
+# Docker invocation below is now re-checked against the CURRENT `remaining` immediately before it
+# runs (so a call that cannot fit in what is left is skipped rather than started) and wrapped in
+# `with_deadline` so a call that DOES start cannot itself outlive the budget.
+wait_ready() {
+  local name="$1" url="$2" budget="${3:-120}" code=000 status start elapsed remaining req_timeout sleep_for insp_timeout run_timeout
+  start=$SECONDS
+  while :; do
+    elapsed=$((SECONDS - start))
+    remaining=$((budget - elapsed))
+    [ "$remaining" -le 0 ] && break
+    # Diagnostic control-plane call — normally instant, so capped at a small fixed ceiling
+    # (never more than 5s of the budget) rather than however much of `remaining` happens to be
+    # left, so a wedged daemon still yields several retries instead of burning the whole budget
+    # on one inspect.
+    insp_timeout="$(cap_timeout "$remaining" 5)"
+    status="$(with_deadline "$insp_timeout" docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo missing)"
+    if [ "$status" != "running" ]; then
+      echo "::error::$name is gone (status: $status); logs follow" >&2
+      remaining=$((budget - (SECONDS - start)))
+      with_deadline "$(cap_timeout "$remaining" 10)" docker logs "$name" 2>&1 | tail -30 >&2
+      return 1
+    fi
+    remaining=$((budget - (SECONDS - start)))
+    [ "$remaining" -le 0 ] && break
+    # `--connect-timeout`/`--max-time`: this is a POLLING loop, so a single hung request would
+    # otherwise stall past the deadline rather than just costing one iteration. Capped at whatever
+    # of the budget remains (and never below 1s), not a fixed 5s.
+    req_timeout=$((remaining < 5 ? remaining : 5))
+    [ "$req_timeout" -lt 1 ] && req_timeout=1
+    # `docker run`'s OWN startup (image already pulled, but the daemon still has to create and
+    # start a container) is outside curl's `--max-time`, so the `docker run` invocation itself is
+    # bounded too — a few seconds' allowance over `req_timeout` for that overhead, still capped at
+    # whatever of the budget remains.
+    run_timeout="$(cap_timeout $((req_timeout + 3)) "$remaining")"
+    code="$(with_deadline "$run_timeout" docker run --rm --network "$NET" "$CURL_8_11_1_DIGEST" -s --connect-timeout 2 --max-time "$req_timeout" -o /dev/null -w '%{http_code}' "$url" || echo 000)"
+    [ "$code" = "200" ] && { echo "  $name is ready (${elapsed}s)"; return 0; }
+    remaining=$((budget - (SECONDS - start)))
+    [ "$remaining" -le 0 ] && break
+    sleep_for=$((remaining < 1 ? remaining : 1))
+    sleep "$sleep_for"
+  done
+  echo "::error::$name never became ready within ${budget}s (last /readyz status: $code)" >&2
+  with_deadline 10 docker logs "$name" 2>&1 | tail -30 >&2
+  return 1
+}
+
 # The base must stay the base. Without these a future `FROM ubuntu:24.04` "just to debug
 # something" would pass every other assertion in this suite.
 assert_base_intact() {
@@ -317,6 +412,7 @@ smoke() {
     -e IAM_API_KEYS__PEPPER="cGFpZ2FzdXMtc21va2UtcGVwcGVyLW5vdC1hLXJlYWwtc2VjcmV0LTAwMA==" \
     paigasus-iam:dev >/dev/null
   wait_healthy "$IAM_NAME"
+  wait_ready "$IAM_NAME" "http://${IAM_NAME}:8080/readyz"
   expect_status "iam /healthz" "http://${IAM_NAME}:8080/healthz" 200
   expect_status "iam /readyz"  "http://${IAM_NAME}:8080/readyz"  200
   assert_base_intact paigasus-iam:dev

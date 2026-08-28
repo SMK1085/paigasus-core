@@ -129,6 +129,13 @@ pub struct AuthEnforce<S> {
 /// actor must already be resolved from the bearer before `UserService.CreateUser` can
 /// authorize it; `OutboxService`'s four RPCs enforce Root internally, same as their HTTP
 /// mirror, and depend on this layer for the same reason.
+///
+/// **The health-prefix arm is dead in *production* since SMA-571** (spec §4.4): `boot_grpc_routes`
+/// mounts the health service as a matched route on the boot-time router, so a
+/// `/grpc.health.v1.Health/*` request never reaches `AuthEnforce` there at all — `Serving.grpc`
+/// only ever sees requests the outer boot routes' fallback forwarded to it. The arm stays live for
+/// the eleven Docker-gated suites that drive `grpc::router` directly (`AuthLayer` still wraps the
+/// WHOLE `Server` there, health included), which is why it is kept rather than deleted.
 fn is_exempt(path: &str) -> bool {
     path.starts_with("/grpc.health.v1.Health/") || path == "/paigasus.iam.v1.AuthnService/Introspect" || path == "/paigasus.iam.v1.AuthnService/IntrospectApiKey"
 }
