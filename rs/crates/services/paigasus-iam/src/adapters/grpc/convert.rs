@@ -242,14 +242,17 @@ pub(crate) fn require_present<'a>(raw: &'a str, field: &'static str) -> Result<&
     Ok(raw)
 }
 
-/// Builds `AuditMetadata` from created/modified timestamps. `created_by`/`modified_by` stay
-/// empty until M2 wires an actor through the request context (task-16 brief).
+/// Builds `AuditMetadata` from created/modified timestamps. `creator`/`modifier` stay ABSENT —
+/// the canonical "unknown/system" (SMA-439) — until the actor is PERSISTED. The acting
+/// principal is already available at every mutation (`actor_prn(&AuthContext)`), but no
+/// tenancy aggregate stores a creator and no migration defines the column, so writing it on
+/// create only would leave the field inconsistent across later reads (M2, task-16 brief).
 pub fn audit(created: DateTime<Utc>, updated: DateTime<Utc>) -> AuditMetadata {
     AuditMetadata {
         created_at: Some(ts(created)),
         modified_at: Some(ts(updated)),
-        created_by: String::new(),
-        modified_by: String::new(),
+        creator: None,
+        modifier: None,
     }
 }
 
@@ -522,6 +525,23 @@ pub fn to_proto_retire_response(outcome: RetireOutcome) -> RetireSystemPolicyRes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_leaves_the_actor_unset() {
+        let t = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let meta = audit(t, t);
+
+        // IAM cannot name the actor: no tenancy aggregate persists a creator and no
+        // migration defines the column (SMA-439 spec D8). Absent is the canonical
+        // "unknown" — a synthetic "system" PRN here would violate Actor's contract,
+        // and writing the request's actor on create only would make the field
+        // inconsistent across later reads of the same entity.
+        assert!(meta.creator.is_none());
+        assert!(meta.modifier.is_none());
+        // The timestamps are what this builder DOES know.
+        assert_eq!(meta.created_at, Some(ts(t)));
+        assert_eq!(meta.modified_at, Some(ts(t)));
+    }
 
     #[test]
     fn forbidden_maps_to_permission_denied_with_structured_detail() {

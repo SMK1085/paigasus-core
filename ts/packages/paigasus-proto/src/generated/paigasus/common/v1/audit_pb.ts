@@ -8,13 +8,15 @@ import type { GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
 import { fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
 import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
+import type { Actor } from "./actor_pb.js";
+import { file_paigasus_common_v1_actor } from "./actor_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file paigasus/common/v1/audit.proto.
  */
 export const file_paigasus_common_v1_audit: GenFile = /*@__PURE__*/
-  fileDesc("Ch5wYWlnYXN1cy9jb21tb24vdjEvYXVkaXQucHJvdG8SEnBhaWdhc3VzLmNvbW1vbi52MSKZAQoNQXVkaXRNZXRhZGF0YRIuCgpjcmVhdGVkX2F0GAEgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIvCgttb2RpZmllZF9hdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEgoKY3JlYXRlZF9ieRgDIAEoCRITCgttb2RpZmllZF9ieRgEIAEoCWIGcHJvdG8z", [file_google_protobuf_timestamp]);
+  fileDesc("Ch5wYWlnYXN1cy9jb21tb24vdjEvYXVkaXQucHJvdG8SEnBhaWdhc3VzLmNvbW1vbi52MSLuAQoNQXVkaXRNZXRhZGF0YRIuCgpjcmVhdGVkX2F0GAEgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIvCgttb2RpZmllZF9hdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASKgoHY3JlYXRvchgFIAEoCzIZLnBhaWdhc3VzLmNvbW1vbi52MS5BY3RvchIrCghtb2RpZmllchgGIAEoCzIZLnBhaWdhc3VzLmNvbW1vbi52MS5BY3RvckoECAMQBEoECAQQBVIKY3JlYXRlZF9ieVILbW9kaWZpZWRfYnliBnByb3RvMw", [file_google_protobuf_timestamp, file_paigasus_common_v1_actor]);
 
 /**
  * Shared audit metadata for auditable entities and DTOs across all Paigasus
@@ -41,19 +43,19 @@ export type AuditMetadata = Message<"paigasus.common.v1.AuditMetadata"> & {
   modifiedAt?: Timestamp | undefined;
 
   /**
-   * Opaque identifier of the actor that created the entity (user id / subject
-   * claim / service name). Empty = unknown/system, pending a structured Actor.
+   * Who created the entity. ABSENT means unknown-or-system; see Actor's contract,
+   * under which an empty or unparseable `prn` means the same thing.
    *
-   * @generated from field: string created_by = 3;
+   * @generated from field: paigasus.common.v1.Actor creator = 5;
    */
-  createdBy: string;
+  creator?: Actor | undefined;
 
   /**
-   * Opaque identifier of the actor that last modified the entity.
+   * Who last modified the entity. Same absence semantics as `creator`.
    *
-   * @generated from field: string modified_by = 4;
+   * @generated from field: paigasus.common.v1.Actor modifier = 6;
    */
-  modifiedBy: string;
+  modifier?: Actor | undefined;
 };
 
 /**

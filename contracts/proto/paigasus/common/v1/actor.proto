@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package paigasus.common.v1;
+
+// The actor behind a change: a principal named by its canonical PRN (ADR-0014).
+//
+// CONTRACT. Producers MUST write a canonical PRN. Consumers MUST treat an `Actor`
+// whose `prn` is empty or unparseable as *unknown* — identically to an absent
+// `Actor` — and never as an error. proto3 gives message presence but not field
+// presence, so `Actor{prn: ""}` is constructible in every language; this rule is
+// what stops that from becoming a second spelling of "unknown".
+//
+// Deliberately carries no `kind` enum: the PRN's resource-type segment already
+// encodes it (user / service-account / principal), and the resource-type accessor is
+// exported from the kernel bindings in every language (`prnResourceType` in TS/JS,
+// `prn_resource_type` in Rust/Python), so branching on kind does not require a
+// duplicated field. It also carries no `display_name`: adding a proto field is
+// non-breaking, so it can land the day a consumer needs one.
+message Actor {
+  // Canonical PRN of the actor, e.g. prn:pgs:iam:::principal/<uuid>.
+  string prn = 1;
+}
