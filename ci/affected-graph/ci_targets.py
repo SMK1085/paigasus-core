@@ -233,6 +233,18 @@ SELF_TASK_EXPECTED_GLOBS = {
         "rs/crates/**/src/**/*.rs",
         "contracts/proto/paigasus/common/v1/error.proto",
     ),
+    # SMA-587/SMA-572. An EXPECTED entry, not an exemption: unlike release-parity's
+    # ecosystem-specific globs, this gate's whole authored input set is two static globs, so an
+    # exact-match pin is cheap and does not fight a legitimately growing list. moon.yml's own
+    # comment on this task says the first glob is DELIBERATELY IDENTICAL to check.py's SCAN_GLOB —
+    # "scheduling and scanning must not be able to drift apart" — which makes that glob's exact
+    # text load-bearing here too: narrowing or renaming it silently reopens the gap it exists to
+    # close (the one case this gate exists for — a NEW handler in a NEW file — becomes the one
+    # case it never runs on).
+    "http-extractor-envelope": (
+        "ci/http-extractor/**/*",
+        "rs/crates/services/*/src/adapters/http/**/*.rs",
+    ),
 }
 
 # C3 checks the flag tail too. The first spec draft omitted it on the stated grounds that
@@ -384,6 +396,20 @@ SELF_SCHEDULED_GATES = {
         "set -euo pipefail",
         "python3 ci/error-registry/check.py --self-test",
         "python3 ci/error-registry/check.py --single-site",
+    ),
+    # SMA-587/SMA-572 — repo:http-extractor-envelope, same three-line shape as
+    # error-code-single-site above: `--self-test` runs first in the same script block (moon.yml's
+    # own comment on this task: "a rotted checker must red rather than ship green"), and
+    # `set -euo pipefail` is exactly as load-bearing as either invocation, since Moon takes a
+    # `script:` block's status from its LAST command — without it a failing `--self-test` would be
+    # masked by a passing `--check`. Its real-run line (`--check`) is NOT a prefix of its
+    # self-test line, so unlike error-code-single-site's sibling entries there is no prefix hazard
+    # here either, but it is matched whole-line like every other entry because the table's contract
+    # is one rule, not per-entry rules.
+    "http-extractor-envelope": (
+        "set -euo pipefail",
+        "python3 ci/http-extractor/check.py --self-test",
+        "python3 ci/http-extractor/check.py --check",
     ),
     # One command, so the script's status IS its status — there is no pipefail line to pin.
     # Registered mainly so its `inputs` pin below is not an orphan_globs row: repo:actionlint's
