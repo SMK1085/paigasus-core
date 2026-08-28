@@ -2112,6 +2112,7 @@ T_AFFECTED_SMOKE_REQUIRED_INPUTS=(
   'ts/apps/*/package.json'
   'ci/actionlint/**/*'
   'ci/release-parity/**/*'
+  'ci/workflow-credentials/**/*'
   'CLAUDE.md'
   '.prototools'
 )
