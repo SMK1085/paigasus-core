@@ -1,37 +1,33 @@
-# SMA-593 — Parse the workflow YAML in `repo:publish-metadata`'s P-D6 credential guard
+# SMA-593 — Parse the workflow YAML, and lift the credential guard into its own gate
 
-**Status:** Approved (gate 1, 2026-08-28).
+**Status:** Revision 2. Revision 1 was challenged and returned NEEDS REWORK. This revision
+folds in every justified finding and three decisions taken at gate 1.
 **Date:** 2026-08-28
 **Linear:** [SMA-593](https://linear.app/smaschek/issue/SMA-593/ci-repopublish-metadatas-p-d6-credential-guard-misses-five-ordinary)
-— follow-up from [SMA-578](https://linear.app/smaschek/issue/SMA-578)'s whole-branch review,
-deliberately deferred there.
+— follow-up from [SMA-578](https://linear.app/smaschek/issue/SMA-578)'s whole-branch review.
 **Branch:** `feature/sma-593-close-p-d6-credential-spelling-gaps`
 **Targets:** `main` (currently `82fe78e`, after SMA-560 landed).
-**References:** SMA-407 §7 review M2 (the rule this gate enforces); SMA-578 (which added
-P-D6); SMA-542 (guard-the-guard — a control that lies is worse than no control);
-SMA-529/SMA-530 (negative controls); SMA-541/SMA-553/SMA-572 (gate bookkeeping);
-SMA-579 (which makes this gate load-bearing).
+**References:** SMA-407 §7 review M2 (the rule); SMA-578 (which added P-D6); SMA-542
+(guard-the-guard); SMA-529/SMA-530 (negative controls); SMA-541 (the `T` array and the
+CLAUDE.md marker command); SMA-553/SMA-572/SMA-576 (gate bookkeeping); SMA-579.
 
 ---
 
-## 1. The rule P-D6 enforces
+## 1. The rule
 
 `.github/workflows/wheels.yml` carries a `pull_request` trigger. Same-repo pull requests
 receive repository secrets. A registry credential in that workflow is therefore readable by
-any code the pull request introduces. SMA-407 §7 review M2 forbids it. `wheels.yml`'s own
-header comment (line 9) states the ban and names this gate as the thing that asserts it.
+any code the pull request introduces. SMA-407 §7 review M2 forbids it.
 
-`assert_wheels_has_no_credentials` in `ci/publish-metadata/run.sh` is that assertion. It
-strips YAML comments with a hand-written scanner, then applies three regular expressions to
-the remaining text.
+`assert_wheels_has_no_credentials` in `ci/publish-metadata/run.sh` is the current assertion.
+It strips YAML comments with a hand-written scanner, then applies three regular expressions.
 
 ## 2. The measurement
 
-Every claim below comes from driving the real `strip_comments` and `PATTERNS` code, not
-from reading it. `rc 0` means the checker accepted the input. The workflow is a credential
-leak and the gate stays silent.
+Every claim comes from driving the real `strip_comments` and `PATTERNS` code. `rc 0` means
+the checker accepted the input, so the workflow leaks and the gate stays silent.
 
-**The five spellings the issue reports. All five are confirmed.**
+**The five spellings the issue reports. All five confirmed.**
 
 | # | Input | rc |
 |---|---|---|
@@ -41,7 +37,7 @@ leak and the gate stays silent.
 | 4 | `${{ secrets['PYPI_API_TOKEN'] }}` | 0 |
 | 5 | `${{ Secrets.PYPI_API_TOKEN }}` | 0 |
 
-**Nine more that the issue does not list. All were found in one sitting.**
+**Nine more the issue does not list.**
 
 | # | Input | rc | Class |
 |---|---|---|---|
@@ -55,215 +51,322 @@ leak and the gate stays silent.
 | 13 | `permissions: write-all` (job level) | 0 | implicit grant |
 | 14 | `x: &w write` … `id-token: *w` | 0 | YAML alias |
 
-Rows 12 and 13 matter most. `write-all` grants every permission scope, `id-token` included.
-It is what a person writes to make a step work. It is ordinary YAML and it needs no craft.
+Rows 12 and 13 matter most. `write-all` grants every scope, `id-token` included. It is what
+a person writes to make a step work. Row 14 matters differently: the banned value never
+stands next to its key, so no regular expression over raw text reaches it cleanly.
 
-Row 14 matters for a different reason. The banned value never stands next to its key in the
-text. No regular expression over raw text reaches it cleanly.
+**One result that is not a hazard.** `ID-TOKEN: WRITE` also returns rc 0. Actions reads
+workflow schema keys case-sensitively, so that workflow grants nothing. The count of real
+gaps is 14, not 15.
 
-**One result that is not a hazard.** `ID-TOKEN: WRITE` also returns rc 0. GitHub Actions
-reads workflow schema keys case-sensitively, so that workflow does not grant the permission.
-The count of real gaps is 14, not 15. This distinction is recorded to keep the count honest.
+**The already-caught set.** Revision 1 stated this three different ways. Driving the old code
+gives one answer, and it is six inputs, not four:
 
-**Four inputs are already caught,** and the redesign must keep them caught: a single-line
-`run:` block scalar carrying `${{ secrets.X }}`, the no-space form `${{secrets.X}}`, a
-double-quoted `"${{ secrets.X }}"` value, and `permissions: {id-token: write}`.
+| Input | Old rc | Note |
+|---|---|---|
+| single-line `run:` block scalar with `${{ secrets.X }}` | 1 | |
+| `${{secrets.X}}` (no space) | 1 | |
+| `"${{ secrets.X }}"` (quoted value) | 1 | |
+| `permissions: {id-token: write}` | 1 | |
+| `workflow_call` `secrets:` declaration | 1 | |
+| YAML merge key (`<<: *p`) | 1 | **caught by accident** |
 
-**What a parser sees.** `id-token: 'write'`, `"id-token": write`, the alias form and the
-merge-key form all parse to the identical mapping `{'id-token': 'write'}`. One structural
-test replaces the whole quoting and aliasing column. This is the argument for section 4.
+The merge-key row is caught only because the anchor block `x: &p` / `id-token: write`
+appears literally in the text, so the pattern matches the anchor **definition**, not the
+merged result. It is recorded as accidental so a later refactor cannot lose it silently.
+Its near relative, the alias form (row 14), is genuinely uncaught.
 
-## 3. Decision: parse, and widen the subject
+**What a parser sees.** Rows 2, 3, 6, 7, 14 and the merge-key form all parse to the identical
+mapping `{'id-token': 'write'}`. One structural test replaces the whole column.
 
-The issue offers two routes. Route 1 extends the regular expressions. Route 2 parses the
-YAML. The measurement decides it. Route 1 is incomplete by construction: 9 spellings beyond
-the reported 5 appeared in one sitting, and row 14 has no clean regular-expression answer.
-A longer pattern table makes the check look complete while it stays incomplete. SMA-542
-records what that failure mode costs.
+## 3. Decisions
 
-Two decisions were taken at gate 1.
+Revision 1 proposed extending P-D6 in place. The adversarial review rejected three parts of
+that. Three decisions were taken.
 
-**Decision A — parse the YAML.** Obtain PyYAML through the pinned `uv`:
-`uv run --no-project --with 'pyyaml==6.0.3' python3`. `uv` is pinned in `.prototools`,
-`moon setup` installs it before `moon ci`, and CI restores the uv cache before `moon ci`
-runs. Measured cost on a warm cache: 0.19 s. The exact version pin keeps the gate
-deterministic. A PyYAML change cannot alter the verdict without a visible edit here.
+**Decision A — parse the YAML, and obtain PyYAML from the `py/` workspace.** Add
+`"pyyaml>=6,<7"` to `py/pyproject.toml`'s `[dependency-groups] dev`, and invoke
+`uv run --project py python3`.
 
-Nothing under `ci/` imports `yaml` today, and PyYAML is absent from the `py/` workspace.
-This is the dependency implication the issue flags. The pinned-`uv` route answers it without
-a gamble on what the runner's system Python contains.
+Revision 1 proposed `uv run --no-project --with 'pyyaml==6.0.3'`. That is withdrawn. The
+CI uv cache key is `uv-${{ runner.os }}-${{ hashFiles('py/uv.lock') }}`
+(`.github/workflows/ci.yml:167`). PyYAML would not be in `py/uv.lock`, so the key would never
+change, the restore would be an exact primary-key hit, and `actions/cache` skips its save on
+an exact hit. PyYAML would be re-fetched from PyPI on **every CI run, indefinitely**. Putting
+the dependency in `py/uv.lock` changes that key when it lands, so the cache saves. It also
+puts the pin in a lockfile, where Dependabot sees it and `repo:osv` already scans it.
 
-**Decision B — widen the subject from `wheels.yml` to every pull-request-triggered
-workflow.** The hazard is a property of the trigger, not of one file. Measured today: five
-of six workflows carry a `pull_request` trigger (`ci.yml`, `images.yml`, `prebuild.yml`,
-`security-scan.yml`, `wheels.yml`) and **none of them uses a secret**. `release.yml` is the
-only workflow that reads secrets, and it has no `pull_request` trigger. The invariant
-already holds repo-wide, so widening costs nothing today and guards the class instead of the
-instance.
+**Decision B — pin the discovered subject set by strict equality.** Revision 1 proposed only
+a non-empty assertion. `ci/publish-metadata/run.sh` already holds two runtime-discovered sets
+behind exact-equality expected lists (`EXPECTED_PUBLISHABLE`, `EXPECTED_PYPI_PUBLISHABLE`),
+and Check P0's comment states the reason: a stale list silently **shrinks** the gate rather
+than reporting red. A bare non-empty assertion does not survive an unbounded allowlist —
+four entries with plausible reasons take the subject set from five to one and stay green.
 
-Gate 1 chose runtime discovery with an allowlist. It did **not** choose a pinned expected
-subject set. Section 5 adds a bare non-empty assertion instead, which closes the vacuity
-hole at near-zero maintenance cost.
+**Decision C — lift the check into its own gate, `repo:workflow-credentials`.** Revision 1
+widened `repo:publish-metadata`'s inputs to every workflow. `repo:publish-metadata` runs
+`cargo publish --dry-run` per publish group plus a crates.io category check, and `ci.yml` is
+the most-edited workflow in the repo, so every `ci.yml` edit would have paid that cost on a
+required check. The credential check moves out instead, with narrow inputs. P-D6 leaves
+`repo:publish-metadata` entirely.
 
 ## 4. The checker
 
-The checker parses each workflow with `yaml.safe_load_all` and walks every document. Four
-rules apply to the parsed tree.
+The checker parses each workflow with `yaml.safe_load_all` and walks every document. It takes
+the repository root as `argv[1]`. It must not rely on the current directory: `run.sh` computes
+`REPO_ROOT` from `BASH_SOURCE` and works relative to it, and a directory-relative glob would
+find zero files and report a false rc 2.
+
+Four rules apply to the parsed tree.
 
 | Rule | Condition | Closes |
 |---|---|---|
-| R1 | a mapping key equals `secrets` | rows 8; `secrets:`, `secrets: inherit`, flow mappings, `workflow_call` pass-through |
+| R1 | a mapping key equals `secrets` | row 8; `secrets:`, `secrets: inherit`, flow mappings, `workflow_call` pass-through |
 | R2 | a mapping key equals `id-token` and its value is `write` | rows 1, 2, 3, 6, 7, 14 |
 | R3 | a mapping key equals `permissions` and its scalar value is `write-all` | rows 12, 13 |
-| R4 | a scalar string matches the secrets-context pattern | rows 4, 5, 9, 10, 11 |
+| R4 | an Actions expression references the `secrets` context | rows 4, 5, 9, 10, 11 |
 
 R2 and R3 compare the parsed value after `str(value).strip().lower()`. Actions rejects a
-case-varied value, so the lowercase comparison only ever adds a conservative red.
+case-varied value, so a lowercase comparison only ever adds a conservative red.
 
-R4's pattern is `\$\{\{[^}]*\bsecrets\s*(?:\.|\[)` with `re.IGNORECASE`. It requires the
-`${{` wrapper, so the word "secrets" in ordinary prose does not match. `re.IGNORECASE` is
-correct here and only here: Actions expression **context names** are case-insensitive, while
-workflow **schema keys** are not.
+### 4.1 R4 must extract the expression span first
 
-**Comment handling disappears.** PyYAML never returns a comment, so `strip_comments` and its
-whole class of defects leave the codebase. Row 1 closes because the escape bug no longer
-exists, not because the escape rule was fixed. A `#` inside a block scalar is literal by
-construction. A block scalar arrives as an ordinary scalar value, so R4 covers `run:` bodies
-without a special case.
+Revision 1 specified R4 as the single pattern
+`\$\{\{[^}]*\bsecrets\s*(?:\.|\[)` with `re.IGNORECASE`. **That is withdrawn. It was
+measured to miss two ordinary expressions that read real secrets:**
+
+| Expression | Revision 1 R4 | Why it escapes |
+|---|---|---|
+| `${{ format('{0}', secrets.PYPI_API_TOKEN) }}` | **miss** | the `}` inside `{0}` stops `[^}]*` before it reaches `secrets` |
+| `${{ toJSON(secrets) }}` | **miss** | `secrets` is followed by `)`, not `.` or `[` |
+
+`toJSON(secrets)` is the canonical expression for dumping every secret at once, so missing it
+is not an edge case. Revision 1 argued the whole redesign on the grounds that a pattern table
+"makes the check look complete while it stays incomplete", and then reproduced that failure
+inside the parser design.
+
+R4 therefore extracts each `${{ … }}` span with `\$\{\{(.*?)\}\}` under `re.S`, then searches
+the span for `\bsecrets\b` with `re.IGNORECASE` and **no requirement on the following
+character**. Measured: this catches all four inputs above, including both that escaped.
+
+### 4.2 R4 exempts `secrets.GITHUB_TOKEN` by name
+
+`${{ secrets.GITHUB_TOKEN }}` is the workflow's own permission-scoped token, not a repository
+secret. It is the most common expression in Actions, and most action READMEs show that
+spelling rather than `${{ github.token }}`. Reding it would be a false positive on a standard,
+safe construct, and a first false positive is how a gate gets allowlisted into irrelevance.
+The exemption is by name, with a stated reason: the token's power is bounded by
+`permissions:`, which `repo:actionlint` already governs.
+
+R1 carries the matching correction. Revision 1's Risk 1 justified a red on any `secrets` key
+with "such an input does pass a secret". That is **false** for `docker/build-push-action`'s
+documented `with: secrets:` input when it is sourced from `github.token` or from a file.
+`images.yml` is `pull_request`-triggered and builds images, so the construct is plausible
+here. R1 keeps the conservative red, but the reason is corrected: the red means "a human
+must look", not "this is a leak".
+
+### 4.3 Comment handling disappears
+
+PyYAML never returns a comment, so `strip_comments` and its whole defect class leave the
+codebase. Row 1 closes because the escape bug no longer exists, not because the escape rule
+was fixed. A `#` inside a block scalar is literal by construction, and a block scalar arrives
+as an ordinary scalar value, so R4 covers `run:` bodies with no special case.
 
 ## 5. Discovery
 
-The checker globs `.github/workflows/*.yml`. A workflow is a subject when its triggers
-include `pull_request` or `pull_request_target`. `pull_request_target` is included because it
-is strictly more dangerous: it runs with the base repository's secrets.
+The checker globs `.github/workflows/*.y*ml`. **Both extensions must be covered.** Actions
+accepts `.yaml` equally, and `ci/actionlint/run.sh` already iterates both. Globbing `*.yml`
+alone is a complete bypass that needs no allowlist and no malice: renaming four workflows to
+`.yaml`, or adding one new `publish.yaml` from a template, leaves the remaining `.yml` file
+as the only subject while every registry stays satisfied.
+
+A workflow is a subject when its triggers include `pull_request` or `pull_request_target`.
+`pull_request_target` is included because it is strictly more dangerous: it runs with the base
+repository's secrets.
 
 Two traps must be handled explicitly.
 
 - **The YAML 1.1 boolean trap.** PyYAML parses the `on:` key as the boolean `True`, so
-  `doc.get("on")` returns `None`. The checker must read both the `"on"` key and the `True`
-  key.
-- **Three trigger shapes.** `on:` appears as a string (`on: pull_request`), as a list
-  (`on: [push, pull_request]`), and as a mapping. The checker normalises all three to a set.
+  `doc.get("on")` returns `None`. The checker reads both the `"on"` key and the `True` key.
+  Measured on `release.yml`: its top-level keys are `['name', True, 'concurrency',
+  'permissions', 'jobs']`, `'on' in d` is `False`, and `True in d` is `True`.
+- **Three trigger shapes.** `on:` appears as a string, as a list, and as a mapping. All three
+  normalise to a set.
 
-`PR_CREDENTIAL_ALLOWED` maps a workflow filename to a stated reason, following the repo's
-`T_EXEMPT` and `ALLOW_DEAD_INPUT` pattern. It is empty when this lands.
+### 5.1 The subject set is pinned by strict equality
 
-**Non-vacuity.** Discovery that returns nothing is a gate that asserts nothing. Zero
-discovered subjects is rc 2, never rc 0. An allowlist entry that names a file which does not
-exist is also rc 2, so a stale exemption reds instead of silently widening.
+`EXPECTED_PR_SUBJECTS` names the five subjects: `ci.yml`, `images.yml`, `prebuild.yml`,
+`security-scan.yml`, `wheels.yml`. Discovery that disagrees is rc 1, and the failure message
+says to re-baseline deliberately. A new pull-request-triggered workflow reds until someone
+adds it. That is the same ergonomics the repo already accepts for a new publishable crate.
 
-## 6. Exit codes
+The non-vacuity count runs **before** the allowlist is applied. Revision 1 left this
+ambiguous, and the two readings are different code: counting after the allowlist would let
+"allowlist everything" pass. An allowlisted subject is still **reported on stdout**, so a
+suppressed subject is visible rather than silent.
+
+`PR_CREDENTIAL_ALLOWED` maps a filename to a stated reason. It is empty when this lands.
+
+## 6. Exit codes and the dependency preflight
 
 | Code | Meaning |
 |---|---|
 | 0 | every subject is credential-free |
-| 1 | a subject declares a credential |
-| 2 | infrastructure: a file is unreadable, a file does not parse, PyYAML is unavailable, discovery found no subject, or an allowlist entry is stale |
+| 1 | a subject declares a credential, or discovery disagrees with `EXPECTED_PR_SUBJECTS` |
+| 2 | infrastructure |
 
-A parse failure is rc 2 by decision, not rc 1. `repo:actionlint` owns workflow YAML validity.
-This gate cannot assert on a tree it does not have, so it reports that it could not run.
+Revision 1 claimed "PyYAML unavailable gives rc 2". **That was unproven and is false.**
+Measured:
 
-**Accepted new failure mode.** A cold uv cache with PyPI unreachable makes the gate exit 2.
-The gate reds loudly rather than passing silently. That ordering is deliberate.
+| Condition | rc |
+|---|---|
+| `uv` fails to resolve a package, online | **1** |
+| `uv` fails to resolve a package, offline (`UV_OFFLINE=1`) | **1** |
+| `uv` absent from `PATH` | **127** |
+| child exits 2 | 2 (propagated correctly) |
+| child exits 1 | 1 (propagated correctly) |
+
+`uv` exits 1 on its own failures, which collides exactly with "1 = the repo is wrong". As
+revision 1 specified it, a PyPI outage would have reported "a subject declares a credential".
+
+The remedy has three parts. `run.sh` preflights `command -v uv` and maps absence to rc 2. It
+then probes `uv run --project py python3 -c 'import yaml'` and maps any non-zero to rc 2. The
+checker prints a **sentinel line** on stdout, and `run.sh` refuses to trust an rc of 1 unless
+the sentinel is present. Without the sentinel, an rc 1 from the toolchain cannot be told apart
+from an rc 1 from the assertion.
+
+A document that is not a mapping is rc 2 with a named message. An empty `.yml` parses to
+`None` and a top-level sequence parses to a `list`; `doc.get` on either raises
+`AttributeError`, which Python reports as exit 1 — the same lie about which thing broke.
+
+The interpreter is pinned with `--python 3.12` and `UV_PYTHON_DOWNLOADS=never`, so a host
+without a suitable interpreter fails as a clean rc 2 rather than silently downloading one.
+
+**The red output contract.** A red names the workflow file, the rule, and the YAML path to
+the offending node. With six files and four rules, triage is otherwise a manual re-run.
 
 ## 7. Non-goals
 
-The gate asserts **declaration**. It does not assert that no credential can reach the
-workflow by any path. These are out of reach and are stated so the check does not overclaim:
+The gate asserts **declaration**. It does not assert that no credential can reach a workflow
+by any path:
 
 - an expression built by concatenation, or laundered through `${{ env.X }}` — both need
   dataflow analysis;
 - a credential a third-party action fetches by itself;
-- a credential reaching the workflow through a `workflow_call` from a caller.
+- `workflow_run` and `merge_group` triggers. Both run with repository secrets, and
+  `workflow_run` is the classic pwn-request vector. Neither is used in this repo today.
+  They are **out of scope by decision, not by oversight**, and the README says so. Adding
+  them later is a one-line change to the trigger set plus two control rows.
 
-## 8. Control table
+## 8. Controls
 
-`ci/publish-metadata/run.sh --negative-control` gains one row per closed spelling. Every one
-of the 14 measured bypasses gets its own row, so each is pinned rather than assumed. The
-four already-caught inputs from section 2 keep their rows, which is what proves the redesign
-did not trade old coverage for new.
+Revision 1 specified the control table three incompatible ways. This is the single list.
 
-Discovery gets its own rows: a `pull_request` workflow is selected; `release.yml` is not
-selected; zero subjects is rc 2; a stale allowlist entry is rc 2; an allowlist entry
-suppresses a real subject.
+**In-process, behind `workflow_credentials.py --self-test`.** Revision 1 would have run about
+29 fixture rows as separate `uv` subprocesses. Every other checker in this repo puts its
+fixture table in-process (`categories.py`, `ci/error-registry/check.py`,
+`ci/http-extractor/check.py`, `ci/affected-graph/task_inputs.py`). The rule-level table goes
+there: one row for each of the 14 bypasses, one for each of the 6 already-caught inputs, the
+6 honest passes, plus `format('{0}', secrets.X)`, `toJSON(secrets)`, `secrets.GITHUB_TOKEN`
+(must pass), and a `with: secrets:` build-arg case.
 
-The `release.yml` row is the strongest of these, and section 11 explains why: that workflow
-fails the credential rules and passes the gate only because discovery excludes it. A row that
-asserts both halves proves the trigger filter does real work.
+**In `run.sh --negative-control`.** Only the wiring rows, which need the real tree: discovery
+over the real workflows; `release.yml` excluded; the strict-equality mismatch path; zero
+subjects is rc 2; a stale allowlist entry is rc 2; the `uv` preflight rc 2 paths; the sentinel
+check.
 
-At least one rc-0 row stays in the table. Without it a checker that fails unconditionally
-would satisfy every other row and the table would prove nothing.
+At least one rc-0 row stays in each table, so a checker that fails unconditionally cannot
+satisfy either.
 
-## 9. Files, and the obligation the widening forces
+**The `release.yml` row.** That workflow fails the credential rules and passes the gate only
+because discovery excludes it. A row asserting both halves proves the trigger filter does
+real work rather than decorating. Its failure message must say "re-baseline: `release.yml` no
+longer reads a secret", because an SMA-589 follow-up moving to OIDC would otherwise red this
+gate with no obvious cause.
+
+**Rows that exercise PyYAML rather than the gate.** Rows 2, 3, 6, 7 and 14 all parse to one
+mapping, as section 2 proves. Their rows are regression pins on the parser, not coverage of
+the gate's own logic, and the table says so rather than implying otherwise.
+
+## 9. Files and bookkeeping
 
 | File | Change |
 |---|---|
-| `ci/publish-metadata/workflow_credentials.py` | new — discovery, the four rules, the exit codes |
-| `ci/publish-metadata/run.sh` | replace `assert_wheels_has_no_credentials`; add the control rows |
-| `ci/publish-metadata/README.md` | document the check, the allowlist, and the non-goals |
-| `moon.yml` | `publish-metadata` inputs gain `.github/workflows/*.yml` and the new `.py` |
-| `ci/affected-graph/ci_targets.py` | re-baseline `SELF_TASK_EXPECTED_GLOBS["publish-metadata"]` |
-| `CLAUDE.md` | record the gotchas |
+| `ci/workflow-credentials/workflow_credentials.py` | new — discovery, four rules, `--self-test` |
+| `ci/workflow-credentials/run.sh` | new — preflight, sentinel, `--negative-control` |
+| `ci/workflow-credentials/README.md` | new — the check, the allowlist, the non-goals |
+| `ci/publish-metadata/run.sh` | **remove** P-D6 and its fixture rows; correct the "pure-Python" header at `:79-82` |
+| `ci/publish-metadata/README.md` | remove the P-D6 row |
+| `py/pyproject.toml` | add `"pyyaml>=6,<7"` to `[dependency-groups] dev` |
+| `py/uv.lock` | regenerate |
+| `moon.yml` | new `repo:workflow-credentials` task; **remove** `.github/workflows/wheels.yml` from `publish-metadata` inputs |
+| `.github/workflows/ci.yml` | add `:workflow-credentials` to the `T=(…)` array |
+| `CLAUDE.md` | add `:workflow-credentials` to the marker-delimited command; record the gotchas |
+| `.github/workflows/wheels.yml` | update the header comment at `:9-10` — it names two banned spellings and cites this gate |
+| `ci/affected-graph/ci_targets.py` | four edits, below |
 
-**The obligation.** The gate now reads every workflow, so `moon.yml`'s `publish-metadata`
-`inputs` must gain `.github/workflows/*.yml`. It must be a glob, not a list of literal paths.
-A glob selects the task for a workflow that does not exist yet; a literal list cannot. This
-is the same argument the existing comment already makes for the `py/packages/*` globs.
+**`ci_targets.py` obligations.** All four are required, and missing any one reds
+`repo:affected-smoke`:
 
-`SELF_TASK_EXPECTED_GLOBS["publish-metadata"]` in `ci/affected-graph/ci_targets.py` pins that
-input list by **exact match**. It must be re-baselined in the same commit, or
-`repo:affected-smoke` reds. The new `.py` file needs an entry in both places too, because
-that tuple lists `ci/publish-metadata/` files literally rather than by glob.
+1. `SELF_TASK_EXPECTED_GLOBS["publish-metadata"]` — **shrinks**. `.github/workflows/wheels.yml`
+   was listed only because P-D6 read it. `.github/workflows/security-scan.yml` stays, because
+   Check 4 asserts on it. Rewrite the comment at `:213-226`, which names `wheels.yml` by
+   reason and goes stale otherwise.
+2. `SELF_TASK_EXPECTED_GLOBS["workflow-credentials"]` — new. Ordering is **globs first
+   (sorted), then literal files (sorted)**, verified at `ci_targets.py:1067-1082`; the
+   injected `.moon/*` glob is filtered before comparison. Confirm with a real
+   `moon query projects` before writing the tuple rather than after CI reports it.
+3. `SELF_SCHEDULED_GATES["workflow-credentials"]` — new, pinning the `moon.yml` invocation
+   lines including `set -euo pipefail`. Note the self-test invocation makes this **four**
+   lines, not three, the same shape as `version-lockstep`.
+4. `REQUIRED_REPO_TASKS` — add `workflow-credentials`. That tuple is the floor for gates
+   carrying a negative control, and without an entry the control can be switched off while
+   every other check stays green.
 
-`repo:input-liveness` asserts every declared glob still matches a tracked file.
-`.github/workflows/*.yml` matches six files, so it passes.
+**The scan glob, and why it needs no fifth registry.** `repo:http-extractor-envelope` is the
+precedent for keeping a checker's scan glob identical to its `moon.yml` input glob so that
+"scheduling and scanning cannot drift apart". Its actual coupling is weaker than it reads:
+`SELF_TASK_EXPECTED_GLOBS` pins the `moon.yml` side exactly, but `check.py`'s `SCAN_GLOB` is
+held only by a `moon.yml` comment and by an infra guard that fires when the glob matches no
+file at all. Narrowing it to ONE file would pass.
+
+This gate needs no equivalent pin, because Decision B already closes that hole. Narrowing the
+checker's glob shrinks the discovered subject set, and a shrunk set fails the strict-equality
+comparison against `EXPECTED_PR_SUBJECTS` with rc 1. The subject pin subsumes the glob pin.
+Keep the two glob strings textually identical and say so in `moon.yml`'s comment, but do not
+add a fifth `ci_targets.py` registry for it — that would be ceremony over an assertion that is
+already made.
+
+**CLAUDE.md hazard.** Do not add a second copy of the ci-targets markers or of the `T=(…)`
+command anywhere in that file. `repo:affected-smoke` counts occurrences, and a second copy —
+even inside backticks in prose — makes the count 2 and reds the gate (SMA-541).
+
+**`repo:input-liveness`.** `.github/workflows/*.y*ml` matches six tracked files, so it passes.
+If Moon 2.3.2's matcher rejects `*.y*ml`, declare `*.yml` and `*.yaml` separately and add an
+`ALLOW_DEAD_INPUT` entry for the `.yaml` one with a stated reason, since it matches zero
+tracked files today.
 
 ## 10. Risks
 
 - **A conservative red on an unrelated `secrets` key.** R1 matches any mapping key named
-  `secrets`, including a `with:` input to a third-party action. The red is deliberate: such
-  an input does pass a secret. The allowlist carries the exemption if one is ever justified.
-- **A new dependency on `uv` for a `toolchain: 'system'` task.** The task keeps
-  `toolchain: 'system'` and calls the `uv` shim, as other tasks call `cargo` or `buf`.
-- **PyYAML is pinned outside any lockfile,** so Dependabot does not see it. The pin is a
-  literal in `run.sh`. The API used (`safe_load_all`) is old and stable, so the risk of a
-  silent behaviour change is low. The README records where the pin lives.
-- **SMA-579 interaction.** `wheels.yml` is a reusable workflow that SMA-579's gated
-  `release` job will call. It carries a `pull_request` trigger, so it stays a subject and
-  must never declare `secrets:`. A credential for the real publish path belongs in
-  `release.yml`, which has no `pull_request` trigger and is therefore not a subject.
+  `secrets`, including a third-party action's `with: secrets:` input. The red means "a human
+  must look", not "this is a leak" (section 4.2). The allowlist carries a justified exemption.
+- **The gate now depends on the `py/` workspace.** `uv run --project py` needs a synced
+  environment, and `py`'s `moon.yml` runs bare `uv sync`, not `--locked`. This is the cost of
+  Decision A, accepted in exchange for a cache that saves and a pin Dependabot can see.
+- **SMA-579 topology.** `wheels.yml` carries a `pull_request` trigger, so it stays a subject
+  and must never declare `secrets:` or `id-token: write`. The confirmed topology is that
+  `wheels.yml` builds and uploads artifacts, and `release.yml` downloads them and publishes.
+  `release.yml` has no `pull_request` trigger, so it is not a subject and may hold both the
+  credential and `id-token: write` for Trusted Publishing.
+- **A new gate is new bookkeeping.** Four `ci_targets.py` registries, the `T` array and the
+  CLAUDE.md marker command must all agree. Two peer sessions are editing `ci_targets.py`
+  concurrently and have been told.
 
-## 11. Verification of this design
+## 11. What revision 1 got wrong
 
-The rules in section 4 and the discovery in section 5 were built as a prototype and driven
-against every case before this document was approved. The design is measured, not asserted.
-
-**All 14 bypasses from section 2 now report rc 1.** The rule that catches each one matches
-the mapping in section 4's table.
-
-**All six inputs the old checker already caught stay caught:** the single-line `run:` block
-scalar, the no-space `${{secrets.X}}`, the double-quoted `"${{ secrets.X }}"` value,
-`permissions: {id-token: write}`, the YAML merge key, and a `workflow_call` `secrets:`
-declaration. The redesign trades no old coverage for new.
-
-**All six honest passes stay green:** `contents: read`; a header comment that quotes the ban;
-a `#` inside a quoted scalar; the word "secrets" in ordinary prose; `permissions: read-all`;
-and `id-token: none`. The second of these is the case that forced `strip_comments` to exist.
-The parser makes it green with no comment handling at all.
-
-**Discovery over the six real workflows:**
-
-| Workflow | Subject | Verdict if it were checked |
-|---|---|---|
-| `ci.yml` | yes | rc 0 |
-| `images.yml` | yes | rc 0 |
-| `prebuild.yml` | yes | rc 0 |
-| `security-scan.yml` | yes | rc 0 |
-| `wheels.yml` | yes | rc 0 |
-| `release.yml` | **no** | **rc 1** |
-
-The last row is the important one. `release.yml` fails the credential rules, because it
-genuinely reads secrets, and it passes the gate only because discovery excludes it. The
-trigger filter is therefore load-bearing, not decorative. Section 8 pins both halves of that
-row: the workflow is not a subject, and its content would red if it were. A change that
-broke discovery into selecting everything would red on this row instead of passing.
+Recorded so the same mistakes are not repeated. Revision 1 carried a section claiming the
+design was verified and "ALL GREEN". It was green only against a case list that did not
+contain `format()` or `toJSON()`. A verification is worth exactly its inputs, and a green
+result over a self-chosen corpus is not evidence of completeness. The rewritten section 8
+fixes the corpus; it cannot fix the general lesson, which is that the corpus is the claim.
