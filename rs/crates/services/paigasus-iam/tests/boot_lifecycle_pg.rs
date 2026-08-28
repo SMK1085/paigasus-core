@@ -207,9 +207,14 @@ async fn a_lock_blocked_replica_is_bound_and_reports_migrating() {
         "the holder must actually release the lock"
     );
 
-    // Once the lock is free the replica migrates and flips to ready.
+    // Once the lock is free the replica migrates and flips to ready. Budget is 90s (900 x
+    // 100ms), not the bind-wait loop's tight 10s: production's own documented worst case is
+    // `MIGRATION_BUDGET_SECS = 60` (`migration_lock.rs`), so a slow-but-CORRECT run under loaded
+    // CI must not exhaust this loop and report a false failure — unlike the bind-wait and SIGTERM
+    // budgets, which stay tight deliberately because that tightness is what makes their
+    // respective regressions detectable.
     let mut ready = false;
-    for _ in 0..300 {
+    for _ in 0..900 {
         if let Some((200, _)) = http_status(http_port, "/readyz").await {
             ready = true;
             break;
