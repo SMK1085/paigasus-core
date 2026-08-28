@@ -89,7 +89,7 @@ not just the port number. IAM also accepts an optional, separate `[metrics].addr
 | --- | --- | --- |
 | liveness | `GET /healthz` | Never touches a dependency, by construction in both services |
 | readiness | `GET /readyz` | IAM pings Postgres; gateway issues a real gRPC introspect to IAM |
-| startup | `GET /healthz` | IAM migrates at boot, and since SMA-559 a replica that loses the migration-lock race also *waits* with nothing bound — budget `lock_wait_secs` + the migration + `AppState::new`, see §5 |
+| startup | `GET /healthz` | Since SMA-571 IAM binds before it migrates, so this only covers process start: config load, `Database::connect`, and the binds. A migrating replica is *unready*, not absent — `/readyz` carries the distinction |
 
 The image has no shell, so every probe command must use an **absolute path** and the **exec
 form** — no `sh -c`, no shell pipelines. Docker's own `HEALTHCHECK` only ever calls `/healthz`
@@ -126,27 +126,25 @@ build itself — they bite the first operator who deploys without reading this s
   running replica's audit writes block** for that window. Sizing `lock_wait_secs` for a large
   table is simultaneously sizing an audit-write stall.
 
-  **Probe budgets.** A waiting replica has **no listener bound at all**, and the two probe systems
-  are not the same system. The image's `HEALTHCHECK --start-period` (180s = the 120s default wait
-  + a 60s migration budget, enforced by `ci/images/run.sh`'s `assert_pins`) governs
-  `docker run`, Compose and Swarm; **the kubelet ignores a `HEALTHCHECK` entirely** and sizes
-  `startupProbe` instead:
+  **Probe budgets.** A migrating or lock-waiting replica now has all three sockets bound and
+  answers `/healthz` 200 within a second of process start, so `startupProbe` no longer has to be
+  sized against `migration.lock_wait_secs` at all — budget it for config load plus
+  `Database::connect`. What a long migration now costs is readiness, not existence: `/readyz`
+  answers `503 {"status":"migrating"}` for as long as it takes, and the replica stays out of the
+  Service's endpoint list until it flips. Set `readinessProbe.failureThreshold ×
+  periodSeconds` above your worst-case `lock_wait_secs` + migration + `AppState::new` if you would
+  rather a slow migration not restart the pod.
 
-  ```text
-  startupProbe.failureThreshold × periodSeconds  >  lock_wait_secs + migration budget + AppState::new
-  ```
-
-  There is no chart in this repo yet, so nothing ships a `startupProbe` today — the formula's
-  values at today's `lock_wait_secs` default would be `periodSeconds: 10`, `failureThreshold: 30`
-  (300s), and SMA-513's chart should ship exactly that pair rather than something smaller. Until
-  that chart lands, do not assume any `startupProbe` you have already deployed carries them.
-  `AppState::new` is a third, unbudgeted term — it reconciles policies and loads a snapshot after
-  the migration and still before any bind. Raising `lock_wait_secs` means raising both.
+  `/readyz` has three bodies and they are not interchangeable: `migrating` means the schema is not
+  yet applied, `unready` means the schema is there but the database ping failed, `ready` means
+  serving. Alert on sustained `migrating`, page on `unready`.
 
   **Chart defaults (handoff to SMA-513).** `strategy.rollingUpdate.maxSurge` need no longer be
   pinned to `0`, subject to the two exceptions above; set `startupProbe` from the formula; expose
-  `IAM_MIGRATION__LOCK_WAIT_SECS`. SMA-571 (bind-first readiness gating) will make the
-  `start-period` coupling vestigial. **Precondition to confirm before relaxing `maxSurge`:**
+  `IAM_MIGRATION__LOCK_WAIT_SECS`.
+  `startupProbe` no longer needs sizing against `IAM_MIGRATION__LOCK_WAIT_SECS` (SMA-571 removed
+  the `start-period` coupling entirely — see the probe budgets above), but still expose the env
+  var so a slow migration can be given more room. **Precondition to confirm before relaxing `maxSurge`:**
   `AppState::new`'s `reconcile_starter` (`src/adapters/http/mod.rs` around :396) writes system
   policies and roles on every boot with no advisory lock of its own and has never been tested
   under concurrency — pre-existing and out of scope for SMA-559, but SMA-513 should confirm it is
@@ -191,6 +189,21 @@ build itself — they bite the first operator who deploys without reading this s
   or above, and filter `route!~"/healthz|/readyz"` on dashboards. IAM's health routes sit
   **outside** its equivalent layers, so this asymmetry between the two services is real, not an
   oversight to normalize away.
+- **A migrating IAM now answers on a live socket rather than refusing the connection** (SMA-571).
+  HTTP returns `503 {"status":"migrating"}`; gRPC returns a well-formed `UNAVAILABLE` (HTTP 200 with
+  `grpc-status: 14`), and gRPC health reports `NOT_SERVING`. The gateway needs no change: its
+  readiness classification already treats `Unavailable` as not-ready, and its channel is built with
+  `connect_lazy`, so a dead IAM has always surfaced as `Rpc(Status::Unavailable)` rather than a
+  connect error. One caveat for a future topology: if IAM is ever fronted by a headless Service with
+  client-side load balancing, a subchannel to a migrating replica stays READY and returns per-RPC
+  `UNAVAILABLE` instead of being evicted on TRANSIENT_FAILURE — correct, but worth knowing before
+  adopting that shape.
+- **gRPC health is not equivalent to `/readyz` after startup.** `grpc.health.v1.Health` reports
+  `NOT_SERVING` during the migration and `SERVING` once installed, and then stays `SERVING`
+  regardless of later database health, while `/readyz` can go 503 `unready` on a failed ping.
+  A `grpc_health_probe` readiness probe therefore catches the boot case but not a later database
+  outage; use the HTTP probe for readiness. Making gRPC health track `/readyz` is a deferred
+  follow-up.
 - **Neither service terminates TLS.** Both require a TLS-terminating ingress in front of them.
 - **A private-CA identity provider is supported (SMA-558), and the routes are not equivalent.**
   Both services' `reqwest` clients now trust the compiled-in Mozilla roots, the image's own store,
