@@ -4,9 +4,11 @@
 #
 # `moon ci` USES the affected graph but never ASSERTS it is correct, so a deleted
 # dependsOn edge — or a crate's `fileGroups.upstreams` drifting from Moon's own dependsOn
-# closure, since `@group(upstreams)` is what confers affectedness in Moon 2.3.2, not
-# `--include-relations` (SMA-528 measured the flag to change nothing in every probe,
-# including the full 24-target ci.yml shape) — silently under-builds and stays green. This
+# closure, since `@group(upstreams)` is what confers affectedness in Moon 2.5.3, and
+# `--include-relations` adds only a single task on top of it (SMA-595 re-measured the flag
+# at the full 27-target ci.yml shape: it adds `paigasus-kernel-py:build` and nothing else,
+# where SMA-528 measured it to change nothing at all on 2.3.2) — silently under-builds and
+# stays green. This
 # guard feeds a synthetic touched-file to `moon query projects
 # --affected --downstream deep` and asserts the resulting project set EQUALS a known
 # expected set per case (default-deny — any unlisted project present fails the case), so
@@ -131,12 +133,14 @@ assert_task_case() {
 # assert_task_case_ci LABEL FILE EXPECTED_CSV — the traversal `moon ci` ACTUALLY USES: no graph
 # flags at all.
 #
-# Why this exists (SMA-528). Moon 2.3.2 confers affectedness ONLY through a task's own `inputs`.
-# `--downstream deep` walks dependents in the QUERY, but `moon ci` never does — measured at the full
-# 24-target ci.yml shape, `moon ci "${T[@]}" --stdin --include-relations` and the same command plus
-# `--downstream deep` produce byte-identical action sets. So `assert_task_case` asserts what the
-# task graph WOULD cascade, and this asserts what CI actually selects. Before SMA-528 only the
-# former existed, and it was green for years while no consumer test ran.
+# Why this exists (SMA-528, re-measured on the 2.5.3 bump by SMA-595). Moon confers affectedness
+# essentially through a task's own `inputs`. `--downstream deep` walks dependents in the QUERY, but
+# `moon ci` still does not — measured at the full 27-target ci.yml shape on 2.5.3, `moon ci
+# "${T[@]}" --stdin --include-relations` selects exactly ONE task the same command without the flag
+# does not (`paigasus-kernel-py:build`; 44 vs 43 RunTasks, stable across repeated runs). On 2.3.2
+# the two sets were byte-identical. So `assert_task_case` asserts what the task graph WOULD cascade,
+# and this asserts what CI actually selects. Before SMA-528 only the former existed, and it was
+# green for years while no consumer test ran.
 #
 # This traversal is a CHARACTERIZED proxy, not `moon ci` itself. Measured relationship:
 #     moon ci RunTask set = (query-affected ∩ ci.yml's T array ∩ runInCI) ∪ upstream-dep closure
@@ -155,14 +159,19 @@ assert_task_case_ci() {
 # silently disappear from ci.yml: it remains the documented mechanism for relation/dependent
 # rebuilds, should moonrepo fix the dependent traversal upstream.
 #
-# NOTE (SMA-528): `--include-relations` was measured to change NOTHING in every probe run —
-# including the full 24-target ci.yml shape, where `moon ci "${T[@]}" --stdin --include-relations`
-# and the same command WITHOUT it produce identical action sets, and where adding
-# `--downstream deep` also changes nothing. No probe was found in which it alters the RunTask set.
-# The flag is kept and still asserted because removing it on that evidence is an unforced risk and
-# it remains the documented mechanism should moonrepo fix the dependent traversal upstream — but do
-# NOT read this gate as evidence that the cascade works. What carries the cascade is
-# `@group(upstreams)`, asserted by the *_ci task cases and by cargo_moon_parity.py's A6.
+# NOTE (SMA-528, superseded in part by SMA-595): on moon 2.3.2 `--include-relations` was measured
+# to change NOTHING in every probe run. That is NO LONGER TRUE. Re-measured on moon 2.5.3 at the
+# full 27-target ci.yml shape, feeding `rs/crates/libs/paigasus-kernel/src/lib.rs` on stdin:
+#     with    --include-relations -> 44 RunTasks
+#     without --include-relations -> 43 RunTasks
+#     delta               -> + paigasus-kernel-py:build
+# Reproduced twice, byte-identical across repeats. Moon 2.5.0 turned the `asyncAffectedTracking`,
+# `asyncGraphBuilding` and `nativeFileHashing` experiments on by default and fixed the synchronous
+# tracker's silent skipping of transitive dependents; this one added task is what that surfaced
+# here. So the flag now demonstrably does something, and removing it would under-build a real task.
+# It is still NOT a general dependent cascade — it added one `build`, not the dependent closure.
+# What carries the cascade remains `@group(upstreams)`, asserted by the *_ci task cases and by
+# cargo_moon_parity.py's A6. Re-run this A/B on the next moon bump.
 #
 # Match only the actual command invocations — `moon ci "${T[@]}" ...` — NOT the job/step `name:`
 # fields or the comments that also contain the words "moon ci" (matching those would false-FAIL;

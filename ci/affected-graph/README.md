@@ -2,9 +2,11 @@
 
 `moon ci` *uses* the affected graph but never *asserts* it is correct: a deleted
 `dependsOn` edge — or a dropped `@group(upstreams)` reference, the fileGroup that actually
-confers affectedness in Moon 2.3.2 (not `--include-relations`, which SMA-528 measured to
-change nothing in any probe, including the full 24-target CI shape) — makes the affected set
-silently shrink, so CI under-builds and stays **green**. This guard closes that gap.
+confers affectedness in Moon 2.5.3 (`--include-relations` adds only `paigasus-kernel-py:build`
+on top of it: SMA-595 re-measured the flag at the full 27-target CI shape and got 44 RunTasks
+with it against 43 without, where SMA-528 had measured it to change nothing at all on 2.3.2)
+— makes the affected set silently shrink, so CI under-builds and stays **green**. This guard
+closes that gap.
 
 `run.sh` feeds a synthetic touched-file to `moon query projects --affected --downstream
 deep` and asserts the affected project set **equals** an exact expected set per known case
@@ -298,7 +300,7 @@ implicitly: any project that appears but isn't in the expected set fails the cas
   `src/**/*` and `Cargo.toml` entries, or A6 fails with an `inputs omit ...` row.
 
 The expected sets are a snapshot of `moon query --affected --downstream deep` output at the
-**pinned moon version** (currently 2.3.2). A4 additionally depends on `moon query projects`
+**pinned moon version** (currently 2.5.3). A4 additionally depends on `moon query projects`
 emitting per-task `inputFiles` as a path-keyed object, A5 on it emitting per-task `command`,
 `args` and `script`, and A6 on it emitting per-task `inputGlobs` the same shape as `inputFiles` and
 per-project `language`. A7 depends on all four at once — it reuses A5's `command`/`args`/`script`

@@ -4,7 +4,7 @@ id: 'paigasus-observability-rs'
 layer: 'library'
 language: 'rust'
 
-# This crate depends on paigasus-kernel via `workspace = true` (Cargo.toml). Moon 2.3.2's Rust
+# This crate depends on paigasus-kernel via `workspace = true` (Cargo.toml). Moon 2.5.3's Rust
 # toolchain resolves `path = "..."` deps into the project graph automatically but does NOT resolve
 # workspace-inherited ones, so a `workspace = true` dep MUST be hand-declared here (SMA-524).
 #

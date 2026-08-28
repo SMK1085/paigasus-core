@@ -22,7 +22,7 @@ fileGroups:
     - '**/*_test.rs'
 
 # `@group(upstreams)` (SMA-528) is each crate's transitive dependsOn closure, declared per-crate in
-# its own moon.yml. It is what makes a CONSUMER affected by an UPSTREAM source change: Moon 2.3.2
+# its own moon.yml. It is what makes a CONSUMER affected by an UPSTREAM source change: Moon 2.5.3
 # confers affectedness only through a task's own `inputs`, so `dependsOn` and the `^:build` below
 # schedule an upstream's build but never SELECT this crate. Without it `moon ci` ran a kernel edit's
 # own tests and no consumer's — including paigasus-kernel-parity-rs, the ADR-0005 harness.
