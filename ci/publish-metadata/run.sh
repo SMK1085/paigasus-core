@@ -952,7 +952,14 @@ for p in paths:
         raise SystemExit(2)
     name = proj["name"]
     if doc.get("tool", {}).get("paigasus", {}).get("pypi") is True:
-        found[name] = (p, proj)
+        if name in found:
+            errors.append(
+                f"Check P0 FAILED: duplicate PyPI distribution name {name!r} in "
+                f"{found[name][0]} and {p} — found[name] silently overwrites, hiding one "
+                f"manifest's metadata from P1/P2"
+            )
+        else:
+            found[name] = (p, proj)
 
 # P0 — strict equality. The set is discovered from the very marker this gate protects, so
 # a shrunken set must be a hard failure, not a green run over nothing (mirrors Check 0).
@@ -1624,6 +1631,19 @@ $scanroot/rs/crates/bindings/paigasus-py-bindings/pyproject.toml"
   # P0 — one distribution short of EXPECTED_PYPI_PUBLISHABLE.
   _expect_rc 1 "Check P0 (shrunken publishable set)" \
     assert_pypi_metadata "$pyd/ok/pyproject.toml"
+
+  # P0 — duplicate PyPI-bound distribution names. `found` is keyed by distribution name, so
+  # a second PyPI-marked manifest declaring an already-seen name silently OVERWRITES the
+  # first: set(found) is unchanged, so P0's strict-equality check alone cannot see it, and
+  # only the surviving manifest's metadata ever reaches P1/P2. Three inputs, not two: two
+  # otherwise well-formed manifests sharing the "paigasus-kernel" name, plus a normal
+  # paigasus-py-bindings manifest — so set(found) still equals EXPECTED_PYPI_PUBLISHABLE and
+  # this row fails ONLY on the duplicate-name rule, not on P0's set mismatch or on P1/P2.
+  _pyproj "$pyd/dup1"; : >"$pyd/dup1/README.md"; : >"$pyd/dup1/LICENSE"
+  _pyproj "$pyd/dup2"; : >"$pyd/dup2/README.md"; : >"$pyd/dup2/LICENSE"
+  _pybind "$pyd/dupbind"; : >"$pyd/dupbind/README.md"; : >"$pyd/dupbind/LICENSE"
+  _expect_rc 1 "Check P0 (duplicate PyPI distribution name overwrites instead of reporting)" \
+    assert_pypi_metadata "$pyd/dup1/pyproject.toml" "$pyd/dup2/pyproject.toml" "$pyd/dupbind/pyproject.toml"
 
   # P1 — a required [project] key is absent.
   _pyproj "$pyd/nodesc"; : >"$pyd/nodesc/README.md"; : >"$pyd/nodesc/LICENSE"
