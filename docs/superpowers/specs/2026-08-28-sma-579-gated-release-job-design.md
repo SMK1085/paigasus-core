@@ -507,10 +507,16 @@ and another drops the condition (uploading on every run).
 
 Downloads, asserts, publishes. **Builds nothing** (§1.1).
 
-`napi prepublish` publishes **eight** packages (seven platform + the main one) and **npm has no
-`--skip-existing`**. A re-run after a partial success hits `403 You cannot publish over the
-previously published versions` on the ones that landed. §5.2's own argument — *"an un-skipped
-retry can never succeed unaided"* — applies verbatim to npm and revision 1 did not make it there.
+`napi prepublish` publishes **seven** packages — the platform packages only. **MEASURED**:
+`@napi-rs/cli@3.7.2` contains exactly one `npm publish` call (`dist/index.js:3452`), and it runs
+with `cwd: pkgDir` inside `for (const target of targets)` — it never touches the crate root. The
+consumer-facing `@paigasus/node-bindings` main package is published by a **separate, explicit**
+`npm publish` step instead (§7.4); without it the platform packages would land as orphans
+referenced by nothing installable, and `npm install @paigasus/node-bindings` would 404 forever.
+And **npm has no `--skip-existing`**. A re-run after a partial success hits `403 You cannot
+publish over the previously published versions` on the ones that landed. §5.2's own argument —
+*"an un-skipped retry can never succeed unaided"* — applies verbatim to npm and revision 1 did not
+make it there.
 
 `publish-pypi` and `publish-npm` also run **in parallel** off `needs: release`, so partial failure
 across three registries is the normal shape, not the exceptional one.
@@ -570,9 +576,15 @@ activation"* — must be corrected: creds are **not** added there, by design.
 
 ```
 download prebuild-* / npm-dirs / wasm-dist        (built in the reversible stage)
-napi prepublish --no-gh-release --npm-dir npm --cwd $CRATE     ← §2's invariant
-npm publish --provenance   (@paigasus/wasm, from wasm-dist)
+napi prepublish --no-gh-release --npm-dir npm --cwd $CRATE     ← §2's invariant, seven platform packages only
+npm publish --provenance --access public   (@paigasus/node-bindings, the main package — §6)
+npm publish --provenance --access public   (@paigasus/wasm, from wasm-dist)
 ```
+
+The middle step is not optional bookkeeping: `napi prepublish` never publishes the main package
+(§6), so without this explicit step nothing installable exists for `@paigasus/node-bindings` at
+all. It must run **after** `napi prepublish`, since the main package's `optionalDependencies`
+point at the platform packages, which must already exist on the registry.
 
 ### 7.5 Assert the tarball, not the working tree
 
@@ -591,9 +603,15 @@ in the job env, which napi's internal `npm publish` calls inherit.
 prepublish`'s internal call is `execSync(\`${npmClient} publish\`, { cwd: pkgDir, env: process.env,
 stdio: "pipe" })` — `process.env` is the full, unfiltered parent environment, and npm CLI's
 standard `NPM_CONFIG_<KEY>` env-to-flag mapping treats `NPM_CONFIG_PROVENANCE=true` as equivalent
-to `--provenance`. A job-level `NPM_CONFIG_PROVENANCE=true` reaches all eight `npm publish`
-invocations `napi prepublish` makes (main package + seven platform packages). No asymmetry to
-record — provenance applies uniformly.
+to `--provenance`. `napi prepublish` itself makes exactly **seven** `npm publish` invocations —
+the platform packages only (§6 corrects the earlier "eight … main package" claim); the main
+package is published by the separate explicit step in §7.4, which as implemented passes
+`--provenance` directly rather than relying on the env var. **As implemented**
+(`.github/workflows/release.yml`), `NPM_CONFIG_PROVENANCE=true` is scoped to the "Publish the
+node addon and its platform packages" step's own `env:`, not the job level, so it reaches only
+those seven invocations; the main-package and `@paigasus/wasm` steps get provenance from their own
+explicit `--provenance` flag instead. No asymmetry to record — every publish gets provenance, by
+whichever of the two mechanisms applies to it.
 
 Related, and a §12 question: `npm publish --provenance` requires a `repository` field matching the
 building repo. `@paigasus/node-bindings/package.json:9-13` has one. **MEASURED: the seven

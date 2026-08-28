@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 name: release
 
-# Only the RELEASE-PR half is live (SMA-576). The release job — tags + registry publishes —
-# lands with SMA-580 behind `vars.PAIGASUS_RELEASE_ENABLED`. Nothing here publishes.
+# The full release path — `release`, `publish-pypi`, `publish-npm` — is present in this file
+# (SMA-579), but INERT: each job is gated on `if: vars.PAIGASUS_RELEASE_ENABLED == 'true'`, and
+# SMA-580 is what flips that variable, after its own pre-flight. Nothing publishes until then.
 on:
   push:
     branches:
