@@ -80,6 +80,16 @@ WORKSPACE_LINT_INPUTS = ("rs/Cargo.lock", "rs/Cargo.toml", "rs/rust-toolchain.to
 # ("the pinned wasm-pack must support that 0.2.z — bump the two together").
 FFI_TASK_INPUTS = (*WORKSPACE_LINT_INPUTS, ".prototools")
 
+# SMA-537 — what every crate's `fmt` must key on. The two globs come from the shared fileGroups
+# and land in moon's `inputGlobs`; the two literals land in `inputFiles`. check_task_inputs spans
+# both, which is the whole reason it does not simply reuse check_lint_inputs' one-bucket read.
+FMT_TASK_INPUTS = (
+    "rs/rustfmt.toml",
+    "rs/rust-toolchain.toml",
+    "src/**/*",
+    "tests/**/*",
+)
+
 # Substrings that mean "this task shells out to a Rust build". Matched against the task's resolved
 # `command` + `args` + `script` joined — NOT `command` alone: measured on moon 2.3.2, a
 # command-form task reports command='cargo' with the verb in args (paigasus-kernel-rs:lint ->
@@ -195,8 +205,8 @@ def check(projects, crates, allow=None):
     return a1, a2, a3
 
 
-def check_lint_inputs(projects, crates, required=WORKSPACE_LINT_INPUTS):
-    """Return the A4 violation list: crates whose `lint` does not key on the workspace files.
+def check_task_inputs(projects, crates, task, required):
+    """Return the A4 violation list: crates whose `task` does not key on `required`.
 
     A1-A3 are about dependency EDGES. A4 is about task INPUTS, and the two are independent: a crate
     can have a flawless edge set and still be structurally blind to a `rs/Cargo.lock` bump, because
@@ -206,6 +216,17 @@ def check_lint_inputs(projects, crates, required=WORKSPACE_LINT_INPUTS):
     guard, which is only reached by crates that have in-tree dependencies: paigasus-kernel,
     paigasus-logging, paigasus-observability and paigasus-proto-derive have none, so copying that
     shape would leave four of thirteen unasserted with a green negative control.
+
+    Spans BOTH input buckets (SMA-537). moon splits resolved inputs by kind: plain paths go to
+    `inputFiles`, globs to `inputGlobs`. `lint`'s required set is all literals, but `fmt`'s is half
+    globs (`@group(sources)`, `@group(tests)`), so a one-bucket read would silently assert nothing
+    about them. An entry is matched if it appears in EITHER bucket verbatim; a non-workspace-relative
+    entry (`src/**/*`, `tests/**/*` — the group-derived globs, which resolve per-crate) is also
+    matched as the tail of a path in either bucket, e.g. `src/**/*` against
+    `rs/crates/libs/<crate>/src/**/*`. A workspace-relative entry (`rs/...`, e.g. `rs/rustfmt.toml`
+    or `rs/Cargo.lock`) resolves verbatim and must match EXACTLY — a suffix match there would let a
+    stray `<anything>/rs/Cargo.lock` satisfy A4-lint, which is looser than what this check asserts
+    today.
     """
     by_dir = {p["source_dir"]: mid for mid, p in projects.items()}
     a4 = []
@@ -214,19 +235,32 @@ def check_lint_inputs(projects, crates, required=WORKSPACE_LINT_INPUTS):
         if mid is None:
             continue
         declared = projects[mid].get("task_inputs") or {}
-        if "lint" not in declared:
-            a4.append(f"{mid} has no `lint` task (nothing can key on the workspace files)")
+        declared_globs = projects[mid].get("task_input_globs") or {}
+        if task not in declared:
+            a4.append(f"{mid} has no `{task}` task (nothing can key on {', '.join(required)})")
             continue
-        resolved = declared["lint"]
-        if resolved is None:
+        files, globs = declared[task], declared_globs.get(task)
+        if files is None or globs is None:
             a4.append(
-                f"{mid}:lint reported no `inputFiles` — moon's output shape changed, so this "
-                f"assertion cannot be evaluated (treated as a violation, never skipped)"
+                f"{mid}:{task} reported no `inputFiles`/`inputGlobs` — moon's output shape "
+                f"changed, so this assertion cannot be evaluated (treated as a violation, "
+                f"never skipped)"
             )
             continue
-        missing = [f for f in required if f not in resolved]
+        observed = set(files) | set(globs)
+        missing = []
+        for f in required:
+            if f in observed:
+                continue
+            # Workspace-relative entries (`rs/...`) resolve verbatim, so they must match exactly —
+            # a suffix match would let a stray `<anything>/rs/Cargo.lock` satisfy A4-lint, which
+            # is looser than what this check asserts today. Only the group-derived relative
+            # entries (`src/**/*`, `tests/**/*`) resolve per-crate and need the suffix match.
+            if not f.startswith("rs/") and any(o.endswith(f"/{f}") for o in observed):
+                continue
+            missing.append(f)
         if missing:
-            a4.append(f"{mid}:lint inputs omit {', '.join(missing)}")
+            a4.append(f"{mid}:{task} inputs omit {', '.join(missing)}")
     return a4
 
 
@@ -559,6 +593,36 @@ def self_test():
     if not REQUIRED_FFI_TASKS:
         failures.append("REQUIRED_FFI_TASKS is empty — A5's floor would assert nothing")
 
+    if not FMT_TASK_INPUTS:
+        failures.append("FMT_TASK_INPUTS is empty — the fmt half of A4 would assert nothing")
+
+    # A4-fmt: the fmt call must span BOTH buckets. `rs/rustfmt.toml` is a literal (inputFiles)
+    # and `rs/crates/libs/b/tests/**/*` is a glob (inputGlobs), so a one-bucket check passes
+    # while blind to half its own required set — the split A6 already exists because of.
+    fmt_ok = json.loads(json.dumps(ok))
+    for pid in ("a-rs", "b-rs"):
+        fmt_ok[pid]["task_inputs"]["fmt"] = ["rs/rustfmt.toml", "rs/rust-toolchain.toml"]
+        src = fmt_ok[pid]["source_dir"]
+        fmt_ok[pid]["task_input_globs"]["fmt"] = [f"{src}/src/**/*", f"{src}/tests/**/*"]
+    if check_task_inputs(fmt_ok, crates, "fmt", FMT_TASK_INPUTS) != []:
+        failures.append("A4-fmt reported violations on a complete fixture")
+
+    broken = json.loads(json.dumps(fmt_ok))
+    broken["a-rs"]["task_input_globs"]["fmt"] = ["rs/crates/libs/a/src/**/*"]
+    if not any(
+        "tests/**/*" in row
+        for row in check_task_inputs(broken, crates, "fmt", FMT_TASK_INPUTS)
+    ):
+        failures.append("A4-fmt did not fire on a fmt task missing @group(tests)")
+
+    broken = json.loads(json.dumps(fmt_ok))
+    broken["a-rs"]["task_inputs"]["fmt"] = ["rs/rust-toolchain.toml"]
+    if not any(
+        "rustfmt.toml" in row
+        for row in check_task_inputs(broken, crates, "fmt", FMT_TASK_INPUTS)
+    ):
+        failures.append("A4-fmt did not fire on a fmt task missing the rustfmt config")
+
     a1, a2, a3 = check(ok, crates)
     if (a1, a2, a3) != ([], [], []):
         failures.append(f"clean fixture reported violations: {a1} {a2} {a3}")
@@ -608,13 +672,13 @@ def self_test():
     # A4 (SMA-534): the workspace-level lint inputs must be DECLARED for every crate. Distinct from
     # A1-A3, which are about dependency edges — a crate can have a perfect edge set and still be
     # blind to a Cargo.lock bump.
-    if check_lint_inputs(ok, crates):
+    if check_task_inputs(ok, crates, "lint", WORKSPACE_LINT_INPUTS):
         failures.append("A4 reported violations on the clean fixture")
 
     # Fires when a required file is missing from the declared inputs.
     broken = json.loads(json.dumps(ok))
     broken["a-rs"]["task_inputs"]["lint"] = ["rs/Cargo.lock", "rs/Cargo.toml"]
-    rows = check_lint_inputs(broken, crates)
+    rows = check_task_inputs(broken, crates, "lint", WORKSPACE_LINT_INPUTS)
     if not rows:
         failures.append("A4 did not fire on a missing workspace lint input")
     elif not any("rs/rust-toolchain.toml" in row for row in rows):
@@ -625,20 +689,29 @@ def self_test():
     # the negative control stays green.
     broken = json.loads(json.dumps(ok))
     broken["b-rs"]["task_inputs"]["lint"] = []
-    if not any(row.startswith("b-rs") for row in check_lint_inputs(broken, crates)):
+    if not any(
+        row.startswith("b-rs")
+        for row in check_task_inputs(broken, crates, "lint", WORKSPACE_LINT_INPUTS)
+    ):
         failures.append("A4 did not fire for a dep-free crate (it inherited A3's `if want:` guard)")
 
     # An ABSENT lint task is a different defect from a lint task with incomplete inputs.
     broken = json.loads(json.dumps(ok))
     del broken["a-rs"]["task_inputs"]["lint"]
-    if not any("has no `lint` task" in row for row in check_lint_inputs(broken, crates)):
+    if not any(
+        "has no `lint` task" in row
+        for row in check_task_inputs(broken, crates, "lint", WORKSPACE_LINT_INPUTS)
+    ):
         failures.append("A4 did not distinguish an absent lint task from incomplete inputs")
 
     # Moon emitting no `inputFiles` for the task must FIRE, never silently skip: a skip would turn a
     # moon-version change into a vacuous pass, which is the failure mode this whole gate exists for.
     broken = json.loads(json.dumps(ok))
     broken["a-rs"]["task_inputs"]["lint"] = None
-    if not any("inputFiles" in row for row in check_lint_inputs(broken, crates)):
+    if not any(
+        "inputFiles" in row
+        for row in check_task_inputs(broken, crates, "lint", WORKSPACE_LINT_INPUTS)
+    ):
         failures.append("A4 did not fire when moon reported no inputFiles")
 
     # A5 (SMA-546): the FFI build tasks must key on the workspace files. Fixture mirrors the real
@@ -892,9 +965,10 @@ def main():
         return 2
 
     a1, a2, a3 = check(projects, crates)
-    a4 = check_lint_inputs(projects, crates)
+    a4 = check_task_inputs(projects, crates, "lint", WORKSPACE_LINT_INPUTS)
+    a4_fmt = check_task_inputs(projects, crates, "fmt", FMT_TASK_INPUTS)
     a6 = check_upstream_inputs(projects)
-    if not (a1 or a2 or a3 or a4 or a5 or a6):
+    if not (a1 or a2 or a3 or a4 or a4_fmt or a5 or a6):
         print(
             f"PASS  {'cargo-moon-parity':<18} -> "
             f"{len(crates)} crates: every Cargo dep has a Moon edge that schedules its build, "
@@ -920,6 +994,12 @@ def main():
              "    Fix: the inputs are declared once for ALL crates in .moon/tasks/rust.yml —\n"
              "    restore them there, not per-crate. Expected: /rs/Cargo.lock, /rs/Cargo.toml,\n"
              "    /rs/rust-toolchain.toml."),
+        (a4_fmt, "`fmt` does not key on everything `cargo fmt --check` actually reads, so a\n"
+                 "    rustfmt.toml edit, a toolchain bump or a misformatted tests/ file schedules\n"
+                 "    NOTHING for this crate (SMA-537).\n"
+                 "    Fix: the inputs are declared once for ALL crates in .moon/tasks/rust.yml —\n"
+                 "    restore them there, not per-crate. Expected: @group(sources), @group(tests),\n"
+                 "    /rs/rustfmt.toml, /rs/rust-toolchain.toml."),
         (a5, "An FFI build task does not key on the workspace-level files, so a dependency bump\n"
              "    replays a CACHED artifact built from a different resolution — and clippy cannot\n"
              "    cover it, because it never links a cdylib and never targets wasm32 (SMA-546).\n"
