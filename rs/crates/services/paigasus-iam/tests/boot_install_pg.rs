@@ -66,6 +66,41 @@ async fn the_swap_takes_effect_on_an_already_built_router() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "503 -> 401 is what proves delegation happened");
 }
 
+/// CR round 2 (docs/superpowers/specs/2026-08-27-sma-571-bind-before-migrate-design.md §7's
+/// "catch-all, scoped to no prefix" note; RUNBOOK-containers.md's matching paragraph): pins that
+/// the deferred fallback is a genuine catch-all, NOT scoped to `/v1/*`. `/unknown` is a path with
+/// no route anywhere — not a real `/v1/*` app route and not a probe — so this is the case that
+/// tells the two apart: a `/v1/*`-scoped fallback would 404 it even while the slot is empty, but
+/// the catch-all answers it with the SAME `service-migrating` envelope a real route would get.
+/// Once `install` swaps in the real router, `/unknown` reverts to the ordinary 404 an unmatched
+/// route always returns. The 503 -> 404 transition on the SAME path is what makes the documented
+/// "catch-all while migrating, ordinary routing after" claim falsifiable rather than asserted.
+#[tokio::test]
+async fn an_unknown_path_gets_the_migrating_envelope_while_empty_and_404s_once_installed() {
+    let Some((_node, slot, router, state)) = slot_and_router().await else {
+        return;
+    };
+
+    let resp = router.clone().oneshot(Request::builder().uri("/unknown").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "an unknown path must be caught by the SAME catch-all as a real /v1/* route while the slot is empty"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    assert_eq!(
+        body["error"]["code"],
+        ErrorReason::ServiceMigrating.as_wire_reason().expect("not the Unspecified sentinel"),
+        "the empty-slot response for an unknown path must be the deferred fallback's own envelope, got {body}"
+    );
+
+    slot.install(Serving::new(state, Duration::from_secs(30)).await).await.expect("install");
+
+    let resp = router.oneshot(Request::builder().uri("/unknown").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "once the real router is installed an unknown path reverts to the normal 404");
+}
+
 /// AC 4's third clause: `OnceLock::get` is taken ONCE at dispatch, so a request whose handling
 /// started before an `install` must resolve against the value it started with, never tearing
 /// across the swap.

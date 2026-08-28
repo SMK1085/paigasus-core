@@ -199,8 +199,13 @@ Boot then proceeds in three phases:
 `/readyz`'s three bodies are what AC 1 asks for: `migrating` (schema not yet applied) is distinct
 from `unready` (the DB ping failed) is distinct from `ready`.
 
-Every OTHER HTTP path (i.e. every `/v1/*` app route) answers `503` in the house error envelope,
+Every OTHER HTTP path answers `503` in the house error envelope,
 `{"error":{"code":"service-migrating","message":…}}`, not a `status` body — see §7's first entry.
+This is a **catch-all**, not a `/v1/*`-scoped fallback: the deferred router has no routing table
+for app routes, so it cannot tell a real `/v1/*` route from a path that will never exist. A
+genuinely unknown path (`GET /unknown`) gets the same 503 envelope as a real one while the slot
+is empty, then reverts to the normal 404 once `install` swaps in the real router — see the CR
+round-2 note in §7 for why the catch-all shape is the decision, not an oversight.
 
 ### 4.2 gRPC — why symmetry is a correctness requirement
 
@@ -474,7 +479,11 @@ the `reconcile_starter` concurrency question stays with SMA-513 unchanged.
    (`/v1/organizations`) → 503 `{"error":{"code":"service-migrating",…}}` — asserting the code
    against `ErrorReason::ServiceMigrating`'s wire string, that the body is *not* the probes'
    `status` shape, and explicitly that the status is *not* 404 (fallback missing) and *not* 401
-   (the real router leaked through).
+   (the real router leaked through). Also `GET /unknown` (a path with no route anywhere) → the
+   SAME 503 envelope while the slot is empty, and 404 after `install` — the catch-all's
+   503→404 transition is what makes §7's "catch-all, not `/v1/*`-scoped" decision falsifiable
+   (`tests/boot_install_pg.rs`, since it needs the real post-install `Serving` to observe the
+   404 side).
 2. **gRPC fallback shape.** HTTP **200** with `content-type: application/grpc` and `grpc-status: 14`
    — asserted on the headers, not on an HTTP status code. Comment names
    `gateway/adapters/http/mod.rs:150` as the consumer and states why `UNIMPLEMENTED` would be wrong,
@@ -553,6 +562,19 @@ process exits 0 promptly rather than after `lock_wait_secs`.
 > of the condition on either transport. `Code::Unavailable` is unchanged by this: the gateway's
 > readiness classification (§4.2) keys on `status.code()` alone, which `ErrorDetails` never
 > touches.
+
+> **CR round-2: the deferred fallback stays a catch-all, scoped to no prefix.** CodeRabbit asked
+> (twice, on this spec and on the RUNBOOK) to either scope the 503 envelope to `/v1/*` and 404
+> elsewhere, or document and test the catch-all's behaviour on a genuinely unknown path. The
+> underlying observation is correct — "every non-probe path" and "every `/v1/*` route" are not
+> the same set, and the spec conflated them (fixed at §4.3 above). The scoping suggestion itself
+> is rejected: during the boot window the replica has no routing table for app routes at all, so
+> a 404 for an unmatched path would assert "this route does not exist" — a stronger and less true
+> claim than "not ready yet" — and scoping the fallback to `/v1/*` would duplicate route-prefix
+> knowledge into `adapters/boot.rs` that only `Serving.http`'s real router should own. The
+> catch-all stays; `GET /unknown` gets the same `service-migrating` envelope as any real `/v1/*`
+> path while the slot is empty, and 404s once `install` runs — pinned by the new test in §6.1
+> case 1.
 
 * **No new metric family for deferred-phase 503s.** They are outside `http_metrics_layer` (§4.3) and
   therefore invisible in `/metrics`. A family costs `names.rs`, `describe_iam_metrics`,

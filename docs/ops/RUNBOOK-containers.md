@@ -149,13 +149,22 @@ build itself — they bite the first operator who deploys without reading this s
   serving. Alert on sustained `migrating`, page on `unready`.
 
   **App routes answer differently from the probes, deliberately.** While a replica is migrating,
-  every non-probe path — every `/v1/*` route — returns `503` with the service's standard error
-  envelope, `{"error":{"code":"service-migrating","message":…}}`, plus `paigasus-retryable: true`
-  and the usual correlation headers. That is the same shape every other error on those routes
-  takes (SMA-587), so a client can branch on `error.code` without special-casing the boot window;
-  `service-migrating` is a registered reason in `contracts/proto/paigasus/common/v1/error.proto`.
-  The probes keep their `{"status":…}` bodies because they are not part of the API surface and
-  because `/readyz`'s three values are the distinction above. Do not "unify" the two.
+  every path except the probes (`/healthz`, `/readyz`, and `/metrics` when mounted) returns `503`
+  with the service's standard error envelope, `{"error":{"code":"service-migrating","message":…}}`,
+  plus `paigasus-retryable: true` and the usual correlation headers. That is the same shape every
+  other error on `/v1/*` routes takes (SMA-587), so a client can branch on `error.code` without
+  special-casing the boot window; `service-migrating` is a registered reason in
+  `contracts/proto/paigasus/common/v1/error.proto`. This is deliberately a **catch-all**, not a
+  `/v1/*`-scoped fallback: the deferred router has no routing table for app routes yet, so it
+  cannot distinguish a real `/v1/*` route from a path that will never exist — `GET /unknown` gets
+  the same `503 service-migrating` envelope as `GET /v1/organizations` while the slot is empty.
+  Answering `404` for an unrecognized path during this window would assert "this route does not
+  exist", which is a stronger and less true claim than "not ready yet"; scoping the fallback to
+  `/v1/*` would also duplicate route-prefix knowledge into the boot router that only the real
+  router should own. Once `install` swaps in the real router, an unknown path goes back to the
+  normal `404` an unmatched route always returns. The probes keep their `{"status":…}` bodies
+  because they are not part of the API surface and because `/readyz`'s three values are the
+  distinction above. Do not "unify" the two.
 
   **Chart defaults (handoff to SMA-513).** `strategy.rollingUpdate.maxSurge` need no longer be
   pinned to `0`, subject to the two exceptions above. `startupProbe` no longer needs sizing
