@@ -5,7 +5,9 @@ Fourth increment of SMA-407. Input specs: §7/§9 of
 **§9 of** `docs/superpowers/specs/2026-08-28-sma-578-maturin-wheel-matrix-design.md`, which is a
 reviewed specification for this issue's PyPI half, not a sketch.
 
-**Status:** design. Nothing here is implemented yet.
+**Status:** design, revision 2. Revision 1 was reviewed adversarially and returned NEEDS REWORK
+with six blocking findings; §13 records what changed and what was rejected. Nothing here is
+implemented yet.
 
 ---
 
@@ -15,20 +17,25 @@ It ships the **complete but inert** irreversible half of the release path: tags,
 and npm, behind `vars.PAIGASUS_RELEASE_ENABLED == 'true'`. SMA-580 flips that variable after its
 pre-flight. **This issue publishes nothing.**
 
-It also settles three decisions that SMA-578 refused to make by default, because making them by
-default is how they would have been made wrongly:
+It also settles three decisions SMA-578 refused to make by default, because making them by default
+is how they would have been made wrongly:
 
 1. the napi ↔ release-plz **tagging boundary** (§2),
 2. the **crates.io credential mechanism** (§4),
-3. `py/packages/paigasus-proto`'s **PyPI ownership** (§5.3).
+3. `py/packages/paigasus-proto`'s **PyPI ownership** (§5.4).
 
 ### Scope decision (2026-08-28)
 
-The six sub-scopes were offered for splitting — specifically, moving the npm *publish path* to a
-follow-up issue, since `prebuild.yml` is not a reusable workflow and converting it is a subsystem
-of its own. **Sven chose all six in one PR.** This spec therefore carries the full scope. The
-concern is recorded here rather than silently dropped: this is a large change touching two
-workflows, two `package.json` files, `rs/release-plz.toml`, and a 4,745-line gate script.
+A split was offered — moving the npm *publish path* to a follow-up, since `prebuild.yml` is not a
+reusable workflow. **Sven chose all six sub-scopes in one PR.** That decision stands and this spec
+carries the full scope.
+
+**New information since that decision, recorded because it postdates it:** the adversarial review
+found the npm half carries five unresolved items the PyPI half does not — the `wasm-pack`
+clobber (§7.2), tarball-vs-disk assertion (§7.5), npm's non-idempotency (§6), npm Trusted
+Publishing (§4.4), and per-platform provenance (§7.6). The PyPI half is fully specified by
+SMA-578 §9 and carries none. If the PR proves unreviewable, **the npm half is the seam**, and it
+is pre-identified here so the split does not have to be re-derived under pressure.
 
 ### Not in scope
 
@@ -42,81 +49,124 @@ build task is `tsc --noEmit` — so those need a TypeScript build pipeline first
 ```
 .github/workflows/release.yml        on: push → branches: [main]
 
-  release-pr                                          ← existing, UNTOUCHED
+  release-pr                                          ← existing, UNTOUCHED, ungated
   plan          if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
-                  release-plz release --dry-run --output json  → outputs.releases
-  wheels        needs: plan   if: fromJSON(needs.plan.outputs.has_releases)
-                  uses: ./.github/workflows/wheels.yml
-  prebuild      needs: plan   if: fromJSON(needs.plan.outputs.has_releases)
-                  uses: ./.github/workflows/prebuild.yml
-  release       needs: [plan, wheels, prebuild]       environment: release
-                  release-plz release                 ← FIRST IRREVERSIBLE STEP
-  publish-pypi  needs: [wheels, release]              environment: release
-  publish-npm   needs: [prebuild, release]            environment: release
+                  mint App token → release-plz release --dry-run --output json
+                  outputs: kernel_release, proto_release, kernel_version, proto_version
+  wheels        needs: plan     uses: ./.github/workflows/wheels.yml
+  prebuild      needs: plan     uses: ./.github/workflows/prebuild.yml
+  proto-dist    needs: plan     builds py/packages/paigasus-proto
+  release       needs: [plan, wheels, prebuild, proto-dist]   environment: release-publish
+                  mint App token + crates.io OIDC → release-plz release
+                                                      ← FIRST IRREVERSIBLE STEP
+  publish-pypi  needs: [plan, wheels, proto-dist, release]    environment: release-publish
+  publish-npm   needs: [plan, prebuild, release]              environment: release-publish
 ```
 
 ### 1.1 Why this order
 
-**Everything reversible precedes the first irreversible step** (SMA-578 review **B3**). The first
-draft of the umbrella ran `release → wheels → publish-pypi`, so `release-plz release` completed the
-crates.io upload *and* cut the tags before a single wheel was built. A failure in the six-leg
-matrix — a zig regression, a runner image change — would then leave crates.io permanently
-published, tags permanently cut, and `paigasus-kernel` missing from PyPI while pinning
+**Everything reversible precedes the first irreversible step** (SMA-578 review **B3**). The
+umbrella's first draft ran `release → wheels → publish-pypi`, so `release-plz release` completed
+the crates.io upload *and* cut the tags before a single wheel was built. A failure in the six-leg
+matrix — a zig regression, a runner image change — would leave crates.io permanently published,
+tags permanently cut, and `paigasus-kernel` missing from PyPI while pinning
 `paigasus-py-bindings==X.Y.Z`.
 
-Nothing forces the bad order: the release commit on `main` already carries the bumped versions, so
-wheels can be built before release-plz runs. **`release.yml` must carry this rationale as a
-comment**, because the order looks arbitrary otherwise and a future editor would "simplify" it.
+Nothing forces the bad order: the release commit on `main` already carries the bumped versions.
+**`release.yml` must carry this rationale as a comment**, because the order looks arbitrary
+otherwise and a future editor would "simplify" it.
 
-### 1.2 Why `plan` exists
+**Revision 2 extends the principle inside the jobs, which revision 1 violated.** Revision 1 had
+`publish-npm` run `wasm-pack` (a full wasm32 compile) and `publish-pypi` run
+`uv build --package paigasus-proto` — both *after* `release-plz release` had published to
+crates.io and cut tags. A rustup or toolchain failure there produced exactly the half-published
+state B3 exists to prevent.
 
-`release-plz release` is idempotent — it publishes only packages not yet on the registry at that
-version — so the standard two-job pattern runs it on *every* push to `main`. Without `plan`, every
-such push would also build a 6-leg wheel matrix and a 6-leg napi matrix, to learn there is nothing
-to release. `plan` runs the cheap dry-run first and short-circuits the expensive legs.
+**Rule, now explicit: no job downstream of `release` may build anything.** `publish-pypi` and
+`publish-npm` may only download, assert, and upload. Every artifact they need is produced in the
+reversible stage:
 
-`plan` is itself gated on `PAIGASUS_RELEASE_ENABLED`, so the entire graph below `release-pr` costs
-nothing until SMA-580 flips it.
+| Artifact | Produced by | Consumed by |
+|---|---|---|
+| `wheel-<platform>` ×7, `sdist` | `wheels.yml` | `publish-pypi` |
+| `face-paigasus-kernel` | `wheels.yml` | `publish-pypi` |
+| `proto-dist-py` | `proto-dist` | `publish-pypi` |
+| `prebuild-<platform>` ×7 | `prebuild.yml` | `publish-npm` |
+| `npm-dirs` (assembled `npm/`) | `prebuild.yml` | `publish-npm` |
+| `wasm-dist` (glue + `.wasm`) | `prebuild.yml` | `publish-npm` |
 
-**`plan` is also the only job carrying the gate directly**, and that is deliberate rather than
-incidental. `wheels`, `prebuild`, `release`, `publish-pypi` and `publish-npm` are all gated
-*transitively*, through an unbroken `needs:` chain rooted at `plan`. This is exactly the topology
-§6.2's verdict is written to reason about — a single direct gate plus a chain — so the guard's
-`needs:`-walking is load-bearing on the real file, not merely exercised by fixtures. A guard that
-only ever saw directly-gated jobs would have its most important code path untested in production.
+### 1.2 Why `plan` exists, and why it does **not** gate the build jobs
 
-### 1.3 The unmeasured premise, and its fallback
+`release-plz release` is idempotent — it publishes only packages not already on the registry at
+that version — so the standard two-job pattern runs it on every push to `main`. `plan` runs the
+dry-run first so a non-release push does not build twelve matrix legs.
 
-**`plan` assumes `release-plz release --dry-run` pushes no tags.** The CLI's own `--help` says only
-*"Perform all checks without uploading"*, which is silent about tagging, and the command's summary
-says it *"create[s] and push[es] upstream a tag … and then publish[es]"*. Those two sentences do
-not settle whether `--dry-run` suppresses the tag half.
+**`plan` is the only job carrying the gate directly.** Everything else is gated *transitively*
+through an unbroken `needs:` chain rooted at `plan`. This is exactly the topology §8.2's verdict
+reasons about, so the guard's `needs:`-walking is load-bearing on the real file, not merely
+exercised by fixtures.
 
-**This is a hard precondition of Task 1 of the implementation plan**, to be measured against the
-pinned 0.3.158 in a throwaway clone with a fake remote — never against this repo's origin.
+**A per-family optimisation was designed and then rejected — the reason is worth recording.** The
+review correctly observed that a proto-only release still builds the 12-leg kernel matrix, and
+proposed gating `wheels`/`prebuild` on a `kernel_release` output. **That cannot be implemented
+without defeating this issue's own guard.** In GitHub Actions a job whose `needs:` dependency was
+*skipped* is itself skipped; reviving it requires `if: always() && …` or `if: !cancelled() && …`,
+and §8.2 **bans every status-check function** on any job on a registry-reaching `needs:` path.
+The optimisation and the guard are mutually exclusive as long as the build jobs sit on that path.
 
-- **If `--dry-run` is non-mutating:** the graph above stands.
-- **If it pushes tags:** delete `plan`; gate `wheels` and `prebuild` on
-  `vars.PAIGASUS_RELEASE_ENABLED == 'true'` directly; accept a 12-leg build on every push to `main`
-  once the flag is on. The B3 ordering is unaffected either way — only the cost is.
+**Decision: correctness over cost.** All three build jobs run whenever *anything* is releasable.
+`plan`'s per-family outputs are still emitted and are consumed at **step level** inside
+`publish-pypi` / `publish-npm`, where a skip does not propagate through `needs:`. A proto-only
+release therefore builds kernel wheels nobody uploads — wasted minutes on a rare event, in
+exchange for a guard with no `always()` hole in it.
 
-Recording both branches here means the fallback needs no re-design.
+### 1.3 `plan`'s three unmeasured premises
+
+Revision 1 measured one and assumed two. All three are Task-1 preconditions.
+
+**(a) Does `--dry-run` push tags? — MEASURED, NO.** Settled by reading `release_plz_core`
+**0.36.14**, the version the pinned CLI `release-plz 0.3.158` depends on (`^0.36.14`, from
+crates.io's dependencies API — the CLI and core are versioned separately). In
+`src/command/release.rs`, `create_git_tag_and_release(...)` is reachable **only** from the `else`
+arm of `if input.dry_run` — at both call sites, `release_package` (line 888) and
+`release_package_git_only` (line 959). Under `--dry-run` the function logs and returns
+`Ok(false)` without touching git. **R1 closes; no fallback needed.**
+
+**(b) Does `--dry-run` succeed at all, and what does it cost? — UNMEASURED.** `release-plz
+release --dry-run` runs `cargo publish --dry-run` per package, i.e. full verify builds on a cold
+runner. Worse, umbrella §14 Q6 records a **measured** `exit 101, no matching package named
+'paigasus-proto-derive'` for exactly this shape before the derive crate exists on crates.io — the
+same first-publish ordering trap `repo:publish-metadata` Check 2 solves by grouping. If the
+dry-run inherits it, `plan` fails on the first push after SMA-580 and takes the whole graph with
+it. **Measure both the wall-clock and the exit status with `paigasus-proto-derive` absent from
+the registry.** If it fails, `plan` cannot use `--dry-run`; fall back to gating `wheels`/
+`prebuild`/`proto-dist` on `PAIGASUS_RELEASE_ENABLED` directly and delete `plan`.
+
+**(c) `release-plz release` requires a git token EVEN under `--dry-run`. — MEASURED, YES.**
+`release()` calls `get_git_client(input)?` **unconditionally** at `src/command/release.rs:543`,
+before `should_release`; it hard-errors `git release not configured. Did you specify git-token and
+forge?` when `input.git_release` is `None`. This is **not** suppressed by `git_release_enable =
+false` — tried at both `[workspace]` and `[[package]]` scope, still errored, exit status 1
+(measured **unpiped**; a first attempt read `tail`'s status through a pipe and wrongly recorded
+0). **Consequence: `plan` must mint a GitHub App installation token exactly as `release-pr` does.**
+Revision 1 did not budget this step.
 
 ### 1.4 `concurrency:`
 
 `release.yml:13-15` currently holds `concurrency: { group: release-pr, cancel-in-progress: false }`
-at the **workflow** level. Adding a multi-leg matrix under that same group would serialize every
-subsequent push to `main` behind a full wheel build.
+at the **workflow** level. A multi-leg matrix under that group would serialize every subsequent
+push to `main` behind a full wheel build. **Design:** move the existing group to the `release-pr`
+job; give the release path its own job-level group. Neither cancels in progress.
 
-**Design:** move the existing group to the `release-pr` job, and give the release path its own
-job-level group. Neither may cancel in progress — a cancelled `release` job can leave crates.io
-half-published, and a cancelled `release-pr` can leave the branch half-written (the reason the
-existing setting is `false`).
+Two semantics to verify rather than assume (§12 Q4):
 
-`wheels.yml` and `prebuild.yml` carry their own workflow-level `concurrency` keyed on
-`github.workflow`/`ref`/`event_name`. Called via `workflow_call` they inherit the **caller's**
-`github.workflow`, so their groups do not collide with their own `push` runs. This must be
-verified during implementation, not assumed.
+- **`cancel-in-progress: false` does not mean "never cancel".** GitHub still cancels a previously
+  **pending** run in the group when a third arrives. Three rapid pushes to `main` therefore cancel
+  the middle release path. `release-plz release` is idempotent so the outcome is probably benign,
+  but the current rationale does not cover it and the behaviour must be recorded.
+- **`concurrency:` on a job that uses `uses:`** — the allowed-key set for reusable-workflow caller
+  jobs is narrower than for normal jobs, and `wheels`/`prebuild` are such jobs. Verify the key is
+  accepted at all, not merely that its group does not collide.
 
 ---
 
@@ -124,47 +174,78 @@ verified during implementation, not assumed.
 
 `prebuild.yml:244-245` assigns this decision here in as many words. `napi prepublish` defaults
 `ghRelease: true` and cuts a GitHub release plus a lerna-style tag
-(`@paigasus/node-bindings@0.1.0`) from `package.json`. release-plz also cuts tags. Two tools
-tagging one repo is precisely the ADR-0011 S3 failure mode — *"the tool owns every tag"*, singular —
-and the SMA-385 trap that motivated it.
+(`@paigasus/node-bindings@0.1.0`). release-plz also cuts tags. Two tools tagging one repo is
+precisely the ADR-0011 S3 failure mode — *"the tool owns every tag"*, singular — and the SMA-385
+trap that motivated it.
 
-**Decision.** release-plz owns every tag. `napi prepublish` runs with `--no-gh-release` in the live
-path, exactly as it already does in `prebuild.yml`'s dry-run. `@paigasus/wasm` publishes with a
-plain `npm publish`, which never tags.
+**Decision.** release-plz owns every tag. `napi prepublish` runs `--no-gh-release` in the live
+path, exactly as in `prebuild.yml`'s dry-run. `@paigasus/wasm` publishes with a plain
+`npm publish`, which never tags.
+
+> `napi prepublish --help` lists only `--gh-release` (opt-in) and **not** `--no-gh-release`.
+> `prebuild.yml:241-243` already records why: the negation exists and is required, and this "is
+> not visible from `--help` — the Task-1 spike misread this; CI confirmed." **Do not "correct"
+> the invocation on the strength of `--help`.**
 
 **`git_tag_name` stays unset**, i.e. the default `<package>-v<version>` — confirmed from
-`release-plz release --help` at the pinned 0.3.158: *"create and push upstream a tag in the format
-of `<package>-v<version>`"*. A group-collapsing name such as `v{{version}}` is **not** an option:
-all four kernel-family packages share one version, so they would collide on a single tag name.
+`release-plz release --help` at the pinned 0.3.158. A group-collapsing name such as `v{{version}}`
+is **not** an option: all four kernel-family packages share one version and would collide.
 
-A release commit therefore cuts up to six tags, all at the same commit:
+A release commit cuts up to six tags at the same commit (`paigasus-kernel-v…`,
+`-py-bindings-v…`, `-node-bindings-v…`, `-wasm-v…`, `-proto-v…`, `-proto-derive-v…`). Four are
+redundant by construction. Accepted deliberately: the alternative is a collision.
 
-```
-paigasus-kernel-v0.1.0          paigasus-proto-v0.1.0
-paigasus-py-bindings-v0.1.0     paigasus-proto-derive-v0.1.0
-paigasus-node-bindings-v0.1.0
-paigasus-wasm-v0.1.0
-```
+### 2.1 GitHub Releases — release-plz makes exactly two
 
-Four of those are redundant by construction (the kernel family is version-locked). That redundancy
-is accepted deliberately: the alternative is a collision.
+Revision 1 settled who cuts *tags* and never said whether release-plz also creates *GitHub
+Releases*. It does, by default, per released package — which would mean six release pages per
+release commit.
 
-**This decision is enforced, not merely documented.** §6's guard fails if any `napi prepublish`
-invocation lacks `--no-gh-release`. Without that assertion the boundary would revert the first time
-someone copied an invocation from upstream napi docs.
+**Decision:** `git_release_enable = false` for every package except the two family heads,
+`paigasus-kernel` and `paigasus-proto`, which each get one carrying that family's changelog. Two
+pages per release commit, each meaningful.
+
+The exact TOML key spelling (`git_release_enable`, per-package) **must be verified** against the
+pinned CLI — the config parser lives in the CLI crate, not in `release_plz_core`, and this spec
+does not assert it from memory. Note that disabling it does **not** remove the token requirement
+(§1.3c).
+
+**This decision is enforced, not merely documented.** §8.2's guard fails if any `napi prepublish`
+invocation lacks `--no-gh-release`.
 
 ---
 
 ## 3. `release` — crates.io and tags
 
-Runs `release-plz release` from `rs/`. Config and manifest discovery is CWD-relative with no upward
-search (the same reason `release-pr` sets `working-directory: rs`).
+Runs `release-plz release` from `rs/` (config and manifest discovery is CWD-relative with no
+upward search).
 
-`--output json` is captured and exposed as a job output. Per `--help` it *"prints the version and
-the tag of the released packages"*; **its exact shape must be measured** against the pinned 0.3.158
-before `publish-pypi` keys on it — the same discipline `release-pr` applied when it read
-`release_pr()`'s `Option<ReleasePr>` from source rather than trusting `--help`. `publish-pypi` and
-`publish-npm` both consume it, so an assumed shape would fail at the worst moment.
+`--output json`'s schema, **measured** from `release_plz_core` 0.36.14:
+
+```rust
+pub struct Release        { releases: Vec<PackageRelease> }
+pub struct PackageRelease { package_name: String, prs: Vec<Pr>, tag: String, version: Version }
+```
+
+So `{"releases": [{"package_name": …, "prs": […], "tag": …, "version": …}, …]}`. **The array key
+is `releases` and the field is `package_name`** — *not* `prs`/`package`, which is `release-pr`'s
+different shape. `release()` returns `Option<Release>` and yields `None` when nothing is
+releasable; **how the CLI serializes `None` still needs confirming** (`release-pr`'s precedent
+wraps `None` as `[]`).
+
+### 3.1 Credentials for the tag push
+
+Every `actions/checkout` in this repo sets `persist-credentials: false` (artipacked hardening:
+`release.yml:102`, `wheels.yml:128`, `prebuild.yml:82`), so there are **no ambient git
+credentials**. `release-plz release` pushes tags and creates the two GitHub Releases of §2.1.
+
+**Decision:** `release` mints its own GitHub App installation token, mirroring `release-pr`'s step
+(`release.yml:151`), and passes it as `GIT_TOKEN`. Tokens are per-job and live one hour; each job
+mints its own. `plan` does the same, for the reason in §1.3c.
+
+Revision 1 showed only `contents: write` and `CARGO_REGISTRY_TOKEN` and would have failed on the
+tag push **after** the crates.io upload — a half-completed irreversible step, the one outcome
+§1.1 exists to prevent.
 
 ---
 
@@ -173,272 +254,182 @@ before `publish-pypi` keys on it — the same discipline `release-pr` applied wh
 **All credentials live in `release.yml` and nowhere else** (umbrella §7 review **M2**).
 `prebuild.yml` and `wheels.yml` both carry a `pull_request` trigger, and same-repo PRs receive
 repository secrets — so a contributor with push access could exfiltrate a registry token in a PR
-that never merges. Registry tokens are the highest-value secret this project will hold and their
-compromise is not reversible.
+that never merges.
 
-This is now also **externally enforced**: SMA-593 widens `repo:publish-metadata`'s P-D6 check from
-`wheels.yml` alone to every workflow whose parsed triggers include `pull_request` or
-`pull_request_target`. `release.yml` has neither, so it is correctly not a subject.
+**Two independent mechanisms enforce this, and it is worth naming both:**
 
-> **Constraint for every future editor of `release.yml`:** adding a `pull_request` or
-> `pull_request_target` trigger to it makes it a P-D6 subject, and it will red — it genuinely reads
-> secrets. That red is correct behaviour, not a bug. Do not add such a trigger, and do not reach for
-> P-D6's `PR_CREDENTIAL_ALLOWED` escape hatch to silence it.
+1. **The call site.** Secrets are **not** passed automatically to a called workflow; the caller
+   must use `secrets:` or `secrets: inherit`. `release.yml` uses neither, so `wheels.yml` and
+   `prebuild.yml` receive no secrets regardless of what they declare.
+2. **The callee's declaration**, asserted by `repo:publish-metadata`'s P-D6.
 
-### 4.1 `environment: release`
+> **Constraint for every future editor of `release.yml`:** it must never gain a `pull_request` or
+> `pull_request_target` trigger. It genuinely reads secrets, so under SMA-593's widened P-D6 it
+> would red — correctly. Do not add such a trigger, and do not reach for P-D6's
+> `PR_CREDENTIAL_ALLOWED` escape hatch to silence it.
 
-All three publishing jobs (`release`, `publish-pypi`, `publish-npm`) declare
-`environment: release`. crates.io's own Trusted Publishing guidance suggests it as hardening, which
-is why it was requested — but it buys something the umbrella explicitly wanted and could not
-otherwise get.
+**R7 dependency, stated honestly:** that widening is **SMA-593's, and is not on `main`.** Today
+`repo:publish-metadata` reads `.github/workflows/wheels.yml` only. Until SMA-593 lands, nothing
+reds when a `pull_request` trigger is added to `release.yml`. **Fallback:** if SMA-593 has not
+landed when this issue is ready, §8's guard adds the trigger assertion itself — it already parses
+`release.yml`'s `on:` block, so the marginal cost is one fixture row.
 
-Umbrella §9 review **M12** accepts that the re-founded guard protects the *mechanism*, not the
-*decision*: `PAIGASUS_RELEASE_ENABLED` is a repository variable any maintainer can flip in the UI
-with no PR and no review. §9 names the remedy — *"the standard tool is a GitHub Environment with
-required reviewers"* — and calls it an option, not part of that design. Declaring the environment
-here **creates the place where that option can later be exercised**, without exercising it now.
-Adding required reviewers to the `release` environment becomes a settings change, not a code change.
+### 4.1 Environments — **two, not one**
 
-The environment also appears in the OIDC claim, so PyPI's and npm's trusted-publisher configs can
-bind against it.
+Revision 1 put `environment: release` on all three publishing jobs, so that required reviewers
+could later be added by settings (umbrella §9 **M12**). **The review showed that breaks §1.1.**
+If reviewers are added, GitHub pauses *each* job entering the environment: `release` → approve →
+crates.io published and tags cut → `publish-pypi` pauses again, with a 30-day default timeout. A
+rejected or expired second approval leaves crates.io published and PyPI empty, permanently — the
+exact split state B3 removed.
+
+**Design: separate the approval from the OIDC claim.**
+
+| Environment | Used by | Purpose |
+|---|---|---|
+| `release-approval` | a no-op `approve-release` job that `release` depends on | the single place to add required reviewers |
+| `release-publish` | `release`, `publish-pypi`, `publish-npm` | scopes the OIDC claim only; **never** gets reviewers |
+
+One approval gates the whole irreversible stage. **SMA-580 must add reviewers to
+`release-approval` and never to `release-publish`** — recorded here so the wrong one is not
+chosen.
 
 ### 4.2 crates.io — OIDC, not a stored token
 
-release-plz 0.3.158 authenticates with `CARGO_REGISTRY_TOKEN` (or `--token`). It has no native
-OIDC support. crates.io Trusted Publishing needs an explicit OIDC→token exchange.
-
-**Design:** exchange the job's OIDC identity for a short-lived crates.io token in a dedicated step,
-and hand it to release-plz through the environment.
+release-plz 0.3.158 authenticates with `CARGO_REGISTRY_TOKEN` and has no native OIDC support.
 
 ```yaml
 permissions:
   id-token: write     # crates.io OIDC exchange
   contents: write     # release-plz pushes tags
 steps:
-  - uses: rust-lang/crates-io-auth-action@<pinned-sha>   # exact name + SHA to be verified
+  - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18  # v1.0.5
     id: cratesio
+  - uses: actions/create-github-app-token@…                  # §3.1
+    id: app_token
   - run: release-plz release
     env:
       CARGO_REGISTRY_TOKEN: ${{ steps.cratesio.outputs.token }}
+      GIT_TOKEN:            ${{ steps.app_token.outputs.token }}
 ```
 
-No long-lived registry secret enters the repository. **The action's exact name, latest version and
-output name must be verified during implementation** — this spec names the mechanism, not a
-memorized identifier.
+Resolved: output name is `token`; the action's post-step revokes it at job end. **There is no
+moving `v1` tag ref** (`git/ref/tags/v1` 404s), so the README's `@v1` snippet has no resolvable
+ref in this repo's SHA-pinning style — hence the versioned pin above.
 
 ### 4.3 PyPI — trusted publishing
 
 OIDC, `id-token: write`. **The claim binds to the *calling* workflow's filename**, so SMA-580
-registers the pending publisher against **`release.yml`**, not `wheels.yml`. This is easy to get
-wrong and produces a failure only at first publish.
+registers the pending publisher against **`release.yml`**, not `wheels.yml`. Easy to get wrong;
+fails only at first publish.
 
-### 4.4 npm — provenance
+### 4.4 npm — **measure before accepting a long-lived token**
 
-`npm publish --provenance`, `id-token: write`. A granular npm automation token is still required
-for authentication (provenance attests origin; it does not authenticate), so `NPM_TOKEN` is the one
-long-lived registry credential this design cannot avoid. It is confined to `publish-npm`'s own
-`env:`, never a job- or workflow-level `env:`.
+Revision 1 asserted `NPM_TOKEN` was unavoidable. That was reasoned from memory, in the one
+decision that creates the highest-value long-lived secret in the repo — against §4's whole
+argument.
+
+**npm shipped Trusted Publishing (OIDC, workflow-filename-bound, like PyPI's), which removes the
+token and enables provenance implicitly.** Whether it applies here is a **Task-1 measurement**:
+
+1. Does npm Trusted Publishing cover a **scoped org package** (`@paigasus/*`)?
+2. Does `napi prepublish` publish through the npm CLI in a way that picks it up?
+
+If both hold, there is no `NPM_TOKEN` at all. If either fails, `NPM_TOKEN` stays — **and §4.5
+records that it was rejected for a measured reason, not merely unconsidered.**
 
 ### 4.5 What SMA-580's pre-flight must create
 
 | Kind | Name | Purpose |
 |---|---|---|
 | Repository variable | `PAIGASUS_RELEASE_ENABLED` | the gate; `'true'` activates |
-| Environment | `release` | scopes OIDC claims; optional required reviewers |
-| crates.io | Trusted Publisher | repo + `release.yml` (+ `release` environment) |
-| PyPI | pending publisher ×3 | `paigasus-py-bindings`, `paigasus-kernel`, `paigasus-proto` — all against **`release.yml`** |
-| Secret | `NPM_TOKEN` | granular npm automation token, publish scope, the two `@paigasus` packages |
+| Environment | `release-approval` | **the only** place reviewers go (§4.1) |
+| Environment | `release-publish` | OIDC claim scope; never gets reviewers |
+| crates.io | Trusted Publisher | repo + `release.yml` (+ environment) |
+| PyPI | pending publisher ×3 | `paigasus-py-bindings`, `paigasus-kernel`, `paigasus-proto`, all against **`release.yml`**; environment field per §12 Q3 |
+| npm | Trusted Publisher **or** `NPM_TOKEN` | per §4.4's measurement |
 
-The existing `PAIGASUS_BOT_APP_ID` / `PAIGASUS_BOT_PRIVATE_KEY` are unchanged and remain
-`release-pr`'s.
+`PAIGASUS_BOT_APP_ID` / `PAIGASUS_BOT_PRIVATE_KEY` are unchanged and now serve `release-pr`,
+`plan` and `release`.
 
 ---
 
 ## 5. `publish-pypi`
 
-Consumes `wheels.yml`'s artifacts. That workflow was built for this consumer and its artifact names
-are deliberate.
-
-| Artifact | Contents |
-|---|---|
-| `wheel-<platform>` ×7 | `paigasus-py-bindings` platform wheels |
-| `sdist` | `paigasus-py-bindings` sdist |
-| `face-paigasus-kernel` | `paigasus-kernel` wheel + tar.gz |
+Downloads, asserts, uploads. **Builds nothing** (§1.1).
 
 ### 5.1 Upload order
 
-**`paigasus-py-bindings` first, then `paigasus-kernel`.** The face pins `==`, so the reverse order
-leaves it uninstallable in the window between uploads (the derive→proto lesson, umbrella §3).
+**`paigasus-py-bindings` first, then `paigasus-kernel`** — the face pins `==`, so the reverse
+leaves it uninstallable in the window between uploads (umbrella §3). `paigasus-proto` is
+independent and may go in any position.
 
-`wheels.yml` carries a standing comment warning that the face artifact is deliberately outside the
-`wheel-*` namespace, precisely so that the natural implementation here — one `download-artifact`
+`wheels.yml` carries a standing comment warning that `face-paigasus-kernel` is deliberately
+outside the `wheel-*` namespace, precisely so the natural implementation — one `download-artifact`
 with `pattern: wheel-*` and `merge-multiple: true`, then a single upload — cannot silently violate
-that ordering. **Honour it: two downloads, two uploads.**
+that ordering. **Honour it: three downloads, three uploads.**
 
-### 5.2 Idempotency and version binding
+### 5.2 Idempotency
 
-- **`skip-existing: true`** on every upload (review **M9**). The upload is multiple distributions;
-  if a later one fails, a retry re-uploads the earlier ones and PyPI returns 400 *"file already
-  exists"*, so an un-skipped retry can never succeed unaided. PyPI is delete-but-never-reuse.
-- **Version binding** (review **M10**): assert the built wheel's version equals the version
-  release-plz reports for `paigasus-py-bindings`, as a hard precondition of the upload. This is what
-  stops a stale artifact — a re-run against a newer `main`, say — being published under a version it
-  was not built from.
+`skip-existing: true` on every upload (review **M9**). The upload is many distributions; if a
+later one fails, a retry re-uploads the earlier ones and PyPI returns 400 *"file already exists"*,
+so an un-skipped retry can never succeed unaided. PyPI is delete-but-never-reuse.
 
-### 5.3 `py/packages/paigasus-proto` — **published here**
+### 5.3 Version binding — bind to `paigasus-kernel`, not `paigasus-py-bindings`
+
+Review **M10** requires asserting the built wheel's version equals the version release-plz
+reports, as a hard precondition of upload. Revision 1 named `paigasus-py-bindings`.
+
+**That package is Cargo `publish = false`** (it ships as a maturin byproduct), so release-plz
+uploads nothing for it and **it may not appear in `--output json` at all**. If it does not, the
+assertion is unsatisfiable and the natural repair under pressure is "assert if present" — which is
+vacuous, and is exactly the control-that-lies failure this repo has paid for.
+
+**Design:** bind against **`paigasus-kernel`**'s reported version. The family is version-locked by
+`version_group` and asserted by `repo:version-lockstep`, so it is the same number, and it is a
+package release-plz definitely reports. Whether `publish = false` packages appear in the JSON is
+folded into §1.3's measurement; if they do, binding against both is strictly better.
+
+### 5.4 `py/packages/paigasus-proto` — **published here**
 
 SMA-578 review **M8** required this be decided rather than left to omission. It is version-locked
-with the **proto** family, its name is reserved on PyPI, and today no publish path uploads it. Left
+with the **proto** family, its name is reserved on PyPI, and no publish path uploads it. Left
 unowned, every proto-family release burns a PyPI version that is never uploaded, so the Python
-`paigasus-proto` permanently trails crates.io and can never be published at a matching version — an
-irreversible skew introduced by doing nothing.
+`paigasus-proto` permanently trails crates.io and can never be published at a matching version.
 
-**Decision: publish it in this issue.** It is a pure-Python `uv_build` package
-(`uv build --package paigasus-proto`), so the marginal cost is one build step.
+**Decision: publish it in this issue.**
 
-**The complication is real and must be handled:** the proto family and the kernel family release on
-**independent cadences**. `publish-pypi` therefore conditions each family's upload on that family
-actually appearing in `release-plz release --output json`. A run that released only the kernel
-family must not attempt a `paigasus-proto` upload, and vice versa.
+**The condition, spelled out because the name means two different things.** release-plz only ever
+sees the **Rust crate** `paigasus-proto`. The thing uploaded is the **Python distribution** built
+from `py/packages/paigasus-proto`, which release-plz knows nothing about. The condition is
+therefore:
 
-`EXPECTED_PYPI_PUBLISHABLE` in SMA-578 §8 excludes `paigasus-proto` because it carries no
-`[tool.paigasus] pypi = true` marker. Adding it to the publish path means adding that marker and
-re-baselining that set.
+> If `release-plz release --output json` reports a release for the **Rust crate**
+> `paigasus-proto`, upload the **Python distribution** built from `py/packages/paigasus-proto` at
+> the version `repo:version-lockstep` stamped there.
+
+Written loosely, one engineer keys on a name that can never appear (silently uploading nothing)
+and another drops the condition (uploading on every run).
+
+**This requires editing `ci/publish-metadata/run.sh`** — see §9.
 
 ---
 
-## 6. The re-founded release guard
+## 6. `publish-npm` — and npm's missing idempotency
 
-Umbrella §9 specifies it; SMA-576 scoped it but could not implement it (no job to guard); SMA-578
-left it open for the same reason. **This issue has the job, so the guard lands here.**
+Downloads, asserts, publishes. **Builds nothing** (§1.1).
 
-### 6.1 Why the obvious rubric is wrong
+`napi prepublish` publishes **eight** packages (seven platform + the main one) and **npm has no
+`--skip-existing`**. A re-run after a partial success hits `403 You cannot publish over the
+previously published versions` on the ones that landed. §5.2's own argument — *"an un-skipped
+retry can never succeed unaided"* — applies verbatim to npm and revision 1 did not make it there.
 
-SMA-578 review **B4** rejected the first draft's rubric, which transplanted
-`assert_freshness_call_site`'s test — *"the `if:` is present, not defeated by a
-`continue-on-error:` other than literal `false`, exit status not discarded"*. That rubric guards **a
-check that must be able to report red**. This guard must **prevent execution**, and its bypasses
-differ:
+`publish-pypi` and `publish-npm` also run **in parallel** off `needs: release`, so partial failure
+across three registries is the normal shape, not the exceptional one.
 
-- `publish-pypi` is gated only *transitively* through `needs:`. An added `if: always()` or
-  `if: !cancelled()` un-gates the upload while the pinned `release` guard stays byte-identical and
-  green.
-- `continue-on-error: true` on `release` does not suppress a red — it makes a **failed** release job
-  count as success for `needs:`, so a failed crates.io publish still lets wheels reach PyPI.
-- The verdict must find a **job-level** `if:` in a file already carrying seven step-level ones
-  (`release.yml:45,63,77,81,85,106,125`). A grep-shaped verdict cannot tell them apart.
-
-### 6.2 The verdict
-
-> Every job that can reach a registry is gated on `PAIGASUS_RELEASE_ENABLED` — directly, or through
-> an unbroken `needs:` chain from a gated job — and no such job carries `if: always()`,
-> `if: !cancelled()`, or a `continue-on-error:` value other than the literal `false`.
-
-Plus, from §2:
-
-> No `napi prepublish` invocation omits `--no-gh-release`.
-
-### 6.3 Implementation — real YAML, obtained through the pinned uv
-
-SMA-578 §9.2 offered four routes and required one be picked and justified, on the premise that
-*"`repo:publish-metadata` runs under `toolchain: 'system'`, where PyYAML is **not guaranteed** to be
-importable."*
-
-**That premise is measured false**, and the correction belongs in the record:
-
-```
-uv run --no-project --with 'pyyaml==6.0.3' python3 …      → 0.068s warm (this host)
-```
-
-`uv` is pinned in `.prototools`, `moon setup` installs it before `moon ci`, and CI restores the uv
-cache first. The §9.2 constraint holds only for a bare `import yaml`. A version-pinned real parser
-*is* reachable from a `toolchain: 'system'` task.
-
-**Decision: `ci/actionlint/release_guard.py`, invoked through `uv run --no-project --with
-'pyyaml==6.0.3'`.** Not a vendored parser.
-
-The decisive argument is not the timing, it is the defect class. SMA-593 exists **because**
-`ci/publish-metadata` hand-rolled a partial YAML scanner: it tracked quotes but not backslash
-escapes, so `\"` closed a string early and the rest of the line vanished as a comment. That session
-measured 14 distinct bypasses of it, including `permissions: write-all` and a YAML **alias**
-(`x: &w write` … `id-token: *w`) whose value never stands next to its key and so is unreachable by
-any text match. Writing a second hand-rolled indentation-aware scanner would recreate exactly the
-defect class SMA-593 is removing, in a guard whose verdict depends on distinguishing job-level from
-step-level keys and on walking `needs:` chains — the surface where those forms bite hardest.
-
-*(Precision, since the looser claim was made once in discussion and corrected: the **merge-key**
-form reds under a text checker too, but only **by accident** — the anchor definition appears
-literally, so a regex matches the anchor, not the merged result. **Alias** is the genuinely
-unreachable class. One unreachable, one caught-by-accident.)*
-
-The two gates use **separate parse sites and an identical mechanism**. They share no predicate
-(SMA-593's subject set is trigger-derived; this one's is reachability-derived), and a shared module
-would make `ci/actionlint/**` an input to `repo:publish-metadata` and vice versa — widening both
-gates' affectedness for no assertion gained, and forcing both `SELF_TASK_EXPECTED_GLOBS` entries to
-move whenever either directory changed.
-
-### 6.4 YAML 1.1 coercions — every one gets a fixture row
-
-PyYAML is a YAML 1.1 parser and GitHub's schema collides with it in three places that land directly
-on this verdict. All three were measured, not assumed:
-
-| Source | Parses to | Consequence |
-|---|---|---|
-| `on:` (top-level key) | `True` (bool) | `doc.get("on")` returns `None`; must read `doc.get("on", doc.get(True))` |
-| `if: false` | `False` (bool) | a job disabled outright is not the string `"false"` |
-| `continue-on-error: false` | `False` (bool) | the "literal false" test must accept the **boolean**, not only the string |
-
-Measured on `release.yml` itself: top-level keys come back as
-`['name', True, 'concurrency', 'permissions', 'jobs']`, with `'on' in doc` **False** and
-`True in doc` **True**.
-
-A guard that tested `continue-on-error == "false"` would red on the correct spelling and pass on
-`continue-on-error: true`-adjacent mistakes. Each row above becomes a named fixture.
-
-### 6.5 Two strengthenings beyond the specified minimum
-
-1. **Registry-reaching jobs are detected, then checked against a pinned expected set.** Detection
-   (a step invoking `release-plz release`, `npm publish`, `napi prepublish`, `twine upload`, or a
-   PyPI publish action) catches a publish step added to a *new* job. The pinned set catches
-   detection silently ceasing to match — a renamed action, a reworded `run:`. Neither alone
-   suffices: detection alone rots, and a pin alone misses new jobs.
-
-   **The pin lives in `ci/actionlint/release_guard.py` itself**, as a module-level constant
-   (`EXPECTED_REGISTRY_JOBS = {"release", "publish-pypi", "publish-npm"}`), compared to the detected
-   set by **strict equality in both directions**. A detected job missing from the pin is a new
-   publish path nobody declared; a pinned job no longer detected means detection rotted. Both red,
-   with different messages, and both have fixture rows. Adding a genuine fourth publishing job is
-   then a deliberate two-line change, which is the intent.
-2. **Local reusable-workflow calls are followed.** A job whose `uses:` is
-   `./.github/workflows/*.yml` is resolved and that workflow's own jobs are checked, so a publish
-   step added to `wheels.yml` or `prebuild.yml` is reachable from `release.yml` and gated. P-D6
-   covers those files' *credentials*; nothing today covers their *reachability*.
-
-### 6.6 Guard-the-guard obligations
-
-Per the repo's doctrine (`ci_targets.py`: *"That script cannot assert its own invocation"*), this is
-a **new** verdict function against a **new** file:
-
-1. A new `release_guard_self_test` table driving the verdict through pass and fail fixtures — one
-   per bypass in §6.1, one per coercion in §6.4, one per strengthening in §6.5.
-2. **`SELF_TEST_COUNT` 10 → 11.** The SMA-578 spec says "9 → 10"; **that is stale** — SMA-572
-   already added `affected_smoke_block_self_test` as the tenth. Check 9 asserts invocations **and**
-   definitions, so both must move together.
-3. A whole-line `ACTIONLINT_SH_CALL_SITES` entry in `ci/affected-graph/ci_targets.py`, **at column
-   0** (review **N5**): that haystack matches at column 0 deliberately, so a call site nested inside
-   a function or an `if` cannot satisfy it.
-4. Check 9's mutation battery is derived from `run_self_tests`' body, so an eleventh table makes a
-   **twelfth** concurrent mutant. The measured cost tables in `ci/actionlint/README.md` and
-   `moon.yml` must be **re-measured, not adjusted by estimate** — and re-measured the way that file
-   already prescribes, via interleaved A/B sweeps rather than sequential min-of-N, which is invalid
-   on this shared host.
-
-### 6.7 What the guard still does not protect
-
-Unchanged from umbrella §9 **M12**, and stated so it is not mistaken for a stronger claim: the guard
-asserts the `if:` expression **exists and is not defeated**. The *decision* remains a repository
-variable a maintainer can flip in the UI with no PR and no review. §4.1's `environment: release` is
-where that gap can be closed later, by settings rather than by code.
+**Design:** before each publish, check `npm view <pkg>@<version> version` and skip if present,
+giving npm the `skip-existing` semantics it lacks. §11 carries the per-registry recovery
+procedure, including npm's 72-hour unpublish window.
 
 ---
 
@@ -446,137 +437,399 @@ where that gap can be closed later, by settings rather than by code.
 
 ### 7.1 Package metadata
 
-Both packages are `private: true` today, which `npm publish` refuses.
+Both packages are `private: true`, which `npm publish` refuses.
 
-**`@paigasus/node-bindings`** — drop `private: true`. Everything else is already correct: it has
-`publishConfig.access: public`, description, keywords, homepage, repository, engines.
+- **`@paigasus/node-bindings`** — drop `private: true`. Everything else is already correct.
+- **`@paigasus/wasm`** — drop `private: true`; add `publishConfig.access: public` (a scoped
+  package without it publishes **restricted**); add `description`, `repository`, `homepage`,
+  `keywords`.
 
-**`@paigasus/wasm`** — drop `private: true`; add `publishConfig.access: public` (a scoped package
-without it publishes **restricted**, unlike its sibling); add `description`, `repository`,
-`homepage`, `keywords` to match.
+### 7.2 `wasm-pack` destroys the `package.json` it is about to publish
 
-### 7.2 The untracked `.wasm`
+`rs/crates/bindings/paigasus-wasm/.gitignore:4-10` records the measured behaviour:
 
-`package.json`'s `files` lists `paigasus_wasm_bg.wasm`, which is ignored by the **crate-local**
-`rs/crates/bindings/paigasus-wasm/.gitignore:11` (`*.wasm`) — **not** the root `.gitignore`, which
-has no wasm rule. Verified with `git check-ignore -v`.
+> `wasm-pack build` **CLEANS its `--out-dir` each run** (overwrites `.gitignore` with a bare `*`,
+> **DELETES `package.json`**, even with `--no-pack`).
 
-The JS glue (`paigasus_wasm.js`, `paigasus_wasm_bg.js`, both `.d.ts` files) **is** tracked; only the
-binary is absent from a fresh checkout. So `publish-npm` must run `wasm-pack` before publishing, or
-it ships a package with no wasm binary — an artifact that installs cleanly and fails at import.
+Revision 1's step list said `wasm-pack build (paigasus-wasm)`. Following that literally destroys
+every bit of §7.1's metadata moments before publishing. Best case the publish hard-fails; worse,
+wasm-pack regenerates a `package.json` **without** `publishConfig.access: public` and the scoped
+package publishes **restricted, irreversibly, at that version**.
 
-**An assertion is required, not just a build step:** after `wasm-pack` and before `npm publish`,
-assert the `.wasm` exists and is non-empty. This is the same class as SMA-578's "a tag is not a
-binary" rule — the publish would otherwise succeed and be irreversible.
+**The repo already has the pattern** (`ts/packages/paigasus-kernel/moon.yml:43`): build into a
+gitignored scratch dir, copy only `paigasus_wasm*` back, never build into the crate root. The
+`build` task owns `.wasmpack-out` and `test` owns `.wasmpack-test-out`, so the release path needs
+a **third** name to avoid racing either.
+
+**Design:** the wasm build moves into `prebuild.yml` (also satisfying §1.1), builds into
+`.wasmpack-release-out`, and uploads a `wasm-dist` artifact containing the glue plus the `.wasm`.
+`publish-npm` downloads it over a clean checkout. The crate-root `package.json` is never at risk
+because nothing in the publish path runs `wasm-pack`.
 
 ### 7.3 `prebuild.yml` → reusable
 
-`prebuild.yml` has `workflow_dispatch`, `push` and `pull_request` triggers but **no
-`workflow_call`**, so `release.yml` cannot consume it the way it consumes `wheels.yml`. Add
-`workflow_call`.
+`prebuild.yml` has `workflow_dispatch`, `push` and `pull_request` but **no `workflow_call`**. Add
+it. It stays credential-free (§4).
 
-It stays credential-free — it keeps its `pull_request` trigger, so it is a P-D6 subject under
-SMA-593 and must never declare `secrets:` or `id-token: write`. Publishing happens in `release.yml`,
-which downloads `prebuild.yml`'s `prebuild-<platform>` artifacts.
+It also gains the wasm build (§7.2) and uploads the assembled `npm/` dirs, so the publish stage
+only downloads. Its `permissions: contents: read` comment — *"SMA-407 adds publish creds at
+activation"* — must be corrected: creds are **not** added there, by design.
 
-`prebuild.yml`'s existing `permissions: contents: read` and its comment *"SMA-407 adds publish creds
-at activation"* should be updated: creds are **not** added there, by design.
+**`prebuild.yml` has no SPDX header** (line 1 is `name: prebuild`), unlike `release.yml` and
+`wheels.yml`. The file is being edited anyway; add it.
 
 ### 7.4 The publish steps
 
 ```
-download prebuild-<platform> artifacts  →  $CRATE/artifacts
-napi create-npm-dirs --cwd $CRATE
-napi artifacts --cwd $CRATE --npm-dir npm
+download prebuild-* / npm-dirs / wasm-dist        (built in the reversible stage)
 napi prepublish --no-gh-release --npm-dir npm --cwd $CRATE     ← §2's invariant
-wasm-pack build (paigasus-wasm)  →  assert .wasm non-empty
-npm publish --provenance  (@paigasus/wasm)
+npm publish --provenance   (@paigasus/wasm, from wasm-dist)
 ```
 
-`--no-gh-release` is load-bearing and guarded (§6.2). `prebuild.yml`'s dry-run already passes it;
-the live path must not "helpfully" drop it.
+### 7.5 Assert the tarball, not the working tree
+
+Revision 1 said "assert the `.wasm` exists and is non-empty" — which checks the *disk*, not what
+`npm publish` will ship. `prebuild.yml:250-262` already carries the correct idiom: `npm pack
+--dry-run --json`, parse `files`, assert membership. Use it. This is the same "a tag is not a
+binary" rule §7.2 cites, applied to the artifact that actually leaves the machine.
+
+### 7.6 Provenance on the platform packages
+
+`napi prepublish` exposes no `--provenance` flag, so the seven platform packages would publish
+without provenance while `@paigasus/wasm` gets it. **Likely remedy:** `NPM_CONFIG_PROVENANCE=true`
+in the job env, which napi's internal `npm publish` calls inherit. **Verify against napi 3.x**;
+if it does not work, record the asymmetry rather than leaving it undiscovered.
+
+Related, and a §12 question: `npm publish --provenance` requires a `repository` field matching the
+building repo. `@paigasus/node-bindings/package.json:9-13` has one; the seven
+`napi create-npm-dirs`-generated children may not.
 
 ---
 
-## 8. CI bookkeeping
+## 8. The re-founded release guard
 
-- **No new `repo:*` gate.** This extends `repo:actionlint`, already in `ci.yml`'s `T=(…)` array. So
-  **no `T` change and no CLAUDE.md marker edit** — which also avoids a conflict with two concurrent
-  sessions editing `ci/affected-graph/ci_targets.py`.
+Umbrella §9 specifies it; SMA-576 scoped it but had no job to guard; SMA-578 left it open for the
+same reason. **This issue has the job, so the guard lands here.**
+
+### 8.1 Why the obvious rubric is wrong
+
+SMA-578 review **B4** rejected transplanting `assert_freshness_call_site`'s test. That rubric
+guards **a check that must be able to report red**; this guard must **prevent execution**, and its
+bypasses differ:
+
+- `publish-pypi` is gated only *transitively*. An added `if: always()` un-gates the upload while
+  the pinned `release` guard stays byte-identical and green.
+- `continue-on-error: true` on `release` does not suppress a red — it makes a **failed** release
+  job count as success for `needs:`, so a failed crates.io publish still lets wheels reach PyPI.
+- The verdict must find a **job-level** `if:` in a file carrying **eight** identical step-level
+  ones (`if: steps.preflight.outputs.configured == 'true'`) and **zero** job-level ones.
+
+> **Correction.** SMA-578 §9.2 says "seven step-level ones (`release.yml:45,63,77,81,85,106,125`)"
+> and revision 1 of this spec repeated it verbatim. **Both the count and every line number are
+> wrong** — SMA-589's App-token work shifted the file. Measured: eight, at 72, 87, 105, 119, 123,
+> 127, 148, 167. The cited numbers now point at a shell `if`, four comments, `client-id:`, a
+> `uses:` and a blank line. **This spec deliberately states the shape, not the numbers**, because
+> line numbers rot on the next edit — which is precisely what happened.
+
+### 8.2 The verdict — inverted subject set
+
+Revision 1 defined the subject set by **detecting** registry-reaching jobs. The review showed
+detection ∪ pin does not close the class it claims: a new job publishing by an unrecognised
+mechanism (`JS-DevTools/npm-publish`, `cargo publish` rather than `release-plz release`, a local
+composite action) is simply *not detected*, so the detected set still equals the pin, strict
+equality holds, and the gate is green. That is this repo's own "looks complete while leaving a
+simpler hole open" standard, applied to the central strengthening.
+
+**Design: invert it.** The subject is every job, and the exemption is the pin.
+
+> **(V1)** Every job in `release.yml` is gated on `PAIGASUS_RELEASE_ENABLED` — directly, or
+> through an unbroken `needs:` chain from a gated job — **except** members of
+> `UNGATED_JOBS = {"release-pr"}`.
+>
+> **(V2)** The gating expression equals a **pinned literal string**, accepted in both its bare and
+> `${{ }}`-wrapped forms and no others.
+>
+> **(V3)** No **status-check function** (`always`, `cancelled`, `success`, `failure`) appears in
+> the `if:` of any job on a gated path.
+>
+> **(V4)** No `continue-on-error:` other than literal false appears on any such job **or on any
+> step of one**.
+>
+> **(V5)** No `napi prepublish` invocation omits `--no-gh-release`.
+
+V1 is strictly stronger than detection, cannot rot, and reduces the pin to one direction — a new
+job is gated or it is exempted by name, and there is no third outcome. V2 closes
+`if: vars.PAIGASUS_RELEASE_ENABLED != 'disabled'` and
+`… == 'true' || github.actor == 'x'`, which revision 1's "gated on `PAIGASUS_RELEASE_ENABLED`"
+admitted. V3 replaces revision 1's two literal spellings — the real class is any status function,
+and `success() || failure()`, `!failure()` and `${{ ! cancelled() }}` all evaded a two-string
+test. V4 adds the step level, which is §8.1's second bullet one level down.
+
+This follows `wheels.yml:15-18`'s standing rule: **exact equality, never a substring.**
+
+### 8.3 Called workflows — a conservative transfer rule
+
+Revision 1 said a publish step added to `wheels.yml` "is reachable from `release.yml` and gated."
+**That is false and dangerously so.** Both files carry their own `push:` and `pull_request:`
+triggers. A `twine upload` added to `wheels.yml`'s `build` job would be judged **green** — the
+calling job is gated through `needs: plan` — while running on every PR and every push to `main`,
+with `PAIGASUS_RELEASE_ENABLED` irrelevant. The guard would report green on precisely the ungated
+publish it exists to prevent, and with a *stronger* claim than "we do not check that file."
+
+> **(V6)** A workflow reachable by `uses: ./.github/workflows/*.yml` may contain a
+> registry-reaching job **only if** its `on:` block contains `workflow_call` **and nothing else**.
+
+Both files today would fail that test *if they ever gained a publish step*, which is the correct
+verdict. Detection (a step invoking `release-plz release`, `npm publish`, `napi prepublish`,
+`twine upload`, or a PyPI publish action) is retained **only here**, where V1's whitelist has no
+meaning.
+
+Where a set of jobs must be named across files it is keyed by **`(workflow_file, job_id)` pairs**,
+never bare strings: `wheels.yml` and `prebuild.yml` both have a job literally named `build`.
+
+### 8.4 Implementation — real YAML, obtained through the pinned uv
+
+SMA-578 §9.2 offered four routes on the premise that *"`repo:publish-metadata` runs under
+`toolchain: 'system'`, where PyYAML is **not guaranteed** to be importable."* **That premise is
+measured false:** `uv run --no-project --with 'pyyaml==6.0.3' python3 …` → **0.068s warm**. The
+constraint holds only for a bare `import yaml`.
+
+**Decision: `ci/actionlint/release_guard.py`, a real parser. Not a vendored one.**
+
+The decisive argument is the defect class, not the timing. SMA-593 exists **because**
+`ci/publish-metadata` hand-rolled a partial YAML scanner: it tracked quotes but not backslash
+escapes, so `\"` closed a string early. That session measured 14 distinct bypasses. A second
+hand-rolled scanner would recreate exactly the defect class SMA-593 is removing, in a guard whose
+verdict depends on distinguishing job-level from step-level keys and walking `needs:` chains.
+
+> **Precision on the YAML-alias argument, since it was overstated twice and is checkable.**
+> GitHub **added anchor/alias support in September 2025**, so the alias bypass (`x: &w write` …
+> `id-token: *w`) is real in a workflow GitHub will run, and a real parser resolves it.
+> **Merge keys are NOT supported by GitHub Actions**, so a merge-key bypass cannot exist in a
+> runnable workflow at all — it is not, as earlier discussion had it, "caught by accident." One
+> real class, one impossible class. The adversarial review's counter-claim that anchors are
+> unsupported is itself out of date.
+
+**§9.1 fixes the dependency problem this creates**, which is not free.
+
+### 8.5 Fail-closed contract
+
+Stated explicitly because a gate that silently does nothing is worse than the regex it replaced:
+
+| Condition | Result |
+|---|---|
+| `uv` not on `PATH` | **exit 2** (infra), never a skip |
+| `pyyaml` unobtainable | **exit 2** |
+| workflow file missing / unreadable | **exit 2** |
+| YAML unparseable, or `jobs:` not a mapping | **exit 2** |
+| verdict violated | **exit 1** (fail) |
+
+Never a pass, never a skip, in any row.
+
+### 8.6 YAML coercions — every one gets a fixture row
+
+PyYAML is a YAML 1.1 parser and GitHub's schema collides with it. All measured:
+
+| Source | Parses to | Consequence |
+|---|---|---|
+| `on:` (top-level key) | `True` (bool) | must read `doc.get("on", doc.get(True))` |
+| `if: false` | `False` (bool) | a job disabled outright is not the string `"false"` |
+| `continue-on-error: false` | `False` (bool) | the literal-false test must accept the **boolean** |
+| `continue-on-error: "false"` | `"false"` (**str**) | GitHub treats it as false; the test must accept **both** |
+| `needs: release` (scalar) | `str`, not `list` | **iterating it yields characters** and silently walks nothing |
+
+Measured on `release.yml`: top-level keys are `['name', True, 'concurrency', 'permissions',
+'jobs']`, `'on' in doc` **False**, `True in doc` **True**.
+
+The `needs:` row is the most dangerous: it makes the **transitive half of V1 quietly vacuous**,
+and that half is load-bearing because §1.2 makes every job but `plan` transitively gated.
+
+Also required, each with a fixture: `!!str`-tagged scalars; multi-document files
+(`yaml.safe_load_all`); the closed set of accepted `if:` forms (bare, `${{ }}`-wrapped, folded
+`>-` with varying whitespace); and an explicit verdict for a job-level `if: false` on a
+registry-reaching job — **more restrictive than the gate, so it passes** (it cannot cause a
+publish), recorded so it is not read as an oversight.
+
+### 8.7 Guard-the-guard obligations
+
+Per the repo's doctrine (*"That script cannot assert its own invocation"*), this is a **new**
+verdict function against a **new** file:
+
+1. A new `release_guard_self_test` table driving the verdict through pass and fail fixtures — one
+   per bypass in §8.1–8.3, one per coercion in §8.6.
+2. **`SELF_TEST_COUNT` 10 → 11.** SMA-578 says "9 → 10"; **that is stale** — SMA-572 already added
+   `affected_smoke_block_self_test` as the tenth. Check 9 asserts invocations **and** definitions
+   (`run.sh:4044` counts bash `*_self_test` definitions; `:4079-4090` derives the battery by awk
+   over `run_self_tests`' body), so both must move together.
+3. A whole-line `ACTIONLINT_SH_CALL_SITES` entry in `ci/affected-graph/ci_targets.py`, **at column
+   0** (review **N5**) — that haystack matches at column 0 deliberately, so a call site nested in
+   a function or an `if` cannot satisfy it.
+4. The battery grows from eleven subprocesses to **twelve** (ten mutants + one unmutated becomes
+   eleven + one). `moon.yml:635` phrases it as subprocesses; keep that phrasing. The measured cost
+   tables in `ci/actionlint/README.md` and `moon.yml` must be **re-measured, not estimated** — and
+   via interleaved A/B sweeps, since sequential min-of-N is invalid on this shared host.
+5. **NEW — an arity floor on the Python fixture table.** This obligation exists because the verdict
+   is Python and the machinery is bash. Check 9 only ever sees bash functions, so a **single** bash
+   `release_guard_self_test` wrapping a Python `--self-test` means **emptying the Python table is
+   invisible to every existing check** — the gate passes having asserted nothing. That is the same
+   hole check 8e's two arity floors (`ci_targets.py:585,597`) exist to close, and it was **measured**
+   there: with the array replaced by `()`, the verdict emitted zero lines against a fully-wired
+   file. Add an `ACTIONLINT_SH_CALL_SITES` floor entry of the form
+   `[ "${#RELEASE_GUARD_FIXTURES[@]}" -ge N ] || infra …`.
+
+   The alternative — N separate bash fixture rows — was **rejected on cost**: each spawns a
+   `uv run`, and at 8–20 rows × 12 concurrent `--self-test` mutants that is 96–240 `uv run`
+   invocations per gate run, which is not what §11's R6 sizes.
+
+### 8.8 What the guard still does not protect
+
+Unchanged from umbrella §9 **M12**: the guard asserts the `if:` exists and is not defeated. The
+*decision* remains a repository variable a maintainer can flip in the UI. §4.1's
+`release-approval` environment is where that gap can be closed later, by settings rather than code.
+
+---
+
+## 9. CI bookkeeping
+
+- **No new `repo:*` gate.** This extends `repo:actionlint`, already in `ci.yml`'s `T=(…)` array —
+  so **no `T` change and no CLAUDE.md marker edit**, which also avoids conflicting with two
+  concurrent sessions in `ci_targets.py`.
 - `repo:actionlint` already declares `inputs: ['**/*']`, pinned by
   `SELF_TASK_EXPECTED_GLOBS["actionlint"]`, so `ci/actionlint/release_guard.py` is covered with no
-  input change. `repo:input-liveness` is satisfied for the same reason.
-- **`ci/publish-metadata/**` is not touched by this issue** — it is SMA-593's, in flight in a peer
-  session. `moon.yml`'s `repo:publish-metadata` `inputs` are likewise untouched, so
-  `SELF_TASK_EXPECTED_GLOBS["publish-metadata"]` and its pinned `rs/.cargo/config.toml` entry do not
-  move (which a third session's SMA-594 depends on).
-- CLAUDE.md gains the release-path gotchas: the tagging boundary, the `--dry-run` measurement
-  result, the three YAML 1.1 coercions, and the "never add a `pull_request` trigger to
+  input change, and `repo:input-liveness` is satisfied for the same reason.
+- **`ci/publish-metadata/run.sh` IS edited by this issue**, contrary to revision 1's §8. §5.4's
+  decision cannot be implemented otherwise: `EXPECTED_PYPI_PUBLISHABLE` at **line 119** is
+  strict-equality (Check P0), and the discovery scan is runtime-based, so adding
+  `[tool.paigasus] pypi = true` to `py/packages/paigasus-proto/pyproject.toml` reds the gate until
+  that array moves. The file's own comment at lines 116-118 says **"SMA-579 owns that decision"** —
+  it was always this issue's edit. It is a **one-line array change**, far from SMA-593's P-D6
+  region. §9.2 records the boundary.
+- CLAUDE.md gains: the tagging boundary and the two-GitHub-Release decision; the `--dry-run`
+  measurements (no tags, but a token still required); the YAML 1.1 coercions; the wasm-pack
+  clobber as it applies to the release path; and the "never add a `pull_request` trigger to
   `release.yml`" constraint.
 
-### 8.1 Concurrency with other sessions
+### 9.1 `pyyaml` must be locked and scanned
 
-Two peer sessions are active in this repo. Boundaries agreed directly with both:
+`uv run --with 'pyyaml==6.0.3'` as written adds an **unlocked, unscanned, network-dependent** input
+to a required-check gate. `pyyaml` would appear in no lockfile, so `repo:osv` and dependabot cannot
+see it; and `ci.yml:163-169` keys the uv cache on `hashFiles('py/uv.lock')`, so a lockfile change
+or cache eviction makes `repo:actionlint` depend on PyPI being reachable. The 0.068s figure is
+**warm on one host**; the cold path is unmeasured.
+
+**Design:** add `pyyaml` as a `py/` dev dependency so it is locked by `py/uv.lock` and scanned by
+`repo:osv`, and invoke through the project rather than `--with`. §8.5's fail-closed contract covers
+the residual (a missing interpreter reds; it never skips).
+
+### 9.2 Concurrency with other sessions
 
 | Session | Issue | Shared file | Resolution |
 |---|---|---|---|
+| paigasus-core-2b | SMA-593 | `ci/publish-metadata/run.sh` | they own the P-D6 region + `workflow_credentials.py`; this issue changes **only** `EXPECTED_PYPI_PUBLISHABLE` (line 119). **Must be renegotiated — revision 1 promised not to touch this file.** |
 | paigasus-core-2b | SMA-593 | `ci/affected-graph/ci_targets.py` | they own `["publish-metadata"]`; this issue owns `SELF_SCHEDULED_GATES`, `ACTIONLINT_SH_CALL_SITES`, `["actionlint"]` |
-| paigasus-core-2b | SMA-593 | `moon.yml` | they edit `repo:publish-metadata` inputs; this issue edits no task inputs |
-| paigasus-core-3c | SMA-594/592/535 | `ci/affected-graph/ci_targets.py`, CLAUDE.md | disjoint regions; whoever lands second rebases |
+| paigasus-core-3c | SMA-594/592/535 | `ci_targets.py`, CLAUDE.md | disjoint regions; whoever lands second rebases |
 
 ---
 
-## 9. Testing
+## 10. Testing
 
-Nothing in this design can be tested by running it — the whole point is that it does not execute.
-So the evidence is structural:
+Nothing here can be tested by running it — the point is that it does not execute. The evidence is
+structural:
 
-1. **`release_guard_self_test`** — the fixture table of §6.6, driving the verdict through every
-   bypass and coercion.
-2. **A negative control.** The guard must be shown to report **red** on a deliberately broken
-   `release.yml` (gate removed, `if: always()` added, `continue-on-error: true` added,
-   `--no-gh-release` dropped), and green on the real one. A guard never observed reporting red is
-   the "control that lies" failure this repo has paid for twice (SMA-542, SMA-530).
-3. **`actionlint` over the new workflow structure**, including its `workflow_call` additions.
-4. **`moon run repo:actionlint --force`** — the `--force` matters, since check 5's branch half reads
+1. **`release_guard_self_test`** — §8.7's fixture table.
+2. **A negative control.** The guard must be observed reporting **red** on a deliberately broken
+   `release.yml` (gate removed; `if: always()` added; step-level `continue-on-error: true` added;
+   `--no-gh-release` dropped; a publish step added to `wheels.yml`), and green on the real one. A
+   guard never observed reporting red is the control-that-lies failure this repo has paid for
+   twice (SMA-542, SMA-530).
+3. **`actionlint`** over the new workflow structure, including the `workflow_call` additions.
+4. **`moon run repo:actionlint --force`** — `--force` matters, since check 5's branch half reads
    git ref state that is in no input hash.
-5. **The full gate graph** before pushing, per CLAUDE.md's marker-delimited command — not the
-   per-project tasks, which do not run `repo:*` gates.
-6. **`repo:version-lockstep`** — `package.json` edits touch two of its eighteen sites.
+5. **`repo:publish-metadata`** — §5.4 changes `EXPECTED_PYPI_PUBLISHABLE` and adds a marker.
+6. **`repo:version-lockstep`** — the two `package.json` edits change no version, but the files are
+   among its eighteen sites, so the edits **schedule** the gate.
+7. **The JS workspace**: `pnpm --dir ts install --frozen-lockfile` (run by all three workflows) and
+   **`moon run ts:fmt`**, a separate whole-tree Prettier gate.
+8. **The full gate graph** before pushing, per CLAUDE.md's marker-delimited command.
 
-### 9.1 What cannot be tested pre-merge, and is therefore stated as risk
+### 10.1 What cannot be tested pre-merge
 
 The publish path itself. No CI run can exercise a crates.io, PyPI or npm upload without publishing.
 `--dry-run` covers part of the crates.io half; nothing covers the OIDC exchanges, which fail only
-against a real registry with a real trusted-publisher registration. **SMA-580's pre-flight is where
-that first executes, and it will be the first genuine test of §4.** This is inherent to the work,
-not an omission.
+against a real registry with a real trusted-publisher registration. **SMA-580's pre-flight is the
+first genuine test of §4.** Inherent, not an omission.
 
 ---
 
-## 10. Risks
+## 11. Rollback and recovery
 
-| # | Risk | Mitigation |
+Revision 1 had no such section; the umbrella has one and §1.1's whole rationale is about this class.
+
+| Failure | Reversible? | Procedure |
 |---|---|---|
-| R1 | `release-plz release --dry-run` pushes tags, breaking `plan` | measured as Task 1; §1.3 fallback needs no re-design |
-| R2 | `--output json`'s shape differs from the assumed one | measured before `publish-pypi` keys on it; §3 |
-| R3 | `rust-lang/crates-io-auth-action`'s name/output verified from memory rather than upstream | §4.2 requires verification during implementation; the spec names the mechanism, not an identifier |
-| R4 | PyPI trusted publisher registered against `wheels.yml` instead of `release.yml` | §4.3 states it explicitly; SMA-580's table repeats it |
-| R5 | `wasm-pack` not run → package ships with no binary | §7.2's non-empty assertion, before publish |
-| R6 | The 12-mutant battery pushes `repo:actionlint` past a tolerable runtime | re-measured, not estimated; if it regresses badly, the table's parallelism is the lever, not deleting fixtures |
-| R7 | A future editor adds a `pull_request` trigger to `release.yml` | SMA-593's P-D6 reds it; §4's constraint block says so and forbids the allowlist escape |
-| R8 | Merge conflict with two concurrent sessions in `ci_targets.py` | §8.1's agreed boundaries; different dict entries |
-| R9 | The first `release` run tags six packages at once, four redundantly | accepted deliberately (§2); the alternative is a tag collision |
+| `plan` fails | yes | nothing happened; fix and re-push |
+| a build job fails | yes | nothing irreversible has run; re-run |
+| `release-plz release` fails **partway** — one crate published, next not, tags partial | **no** | crates.io cannot be unpublished (only yanked). Yank the published crate, delete the partial tags, fix, re-run: release-plz skips already-published packages, so a re-run converges |
+| `publish-pypi` fails partway | **no** | `skip-existing: true` makes a re-run converge; PyPI is delete-but-never-reuse, so a bad file needs a **new version**, never a re-upload |
+| `publish-npm` fails partway | **no** | §6's `npm view` pre-check makes a re-run converge; a genuinely bad publish must be unpublished **within 72 hours** or superseded by a new version |
+| `release` succeeds, a publish job never runs | **no** | crates.io and tags are live while a registry is empty. Re-run the publish job; it is the reason both are independently re-runnable |
 
 ---
 
-## 11. Open questions for the plan
+## 12. Open questions for the plan
 
-1. Does `release-plz release --dry-run` push tags? **(R1 — blocks §1's shape.)**
-2. What is `release --output json`'s exact schema at 0.3.158? **(R2 — blocks §5.)**
-3. What is `rust-lang/crates-io-auth-action`'s current name, latest release SHA, and output name?
-   **(R3.)**
-4. Do `wheels.yml`/`prebuild.yml`'s workflow-level `concurrency` groups collide with the caller's
-   when invoked via `workflow_call`? **(§1.4.)**
-5. Does `napi prepublish` require an `NPM_TOKEN` in `env:`, or does it read `.npmrc`? Does it
-   support `--provenance`, or must the platform packages publish without it?
+1. Does `release-plz release --dry-run` **succeed**, and what does it cost, with
+   `paigasus-proto-derive` absent from crates.io? **(§1.3b — blocks `plan`'s existence.)**
+2. Does `--output json` list Cargo `publish = false` packages? **(§5.3 — decides the binding
+   target.)**
+3. Does PyPI's pending-publisher registration need the `environment` field set? §4.1 says the
+   environment appears in the OIDC claim; §4.5's PyPI row leaves it open. A mismatch fails only at
+   first publish.
+4. `workflow_call` semantics: does `github.workflow` resolve to caller or callee (§1.4)? Is
+   `concurrency:` accepted at all on a `uses:` job? Do artifacts uploaded by a **called** workflow's
+   jobs resolve for a sibling job in the **caller**? *(The last is near-certain — same run — but is
+   the load-bearing assumption of §5 and §7.)*
+5. Does npm Trusted Publishing cover scoped org packages, and does `napi prepublish` pick it up?
+   **(§4.4 — decides whether `NPM_TOKEN` exists.)**
+6. Does `NPM_CONFIG_PROVENANCE=true` reach napi's internal `npm publish` calls? **(§7.6.)**
+7. Do the seven `napi create-npm-dirs`-generated `package.json` files carry a `repository` field?
+   `--provenance` requires one matching the building repo. **(§7.6.)**
+8. Is the per-package TOML key `git_release_enable`? **(§2.1 — not asserted from memory.)**
+9. What happens on **"Re-run all jobs"** of an older run? `plan`/build jobs re-execute at the old
+   commit while `main` has moved. §5.3's version binding catches the PyPI half; nothing catches the
+   crates.io or npm half.
+
+---
+
+## 13. Revision 2 — what the adversarial review changed
+
+Verdict on revision 1: **NEEDS REWORK**, six BLOCKERs.
+
+**Accepted and folded in (all six blockers, all majors):** the called-workflow transfer rule
+(§8.3); inverting the subject set (§8.2 V1); pinning the gate expression and banning all status
+functions and step-level `continue-on-error` (V2–V4); the `wasm-pack` clobber (§7.2); the missing
+git credential for the tag push (§3.1); the `§5.4`/`§9` contradiction about
+`ci/publish-metadata/run.sh`; no builds downstream of `release` (§1.1); `plan`'s cost and
+exit-101 risk (§1.3b); two environments instead of one (§4.1); npm Trusted Publishing as a
+measurement (§4.4); binding the version assertion to `paigasus-kernel` (§5.3); the Rust-crate vs
+Python-distribution conflation (§5.4); npm's non-idempotency (§6); `pyyaml` locked and scanned
+(§9.1); the Python fixture table's arity floor (§8.7.5); the `needs:`-as-string coercion and the
+rest of §8.6; SMA-593 named as an unlanded dependency with a fallback (§4); the concurrency
+semantics (§1.4); the tarball-not-disk assertion (§7.5); `prebuild.yml`'s missing SPDX header
+(§7.3); the JS workspace in testing (§10).
+
+**Rejected, with reasons:**
+
+- **"Anchors are unsupported by GitHub Actions, so §8.4's alias argument rests on a false
+  premise."** The review is out of date. GitHub added anchor/alias support in September 2025; it
+  is **merge keys** that remain unsupported. So the alias bypass is real and the argument stands —
+  what changed is the merge-key half, corrected in §8.4.
+- **Per-family gating of the build jobs (`kernel_release`).** Correct about the waste, but it
+  cannot be built without `always()`/`!cancelled()`, which V3 bans. §1.2 records the tension and
+  chooses the guard.
+
+**Found independently of the review, during measurement:** `--dry-run` does not tag (§1.3a);
+`release` needs a git token even under `--dry-run` (§1.3c); the `--output json` schema (§3); the
+`crates-io-auth-action` pin and the absent `v1` ref (§4.2); `napi prepublish`'s `--help` omitting
+`--no-gh-release` (§2); the stale step-level `if:` count (§8.1); artifacts resolving across a
+`workflow_call` boundary (§1.1).
