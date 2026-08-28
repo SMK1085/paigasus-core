@@ -318,12 +318,24 @@ async fn sigterm_during_the_deferred_phase_exits_promptly() {
 
     let (http_port, grpc_port) = (free_port(), free_port());
     let mut child = spawn_iam(&url, http_port, grpc_port);
+
+    // Require the precondition, not merely attempt it (CodeRabbit, PR 167): this test is titled
+    // "during the deferred phase", i.e. while the listener is live and answering — so if the bind
+    // never happens, the SIGTERM handler (installed before the boot `select!`, see below) would
+    // still catch the signal and the process would still exit 0 promptly with NO listener ever
+    // having come up, and every assertion after this point would pass having proven nothing about
+    // "SIGTERM while listeners are live". Mirrors
+    // `a_lock_blocked_replica_is_bound_and_reports_migrating`'s own bind-wait assertion above.
+    let mut bound = None;
     for _ in 0..100 {
-        if http_status(http_port, "/healthz").await.is_some() {
+        if let Some(r) = http_status(http_port, "/healthz").await {
+            bound = Some(r);
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    let (status, _) = bound.unwrap_or_else(|| panic!("the listener must bind while the migration lock is held; stderr:\n{}", child.tail()));
+    assert_eq!(status, 200, "the precondition for this test — a live /healthz — must hold before SIGTERM is sent");
 
     let pid = child.child.id();
     let status = std::process::Command::new("kill").arg("-TERM").arg(pid.to_string()).status().expect("run kill(1)");
