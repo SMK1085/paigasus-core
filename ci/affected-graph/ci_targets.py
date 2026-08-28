@@ -274,6 +274,10 @@ SELF_TASK_EXPECTED_GLOBS = {
     # the pin stays green on exactly the PR that deletes the negative control it pins.
     "workflow-credentials": (
         ".github/workflows/*.y*ml",
+        # Dot-prefixed workflows need their own glob — `*` matches no leading dot, in moon's
+        # matcher or in python's. Waived in task_inputs.py's ALLOW_DEAD_INPUT as a forward
+        # guard: it matches nothing today and must schedule the gate the day it does.
+        ".github/workflows/.*.y*ml",
         "ci/workflow-credentials/**/*",
         # A LITERAL path, so moon resolves it into inputFiles and it sorts after both globs
         # (measured on 2.5.3). The gate shells out to `uv`, pinned in .prototools, so without
@@ -2310,7 +2314,7 @@ def main():
          "    guard falls straight through to the real suite and reports nothing; a missing\n"
          "    assertion or report arm breaks or misreports the control's own verdict).\n"
          "    A row prefixed `ci/workflow-credentials/run.sh:` means the same for that gate's\n"
-         "    four pinned --negative-control lines — the flag parse, the dispatch arm, the\n"
+         "    five pinned --negative-control lines — the flag parse, the dispatch arm, the\n"
          "    failure guard, or the report line."),
         (bad_invocation,
          "A `moon ci` invocation in .github/workflows/ci.yml does not hand it the WHOLE `T`\n"

@@ -3,8 +3,10 @@
 # `repo:publish-metadata`
 
 Asserts every publishable crate is genuinely releasable (SMA-376), and that its
-`categories` are real crates.io slugs (SMA-529). A second, Python arm asserts the same
-for every PyPI-bound distribution (SMA-578) — the `P*` checks below.
+`categories` are real crates.io slugs (SMA-529). A second, Python arm covers the PyPI-bound
+distributions (SMA-578) — the `P*` checks below. That arm asserts a DIFFERENT set of things:
+which packages are PyPI-bound, their `[project]` metadata, and that the files they name exist.
+It does not validate category slugs, which are a crates.io concept.
 
 ## Checks
 

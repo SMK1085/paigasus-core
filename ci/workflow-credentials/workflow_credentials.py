@@ -312,7 +312,12 @@ def triggers(doc) -> set[str]:
 def discover(root: str) -> list[str]:
     """Basenames of every workflow whose triggers make it a subject."""
     github_dir = os.path.join(root, ".github")
-    paths = sorted(glob.glob(os.path.join(root, SCAN_GLOB)))
+    # include_hidden: glob's wildcards skip a leading dot, so `*.y*ml` would miss
+    # `.github/workflows/.credentials.yml`. The literal `.github` component is unaffected —
+    # only WILDCARD matching skips dotfiles — so the omission was invisible until named.
+    # A gate that silently declines to read a file is the failure this whole issue is about,
+    # so the scan is widened rather than argued about (SMA-593, CodeRabbit PR review).
+    paths = sorted(glob.glob(os.path.join(root, SCAN_GLOB), include_hidden=True))
     if not paths:
         # SPLIT, deliberately (SMA-593, controller ruling 10). Two different causes hide in
         # "no files matched", and they triage differently. The wrong repo root is a broken
@@ -402,7 +407,7 @@ def check(root: str) -> int:
 # covers both extensions. Two cover the stale-allowlist guard (Finding 2): PR_CREDENTIAL_ALLOWED
 # is this gate's only escape hatch and was otherwise untested — an entry naming a workflow that
 # is not a subject must raise AssertionFailure, and an empty allowlist must not.
-FILESYSTEM_CASES = 7
+FILESYSTEM_CASES = 8
 
 
 def _self_test_filesystem() -> tuple[int, int]:
@@ -545,6 +550,30 @@ def _self_test_filesystem() -> tuple[int, int]:
             print(f"  FAIL discover/non-utf8: expected AssertionFailure, "
                   f"got {type(exc).__name__}", file=sys.stderr)
             failures += 1
+
+    # 8. A DOT-PREFIXED workflow is still discovered. glob's wildcards skip a leading dot, so
+    #    `*.y*ml` missed `.credentials.yml` until include_hidden was set. Without this row the
+    #    widening could be reverted for tidiness and nothing would notice.
+    rows += 1
+    with tempfile.TemporaryDirectory() as root:
+        wf = os.path.join(root, ".github", "workflows")
+        os.makedirs(wf)
+        with open(os.path.join(wf, ".credentials.yml"), "w", encoding="utf-8") as handle:
+            handle.write("on:\n  pull_request:\njobs:\n  a:\n    runs-on: x\n")
+        # Wrapped: without include_hidden, discover() finds nothing and raises rather than
+        # returning, which would abort the whole run instead of reporting THIS row.
+        try:
+            found = discover(root)
+        except (AssertionFailure, InfraError) as exc:
+            print(f"  FAIL discover/hidden workflow: expected ['.credentials.yml'], "
+                  f"got {type(exc).__name__} — a dot-prefixed workflow was not scanned",
+                  file=sys.stderr)
+            failures += 1
+        else:
+            if found != [".credentials.yml"]:
+                print(f"  FAIL discover/hidden workflow: expected ['.credentials.yml'], "
+                      f"got {found}", file=sys.stderr)
+                failures += 1
 
     return failures, rows
 

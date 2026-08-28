@@ -760,6 +760,12 @@ tasks:
     toolchain: 'system'
     inputs:
       - '.github/workflows/*.y*ml'
+      # A DOT-PREFIXED workflow needs its own entry: a `*` does not match a leading dot in
+      # moon's matcher any more than in python's glob, and the checker was widened with
+      # include_hidden for the same reason. Without this a PR adding ONLY
+      # `.github/workflows/.x.yml` would not select this gate, so the widened scan would
+      # never run on it. Matches zero tracked files today — see ALLOW_DEAD_INPUT.
+      - '.github/workflows/.*.y*ml'
       - 'ci/workflow-credentials/**/*'
       # The gate shells out to `uv`, whose version is pinned here — without this input a uv
       # bump would not invalidate a cached PASS, exactly as the release-parity tasks list it.

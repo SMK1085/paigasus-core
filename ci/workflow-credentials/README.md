@@ -13,7 +13,7 @@ with no `pull_request` or `pull_request_target` trigger instead.
 `run.sh` runs the checker, `workflow_credentials.py`, in three modes:
 
 - a bare check of the real tree;
-- `--self-test`, an in-process table of 55 rows;
+- `--self-test`, an in-process table of 56 rows;
 - `--negative-control`, which asserts against the real tree. It covers the `release.yml`
   exclusion and the exit-code mapping below.
 
