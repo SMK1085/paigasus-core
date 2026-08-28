@@ -162,6 +162,17 @@ A document that is not a mapping is rc 1 with a named message: an empty `.yml` p
 `yaml.YAMLError` on a malformed workflow is rc 1: the repo is wrong, and `repo:actionlint`
 owns YAML validity independently.
 
+**Added during implementation: a merge key plus an explicit override is rejected, and that
+is accepted over-rejection.** The strict loader calls `flatten_mapping` — which resolves
+`<<: *anchor` merge keys — before it walks the key set for duplicates. If the same mapping
+also sets one of the merged keys explicitly, the loader sees two keys of that name post-merge
+and raises a duplicate-key error, even though the YAML 1.2 spec treats an explicit key as a
+legal override of a merged one. This is accepted, not fixed, because GitHub Actions does not
+support merge keys at all: Actions added anchor and alias support on 2025-09-18, but merge
+keys are not in the YAML 1.2 spec Actions follows and never shipped. A workflow using `<<:`
+therefore never runs on GitHub Actions regardless, so this rejection can only ever fire on an
+input Actions itself would already refuse.
+
 ### 4.2 The four rules
 
 | Rule | Condition | Closes |
@@ -296,6 +307,18 @@ cases are genuinely different and both are kept: the glob matching **zero files*
 because the scan root moved and the gate is scanning nothing; **zero of N files** carrying a
 pull-request trigger is rc 1, because that is a disagreement with `EXPECTED_PR_SUBJECTS`.
 
+**Amended (controller ruling 10): the "glob matches zero files" case itself splits in two.**
+Implementation found that "zero files matched" is not one cause — it hides two, and they
+triage differently. An **absent** `.github/workflows/` directory means the checker was
+handed the wrong repository root: a broken tool, rc 2. A **present** `.github/workflows/`
+directory holding no `.y*ml` file means someone removed or renamed the workflows: an
+authorial act. `ci_targets.py:28-36` states the repo's rule for exactly that case — "someone
+edited a file into a shape this gate cannot read … is a red with a fix, not a broken tool" —
+so this second case is rc 1, not rc 2. Collapsing both into rc 2 would tell a contributor to
+re-run a job that can never go green. This split is orthogonal to the "zero of N files
+carrying a pull-request trigger" case above, which stays rc 1 via the `EXPECTED_PR_SUBJECTS`
+equality check in `check()` and needs no change.
+
 **The red output contract.** A red names the workflow file, the rule, and the YAML path to the
 offending node. With six files and four rules, triage is otherwise a manual re-run.
 
@@ -312,6 +335,16 @@ The gate asserts **declaration**, not that no credential can reach a workflow by
   `workflow_run` is the classic pwn-request vector. Neither is used here today. They are out
   of scope **by decision, not by oversight**; adding them is a one-line change to the trigger
   set plus two control rows.
+- **`${{ github.token }}`, and an individual write-scope permission grant paired with it
+  (added during implementation).** A workflow that reads `${{ github.token }}` under
+  `permissions: contents: write` obtains a real, usable credential, and this gate does not
+  catch that case. Two measured reasons. First, `.github/workflows/ci.yml:58` already reads
+  `GH_TOKEN: ${{ github.token }}` deliberately, so a rule against `github.token` would red
+  the gate on day one against correct usage. Second, `github.token` is ephemeral and bounded
+  by the workflow's own `permissions:` block, and `repo:actionlint` and zizmor already govern
+  `permissions:` for least privilege. Broadening R3 from `write-all` to any write scope would
+  turn a registry-credential-declaration gate into a least-privilege audit — a different job.
+  This is a named boundary, stated here and in the README, not a silent gap.
 
 The README states these, and states R4's residual false-positive surface, so the gate does
 not overclaim.
