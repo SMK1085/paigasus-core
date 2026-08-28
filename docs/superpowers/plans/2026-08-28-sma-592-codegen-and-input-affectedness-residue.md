@@ -745,10 +745,22 @@ would mean one of the new inputs is broader than intended.
 
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
-time (cd contracts && buf generate)
-git checkout -- rs/crates/libs/paigasus-proto/src/generated \
-                py/packages/paigasus-proto/src/paigasus_proto/generated \
-                ts/packages/paigasus-proto/src/generated
+GEN=(rs/crates/libs/paigasus-proto/src/generated
+     py/packages/paigasus-proto/src/paigasus_proto/generated
+     ts/packages/paigasus-proto/src/generated)
+
+# `buf generate` REWRITES these three dirs, and the restore below is `git checkout --`,
+# which destroys unstaged work in them without warning. Refuse to run unless they are
+# already clean. This is the same hazard the probe blocks in tasks 1-3 avoid with cp/mv
+# backups; the difference here is that regeneration is wholesale, so a backup would be
+# larger than the check is worth.
+if [ -n "$(git status --porcelain -- "${GEN[@]}")" ]; then
+  echo "REFUSING: generated dirs have uncommitted changes. Commit or stash them first:" >&2
+  git status --short -- "${GEN[@]}" >&2
+else
+  time (cd contracts && buf generate)
+  git checkout -- "${GEN[@]}"
+fi
 ```
 
 Record the wall-clock. Then update §9 of the spec with the answer, including the churn figures
