@@ -227,8 +227,9 @@ new directory.
 `BRANCH_SKIP`, `COE_SKIP`, `SELF_TASK_GLOBS_EXEMPT` all work this way): a
 `REQUIRED_INPUT_SKIP` table keyed by glob with a required non-empty reason, so a legitimate
 removal is a reviewed, stated decision rather than an edit indistinguishable from an
-attacker's. An entry naming a glob that is still declared is itself reported, so skips
-cannot outlive their globs.
+attacker's. A skip is honoured only while its glob is still listed in
+`T_AFFECTED_SMOKE_REQUIRED_INPUTS`; an entry naming a glob that is absent from that table is
+itself reported (`stale-skip`), so skips cannot outlive their globs.
 
 This also resolves the one conflict with `repo:input-liveness`: if a directory a required
 glob names is ever renamed, `task_inputs.py` demands the dead glob be removed while 8e
@@ -298,17 +299,35 @@ automatically.
 
 ### §4 — The mutual guard
 
-`ACTIONLINT_SH_CALL_SITES` in `ci_targets.py` gains **two** column-0 whole lines — check
-8e's production call site and its input-table arity floor:
+`ACTIONLINT_SH_CALL_SITES` in `ci_targets.py` gains **three** column-0 whole lines (nine
+entries total) — check 8e's production call site, its input-table arity floor, and its
+script-table arity floor:
 
 ```
 done < <(affected_smoke_block_verdict moon.yml)
 [ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 19 ] || infra "…"
+[ "${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}" -ge 3 ] || infra "…"
 ```
 
-Whole-line matched, like their siblings, because `affected_smoke_block_verdict` is also
-called from inside its own self-test fixtures, so a substring test would be satisfied by
-those and survive deleting the production line.
+The production call site is whole-line matched, like its siblings, because
+`affected_smoke_block_verdict` is also called from inside its own self-test fixtures, so a
+substring test would be satisfied by those and survive deleting the production line.
+
+The two arity floors close two *different* holes, which is why both need their own entry
+rather than one standing in for the other. The INPUT floor stops the required-inputs table
+from being silently emptied — the verdict function iterates the table, so an empty table
+emits zero verdicts and the gate passes having asserted nothing (measured: replacing the
+array with `()` made `affected_smoke_block_verdict moon.yml` emit 0 lines against the real,
+fully wired file). The SCRIPT floor closes a narrower, but structurally distinct, gap: it
+is what makes check 8e's script-line ORDER assertion non-bypassable. `SELF_SCHEDULED_GATES`
+in this same file already asserts the three required script lines exist, but only as an
+*unordered* set of stripped lines — it cannot see their order, and reading them in order is
+the one thing check 8e was added to contribute. Without the SCRIPT floor, emptying
+`T_AFFECTED_SMOKE_REQUIRED_SCRIPT` is a one-file edit that silently drops that order
+assertion (8e's loop then iterates nothing, so a `set -euo pipefail` line moved below the
+invocations stops being caught by anything, since Moon takes a script block's status from
+its last command); with the floor, the same deletion is a two-file edit across two
+independently scheduled gates.
 
 That closes the cycle in three directions rather than two:
 

@@ -591,11 +591,13 @@ tasks:
     # docs/superpowers/specs/2026-08-19-sma-540-branches-filter-gate-design.md.
     #
     # The narrow-inputs convention elsewhere in this file exists because those gates are expensive
-    # (cargo nextest, next typegen). This one is ~14.42s standalone and warm (measured, min-of-7,
-    # re-measured after the SMA-542 residual closure (PR 150 follow-up) added a ninth self-test
-    # rather than paired with a stale figure from an earlier fixture-table count — was ~1.0s before
-    # SMA-542 added checks 8-9, ~6.33s before this wave added check 8d): six actionlint invocations
-    # — one over the real workflows, five stdin fixtures — and ten fixture tables (extractor,
+    # (cargo nextest, next typegen). This one is ~17-19s standalone and warm (measured via
+    # interleaved base/branch A/B sweeps — sequential min-of-N is invalid on this shared host, see
+    # the measured table in ci/actionlint/README.md; supersedes an earlier ~14.42s min-of-7 figure,
+    # which predated this wave's tenth self-test — was ~1.0s before SMA-542 added checks 8-9,
+    # ~6.33s before the SMA-542 residual-closure wave added check 8d, ~14.42s before this wave added
+    # check 8e): six actionlint invocations — one over the real workflows, five stdin fixtures —
+    # and ten fixture tables (extractor,
     # path-filter verdicts, branch-filter verdicts, config allowlist, ci-target floor, invocation
     # allowlist, affected-graph wiring, block execution, kill predicate, affected-smoke block).
     # TWO DIFFERENT `git ls-files` counts, for two different walks, are worth keeping distinct
@@ -617,7 +619,11 @@ tasks:
     # branch-swap mutant, the duplicate-invocation mutant, and the final aggregate re-run — every
     # other fixture returns before the loop) spawns a handful of real subprocesses (a scratch
     # `mktemp -d`, then per event path a `bash -c` running the extracted block, which itself shells
-    # out to `grep` and the stubbed `moon`) rather than a `grep`/`sed` pass over text.
+    # out to `grep` and the stubbed `moon`) rather than a `grep`/`sed` pass over text. That
+    # ~2.01s -> ~3.52s figure is itself now historical: this wave's tenth self-test
+    # (`affected_smoke_block_self_test`, check 8e) took standalone `--self-test` to ~3.85s
+    # (interleaved base/branch measurement, base ~3.3s) — a different number from the full-gate
+    # ~17-19s above, not a restatement of it.
     # See the measured table in ci/actionlint/README.md.
     # Through Moon it is ~11.6s, essentially all of which is Moon's own per-task floor; see the
     # measured table in ci/actionlint/README.md before concluding the inputs are the problem.
