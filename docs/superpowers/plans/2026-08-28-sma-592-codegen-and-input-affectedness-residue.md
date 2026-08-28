@@ -28,8 +28,13 @@ feeding A4/A5; A7's derived `want` set) and one is added (`check_contracts_gener
 - `ci/affected-graph/run.sh` is strict-equality. Any expected-set movement is REPORTED in the
   commit message, never silently re-baselined.
 - Two peer sessions are live in this repo. `paigasus-core-2b` (SMA-593) edits
-  `SELF_TASK_EXPECTED_GLOBS["publish-metadata"]` in `ci_targets.py`; `paigasus-core-b2` (SMA-579)
-  edits `SELF_SCHEDULED_GATES` and `ACTIONLINT_SH_CALL_SITES`. Touch none of those three.
+  `SELF_TASK_EXPECTED_GLOBS["publish-metadata"]` in `ci_targets.py`, adds a new
+  `SELF_TASK_EXPECTED_GLOBS["workflow-credentials"]` and `SELF_SCHEDULED_GATES`
+  ["workflow-credentials"], and adds `:workflow-credentials` to `ci.yml`'s `T=(…)` array;
+  `paigasus-core-b2` (SMA-579) edits `SELF_SCHEDULED_GATES` and `ACTIONLINT_SH_CALL_SITES`.
+  Touch none of those. **Both peers also edit `CLAUDE.md`**, so expect a merge there in Task 4 —
+  add your bullets to the Gotchas list rather than reflowing neighbouring text, and never touch
+  the marker-delimited command block (`<!-- ci-targets:begin -->`), which is theirs to change.
 
 ---
 
@@ -59,8 +64,13 @@ cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-592
 moon run contracts:generate
 git status --short -- '*/generated' '*/generated/**'   # expect: clean
 
-# Bump a generator pin that is NOT currently an input. `.prototools` pins buf itself.
-sed -i '' 's/^buf = "1.70.0"$/buf = "1.70.1"/' .prototools
+# Move a generator-pin file that is NOT currently an input, WITHOUT changing any version.
+# The assertion is "does contracts:generate re-run", not "does output change", so a content-only
+# edit proves it: moon hashes file CONTENT. A real version bump would make this probe depend on
+# buf 1.70.1 existing in the proto index and on a toolchain install succeeding — two failure
+# modes unrelated to what is being proven.
+cp .prototools .prototools.probe-backup
+printf '\n# SMA-592 probe line — reverted below\n' >> .prototools
 
 # The drift gate's own commands, lifted verbatim from ci.yml:249-262.
 moon run contracts:generate
@@ -76,23 +86,25 @@ echo "diff exit: $?"
 ```
 
 Expected: `moon run contracts:generate` reports a **cached** run (no `buf generate` output), and
-the diff exits **0**. That zero is the bug: a generator pin moved and the gate said nothing.
+the diff exits **0**. That zero is the bug: a generator-pin file moved and the gate said nothing.
 
 Record the exact `moon` line that shows the cache hit — it goes in the commit message.
 
-**If `buf 1.70.1` does not exist in the proto plugin index** and `moon run` fails at toolchain
-install rather than serving a cache hit, use `py/uv.lock` instead: run
-`(cd py && uv lock --upgrade-package basedpyright)` and repeat from the second `moon run`. Either
-file proves the same thing; the spec measured both as absent from the inputs.
+**Fallback, if the content-only edit does not reproduce a cache hit** (moon normalising the file,
+say): do a real generator bump instead — `sed -i '' 's/^buf = "1.70.0"$/buf = "1.70.1"/'
+.prototools`, or `(cd py && uv lock --upgrade-package basedpyright)` for the other pin file. Both
+prove the same thing; the spec measured both as absent from the inputs. Report which form you
+used, because a fallback means Ruling 1 in the ledger was wrong and should be corrected.
 
 - [ ] **Step 2: Restore the tree**
 
 ```bash
-git checkout -- .prototools py/uv.lock
+mv .prototools.probe-backup .prototools
 git status --short   # expect: clean apart from untracked plan/spec files
 ```
 
-Do not skip this. A leftover pin bump silently changes every later measurement.
+Do not skip this. A leftover probe line silently changes every later measurement. If you used the
+fallback form, `git checkout -- .prototools py/uv.lock` restores it instead.
 
 - [ ] **Step 3: Add the two inputs**
 
@@ -291,9 +303,14 @@ And add a reporting row to the `for rows, title in (...)` tuple:
 
 - [ ] **Step 10: Prove the wired gate reds**
 
+Step 3's edit is still uncommitted here, so `git checkout --` would discard the fix along with
+the probe. Back the file up instead.
+
 ```bash
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 cd /Users/smaschek/dev/paigasus/paigasus-core/.claude/worktrees/sma-592
+
+cp contracts/moon.yml contracts/moon.yml.probe-backup
 
 # Remove one input for real, and confirm the LIVE gate (not just the self-test) reports it.
 sed -i '' "/^      - '\/py\/uv.lock'$/d" contracts/moon.yml
@@ -303,12 +320,13 @@ python3 ci/affected-graph/ci_targets.py; echo "exit: $?"
 Expected: exit 1, and the output names `py/uv.lock` and `CONTRACTS_GENERATE_INPUTS`.
 
 ```bash
-git checkout -- contracts/moon.yml   # NO, this reverts step 3 too — see below
+mv contracts/moon.yml.probe-backup contracts/moon.yml
+python3 ci/affected-graph/ci_targets.py; echo "exit: $?"    # expect 0
+git status --short   # expect: no .probe-backup file left behind
 ```
 
-**Do not run that checkout.** Step 3's edit is uncommitted at this point, so a checkout would
-discard it. Restore the deleted line by hand with the exact text from Step 3, then re-run
-`python3 ci/affected-graph/ci_targets.py` and confirm exit 0.
+Moon hashes file content, not mtime, so restoring an older-mtime copy is safe here — unlike the
+cargo mtime hazard recorded elsewhere in this repo.
 
 - [ ] **Step 11: Commit**
 
@@ -453,21 +471,26 @@ Expected: both exit 0.
 
 - [ ] **Step 8: Prove A4 and A5 each red**
 
+Steps 5 and 6 are uncommitted here, so `git checkout --` would discard them along with each
+probe. Back each file up first. Note the `sed` deletes the line from ALL FOUR tasks in
+`rust.yml`, which is what makes A4 fire for every crate.
+
 ```bash
-# A4: drop it from the shared lint task.
+# A4: drop it from the shared Rust tasks.
+cp .moon/tasks/rust.yml .moon/tasks/rust.yml.probe-backup
 sed -i '' "/^      - '\/rs\/.cargo\/config.toml'$/d" .moon/tasks/rust.yml
 python3 ci/affected-graph/cargo_moon_parity.py 2>&1 | grep -c "a4-lint"   # expect 13 rows
-```
+mv .moon/tasks/rust.yml.probe-backup .moon/tasks/rust.yml
 
-Restore by hand (a `git checkout` would also discard Step 5). Then:
-
-```bash
 # A5: drop it from one FFI task only.
+cp py/packages/paigasus-kernel/moon.yml py/packages/paigasus-kernel/moon.yml.probe-backup
 sed -i '' "/^      - '\/rs\/.cargo\/config.toml'$/d" py/packages/paigasus-kernel/moon.yml
 python3 ci/affected-graph/cargo_moon_parity.py 2>&1 | grep "a5"           # expect paigasus-kernel-py:test
-```
+mv py/packages/paigasus-kernel/moon.yml.probe-backup py/packages/paigasus-kernel/moon.yml
 
-Restore by hand, re-run, confirm exit 0.
+python3 ci/affected-graph/cargo_moon_parity.py; echo "exit: $?"   # expect 0
+git status --short   # expect: no .probe-backup file left behind
+```
 
 - [ ] **Step 9: Commit**
 
