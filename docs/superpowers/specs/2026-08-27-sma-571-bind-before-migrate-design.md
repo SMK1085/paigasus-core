@@ -199,8 +199,12 @@ Boot then proceeds in three phases:
 `/readyz`'s three bodies are what AC 1 asks for: `migrating` (schema not yet applied) is distinct
 from `unready` (the DB ping failed) is distinct from `ready`.
 
-Every OTHER HTTP path answers `503` in the house error envelope,
+Every other HTTP path answers `503` in the house error envelope,
 `{"error":{"code":"service-migrating","message":…}}`, not a `status` body — see §7's first entry.
+One further exception besides the two probes: `/metrics`, when metrics are enabled with no
+separate `metrics.addr`, is merged onto the boot router and is therefore a MATCHED route, so a
+scrape during the boot window is served normally rather than falling through to the 503. When
+`metrics.addr` is set it lives on its own listener and never reaches this router at all.
 This is a **catch-all**, not a `/v1/*`-scoped fallback: the deferred router has no routing table
 for app routes, so it cannot tell a real `/v1/*` route from a path that will never exist. A
 genuinely unknown path (`GET /unknown`) gets the same 503 envelope as a real one while the slot
