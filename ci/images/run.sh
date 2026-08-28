@@ -226,9 +226,21 @@ expect_status() {
 # SMA-571: `healthy` no longer implies migrated — IAM binds before it migrates, so /healthz
 # answers 200 while /readyz is still 503 "migrating". Without this the very next assertion races
 # a fresh database's full migration set. Its own budget, deliberately separate from wait_healthy's.
+#
+# Mirrors wait_healthy's "container is gone" early-out (SMA-571 final review): the most likely
+# NEW way this loop fails is a migration failure AFTER `healthy` — the boot-phase drain now runs
+# and the container exits 1 — and without this check that burns the full 120-iteration budget
+# (each iteration spawning a `docker run`) before ever reporting anything more useful than
+# "last /readyz status: 000".
 wait_ready() {
-  local name="$1" url="$2" i code
+  local name="$1" url="$2" i code status
   for i in $(seq 1 120); do
+    status="$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo missing)"
+    if [ "$status" != "running" ]; then
+      echo "::error::$name is gone (status: $status); logs follow" >&2
+      docker logs "$name" 2>&1 | tail -30 >&2
+      return 1
+    fi
     code="$(docker run --rm --network "$NET" "$CURL_8_11_1_DIGEST" -s -o /dev/null -w '%{http_code}' "$url" || echo 000)"
     [ "$code" = "200" ] && { echo "  $name is ready (${i}s)"; return 0; }
     sleep 1

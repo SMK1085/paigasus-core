@@ -104,10 +104,16 @@ async fn the_grpc_fallback_is_a_wellformed_unavailable_not_unimplemented() {
     );
 }
 
-/// Health must answer during the deferred phase, and answer NOT_SERVING — a `grpc_health_probe`
-/// readiness probe is the gRPC-side equivalent of `/readyz` 503 `migrating`.
+/// Health must be ROUTED to the health service during the deferred phase, not swallowed by the
+/// migrating fallback — delete the health mount and this returns `grpc-status: 14` and fails.
+///
+/// **What this does NOT check** (SMA-571 final review): it asserts only that `grpc-status` is
+/// not `"14"`, so it passes identically whether the reporter reports `NOT_SERVING` or `SERVING`.
+/// The real status-VALUE decode — proving the response is actually `NOT_SERVING` while migrating
+/// and flips to `SERVING` once installed — lives in `boot_lifecycle_pg.rs` against the spawned
+/// process, where a genuine migrate -> ready transition exists to observe.
 #[tokio::test]
-async fn grpc_health_answers_not_serving_while_the_slot_is_empty() {
+async fn grpc_health_is_routed_to_the_health_service_not_the_migrating_fallback() {
     let (reporter, health) = paigasus_iam::adapters::grpc::health_service().await;
     reporter.set_service_status("", tonic_health::ServingStatus::NotServing).await;
     let routes = boot_grpc_routes(BootSlot::new(reporter.clone()), health);

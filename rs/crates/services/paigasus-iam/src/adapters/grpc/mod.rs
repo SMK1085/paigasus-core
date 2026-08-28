@@ -156,7 +156,17 @@ mod tests {
         // This test module itself quotes `.add_service(`/`.add_routes(` as string literals
         // (the match patterns and assert messages below), so counting over the WHOLE file
         // would self-match and corrupt every count. Slice them off first.
+        //
+        // Comments are STRIPPED before matching (SMA-571 final review, mirroring
+        // `migration_lock.rs::the_composition_root_still_migrates_under_the_lock`'s identical
+        // fix): a `.add_service(` inside a `//`-comment WITHIN `routes()` would otherwise
+        // inflate `in_routes` and mask a real registration moved to `router()` — the counts stay
+        // equal and this guard reports green while production silently mounts a service on only
+        // one of the two surfaces. Stripping is line-granular and deliberately naive (a `//`
+        // opening a string literal would be over-stripped); that direction only ever makes this
+        // guard stricter, never looser.
         let production = ME.split("\n#[cfg(test)]").next().expect("module must have a #[cfg(test)] block");
+        let production = production.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
         let registrations = production.matches(".add_service(").count();
         let in_routes = production
             .split("async fn routes(")

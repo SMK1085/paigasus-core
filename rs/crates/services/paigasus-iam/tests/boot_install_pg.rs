@@ -6,14 +6,19 @@
 //!
 //! Without this file, production's composition (`boot_http_router` → fallback → the real
 //! `app_routes` under `TraceLayer`/`TimeoutLayer`) would be exercised by nothing: every existing
-//! suite drives `http::router` instead.
+//! suite drives `http::router` instead. `the_delegated_grpc_path_completes_a_real_authenticated_rpc`
+//! is the gRPC half of that same claim — spec §6.2(a) asked for "an authenticated app route AND
+//! an authenticated RPC through the boot router" and the HTTP-only tests above it were the first
+//! draft's whole answer to that (SMA-571 final review).
 
 mod support;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use paigasus_iam::adapters::boot::{BootSlot, Serving, boot_http_router};
+use paigasus_iam::adapters::boot::{BootSlot, Serving, boot_grpc_routes, boot_http_router};
 use paigasus_iam::adapters::persistence::entities::event_outbox;
+use paigasus_proto::paigasus::common::v1::GetServiceInfoRequest;
+use paigasus_proto::paigasus::common::v1::service_info_service_client::ServiceInfoServiceClient;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use std::time::Duration;
 use testcontainers_modules::postgres::Postgres;
@@ -94,6 +99,15 @@ async fn the_swap_takes_effect_on_an_already_built_router() {
 /// spawned request has already returned, so the response can only ever be the pre-swap value). A
 /// vacuous test is strictly worse than a timing-dependent one that can still fail, so the
 /// wall-clock `sleep` — the only mechanism left that keeps this test able to fail — stays.
+///
+/// **The flake direction, not just the vacuity direction (SMA-571 final review).** Everything
+/// above reasons about the test going vacuously green; the fixed 50ms head start can also fail
+/// SPURIOUSLY under load, on unmutated code, if the spawned task simply hasn't been scheduled by
+/// the time it elapses — nothing here guarantees the runtime picks up `in_flight` within 50ms of
+/// `spawn`, only that it eventually does. `nextest`'s default retry budget (`rs/.config/
+/// nextest.toml`) masks that: an occasional scheduler-starved run reports FLAKY rather than
+/// failing outright, which is an acceptable cost for keeping this test non-vacuous, but it means
+/// a persistent failure here is the signal to look at, not an isolated flaky one.
 #[tokio::test]
 async fn a_request_dispatched_before_install_completes_against_its_pre_swap_value() {
     let Some((_node, slot, router, state)) = slot_and_router().await else {
@@ -210,4 +224,68 @@ async fn the_delegated_path_applies_correlation_layer_exactly_once() {
         "the id the client received must be the SAME id CreateUser's handler actually observed via \
          current_ids() and persisted — a second CorrelationLayer on the delegated path would make these diverge"
     );
+}
+
+/// I1 (SMA-571 final review): drives a REAL, AUTHENTICATED gRPC RPC through the production
+/// delegation chain in `deferred_grpc_fallback`'s `Some` arm — `req.map(tonic::body::Body::new)
+/// -> AuthEnforce -> Routes -> .map(axum::body::Body::new)` — with a genuine wire-encoded request
+/// and a genuine wire-decoded response, over a real TCP connection so trailers are exercised too.
+///
+/// Before this test, the two RPCs `boot_lifecycle_pg.rs` drives both terminate at an ERROR
+/// status (`UNAVAILABLE` from the empty-slot arm, `UNAUTHENTICATED` from `AuthEnforce` rejecting
+/// a missing bearer) and both are trailers-only `Status::into_http` responses with no message
+/// body — so nothing anywhere proved a SUCCESSFUL unary RPC's response body and trailers survive
+/// this mapping. A defect here would break every unary gRPC response in production for the life
+/// of the process, with the whole suite green.
+///
+/// `ServiceInfoService.GetServiceInfo` is the cheapest target: always mounted (SMA-505,
+/// regardless of any capability flag) and needs no tenancy/authorization setup beyond a
+/// resolvable bearer — mirrors `tests/grpc_service_info.rs`'s own posture for the same RPC.
+///
+/// The decode is the point: a `grpc-status: 0` assertion alone would not prove the response
+/// MESSAGE survived `AuthEnforce::call`'s body mapping — only decoding `service_info` and
+/// checking a real field does.
+#[tokio::test]
+async fn the_delegated_grpc_path_completes_a_real_authenticated_rpc() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let (_app, state, idp) = support::app_with_state(db).await;
+    let token = idp.bearer("boot-grpc-svcinfo", Some("boot-grpc-svcinfo@example.com"), "paigasus", 3600);
+    support::provision(&state, &token).await;
+
+    let (reporter, health) = paigasus_iam::adapters::grpc::health_service().await;
+    let slot = BootSlot::new(reporter);
+    let routes = boot_grpc_routes(slot.clone(), health);
+    slot.install(Serving::new(state, Duration::from_secs(30)).await).await.expect("install");
+
+    // A real TCP server, mirroring `main.rs`'s own `serve_with_incoming(routes.prepare(), ..)`
+    // call (minus the `CorrelationLayer`/`timeout` wrapping, which is orthogonal to the
+    // body/trailer mapping under test here) — so the generated tonic client stub does the wire
+    // encode/decode, exactly as a real caller would, rather than this test hand-rolling gRPC
+    // framing over a bare `oneshot`.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder().serve_with_incoming(routes.prepare(), incoming).await.expect("boot grpc server");
+    });
+
+    let channel = tonic::transport::Endpoint::new(format!("http://{addr}")).expect("endpoint").connect().await.expect("connect");
+    let mut client = ServiceInfoServiceClient::new(channel);
+    let mut req = tonic::Request::new(GetServiceInfoRequest {});
+    support::grpc_bearer(&mut req, &token);
+    let resp = client
+        .get_service_info(req)
+        .await
+        .expect("an authenticated GetServiceInfo must succeed through the boot router's delegated path")
+        .into_inner();
+
+    let info = resp
+        .service_info
+        .expect("service_info must always be populated, never None — this is the decode that proves the mapping");
+    assert_eq!(info.service, "iam", "the decoded response body must be the REAL ServiceInfo, not an artifact of a broken mapping");
+    assert!(!info.version.is_empty(), "version must be a non-empty string decoded off the wire");
+
+    server.abort();
 }

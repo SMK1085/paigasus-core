@@ -833,11 +833,14 @@ pub fn health_router() -> Router {
 
 /// DB-backed readiness alone, on its own `Router<AppState>`-turned-`Router` (mirrors
 /// [`health_router`]'s standalone posture) — split out of the old inline `router()` body so
-/// [`router`] and [`serve_http`] can each merge it in at the top level, OUTSIDE both
-/// [`app_routes`]'s `http_metrics_layer` and (in `serve_http`) `TraceLayer`/`TimeoutLayer`
-/// (SMA-446 Unit 3): a 15s Prometheus scrape hitting `/metrics`, or a liveness/readiness
-/// poller hitting `/healthz`/`/readyz`, must not spam a request-span trace log every tick nor
-/// inflate the RED (rate/errors/duration) metrics with health-check traffic.
+/// [`router`] can merge it in at the top level, OUTSIDE both [`app_routes`]'s
+/// `http_metrics_layer` and `TraceLayer`/`TimeoutLayer` (SMA-446 Unit 3): a 15s Prometheus scrape
+/// hitting `/metrics`, or a liveness/readiness poller hitting `/healthz`/`/readyz`, must not spam
+/// a request-span trace log every tick nor inflate the RED (rate/errors/duration) metrics with
+/// health-check traffic. Since SMA-571, production composes its own `/readyz` differently —
+/// `adapters::boot::boot_http_router`'s `readyz` handler reads the boot slot directly rather
+/// than merging this router — so `serve_http` no longer merges this at all; only `router` (the
+/// test harness) does.
 fn readyz_router(state: AppState) -> Router {
     Router::new().route("/readyz", get(readyz)).with_state(state)
 }
@@ -906,8 +909,9 @@ fn app_routes(state: AppState) -> Router {
 /// Full HTTP surface for the `oneshot`-based test harness: liveness + DB-backed readiness
 /// (outside any layer) merged with [`app_routes`] (the `http_metrics_layer`-wrapped tenancy/
 /// authn API). Deliberately carries no `TraceLayer`/`TimeoutLayer` and no `/metrics` route —
-/// those are [`serve_http`]-only concerns (production wiring), unchanged from before this
-/// crate had any of them.
+/// since SMA-571, `TraceLayer`/`TimeoutLayer` are [`traced_app_routes`]-only concerns and the
+/// `/metrics` merge is [`crate::adapters::boot::boot_http_router`]-only, both production wiring
+/// relocated out of `serve_http` (which no longer composes a router at all — see its doc).
 pub fn router(state: AppState) -> Router {
     health_router().merge(readyz_router(state.clone())).merge(app_routes(state))
 }

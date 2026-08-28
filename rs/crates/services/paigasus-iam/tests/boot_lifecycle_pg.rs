@@ -34,12 +34,27 @@ use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 /// Kills the child on drop, so a failing assertion cannot leave a service holding a port.
 struct Child {
     child: std::process::Child,
-    /// The child's stderr, drained on a background thread and capped at 16KiB — surfaced in
-    /// panic messages below. `Stdio::piped()` with nobody reading it is a real deadlock risk
-    /// (a full OS pipe buffer blocks the child's next write, which during the migration wait
-    /// would silently hang the very boot sequence this test is timing), not merely a missed
-    /// diagnostic — draining it is load-bearing, the capture is the bonus.
+    /// BOTH the child's stdout AND stderr, drained on background threads into one buffer and
+    /// capped at 16KiB — surfaced in panic messages below. `Stdio::piped()` with nobody reading
+    /// it is a real deadlock risk (a full OS pipe buffer blocks the child's next write, which
+    /// during the migration wait would silently hang the very boot sequence this test is
+    /// timing), not merely a missed diagnostic — draining it is load-bearing, the capture is the
+    /// bonus.
+    ///
+    /// **Both streams, not stderr alone (SMA-571 final review fix).** `paigasus_logging::init`
+    /// installs `tracing_subscriber::fmt::layer()` with no `.with_writer` override, and that
+    /// layer's default `MakeWriter` is `io::stdout` — so EVERY structured log line this process
+    /// emits, including `"shutdown signal received during boot"`/`"drain timed out"`, goes to
+    /// STDOUT. A stderr-only capture (this struct's original shape) observes only bare Rust
+    /// panics and never a single `tracing::info!`/`warn!` line — measured directly: before this
+    /// fix, `sigterm_during_the_deferred_phase_exits_promptly`'s new log assertions failed with
+    /// an EMPTY `child.tail()`, not a not-found substring, which is what exposed this.
     log: Arc<Mutex<String>>,
+    /// The two draining threads, taken by [`Child::drain`] — joining them is how a caller that
+    /// has already observed the child exit proves the pipes are FULLY drained (EOF reached and
+    /// every line pushed into `log`) before reading `tail()`, rather than racing a
+    /// still-draining background thread the instant after `try_wait` returns `Some`.
+    readers: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for Child {
@@ -52,6 +67,15 @@ impl Drop for Child {
 impl Child {
     fn tail(&self) -> String {
         self.log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// Blocks until both reader threads have hit EOF on their pipe. Only meaningful to call
+    /// AFTER the child process itself has been confirmed exited (otherwise this simply blocks
+    /// for the process's remaining lifetime) — see [`Child::readers`]'s doc.
+    fn drain(&mut self) {
+        for handle in self.readers.drain(..) {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -113,23 +137,31 @@ fn spawn_iam(db_url: &str, http_port: u16, grpc_port: u16) -> Child {
         .env("IAM_AUTHN__ISSUERS", r#"[{issuer="https://idp.example.com",audiences=["paigasus"]}]"#)
         .env("IAM_API_KEYS__PEPPER", "cGFpZ2FzdXMtc21va2UtcGVwcGVyLW5vdC1hLXJlYWwtc2VjcmV0LTAwMA==")
         .env("IAM_MIGRATION__LOCK_WAIT_SECS", "60")
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn paigasus-iam");
+    let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let log = Arc::new(Mutex::new(String::new()));
-    let writer = log.clone();
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
-            let mut buf = writer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if buf.len() < 16 * 1024 {
-                buf.push_str(&line);
-                buf.push('\n');
-            }
-        }
-    });
-    Child { child, log }
+    // Two draining threads into the SAME buffer: `tracing_subscriber`'s JSON layer writes to
+    // stdout (see this struct's doc), but stderr still carries bare Rust panics, so both are
+    // captured rather than picking one.
+    let readers = [("stdout", Box::new(stdout) as Box<dyn std::io::Read + Send>), ("stderr", Box::new(stderr))]
+        .into_iter()
+        .map(|(name, reader)| {
+            let writer = log.clone();
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                for line in std::io::BufReader::new(reader).lines().map_while(Result::ok) {
+                    let mut buf = writer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if buf.len() < 16 * 1024 {
+                        buf.push_str(&format!("[{name}] {line}\n"));
+                    }
+                }
+            })
+        })
+        .collect();
+    Child { child, log, readers }
 }
 
 /// AC 1 and AC 2: while the migration lock is held elsewhere, the replica is BOUND and visibly
@@ -208,11 +240,12 @@ async fn a_lock_blocked_replica_is_bound_and_reports_migrating() {
     );
 
     // Once the lock is free the replica migrates and flips to ready. Budget is 90s (900 x
-    // 100ms), not the bind-wait loop's tight 10s: a real migration run has no fixed budget any
-    // more (SMA-571 dropped the `MIGRATION_BUDGET_SECS` ceiling — see `migration_lock.rs`), so a
-    // slow-but-CORRECT run under loaded CI must not exhaust this loop and report a false failure
-    // — unlike the bind-wait and SIGTERM budgets, which stay tight deliberately because that
-    // tightness is what makes their respective regressions detectable.
+    // 100ms), not the bind-wait loop's tight 10s: SMA-571's migration path (`migrate_under_lock`
+    // in `migration_lock.rs`) polls the advisory lock on `lock_wait_secs` but imposes no fixed
+    // ceiling of its own on the migration itself, so a slow-but-CORRECT run under loaded CI must
+    // not exhaust this loop and report a false failure — unlike the bind-wait and SIGTERM
+    // budgets, which stay tight deliberately because that tightness is what makes their
+    // respective regressions detectable.
     let mut ready = false;
     for _ in 0..900 {
         if let Some((200, _)) = http_status(http_port, "/readyz").await {
@@ -310,5 +343,28 @@ async fn sigterm_during_the_deferred_phase_exits_promptly() {
         "the process must exit NORMALLY (via main()'s own Ok return), not be signal-terminated by \
          an unhandled default SIGTERM disposition; status = {exit_status:?}, stderr:\n{}",
         child.tail()
+    );
+
+    // Neither `elapsed < 20s` nor `code() == Some(0)` above can see a REGRESSION that still exits
+    // cleanly but slowly: SIGTERM caught -> `tx.send(())` -> a server task stops observing the
+    // shutdown watch -> `drain_bounded` times out at its 10s `DRAIN_TIMEOUT` -> logs "drain timed
+    // out with tasks not yet joined" -> `main` still returns `Ok(())` -> exit 0, well inside the
+    // 20s budget. That sequence would pass every assertion above unchanged. The child's stdout
+    // AND stderr are already captured (see `Child::log`'s doc — the structured log lines below
+    // are on STDOUT, not stderr); use it to pin the boot-phase shutdown arm's own log line and
+    // rule out the drain-timeout line, matching `main.rs`'s exact strings verbatim
+    // (`"shutdown signal received during boot"` / `"drain timed out"`). `drain()` first: the
+    // process is confirmed exited above, but the reader threads race their own EOF against this
+    // assertion, so block until both pipes are FULLY drained rather than reading `tail()` the
+    // instant `try_wait` returns.
+    child.drain();
+    let log = child.tail();
+    assert!(
+        log.contains("shutdown signal received during boot"),
+        "the boot-phase select! arm must have observed the signal; stderr:\n{log}"
+    );
+    assert!(
+        !log.contains("drain timed out"),
+        "a clean SIGTERM-during-boot exit must not need the drain's timeout budget at all; stderr:\n{log}"
     );
 }

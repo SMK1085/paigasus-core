@@ -126,14 +126,20 @@ build itself — they bite the first operator who deploys without reading this s
   running replica's audit writes block** for that window. Sizing `lock_wait_secs` for a large
   table is simultaneously sizing an audit-write stall.
 
-  **Probe budgets.** A migrating or lock-waiting replica now has all three sockets bound and
-  answers `/healthz` 200 within a second of process start, so `startupProbe` no longer has to be
+  **Probe budgets.** A migrating or lock-waiting replica now has its HTTP and gRPC sockets bound
+  (the metrics socket too, but only when `metrics.enabled` AND a separate `metrics.addr` are both
+  set — otherwise `/metrics` is merged onto the HTTP socket, and with metrics disabled there is no
+  third socket at all) and answers `/healthz` 200 within a second of process start, so
+  `startupProbe` no longer has to be
   sized against `migration.lock_wait_secs` at all — budget it for config load plus
   `Database::connect`. What a long migration now costs is readiness, not existence: `/readyz`
   answers `503 {"status":"migrating"}` for as long as it takes, and the replica stays out of the
-  Service's endpoint list until it flips. Set `readinessProbe.failureThreshold ×
-  periodSeconds` above your worst-case `lock_wait_secs` + migration + `AppState::new` if you would
-  rather a slow migration not restart the pod.
+  Service's endpoint list until it flips. **A failing `readinessProbe` never restarts a pod — it
+  only removes it from the Service's endpoints** — and liveness is unconditional from process
+  start (`/healthz` never depends on migration state), so nothing in this design restarts a
+  slow-migrating pod at all. Size `readinessProbe.failureThreshold × periodSeconds` above your
+  worst-case `lock_wait_secs` + migration + `AppState::new` so the replica is not flapped in and
+  out of the endpoint list for the whole migration window.
 
   `/readyz` has three bodies and they are not interchangeable: `migrating` means the schema is not
   yet applied, `unready` means the schema is there but the database ping failed, `ready` means
