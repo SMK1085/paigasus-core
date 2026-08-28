@@ -599,6 +599,16 @@ verdict. Detection (a step invoking `release-plz release`, `npm publish`, `napi 
 `twine upload`, or a PyPI publish action) is retained **only here**, where V1's whitelist has no
 meaning.
 
+> **This overlaps `repo:workflow-credentials` (SMA-593) and the overlap is deliberate — do not
+> delete either as redundant.** That gate's rule is **trigger-derived**: a workflow whose `on:`
+> block contains `pull_request`/`pull_request_target` may declare no credentials. V6 is
+> **reachability-derived**: a workflow called from `release.yml` may publish only if it is
+> `workflow_call`-only. They share no predicate and catch different failures — a credential added
+> to a PR-triggered workflow versus a publish step added to a workflow the release path calls. Both
+> would red on `wheels.yml`/`prebuild.yml` gaining a publish step, for different reasons. A future
+> reader who removes one on the grounds that the other covers it will silently reopen the half it
+> did not cover.
+
 Where a set of jobs must be named across files it is keyed by **`(workflow_file, job_id)` pairs**,
 never bare strings: `wheels.yml` and `prebuild.yml` both have a job literally named `build`.
 
