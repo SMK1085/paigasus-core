@@ -86,16 +86,17 @@ It also runs several checks that the per-case project sets structurally **cannot
   case — which is how SMA-524's bug survived a full review cycle. Edges intentionally declared without
   Cargo backing live in its `ALLOW_NO_CARGO_BACKING` table with a required reason string.
 - **A4** (in `cargo_moon_parity.py`) is the generic twin of `lockfile->all-lint`: for every crate,
-  moon's **resolved** `lint` `inputFiles` must contain `rs/Cargo.lock`, `rs/Cargo.toml` and
-  `rs/rust-toolchain.toml`. The behavioural case proves the inputs take effect; A4 proves they are
+  moon's **resolved** `lint` `inputFiles` must contain `rs/Cargo.lock`, `rs/Cargo.toml`,
+  `rs/rust-toolchain.toml` and `rs/.cargo/config.toml` (the fourth added by SMA-594 — cargo reads
+  it by walking up from a cwd inside `rs/`, so it influences every compile and link). The behavioural case proves the inputs take effect; A4 proves they are
   declared for crates no case names. It iterates every crate unconditionally — unlike A1-A3, which
   are guarded by `if want:` and so never reach the four crates with no in-tree dependencies.
 - **A5** (in `cargo_moon_parity.py`) is A4's cross-stack twin (SMA-546): the tasks that COMPILE the
   FFI cdylibs live in the ts/py stacks, where A4's per-crate loop cannot reach them. A5 **derives**
   its targets — any task whose resolved `command` + `args` + `script` mentions `napi build`,
   `wasm-pack`, `maturin` or `--reinstall-package` — and requires each to declare `rs/Cargo.lock`,
-  `rs/Cargo.toml`, `rs/rust-toolchain.toml` and `.prototools`. Deriving covers a future fourth
-  binding task on day one; a `REQUIRED_FFI_TASKS` **floor** stops the derivation degrading to a
+  `rs/Cargo.toml`, `rs/rust-toolchain.toml`, `rs/.cargo/config.toml` and `.prototools`. Deriving
+  covers a future fourth binding task on day one; a `REQUIRED_FFI_TASKS` **floor** stops the derivation degrading to a
   vacuous PASS if a task ever stops matching the markers. A task with none of a `command`, a
   `script`, or any `args` aborts as infra (rc 2), never as a silent skip.
 - **A6** (in `cargo_moon_parity.py`, SMA-528) asserts every crate's `build`/`test`/`lint` keys on its
@@ -133,9 +134,10 @@ It also runs several checks that the per-case project sets structurally **cannot
   wrapper's tasks: `Cargo.toml` lands in `inputFiles`, `src/**/*` in `inputGlobs`, and a wrapper's
   `build` and `test` declare different sets, so a one-bucket or task-unioned read would pass the
   very under-declaration this check exists to catch. Per closure member it demands
-  `<upstream>/src/**/*`, `<upstream>/Cargo.toml`, and `<upstream>/build.rs` when one exists ON
-  DISK — which is why the repo `root` is a REQUIRED positional argument and never defaults: a
-  `root=None` default made the build.rs half opt-in, so a call site that stopped passing it went
+  `<upstream>/src/**/*`, `<upstream>/Cargo.toml`, and — each when one exists ON DISK —
+  `<upstream>/build.rs` plus any `<upstream>/*.pyi` stub (SMA-594') — which is why the repo
+  `root` is a REQUIRED positional argument and never defaults: a `root=None` default made the
+  build.rs half opt-in, so a call site that stopped passing it went
   on printing PASS while the two `paigasus-node-bindings/build.rs` lines could be deleted from
   `ts/packages/paigasus-kernel/moon.yml` for free. `REQUIRED_WRAPPER_CLOSURE` is its
   anti-vacuity floor, and it is edge-based rather than a task-name list for a reason specific to
@@ -171,7 +173,15 @@ It also runs several checks that the per-case project sets structurally **cannot
   — SMA-530); **C5** every
   `moon ci` invocation in `ci.yml` is handed the WHOLE array — C1-C4 assert what is *in* `T`,
   and a subsetted `"${T[@]:0:5}"` leaves all four green while switching most of the graph
-  off. C5's line matcher is deliberately BROADER than
+  off; **C6** (SMA-592) `contracts:generate`'s authored `inputs` still equal
+  `CONTRACTS_GENERATE_INPUTS` exactly — strict equality, both moon input buckets, the injected
+  `.moon/*` glob filtered first. That task is not a `repo:*` task, so C1 and C2 never look at it,
+  but `ci.yml`'s codegen-drift step delegates its freshness to that task's cache key: the step
+  runs `moon run contracts:generate` and diffs the three generated dirs, so an input dropped from
+  the task makes the step regenerate nothing and diff the committed output against itself — a
+  vacuous PASS. Exact equality, not containment: an edit to how the repo's codegen is keyed
+  should stop a human, and the constant is cheap to update deliberately. C5's line matcher is
+  deliberately BROADER than
   `assert_include_relations`' `moon ci +"` grep: mirroring it left both blind to a subsetted array
   behind a leading flag (`moon ci --base origin/main "${T[@]:0:5}"`). `moon ci` exits **0** on a target that resolves to nothing —
   measured, including the mixed case — so without C2 a renamed or mistyped entry is a silent no-op
@@ -187,7 +197,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   under `CI=true` (`ts/moon.yml`). `REQUIRED_REPO_TASKS` is the floor that stops the comparison
   degrading to two empty sets. **`:affected-smoke` is load-bearing for every assertion in this
   file**: this gate runs *inside* it, so removing that one entry from `T` (and from CLAUDE.md)
-  passes C1-C5 by never executing them, and takes the eight project cascade cases, the five task
+  passes C1-C6 by never executing them, and takes the eight project cascade cases, the five task
   cases, A1-A7 and `assert_include_relations` with it. Never exempt or drop it — see the design
   doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the

@@ -33,10 +33,23 @@ fileGroups:
 tasks:
   build:
     command: 'cargo build'
-    inputs: ['@group(sources)', 'Cargo.toml', '@group(upstreams)']
+    # `/rs/.cargo/config.toml` (SMA-594) sets rustflags for the two *-apple-darwin targets, and
+    # cargo reads it by walking up from the cwd — which for every task here is inside `rs/`. It is
+    # on build/build-release/test/lint and deliberately NOT on `fmt`: `cargo fmt --check` neither
+    # compiles nor links, and rustflags cannot change formatting. That mirrors how `fmt` already
+    # omits @group(upstreams) and the workspace lock. CI is Linux, where the flags are inert, so
+    # this is a cache-correctness fix for macOS developers, not a CI-correctness one.
+    inputs:
+      - '@group(sources)'
+      - 'Cargo.toml'
+      - '@group(upstreams)'
+      - '/rs/.cargo/config.toml'
   build-release:
     command: 'cargo build --release'
-    inputs: ['@group(sources)', 'Cargo.toml']
+    inputs:
+      - '@group(sources)'
+      - 'Cargo.toml'
+      - '/rs/.cargo/config.toml'
   test:
     command: 'cargo nextest run --no-tests=pass'
     # `/rs/.config/nextest.toml` is workspace-relative (leading `/`). Required because `rs/` is
@@ -45,7 +58,13 @@ tasks:
     # `implicitInputs` covers only `.moon/*`. Without this, editing the retry policy would not
     # bust this task's cache (stale PASS) and a profile-only PR would not select it under
     # `moon ci --affected`.
-    inputs: ['@group(sources)', '@group(tests)', 'Cargo.toml', '/rs/.config/nextest.toml', '@group(upstreams)']
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - 'Cargo.toml'
+      - '/rs/.config/nextest.toml'
+      - '@group(upstreams)'
+      - '/rs/.cargo/config.toml'
   lint:
     # `--locked` so clippy lints the resolution the PR actually SHIPS. Without it cargo silently
     # re-resolves and rewrites an inconsistent Cargo.lock, and the thirteen lints below would
@@ -63,8 +82,9 @@ tasks:
     # hand-written `dependsOn` (SMA-524) — the parity gate's A1 catches that separately.
     # `repo:affected-smoke` asserts this expansion for every crate (cargo_moon_parity.py A3).
     deps: ['^:build']
-    # The three WORKSPACE-level inputs (SMA-534). `rs/` has no Moon project, so without these a
-    # Cargo.lock-only change — every Dependabot Cargo PR — scheduled no crate task at all.
+    # The four WORKSPACE-level inputs (SMA-534, SMA-594). `rs/` has no Moon project, so without
+    # these a Cargo.lock-only change — every Dependabot Cargo PR — scheduled no crate task
+    # at all.
     # Leading `/` = workspace-relative. Declared here, not per-crate, for the same reason as `deps`.
     #   /rs/Cargo.lock          the resolved dependency versions. The issue's motivating case.
     #   /rs/Cargo.toml          [workspace.dependencies] AND [workspace.lints.{rust,clippy}] — the
@@ -74,13 +94,22 @@ tasks:
     #                           (.moon/tasks.yml:17) and already schedules all thirteen lints. This
     #                           input catches the bump that drifts the two files apart, which
     #                           rust-toolchain.toml's own lockstep comment warns about.
-    # Deliberately NOT on build/test/fmt: `clippy --all-targets` is a superset of
-    # `check --all-targets`, so it already type-checks libs, bins and tests; adding `test` would put
-    # the Docker-gated IAM container suites on every Dependabot PR. Clippy still neither links the
-    # cdylibs nor compiles wasm32 — but that gap is CLOSED for the FFI cdylibs by SMA-546, which puts
-    # these same three workspace inputs on `paigasus-kernel-ts:{build,test}` and
-    # `paigasus-kernel-py:test` instead, since those are the tasks that actually link and compile
-    # them. See `ci/affected-graph/README.md`'s A5 bullet for the guard that keeps it that way.
+    #   /rs/.cargo/config.toml  the *-apple-darwin `-undefined dynamic_lookup` rustflags (SMA-594).
+    #                           The criterion is INFLUENCE, not necessity: those rustflags reach
+    #                           every cargo run whose cwd is inside `rs/` on darwin, clippy
+    #                           included. It is the one entry here that is ALSO on
+    #                           build/build-release/test — see the `build` comment above.
+    # The first three are deliberately not on build/test; `rust-toolchain.toml` is also on
+    # `fmt`, for the reason `fmt`'s own comment gives. `clippy --all-targets` is a
+    # superset of `check --all-targets`, so it already type-checks libs, bins and tests; adding
+    # `test` would put the Docker-gated IAM container suites on every Dependabot PR. Clippy
+    # still neither links the cdylibs nor compiles wasm32 — but that gap is CLOSED for the FFI
+    # cdylibs by SMA-546, which puts these same workspace inputs on
+    # `paigasus-kernel-ts:{build,test}` and `paigasus-kernel-py:test` instead, since those are
+    # the tasks that actually link and compile them. Those three tasks carry FIVE such inputs,
+    # not four: the four listed above plus `/.prototools`, which pins wasm-pack on the ts path
+    # and uv (hence maturin) on the py path.
+    # See `ci/affected-graph/README.md`'s A5 bullet for the guard that keeps it that way.
     inputs:
       - '@group(sources)'
       - '@group(tests)'
@@ -89,6 +118,7 @@ tasks:
       - '/rs/Cargo.lock'
       - '/rs/rust-toolchain.toml'
       - '@group(upstreams)'
+      - '/rs/.cargo/config.toml'
   fmt:
     command: 'cargo fmt --check'
     # SMA-537. `cargo fmt --check` formats EVERY target in the package, but this task keyed on

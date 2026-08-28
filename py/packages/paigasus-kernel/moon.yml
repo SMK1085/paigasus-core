@@ -54,6 +54,12 @@ tasks:
       # (Cargo.toml) change re-keys the guard even without a Rust src diff (cache-input completeness).
       - '/rs/crates/bindings/paigasus-py-bindings/Cargo.toml'
       - '/rs/crates/bindings/paigasus-py-bindings/pyproject.toml'
+      # The hand-written PyO3 stub (SMA-594'). It is the interface contract this test exercises,
+      # and basedpyright reads it INSTEAD of the Rust — but it sits at the crate ROOT, so the
+      # `src/**/*` glob above does not match it. Before this line, editing the stub selected only
+      # repo:actionlint, repo:input-liveness and repo:publish-metadata (all three broad or
+      # packaging gates); the FFI smoke test that exercises those very symbols did not run.
+      - '/rs/crates/bindings/paigasus-py-bindings/paigasus_py_bindings.pyi'
       # Parity corpus (SMA-433): a corpus change must re-run the py replay. This is a task-hash
       # input only — it does NOT make this project affected by a corpus-only edit (see affected-smoke
       # parity-oneway).
@@ -63,7 +69,12 @@ tasks:
       # for the full rationale. `--reinstall-package` forces maturin to relink the cdylib, so this
       # task's result depends on the resolution these files pin. `/.prototools` on THIS path pins
       # `uv` (which drives maturin) rather than wasm-pack — nothing on the py path invokes wasm-pack.
+      #   /rs/.cargo/config.toml  read by maturin's cargo (cwd is inside rs/). maturin injects these
+      #                           link args ITSELF (SMA-578, measured), so the wheel does not NEED
+      #                           them — but the file still influences any darwin build from rs/,
+      #                           which is the criterion for a cache input.
       - '/rs/Cargo.lock'
       - '/rs/Cargo.toml'
       - '/rs/rust-toolchain.toml'
       - '/.prototools'
+      - '/rs/.cargo/config.toml'

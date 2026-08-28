@@ -13,8 +13,8 @@
 # five sound edges as phantom.
 #
 # It also carries A4 (SMA-534), which is about task INPUTS rather than edges: every crate's `lint`
-# must key on the workspace-level files (Cargo.lock, Cargo.toml, rust-toolchain.toml), since `rs/`
-# has no Moon project for a dependency edge to point at. A4 reads moon's RESOLVED `inputFiles`, so
+# must key on the workspace-level files (Cargo.lock, Cargo.toml, rust-toolchain.toml and, since
+# SMA-594, .cargo/config.toml), since `rs/` has no Moon project for a dependency edge to point at. A4 reads moon's RESOLVED `inputFiles`, so
 # it stays inside the "never parse YAML" rule above.
 #
 # usage: cargo_moon_parity.py [--self-test]
@@ -72,7 +72,19 @@ NON_CARGO_PARENTS = {"contracts"}
 # these declared on the inherited lint task a Cargo.lock-only change (every Dependabot Cargo PR)
 # schedules no crate task at all. Paths are workspace-relative, exactly as Moon RESOLVES them:
 # the YAML says `/rs/Cargo.lock`, `moon query projects` reports `rs/Cargo.lock`.
-WORKSPACE_LINT_INPUTS = ("rs/Cargo.lock", "rs/Cargo.toml", "rs/rust-toolchain.toml")
+#
+# SMA-594 adds the fourth. Cargo finds `.cargo/config.toml` by walking up from the WORKING
+# DIRECTORY, and every cargo invocation in this repo runs with cwd inside `rs/`, so the file is
+# read by all of them. It sets `rustflags` for the two *-apple-darwin targets. The criterion for
+# a cache input is "does this influence the output", not "is it strictly required" — which is why
+# it goes on every cargo-from-rs/ task and not only the two that need the flags today. This
+# REVERSES SMA-546's deliberate exclusion; see the design doc's D1 and §3.4 for the argument.
+WORKSPACE_LINT_INPUTS = (
+    "rs/Cargo.lock",
+    "rs/Cargo.toml",
+    "rs/rust-toolchain.toml",
+    "rs/.cargo/config.toml",
+)
 
 # SMA-546 — A5. The tasks that COMPILE the FFI cdylibs live in the ts/py stacks, so A4's
 # per-crate loop cannot reach them: `moon query projects` lists them under their own project ids,
@@ -546,6 +558,19 @@ def check_wrapper_upstream_inputs(projects, root, floor=REQUIRED_WRAPPER_CLOSURE
             # disk — which is why `root` is required rather than defaulted (see the docstring).
             if (root / src / "build.rs").is_file():
                 want.add(f"{src}/build.rs")
+            # SMA-594'. A hand-written .pyi is the interface contract between a PyO3 cdylib and
+            # every Python consumer, and it is what basedpyright reads INSTEAD of the Rust. It
+            # lives at the crate ROOT, so `{src}/src/**/*` does not match it and nothing that
+            # validates it keyed on it. Disk-conditional and globbed, mirroring build.rs above:
+            # conditional so the twelve crates without a stub gain no dead demand, globbed so a
+            # second stub is covered the day it appears rather than needing a hand-maintained list.
+            # Deliberately NOT scoped to py wrappers: a stub at the root of a crate in BOTH
+            # closures — paigasus-kernel is the live candidate — would also be demanded of
+            # paigasus-kernel-ts, which never reads it. That over-approximation is accepted.
+            # A7 asserts CONTAINMENT, so the cost is one extra declared input, not a failure,
+            # and a language guard would need its own fixture to prove it fires.
+            for stub in sorted((root / src).glob("*.pyi")):
+                want.add(f"{src}/{stub.name}")
         for task in sorted(tasks):
             files = (projects[pid].get("task_inputs") or {}).get(task)
             globs = (projects[pid].get("task_input_globs") or {}).get(task)
@@ -653,7 +678,10 @@ def self_test():
 
     A gate whose whole value is catching a silent hole must not be able to pass vacuously.
     """
-    complete_inputs = ["rs/Cargo.lock", "rs/Cargo.toml", "rs/rust-toolchain.toml"]
+    # Derived, never hand-listed: this fixture is what A4's CLEAN row asserts against, so a
+    # hardcoded copy silently breaks every A4 self-test row the day WORKSPACE_LINT_INPUTS grows
+    # (it did, on SMA-594). Deriving it means a new workspace input is covered on day one.
+    complete_inputs = list(WORKSPACE_LINT_INPUTS)
     ok = {
         "a-rs": {
             "source_dir": "rs/crates/libs/a",
@@ -991,6 +1019,30 @@ def self_test():
         if any("rs/crates/libs/kern/build.rs" in row for row in rows):
             failures.append("A7 demanded a build.rs for an upstream that has none on disk")
 
+    # A7-i: the .pyi half (SMA-594'). Same disk-conditional shape as A7-h's build.rs, and it needs
+    # its own tree for the same reason — the `is_file()`/glob branch is only live when a stub
+    # actually exists under an upstream's source_dir.
+    with tempfile.TemporaryDirectory() as tmp:
+        stubbed = Path(tmp)
+        (stubbed / "rs" / "crates" / "bindings" / "nb").mkdir(parents=True)
+        (stubbed / "rs" / "crates" / "bindings" / "nb" / "nb.pyi").write_text("def f() -> int: ...\n")
+        rows = check_wrapper_upstream_inputs(wrap, stubbed, floor=wrap_floor)
+        if not any("inputs omit rs/crates/bindings/nb/nb.pyi" in row for row in rows):
+            failures.append(
+                "A7 did not demand an upstream's .pyi stub that exists on disk — the stub half "
+                "of the check is not asserting anything"
+            )
+        # Demanded of EVERY examined task, not just the first.
+        for task in ("build", "test"):
+            if not any(
+                f"k-ts:{task} inputs omit rs/crates/bindings/nb/nb.pyi" == row for row in rows
+            ):
+                failures.append(f"A7 did not demand nb's .pyi of k-ts:{task}")
+        # An upstream with NO stub must not be demanded one, or every wrapper gains an
+        # unsatisfiable row the day this branch is written wrong.
+        if any(row.endswith(".pyi") and "rs/crates/libs/kern/" in row for row in rows):
+            failures.append("A7 demanded a .pyi for an upstream that has none on disk")
+
     a1, a2, a3 = check(ok, crates)
     if (a1, a2, a3) != ([], [], []):
         failures.append(f"clean fixture reported violations: {a1} {a2} {a3}")
@@ -1045,7 +1097,9 @@ def self_test():
 
     # Fires when a required file is missing from the declared inputs.
     broken = json.loads(json.dumps(ok))
-    broken["a-rs"]["task_inputs"]["lint"] = ["rs/Cargo.lock", "rs/Cargo.toml"]
+    broken["a-rs"]["task_inputs"]["lint"] = [
+        f for f in WORKSPACE_LINT_INPUTS if f != "rs/rust-toolchain.toml"
+    ]
     rows = check_task_inputs(broken, crates, "lint", WORKSPACE_LINT_INPUTS)
     if not rows:
         failures.append("A4 did not fire on a missing workspace lint input")
@@ -1119,9 +1173,7 @@ def self_test():
 
     # Fires when a matched task omits one of the required files.
     broken = json.loads(json.dumps(ffi_ok))
-    broken["paigasus-kernel-ts"]["task_inputs"]["build"] = [
-        "rs/Cargo.lock", "rs/Cargo.toml", "rs/rust-toolchain.toml"
-    ]
+    broken["paigasus-kernel-ts"]["task_inputs"]["build"] = list(WORKSPACE_LINT_INPUTS)
     rows = check_ffi_inputs(broken)
     if not rows:
         failures.append("A5 did not fire on a missing FFI workspace input")
@@ -1349,6 +1401,18 @@ def collect_findings(projects, crates, root):
     """
     a1, a2, a3 = check(projects, crates)
     a5 = check_ffi_inputs(projects)
+    # SMA-594. Derived, never hand-listed, for the same reason `self_test`'s `complete_inputs` is:
+    # these two hints named three files while the checks already demanded four, so a developer who
+    # followed the advice verbatim was left with a still-red gate. `/`-prefixed because that is the
+    # form the YAML `inputs` take (the checks compare the resolved, slash-free form).
+    #
+    # Do NOT extend this to the `a4-fmt` hint below. Every member of these two constants is
+    # WORKSPACE-relative, which is what makes a blanket `/` prefix right. FMT_TASK_INPUTS is mixed:
+    # `rs/rustfmt.toml` is workspace-relative but `Cargo.toml`, `src/**/*` and `tests/**/*` are
+    # PROJECT-relative, so the same one-liner would emit `/Cargo.toml` and `/src/**/*` and send the
+    # reader to paths that do not exist. That hint stays hand-listed on purpose.
+    want_lint_inputs = ", ".join(f"/{f}" for f in WORKSPACE_LINT_INPUTS)
+    want_ffi_inputs = ", ".join(f"/{f}" for f in FFI_TASK_INPUTS)
     findings = [
         ("a1", a1,
              "Cargo dep with NO Moon edge (under-builds — CI stays green while skipping work).\n"
@@ -1367,8 +1431,8 @@ def collect_findings(projects, crates, root):
              "    [workspace.lints] edit or a toolchain drift schedules NOTHING for this crate\n"
              "    (SMA-534).\n"
              "    Fix: the inputs are declared once for ALL crates in .moon/tasks/rust.yml —\n"
-             "    restore them there, not per-crate. Expected: /rs/Cargo.lock, /rs/Cargo.toml,\n"
-             "    /rs/rust-toolchain.toml."),
+             "    restore them there, not per-crate.\n"
+             f"    Expected: {want_lint_inputs}."),
         ("a4-fmt", check_task_inputs(projects, crates, "fmt", FMT_TASK_INPUTS),
              "`fmt` does not key on everything `cargo fmt --check` actually reads, so a\n"
              "    rustfmt.toml edit, a toolchain bump or a misformatted tests/ file schedules\n"
@@ -1380,8 +1444,8 @@ def collect_findings(projects, crates, root):
              "An FFI build task does not key on the workspace-level files, so a dependency bump\n"
              "    replays a CACHED artifact built from a different resolution — and clippy cannot\n"
              "    cover it, because it never links a cdylib and never targets wasm32 (SMA-546).\n"
-             "    Fix: add /rs/Cargo.lock, /rs/Cargo.toml, /rs/rust-toolchain.toml and\n"
-             "    /.prototools to that task's `inputs`. A `not matched by any FFI marker` row\n"
+             f"    Fix: add {want_ffi_inputs}\n"
+             "    to that task's `inputs`. A `not matched by any FFI marker` row\n"
              "    means the opposite — the task stopped looking like a Rust build to A5; either\n"
              "    restore the invocation or update FFI_MARKERS."),
         ("a6", check_upstream_inputs(projects),
@@ -1402,7 +1466,8 @@ def collect_findings(projects, crates, root):
              "    silently stops running on it (SMA-560).\n"
              "    Fix: add the missing entry to that task's `inputs` in the wrapper's own\n"
              "    moon.yml — `/<src_dir>/src/**/*` and `/<src_dir>/Cargo.toml` for every crate in\n"
-             "    its TRANSITIVE dependsOn closure, plus `/<src_dir>/build.rs` where one exists.\n"
+             "    its TRANSITIVE dependsOn closure, plus `/<src_dir>/build.rs` and any\n"
+             "    `/<src_dir>/*.pyi` stub, each where one exists on disk.\n"
              "    Extra inputs beyond the closure are ALLOWED (this is containment, unlike A6).\n"
              "    A `FLOOR:` row means the check itself cannot be trusted — the wrapper is\n"
              "    missing, its closure derivation broke, or its task stopped matching an FFI\n"

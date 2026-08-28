@@ -57,13 +57,32 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   local run. CI has no agent detection, so it never shows there. This is NOT new in proto 0.61.1;
   0.58.1 behaves identically (measured both, SMA-595). To verify those gates locally, `unset
   AI_AGENT CLAUDECODE CLAUDE_CODE_ENTRYPOINT` first — with that, all three pass.
-- `repo:affected-smoke` failed **once** under a concurrent `moon ci` on 2.5.3, aborting at 2.4s
-  against its usual 6–8s (SMA-595). It did not reproduce in four attempts: warm, cold
-  `.moon/cache`, cold `MOON_HOME`, and cold `rs/target` with cargo compiling alongside. An
-  inherited `MOON_BASE` was tested and ruled out (the gate passes with it set). Cause unknown and
-  the gate is otherwise green everywhere. If you see a sub-3s `affected-smoke` failure, it is
-  this — capture the full task output before re-running, because a re-run passes and destroys the
-  evidence.
+- `repo:affected-smoke` has aborted **twice**, both times under a concurrent `moon ci` on 2.5.3,
+  at ~2.4s against its usual 6–8s: once on SMA-595, which captured no output, and once on
+  SMA-592, which captured its output. The two are matched on SYMPTOM SHAPE alone — a sub-3s abort
+  under a concurrent `moon ci` — so nothing proves they are one and the same failure. Neither
+  session reproduced it: four attempts on SMA-595 (warm, cold `.moon/cache`, cold `MOON_HOME`, and
+  cold `rs/target` with cargo compiling alongside), and three more on SMA-592. An inherited
+  `MOON_BASE` was tested and ruled out (the gate passes with it set). The gate is otherwise green
+  everywhere. If you see a sub-3s `affected-smoke` failure, capture the full task output before
+  re-running, because a re-run passes and destroys the evidence.
+  **The mechanism below is measured on the ONE session that captured output (SMA-592), not on
+  both.** In that occurrence the failure is an infrastructure ABORT, not a red verdict: the gate's
+  own nested `moon query projects` dies with `Error: proto-shim:
+  Failed to execute proto for the shimmed command: Permission denied (os error 13)`, writes
+  nothing to stdout, and the reader then raises `JSONDecodeError: Expecting value: line 1 column
+  1`, so `run.sh` prints `FATAL [contracts->proto]: moon query failed` and
+  `== affected-graph guard ABORTED: infrastructure error (rc=2) ==`. So the proximate cause THERE
+  is the **proto shim failing to exec `proto` with EACCES** while a `moon ci` runs concurrently —
+  why the shim is briefly non-executable is still unknown, and SMA-595's four hypotheses above
+  stay ruled out.
+  Two consequences. The gate FAILS SAFE — rc=2 is distinct from rc=1, and it never reports a false
+  green. And the `proto-shim` line is the tell, so grep the captured output for it: if that line
+  is there, the failure is not about the affected graph at all, and re-running the task alone
+  (`moon run repo:affected-smoke --force`) passes in the usual 6s. If it is absent, this entry
+  does not explain your failure — diagnose it on its own terms.
+  The NDJSON entry above is the same root tool, a different symptom; both mean a `moon`/`proto`
+  call inside a gate is the fragile part of an agent-driven local run, never in CI.
 - `cargo nextest` exits non-zero on a workspace with **no tests** — use `--no-tests=pass`.
 - `.github/CODEOWNERS` is Moon-generated — don't hand-edit.
 - `vcs.hooks` is intentionally empty; lefthook will own `.git/hooks` (SMA-371).
@@ -423,6 +442,70 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   is set, and the failure reads as "the reader found nothing" rather than "the flag is invalid".
   That is not hypothetical — it cost a cycle on this very branch, where the first measurement
   read `head`'s status through a pipe and recorded exit 0.
+- The **codegen-drift gate is an inline `ci.yml` step** (`.github/workflows/ci.yml:249-262`), NOT
+  a `repo:*` Moon task — searching `moon.yml` for it finds nothing. That placement is deliberate
+  and load-bearing: the step carries no `if:`, so it runs on EVERY CI run and cannot be
+  deselected, where a `T`-array task would run only when affected and a wrong `inputs` list would
+  switch it off silently. It delegates its freshness to `moon run contracts:generate`, so that
+  task's `inputs` are what make the diff real: they now include `/.prototools` (which pins `buf`
+  itself) and `/py/uv.lock` (which pins the `local:` betterproto2 plugin, run via `uv run
+  --project ../py`), alongside `buf.gen.yaml` which pins the three REMOTE plugins. Before SMA-592
+  the first two were absent, so a generator bump left the hash unchanged, Moon served a cached
+  pass, `buf generate` never ran, and the diff compared the committed output against itself —
+  vacuously green. `.moon/cache` is restored across CI runs (`ci.yml:113-119`), so that was a real
+  CI hole, not a local-only one. `contracts:generate` still declares no `outputs:`; this makes its
+  cache KEY honest, not its output restorable, which is the second reason the drift step stays
+  unconditional. The inputs are pinned to exact equality by `CONTRACTS_GENERATE_INPUTS` in
+  `ci/affected-graph/ci_targets.py` — reachable because `repo:affected-smoke` lists `*/moon.yml`.
+  Cost of the two added inputs, measured on 2.5.3: one `buf generate` is ~0.7s warm, and over
+  `main`'s 163 commits they select it on 32 commits (19%) that no old input would have selected.
+- Two limits on that fix, both measured, neither closed. First, **`repo:input-liveness` cannot see
+  `contracts:generate`.** `ci/affected-graph/task_inputs.py`'s `_repo_tasks` is keyed to
+  `projects.get("repo")` by exact project id, so it liveness-checks `repo:*` tasks and nothing
+  else. If `py/uv.lock` moved, `contracts:generate` would silently stop keying on the betterproto2
+  pin while `CONTRACTS_GENERATE_INPUTS` stayed green — the SMA-553 failure class, on a task the
+  liveness gate cannot reach. Second, the fix is a **CACHE-KEY fix, not an execution fix**:
+  `uv run` executes the installed `py/.venv`, not `py/uv.lock`, and `contracts:generate` declares
+  no `deps:` that syncs `py`. A stale venv can still run a different betterproto2 than the key
+  implies.
+- `rs/.cargo/config.toml` is now an input of every task that runs cargo from `rs/`: all thirteen
+  crates' `build`/`build-release`/`test`/`lint`, the three FFI wrapper tasks, and three `repo:*`
+  gates that shell out to cargo (`repo:parity-corpus-drift`, `repo:observability-drift`,
+  `repo:nats-permissions`). Editing it selects 61 tasks against 3 before — the 52 crate tasks, the
+  3 FFI tasks, and 6 `repo:*` gates (those three, plus `repo:actionlint`, `repo:input-liveness`
+  and `repo:publish-metadata`, which select on everything). **Only 16 of those 61 declarations are
+  asserted**: A4 (via `WORKSPACE_LINT_INPUTS`) covers the thirteen `lint` declarations and A5 (via
+  the `FFI_TASK_INPUTS` splat) the three FFI tasks, because `check_task_inputs` is called for
+  `lint` and `fmt` only. The 39 `build`/`build-release`/`test` declarations and the three gates
+  are declared by hand and asserted by nothing — delete one and CI stays green. It is deliberately
+  NOT on `fmt`: `cargo fmt --check` neither compiles nor links, so rustflags cannot change its result.
+  `repo:wasm-getrandom-free` is excluded for the same kind of reason — it runs `cargo tree`, which
+  resolves the dependency graph and never applies rustflags. This REVERSES SMA-546's deliberate
+  exclusion, which reasoned that CI is Linux and the darwin flags are inert there. Both are true;
+  the criterion changed to "does this file influence the output" rather than "is it strictly
+  required", because `rustflags` affect every darwin build from `rs/`. Note maturin injects the
+  `-undefined dynamic_lookup` args ITSELF (SMA-578), so the py wheel does not NEED the file — it
+  is keyed on it anyway, under the same one rule, which is why `REQUIRED_FFI_TASKS` needs no
+  carve-out.
+- **Nothing enforces that one rule.** A4 covers each crate's `lint`/`fmt`, A5 the three derived FFI
+  tasks, and `repo:input-liveness` proves DECLARED inputs are live — never that NEEDED ones are
+  declared. A future `repo:*` task that runs cargo from `rs/` can omit `rs/.cargo/config.toml` and
+  nothing reds. That is exactly how the three gates named above were missed until SMA-594; assume
+  the next one will be missed the same way, and check by hand when adding a cargo-invoking gate.
+- A hand-written `.pyi` next to a PyO3 crate is an interface contract that basedpyright reads
+  INSTEAD of the Rust, and it lives at the crate ROOT where `src/**/*` does not match it. A7 now
+  demands every `{upstream}/*.pyi` found on disk, disk-conditional exactly like its `build.rs`
+  clause. Do NOT read this as closing SMA-535: it makes a stub edit re-run the FFI smoke test, it
+  does NOT make a stub that disagrees with the Rust fail. That needs a three-set drift gate
+  (`#[pyfunction]` idents × `wrap_pyfunction!` registrations × stub `def` names), which is SMA-535
+  proper and pairs with SMA-536.
+- `moon query tasks --affected` emits each selected task's `deps[]`, and every dep entry carries a
+  `"target"` key of its own. So `grep -o '"target": "[^"]*"'` over the raw JSON counts SCHEDULED
+  upstreams as if they were SELECTIONS — it reported 15 tasks for a `.prototools` edit where the
+  real answer is 12. Parse the JSON and take one target per `tasks[project][task]`. This matters
+  because scheduled-vs-selected is the exact distinction every affectedness measurement in this
+  repo turns on; an extraction that conflates the two cannot measure it. It inflated this branch's
+  own spec table before the numbers were re-derived.
 
 ## Workflow
 

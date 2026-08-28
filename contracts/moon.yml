@@ -7,11 +7,23 @@ tasks:
   generate:
     command: 'buf generate'
     toolchain: 'system'
+    # SMA-592. The three REMOTE plugin versions live in buf.gen.yaml, already listed below. The
+    # other two generators do not, and without them this task's cache key is a lie:
+    #   /.prototools   pins buf ITSELF (1.70.0). buf's own version changes its output.
+    #   /py/uv.lock    pins protoc-gen-python_betterproto2 — the `local:` plugin in buf.gen.yaml
+    #                  is run through `uv run --project ../py`, so the py workspace lock is what
+    #                  selects the compiler version.
+    # This matters because ci.yml:249-262's codegen-drift gate DELEGATES its freshness to this
+    # task: it runs `moon run contracts:generate` and diffs. On a cache hit buf never runs, and
+    # the diff compares the committed output against itself. `.moon/cache` is restored across CI
+    # runs (ci.yml:115-121), so that vacuous pass happens in CI, not just locally.
     inputs:
       - 'proto/**/*'
       - 'buf.yaml'
       - 'buf.gen.yaml'
       - 'buf.lock'
+      - '/.prototools'
+      - '/py/uv.lock'
   lint:
     command: 'buf lint'
     toolchain: 'system'
