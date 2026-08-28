@@ -32,7 +32,7 @@ jobs:
       # individually guarded on this step's output instead. Left unconfigured, this makes the
       # whole job skip cleanly (green) on every push to main rather than failing forever.
       #
-      # Keyed on the App ID rather than the private key purely because an ID is not itself a
+      # Keyed on the App identifier rather than the private key purely because it is not a
       # credential. Both are required by the mint step below, so a HALF-configured App fails
       # there instead of skipping — which is correct: that is a real misconfiguration, not a
       # "not set up yet".
@@ -72,7 +72,13 @@ jobs:
         if: steps.preflight.outputs.configured == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
-          app-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
+          # `client-id`, not the deprecated `app-id` (v3.2.0 warns on the latter).
+          # PAIGASUS_BOT_APP_ID holds the App's CLIENT ID, not the numeric App ID — the secret
+          # predates this input's rename and is deliberately left named as it is, since
+          # rotating a secret name costs more than this comment. Do not "correct" it by
+          # swapping in the numeric App ID: the value here is the Client ID, and the secret
+          # NAME is the only stale thing about it.
+          client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
           private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
