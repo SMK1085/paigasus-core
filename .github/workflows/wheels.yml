@@ -1,0 +1,695 @@
+# SPDX-License-Identifier: Apache-2.0
+name: wheels
+
+# Builds the PyO3 extension wheels for paigasus-py-bindings, builds and verifies the sdist
+# from source on three platforms, and builds the pure-Python paigasus-kernel wrapper. NOTHING
+# here publishes: SMA-579's gated `release` job consumes this workflow via `uses:` and does
+# the uploading.
+#
+# DECISION (SMA-578 D6): this workflow must NEVER declare `secrets:` or `id-token: write`.
+# It carries a `pull_request` trigger, and same-repo PRs receive repository secrets — putting
+# a registry credential here is the exfiltration hazard SMA-407 §7 review M2 exists to
+# prevent. repo:publish-metadata asserts this.
+#
+# TWO RULES that govern every assertion below:
+#   1. Exact equality, never a substring. prebuild.yml's `lipo -archs` lesson: `grep -q x86_64`
+#      passes for a universal binary, i.e. is vacuously green in precisely the case worth
+#      catching. If an assertion reds on a wheel that is actually CORRECT, re-pin the constant
+#      to what was measured — never loosen the comparison.
+#   2. A tag is not a binary. Platform tags come from the requested compatibility and the
+#      deployment target, not from the artifact, so a tag assertion alone cannot catch a wheel
+#      that installs cleanly and then fails at import. Hence the Mach-O / GLIBC / import checks.
+on:
+  workflow_call:
+
+  workflow_dispatch:
+
+  # PRE-merge verification of the narrow set of inputs that can break a wheel build.
+  # `rs/**` is DELIBERATELY absent, for the reason prebuild.yml records: most PRs here touch
+  # it, and a macOS + Windows matrix on every one of them would raise the bill. Not a required
+  # check (the `Protect main` ruleset requires only `moon ci`), so a skipped run cannot wedge
+  # a merge.
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/wheels.yml'
+      - '.prototools'
+      # The vendored plugin manifest, not just the version pin: `proto install maturin`
+      # resolves the download URL and archive layout from THIS file, so an edit here can
+      # break every leg while .prototools is untouched. Pointedly, the documented fallback
+      # for the plugin's unverified Windows exe-path is an edit to this file — which
+      # without this entry would not run the matrix that proves the fix. Mirrors moon.yml's
+      # release-parity task, which lists .prototools and .proto/plugins/release-plz.toml.
+      - '.proto/plugins/maturin.toml'
+      - '.moon/**'
+      - 'rs/.cargo/config.toml'
+      - 'rs/crates/bindings/paigasus-py-bindings/pyproject.toml'
+      - 'rs/crates/bindings/paigasus-py-bindings/Cargo.toml'
+      - 'py/packages/paigasus-kernel/pyproject.toml'
+
+  # POST-merge verification of Rust changes — where the broad coverage lives.
+  push:
+    branches:
+      - main
+    paths:
+      - 'rs/**'
+      - '.github/workflows/wheels.yml'
+      - '.prototools'
+      - '.proto/plugins/maturin.toml'
+      - '.moon/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  # `event_name` is in the GROUP so a manual dispatch cannot cancel a running push-to-main job
+  # — without it both resolve to refs/heads/main and share a group (prebuild.yml's precedent).
+  group: wheels-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  # Never cancel a push run: its actions/cache post-step save is the only writer to main's
+  # cache scope for this workflow, and a cancelled job does not run it.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+jobs:
+  build:
+    name: wheel ${{ matrix.platform }}${{ matrix.extra_platform && format(' + {0}', matrix.extra_platform) || '' }}
+    runs-on: ${{ matrix.runner }}
+    # The darwin leg does two full --release builds; 30 was sized for one.
+    timeout-minutes: ${{ matrix.extra_target && 45 || 30 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both apple triples in ONE macos-latest job: the macOS SDK ships both slices and
+          # merging drops a duplicated toolchain setup (prebuild.yml's precedent, SMA-520).
+          #
+          # `rustup_target` is a SEPARATE key from `target`, and today it is always equal to it.
+          # It is kept because the two answer different questions, and an earlier revision got
+          # that wrong in a way CI caught: the gnu legs briefly carried a `.2.17` glibc-floor
+          # suffix on `target`, on the assumption that maturin took cargo-zigbuild's suffixed
+          # -triple form. It does not — MEASURED on the first CI run of this workflow:
+          #   error loading target specification: could not find specification for target
+          #   "x86_64-unknown-linux-gnu.2.17"
+          # maturin passes --target straight to `cargo metadata`/rustc, which knows only real
+          # triples. The glibc floor comes from `--zig` + `--compatibility` instead (maturin's
+          # own --help: "--zig … Default to manylinux2014/manylinux_2_17 if you do not specify
+          # a --compatibility"). So `target` is always a real triple, and if a future leg ever
+          # does need a decorated build target, this key is already where the bare one lives.
+          - { platform: macosx-arm64,      target: aarch64-apple-darwin,           rustup_target: aarch64-apple-darwin,      runner: macos-latest,     zig: false, expect_tag: 'macosx_11_0_arm64', extra_platform: macosx-x86_64, extra_target: x86_64-apple-darwin, extra_expect_tag: 'macosx_10_12_x86_64' }
+          - { platform: win-amd64,         target: x86_64-pc-windows-msvc,         rustup_target: x86_64-pc-windows-msvc,    runner: windows-latest,   zig: false, expect_tag: 'win_amd64' }
+          # ALL FOUR linux legs use zig, not just musl — the deliberate divergence from
+          # prebuild.yml. ubuntu-latest ships glibc 2.39, so a NATIVE build tags
+          # manylinux_2_39, a wheel almost no consumer can install. The floor comes from
+          # `--zig` together with `--compatibility`, passed as flags: maturin's own --help says
+          # "--zig … Default to manylinux2014/manylinux_2_17 if you do not specify a
+          # --compatibility". It does NOT come from a decorated target triple — see the
+          # measured failure recorded above the darwin row.
+          # expect_glibc is MEASURED per row and the two arches legitimately differ — do not
+          # "harmonise" them. x86_64 tops out at GLIBC_2.14 (its base is GLIBC_2.2.5; 2.14 is
+          # memcpy's versioned symbol), while aarch64 reaches 2.17. A wheel needing LESS than
+          # its manylinux_2_17 tag promises is correct: the tag declares a minimum platform, so
+          # requiring less is installable everywhere the tag allows. Both values come from the
+          # first green run of this workflow, not from a guess.
+          - { platform: manylinux-x86_64,  target: x86_64-unknown-linux-gnu,       rustup_target: x86_64-unknown-linux-gnu,  runner: ubuntu-latest,    zig: true, compat: manylinux2014, expect_tag: 'manylinux_2_17_x86_64.manylinux2014_x86_64', expect_glibc: 'GLIBC_2.14' }
+          # ubuntu-24.04-arm is kept for this leg specifically so that ONE aarch64 wheel is
+          # actually EXECUTED rather than merely inspected — otherwise that arch family, three
+          # of the seven wheels, has no runtime verification at all.
+          - { platform: manylinux-aarch64, target: aarch64-unknown-linux-gnu,      rustup_target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, zig: true, compat: manylinux2014, expect_tag: 'manylinux_2_17_aarch64.manylinux2014_aarch64', expect_glibc: 'GLIBC_2.17' }
+          # `expect_glibc: ''` is a SENTINEL, not an omission: it is what tells the symbol-version
+          # step to demand that these cross-built .so files reference NO glibc versioned symbol
+          # at all. Deleting the key would read as "no expectation" to a future editor while
+          # behaving identically — keep it written out.
+          - { platform: musllinux-x86_64,  target: x86_64-unknown-linux-musl,      rustup_target: x86_64-unknown-linux-musl, runner: ubuntu-latest,    zig: true, compat: musllinux_1_2, expect_tag: 'musllinux_1_2_x86_64', expect_glibc: '' }
+          - { platform: musllinux-aarch64, target: aarch64-unknown-linux-musl,     rustup_target: aarch64-unknown-linux-musl, runner: ubuntu-latest,   zig: true, compat: musllinux_1_2, expect_tag: 'musllinux_1_2_aarch64', expect_glibc: '' }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install Moon-managed toolchains
+        run: moon setup
+
+      # .prototools pins maturin 1.9.6; this materializes the shim so a bare `maturin` resolves.
+      - name: Install pinned maturin
+        run: proto install maturin
+
+      # Pinned so every leg has the SAME `python` on PATH, at a version that can install a
+      # cp312-abi3 wheel: the runner images' default interpreter differs per OS and moves
+      # without notice, and `python3` is not reliably present on the Windows image at all.
+      #
+      # MUST STAY AFTER setup-toolchain. $GITHUB_PATH PREPENDS, so the last writer wins, and
+      # setup-toolchain puts ~/.proto/shims in front of everything it follows. There IS a
+      # `python` proto shim and .prototools does NOT pin python, so a bare `python` resolving
+      # through that shim fails `proto::detect::failed` on the fresh ~/.proto that
+      # `cache: false` guarantees — the exact failure .prototools:16-24 records for node/pnpm/uv.
+      # It would pass locally, where a global ~/.proto/.prototools masks it. Ordering this step
+      # last is what makes the pin real; nothing here needs Python before this point.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Cache Rust (cargo + target)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rs/target
+          # `wheels-` prefix + the `abi3` literal are load-bearing: actions/cache SKIPS its
+          # post-job save on an exact primary-key hit, so reusing prebuild.yml's key shape
+          # would mean this workflow restores prebuild's cache and never saves its own —
+          # cold rebuilds forever. Precedent: ci.yml's `-line-tables-only-` segment.
+          key: wheels-rust-${{ runner.os }}-${{ matrix.platform }}-abi3-${{ hashFiles('rs/rust-toolchain.toml') }}-${{ hashFiles('rs/Cargo.lock') }}
+          restore-keys: |
+            wheels-rust-${{ runner.os }}-${{ matrix.platform }}-abi3-${{ hashFiles('rs/rust-toolchain.toml') }}-
+
+      # Run from rs/ so rust-toolchain.toml's override selects the pinned 1.95.0 rather than
+      # the runner default (prebuild.yml's lesson). `matrix.extra_target` expands to nothing on
+      # the five single-target legs; on the darwin leg it needs no bare-triple twin because no
+      # apple target carries a glibc suffix.
+      - name: Add Rust target(s) (pinned toolchain)
+        working-directory: rs
+        run: rustup target add ${{ matrix.rustup_target }} ${{ matrix.extra_target }}
+
+      # maturin's --zig discovers zig via `python3 -m ziglang`; the ziglang wheel is the whole
+      # dependency (unlike napi's `-x`, maturin embeds cargo-zigbuild as a library, so no
+      # `cargo install cargo-zigbuild` is needed here).
+      - name: Set up zig (Linux cross-compile)
+        if: ${{ matrix.zig }}
+        run: python -m pip install ziglang
+
+      # Set ONLY on the musl legs, and via $GITHUB_ENV rather than a step-level
+      # `env: RUSTFLAGS: ${{ … || '' }}`. A set-but-EMPTY RUSTFLAGS still outranks
+      # `target.<triple>.rustflags` in cargo's precedence order, which would silently suppress
+      # rs/.cargo/config.toml's `-undefined dynamic_lookup` flags on the darwin leg.
+      - name: Allow a dynamic CRT (musl legs)
+        if: ${{ contains(matrix.target, 'musl') }}
+        shell: bash
+        run: echo 'RUSTFLAGS=-C target-feature=-crt-static' >> "$GITHUB_ENV"
+
+      # --compatibility is passed EXPLICITLY so maturin's built-in auditwheel errors on a
+      # mismatch rather than silently emitting a `linux_*` tag that PyPI rejects.
+      - name: Build the wheel
+        working-directory: rs
+        shell: bash
+        run: |
+          maturin build --release \
+            -m crates/bindings/paigasus-py-bindings/Cargo.toml \
+            --target ${{ matrix.target }} \
+            ${{ matrix.zig && '--zig' || '' }} \
+            ${{ matrix.compat && format('--compatibility {0}', matrix.compat) || '' }} \
+            --out ../dist
+
+      # Exact copy of the step above with only --target changed. No --zig: darwin never
+      # cross-compiles via zig, and on a macOS host no cross flag is needed for either slice.
+      - name: Build the second darwin wheel
+        if: ${{ matrix.extra_target }}
+        working-directory: rs
+        shell: bash
+        run: |
+          maturin build --release \
+            -m crates/bindings/paigasus-py-bindings/Cargo.toml \
+            --target ${{ matrix.extra_target }} \
+            --out ../dist
+
+      # The platform tag is a compressed SET (`manylinux_2_17_x86_64.manylinux2014_x86_64`), so
+      # "equals the expected string" has no single answer: split on `.` and compare SETS. The
+      # step also EXPORTS the one wheel it matched, so every later step names an exact file
+      # instead of re-globbing a tag that contains dots — a glob whose miss would otherwise be
+      # absorbed by a fallback and quietly test the wrong artifact.
+      - name: Assert the wheel's tag set
+        id: tag_set
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - "${{ matrix.expect_tag }}" <<'PY'
+          import os, pathlib, sys
+
+          want = set(sys.argv[1].split("."))
+          wheels = sorted(pathlib.Path("dist").glob("*.whl"))
+          hits = [w for w in wheels if set(w.stem.split("-")[-1].split(".")) == want]
+          if len(hits) != 1:
+              print(
+                  f"FAIL: expected exactly one wheel with tag set {sorted(want)}, matched "
+                  f"{[w.name for w in hits]}; dist/ holds {[w.name for w in wheels]}",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          whl = hits[0]
+          parts = whl.stem.split("-")
+          if parts[-3:-1] != ["cp312", "abi3"]:
+              print(f"FAIL: not a cp312-abi3 wheel: {whl.name}", file=sys.stderr)
+              raise SystemExit(1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"wheel=dist/{whl.name}\n")
+          print(f"OK: {whl.name}")
+          PY
+
+      - name: Assert the second darwin wheel's tag set
+        id: tag_set_extra
+        if: ${{ matrix.extra_target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - "${{ matrix.extra_expect_tag }}" <<'PY'
+          import os, pathlib, sys
+
+          want = set(sys.argv[1].split("."))
+          wheels = sorted(pathlib.Path("dist").glob("*.whl"))
+          hits = [w for w in wheels if set(w.stem.split("-")[-1].split(".")) == want]
+          if len(hits) != 1:
+              print(
+                  f"FAIL: expected exactly one wheel with tag set {sorted(want)}, matched "
+                  f"{[w.name for w in hits]}; dist/ holds {[w.name for w in wheels]}",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          whl = hits[0]
+          parts = whl.stem.split("-")
+          if parts[-3:-1] != ["cp312", "abi3"]:
+              print(f"FAIL: not a cp312-abi3 wheel: {whl.name}", file=sys.stderr)
+              raise SystemExit(1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"wheel=dist/{whl.name}\n")
+          print(f"OK: {whl.name}")
+          PY
+
+      # Nothing in this workflow EXECUTES the cross-built x86_64 slice, so without this the
+      # only evidence about it is its own filename. Exact equality, NOT a substring match:
+      # `lipo -archs` prints "x86_64 arm64" for a universal binary, so `grep -q x86_64` would
+      # pass for a fat file — vacuously green in precisely the case worth catching.
+      - name: Assert Mach-O arch and minimum macOS (darwin only)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          for whl in dist/*.whl; do
+            rm -rf "${work:?}"/*
+            unzip -q "$whl" -d "$work"
+            so="$(find "$work" -name '*.abi3.so' -print -quit)"
+            [ -n "$so" ] || { echo "::error::$whl contains no *.abi3.so"; unzip -l "$whl"; exit 1; }
+            archs="$(lipo -archs "$so")"
+            echo "$whl archs: [$archs]"
+            case "$whl" in
+              *arm64*)
+                [ "$archs" = "arm64" ] || { echo "::error::$whl is not pure arm64: [$archs]"; exit 1; }
+                # The arm64 slice needs its deployment target checked too, for the same reason
+                # the x86_64 one does: the wheel is TAGGED macosx_11_0_arm64, and a tag is not a
+                # binary. If the SDK ever raised `minos` above 11.0 the loader would reject the
+                # wheel on macOS 11 while the filename still promised it. arm64 emits
+                # LC_BUILD_VERSION (whose field is `minos`), NOT the legacy LC_VERSION_MIN_MACOSX
+                # the x86_64 branch parses — so it needs its own parse, not a shared one.
+                otool -l "$so" | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+                minos="$(otool -l "$so" | awk '/LC_BUILD_VERSION/{f=1} f&&/^ *minos/{print $2; exit}')"
+                [ -n "$minos" ] || { echo "::error::could not read LC_BUILD_VERSION minos from $so"; exit 1; }
+                [ "$minos" = "11.0" ] || { echo "::error::arm64 minimum macOS is [$minos], but the wheel is tagged macosx_11_0 — re-pin this constant if [$minos] is correct, never relax the check"; exit 1; }
+                echo "darwin-arm64 minimum macOS: [$minos] — agrees with the tag"
+                ;;
+              *x86_64*)
+                [ "$archs" = "x86_64" ] || { echo "::error::$whl is not pure x86_64: [$archs]"; exit 1; }
+                # BOTH load commands must be matched: x86_64 emits the legacy
+                # LC_VERSION_MIN_MACOSX while arm64 emits LC_BUILD_VERSION. Grepping only the
+                # latter prints nothing at all for the x64 binary — the cross-built one.
+                otool -l "$so" | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+                min="$(otool -l "$so" | awk '/LC_VERSION_MIN_MACOSX/{getline; getline; print $2; exit}')"
+                # A cross-built slice could otherwise inherit the HOST SDK's floor and silently
+                # drop macOS 10.13-10.15 Intel users while the tag still reads 10_12.
+                [ "$min" = "10.12" ] || { echo "::error::x86_64 minimum macOS is [$min], but the wheel is tagged 10_12"; exit 1; }
+                echo "darwin-x86_64 minimum macOS: [$min] — agrees with the tag"
+                ;;
+              *)
+                echo "::error::unclassified darwin wheel: $whl"; exit 1
+                ;;
+            esac
+          done
+
+      # An ELF-CLASS check reports only the machine type: a wheel tagged _2_17 whose .so needs
+      # GLIBC_2.34 would pass one, install cleanly, and fail at import. Runs on ALL FOUR linux
+      # legs, with the expectation carried per matrix row in `expect_glibc`:
+      #   - manylinux: the exact max versioned symbol the tag promises (`GLIBC_2.17`);
+      #   - musllinux: the EMPTY string. A musl-linked .so must reference NO `GLIBC_` versioned
+      #     symbol at all, so any output at all means the wheel is mis-tagged or was linked
+      #     against glibc. Spec §5.4/§12 promise the musl wheels this check, and it is the ONLY
+      #     binary evidence either of them gets: both are cross-built and neither is executed
+      #     anywhere in this workflow.
+      #
+      # `readelf`, not `objdump`: BOTH musl legs run on ubuntu-latest (x86_64) and one of them
+      # carries an aarch64 .so. readelf parses ELF directly instead of through BFD, so it reads
+      # a foreign-arch object; Ubuntu's objdump is configured for x86 targets only and would
+      # answer "file format not recognized" — a hard error rather than a finding. The manylinux
+      # legs use the same tool so there is one code path, not two.
+      - name: Assert max GLIBC symbol version (linux legs)
+        if: ${{ startsWith(matrix.platform, 'manylinux') || startsWith(matrix.platform, 'musllinux') }}
+        shell: bash
+        env:
+          WHEEL: ${{ steps.tag_set.outputs.wheel }}
+          EXPECT: ${{ matrix.expect_glibc }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          unzip -q "$WHEEL" -d "$work"
+          so="$(find "$work" -name '*.abi3.so' -print -quit)"
+          [ -n "$so" ] || { echo "::error::$WHEEL contains no *.abi3.so"; exit 1; }
+          syms="$(readelf --dyn-syms -W "$so")"
+          # The trailing `|| true` is load-bearing and is NOT a swallowed failure: grep exits 1
+          # on NO MATCH, which under `pipefail` would abort this step on exactly the musl
+          # PASSING case. The verdict is taken from the captured value below instead, so a musl
+          # wheel that DOES carry GLIBC symbols still reds.
+          max="$(printf '%s\n' "$syms" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -V -u | tail -1 || true)"
+          echo "max glibc symbol required by $WHEEL: [$max] (expected [$EXPECT])"
+          if [ "$max" != "$EXPECT" ]; then
+            if [ -z "$EXPECT" ]; then
+              echo "::error::$WHEEL is tagged musllinux but its .so requires glibc versioned symbols (max [$max]) — mis-tagged, or linked against glibc"
+              printf '%s\n' "$syms" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -V -u || true
+            else
+              # Exact equality both ways, on purpose. A max ABOVE the pinned floor is a broken
+              # wheel; a max BELOW it is a safe wheel whose floor moved, and the constant must be
+              # RE-PINNED to the measured value rather than the check relaxed to an inequality.
+              highest="$(printf '%s\n%s\n' "$max" "$EXPECT" | sort -V | tail -1)"
+              if [ "$highest" = "$EXPECT" ]; then
+                echo "::error::wheel needs only [$max], below the pinned [$EXPECT] — safe, but re-pin matrix.expect_glibc to [$max]"
+              else
+                echo "::error::wheel is tagged manylinux_2_17 but needs [$max]"
+              fi
+            fi
+            exit 1
+          fi
+          if [ -z "$EXPECT" ]; then
+            echo "OK: no GLIBC_ versioned symbols — consistent with the musllinux tag"
+          fi
+
+      # Only on legs whose arch the runner can EXECUTE: macosx-arm64, win-amd64,
+      # manylinux-x86_64, manylinux-aarch64. The three cross-built wheels (the darwin x86_64
+      # slice and both musl wheels) are covered by the binary and tag-set assertions instead.
+      - name: Install into a clean venv, import and call
+        if: ${{ !startsWith(matrix.platform, 'musllinux') }}
+        shell: bash
+        env:
+          WHEEL: ${{ steps.tag_set.outputs.wheel }}
+        run: |
+          set -euo pipefail
+          venv=".smoke-venv"
+          rm -rf "$venv"
+          python -m venv "$venv"
+          # Windows lays a venv out as Scripts/, POSIX as bin/. Probe for the interpreter and
+          # FAIL LOUDLY when neither exists — a smoke test that quietly does nothing is the one
+          # outcome this step must never produce.
+          if [ -f "$venv/bin/python" ]; then
+            vpy="$venv/bin/python"
+          elif [ -f "$venv/Scripts/python.exe" ]; then
+            vpy="$venv/Scripts/python.exe"
+          else
+            echo "::error::no interpreter under $venv"
+            ls -R "$venv"
+            exit 1
+          fi
+          "$vpy" -m pip install --no-index --disable-pip-version-check "$WHEEL"
+          # Exercises real kernel logic, not just the loader: the PRN below is vector 0 of
+          # rs/crates/libs/paigasus-kernel-parity/vectors/prn_canonical.json, whose `canonical`
+          # equals its `input`.
+          "$vpy" - <<'PY'
+          import paigasus_py_bindings as k
+
+          assert k.sum_as_string(2, 3) == "5", k.sum_as_string(2, 3)
+          p = "prn:pgs:iam:::organization/0190a1e5-0000-7000-8000-000000000000"
+          assert k.prn_canonicalize(p) == p, k.prn_canonicalize(p)
+          print("FFI load + call OK")
+          PY
+
+      # The motivating defect (SMA-578 §1) — an 88-byte METADATA — was measured on the WHEEL,
+      # and maturin derives wheel METADATA from [project] through a different code path than
+      # the sdist's PKG-INFO. Every wheel in dist/ is checked, not just the first.
+      - name: Assert wheel METADATA is complete
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import email.parser, glob, sys, zipfile
+
+          # PARSE the headers; do not substring-search the raw text. METADATA is an RFC 822
+          # document whose body is the rendered README, so `"Summary:" in text` is satisfied by
+          # a README that merely CONTAINS that word, and it accepts a present-but-empty header
+          # too. Either way the check passes while the field it names is missing — the same
+          # vacuity the tag assertions above are written to avoid.
+          REQUIRED = ("Summary", "License-Expression", "Description-Content-Type", "Classifier")
+
+          wheels = sorted(glob.glob("dist/*.whl"))
+          if not wheels:
+              print("FAIL: dist/ holds no wheels", file=sys.stderr)
+              raise SystemExit(1)
+          for whl in wheels:
+              zf = zipfile.ZipFile(whl)
+              names = zf.namelist()
+              meta = next(n for n in names if n.endswith(".dist-info/METADATA"))
+              text = zf.read(meta).decode("utf-8")
+              # headersonly stops at the blank line, so the README body cannot contribute.
+              msg = email.parser.Parser().parsestr(text, headersonly=True)
+              for field in REQUIRED:
+                  values = [v.strip() for v in msg.get_all(field) or []]
+                  if not any(values):
+                      print(f"FAIL: {whl} METADATA has no non-empty {field}\n"
+                            f"      headers present: {sorted(set(msg.keys()))}", file=sys.stderr)
+                      raise SystemExit(1)
+              if not any("/licenses/LICENSE" in n for n in names):
+                  print(f"FAIL: no license file in {whl}: {names}", file=sys.stderr)
+                  raise SystemExit(1)
+              print(f"OK: {whl} METADATA complete "
+                    f"({len(text)} bytes, {len(msg.get_all('Classifier') or [])} classifiers)")
+          PY
+
+      # One wheel per artifact: both darwin wheels land in the same dist/, so a `dist/*.whl`
+      # path here would sweep them both under the arm64 name. The paths come from the tag-set
+      # steps, which resolved an exact filename.
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: ${{ steps.tag_set.outputs.wheel }}
+          if-no-files-found: error
+
+      - name: Upload second darwin wheel
+        if: ${{ matrix.extra_platform }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wheel-${{ matrix.extra_platform }}
+          path: ${{ steps.tag_set_extra.outputs.wheel }}
+          if-no-files-found: error
+
+  sdist:
+    name: build sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install Moon-managed toolchains
+        run: moon setup
+
+      - name: Install pinned maturin
+        run: proto install maturin
+
+      - name: Build the sdist
+        working-directory: rs
+        run: maturin sdist -m crates/bindings/paigasus-py-bindings/Cargo.toml --out ../dist
+
+      # The `include` allowlist in the crate's Cargo.toml is what keeps moon.yml out
+      # (MEASURED: without it the sdist ships it). Checks 1d/2b/2c in
+      # repo:publish-metadata do NOT reach this crate — it is `publish = false` — so this
+      # assertion is the only thing holding the allowlist honest.
+      - name: Assert the sdist ships nothing repo-internal
+        run: |
+          set -euo pipefail
+          listing="$(tar tzf dist/*.tar.gz)"
+          echo "$listing"
+          if printf '%s\n' "$listing" | grep -q 'moon\.yml'; then
+            echo "::error::sdist ships moon.yml — the Cargo include allowlist has regressed"; exit 1
+          fi
+          # README.md and LICENSE are anchored on the CRATE PATH, not on their basename. The
+          # sdist vendors paigasus-kernel, which ships its OWN README.md and LICENSE, so a
+          # basename grep matched those and passed even with the bindings crate's entries
+          # deleted from the `include` allowlist — vacuous with respect to the very regression
+          # this step exists to catch. pyproject.toml and Cargo.lock stay on the basename:
+          # maturin relocates them to the ARCHIVE ROOT (§14 answer 1), and no vendored crate
+          # contributes a competing copy.
+          #
+          # MEASURED 2026-08-28 (maturin 1.9.6, both entries deleted from `include` and the
+          # sdist rebuilt): the crate-path LICENSE DISAPPEARS, so that anchor binds the
+          # allowlist. The crate-path README.md SURVIVES — cargo infers `readme = "README.md"`
+          # from the file's presence and packages it regardless of `include` — so that anchor
+          # is not allowlist evidence; what it does assert is that the BINDINGS' own README
+          # shipped rather than only the vendored kernel's, which the basename form could not
+          # tell apart.
+          for required in \
+            crates/bindings/paigasus-py-bindings/README.md \
+            crates/bindings/paigasus-py-bindings/LICENSE \
+            pyproject.toml \
+            Cargo.lock; do
+            printf '%s\n' "$listing" | grep -q "/$required$" \
+              || { echo "::error::sdist is missing $required"; exit 1; }
+          done
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  sdist-verify:
+    name: verify sdist on ${{ matrix.runner }}${{ matrix.msrv && ' (MSRV 1.95)' || '' }}
+    needs: sdist
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS is THE control for SMA-578 §2: it is the only platform where the
+          # -undefined dynamic_lookup question exists at all. A Linux-only verification
+          # would be vacuous with respect to the claim that retired the "no sdist" rule.
+          - { runner: macos-latest, msrv: false }
+          - { runner: windows-latest, msrv: false }
+          - { runner: ubuntu-latest, msrv: false }
+          # The sdist ships NO rust-toolchain.toml, so a consumer builds with whatever
+          # rustc they have. This leg proves the advertised MSRV is real.
+          - { runner: ubuntu-latest, msrv: true }
+    steps:
+      - name: Download the sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sdist
+          path: dist
+
+      # This job has NO moonrepo/setup-toolchain, so Task 4's "setup-python MUST STAY AFTER
+      # setup-toolchain" ordering constraint does not bind here — there is no ~/.proto/shims
+      # write to race against. It still needs a PINNED interpreter: this job sets up no
+      # toolchain of any kind, and wheels.yml:114-116 already documents that the runner
+      # images' default Python moves without notice and that `python3` specifically is not
+      # reliably present on the Windows image. The distribution also declares
+      # `requires-python = ">=3.12"`, so an unpinned default could be too old even where one
+      # exists. Same action/SHA/version as the `build` job's "Set up Python 3.12" step.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # No `actions/checkout` in this job on purpose: the sdist ships no rust-toolchain.toml
+      # (MEASURED: its Cargo `include` allowlist doesn't list it). The real insulation isn't
+      # the missing checkout, though — `pip install <local-sdist>` uses pip's build isolation,
+      # which unpacks the sdist and runs the build entirely under the OS temp root (MEASURED
+      # locally: `/private/var/.../T/pip-req-build-*`), a directory tree that is not an
+      # ancestor or descendant of $GITHUB_WORKSPACE. So rustup's upward directory walk from
+      # that build dir would never reach a checked-out rust-toolchain.toml even if this job
+      # did add a checkout step — `rustup default` below stays authoritative either way. The
+      # checkout is omitted because this job simply doesn't need repo source, not as a load-
+      # bearing MSRV precaution.
+      - name: Use rustc at the declared MSRV
+        if: ${{ matrix.msrv }}
+        run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
+
+      - name: Install from source into a clean venv, import and call
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv venv
+          # Windows lays a venv out as Scripts/, POSIX as bin/. Probe for the interpreter and
+          # FAIL LOUDLY when neither exists — a smoke test that quietly does nothing is the
+          # one outcome this step must never produce (Task 4's precedent for this exact trap).
+          if [ -f venv/bin/python ]; then
+            vpy="venv/bin/python"
+            vpip="venv/bin/pip"
+          elif [ -f venv/Scripts/python.exe ]; then
+            vpy="venv/Scripts/python.exe"
+            vpip="venv/Scripts/pip.exe"
+          else
+            echo "::error::no interpreter under venv"
+            ls -R venv
+            exit 1
+          fi
+          # NOT --no-binary :all: — that forces source builds of BUILD dependencies too,
+          # maturin included. Installing a local sdist never consults a wheel for the
+          # package itself, so the plain form already proves the source build.
+          "$vpip" install dist/*.tar.gz
+          # Exercises real kernel logic, not just the loader: same assertion Task 4 Step 7
+          # settled on. The PRN below is vector 0 of
+          # rs/crates/libs/paigasus-kernel-parity/vectors/prn_canonical.json, whose
+          # `canonical` equals its `input`.
+          "$vpy" - <<'PY'
+          import paigasus_py_bindings as k
+
+          assert k.sum_as_string(2, 3) == "5", k.sum_as_string(2, 3)
+          p = "prn:pgs:iam:::organization/0190a1e5-0000-7000-8000-000000000000"
+          assert k.prn_canonicalize(p) == p, k.prn_canonicalize(p)
+          print("sdist source build + FFI call OK")
+          PY
+
+  face:
+    name: build paigasus-kernel (pure python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install Moon-managed toolchains
+        run: moon setup
+
+      - name: Build the wrapper distribution
+        working-directory: py
+        run: uv build --package paigasus-kernel --out-dir ../dist
+
+      # [tool.uv.sources] is DEVELOPMENT-ONLY metadata that uv strips from the built
+      # wheel, so the published wrapper depends on the `==` pin alone. Assert the pin
+      # survived: without it the wrapper would float against any bindings version.
+      - name: Assert the exact dependency pin shipped
+        run: |
+          set -euo pipefail
+          meta="$(python3 -c "
+          import glob, zipfile
+          w = sorted(glob.glob('dist/paigasus_kernel-*.whl'))[0]
+          z = zipfile.ZipFile(w)
+          n = next(i for i in z.namelist() if i.endswith('.dist-info/METADATA'))
+          print(z.read(n).decode())")"
+          printf '%s\n' "$meta" | grep -qE '^Requires-Dist: paigasus-py-bindings==' \
+            || { echo "::error::the wrapper lost its == pin on paigasus-py-bindings"; printf '%s\n' "$meta"; exit 1; }
+          echo "OK: exact pin present"
+
+      # DELIBERATELY OUTSIDE the `wheel-*` namespace, and it must stay outside it. `wheel-*` is
+      # the seven paigasus-py-bindings platform wheels; this is a DIFFERENT distribution, and
+      # spec §9.1 requires paigasus-py-bindings to reach PyPI BEFORE paigasus-kernel (the face
+      # pins `==`, so the reverse order leaves it uninstallable in the window between uploads).
+      # The natural SMA-579 implementation — one `download-artifact` with `pattern: wheel-*`
+      # and `merge-multiple: true`, then a single upload — would silently violate that ordering
+      # if this artifact answered to `wheel-*`. It also carries a `.tar.gz`, which a `wheel-`
+      # name would misdescribe. Do not "tidy" it back.
+      - name: Upload the face distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: face-paigasus-kernel
+          path: |
+            dist/paigasus_kernel-*.whl
+            dist/paigasus_kernel-*.tar.gz
+          if-no-files-found: error

@@ -250,11 +250,29 @@ extractor fails all four keys loudly on inline flow.
   publishing from a fresh checkout ships a package with no wasm binary unless the release job runs
   `wasm-pack` first.
 
-### The PyPI wheel problem (review M3)
+### The PyPI wheel problem (review M3) — **premise amended 2026-08-28 (SMA-578)**
 
 "Wheels only, no sdist" closes the macOS sdist trap — `rs/crates/bindings/paigasus-py-bindings/pyproject.toml`
 notes a published sdist would not carry `rs/.cargo/config.toml`, whose apple-darwin
 `-undefined dynamic_lookup` flags the `extension-module` cdylib needs to link.
+
+> **Correction (SMA-578 §2, 2026-08-28).** The paragraph above is kept because it was
+> load-bearing for the "wheels only" decision, but its premise was **measured false**. The
+> observation is true — a published sdist does not carry `rs/.cargo/config.toml` — and the
+> conclusion drawn from it is not. The sdist was extracted to a directory with **no
+> `.cargo/config.toml` anywhere on cargo's upward walk** (`~/.cargo/config.toml` confirmed
+> absent) and `maturin build` linked cleanly on macOS. maturin supplies those link arguments
+> itself; `rs/.cargo/config.toml` exists so that a *non-maturin* `cargo build` links, exactly
+> as its own comment says. The control — plain `cargo build` in that same directory — fails
+> with undefined `_Py*` symbols.
+>
+> **Scope of the measurement:** one host, one maturin version (1.9.6), one target, built
+> natively. It does **not** cover the darwin *cross* build, Windows, or any other maturin
+> version — which is precisely why SMA-578's `wheels.yml` verifies the sdist from source on
+> three platforms, with the macOS leg as the standing control for this claim.
+>
+> So the design is **wheels plus a verified sdist**, not wheels only. SMA-578 delivers the
+> wheel matrix (six legs, seven wheels) and that three-platform sdist verification.
 
 But **no maturin wheel matrix exists.** `prebuild.yml`'s matrix builds the *napi addon*, not
 wheels; there is no cibuildwheel or maturin-action anywhere. A single-runner build yields one
@@ -262,7 +280,7 @@ manylinux-x86_64 wheel, and with no sdist there is no fallback — so `pip insta
 (pinned `==` to the bindings) fails outright on macOS, Windows and linux-aarch64.
 
 This is a subsystem of the same size SMA-428 was for napi. It is **not** solvable inside this
-issue; see §12.
+issue; see §12. *(Built out by **SMA-578** — `.github/workflows/wheels.yml`.)*
 
 ## 8. Replacing `[workspace] release = false`
 
@@ -481,7 +499,8 @@ An **ADR-0011 amendment** recording four things:
 | `paigasus-proto` reds Check 2 on its own PR | §6's work list + resolving the derive publish order first (§3, §14 Q5). |
 | Registry tokens exfiltrated via a PR | Credentials only in `release.yml` (no `pull_request` trigger); prefer OIDC (§7). |
 | The release PR can never merge | GitHub App token, not `GITHUB_TOKEN` (§7). |
-| PyPI package uninstallable off linux/x86_64 | Blocked out to SMA-407c; **not** claimed as closed (§7). |
+| PyPI package uninstallable off linux/x86_64 | **Platform coverage closed by SMA-578; publication deferred to SMA-579.** Nothing publishes yet — SMA-578 builds and verifies the artifacts and deliberately declares no `secrets:` / `id-token: write` (its D6), so the package remains uninstallable *from PyPI* on every platform until SMA-579's gated release job lands. What is closed is the coverage half (was: blocked out to SMA-407c, not claimed as closed) — a six-leg / seven-wheel matrix (darwin arm64 + x86_64, win x86_64, manylinux + musllinux on x86_64 and aarch64) **plus** an sdist verified from source on macOS, Windows and Linux. The "no sdist" half of §7's original mitigation rested on a premise measured false; see §7's correction block. |
+| A partial PyPI upload cannot be retried | PyPI is delete-but-never-reuse: a failed second distribution makes a naive retry hit 400 "file already exists". The publish job uses `skip-existing` and is re-runnable (SMA-578 §9.1, owned by SMA-579). |
 | Two tools cutting tags | Unresolved — settle the napi boundary before writing the release job (§7). |
 | A squatted crates.io name becomes the version baseline | Pre-flight checklist (§10). |
 | Published URLs 404 | Repo must be public first (§10). |

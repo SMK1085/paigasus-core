@@ -1,0 +1,39 @@
+# Vendored proto TOML plugin for maturin (SMA-578).
+#
+# Resolves official PyO3/maturin GitHub release tarballs. Same vendoring rationale as
+# wasm-pack/cargo-machete: a static schema over official release assets. maturin builds the
+# PyO3 extension wheels and the sdist in .github/workflows/wheels.yml.
+#
+# Version is pinned to the exact release SMA-578 §2's consumer-path experiment was measured
+# on. The consumer-facing floor in the crate's [build-system] requires must not drop below
+# it either — an sdist consumer resolving an older maturin builds on unmeasured behaviour.
+#
+# Asset names confirmed against the v1.9.6 GitHub release API (not assumed): the tarball/zip
+# for every platform contains the bare binary at the archive ROOT (`maturin` / `maturin.exe`,
+# no nested `maturin-{target}/` directory) — verified by downloading and listing the Linux,
+# macOS and Windows assets, not just the filenames. So — unlike wasm-pack, whose binary nests
+# one directory deep — NO exe-path is needed anywhere, on ANY platform including Windows:
+# this mirrors the release-plz and cargo-nextest plugins (root binary, no exe-path even on
+# Windows), not the wasm-pack/cargo-machete/promtool shape (nested, exe-path required
+# everywhere). Tags are "v"-prefixed (v1.9.6) but asset filenames do NOT embed the version.
+# Linux is symmetric musl (both x86_64 and aarch64 assets exist), so {arch} works as-is.
+# maturin publishes no per-asset checksum file, so resolution is HTTPS-from-GitHub only
+# (like release-plz/wasm-pack; unlike cargo-deny/cargo-machete/cargo-nextest).
+
+name = "maturin"
+type = "cli"
+
+[platform.linux]
+download-file = "maturin-{arch}-unknown-linux-musl.tar.gz"
+
+[platform.macos]
+download-file = "maturin-{arch}-apple-darwin.tar.gz"
+
+[platform.windows]
+download-file = "maturin-x86_64-pc-windows-msvc.zip"
+
+[install]
+download-url = "https://github.com/PyO3/maturin/releases/download/v{version}/{download_file}"
+
+[resolve]
+git-url = "https://github.com/PyO3/maturin"

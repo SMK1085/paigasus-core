@@ -344,6 +344,58 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   registry-faithful, not a workspace shortcut — measured by breaking the derive crate's
   `include` and watching the run fail. Grouping keeps `paigasus-kernel` in a group of one so
   it retains its standalone assertion.
+- `paigasus-py-bindings` ships to PyPI as **`cp312-abi3` wheels (six matrix legs, seven wheels)
+  plus a source-verified sdist**, built by `.github/workflows/wheels.yml` (SMA-578) — a
+  *reusable* workflow (`on: workflow_call`) that SMA-579's gated `release` job will consume. It
+  must **never** declare `secrets:` or `id-token: write`: it carries a `pull_request` trigger, so
+  a same-repo PR would receive the credential — `repo:publish-metadata` asserts this. Four facts
+  that cost a measurement each: (1) maturin injects the apple-darwin `-undefined dynamic_lookup`
+  args **itself**, so an sdist builds on macOS without `rs/.cargo/config.toml` — that file exists
+  for plain `cargo build`, as its own comment says, and the old "no sdist" rule rested on a false
+  premise (measured on ONE host / maturin 1.9.6 / one target, natively — which is why the sdist
+  is verified on three platforms rather than trusted); (2) maturin builds the sdist from `cargo
+  package --list`, so the crate's **Cargo** `include` allowlist is what keeps `moon.yml` out —
+  `[tool.maturin] include` is not needed, and Checks 1c/1d/2b/2c never reach this crate because it
+  is `publish = false`, so the only assertion holding that allowlist honest lives in `wheels.yml`;
+  (3) the sdist ships the **workspace** `Cargo.toml` verbatim, `[workspace.lints.rust] warnings =
+  "deny"` included, and a consumer builds as the ROOT package where `--cap-lints allow` does NOT
+  apply — so every sdist-shipped crate needs its own non-denying `[lints.rust]` table, the
+  Check-1c rule extended past `publish = true`; (4) `pyo3`'s `abi3-py312` means one wheel per
+  (OS, arch) covers CPython 3.12+, so the matrix never multiplies by Python version. maturin also
+  relocates `pyproject.toml` to the sdist **root**, not the crate dir, so the sdist content
+  assertions match on basename.
+- All four **Linux** wheel legs cross-compile with `--zig` — not only the musl ones, unlike
+  `prebuild.yml`. `ubuntu-latest` ships glibc 2.39, so a *native* build tags `manylinux_2_39`,
+  which almost nothing can install. The floor comes from **`--zig` together with
+  `--compatibility`, both passed as FLAGS** (maturin's own `--help`: "`--zig` … Default to
+  manylinux2014/manylinux_2_17 if you do not specify a `--compatibility`"). It does **not** come
+  from cargo-zigbuild's decorated triple: maturin hands `--target` straight to `cargo metadata`,
+  so `x86_64-unknown-linux-gnu.2.17` dies with `could not find specification for target` —
+  measured, it failed both manylinux legs on this workflow's first CI run while the other ten
+  jobs passed.
+  Pass `--compatibility` explicitly so maturin's auditwheel **errors** instead of silently
+  emitting a PyPI-rejected `linux_*` tag, and set `-C target-feature=-crt-static` on musl (the
+  target defaults to a static CRT a cdylib cannot use). A wheel's **tag is not its binary**:
+  assert the compressed tag *set* (split on `.` — `manylinux_2_17_x86_64.manylinux2014_x86_64` is
+  ONE platform FIELD carrying TWO tags, so a cardinality check that counts fields as tags is
+  wrong), and separately assert the binary via `otool -l`'s minimum-macOS on darwin and a
+  max-`GLIBC_` symbol check on manylinux. An ELF-class check proves only the machine type and
+  passes for a wheel that fails at import. **Only the `aarch64-apple-darwin` wheel and the macOS
+  sdist path have been built locally.** The macOS / Windows / manylinux / musllinux tag sets, the
+  `macosx_10_12` minimum-macOS value have all now been **MEASURED green on CI**. The GLIBC floor
+  is per-arch and the two values legitimately differ: x86_64 tops out at **`GLIBC_2.14`** (its
+  base is `GLIBC_2.2.5`; 2.14 is `memcpy`'s versioned symbol) while aarch64 reaches
+  **`GLIBC_2.17`** — do not harmonise them. x86_64 was pinned at 2.17 on the first run and the
+  assertion red with *"needs only [GLIBC_2.14] … safe, but re-pin"*, which is the intended
+  behaviour: a wheel needing LESS than its `manylinux_2_17` tag promises is correct, since the
+  tag declares a minimum platform. When one of these reds, read what the tool produced, confirm
+  it is correct, and re-pin the constant — never loosen the comparison to an inequality.
+- `moon query projects --json` **errors** on Moon 2.3.2 (`unexpected argument '--json' found`) —
+  bare `moon query projects` already emits JSON. **Measure its exit status UNPIPED (2):** `jq`
+  returns 0 on empty input, so `moon query projects --json | jq …` reports 0 unless `pipefail`
+  is set, and the failure reads as "the reader found nothing" rather than "the flag is invalid".
+  That is not hypothetical — it cost a cycle on this very branch, where the first measurement
+  read `head`'s status through a pipe and recorded exit 0.
 
 ## Workflow
 
