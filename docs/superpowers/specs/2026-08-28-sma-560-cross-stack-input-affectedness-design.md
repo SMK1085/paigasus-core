@@ -1,313 +1,368 @@
-# SMA-560 — Cross-stack input affectedness: assert the ADR-0005 guarantee, and close two input gaps
+# SMA-560 — Cross-stack input affectedness: assert the ADR-0005 guarantee, and close two Rust input gaps
 
-**Status:** Draft (brainstorming 2026-08-28).
+**Status:** Draft, rev 2 (brainstorming 2026-08-28; **adversarial review incorporated — B1–B4, M1–M8, m1–m4**; **scope reduced 2026-08-28 — §2**).
 **Date:** 2026-08-28
-**Linear:** [SMA-560](https://linear.app/smaschek/issue/SMA-560) (lead) + [SMA-535](https://linear.app/smaschek/issue/SMA-535) + [SMA-537](https://linear.app/smaschek/issue/SMA-537) + [SMA-536](https://linear.app/smaschek/issue/SMA-536) (folded in — §2).
+**Linear:** [SMA-560](https://linear.app/smaschek/issue/SMA-560) (lead) + [SMA-537](https://linear.app/smaschek/issue/SMA-537).
+**Removed from scope in rev 2:** [SMA-535](https://linear.app/smaschek/issue/SMA-535) and [SMA-536](https://linear.app/smaschek/issue/SMA-536) — §2.1. Findings recorded on both issues.
 **Branch:** `feature/sma-560-assert-cross-stack-input-affectedness`
 **Targets:** `main` (currently `2f37378`).
-**References:** ADR-0005 (cross-language behaviour lives once in the kernel); SMA-528 (inputs are the only thing that confers affectedness; assertion A6); SMA-546 (workspace-level FFI inputs; A5); SMA-534 (`--locked` lint, workspace inputs); SMA-524 ("a MISSING case is how the bug survived"); SMA-429 (default-deny model); SMA-436 (the py typecheck vacuity guard); SMA-553 / SMA-556 (input liveness, dead inputs); SMA-541 (a new `repo:*` gate must be in both `T` and CLAUDE.md); SMA-433 (parity corpus); SMA-434 (ts glue drift — deliberately *not* here, §5); SMA-590 (`ty` swap — deliberately not here, §9).
+**References:** ADR-0005; SMA-528 (inputs are the only thing that confers affectedness; A6); SMA-546 (A5); SMA-534 (A4, workspace lint inputs); SMA-524 ("a MISSING case is how the bug survived"); SMA-429 (default-deny); SMA-542 (guard the guard: a check's own call site is what goes unguarded); SMA-553 / SMA-556 (input liveness, dead inputs); SMA-541 (a new `repo:*` gate must be in both `T` and CLAUDE.md); SMA-433 (parity corpus); SMA-434 (ts glue drift).
 
 ---
 
 ## 1. Problem
 
-One principle, three places it is unapplied or unasserted.
-
 Moon 2.3.2 confers affectedness **only** through a task's own `inputs`. `dependsOn` and a
 task-level `^:build` schedule an upstream's build but never *select* a downstream; measured at the
 full 24-target shape, neither `--include-relations` nor `--downstream` changes that (SMA-528).
-Every guarantee about "a change to X re-runs Y" is therefore a claim about Y's `inputs` and
+Every guarantee of the form "a change to X re-runs Y" is therefore a claim about Y's `inputs` and
 nothing else.
 
-**SMA-537 — two files are in no task's inputs.** `.moon/tasks/rust.yml` declares inputs as
-`@group(sources)` (`src/**/*`), `@group(tests)`, `Cargo.toml` and the workspace-level files. A
-crate-root `build.rs` matches none of them, so editing
-`rs/crates/bindings/paigasus-node-bindings/build.rs` re-keys nothing and schedules nothing —
-though `cargo build` runs it and `cargo clippy --all-targets` compiles it. Separately, `fmt` runs
-`cargo fmt --check` with `inputs: ['@group(sources)']`, so the workspace-level `rs/rustfmt.toml`
-(which sets `max_width = 200`) invalidates no `fmt` task: changing the global format config leaves
-the whole tree free to drift out of compliance until some unrelated edit re-runs `fmt` per crate.
+Two consequences, both open.
 
-**SMA-535 — `py:typecheck` cannot be selected by a Rust change.** `py:lint`, `py:typecheck` and
-`py:test` live on the `py` configuration-root project, which has no `dependsOn` to any Rust
-project and no `rs/**` inputs on any task. A PyO3 signature change schedules none of them.
+### 1.1 Two files are in no *crate* task's inputs (SMA-537)
 
-**SMA-560 — the ADR-0005 guarantee is unasserted.** SMA-528 gave every Rust crate a
-`fileGroups.upstreams` and added assertion **A6** holding it to strict equality against Moon's own
-closure. A6 iterates `language == "rust"` projects only. The py/ts wrappers reach the kernel
-through hand-written globs instead, and those globs *are* the cross-binding guarantee — they are
-what makes a kernel edit re-run the parity replay in each language. Deleting
-`/rs/crates/libs/paigasus-kernel/src/**/*` from `paigasus-kernel-ts:build` leaves every gate green
-while the ts parity replay silently stops running on kernel changes: the exact defect shape
-SMA-528 fixed for Rust, one stack over.
+`.moon/tasks/rust.yml` declares crate task inputs as `@group(sources)` (`src/**/*`),
+`@group(tests)`, `Cargo.toml`, and — on `lint` only — three workspace-level files. So:
+
+- A crate-root `build.rs` matches none of them. Editing
+  `rs/crates/bindings/paigasus-node-bindings/build.rs` re-keys no crate task, though `cargo build`
+  runs it and `cargo clippy --all-targets` compiles it.
+- `fmt` runs `cargo fmt --check` with `inputs: ['@group(sources)']` alone
+  (`.moon/tasks/rust.yml:83-85`), so `rs/rustfmt.toml` (`max_width = 200`) invalidates no `fmt`
+  task, and neither does `@group(tests)` nor `rs/rust-toolchain.toml` (which selects the rustfmt
+  binary).
+
+*Both files do match some broad `repo:*` task input — `repo:machete`'s `rs/**/*.rs`,
+`repo:publish-metadata`'s `rs/crates/**/*`, and the two `['**/*']` gates. The claim is specifically
+about crate `build`/`test`/`lint`/`fmt`, which is where the invalidation matters (m1).*
+
+### 1.2 The wrappers' Rust globs are only partly asserted (SMA-560)
+
+SMA-528 gave every Rust crate a `fileGroups.upstreams` and added **A6**, holding it to strict
+equality against Moon's own closure. A6 iterates `language == "rust"` projects only
+(`cargo_moon_parity.py:331`). The py/ts wrappers reach the kernel through hand-written per-task
+globs instead, and those globs *are* the ADR-0005 cross-binding guarantee.
+
+**Correction to rev 1 (B3).** Rev 1 claimed "deleting `/rs/crates/libs/paigasus-kernel/src/**/*`
+from `paigasus-kernel-ts:build` leaves every gate green." **That is false**, and the adversarial
+review caught it. `ci/affected-graph/run.sh:343` — `run_task_case_ci "kernel->consumer-tasks"`,
+strict equality — explicitly lists `paigasus-kernel-ts:build`, `paigasus-kernel-ts:test` and
+`paigasus-kernel-py:test` in the expected set for a touch of
+`rs/crates/libs/paigasus-kernel/src/lib.rs`. Removing that glob makes the task un-affected and the
+case reports it `missing`. The comment directly above that line even says those three "key on the
+kernel's sources by hand (SMA-420/546)".
+
+So **the kernel→wrapper edge is already covered**, by one hand-written `run.sh` case.
+
+#### What is genuinely uncovered
+
+Three things, and they are what A7 exists for:
+
+1. **Every non-kernel upstream.** No `run.sh` case touches
+   `rs/crates/bindings/paigasus-wasm/src/**` *and* asserts `paigasus-kernel-ts:test`. Deleting the
+   wasm glob from `paigasus-kernel-ts:test` is green today. The project-level `binding-oneway-wasm`
+   case stays green via `:build`'s own wasm glob, so it does not catch it either.
+2. **A new wrapper, or a new upstream on an existing one.** `run.sh`'s coverage is a hand-written
+   case list; A6 exists because a *missing* case is how SMA-524's bug survived review. The same
+   argument applies one stack over.
+3. **A live under-declaration, today.** Neither wrapper declares the kernel's `Cargo.toml` —
+   verified, zero occurrences in both `moon.yml` files — while A6 demands `src/**/*` **and**
+   `Cargo.toml` per upstream for every Rust crate (`cargo_moon_parity.py:357-360`), and
+   `repo:parity-corpus-drift` lists it explicitly for exactly this hazard ("a kernel Cargo.toml
+   change (a future `[features]` toggle altering `sum`) must re-key the gate", `moon.yml:214-217`).
+   A future `[features]` toggle in the kernel would change wrapper behaviour without re-keying
+   either wrapper task.
+
+Item 3 is a defect to **fix**, not merely to assert (§4.4).
 
 ### Verified against `main` @ `2f37378`
 
-Every claim above was re-measured rather than taken from the issues, which were filed 8–12 days
-before this spec and predate SMA-546, SMA-553 and SMA-572/573.
-
 | Claim | Verdict |
 | -- | -- |
-| `build.rs` in no task's inputs | Holds — `sources` is `src/**/*`; no task lists it |
-| `/rs/rustfmt.toml` in no `fmt` inputs | Holds — `fmt: inputs: ['@group(sources)']` |
+| `build.rs` in no *crate* task's inputs | Holds — `sources` is `src/**/*`; no crate task lists it |
+| `rs/rustfmt.toml` in no `fmt` inputs | Holds — `fmt: inputs: ['@group(sources)']` |
 | A6 iterates Rust only | Holds — `examined = {… if proj.get("language") == "rust"}` |
-| py/ts wrapper globs ungated | Holds — A5 asserts only the four workspace-level files |
 | Exactly one `build.rs` in the workspace | Holds — `rs/crates/bindings/paigasus-node-bindings/build.rs` |
+| Neither wrapper declares the kernel's `Cargo.toml` | Holds — 0 occurrences in both wrapper `moon.yml`s |
+| Kernel→wrapper edge already covered by `run.sh` | Holds — `run.sh:343`, strict equality |
+| `repo:affected-smoke` has no `build.rs` glob | Holds — `moon.yml:165-202`; nearest is `rs/**/Cargo.toml` |
 
 ---
 
 ## 2. Scope
 
-The three issues as filed, **plus SMA-536** (the `ts:typecheck` twin of SMA-535). 535 and 536 are
-the same defect one stack apart; fixing only py would leave an asymmetry that reads as deliberate
-and is not.
+**SMA-560 and SMA-537 only.**
 
-### Out of scope, each with a reason
+### 2.1 Why SMA-535 and SMA-536 left (B1, B2)
 
-- **SMA-560's second case** — a `buf.gen.yaml` or codegen-plugin-version change regenerates output
-  without touching a `.proto`, and selects no consumer task. Same *principle*, genuinely different
-  *mechanism* (generate-output → committed code → consumers). It earns its own spec rather than
-  riding along. **Needs a new issue.**
-- **SMA-434** — the drift check for the committed napi/wasm glue. It is the ts analogue of this
-  spec's new stub-drift gate (§4) and is already tracked. §5 records the resulting asymmetry
-  explicitly so it does not read as an oversight.
-- **SMA-590** — replacing basedpyright with `ty`. Checker-agnostic by construction (§4, D2).
+Rev 1 folded both in and designed a "key the typecheck task on the interface artifact" fix for
+each. The adversarial review showed both are **vacuous by the same mechanism rev 1 used to reject
+SMA-535's originally filed fix** — the reasoning was applied one level up and not one level down.
+
+- **py:** `py/pyproject.toml:12` sets `include = ["packages/*/src/**", "packages/*/tests/**"]`, so
+  basedpyright never opens the source stub; it reads the maturin-**installed** copy.
+  `.moon/tasks/python.yml:38` runs plain `uv run basedpyright` with no `--reinstall-package`, and
+  this repo has already measured that plain `uv run` serves a cached wheel
+  (`ci/affected-graph/run.sh:325-329`). An input on the source stub is a pure cache key over a file
+  the task never reads.
+- **ts:** `tsc` resolves `@paigasus/node-bindings` through `node_modules` with no `paths` mapping,
+  and pnpm copies a `file:` dep into its store and never re-copies
+  (`ts/packages/paigasus-kernel/moon.yml:99-102`, measured). Same shape.
+
+Both issues' real problem is *make the checker read a fresh artifact*, which is a different and
+larger fix (uv `cache-keys` or `--reinstall-package`; a tsconfig `paths` mapping or `link:` dep).
+Full analysis is recorded on each issue, including a third finding — a correct PyO3 stub-drift gate
+must compare **three** sets (`#[pyfunction]` idents, `wrap_pyfunction!` registrations, stub `def`
+names), because an unregistered `#[pyfunction]` does not exist at runtime.
+
+### 2.2 Also out of scope
+
+- **SMA-560's codegen case** — a `buf.gen.yaml` or plugin-version change regenerates output without
+  touching a `.proto`. Same principle, different mechanism. **Needs a new issue.**
+- **SMA-434** — ts glue drift, already tracked.
+- **SMA-590** — the `ty` swap.
+
+### 2.3 What still justifies one PR
+
+Rev 1 claimed these belong together because each re-baselines `run.sh`'s strict-equality expected
+sets. **That was probably false** and the adversarial review independently agreed: no existing case
+edits `rs/rustfmt.toml`, `build.rs`, or `@group(tests)` in a way that moves a recorded set, and
+`fmt` is outside `run.sh`'s task-case name filter entirely (`run.sh:94-97`, m4).
+
+The surviving grounds are narrower and honest: **one principle, one review cycle, and one file** —
+`cargo_moon_parity.py` gains both new assertions, and `repo:affected-smoke`'s `inputs` need one
+edit that serves both. §6 requires the plan to report what the affected sets actually do rather
+than inherit the assumption.
 
 ---
 
-## 3. SMA-537 — `build.rs` and `rustfmt.toml`
+## 3. SMA-537 — the two Rust input gaps
 
-### D1. `rustfmt.toml` on `fmt`
+### D1. `fmt` inputs, widened past what SMA-537 asked for (M3)
 
-`.moon/tasks/rust.yml`'s `fmt.inputs` gains `/rs/rustfmt.toml` (leading `/` = workspace-relative,
-matching the `lint` task's existing workspace inputs). No ambiguity, no alternatives worth
-recording. Note this is a *config*-edit hole, distinct from the `fmt` **propagation** question
-SMA-526 considered and correctly rejected — `cargo fmt --check` reads only the crate's own files,
-so it cannot be broken by an upstream *crate* edit, but it certainly can by a config edit.
+`.moon/tasks/rust.yml`'s `fmt.inputs` becomes:
+
+```yaml
+inputs: ['@group(sources)', '@group(tests)', '/rs/rustfmt.toml', '/rs/rust-toolchain.toml']
+```
+
+SMA-537 asks only for `rustfmt.toml`. That stops three-quarters short: `cargo fmt --check` formats
+**every** target in the package — `src/**`, `tests/**`, `benches/**`, `build.rs` — so a misformatted
+integration test can merge green today and red `main` on an unrelated later `src` edit.
+`rust-toolchain.toml` selects the rustfmt binary, which is the same argument
+`.moon/tasks/rust.yml:63-67` already makes for putting it on `lint`. Leaving those out while
+touching this exact line would read to the next engineer as a deliberate decision.
+
+`build.rs` is handled by D2 rather than listed here.
 
 ### D2. `build.rs` — per-crate declaration plus a derived assertion
 
-**Chosen:** declare `build.rs` only in
-`rs/crates/bindings/paigasus-node-bindings/moon.yml` (`build`/`test`/`lint`), and add a parity-gate
-assertion that **every crate with a `build.rs` on disk declares it**.
+**Chosen:** declare `build.rs` in `rs/crates/bindings/paigasus-node-bindings/moon.yml`
+(`build`/`test`/`lint`/`fmt`), and add a parity assertion that **every crate with a `build.rs` on
+disk declares it in those tasks**.
 
-**Rejected — the shared template.** Adding `'build.rs'` to `.moon/tasks/rust.yml` is one line and
-covers a future crate automatically, but it makes 12 of 13 crates declare a file that does not
-exist. That is precisely the untracked-input class `repo:input-liveness` reds on, and that SMA-556
-must clear before that gate can widen past `repo:*`. Harmless today — input-liveness covers
-`repo:*` tasks only — but it is debt pointed the wrong way, and it would enlarge SMA-556's job.
+**Rejected — the shared template.** One line, and covers a future crate automatically, but it makes
+12 of 13 crates declare a file that does not exist: the untracked-input class `repo:input-liveness`
+reds on and that SMA-556 must clear before that gate widens past `repo:*`. Harmless today,
+debt pointed the wrong way.
 
-**Rejected — per-crate with no assertion.** Smallest change, no dead inputs, but the next crate to
-add a `build.rs` silently repeats the exact bug SMA-537 was filed for. This is SMA-524's "a MISSING
-case is how the bug survived" lesson.
+**Rejected — per-crate with no assertion.** The next crate to add a `build.rs` silently repeats the
+exact bug SMA-537 was filed for (SMA-524's lesson).
 
-The chosen shape is the same derived-plus-floor pattern §6 uses one level up: derive from ground
-truth (here, the filesystem) so a new instance is covered on day one, and keep the declaration
-itself honest.
+### D3. The assertion must be reachable (M5)
+
+`repo:affected-smoke`'s `inputs` (`moon.yml:165-202`) contain **no `build.rs` glob**; the nearest is
+`rs/**/Cargo.toml`. So adding a `build.rs` to an *existing* crate without touching its `Cargo.toml`
+or `moon.yml` does not schedule `repo:affected-smoke`, and D2's assertion serves a cached PASS on
+exactly the PR it exists for. `moon.yml:181-192` already documents this precise trap for the
+actionlint and release-parity pins: *"the pin is real but unreachable: the PR that deletes those
+lines does not schedule this task."*
+
+**Add `rs/crates/*/*/build.rs` to `repo:affected-smoke`'s `inputs`.** This acquires a
+`repo:input-liveness` obligation — the glob must keep matching a tracked file, which it does today
+(one crate) and would stop doing if that crate's `build.rs` were deleted. That is the correct
+behaviour: the assertion becomes dead at exactly that moment.
+
+### D4. `fmt`'s new inputs need an assertion too (M4)
+
+A spec whose thesis is *unasserted inputs rot* must not add four unasserted inputs. A4
+(`check_lint_inputs`, `cargo_moon_parity.py:198-230`) already asserts the three workspace files on
+every crate's `lint` for exactly this reason; there is no equivalent for `fmt`.
+
+Generalize A4 into `check_task_inputs(projects, crates, task, required)` and call it twice — for
+`lint` (the existing three files) and for `fmt` (`rustfmt.toml`, `rust-toolchain.toml`) — with a
+self-test row per task. This is a refactor of an existing check, not a new gate, so it carries no
+SMA-541 wiring cost.
 
 ### R1. Implementation risk — does Moon append or replace inherited inputs?
 
-The per-crate route assumes a project's `inputs:` on an **inherited** task *appends* to the
-inherited list rather than replacing it. There is no `mergeInputs` setting anywhere in `.moon/`, so
-Moon's defaults apply, and the default has not been verified on 2.3.2 in this repo.
+D2 assumes a project's `inputs:` on an **inherited** task *appends* rather than replaces. There is
+no `mergeInputs` setting in `.moon/`, so defaults apply, and this has not been verified on 2.3.2
+here. **Measure first**, comparing resolved `inputFiles` from `moon query projects` before and
+after.
 
-**This must be measured before anything is built on it**, by comparing a task's resolved
-`inputFiles` from `moon query projects` before and after the per-crate declaration. If Moon
-*replaces*, the crate's `build`/`test`/`lint` would silently lose `@group(sources)` and every
-workspace input — a far worse defect than the one being fixed, and one that would present as a
-cache anomaly rather than an error. Fallback in that case: route `build.rs` through a
-`fileGroups` entry the shared template already consumes.
+**Corrected from rev 1 (m2):** rev 1 said a replace would be "silent" and "present as a cache
+anomaly". It would not. A4 reds immediately for that crate's `lint`, and A6 reds for all three
+tasks, since `paigasus-node-bindings-rs` has a non-empty `upstreams` group. The measurement is
+still the right first step, but the existing gates catch replace-semantics loudly.
 
----
-
-## 4. SMA-535 — the stub is the interface
-
-### F1. The filed fix would have passed vacuously
-
-SMA-535 proposes adding `/rs/crates/{libs/paigasus-kernel,bindings/paigasus-py-bindings}/src/**/*`
-to `py:typecheck`. Measured, that would schedule the gate without giving it anything new to see.
-
-`basedpyright` resolves `paigasus_py_bindings` **from a hand-written `.pyi` stub**, not from the
-Rust source and not from the compiled `.so`. maturin installs
-`rs/crates/bindings/paigasus-py-bindings/paigasus_py_bindings.pyi` into site-packages as
-`__init__.pyi`, beside a `py.typed` marker:
-
-```
-py/.venv/lib/python3.12/site-packages/paigasus_py_bindings/
-  __init__.py
-  __init__.pyi                     <- what basedpyright reads
-  paigasus_py_bindings.abi3.so
-  py.typed
-```
-
-So a Rust-source input would re-run basedpyright against the **same, possibly stale** stub and
-pass. That is scheduling without coverage — the vacuous-pass shape SMA-436 and SMA-489 were both
-filed for.
-
-Two real holes sit behind it:
-
-1. The `.pyi` is in **no task's inputs anywhere** — editing the stub alone re-keys nothing.
-2. **Nothing asserts the stub matches the Rust.** Twelve `#[pyfunction]`s and twelve stub entries
-   agree today, by hand. No drift gate exists in `moon.yml` or `ci/`.
-
-### D3. Stub-as-interface, plus a name-level drift gate
-
-- `.moon/tasks/python.yml`'s `typecheck.inputs` gains
-  `/rs/crates/bindings/paigasus-py-bindings/paigasus_py_bindings.pyi`.
-- A new gate asserts the stub's `def` names match the Rust `#[pyfunction]` set exactly.
-
-**Names, not full signatures.** Name-level drift catches add / remove / rename — the failure modes
-that actually occur — and is cheap and robust to parse. Comparing arity and types would require
-parsing PyO3 attributes and mapping Rust types to Python ones (`f64`→`float`, `String`→`str`,
-`PyResult` unwrapping), which is materially more work and brittle in a way that invites waivers.
-Recorded as a deliberate limitation in §8 (L1) rather than left implicit.
-
-**Where the coverage actually comes from.** The drift gate, not the scheduling. Keying
-`py:typecheck` on the stub does **not** make a Rust-source edit select it, and that is correct —
-basedpyright would only re-read the same stub. What makes a Rust signature change red is the drift
-gate. The input keying closes the separate, smaller hole that editing the stub re-keys nothing.
-
-This design is deliberately **checker-agnostic**: any conforming checker resolves a distributed
-stub via `py.typed`, so SMA-590's `ty` swap neither blocks nor is blocked by it. Doing this first
-makes that swap safer, because the drift gate catches a stub regression independently of which
-checker runs.
+**Corrected fallback (M7).** Rev 1 offered "route it through a `fileGroups` entry the shared
+template already consumes" — but no candidate group exists, and adding `@group(buildscript)` makes
+its absence a hard graph-load error (`project::unknown_file_group`) for every moon command, forcing
+all 13 crates to declare it, 12 of them empty. That is *larger* than the shared-template option D2
+rejected. The actually-cheap fallback: declare `build.rs` inside the crate's existing
+`fileGroups.upstreams`. A6's `observed` filter excludes `own/`-prefixed entries
+(`cargo_moon_parity.py:400-401`, verified), so it passes A6 untouched. Verify that before relying
+on it.
 
 ---
 
-## 5. SMA-536 — the ts twin, and where it stops
-
-Same shape, different artifact. TypeScript's equivalent of the `.pyi` is the **committed napi and
-wasm glue** (`index.d.ts`, `paigasus_wasm.d.ts`) — generated, committed, and read by `tsc` in place
-of the compiled binary. So the ts typecheck path keys on the committed glue.
-
-**The drift half is excluded**, because it is already SMA-434 ("CI drift check for committed FFI
-binding glue (napi + wasm)"). The resulting asymmetry — py gets both halves here, ts gets only the
-input keying — is deliberate and is stated here so it does not read as an oversight. SMA-434 does
-for ts what §4's gate does for py.
-
-Note the glue is *generated*: `paigasus-kernel-ts:build` regenerates it as part of `napi build`.
-The plan must confirm that keying a typecheck task on a file another task regenerates does not
-create a cyclic or self-invalidating input, and record the answer.
-
----
-
-## 6. SMA-560 — assertion A7
+## 4. SMA-560 — assertion A7
 
 A new `check_wrapper_upstream_inputs()` in `ci/affected-graph/cargo_moon_parity.py`, **alongside**
-A6 rather than inside it: A6's strict equality is correct for Rust and must not be loosened.
+A6. A6's strict equality is correct for Rust and is not loosened.
 
-### Measured, and why strict equality cannot be reused
+### 4.1 Measured shape
 
-| project | Rust `dependsOn` closure | crate dirs observed in inputs |
+| project | Rust closure | crate dirs observed |
 | -- | -- | -- |
 | `paigasus-kernel-py` | kernel, py-bindings | kernel, py-bindings, **kernel-parity** |
 | `paigasus-kernel-ts` | kernel, node-bindings, wasm | those three, **+ kernel-parity** |
 
-The extra `kernel-parity` is the SMA-433 parity-vectors input. It is **correct and deliberate**, not
-an over-approximation. `paigasus-kernel-py:build` and `paigasus-kernel-ts:typecheck` observe
-nothing at all, and should not: they are the inherited wheel-build and `tsc` tasks.
+`kernel-parity` is the SMA-433 parity-vectors input — correct and deliberate.
+`paigasus-kernel-py:build` and `paigasus-kernel-ts:typecheck` observe nothing, and should not.
 
-A naive strict-equality extension therefore reports three false violations on an unmutated tree.
+### D5. Containment, file-granular, with two floors
 
-### D4. Derived closure + containment + explicit floor
+**Containment, not strict equality.** Every required file must be keyed on; extras are allowed.
 
-- **Derived.** Reuse `rust_closure`, whose per-*dependency* `language != "rust"` filter stays
-  exactly as is; only the *root* language filter changes. A fourth wrapper is covered the day it is
-  added.
-- **Containment, not strict equality.** Every closure member must be keyed on; extras are allowed.
-  Rust's strict equality exists because `fileGroups.upstreams` is a mechanical mirror of the
-  closure, so anything extra there is pure waste. The wrapper globs are hand-written per task and
-  legitimately mixed with non-crate inputs — parity vectors, `package.json`, `pyproject.toml`,
-  `uv.lock`. Strict equality there compares apples to a fruit salad, and would force waivers that
-  record *correct* inputs as tolerated defects. That is worse than a weaker assertion: it teaches
-  the next reader that a right thing is wrong.
-- **Explicit floor.** `REQUIRED_WRAPPER_TASKS = {paigasus-kernel-py:test, paigasus-kernel-ts:build,
-  paigasus-kernel-ts:test}`, mirroring `REQUIRED_FFI_TASKS`' role for A5. A derived set that
-  shrinks to empty asserts nothing while printing PASS — a moon rename or JSON reshape would do
-  exactly that. Every task named here must appear in the derived set or A7 fails.
-- **Negative control** in `self_test()` asserting the **specific violation row**, not mere
-  non-emptiness. This is the file's own stated convention (see A6's controls) and the
-  guard-the-guard lesson from SMA-542: a control that only checks "something failed" passes when
-  the wrong thing fails.
+The adversarial review challenged this (Q3), arguing A6's `startswith("rs/crates/")` filter already
+removes the non-crate inputs, leaving only `kernel-parity` — so strict equality plus one waiver
+would be strictly stronger at the same cost. **That holds at crate-dir granularity and fails at
+file granularity**, which is where D5 operates: both wrappers declare
+`rs/crates/bindings/paigasus-node-bindings/package.json` and
+`rs/crates/bindings/paigasus-py-bindings/pyproject.toml`, which *are* under `rs/crates/` and would
+enter `observed`. Strict equality would flag correct, deliberate inputs as over-approximation —
+recording a right thing as wrong, which is worse than a weaker assertion.
 
-### D5. Task selection is explicit, not derived
+**File-granular, not crate-dir (M6).** A7 demands `<upstream>/src/**/*` **and**
+`<upstream>/Cargo.toml` per closure member, matching what A6 demands of every Rust crate. Crate-dir
+granularity would certify §1.2's item 3 — the missing kernel `Cargo.toml` — as green forever.
+
+**Two floors, not one (B4).** Rev 1 specified only a task-name floor, and the adversarial review
+showed it cannot catch A7's actual vacuity mode: if `rust_closure` degrades to empty (a moon
+rename, a `dependencies` reshape, a `language` field change), `want` becomes `{}` and containment
+`want ⊆ observed` is *vacuously satisfied* while A7 prints PASS. A task-name floor is silent on
+that. A6 gets this right with a per-consumer **edge** floor plus a membership half
+(`cargo_moon_parity.py:129-132`, `:339-343`).
+
+```python
+REQUIRED_WRAPPER_TASKS = {
+    "paigasus-kernel-py:test", "paigasus-kernel-ts:build", "paigasus-kernel-ts:test",
+}
+REQUIRED_WRAPPER_CLOSURE = {
+    "paigasus-kernel-py": {"paigasus-kernel-rs", "paigasus-py-bindings-rs"},
+    "paigasus-kernel-ts": {"paigasus-kernel-rs", "paigasus-node-bindings-rs", "paigasus-wasm-rs"},
+}
+```
+
+Floor rows are `FLOOR:`-prefixed so the negative control can distinguish a floor failure from a
+per-wrapper one, as A6's already are. Note A6's own warning applies: emptying `deps` also empties
+`want`, producing confusable rows — the control must match the prefix.
+
+### D6. The task set is the floor, and that is a coverage decision
 
 A7 cannot ask "every task on the project": `paigasus-kernel-py:build` and
-`paigasus-kernel-ts:typecheck` legitimately observe nothing, so a whole-project rule would red on
-an unmutated tree.
+`paigasus-kernel-ts:typecheck` legitimately observe nothing, so a whole-project rule reds on an
+unmutated tree.
 
-To be unambiguous about what "derived" covers here — the *closure* is derived per wrapper, and the
-*set of tasks examined* is not. A7 examines exactly the tasks named in `REQUIRED_WRAPPER_TASKS`.
-That is a narrower derivation than A6's (which examines every task in `UPSTREAM_INPUT_TASKS` on
-every Rust crate), and it is the reason the floor is load-bearing rather than merely defensive: for
-A7 the floor **is** the task set, so an omission from it is not a vacuity risk but a coverage hole.
-A new wrapper therefore needs a floor entry — the one hand-maintained part of this design, and the
-price of the wrappers having no uniform task shape.
+To be unambiguous — the *closure* is derived per wrapper; the *set of tasks examined* is not. A7
+examines exactly `REQUIRED_WRAPPER_TASKS`. For A7 the task floor **is** the task set, so an
+omission from it is not a vacuity risk but a **coverage hole**: a new wrapper needs a floor entry
+or it is simply unchecked. This is the one hand-maintained part of the design, and the price of the
+wrappers having no uniform task shape. `REQUIRED_WRAPPER_CLOSURE` is what carries the anti-vacuity
+role.
 
----
+### 4.2 Wording correction (m3)
 
-## 7. Testing
+Rev 1 said "only the root language filter changes" in `rust_closure`. `rust_closure`
+(`cargo_moon_parity.py:279-305`) has **no** root language filter — the root filter lives in
+`check_upstream_inputs`'s `examined` set (`:331`). A7 modifies nothing in `rust_closure`; it
+defines its own root set.
 
-Every gate must demonstrate it bites. Assertions that cannot be shown to fail are not covering
-anything — the standard SMA-560 itself sets.
+### 4.3 Fix the wrappers first (M6)
 
-1. **A7 positive.** Passes on the unmutated tree, with all three floor tasks in the derived set.
-2. **A7 negative, per row.** Delete `/rs/crates/libs/paigasus-kernel/src/**/*` from
-   `paigasus-kernel-ts:build`; confirm A7 reds **naming that specific consumer and upstream**;
-   restore; confirm green. Repeat for `paigasus-kernel-py:test`.
-3. **A7 floor.** Simulate an emptied derivation and confirm the `FLOOR:` rows fire — distinguishable
-   from a per-wrapper failure, as A6's controls already are.
-4. **`build.rs` assertion.** Remove the per-crate declaration; confirm red naming the crate; restore.
-5. **Stub drift gate.** Add a `#[pyfunction]` without touching the stub; confirm red naming the
-   missing symbol. Then the reverse: add a stub entry with no Rust function.
-6. **`rustfmt.toml` input.** Confirm editing `rs/rustfmt.toml` now selects the `fmt` tasks, via
-   `moon query tasks --affected`. Note this is a **new ad-hoc probe**, not an existing `run.sh`
-   case — no `run.sh` case edits that file today, which is exactly why the re-baseline below may
-   turn out empty. The two statements are consistent: the input genuinely changes behaviour, and
-   no *recorded* case exercises it.
-7. **Merge-strategy probe (R1).** Before anything else — resolved `inputFiles` before and after the
-   per-crate declaration.
-8. **Full graph.** `moon ci` with all 27 targets, `--base origin/main --include-relations`. A new
-   `repo:*` gate reds `:affected-smoke` until it is in **both** `ci.yml`'s `T=(…)` and CLAUDE.md's
-   marker-delimited command (SMA-541).
+Add `/rs/crates/libs/paigasus-kernel/Cargo.toml` to `paigasus-kernel-py:test`,
+`paigasus-kernel-ts:build` and `paigasus-kernel-ts:test`, plus each binding crate's `Cargo.toml`
+where absent. This must land **before or with** A7; otherwise A7's first run reds on a pre-existing
+defect and the temptation is to weaken A7 rather than fix the wrappers.
 
-### The re-baseline — measure, do not assume
+### 4.4 A7's own call site (SMA-542)
 
-The stated rationale for combining these three was that each re-baselines
-`ci/affected-graph/run.sh`'s strict-equality expected sets, so the re-baseline should happen once.
-**On reflection that rationale is weaker than claimed and must be measured, not assumed.** The new
-inputs are `/rs/rustfmt.toml`, a `.pyi`, and a `build.rs` — and no existing case in `run.sh` edits
-any of those files, so the expected sets may not move at all.
-
-The combination remains right on other grounds: one coherent principle, one review cycle, one PR,
-and one gate file (`cargo_moon_parity.py`) touched by two of the three changes. But the plan must
-report what the affected sets actually do rather than inheriting the assumption.
+A7's production invocation in `main()` must itself be pinned, not merely its verdict function
+exercised by fixtures. SMA-542's lesson: deleting the production block passes green when only the
+verdict function is tested.
 
 ---
 
-## 8. Limitations, stated
+## 5. Testing
 
-- **L1 — stub drift is name-level only.** A changed parameter *type* that keeps the name passes
-  (§4, D3). Closing it needs a Rust→Python type mapping; deferred deliberately, not overlooked.
-- **L2 — A7 is containment, so a wrapper may over-declare permanently.** A glob for a crate no
-  longer in the closure stays green. Accepted: for wrappers the extra inputs are hand-written with
-  stated reasons, and the cost of a stale glob is a spurious re-run, not a missed one. The
-  dangerous direction — a *missing* glob — is what A7 catches.
-- **L3 — A7 asserts crate-dir granularity, not glob shape.** Keying on
-  `<crate>/Cargo.toml` alone satisfies A7 even though `src/**/*` is what matters, because the
-  upstream half is recovered structurally from the first four path segments (the same recovery A6
-  uses). Tightening it would require A7 to know which suffix each consumer needs.
+Every assertion must demonstrate it bites.
+
+1. **R1 probe, first.** Resolved `inputFiles` before/after the per-crate `build.rs` declaration.
+2. **A7 positive** on the unmutated tree, after §4.3 lands.
+3. **A7 negative, per row — using mutations no other assertion can see (B3).** Delete the wasm glob
+   from `paigasus-kernel-ts:test`; confirm A7 reds naming that consumer and upstream; restore.
+   *Do not* use the kernel glob on `:build` or `:test` — `run.sh:343` already reds on those, so a
+   red proves nothing about A7. Then delete the kernel's `Cargo.toml` from
+   `paigasus-kernel-py:test`.
+4. **A7 closure floor.** Simulate an emptied derivation; confirm `FLOOR:` rows fire and are
+   distinguishable from per-wrapper rows.
+5. **A7 task floor.** Remove a task from `REQUIRED_WRAPPER_TASKS`; confirm the pairing/registry
+   check notices, or record explicitly that it cannot (see L2).
+6. **`build.rs` assertion.** Remove the per-crate declaration; confirm red naming the crate.
+7. **`build.rs` reachability (D3).** Add a `build.rs` to a crate whose `Cargo.toml` and `moon.yml`
+   are untouched; confirm `repo:affected-smoke` is now scheduled by
+   `moon query tasks --affected`. Without the new glob this is the case that silently passes.
+8. **`fmt` inputs.** Confirm editing `rs/rustfmt.toml` selects the `fmt` tasks via
+   `moon query tasks --affected`. **This is an ad-hoc probe, not a `run.sh` case** —
+   `_assert_task_case_impl` filters to `build`/`test`/`lint` names (`run.sh:94-97`), so promoting it
+   into `run.sh` would yield a vacuous green (m4).
+9. **A4/`check_task_inputs` refactor.** Existing `lint` rows still red; new `fmt` rows red on
+   removal.
+10. **Full graph.** `moon ci` with all 27 targets, `--base origin/main --include-relations`. No new
+    `repo:*` task is created (§3 D4, §4 are edits to an existing gate), so the count stays 27 and no
+    `T` / CLAUDE.md / `SELF_SCHEDULED_GATES` wiring is needed (M8).
+
+### The re-baseline
+
+Measure, do not assume — see §2.3. Report what the affected sets actually do.
 
 ---
 
-## 9. Open questions for the plan
+## 6. Limitations
 
-1. **R1's answer** — does Moon append or replace? Everything in §3 D2 depends on it.
-2. **Where the stub-drift gate lives.** A new `repo:pyo3-stub-drift` task, or folded into an
-   existing gate's script. A new `repo:*` task carries the full SMA-541 wiring cost (`T`,
-   CLAUDE.md's marker block) plus a `repo:input-liveness` obligation that its declared inputs stay
-   live.
-3. **§5's regenerated-glue question** — is keying a typecheck task on a file another task
-   regenerates sound, or self-invalidating?
-4. **Does `ts:typecheck` exist as a distinct task worth keying**, or is the committed-glue input
-   better placed on the inherited `tsc` task that SMA-536 says a build override currently hides?
+- **L1 — A7 is containment, so a wrapper may over-declare permanently.** A glob for a crate no
+  longer in the closure stays green. Accepted: the wrapper globs are hand-written with stated
+  reasons, and a stale glob costs a spurious re-run, not a missed one. The dangerous direction —
+  a *missing* glob — is what A7 catches.
+- **L2 — a new wrapper is unchecked until someone adds a `REQUIRED_WRAPPER_TASKS` entry** (D6).
+  Unlike A6, whose task set is uniform across crates, A7's must be hand-maintained. Nothing detects
+  the omission.
+- **L3 — A7 asserts file presence, not glob correctness.** `<upstream>/src/**/*` satisfies it;
+  so would a hypothetical `<upstream>/src/lib.rs`. Tightening would require A7 to know which shape
+  each consumer needs.
+- **L4 — §1.2's item 1 hole is closed for the three floor tasks only.** A wrapper task outside
+  `REQUIRED_WRAPPER_TASKS` is not examined at all (L2).
+
+---
+
+## 7. Open questions for the plan
+
+1. **R1's answer** — append or replace. Everything in D2 depends on it.
+2. **Does `check_task_inputs`'s `fmt` call need a per-crate exemption?** Every crate has `src/`, but
+   `@group(tests)` is empty for crates without a `tests/` dir — confirm an empty group does not red
+   the new `fmt` rows.
+3. **Ordering of §4.3 against A7** — same commit, or a preparatory one? A separate commit makes the
+   "A7 reds on a pre-existing defect" state briefly real in history.
