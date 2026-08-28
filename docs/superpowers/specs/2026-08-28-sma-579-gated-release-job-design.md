@@ -46,6 +46,40 @@ build task is `tsc --noEmit` — so those need a TypeScript build pipeline first
 
 ## 1. The job graph
 
+> **SUPERSEDED IN IMPLEMENTATION — THERE IS NO `plan` JOB.** The graph below, and §§1.2, 1.3, 4.5
+> and 11 which build on it, describe the DESIGN as written. Implementation removed `plan`
+> entirely (SMA-579 Tasks 6+7; §7.4 was corrected at the time and the rest of this document was
+> not — fix round 3, Minor 6). Reason, measured against the real repository: `release-plz release
+> --dry-run` FAILS every time with `no matching package named paigasus-proto-derive`, because a
+> dry run never publishes the derive crate, so the dependent `paigasus-proto` dry run can never
+> resolve it. That failure is permanent until a LIVE release publishes the derive crate first, so
+> a `plan` job built on it would red the whole graph on every push to `main`.
+>
+> **Read `.github/workflows/release.yml`'s own header as the authority, not this section.** The
+> shipped graph is:
+>
+> ```
+>   release-pr                                        ← existing, UNTOUCHED, ungated
+>   wheels        if: vars.PAIGASUS_RELEASE_ENABLED == 'true'   uses: ./.github/workflows/wheels.yml
+>   prebuild      if: vars.PAIGASUS_RELEASE_ENABLED == 'true'   uses: ./.github/workflows/prebuild.yml
+>   proto-dist    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'   builds py/packages/paigasus-proto
+>   approve-release  needs: [wheels, prebuild, proto-dist]      environment: release-approval
+>   release       needs: [wheels, prebuild, proto-dist, approve-release]  environment: release-publish
+>                                                     ← FIRST IRREVERSIBLE STEP
+>   publish-pypi  needs: [wheels, proto-dist, release]          environment: release-publish
+>   publish-npm   needs: [prebuild, release]                    environment: release-publish
+> ```
+>
+> The gate reaches each job THREE ways: literally on the three build jobs; transitively through
+> `needs:` on `approve-release`, `release` and both publish jobs; and not at all on `release-pr`,
+> which is in `release_guard.py`'s `UNGATED_JOBS` and is asserted by V7 to contain no publish
+> step. The accepted cost of dropping `plan`: once the flag is on, every push to `main` builds the
+> full wheel and napi matrices even when nothing is releasable. Do not reintroduce a dry-run-based
+> `plan` without first re-verifying that the dry run can resolve the derive-crate dependency.
+>
+> The per-family decision `plan` was to supply now comes from `release`'s own `released` output,
+> read at STEP level inside `publish-pypi` and `publish-npm`.
+
 ```
 .github/workflows/release.yml        on: push → branches: [main]
 
@@ -97,6 +131,13 @@ reversible stage:
 
 ### 1.2 Why `plan` exists, and why it does **not** gate the build jobs
 
+> **SUPERSEDED — `plan` does not exist.** See §1's banner. What survived into the implementation
+> is everything in this section that is NOT about `plan`: the rejection of the per-family build
+> optimisation (still rejected, for the same `always()` reason), the "correctness over cost"
+> decision, and the step-level consumption of the per-family outputs — those now come from
+> `release`'s `released` output. What did not survive: "`plan` is the only job carrying the gate
+> directly". Three build jobs carry it directly, and the `needs:` chains root at them.
+
 `release-plz release` is idempotent — it publishes only packages not already on the registry at
 that version — so the standard two-job pattern runs it on every push to `main`. `plan` runs the
 dry-run first so a non-release push does not build twelve matrix legs.
@@ -121,6 +162,14 @@ release therefore builds kernel wheels nobody uploads — wasted minutes on a ra
 exchange for a guard with no `always()` hole in it.
 
 ### 1.3 `plan`'s three unmeasured premises
+
+> **PARTIALLY SUPERSEDED — `plan` does not exist.** See §1's banner. Premise (b) is what removed
+> it: the dry run cannot pass until `paigasus-proto-derive` is on crates.io, so the "re-measure it
+> before trusting `plan`'s `--dry-run` step in production" instruction below has no `plan` step
+> left to apply to. The `rs/release-plz.toml` `publish = false` prerequisite it identifies is REAL
+> and SHIPPED — it blocks `release-plz release` itself, not only the dry run. Premise (c)'s
+> App-token requirement now applies to `release`, which mints its own token exactly as
+> `release-pr` does.
 
 Revision 1 measured one and assumed two. All three are Task-1 preconditions.
 
@@ -269,7 +318,7 @@ credentials**. `release-plz release` pushes tags and creates the two GitHub Rele
 
 **Decision:** `release` mints its own GitHub App installation token, mirroring `release-pr`'s step
 (`release.yml:151`), and passes it as `GIT_TOKEN`. Tokens are per-job and live one hour; each job
-mints its own. `plan` does the same, for the reason in §1.3c.
+mints its own. (§1.3c said the same of `plan`; there is no `plan` job — see §1's banner.)
 
 Revision 1 showed only `contents: write` and `CARGO_REGISTRY_TOKEN` and would have failed on the
 tag push **after** the crates.io upload — a half-completed irreversible step, the one outcome
@@ -419,9 +468,15 @@ action) relevant to that future migration, not to this decision.
 | crates.io | Trusted Publisher | repo + `release.yml` (+ environment) |
 | PyPI | pending publisher ×3 | `paigasus-py-bindings`, `paigasus-kernel`, `paigasus-proto`, all against **`release.yml`**; environment field per §12 Q3 |
 | npm | `NPM_TOKEN` | **MEASURED (§4.4): Trusted Publishing cannot cover a package's first-ever publish** (npmjs.com requires the package to already exist before OIDC can be registered), and every npm package here is a first publish. `NPM_TOKEN` is a bootstrap credential; a later, separate change may migrate to Trusted Publishing once every package exists. |
+| **Reviewer on `release-approval`** | at least one required reviewer | **The environment alone does nothing.** An environment with no protection rule does not pause — the job walks straight through it. §4.1 says the next issue must add reviewers; this table is what someone will actually work from, and it listed only the environment. §10.1 concedes the live path cannot be verified before merge, which makes this human pause the ONLY verification that exists. (fix round 3, Important 7) |
+| npm | `@paigasus` org/scope must exist | Every package here is scoped. Publishing into a scope nobody owns fails at the first `npm publish` — after crates.io has published. |
+| npm | `NPM_TOKEN` must be an **Automation** token | A classic publish token fails with "2FA required for publishing" on an account with 2FA enforced. The token TYPE is the thing to check, not merely that a token exists. |
+| crates.io | **MUST-CHECK, deliberately not asserted either way** | This table lists a crates.io Trusted Publisher the way it lists PyPI's *pending* publisher — but the two are not known to be the same. PyPI's pending-publisher flow exists precisely to cover a project that does not yet exist; crates.io's trusted-publishing configuration lives on **a crate's own settings page**, so it may not be registerable for a crate that has never been published. **This has NOT been measured**, unlike the npm case in §4.4 and the PyPI case above. If it is not pre-registerable, `rust-lang/crates-io-auth-action` fails on the first release for all three crates and a bootstrap `CARGO_REGISTRY_TOKEN` is required — the same bootstrap shape npm needs. Resolve this **before** flipping `PAIGASUS_RELEASE_ENABLED`, not during the first release. |
+| crates.io | **name availability** for `paigasus-kernel`, `paigasus-proto`, `paigasus-proto-derive` | release-plz's version baseline is the crates.io REGISTRY, not git tags (no `git_only` in `rs/release-plz.toml`). It performs a lookup for every workspace member name, so a **squatted** name silently becomes the comparison baseline. Check all three are free or already ours. |
 
-`PAIGASUS_BOT_APP_ID` / `PAIGASUS_BOT_PRIVATE_KEY` are unchanged and now serve `release-pr`,
-`plan` and `release`.
+`PAIGASUS_BOT_APP_ID` / `PAIGASUS_BOT_PRIVATE_KEY` are unchanged and now serve `release-pr` and
+`release`. (There is no `plan` job — see §1's banner.) `PAIGASUS_BOT_APP_ID` holds the App's
+**Client ID**, not the numeric App ID; the name is the only stale thing about it.
 
 ---
 
@@ -673,7 +728,25 @@ simpler hole open" standard, applied to the central strengthening.
 > **(V4)** No `continue-on-error:` other than literal false appears on any such job **or on any
 > step of one**.
 >
-> **(V5)** No `napi prepublish` invocation omits `--no-gh-release`.
+> **(V5)** No `napi prepublish` invocation omits `--no-gh-release`. **In `release.yml` AND in every
+> workflow it calls** — the implementation first applied this to the main workflow only, so
+> `prebuild.yml:295`, the invocation whose own comment says the flag "IS REQUIRED", was unguarded
+> (fix round 3, Important 4).
+>
+> **(V6)** See §8.3 — a called workflow may publish only if it is `workflow_call`-only.
+>
+> **(V7)** A member of `UNGATED_JOBS` contains **no publish step** (fix round 3, Critical 2).
+
+**V7 is not optional decoration on V1's exemption — it is the exemption's premise.** As first
+implemented, membership in `UNGATED_JOBS` exempted a job from EVERYTHING, and that was measured: a
+`release-pr` job whose three steps ran `cargo publish`, `npm publish` and
+`pypa/gh-action-pypi-publish` passed the whole guard at **exit 0**, while the identical steps in
+any other job correctly exited 1. `release-pr` runs on every push to `main` with an App
+installation token carrying `contents: write`, so the exemption was live and unbounded. The
+exemption is justified by the claim "`release-pr` cannot reach a registry"; V7 asserts that claim
+rather than assuming it. V7 inherits detection's closed-vocabulary limit (see §8.3 and
+`ci/actionlint/README.md`'s L20) — it closes the known publish verbs, not the unknown ones, which
+is precisely why V1 stays inverted rather than being derived from detection.
 
 V1 is strictly stronger than detection, cannot rot, and reduces the pin to one direction — a new
 job is gated or it is exempted by name, and there is no third outcome. V2 closes
@@ -690,7 +763,8 @@ This follows `wheels.yml:15-18`'s standing rule: **exact equality, never a subst
 Revision 1 said a publish step added to `wheels.yml` "is reachable from `release.yml` and gated."
 **That is false and dangerously so.** Both files carry their own `push:` and `pull_request:`
 triggers. A `twine upload` added to `wheels.yml`'s `build` job would be judged **green** — the
-calling job is gated through `needs: plan` — while running on every PR and every push to `main`,
+calling job is gated (transitively, through its `needs:` chain) — while running on every PR and
+every push to `main`,
 with `PAIGASUS_RELEASE_ENABLED` irrelevant. The guard would report green on precisely the ungated
 publish it exists to prevent, and with a *stronger* claim than "we do not check that file."
 
@@ -698,9 +772,27 @@ publish it exists to prevent, and with a *stronger* claim than "we do not check 
 > registry-reaching job **only if** its `on:` block contains `workflow_call` **and nothing else**.
 
 Both files today would fail that test *if they ever gained a publish step*, which is the correct
-verdict. Detection (a step invoking `release-plz release`, `npm publish`, `napi prepublish`,
-`twine upload`, or a PyPI publish action) is retained **only here**, where V1's whitelist has no
-meaning.
+verdict.
+
+**Detection's vocabulary must name this repository's own tooling, and the first version did not**
+(fix round 3, Important 3). `PUBLISH_MARKERS` shipped with `release-plz release`, `npm publish`,
+`napi prepublish`, `twine upload`, `gh-action-pypi-publish` and `cargo publish` — omitting
+`maturin publish`, `maturin upload`, `uv publish` and `yarn publish`. `wheels.yml` **is** a maturin
+workflow carrying both `pull_request` and `push`, and `maturin publish` is a one-word edit from the
+`maturin build` already in it. §8.2 argues detection cannot see an unrecognised mechanism, which is
+why V1 is inverted; that argument is only honest if the vocabulary at least covers the mechanisms
+the repository already uses. All four are now present, each with a fixture row.
+
+The markers are **regexes, not substrings**, and one entry forces that: `release-plz release` is a
+strict prefix of `release-plz release-pr`, which is exactly what the real, correct `release-pr` job
+runs. Measured — `'release-plz release' in 'release-plz release-pr --output json'` is `True`,
+while `re.search(r'release-plz\s+release(?![-\w])', …)` is `False` on the same string and `True`
+on a real `release-plz release`. A substring test would red the real repository.
+
+**Detection is retained here AND applied to `UNGATED_JOBS` (V7, fix round 3, Critical 2).** V1's
+whitelist has no meaning for a called workflow, which is the original reason for detection. It has
+a second one now: an exemption from V1 must not become an exemption from everything. See §8.2's
+V7 note.
 
 > **This overlaps `repo:workflow-credentials` (SMA-593) and the overlap is deliberate — do not
 > delete either as redundant.** That gate's rule is **trigger-derived**: a workflow whose `on:`
@@ -770,7 +862,8 @@ Measured on `release.yml`: top-level keys are `['name', True, 'concurrency', 'pe
 'jobs']`, `'on' in doc` **False**, `True in doc` **True**.
 
 The `needs:` row is the most dangerous: it makes the **transitive half of V1 quietly vacuous**,
-and that half is load-bearing because §1.2 makes every job but `plan` transitively gated.
+and that half is load-bearing because four of the seven shipped jobs — `approve-release`,
+`release`, `publish-pypi` and `publish-npm` — are gated ONLY transitively (§1's banner).
 
 Also required, each with a fixture: `!!str`-tagged scalars; multi-document files
 (`yaml.safe_load_all`); the closed set of accepted `if:` forms (bare, `${{ }}`-wrapped, folded
@@ -911,8 +1004,8 @@ Revision 1 had no such section; the umbrella has one and §1.1's whole rationale
 
 | Failure | Reversible? | Procedure |
 |---|---|---|
-| `plan` fails | yes | nothing happened; fix and re-push |
-| a build job fails | yes | nothing irreversible has run; re-run |
+| a build job fails (`wheels`, `prebuild`, `proto-dist`) | yes | nothing irreversible has run; fix and re-push, or re-run |
+| `approve-release` is rejected or times out | yes | nothing irreversible has run. This is the pause §4.5's reviewer row exists to create |
 | `release-plz release` fails **partway** — one crate published, next not, tags partial | **no** | crates.io cannot be unpublished (only yanked). Yank the published crate, delete the partial tags, fix, re-run: release-plz skips already-published packages, so a re-run converges |
 | `publish-pypi` fails partway | **no** | `skip-existing: true` makes a re-run converge; PyPI is delete-but-never-reuse, so a bad file needs a **new version**, never a re-upload |
 | `publish-npm` fails partway | **no** | §6's `npm view` pre-check makes a re-run converge; a genuinely bad publish must be unpublished **within 72 hours** or superseded by a new version |
@@ -945,7 +1038,7 @@ Revision 1 had no such section; the umbrella has one and §1.1's whole rationale
    field?~~ **MEASURED, Task 1 (§7.6): yes, all seven do**, matching the building repo.
 8. ~~Is the per-package TOML key `git_release_enable`?~~ **MEASURED, Task 1 (§2.1): yes, confirmed
    exactly, and valid at both `[workspace]` and `[[package]]` scope.**
-9. What happens on **"Re-run all jobs"** of an older run? `plan`/build jobs re-execute at the old
+9. What happens on **"Re-run all jobs"** of an older run? The build jobs re-execute at the old
    commit while `main` has moved. §5.3's version binding catches the PyPI half; nothing catches the
    crates.io or npm half.
 
