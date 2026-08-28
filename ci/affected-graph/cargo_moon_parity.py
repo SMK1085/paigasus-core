@@ -18,6 +18,7 @@
 # it stays inside the "never parse YAML" rule above.
 #
 # usage: cargo_moon_parity.py [--self-test]
+import inspect
 import json
 import subprocess
 import sys
@@ -659,6 +660,20 @@ def self_test():
             f"{sorted(derive_ffi_tasks(ffi_fixture))}"
         )
 
+    # Guard the guard (SMA-542). A check that is defined but never invoked by main() asserts
+    # nothing, and no fixture here would notice — self_test calls the check functions directly.
+    # This is generic on purpose: it covers a future A8 on the day it is written.
+    main_src = inspect.getsource(main)
+    unreferenced = sorted(
+        name for name in globals()
+        if name.startswith("check_") and f"{name}(" not in main_src
+    )
+    if unreferenced:
+        failures.append(
+            f"main() never calls {', '.join(unreferenced)} — a check that is defined but not "
+            f"invoked asserts nothing (SMA-542)"
+        )
+
     a1, a2, a3 = check(ok, crates)
     if (a1, a2, a3) != ([], [], []):
         failures.append(f"clean fixture reported violations: {a1} {a2} {a3}")
@@ -1001,20 +1016,12 @@ def main():
         return 2
 
     a1, a2, a3 = check(projects, crates)
-    a4 = check_task_inputs(projects, crates, "lint", WORKSPACE_LINT_INPUTS)
-    a4_fmt = check_task_inputs(projects, crates, "fmt", FMT_TASK_INPUTS)
-    a6 = check_upstream_inputs(projects)
-    if not (a1 or a2 or a3 or a4 or a4_fmt or a5 or a6):
-        print(
-            f"PASS  {'cargo-moon-parity':<18} -> "
-            f"{len(crates)} crates: every Cargo dep has a Moon edge that schedules its build, "
-            f"every lint keys on the workspace files, every FFI build task does too, and every "
-            f"crate keys on its upstream sources"
-        )
-        return 0
-
-    print("FAIL  [cargo-moon-parity] Cargo and Moon disagree", file=sys.stderr)
-    for rows, title in (
+    # ONE list, used for BOTH the pass/fail verdict and the report. Previously the two were
+    # written separately, so a new check folded into one and not the other was a green no-op —
+    # the SMA-542 shape, where the guard around a check is as unguarded as its call site.
+    # Appending here is now the only way to add a check, and forgetting to means it is never
+    # called at all, which is loud rather than silent.
+    findings = [
         (a1, "Cargo dep with NO Moon edge (under-builds — CI stays green while skipping work).\n"
              "    Fix: add the upstream to `dependsOn` in the consumer's moon.yml."),
         (a2, "Hand-declared Moon edge with NO Cargo backing (over-builds).\n"
@@ -1024,18 +1031,20 @@ def main():
              "    Fix: for `build`/`test`, add '^:build' to the task's `deps` in the consumer's\n"
              "    moon.yml. For `lint` the dep is declared once for ALL crates in\n"
              "    .moon/tasks/rust.yml — restore it there, not per-crate (SMA-526)."),
-        (a4, "`lint` does not key on the workspace-level files, so a dependency bump, a\n"
+        (check_task_inputs(projects, crates, "lint", WORKSPACE_LINT_INPUTS),
+             "`lint` does not key on the workspace-level files, so a dependency bump, a\n"
              "    [workspace.lints] edit or a toolchain drift schedules NOTHING for this crate\n"
              "    (SMA-534).\n"
              "    Fix: the inputs are declared once for ALL crates in .moon/tasks/rust.yml —\n"
              "    restore them there, not per-crate. Expected: /rs/Cargo.lock, /rs/Cargo.toml,\n"
              "    /rs/rust-toolchain.toml."),
-        (a4_fmt, "`fmt` does not key on everything `cargo fmt --check` actually reads, so a\n"
-                 "    rustfmt.toml edit, a toolchain bump or a misformatted tests/ file schedules\n"
-                 "    NOTHING for this crate (SMA-537).\n"
-                 "    Fix: the inputs are declared once for ALL crates in .moon/tasks/rust.yml —\n"
-                 "    restore them there, not per-crate. Expected: @group(sources), @group(tests),\n"
-                 "    /rs/rustfmt.toml, /rs/rust-toolchain.toml."),
+        (check_task_inputs(projects, crates, "fmt", FMT_TASK_INPUTS),
+             "`fmt` does not key on everything `cargo fmt --check` actually reads, so a\n"
+             "    rustfmt.toml edit, a toolchain bump or a misformatted tests/ file schedules\n"
+             "    NOTHING for this crate (SMA-537).\n"
+             "    Fix: the inputs are declared once for ALL crates in .moon/tasks/rust.yml —\n"
+             "    restore them there, not per-crate. Expected: @group(sources), @group(tests),\n"
+             "    /rs/rustfmt.toml, /rs/rust-toolchain.toml."),
         (a5, "An FFI build task does not key on the workspace-level files, so a dependency bump\n"
              "    replays a CACHED artifact built from a different resolution — and clippy cannot\n"
              "    cover it, because it never links a cdylib and never targets wasm32 (SMA-546).\n"
@@ -1043,7 +1052,8 @@ def main():
              "    /.prototools to that task's `inputs`. A `not matched by any FFI marker` row\n"
              "    means the opposite — the task stopped looking like a Rust build to A5; either\n"
              "    restore the invocation or update FFI_MARKERS."),
-        (a6, "A crate's build/test/lint does not key on its upstream crates' sources, so an\n"
+        (check_upstream_inputs(projects),
+             "A crate's build/test/lint does not key on its upstream crates' sources, so an\n"
              "    upstream change SELECTS NOTHING for this crate and its cached PASS replays\n"
              "    against a different upstream (SMA-528).\n"
              "    Fix: the list lives in that crate's own moon.yml under `fileGroups.upstreams` —\n"
@@ -1054,7 +1064,19 @@ def main():
              "    from the graph, it dropped out of A6's examined set (e.g. stopped reporting\n"
              "    `language: rust`), or its dependsOn closure derivation is broken — fix that\n"
              "    first, every other A6 row is meaningless until it passes."),
-    ):
+    ]
+
+    if not any(rows for rows, _ in findings):
+        print(
+            f"PASS  {'cargo-moon-parity':<18} -> "
+            f"{len(crates)} crates: every Cargo dep has a Moon edge that schedules its build, "
+            f"every lint and fmt keys on the files its command reads, every FFI build task does "
+            f"too, and every crate keys on its upstream sources"
+        )
+        return 0
+
+    print("FAIL  [cargo-moon-parity] Cargo and Moon disagree", file=sys.stderr)
+    for rows, title in findings:
         if rows:
             print(f"  {title}", file=sys.stderr)
             for row in rows:
