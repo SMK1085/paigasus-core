@@ -43,6 +43,10 @@ tasks:
       - 'osv-scanner.toml'
       - 'ts/pnpm-lock.yaml'
       - 'py/uv.lock'
+      # SMA-593 — repo:workflow-credentials resolves pyyaml through its own uv project, so
+      # its lockfile is a third pip-ecosystem manifest. It is in ci/osv/run.sh's LOCKFILES
+      # array too; this entry is what re-keys the gate when that lockfile changes.
+      - 'ci/workflow-credentials/uv.lock'
       - '.prototools'
       - '.proto/plugins/osv-scanner.toml'
 

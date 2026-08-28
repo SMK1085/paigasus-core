@@ -515,7 +515,7 @@ SELF_TASK_GLOBS_EXEMPT = {
     "release-parity-py": "as release-parity",
     "release-parity-ts": "as release-parity",
     # SMA-572/SMA-573. NOT a skip — a delegation, and the harder half of this issue. This gate's
-    # nineteen inputs are the most load-bearing list in the repo (every pin in this file is
+    # twenty inputs are the most load-bearing list in the repo (every pin in this file is
     # reachable only because it lists `moon.yml`), so they ARE pinned — by check 8e in
     # ci/actionlint/run.sh, which is scheduled independently of this gate. An entry in
     # SELF_TASK_EXPECTED_GLOBS instead would make repo:affected-smoke the sole judge of its own
@@ -525,7 +525,7 @@ SELF_TASK_GLOBS_EXEMPT = {
     # so this delegation cannot rot silently.
     "affected-smoke": (
         "inputs pinned by check 8e in ci/actionlint/run.sh instead — an entry here would make "
-        "this gate the sole judge of its own reachability, and exact-match a nineteen-entry "
+        "this gate the sole judge of its own reachability, and exact-match a twenty-entry "
         "list that legitimately grows; ACTIONLINT_SH_CALL_SITES pins 8e's call site and arity "
         "floor so the delegation cannot rot (SMA-572/SMA-573)"
     ),
@@ -645,7 +645,7 @@ ACTIONLINT_SH_CALL_SITES = (
     # RUN_SH_CALL_SITES above and the other copy still asserts the lines; 8e deliberately keeps
     # its set at one site, so the floor is what makes shrinking it a two-file edit across two
     # independently scheduled gates.
-    '[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 19 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 19"',
+    '[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 20 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 20"',
     # ...and the SCRIPT table's arity floor, the same hole one table over — but closing a
     # strictly narrower gap, which is why it is worth its own entry rather than being read as
     # a duplicate of the line above. SELF_SCHEDULED_GATES["affected-smoke"] already asserts
@@ -1665,7 +1665,7 @@ def self_test():
         # appears in substring form elsewhere (the verdict function inside its own fixtures; the
         # array name in its own declaration), so only the whole line proves the PRODUCTION use.
         'done < <(affected_smoke_block_verdict moon.yml)\n'
-        '[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 19 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 19"\n'
+        '[ "${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]}" -ge 20 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_INPUTS has ${#T_AFFECTED_SMOKE_REQUIRED_INPUTS[@]} entries, expected at least 20"\n'
         '[ "${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]}" -ge 3 ] || infra "check 8e: T_AFFECTED_SMOKE_REQUIRED_SCRIPT has ${#T_AFFECTED_SMOKE_REQUIRED_SCRIPT[@]} entries, expected at least 3"\n'
     )
     wired_release_parity = (
