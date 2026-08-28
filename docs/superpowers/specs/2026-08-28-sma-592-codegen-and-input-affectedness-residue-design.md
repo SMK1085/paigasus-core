@@ -4,26 +4,47 @@
 **Issues:** SMA-592 (codegen-config selection), SMA-594 (`rs/.cargo/config.toml`), plus one gap
 found during this design and folded into SMA-594.
 **Branch:** `feature/sma-592-codegen-and-input-affectedness-residue`
-**Verified against `main` @ `82fe78e`.**
+**Verified against `main` @ `82fe78e` (moon 2.3.2); re-measured against `main` @ `4f0d9b2`
+(moon 2.5.3, proto 0.61.1 — SMA-595) before implementation. §1 carries the 2.5.3 numbers.**
 
-One principle, three files: *task `inputs` are the only thing that confers affectedness in Moon
-2.3.2, and the only thing that makes a cache key honest.* SMA-528, SMA-546 and SMA-560 closed this
-class for crate sources, workspace files and the py/ts wrapper closures. These are the residue.
+One principle, three files: *task `inputs` are essentially the only thing that confers
+affectedness in Moon 2.5.3, and the only thing that makes a cache key honest.* SMA-528, SMA-546
+and SMA-560 closed this class for crate sources, workspace files and the py/ts wrapper closures.
+These are the residue.
+
+The word "essentially" carries one measured exception, and no more. On 2.3.2 SMA-528 measured
+`--include-relations` to change **nothing**. That is no longer true. SMA-595 re-measured the flag
+on 2.5.3 at the full 27-target `ci.yml` shape: it selects exactly ONE task the same command
+without it does not — `paigasus-kernel-py:build`, 44 RunTasks against 43, stable across repeated
+runs. One added `build` is a SCHEDULED upstream, not a dependent being SELECTED, so it is not a
+working dependent cascade and the principle above still governs this spec. What carries the
+cascade remains `@group(upstreams)`. The comments at the top of `ci/affected-graph/run.sh` and
+above `assert_task_case_ci` state this in the same terms; keep the three in agreement, and re-run
+the A/B on the next moon bump — the delta moved once and can move again.
 
 ---
 
 ## 1. Measured baseline
 
-All five rows come from `moon query tasks --affected` on the worktree at `82fe78e`. They are the
-evidence for every claim in this spec.
+All five rows come from `moon query tasks --affected`, **re-measured on `main` @ `4f0d9b2`
+(moon 2.5.3)**. They are the evidence for every claim in this spec.
 
-| Edited file | Tasks selected today |
-| -- | -- |
-| `rs/crates/bindings/paigasus-py-bindings/paigasus_py_bindings.pyi` | `repo:actionlint`, `repo:input-liveness`, `repo:publish-metadata` |
-| `rs/.cargo/config.toml` | `repo:actionlint`, `repo:input-liveness`, `repo:publish-metadata` |
-| `.prototools` | 8 crate/wrapper tasks + 8 `repo:*` gates — but **not** `contracts:generate` |
-| `py/uv.lock` | `paigasus-kernel-py:test`, `paigasus-py-bindings-rs:build`, the four `py:*` tasks, 5 `repo:*` gates — but **not** `contracts:generate` |
-| `contracts/buf.gen.yaml` | `contracts:generate`, `repo:actionlint`, `repo:input-liveness` |
+| Edited file | Tasks selected today | Count |
+| -- | -- | -- |
+| `rs/crates/bindings/paigasus-py-bindings/paigasus_py_bindings.pyi` | `repo:actionlint`, `repo:input-liveness`, `repo:publish-metadata` | 3 |
+| `rs/.cargo/config.toml` | `repo:actionlint`, `repo:input-liveness`, `repo:publish-metadata` | 3 |
+| `.prototools` | `paigasus-kernel-py:test`, `paigasus-kernel-ts:{build,test}` + 8 `repo:*` gates — but **not** `contracts:generate` | 11 |
+| `py/uv.lock` | `paigasus-kernel-py:test`, the four `py:*` tasks, 5 `repo:*` gates — but **not** `contracts:generate` | 10 |
+| `contracts/buf.gen.yaml` | `contracts:generate`, `repo:actionlint`, `repo:input-liveness` | 3 |
+
+**Read these counts from the `tasks` map, not from a grep.** An earlier draft of rows 3 and 4
+listed 8 and 6 non-`repo` tasks. Those were inflated: `moon query tasks --affected` emits each
+selected task's `deps[]` entries, which carry a `"target"` key of their own, so a
+`grep -o '"target": "[^"]*"'` over the raw JSON counts scheduled upstreams
+(`paigasus-py-bindings-rs:build`, `paigasus-node-bindings-rs:build`, `paigasus-wasm-rs:build`)
+as if they were selections. Parse the JSON and take one target per `tasks[project][task]`
+instead. The distinction is the whole subject of this spec — a scheduled upstream is not a
+selection — so an extraction that conflates them cannot measure it.
 
 The first two rows select only broad or packaging gates. `repo:actionlint` and
 `repo:input-liveness` both declare `inputs: ['**/*']`, so they select on *every* file and prove
@@ -328,12 +349,42 @@ guards; a guard that cannot report red is worse than no guard.
 
 ---
 
-## 9. Open questions for the plan
+## 9. Open questions — answered
 
-1. Does adding `/py/uv.lock` to `contracts:generate` cause unwanted churn? Every Python dependency
-   bump would re-run `buf generate`. That is correct but broad. Measure the cost; `buf generate` is
-   fast, and the drift step already runs it unconditionally on every CI run, so the marginal cost
-   may be zero.
-2. Should `.prototools` be narrowed? It pins twelve tools, only one of which (`buf`) affects
-   codegen. Moon has no sub-file input granularity, so the answer is probably "accept it", but
-   record the reasoning rather than leaving it implicit.
+Both were measured during implementation, on `main` @ `4f0d9b2` (moon 2.5.3, proto 0.61.1).
+
+**1. Does adding `/py/uv.lock` to `contracts:generate` cause unwanted churn? — No. Accept it.**
+
+Wall-clock for one `buf generate`, run from `contracts/` with a warm buf module cache:
+**0.81 s, then 0.66 s and 0.62 s on two repeats.** The run also reproduced the committed output
+byte-for-byte (`git status --porcelain` empty afterwards), so codegen is deterministic here and
+the drift diff has nothing to hide.
+
+Churn over the 163 commits on `main`, by input set:
+
+| Input set | Commits touching it | Share |
+| -- | -- | -- |
+| pre-SMA-592 inputs (`contracts/proto`, `buf.{gen.yaml,yaml,lock}`) | 24 | 14% |
+| the two new inputs (`.prototools`, `py/uv.lock`) | 34 | 21% |
+| union | 56 | 34% |
+| **marginal — new inputs only, no old input touched** | **32** | **19%** |
+
+Per file: `contracts/proto` 21 commits (12%), `py/uv.lock` 21 (12%), `.prototools` 14 (8%),
+`contracts/buf.gen.yaml` 4 (2%).
+
+So the change makes roughly one PR in five pay one extra `buf generate` — under a second each.
+And it does not add a `buf generate` that was not going to happen: the drift step in `ci.yml`
+runs `moon run contracts:generate` **unconditionally** on every CI run. What the two inputs buy
+is that on those 32 commits the run is a real one rather than a restored cache hit, which is
+exactly the vacuous-pass hole §2 describes. The marginal cost is therefore ~19% of runs × ~0.7 s;
+the marginal benefit is that the gate stops lying on precisely the commits that bump a generator.
+
+**2. Should `.prototools` be narrowed? — It cannot be, and the over-trigger is accepted.**
+
+`.prototools` pins twelve tools and only `buf` affects codegen, so keying `contracts:generate` on
+the whole file over-triggers on eleven irrelevant pins. Moon 2.5.3 has **no sub-file input
+granularity** — `inputs` names paths, never regions within a file — so the only alternatives are
+to key on the whole file or on nothing. Keying on nothing is what SMA-592 is fixing. At 14
+commits over 163 (8%), and at the sub-second cost measured above, the over-trigger is cheaper
+than the failure it prevents. Recorded here so a later reader does not re-open it as an
+optimization; a genuine narrowing needs upstream support, not a local change.
