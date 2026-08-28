@@ -2,8 +2,21 @@
 name: release
 
 # The full release path — `release`, `publish-pypi`, `publish-npm` — is present in this file
-# (SMA-579), but INERT: each job is gated on `if: vars.PAIGASUS_RELEASE_ENABLED == 'true'`, and
-# SMA-580 is what flips that variable, after its own pre-flight. Nothing publishes until then.
+# (SMA-579), but INERT until `vars.PAIGASUS_RELEASE_ENABLED` is `'true'`. SMA-580 is what flips
+# that variable, after its own pre-flight. Nothing publishes until then.
+#
+# HOW THE GATE REACHES EACH JOB — three ways, not one (fix round 3, Minor 1; an earlier wording
+# here said "each job is gated on `if: …`", which is true of three of the seven jobs). The
+# authoritative statement is the "NO `plan` JOB EXISTS" note below; this is its summary:
+#   * `wheels`, `prebuild` and `proto-dist` carry `if: vars.PAIGASUS_RELEASE_ENABLED == 'true'`
+#     literally.
+#   * `approve-release`, `release`, `publish-pypi` and `publish-npm` carry NO `if:` of their own.
+#     They are gated TRANSITIVELY, through an unbroken `needs:` chain back to those three.
+#   * `release-pr` is not gated at all, by design — it must keep proposing the release PR while
+#     the flag is off. That is only safe because it cannot reach a registry, which
+#     `ci/actionlint/release_guard.py`'s V7 now ASSERTS (it is in that guard's `UNGATED_JOBS`,
+#     and a member of that set carrying a publish step fails the gate).
+# `release_guard.py` V1 accepts all three shapes and rejects a fourth.
 on:
   push:
     branches:
@@ -25,9 +38,34 @@ permissions:
 # missing from PyPI while pinning paigasus-py-bindings==X.Y.Z. Nothing forces that order: the
 # release commit on main already carries the bumped versions, so the artifacts can be built first.
 #
-# COROLLARY, equally load-bearing: NO JOB DOWNSTREAM OF `release` MAY BUILD ANYTHING. publish-pypi
-# and publish-npm only download, assert and upload. A wasm-pack or uv build after the crates.io
-# upload reintroduces exactly the half-published state this order exists to prevent.
+# COROLLARY, equally load-bearing: NO JOB DOWNSTREAM OF `release` MAY BUILD ANYTHING. A wasm-pack
+# or uv build after the crates.io upload reintroduces exactly the half-published state this order
+# exists to prevent.
+#
+# ONE EXCEPTION, stated precisely (fix round 3, Important 5; the earlier wording claimed both
+# publish jobs "only download, assert and upload", and that was false of one of them):
+#
+#   * `publish-pypi` genuinely only downloads, asserts and uploads. It has no checkout and no
+#     toolchain setup.
+#   * `publish-npm` runs `actions/checkout`, `moonrepo/setup-toolchain` and
+#     `pnpm --dir ts install --frozen-lockfile` BEFORE it publishes. It COMPILES NOTHING — no
+#     cargo, no wasm-pack, no napi build. It needs a JS toolchain because the publisher itself,
+#     `napi prepublish`, is a Node CLI that must be resolvable from the pnpm workspace, and
+#     because the main package publishes from the crate directory in the checkout.
+#
+# THE RESIDUAL, honestly: a `pnpm install` failure inside publish-npm lands AFTER crates.io has
+# published and after publish-pypi may have uploaded. Two things bound it, neither of which
+# removes it. `prebuild.yml` ran the byte-identical `pnpm --dir ts install --frozen-lockfile`
+# earlier in the SAME run, against the same lockfile and the same pinned toolchain, and
+# publish-npm cannot start until it succeeded — so the window is narrow and mostly covers
+# registry/network faults rather than a broken lockfile. And the `npmstate` pre-check makes a
+# re-run converge: it skips whatever already published, so the job is safe to run again.
+#
+# DO NOT "FIX" THIS BY RESTRUCTURING publish-npm (SMA-579 Ruling 24). Removing the install means
+# replacing `napi prepublish` with a hand-rolled `npm publish` loop over the seven platform dirs
+# plus a `jq` rewrite of the main package's optionalDependencies. That puts new, unreviewed logic
+# in the one path where a mistake cannot be undone — a worse trade than the narrow, re-runnable
+# failure window it would close.
 #
 # NO `plan` JOB EXISTS (SMA-579 Task 6+7 decision). The original design had a `plan` job run
 # `release-plz release --dry-run` first, so a push with nothing to release could skip the 12-leg
@@ -489,6 +527,14 @@ jobs:
     timeout-minutes: 20
     environment: release-publish
     permissions:
+      # `contents: read` is REQUIRED here and is not a copy of `release`'s block for symmetry
+      # (fix round 3, Important 8). A job-level `permissions:` block sets every scope it does NOT
+      # list to `none` — so declaring `id-token: write` alone left `contents` at none while
+      # `actions/checkout` below runs. It works today only because this repository is public; the
+      # day it is not, or the day a checkout needs any contents scope, the job fails AFTER
+      # crates.io has already published. `release` carries `contents: read` beside
+      # `id-token: write` for exactly this reason.
+      contents: read
       id-token: write    # npm provenance
     steps:
       - name: Checkout
@@ -528,13 +574,14 @@ jobs:
           fi
           echo "kernel_version=$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Download the node addons
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          pattern: prebuild-*
-          merge-multiple: true
-          path: rs/crates/bindings/paigasus-node-bindings/artifacts
-
+      # There is deliberately NO `prebuild-*` download here (fix round 3, Minor 4). One existed and
+      # wrote the raw addons to `…/artifacts`, which NOTHING in this job reads: `napi artifacts`
+      # (the subcommand that moves `artifacts/` into `npm/`) runs in prebuild.yml, not here, and
+      # `napi prepublish` reads only the `npm/` dirs. The `npm-dirs` artifact below already carries
+      # each platform's `.node`, because prebuild.yml uploads that directory AFTER running
+      # `napi artifacts` into it. The assertion step further down is what proves that rather than
+      # assuming it — it fails the job if any platform dir arrives without its binary, before
+      # anything is published.
       - name: Download the assembled npm dirs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
@@ -546,6 +593,53 @@ jobs:
         with:
           name: wasm-dist
           path: wasm-dist
+
+      # Fix round 3, Important 6. publish-pypi asserts BOTH a version binding (every wheel filename
+      # carries $KERNEL_VERSION) and an artifact floor (at least 7 wheels). publish-npm asserted
+      # NEITHER, and both gaps end in an irreversible publish:
+      #
+      #   * No version binding. The packages publish whatever version their downloaded
+      #     package.json carries. On a mismatch the `npm view "$PKG@$VERSION"` pre-check below
+      #     404s — it asks about the RELEASED version — so the job concludes "not published yet"
+      #     and then publishes the WRONG version. npm allows unpublish only within 72 hours.
+      #   * No platform-count floor. In @napi-rs/cli 3.7.2 `napi artifacts` writes only the
+      #     binaries it finds, and `prepublish` skips a missing one with
+      #     `if (!existsSync(dstPath)) { debug.warn(...); continue; }` — a `debug`-namespaced
+      #     warning, invisible without DEBUG= set. So a missing platform binary publishes 6 of 7
+      #     platform packages and then publishes the main package whose optionalDependencies name
+      #     the seventh, which does not exist. Silently.
+      #
+      # Seven is the `napi.targets` count in the crate's package.json, not a guess. The two
+      # non-platform package.json files are checked too: the main package publishes from the
+      # checkout and @paigasus/wasm from the downloaded artifact, so each is its own binding.
+      - name: Assert the npm artifacts match the released version
+        if: steps.relinfo.outputs.kernel_release == 'true'
+        env:
+          KERNEL_VERSION: ${{ steps.relinfo.outputs.kernel_version }}
+        run: |
+          set -euo pipefail
+          [ -n "$KERNEL_VERSION" ] || { echo "::error::no kernel version from relinfo"; exit 1; }
+          NPM_DIR=rs/crates/bindings/paigasus-node-bindings/npm
+          count=0
+          for d in "$NPM_DIR"/*/; do
+            [ -d "$d" ] || continue
+            count=$((count + 1))
+            plat="$(basename "$d")"
+            [ -f "$d/package.json" ] || { echo "::error::npm/$plat has no package.json"; exit 1; }
+            v="$(jq -r '.version' "$d/package.json")"
+            [ "$v" = "$KERNEL_VERSION" ] \
+              || { echo "::error::npm/$plat is at version $v, expected $KERNEL_VERSION"; exit 1; }
+            ls "$d"*.node >/dev/null 2>&1 \
+              || { echo "::error::npm/$plat ships no .node binary"; exit 1; }
+          done
+          [ "$count" -eq 7 ] \
+            || { echo "::error::found $count platform packages under $NPM_DIR, expected exactly 7"; exit 1; }
+          for p in rs/crates/bindings/paigasus-node-bindings/package.json wasm-dist/package.json; do
+            v="$(jq -r '.version' "$p")"
+            [ "$v" = "$KERNEL_VERSION" ] \
+              || { echo "::error::$p is at version $v, expected $KERNEL_VERSION"; exit 1; }
+          done
+          echo "OK: 7 platform packages (each with its .node) + 2 main packages at $KERNEL_VERSION"
 
       # npm has no --skip-existing, and napi prepublish publishes several packages. A re-run
       # after a partial success would hit 403 "cannot publish over the previously published
