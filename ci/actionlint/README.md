@@ -262,7 +262,7 @@ point the entry is added, not an automated check; the value it buys is that a wa
 and greppable, not that it is correct.
 
 **L15 — the `-ge` arity floors catch a SHRUNK table, not a same-size SWAP.** They assert count
-only. Replacing all nineteen entries of `T_AFFECTED_SMOKE_REQUIRED_INPUTS` with nineteen
+only. Replacing all twenty entries of `T_AFFECTED_SMOKE_REQUIRED_INPUTS` with twenty
 different globs — or all three of `T_AFFECTED_SMOKE_REQUIRED_SCRIPT`'s — passes both floors
 unchanged; only the per-entry `missing-input`/`missing-script` verdicts would catch that, and
 only for globs still named somewhere in the (now-different) table.
@@ -274,7 +274,7 @@ itself need a pin to be honest, which does not terminate the regress, only moves
 level. Recorded rather than closed, deliberately (SMA-572).
 
 **L17 — five of check 8e's fixture rows hard-code the literal globs `CLAUDE.md` / `moon.yml`**,
-rather than deriving them from `T_AFFECTED_SMOKE_REQUIRED_INPUTS` the way the nineteen per-glob
+rather than deriving them from `T_AFFECTED_SMOKE_REQUIRED_INPUTS` the way the twenty per-glob
 deletion rows do. They must: the fixture compares exact verdict strings, and deriving the
 expectation from the same table the production code reads would make the fixture adapt to
 whatever the table says — the self-referentiality the arity floors exist to break. Cost:
@@ -287,7 +287,7 @@ key's text to `affected-smoke`; nothing requires the key to sit under `tasks:`. 
 `affected-smoke:` key under some other top-level mapping would therefore be read as the task, and
 `no-task` means only "no such two-space key was found", not "moon.yml declares no such task".
 This is a precision-of-documentation point rather than a rot path, and is recorded on those terms:
-to green the check through a decoy key you would have to reproduce all nineteen `inputs:` entries
+to green the check through a decoy key you would have to reproduce all twenty `inputs:` entries
 and all three `script:` lines, in order, underneath it — at which point you have written the real
 block a second time rather than switched the gate off, and the real block is still whatever it is.
 The extractor is deliberately left alone; tightening it to require `tasks:` would buy nothing that
