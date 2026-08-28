@@ -899,8 +899,10 @@ occurrence the deletion never touched is the substring hazard `ACTIONLINT_SH_CAL
 documents. **Before committing, verify every pinned line occurs EXACTLY once:**
 
 ```bash
+# NOTE the `--` before "$line": a pinned line starting with `--` is otherwise parsed as a
+# grep OPTION and the check dies instead of counting (measured during Task 5).
 while IFS= read -r line; do
-  printf '%s -> %s\n' "$(grep -cF "$line" ci/workflow-credentials/run.sh)" "$line"
+  printf '%s -> %s\n' "$(grep -cF -- "$line" ci/workflow-credentials/run.sh)" "$line"
 done <<'LINES'
 --negative-control) MODE=negctl;   shift ;;
 negctl)   negative_control ;;
