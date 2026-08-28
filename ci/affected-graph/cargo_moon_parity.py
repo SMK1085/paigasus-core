@@ -18,6 +18,7 @@
 # it stays inside the "never parse YAML" rule above.
 #
 # usage: cargo_moon_parity.py [--self-test]
+import inspect
 import json
 import subprocess
 import sys
@@ -80,6 +81,17 @@ WORKSPACE_LINT_INPUTS = ("rs/Cargo.lock", "rs/Cargo.toml", "rs/rust-toolchain.to
 # ("the pinned wasm-pack must support that 0.2.z — bump the two together").
 FFI_TASK_INPUTS = (*WORKSPACE_LINT_INPUTS, ".prototools")
 
+# SMA-537 — what every crate's `fmt` must key on. The two globs come from the shared fileGroups
+# and land in moon's `inputGlobs`; the two literals land in `inputFiles`. check_task_inputs spans
+# both, which is the whole reason it does not read a single bucket the way its lint-only ancestor did.
+FMT_TASK_INPUTS = (
+    "rs/rustfmt.toml",
+    "rs/rust-toolchain.toml",
+    "Cargo.toml",
+    "src/**/*",
+    "tests/**/*",
+)
+
 # Substrings that mean "this task shells out to a Rust build". Matched against the task's resolved
 # `command` + `args` + `script` joined — NOT `command` alone: measured on moon 2.3.2, a
 # command-form task reports command='cargo' with the verb in args (paigasus-kernel-rs:lint ->
@@ -129,6 +141,20 @@ ALLOW_OVER_APPROXIMATION = {}
 REQUIRED_CLOSURE_EDGES = {
     "paigasus-iam-rs": {"paigasus-kernel-rs", "paigasus-proto-rs"},
     "paigasus-kernel-parity-rs": {"paigasus-kernel-rs"},
+}
+
+# A7's anti-vacuity floor (SMA-560), and the reason it is EDGE-based rather than a task list.
+# A7 asserts CONTAINMENT (`want <= observed`), and a containment check whose `want` empties is
+# VACUOUSLY SATISFIED — it prints PASS having asserted nothing. A moon rename, a `dependencies`
+# reshape or a `language` field change on a binding crate would each do that. A task-name floor
+# cannot see it, because the tasks are still examined; only these edges can.
+# The task SET needs no floor of its own: A7 derives it from derive_ffi_tasks(), whose own floor
+# is REQUIRED_FFI_TASKS, already asserted by A5.
+REQUIRED_WRAPPER_CLOSURE = {
+    "paigasus-kernel-py": {"paigasus-kernel-rs", "paigasus-py-bindings-rs"},
+    "paigasus-kernel-ts": {
+        "paigasus-kernel-rs", "paigasus-node-bindings-rs", "paigasus-wasm-rs",
+    },
 }
 
 # "moon reported no such task key at all", distinct from both None and []. A unique object, never a
@@ -195,8 +221,8 @@ def check(projects, crates, allow=None):
     return a1, a2, a3
 
 
-def check_lint_inputs(projects, crates, required=WORKSPACE_LINT_INPUTS):
-    """Return the A4 violation list: crates whose `lint` does not key on the workspace files.
+def check_task_inputs(projects, crates, task, required):
+    """Return the A4 violation list: crates whose `task` does not key on `required`.
 
     A1-A3 are about dependency EDGES. A4 is about task INPUTS, and the two are independent: a crate
     can have a flawless edge set and still be structurally blind to a `rs/Cargo.lock` bump, because
@@ -206,6 +232,21 @@ def check_lint_inputs(projects, crates, required=WORKSPACE_LINT_INPUTS):
     guard, which is only reached by crates that have in-tree dependencies: paigasus-kernel,
     paigasus-logging, paigasus-observability and paigasus-proto-derive have none, so copying that
     shape would leave four of thirteen unasserted with a green negative control.
+
+    Spans BOTH input buckets (SMA-537). moon splits resolved inputs by kind: plain paths go to
+    `inputFiles`, globs to `inputGlobs`. `lint`'s required set is all literals, but `fmt`'s is half
+    globs (`@group(sources)`, `@group(tests)`), so a one-bucket read would silently assert nothing
+    about them. An entry is matched if it appears in EITHER bucket verbatim; a crate-relative entry
+    (`src/**/*`, `tests/**/*` — the group-derived globs) is also matched against the crate's OWN
+    `source_dir`, because moon resolves those groups to exactly `<source_dir>/src/**/*` (SMA-560 M3).
+
+    That anchoring replaced a `not f.startswith("rs/")` test plus an unanchored tail match, which
+    was weak in two directions at once. A required entry outside `rs/` (`.prototools`, a
+    `contracts/...` path) would have silently gained tail matching on the day it was added; and an
+    unanchored tail let ANOTHER crate's glob satisfy this crate — `a-rs:fmt` counted as covered by
+    `rs/crates/libs/b/src/**/*`. Anchoring drops the `rs/`-prefix special case entirely: a
+    workspace-relative entry still has to match verbatim, since `<source_dir>/rs/rustfmt.toml` is
+    not a path moon ever resolves.
     """
     by_dir = {p["source_dir"]: mid for mid, p in projects.items()}
     a4 = []
@@ -214,20 +255,57 @@ def check_lint_inputs(projects, crates, required=WORKSPACE_LINT_INPUTS):
         if mid is None:
             continue
         declared = projects[mid].get("task_inputs") or {}
-        if "lint" not in declared:
-            a4.append(f"{mid} has no `lint` task (nothing can key on the workspace files)")
+        declared_globs = projects[mid].get("task_input_globs") or {}
+        if task not in declared:
+            a4.append(f"{mid} has no `{task}` task (nothing can key on {', '.join(required)})")
             continue
-        resolved = declared["lint"]
-        if resolved is None:
+        files, globs = declared[task], declared_globs.get(task)
+        if files is None or globs is None:
             a4.append(
-                f"{mid}:lint reported no `inputFiles` — moon's output shape changed, so this "
-                f"assertion cannot be evaluated (treated as a violation, never skipped)"
+                f"{mid}:{task} reported no `inputFiles`/`inputGlobs` — moon's output shape "
+                f"changed, so this assertion cannot be evaluated (treated as a violation, "
+                f"never skipped)"
             )
             continue
-        missing = [f for f in required if f not in resolved]
+        observed = set(files) | set(globs)
+        missing = []
+        for f in required:
+            if f in observed:
+                continue
+            # Crate-relative entries (`src/**/*`, `tests/**/*`) resolve to exactly
+            # `<source_dir>/<entry>`, so ANCHOR the fallback to this crate's own source_dir rather
+            # than accepting any tail match (SMA-560 M3). A workspace-relative entry (`rs/...`)
+            # never matches this form, so it keeps its verbatim-only rule with no special case.
+            if f"{info['source_dir']}/{f}" in observed:
+                continue
+            missing.append(f)
         if missing:
-            a4.append(f"{mid}:lint inputs omit {', '.join(missing)}")
+            a4.append(f"{mid}:{task} inputs omit {', '.join(missing)}")
     return a4
+
+
+def derive_ffi_tasks(projects):
+    """Every `<pid>:<task>` whose resolved invocation shells out to a Rust build.
+
+    Shared by A5 (which asserts those tasks key on the workspace files) and A7 (which asserts the
+    non-Rust ones key on their upstream crates' sources). Sharing it is deliberate: a wrapper that
+    A5 covers and A7 does not — or the reverse — is a hole neither check can see.
+
+    Raises MoonOutputError if a task exposes none of a command, a script, or any args.
+    """
+    matched = set()
+    for pid in sorted(projects):
+        invocations = projects[pid].get("invocations") or {}
+        for name in sorted(invocations):
+            blob = invocations[name]
+            if blob is None:
+                raise MoonOutputError(
+                    f"{pid}:{name} reported none of a `command`, a `script`, or any `args` — "
+                    f"moon's output shape changed, so the FFI derivation cannot be evaluated"
+                )
+            if any(marker in blob for marker in FFI_MARKERS):
+                matched.add(f"{pid}:{name}")
+    return matched
 
 
 def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASKS):
@@ -241,33 +319,23 @@ def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASK
       silently stops matching (a renamed flag, an invocation moved behind a wrapper script, a moon
       upgrade dropping `script`) degrades to an empty set and a vacuous PASS.
 
+    The derivation itself lives in `derive_ffi_tasks`, shared with A7.
+
     Raises MoonOutputError if a task exposes none of a command, a script, or any args.
     """
-    matched, a5 = set(), []
-    for pid in sorted(projects):
-        invocations = projects[pid].get("invocations") or {}
-        declared = projects[pid].get("task_inputs") or {}
-        for name in sorted(invocations):
-            blob = invocations[name]
-            if blob is None:
-                raise MoonOutputError(
-                    f"{pid}:{name} reported none of a `command`, a `script`, or any `args` — "
-                    f"moon's output shape changed, so A5 cannot be evaluated"
-                )
-            if not any(marker in blob for marker in FFI_MARKERS):
-                continue
-            target = f"{pid}:{name}"
-            matched.add(target)
-            resolved = declared.get(name)
-            if resolved is None:
-                a5.append(
-                    f"{target} reported no `inputFiles` — moon's output shape changed, so this "
-                    f"assertion cannot be evaluated (treated as a violation, never skipped)"
-                )
-                continue
-            missing = [f for f in required if f not in resolved]
-            if missing:
-                a5.append(f"{target} inputs omit {', '.join(missing)}")
+    matched, a5 = derive_ffi_tasks(projects), []
+    for target in sorted(matched):
+        pid, _, name = target.partition(":")
+        resolved = (projects[pid].get("task_inputs") or {}).get(name)
+        if resolved is None:
+            a5.append(
+                f"{target} reported no `inputFiles` — moon's output shape changed, so this "
+                f"assertion cannot be evaluated (treated as a violation, never skipped)"
+            )
+            continue
+        missing = [f for f in required if f not in resolved]
+        if missing:
+            a5.append(f"{target} inputs omit {', '.join(missing)}")
     for target in sorted(set(floor) - matched):
         a5.append(
             f"{target} is not matched by any FFI marker — the derived set no longer covers it, "
@@ -409,6 +477,89 @@ def check_upstream_inputs(
                 if not _allowlisted(allow, pid, upstream):
                     a6.append(f"{pid}:{task} inputs include {entry}, which is not in its closure")
     return a6
+
+
+def check_wrapper_upstream_inputs(projects, root, floor=REQUIRED_WRAPPER_CLOSURE):
+    """Return the A7 violation list: py/ts wrappers that do not key on their upstream crates.
+
+    The cross-stack half of A6. A6 iterates `language == "rust"` only, so the py/ts wrappers —
+    whose hand-written `/rs/...` globs ARE the ADR-0005 cross-binding guarantee — were asserted
+    by nothing. Note the kernel->wrapper edge specifically IS covered, by one hand-written
+    `run.sh` case (`kernel->consumer-tasks`); what was uncovered is every OTHER upstream, any new
+    wrapper, and the under-declarations this check's first run found.
+
+    Three deliberate differences from A6:
+
+    * DERIVED TASK SET, not a hand-written one. `derive_ffi_tasks` already finds exactly these
+      tasks for A5, so a new wrapper's `napi build` is examined on day one even if it declares no
+      inputs at all — which is precisely the bug a hand-written list could not detect.
+    * CONTAINMENT, not strict equality. A6's strict equality is right for `fileGroups.upstreams`,
+      a mechanical mirror of the closure where anything extra is waste. The wrapper globs are
+      hand-written per task and legitimately mixed with non-closure inputs under `rs/crates/` —
+      the SMA-433 parity vectors, and each binding's `package.json` / `pyproject.toml`. Strict
+      equality would report those correct entries as violations.
+    * BOTH BUCKETS, PER TASK. `Cargo.toml` is a path (`inputFiles`), `src/**/*` is a glob
+      (`inputGlobs`), and a wrapper's `build` and `test` declare different sets — so a
+      one-bucket read, or one that unions across a wrapper's tasks, passes the very mutations
+      this check exists to catch.
+
+    `root` is POSITIONAL AND REQUIRED, never defaulted (SMA-560 I3). It gates the `build.rs`
+    half — the branch that catches this branch's own headline under-declaration — and a
+    `root=None` default made that half opt-in: a call site that simply stopped passing it went
+    on printing PASS while the two `paigasus-node-bindings/build.rs` lines could be deleted from
+    `ts/packages/paigasus-kernel/moon.yml` for free. Required means the same mistake is now a
+    TypeError at the call site instead of a silent downgrade.
+    """
+    a7 = []
+    examined = {}
+    for target in sorted(derive_ffi_tasks(projects)):
+        pid, _, task = target.partition(":")
+        proj = projects.get(pid)
+        if proj is None or proj.get("language") == "rust":
+            continue
+        examined.setdefault(pid, []).append(task)
+
+    # FLOOR first: if the derivation broke, every per-wrapper check below is vacuous. Rows are
+    # `FLOOR:`-prefixed so a control can tell a floor failure from a per-wrapper one.
+    for pid, required in sorted((floor or {}).items()):
+        if pid not in projects:
+            a7.append(f"FLOOR: {pid} is not in the graph at all")
+            continue
+        if pid not in examined:
+            a7.append(
+                f"FLOOR: {pid} has no task matched by an FFI marker, so A7 examines nothing for "
+                f"it — either restore the invocation or update FFI_MARKERS"
+            )
+            continue
+        derived = rust_closure(projects, pid)
+        for missing in sorted(required - derived):
+            a7.append(f"FLOOR: {pid}'s dependsOn closure no longer derives {missing}")
+
+    for pid, tasks in sorted(examined.items()):
+        want = set()
+        for upstream in sorted(rust_closure(projects, pid)):
+            src = projects[upstream]["source_dir"]
+            want.add(f"{src}/src/**/*")
+            want.add(f"{src}/Cargo.toml")
+            # A build script is compiled by the wrapper's own `napi build`/`maturin` invocation,
+            # so a change to it changes what the wrapper links. Only demanded when one exists on
+            # disk — which is why `root` is required rather than defaulted (see the docstring).
+            if (root / src / "build.rs").is_file():
+                want.add(f"{src}/build.rs")
+        for task in sorted(tasks):
+            files = (projects[pid].get("task_inputs") or {}).get(task)
+            globs = (projects[pid].get("task_input_globs") or {}).get(task)
+            if files is None or globs is None:
+                a7.append(
+                    f"{pid}:{task} reported no `inputFiles`/`inputGlobs` — moon's output shape "
+                    f"changed, so this assertion cannot be evaluated (treated as a violation, "
+                    f"never skipped)"
+                )
+                continue
+            observed = set(files) | set(globs)
+            for entry in sorted(want - observed):
+                a7.append(f"{pid}:{task} inputs omit {entry}")
+    return a7
 
 
 def moon_projects():
@@ -559,6 +710,287 @@ def self_test():
     if not REQUIRED_FFI_TASKS:
         failures.append("REQUIRED_FFI_TASKS is empty — A5's floor would assert nothing")
 
+    if not FMT_TASK_INPUTS:
+        failures.append("FMT_TASK_INPUTS is empty — the fmt half of A4 would assert nothing")
+
+    # A4-fmt: the fmt call must span BOTH buckets. `rs/rustfmt.toml` is a literal (inputFiles)
+    # and `rs/crates/libs/b/tests/**/*` is a glob (inputGlobs), so a one-bucket check passes
+    # while blind to half its own required set — the split A6 already exists because of.
+    fmt_ok = json.loads(json.dumps(ok))
+    for pid in ("a-rs", "b-rs"):
+        fmt_ok[pid]["task_inputs"]["fmt"] = [
+            "rs/rustfmt.toml", "rs/rust-toolchain.toml", f"{fmt_ok[pid]['source_dir']}/Cargo.toml",
+        ]
+        src = fmt_ok[pid]["source_dir"]
+        fmt_ok[pid]["task_input_globs"]["fmt"] = [f"{src}/src/**/*", f"{src}/tests/**/*"]
+    if check_task_inputs(fmt_ok, crates, "fmt", FMT_TASK_INPUTS) != []:
+        failures.append("A4-fmt reported violations on a complete fixture")
+
+    broken = json.loads(json.dumps(fmt_ok))
+    broken["a-rs"]["task_input_globs"]["fmt"] = ["rs/crates/libs/a/src/**/*"]
+    if not any(
+        "tests/**/*" in row
+        for row in check_task_inputs(broken, crates, "fmt", FMT_TASK_INPUTS)
+    ):
+        failures.append("A4-fmt did not fire on a fmt task missing @group(tests)")
+
+    # A4-fmt: the manifest half. `cargo fmt` reads Cargo.toml for its target list and edition, so
+    # a fmt task blind to it can serve a cached PASS across a [[bin]] addition (CodeRabbit, PR 174).
+    broken = json.loads(json.dumps(fmt_ok))
+    broken["a-rs"]["task_inputs"]["fmt"] = ["rs/rustfmt.toml", "rs/rust-toolchain.toml"]
+    if not any(
+        "Cargo.toml" in row
+        for row in check_task_inputs(broken, crates, "fmt", FMT_TASK_INPUTS)
+    ):
+        failures.append("A4-fmt did not fire on a fmt task missing its crate's Cargo.toml")
+
+    broken = json.loads(json.dumps(fmt_ok))
+    broken["a-rs"]["task_inputs"]["fmt"] = ["rs/rust-toolchain.toml"]
+    if not any(
+        "rustfmt.toml" in row
+        for row in check_task_inputs(broken, crates, "fmt", FMT_TASK_INPUTS)
+    ):
+        failures.append("A4-fmt did not fire on a fmt task missing the rustfmt config")
+
+    # A4's crate-relative fallback is ANCHORED to the crate's own source_dir (SMA-560 M3). The
+    # previous unanchored tail match let ANOTHER crate's globs satisfy this one: `a-rs:fmt` counted
+    # as covered by `rs/crates/libs/b/src/**/*`, so a crate that lost @group(sources) entirely was
+    # still reported green as long as some other crate declared its own.
+    broken = json.loads(json.dumps(fmt_ok))
+    src_b = fmt_ok["b-rs"]["source_dir"]
+    broken["a-rs"]["task_input_globs"]["fmt"] = [f"{src_b}/src/**/*", f"{src_b}/tests/**/*"]
+    if not any(
+        row == "a-rs:fmt inputs omit src/**/*, tests/**/*"
+        for row in check_task_inputs(broken, crates, "fmt", FMT_TASK_INPUTS)
+    ):
+        failures.append("A4 let one crate's fmt be satisfied by ANOTHER crate's source globs")
+
+    # A5/A7 share one derivation. If they ever diverge, A7 silently stops examining a wrapper
+    # while A5 keeps passing — so assert the split function returns exactly what A5 matches.
+    ffi_fixture = {
+        "w-ts": {
+            "source_dir": "ts/packages/w", "deps": {}, "language": "typescript",
+            "tasks": {"build": []}, "task_inputs": {"build": []},
+            "task_input_globs": {"build": []},
+            "invocations": {"build": "touch ../x && pnpm exec napi build --platform"},
+        },
+        "q-rs": {
+            "source_dir": "rs/crates/libs/q", "deps": {}, "language": "rust",
+            "tasks": {"build": []}, "task_inputs": {"build": []},
+            "task_input_globs": {"build": []},
+            "invocations": {"build": "cargo build"},
+        },
+    }
+    if derive_ffi_tasks(ffi_fixture) != {"w-ts:build"}:
+        failures.append(
+            f"derive_ffi_tasks did not match exactly the FFI-marked task: "
+            f"{sorted(derive_ffi_tasks(ffi_fixture))}"
+        )
+
+    # Guard the guard (SMA-542). A check that is defined but never invoked on the real run asserts
+    # nothing, and no fixture here would notice — self_test calls the check functions directly.
+    # This is generic on purpose: it covers a future A8 on the day it is written. It scans BOTH
+    # `main` and `collect_findings`, since SMA-560 moved every invocation into the latter.
+    real_run_src = inspect.getsource(main) + inspect.getsource(collect_findings)
+    unreferenced = sorted(
+        name for name in globals()
+        if name.startswith("check_") and f"{name}(" not in real_run_src
+    )
+    if unreferenced:
+        failures.append(
+            f"the real run never calls {', '.join(unreferenced)} — a check that is defined but "
+            f"not invoked asserts nothing (SMA-542)"
+        )
+
+    # ...and the name scan above is only HALF the guard (SMA-560 I4). It cannot separate two call
+    # sites of the same function, and it never sees `check` at all (no `check_` prefix), so three
+    # measured deletions from the findings list left `--self-test` green with a real assertion
+    # gone: the `a5` tuple, either `check_task_inputs` tuple, and the `a1`/`a2`/`a3` tuples. Pin
+    # the LIST itself — arity first, so a shrunk list says so plainly, then the exact key sequence.
+    if not EXPECTED_FINDING_KEYS:
+        failures.append("EXPECTED_FINDING_KEYS is empty — the findings floor would assert nothing")
+    with tempfile.TemporaryDirectory() as tmp:
+        collected = collect_findings(ok, crates, Path(tmp))
+    if len(collected) != len(EXPECTED_FINDING_KEYS):
+        failures.append(
+            f"collect_findings returned {len(collected)} entries, expected "
+            f"{len(EXPECTED_FINDING_KEYS)} — a check was added or dropped without updating "
+            f"EXPECTED_FINDING_KEYS"
+        )
+    got_keys = tuple(key for key, _, _ in collected)
+    if got_keys != EXPECTED_FINDING_KEYS:
+        failures.append(
+            f"collect_findings reported {got_keys}, expected {EXPECTED_FINDING_KEYS} — a check "
+            f"was dropped, added or reordered in the findings list"
+        )
+
+    if not REQUIRED_WRAPPER_CLOSURE:
+        failures.append("REQUIRED_WRAPPER_CLOSURE is empty — A7's floor would assert nothing")
+
+    # A7 fixture: a ts wrapper depending on a binding crate that depends on the kernel. The
+    # wrapper declares the manifest as a literal and the sources as a glob — the same two-bucket
+    # split A6 spans — plus one legitimate extra outside its closure (the parity corpus), which
+    # containment must ALLOW and strict equality would have wrongly flagged.
+    #
+    # TWO tasks, and that is load-bearing (SMA-560 I2). A one-task wrapper cannot tell a per-task
+    # read from one that unions across the wrapper's tasks, so the per-(project, task) read the
+    # docstring names as one of A7's three deliberate differences would be held by nothing. `build`
+    # and `test` therefore declare DIFFERENT complete sets, exactly as the real wrappers do, and
+    # A7-g below drops an entry from `test` alone that `build` still carries.
+    wrap = {
+        "k-ts": {
+            "source_dir": "ts/packages/k", "deps": {"nb-rs": "explicit"}, "language": "typescript",
+            "tasks": {"build": [], "test": []},
+            "task_inputs": {
+                "build": ["rs/crates/libs/kern/Cargo.toml",
+                          "rs/crates/bindings/nb/Cargo.toml"],
+                "test": ["rs/crates/libs/kern/Cargo.toml",
+                         "rs/crates/bindings/nb/Cargo.toml",
+                         "rs/crates/bindings/nb/package.json"],
+            },
+            "task_input_globs": {
+                "build": ["rs/crates/libs/kern/src/**/*",
+                          "rs/crates/bindings/nb/src/**/*",
+                          "rs/crates/libs/parity/vectors/**/*"],
+                "test": ["rs/crates/libs/kern/src/**/*",
+                         "rs/crates/bindings/nb/src/**/*"],
+            },
+            "invocations": {
+                "build": "pnpm exec napi build --platform",
+                "test": "touch ../x && pnpm exec napi build --platform && vitest run",
+            },
+        },
+        "nb-rs": {
+            "source_dir": "rs/crates/bindings/nb", "deps": {"kern-rs": "explicit"},
+            "language": "rust", "tasks": {"build": []}, "task_inputs": {"build": []},
+            "task_input_globs": {"build": []}, "invocations": {"build": "cargo build"},
+        },
+        "kern-rs": {
+            "source_dir": "rs/crates/libs/kern", "deps": {}, "language": "rust",
+            "tasks": {"build": []}, "task_inputs": {"build": []},
+            "task_input_globs": {"build": []}, "invocations": {"build": "cargo build"},
+        },
+    }
+    wrap_floor = {"k-ts": {"kern-rs", "nb-rs"}}
+    # A7's `root` is required, so every call below passes one. This tempdir holds NO build.rs, so
+    # `want` stays at the two-entry-per-upstream shape these rows are written against; the
+    # build.rs half gets its own fixture tree in A7-h.
+    with tempfile.TemporaryDirectory() as no_build_rs:
+        bare = Path(no_build_rs)
+
+        if check_wrapper_upstream_inputs(wrap, bare, floor=wrap_floor) != []:
+            failures.append(
+                f"A7 reported violations on a complete fixture: "
+                f"{check_wrapper_upstream_inputs(wrap, bare, floor=wrap_floor)}"
+            )
+
+        # A7-a: a MISSING upstream glob is the dangerous direction and must fire.
+        broken = json.loads(json.dumps(wrap))
+        broken["k-ts"]["task_input_globs"]["build"] = ["rs/crates/libs/kern/src/**/*"]
+        if not any(
+            "rs/crates/bindings/nb/src/**/*" in row
+            for row in check_wrapper_upstream_inputs(broken, bare, floor=wrap_floor)
+        ):
+            failures.append("A7 did not fire on a wrapper task missing an upstream's sources")
+
+        # A7-b: the manifest half, which lives in the OTHER bucket. A one-bucket A7 passes this.
+        broken = json.loads(json.dumps(wrap))
+        broken["k-ts"]["task_inputs"]["build"] = ["rs/crates/bindings/nb/Cargo.toml"]
+        if not any(
+            "rs/crates/libs/kern/Cargo.toml" in row
+            for row in check_wrapper_upstream_inputs(broken, bare, floor=wrap_floor)
+        ):
+            failures.append("A7 did not fire on a wrapper task missing an upstream's Cargo.toml")
+
+        # A7-c: Rust projects belong to A6, never A7. Double-covering them would make A6's strict
+        # equality and A7's containment disagree on the same task.
+        #
+        # The flipped project is UNDER-DECLARED on purpose (SMA-560 I1). With a CLEAN one this row
+        # was vacuous: `!= []` cannot tell "filtered out by the language test" from "examined and
+        # found satisfied", so deleting `or proj.get("language") == "rust"` from the examined-set
+        # filter kept --self-test green (measured). Emptying both glob buckets means an examined
+        # k-ts MUST emit rows, so the empty result now proves the filter ran.
+        rusty = json.loads(json.dumps(wrap))
+        rusty["k-ts"]["language"] = "rust"
+        rusty["k-ts"]["task_input_globs"] = {"build": [], "test": []}
+        rusty["k-ts"]["task_inputs"] = {"build": [], "test": []}
+        if check_wrapper_upstream_inputs(rusty, bare, floor={}) != []:
+            failures.append("A7 examined a Rust project, which is A6's job")
+
+        # A7-d: the FLOOR must fire when the closure derivation degrades to empty. Emptying `deps`
+        # also empties `want`, so the per-task loop goes quiet by itself — this MUST match the
+        # `FLOOR:` prefix or it passes with the whole floor block deleted (A6-e's lesson).
+        broken = json.loads(json.dumps(wrap))
+        broken["k-ts"]["deps"] = {}
+        if not any(
+            row.startswith("FLOOR:") and "k-ts's dependsOn closure no longer derives kern-rs" in row
+            for row in check_wrapper_upstream_inputs(broken, bare, floor=wrap_floor)
+        ):
+            failures.append("A7 floor did not fire on a neutered closure derivation")
+
+        # A7-e: a floor entry naming a project that is not examined at all is a FLOOR violation,
+        # never a silent skip — the wrapper's task could have stopped matching an FFI marker.
+        # The assertion names THIS branch's own message, never the bare `FLOOR:` prefix: with only
+        # the prefix asserted, deleting the branch lets `k-ts` fall through to the
+        # closure-derivation branch, which emits a `FLOOR:` row of its own and keeps this control
+        # green with the very code it names removed (SMA-542, measured).
+        broken = json.loads(json.dumps(wrap))
+        broken["k-ts"]["invocations"] = {"build": "echo nothing", "test": "echo nothing"}
+        if not any(
+            row.startswith("FLOOR:") and "k-ts has no task matched by an FFI marker" in row
+            for row in check_wrapper_upstream_inputs(broken, bare, floor=wrap_floor)
+        ):
+            failures.append("A7 floor did not fire when a wrapper stopped matching any FFI marker")
+
+        # A7-f: a floor entry naming an absent project is a FLOOR violation.
+        # Same discrimination as A7-e, in the other direction: an absent project deleted from the
+        # `pid not in projects` branch falls straight through to the `pid not in examined` one.
+        if not any(
+            row.startswith("FLOOR:") and "ghost-ts is not in the graph at all" in row
+            for row in check_wrapper_upstream_inputs(wrap, bare, floor={"ghost-ts": {"kern-rs"}})
+        ):
+            failures.append("A7 floor did not fire on a floor entry naming an absent project")
+
+        # A7-g: the read is PER (project, task) — SMA-560 I2. `test` loses an upstream glob that
+        # `build` still declares, so an A7 that unioned a wrapper's tasks would see a complete set
+        # and report nothing. The row must NAME `k-ts:test`: asserting only that some row mentions
+        # the glob would also pass if the union leaked it out under `k-ts:build`.
+        broken = json.loads(json.dumps(wrap))
+        broken["k-ts"]["task_input_globs"]["test"] = ["rs/crates/bindings/nb/src/**/*"]
+        rows = check_wrapper_upstream_inputs(broken, bare, floor=wrap_floor)
+        if not any("k-ts:test inputs omit rs/crates/libs/kern/src/**/*" == row for row in rows):
+            failures.append(
+                "A7 did not report a per-task under-declaration against the task that carries it "
+                "— it may be unioning inputs across the wrapper's tasks"
+            )
+        if any(row.startswith("k-ts:build inputs omit") for row in rows):
+            failures.append("A7 blamed `build` for a shortfall that lives on `test`")
+
+    # A7-h: the build.rs half, which is A7's headline assertion and was previously unreachable
+    # from --self-test at all — `root` defaulted to None, so no self-test row could exercise it
+    # (SMA-560 I3). A real file on disk under a fixture crate's source_dir is what turns the
+    # `is_file()` branch on, so this row needs its own tree.
+    with tempfile.TemporaryDirectory() as tmp:
+        rooted = Path(tmp)
+        (rooted / "rs" / "crates" / "bindings" / "nb").mkdir(parents=True)
+        (rooted / "rs" / "crates" / "bindings" / "nb" / "build.rs").write_text("fn main() {}\n")
+        rows = check_wrapper_upstream_inputs(wrap, rooted, floor=wrap_floor)
+        if not any("inputs omit rs/crates/bindings/nb/build.rs" in row for row in rows):
+            failures.append(
+                "A7 did not demand an upstream's build.rs that exists on disk — the `root` half "
+                "of the check is not asserting anything"
+            )
+        # ...and it must be demanded of EVERY examined task, not just the first one.
+        for task in ("build", "test"):
+            if not any(
+                f"k-ts:{task} inputs omit rs/crates/bindings/nb/build.rs" == row for row in rows
+            ):
+                failures.append(f"A7 did not demand nb's build.rs of k-ts:{task}")
+        # A crate with NO build.rs on disk must not be demanded one — otherwise every wrapper
+        # gains an unsatisfiable row the day this branch is written wrong.
+        if any("rs/crates/libs/kern/build.rs" in row for row in rows):
+            failures.append("A7 demanded a build.rs for an upstream that has none on disk")
+
     a1, a2, a3 = check(ok, crates)
     if (a1, a2, a3) != ([], [], []):
         failures.append(f"clean fixture reported violations: {a1} {a2} {a3}")
@@ -608,13 +1040,13 @@ def self_test():
     # A4 (SMA-534): the workspace-level lint inputs must be DECLARED for every crate. Distinct from
     # A1-A3, which are about dependency edges — a crate can have a perfect edge set and still be
     # blind to a Cargo.lock bump.
-    if check_lint_inputs(ok, crates):
+    if check_task_inputs(ok, crates, "lint", WORKSPACE_LINT_INPUTS):
         failures.append("A4 reported violations on the clean fixture")
 
     # Fires when a required file is missing from the declared inputs.
     broken = json.loads(json.dumps(ok))
     broken["a-rs"]["task_inputs"]["lint"] = ["rs/Cargo.lock", "rs/Cargo.toml"]
-    rows = check_lint_inputs(broken, crates)
+    rows = check_task_inputs(broken, crates, "lint", WORKSPACE_LINT_INPUTS)
     if not rows:
         failures.append("A4 did not fire on a missing workspace lint input")
     elif not any("rs/rust-toolchain.toml" in row for row in rows):
@@ -625,20 +1057,29 @@ def self_test():
     # the negative control stays green.
     broken = json.loads(json.dumps(ok))
     broken["b-rs"]["task_inputs"]["lint"] = []
-    if not any(row.startswith("b-rs") for row in check_lint_inputs(broken, crates)):
+    if not any(
+        row.startswith("b-rs")
+        for row in check_task_inputs(broken, crates, "lint", WORKSPACE_LINT_INPUTS)
+    ):
         failures.append("A4 did not fire for a dep-free crate (it inherited A3's `if want:` guard)")
 
     # An ABSENT lint task is a different defect from a lint task with incomplete inputs.
     broken = json.loads(json.dumps(ok))
     del broken["a-rs"]["task_inputs"]["lint"]
-    if not any("has no `lint` task" in row for row in check_lint_inputs(broken, crates)):
+    if not any(
+        "has no `lint` task" in row
+        for row in check_task_inputs(broken, crates, "lint", WORKSPACE_LINT_INPUTS)
+    ):
         failures.append("A4 did not distinguish an absent lint task from incomplete inputs")
 
     # Moon emitting no `inputFiles` for the task must FIRE, never silently skip: a skip would turn a
     # moon-version change into a vacuous pass, which is the failure mode this whole gate exists for.
     broken = json.loads(json.dumps(ok))
     broken["a-rs"]["task_inputs"]["lint"] = None
-    if not any("inputFiles" in row for row in check_lint_inputs(broken, crates)):
+    if not any(
+        "inputFiles" in row
+        for row in check_task_inputs(broken, crates, "lint", WORKSPACE_LINT_INPUTS)
+    ):
         failures.append("A4 did not fire when moon reported no inputFiles")
 
     # A5 (SMA-546): the FFI build tasks must key on the workspace files. Fixture mirrors the real
@@ -875,59 +1316,76 @@ def self_test():
     if failures:
         print("negative-control FAILED: the parity gate can pass vacuously", file=sys.stderr)
         return 1
-    print("  OK   [parity] all six assertions fire on synthetic violations")
+    print("  OK   [parity] all seven assertions fire on synthetic violations")
     return 0
 
 
-def main():
-    root = Path(__file__).resolve().parents[2]
-    try:
-        projects = moon_projects()
-        crates = cargo_crates(root)
-        a5 = check_ffi_inputs(projects)
-    except INFRA_ERRORS as exc:
-        # Mirror run.sh's infra-vs-assertion split: a broken `moon` — or an unparseable Cargo.toml —
-        # must never be mistaken for a graph regression. See INFRA_ERRORS.
-        print(f"FATAL [parity] could not build the graphs: {exc}", file=sys.stderr)
-        return 2
+# SMA-560 I4 — the findings list's own floor. `collect_findings` is the ONLY place a check is
+# invoked for the real run, so a check dropped from that list is never called; but "never called"
+# was, until now, only LOUD for a check whose name appears nowhere else in the list. Three shapes
+# were measured passing `--self-test` with a real assertion silently removed: deleting the `a5`
+# tuple (the name `check_ffi_inputs` still appears, on the line that pre-computes `a5`), deleting
+# either `check_task_inputs` tuple (the name still appears on the other one), and deleting the
+# `a1`/`a2`/`a3` tuples (`check` does not even carry the `check_` prefix the name guard scans for).
+# A name-based guard structurally cannot separate two call sites of the same function, so this pins
+# the LIST: `collect_findings` returns `(key, rows, title)` triples and `self_test` asserts both the
+# arity and the exact key sequence, the way ci_targets.py's SELF_SCHEDULED_GATES pins a membership
+# rather than a bare count.
+#
+# Adding a check means adding its key here AND its tuple there, in the same order.
+EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7")
 
+
+def collect_findings(projects, crates, root):
+    """Every assertion's rows, as `(key, rows, title)`, in report order.
+
+    ONE list, used for BOTH the pass/fail verdict and the report. Before SMA-542 the two were
+    written separately, so a new check folded into one and not the other was a green no-op.
+    That restructure is necessary but NOT sufficient on its own: what makes the list itself
+    hard to shrink is `EXPECTED_FINDING_KEYS` above, asserted by `self_test`.
+
+    Raises the INFRA_ERRORS members its checks raise (`MoonOutputError` from the FFI derivation),
+    so `main` keeps them inside its try and maps them to rc 2.
+    """
     a1, a2, a3 = check(projects, crates)
-    a4 = check_lint_inputs(projects, crates)
-    a6 = check_upstream_inputs(projects)
-    if not (a1 or a2 or a3 or a4 or a5 or a6):
-        print(
-            f"PASS  {'cargo-moon-parity':<18} -> "
-            f"{len(crates)} crates: every Cargo dep has a Moon edge that schedules its build, "
-            f"every lint keys on the workspace files, every FFI build task does too, and every "
-            f"crate keys on its upstream sources"
-        )
-        return 0
-
-    print("FAIL  [cargo-moon-parity] Cargo and Moon disagree", file=sys.stderr)
-    for rows, title in (
-        (a1, "Cargo dep with NO Moon edge (under-builds — CI stays green while skipping work).\n"
+    a5 = check_ffi_inputs(projects)
+    findings = [
+        ("a1", a1,
+             "Cargo dep with NO Moon edge (under-builds — CI stays green while skipping work).\n"
              "    Fix: add the upstream to `dependsOn` in the consumer's moon.yml."),
-        (a2, "Hand-declared Moon edge with NO Cargo backing (over-builds).\n"
+        ("a2", a2,
+             "Hand-declared Moon edge with NO Cargo backing (over-builds).\n"
              "    Fix: delete it, or add it to ALLOW_NO_CARGO_BACKING with a reason."),
-        (a3, "Moon edge exists but the upstream's build is NOT scheduled — the affected-graph\n"
+        ("a3", a3,
+             "Moon edge exists but the upstream's build is NOT scheduled — the affected-graph\n"
              "    guard CANNOT see this (SMA-429 F3).\n"
              "    Fix: for `build`/`test`, add '^:build' to the task's `deps` in the consumer's\n"
              "    moon.yml. For `lint` the dep is declared once for ALL crates in\n"
              "    .moon/tasks/rust.yml — restore it there, not per-crate (SMA-526)."),
-        (a4, "`lint` does not key on the workspace-level files, so a dependency bump, a\n"
+        ("a4-lint", check_task_inputs(projects, crates, "lint", WORKSPACE_LINT_INPUTS),
+             "`lint` does not key on the workspace-level files, so a dependency bump, a\n"
              "    [workspace.lints] edit or a toolchain drift schedules NOTHING for this crate\n"
              "    (SMA-534).\n"
              "    Fix: the inputs are declared once for ALL crates in .moon/tasks/rust.yml —\n"
              "    restore them there, not per-crate. Expected: /rs/Cargo.lock, /rs/Cargo.toml,\n"
              "    /rs/rust-toolchain.toml."),
-        (a5, "An FFI build task does not key on the workspace-level files, so a dependency bump\n"
+        ("a4-fmt", check_task_inputs(projects, crates, "fmt", FMT_TASK_INPUTS),
+             "`fmt` does not key on everything `cargo fmt --check` actually reads, so a\n"
+             "    rustfmt.toml edit, a toolchain bump or a misformatted tests/ file schedules\n"
+             "    NOTHING for this crate (SMA-537).\n"
+             "    Fix: the inputs are declared once for ALL crates in .moon/tasks/rust.yml —\n"
+             "    restore them there, not per-crate. Expected: @group(sources), @group(tests),\n"
+             "    /rs/rustfmt.toml, /rs/rust-toolchain.toml."),
+        ("a5", a5,
+             "An FFI build task does not key on the workspace-level files, so a dependency bump\n"
              "    replays a CACHED artifact built from a different resolution — and clippy cannot\n"
              "    cover it, because it never links a cdylib and never targets wasm32 (SMA-546).\n"
              "    Fix: add /rs/Cargo.lock, /rs/Cargo.toml, /rs/rust-toolchain.toml and\n"
              "    /.prototools to that task's `inputs`. A `not matched by any FFI marker` row\n"
              "    means the opposite — the task stopped looking like a Rust build to A5; either\n"
              "    restore the invocation or update FFI_MARKERS."),
-        (a6, "A crate's build/test/lint does not key on its upstream crates' sources, so an\n"
+        ("a6", check_upstream_inputs(projects),
+             "A crate's build/test/lint does not key on its upstream crates' sources, so an\n"
              "    upstream change SELECTS NOTHING for this crate and its cached PASS replays\n"
              "    against a different upstream (SMA-528).\n"
              "    Fix: the list lives in that crate's own moon.yml under `fileGroups.upstreams` —\n"
@@ -938,13 +1396,51 @@ def main():
              "    from the graph, it dropped out of A6's examined set (e.g. stopped reporting\n"
              "    `language: rust`), or its dependsOn closure derivation is broken — fix that\n"
              "    first, every other A6 row is meaningless until it passes."),
-    ):
+        ("a7", check_wrapper_upstream_inputs(projects, root),
+             "A py/ts wrapper's FFI task does not key on an upstream Rust crate's sources, so a\n"
+             "    change there SELECTS NOTHING for that wrapper and the ADR-0005 parity replay\n"
+             "    silently stops running on it (SMA-560).\n"
+             "    Fix: add the missing entry to that task's `inputs` in the wrapper's own\n"
+             "    moon.yml — `/<src_dir>/src/**/*` and `/<src_dir>/Cargo.toml` for every crate in\n"
+             "    its TRANSITIVE dependsOn closure, plus `/<src_dir>/build.rs` where one exists.\n"
+             "    Extra inputs beyond the closure are ALLOWED (this is containment, unlike A6).\n"
+             "    A `FLOOR:` row means the check itself cannot be trusted — the wrapper is\n"
+             "    missing, its closure derivation broke, or its task stopped matching an FFI\n"
+             "    marker — fix that first, every other A7 row is meaningless until it passes."),
+    ]
+
+    return findings
+
+
+def main():
+    root = Path(__file__).resolve().parents[2]
+    try:
+        projects = moon_projects()
+        crates = cargo_crates(root)
+        findings = collect_findings(projects, crates, root)
+    except INFRA_ERRORS as exc:
+        # Mirror run.sh's infra-vs-assertion split: a broken `moon` — or an unparseable Cargo.toml —
+        # must never be mistaken for a graph regression. See INFRA_ERRORS.
+        print(f"FATAL [parity] could not build the graphs: {exc}", file=sys.stderr)
+        return 2
+
+    if not any(rows for _, rows, _ in findings):
+        print(
+            f"PASS  {'cargo-moon-parity':<18} -> "
+            f"{len(crates)} crates: every Cargo dep has a Moon edge that schedules its build, "
+            f"every lint and fmt keys on the files its command reads, every FFI build task does "
+            f"too, every crate keys on its upstream sources, and every py/ts wrapper keys on the "
+            f"Rust crates it builds"
+        )
+        return 0
+
+    print("FAIL  [cargo-moon-parity] Cargo and Moon disagree", file=sys.stderr)
+    for _, rows, title in findings:
         if rows:
             print(f"  {title}", file=sys.stderr)
             for row in rows:
                 print(f"      {row}", file=sys.stderr)
     return 1
-
 
 if __name__ == "__main__":
     sys.exit(self_test() if "--self-test" in sys.argv[1:] else main())

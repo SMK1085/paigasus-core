@@ -53,6 +53,13 @@ tasks:
       # so a kernel-source edit must bust this task's cache too (review F4) — Moon hashes only
       # listed inputs, and an upstream `^:build` recompile alone does not re-key this task.
       - '/rs/crates/libs/paigasus-kernel/src/**/*'
+      # The kernel's manifest, not just its sources (SMA-560) — a `[features]` toggle there can
+      # change what this task links with no src diff.
+      - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
+      # The napi crate's build script. `napi build` COMPILES it (it is `napi_build::setup()`,
+      # which emits the addon's link args), so a change to it changes this task's output — but
+      # nothing keyed on it. This is where SMA-537 and SMA-560 meet.
+      - '/rs/crates/bindings/paigasus-node-bindings/build.rs'
       - '/rs/crates/bindings/paigasus-node-bindings/src/**/*'
       # ...and the binding's manifests, so a napi-config (package.json) or dependency (Cargo.toml)
       # change re-keys the build even without a Rust src diff (cache-input completeness, CodeRabbit).
@@ -129,6 +136,13 @@ tasks:
       # rather than caching a stale green (review F4) — see the build task's note. The binding's
       # manifests are listed too so a napi-config/dep change re-keys this task (CodeRabbit).
       - '/rs/crates/libs/paigasus-kernel/src/**/*'
+      # The kernel's manifest, not just its sources (SMA-560) — a `[features]` toggle there can
+      # change what this task links with no src diff.
+      - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
+      # The napi crate's build script. `napi build` COMPILES it (it is `napi_build::setup()`,
+      # which emits the addon's link args), so a change to it changes this task's output — but
+      # nothing keyed on it. This is where SMA-537 and SMA-560 meet.
+      - '/rs/crates/bindings/paigasus-node-bindings/build.rs'
       - '/rs/crates/bindings/paigasus-node-bindings/src/**/*'
       - '/rs/crates/bindings/paigasus-node-bindings/Cargo.toml'
       - '/rs/crates/bindings/paigasus-node-bindings/package.json'
