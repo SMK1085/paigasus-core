@@ -1174,9 +1174,15 @@ mod tests {
         assert_eq!(gdl::parse_id("not-a-uuid").unwrap_err().code(), wire, "gRPC reason");
     }
 
-    /// The counterpart to the agreement table: the transport divergences this branch ACCEPTS,
-    /// each pinned as an assertion so a change breaks this test rather than slipping through as
-    /// an omission — the failure mode the SMA-586 spec review caught in its own first draft.
+    /// The counterpart to the agreement table: the transport divergences this branch ACCEPTS.
+    /// Rows 1-2 are each pinned as an assertion right here, so a change to either breaks this
+    /// test rather than slipping through as an omission — the failure mode the SMA-586 spec
+    /// review caught in its own first draft. Rows 3-4 are recorded below only as comments, not
+    /// assertions in this test: row 3's HTTP half (`unsupported-content-type`) is pinned in
+    /// `http/json.rs`'s own unit tests; row 4's HTTP half (`invalid-request-schema`) is pinned
+    /// incidentally inside row 1's block below — the same `not-a-timestamp` body that exercises
+    /// row 1 also happens to trigger row 4's code — and independently again in `http/json.rs`'s
+    /// unit tests.
     ///
     /// The name says "recorded", not "exactly these four", because nothing here enumerates the
     /// transports' failure modes: this test asserts that the recorded divergences still hold,

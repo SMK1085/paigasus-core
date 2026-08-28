@@ -418,7 +418,7 @@ export enum ErrorReason {
    * MALFORMED body (a JSON syntax error, or a body that failed to buffer), having split the
    * wrong-content-type and schema-mismatch cases out to 905 and 906; the gateway's own funnel
    * (`adapters/http/error.rs`) still emits it for ANY deserialization failure. Reconverging the
-   * two is a follow-up, not an accident.
+   * two is SMA-588, not an accident (amends ADR-0019 A1.3).
    *
    * @generated from enum value: ERROR_REASON_INVALID_REQUEST_BODY = 901;
    */

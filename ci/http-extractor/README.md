@@ -29,10 +29,10 @@ grep. `organizations.rs` really does carry both contexts on one physical line.
 **`Query` and `Path`.** `BANNED` carries a row per extractor with an on/off flag. `Query` and
 `Path` are **reserved and deliberately off**: ten `Query<…>` bindings and two `Path<String>` in
 this tree still answer outside the envelope, the same class of escape with a different extractor,
-and SMA-587's spec defers them explicitly. Closing them later is a **flag flip**, not a second
-gate. (Whoever flips `Path` on: the match is on the bare identifier, so it will also match
-`std::path::Path` — `p: &Path`. `UuidPath<…>`, the house replacement already in use, is correctly
-not matched.)
+and SMA-587's spec defers them explicitly to the follow-up, **SMA-588**. Closing them later is a
+**flag flip**, not a second gate. (Whoever flips `Path` on: the match is on the bare identifier,
+so it will also match `std::path::Path` — `p: &Path`. `UuidPath<…>`, the house replacement
+already in use, is correctly not matched.)
 
 ## How it reads Rust without a Rust parser
 
@@ -63,11 +63,14 @@ Identifier boundaries are what keep the rule usable: `EnvelopeJson<T>`, `UuidPat
 ## Fail-closed properties
 
 A gate that fails open is worse than no gate, because it converts "unguarded" into "believed
-guarded". Four things here abort with **rc 2** (`InfraError`) rather than reporting a clean tree:
+guarded". Six things here abort with **rc 2** (`InfraError`) rather than reporting a clean tree:
 
-- `SCAN_GLOB` matching no file (the scan root moved).
+- An unterminated generic parameter list (`_skip_generics`) — a `<...>` that never closes.
+- A `fn <ident>` token not followed by `(` — the parser cannot read this shape. A `macro_rules!`
+  matcher (`fn $n:ident`) is the known case; see L7 in Limitations below.
 - A signature whose parentheses do not balance — the parser cannot read that file, so it must not
   call it clean.
+- `SCAN_GLOB` matching no file (the scan root moved).
 - Zero function signatures parsed across the whole scope.
 - **The positive control:** zero occurrences of `EnvelopeJson` in *any* request position. If the
   parameter-span walk stops reaching real handler signatures, this identifier vanishes from every
@@ -137,6 +140,8 @@ scanned tree — `pub r#type` in
 so the shape is not hypothetical, even though that particular occurrence is a struct field, not a
 `fn` name. `_FN` now matches `fn (?:r#)?name`
 with `name` also allowing a leading `$` (a `macro_rules!` template parameter), and a matched `fn`
-token with no following `(` now raises `InfraError` instead of being silently skipped: no
-legitimate Rust shape reaches that branch, since every `fn <ident>` this regex can match is a
-declaration, and every declaration — even a zero-argument one — is followed by `(`.
+token with no following `(` now raises `InfraError` instead of being silently skipped: the parser
+cannot read this shape. A `macro_rules!` matcher (`fn $n:ident`) is the known case — the same `$`
+support this change adds also makes `_FN` match inside a matcher arm like
+`macro_rules! r { (fn $n:ident) => {...} }`, which is not a function declaration and is never
+followed by `(` — and it must be handled explicitly rather than skipped.

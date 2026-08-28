@@ -40,8 +40,8 @@ SCAN_GLOB = "rs/crates/services/*/src/adapters/http/**/*.rs"
 # `Query` and `Path` are RESERVED, NOT FORGOTTEN. Ten `Query<…>` bindings and two `Path<String>`
 # in this tree still answer a refused query string / path segment outside the envelope — the same
 # class of escape, a different extractor. SMA-587's spec defers them explicitly (its "Out of
-# scope"), and their replacement is the follow-up's design call, not this gate's; turning the rows
-# on today would red the build on work this ticket is not doing.
+# scope"), and their replacement is SMA-588's design call, not this gate's; turning the rows on
+# today would red the build on work that ticket is not doing.
 #
 # NOTE for whoever flips `Path` on: the match is an identifier-boundary match on the bare name, so
 # an enabled `Path` row also matches `std::path::Path` (`p: &Path`). That is not a problem in an
@@ -236,12 +236,12 @@ def parameter_spans(text, origin="<fixture>"):
         while i < n and text[i].isspace():
             i += 1
         if i >= n or text[i] != "(":
-            # `_FN` only matches `fn <ident>` (or `fn r#<ident>`) with whitespace between them, which
-            # in well-formed Rust is always a function declaration — and every function declaration,
-            # including a zero-argument one, is followed by `(`. No fixture or scanned file has ever
-            # exercised a legitimate `fn <ident>` with no following `(`, so this is not a shape to
-            # skip past — it is the parser failing to read a signature it claims to recognise.
-            # Per this function's own docstring: abort the gate loudly, never pass quietly.
+            # `_FN` also matches inside a `macro_rules!` matcher such as
+            # `macro_rules! r { (fn $n:ident) => {...} }` — a legitimate Rust shape that is not a
+            # function declaration at all, so it is never followed by `(`. The parser cannot read
+            # this shape; a `macro_rules!` matcher (`fn $n:ident`) is the known case and must be
+            # handled explicitly rather than skipped. Per this function's own docstring: abort
+            # the gate loudly, never pass quietly.
             raise InfraError(
                 f"{origin}: `fn {m.group(1)}` at offset {m.start()} is not followed by `(` — "
                 "the parser cannot read this signature, so it must not report it clean"

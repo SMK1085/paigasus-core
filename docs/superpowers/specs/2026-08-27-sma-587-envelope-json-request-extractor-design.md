@@ -483,8 +483,8 @@ the asymmetry is an assertion rather than an omission.
   `teams.rs`, `api_keys.rs`) — `?limit=abc` yields axum's plain-text
   `FailedToDeserializeQueryString` 400 today — plus two `Path<String>` (`authz.rs`,
   `system_retirement.rs:96`) which `UuidPath` did not cover because the segment is not a uuid.
-  Same class of hole, different extractor. **A follow-up Linear issue is filed**, and D4's
-  banned-extractor table is shaped so closing them is a table row rather than a second gate.
+  Same class of hole, different extractor. **A follow-up Linear issue is filed: SMA-588**, and
+  D4's banned-extractor table is shaped so closing them is a table row rather than a second gate.
 - **Request body limits.** The fourteen inherit axum's 2 MB default. After the swap a >2 MB body
   answers 413 `request-too-large` in the envelope, which is the improvement. *Choosing* per-route
   limits is a sizing and DoS-posture question with no AC here, and lowering one is the single
