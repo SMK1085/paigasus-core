@@ -830,24 +830,30 @@ def self_test():
     broken = json.loads(json.dumps(wrap))
     broken["k-ts"]["deps"] = {}
     if not any(
-        row.startswith("FLOOR:")
+        row.startswith("FLOOR:") and "k-ts's dependsOn closure no longer derives kern-rs" in row
         for row in check_wrapper_upstream_inputs(broken, floor=wrap_floor)
     ):
         failures.append("A7 floor did not fire on a neutered closure derivation")
 
     # A7-e: a floor entry naming a project that is not examined at all is a FLOOR violation,
     # never a silent skip — the wrapper's task could have stopped matching an FFI marker.
+    # The assertion names THIS branch's own message, never the bare `FLOOR:` prefix: with only the
+    # prefix asserted, deleting the branch lets `k-ts` fall through to the closure-derivation branch,
+    # which emits a `FLOOR:` row of its own and keeps this control green with the very code it names
+    # removed (SMA-542, measured).
     broken = json.loads(json.dumps(wrap))
     broken["k-ts"]["invocations"]["build"] = "echo nothing"
     if not any(
-        row.startswith("FLOOR:")
+        row.startswith("FLOOR:") and "k-ts has no task matched by an FFI marker" in row
         for row in check_wrapper_upstream_inputs(broken, floor=wrap_floor)
     ):
         failures.append("A7 floor did not fire when a wrapper stopped matching any FFI marker")
 
     # A7-f: a floor entry naming an absent project is a FLOOR violation.
+    # Same discrimination as A7-e, in the other direction: an absent project deleted from the
+    # `pid not in projects` branch falls straight through to the `pid not in examined` one.
     if not any(
-        row.startswith("FLOOR:")
+        row.startswith("FLOOR:") and "ghost-ts is not in the graph at all" in row
         for row in check_wrapper_upstream_inputs(wrap, floor={"ghost-ts": {"kern-rs"}})
     ):
         failures.append("A7 floor did not fire on a floor entry naming an absent project")
