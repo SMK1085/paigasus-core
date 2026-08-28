@@ -551,10 +551,31 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   repo turns on; an extraction that conflates the two cannot measure it. It inflated this branch's
   own spec table before the numbers were re-derived.
 - release-plz owns every tag (`<package>-v<version>`, its default). `napi prepublish` always
-  carries `--no-gh-release` (`.github/workflows/release.yml:572,595`) — a flag its own `--help`
-  does not list. `ci/actionlint/release_guard.py`'s V5 asserts every `napi prepublish` invocation
-  carries it. Exactly two GitHub Releases land per release commit — the two family heads — not
-  one per published package (SMA-579).
+  carries `--no-gh-release` — a flag its own `--help` does not list. Two invocations exist:
+  `.github/workflows/release.yml:596` (the real publish; the requirement is recorded in the
+  comment at `:573`) and `.github/workflows/prebuild.yml:295` (the dry run).
+  `ci/actionlint/release_guard.py`'s V5 asserts **both** carry it. That sentence used to be
+  aspirational: V5 was inlined in `check_main`, which `main()` runs on `argv[0]` only, so every
+  CALLED workflow — `prebuild.yml` included — got `check_called`, which had no V5 at all. It is
+  now a shared helper invoked from both (SMA-579 fix round 3). Exactly two GitHub Releases land
+  per release commit — the two family heads — not one per published package (SMA-579).
+- `release_guard.py`'s `UNGATED_JOBS` exempts a job from the GATING rule (V1) and from nothing
+  else. V7 applies the publish detector to every member, because the exemption's premise is that
+  the job cannot reach a registry — and `release-pr`, the only member, runs on every push to
+  `main` with a `contents: write` App token. Measured before V7 existed: a `release-pr` job whose
+  steps ran `cargo publish`, `npm publish` and `pypa/gh-action-pypi-publish` passed the guard at
+  **exit 0**, while the same steps in any other job correctly exited 1. The detector's markers are
+  REGEXES, not substrings, and the reason is one entry: `release-plz release` is a strict prefix
+  of `release-plz release-pr`, which is exactly what the real job runs — a substring test reds the
+  real repository, so the marker is bounded with `(?![-\w])` (SMA-579).
+- `ci/actionlint/run.sh`'s check 10 must route **every** exit status of its `release_guard_py`
+  wrapper, not only the guard's own 2. `run.sh` is `set -uo pipefail` with **no `-e`**, so an
+  unrouted status leaves `$RG_OUT` empty, the read loop finds nothing and the gate exits 0 having
+  asserted nothing — measured at rc 127, the status a **missing `uv`** produces from the wrapper
+  rather than from the guard. Do not read "missing uv aborts the gate" as a property of this
+  routing: on the full-gate path that abort comes from `release_guard_self_test`'s
+  `|| infra`. The wrapper also passes `--locked`, so the gate cannot re-lock `py/uv.lock` as a
+  side effect (SMA-579).
 - `release-plz release` requires `publish = false` in `rs/release-plz.toml` for every package
   whose Cargo manifest already says so. An absent key reads as `publish = true` and hard-errors.
   This blocked `release-plz release` entirely and stayed invisible because `release-pr` never
