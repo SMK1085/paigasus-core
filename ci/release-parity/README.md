@@ -156,8 +156,11 @@ under `ci/release-parity/` schedule all three at once. Net measured cost
 *subset* of the real run's — the argument is affectedness and symmetry, not extra
 adapter coverage.
 
-**What guards it.** `ci/affected-graph/ci_targets.py` pins the nine `moon.yml` lines
-(`SELF_SCHEDULED_GATES`) and five discrete lines inside `run.sh` itself
+**What guards it.** `ci/affected-graph/ci_targets.py` pins the nine `moon.yml` lines **of these
+three tasks** — `SELF_SCHEDULED_GATES` is a registry spanning nine gates in all, of which
+`release-parity`, `release-parity-py` and `release-parity-ts` contribute three lines apiece; the
+"nine" here is those three tasks' own lines, not the registry's total — and five discrete lines
+inside `run.sh` itself
 (`RELEASE_PARITY_SH_CALL_SITES`: the flag parse `--negative-control) NEGATIVE=1; shift ;;`,
 the `if [ "$NEGATIVE" = 1 ]; then` guard, the assertion body `check_case "neg-fix-bang" …`,
 and both report arms — the `exit 0` on "reported red as expected" and the `exit 1` on
