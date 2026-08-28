@@ -25,3 +25,10 @@ dependencies = [
 [build-system]
 requires = ["uv_build>=0.12.6,<0.13"]
 build-backend = "uv_build"
+
+# SMA-579 §5.4 — this distribution is uploaded by release.yml's publish-pypi job, conditioned on
+# release-plz reporting a release for the RUST crate `paigasus-proto`. Without this marker the
+# proto family would burn a PyPI version on every release that nothing ever uploaded, so the
+# Python package could never be published at a matching version.
+[tool.paigasus]
+pypi = true

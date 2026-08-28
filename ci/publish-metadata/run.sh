@@ -108,10 +108,10 @@ FORBIDDEN_PACKAGED=("moon.yml")
 # (repo:version-lockstep writes it), and paigasus-py-bindings is simultaneously
 # `publish = false` on the Cargo side and PyPI-bound (SMA-578 review M7).
 #
-# py/packages/paigasus-proto is DELIBERATELY absent: it is version-locked with the proto
-# family and its name is reserved on PyPI, but no publish path uploads it yet. SMA-579
-# owns that decision (SMA-578 §9.3) — it must be recorded, not made by omission.
-EXPECTED_PYPI_PUBLISHABLE=("paigasus-kernel" "paigasus-py-bindings")
+# py/packages/paigasus-proto IS published: release.yml's publish-pypi job uploads it,
+# conditioned on release-plz reporting a release for the RUST crate `paigasus-proto`. This
+# is SMA-579's decision (SMA-578 §9.3) — it is recorded here, not made by omission.
+EXPECTED_PYPI_PUBLISHABLE=("paigasus-kernel" "paigasus-proto" "paigasus-py-bindings")
 
 # The scan set. The py/packages half is DISCOVERED AT RUNTIME from a single-level glob, not
 # hand-maintained. The distinction matters more here than it looks: the crates.io half is
