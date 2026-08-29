@@ -354,7 +354,9 @@ print([t for t, v in sorted(k.items()) if v == "script"])
 PY
 ```
 
-Expected: `Counter({'literal': 57, 'wrapper': 3, 'script': 2})` and the script list is exactly `['repo:publish-metadata', 'repo:version-lockstep']`. If the counts differ, reconcile before continuing — the spec's §1.3 table depends on them.
+Expected: `Counter({'literal': 57, 'wrapper': 3, 'script': 3})` and the script list is exactly `['repo:actionlint', 'repo:publish-metadata', 'repo:version-lockstep']`.
+
+`repo:actionlint` belongs in that list, and an earlier draft of this step said `2` because it was measured against the four-layer classifier that stripped quoted strings. The shipped conservative rule does not strip them, so `ci/actionlint/run.sh`'s five pinned cargo strings surface as rows — all carrying `--locked`, so 0 would-report. It needs no waiver anywhere: A8 clears it on the flag, and A9 excludes it on both tests (that script holds zero config-sensitive verbs and zero cd-into-`rs` tokens). If the counts differ from 57/3/3, reconcile before continuing — spec §1.3 and §2.2 depend on them.
 
 - [ ] **Step 7: Commit**
 
@@ -455,16 +457,29 @@ After `ALLOW_UNLOCKED_CARGO` (`:197`):
 # A stale entry (text no longer present) is a row, the stale-skip idiom
 # ci/actionlint/run.sh:2376-2383 already uses.
 ALLOW_UNLOCKED_CARGO_SCRIPT = {
-    ("ci/version-lockstep/run.sh", "cargo update -w --offline >/dev/null 2>&1"): (
+    ("ci/version-lockstep/run.sh", "cargo update -w --offline >/dev/null 2>"): (
         "MEASURED unreachable from the Moon task (SMA-599 §2.4): repo:version-lockstep runs "
         "run.sh --self-test, --negative-control and bare, while this line is inside "
         "run_write(), reached only by `--write`. `--locked` would defeat the function, whose "
         "PURPOSE is to regenerate the lock after writing the six non-Cargo version sites. The "
         "scan is path-insensitive and cannot see this (L1), so the waiver stands in for it; "
-        "the `--write` assertion below is what keeps the premise honest."
+        "check_version_lockstep_no_write below is what keeps the premise honest."
     ),
-    ("ci/version-lockstep/run.sh", "cargo update -w >/dev/null"): (
+    ("ci/version-lockstep/run.sh", "cargo update -w >/dev/null )"): (
         "the un-offline fallback of the line above, same reason"
+    ),
+    ("ci/version-lockstep/run.sh", 'die_infra "cargo update -w failed (site 16)"'): (
+        "PROSE, not an invocation: the failure message for the two lines above. The "
+        "conservative rule does not strip quoted strings — that stripping is exactly what "
+        "silently dropped real invocations before SMA-599's classifier was replaced — so a "
+        "cargo verb inside a diagnostic surfaces as a row and is waived here instead. "
+        "A false positive waived is the trade the design makes for never missing a real call."
+    ),
+    ("ci/publish-metadata/run.sh",
+     'die_infra "FATAL: \\`cargo metadata\\` failed in $RS_DIR — nothing could be verified."'): (
+        "PROSE, same class as the entry above: the diagnostic for the `cargo metadata "
+        "--no-deps` call on the joined logical line starting at :1663. The real invocation "
+        "itself does not report, because --no-deps never resolves (MEASURED, §2.1)."
     ),
 }
 ```

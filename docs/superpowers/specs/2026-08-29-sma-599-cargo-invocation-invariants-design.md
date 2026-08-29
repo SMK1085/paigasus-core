@@ -59,9 +59,11 @@ The two are `repo:deny` (cwd is the repo root — §2.3) and `repo:wasm-getrando
 (`cargo tree`). Neither is a defect, and under §3.3's verb predicate both fall out
 structurally rather than by waiver.
 
-This table counts the **blob-matched** set only. Script-following (§3.2) adds
-`repo:publish-metadata`, which already declares the file, and `repo:version-lockstep`,
-which does not and correctly should not (§2.4).
+This table counts the **blob-matched** set only. Script-following (§3.2) adds three more:
+`repo:publish-metadata`, which already declares the file; `repo:version-lockstep`, which
+does not and correctly should not (§2.4); and `repo:actionlint`, which enters because its
+script quotes another gate's cargo line as pinned text (§2.2) and which A9 excludes on
+both the verb and the cwd test.
 
 The issue's "39 unasserted `build`/`build-release`/`test` declarations" are really
 **three lines** in `.moon/tasks/rust.yml`, inherited by thirteen crates. A9 reads
@@ -121,20 +123,37 @@ scripts**:
 | `ci/version-lockstep/run.sh` | `repo:version-lockstep` |
 | `ci/workflow-credentials/run.sh` | `repo:workflow-credentials` |
 
-Re-measured across all eight, with the corrected filter order of §3.1:
+Re-measured across all eight under the **shipped** conservative rule of §3.1. Two
+columns, and the distinction is load-bearing: a *row* is a cargo invocation the scanner
+found, a *would-report* row is one that resolves and lacks `--locked`. Only the second
+column produces a finding.
 
-| Script | cargo lines surviving filters | rows reported |
+| Script | rows | would-report |
 | -- | -- | -- |
-| `ci/publish-metadata/run.sh` | 3 | **0** — two already `--locked`, one `--no-deps` |
-| `ci/version-lockstep/run.sh` | 2 | **2** — both `cargo update -w` |
-| the other six | 0 | 0 |
+| `ci/version-lockstep/run.sh` | 3 | **3** — two real `cargo update -w`, one `die_infra` prose |
+| `ci/publish-metadata/run.sh` | 4 | **1** — a `die_infra` prose row; the two real calls carry `--locked`, one is `--no-deps` |
+| `ci/actionlint/run.sh` | 5 | **0** — all five carry `--locked` |
+| the other five | 0 | 0 |
 
-**`ci/actionlint/run.sh` carries eight raw cargo-verb matches** (`:2136, :2153, :2178,
-:3692, :3714, :3716, :5075, :5094`) and `ci/affected-graph/run.sh` one (`:318`). Every
-one is a comment or a quoted string — several are check 8f's *pins of another gate's
-cargo line*, and `:3714` deliberately constructs an **unlocked** cargo string as a
-mutation fixture. All nine are correctly filtered today, but they survive on the
-filters, not on absence. D9 addresses the fragility that creates.
+**These numbers changed when the classifier changed, and the earlier draft of this
+section was measured against a design that no longer ships.** The four-layer classifier
+stripped quoted strings, so `ci/actionlint/run.sh`'s five matches — several of them
+check 8f's *pins of another gate's cargo line*, and one that deliberately constructs an
+**unlocked** cargo string as a mutation fixture — were filtered out entirely. The
+conservative rule does not strip strings, so they surface as rows and are excluded by
+carrying `--locked` instead. That is the intended trade: they now survive on their own
+content rather than on a filter that could silently drop real code.
+
+One consequence for §3.2: because `script_cargo_lines` returns a non-empty list for
+`ci/actionlint/run.sh`, `repo:actionlint` is a **third** member of the derived set's
+`script` kind. It is harmless for both consumers and needs no waiver — all five of its
+rows carry `--locked` for A8, and for A9 the script holds zero config-sensitive verbs
+and zero cd-into-`rs` tokens, so A9 excludes it on both tests independently.
+
+`ci/cargo-lock-integrity/run.sh` carries 2 rows and 1 would-report row, but **no Moon
+task invokes it** — it is an unconditional `ci.yml` step (SMA-601). A8's script arm
+follows only scripts named in a Moon task's resolved blob, so that row is out of reach
+and needs no waiver. Do not add one; it would be stale on arrival.
 
 ### 2.3 `--manifest-path` does not move cargo's config walk (D2's premise)
 
