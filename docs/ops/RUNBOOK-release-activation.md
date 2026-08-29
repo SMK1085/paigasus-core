@@ -302,6 +302,20 @@ classic publish token fails with *"2FA required for publishing"*.
 `publish-npm` already declares `environment: release-publish`, so an environment secret resolves
 with no workflow change, and the credential is not readable by every other workflow.
 
+**Why a token and not OIDC.** npm Trusted Publishing has the same first-publish constraint
+crates.io does: `npm trust` requires that *"the package you're configuring must already exist on
+the npm registry"*, and `npm/cli#8544`, the request to allow an initial OIDC publish, is still
+open. The nine packages do not exist yet.
+
+**⚠️ This token expires as a MECHANISM, not just as a credential.** GitHub's changelog of
+2026-07-31 restricts npm 2FA-bypass granular access tokens. They have **already** lost the ability
+to change package access, maintainers and trusted-publishing configuration, and they lose **direct
+publish entirely in January 2027**. It works for this release. It will not work after that date.
+
+So §8's `NPM_TOKEN` removal is dated, not optional: once the nine packages exist, configure trusted
+publishing on each and delete the token, **before January 2027**. Set the token's expiry to bound
+the gap rather than relying on memory.
+
 ### 5.2 PyPI — step C
 
 Create a **pending publisher** for each of the three project names. Pending publishers are PyPI's
@@ -486,7 +500,7 @@ Both are temporary by decision. **No gate enforces either.**
 | Item | Removal condition |
 | --- | --- |
 | `workflow_dispatch` on `release.yml` | The first release has published and §7 has passed. Remove it in the same pull request that records the outcome |
-| `NPM_TOKEN` | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **File a follow-up issue**, and set the token's expiry short enough to bound the gap |
+| `NPM_TOKEN` | Every `@paigasus/*` package exists, so npm Trusted Publishing becomes configurable. **HARD DEADLINE: January 2027** — npm 2FA-bypass tokens lose direct publish then (GitHub changelog, 2026-07-31). File a follow-up issue and set the token's expiry to bound the gap |
 
 ---
 
