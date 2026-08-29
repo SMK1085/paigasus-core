@@ -198,9 +198,11 @@ LOCKED_FLAG = "--locked"
 # benign string that mentions a cargo verb reports, CI reds loudly, and a reviewer adds a
 # waiver. A default-deny gate is built on exactly that asymmetry.
 HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-# Used ONLY to LOCATE a `#` comment marker, never to remove content: matched quote pairs are
-# blanked to equal-length runs of spaces so every surviving offset still indexes the original
-# text, and `_code_region` slices the ORIGINAL. What gets classified keeps its quotes.
+# Used ONLY to decide WHICH OFFSETS of a physical line the shell executes, never to remove
+# content: matched quote pairs are blanked to equal-length runs of spaces so every surviving
+# offset still indexes the original, and `_line_regions` slices the ORIGINAL. Both line-local
+# exclusions read that one mask — the `#` comment cut and the heredoc-opener scan — because a
+# `<<EOF` inside a string is no more an opener than a `#` inside one is a comment.
 SHELL_STRING_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 # Command separators. `--no-deps` is read within the segment holding the cargo verb, and
 # `--locked` within that segment AFTER the verb — so `cargo build && cargo metadata --locked`
@@ -468,41 +470,76 @@ def _strip_arithmetic(text):
 
 # A real shell comment `#` starts a new WORD — it is preceded by whitespace, a shell
 # metacharacter, or the start of the line. `${#arr[@]}` / `${#var}` (bash's length operator)
-# put a `#` directly after `{`, mid-word, which is never a comment; `_code_region` was cutting
-# the line there and orphaning the rest of a real `$( ... )` on the same logical line.
+# put a `#` directly after `{`, mid-word, which is never a comment; `_line_regions` was
+# cutting the line there and dropping everything after it, `n=${#arr[@]} && cargo build`
+# included. Fixture and mutation both pin it.
 _COMMENT_PRECEDING_CHARS = frozenset(" \t;&|()")
 
 
-def _code_region(text):
-    """The prefix of `text` before an unquoted `#` comment marker — everything else INTACT.
+def _odd_quotes(masked, singles=False):
+    """True when `masked` has an unpaired quote, so its quote state is AMBIGUOUS.
 
-    This is the comment half of the conservative rule's three exclusions, and it removes a
-    TAIL, never any content in the middle: quotes, `$( ... )` and backticks all survive into
-    what gets classified.
+    `masked` has already had every matched pair blanked, so whatever is left is unpaired. An
+    odd count means this physical line takes part in a quote span crossing physical lines and
+    the mask therefore paired the wrong characters.
 
-    The cut must be quote-aware, because a `#` inside a real string is not a comment marker
-    (the `echo "a # b" && cargo build` fixture exists for exactly this). Blanking matched
-    quote pairs to EQUAL-LENGTH runs of spaces, rather than deleting them, keeps every
-    surviving offset aligned with `text`, so the first `#` still standing in the masked copy
-    is a candidate comment start — and slicing that offset out of the ORIGINAL `text` hands
-    back the code prefix unaltered. A candidate only counts if it also starts a word (see
-    `_COMMENT_PRECEDING_CHARS` above), which is what keeps `${#arr[@]}` from reading as a
-    comment.
-
-    An ODD number of surviving double quotes means this physical line takes part in a quote
-    span that crosses physical lines, and the masking therefore paired the wrong characters.
-    Refuse to cut at all in that case. Cutting on a mispaired mask is the one way this
-    function can DROP a live invocation — `X="a` newline `b # c" cargo build` is one bash
-    statement that runs cargo — and dropping is the silent-pass direction this whole design
-    exists to avoid. Not cutting costs at most a false positive, which reds loudly.
+    `singles` is the difference between the two callers and it is deliberate, not an
+    oversight. The heredoc decision counts BOTH quote characters, because opening a heredoc
+    wrongly SWALLOWS every line up to the terminator — a silent pass. The comment cut counts
+    DOUBLE quotes only, because an apostrophe in prose (`PKG_DIR's`, `don't`) is English, not
+    shell quoting, and this repo's comments are full of them: counting singles there turns
+    `ci/publish-metadata/run.sh:772` — a plain comment mentioning `cargo metadata` — into a
+    would-report row (MEASURED). The residual that leaves open is L9, and it is narrow.
     """
-    masked = SHELL_STRING_RE.sub(lambda m: " " * len(m.group(0)), text)
     if masked.count('"') % 2:
-        return text
-    for idx, ch in enumerate(masked):
-        if ch == "#" and (idx == 0 or masked[idx - 1] in _COMMENT_PRECEDING_CHARS):
-            return text[:idx]
-    return text
+        return True
+    return bool(singles and masked.count("'") % 2)
+
+
+def _line_regions(raw):
+    """One PHYSICAL line's executable code region, and its heredoc opener (or None).
+
+    Both of the conservative rule's line-local exclusions are decided here, from ONE
+    within-line quote mask, because they are the same decision: which characters of this line
+    does the shell actually execute. Splitting them is what let a `<<EOF` inside a string open
+    a phantom heredoc and swallow a real invocation (SMA-599 round 5, measured against bash).
+
+    The mask blanks matched quote pairs to EQUAL-LENGTH runs of spaces, so every surviving
+    offset still indexes `raw`, and the returned code region is sliced out of the ORIGINAL.
+    Nothing is removed but a comment TAIL: quotes, `$( ... )` and backticks all survive into
+    what gets classified, because the conservative rule does not strip strings.
+
+    Three decisions, each with its own fixture and its own mutation:
+
+    1. **Ambiguous parity refuses BOTH.** An ODD count of surviving `"` or `'` means this line
+       takes part in a quote span crossing physical lines, so the mask paired the wrong
+       characters. Cut nothing and open nothing. Refusing to cut can only add a false
+       positive; refusing to OPEN is likewise safe, because the would-be body is then scanned
+       as ordinary code. Opening wrongly is what SWALLOWS, and swallowing is the silent-pass
+       direction this design exists to avoid.
+    2. **The `#` must start a word.** `${#arr[@]}` / `${#var}` (bash's length operator) put a
+       `#` mid-word, where it is never a comment; cutting there drops the rest of the line,
+       `n=${#arr[@]} && cargo build` included.
+    3. **A heredoc opener must be UNMASKED.** `HEREDOC_OPEN_RE` is matched against the code
+       region but accepted only where the `<<` itself survives the mask, so `echo "a <<EOF b"`
+       opens nothing while `cat <<'EOF' > "$out"` still does — there the `<<` sits outside
+       every quote pair even though its delimiter is quoted.
+    """
+    text = _strip_arithmetic(raw)
+    masked = SHELL_STRING_RE.sub(lambda m: " " * len(m.group(0)), text)
+    cut = len(masked)
+    if not _odd_quotes(masked):
+        for idx, ch in enumerate(masked):
+            if ch == "#" and (idx == 0 or masked[idx - 1] in _COMMENT_PRECEDING_CHARS):
+                cut = idx
+                break
+    code, scan = text[:cut], masked[:cut]
+    if _odd_quotes(scan, singles=True):
+        return code, None
+    for found in HEREDOC_OPEN_RE.finditer(code):
+        if scan[found.start() : found.start() + 2] == "<<":
+            return code, found
+    return code, None
 
 
 def _join(pending):
@@ -562,16 +599,13 @@ def script_cargo_lines(path):
             if raw.strip() == delim:
                 delim = None
             continue
-        # Arithmetic BEFORE the heredoc scan: `HEREDOC_OPEN_RE` matches a bare `<<`, so
-        # `$((1 << BITS))` otherwise reads as a heredoc named BITS and swallows every line up
-        # to the next bare `BITS` — a real unlocked `cargo build` included.
-        #
-        # The comment cut runs PER PHYSICAL LINE and BEFORE the continuation test, not after
+        # `_line_regions` runs PER PHYSICAL LINE and BEFORE the continuation test, not after
         # joining. A `#` comment ends at the newline even when the line ends in a backslash
         # (a backslash is not special inside a comment), so joining first would pull the next
-        # line's real invocation into the comment and drop it.
-        work = _code_region(_strip_arithmetic(raw))
-        opener = HEREDOC_OPEN_RE.search(work)
+        # line's real invocation into the comment and drop it. It also strips `$(( ... ))`
+        # first, because `HEREDOC_OPEN_RE` matches a bare `<<` and `$((1 << BITS))` would
+        # otherwise read as a heredoc named BITS.
+        work, opener = _line_regions(raw)
         pending.append((lineno, work))
         if opener is None and work.rstrip().endswith("\\"):
             continue
@@ -1981,25 +2015,92 @@ def self_test():
                 "the conservative rule reports it deliberately"
             )
 
-        # The comment cut is the ONE remaining way this scanner can drop a live invocation,
-        # so it carries two guards of its own, and each has a row here.
+        # --- `_line_regions`: the two line-local exclusions, one decision each ------------
         #
-        # First: an ODD count of surviving double quotes means the quote masking paired the
-        # wrong characters, so the `#` it found may be string content. `X="a` newline
-        # `b # c" cargo build` is one bash statement that runs cargo; cutting at that `#`
-        # deletes it.
+        # Both can DROP a live invocation, which is the silent-pass direction. Every row below
+        # was executed under real bash with cargo stubbed before it was written down.
+        #
+        # 1a. Ambiguous parity refuses the comment cut. An ODD count of surviving quotes means
+        # the mask paired the wrong characters, so the `#` it found may be string content.
+        # `X="a` newline `b # c" cargo build` is one bash statement that runs cargo.
         if not _reports('X="a\nb # c" cargo build\n', "b # c"):
             failures.append(
                 "script_cargo_lines cut at a `#` on a line with unbalanced quotes and lost "
                 "`cargo build`"
             )
-        # Second: the cut runs PER PHYSICAL LINE, before continuations are joined. A `#`
-        # comment ends at the newline even when the previous line ends in a backslash, so
-        # joining first would swallow this `cargo build` into the comment.
+        # 1b. The SAME ambiguity refuses to open a heredoc. Without that, the refused comment
+        # cut leaves a `<<EOF` standing inside what is really string content, the body is
+        # skipped, and the invocation vanishes with no error.
+        if not _reports('echo \\" # <<EOF\ncargo build\nEOF\ncargo build --locked\n'):
+            failures.append(
+                "script_cargo_lines opened a heredoc from a line whose quote parity is "
+                "ambiguous and swallowed `cargo build`"
+            )
+        # 1c. The cut runs PER PHYSICAL LINE, before continuations are joined. A `#` comment
+        # ends at the newline even when the previous line ends in a backslash, so joining
+        # first would swallow this `cargo build` into the comment.
         if not _reports("# note \\\ncargo build\n"):
             failures.append(
                 "script_cargo_lines joined a comment across a backslash continuation and "
                 "lost `cargo build`"
+            )
+        # 2. The `#` must start a WORD. `${#arr[@]}` is bash's length operator, never a
+        # comment; cutting there drops everything after it. This guard shipped in an earlier
+        # round with no fixture, and its mutant passed at rc 0 (SMA-599 round 5).
+        if not _reports("n=${#arr[@]} && cargo build\n"):
+            failures.append(
+                "script_cargo_lines read `${#arr[@]}` as a comment and lost `cargo build`"
+            )
+        # 3. A heredoc opener must be UNMASKED — a `<<EOF` inside a quoted string is text, not
+        # an opener, and treating it as one skips real code as if it were a body. Five shapes,
+        # all measured: bare, `<<-` with a tab-indented terminator, a quoted delimiter inside
+        # the string, an opener inside a SINGLE-quoted string, and the realistic prose case.
+        for label, body in (
+            ("a bare opener", 'echo "a <<EOF b"\ncargo build\nEOF\ncargo build --locked\n'),
+            ("`<<-`", 'echo "a <<-EOF b"\ncargo build\n\tEOF\ncargo build --locked\n'),
+            ("a quoted delimiter", "echo \"a <<'EOF' b\"\ncargo build\nEOF\ncargo build --locked\n"),
+            ("a single-quoted string", "echo 'a <<EOF b'\ncargo build\nEOF\ncargo build --locked\n"),
+            ("prose", 'die_infra "run <<EOF to reproduce"\ncargo build\nEOF\ncargo build --locked\n'),
+        ):
+            if not _reports(body):
+                failures.append(
+                    f"script_cargo_lines opened a phantom heredoc from {label} inside a "
+                    f"string and swallowed `cargo build`"
+                )
+        # 3a2. A `<<EOF` in a COMMENT is not an opener either. Two independent mechanisms
+        # stop it — the scan runs on the comment-cut code region, and the mask-position check
+        # rejects any offset past that region — so no single mutation can break it. The row
+        # exists to pin the behaviour, not because one mechanism is load-bearing alone.
+        if not _reports("# see <<EOF\ncargo build\nEOF\ncargo build --locked\n"):
+            failures.append(
+                "script_cargo_lines opened a heredoc from a `<<` inside a comment and "
+                "swallowed `cargo build`"
+            )
+        # 3b. POSITIVE CONTROL for the same rule: a REAL heredoc must still open, quoted
+        # delimiter and redirection included, and its body must still be skipped. Without
+        # this, "never open a heredoc" would pass every row above.
+        rows = _lines('cat <<\'EOF\' > "$out"\ncargo build\nEOF\ncargo build\n')
+        if len(rows) != 1 or rows[0].lineno != 4:
+            failures.append(
+                f"script_cargo_lines did not skip the body of a real `cat <<'EOF' > \"$out\"` "
+                f"heredoc: {rows}"
+            )
+        # 3c. The ambiguity test counts SINGLE quotes too, because `X='a` newline
+        # `b <<EOF c'` puts the opener inside a single-quoted span that bash never reads as
+        # a heredoc. Only the heredoc decision counts them (see `_odd_quotes`).
+        if not _reports("X='a\nb <<EOF c'\ncargo build\nEOF\n"):
+            failures.append(
+                "script_cargo_lines opened a heredoc from a `<<` inside a cross-line "
+                "single-quoted span and swallowed `cargo build`"
+            )
+        # 3d. ...and the COMMENT cut does NOT count them, because an apostrophe in prose is
+        # English. Counting singles there refuses the cut, leaves the `<<EOF` standing in the
+        # scanned region, and stops this REAL heredoc from opening.
+        rows = _lines("cat <<EOF # don't\ncargo build\nEOF\ncargo build\n")
+        if len(rows) != 1 or rows[0].lineno != 4:
+            failures.append(
+                f"script_cargo_lines let an apostrophe in a comment stop a real heredoc from "
+                f"opening: {rows}"
             )
 
     for f in failures:

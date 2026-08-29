@@ -179,18 +179,36 @@ provably never executes the text:
    (terminator may be tab-indented). A heredoc still open at EOF raises `MoonOutputError`
    (rc 2) — otherwise the scanner silently skips the rest of the file and reports zero rows,
    the same "infrastructure, never a silent pass" contract `check_dockerfile_locked` uses.
-2. **`#` comment tails.** The cut is quote-aware (a `#` inside a string is not a comment
-   marker, hence the `echo "a # b" && cargo build` fixture) and runs **per physical line,
-   before continuations are joined**: a `#` comment ends at the newline even when the
-   previous line ends in a backslash, so joining first would pull the next line's real
-   invocation into the comment. It carries one guard of its own — an ODD count of surviving
-   double quotes means the quote masking paired the wrong characters, so it refuses to cut at
-   all. That is the one remaining way this scanner can DROP a live invocation
-   (`X="a` / `b # c" cargo build` is one bash statement that runs cargo). A/B-measured over
-   the whole `ci/**/*.sh` corpus: the guard fires on 343 physical lines and changes not one row.
-3. **`$(( ... ))` arithmetic**, blanked before the heredoc scan, because `HEREDOC_OPEN_RE`
+2. **`#` comment tails.** The cut runs **per physical line, before continuations are joined**:
+   a `#` comment ends at the newline even when the previous line ends in a backslash, so
+   joining first would pull the next line's real invocation into the comment.
+3. **`$(( ... ))` arithmetic**, blanked before everything else, because `HEREDOC_OPEN_RE`
    matches a bare `<<` and `$((1 << BITS))` would otherwise read as a heredoc named `BITS`,
    swallowing every line up to the next bare `BITS`.
+
+Exclusions 1 and 2 are **one decision, taken together** in `_line_regions`, from ONE
+within-line quote mask (matched pairs blanked to equal-length spaces, so every surviving
+offset still indexes the original, and the code region is sliced out of the ORIGINAL). Keeping
+them apart is what shipped a phantom heredoc in round 4: a `<<EOF` inside a string opened a
+real heredoc and swallowed the lines after it, silently. Three sub-decisions, each with a
+fixture and a mutation:
+
+- **A `#` must start a WORD.** `${#arr[@]}` / `${#var}` is bash's length operator, never a
+  comment; cutting there drops `n=${#arr[@]} && cargo build`. This guard shipped in an earlier
+  round **with no fixture**, and its mutant passed the self-test at rc 0.
+- **A heredoc opener must be UNMASKED.** `HEREDOC_OPEN_RE` is matched against the code region
+  and accepted only where the `<<` itself survives the mask, so `echo "a <<EOF b"` opens
+  nothing while `cat <<'EOF' > "$out"` still does — there the `<<` sits outside every quote
+  pair even though its delimiter is quoted. Five string shapes and the comment shape are
+  fixtures; the real-heredoc positive control is what stops "never open one" passing them all.
+- **Ambiguous quote parity refuses BOTH.** An unpaired quote means the mask paired the wrong
+  characters. The heredoc decision counts `"` and `'`; the comment cut counts `"` only,
+  because an apostrophe in prose is English, not shell quoting — counting singles there turns
+  `ci/publish-metadata/run.sh:772`, a plain comment mentioning `cargo metadata`, into a
+  would-report row (MEASURED, and its own fixture pins the asymmetry in both directions).
+  Refusing to cut, and refusing to open, can only add a **false positive**: the text is then
+  scanned as ordinary code. Opening wrongly is what SWALLOWS. A/B-measured over the whole
+  `ci/**/*.sh` corpus: the `"` guard fires on 343 physical lines and changes not one row.
 
 Two more rules complete it. Backslash continuations are joined into one logical line, reported
 against the FIRST physical line number. And `--locked` counts only **in the segment holding the
@@ -368,7 +386,14 @@ a cargo call inside a `.sh` is outside A8's derived set — also now false.
    `X="a` / `b # c" cargo build` (the odd-double-quote guard); `# note \` / `cargo build`
    (the per-physical-line comment cut); and `echo "start` / `cargo build` / `end"`, the
    accepted false positive of L8, pinned so nobody reintroduces string stripping.
-   An unterminated heredoc must raise `MoonOutputError`. A nine-mutation battery — one
+   `n=${#arr[@]} && cargo build` (the `#` word-start guard); a `<<EOF` that must NOT open a
+   heredoc — inside a double-quoted string, as `<<-` with a tab-indented terminator, as
+   `<<'EOF'` inside a string, inside a single-quoted string, in realistic prose
+   (`die_infra "run <<EOF to reproduce"`), inside a comment, and on a line whose quote parity
+   is ambiguous (`echo \" # <<EOF`) — plus `X='a` / `b <<EOF c'` for single-quote parity; and
+   two positive controls, that `cat <<'EOF' > "$out"` still opens a heredoc whose body is
+   skipped and that an apostrophe in a trailing comment does not stop it.
+   An unterminated heredoc must raise `MoonOutputError`. A fourteen-mutation battery — one
    mutation per decision — must kill every mutant.
 2. **A9** — missing input reports; declared does not; empty-reason waiver is a row;
    stale waiver is a row; floor member out of scope reports; floor member allowlisted
@@ -513,3 +538,13 @@ reds.
 all three are A8 waivers. This is the design's accepted false-positive direction, pinned by a
 self-test fixture so nobody "fixes" it by reintroducing string stripping; it reds CI loudly
 rather than passing silently.
+
+
+**L9 — the comment cut ignores single-quote parity, so one narrow silent drop remains.**
+`X='a` / `b # c' cargo build` is one bash statement that runs cargo; the second line's `#` is
+string content, but the cut counts double quotes only and truncates there, dropping the row
+(MEASURED). Counting single quotes closes it and costs a false positive on every prose comment
+carrying an apostrophe, which is far more common — so the trade was taken deliberately, in the
+direction that keeps today's corpus honest. The heredoc decision, where a wrong answer swallows
+whole blocks rather than one line, does count them. No instance of this shape exists in
+`ci/**/*.sh`.

@@ -28,7 +28,7 @@
 ### Task 1: The shared shell-line classifier — THE CONSERVATIVE RULE
 
 **Files:**
-- Modify: `ci/affected-graph/cargo_moon_parity.py` (constants after `LOCKED_FLAG`; `_code_region`, `_join`, `_classify_shell_line`, `script_cargo_lines`; self-test rows inside `self_test()` before its `return`)
+- Modify: `ci/affected-graph/cargo_moon_parity.py` (constants after `LOCKED_FLAG`; `_odd_quotes`, `_line_regions`, `_join`, `_classify_shell_line`, `script_cargo_lines`; self-test rows inside `self_test()` before its `return`)
 
 **Interfaces:**
 - Consumes: `CARGO_INVOCATION_RE`, `LOCKED_FLAG`, `MoonOutputError`, `_strip_arithmetic` (all existing).
@@ -59,11 +59,22 @@ failure mode is a **loud false positive**, not a silent pass.
 Report every cargo invocation whose own command segment lacks `--locked`. Exclude exactly three
 regions, because in each the shell provably never executes the text:
 
-1. **Heredoc bodies** (the existing tracker; a heredoc open at EOF still raises `MoonOutputError`).
-2. **`#` comment tails** (`_code_region`, quote-aware, cut PER PHYSICAL LINE before continuations
-   are joined — a `#` comment ends at the newline even when the previous line ends in a backslash).
-3. **`$(( ... ))` arithmetic** (`_strip_arithmetic`, before the heredoc scan, so `$((1 << BITS))`
+1. **Heredoc bodies** (a heredoc open at EOF still raises `MoonOutputError`).
+2. **`#` comment tails**, cut PER PHYSICAL LINE before continuations are joined — a `#` comment
+   ends at the newline even when the previous line ends in a backslash.
+3. **`$(( ... ))` arithmetic** (`_strip_arithmetic`, before everything else, so `$((1 << BITS))`
    cannot read as a heredoc named `BITS`).
+
+Exclusions 1 and 2 are ONE decision, taken together in `_line_regions` from ONE within-line quote
+mask. Keeping them apart shipped a phantom heredoc (round 5): a `<<EOF` inside a string, a
+comment, or a line with ambiguous quote parity opened a real heredoc and SWALLOWED the lines
+after it, silently. Three sub-decisions, each with a fixture and a mutation: a `#` must start a
+word (`${#arr[@]}` is bash's length operator, and this guard had shipped with no fixture at all);
+a heredoc opener is accepted only where the `<<` survives the mask (so `cat <<'EOF' > "$out"`
+still opens, which is its own positive control); and ambiguous parity refuses BOTH decisions —
+counting `"` and `'` for the heredoc, `"` only for the comment cut, because an apostrophe in
+prose is English and counting it reds `ci/publish-metadata/run.sh:772` (measured, both directions
+pinned). Refusing can only add a false positive; opening wrongly swallows.
 
 Plus the `cargo metadata --no-deps` carve-out (MEASURED: `--no-deps` never resolves, so `--locked`
 on it is inert).
@@ -76,11 +87,10 @@ string simply reports; the three live instances in `ci/` are waived in Task 3.
 `--locked` that is string content sitting BEFORE the verb (`X="abc` / `--locked" cargo build`, one
 bash statement across two physical lines) from covering a genuinely unlocked call.
 
-`_code_region` carries one extra guard: an ODD count of surviving double quotes means the quote
-masking paired the wrong characters, so it refuses to cut at all. Cutting on a mispaired mask is
-the one remaining way this scanner can DROP a live invocation (`X="a` / `b # c" cargo build`).
-A/B-measured against the whole `ci/**/*.sh` corpus: the guard fires on 343 physical lines and
-changes not one row.
+The `"`-parity guard on the comment cut is A/B-measured against the whole `ci/**/*.sh` corpus: it
+fires on 343 physical lines and changes not one row. It does NOT close every drop — see L9 in the
+spec: `X='a` / `b # c' cargo build` still truncates at the `#`, because counting single quotes
+there costs a false positive on every prose comment with an apostrophe. Recorded, not fixed.
 
 - [x] **Step 2: Fail-first**
 
@@ -103,12 +113,21 @@ MASK=$((1 << BITS))\ncargo build\nBITS
 echo "a # b" && cargo build
 X="a\nb # c" cargo build               (the odd-quote guard)
 # note \\\ncargo build                 (the per-physical-line comment cut)
+n=${#arr[@]} && cargo build            (the `#` word-start guard)
+echo "a <<EOF b"                       (phantom heredoc: 5 string shapes + comment + ambiguous)
+X='a\nb <<EOF c'                       (single-quote parity on the heredoc decision)
 echo "start\ncargo build\nend"         (THE ACCEPTED FALSE POSITIVE, pinned deliberately)
 ```
 
-A nine-mutation battery killed every mutation, one per decision: the odd-quote guard, the
-after-the-verb flag scope, the arithmetic strip, the per-physical-line comment cut, string
-stripping, the heredoc body skip, the `--no-deps` carve-out, continuation joining, and the
+Two positive controls stop "never open a heredoc" passing the phantom rows: `cat <<'EOF' >
+"$out"` must still open one whose body is skipped, and an apostrophe in a trailing comment must
+not stop it.
+
+A fourteen-mutation battery killed every mutation, one per decision: the double-quote ambiguity
+test, single-quote counting on the heredoc decision, single-quote counting NOT on the comment
+cut, the unmasked-opener check, the `#` word-start guard, the comment cut feeding the heredoc
+scan, the arithmetic strip, the per-physical-line cut, the after-the-verb flag scope, string
+stripping, the `--no-deps` carve-out, the heredoc body skip, continuation joining, and the
 `MoonOutputError` on a heredoc open at EOF.
 
 - [x] **Step 4: Verify against the real corpus**
