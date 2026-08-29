@@ -264,11 +264,16 @@ REQUIRED_CARGO_CONFIG_TASKS = (
 
 # SMA-599 — the shell-script cargo-line classifier shared by A8's script arm and A10.
 #
-# THE CONSERVATIVE RULE. Report every cargo invocation whose own command segment does not
-# carry `--locked` after the verb. Exactly three regions are excluded, because in each the
-# shell provably never executes the text: a heredoc BODY, a `#` comment tail, and a
-# `$(( ... ))` arithmetic expansion. Nothing else is. In particular quoted string literals
-# are NOT stripped, so a cargo verb sitting inside a string reports like any other.
+# THE CONSERVATIVE RULE. Report every cargo invocation that does not carry `--locked` in its
+# own tail — the text from its verb to the next invocation in the same command segment, or to
+# the end of that segment. Exactly three regions are excluded, because in each the shell
+# provably never executes the text as a command: a heredoc BODY, a `#` comment tail, and a
+# BRACKETED OPERATOR SPAN. The last one is three shapes, not one — `$(( ... ))`, a bare
+# `(( ... ))` arithmetic command, and `[ ... ]` (an array subscript, a `[[ ]]` test, a glob) —
+# and it is blanked in the MASK only, so a `<<` there is a shift and a `#` a base marker while
+# the code text itself survives verbatim and still classifies (see `_blank_operator_spans`).
+# Nothing else is excluded. In particular quoted string literals are NOT stripped, so a cargo
+# verb sitting inside a string reports like any other.
 #
 # WHY, and what this replaced (SMA-599). The first implementation stripped quoted strings and
 # then tried to decide, per line, whether a verb inside one still executed: `bash -c "..."`,
@@ -359,6 +364,18 @@ ALLOW_UNLOCKED_CARGO_SCRIPT = {
         "silently dropped real invocations before SMA-599's classifier was replaced — so a "
         "cargo verb inside a diagnostic surfaces as a row and is waived here instead. "
         "A false positive waived is the trade the design makes for never missing a real call."
+    ),
+    ("ci/actionlint/run.sh",
+     'unlocked="${script/cargo metadata --locked --format-version 1/cargo metadata '
+     '--format-version 1}"'): (
+        "NOT an invocation: a `${var/old/new}` substitution that BUILDS the mutated script "
+        "text for check 8f's own negative control, which then asserts that dropping --locked "
+        "from ci/cargo-lock-integrity/run.sh is reported. Naming the unlocked form is the "
+        "whole point of the line. It surfaced only once `_classify_shell_line` moved to "
+        "finditer (SMA-599 review): the line holds TWO cargo invocations, the first carrying "
+        "--locked, and reading just the first hid the second — the exact silent false "
+        "negative the conservative rule claims it cannot have. One waiver is the price of "
+        "making that claim true."
     ),
     ("ci/publish-metadata/run.sh",
      'die_infra "FATAL: \\`cargo metadata\\` failed in $RS_DIR — nothing could be verified."'): (
@@ -741,36 +758,50 @@ def _classify_shell_line(lineno, logical):
     """Rows for one LOGICAL line (backslash continuations already joined).
 
     The conservative rule, in full: split the line on `;`, `&` and `|`, and emit a row for
-    every resulting segment that holds a cargo invocation. Nothing else is consulted — no
-    string stripping, no exec detection, no substitution extraction.
+    EVERY cargo invocation in every resulting segment. Nothing else is consulted — no string
+    stripping, no exec detection, no substitution extraction.
 
-    `--locked` counts only when it appears AFTER the matched verb, IN THAT SEGMENT. The
-    segment scope is what keeps `cargo build && cargo metadata --locked` reporting
-    `cargo build`; the after-the-verb scope is what stops a `--locked` that is string content
-    sitting BEFORE the verb from covering a genuinely unlocked call — `X="abc` newline
-    `--locked" cargo build` is one bash statement across two physical lines, and the second
-    line reaches cargo unlocked.
+    ONE ROW PER INVOCATION, not per segment (SMA-599 review). `finditer`, not `search`:
+    `cargo build --locked --features "$(cargo test)"` is one segment holding two invocations,
+    and reading only the first reported a single locked row while the nested `cargo test`
+    vanished — a SILENT FALSE NEGATIVE, the one failure direction this design claims it
+    cannot have. A live instance of the shape sits at `ci/actionlint/run.sh:3715` (benign; it
+    is a `${var/old/new}` substitution naming both the locked and the unlocked form), and it
+    is waived in ALLOW_UNLOCKED_CARGO_SCRIPT.
+
+    Each invocation's flags are read from ITS OWN TAIL: the text from the end of its verb to
+    the start of the NEXT invocation in the same segment, or to the end of the segment. That
+    bound is what stops the nested call's flag from covering the outer one —
+    `cargo build "$(cargo test --locked)"` reports `cargo build`, because the `--locked`
+    belongs to the invocation after it. The segment scope is what keeps
+    `cargo build && cargo metadata --locked` reporting `cargo build`; the after-the-verb scope
+    is what stops a `--locked` that is string content sitting BEFORE the verb from covering a
+    genuinely unlocked call — `X="abc` newline `--locked" cargo build` is one bash statement
+    across two physical lines, and the second line reaches cargo unlocked.
+
+    Every row from one segment carries that WHOLE segment as its `segment` text, deliberately:
+    it is the waiver key, and an invocation's own span alone (`cargo metadata\\` failed …`)
+    reads as garbage to the reviewer who has to judge the waiver. Two rows sharing a text is
+    handled where the waivers are checked, not here.
     """
     rows = []
     for segment in COMMAND_SPLIT_RE.split(logical):
-        found = CARGO_INVOCATION_RE.search(segment)
-        if found is None:
-            continue
-        # MEASURED (SMA-599 §2.1): `cargo metadata --no-deps` does not resolve and never
-        # rewrites the lock, so --locked on it is INERT. Demanding the flag would be
-        # cargo-cult compliance a later reader would mistake for a guarantee.
-        resolves = not (
-            CARGO_METADATA_RE.search(segment) and re.search(r"--no-deps\b", segment)
-        )
-        rows.append(
-            ScriptCargoLine(
-                lineno,
-                logical,
-                segment,
-                resolves,
-                LOCKED_FLAG in segment[found.end() :],
+        found = list(CARGO_INVOCATION_RE.finditer(segment))
+        for idx, match in enumerate(found):
+            stop = found[idx + 1].start() if idx + 1 < len(found) else len(segment)
+            tail = segment[match.end() : stop]
+            # MEASURED (SMA-599 §2.1): `cargo metadata --no-deps` does not resolve and never
+            # rewrites the lock, so --locked on it is INERT. Demanding the flag would be
+            # cargo-cult compliance a later reader would mistake for a guarantee. Read from
+            # THIS invocation's verb and tail, never the whole segment: a `--no-deps` on a
+            # neighbouring call must not excuse a resolving one.
+            resolves = not (
+                CARGO_METADATA_RE.search(match.group(0))
+                and re.search(r"--no-deps\b", tail)
             )
-        )
+            rows.append(
+                ScriptCargoLine(lineno, logical, segment, resolves, LOCKED_FLAG in tail)
+            )
     return rows
 
 
@@ -1000,8 +1031,20 @@ def check_cargo_locked_scripts(projects, root, allow=None):
                     )
     # Stale and ambiguous waiver entries. A waiver that matches nothing has silently stopped
     # asserting; one that matches twice covers a line nobody reviewed.
+    #
+    # Only REPORTING rows are counted (SMA-599 review). Since `_classify_shell_line` emits one
+    # row per invocation rather than per segment, a segment holding two invocations yields two
+    # rows carrying the same segment text — `ci/actionlint/run.sh:3715` is the live instance,
+    # where the first invocation is locked and the second is not. A row that does not report
+    # needs no waiver, so a waiver cannot be "covering a line nobody reviewed" by matching it;
+    # counting it would red an honest waiver. A waiver whose line stops reporting still reads
+    # as STALE, which is the correct verdict — the exemption is no longer earning its place.
     for (rel, text), _reason in sorted(allow.items()):
-        hits = [l for l in seen.get(rel, []) if l.segment.strip() == text]
+        hits = [
+            l
+            for l in seen.get(rel, [])
+            if l.segment.strip() == text and l.resolves and not l.locked
+        ]
         if not hits:
             rows.append(
                 f"ALLOW_UNLOCKED_CARGO_SCRIPT entry ({rel}, {text[:60]!r}) matches no line — "
@@ -1041,14 +1084,23 @@ def _cwd_inside_rs(text, source_dir):
     Reads RAW text, never the quote-stripped form: stripping strings first turns
     `RS_DIR="$REPO_ROOT/rs"` into `RS_DIR=` and `cd "$RS_DIR"` into `cd`, and the whole
     shape dies.
+
+    Substitution runs LONGEST NAME FIRST (SMA-599 review, MEASURED false negative before this
+    fix). `str.replace` on the bare `$NAME` form has no word boundary, so a short name that
+    prefixes a longer one eats it: with `R=zzz` and `RS_DIR="$REPO_ROOT/rs"`, substituting `R`
+    first turned `$RS_DIR` into `zzzS_DIR` and `cd "$RS_DIR"` resolved to False. Real followed
+    scripts do carry prefix collisions, and dict order is the file's assignment order, so the
+    outcome depended on which variable a script happened to define first. Longest-first removes
+    the class: a longer name is always tried before any of its prefixes.
     """
     if source_dir == "rs" or source_dir.startswith("rs/"):
         return True
     env = dict(VAR_ASSIGN_RE.findall(text))
+    ordered = sorted(env.items(), key=lambda kv: (-len(kv[0]), kv[0]))
     scan_text = CMD_SUBST_RE.sub("", text)
     for token in CWD_TOKEN_RE.findall(scan_text):
         resolved = token
-        for name, value in env.items():
+        for name, value in ordered:
             resolved = resolved.replace(f"${{{name}}}", value).replace(f"${name}", value)
         if RS_PATH_RE.search(resolved):
             return True
@@ -1067,11 +1119,12 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
     `.moon/tasks/rust.yml:46`'s `/rs/.cargo/config.toml` both resolve to the same slash-free
     path, which is why all 58 declaring tasks match verbatim.
 
-    For a `script` task, CONFIG_SENSITIVE_RE and CWD_TOKEN_RE run over the RAW referenced file
-    text — comments and string literals included, unlike A8's region-stripped scan. This is
-    over-approximation ONLY: it can only pull a task INTO scope that a stricter scan would have
-    left out (a false "in scope", never a false "out of scope"), so the failure direction is a
-    row a human must dismiss by hand, not a silently missed one (SMA-599 review).
+    Whenever a task's invocation names a `ci/**/*.sh`, CONFIG_SENSITIVE_RE and CWD_TOKEN_RE run
+    over that file's RAW text — for EVERY kind, not only `script` — comments, heredoc bodies
+    and string literals included, unlike A8's region-stripped scan. This is over-approximation
+    ONLY: it can only pull a task INTO scope that a stricter scan would have left out (a false
+    "in scope", never a false "out of scope"), so the failure direction is a row a human must
+    dismiss by hand, not a silently missed one (SMA-599 review).
     """
     allow = ALLOW_MISSING_CARGO_CONFIG if allow is None else allow
     floor = REQUIRED_CARGO_CONFIG_TASKS if floor is None else floor
@@ -1080,9 +1133,16 @@ def check_cargo_config_inputs(projects, root, allow=None, floor=None):
         pid, _, name = target.partition(":")
         blob = projects[pid]["invocations"][name]
         text = blob
-        if kind == "script":
-            for path in task_script_refs(projects, root, target):
-                text += "\n" + Path(path).read_text()
+        # Followed for EVERY kind, not only `script` (SMA-599 review). `derive_cargo_tasks`
+        # assigns `literal` on any cargo verb ANYWHERE in the blob, prose included, so a gate
+        # whose blob reads `echo "running cargo check"; bash ci/foo/run.sh` is `literal` while
+        # the identical gate without the echo is `script` — and the guard then read the script
+        # for the second and not the first. A benign `echo` in a moon.yml block silently
+        # switched A10 off for that gate. `task_script_refs` returns [] when a blob names no
+        # script, so this costs nothing for a task that really is blob-only: MEASURED on the
+        # real corpus, in_scope stays 58 and no row appears.
+        for path in task_script_refs(projects, root, target):
+            text += "\n" + Path(path).read_text()
         # A wrapper reaches cargo without a literal verb, so the verb test cannot see it. The
         # three FFI tasks compile and link cdylibs and wasm32 by construction.
         sensitive = kind == "wrapper" or bool(CONFIG_SENSITIVE_RE.search(text))
@@ -2157,6 +2217,34 @@ def self_test():
                    check_cargo_locked_scripts(fixture, Path(tmp), allow=allow_ok)):
             failures.append("A8's script arm accepted a waiver text that is not unique")
 
+        # …but the ambiguity count reads REPORTING rows only (SMA-599 review). Since
+        # `_classify_shell_line` emits one row per INVOCATION, a segment holding a locked and
+        # an unlocked call yields two rows carrying the same segment text. Exactly one of them
+        # reports, so the waiver is unambiguous; counting the locked row would red the honest
+        # waiver `ci/actionlint/run.sh:3715` needs. This is the live corpus shape.
+        (probe / "run.sh").write_text(
+            'x="${s/cargo metadata --locked --format-version 1/cargo metadata '
+            '--format-version 1}"\n'
+        )
+        pair_text = (
+            'x="${s/cargo metadata --locked --format-version 1/cargo metadata '
+            '--format-version 1}"'
+        )
+        rows = check_cargo_locked_scripts(fixture, Path(tmp), allow={})
+        if len(rows) != 1:
+            failures.append(
+                f"A8's script arm did not report exactly the unlocked half of a two-invocation "
+                f"segment: {rows}"
+            )
+        rows = check_cargo_locked_scripts(
+            fixture, Path(tmp), allow={("ci/probe/run.sh", pair_text): "prose, not a call"}
+        )
+        if rows:
+            failures.append(
+                f"A8's script arm called a waiver ambiguous because the segment ALSO holds a "
+                f"locked invocation, which needs no waiver: {rows}"
+            )
+
     if not ALLOW_UNLOCKED_CARGO_SCRIPT:
         failures.append("ALLOW_UNLOCKED_CARGO_SCRIPT is empty — its stale-entry rule asserts nothing")
 
@@ -2614,6 +2702,36 @@ def self_test():
                 "script_cargo_lines treated `cargo metadata --no-deps` as resolving"
             )
 
+        # ONE ROW PER INVOCATION (SMA-599 review). A segment holding two cargo calls must
+        # emit two rows. `search` emitted one — the first, locked — and the nested unlocked
+        # `cargo test` VANISHED, a silent false negative in the one direction this design
+        # claims it cannot have. `ci/actionlint/run.sh:3715` is the live instance.
+        rows = _lines('cargo build --locked --features "$(cargo test)"\n')
+        if len(rows) != 2 or rows[0].locked is not True or rows[1].locked is not False:
+            failures.append(
+                f"script_cargo_lines did not emit one row per cargo invocation in a segment "
+                f"holding two — the nested unlocked call is invisible: {rows}"
+            )
+
+        # The flag scope is bounded by the NEXT invocation, not by the end of the segment: a
+        # nested call's --locked must not cover the outer one. Without the bound this reads
+        # `cargo build` as locked and reports nothing.
+        rows = _lines('cargo build "$(cargo test --locked)"\n')
+        if len(rows) != 2 or rows[0].locked is not False:
+            failures.append(
+                f"script_cargo_lines let a NESTED invocation's --locked cover the outer "
+                f"`cargo build`: {rows}"
+            )
+
+        # The --no-deps carve-out is bounded the same way. A `--no-deps` on a neighbouring
+        # invocation must not excuse a resolving one in the same segment.
+        rows = _lines('cargo build "$(cargo metadata --no-deps)"\n')
+        if len(rows) != 2 or rows[0].resolves is not True or rows[1].resolves is not False:
+            failures.append(
+                f"script_cargo_lines applied a neighbouring `--no-deps` to `cargo build`, "
+                f"which does resolve: {rows}"
+            )
+
         # A cargo verb inside a heredoc BODY is data the shell never executes.
         if _lines("cat <<'PY'\ncargo build\nPY\n"):
             failures.append("script_cargo_lines read a cargo line inside a heredoc body")
@@ -2910,7 +3028,7 @@ def self_test():
     # SMA-599 — A10. Its verb predicate is its OWN, not LOCK_RESOLVING_VERBS: reusing A8's list
     # excluded the thirteen `fmt` tasks by COINCIDENCE and would hide any future
     # compiling-but-not-resolving subcommand (cargo llvm-cov, insta, udeps).
-    a9_fixture = {
+    a10_fixture = {
         "c-rs": {
             "source_dir": "rs/crates/libs/c", "deps": {}, "tasks": {},
             "task_inputs": {"build": ["rs/.cargo/config.toml"], "fmt": []},
@@ -2930,11 +3048,31 @@ def self_test():
             },
         },
     }
-    if check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",)):
+    if check_cargo_config_inputs(a10_fixture, Path("."), allow={}, floor=("c-rs:build",)):
         failures.append("A10 reported violations on a clean fixture")
 
+    # A10's cwd derivation, exercised directly. Substitution runs LONGEST NAME FIRST because
+    # `str.replace` on the bare `$NAME` form has no word boundary: a short name that prefixes a
+    # longer one eats it. MEASURED before the fix — `R=zzz` ahead of `RS_DIR="$REPO_ROOT/rs"`
+    # rewrote `$RS_DIR` to `zzzS_DIR` and the same script resolved to False, while dropping the
+    # `R=` line resolved to True. Dict order is the script's assignment order, so the verdict
+    # depended on which variable a file happened to define first.
+    for label, probe, want in (
+        ("a bare `cd rs`", "cd rs\ncargo build\n", True),
+        ("one round of substitution",
+         'RS_DIR="$REPO_ROOT/rs"\ncd "$RS_DIR"\ncargo build\n', True),
+        ("a prefix-colliding shorter name defined FIRST",
+         'R=zzz\nRS_DIR="$REPO_ROOT/rs"\ncd "$R_DIR_UNUSED"\ncd "$RS_DIR"\ncargo build\n', True),
+        ("a cwd outside rs/", 'cd ts\ncargo build --manifest-path rs/Cargo.toml\n', False),
+    ):
+        if _cwd_inside_rs(probe, ".") is not want:
+            failures.append(
+                f"_cwd_inside_rs returned {not want} for {label} — the cwd rule is wrong in "
+                f"the {'false-negative' if want else 'false-positive'} direction"
+            )
+
     # The core assertion: an in-scope task missing the input.
-    broken = json.loads(json.dumps(a9_fixture))
+    broken = json.loads(json.dumps(a10_fixture))
     broken["c-rs"]["task_inputs"]["build"] = []
     if not any("c-rs:build" in r for r in
                check_cargo_config_inputs(broken, Path("."), allow={}, floor=("c-rs:build",))):
@@ -2946,7 +3084,7 @@ def self_test():
     # CONFIG_SENSITIVE_VERBS (SMA-599 review corrected the prior "excluded BY THE VERB" claim,
     # which wrongly implied the verb test runs and rejects `fmt` — it never runs at all).
     if any("c-rs:fmt" in r for r in
-           check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
+           check_cargo_config_inputs(a10_fixture, Path("."), allow={}, floor=("c-rs:build",))):
         failures.append("A10 demanded rs/.cargo/config.toml from `cargo fmt`, which cannot read it")
 
     # `repo:deny` and `repo:mach` are excluded BY VERB, not cwd (SMA-599 review corrected the
@@ -2962,12 +3100,12 @@ def self_test():
     # both --self-test and the real corpus.
     for task in ("repo:deny", "repo:mach"):
         if any(task in r for r in
-               check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
+               check_cargo_config_inputs(a10_fixture, Path("."), allow={}, floor=("c-rs:build",))):
             failures.append(f"A10 pulled {task} into scope from an `rs` path ARGUMENT, not a cd")
 
     # `cargo tree` runs from rs/ but resolves without compiling — out of scope by verb (AC 4).
     if any("repo:tree" in r for r in
-           check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
+           check_cargo_config_inputs(a10_fixture, Path("."), allow={}, floor=("c-rs:build",))):
         failures.append("A10 demanded the config file from `cargo tree`, which never compiles")
 
     # cwd-only exclusion, negative coverage (SMA-599 review). Unlike repo:deny/repo:mach above,
@@ -2975,7 +3113,7 @@ def self_test():
     # rs/, so this is the fixture that actually exercises `_cwd_inside_rs`'s False branch on a
     # sensitive task.
     if any("repo:root-build" in r for r in
-           check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:build",))):
+           check_cargo_config_inputs(a10_fixture, Path("."), allow={}, floor=("c-rs:build",))):
         failures.append(
             "A10 pulled repo:root-build into scope though its cargo build runs from the repo "
             "root, not rs/ — the cwd exclusion is not being applied"
@@ -2983,7 +3121,7 @@ def self_test():
 
     # Both input buckets matter, and an absent bucket is a violation, never a skip — the same
     # contract A4/A5/A6/A7 already assert (SMA-599 review: neither half was exercised for A10).
-    glob_only = json.loads(json.dumps(a9_fixture))
+    glob_only = json.loads(json.dumps(a10_fixture))
     glob_only["c-rs"]["task_inputs"]["build"] = []
     glob_only["c-rs"]["task_input_globs"]["build"] = ["rs/.cargo/config.toml"]
     if check_cargo_config_inputs(glob_only, Path("."), allow={}, floor=("c-rs:build",)):
@@ -2992,7 +3130,7 @@ def self_test():
             "`| set(globs)` from the production code must fail this"
         )
 
-    missing_bucket = json.loads(json.dumps(a9_fixture))
+    missing_bucket = json.loads(json.dumps(a10_fixture))
     missing_bucket["c-rs"]["invocations"]["check"] = "cargo check --locked"
     # `check` is deliberately absent from BOTH task_inputs and task_input_globs, simulating
     # moon's output shape changing underneath this task.
@@ -3009,7 +3147,7 @@ def self_test():
 
     # Floor: a member that leaves scope must fail, or the derivation could empty silently.
     if not any("FLOOR:" in r for r in
-               check_cargo_config_inputs(a9_fixture, Path("."), allow={}, floor=("c-rs:nope",))):
+               check_cargo_config_inputs(a10_fixture, Path("."), allow={}, floor=("c-rs:nope",))):
         failures.append("A10's floor did not fire on a member outside the derived set")
 
     # Second vacuity mode, specific to default-deny: an allowlist that swallows a floor member.
@@ -3022,6 +3160,37 @@ def self_test():
     if not any("empty reason" in r for r in check_cargo_config_inputs(
             broken, Path("."), allow={"c-rs:build": " "}, floor=())):
         failures.append("A10 accepted an ALLOW_MISSING_CARGO_CONFIG entry with an empty reason")
+
+    # A10 must follow a task's script for EVERY kind, not only `script` (SMA-599 review).
+    # `derive_cargo_tasks` assigns `literal` on any cargo verb anywhere in the blob, PROSE
+    # INCLUDED, so a benign `echo "running cargo check"` in a moon.yml block changed a gate's
+    # kind and — while A10 read scripts only for kind `script` — silently took that gate out
+    # of scope. Two gates run the SAME script here and differ only by that echo; both must be
+    # in scope and both must be reported. A8's script arm never had this bug.
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "ci" / "foo"
+        probe.mkdir(parents=True)
+        (probe / "run.sh").write_text("cd rs\ncargo build --locked\n")
+        echo_fixture = {
+            "repo": {
+                "source_dir": ".", "deps": {}, "tasks": {},
+                "task_inputs": {"plain": [], "chatty": []},
+                "task_input_globs": {"plain": [], "chatty": []},
+                "invocations": {
+                    "plain": "bash ci/foo/run.sh",
+                    "chatty": 'echo "running cargo check"; bash ci/foo/run.sh',
+                },
+            },
+        }
+        rows = check_cargo_config_inputs(
+            echo_fixture, Path(tmp), allow={}, floor=("repo:plain", "repo:chatty")
+        )
+        for task in ("repo:plain", "repo:chatty"):
+            if not any(task in r and "FLOOR:" not in r for r in rows):
+                failures.append(
+                    f"A10 did not report {task}, which reaches a compiling cargo from rs/ "
+                    f"through its script — a benign `echo` in the blob must not change scope"
+                )
 
     if not REQUIRED_CARGO_CONFIG_TASKS:
         failures.append("REQUIRED_CARGO_CONFIG_TASKS is empty — A10's floor would assert nothing")
