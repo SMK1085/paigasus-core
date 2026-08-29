@@ -694,6 +694,10 @@ ACTIONLINT_SH_CALL_SITES = (
     # this arm existed and exits 2 after it. Deleting this one line restores that fail-open while
     # every other entry here stays green, which is exactly the shape this registry exists to catch.
     'elif [ "$rg_rc" -ne 0 ] && [ "$rg_rc" -ne 1 ]; then',
+    # SMA-603 — check 11's production call site, at run.sh's top level (verified: not nested in
+    # a function, if, or loop) — column 0 like every other entry above. Deleting it stops
+    # ci/release-plan/run.sh from ever being invoked against the real repository.
+    "release_plan_sh --assert || rp_rc=$?",
 )
 
 # SMA-579 — check 10's two remaining call sites, pinned SEPARATELY from ACTIONLINT_SH_CALL_SITES
@@ -706,6 +710,8 @@ ACTIONLINT_SH_CALL_SITES = (
 # residual it does NOT close (a dead copy at the SAME indentation, e.g. wrapped in
 # `if false; then … fi`) is the same accepted gap already recorded for
 # RELEASE_PARITY_SH_CALL_SITES and SELF_SCHEDULED_GATES.
+# SMA-603 adds check 11's own two: both sit INSIDE `run_self_tests() { ... }` or
+# `release_plan_self_test() { ... }` for the same reason, and are pinned here rather than above.
 ACTIONLINT_SH_INDENTED_CALL_SITES = (
     # check 10's FIXTURE TABLE arity floor. Same shape as the two check-8e floors in
     # ACTIONLINT_SH_CALL_SITES, one language over: release_guard.py's verdict is Python and
@@ -720,6 +726,21 @@ ACTIONLINT_SH_INDENTED_CALL_SITES = (
     # physical lines — but it is still this file's own complete physical line, so whole-line
     # matching still applies cleanly.
     'release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken',
+    # SMA-603 — check 11's invocation inside run_self_tests. `release_plan_self_test` alone is a
+    # PREFIX of its own definition (`release_plan_self_test() {`), so a substring-over-the-whole-
+    # text match would be satisfied by the definition line and survive deleting this exact call —
+    # the same prefix hazard RUN_SH_CALL_SITES' own comment records for `run_self_tests` and
+    # `task_inputs.py`. Whole-line matching, stripped for the leading whitespace this call carries
+    # inside run_self_tests(), is what closes it. Deleting this line would still be caught by
+    # assert_self_tests_ran (SELF_TESTS_RAN would fall to 12 against SELF_TEST_COUNT=13), but that
+    # is a run.sh-internal control; this entry is the INDEPENDENT, cross-file pin the same way
+    # every other production call site above is — a single edit to run.sh alone cannot silence
+    # both at once.
+    "release_plan_self_test",
+    # ...and check 11's SELF-TEST invocation, the same shape as check 10's entry immediately
+    # above: deleting it leaves the production call (in ACTIONLINT_SH_CALL_SITES above) running
+    # against a verdict function nothing has proved correct.
+    'release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken',
 )
 
 # SMA-530. The moon.yml pins above prove the CONTROL IS INVOKED; these prove it still DOES
@@ -1763,11 +1784,19 @@ def self_test():
         'rg_rc=$?\n'
         'if [ "$rg_rc" -eq 2 ]; then\n'
         'elif [ "$rg_rc" -ne 0 ] && [ "$rg_rc" -ne 1 ]; then\n'
+        # Check 11's production call site (SMA-603) — same shape: at run.sh's top level, outside
+        # any function.
+        "release_plan_sh --assert || rp_rc=$?\n"
         # ...and check 10's fixture-table arity floor and self-test invocation (SMA-579),
         # matched via ACTIONLINT_SH_INDENTED_CALL_SITES instead: both sit inside
         # release_guard_self_test(), so they carry real, executing leading whitespace.
         '  [ "$n" -ge 20 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 20"\n'
         '  release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken\n'
+        # ...and check 11's invocation inside run_self_tests, and its own self-test invocation
+        # (SMA-603), matched via ACTIONLINT_SH_INDENTED_CALL_SITES for the same reason: both carry
+        # real, executing leading whitespace inside run_self_tests()/release_plan_self_test().
+        "  release_plan_self_test\n"
+        '  release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken\n'
     )
     wired_release_parity = (
         '    --negative-control) NEGATIVE=1; shift ;;\n'
