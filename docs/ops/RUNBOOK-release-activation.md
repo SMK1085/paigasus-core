@@ -32,7 +32,7 @@ Steps **D** and **I** are irreversible. Work top to bottom. Do not reorder.
 | **B1** | ~~Create the three environments (§3)~~ **done** | — | owner | yes |
 | **B2** | ~~Add the required reviewer to `release-approval`~~ **done** | — | owner | yes |
 | **B3** | App tag/Release capability — evidenced, see §2 | — | owner | yes |
-| **C** | `@paigasus` npm scope, `NPM_TOKEN`, three PyPI pending publishers | — | owner | yes |
+| **C** | ~~npm scope, `NPM_TOKEN`, `PYPI_API_TOKEN`~~ **done** | — | owner | yes |
 | **D** | Publish the three `0.1.0-alpha.1` seeds | — | owner | **NO** |
 | **E** | Configure crates.io Trusted Publishing for the three crates | — | owner | yes |
 | **F** | Merge this issue's PR. **OBSERVATION GATE** | the merge in F | owner | yes |
@@ -159,6 +159,23 @@ check read the same run.
 **Step 3 is the only proof, and "the run was green" is not it.** `release-pr`'s preflight makes the
 whole job skip **green** when `PAIGASUS_BOT_APP_ID` is unreadable, so a botched migration looks
 identical to a healthy run in the checks list. Open the run and confirm the job executed.
+
+---
+
+### 5.4 Credential cross-check — measured 2026-08-29
+
+Every `secrets.X` in `release.yml` resolves on the environment of the job that reads it. There are
+no repository secrets left, so a job sees only its own environment's.
+
+| Job | Environment | Secrets needed | |
+| --- | --- | --- | --- |
+| `release-pr` | `release-pr` | `PAIGASUS_BOT_APP_ID`, `PAIGASUS_BOT_PRIVATE_KEY` | OK |
+| `release` | `release-publish` | `PAIGASUS_BOT_APP_ID`, `PAIGASUS_BOT_PRIVATE_KEY` | OK |
+| `publish-pypi` | `release-publish` | `PYPI_API_TOKEN` | OK |
+| `publish-npm` | `release-publish` | `NPM_TOKEN` | OK |
+
+Worth re-running after any credential change. A miss is invisible at runtime for `release-pr`,
+whose preflight skips **green**.
 
 ---
 
