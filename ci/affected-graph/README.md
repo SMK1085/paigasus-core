@@ -178,6 +178,31 @@ It also runs several checks that the per-case project sets structurally **cannot
   Nothing is wrong today: exactly one task has more than one regex match
   (`repo:wasm-getrandom-free`, whose second match sits inside an `echo`), and its real cargo call
   is locked.
+- **A9** (in `cargo_moon_parity.py`, SMA-604) is the only assertion in this file about a consumer
+  OUTSIDE this repo. Every workspace crate must be reachable through **Dependabot's** expansion of
+  `rs/Cargo.toml`'s `[workspace] members`, which is weaker than Cargo's: `expand_workspaces`
+  (`cargo/lib/dependabot/cargo/file_fetcher.rb`) lists exactly ONE directory level below a glob's
+  literal prefix, so `crates/*/*` yields `crates/libs`, `crates/services`, `crates/bindings` and
+  then drops all three, because `File.fnmatch?("crates/*/*", "crates/libs")` is false. That
+  resolved to **zero** members, leaving Dependabot to build its sandbox from the five crates still
+  reachable through `path =` in `[workspace.dependencies]` — a 5-of-13 workspace that cargo
+  re-resolved to 176 packages against 543. Both known symptoms follow from it: the recurring
+  truncated `rs/Cargo.lock` A8 exists to survive, and a hard red on every `cargo in /rs` job from
+  2026-08-17 on (`cargo update -p serde:1.0.228` reports `Locking 0 packages` in the reduced
+  workspace, since serde 1.0.229 needs `serde_core =1.0.229` and `serde_core` is not in the `-p`
+  set). A8 and A9 are therefore the two halves of the same lockfile story: **A8 catches a truncated
+  lock once it exists; A9 removes the thing that writes one.**
+  A9 does not encode a rule of its own — it TRANSCRIBES the Ruby into
+  `dependabot_expand_member`, because a rule restated in this file's terms would drift away from
+  the expander it models. The self-test measures both forms against a synthetic tree and fails if
+  they ever agree, since a two-level glob resolving to anything would mean the model has stopped
+  reproducing the bug. Two rows, deliberately: a glob that resolves to nothing, and — separately —
+  a crate directory no entry reaches, which is the same shrunken-sandbox failure one crate at a
+  time and would survive a check that only tested the zero-resolve case. Nothing else in the repo
+  can see this: `cargo metadata` is identical either way, every Moon task is identical, and every
+  other assertion here is identical. **Adding a crate directory** (a fourth sibling of
+  `libs`/`services`/`bindings`) needs a new `members` entry; adding a crate inside an existing one
+  does not.
 - **`ci-targets`** (`ci_targets.py`, SMA-541) asserts `ci.yml`'s hand-written `moon ci` target array
   is complete and live: **C1** every CI-eligible `repo:*` task appears in `T=(…)` and — strict
   equality, not a subset — nothing in `T` names a `repo` task that is switched off; **C2** every `T`
@@ -232,7 +257,7 @@ It also runs several checks that the per-case project sets structurally **cannot
   degrading to two empty sets. **`:affected-smoke` is load-bearing for every assertion in this
   file**: this gate runs *inside* it, so removing that one entry from `T` (and from CLAUDE.md)
   passes C1-C6 by never executing them, and takes the eight project cascade cases, the five task
-  cases, A1-A8 and `assert_include_relations` with it. Never exempt or drop it — see the design
+  cases, A1-A9 and `assert_include_relations` with it. Never exempt or drop it — see the design
   doc's L6.
   Not covered: whether a `repo:*` task's `inputs` still match anything — see the follow-up in the
   design doc's L3.

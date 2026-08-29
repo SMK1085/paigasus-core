@@ -7,16 +7,27 @@
 
 ## What it gates
 
-No function under `rs/crates/services/*/src/adapters/http/**/*.rs` may take a bare `axum::Json<T>`
-in **request position** — its parameter list.
+No function under `rs/crates/services/*/src/adapters/http/**/*.rs` may take a bare `axum::Json<T>`,
+`axum::extract::Query<T>`, `axum::extract::Path<T>` or `axum::body::Bytes` in **request
+position** — its parameter list. `BANNED` carries one row per extractor type with an on/off flag,
+and all four rows are enabled: this is now the complete set of request-input kinds used in this
+tree.
 
-A bare `Json<T>` answers a refused body with axum's default **plain-text** rejection: malformed
-JSON, a wrong `Content-Type`, a schema mismatch, an oversized body. That escapes the service's
-stable `{"error":{code,message}}` envelope that every other IAM response uses. The house extractor
+A bare extractor of any of these kinds answers a refused input with axum's default **plain-text**
+rejection: malformed JSON, a wrong `Content-Type`, a schema mismatch, an unparseable query value, a
+malformed path segment, an oversized body. That escapes the stable `{"error":{code,message}}`
+envelope every other response in these two services uses. The house extractors —
 `EnvelopeJson<T>`
-([`paigasus-iam/src/adapters/http/json.rs`](../../rs/crates/services/paigasus-iam/src/adapters/http/json.rs))
-exists so that cannot happen; SMA-587 converted fourteen handlers to it. This gate is what stops a
-fifteenth being written with bare `Json<T>` tomorrow.
+([`paigasus-iam/src/adapters/http/json.rs`](../../rs/crates/services/paigasus-iam/src/adapters/http/json.rs)),
+`EnvelopeQuery<T>`
+([`paigasus-iam/src/adapters/http/query.rs`](../../rs/crates/services/paigasus-iam/src/adapters/http/query.rs)),
+`UuidPath<F>`/`StringPath<F>`
+([`paigasus-iam/src/adapters/http/path.rs`](../../rs/crates/services/paigasus-iam/src/adapters/http/path.rs))
+and `EnvelopeBytes`
+([`paigasus-gateway/src/adapters/http/bytes.rs`](../../rs/crates/services/paigasus-gateway/src/adapters/http/bytes.rs))
+— exist so that cannot happen. SMA-587 converted fourteen `Json` handlers; SMA-588 converted the
+ten `Query` handlers, the two `Path<String>` handlers, and the gateway's one `Bytes` handler. This
+gate is what stops a new one being written with a bare extractor tomorrow.
 
 Violations report `path:line  fn <name>(…)` and name the required replacement.
 
@@ -25,14 +36,6 @@ Violations report `path:line  fn <name>(…)` and name the required replacement.
 **Response position.** `-> Result<Json<Dto>, ApiError>` is the correct and universal way to render
 a success body here, and it is untouched — that is the whole reason this is a parser and not a
 grep. `organizations.rs` really does carry both contexts on one physical line.
-
-**`Query` and `Path`.** `BANNED` carries a row per extractor with an on/off flag. `Query` and
-`Path` are **reserved and deliberately off**: ten `Query<…>` bindings and two `Path<String>` in
-this tree still answer outside the envelope, the same class of escape with a different extractor,
-and SMA-587's spec defers them explicitly to the follow-up, **SMA-588**. Closing them later is a
-**flag flip**, not a second gate. (Whoever flips `Path` on: the match is on the bare identifier,
-so it will also match `std::path::Path` — `p: &Path`. `UuidPath<…>`, the house replacement
-already in use, is correctly not matched.)
 
 ## How it reads Rust without a Rust parser
 
@@ -57,8 +60,16 @@ That single mechanism answers all four ways a line grep gets this wrong:
 | Non-destructuring form | `body: Option<EnvelopeJson<RetireBody>>`, `path: UuidPath<OrganizationId>` | The span is scanned as text, so `body: Json<CreateNodeBody>` is caught exactly like `Json(b): Json<…>`. |
 | `where` clauses (a third context) | `where Json<T>: FromRequest<S, Rejection = JsonRejection>` in `json.rs` | A `where` clause sits outside the parentheses — for a free function and for an impl block, whose `where` belongs to no `fn` at all. So do `Json::<T>::from_request(…)` and `Ok(Json(value))`, which are function *bodies*. |
 
-Identifier boundaries are what keep the rule usable: `EnvelopeJson<T>`, `UuidPath<T>` and
-`JsonRejection` do **not** match, while `axum::Json<T>` does (`:` is not an identifier character).
+Identifier boundaries are what keep the rule usable: `EnvelopeJson<T>`, `EnvelopeQuery<T>`,
+`UuidPath<T>`, `StringPath<T>`, `EnvelopeBytes` and the `*Rejection` types do **not** match, while
+`axum::Json<T>` does (`:` is not an identifier character).
+
+The `Path` row additionally requires a following `<` (`_banned_pattern`'s `require_generic`), which
+none of the other rows do. A bare `Path` also matches `std::path::Path` (`p: &Path`) — a shape that
+does not exist in either `adapters/http` tree today, but the `<` requirement is cheap and fails
+safe against it. `PathBuf` needs no such flag: the trailing identifier-boundary lookahead already
+excludes it. Every other row keeps plain bare-identifier matching, which fails **closed**: it would
+catch a hypothetical non-generic alias that a `<`-anchored match would miss.
 
 ## Fail-closed properties
 
@@ -83,19 +94,34 @@ failing `--self-test` would be masked by a passing `--check`.
 
 ## The ALLOW table
 
-One row, stating its reason: `paigasus-iam/src/adapters/http/json.rs`, *the extractor's own
-definition site — it wraps `axum::Json` by construction*.
+Three rows today, each stating its reason and each an extractor's own definition site:
 
-An ALLOW row switches the gate off for a **whole file**, so rows are named literally (globs are
-rejected by the self-test) and must each state a reason. The row's path is asserted to still
-exist, so a rename reds rather than silently exempting nothing.
+- `paigasus-iam/src/adapters/http/json.rs` — wraps `axum::Json` by construction.
+- `paigasus-iam/src/adapters/http/query.rs` — wraps `axum::Query` by construction.
+- `paigasus-gateway/src/adapters/http/bytes.rs` — wraps `axum::body::Bytes` by construction.
+
+**ALLOW is per-FILE, not per-row.** An ALLOW row switches the gate off for the **whole file** it
+names — every enabled extractor, not just the one the row's reason mentions — so rows are named
+literally (globs are rejected by the self-test) and must each state a reason. The row's path is
+asserted to still exist, so a rename reds rather than silently exempting nothing. This is the one
+structural way this check could come to guard nothing, so the table stays deliberately tiny.
+
+Two files that are NOT in this table, on purpose:
+
+- `paigasus-iam/src/adapters/http/path.rs` — `UuidPath` and `StringPath` reach
+  `Path::<String>::from_request_parts` inside a function **body**, outside every parameter span,
+  and the `<`-requiring `Path` pattern does not match a turbofish either. The file needs no
+  exemption; adding one would be a silent widening with no matching need.
+- `paigasus-gateway/src/adapters/http/chat.rs` — `chat_completions` is the exact handler the
+  `Bytes` row exists to catch. An ALLOW row here would report it green over an unconverted
+  handler — a fail-open on the exact target this row was added for.
 
 There is deliberately **no stale-row red** (unlike `ci/error-registry/check.py`'s `MANIFEST`).
-`json.rs` produces zero parameter-span hits today — all of its `Json` mentions are impl-block
-`where` clauses, turbofish calls and match arms. The row is *defensive*: the definition site
-legitimately has to be able to name `axum::Json` anywhere, including in a future helper's
-parameters, and a gate that red on the file whose job is to wrap the banned type would just get
-deleted.
+Each of the three files produces zero parameter-span hits today — every mention of its wrapped
+type lives in an impl-block `where` clause, a turbofish call, or a match arm. Each row is
+*defensive*: the definition site legitimately has to be able to name its wrapped axum type
+anywhere, including in a future helper's parameters, and a gate that red on the file whose job is
+to wrap the banned type would just get deleted.
 
 ## Limitations
 
@@ -108,11 +134,11 @@ imports `EnvelopeJson`, and it survives neither review nor a reader.
 boundary), and so is any `…::Json<T>`. A re-export renamed on the way through
 (`crate::compat::JsonBody<T>` aliasing `axum::Json`) is not.
 
-**L3 — A body taken as `Bytes` or `String`.** These extract successfully and defer parsing to the
-handler, so no rejection is produced for this gate to care about — but the handler's own
-`serde_json::from_slice` error then answers in whatever shape that handler chooses. The gateway's
-`chat_completions` takes `body: Bytes` for streaming reasons and is legitimately outside the IAM
-envelope contract. Catching "hand-rolled parsing of an opaque body" is a different gate.
+**L3 — A body taken as `String`.** A bare `String` extractor honours `DefaultBodyLimit` exactly
+like `Bytes` did, so an over-limit body produces the identical plain-text rejection SMA-588 closed
+for `Bytes` — the `BANNED` table has no `String` row because no `String` request-body extractor
+exists in either tree today, not because the hole does not apply to it. A future one needs the
+same treatment: a house `EnvelopeString` extractor and a new enabled row, exactly like `Bytes`.
 
 **L4 — Scope is `adapters/http` only.** A handler mounted from outside that tree is not scanned.
 The Moon task's `inputs` and `SCAN_GLOB` are the same glob, so the two cannot silently disagree

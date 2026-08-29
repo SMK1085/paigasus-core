@@ -556,7 +556,9 @@ itself once `0.1.0` is on the registry.
 2. PyPI serves `paigasus-py-bindings`, `paigasus-kernel`, `paigasus-proto` at `0.1.0`.
    `paigasus-py-bindings` carries seven wheels and one sdist.
 3. npm serves nine packages at `0.1.0`.
-4. Six git tags of the form `<package>-v0.1.0` exist.
+4. **Three** git tags: `paigasus-kernel-v0.1.0`, `paigasus-proto-v0.1.0`,
+   `paigasus-proto-derive-v0.1.0`. Not six — `release-plz release` tags only what it
+   publishes, so the three `publish = false` binding crates get none (measured).
 5. Exactly **two** GitHub Releases exist for the release commit, one per family head.
 6. `moon ci` stays green on `main`. If your shell does not already resolve the
    repository-pinned tools, prefix it with
@@ -600,13 +602,77 @@ cargo new /tmp/c && cd /tmp/c && cargo add paigasus-kernel && cargo build
 | `release` failed partway | Re-run it. release-plz's `is_published` and existing-tag short-circuits converge |
 | crates.io done, PyPI failed | Re-run `publish-pypi`. `skip-existing: true` converges |
 | crates.io done, npm main packages failed | Re-run `publish-npm`. The `npmstate` pre-check skips what landed |
-| npm platform loop failed partway | Re-run `publish-npm`. `napi prepublish` catches npm's 403 per target and continues the loop |
+| npm platform loop failed partway | Re-run `publish-npm` **in place**. `napi prepublish` skips each already-published platform package. **A fresh dispatch does NOT work** — see §7.4 |
+| npm published nothing and the release is already tagged | Publish by hand from the run's artifacts — **§7.4**. A re-dispatch would go green having published nothing |
 
 The last row's guard lives in `@napi-rs/cli`, not in this repository, and it matches on npm's error
 **message text**. A napi upgrade or an npm wording change could remove it silently. Nothing gates
 that.
 
-### 7.4 Cleanup — only after §7.1 and §7.2 pass
+### 7.4 Recovering the npm half by hand — EXECUTED 2026-08-29, and its two traps
+
+The first live release published crates.io and PyPI, then `publish-npm` died on
+`pnpm: command not found`. This is the recovery that was actually run. Keep it: the same shape
+applies to any future partial npm failure.
+
+**Why a re-dispatch cannot fix it.** `relinfo` reads `needs.release.outputs.released`. Once the
+release commit is tagged, `release-plz release` finds the tags, returns an empty `releases` array,
+and `kernel_release` becomes `false` — so every npm step **skips and the job goes green having
+published nothing**. Re-running the job *within the original run* does work, because that run's
+`released` output is still populated; a fresh dispatch does not.
+
+**The procedure.** The artifacts CI built are already asserted by the workflow, so reuse them
+rather than rebuilding:
+
+```bash
+gh run download <RUN_ID> --repo <owner/repo> -n npm-dirs -D npm-dirs
+gh run download <RUN_ID> --repo <owner/repo> -n wasm-dist -D wasm-dist
+cp -R npm-dirs rs/crates/bindings/paigasus-node-bindings/npm
+```
+
+**TRAP 1 — you cannot use your logged-in npm session.** `napi prepublish` shells out with
+`execSync(..., {stdio: 'pipe'})`, so npm's one-time-password prompt has nowhere to go. On a 2FA
+account (this one is `auth-and-writes`) it dies with `npm error code EOTP` on the **first** package.
+It needs a credential that bypasses 2FA — the **Automation** token, the same one in `NPM_TOKEN`.
+Point npm at a throwaway rc so your login survives:
+
+```bash
+printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_AUTOMATION_TOKEN" > /tmp/npmrc-publish
+export npm_config_userconfig=/tmp/npmrc-publish
+# ... publish ...
+rm -f /tmp/npmrc-publish
+```
+
+**TRAP 2 — never `npm publish` the main package directly from the committed manifest.** It carries
+**no** `optionalDependencies`; `napi prepublish` injects them. Publishing it as-is ships a package
+that resolves no platform binary and fails at `require()`. Always run `napi prepublish` first, and
+in this order:
+
+```bash
+cd ts/packages/paigasus-kernel
+pnpm exec napi prepublish --no-gh-release --npm-dir npm \
+  --cwd ../../../rs/crates/bindings/paigasus-node-bindings   # 7 platform packages + injection
+
+cd ../../../rs/crates/bindings/paigasus-node-bindings
+npm publish --access public                                   # main package, AFTER the seven
+
+cd <wasm-dist>
+npm publish --access public
+```
+
+Omit `--provenance` locally — it needs an OIDC context only CI has.
+
+**Afterwards, revert `rs/crates/bindings/paigasus-node-bindings/package.json`.** napi rewrites it
+in place (injected `optionalDependencies`, reflowed arrays, stripped trailing newline). That edit
+must never be committed — the committed manifest deliberately carries none, and the reflow fails
+`ts:fmt`.
+
+**Verifying: retry before you believe a MISSING.** npm's read replicas lag. Immediately after a
+successful publish (`exit 0`, `info ok` in `~/.npm/_logs`), both `npm view` and the registry
+endpoint reported eight of nine packages missing for several minutes. Trust the publish exit
+status; re-check the registry after a pause.
+
+### 7.5 Cleanup — only after §7.1 and §7.2 pass
 
 Verify first. A yank is cheap to do late and awkward to undo, and the seeds are the diagnostic
 baseline if verification fails.

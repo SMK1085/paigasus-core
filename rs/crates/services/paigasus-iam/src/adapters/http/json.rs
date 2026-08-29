@@ -53,9 +53,9 @@ impl RejectionKind {
 /// The status-only half of the classification rule (spec D1.1).
 ///
 /// `None` means "this is not the caller's mistake" — the caller gets axum's own response rather
-/// than a 4xx-flavoured code on a 5xx status. `path.rs:87-92` makes the identical choice for
-/// `PathRejection`'s server-bug family, and two extractors answering server bugs differently
-/// would be worse than one plain-text 500.
+/// than a 4xx-flavoured code on a 5xx status. `path.rs`'s `is_client_error` makes the identical
+/// choice for `PathRejection`'s server-bug family, and two extractors answering server bugs
+/// differently would be worse than one plain-text 500.
 fn classify(status: StatusCode) -> Option<RejectionKind> {
     match status {
         StatusCode::PAYLOAD_TOO_LARGE => Some(RejectionKind::TooLarge),

@@ -1,18 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
-# SMA-587 — single-site gate for HTTP request-body extractors.
+# SMA-587/SMA-588 — single-site gate for HTTP request-body/query/path extractors.
 #
-# WHAT THIS GATES: no function under an `adapters/http` tree may take a bare `axum::Json<T>` in
-# REQUEST position (its parameter list). A bare `Json<T>` answers a refused body — malformed JSON,
-# wrong content-type, schema mismatch, oversized body — with axum's default PLAIN TEXT rejection,
-# escaping the service's stable `{"error":{code,message}}` envelope. The house extractor
-# `EnvelopeJson<T>` (rs/crates/services/paigasus-iam/src/adapters/http/json.rs) exists precisely so
-# that cannot happen. Fourteen handlers were converted by SMA-587; nothing but this gate stops a
-# fifteenth being written with bare `Json<T>` tomorrow.
+# WHAT THIS GATES: no function under an `adapters/http` tree may take a bare `axum::Json<T>`,
+# `axum::extract::Query<T>`, `axum::extract::Path<T>` or `axum::body::Bytes` in REQUEST position
+# (its parameter list). A bare extractor answers a refused input — malformed JSON, wrong
+# content-type, schema mismatch, an unparseable query value, a malformed path segment, an
+# oversized body — with axum's default PLAIN TEXT rejection, escaping the service's stable
+# `{"error":{code,message}}` envelope. The house extractors (`EnvelopeJson<T>`, `EnvelopeQuery<T>`,
+# `UuidPath`/`StringPath`, `EnvelopeBytes`; see each's own `adapters/http` module) exist precisely
+# so that cannot happen. SMA-587 converted fourteen `Json` handlers; SMA-588 converted the ten
+# `Query` handlers, the two `Path<String>` handlers, and the gateway's one `Bytes` handler. Nothing
+# but this gate stops a new one being written with a bare extractor tomorrow.
 #
 # WHAT THIS DOES NOT GATE: RESPONSE position. `-> Result<Json<Dto>, ApiError>` is the correct and
 # universal way to render a success body here and is deliberately untouched — which is the whole
 # reason this is a parser and not a grep. See ci/http-extractor/README.md's Limitations for the
-# residuals the scan genuinely cannot see (an aliased import, a body taken as `Bytes`/`String`).
+# residuals the scan genuinely cannot see (an aliased import, a body taken as `String`).
 #
 # It never shells out to cargo (the Moon task is toolchain: 'system') and reads no YAML.
 #
@@ -32,25 +35,22 @@ REPO = Path(__file__).resolve().parents[2]
 # asserts the glob still resolves to the real tree.
 SCAN_GLOB = "rs/crates/services/*/src/adapters/http/**/*.rs"
 
-# (type name, enabled, required replacement)
+# (type name, enabled, required replacement, require a following `<`)
 #
-# One row per extractor type with an explicit on/off flag, so closing the other known instances of
-# this same hole later is a FLAG FLIP rather than a second gate.
+# One row per extractor type with an explicit on/off flag. SMA-587 reserved the `Query` and
+# `Path` rows so closing those instances would be a flag flip; SMA-588 flips them, adds `Bytes`,
+# and this table is now COMPLETE for every request-input kind used in this tree.
 #
-# `Query` and `Path` are RESERVED, NOT FORGOTTEN. Ten `Query<…>` bindings and two `Path<String>`
-# in this tree still answer a refused query string / path segment outside the envelope — the same
-# class of escape, a different extractor. SMA-587's spec defers them explicitly (its "Out of
-# scope"), and their replacement is SMA-588's design call, not this gate's; turning the rows on
-# today would red the build on work that ticket is not doing.
-#
-# NOTE for whoever flips `Path` on: the match is an identifier-boundary match on the bare name, so
-# an enabled `Path` row also matches `std::path::Path` (`p: &Path`). That is not a problem in an
-# `adapters/http` tree today, but it is the first thing to check, and `UuidPath<…>` — the house
-# replacement already in use — is correctly NOT matched (see `_banned_pattern`).
+# The fourth element narrows the match to `Name<`. Only `Path` needs it: a bare `Path` also
+# matches `std::path::Path` (`p: &Path`). There is no `std::path` use in either `adapters/http`
+# tree today — measured — so this is prophylactic, but it is cheap and it fails safe. `PathBuf`
+# was already excluded by the trailing identifier-boundary lookahead. Every other row keeps
+# bare-identifier matching, which fails CLOSED (see `_banned_pattern`).
 BANNED = (
-    ("Json", True, "EnvelopeJson"),
-    ("Query", False, None),
-    ("Path", False, None),
+    ("Json", True, "EnvelopeJson", False),
+    ("Query", True, "EnvelopeQuery", False),
+    ("Path", True, "UuidPath/StringPath", True),
+    ("Bytes", True, "EnvelopeBytes", False),
 )
 
 # Files permitted to name a banned extractor in a parameter span. Each row states why.
@@ -59,16 +59,25 @@ BANNED = (
 # structural way this check could come to guard nothing.
 #
 # There is intentionally NO "stale row" red here (unlike ci/error-registry/check.py's MANIFEST).
-# json.rs today produces ZERO parameter-span hits — every `Json` it names lives in an impl-block
-# `where` clause (`Json<T>: FromRequest<S, …>`), a turbofish call (`Json::<T>::from_request`), or a
-# match arm (`Ok(Json(value))`), none of which is a parameter list. The row is therefore DEFENSIVE
-# and must stay: the definition site legitimately has to be able to name `axum::Json` anywhere,
-# including in a future helper's parameters, and a gate that reds on the file whose job is to wrap
-# the banned type would just get deleted. What IS asserted is that the path still exists — a rename
-# reds rather than silently exempting nothing.
+# Each definition-site file today produces ZERO parameter-span hits — every banned mention lives
+# in an impl-block `where` clause, a turbofish call, or a match arm, none of which is a parameter
+# list. Each row is therefore DEFENSIVE and must stay: a definition site legitimately has to be
+# able to name its wrapped axum type anywhere, including in a future helper's parameters, and a
+# gate that reds on the file whose job is to wrap the banned type would just get deleted. What IS
+# asserted is that the path still exists — a rename reds rather than silently exempting nothing.
+#
+# Do NOT add `path.rs` here: `StringPath` (and `UuidPath`) reach `Path::<String>::from_request_parts`
+# inside a function BODY, outside every parameter span, and the `<`-requiring `Path` pattern does not
+# match a turbofish either — so `path.rs` needs no exemption and adding one would be a silent
+# widening. Do NOT add `chat.rs` either: that file's `chat_completions` is the exact handler the
+# `Bytes` row exists to catch, and an ALLOW row there would report it green unconverted.
 ALLOW = (
     ("rs/crates/services/paigasus-iam/src/adapters/http/json.rs",
      "the extractor's own definition site — it wraps `axum::Json` by construction"),
+    ("rs/crates/services/paigasus-iam/src/adapters/http/query.rs",
+     "the extractor's own definition site — it wraps `axum::Query` by construction"),
+    ("rs/crates/services/paigasus-gateway/src/adapters/http/bytes.rs",
+     "the extractor's own definition site — it wraps `axum::body::Bytes` by construction"),
 )
 
 
@@ -317,40 +326,48 @@ def _top_level_index(span, needle):
     return None
 
 
-def _banned_pattern(name):
+def _banned_pattern(name, require_generic=False):
     """Match `name` as a whole IDENTIFIER inside a parameter span.
 
     The boundaries are what make the rule usable:
-      * `EnvelopeJson<T>` and `UuidPath<T>` — the house replacements — do NOT match, because the
+      * `EnvelopeJson<T>`, `EnvelopeQuery<T>`, `UuidPath<T>`, `StringPath<T>` and
+        `EnvelopeBytes` — the house replacements — do NOT match, because the
         preceding character is an identifier character. Without that, the gate would red on every
-        handler SMA-587 just fixed.
-      * `JsonRejection` does not match either (trailing identifier characters).
+        handler these tickets just fixed.
+      * `JsonRejection` / `QueryRejection` / `PathRejection` / `BytesRejection` do not match
+        either (trailing identifier characters).
       * `axum::Json<T>` DOES match: `:` is not an identifier character. Catching the
         fully-qualified spelling is free here and strictly better than not.
 
-    No `<` is required after the name. Requiring one would be narrower for no benefit and would
-    miss a hypothetical non-generic alias; matching the bare identifier fails CLOSED.
+    `require_generic` additionally demands a following `<`, so `p: &Path` (std::path) and
+    `p: PathBuf` are not violations while `Path<String>` is. It is opt-in per row and used only
+    by `Path`: requiring `<` everywhere would miss a hypothetical non-generic alias, so the
+    default still fails CLOSED (this reverses the blanket claim this comment used to make).
     """
-    return re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
+    tail = r"\s*<" if require_generic else r"(?![A-Za-z0-9_])"
+    return re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + tail)
 
 
-_PATTERNS = {name: _banned_pattern(name) for name, _, _ in BANNED}
+_PATTERNS = {name: _banned_pattern(name, needs_generic) for name, _, _, needs_generic in BANNED}
 
 
 def violations_in(text, origin="<fixture>", enabled=None):
     """[(fn_name, line, extractor, replacement)] for one file's worth of Rust source.
 
-    `enabled` defaults to the BANNED rows whose flag is on; the self-test passes an explicit set to
-    exercise the reserved rows without turning them on for the real tree.
+    `enabled` defaults to the BANNED rows whose flag is on. All four BANNED rows are enabled
+    today, so there are no reserved rows left to exercise this way; the self-test instead passes
+    an explicit set naming a synthetic `Widget` row, to prove a FUTURE row would work when
+    flipped on without turning any real one off for the real tree.
     """
     if enabled is None:
-        enabled = {name: repl for name, on, repl in BANNED if on}
+        enabled = {name: repl for name, on, repl, _g in BANNED if on}
     stripped = strip_noise(text)
     found = []
     for fn_name, start, end in parameter_spans(stripped, origin):
         span = _cut_at_return_arrow(stripped[start:end])
         for extractor, replacement in sorted(enabled.items()):
-            hit = _PATTERNS[extractor].search(span)
+            pattern = _PATTERNS.get(extractor) or _banned_pattern(extractor)
+            hit = pattern.search(span)
             if hit:
                 line = stripped.count("\n", 0, start + hit.start()) + 1
                 found.append((fn_name, line, extractor, replacement))
@@ -516,9 +533,40 @@ FIXTURES = (
         [],
     ),
     (
-        "legal — a body taken as Bytes (the gateway's shape); see README Limitations L3",
+        "planted violation — a body taken as Bytes, the gateway's shape (SMA-588 closed this)",
         "pub async fn chat_completions(State(state): State<AppState>, "
         "caller: Option<Extension<CallerContext>>, body: Bytes) -> Response {",
+        [("chat_completions", "Bytes")],
+    ),
+    (
+        "planted violation — a bare Query in request position",
+        "async fn list(State(s): State<AppState>, Query(q): Query<PageQuery>) -> Response {",
+        [("list", "Query")],
+    ),
+    (
+        "planted violation — a bare Path<String> in request position",
+        "async fn delete_policy(State(s): State<AppState>, Path(id): Path<String>) -> Response {",
+        [("delete_policy", "Path")],
+    ),
+    (
+        "legal — the house replacements for the newly enabled rows",
+        "async fn list(State(s): State<AppState>, path: UuidPath<TeamId>, "
+        "EnvelopeQuery(q): EnvelopeQuery<PageQuery>) -> Result<Json<Vec<Dto>>, ApiError> {",
+        [],
+    ),
+    (
+        "legal — StringPath and EnvelopeBytes are not their wrapped types",
+        "async fn retire(policy: StringPath<PolicyId>, EnvelopeBytes(b): EnvelopeBytes) -> Response {",
+        [],
+    ),
+    (
+        "legal — `std::path::Path` is not axum's, which is why the Path row requires a `<`",
+        "fn read_bundle(p: &Path, buf: PathBuf) -> Response {",
+        [],
+    ),
+    (
+        "legal — the rejection types are not their extractors",
+        "fn envelope_rejection(q: QueryRejection, p: PathRejection, b: BytesRejection) -> Response {",
         [],
     ),
     (
@@ -617,28 +665,25 @@ def self_test():
         rc = 1
 
     # BANNED table shape: exactly the enabled rows name a replacement, and no name repeats.
-    names = [name for name, _on, _repl in BANNED]
+    names = [name for name, _on, _repl, _g in BANNED]
     if len(names) != len(set(names)):
         print("  FAIL [BANNED] duplicate extractor rows", file=sys.stderr)
         rc = 1
-    for name, on, repl in BANNED:
+    for name, on, repl, _g in BANNED:
         if on != (repl is not None):
             print(f"  FAIL [BANNED] {name}: exactly the enabled rows must name a replacement", file=sys.stderr)
             rc = 1
-    if not any(on for _n, on, _r in BANNED):
+    if not any(on for _n, on, _r, _g in BANNED):
         print("  FAIL [BANNED] every row is disabled — the gate would guard nothing", file=sys.stderr)
         rc = 1
 
-    # A reserved row must still WORK when flipped on. Without this the `Query`/`Path` rows could
-    # rot for a year and the flag flip would ship a gate that matches nothing.
-    reserved = "async fn list(State(s): State<AppState>, Query(q): Query<PageQuery>) -> Response {"
-    got = sorted(ext for _fn, _l, ext, _r in violations_in(reserved, "<reserved>", {"Query": "EnvelopeQuery"}))
-    if got != ["Query"]:
-        print(f"  FAIL [BANNED reserved] flipping the Query row on matched nothing: {got}", file=sys.stderr)
-        rc = 1
-    # ...and it must be OFF for the real tree right now, or SMA-587 reds work it does not do.
-    if any(on for name, on, _r in BANNED if name in ("Query", "Path")):
-        print("  FAIL [BANNED] a reserved row is enabled — that is a follow-up's call", file=sys.stderr)
+    # A row must WORK when flipped on. Every real row is enabled now, so this drives a SYNTHETIC
+    # name instead — otherwise the check would only re-test a live row and prove nothing about a
+    # FUTURE reserved one. Deleting it would remove the only thing keeping that mechanism honest.
+    reserved = "async fn list(State(s): State<AppState>, Widget(w): Widget<PageQuery>) -> Response {"
+    got = sorted(ext for _fn, _l, ext, _r in violations_in(reserved, "<reserved>", {"Widget": "EnvelopeWidget"}))
+    if got != ["Widget"]:
+        print(f"  FAIL [BANNED reserved] enabling a new row matched nothing: {got}", file=sys.stderr)
         rc = 1
 
     # ALLOW rows must each state a reason, and none may be a glob: an ALLOW row switches the gate

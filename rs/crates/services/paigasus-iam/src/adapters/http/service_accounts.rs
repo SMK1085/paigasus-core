@@ -16,7 +16,7 @@
 //! `*Dto`, so a client threads the SAME id forward by taking the PRN's trailing `/`-segment —
 //! exactly the convention `tests/http_tenancy.rs` already uses for `ProjectDto`.
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -29,6 +29,7 @@ use super::dto::{CreateServiceAccountBody, ServiceAccountDto, ServiceAccountQuer
 use super::error::ApiError;
 use super::json::EnvelopeJson;
 use super::path::{ServiceAccountId, UuidPath};
+use super::query::EnvelopeQuery;
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
@@ -72,7 +73,7 @@ async fn create(
     Ok((StatusCode::CREATED, Json(sa.into())))
 }
 
-async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Query(q): Query<ServiceAccountQuery>) -> Result<Json<Vec<ServiceAccountDto>>, ApiError> {
+async fn list(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeQuery(q): EnvelopeQuery<ServiceAccountQuery>) -> Result<Json<Vec<ServiceAccountDto>>, ApiError> {
     let actor = actor_prn(&ctx);
     let owner_prn = q.owner_prn.filter(|s| !s.trim().is_empty()).ok_or(TenancyError::MissingRequiredField("owner_prn"))?;
     let owner = parse_node_prn(&owner_prn)?;

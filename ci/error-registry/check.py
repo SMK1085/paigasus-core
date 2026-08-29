@@ -108,6 +108,7 @@ MANIFEST = (
      "EXPECTED_REASONS — the registry's own mirror, which this gate cross-checks against"),
     ("rs/crates/services/paigasus-iam/src/adapters/http/error.rs", "asserts", None, "test assertions only"),
     ("rs/crates/services/paigasus-gateway/src/adapters/http/auth.rs", "asserts", None, "test assertion only"),
+    ("rs/crates/services/paigasus-gateway/src/adapters/http/bytes.rs", "asserts", None, "test assertion only"),
     ("rs/crates/services/paigasus-iam/src/application/create_user.rs", "asserts", None, "test assertion only"),
     ("rs/crates/libs/paigasus-observability/src/grpc.rs", "excluded", None,
      "grpc_code_name maps tonic::Code to a METRIC LABEL; its \"internal\" collides with the "

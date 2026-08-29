@@ -28,7 +28,7 @@
 //! `Authorize` (not here) so the gRPC `IsAuthorized` surface (SMA-444 Task 19) calls the
 //! exact same rule and the two transports can never diverge.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Extension, Json, Router};
@@ -41,7 +41,8 @@ use super::AppState;
 use super::dto::{GrantRoleBody, IsAuthorizedBody, IsAuthorizedResponseDto, PageQuery, PolicyDto, PutPolicyBody, RoleGrantDto, RoleGrantQuery};
 use super::error::ApiError;
 use super::json::EnvelopeJson;
-use super::path::{RoleGrantId, UuidPath};
+use super::path::{PolicyId, RoleGrantId, StringPath, UuidPath};
+use super::query::EnvelopeQuery;
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
@@ -122,16 +123,16 @@ async fn put_policy(State(s): State<AppState>, Extension(ctx): Extension<AuthCon
     Ok((StatusCode::OK, Json(doc.into())))
 }
 
-async fn list_policies(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Query(q): Query<PageQuery>) -> Result<Json<Vec<PolicyDto>>, ApiError> {
+async fn list_policies(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeQuery(q): EnvelopeQuery<PageQuery>) -> Result<Json<Vec<PolicyDto>>, ApiError> {
     let actor = actor_prn(&ctx);
     let page = Page::new(q.limit, q.offset)?;
     let docs = s.policies.list(&actor, page.limit, page.offset).await?;
     Ok(Json(docs.into_iter().map(PolicyDto::from).collect()))
 }
 
-async fn delete_policy(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Path(policy_id): Path<String>) -> Result<StatusCode, ApiError> {
+async fn delete_policy(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, policy: StringPath<PolicyId>) -> Result<StatusCode, ApiError> {
     let actor = actor_prn(&ctx);
-    s.policies.delete(&actor, &policy_id).await?;
+    s.policies.delete(&actor, &policy.value).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -141,7 +142,7 @@ async fn create_role_grant(State(s): State<AppState>, Extension(ctx): Extension<
     Ok((StatusCode::CREATED, Json(grant.into())))
 }
 
-async fn list_role_grants(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Query(q): Query<RoleGrantQuery>) -> Result<Json<Vec<RoleGrantDto>>, ApiError> {
+async fn list_role_grants(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeQuery(q): EnvelopeQuery<RoleGrantQuery>) -> Result<Json<Vec<RoleGrantDto>>, ApiError> {
     let actor = actor_prn(&ctx);
     let principal_prn = q.principal_prn.filter(|s| !s.trim().is_empty()).ok_or(TenancyError::MissingRequiredField("principal_prn"))?;
     let grants = s.roles.list(&actor, &principal_prn).await?;

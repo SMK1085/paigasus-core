@@ -22,7 +22,7 @@
 //!   `Root` for a principal-filtered query (there is no single "target node" for "every node
 //!   a principal belongs to" — mirrofs `ListOrganizations`' platform-only posture, D4).
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Extension, Json, Router};
@@ -35,6 +35,7 @@ use super::dto::{CreateMembershipBody, MembershipDto, MembershipQuery};
 use super::error::ApiError;
 use super::json::EnvelopeJson;
 use super::path::{MembershipId, UuidPath};
+use super::query::EnvelopeQuery;
 use crate::adapters::auth::AuthContext;
 use crate::application::error::TenancyError;
 use crate::application::memberships::MembershipFilter;
@@ -116,7 +117,7 @@ pub(crate) fn membership_filter(principal: Option<String>, node: Option<String>)
     }
 }
 
-async fn list_memberships(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, Query(q): Query<MembershipQuery>) -> Result<Json<Vec<MembershipDto>>, ApiError> {
+async fn list_memberships(State(s): State<AppState>, Extension(ctx): Extension<AuthContext>, EnvelopeQuery(q): EnvelopeQuery<MembershipQuery>) -> Result<Json<Vec<MembershipDto>>, ApiError> {
     let filter = membership_filter(q.principal, q.node)?;
     if s.enforce_tenancy {
         let resource = match &filter {

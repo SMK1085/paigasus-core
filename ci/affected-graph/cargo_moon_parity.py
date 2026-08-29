@@ -22,8 +22,15 @@
 # SMA-594, .cargo/config.toml), since `rs/` has no Moon project for a dependency edge to point at. A4 reads moon's RESOLVED `inputFiles`, so
 # it stays inside the "never parse YAML" rule above.
 #
+# It also carries A9 (SMA-604), the only assertion here about a consumer OUTSIDE this repo:
+# Dependabot resolves `rs/Cargo.toml`'s `[workspace] members` with its own expander, which is
+# weaker than Cargo's. A glob Cargo reads fine can resolve to ZERO members there, which silently
+# shrinks Dependabot's sandbox to whatever `path =` deps it can still reach — and a shrunken
+# sandbox both truncates the lock it proposes and reds its own job.
+#
 # usage: cargo_moon_parity.py [--self-test]
 import collections
+import fnmatch
 import inspect
 import json
 import re
@@ -1156,6 +1163,99 @@ def check_dockerfile_locked(root):
     return rows
 
 
+def dependabot_expand_member(rs_root, entry):
+    """Replay Dependabot's `expand_workspaces` for ONE `[workspace] members` entry.
+
+    A transcription of `cargo/lib/dependabot/cargo/file_fetcher.rb`, not an approximation of it,
+    because the whole point of A9 is that Dependabot's expander and Cargo's disagree — a rule
+    written in this file's own terms would drift away from the thing it models. Ruby:
+
+        unglobbed_path = (path.split("*").first || "").gsub(%r{(?<=/)[^/]*$}, "")
+        repo_contents(dir: unglobbed_path, raise_errors: false)
+          .select { |file| file.type == "dir" }
+          .map    { |f| f.path.gsub(%r{^/?#{Regexp.escape(dir)}/?}, "") }
+          .select { |filename| File.fnmatch?(path, filename) }
+
+    So it lists exactly ONE directory level below the glob's literal prefix. `crates/*/*` yields
+    the prefix `crates/`, whose children are `crates/libs`, `crates/services` and
+    `crates/bindings` — and `File.fnmatch?("crates/*/*", "crates/libs")` is false for all three,
+    because the pattern still needs a `/` the candidate does not have. Zero members.
+
+    Ruby's `File.fnmatch?` without `FNM_PATHNAME` lets `*` cross `/`, and so does Python's
+    `fnmatch`, which is why the two agree here. A literal entry (no `*`) is returned as itself:
+    Dependabot takes that path verbatim, and so does Cargo.
+    """
+    if "*" not in entry:
+        return [entry]
+    prefix = re.sub(r"(?<=/)[^/]*$", "", entry.split("*", 1)[0])
+    base = rs_root / prefix if prefix else rs_root
+    if not base.is_dir():
+        return []
+    return sorted(
+        candidate
+        for child in base.iterdir()
+        if child.is_dir() and fnmatch.fnmatchcase(candidate := f"{prefix}{child.name}", entry)
+    )
+
+
+def check_member_globs(root, crates):
+    """Return the A9 violation list: workspace crates Dependabot's member expansion cannot reach.
+
+    Cargo's member set is the ONLY thing the rest of this repo cares about, so a `members` entry
+    that Dependabot resolves to nothing is invisible everywhere else — `cargo metadata` is
+    identical, every Moon task is identical, every other assertion in this file is identical. The
+    only tell in production is a Dependabot PR whose `rs/Cargo.lock` shrank, which is how
+    `crates/*/*` survived from the workspace's bootstrap to SMA-604.
+
+    An absent manifest or an absent `members` key is infrastructure, never a silent pass: both
+    would make the comparison vacuous while still printing PASS.
+    """
+    path = root / "rs" / "Cargo.toml"
+    if not path.is_file():
+        raise MoonOutputError(
+            f"{path} is absent — A9's member-glob assertion cannot be evaluated. If the workspace "
+            f"root legitimately moved, update check_member_globs rather than deleting the check"
+        )
+    members = (tomllib.loads(path.read_text()).get("workspace") or {}).get("members")
+    if not members:
+        raise MoonOutputError(
+            f"{path} declares no `[workspace] members` — A9 cannot compare an expansion against "
+            f"a member set that does not exist"
+        )
+
+    rows = []
+    reachable = set()
+    for entry in members:
+        expanded = dependabot_expand_member(root / "rs", entry)
+        reachable.update(expanded)
+        if not expanded:
+            rows.append(
+                f"members entry {entry!r} resolves to ZERO members under Dependabot's expander "
+                f"(it lists one directory level below {entry.split('*', 1)[0]!r})"
+            )
+
+    # `source_dir` is root-relative (`rs/crates/libs/paigasus-kernel`); `members` entries are
+    # rs-relative. Compare in the members entries' own frame.
+    want = {
+        c["source_dir"].split("/", 1)[1]
+        for c in crates.values()
+        if c["source_dir"].startswith("rs/")
+    }
+    for missing in sorted(want - reachable):
+        rows.append(
+            f"{missing} is a workspace crate that Dependabot's member expansion never reaches"
+        )
+
+    # The floor, for the reason REQUIRED_LOCKED_TASKS carries: an empty `want` makes the set
+    # difference above trivially empty, so A9 would print PASS having compared nothing.
+    if not want:
+        rows.append(
+            "A9 examines rs/Cargo.toml's members against the crates cargo_crates() found and "
+            "found NO crates at all — this assertion now covers nothing"
+        )
+    return rows
+
+
 def check_ffi_inputs(projects, required=FFI_TASK_INPUTS, floor=REQUIRED_FFI_TASKS):
     """Return the A5 violation list: FFI-compiling tasks that do not key on the workspace files.
 
@@ -1689,11 +1789,23 @@ def self_test():
             "the arity fixture now references a ci/ script but its tmp root does not create one"
         )
     with tempfile.TemporaryDirectory() as tmp:
-        # collect_findings now folds check_dockerfile_locked(root) into a8, which requires a real
-        # rs/Dockerfile under root — write a locked one so this arity check stays about arity.
+        # collect_findings now folds check_dockerfile_locked(root) into a8 and
+        # check_member_globs(root, crates) into a9, and BOTH raise on an absent file — write a
+        # locked Dockerfile and a members list that reaches `crates`' own source dirs, so this
+        # arity check stays about arity. The members list is DERIVED from the same `crates`
+        # fixture the call passes, so a fixture edit cannot leave this row asserting an arity
+        # failure that is really an a9 violation in disguise.
         tmp_rs = Path(tmp) / "rs"
         tmp_rs.mkdir()
         (tmp_rs / "Dockerfile").write_text("RUN cargo build --release --locked -p paigasus-iam\n")
+        member_dirs = sorted(
+            c["source_dir"].split("/", 1)[1]
+            for c in crates.values()
+            if c["source_dir"].startswith("rs/")
+        )
+        (tmp_rs / "Cargo.toml").write_text(
+            "[workspace]\nmembers = [%s]\n" % ", ".join(f'"{d}"' for d in member_dirs)
+        )
         collected = collect_findings(ok, crates, Path(tmp))
     if len(collected) != len(EXPECTED_FINDING_KEYS):
         failures.append(
@@ -2058,6 +2170,84 @@ def self_test():
         failures.append("check_version_lockstep_no_write fired on a task that passes no --write")
     if check_version_lockstep_no_write({"repo": {"invocations": {}}}) == []:
         failures.append("check_version_lockstep_no_write treated an absent task as a pass")
+    # A9: Dependabot's member expander, replayed against a synthetic tree. The whole assertion
+    # rests on `dependabot_expand_member` modelling the Ruby faithfully, so the fixture exercises
+    # the expander directly as well as the check that consumes it.
+    with tempfile.TemporaryDirectory() as tmp:
+        root9 = Path(tmp)
+        rs9 = root9 / "rs"
+        for d in ("crates/libs/kernel", "crates/services/gateway", "crates/bindings/wasm"):
+            (rs9 / d).mkdir(parents=True)
+        crates9 = {
+            "kernel": {"source_dir": "rs/crates/libs/kernel", "deps": set()},
+            "gateway": {"source_dir": "rs/crates/services/gateway", "deps": set()},
+            "wasm": {"source_dir": "rs/crates/bindings/wasm", "deps": set()},
+        }
+
+        def write_members(entries):
+            (rs9 / "Cargo.toml").write_text(
+                "[workspace]\nmembers = [%s]\n" % ", ".join(f'"{e}"' for e in entries)
+            )
+
+        # The expander itself, on the two forms that matter. This is the measurement the whole
+        # check is built on: if these two ever agree, A9 is asserting nothing real.
+        if dependabot_expand_member(rs9, "crates/*/*") != []:
+            failures.append(
+                "A9's expander resolved a two-level glob to something — it no longer models "
+                "Dependabot's one-directory-level listing, so A9 proves nothing"
+            )
+        if dependabot_expand_member(rs9, "crates/libs/*") != ["crates/libs/kernel"]:
+            failures.append("A9's expander failed to resolve a one-level glob")
+
+        # Clean: three one-level globs reach all three crate directories.
+        write_members(["crates/bindings/*", "crates/libs/*", "crates/services/*"])
+        if check_member_globs(root9, crates9):
+            failures.append("A9 reported a violation on member globs that reach every crate")
+
+        # The SMA-604 regression itself: one two-level glob, zero members, every crate missed.
+        write_members(["crates/*/*"])
+        rows = check_member_globs(root9, crates9)
+        if not any("resolves to ZERO members" in r for r in rows):
+            failures.append("A9 did not fire on a two-level members glob")
+        if not any("never reaches" in r and "crates/libs/kernel" in r for r in rows):
+            failures.append("A9 did not report the crates a two-level glob leaves unreachable")
+
+        # A glob that resolves NON-empty but still misses a directory. Without this row, a check
+        # that only tested the zero-resolve case would pass a `members` list that silently drops
+        # one crate directory — the same shrunken-sandbox failure, one crate at a time.
+        write_members(["crates/libs/*", "crates/services/*"])
+        rows = check_member_globs(root9, crates9)
+        if any("resolves to ZERO members" in r for r in rows):
+            failures.append("A9 reported a zero-resolve row for globs that both resolve")
+        if not any("never reaches" in r and "crates/bindings/wasm" in r for r in rows):
+            failures.append("A9 did not fire on a members list that omits a crate directory")
+
+        # A literal (glob-free) entry is taken verbatim by both expanders.
+        write_members(["crates/libs/kernel", "crates/services/gateway", "crates/bindings/wasm"])
+        if check_member_globs(root9, crates9):
+            failures.append("A9 reported a violation on literal, glob-free members entries")
+
+        # The FLOOR, for the reason A8's Dockerfile floor carries: with no crates the set
+        # difference is trivially empty and A9 would print PASS having compared nothing.
+        write_members(["crates/libs/*"])
+        rows = check_member_globs(root9, {})
+        if not any("A9 examines" in r for r in rows):
+            failures.append("A9's floor did not fire when cargo_crates() found no crates")
+
+        # Both infra shapes: an absent manifest and a manifest with no `members` key. Either one
+        # would otherwise make the comparison vacuous while still printing PASS.
+        (rs9 / "Cargo.toml").write_text("[workspace]\nresolver = \"3\"\n")
+        try:
+            check_member_globs(root9, crates9)
+            failures.append("A9 did not raise infra on a workspace with no `members` key")
+        except MoonOutputError:
+            pass
+        (rs9 / "Cargo.toml").unlink()
+        try:
+            check_member_globs(root9, crates9)
+            failures.append("A9 did not raise infra on a missing rs/Cargo.toml")
+        except MoonOutputError:
+            pass
 
     a1, a2, a3 = check(ok, crates)
     if (a1, a2, a3) != ([], [], []):
@@ -2843,7 +3033,7 @@ def self_test():
     if failures:
         print("negative-control FAILED: the parity gate can pass vacuously", file=sys.stderr)
         return 1
-    print("  OK   [parity] all nine assertions fire on synthetic violations")
+    print("  OK   [parity] all ten assertions fire on synthetic violations")
     return 0
 
 
@@ -2860,7 +3050,7 @@ def self_test():
 # rather than a bare count.
 #
 # Adding a check means adding its key here AND its tuple there, in the same order.
-EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9")
+EXPECTED_FINDING_KEYS = ("a1", "a2", "a3", "a4-lint", "a4-fmt", "a5", "a6", "a7", "a8", "a9", "a10")
 
 
 def collect_findings(projects, crates, root):
@@ -2968,7 +3158,17 @@ def collect_findings(projects, crates, root):
              "    ALLOW_UNLOCKED_CARGO_SCRIPT entry keyed by (script, exact segment text). The scan is\n"
              "    path-insensitive — check by hand whether the task's arguments actually reach that\n"
              "    line before waiving it (SMA-599 L1)."),
-        ("a9", check_cargo_config_inputs(projects, root),
+        ("a9", check_member_globs(root, crates),
+             "A workspace crate is unreachable through Dependabot's `[workspace] members`\n"
+             "    expansion, so its cargo update job resolves a SHORTER workspace than Cargo\n"
+             "    does — it proposes a truncated rs/Cargo.lock and reds on any dependency that\n"
+             "    needs a companion package unlocked with it (SMA-604).\n"
+             "    Fix: give each `members` entry at most ONE wildcard level\n"
+             "    (`crates/libs/*`, never `crates/*/*`), one entry per crate directory.\n"
+             "    Dependabot lists a single directory level below the glob's literal prefix.\n"
+             "    An `A9 examines` row means the opposite — cargo_crates() found no crates, so\n"
+             "    the comparison covers nothing; fix that first."),
+        ("a10", check_cargo_config_inputs(projects, root),
              "A task runs a COMPILING cargo command with cwd inside rs/ but does not key on\n"
              "    rs/.cargo/config.toml, so a rustflags edit replays its cached result\n"
              "    (SMA-594, SMA-599).\n"
@@ -2978,7 +3178,7 @@ def collect_findings(projects, crates, root):
              "    `cargo fmt`, `cargo tree`, `cargo metadata`, `cargo deny` and `cargo machete`\n"
              "    are out of scope BY VERB (they never compile or link) — see\n"
              "    CONFIG_SENSITIVE_VERBS. A `FLOOR:` row means the check itself cannot be\n"
-             "    trusted; fix that first, every other A9 row is meaningless until it passes."),
+             "    trusted; fix that first, every other A10 row is meaningless until it passes."),
     ]
 
     return findings
@@ -3003,7 +3203,8 @@ def main():
             f"every lint and fmt keys on the files its command reads, every FFI build task does "
             f"too, every crate keys on its upstream sources, and every py/ts wrapper keys on the "
             f"Rust crates it builds, every cargo-resolving task passes --locked, and every "
-            f"compiling cargo task inside rs/ keys on .cargo/config.toml"
+            f"workspace crate is reachable through Dependabot's member expansion, and "
+            f"every compiling cargo task inside rs/ keys on .cargo/config.toml"
         )
         return 0
 

@@ -91,13 +91,29 @@ permissions:
 #     `napi prepublish`, is a Node CLI that must be resolvable from the pnpm workspace, and
 #     because the main package publishes from the crate directory in the checkout.
 #
-# THE RESIDUAL, honestly: a `pnpm install` failure inside publish-npm lands AFTER crates.io has
-# published and after publish-pypi may have uploaded. Two things bound it, neither of which
-# removes it. `prebuild.yml` ran the byte-identical `pnpm --dir ts install --frozen-lockfile`
-# earlier in the SAME run, against the same lockfile and the same pinned toolchain, and
-# publish-npm cannot start until it succeeded — so the window is narrow and mostly covers
-# registry/network faults rather than a broken lockfile. And the `npmstate` pre-check makes a
-# re-run converge: it skips whatever already published, so the job is safe to run again.
+# THE RESIDUAL, honestly — and REWRITTEN after it fired on the first live release (SMA-580).
+# A setup failure inside publish-npm lands AFTER crates.io has published and after publish-pypi
+# may have uploaded. That happened: run 33264074393 died on `pnpm: command not found` (exit 127)
+# with both other registries already live.
+#
+# The previous wording here got BOTH of its comforts wrong, so neither is repeated:
+#
+#   1. It argued the window was narrow because `prebuild.yml` ran the byte-identical
+#      `pnpm --dir ts install --frozen-lockfile` earlier in the SAME run. That reasoning does not
+#      transfer: prebuild runs in DIFFERENT JOBS, on different runners, each doing its own
+#      `moon setup`. A sibling job succeeding says nothing about this job's PATH. The actual fault
+#      was a missing toolchain, not a lockfile — see the `moon setup` step below.
+#   2. It claimed the `npmstate` pre-check "makes a re-run converge … so the job is safe to run
+#      again". That is true only for a re-run WITHIN the same run, where
+#      `needs.release.outputs.released` is still populated. It is FALSE for a fresh dispatch:
+#      release-plz then finds the tags already present, returns an empty `releases` array, and
+#      `relinfo` sets `kernel_release=false` — so every publish step SKIPS and the job goes GREEN
+#      having published nothing. MEASURED reasoning, not hypothetical; it is why SMA-580's npm
+#      half had to be published by hand.
+#
+# So the honest statement: this job is re-runnable in place, and NOT recoverable by re-dispatch
+# once the release commit is tagged. Making it recoverable needs a version override input —
+# tracked in SMA-602, not bolted on here.
 #
 # DO NOT "FIX" THIS BY RESTRUCTURING publish-npm (SMA-579 Ruling 24). Removing the install means
 # replacing `napi prepublish` with a hand-rolled `npm publish` loop over the seven platform dirs
@@ -659,6 +675,18 @@ jobs:
         uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
         with:
           cache: false
+
+      # REQUIRED, and its absence is why the first live release failed here (SMA-580).
+      # `setup-toolchain` installs proto and Moon; it does NOT install the Moon-MANAGED
+      # toolchains. `moon setup` is what installs node and pnpm via proto and puts their shims on
+      # PATH. Without it the next step dies with `pnpm: command not found`, exit 127 — MEASURED on
+      # run 33264074393, after crates.io and PyPI had already published.
+      #
+      # Every other job in this repository that runs pnpm already does this: `release-pr` below,
+      # `proto-dist` above, and both `prebuild.yml` jobs. `publish-npm` was the only one missing
+      # it, and it is the one job that had never executed before the flag was flipped.
+      - name: Install Moon-managed toolchains (node, pnpm, rust, python, uv)
+        run: moon setup
 
       - name: Install JS workspace deps
         run: pnpm --dir ts install --frozen-lockfile
