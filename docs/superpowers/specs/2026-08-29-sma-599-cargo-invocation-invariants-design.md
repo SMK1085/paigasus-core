@@ -66,7 +66,9 @@ script quotes another gate's cargo line as pinned text (§2.2) and which A10 exc
 both the verb and the cwd test.
 
 The issue's "39 unasserted `build`/`build-release`/`test` declarations" are really
-**three lines** in `.moon/tasks/rust.yml`, inherited by thirteen crates. A10 reads
+**four lines** in `.moon/tasks/rust.yml` — `build:46`, `build-release:52`, `test:67` and
+`lint:124` — each inherited by thirteen crates. (An earlier draft of this section said three;
+counted on disk, it is four.) A10 reads
 moon's RESOLVED inputs, so inheritance is transparent to it and deleting one line reds
 thirteen tasks at once.
 
