@@ -633,23 +633,47 @@ def _mask_quote_span(raw, open_quote):
     line 2 reads as an unquoted `--locked` flag sitting right next to a real cargo invocation —
     `LOCKED_FLAG in segment` is a bare substring test — and a genuinely unlocked call is
     silently reported as locked. That is the fatal direction (a false negative on a default-deny
-    gate), so this blanks any span that is honestly INSIDE a quote opened on an earlier line
-    and/or still open at the end of this one, the same way `script_cargo_lines` already blanks
-    a heredoc body.
+    gate), so this blanks any span that is honestly PLAIN STRING DATA inside a quote opened on
+    an earlier line and/or still open at the end of this one, the same way `script_cargo_lines`
+    already blanks a heredoc body.
 
-    A quote pair that both opens and closes on THIS line is left completely untouched: that is
-    what `_code_region`/`_extract_substitutions`/`SHELL_STRING_RE` already handle, and the
-    `bash -c "cargo build"` unclassifiable detection specifically depends on seeing the string
-    intact (it compares before- and after-strip). Single quotes have no escape mechanism in
-    POSIX shell (a backslash inside them is literal), so their close is a plain search; double
-    quotes use `_is_escaped`, the same odd-backslash-count rule already governing `$(`/backtick
-    recognition elsewhere in this module.
+    Review fix (SMA-599 round 3): a double-quoted string's interior is NOT all inert data —
+    `$( ... )` and a backtick pair inside it are CODE that actually runs (`X="$(cargo build)"`),
+    and `"..."` handed to `bash -c`/`sh -c`/`zsh -c`/`eval` is executed as a whole, not printed.
+    Round 2 blanked a cross-line double-quote span WHOLESALE, so a real unlocked invocation
+    living inside one of those two shapes vanished with ZERO rows and no error — a worse false
+    negative than the one round 2 fixed. So while inside a cross-line double-quote, this now
+    tracks THREE states, not one: PLAIN (mask — genuine string data), NESTED SUBSTITUTION (do
+    not mask — `$(`/backtick was seen, its body is code, so it is handed through untouched for
+    `_extract_substitutions`/`_classify_shell_line` to process normally), and EXEC (do not mask
+    anything in the whole span — the code immediately before the opening quote, on the SAME
+    line, matched `SHELL_EXEC_RE`, so the entire quoted argument is executed regardless of shape,
+    the cross-line generalization of the existing single-line `bash -c "cargo build"` detection).
+    A double-quote pair that both opens and closes on THIS line no longer gets a separate
+    "hand through untouched" shortcut (round 2 had one; round 3 removed it) — every `"` opener,
+    same-line-complete or genuinely cross-line, is handed to the SAME dq/dqexec state machine.
+    There is no cheap, reliable "does it close on this line" pre-check: its interior can itself
+    contain a `$(...)` whose OWN body holds unrelated single-quoted text with unrelated `"`
+    characters inside it — e.g. `channel="$(... | sed -E 's/.*"([^"]+)".*/\1/')"`
+    (measured against `ci/images/run.sh:49`) — and a naive scan for "the next `"`" finds one of
+    THOSE literal quote characters, not the real matching close, silently mis-splitting the
+    line. Verified this removal changes no round-1/round-2 single-line fixture's result: EXEC
+    mode reproduces "hand through untouched" byte-for-byte since it masks nothing, and PLAIN
+    mode reproduces it for every case that matters, since the only thing it additionally blanks
+    is inert same-line string content no existing fixture depends on seeing unblanked.
 
-    Returns `(new_open_quote, masked)`. `new_open_quote` is None, "'", or '"' — the quote still
-    open at the end of this line, carried into the next call. GOVERNING RULE (coordinator
-    ruling): when in doubt, report. This function never resolves an ambiguous close by guessing;
-    a quote that is still open when the file ends is the caller's job to raise on, not this
-    function's job to paper over.
+    Single-quoted spans need NO version of this: `$(`/backticks are LITERAL inside single quotes
+    (no expansion happens there at all), so a plain "next `'` closes it" scan has no ambiguity to
+    get wrong, same-line or cross-line — round 2's original design, unchanged.
+
+    Returns `(new_open_quote, masked)`. `new_open_quote` is `None` (top level), `("sq",)`
+    (inside a cross-line single-quote), `("dq", None)` (inside a cross-line double-quote, plain
+    data), `("dq", ("paren", depth))` / `("dq", ("back",))` (inside a `$(...)` / backtick
+    substitution nested in a cross-line double-quote), or `("dqexec",)` (inside a cross-line
+    double-quote that is a `bash -c`/`eval` argument). GOVERNING RULE (coordinator ruling): when
+    in doubt, report. This function never resolves an ambiguous close by guessing; any of these
+    states still open when the file ends is the caller's job to raise on (`script_cargo_lines`),
+    never this function's job to paper over.
 
     A real `#` comment is NOT scanned for quotes at all, at TOP LEVEL only (not while already
     inside an open string, where `#` has no special meaning): this repo's comments are full of
@@ -657,12 +681,18 @@ def _mask_quote_span(raw, open_quote):
     string delimiter. Scanning past it corrupts cross-line parity for the rest of the FILE, not
     just the line — measured against the real corpus, where it produced phantom rows several
     files downstream and an EOF `MoonOutputError` on a file whose quoting was, in fact, fine.
+    Nested `$(...)`'s own paren-depth counting has the SAME known limitation `_extract_
+    substitutions` already carries and this does not newly introduce: it is not quote-aware, so
+    a literal `)` inside a quoted string INSIDE the substitution (`$(echo ")")`) could close it
+    early. None of this module's fixtures exercise that shape; out of scope here, same as there.
     """
     out = []
     i, n = 0, len(raw)
     while i < n:
-        if open_quote is not None:
-            close = _find_unescaped(raw, '"', i) if open_quote == '"' else raw.find("'", i)
+        kind = open_quote[0] if open_quote is not None else None
+
+        if kind == "sq":
+            close = raw.find("'", i)
             if close == -1:
                 out.append(" " * (n - i))
                 return open_quote, "".join(out)
@@ -670,6 +700,75 @@ def _mask_quote_span(raw, open_quote):
             i = close + 1
             open_quote = None
             continue
+
+        if kind == "dqexec":
+            # The whole argument is executed code, regardless of shape — never mask any of it.
+            close = _find_unescaped(raw, '"', i)
+            if close == -1:
+                out.append(raw[i:])
+                return open_quote, "".join(out)
+            out.append(raw[i : close + 1])
+            i = close + 1
+            open_quote = None
+            continue
+
+        if kind == "dq" and open_quote[1] is not None:
+            # Inside a `$(...)`/backtick substitution nested in a cross-line double-quote: this
+            # is CODE, hand it through untouched so it gets classified normally.
+            subst = open_quote[1]
+            if subst[0] == "paren":
+                depth = subst[1]
+                j = i
+                while j < n and depth > 0:
+                    if raw[j] == "(":
+                        depth += 1
+                    elif raw[j] == ")":
+                        depth -= 1
+                    j += 1
+                out.append(raw[i:j])
+                i = j
+                if depth > 0:
+                    return ("dq", ("paren", depth)), "".join(out)
+                open_quote = ("dq", None)
+                continue
+            close = _find_unescaped(raw, "`", i)
+            if close == -1:
+                out.append(raw[i:])
+                return open_quote, "".join(out)
+            out.append(raw[i : close + 1])
+            i = close + 1
+            open_quote = ("dq", None)
+            continue
+
+        if kind == "dq":
+            # Plain content inside a cross-line double-quote: mask by default (genuine string
+            # data), UNLESS a `$(`/backtick opens here — that starts real code, not data.
+            j = i
+            while j < n:
+                if raw[j] == '"' and not _is_escaped(raw, j):
+                    out.append(" " * (j - i + 1))
+                    i = j + 1
+                    open_quote = None
+                    break
+                if raw[j : j + 2] == "$(" and not _is_escaped(raw, j):
+                    out.append(" " * (j - i))
+                    out.append("$(")
+                    i = j + 2
+                    open_quote = ("dq", ("paren", 1))
+                    break
+                if raw[j] == "`" and not _is_escaped(raw, j):
+                    out.append(" " * (j - i))
+                    out.append("`")
+                    i = j + 1
+                    open_quote = ("dq", ("back",))
+                    break
+                j += 1
+            else:
+                out.append(" " * (n - i))
+                return open_quote, "".join(out)
+            continue
+
+        # ---- TOP LEVEL: not currently inside any cross-line span. ----
         ch = raw[i]
         if ch == "#" and (i == 0 or raw[i - 1] in _COMMENT_PRECEDING_CHARS):
             # A real comment start: the rest of the line is prose, not code. Hand it through
@@ -677,20 +776,47 @@ def _mask_quote_span(raw, open_quote):
             # scanning it for quote characters that mean nothing here.
             out.append(raw[i:])
             return None, "".join(out)
-        if ch in ("'", '"'):
-            close = (
-                _find_unescaped(raw, '"', i + 1) if ch == '"' else raw.find("'", i + 1)
-            )
+        if ch == "'":
+            close = raw.find("'", i + 1)
             if close != -1:
-                # Complete on THIS line — hand it to the caller untouched.
                 out.append(raw[i : close + 1])
                 i = close + 1
                 continue
             out.append(" " * (n - i))
-            return ch, "".join(out)
+            return ("sq",), "".join(out)
+        if ch == '"' and not _is_escaped(raw, i):
+            # Review fix (SMA-599 round 3, found only by the real-corpus probe): there is no
+            # cheap, reliable "does this quote close on THIS line" pre-check for a double
+            # quote, because its interior can itself contain a `$(...)` whose OWN body holds
+            # unrelated single-quoted text with unrelated `"` characters inside it — e.g.
+            # `channel="$(... | sed -E 's/.*"([^"]+)".*/\1/')"` (ci/images/run.sh:49): a naive
+            # `_find_unescaped` scan for the next `"` finds one of THOSE literal quote chars,
+            # not the real matching close, and mis-splits the line. So every double quote — same
+            # -line-complete or genuinely cross-line, no upfront distinction — is handed to the
+            # dq/dqexec state machine below, which tracks `$(...)` by paren depth (ignoring
+            # quotes inside it, the SAME known limitation `_extract_substitutions` already
+            # carries — not new scope) rather than by naively hunting for the next `"`. Verified
+            # this does not change any round-1/round-2 single-line fixture's result (see the
+            # round-3 report): EXEC mode reproduces "hand through untouched" byte-for-byte since
+            # it masks nothing, and PLAIN mode reproduces it for every case that matters because
+            # the only thing it additionally blanks is inert same-line string content no
+            # existing fixture depends on seeing unblanked.
+            #
+            # If the code immediately before this quote on THIS line names
+            # bash -c/sh -c/zsh -c/eval, the WHOLE argument is executed code no matter its shape
+            # — never mask any of it.
+            if SHELL_EXEC_RE.search(raw[:i]):
+                out.append(ch)
+                i += 1
+                open_quote = ("dqexec",)
+                continue
+            out.append(" ")
+            i += 1
+            open_quote = ("dq", None)
+            continue
         out.append(ch)
         i += 1
-    return None, "".join(out)
+    return open_quote, "".join(out)
 
 
 def script_cargo_lines(path):
@@ -733,8 +859,9 @@ def script_cargo_lines(path):
         )
     if open_quote is not None:
         raise MoonOutputError(
-            f"{path}: a {open_quote!r} string is still open at EOF — the scan would silently "
-            f"treat string content as code, or code as string content, past that point"
+            f"{path}: a quoted string (or a substitution nested inside one, state {open_quote!r}) "
+            f"is still open at EOF — the scan would silently treat string content as code, or "
+            f"code as string content, past that point"
         )
     return rows
 
@@ -2107,6 +2234,33 @@ def self_test():
         if _lines('echo "start\ncargo build\nend"\n'):
             failures.append(
                 "script_cargo_lines reported a cargo verb sitting inside a multi-line string"
+            )
+
+        # SMA-599 round 3 review fix — a double-quoted string's interior is NOT all inert: a
+        # `$( ... )`/backtick pair inside it is CODE that actually runs. Round 2 masked a
+        # cross-line double-quote span wholesale, so a real unlocked `cargo build` living
+        # inside a multi-line `$(...)` vanished with ZERO rows and no error — verified against
+        # real bash (cargo stubbed) to actually execute. That is the worse false negative: the
+        # gate must still find it.
+        rows = _lines('X="$(\ncargo build\n)"\n')
+        if not any(
+            r.segment.strip().startswith("cargo build") and not r.locked for r in rows
+        ):
+            failures.append(
+                "script_cargo_lines let a cargo invocation inside a multi-line `$(...)` "
+                "nested in a double-quoted string vanish"
+            )
+
+        # The substitution can close on the SAME line it opens while the ENCLOSING double
+        # quote still spans further lines (`X="$(cargo build) more` / `stuff"`) — the body must
+        # still be seen as code even though the surrounding quote is genuinely cross-line.
+        rows = _lines('X="$(cargo build) more\nstuff"\n')
+        if not any(
+            r.segment.strip().startswith("cargo build") and not r.locked for r in rows
+        ):
+            failures.append(
+                "script_cargo_lines let a same-line-complete `$(...)` inside a still-open "
+                "cross-line double-quoted string vanish"
             )
 
     for f in failures:
