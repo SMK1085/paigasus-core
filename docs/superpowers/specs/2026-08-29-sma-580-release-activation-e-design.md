@@ -19,7 +19,7 @@ The issue therefore builds no workflow machinery. It does four things:
 
 1. It runs the pre-flight. §1 records the result of every item.
 2. It settles the crates.io bootstrap. §2.
-3. It ships two committed artifacts and one Notion artifact. §6.
+3. It ships three committed artifacts, one of which is a draft applied to Notion. §6.
 4. It executes the activation sequence. §3.
 
 **One finding changes the shape of the issue.** crates.io cannot pre-register a Trusted Publisher
@@ -45,8 +45,9 @@ Method: `GET https://crates.io/api/v1/crates/<name>`, `GET https://pypi.org/pypi
 
 **Two limits on the npm row, both real.** It checked the wrong set. Three of those names
 (`sdk`, `ui`, `console`) never publish, and two (`kernel`, `proto`) are `private: true` at `0.0.0`
-(§6.3 item 4). Six of the nine names that **do** publish — the platform packages derived from
-`napi.targets` — were not checked. The risk is nil once the scope is owned, because a scope owner
+(§6.4 item 4). Only two of the nine names that **do** publish were checked: `@paigasus/node-bindings`
+and `@paigasus/wasm`. The other **seven** — the platform packages derived from `napi.targets` — were
+not. The risk is nil once the scope is owned, because a scope owner
 holds every name under it. **The row is evidence about names, not about the scope.** §1.4 is the
 row that matters.
 
@@ -130,7 +131,8 @@ find a repository, so extracting under a directory that is itself tracked reintr
 §2.5 gives the measured reason. Build it with `git archive` — not `git worktree add`, not a clone:
 
 ```
-mkdir -p /tmp/seed && git archive HEAD | tar -x -C /tmp/seed
+rm -rf /tmp/seed && mkdir -p /tmp/seed        # rm -rf: a stale tree from a prior run would ship
+git archive HEAD | tar -x -C /tmp/seed
 git -C /tmp/seed rev-parse --show-toplevel   # MUST fail: "not a git repository"
 ```
 
@@ -410,14 +412,29 @@ So step I is: flip at H, then dispatch `release.yml` against `main`. The commit 
 `main`'s head, which after G is PR 170's merge — the same commit the re-run would have used, chosen
 explicitly instead of inferred.
 
-**What the trigger costs, stated plainly.** `workflow_dispatch` lets anyone with write access fire
-an irreversible release. Three things bound it, and none of them is the trigger itself:
+**What the trigger costs, and where the boundary actually is.** Revision 3 first claimed the flag
+and `approve-release` bound this trigger. **That claim was wrong**, and a local review caught it
+before the branch was pushed.
 
-- `vars.PAIGASUS_RELEASE_ENABLED` still gates every build job, so the dispatch does nothing while
-  the flag is off.
-- `approve-release` still pauses in the `release-approval` environment and needs the owner's
-  approval before anything publishes.
-- The trigger is **temporary**. §6.3 states the removal condition and §9 tracks it.
+A dispatch runs the workflow definition **from the dispatched ref**. Anyone with write access can
+push a branch carrying an edited `release.yml` — flag check deleted, `environment:` keys deleted —
+and dispatch that ref. Every in-workflow control is attacker-controlled there. So no `if:`, no
+`environment:` key, and no `github.ref` check inside the file can bound this trigger.
+
+**The boundary is enforced outside the repository, and it closes in both directions:**
+
+- The edited copy **keeps** `environment: release-publish` → that environment's deployment branch
+  policy is **`main` only**, so a job entering it from any other ref fails.
+- The edited copy **removes** it → the OIDC token carries no environment claim, and the crates.io
+  and PyPI trusted publishers are configured to **require** `release-publish`, so both registries
+  reject it. `NPM_TOKEN` is an environment secret on the same environment, so npm loses its
+  credential too.
+
+This is why §4.2's branch policy is `main`-only rather than "permits `main`", and why §5.1 and
+§5.3 make the environment field mandatory rather than recommended. **Those three settings are the
+authorization boundary.** Relaxing any one of them re-opens the hole.
+
+The trigger is also **temporary**. §6.3 states the removal condition and §9.1 tracks it.
 
 `release.yml` must still never gain `pull_request` or `pull_request_target`. `workflow_dispatch`
 carries no such prohibition, and no gate in `ci/` asserts anything about this file's trigger set —
@@ -604,11 +621,13 @@ No `inputs:`, so `repo:actionlint`'s branches-filter extractor has nothing to pa
 so V1 is unaffected. `repo:workflow-credentials` applies only to `pull_request` and
 `pull_request_target` workflows. **All three checked, not assumed.**
 
-### 6.4 The ADR-0011 amendment — **Notion, not committed**
+### 6.4 The ADR-0011 amendment — a committed draft, applied to Notion
 
-This repository holds no ADR directory; ADRs live in Notion, as CLAUDE.md states. So this artifact
-is **not reviewable in the pull request**. The agent drafts it; the owner applies it to the Notion
-page.
+This repository holds no ADR directory; ADRs live in Notion, as CLAUDE.md states. **The ADR itself
+is therefore not in this repository.** What the pull request carries is a committed *draft* —
+`docs/superpowers/specs/2026-08-29-sma-580-adr-0011-amendment-draft.md` — so the wording is
+reviewable alongside the rest of the change. The owner applies it to the Notion page separately,
+and the draft may be deleted afterwards.
 
 The umbrella spec §13 asks for four items. This issue adds a fifth.
 
@@ -695,7 +714,8 @@ Yank the three seeds (§2.6) and revoke the local crates.io token (§5.4).
 ### 8.1 Partial-failure recovery — the honest gap
 
 `publish-pypi` and `publish-npm` are parallel siblings on `needs: [.., release]`. Four states are
-reachable, and only three have a clean recovery.
+reachable, and **all four now have a clean recovery** — the fourth only since the §11.4
+measurement. Revision 2 recorded it as unbounded.
 
 | State | Recovery |
 | --- | --- |

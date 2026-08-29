@@ -26,12 +26,28 @@ on:
   # semantics that SMA-580's design never measured: that a re-run re-reads repository variables,
   # and that it re-executes jobs that previously skipped.
   #
-  # This trigger lets anyone with write access START this workflow. It cannot publish on its own:
-  # `vars.PAIGASUS_RELEASE_ENABLED` still gates every build job, and `approve-release` still
-  # pauses in the `release-approval` environment for a required reviewer.
+  # THE AUTHORIZATION BOUNDARY IS NOT IN THIS FILE, and must not be moved into it. A dispatch runs
+  # the workflow definition FROM THE DISPATCHED REF, so anyone with write access can push a branch
+  # carrying an edited copy of this file and dispatch that. Every in-workflow control — the `if:`
+  # gate below, the `environment:` keys, a `github.ref` check — is therefore attacker-controlled on
+  # such a ref, and none of them bounds this trigger.
   #
-  # REMOVE once the first release has published and its verification has passed — see
-  # docs/ops/RUNBOOK-release-activation.md step J. NO GATE ENFORCES THAT REMOVAL.
+  # What DOES bound it is enforced outside this repository, by GitHub environments and by the
+  # registries, and it holds in both directions:
+  #
+  #   * Keep `environment: release-publish` — the environment's deployment branch policy is
+  #     restricted to `main` ONLY, so a job entering it from any other ref fails.
+  #   * Remove `environment: release-publish` — the OIDC token then carries no environment claim,
+  #     and the crates.io and PyPI trusted publishers are configured to REQUIRE `release-publish`,
+  #     so both registries reject it. `NPM_TOKEN` is an environment secret on the same
+  #     environment, so npm loses its credential too.
+  #
+  # That pair is the boundary. It depends on the `release-publish` deployment branch policy staying
+  # `main`-only and on all three registry credentials staying bound to that environment — see
+  # docs/ops/RUNBOOK-release-activation.md §3. Do not relax either.
+  #
+  # REMOVE this trigger once the first release has published and its verification has passed — see
+  # that runbook's step J. NO GATE ENFORCES THAT REMOVAL.
   workflow_dispatch:
 
 # Least privilege for the auto GITHUB_TOKEN, matching every other workflow here: it is never

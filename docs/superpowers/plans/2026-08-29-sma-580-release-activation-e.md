@@ -63,9 +63,10 @@ on:
   # semantics that SMA-580's design never measured: that a re-run re-reads repository variables,
   # and that it re-executes jobs that previously skipped.
   #
-  # This trigger lets anyone with write access START this workflow. It cannot publish on its own:
-  # `vars.PAIGASUS_RELEASE_ENABLED` still gates every build job, and `approve-release` still
-  # pauses in the `release-approval` environment for a required reviewer.
+  # (The shipped comment is longer: local review found that the two mitigations named here do NOT
+  # bound the trigger, because a dispatch runs the workflow file from the DISPATCHED REF. See the
+  # committed `release.yml` and spec §3.3 for the real boundary — the `release-publish` environment
+  # branch policy plus the registries' required environment claim.)
   #
   # REMOVE once the first release has published and its verification has passed — see
   # docs/ops/RUNBOOK-release-activation.md step J. NO GATE ENFORCES THAT REMOVAL.
@@ -366,7 +367,7 @@ Those suites are flaky under parallel load. This branch changes no Rust code, so
 git diff --stat origin/main...HEAD
 ```
 
-Expected: exactly four files — the spec, the plan, `.github/workflows/release.yml`, `docs/ops/RUNBOOK-release-activation.md`, and the ADR draft. **No Rust, Python or TypeScript source file may appear.** If one does, it was not part of this issue.
+Expected: exactly five files — the spec, the plan, `.github/workflows/release.yml`, `docs/ops/RUNBOOK-release-activation.md`, and the ADR draft. **No Rust, Python or TypeScript source file may appear.** If one does, it was not part of this issue.
 
 ---
 

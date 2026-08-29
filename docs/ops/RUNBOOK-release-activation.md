@@ -28,7 +28,7 @@ Steps **D** and **I** are irreversible. Work top to bottom. Do not reorder.
 
 | Step | Action | Trigger | Owner | Reversible |
 | --- | --- | --- | --- | --- |
-| **A** | Merge this issue's PR — runbook, `release.yml` comment + dispatch trigger, ADR draft | — | agent → owner merges | yes |
+| **A** | **Prepare** this issue's PR — runbook, `release.yml` comment + dispatch trigger, ADR draft | — | agent | yes |
 | **B1** | Create both environments with the settings in §3 | — | agent or owner | yes |
 | **B2** | Add the required reviewer to `release-approval` | — | agent or owner | yes |
 | **B3** | Prove the App can push a tag and cut a Release | — | agent or owner | yes |
@@ -47,8 +47,9 @@ Steps C, D and E use this runbook **from the PR branch**, before step F merges i
 
 ## 2. Steps A and B — already done when you read this
 
-**A** merged the pull request carrying this file, the `release.yml` comment naming the Paigasus bot
-App, and the temporary `workflow_dispatch` trigger.
+**A** prepared the pull request carrying this file, the `release.yml` comment naming the Paigasus
+bot App, and the temporary `workflow_dispatch` trigger. **That pull request is merged at step F,
+not here** — you read this runbook from its branch while you work through steps C, D and E.
 
 **B1 and B2** created the two environments. **B3** proved the App installation can push a tag and
 create a GitHub Release, using a throwaway tag that was then deleted. The absence of tag protection
@@ -71,7 +72,7 @@ straight through and the whole irreversible stage runs unattended. Verify both, 
 | Required reviewers | the repository owner | The one place a human can stop the run |
 | Prevent self-review | **OFF** | The owner dispatches the run at step I **and** must approve it |
 | Wait timer | 0 | Nothing to delay |
-| Deployment branch policy | must permit `main` | A policy excluding `main` fails the job |
+| Deployment branch policy | **`main` only** | Same reasoning as `release-publish` below |
 
 ### `release-publish` — no reviewers, deliberately
 
@@ -79,7 +80,21 @@ straight through and the whole irreversible stage runs unattended. Verify both, 
 | --- | --- | --- |
 | Required reviewers | **none** | See below |
 | Wait timer | **0** | A wait timer delays *each* of the three jobs independently |
-| Deployment branch policy | must permit `main` | Excluding `main` fails `release` **after** approval was given |
+| Deployment branch policy | **`main` only** | This is the authorization boundary for the temporary `workflow_dispatch` trigger. See below |
+
+**The `main`-only branch policy is load-bearing, not hygiene.** A dispatch runs the workflow
+definition from the dispatched ref, so anyone with write access can dispatch an edited copy of
+`release.yml`. Every in-workflow control is attacker-controlled on such a ref. Two things outside
+this repository close that, and they hold in both directions:
+
+- If the edited copy **keeps** `environment: release-publish`, this branch policy fails the job on
+  any ref but `main`.
+- If it **removes** the environment, the OIDC token carries no environment claim, and the crates.io
+  and PyPI trusted publishers — configured in §5.2 and §5.3 to require `release-publish` — reject
+  it. `NPM_TOKEN` is an environment secret on the same environment, so npm loses its credential.
+
+**Do not relax the branch policy, and do not leave the environment field blank on any of the three
+registry configurations.** Together they are the boundary.
 
 GitHub pauses **each** job that enters an environment, and three enter this one: `release`,
 `publish-pypi` and `publish-npm`. A reviewer here would stop the run again between crates.io and
@@ -185,9 +200,14 @@ cd /tmp/seed/rs
 cargo publish -p paigasus-proto-derive
 
 # Wait for the index. cargo publish -p paigasus-proto verifies against the REGISTRY.
-until cargo info paigasus-proto-derive@0.1.0-alpha.1 >/dev/null 2>&1; do
-  echo "waiting for the index…"; sleep 10
+# BOUNDED at ~3 minutes. An unbounded loop would hang forever on an outage or an auth
+# failure, and you would never reach the fallback below.
+ok=0
+for i in $(seq 1 18); do
+  if cargo info paigasus-proto-derive@0.1.0-alpha.1 >/dev/null 2>&1; then ok=1; break; fi
+  echo "waiting for the index… ($i/18)"; sleep 10
 done
+[ "$ok" -eq 1 ] || { echo "index did not converge — use the fallback below"; exit 1; }
 
 cargo publish -p paigasus-proto
 cargo publish -p paigasus-kernel
@@ -349,7 +369,9 @@ itself once `0.1.0` is on the registry.
 3. npm serves nine packages at `0.1.0`.
 4. Six git tags of the form `<package>-v0.1.0` exist.
 5. Exactly **two** GitHub Releases exist for the release commit, one per family head.
-6. `moon ci` stays green on `main`.
+6. `moon ci` stays green on `main`. If your shell does not already resolve the
+   repository-pinned tools, prefix it with
+   `export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"`.
 
 ### 7.2 Installability — inside the 72-hour npm window
 
