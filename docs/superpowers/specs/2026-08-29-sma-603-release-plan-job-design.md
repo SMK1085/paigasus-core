@@ -209,8 +209,11 @@ ci/release-plan/
 3. Resolve each name to its manifest by walking `rs/crates/**/Cargo.toml` and reading
    `[package] name`, then read that manifest's literal `[package] version`. A `version.workspace
    = true`, a missing manifest, or a duplicate name → **inconclusive**.
-4. Floor: if the repository reports **zero** tags at all, → **inconclusive**. This is what stops
-   a shallow checkout reading as "everything is already released".
+4. Floor: if the repository reports **zero** tags at all, → **inconclusive**. This floor is
+   **redundant for safety** and is kept for legibility: with no tags every wanted tag is absent,
+   so step 6 already builds. What it adds is a log line naming the misconfiguration, instead of a
+   list of "not yet cut" tags that were never really looked for. A shallow checkout therefore
+   costs runner time, never a missed release.
 5. Floor: if `rs/release-plz.toml` sets `git_tag_name` anywhere, → **inconclusive**. The
    `<package>-v<version>` format is release-plz's default and step 6 assumes it.
 6. `true` if and only if every releasable package's `<name>-v<version>` tag exists. Otherwise
@@ -404,7 +407,7 @@ wiring is, and V9c/V9d assert the wiring statically.
 | --- | --- | --- |
 | The derived releasable set drifts from what release-plz tags | **unsafe, fails green** | derived at runtime, not hard-coded; `--assert` pins the expected set with strict equality |
 | A tag naming scheme change (`git_tag_name`) | unsafe | floor 5 → inconclusive → builds |
-| A shallow checkout removes the tags | unsafe | floor 4 (zero tags → inconclusive) plus `fetch-depth: 0` |
+| A shallow checkout removes the tags | **safe** — every tag reads as absent, so it builds | `fetch-depth: 0` is declared; floor 4 makes the cause legible in the log rather than adding safety |
 | An inverted decision | unsafe | fixture table covers polarity directly; V9b pins the consumer side |
 | A publish step added upstream of approval | **unsafe, irreversible** | V8b, and V8d for callees |
 | `approve-release` removed from `release`'s `needs:` | **unsafe, irreversible** | V8c |
