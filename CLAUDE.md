@@ -615,6 +615,28 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
 - `release.yml` must never gain a `pull_request` or `pull_request_target` trigger (SMA-579).
 - GitHub Actions supports YAML **anchors and aliases** (since 2025-09-18) but **not merge keys**
   (`<<:`) — a workflow using one keeps the literal, unmerged key rather than erroring (SMA-579).
+- An **unlocked cargo invocation repairs a truncated `rs/Cargo.lock` in place, mid-run**, and that
+  is why five Dependabot PRs (83, 96, 140, 149, 181) merged a truncated lock through a green
+  `moon ci`. Measured on PR 181's `72c0ddb52` (176 packages against main's 543, holding 5 of 13
+  workspace members): `cargo tree` and `cargo deny` each re-resolved the lock to **548 packages and
+  exited 0**, both starting at 06:37:55 — twelve seconds before the first `--locked` task. So
+  `paigasus-gateway-rs:lint` and `paigasus-iam-rs:lint` ran `cargo clippy --locked` for real, for
+  24s and 72s, against a lock that had already been repaired, and passed. The repaired lock is
+  never committed, so `main` keeps the truncated one. Two consequences. A gate that reads the lock
+  from the WORKING TREE inside `moon ci` races the repair and is worthless — which is why
+  `ci/cargo-lock-integrity/run.sh` is an unconditional **`ci.yml` step placed before the `moon ci`
+  step** (pinned by check 8f in `ci/actionlint/run.sh`), not a `repo:*` task. And `cargo deny`
+  audits a re-resolved graph whenever the lock does not already satisfy the manifests — not on
+  every PR, since cargo rewrites nothing when the lock is consistent, but on exactly the PRs that
+  matter. Since SMA-601 every cargo-resolving task passes `--locked`, asserted generically by A8
+  (`ci/affected-graph/cargo_moon_parity.py`); the three FFI wrapper tasks cannot, because
+  `napi build` exposes no `--locked` and no cargo passthrough, `uv sync` drives maturin with no
+  flag path, and `wasm-pack` — which DOES forward `-- --locked` — makes its own unlocked cargo
+  call before the forwarded build and repairs the lock there (measured: 176 -> 548 packages,
+  exit 0). All three carry `ALLOW_UNLOCKED_CARGO` entries, and A8 demands one for every
+  wrapper-matched task even when `--locked` appears elsewhere in its script. `--locked` proves the lock is
+  CONSISTENT with the manifests, not that it is correct: a swapped-but-compatible version or a
+  tampered checksum still passes.
 
 ## Workflow
 
