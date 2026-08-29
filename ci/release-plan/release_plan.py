@@ -155,11 +155,19 @@ def repo_tags(repo_root: Path) -> set[str]:
 
 
 def run(repo_root: Path, event_name: str) -> tuple[bool, str]:
+    """The runtime path. It must NEVER traceback: `--github-output` wraps this call and its
+    fail-safe is "warn and build", not "crash and let the caller decide". `Inconclusive` is the
+    expected collection failure, but a malformed manifest can raise something else entirely —
+    measured: `workspace = 3` in `rs/release-plz.toml` raises a bare `TypeError` from inside
+    `assert_default_tag_format`'s `"git_tag_name" in (...)` membership test. Catching `Exception`
+    here, and ONLY here, is what keeps that a "build" instead of a traceback. `--assert` and
+    `--self-test` deliberately do not call `run()` and must keep surfacing errors loudly.
+    """
     try:
         packages = releasable_packages(repo_root / "rs")
         tags = repo_tags(repo_root)
-    except Inconclusive as exc:
-        return False, f"inconclusive ({exc}) — build"
+    except Exception as exc:  # noqa: BLE001 - deliberately broad; see the docstring above.
+        return False, f"inconclusive ({type(exc).__name__}: {exc}) — build"
     return decide(event_name, packages, tags)
 
 
@@ -195,6 +203,15 @@ def _missing_config_is_inconclusive() -> str | None:
 
     `load_toml` is the first thing `releasable_packages` calls, and a missing file raises
     `FileNotFoundError`, an `OSError` subclass, which `load_toml` already converts.
+
+    The `except` below matches the SPECIFIC message `load_toml` raises for an unreadable file
+    ("cannot read ... release-plz.toml"), not any `Inconclusive` whatsoever. A bare
+    `except Inconclusive: return None` would also accept `crate_manifests`' unrelated "no crate
+    manifests" Inconclusive, which this tree cannot even reach — this crate dir exists — but a
+    future refactor could make it reachable, and a helper that accepts any cause proves nothing
+    about the ONE cause it claims to test (MEASURED — see I2 in the fix-round report: this is
+    exactly the shape that let a neutered `assert_default_tag_format` pass unnoticed in the
+    sibling helper below).
     """
     tmp = tempfile.mkdtemp()
     try:
@@ -204,8 +221,11 @@ def _missing_config_is_inconclusive() -> str | None:
         (crate_dir / "Cargo.toml").write_text('[package]\nname = "a"\nversion = "1.0.0"\n')
         try:
             releasable_packages(rs_root)
-        except Inconclusive:
-            return None
+        except Inconclusive as exc:
+            if "cannot read" in str(exc) and "release-plz.toml" in str(exc):
+                return None
+            return (f"releasable_packages raised Inconclusive for the wrong reason: {exc!r} "
+                    f"(expected a 'cannot read ... release-plz.toml' message)")
         return "releasable_packages did not raise Inconclusive for a missing release-plz.toml"
     finally:
         shutil.rmtree(tmp)
@@ -214,6 +234,10 @@ def _missing_config_is_inconclusive() -> str | None:
 def _workspace_version_is_inconclusive() -> str | None:
     """`version.workspace = true` parses as a dict, not a literal string, and must be
     Inconclusive rather than silently treated as absent.
+
+    Matches on the specific "no literal [package] version" message `releasable_packages` raises
+    for this exact cause, for the same reason `_missing_config_is_inconclusive` does: a bare
+    `except Inconclusive` proves only that SOMETHING failed, not that THIS check fired.
     """
     tmp = tempfile.mkdtemp()
     try:
@@ -226,8 +250,11 @@ def _workspace_version_is_inconclusive() -> str | None:
             '[package]\nname = "a"\nversion.workspace = true\npublish = true\n')
         try:
             releasable_packages(rs_root)
-        except Inconclusive:
-            return None
+        except Inconclusive as exc:
+            if "no literal [package] version" in str(exc):
+                return None
+            return (f"releasable_packages raised Inconclusive for the wrong reason: {exc!r} "
+                    f"(expected a message naming 'no literal [package] version')")
         return "releasable_packages did not raise Inconclusive for a workspace-inherited version"
     finally:
         shutil.rmtree(tmp)
@@ -236,6 +263,15 @@ def _workspace_version_is_inconclusive() -> str | None:
 def _tag_name_override_is_inconclusive() -> str | None:
     """A `[workspace] git_tag_name` override invalidates `tag_for`'s default-format assumption,
     and must be Inconclusive rather than silently tagged the usual way.
+
+    This tree deliberately has NO `rs/crates/` directory at all — `assert_default_tag_format`
+    must raise before `releasable_packages` ever reaches `crate_manifests`. MEASURED: with a
+    bare `except Inconclusive: return None`, neutering `assert_default_tag_format`'s body to a
+    no-op `return` made THIS helper keep passing, because `crate_manifests` then raised its own,
+    unrelated "no crate manifests under .../crates — the tree moved" Inconclusive, and the bare
+    except accepted that too. Matching on "git_tag_name" specifically is what makes that
+    mutation visible: neutering the function under test now removes the ONLY source of a
+    "git_tag_name" message, so this helper reports the wrong-reason string instead of None.
     """
     tmp = tempfile.mkdtemp()
     try:
@@ -245,8 +281,11 @@ def _tag_name_override_is_inconclusive() -> str | None:
             '[workspace]\ngit_tag_name = "v{{ version }}"\n')
         try:
             releasable_packages(rs_root)
-        except Inconclusive:
-            return None
+        except Inconclusive as exc:
+            if "git_tag_name" in str(exc):
+                return None
+            return (f"releasable_packages raised Inconclusive for the wrong reason: {exc!r} "
+                    f"(expected a message naming git_tag_name)")
         return "releasable_packages did not raise Inconclusive for a git_tag_name override"
     finally:
         shutil.rmtree(tmp)
@@ -254,6 +293,15 @@ def _tag_name_override_is_inconclusive() -> str | None:
 
 def self_test() -> int:
     rc = 0
+    # An emptied FIXTURES list makes the loop below run zero times and return 0 — a self-test
+    # that silently stops testing anything still reads as a pass. This floor is IN-PROCESS and
+    # deliberately duplicated by a second, independent floor in ci/release-plan/run.sh's own
+    # negative control (this repo's usual idiom for a self-scheduled gate: two copies in two
+    # files, not one shared helper, so deleting either one leaves the other standing).
+    if len(FIXTURES) < 8:
+        print(f"FAIL FIXTURES has only {len(FIXTURES)} row(s); the floor is 8 — "
+              "something emptied or gutted the fixture table", file=sys.stderr)
+        rc = 3
     for label, event, packages, tags, want in FIXTURES:
         got, reason = decide(event, packages, tags)
         if got != want:
@@ -274,10 +322,18 @@ def self_test() -> int:
 
 
 def _assert_repo(repo_root: Path) -> int:
-    """--assert. The CI-side assertions; the runtime path uses none of them."""
+    """--assert. The CI-side assertions; the runtime path uses none of them.
+
+    Both collection calls sit inside the ONE try below, on purpose: `README.md` documents that
+    this checker exits 0, 2, or 3 and never 1. `repo_tags()` can raise `Inconclusive` too (a
+    failed `git tag -l`), and if that call sat outside the try, that Inconclusive would escape
+    uncaught, the interpreter would exit 1 with a traceback, and `run_checker` would then map
+    that 1 onto its `die_infra` branch (2) — silently breaking the documented contract.
+    """
     problems: list[str] = []
     try:
         packages = releasable_packages(repo_root / "rs")
+        tags = repo_tags(repo_root)
     except Inconclusive as exc:
         print(f"release-plan: {exc}", file=sys.stderr)
         return 3
@@ -287,7 +343,7 @@ def _assert_repo(repo_root: Path) -> int:
             f"the derived releasable set {sorted(derived)} does not equal the pinned "
             f"EXPECTED_RELEASABLE {sorted(EXPECTED_RELEASABLE)}. If a crate legitimately became "
             f"publishable, re-baseline the pin deliberately — do not loosen the comparison.")
-    if not repo_tags(repo_root):
+    if not tags:
         problems.append("the repository reports no tags; --assert needs a full checkout")
     for p in problems:
         print(f"release-plan: {p}", file=sys.stderr)

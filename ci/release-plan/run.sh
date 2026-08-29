@@ -51,16 +51,35 @@ github_output() {
     printf 'nothing_to_release=false\n' >> "${GITHUB_OUTPUT:-/dev/stdout}"
     exit 0
   fi
-  printf '%s\n' "$out" | grep -E '^nothing_to_release=(true|false)$' >> "${GITHUB_OUTPUT:-/dev/stdout}"
+  # `tail -n 1` guards against a second, forged verdict line ahead of the genuine one — e.g. a
+  # releasable package name containing a newline could make the reason line above emit a
+  # literal `nothing_to_release=true`, and both would otherwise match the grep and both would
+  # get appended. The genuine verdict from `main()` is always printed LAST, so taking only the
+  # final match is safe. This is deliberately unverified-assumption-free: the reviewer could not
+  # confirm whether Actions takes the first or the last of two same-named `>>` output keys, and
+  # a fail-safe control must not lean on an assumption nobody checked.
+  printf '%s\n' "$out" | grep -E '^nothing_to_release=(true|false)$' | tail -n 1 \
+    >> "${GITHUB_OUTPUT:-/dev/stdout}"
   exit 0
 }
 
-# The wiring rows — only what needs the real tree. The rule table lives in the checker's
-# --self-test, in-process, because it needs no filesystem beyond the two temp trees it builds
-# itself. This control has one extra job the sibling gates do not: proving the fail-safe
-# --github-output arm actually flips direction with the event name, not merely that it exits 0
-# for both — a checker wired to a constant `nothing_to_release=false` would pass every OTHER
-# row here.
+# The wiring rows — only what needs the real tree, plus two rows that build their OWN synthetic
+# git trees rather than reading the real repository. Rows 3 and 4 used to invoke
+# `--github-output` against the LIVE repository and assert the printed verdict flipped with
+# GITHUB_EVENT_NAME. That depended on TRANSIENT repository state: it held only while every
+# releasable package's manifest version already had a matching tag. On the release PR itself,
+# release-plz has just bumped rs/crates/*/Cargo.toml while the new tags do not exist yet —
+# FIXTURES' own "a kernel-only bump -> build (M6)" row is exactly this shape, and `decide()`
+# correctly returns False for it. So the old row 4 would fail, `--negative-control` would exit
+# 1, and this gate would red on precisely the PR it exists to serve — and the same window
+# reopens on `main` in the gap between a release merging and its tags landing. Fixed: rows 3 and
+# 4 now build throwaway git trees under $tmp and invoke the CHECKER directly — not
+# `github_output`, which hardcodes $REPO_ROOT and so cannot be pointed at a synthetic tree —
+# against each, asserting BOTH directions. That still proves the decision responds to its input
+# rather than being wired to a constant, without depending on what state the real repository
+# happens to be in. It also means this control now writes to $GITHUB_OUTPUT nowhere at all: the
+# real repository's tag state, whatever it is, only ever reaches `--assert` (row 1's kind of
+# check), which every PR already runs independently.
 negative_control() {
   local failures=0 tmp out
 
@@ -72,6 +91,30 @@ negative_control() {
       printf '  FAIL %s: expected rc %s, got %s\n' "$label" "$want" "$got" >&2
       failures=$((failures + 1))
     fi
+  }
+
+  # Builds a throwaway git repo at $1 with one releasable package, "a" at version 1.0.0. The
+  # caller adds whatever tag(s) the row needs before reading the checker's verdict.
+  # `commit.gpgsign false` and `tag.gpgsign false` are scoped to THIS synthetic repo's LOCAL
+  # config only — they never touch the real repository's SSH-signed commits — and exist because
+  # the environment's global `commit.gpgsign = true` / `tag.gpgsign = true` would otherwise make
+  # a plain `git commit` or lightweight `git tag` here hang, or fail outright (MEASURED: an
+  # unguarded `git tag` here errors "fatal: no tag message?", since the global config silently
+  # upgrades it to an annotated, signed tag that needs one) on a signer this fixture has no
+  # business invoking.
+  _build_synthetic_tree() {
+    local dir="$1"
+    mkdir -p "$dir/rs/crates/libs/a"
+    printf '[[package]]\nname = "a"\nrelease = true\n' > "$dir/rs/release-plz.toml"
+    printf '[package]\nname = "a"\nversion = "1.0.0"\npublish = true\n' \
+      > "$dir/rs/crates/libs/a/Cargo.toml"
+    git -C "$dir" init -q
+    git -C "$dir" config commit.gpgsign false
+    git -C "$dir" config tag.gpgsign false
+    git -C "$dir" config user.email "release-plan-negative-control@example.invalid"
+    git -C "$dir" config user.name "release-plan negative control"
+    git -C "$dir" add -A
+    git -C "$dir" commit -q -m "synthetic fixture"
   }
 
   tmp="$(mktemp -d)"
@@ -90,22 +133,31 @@ negative_control() {
   _expect 0 "the self-test passes against the real fixture table" \
     run_checker --self-test
 
-  # Row 3 — the state that would otherwise skip: every tag is already cut, but the event is a
-  # workflow_dispatch. If --github-output ever ignored the event name, this is where it would
-  # show: a dispatch must still print nothing_to_release=false.
-  out="$(GITHUB_EVENT_NAME=workflow_dispatch bash "$0" --github-output 2>&1)" || true
-  if ! printf '%s\n' "$out" | grep -q '^nothing_to_release=false$'; then
-    printf '  FAIL a workflow_dispatch run did not print nothing_to_release=false\n' >&2
+  # Row 3 — a synthetic tree where the wanted tag ALREADY exists -> the checker must print
+  # nothing_to_release=true. Invoked as a direct `release_plan.py` call (not run_checker, whose
+  # 3 -> 1 mapping does not apply to the bare runtime path, and not github_output, which cannot
+  # target this tree at all).
+  _build_synthetic_tree "$tmp/synthetic-true"
+  git -C "$tmp/synthetic-true" tag "a-v1.0.0"
+  out="$(uv run --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" \
+    --event-name push "$tmp/synthetic-true" 2>&1)" || true
+  if ! printf '%s\n' "$out" | grep -q '^nothing_to_release=true$'; then
+    printf '  FAIL a synthetic tree with every tag already cut did not print nothing_to_release=true\n' >&2
     printf '  --- output ---\n%s\n' "$out" >&2
     failures=$((failures + 1))
   fi
 
-  # Row 4 — the real repo, on a push, today: every tag is cut, so this must read true. Without
-  # both this row and row 3, the control cannot tell a working decision from one wired to a
-  # constant in either direction.
-  out="$(GITHUB_EVENT_NAME=push bash "$0" --github-output 2>&1)" || true
-  if ! printf '%s\n' "$out" | grep -q '^nothing_to_release=true$'; then
-    printf '  FAIL a push run against the real, fully-tagged repo did not print nothing_to_release=true\n' >&2
+  # Row 4 — a synthetic tree where a DIFFERENT tag exists but not the wanted one (so this
+  # exercises the "tags not yet cut" branch, not the separate "no tags at all" branch FIXTURES
+  # already covers) -> the checker must print nothing_to_release=false. Without both this row
+  # and row 3, the control cannot tell a working decision from one wired to a constant in
+  # either direction.
+  _build_synthetic_tree "$tmp/synthetic-false"
+  git -C "$tmp/synthetic-false" tag "a-v0.9.0"
+  out="$(uv run --project "$HERE" --python '>=3.12' python3 "$HERE/release_plan.py" \
+    --event-name push "$tmp/synthetic-false" 2>&1)" || true
+  if ! printf '%s\n' "$out" | grep -q '^nothing_to_release=false$'; then
+    printf '  FAIL a synthetic tree with a missing tag did not print nothing_to_release=false\n' >&2
     printf '  --- output ---\n%s\n' "$out" >&2
     failures=$((failures + 1))
   fi
