@@ -287,7 +287,14 @@ def napi_violations(job: dict, job_id: str, name: str) -> list[str]:
         run = str(step.get("run") or "")
         for line in run.splitlines():
             for segment in command_segments(line):
-                if _NAPI_PREPUBLISH_RE.search(segment) and "--no-gh-release" not in segment:
+                # The flag must appear AFTER the invocation, not merely somewhere in the segment.
+                # `NOTE=--no-gh-release napi prepublish --npm-dir npm` is a shell ENVIRONMENT
+                # ASSIGNMENT followed by the command: the flag never reaches napi, and a plain
+                # `in segment` test accepts it. Comparing against the match END is enough here and
+                # stops short of tokenising the command line — see Ruling 10 / the module docstring
+                # for why this guard deliberately does not embed a shell parser.
+                m = _NAPI_PREPUBLISH_RE.search(segment)
+                if m and "--no-gh-release" not in segment[m.end() :]:
                     out.append(
                         f"{name}: job '{job_id}' runs `napi prepublish` without "
                         f"--no-gh-release. release-plz owns every tag (ADR-0011 S3); napi "
@@ -596,6 +603,18 @@ FIXTURES: list[tuple[str, str, str, str | None]] = [
     ("CR1 finding 2: V5 catches a two-space `napi  prepublish` without --no-gh-release", "main",
      _OK_MAIN.replace("run: release-plz release", "run: napi  prepublish --npm-dir npm"),
      "without --no-gh-release"),
+    # CR2: a shell ENVIRONMENT ASSIGNMENT is not an argument. The flag never reaches napi here,
+    # so the invocation keeps napi's default GitHub-release behaviour and must RED.
+    ("CR2: `NOTE=--no-gh-release` before the command does not satisfy V5", "main",
+     _OK_MAIN.replace("run: release-plz release",
+                      "run: NOTE=--no-gh-release napi prepublish --npm-dir npm"),
+     "without --no-gh-release"),
+    # ...and the control, so the position check cannot be "fixed" into rejecting every real
+    # invocation: the flag AFTER the command is what a correct call looks like.
+    ("CR2 control: the flag after the command still passes", "main",
+     _OK_MAIN.replace("run: release-plz release",
+                      "run: napi prepublish --no-gh-release --npm-dir npm"),
+     None),
 ]
 
 
