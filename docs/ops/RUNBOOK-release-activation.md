@@ -59,11 +59,27 @@ If any of B1–B3 was not performed, stop and perform it now. §3 has the settin
 
 ---
 
-## 3. The two GitHub environments
+## 3. The three GitHub environments
 
 **GitHub auto-creates a referenced environment on first use, with no protection rules.** So a
 missing environment and a misconfigured one produce the same outcome: `approve-release` walks
 straight through and the whole irreversible stage runs unattended. Verify both, do not assume.
+
+### `release-pr` — the credential boundary for the release-PR job
+
+**Configured 2026-08-29.** Branch policy `main`, both App secrets present, no reviewers, no wait
+timer.
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Required reviewers | **none** | It runs on every push to `main`; a reviewer would block every merge |
+| Wait timer | **0** | Nothing to delay |
+| Deployment branch policy | **`main` only** | The boundary — a dispatched ref fails here |
+| Secrets | `PAIGASUS_BOT_APP_ID`, `PAIGASUS_BOT_PRIVATE_KEY` | **Environment** secrets, so dropping the `environment:` key loses them |
+
+A job may declare only **one** environment. That is why `release-pr` gets its own rather than
+joining `release-publish`: the latter is bound by the crates.io and PyPI trusted publishers and
+must stay on the `release` job.
 
 ### `release-approval`
 
@@ -96,15 +112,15 @@ this repository close that, and they hold in both directions:
 **Do not relax the branch policy, and do not leave the environment field blank on any of the three
 registry configurations.** Together they are the boundary.
 
-**One path this boundary does NOT cover.** `release-pr` enters no environment, and mints an App
-token with `contents: write` from **repository** secrets, which any run reaches regardless of ref.
-So a dispatched ref can still reach those credentials. The escalation is narrow — the token is
-repo-scoped, masked, and revoked at job end, granting about what a write-access holder already has
-— and `release-pr` now carries `if: github.event_name == 'push'`, which stops an *accidental*
-dispatch from minting it. That `if:` is **not** a boundary: an edited copy of the workflow deletes
-it. Closing it properly means moving `PAIGASUS_BOT_APP_ID` and `PAIGASUS_BOT_PRIVATE_KEY` to
-environment secrets on a `main`-only environment. **That is an open decision — see the spec
-§3.3.1 and §10.2. Settle it before or together with step H.**
+**`release-pr` is now covered too, by the same shape.** It was the one gap: it entered no
+environment and minted its App token from **repository** secrets, which any run reaches regardless
+of ref. It now declares `environment: release-pr` (above), whose branch policy is `main`-only and
+whose App secrets are **environment** secrets. Both directions close, exactly as for
+`release-publish`.
+
+**This only holds once the REPOSITORY secrets are deleted.** An environment secret does not hide a
+repository secret of the same name — the repository one still resolves. Until they are gone the job
+works either way and the migration has proved nothing. See §3.1.
 
 GitHub pauses **each** job that enters an environment, and three enter this one: `release`,
 `publish-pypi` and `publish-npm`. A reviewer here would stop the run again between crates.io and
@@ -112,6 +128,19 @@ PyPI. A rejected or timed-out second approval leaves crates.io published and PyP
 state the job order exists to prevent.
 
 The environment must still exist. Both PyPI's and crates.io's OIDC claims bind to it.
+
+### 3.1 Finishing the App-secret migration — the step that makes it real
+
+1. **Confirm you still hold the App private key** (`.pem`), or can generate a new one from the
+   App's settings. **A GitHub secret cannot be read back**, so this is the only rollback.
+2. **Delete the repository secrets** `PAIGASUS_BOT_APP_ID` and `PAIGASUS_BOT_PRIVATE_KEY`.
+   Until this is done the environment secrets are untested.
+3. Push to `main` and confirm `release-pr` **ran** — that it reached release-plz and refreshed the
+   release PR.
+
+**Step 3 is the only proof, and "the run was green" is not it.** `release-pr`'s preflight makes the
+whole job skip **green** when `PAIGASUS_BOT_APP_ID` is unreadable, so a botched migration looks
+identical to a healthy run in the checks list. Open the run and confirm the job executed.
 
 ---
 

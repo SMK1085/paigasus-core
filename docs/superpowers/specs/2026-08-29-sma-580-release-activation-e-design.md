@@ -475,21 +475,32 @@ to the current repository, so the minted token is repo-scoped and grants roughly
 write-access holder already has. It is masked and revoked in the action's post-step. The real loss
 is auditability: a dispatch runs without a pull request and without `moon ci`.
 
-**What was done:** `release-pr` now carries `if: github.event_name == 'push'`. This closes the
-**accidental** case only — a dispatch never mints the token by mistake. It is **not** a boundary:
-an edited copy of `release.yml` on the dispatched ref simply deletes the line. The spec says so,
-and so does the workflow comment, because overstating this is exactly the error §3.3 was written
-to correct.
+**CLOSED, 2026-08-29.** The owner created a third environment, `release-pr`, and this branch gives
+the job `environment: release-pr`. Measured configuration: deployment branch policy `main` only, no
+reviewers, no wait timer, and `PAIGASUS_BOT_APP_ID` + `PAIGASUS_BOT_PRIVATE_KEY` as **environment**
+secrets on it.
 
-**The proper fix, and why it is not in this branch.** Move `PAIGASUS_BOT_APP_ID` and
-`PAIGASUS_BOT_PRIVATE_KEY` from repository secrets to **environment** secrets on a `main`-only
-environment, and give `release-pr` that environment. Then the same both-directions property holds:
-keeping the environment hits the branch policy, removing it loses the secrets.
+The same both-directions property now holds for `release-pr` as for `release-publish`:
 
-It is deliberately not done blind. `release-pr`'s preflight step makes the whole job **skip green**
-when `PAIGASUS_BOT_APP_ID` is absent, so a botched secret migration is invisible — it looks
-identical to "not configured yet". This is the only job in the release path that currently works,
-and the migration cannot be verified before merge. **Owner decision — §10.2.**
+- Keeps `environment: release-pr` → the `main`-only branch policy fails the job on any other ref.
+- Drops it → the job cannot read the App secrets at all.
+
+`if: github.event_name == 'push'` stays, but it is **not** the boundary and never was — an edited
+copy on the dispatched ref deletes it. It closes the accidental case; the environment closes the
+malicious one.
+
+**Why a third environment rather than reusing `release-publish`.** A job may declare only ONE
+environment, and `release` must keep `release-publish` because the crates.io and PyPI trusted
+publishers bind their OIDC claim to that name. Putting `release-pr` there would also register a
+deployment to the publish environment on every push to `main`, and any reviewer added there later
+would block every merge. So the App secrets are duplicated across both environments deliberately.
+
+**ONE STEP OUTSTANDING, and without it this is not closed.** An environment secret does **not**
+shadow a repository secret of the same name — the repository one still resolves. So while
+`PAIGASUS_BOT_APP_ID` and `PAIGASUS_BOT_PRIVATE_KEY` remain repository secrets, the job succeeds
+either way and the migration is unproven. They must be deleted, and the next `release-pr` run
+inspected to confirm it **executed** rather than skipped — the preflight skips **green**, so the
+checks list cannot tell the two apart. Runbook §3.1 carries the procedure.
 
 ### 3.4 The branch ruleset does not obstruct the sequence
 
@@ -513,7 +524,7 @@ not merge it.** The runbook says so explicitly.
 
 ---
 
-## 4. The two GitHub environments
+## 4. The three GitHub environments
 
 Revision 1 specified reviewers only. Every setting below matters, because each one can split the
 release by a different mechanism.
@@ -780,7 +791,7 @@ Yank the three seeds (§2.6) and revoke the local crates.io token (§5.4).
 | **Partial multi-registry failure** | See §8.1 — it has no complete bound today |
 | crates.io rate-limits new crates | Three new crates land in one session. crates.io documents a burst of **5** per account, so three fits. **Provenance is weak** — the docs page renders client-side and could not be fetched. If refused, wait and retry; earlier seeds stay valid |
 | The `workflow_dispatch` trigger lets a non-owner fire an irreversible release | Bounded **outside** the workflow file: the `release-publish` branch policy is `main`-only and all three registry credentials require that environment (§3.3). Nothing in the file bounds it |
-| A dispatched ref reaches `release-pr`'s **repository-level** App secrets (§3.3.1) | **NOT bounded by the above** — `release-pr` enters no environment. Narrowed, not closed. Open decision |
+| A dispatched ref reaches `release-pr`'s App secrets (§3.3.1) | **Closed** by the `release-pr` environment (`main`-only, environment secrets) — **once the repository secrets are deleted**. Until then, unproven |
 | The dispatch trigger is left in place after the release | §9 names it as a tracked removal with its condition. **Nothing in CI enforces the removal** — this is a real residual |
 | A PyPI publisher field is wrong, or no slots are free | Fails after crates.io published. §5.1 verifies at step C, before D |
 | The npm scope is not owned, or the token is the wrong type | Fails after crates.io **and** PyPI published. §1.4 and §5.2 confirm at step C |
@@ -846,6 +857,9 @@ Both are temporary by decision. Neither is enforced by any gate, which is why th
 
 - **Who performs the flip?** The **owner**, by decision. Step H is no longer delegated. Steps
   B1–B3 stay with the agent if its token permits, and move to the owner if not (§3).
+- **Do the App secrets move to an environment?** **Yes, done** — a third environment `release-pr`,
+  `main`-only, holding both as environment secrets (§3.3.1). The repository secrets must still be
+  deleted for it to take effect; runbook §3.1 has the steps.
 - **Does npm keep a token, or get seeded like crates.io?** **Keep the token**, by decision.
   It is a bootstrap credential for one release; SMA-602 replaces it with trusted publishing before
   the January 2027 cutoff. §5.2 records the two alternatives that were rejected.
@@ -854,15 +868,10 @@ Both are temporary by decision. Neither is enforced by any gate, which is why th
 
 ### 10.2 Still open
 
-1. **Do the App secrets move to an environment (§3.3.1)?** `release-pr` reaches repository-level
-   `contents: write` credentials from a dispatched ref. The escalation is narrow — a repo-scoped
-   token granting about what a write-access holder already has — but it is real, and the `if:`
-   added in this branch narrows it without closing it. The migration cannot be verified before
-   merge, because a botched one skips green. **Decide before, or together with, step H.**
-2. **Does release-plz's registry query skip yanked versions?** If it does not, `0.1.0-alpha.1`
+1. **Does release-plz's registry query skip yanked versions?** If it does not, `0.1.0-alpha.1`
    stays the baseline forever and §2.4's analysis re-applies at `0.2.0`. If it does, the baseline
    silently becomes "unpublished" again after step J. Knowable before step J, either way.
-3. **Does one `crates-io-auth-action` OIDC exchange yield a token valid for all three crates?** The
+2. **Does one `crates-io-auth-action` OIDC exchange yield a token valid for all three crates?** The
    action runs once; release-plz publishes three; three separate trusted-publisher configs exist.
 
 ---

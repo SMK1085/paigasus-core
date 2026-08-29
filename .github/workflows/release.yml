@@ -130,6 +130,18 @@ jobs:
     # only — a dispatch never mints the App token by mistake. See the `workflow_dispatch` comment
     # at the top of this file for the residual it does not close.
     if: github.event_name == 'push'
+    # THE CREDENTIAL BOUNDARY for this job, and the reason it is an environment rather than an
+    # `if:` (SMA-580). `release-pr`'s deployment branch policy is `main`-only, and the App
+    # credentials below are ENVIRONMENT secrets on it — not repository secrets. So both directions
+    # are closed on a dispatched ref carrying an edited copy of this file:
+    #
+    #   * keeps `environment: release-pr` -> the branch policy fails the job on any ref but `main`
+    #   * drops it                        -> the job cannot read PAIGASUS_BOT_* at all
+    #
+    # A job may declare only ONE environment, which is why this is its own environment rather than
+    # `release-publish`: that name is bound by the crates.io and PyPI trusted publishers and must
+    # stay on the `release` job. Do not merge the two.
+    environment: release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # release-plz force-updates its PR branch on every run, so two rapid merges to main would
