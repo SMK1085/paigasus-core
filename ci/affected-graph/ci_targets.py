@@ -698,6 +698,17 @@ ACTIONLINT_SH_CALL_SITES = (
     # a function, if, or loop) — column 0 like every other entry above. Deleting it stops
     # ci/release-plan/run.sh from ever being invoked against the real repository.
     "release_plan_sh --assert || rp_rc=$?",
+    # SMA-603 fix round 1 (review I1) — check 11's exit-status ROUTING, the same shape as check
+    # 10's own `if`/catch-all-`elif` pair pinned above. MEASURED on a copy: deleting the whole
+    # `if [ "$rp_rc" -eq 2 ]; then … elif … elif … fi` block leaves every OTHER pin in both
+    # tuples satisfied, `repo:affected-smoke` green, and a `release_plan_sh` forced to return 1
+    # silently swallowed — the gate exits 0 printing nothing about check 11. With the block
+    # intact the same mutation correctly exits 1. `rp_rc=0` needs NO pin of its own: deleting
+    # that line leaves `$rp_rc` unbound when `release_plan_sh` is later read under `set -u`,
+    # which aborts the script outright — it already fails closed without help, so do not add a
+    # fourth pin for it thinking this is an oversight.
+    'if [ "$rp_rc" -eq 2 ]; then',
+    'elif [ "$rp_rc" -ne 0 ]; then',
 )
 
 # SMA-579 — check 10's two remaining call sites, pinned SEPARATELY from ACTIONLINT_SH_CALL_SITES
@@ -741,6 +752,13 @@ ACTIONLINT_SH_INDENTED_CALL_SITES = (
     # above: deleting it leaves the production call (in ACTIONLINT_SH_CALL_SITES above) running
     # against a verdict function nothing has proved correct.
     'release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken',
+    # SMA-603 fix round 1 (review I2) — check 11's --negative-control invocation. Deleting it
+    # reds nothing else: SELF_TESTS_RAN and the definition count are unaffected (the function
+    # still runs and still increments once), check 9 mutates only the bare invocations inside
+    # run_self_tests, and no other entry in either tuple names this line. This repo pins a
+    # negative-control invocation everywhere else one exists (RELEASE_PARITY_SH_CALL_SITES,
+    # WORKFLOW_CREDENTIALS_SH_CALL_SITES); this closes the same gap for check 11.
+    'release_plan_sh --negative-control || { fail "check 11: ci/release-plan/run.sh',
 )
 
 # SMA-530. The moon.yml pins above prove the CONTROL IS INVOKED; these prove it still DOES
@@ -1787,16 +1805,22 @@ def self_test():
         # Check 11's production call site (SMA-603) — same shape: at run.sh's top level, outside
         # any function.
         "release_plan_sh --assert || rp_rc=$?\n"
+        # ...and check 11's exit-status routing (SMA-603 fix round 1, I1) — the `if`/catch-all
+        # `elif` pair, same shape as check 10's pair immediately above.
+        'if [ "$rp_rc" -eq 2 ]; then\n'
+        'elif [ "$rp_rc" -ne 0 ]; then\n'
         # ...and check 10's fixture-table arity floor and self-test invocation (SMA-579),
         # matched via ACTIONLINT_SH_INDENTED_CALL_SITES instead: both sit inside
         # release_guard_self_test(), so they carry real, executing leading whitespace.
         '  [ "$n" -ge 20 ] || infra "check 10: release_guard.py reports $n fixtures, expected at least 20"\n'
         '  release_guard_py --self-test || { fail "check 10: release_guard.py --self-test reported a broken\n'
-        # ...and check 11's invocation inside run_self_tests, and its own self-test invocation
-        # (SMA-603), matched via ACTIONLINT_SH_INDENTED_CALL_SITES for the same reason: both carry
-        # real, executing leading whitespace inside run_self_tests()/release_plan_self_test().
+        # ...and check 11's invocation inside run_self_tests, its own self-test invocation, and
+        # its negative-control invocation (SMA-603, the last added in fix round 1's I2), matched
+        # via ACTIONLINT_SH_INDENTED_CALL_SITES for the same reason: all three carry real,
+        # executing leading whitespace inside run_self_tests()/release_plan_self_test().
         "  release_plan_self_test\n"
         '  release_plan_sh --self-test || { fail "check 11: release_plan.py --self-test reported a broken\n'
+        '  release_plan_sh --negative-control || { fail "check 11: ci/release-plan/run.sh\n'
     )
     wired_release_parity = (
         '    --negative-control) NEGATIVE=1; shift ;;\n'

@@ -4537,7 +4537,12 @@ release_plan_self_test() {
   local rc=0 n
   SELF_TESTS_RAN=$((SELF_TESTS_RAN + 1))
 
-  n="$(uv run --project ci/release-plan --python '>=3.12' python3 \
+  # Bypasses release_plan_sh (ci/release-plan/run.sh) on purpose: that wrapper's flag parser
+  # rejects anything but --self-test/--negative-control/--assert/--github-output, dying with
+  # `die_infra "unknown flag"` on --fixture-count. `--locked` mirrors check 10's release_guard_py
+  # wrapper (see the comment above it) — inert today since ci/release-plan is zero-dependency,
+  # live the moment that project gains one. Verified against the current lock: exits 0.
+  n="$(uv run --locked --project ci/release-plan --python '>=3.12' python3 \
     ci/release-plan/release_plan.py --fixture-count)" \
     || infra "check 11: release_plan.py --fixture-count failed"
   case "$n" in ''|*[!0-9]*) infra "check 11: --fixture-count printed '$n', expected an integer" ;; esac
