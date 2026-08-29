@@ -108,10 +108,10 @@ FORBIDDEN_PACKAGED=("moon.yml")
 # (repo:version-lockstep writes it), and paigasus-py-bindings is simultaneously
 # `publish = false` on the Cargo side and PyPI-bound (SMA-578 review M7).
 #
-# py/packages/paigasus-proto is DELIBERATELY absent: it is version-locked with the proto
-# family and its name is reserved on PyPI, but no publish path uploads it yet. SMA-579
-# owns that decision (SMA-578 §9.3) — it must be recorded, not made by omission.
-EXPECTED_PYPI_PUBLISHABLE=("paigasus-kernel" "paigasus-py-bindings")
+# py/packages/paigasus-proto IS published: release.yml's publish-pypi job uploads it,
+# conditioned on release-plz reporting a release for the RUST crate `paigasus-proto`. This
+# is SMA-579's decision (SMA-578 §9.3) — it is recorded here, not made by omission.
+EXPECTED_PYPI_PUBLISHABLE=("paigasus-kernel" "paigasus-proto" "paigasus-py-bindings")
 
 # The scan set. The py/packages half is DISCOVERED AT RUNTIME from a single-level glob, not
 # hand-maintained. The distinction matters more here than it looks: the crates.io half is
@@ -1459,6 +1459,9 @@ PY
   # A second marked distribution, so the P0 set matches EXPECTED and the rows below fail
   # on the rule they NAME rather than on P0.
   _pybind() { _pyproj "$1"; sed -i.bak 's/paigasus-kernel/paigasus-py-bindings/' "$1/pyproject.toml"; }
+  # A third marked distribution — EXPECTED_PYPI_PUBLISHABLE has three members (SMA-579
+  # added paigasus-proto), so a fixture that wants P0 to pass needs all three names present.
+  _pyproto() { _pyproj "$1"; sed -i.bak 's/paigasus-kernel/paigasus-proto/' "$1/pyproject.toml"; }
 
   # --- SMA-578 review I1: runtime DISCOVERY of the scan set, driven with a fixture tree ---
   local scanroot="$tmp/scanroot"
@@ -1538,8 +1541,9 @@ $scanroot/rs/crates/bindings/paigasus-py-bindings/pyproject.toml"
 
   _pyproj "$pyd/ok"; : >"$pyd/ok/README.md"; : >"$pyd/ok/LICENSE"
   _pybind "$pyd/ok2"; : >"$pyd/ok2/README.md"; : >"$pyd/ok2/LICENSE"
-  _expect_rc 0 "Check P0/P1/P2 (a well-formed pair passes — not vacuously red)" \
-    assert_pypi_metadata "$pyd/ok/pyproject.toml" "$pyd/ok2/pyproject.toml"
+  _pyproto "$pyd/ok3"; : >"$pyd/ok3/README.md"; : >"$pyd/ok3/LICENSE"
+  _expect_rc 0 "Check P0/P1/P2 (a well-formed triple passes — not vacuously red)" \
+    assert_pypi_metadata "$pyd/ok/pyproject.toml" "$pyd/ok2/pyproject.toml" "$pyd/ok3/pyproject.toml"
 
   # P0 — one distribution short of EXPECTED_PYPI_PUBLISHABLE.
   _expect_rc 1 "Check P0 (shrunken publishable set)" \
@@ -1548,40 +1552,52 @@ $scanroot/rs/crates/bindings/paigasus-py-bindings/pyproject.toml"
   # P0 — duplicate PyPI-bound distribution names. `found` is keyed by distribution name, so
   # a second PyPI-marked manifest declaring an already-seen name silently OVERWRITES the
   # first: set(found) is unchanged, so P0's strict-equality check alone cannot see it, and
-  # only the surviving manifest's metadata ever reaches P1/P2. Three inputs, not two: two
+  # only the surviving manifest's metadata ever reaches P1/P2. Four inputs, not three: two
   # otherwise well-formed manifests sharing the "paigasus-kernel" name, plus a normal
-  # paigasus-py-bindings manifest — so set(found) still equals EXPECTED_PYPI_PUBLISHABLE and
-  # this row fails ONLY on the duplicate-name rule, not on P0's set mismatch or on P1/P2.
+  # paigasus-py-bindings manifest and a normal paigasus-proto manifest — so set(found) still
+  # equals EXPECTED_PYPI_PUBLISHABLE and this row fails ONLY on the duplicate-name rule, not
+  # on P0's set mismatch or on P1/P2.
   _pyproj "$pyd/dup1"; : >"$pyd/dup1/README.md"; : >"$pyd/dup1/LICENSE"
   _pyproj "$pyd/dup2"; : >"$pyd/dup2/README.md"; : >"$pyd/dup2/LICENSE"
   _pybind "$pyd/dupbind"; : >"$pyd/dupbind/README.md"; : >"$pyd/dupbind/LICENSE"
+  _pyproto "$pyd/dupproto"; : >"$pyd/dupproto/README.md"; : >"$pyd/dupproto/LICENSE"
   _expect_rc 1 "Check P0 (duplicate PyPI distribution name overwrites instead of reporting)" \
-    assert_pypi_metadata "$pyd/dup1/pyproject.toml" "$pyd/dup2/pyproject.toml" "$pyd/dupbind/pyproject.toml"
+    assert_pypi_metadata "$pyd/dup1/pyproject.toml" "$pyd/dup2/pyproject.toml" \
+      "$pyd/dupbind/pyproject.toml" "$pyd/dupproto/pyproject.toml"
 
-  # P1 — a required [project] key is absent.
+  # P1 — a required [project] key is absent. A third, well-formed manifest keeps
+  # set(found) equal to EXPECTED_PYPI_PUBLISHABLE's three members, so this row fails on
+  # the missing-field rule rather than on P0's set mismatch.
   _pyproj "$pyd/nodesc"; : >"$pyd/nodesc/README.md"; : >"$pyd/nodesc/LICENSE"
   sed -i.bak '/^description = /d' "$pyd/nodesc/pyproject.toml"
   _pybind "$pyd/nodesc2"; : >"$pyd/nodesc2/README.md"; : >"$pyd/nodesc2/LICENSE"
+  _pyproto "$pyd/nodesc3"; : >"$pyd/nodesc3/README.md"; : >"$pyd/nodesc3/LICENSE"
   _expect_rc 1 "Check P1 (a required [project] field is missing)" \
-    assert_pypi_metadata "$pyd/nodesc/pyproject.toml" "$pyd/nodesc2/pyproject.toml"
+    assert_pypi_metadata "$pyd/nodesc/pyproject.toml" "$pyd/nodesc2/pyproject.toml" \
+      "$pyd/nodesc3/pyproject.toml"
 
-  # P2 — declared LICENSE does not exist on disk.
+  # P2 — declared LICENSE does not exist on disk. Same three-name reasoning as above.
   _pyproj "$pyd/nolicfile"; : >"$pyd/nolicfile/README.md"
   _pybind "$pyd/nolic2"; : >"$pyd/nolic2/README.md"; : >"$pyd/nolic2/LICENSE"
+  _pyproto "$pyd/nolic3"; : >"$pyd/nolic3/README.md"; : >"$pyd/nolic3/LICENSE"
   _expect_rc 1 "Check P2 (declared-but-absent LICENSE)" \
-    assert_pypi_metadata "$pyd/nolicfile/pyproject.toml" "$pyd/nolic2/pyproject.toml"
+    assert_pypi_metadata "$pyd/nolicfile/pyproject.toml" "$pyd/nolic2/pyproject.toml" \
+      "$pyd/nolic3/pyproject.toml"
 
   # P1 — SPDX expression AND a License:: trove classifier. The classifier REPLACES the
   # baseline line rather than being appended: a second `classifiers =` key is a TOML
   # duplicate-key error, which this arm reports as rc 2 (infrastructure) — the fixture
-  # would then fail before ever reaching the rule it names.
+  # would then fail before ever reaching the rule it names. A third, well-formed manifest
+  # keeps set(found) equal to EXPECTED_PYPI_PUBLISHABLE's three members.
   _pyproj "$pyd/spdxclash"
   sed -i.bak 's|^classifiers = .*|classifiers = ["License :: OSI Approved :: Apache Software License"]|' \
     "$pyd/spdxclash/pyproject.toml"
   : >"$pyd/spdxclash/README.md"; : >"$pyd/spdxclash/LICENSE"
   _pybind "$pyd/spdx2"; : >"$pyd/spdx2/README.md"; : >"$pyd/spdx2/LICENSE"
+  _pyproto "$pyd/spdx3"; : >"$pyd/spdx3/README.md"; : >"$pyd/spdx3/LICENSE"
   _expect_rc 1 "Check P1 (SPDX license alongside a License:: classifier)" \
-    assert_pypi_metadata "$pyd/spdxclash/pyproject.toml" "$pyd/spdx2/pyproject.toml"
+    assert_pypi_metadata "$pyd/spdxclash/pyproject.toml" "$pyd/spdx2/pyproject.toml" \
+      "$pyd/spdx3/pyproject.toml"
 
   # Infrastructure, not assertion: no [project] table at all (py/pyproject.toml's shape).
   printf '[tool.uv.workspace]\nmembers = ["packages/*"]\n' >"$pyd/virtual.toml"

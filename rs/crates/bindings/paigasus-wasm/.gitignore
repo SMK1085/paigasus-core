@@ -11,3 +11,11 @@
 *.wasm
 .wasmpack-out/
 .wasmpack-test-out/
+.wasmpack-release-out/
+
+# The release path's UPLOAD staging dir, and the one scratch dir here that is deliberately NOT
+# dot-prefixed: `actions/upload-artifact` excludes hidden files by default, so a dot-prefixed path
+# uploads NOTHING and fails the job with "No files were found" — measured on prebuild.yml's first
+# run with the wasm build in it, after the build step had already reported success. prebuild.yml
+# copies the glue and the CRATE-ROOT package.json here, then uploads this directory (SMA-579).
+wasm-dist/

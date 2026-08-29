@@ -1,29 +1,95 @@
 # SPDX-License-Identifier: Apache-2.0
 name: release
 
-# Only the RELEASE-PR half is live (SMA-576). The release job — tags + registry publishes —
-# lands with SMA-580 behind `vars.PAIGASUS_RELEASE_ENABLED`. Nothing here publishes.
+# The full release path — `release`, `publish-pypi`, `publish-npm` — is present in this file
+# (SMA-579), but INERT until `vars.PAIGASUS_RELEASE_ENABLED` is `'true'`. SMA-580 is what flips
+# that variable, after its own pre-flight. Nothing publishes until then.
+#
+# HOW THE GATE REACHES EACH JOB — three ways, not one (fix round 3, Minor 1; an earlier wording
+# here said "each job is gated on `if: …`", which is true of three of the seven jobs). The
+# authoritative statement is the "NO `plan` JOB EXISTS" note below; this is its summary:
+#   * `wheels`, `prebuild` and `proto-dist` carry `if: vars.PAIGASUS_RELEASE_ENABLED == 'true'`
+#     literally.
+#   * `approve-release`, `release`, `publish-pypi` and `publish-npm` carry NO `if:` of their own.
+#     They are gated TRANSITIVELY, through an unbroken `needs:` chain back to those three.
+#   * `release-pr` is not gated at all, by design — it must keep proposing the release PR while
+#     the flag is off. That is only safe because it cannot reach a registry, which
+#     `ci/actionlint/release_guard.py`'s V7 now ASSERTS (it is in that guard's `UNGATED_JOBS`,
+#     and a member of that set carrying a publish step fails the gate).
+# `release_guard.py` V1 accepts all three shapes and rejects a fourth.
 on:
   push:
     branches:
       - main
-
-# release-plz force-updates its PR branch on every run, so two rapid merges to main would
-# race. Do NOT cancel in progress: a cancelled run can leave the branch half-written.
-concurrency:
-  group: release-pr
-  cancel-in-progress: false
 
 # Least privilege for the auto GITHUB_TOKEN, matching every other workflow here: it is never
 # used for the push/PR below (that goes through the App installation token — see "Mint").
 permissions:
   contents: read
 
+# JOB ORDER IS LOAD-BEARING, and it is the reverse of the obvious one (SMA-578 review B3).
+# Everything REVERSIBLE runs before the first IRREVERSIBLE step:
+#
+#   {wheels, prebuild, proto-dist} -> release -> {publish-pypi, publish-npm}
+#
+# The draft this replaced ran `release` FIRST, so release-plz published to crates.io and cut six
+# tags before a single wheel was built. A zig regression or a runner-image change in the 12-leg
+# matrix then left crates.io permanently published, tags permanently cut, and paigasus-kernel
+# missing from PyPI while pinning paigasus-py-bindings==X.Y.Z. Nothing forces that order: the
+# release commit on main already carries the bumped versions, so the artifacts can be built first.
+#
+# COROLLARY, equally load-bearing: NO JOB DOWNSTREAM OF `release` MAY BUILD ANYTHING. A wasm-pack
+# or uv build after the crates.io upload reintroduces exactly the half-published state this order
+# exists to prevent.
+#
+# ONE EXCEPTION, stated precisely (fix round 3, Important 5; the earlier wording claimed both
+# publish jobs "only download, assert and upload", and that was false of one of them):
+#
+#   * `publish-pypi` genuinely only downloads, asserts and uploads. It has no checkout and no
+#     toolchain setup.
+#   * `publish-npm` runs `actions/checkout`, `moonrepo/setup-toolchain` and
+#     `pnpm --dir ts install --frozen-lockfile` BEFORE it publishes. It COMPILES NOTHING — no
+#     cargo, no wasm-pack, no napi build. It needs a JS toolchain because the publisher itself,
+#     `napi prepublish`, is a Node CLI that must be resolvable from the pnpm workspace, and
+#     because the main package publishes from the crate directory in the checkout.
+#
+# THE RESIDUAL, honestly: a `pnpm install` failure inside publish-npm lands AFTER crates.io has
+# published and after publish-pypi may have uploaded. Two things bound it, neither of which
+# removes it. `prebuild.yml` ran the byte-identical `pnpm --dir ts install --frozen-lockfile`
+# earlier in the SAME run, against the same lockfile and the same pinned toolchain, and
+# publish-npm cannot start until it succeeded — so the window is narrow and mostly covers
+# registry/network faults rather than a broken lockfile. And the `npmstate` pre-check makes a
+# re-run converge: it skips whatever already published, so the job is safe to run again.
+#
+# DO NOT "FIX" THIS BY RESTRUCTURING publish-npm (SMA-579 Ruling 24). Removing the install means
+# replacing `napi prepublish` with a hand-rolled `npm publish` loop over the seven platform dirs
+# plus a `jq` rewrite of the main package's optionalDependencies. That puts new, unreviewed logic
+# in the one path where a mistake cannot be undone — a worse trade than the narrow, re-runnable
+# failure window it would close.
+#
+# NO `plan` JOB EXISTS (SMA-579 Task 6+7 decision). The original design had a `plan` job run
+# `release-plz release --dry-run` first, so a push with nothing to release could skip the 12-leg
+# matrix. Measured against the real repository: the dry-run FAILS every time, with `no matching
+# package named paigasus-proto-derive` — a dry run never publishes the derive crate to crates.io,
+# so the dependent `paigasus-proto` dry-run can never resolve it. That failure is permanent until
+# a LIVE release publishes the derive crate first. A `plan` job built on that dry-run would red
+# the whole graph on every push to main. So `wheels`, `prebuild` and `proto-dist` each carry
+# `if: vars.PAIGASUS_RELEASE_ENABLED == 'true'` directly, and `approve-release`/`release` are
+# gated only TRANSITIVELY through their `needs:` chain. The accepted cost: once the flag is on,
+# every push to main builds the full wheel and napi matrices even when nothing is releasable. Do
+# not "fix" this by reintroducing a dry-run-based `plan` job without first re-verifying that
+# release-plz's dry-run can resolve the derive-crate dependency.
+
 jobs:
   release-pr:
     name: release PR
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # release-plz force-updates its PR branch on every run, so two rapid merges to main would
+    # race. Do NOT cancel in progress: a cancelled run can leave the branch half-written.
+    concurrency:
+      group: release-pr
+      cancel-in-progress: false
     steps:
       # The App credentials may not exist yet (a human must create them — see the workflow's
       # own doc). A job-level `if:` cannot see whether a secret is set: per GitHub's own
@@ -198,3 +264,497 @@ jobs:
           git add -A
           git commit -m "chore(rs): stamp the non-Cargo manifests to the release version"
           git push "$AUTH_REMOTE" "HEAD:$BRANCH"
+
+  # THE REVERSIBLE STAGE. Everything below `release` only downloads what these produce.
+  wheels:
+    name: build wheels
+    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    uses: ./.github/workflows/wheels.yml
+
+  prebuild:
+    name: build node addons and wasm
+    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    uses: ./.github/workflows/prebuild.yml
+
+  proto-dist:
+    name: build the Python proto distribution
+    if: vars.PAIGASUS_RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install Moon-managed toolchains
+        run: moon setup
+
+      - name: Build the distribution
+        working-directory: py
+        run: uv build --package paigasus-proto --out-dir ../dist
+
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: proto-dist-py
+          path: |
+            dist/paigasus_proto-*.whl
+            dist/paigasus_proto-*.tar.gz
+          if-no-files-found: error
+
+  # The ONE place a human approval can be inserted, by adding required reviewers to the
+  # `release-approval` environment in repo settings. It must NOT go on the publishing jobs:
+  # GitHub pauses EACH job entering an environment, so reviewers on release-publish would stop
+  # the run again between crates.io and PyPI — leaving crates.io published and PyPI empty if the
+  # second approval is rejected or times out (30 days). That is the split state the job order
+  # above exists to prevent. SMA-580: add reviewers HERE, never to release-publish.
+  approve-release:
+    name: approve the release
+    needs: [wheels, prebuild, proto-dist]
+    runs-on: ubuntu-latest
+    environment: release-approval
+    steps:
+      - run: echo "Approved. Everything below this point is irreversible."
+
+  release:
+    name: publish to crates.io and cut tags
+    needs: [wheels, prebuild, proto-dist, approve-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release-publish
+    # The irreversible step, serialized. Two merges to main in quick succession would otherwise
+    # run two `release-plz release` invocations concurrently, racing the same crates.io publish
+    # and the same tag push. NEVER cancel-in-progress here: a cancelled release can leave
+    # crates.io half-published with tags partially cut, which is precisely the split state the
+    # job ORDER above exists to prevent. A queued second run is safe — release-plz is idempotent
+    # and skips packages already published at that version.
+    #
+    # The build jobs deliberately carry no group: they only produce artifacts, so concurrent
+    # runs are harmless, and serializing them would put every push to main behind a full
+    # 12-leg matrix.
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
+    permissions:
+      id-token: write    # crates.io OIDC exchange
+      contents: read     # the App token below does the writing, not GITHUB_TOKEN
+    outputs:
+      released: ${{ steps.rel.outputs.json }}
+    steps:
+      - name: Authenticate with crates.io
+        id: cratesio
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18  # v1.0.5
+
+      # A SECOND mint: tokens are per-job and live one hour. Every checkout in this repo sets
+      # persist-credentials: false, so there are no ambient git credentials and release-plz's
+      # tag push needs this explicitly.
+      - name: Mint the App installation token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ secrets.PAIGASUS_BOT_APP_ID }}
+          private-key: ${{ secrets.PAIGASUS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install pinned release-plz CLI
+        run: proto install release-plz
+
+      - name: Release
+        id: rel
+        working-directory: rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.cratesio.outputs.token }}
+          GIT_TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          OUT="$(release-plz release --output json)"
+          echo "$OUT"
+          echo "json=$OUT" >> "$GITHUB_OUTPUT"
+
+  # THE THIRD AND FOURTH IRREVERSIBLE STAGES. There is no `plan` job (see the file-header
+  # decision) — the version and per-family flags are read straight out of `release`'s own
+  # `released` output rather than from a job that does not exist. Both jobs only download,
+  # assert and upload; the corollary above forbids anything that compiles, fetches or
+  # generates here.
+  publish-pypi:
+    name: publish to PyPI
+    needs: [wheels, proto-dist, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release-publish
+    permissions:
+      id-token: write    # PyPI trusted publishing; the claim binds to THIS file's name
+    steps:
+      # `release`'s `released` output is release-plz's own `--output json`, shaped
+      # `{"releases":[{"package_name":...,"version":...}]}` (measured against release_plz_core
+      # 0.36.14 — "releases"/"package_name", NOT "prs"/"package", which is the OTHER command's
+      # shape). paigasus-py-bindings is Cargo `publish = false`, so release-plz never reports
+      # it — bind against paigasus-kernel instead, which it definitely reports and which
+      # version_group holds to the identical number (repo:version-lockstep asserts that).
+      - name: Read the released version
+        id: relinfo
+        env:
+          RELEASED: ${{ needs.release.outputs.released }}
+        run: |
+          set -euo pipefail
+          # Fix round 1 (Critical 2): `paigasus-kernel` (group `kernel`) and `paigasus-proto`
+          # (group `proto`) are INDEPENDENTLY triggered release-plz version groups — a
+          # contracts-only commit legitimately releases proto with no kernel entry in
+          # `$RELEASED`, and vice versa. A missing family must never hard-fail the job: it
+          # must gate that family's steps off instead, so a run where NEITHER family released
+          # still completes having uploaded nothing. `.releases[]?` (not `.releases[]`) so an
+          # empty `{"releases":[]}` array yields "" rather than a jq error under `pipefail`.
+          # Fix round 2 (Important): `?` also swallows a STRUCTURALLY WRONG payload (release-plz
+          # schema drift, or `$RELEASED` wired to the wrong key) — `.releases[]?` on `null`,
+          # `{"unexpected":1}` or `{"releases":null}` would silently report both families absent
+          # and the job would exit 0 having uploaded nothing. Validate the shape explicitly
+          # first, so `?` is doing only the job it was added for (a legitimately empty or
+          # absent-key `releases` array), not hiding a wiring bug as a quiet no-op.
+          jq -e 'has("releases") and (.releases | type == "array")' <<<"$RELEASED" >/dev/null \
+            || { echo "::error::malformed release output from release-plz: $RELEASED"; exit 1; }
+          KERNEL_VERSION="$(jq -r '.releases[]? | select(.package_name == "paigasus-kernel") | .version' <<<"$RELEASED")"
+          PROTO_VERSION="$(jq -r '.releases[]? | select(.package_name == "paigasus-proto") | .version' <<<"$RELEASED")"
+          if [ -n "$KERNEL_VERSION" ]; then
+            echo "kernel_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "kernel_release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "kernel_version=$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
+          # This keys on the RUST crate `paigasus-proto` reported by release-plz. What gets
+          # uploaded below under this flag is the PYTHON distribution built from
+          # py/packages/paigasus-proto — same name, two different artifacts.
+          if [ -n "$PROTO_VERSION" ]; then
+            echo "proto_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "proto_release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "proto_version=$PROTO_VERSION" >> "$GITHUB_OUTPUT"
+
+      # THREE downloads, not one. wheels.yml deliberately keeps face-paigasus-kernel OUTSIDE the
+      # wheel-* namespace precisely so a single `pattern: wheel-*` + merge-multiple cannot
+      # collapse them: paigasus-py-bindings MUST reach PyPI before paigasus-kernel, because the
+      # face pins `==` and the reverse order leaves it uninstallable in between.
+      - name: Download the bindings wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist-bindings
+
+      - name: Download the bindings sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sdist
+          path: dist-bindings
+
+      - name: Download the kernel face
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: face-paigasus-kernel
+          path: dist-face
+
+      - name: Download the proto distribution
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: proto-dist-py
+          path: dist-proto
+
+      # Binds the artifact to the release. Without this a re-run against a moved main could
+      # publish a stale wheel under the wrong version.
+      - name: Assert the wheels match the released version
+        if: steps.relinfo.outputs.kernel_release == 'true'
+        env:
+          KERNEL_VERSION: ${{ steps.relinfo.outputs.kernel_version }}
+        run: |
+          set -euo pipefail
+          [ -n "$KERNEL_VERSION" ] || { echo "::error::no kernel version from relinfo"; exit 1; }
+          found=0
+          for w in dist-bindings/*.whl; do
+            case "$(basename "$w")" in
+              paigasus_py_bindings-"$KERNEL_VERSION"-*) found=$((found+1)) ;;
+              *) echo "::error::unexpected wheel $(basename "$w") — expected version $KERNEL_VERSION"; exit 1 ;;
+            esac
+          done
+          [ "$found" -ge 7 ] || { echo "::error::found $found wheels, expected at least 7"; exit 1; }
+          # The sdist is not a `.whl`, so the loop above never inspects it — without this it
+          # ships whatever version wheels.yml's `sdist` job happened to build, unbound to the
+          # release. A re-run against a moved main could then publish an sdist at the wrong,
+          # permanently-burnt PyPI version.
+          test -f "dist-bindings/paigasus_py_bindings-$KERNEL_VERSION.tar.gz" \
+            || { echo "::error::missing dist-bindings/paigasus_py_bindings-$KERNEL_VERSION.tar.gz"; exit 1; }
+          echo "OK: $found wheels + sdist at $KERNEL_VERSION"
+
+      # ORDER IS LOAD-BEARING: bindings, then the face. skip-existing makes a partial failure
+      # re-runnable — PyPI returns 400 "file already exists" otherwise, so an un-skipped retry can
+      # never succeed unaided. PyPI is delete-but-never-reuse.
+      - name: Publish paigasus-py-bindings
+        if: steps.relinfo.outputs.kernel_release == 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: dist-bindings
+          skip-existing: true
+
+      - name: Publish paigasus-kernel
+        if: steps.relinfo.outputs.kernel_release == 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: dist-face
+          skip-existing: true
+
+      # Binds the proto distribution to the release, same reason as the wheel/sdist assertion
+      # above: `PROTO_VERSION` was computed but never exported, so this upload shipped whatever
+      # proto-dist happened to build — a re-run against a moved main could publish it at a
+      # version that does not match the release. Filenames match `uv build --package
+      # paigasus-proto`'s output (a pure-Python uv_build wheel, tag py3-none-any).
+      - name: Assert the proto distribution matches the released version
+        if: steps.relinfo.outputs.proto_release == 'true'
+        env:
+          PROTO_VERSION: ${{ steps.relinfo.outputs.proto_version }}
+        run: |
+          set -euo pipefail
+          [ -n "$PROTO_VERSION" ] || { echo "::error::no proto version from relinfo"; exit 1; }
+          test -f "dist-proto/paigasus_proto-$PROTO_VERSION-py3-none-any.whl" \
+            || { echo "::error::missing dist-proto/paigasus_proto-$PROTO_VERSION-py3-none-any.whl"; exit 1; }
+          test -f "dist-proto/paigasus_proto-$PROTO_VERSION.tar.gz" \
+            || { echo "::error::missing dist-proto/paigasus_proto-$PROTO_VERSION.tar.gz"; exit 1; }
+          echo "OK: proto wheel + sdist at $PROTO_VERSION"
+
+      # Independent cadence: release-plz sees the RUST crate `paigasus-proto`; what uploads here
+      # is the PYTHON distribution built from py/packages/paigasus-proto. Same name, two things.
+      - name: Publish paigasus-proto
+        if: steps.relinfo.outputs.proto_release == 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: dist-proto
+          skip-existing: true
+
+  publish-npm:
+    name: publish to npm
+    needs: [prebuild, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release-publish
+    permissions:
+      # `contents: read` is REQUIRED here and is not a copy of `release`'s block for symmetry
+      # (fix round 3, Important 8). A job-level `permissions:` block sets every scope it does NOT
+      # list to `none` — so declaring `id-token: write` alone left `contents` at none while
+      # `actions/checkout` below runs. It works today only because this repository is public; the
+      # day it is not, or the day a checkout needs any contents scope, the job fails AFTER
+      # crates.io has already published. `release` carries `contents: read` beside
+      # `id-token: write` for exactly this reason.
+      contents: read
+      id-token: write    # npm provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up proto + Moon
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0
+        with:
+          cache: false
+
+      - name: Install JS workspace deps
+        run: pnpm --dir ts install --frozen-lockfile
+
+      # See publish-pypi's "Read the released version" step for the JSON shape and for why a
+      # missing family must gate its steps off rather than fail (Fix round 1, Critical 2):
+      # `paigasus-kernel` and `paigasus-proto` are independently triggered release-plz version
+      # groups, so a proto-only release legitimately has no kernel entry here. Every @paigasus/*
+      # npm package is in the kernel family, so `kernel_release` alone governs this whole job.
+      - name: Read the released version
+        id: relinfo
+        env:
+          RELEASED: ${{ needs.release.outputs.released }}
+        run: |
+          set -euo pipefail
+          # Fix round 2 (Important): validate the shape before the family filter — see
+          # publish-pypi's identical guard for why `.releases[]?` alone would silently report
+          # kernel_release=false on a structurally wrong payload instead of failing loudly.
+          jq -e 'has("releases") and (.releases | type == "array")' <<<"$RELEASED" >/dev/null \
+            || { echo "::error::malformed release output from release-plz: $RELEASED"; exit 1; }
+          KERNEL_VERSION="$(jq -r '.releases[]? | select(.package_name == "paigasus-kernel") | .version' <<<"$RELEASED")"
+          if [ -n "$KERNEL_VERSION" ]; then
+            echo "kernel_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "kernel_release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "kernel_version=$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
+
+      # There is deliberately NO `prebuild-*` download here (fix round 3, Minor 4). One existed and
+      # wrote the raw addons to `…/artifacts`, which NOTHING in this job reads: `napi artifacts`
+      # (the subcommand that moves `artifacts/` into `npm/`) runs in prebuild.yml, not here, and
+      # `napi prepublish` reads only the `npm/` dirs. The `npm-dirs` artifact below already carries
+      # each platform's `.node`, because prebuild.yml uploads that directory AFTER running
+      # `napi artifacts` into it. The assertion step further down is what proves that rather than
+      # assuming it — it fails the job if any platform dir arrives without its binary, before
+      # anything is published.
+      - name: Download the assembled npm dirs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: npm-dirs
+          path: rs/crates/bindings/paigasus-node-bindings/npm
+
+      - name: Download the wasm distribution
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: wasm-dist
+          path: wasm-dist
+
+      # Fix round 3, Important 6. publish-pypi asserts BOTH a version binding (every wheel filename
+      # carries $KERNEL_VERSION) and an artifact floor (at least 7 wheels). publish-npm asserted
+      # NEITHER, and both gaps end in an irreversible publish:
+      #
+      #   * No version binding. The packages publish whatever version their downloaded
+      #     package.json carries. On a mismatch the `npm view "$PKG@$VERSION"` pre-check below
+      #     404s — it asks about the RELEASED version — so the job concludes "not published yet"
+      #     and then publishes the WRONG version. npm allows unpublish only within 72 hours.
+      #   * No platform-count floor. In @napi-rs/cli 3.7.2 `napi artifacts` writes only the
+      #     binaries it finds, and `prepublish` skips a missing one with
+      #     `if (!existsSync(dstPath)) { debug.warn(...); continue; }` — a `debug`-namespaced
+      #     warning, invisible without DEBUG= set. So a missing platform binary publishes 6 of 7
+      #     platform packages and then publishes the main package whose optionalDependencies name
+      #     the seventh, which does not exist. Silently.
+      #
+      # Seven is the `napi.targets` count in the crate's package.json, not a guess. The two
+      # non-platform package.json files are checked too: the main package publishes from the
+      # checkout and @paigasus/wasm from the downloaded artifact, so each is its own binding.
+      - name: Assert the npm artifacts match the released version
+        if: steps.relinfo.outputs.kernel_release == 'true'
+        env:
+          KERNEL_VERSION: ${{ steps.relinfo.outputs.kernel_version }}
+        run: |
+          set -euo pipefail
+          [ -n "$KERNEL_VERSION" ] || { echo "::error::no kernel version from relinfo"; exit 1; }
+          NPM_DIR=rs/crates/bindings/paigasus-node-bindings/npm
+          count=0
+          for d in "$NPM_DIR"/*/; do
+            [ -d "$d" ] || continue
+            count=$((count + 1))
+            plat="$(basename "$d")"
+            [ -f "$d/package.json" ] || { echo "::error::npm/$plat has no package.json"; exit 1; }
+            v="$(jq -r '.version' "$d/package.json")"
+            [ "$v" = "$KERNEL_VERSION" ] \
+              || { echo "::error::npm/$plat is at version $v, expected $KERNEL_VERSION"; exit 1; }
+            ls "$d"*.node >/dev/null 2>&1 \
+              || { echo "::error::npm/$plat ships no .node binary"; exit 1; }
+          done
+          [ "$count" -eq 7 ] \
+            || { echo "::error::found $count platform packages under $NPM_DIR, expected exactly 7"; exit 1; }
+          for p in rs/crates/bindings/paigasus-node-bindings/package.json wasm-dist/package.json; do
+            v="$(jq -r '.version' "$p")"
+            [ "$v" = "$KERNEL_VERSION" ] \
+              || { echo "::error::$p is at version $v, expected $KERNEL_VERSION"; exit 1; }
+          done
+          echo "OK: 7 platform packages (each with its .node) + 2 main packages at $KERNEL_VERSION"
+
+      # npm has no --skip-existing, and napi prepublish publishes several packages. A re-run
+      # after a partial success would hit 403 "cannot publish over the previously published
+      # versions" on the ones that landed, so the retry could never succeed unaided — the same
+      # argument skip-existing answers for PyPI. Give npm those semantics by hand.
+      - name: Skip packages already at this version
+        id: npmstate
+        if: steps.relinfo.outputs.kernel_release == 'true'
+        env:
+          VERSION: ${{ steps.relinfo.outputs.kernel_version }}
+        run: |
+          set -euo pipefail
+          published () { npm view "$1@$2" version >/dev/null 2>&1; }
+          if published "@paigasus/wasm" "$VERSION"; then
+            echo "wasm=skip" >> "$GITHUB_OUTPUT"
+          else
+            echo "wasm=publish" >> "$GITHUB_OUTPUT"
+          fi
+          if published "@paigasus/node-bindings" "$VERSION"; then
+            echo "node=skip" >> "$GITHUB_OUTPUT"
+          else
+            echo "node=publish" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --no-gh-release IS REQUIRED and is NOT in --help (prebuild.yml records this; ghRelease
+      # defaults ON). release-plz owns every tag — ADR-0011 S3, "the tool owns every tag",
+      # singular. ci/actionlint/release_guard.py's V5 fails if this flag is ever dropped.
+      # `--no-gh-release` immediately after the subcommand, per the task-89 header: the guard
+      # splits a `run:` line on shell separators and drops anything after a `#`, and a quoted
+      # argument containing `#` placed BEFORE the flag would truncate the segment and produce a
+      # false red — putting the flag first makes that unreachable.
+      #
+      # Auth: npm Trusted Publishing (OIDC) cannot be configured before a package's first-ever
+      # publish, and all three @paigasus/* packages are unpublished (measured: `npm view` 404s
+      # for each) — so NPM_TOKEN stays for now, becoming unnecessary after the first release.
+      # Confined to this step's own env (never job- or workflow-level) and written to the HOME
+      # npmrc rather than the committed ts/.npmrc so every per-target `npm publish` napi shells
+      # out to, regardless of its own cwd under --npm-dir, resolves it.
+      - name: Publish the node addon and its platform packages
+        if: steps.npmstate.outputs.node == 'publish'
+        working-directory: ts/packages/paigasus-kernel
+        env:
+          NPM_CONFIG_PROVENANCE: 'true'
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
+          pnpm exec napi prepublish --no-gh-release --npm-dir npm \
+            --cwd ../../../rs/crates/bindings/paigasus-node-bindings
+
+      # Fix round 1, Critical 1: `napi prepublish` publishes ONLY the seven per-platform
+      # packages — its single `npm publish` call runs with `cwd: pkgDir` inside its target
+      # loop (verified in @napi-rs/cli 3.7.2, dist/index.js:3441-3452). It never publishes the
+      # crate root. Without this step the platform packages land as orphans referenced by
+      # nothing installable, and `npm install @paigasus/node-bindings` 404s forever. Must run
+      # AFTER napi prepublish: the main package's optionalDependencies point at the platform
+      # packages, which must already exist on the registry.
+      - name: Publish @paigasus/node-bindings (the main package)
+        if: steps.npmstate.outputs.node == 'publish'
+        working-directory: rs/crates/bindings/paigasus-node-bindings
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
+          npm publish --provenance --access public
+
+      # Assert the TARBALL, not the working tree: `files` membership is what npm actually ships.
+      # A wasm-less package installs cleanly and fails at import.
+      - name: Assert the wasm tarball carries its binary
+        if: steps.npmstate.outputs.wasm == 'publish'
+        working-directory: wasm-dist
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --json > /tmp/pack.json
+          python3 - <<'PY'
+          import json, sys
+          files = {f["path"] for f in json.load(open("/tmp/pack.json"))[0]["files"]}
+          if "paigasus_wasm_bg.wasm" not in files:
+              print("::error::the wasm tarball ships no binary:", sorted(files))
+              sys.exit(1)
+          print("OK: tarball carries paigasus_wasm_bg.wasm")
+          PY
+
+      - name: Publish @paigasus/wasm
+        if: steps.npmstate.outputs.wasm == 'publish'
+        working-directory: wasm-dist
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
+          npm publish --provenance --access public

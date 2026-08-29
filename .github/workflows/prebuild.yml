@@ -1,6 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
 name: prebuild
 
 on:
+  # Consumed by release.yml's reversible stage (SMA-579). This workflow must NEVER declare
+  # `secrets:` or `id-token: write` — it keeps a pull_request trigger, and same-repo PRs receive
+  # repository secrets. Publishing happens in release.yml, which downloads these artifacts.
+  workflow_call:
+
   workflow_dispatch:
 
   # POST-merge verification of Rust changes. Deliberately excludes every `ts/` path:
@@ -42,7 +48,10 @@ on:
 
 # Build-only verification: read the repo, build addons, run dry-run packaging. No publish, and no
 # GitHub release is created (the assemble job omits napi's opt-in --gh-release flag), so no
-# contents:write is needed. SMA-407 adds publish creds at activation.
+# contents:write is needed.
+# No publish, and no GitHub release (the assemble job omits napi's opt-in --gh-release flag).
+# Credentials are NOT added here and never will be: this workflow carries a pull_request trigger.
+# release.yml owns every credential and downloads these artifacts (SMA-579 §4).
 permissions:
   contents: read
 
@@ -235,6 +244,71 @@ jobs:
           CRATE=../../../rs/crates/bindings/paigasus-node-bindings
           pnpm exec napi create-npm-dirs --cwd "$CRATE"
           pnpm exec napi artifacts --cwd "$CRATE" --npm-dir npm
+
+      - name: Upload the assembled npm dirs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: npm-dirs
+          path: rs/crates/bindings/paigasus-node-bindings/npm/
+          if-no-files-found: error
+
+      # wasm-pack is a proto-plugin-pinned CLI (.prototools), NOT a Moon-managed toolchain — and
+      # `moon setup` provisions toolchains and components but NOT bins. That distinction already
+      # cost this repo a wave of "no such command: nextest" failures; see .moon/toolchains.yml's
+      # comment. Narrow install (not a bare `proto install`): this job needs none of
+      # actionlint/buf/deny/machete/nextest/promtool/release-plz.
+      - name: Install pinned wasm-pack CLI
+        run: proto install wasm-pack
+
+      # A THIRD scratch dir. wasm-pack CLEANS --out-dir and deletes package.json, so it must
+      # never run in the crate root (see that crate's .gitignore). ts/packages/paigasus-kernel's
+      # build task owns .wasmpack-out and its test task owns .wasmpack-test-out; this needs its
+      # own name so a concurrent moon ci cannot race it. The wasm32-unknown-unknown target is
+      # already provisioned by the "Install Moon-managed toolchains" step above (declared in
+      # .moon/toolchains.yml's rust.targets), so no `rustup target add` is needed here.
+      - name: Build the wasm distribution
+        run: |
+          set -euo pipefail
+          cd rs/crates/bindings/paigasus-wasm
+          wasm-pack build . --target bundler --release --no-pack \
+            --out-dir .wasmpack-release-out --out-name paigasus_wasm
+          test -s .wasmpack-release-out/paigasus_wasm_bg.wasm \
+            || { echo "::error::wasm-pack produced no binary"; exit 1; }
+
+      # STAGE INTO A NON-HIDDEN DIRECTORY, and do not "simplify" this away.
+      # `actions/upload-artifact` excludes hidden files by default (`include-hidden-files: false`),
+      # and `.wasmpack-release-out` is DOT-PREFIXED — it follows the convention its two sibling
+      # scratch dirs use (`.wasmpack-out`, `.wasmpack-test-out`) precisely because they are
+      # gitignored build output. Uploading that path directly therefore matched NOTHING and failed
+      # the job with "No files were found with the provided path" — MEASURED on this workflow's
+      # first CI run, after the build step above had already reported success.
+      #
+      # Staging is preferred over `include-hidden-files: true`: that flag would also ship the bare
+      # `*` .gitignore wasm-pack writes into its own --out-dir, which would then sit in the publish
+      # job's working directory. Copying out names exactly what ships instead.
+      #
+      # package.json comes from the CRATE ROOT, never from --out-dir: wasm-pack CLEANS its out-dir
+      # and DELETES package.json there even with --no-pack (see this crate's .gitignore), so the
+      # crate-root copy is the only one carrying publishConfig.access and the real metadata.
+      - name: Stage the wasm distribution for upload
+        run: |
+          set -euo pipefail
+          cd rs/crates/bindings/paigasus-wasm
+          rm -rf wasm-dist && mkdir wasm-dist
+          cp .wasmpack-release-out/paigasus_wasm* wasm-dist/
+          cp package.json wasm-dist/package.json
+          test -s wasm-dist/paigasus_wasm_bg.wasm \
+            || { echo "::error::no wasm binary staged for upload"; exit 1; }
+          test -s wasm-dist/package.json \
+            || { echo "::error::no package.json staged for upload"; exit 1; }
+          ls -la wasm-dist
+
+      - name: Upload the wasm distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wasm-dist
+          path: rs/crates/bindings/paigasus-wasm/wasm-dist/
+          if-no-files-found: error
 
       # Dry-run prepublish: assert os/cpu/libc + main paths + optionalDependencies resolve, touching
       # nothing. `--no-gh-release` IS REQUIRED — ghRelease defaults ON, so without it prepublish enters
