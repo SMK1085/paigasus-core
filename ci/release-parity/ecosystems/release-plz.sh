@@ -7,17 +7,61 @@ set -euo pipefail
 A_CRATE="paigasus-release-parity-a"
 B_CRATE="paigasus-release-parity-b"
 
+# Abort with the harness's OWN vocabulary. run.sh prints "infrastructure error
+# (rc=2)" at :67 and :81, but this module is sourced at run.sh:21 — so an exit from
+# here fires DURING the source and run.sh never reaches either line. Without this
+# string the abort would be unclassifiable, and CLAUDE.md tells readers to grep for
+# it. Deliberately duplicated in python-semantic-release.sh rather than shared: one
+# module is sourced per run, and a ci/lib/ layer was considered and rejected
+# (SMA-596 D4).
+_rp_fatal() { # line...
+  echo "FATAL: release-parity ABORTED: infrastructure error (rc=2)" >&2
+  printf '       %s\n' "$@" >&2
+  exit 2
+}
+
 # release-plz and the `cargo metadata` it spawns run inside a temp fixture OUTSIDE
 # this repo. The proto `release-plz` shim resolves its version by walking up from
-# CWD to find .prototools — from /tmp that fails (CI: proto::tool::unknown_id). So
-# resolve the absolute tool binaries once, from the repo, and invoke those directly.
+# CWD to find .prototools — from /tmp that fails (CI: proto::tool::unknown_id;
+# recorded on that CI run, NOT reproduced locally — SMA-596 L2). So resolve the
+# absolute tool binaries once, from the repo, and invoke those directly. Do not
+# delete this dance as redundant; it is what stops the SMA-398 bug returning.
+#
+# `--reporter text` is REQUIRED, not cosmetic. proto prints NDJSON on stdout when it
+# detects an agent environment (AI_AGENT / CLAUDECODE / CLAUDE_CODE_ENTRYPOINT), and
+# `proto bin` still exits 0 while doing it — so an unflagged capture silently yields
+# a JSON blob instead of a path, and every `||` fallback is skipped because nothing
+# failed. That is SMA-596.
+#
+# There is deliberately NO fallback. This harness exists to compare one pinned
+# release-plz's classification behaviour; a silently substituted binary produces a
+# verdict about the wrong tool. Failing loudly is correct here.
+#
+# `exit` from a module that run.sh sources at top level is intentional — do NOT
+# "fix" it to `return`. run.sh parses its arguments (:12) and handles --help (:15)
+# before the source (:21), so this cannot pre-empt either.
 _RP_SELF="${BASH_SOURCE[0]:-$0}"
 _RP_REPO_ROOT="$(cd "$(dirname "$_RP_SELF")/../../.." && pwd)"
-RELEASE_PLZ_BIN="$( (cd "$_RP_REPO_ROOT" && proto bin release-plz) 2>/dev/null || command -v release-plz || echo release-plz )"
+RELEASE_PLZ_BIN="$(cd "$_RP_REPO_ROOT" && proto --reporter text bin release-plz)" || _rp_fatal \
+  "release-plz.sh: 'proto --reporter text bin release-plz' failed." \
+  "Run 'proto install' from the repo root." \
+  "An older proto without --reporter also lands here (SMA-596 D1)."
+[ -x "$RELEASE_PLZ_BIN" ] || _rp_fatal \
+  "release-plz.sh: release-plz did not resolve to an executable file." \
+  "Got: ${RELEASE_PLZ_BIN:-<empty>}" \
+  "If that looks like JSON, proto's agent-mode NDJSON leaked past --reporter text (SMA-596)."
+
 # release-plz shells out to `cargo metadata`; pass an explicit, CWD-independent
-# cargo (rustup proxy / real binary, not a CWD-sensitive shim).
+# cargo (rustup proxy / real binary, not a CWD-sensitive shim). This fallback is
+# KEPT, unlike release-plz's: it is a real reachable default, and cargo is not the
+# tool under test. The assertion below is what stops a bad value surfacing later as
+# a confusing cargo error instead of a resolution error (SMA-596 D2.1).
 CARGO_BIN="$( command -v cargo 2>/dev/null || true )"
 [ -n "$CARGO_BIN" ] || CARGO_BIN="$HOME/.cargo/bin/cargo"
+[ -x "$CARGO_BIN" ] || _rp_fatal \
+  "release-plz.sh: cargo did not resolve to an executable file." \
+  "Got: ${CARGO_BIN:-<empty>}" \
+  "Install Rust, or put cargo on PATH."
 
 ecosystem::_crate_dir() { # dir slot(a|b) -> path
   case "$2" in
