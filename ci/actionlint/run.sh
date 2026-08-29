@@ -2493,9 +2493,14 @@ cargo_lock_step_verdict() { # $1 workflow file
   # is authored on macOS but runs on Linux CI.
   # Applied ONLY to the key scans, never to the T_CARGO_LOCK_STEP_REQUIRED matching above, whose
   # pinned lines are exact text rather than keys.
+  # The third expression closes the same bypass class for WHITESPACE BEFORE THE COLON. YAML
+  # accepts `if : always()` and `continue-on-error : true`, and GitHub honours both; this file
+  # already treats `on :` as a real spelling in extractor_self_test. Without it each scan is a
+  # complete bypass by one space (CodeRabbit, PR 185 round 1).
   keys="$(printf '%s\n' "$window" \
     | sed -E -e 's/^"(if|continue-on-error)"[[:space:]]*:/\1:/' \
-             -e "s/^'(if|continue-on-error)'[[:space:]]*:/\1:/")"
+             -e "s/^'(if|continue-on-error)'[[:space:]]*:/\1:/" \
+             -e 's/^(if|continue-on-error)[[:space:]]+:/\1:/')"
 
   # Anything but the literal `false` suppresses the step's failure. Same rule check 8 applies to
   # the moon ci step. Scanned over the whole window rather than a fixed line count: the run block
@@ -3629,6 +3634,18 @@ out-of-order-script bash ci/cargo-lock-integrity/run.sh --negative-control'
         run: |}"
   expect_step "a single-quoted 'continue-on-error' key is still reported" \
     'continue-on-error true' "$q_coe"
+
+  # SPACE BEFORE THE COLON — the same bypass class, one space wide. Both were clean before the
+  # third normalising expression was added.
+  local sp_if sp_coe
+  sp_if="${wired/        run: |/        if : always()
+        run: |}"
+  expect_step 'a spaced "if :" key is still reported' 'conditional always()' "$sp_if"
+
+  sp_coe="${wired/        run: |/        continue-on-error : true
+        run: |}"
+  expect_step 'a spaced "continue-on-error :" key is still reported' \
+    'continue-on-error true' "$sp_coe"
 
   # ---- the script pin (T_CARGO_LOCK_SH_CALL_SITES) ----
   local script

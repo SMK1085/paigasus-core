@@ -10,6 +10,28 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-29-sma-601-cargo-lock-integrity-design.md`
 
+> **Status: this is the plan AS WRITTEN, kept as the record of intent. Several drafted code
+> blocks were superseded during implementation, because measurement contradicted them. Read the
+> shipped code, not these blocks, for current behaviour.** What changed, and why:
+>
+> - **`wasm-pack` is not fixable by a flag.** The plan calls its `[EXTRA_OPTIONS]` passthrough a
+>   fix. Measured: `wasm-pack build … -- --locked` on a truncated lock exits 0 and rewrites it
+>   176 → 548, because wasm-pack makes its own unlocked cargo call before the build it forwards
+>   to. All three wrapper tools are residual; the flag is kept because it does constrain the
+>   build itself.
+> - **A8 tests wrappers differently from literal-cargo tasks.** The drafted
+>   `if LOCKED_FLAG in blob` body is vacuous for a wrapper: both `paigasus-kernel-ts` tasks carry
+>   `--locked` from their wasm-pack half while `napi build` stays unlocked. The shipped rule
+>   demands an `ALLOW_UNLOCKED_CARGO` entry for any FFI-marker task regardless of flag presence.
+> - **`LOCK_RESOLVING_VERBS` is wider than drafted**, gaining `add`, `remove`,
+>   `generate-lockfile`, `vendor` and `fix`.
+> - **The `ci.yml` step runs all three modes**, not the bare run alone, under `set -euo pipefail`
+>   — measured: with `--locked` removed from `run.sh`'s `cargo metadata` line the bare run exits 0
+>   *and repairs the lock*, so the gate would become the first repairer.
+> - **`--frozen` is not accepted as locked** (it implies `--offline`, which false-reds on a cold
+>   cargo cache), and the self-test's `mktemp` returns rc 2, not an assertion failure.
+> - **`SELF_TEST_COUNT` landed at 12, not 11**, after a rebase onto SMA-579's eleventh table.
+
 ## Global Constraints
 
 - Every source file opens with an SPDX header: `# SPDX-License-Identifier: Apache-2.0` for bash and Python.
@@ -726,7 +748,7 @@ git commit -m "ci(repo): assert rs/Dockerfile keeps --locked and key A8 on it (S
 
 **Interfaces:**
 - Consumes: the exact `name:` and `run:` lines written in Task 1 Step 5.
-- Produces: check 8f. `SELF_TEST_COUNT` rises from 10 to 11; `selftest_mutation_battery` extends automatically from the `*_self_test` definition count, and asserts the two agree.
+- Produces: check 8f. `SELF_TEST_COUNT` rises by one (drafted as 10 -> 11; it landed as 11 -> 12, because SMA-579 added `release_guard_self_test` on `main` while this branch was in flight); `selftest_mutation_battery` extends automatically from the `*_self_test` definition count, and asserts the two agree.
 
 - [ ] **Step 1: Add the pinned constant**
 
@@ -865,7 +887,7 @@ cargo_lock_step_verdict() { # $1 workflow file
 }
 ```
 
-Then call it against the real workflow in the check-8 region, reporting each row through `fail`; add `cargo_lock_step_self_test` to `run_self_tests`; and bump `SELF_TEST_COUNT` from `10` to `11`, extending the trailing comment at `:40-41` with `cargo-lock-step`.
+Then call it against the real workflow in the check-8 region, reporting each row through `fail`; add `cargo_lock_step_self_test` to `run_self_tests`; and bump `SELF_TEST_COUNT` by one, extending the trailing comment at `:40-41` with `cargo-lock-step`. (It landed as 11 -> 12 after the rebase onto SMA-579's eleventh table.)
 
 - [ ] **Step 5: Run the self-test and the real gate to verify they pass**
 
