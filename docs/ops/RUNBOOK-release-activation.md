@@ -278,8 +278,11 @@ minutes. Three fits. If a publish is refused, wait and retry — the earlier see
 
 ### 5.1 npm — step C
 
-Confirm you own the `@paigasus` scope. A package 404 does not prove it. The org page returning 403
-does not prove it either. Check from your npm account.
+**Already confirmed (2026-08-29):** `npm org ls paigasus` reports `smaschek - owner`, and
+`npm access list packages @paigasus` is empty. Nothing to do here unless that changed.
+
+To re-check: `npm whoami` then `npm org ls paigasus`. Do **not** rely on an unauthenticated probe —
+`npmjs.com/org/paigasus` returns 403 and the registry org API 404 whether or not the org exists.
 
 The first release creates **nine** packages under the scope: `@paigasus/node-bindings`, seven
 platform packages, and `@paigasus/wasm`.
@@ -292,8 +295,9 @@ Create the token:
 | Scope | the `@paigasus` scope, read and write — **not** "only select packages", since nine packages do not exist yet |
 | Stored as | an **environment secret on `release-publish`**, not a repository secret |
 
-The type is not a free choice. A classic publish token fails with *"2FA required for publishing"* on
-an account with 2FA enforced.
+The type is not a free choice, and it is not hypothetical here: this account reports
+`two-factor auth: auth-and-writes` (measured 2026-08-29), so 2FA **is** enforced for writes and a
+classic publish token fails with *"2FA required for publishing"*.
 
 `publish-npm` already declares `environment: release-publish`, so an environment secret resolves
 with no workflow change, and the credential is not readable by every other workflow.

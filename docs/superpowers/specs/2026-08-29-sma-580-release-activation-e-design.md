@@ -84,11 +84,31 @@ ruleset would have blocked that push and split the release permanently. Nothing 
 **Residual:** that the App installation can in fact create a tag and a GitHub Release on `main` is
 **not** proven by the absence of protection. §3 step B3 proves it with a throwaway tag.
 
-### 1.4 npm scope ownership — NOT established
+### 1.4 npm scope ownership — CONFIRMED 2026-08-29
 
-`https://www.npmjs.com/org/paigasus` returns HTTP 403. The registry org API returns HTTP 404.
-Neither result proves ownership, and neither proves the scope is free. A package 404 says nothing
-about the scope. **The owner must confirm this from the npm account.** §5.2.
+**The `paigasus` org exists and this account owns it.** Measured from an authenticated session:
+
+```
+$ npm whoami
+smaschek
+$ npm org ls paigasus
+smaschek - owner
+$ npm access list packages @paigasus
+(empty)
+```
+
+The scope is owned and holds no packages, which is consistent with the nine 404s in §1.1.
+
+The earlier unauthenticated probes were inconclusive and are recorded only so nobody repeats them:
+`https://www.npmjs.com/org/paigasus` returns 403 and the registry org API returns 404 **whether or
+not the org exists**, because npm gates org pages behind authentication. There is no
+unauthenticated way to distinguish "free" from "someone else's".
+
+**Second measurement, and it decides §5.2:** the account reports `two-factor auth:
+auth-and-writes`. So 2FA is enforced for writes on this account, which is exactly the condition
+under which a classic publish token fails with *"2FA required for publishing"*. SMA-579's
+Automation-token requirement is therefore confirmed **live on this account**, not merely inherited
+from that issue's measurement.
 
 ### 1.5 Items that need no further work
 
