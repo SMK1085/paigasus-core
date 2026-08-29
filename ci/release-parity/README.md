@@ -120,6 +120,29 @@ loudly if either adds a `releaseRules` clamp (the documented divergence would no
 longer hold) or if the two disagree. Both configs are task inputs, so editing
 either re-runs this check.
 
+## Tool resolution policy (SMA-596)
+
+Both `release-plz.sh` and `python-semantic-release.sh` resolve their tool binary once, at
+module top level, with **no fallback**, and assert `[ -x ]` on the result before use. A
+failure exits 2 carrying the harness's `infrastructure error (rc=2)` classifier in the
+message. That wording is load-bearing: the module is sourced by `run.sh`, so an exit here
+fires *during* the source and `run.sh` never reaches its own abort lines — the classifier in
+the module's own message is what keeps such a failure greppable.
+
+`release-plz.sh` additionally passes `--reporter text` to `proto`. Without it, proto prints
+NDJSON on stdout in an agent environment while still exiting 0, so the capture yields a JSON
+blob and every `||` fallback is skipped.
+
+The reason there is no fallback: this harness compares one specific pinned tool's
+classification behaviour. A silently substituted binary — a different version, or a shim that
+resolves differently in CI than locally — produces a verdict about the wrong tool. That risk
+is highest in `python-semantic-release.sh`, which defines the reference 0.x expectation the
+other ecosystems are compared against.
+
+`semantic-release.sh` is not part of this policy. It invokes `node` against a runner script
+rather than resolving a tool binary into a variable, so there is no obvious site for the
+assertion, and it has not been reviewed for an equivalent hazard.
+
 ## The negative control runs in CI (SMA-530)
 
 All three Moon tasks run `--negative-control` before the real suite, under an explicit

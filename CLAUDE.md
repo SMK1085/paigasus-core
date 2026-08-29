@@ -51,12 +51,28 @@ First-time setup: see [CONTRIBUTING.md](./CONTRIBUTING.md#local-development) (`p
   shell, or set `PROTO_HOME` to an isolated root and `proto install` into it.
 - `proto` prints **NDJSON on stdout** when it detects an agent environment (`AI_AGENT`,
   `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`), including a `Detected an AI agent environment…`
-  preamble line. That breaks every `$(proto bin <tool>)` capture: the variable becomes a JSON
-  blob, not a path. `ci/release-parity/ecosystems/release-plz.sh` does exactly this, so all three
-  `repo:release-parity*` gates abort `INCONCLUSIVE (rc=2)` — **not red** — in any agent-driven
-  local run. CI has no agent detection, so it never shows there. This is NOT new in proto 0.61.1;
-  0.58.1 behaves identically (measured both, SMA-595). To verify those gates locally, `unset
-  AI_AGENT CLAUDECODE CLAUDE_CODE_ENTRYPOINT` first — with that, all three pass.
+  preamble line. That breaks any captured `$(proto <subcommand> …)`: the variable becomes a JSON
+  blob, not a path, and the `||` fallbacks never fire because proto **exits 0** — it succeeded, it
+  just answered in a different language. It is a property of proto's reporter, not of `proto bin`.
+  **Pass `--reporter text`** (or `PROTO_REPORTER=text`) on any proto call whose stdout you capture;
+  `ci/release-parity/ecosystems/release-plz.sh` is the worked example, and it also asserts
+  `[ -x ]` on the result so a future regression fails at the assignment rather than 87 lines later
+  (SMA-596). This is NOT new in proto 0.61.1; 0.58.1 behaves identically (measured both, SMA-595).
+  A proto-**shimmed** tool (`uv`, `node`, `release-plz`) is a different case: the shim execs the
+  tool, so captured stdout is the tool's — measured for the two cases below, not proven generally.
+  **Scope, corrected.** Only `repo:release-parity` was ever affected — NOT all three.
+  `ci/release-parity/run.sh` sources exactly ONE ecosystem module per invocation, and only
+  `release-plz.sh` invoked the proto CLI; `-py` resolves through `uv run` and `-ts` through `node`,
+  and both were measured green in the same agent session that showed `release-parity` aborting.
+  The earlier claim here that all three abort was a regression against SMA-530's own spec, which
+  had the scope right. The `unset AI_AGENT CLAUDECODE CLAUDE_CODE_ENTRYPOINT` workaround is **no
+  longer needed for these gates**; it may still matter for other proto oddities (see the entry
+  above). **Residual:** nothing gates this. A new captured proto call written the broken way reds
+  nothing (SMA-596 D4) — this bullet is the only control.
+  Both ecosystem modules now resolve their tool with **no fallback** and assert `[ -x ]`, exiting 2
+  with the harness's own `infrastructure error (rc=2)` classifier in the message — the module is
+  sourced by `run.sh`, so an exit fires during the source and `run.sh` never reaches its own abort
+  lines. That classifier is what keeps such a failure greppable.
 - `repo:affected-smoke` has aborted **twice**, both times under a concurrent `moon ci` on 2.5.3,
   at ~2.4s against its usual 6–8s: once on SMA-595, which captured no output, and once on
   SMA-592, which captured its output. The two are matched on SYMPTOM SHAPE alone — a sub-3s abort
